@@ -12,12 +12,18 @@ if serial --unit=0 --speed=115200; then
     terminal_output --append serial
 fi
 
-# Radix draws its console into the framebuffer GRUB sets up. Under UEFI it
-# keeps the mode the firmware chose, which is normally the panel's own
-# resolution; under BIOS GRUB picks a VESA graphics mode.
-insmod all_video
+# Radix draws its console into the framebuffer GRUB sets up. Only the
+# firmware's video drivers are loaded, GOP under UEFI and VESA under BIOS, so
+# QEMU boots the way real machines do; GRUB's native drivers for QEMU's
+# display would otherwise take over there. Under UEFI the mode the firmware
+# set, normally the panel's native resolution, is kept; under BIOS GRUB picks
+# the display's preferred VESA mode.
 if [ "${grub_platform}" = "efi" ]; then
+    insmod efi_gop
+    insmod efi_uga
     set gfxpayload=keep
+else
+    insmod vbe
 fi
 
 menuentry "OrthrOS @VERSION@ (Radix)" {

@@ -7,10 +7,10 @@
 
 The framebuffer console draws text itself, so the kernel needs a bitmap
 font compiled in. The reference laptop has a 1920x1080 screen at 15.6
-inches, where an 8x16 font is small; QEMU's default 800x600 needs a small
-one. The font must be legible, cover ASCII and box-drawing characters,
-come in several sizes, and have a license compatible with Apache-2.0 OR
-MIT distribution (ADR 0002).
+inches, where an 8x16 font is small; smaller screens, such as QEMU's
+1280x800, need a small one. The font must be legible, cover ASCII and
+box-drawing characters, come in several sizes, and have a license
+compatible with Apache-2.0 OR MIT distribution (ADR 0002).
 
 Candidates: the Linux console fonts (GPL, which ADR 0002 keeps out of the
 kernel), Terminus (SIL Open Font License, which is permissive but has
