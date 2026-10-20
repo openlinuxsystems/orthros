@@ -450,6 +450,8 @@ pub struct Vm {
     timeout: Duration,
     stderr_log: PathBuf,
     screenshot: PathBuf,
+    /// Whether QEMU runs the guest with KVM.
+    kvm: bool,
 }
 
 impl Vm {
@@ -493,6 +495,7 @@ impl Vm {
             timeout,
             stderr_log,
             screenshot: dir.join(format!("{name}.ppm")),
+            kvm: machine.kvm,
         })
     }
 
@@ -749,6 +752,11 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
 
 fn boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
+    // KVM always offers x2APIC, which QEMU 8's TCG lacks, so with KVM these
+    // cases cover the x2APIC path; make sure the kernel took it.
+    if vm.kvm && !vm.log().contains("APIC: x2APIC mode") {
+        return Err("the local APIC is not in x2APIC mode under KVM".into());
+    }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

@@ -152,7 +152,9 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
 		Boot with 4 CPUs under each firmware and medium, and check the
 		memory map, the CPU list, timer interrupts on every CPU and an
-		IPI to each. *uefi-cdrom* boots with *nox2apic*.
+		IPI to each. *uefi-cdrom* boots with *nox2apic* and checks for
+		xAPIC mode; with KVM, which always offers x2APIC, the other three
+		check for x2APIC mode.
 
 	*screen*
 		Boot under UEFI and read the boot log back from the framebuffer.
