@@ -469,7 +469,12 @@ impl Platform for Arch {
                 // page; SMEP makes the fetch fault, and the page fault
                 // handler panics. Were SMEP off, it would just return.
                 unsafe { core::arch::asm!("call {}", in(reg) page, clobber_abi("C")) };
-                panic!("self-test fault: running code in a user page did not fault")
+                panic!(
+                    "self-test fault: running code in a user page did not fault (CR4 {:#x}, \
+                     entries {:x?})",
+                    cpu::cr4(),
+                    paging::walk(page)
+                )
             }
             FaultTest::UserData => {
                 if !paging::SMAP.load(Ordering::Relaxed) {
@@ -479,7 +484,12 @@ impl Platform for Arch {
                 // SAFETY: deliberately reads a user page; SMAP makes the
                 // read fault, and the page fault handler panics.
                 let value = unsafe { core::ptr::read_volatile(page as *const u64) };
-                panic!("self-test fault: reading a user page did not fault (read {value:#x})")
+                panic!(
+                    "self-test fault: reading a user page did not fault (read {value:#x}; CR4 \
+                     {:#x}, entries {:x?})",
+                    cpu::cr4(),
+                    paging::walk(page)
+                )
             }
         }
     }

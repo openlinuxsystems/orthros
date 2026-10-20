@@ -565,6 +565,12 @@ pub fn map_user_test_page(code: bool) -> usize {
     let state = STATE.lock();
     let access = if code { Access::Code } else { Access::ReadOnly };
     map_4k(state.pml4, USER_TEST_PAGE, phys, user_flags(access)).expect("out of memory");
+    // The table above the page's tables may already exist without USER
+    // (the AP start-up page's identity mapping shares it), and the CPU may
+    // have cached it that way, which would make this a kernel page and
+    // the test pass for the wrong reason. INVLPG drops cached table
+    // entries as well as the page's own.
+    cpu::invlpg(USER_TEST_PAGE as usize);
     USER_TEST_PAGE as usize
 }
 
@@ -678,6 +684,23 @@ pub fn serve_shootdown() {
         flush_local(start..end);
         pending.fetch_and(!bit, Ordering::Release);
     }
+}
+
+/// The page-table entries the CPU walks for `virt` under the current CR3,
+/// top level first, stopping at a missing or large page (0 after it). For
+/// self-test diagnostics.
+pub fn walk(virt: usize) -> [u64; 4] {
+    let mut entries = [0; 4];
+    let mut table_phys = cpu::cr3() & ADDRESS;
+    for (slot, level) in entries.iter_mut().zip((0..=3).rev()) {
+        let index = ((virt as u64 >> (12 + 9 * level)) & 0x1ff) as usize;
+        *slot = table(table_phys)[index];
+        if *slot & PRESENT == 0 || *slot & LARGE != 0 {
+            break;
+        }
+        table_phys = *slot & ADDRESS;
+    }
+    entries
 }
 
 /// The physical address `virt` maps to.
