@@ -56,9 +56,15 @@ The packages `ob` needs on each distribution are:
 
 | Distribution | Install command |
 | --- | --- |
-| Debian, Ubuntu | `sudo apt install rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools scdoc mandoc`, then `cargo install mdbook --version 0.4.52 --locked` |
-| Fedora | `sudo dnf install rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools scdoc mandoc mdbook` |
-| Arch Linux | `sudo pacman -S --needed rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools scdoc mandoc mdbook` |
+| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools scdoc mandoc`, then `cargo install mdbook --version 0.4.52 --locked` |
+| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools scdoc mandoc mdbook` |
+| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools scdoc mandoc mdbook` |
+
+The C compiler (`build-essential`, `gcc` or `base-devel`) is there because
+Rust uses it as the linker for `ob` itself and for mdBook; the kernel links
+with `rust-lld`. Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no
+`rustup` package: install rustup from <https://rustup.rs> instead, and
+drop it from the command.
 
 ## Booting OrthrOS in QEMU
 
