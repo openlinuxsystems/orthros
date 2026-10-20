@@ -75,7 +75,12 @@ the faulting instruction rather than in the handler.
    CPUID reports it and `nox2apic` is not given; xAPIC (registers in a
    4 KiB page mapped uncached) otherwise. If the firmware already enabled
    x2APIC, the kernel stays in it, because leaving x2APIC requires
-   disabling the APIC entirely.
+   disabling the APIC entirely. Register access follows the chosen mode
+   from then on, so `apic::enable` switches the boot CPU at once, and each
+   other CPU right after it loads its IDT; in x2APIC mode the register
+   MSRs raise #GP until the switch. The SDM forbids going from a disabled
+   APIC straight to x2APIC, so `enable` sets the enable bit first and the
+   x2APIC bit in a second write.
 3. **I/O APICs** from the MADT: mapped, and every redirection entry masked.
    Phase 1 takes no device interrupts; the MADT's interrupt source
    overrides, which later phases need to route ISA interrupts, are parsed
@@ -145,8 +150,9 @@ Afterwards the trampoline page is unmapped again.
 
 The new CPU switches from 16-bit real mode to protected mode and long mode
 on the kernel's page tables, and jumps to `ap_entry` in the higher half,
-which loads its GDT, TSS and IDT, applies microcode, enables its local
-APIC and timer, marks itself online and calls the kernel's entry for
+which loads its GDT, TSS and IDT, switches its local APIC into the chosen
+mode, applies microcode, sets up its local APIC and timer, marks itself
+online and calls the kernel's entry for
 secondary CPUs, which idles. CPUs start one at a time because they share
 the trampoline's parameter block.
 

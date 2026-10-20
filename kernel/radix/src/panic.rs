@@ -67,15 +67,24 @@ impl Report<'_> {
                 format_args!("  at {}:{}:{}", location.file(), location.line(), location.column()),
             );
         }
+        let mut cpus = TextBuf::<48>::new();
+        match Arch::cpu_count().saturating_sub(1) {
+            // A single CPU, or a panic before the others were found.
+            0 => {
+                let _ = write!(cpus, "no other CPUs");
+            }
+            others => {
+                let _ = write!(cpus, "{} of {others} other CPUs stopped", self.stopped);
+            }
+        }
         line(
             Style::Plain,
             format_args!(
-                "  Radix {} on {}, boot {}; {} of {} other CPUs stopped",
+                "  Radix {} on {}, boot {}; {}",
                 env!("CARGO_PKG_VERSION"),
                 <Arch as Cpu>::NAME,
                 self.boot,
-                self.stopped,
-                Arch::cpu_count().saturating_sub(1)
+                cpus.as_str()
             ),
         );
         if let Some(fault) = &self.fault {

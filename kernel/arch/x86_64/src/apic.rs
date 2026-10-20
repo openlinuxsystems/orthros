@@ -38,6 +38,10 @@ mod reg {
     pub const TIMER_DIVIDE: u32 = 0x3e0;
 }
 
+/// IA32_APIC_BASE: x2APIC mode (EXTD).
+const BASE_X2APIC: u64 = 1 << 10;
+/// IA32_APIC_BASE: global enable (EN).
+const BASE_ENABLE: u64 = 1 << 11;
 /// LVT mask bit.
 const MASKED: u32 = 1 << 16;
 /// ICR delivery status (xAPIC only): the previous IPI is still pending.
@@ -59,9 +63,10 @@ static ICR_LOCK: SpinLock<()> = SpinLock::new(());
 fn read(offset: u32) -> u32 {
     match MODE.get() {
         Some(Mode::X2Apic) => {
-            // SAFETY: x2APIC mode is enabled on this CPU (every CPU enables
-            // it in `init_cpu` before using the APIC), so the MSRs from
-            // 0x800 exist; reading them has no side effects.
+            // SAFETY: x2APIC mode is enabled on this CPU (`enable` switches
+            // each CPU as soon as the mode is chosen, before anything uses
+            // the APIC), so the MSRs from 0x800 exist; reading them has no
+            // side effects.
             unsafe { cpu::rdmsr(0x800 + offset / 16) as u32 }
         }
         Some(&Mode::XApic(base)) => {
@@ -125,13 +130,12 @@ pub fn read_error_status() -> u32 {
 /// CPU, before [`init_cpu`].
 pub fn init(madt: Option<&Madt<'_>>, allow_x2apic: bool) {
     // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU.
-    let msr_base = unsafe { cpu::rdmsr(msr::APIC_BASE) } & 0x000f_ffff_ffff_f000;
-    let phys = madt.map_or(msr_base, |madt| madt.local_apic_address);
+    let base = unsafe { cpu::rdmsr(msr::APIC_BASE) };
+    let phys = madt.map_or(base & 0x000f_ffff_ffff_f000, |madt| madt.local_apic_address);
     PHYS_BASE.store(phys as usize, Ordering::Relaxed);
     // Firmware may hand over in x2APIC mode already. Leaving it needs the
     // APIC disabled first, so the kernel stays in it whatever the flag says.
-    // SAFETY: as above.
-    let firmware_x2apic = unsafe { cpu::rdmsr(msr::APIC_BASE) } & (1 << 10) != 0;
+    let firmware_x2apic = base & BASE_X2APIC != 0;
     if firmware_x2apic && !allow_x2apic {
         radix_klog::warn!("APIC: the firmware enabled x2APIC mode, so nox2apic is ignored");
     }
@@ -141,6 +145,30 @@ pub fn init(madt: Option<&Madt<'_>>, allow_x2apic: bool) {
         Mode::XApic(paging::map_physical(phys, 4096, Access::ReadWrite, Cache::Uncached))
     };
     let _ = MODE.set(mode);
+    // From here on every APIC access uses the chosen mode, so the boot CPU
+    // must be in it before anything reads a register (its APIC ID, next).
+    enable();
+}
+
+/// Switches the running CPU's local APIC on and into the chosen mode. The
+/// boot CPU does this in [`init`], the others first thing after they load
+/// their IDT; it does nothing when the APIC is already there.
+pub fn enable() {
+    let x2apic = MODE.get() == Some(&Mode::X2Apic);
+    // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU, and these writes
+    // keep its base address. x2APIC mode is only chosen when the CPU has
+    // it. The SDM forbids going from disabled straight to x2APIC, so the
+    // APIC is enabled in xAPIC mode first and switched in a second write.
+    unsafe {
+        let mut base = cpu::rdmsr(msr::APIC_BASE);
+        if base & BASE_ENABLE == 0 {
+            base |= BASE_ENABLE;
+            cpu::wrmsr(msr::APIC_BASE, base);
+        }
+        if x2apic && base & BASE_X2APIC == 0 {
+            cpu::wrmsr(msr::APIC_BASE, base | BASE_X2APIC);
+        }
+    }
 }
 
 /// The NMI wiring from the MADT: LINT pin and flags for the CPU with ACPI
@@ -163,13 +191,7 @@ fn nmi_pin(madt: Option<&Madt<'_>>, uid: Option<u32>) -> (u8, u16) {
 /// (NMI on the pin the MADT names) and an open task priority. The timer
 /// stays masked until [`crate::time`] starts it.
 pub fn init_cpu(madt: Option<&Madt<'_>>, uid: Option<u32>) {
-    // SAFETY: IA32_APIC_BASE exists; setting the global enable bit (11)
-    // and, in x2APIC mode, the x2APIC bit (10) keeps the base address.
-    unsafe {
-        let base = cpu::rdmsr(msr::APIC_BASE);
-        let x2 = if MODE.get() == Some(&Mode::X2Apic) { 1 << 10 } else { 0 };
-        cpu::wrmsr(msr::APIC_BASE, base | (1 << 11) | x2);
-    }
+    enable();
     write(reg::SVR, 0x100 | u32::from(VECTOR_SPURIOUS));
     write(reg::TPR, 0);
     write(reg::LVT_TIMER, MASKED);

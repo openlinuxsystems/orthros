@@ -337,6 +337,9 @@ extern "C" fn ap_entry(index: usize) -> ! {
     let ist_tops = [stacks.ist[0].end, stacks.ist[1].end, stacks.ist[2].end];
     percpu::load_descriptors(ist_tops);
     interrupts::load();
+    // Before anything can use the APIC, a panic's NMIs to the other CPUs
+    // included: in x2APIC mode its registers do not exist until then.
+    apic::enable();
     paging::init_cpu();
     microcode::load(false);
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
