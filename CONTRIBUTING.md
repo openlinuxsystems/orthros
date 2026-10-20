@@ -12,6 +12,7 @@ Everything goes through `./ob`, and CI runs exactly the same commands:
 ./ob lint           # rustfmt and Clippy, warnings are errors (./ob fmt fixes formatting)
 ./ob test           # unit tests, then the QEMU boot tests (./ob help test)
 ./ob docs --check   # man pages and handbook, with completeness checks
+./ob test kani      # Kani proofs of the memory manager, when kernel/mm changes
 ```
 
 If your host lacks tools, `./ob doctor` names them, or use
@@ -21,8 +22,8 @@ If your host lacks tools, `./ob doctor` names them, or use
 
 A change merges when:
 
-- CI is green: lint, unit tests, boot tests, docs check, cargo-deny and the
-  container build.
+- CI is green: lint, unit tests, boot tests, docs check, Kani proofs,
+  cargo-deny and the container build.
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
   hardware lives in a crate under `kernel/lib/` that compiles for the host
   and is unit-tested there; behaviour that needs a machine gets a boot test
@@ -31,8 +32,8 @@ A change merges when:
 - Every new command, file format, kernel command-line flag, `kdb` command
   or interface has a man page in `docs/man/` (see "Man pages" below), and
   the handbook is updated where users would look. `./ob docs --check`
-  enforces this for `ob` commands, `orthros.toml` keys, kernel flags, `kdb`
-  commands and self-tests.
+  enforces this for `ob` commands and boot tests, `orthros.toml` keys,
+  kernel flags, `kdb` commands and self-tests.
 - Any decision the specification leaves open, or any change to an earlier
   decision, has an architecture decision record in `docs/adr/`.
 - It follows the [coding standard](docs/coding-standard.md).

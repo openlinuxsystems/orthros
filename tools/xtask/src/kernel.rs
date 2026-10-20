@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Profile;
 use crate::process::{self, step};
-use crate::{Ctx, Result, ksyms};
+use crate::{Context, Ctx, Result, bail, doctor, krelocs, ksyms};
 
 /// The kernel's target specification, relative to the repository root.
 /// docs/adr/0011-kernel-target-and-build-std.md explains why the kernel has
@@ -25,8 +25,13 @@ pub fn target_args(ctx: &Ctx) -> Vec<String> {
         "--target".into(),
         ctx.root.join(TARGET_SPEC).display().to_string(),
         "-Zjson-target-spec".into(),
-        "-Zbuild-std=core,compiler_builtins".into(),
+        "-Zbuild-std=core,compiler_builtins,alloc".into(),
         "-Zbuild-std-features=compiler-builtins-mem".into(),
+        // `alloc` without its infallible APIs (`Box::new`, `Vec::push`):
+        // every kernel allocation states its context and handles failure
+        // (ADR 0017).
+        "--config".into(),
+        format!(r#"target.{TARGET_NAME}.rustflags=["--cfg","no_global_oom_handling"]"#),
     ]
 }
 
@@ -52,8 +57,8 @@ pub fn installed(ctx: &Ctx) -> PathBuf {
     ctx.out.join("sysroot/boot/radix")
 }
 
-/// Builds the kernel, writes its symbol table into it, and installs it as
-/// `out/sysroot/boot/radix`.
+/// Builds the kernel, writes its symbol and relocation tables into it, and
+/// installs it as `out/sysroot/boot/radix`.
 pub fn build(ctx: &Ctx, profile: Profile) -> Result<PathBuf> {
     step(&format!("Building the Radix kernel ({profile})"));
     let mut cmd = cargo(ctx, "build");
@@ -70,10 +75,42 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<PathBuf> {
 }
 
 fn install(ctx: &Ctx, built: &Path, installed: &Path) -> Result<()> {
-    let functions = ksyms::embed(built, installed)?;
+    let mut bytes = std::fs::read(built).context(|| format!("reading {}", built.display()))?;
+    let functions = ksyms::embed(&mut bytes)?;
+    let relocations = krelocs::embed(&mut bytes)?;
+    if let Some(parent) = installed.parent() {
+        process::create_dir(parent)?;
+    }
+    std::fs::write(installed, &bytes).context(|| format!("writing {}", installed.display()))?;
+    // GRUB refuses to load an ELF file with relocation sections, and the
+    // kernel needs only the table in .krelocs, so they go.
+    process::run(
+        ctx,
+        std::process::Command::new(objcopy(ctx)?)
+            .args(["--wildcard", "--remove-section=.rela*"])
+            .arg(installed),
+    )?;
     step(&format!(
-        "Kernel installed at {} (symbol table of {functions} functions)",
+        "Kernel installed at {} (symbol table of {functions} functions, {relocations} relocations)",
         ctx.display(installed)
     ));
     Ok(())
+}
+
+/// The pinned toolchain's `llvm-objcopy`, from its `llvm-tools` component.
+fn objcopy(ctx: &Ctx) -> Result<PathBuf> {
+    let Some(sysroot) = doctor::sysroot(ctx) else {
+        bail!("cannot find the pinned toolchain; run `./ob setup`");
+    };
+    let rustlib = sysroot.join("lib/rustlib");
+    let found = std::fs::read_dir(&rustlib)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("bin/llvm-objcopy"))
+        .find(|path| path.is_file());
+    match found {
+        Some(path) => Ok(path),
+        None => bail!("the toolchain has no llvm-objcopy; run `./ob setup` to add llvm-tools"),
+    }
 }

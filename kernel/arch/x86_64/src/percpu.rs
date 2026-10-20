@@ -11,7 +11,7 @@
 
 use core::arch::asm;
 use core::ops::Range;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::{Fault, MAX_CPUS};
 use radix_sync::{Once, SpinLock, TakeOnce};
@@ -89,6 +89,8 @@ pub struct PerCpu {
     pub apic_id: AtomicU32,
     /// Listed in the MADT as usable.
     pub present: AtomicBool,
+    /// NUMA node, from the SRAT (0 without one).
+    pub node: AtomicU8,
     /// Running kernel code.
     pub online: AtomicBool,
     /// Stopped by the panic path.
@@ -97,8 +99,11 @@ pub struct PerCpu {
     pub ticks: AtomicU64,
     /// Ping IPIs received.
     pub pings: AtomicU64,
-    /// The TLB generation this CPU has caught up with.
+    /// The last TLB shootdown request this CPU has carried out.
     pub tlb_generation: AtomicU64,
+    /// The address space this CPU runs (its address), or 0 for the
+    /// kernel's own tables.
+    pub space: AtomicUsize,
     /// Exception handlers running on this CPU, to catch recursion.
     pub exception_depth: AtomicU32,
     /// The fault this CPU is panicking for.
@@ -115,11 +120,13 @@ impl PerCpu {
             index: AtomicUsize::new(0),
             apic_id: AtomicU32::new(0),
             present: AtomicBool::new(false),
+            node: AtomicU8::new(0),
             online: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             ticks: AtomicU64::new(0),
             pings: AtomicU64::new(0),
             tlb_generation: AtomicU64::new(0),
+            space: AtomicUsize::new(0),
             exception_depth: AtomicU32::new(0),
             fault: SpinLock::new(None),
             stacks: Once::new(),

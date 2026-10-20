@@ -222,6 +222,8 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - Kani proof harnesses for allocator invariants; host-side property tests with proptest.
 - **Exit:** a multi-CPU stress test allocates and frees tens of millions of objects with no leaks or corruption, and the Kani harnesses pass in CI.
 
+**Status:** implemented. The `mm-stress` boot test has 4 CPUs on 2 emulated NUMA nodes allocate and free about 24 million heap objects and map and unmap 800 areas, then checks that no frame leaked and no object was damaged; seven Kani harnesses run in their own CI job (`./ob test kani`), and proptest properties run with the unit tests. Design notes: `docs/design/memory.md`. Changes from this plan: the kernel builds `alloc` without its infallible APIs, so the compiler enforces the explicit allocation context (ADR 0017); KASLR uses a relocation table that `ob build` writes into the image after linking, and also randomizes the direct map and the mapping window (ADR 0018). Decisions made in this phase: ADRs 0017 to 0020.
+
 ### Phase 3: Capability core (M)
 
 - Capability spaces, object types (memory, frame, address space, thread, process, endpoint, notification, IRQ, I/O port, MMIO, DMA), rights masks, badges, sealing.

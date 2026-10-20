@@ -2,15 +2,17 @@
 //!
 //! GRUB enters `_start` in 32-bit protected mode with paging disabled, the
 //! Multiboot2 magic in EAX and the physical address of the boot information
-//! in EBX. The trampoline builds temporary page tables that map the first
-//! 4 GiB three times, enables long mode and calls [`crate::entry`] in the
-//! higher half on the boot CPU's stack:
+//! in EBX. The trampoline builds temporary page tables, enables long mode,
+//! moves the kernel to a random address ([`crate::kaslr`]) and calls
+//! [`crate::entry`] in the higher half on the boot CPU's stack. The tables
+//! map the first 4 GiB twice and the first GiB once more:
 //!
 //! - at 0, so the trampoline keeps running after paging is switched on;
-//! - at the direct map base (`0xFFFF_8000_0000_0000`), the same alias the
-//!   kernel's own page tables use for RAM, so pointers made from boot
-//!   information stay valid when those tables replace these;
-//! - at `0xFFFF_FFFF_8000_0000` (first GiB only), where the kernel is linked.
+//! - at `0xFFFF_8000_0000_0000`, unused unless KASLR is off, in which case
+//!   it is where the kernel's direct map of RAM goes ([`crate::memory`]
+//!   adds the randomized one before using it);
+//! - at `0xFFFF_FFFF_8000_0000`, where the kernel is linked, and again
+//!   `slide` bytes higher, where it runs.
 //!
 //! The header also asks GRUB for a linear framebuffer, which the kernel's
 //! framebuffer console draws on. The request is optional: if GRUB cannot set
@@ -62,9 +64,9 @@ _start:
     testl $(1 << 29), %edx
     jz .Lno_long_mode
 
-    /* Zero the seven page-table pages. */
+    /* Zero the eight page-table pages. */
     movl $boot_pml4, %edi
-    movl $(7 * 4096 / 4), %ecx
+    movl $(8 * 4096 / 4), %ecx
     xorl %eax, %eax
     rep stosl
 
@@ -89,8 +91,10 @@ _start:
     cmpl $4, %ecx
     jne .Lfill_pdpt
 
-    /* High PDPT[510] (0xFFFFFFFF80000000) -> the first page directory. */
-    movl $boot_pd, %eax
+    /* High PDPT[510] (0xFFFFFFFF80000000) -> the kernel's page directory,
+       which starts out mapping the first GiB; KASLR adds the moved image
+       further up. */
+    movl $boot_pd_kernel, %eax
     orl $0x3, %eax
     movl %eax, boot_pdpt_high + 510 * 8
 
@@ -104,6 +108,11 @@ _start:
     incl %ecx
     cmpl $2048, %ecx
     jne .Lfill_pd
+
+    movl $boot_pd, %esi
+    movl $boot_pd_kernel, %edi
+    movl $1024, %ecx
+    rep movsl
 
     /* CR3, CR4.PAE, EFER.LME, CR0.PG. */
     movl $boot_pml4, %eax
@@ -137,12 +146,44 @@ _start:
     movw %ax, %fs
     movw %ax, %gs
 
-    /* Switch to the boot CPU's stack in the higher half and call
-       entry(magic: u32, info: u32). */
+    /* Switch to the boot CPU's stack in the higher half, at the address
+       the kernel was linked at, and pick the slide: a multiple of 2 MiB. */
     movabsq $bsp_stack_top, %rsp
     xorl %ebp, %ebp
+    movl boot_mb_info, %edi
+    movabsq $radix_kaslr_choose, %rax
+    call *%rax
+    movq %rax, %r12
+    testq %rax, %rax
+    jz .Lenter
+
+    /* Map the image a second time, `slide` higher: kernel PD entries
+       slide/2M up to the end of the GiB map physical 0, 2 MiB, ... */
+    movq %rax, %rcx
+    shrq $21, %rcx
+    movl $0x83, %eax
+.Lfill_moved:
+    movq %rax, boot_pd_kernel(,%rcx,8)
+    addq $(1 << 21), %rax
+    incq %rcx
+    cmpq $512, %rcx
+    jne .Lfill_moved
+    movq %cr3, %rax
+    movq %rax, %cr3
+
+    /* Add the slide to every absolute address in the image, including
+       the two below (the stack and the entry point). */
+    movq %r12, %rdi
+    movabsq $radix_kaslr_relocate, %rax
+    call *%rax
+
+    /* Call entry(magic: u32, info: u32, slide: u64) at the new address,
+       on the stack's new address. */
+.Lenter:
+    movabsq $bsp_stack_top, %rsp
     movl boot_mb_magic, %edi
     movl boot_mb_info, %esi
+    movq %r12, %rdx
     movabsq $radix_arch_entry, %rax
     call *%rax
 .Lhalt:
@@ -173,6 +214,8 @@ boot_pdpt_high:
     .skip 4096
 boot_pd:
     .skip 4 * 4096
+boot_pd_kernel:
+    .skip 4096
 boot_low_stack:
     .skip 4096
 boot_low_stack_top:
@@ -203,6 +246,17 @@ __ksyms_start:
     .skip 1024 * 1024
     .global __ksyms_end
 __ksyms_end:
+
+    /* ---- Room for the KASLR relocation table (radix-relocs) ----
+     * Written by `ob build` like the symbol table; the trampoline leaves
+     * the kernel where it was linked while this is zeros. */
+    .section .krelocs, "a", @progbits
+    .balign 16
+    .global __krelocs_start
+__krelocs_start:
+    .skip 64 * 1024
+    .global __krelocs_end
+__krelocs_end:
 
     .code64
     .text

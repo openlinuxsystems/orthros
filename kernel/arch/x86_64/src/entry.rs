@@ -18,7 +18,7 @@ use crate::paging::{self, Access, Cache};
 use crate::percpu::{self, IST_STACKS, Stacks};
 use crate::serial::SerialSink;
 use crate::vga::VgaSink;
-use crate::{interrupts, microcode, smp, time};
+use crate::{interrupts, kaslr, microcode, smp, time};
 
 unsafe extern "Rust" {
     /// The kernel's main function, defined by the `radix` crate.
@@ -88,17 +88,20 @@ fn init_boot_cpu() {
     interrupts::load();
 }
 
-/// Turns the boot information address into a byte slice.
-fn boot_info_bytes(info_phys: u32) -> &'static [u8] {
+/// Turns the boot information address into a byte slice, through the
+/// mapping of the first 4 GiB at `base`: 0 (the boot tables' identity map,
+/// before the direct map has its place) or the direct map.
+fn boot_info_bytes(info_phys: u32, base: u64) -> &'static [u8] {
     if info_phys == 0 || !info_phys.is_multiple_of(8) {
         panic!("boot information address {info_phys:#x} is invalid");
     }
-    let virt = memory::phys_to_virt(u64::from(info_phys));
+    let virt = (base + u64::from(info_phys)) as usize;
     // SAFETY: GRUB passed this address in EBX, so it is below 4 GiB, where
-    // the boot alias of the direct map reaches it; the first field is the
-    // structure's total size. The structure is reserved before the frame
-    // allocator starts, so nothing overwrites it, and the direct map keeps
-    // mapping it at the same address afterwards.
+    // the boot tables map it at 0 and in the direct map; the first field is
+    // the structure's total size. The structure is reserved before the
+    // frame allocator starts, so nothing overwrites it, and the direct map
+    // keeps mapping it at the same address afterwards (the identity view
+    // is used only before that, and not kept).
     let total = unsafe { (virt as *const u32).read() } as usize;
     // SAFETY: as above, for the whole structure.
     unsafe { core::slice::from_raw_parts(virt as *const u8, total) }
@@ -151,10 +154,11 @@ fn framebuffer(info: &BootInfo<'_>) -> (Option<Framebuffer>, bool) {
     }
 }
 
-/// Called by the boot trampoline in long mode with the Multiboot2 magic and
-/// the physical address of the boot information.
+/// Called by the boot trampoline in long mode with the Multiboot2 magic,
+/// the physical address of the boot information and the KASLR slide.
 #[unsafe(no_mangle)]
-extern "C" fn radix_arch_entry(magic: u32, info_phys: u32) -> ! {
+extern "C" fn radix_arch_entry(magic: u32, info_phys: u32, slide: u64) -> ! {
+    kaslr::set_slide(slide);
     percpu::set_current(0);
     time::record_start();
     radix_klog::set_platform(&KLOG_PLATFORM);
@@ -166,19 +170,26 @@ extern "C" fn radix_arch_entry(magic: u32, info_phys: u32) -> ! {
     if magic != MULTIBOOT2_MAGIC {
         panic!("not started by a Multiboot2 boot loader (magic {magic:#x})");
     }
-    let bytes = boot_info_bytes(info_phys);
-    let info = BootInfo::parse(bytes).unwrap_or_else(|err| panic!("bad boot information: {err}"));
-    let command_line = info.command_line().unwrap_or("");
-    let flags = CommandLine::new(command_line);
+    // A first look at the boot information, through the identity map:
+    // the memory map decides where the direct map goes.
+    let early = BootInfo::parse(boot_info_bytes(info_phys, 0))
+        .unwrap_or_else(|err| panic!("bad boot information: {err}"));
     // Trace points record from here when asked to, before anything else.
-    if flags.has("trace") {
+    if CommandLine::new(early.command_line().unwrap_or("")).has("trace") {
         radix_klog::trace::set_enabled(true);
     }
     radix_klog::tracepoint!("boot.entry", magic, info_phys);
+    let Some(map) = early.memory_map() else { panic!("the boot loader passed no memory map") };
+    memory::set_memory_map(map.regions());
+    memory::choose_layout(kaslr::status() != kaslr::Status::Disabled);
+
+    // From here on the boot information is read through the direct map.
+    let bytes = boot_info_bytes(info_phys, memory::direct_map());
+    let info = BootInfo::parse(bytes).unwrap_or_else(|err| panic!("bad boot information: {err}"));
+    let command_line = info.command_line().unwrap_or("");
+    let flags = CommandLine::new(command_line);
 
     // Physical memory.
-    let Some(map) = info.memory_map() else { panic!("the boot loader passed no memory map") };
-    memory::set_memory_map(map.regions());
     let (image_start, image_end) =
         (&raw const __kernel_phys_start as u64, &raw const __kernel_phys_end as u64);
     memory::reserve("first MiB (firmware, AP start-up)", 0, 1 << 20);
@@ -221,7 +232,7 @@ extern "C" fn radix_arch_entry(magic: u32, info_phys: u32) -> ! {
         microcode::load(true);
     }
 
-    paging::build_and_switch();
+    paging::build_and_switch(!flags.has("nopcid"));
     radix_klog::tracepoint!("boot.paging");
 
     if let Some(rsdp) = info.acpi_rsdp() {

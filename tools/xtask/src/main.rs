@@ -7,8 +7,10 @@
 mod config;
 mod docs;
 mod doctor;
+mod elf;
 mod image;
 mod kernel;
+mod krelocs;
 mod ksyms;
 mod licenses;
 mod lint;
@@ -116,25 +118,32 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
   --media <kind>       Attach the image as a USB stick, CD-ROM or SATA disk
   --headless           Do not open a QEMU window (automatic without a display)
   --gdb                Wait for GDB on localhost:1234; writes out/qemu/radix.gdb,
-                       which stops at the kernel's first Rust function
+                       which stops at the kernel's first Rust function (adds
+                       nokaslr, so the kernel runs where its symbols say)
   --cmdline <flags>    Kernel flags instead of boot.cmdline, such as \"kdb\"
   --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "test" => {
-            "Usage: ./ob test [unit | boot] [--case <name>]... [--timeout <seconds>]
+            "Usage: ./ob test [unit | boot | kani] [--case <name>]... [--timeout <seconds>]
                  [--debug | --release]
 
 Runs host unit tests, then the boot tests: QEMU boots a test image under
 UEFI and BIOS, from USB and CD-ROM, with 4 CPUs, and each test follows the
 serial console, types kdb commands and reads the framebuffer from
 screenshots. Logs go to out/test/. Give `unit` or `boot` to run only that
-part. The boot tests are:
-  uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (uefi-cdrom in xAPIC mode)
+part; `kani` checks the Kani proof harnesses instead (minutes each, so
+plain `ob test` leaves them out). The boot tests are:
+  uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (uefi-cdrom in xAPIC
+                   mode, bios-cdrom without KASLR and PCIDs)
   screen           the boot log on the UEFI framebuffer
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
   crash-log-bios   the same under BIOS
   kdb              a breakpoint and every kdb command
+  mm-stress        tens of millions of heap objects on 4 CPUs and 2 NUMA nodes
+  tlb              TLB shootdowns and address-space switches
+  stack-overflow   a kernel stack overflow stops at its guard page
+  smep, smap       the kernel cannot run or read a user page
   microcode        a microcode module on an emulated Intel CPU
 
   --case <name>         Run only this boot test; repeat for more

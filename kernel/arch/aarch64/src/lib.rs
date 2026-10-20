@@ -13,8 +13,8 @@
 #![forbid(unsafe_code)]
 
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, Fault, InterruptController, Ipi, PageTable, Platform, Smp,
-    Timer,
+    BootParams, Cpu, CpuInfo, CpuLocal, Fault, FaultTest, InterruptController, Ipi, PageTable,
+    Platform, Smp, Timer,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -117,6 +117,22 @@ impl PageTable for Arch {
     fn read(_virt: usize, _buf: &mut [u8]) -> bool {
         false
     }
+
+    fn kernel_slide() -> u64 {
+        0
+    }
+
+    fn describe(_line: &mut dyn FnMut(core::fmt::Arguments<'_>)) {}
+
+    fn map_area(_pages: usize) -> Option<usize> {
+        None
+    }
+
+    fn unmap_area(_virt: usize, _pages: usize) {}
+
+    fn self_test_tlb(_on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
+        Err("not available on aarch64")
+    }
 }
 
 impl Platform for Arch {
@@ -158,7 +174,7 @@ impl Platform for Arch {
         &[]
     }
 
-    fn self_test_fault() -> ! {
-        panic!("self-test fault: not available on aarch64")
+    fn self_test_fault(_test: FaultTest) -> &'static str {
+        "not available on aarch64"
     }
 }

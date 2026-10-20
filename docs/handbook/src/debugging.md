@@ -10,17 +10,17 @@ When the kernel panics, the screen turns into a report under a red
 **RADIX KERNEL PANIC** banner, and the same report goes to the serial port:
 
 ```text
-Radix panic on CPU 0 at 0.327298 s: Page fault (#PF) at 0xffffffff8011416e while writing 0xdead0000: the page is not mapped
+Radix panic on CPU 0 at 0.327298 s: Page fault (#PF) at 0xffffffffa031416e while writing 0xdead0000: the page is not mapped
   Radix 0.0.1 on x86_64, boot 1; 1 of 1 other CPUs stopped
 Registers:
      rax 00000000dead0000     rbx 0000000000000000     rcx 00000000f6d8320b     rdx 000000001fcbfbfd
      ...
 Backtrace:
-  #0  0xffffffff8011416e  <radix_arch_x86_64::Arch as radix_hal::Platform>::self_test_fault+0x3e
-  #1  0xffffffff8010dedf  radix::selftest::page_fault+0x1f
-  #2  0xffffffff8010e1aa  radix::selftest::run+0xca
-  #3  0xffffffff8010d496  radix_kernel_main+0x1476
-  #4  0xffffffff80113221  radix_arch_entry+0x1091
+  #0  0xffffffffa031416e  <radix_arch_x86_64::Arch as radix_hal::Platform>::self_test_fault+0x3e
+  #1  0xffffffffa030dedf  radix::selftest::fault+0x5f
+  #2  0xffffffffa030e1aa  radix::selftest::run+0xca
+  #3  0xffffffffa030d496  radix_kernel_main+0x1476
+  #4  0xffffffffa0313221  radix_arch_entry+0x1091
 Press a key to restart; the log is kept in memory for the next boot.
 ```
 
@@ -35,6 +35,15 @@ Read it from the top:
 - **Backtrace** lists the functions on the stack, innermost first. Frame
   #0 is where the fault happened; each later frame is the function that
   called the one above it.
+
+The kernel runs at a random address on every boot (KASLR), so the same
+function has a different address each time; the `Layout:` line near the
+top of the boot log says where everything was. The names in the
+backtrace are right regardless. Two messages point at memory bugs:
+`the kernel stack overflowed` (in a double fault) means a stack ran into
+its guard page, and `heap corruption:` means the heap found an object
+damaged after it was freed, or freed twice. `radix-debug(7)` explains
+both.
 
 Below the report the screen shows the most recent log messages, which often
 explain what the kernel was doing. Press a key to restart. To photograph
@@ -77,12 +86,13 @@ kdb> cpus
 4 CPUs, interrupts by xAPIC, timer at 100 Hz:
   cpu0: APIC ID 0, boot CPU, online, 24 timer interrupts, 0 pings
   ...
-kdb> sym 0xffffffff8010dedf
-0xffffffff8010dedf is radix::selftest::page_fault+0x1f
+kdb> sym 0xffffffffa030dedf
+0xffffffffa030dedf is radix::selftest::fault+0x5f
 ```
 
-`help` lists the commands: the log, trace points, CPUs, the memory map,
-ACPI tables, backtraces, registers, memory dumps and symbol lookups.
+`help` lists the commands: the log, trace points, CPUs, the memory map
+and the memory manager's state (`mem`, `heap`), ACPI tables, backtraces,
+registers, memory dumps and symbol lookups.
 `kdb` also stops at breakpoints and after a panic. `continue` leaves it.
 
 ## Debugging with GDB
@@ -97,7 +107,8 @@ gdb -x out/qemu/radix.gdb     # terminal 2
 GDB stops at `radix_arch_entry`, the kernel's first Rust function, with the
 kernel's symbols loaded. From there `break`, `next`, `step`, `bt` and
 `print` work as usual; `--debug` builds the kernel without optimisation so
-stepping follows the source.
+stepping follows the source. `--gdb` boots the kernel with `nokaslr`, so
+it runs at the addresses its symbols name.
 
 ## Trace points
 

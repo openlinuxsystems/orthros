@@ -1,12 +1,19 @@
 //! Radix, the OrthrOS kernel.
 //!
-//! Phase 1 brings the machine up: the architecture crate boots the CPU and
-//! calls [`radix_kernel_main`], which brings up the consoles (serial, the
-//! framebuffer, and the crash log kept in RAM across a restart), reports the
-//! memory map, starts the interrupt controllers and timers, starts every
-//! other CPU and checks that each one takes timer interrupts and answers
-//! IPIs. A panic stops the other CPUs and shows a full-screen report with a
-//! symbolized backtrace; `kdb` debugs the kernel over the serial port.
+//! The architecture crate boots the CPU, moves the kernel to a random
+//! address, builds its page tables and calls [`radix_kernel_main`], which
+//! brings up the consoles (serial, the framebuffer, and the crash log kept
+//! in RAM across a restart), reports the memory map and the address-space
+//! layout, starts the interrupt controllers, timers and the frame
+//! allocator (Phase 2, `radix-mm`), starts every other CPU and checks that
+//! each one takes timer interrupts and answers IPIs. A panic stops the
+//! other CPUs and shows a full-screen report with a symbolized backtrace;
+//! `kdb` debugs the kernel over the serial port.
+//!
+//! Memory comes from `radix_mm::HEAP` with explicit flags: the global
+//! allocator refuses every request (ADR 0017), and `alloc` is built without
+//! its infallible APIs, so every allocation states its context and handles
+//! failure.
 //!
 //! Everything here is independent of the processor architecture: hardware
 //! is reached only through the `radix-hal` traits, implemented by
@@ -22,6 +29,8 @@
 #![no_main]
 #![deny(unsafe_code)]
 
+extern crate alloc;
+
 mod console;
 mod crashlog;
 mod kdb;
@@ -29,6 +38,7 @@ mod panic;
 mod report;
 mod selftest;
 mod symbols;
+mod work;
 
 #[cfg(target_arch = "aarch64")]
 use radix_arch_aarch64::Arch;
@@ -36,9 +46,15 @@ use radix_arch_aarch64::Arch;
 use radix_arch_x86_64::Arch;
 
 use radix_hal::cmdline::CommandLine;
-use radix_hal::{BootParams, Cpu, InterruptController, Ipi, Platform, Smp, Timer};
+use radix_hal::{BootParams, Cpu, InterruptController, Ipi, PageTable, Platform, Smp, Timer};
 use radix_klog::{Level, error, info, warn};
+use radix_mm::{Corruption, ExplicitOnly, HEAP};
 use radix_sync::Once;
+
+/// The global allocator refuses every request: allocations go through
+/// `HEAP.with(flags)` instead.
+#[global_allocator]
+static GLOBAL: ExplicitOnly = ExplicitOnly;
 
 /// Kernel settings from the command line.
 #[derive(Clone, Copy, Debug)]
@@ -110,7 +126,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 1)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (OrthrOS Phase 2)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -120,10 +136,13 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     let _ =
         BOOT.set(BootSummary { memory_map: params.memory_map, reservations: params.reservations });
     report::memory(&params);
+    Arch::describe(&mut |args| info!("{args}"));
     console::report();
     crashlog::report_previous();
 
+    HEAP.set_corruption_handler(on_heap_corruption);
     Arch::init(&params);
+    report::frames();
     if settings.kdb {
         Arch::set_breakpoint_handler(kdb::on_breakpoint);
     }
@@ -153,10 +172,20 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     idle()
 }
 
-/// Where the other CPUs start, with interrupts off.
-fn ap_main(_index: usize) -> ! {
+/// Where the other CPUs start, with interrupts off. They sleep, running
+/// the jobs [`work`] posts.
+fn ap_main(index: usize) -> ! {
     Arch::enable_interrupts();
-    idle()
+    loop {
+        work::run_pending(index);
+        Arch::wait_for_interrupt();
+    }
+}
+
+/// The heap found damage it could not explain: the kernel cannot trust its
+/// memory any more.
+fn on_heap_corruption(corruption: &Corruption) {
+    panic!("{corruption}");
 }
 
 /// Sleeps between interrupts forever.

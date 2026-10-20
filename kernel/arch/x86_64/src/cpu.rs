@@ -128,6 +128,77 @@ pub mod feature {
     pub fn hypervisor() -> bool {
         cpuid(1, 0).ecx & (1 << 31) != 0
     }
+
+    /// Structured extended features (CPUID 7, subleaf 0), EBX.
+    fn leaf7_ebx() -> u32 {
+        if super::max_leaf() >= 7 { cpuid(7, 0).ebx } else { 0 }
+    }
+
+    /// Process-context identifiers (CPUID 1, ECX bit 17).
+    pub fn pcid() -> bool {
+        cpuid(1, 0).ecx & (1 << 17) != 0
+    }
+
+    /// Supervisor-mode execution prevention (CPUID 7, EBX bit 7).
+    pub fn smep() -> bool {
+        leaf7_ebx() & (1 << 7) != 0
+    }
+
+    /// Supervisor-mode access prevention (CPUID 7, EBX bit 20).
+    pub fn smap() -> bool {
+        leaf7_ebx() & (1 << 20) != 0
+    }
+
+    /// The `rdrand` instruction (CPUID 1, ECX bit 30).
+    pub fn rdrand() -> bool {
+        cpuid(1, 0).ecx & (1 << 30) != 0
+    }
+
+    /// The `rdseed` instruction (CPUID 7, EBX bit 18).
+    pub fn rdseed() -> bool {
+        leaf7_ebx() & (1 << 18) != 0
+    }
+
+    /// 1 GiB pages (CPUID 0x80000001, EDX bit 26).
+    pub fn huge_pages() -> bool {
+        super::max_extended_leaf() >= 0x8000_0001 && cpuid(0x8000_0001, 0).edx & (1 << 26) != 0
+    }
+}
+
+/// A random number from the CPU's generator (`rdseed`, else `rdrand`), if
+/// it has one and it delivers.
+pub fn hardware_random() -> Option<u64> {
+    let try_instruction = |seed: bool| {
+        for _ in 0..16 {
+            let (value, ok): (u64, u8);
+            // SAFETY: the caller checked CPUID for the instruction; it only
+            // returns a number and sets the carry flag.
+            unsafe {
+                if seed {
+                    asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
+                } else {
+                    asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
+                }
+            }
+            if ok != 0 {
+                return Some(value);
+            }
+        }
+        None
+    };
+    let seeded = if feature::rdseed() { try_instruction(true) } else { None };
+    seeded.or_else(|| if feature::rdrand() { try_instruction(false) } else { None })
+}
+
+/// 64 random bits: the hardware generator mixed with the time-stamp
+/// counter, or the counter alone on CPUs without a generator.
+pub fn random_u64() -> u64 {
+    let tsc = rdtsc();
+    // A 64-bit finaliser (splitmix64) spreads the counter's low bits.
+    let mut x = hardware_random().unwrap_or(0) ^ tsc.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }
 
 /// Model-specific register numbers.
@@ -246,10 +317,41 @@ pub fn invlpg(addr: usize) {
     unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
 }
 
-/// Flushes all non-global TLB entries by reloading CR3.
+/// Flushes the non-global TLB entries of the current address space by
+/// reloading CR3.
 pub fn flush_tlb() {
-    // SAFETY: reloading the current CR3 keeps the same mappings.
+    // SAFETY: reloading the current CR3 keeps the same mappings; bit 63
+    // (keep the TLB) is never set in the value CR3 reads back.
     unsafe { write_cr3(cr3()) };
+}
+
+/// Flushes every TLB entry, global ones and those of every PCID, by
+/// toggling CR4.PGE (or reloading CR3 when global pages are off).
+pub fn flush_tlb_all() {
+    let cr4 = cr4();
+    if cr4 & (1 << 7) != 0 {
+        // SAFETY: clearing and setting PGE again changes no mapping; the
+        // SDM specifies that either write flushes the whole TLB.
+        unsafe {
+            write_cr4(cr4 & !(1 << 7));
+            write_cr4(cr4);
+        }
+    } else {
+        flush_tlb();
+    }
+}
+
+/// Lets the kernel touch user pages despite SMAP (sets RFLAGS.AC). Only
+/// for code that means to, such as the SMAP self-test.
+pub fn stac() {
+    // SAFETY: setting AC only relaxes SMAP checks for this CPU.
+    unsafe { asm!("stac", options(nomem, nostack)) };
+}
+
+/// Undoes [`stac`].
+pub fn clac() {
+    // SAFETY: clearing AC only restores SMAP checks.
+    unsafe { asm!("clac", options(nomem, nostack)) };
 }
 
 /// Reads the time-stamp counter.

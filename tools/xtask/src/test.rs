@@ -19,7 +19,7 @@ use crate::config::{Firmware, Media};
 use crate::image::{self, ImageSpec};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
-use crate::{Args, Ctx, Error, Result, VERSION, kernel, screen};
+use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen};
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
 const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -38,6 +38,8 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-klog",
     "radix-ksyms",
     "radix-microcode",
+    "radix-mm",
+    "radix-relocs",
     "radix-sync",
 ];
 
@@ -69,8 +71,24 @@ pub struct Case {
     image: TestImage,
     /// A CPU model to emulate (without KVM) instead of the host's.
     cpu_model: Option<&'static str>,
+    /// More QEMU arguments.
+    qemu: &'static [&'static str],
     script: fn(&mut Vm, &Case) -> Result<(), String>,
 }
+
+/// Two NUMA nodes of 512 MiB and two CPUs each, 21 apart (with `-m 1G`).
+const TWO_NODES: &[&str] = &[
+    "-object",
+    "memory-backend-ram,id=m0,size=512M",
+    "-object",
+    "memory-backend-ram,id=m1,size=512M",
+    "-numa",
+    "node,nodeid=0,cpus=0-1,memdev=m0",
+    "-numa",
+    "node,nodeid=1,cpus=2-3,memdev=m1",
+    "-numa",
+    "dist,src=0,dst=1,val=21",
+];
 
 /// The CPU the microcode test emulates: an Intel Skylake client part,
 /// signature 0x506e3.
@@ -91,6 +109,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: boot,
     },
     Case {
@@ -104,6 +123,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: boot,
     },
     Case {
@@ -117,19 +137,21 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: boot_xapic,
     },
     Case {
         name: "bios-cdrom",
-        about: "4 CPUs boot under BIOS from CD-ROM",
+        about: "4 CPUs boot under BIOS from CD-ROM, without KASLR and PCIDs",
         firmware: Firmware::Bios,
         media: Media::Cdrom,
-        cmdline: "qemu-exit",
+        cmdline: "qemu-exit nokaslr nopcid",
         cpus: 4,
         memory: "1G",
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: boot,
     },
     Case {
@@ -143,6 +165,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: screen_log,
     },
     Case {
@@ -156,6 +179,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: page_fault,
     },
     Case {
@@ -170,6 +194,7 @@ pub const CASES: &[Case] = &[
         reboot: true,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: crash_reboot,
     },
     Case {
@@ -184,6 +209,7 @@ pub const CASES: &[Case] = &[
         reboot: true,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: crash_reboot,
     },
     Case {
@@ -197,7 +223,78 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
+        qemu: &[],
         script: kdb,
+    },
+    Case {
+        name: "mm-stress",
+        about: "4 CPUs on 2 NUMA nodes stress the heap and the mapping window without leaks",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=mm-stress",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: TWO_NODES,
+        script: mm_stress,
+    },
+    Case {
+        name: "tlb",
+        about: "TLB shootdowns and address-space switches are seen by all 4 CPUs",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=tlb",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: tlb,
+    },
+    Case {
+        name: "stack-overflow",
+        about: "a kernel stack overflow hits its guard page and panics saying so",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=stack-overflow",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: stack_overflow,
+    },
+    Case {
+        name: "smep",
+        about: "SMEP stops the kernel from running code in a user page",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=smep",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: smep,
+    },
+    Case {
+        name: "smap",
+        about: "SMAP stops the kernel from reading a user page",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=smap",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: smap,
     },
     Case {
         name: "microcode",
@@ -210,6 +307,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Microcode,
         cpu_model: Some(MICROCODE_CPU),
+        qemu: &[],
         script: microcode,
     },
 ];
@@ -233,8 +331,11 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         None if selected.is_empty() => (true, true),
         None | Some("boot") => (false, true),
         Some("unit") if selected.is_empty() => (true, false),
-        Some("unit") => crate::bail!("--case selects boot tests; it cannot be used with `unit`"),
-        Some(other) => crate::bail!("unknown test suite `{other}`; use `unit` or `boot`"),
+        Some("kani") if selected.is_empty() => return kani(ctx),
+        Some(suite @ ("unit" | "kani")) => {
+            crate::bail!("--case selects boot tests; it cannot be used with `{suite}`")
+        }
+        Some(other) => crate::bail!("unknown test suite `{other}`; use `unit`, `boot` or `kani`"),
     };
     let cases: Vec<&Case> = if selected.is_empty() {
         CASES.iter().collect()
@@ -274,6 +375,36 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
         cmd.args(["-p", library]);
     }
     process::run(ctx, &mut cmd)
+}
+
+/// The kernel libraries with Kani proof harnesses (ADR 0019).
+pub const PROVED_LIBRARIES: &[&str] = &["radix-mm"];
+
+/// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
+/// so plain `ob test` leaves them to this suite (and to their CI job).
+fn kani(ctx: &Ctx) -> Result<()> {
+    let installed = doctor::kani_version();
+    match installed.as_deref() {
+        Some(version) if version == doctor::KANI_VERSION => {}
+        Some(version) => {
+            return Err(Error::new(format!(
+                "Kani {version} is installed, but the proofs are checked with {}",
+                doctor::KANI_VERSION
+            ))
+            .hint(doctor::kani_install()));
+        }
+        None => return Err(Error::new("Kani is not installed").hint(doctor::kani_install())),
+    }
+    for library in PROVED_LIBRARIES {
+        step(&format!("Checking the Kani proofs of {library}"));
+        let mut cmd = kernel::cargo(ctx, "kani");
+        // Kani builds with its own toolchain, so it gets a directory of its
+        // own instead of sharing the kernel's.
+        cmd.arg("--target-dir").arg(ctx.target.join("kani"));
+        cmd.args(["-p", library, "--output-format", "terse"]);
+        process::run(ctx, &mut cmd)?;
+    }
+    Ok(())
 }
 
 /// Made-up microcode: an update for the emulated CPU and one for another.
@@ -428,7 +559,7 @@ fn run_case(
         reboot: case.reboot,
         gdb: false,
         qmp: Some(qmp),
-        extra: Vec::new(),
+        extra: case.qemu.iter().map(|arg| arg.to_string()).collect(),
     };
     let mut vm = Vm::start(ctx, &machine, dir, case.name, timeout)?;
     let result = (case.script)(&mut vm, case);
@@ -727,17 +858,27 @@ fn screen_shows(screen: &[String], needles: &[&str]) -> Result<(), String> {
 
 // ---- The test scripts ----
 
-/// The checks every normal boot passes, in the order the kernel logs them.
+/// The checks every normal boot passes, in the order the kernel logs them,
+/// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 1)"))?;
+    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 2)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
+    if case.cmdline.split_ascii_whitespace().any(|flag| flag == "nokaslr") {
+        vm.expect("KASLR: off (nokaslr)")?;
+    } else {
+        vm.expect("KASLR: kernel moved by 0x")?;
+    }
+    vm.expect("Layout: kernel at 0x")?;
+    vm.expect("Paging: W^X holds")?;
     vm.expect("CPU: ")?;
     vm.expect("ACPI: RSDP")?;
     vm.expect("ACPI:   APIC at ")?;
+    vm.expect("Memory: frame allocator took ")?;
     vm.expect("APIC: ")?;
     vm.expect("Time: TSC at ")?;
+    vm.expect(" in the frame allocator's zones:")?;
     let cpus = case.cpus;
     vm.expect(&format!("CPUs: {cpus} of {cpus} online:"))?;
     for cpu in 0..cpus {
@@ -747,21 +888,38 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     if cpus > 1 {
         vm.expect(&format!("IPI: all {} other CPUs answered a ping", cpus - 1))?;
     }
-    vm.expect("Boot complete.")
+    Ok(())
+}
+
+/// Waits for the end of boot and checks that self-test `name` passed.
+fn selftest_passed(vm: &mut Vm, name: &str) -> Result<(), String> {
+    vm.expect("Boot complete.")?;
+    let log = vm.log();
+    if log.contains(&format!("selftest {name}: passed")) {
+        return Ok(());
+    }
+    let prefix = format!("selftest {name}: ");
+    let said: Vec<&str> = log.lines().filter(|line| line.contains(&prefix)).collect();
+    Err(format!("selftest {name} did not pass: {}", said.join(" | ")))
 }
 
 fn boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
     // KVM always offers x2APIC, which QEMU 8's TCG lacks, so with KVM these
     // cases cover the x2APIC path; make sure the kernel took it.
     if vm.kvm && !vm.log().contains("APIC: x2APIC mode") {
         return Err("the local APIC is not in x2APIC mode under KVM".into());
+    }
+    if case.cmdline.contains("nopcid") && !vm.log().contains("PCID off") {
+        return Err("PCIDs are in use despite nopcid".into());
     }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
 fn boot_xapic(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
     if !vm.log().contains("APIC: xAPIC mode") {
         return Err("the local APIC is not in xAPIC mode despite nox2apic".into());
     }
@@ -770,7 +928,62 @@ fn boot_xapic(vm: &mut Vm, case: &Case) -> Result<(), String> {
 
 fn screen_log(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
     vm.expect_screen(&["Timer: all 2 CPUs take timer interrupts", "Boot complete."])
+}
+
+fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    let log = vm.log();
+    for needle in ["ACPI: SRAT: 4 CPUs", "in 2 proximity domains", "ACPI: SLIT", "on 2 NUMA nodes"]
+    {
+        if !log.contains(needle) {
+            return Err(format!("the NUMA topology is not reported: no \"{needle}\""));
+        }
+    }
+    vm.expect("selftest mm-stress: ")?;
+    vm.expect(" objects allocated and ")?;
+    selftest_passed(vm, "mm-stress")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    selftest_passed(vm, "tlb")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn stack_overflow(vm: &mut Vm, _case: &Case) -> Result<(), String> {
+    vm.expect("selftest stack-overflow: recursing until the stack guard page")?;
+    vm.expect("Radix panic on CPU 0")?;
+    vm.expect("Double fault (#DF)")?;
+    vm.expect("a stack guard page: the kernel stack overflowed")?;
+    vm.expect("Backtrace:")?;
+    vm.expect("radix::selftest::recurse+0x")?;
+    vm.expect_exit(QEMU_EXIT_PANIC)
+}
+
+/// Checks a SMEP or SMAP fault: `access` names the access to the test page.
+fn user_page_fault(vm: &mut Vm, name: &str, access: &str, why: &str) -> Result<(), String> {
+    vm.expect(&format!("selftest {name}: "))?;
+    vm.expect("Radix panic on CPU 0")?;
+    vm.expect("Page fault (#PF)")?;
+    vm.expect(&format!("while {access} 0x40000000: the page does not allow this access"))?;
+    vm.expect(why)?;
+    vm.expect_exit(QEMU_EXIT_PANIC)
+}
+
+fn smep(vm: &mut Vm, _case: &Case) -> Result<(), String> {
+    user_page_fault(
+        vm,
+        "smep",
+        "executing",
+        "SMEP stopped the kernel from running code in a user page",
+    )
+}
+
+fn smap(vm: &mut Vm, _case: &Case) -> Result<(), String> {
+    user_page_fault(vm, "smap", "reading", "SMAP stopped the kernel from touching a user page")
 }
 
 fn page_fault(vm: &mut Vm, _case: &Case) -> Result<(), String> {
@@ -782,14 +995,14 @@ fn page_fault(vm: &mut Vm, _case: &Case) -> Result<(), String> {
     vm.expect("cr2 00000000dead0000")?;
     vm.expect("Backtrace:")?;
     vm.expect("self_test_fault")?;
-    vm.expect("radix::selftest::page_fault+0x")?;
+    vm.expect("radix::selftest::fault+0x")?;
     vm.expect("radix_kernel_main+0x")?;
     vm.expect("Press a key to restart")?;
     vm.expect_screen(&[
         "RADIX KERNEL PANIC",
         "Radix panic on CPU 0",
         "Page fault (#PF)",
-        "radix::selftest::page_fault+0x",
+        "radix::selftest::fault+0x",
         "Recent kernel log:",
         "Press a key to restart",
     ])?;
@@ -832,7 +1045,20 @@ fn kdb(vm: &mut Vm, _case: &Case) -> Result<(), String> {
     let names: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
     vm.kdb("help", &names)?;
     vm.kdb("cpus", &["2 CPUs", "cpu0: APIC ID", "cpu1: APIC ID", "timer interrupts"])?;
-    vm.kdb("mem", &["Memory map:", "usable", "Reserved by the kernel:", "kernel image"])?;
+    vm.kdb(
+        "mem",
+        &[
+            "Memory map:",
+            "usable",
+            "Reserved by the kernel:",
+            "kernel image",
+            "Frame allocator zones:",
+            "node 0 DMA32",
+            "KASLR: kernel moved by",
+            "Paging: W^X holds",
+        ],
+    )?;
+    vm.kdb("heap", &["Heap: ", " objects in use"])?;
     vm.kdb("acpi", &["ACPI: RSDP", "APIC"])?;
     vm.kdb("log 4", &["Boot complete."])?;
     vm.kdb("trace", &["boot.entry", "events shown"])?;
@@ -864,6 +1090,7 @@ fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // QEMU accepts the update but cannot apply it, so the revision stays.
     vm.expect(&format!("microcode: revision {MICROCODE_REVISION:#x} did not take effect"))?;
     boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
     if !vm.log().contains("(GenuineIntel, family 0x6, model 0x5e, stepping 3, microcode revision") {
         return Err("the CPU line does not show the emulated Intel CPU".into());
     }

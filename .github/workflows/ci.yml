@@ -19,6 +19,8 @@ env:
   CARGO_TERM_COLOR: always
   # Keep in step with tools/container/Containerfile and tools/xtask/src/doctor.rs.
   MDBOOK_VERSION: 0.4.52
+  # Keep in step with tools/xtask/src/doctor.rs (ADR 0019).
+  KANI_VERSION: 0.68.0
 
 jobs:
   build:
@@ -94,6 +96,38 @@ jobs:
             out/test/*.log
             out/test/*.ppm
           if-no-files-found: ignore
+
+  kani:
+    name: Kani proofs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache Kani
+        id: kani-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/bin/kani
+            ~/.cargo/bin/cargo-kani
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
+
+      - name: Install Kani
+        if: steps.kani-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo +stable install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob test kani
+        run: ./ob test kani
 
   container:
     name: Build container

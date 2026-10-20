@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use radix_hal::{Cpu, Platform};
+use radix_hal::{Cpu, PageTable, Platform};
 use radix_ksyms::{Location, Symbols};
 
 use crate::Arch;
@@ -12,9 +12,20 @@ pub fn table() -> Option<Symbols<'static>> {
     Symbols::parse(Arch::kernel_symbols())
 }
 
+/// The link address of run-time address `address`: the table holds link
+/// addresses, and KASLR moved the kernel by [`PageTable::kernel_slide`].
+pub fn link_address(address: u64) -> u64 {
+    address.wrapping_sub(Arch::kernel_slide())
+}
+
+/// The run-time address of link address `address`.
+pub fn run_address(address: u64) -> u64 {
+    address.wrapping_add(Arch::kernel_slide())
+}
+
 /// The function containing `address`.
 pub fn lookup(address: usize) -> Option<Location<'static>> {
-    table()?.lookup(address as u64)
+    table()?.lookup(link_address(address as u64))
 }
 
 /// The function a return address belongs to. A return address points after
@@ -64,7 +75,7 @@ impl Backtrace {
         let table = table();
         for (i, &address) in self.frames[..self.len].iter().enumerate() {
             let location = if i == 0 && self.exact_first {
-                table.and_then(|t| t.lookup(address as u64))
+                table.and_then(|t| t.lookup(link_address(address as u64)))
             } else {
                 lookup_return(address)
             };

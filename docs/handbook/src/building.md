@@ -78,13 +78,19 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (OrthrOS Phase 1)
+[    0.000000] Radix 0.0.1 (OrthrOS Phase 2)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:
 [    0.000000] Memory: 1017 MiB usable in 7 regions; memory map:
 ...
+[    0.000000] KASLR: kernel moved by 0x20200000 (one of 509 places, 2612 addresses patched); direct map one of 65533 places, mapping window one of 32257
+[    0.000000] Layout: kernel at 0xffffffffa0300000, direct map at 0xffff962340000000, mapping window at 0xffffd0de40000000
+[    0.000000] Paging: W^X holds: none of 1025 MiB of kernel mappings is writable and executable
+...
 [    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
+[    0.343077] Memory: 1009 MiB free of 1009 MiB in the frame allocator's zones:
+[    0.344198]   node 0 DMA32  0x000000100000-0x00003fedbfff  1009 MiB managed,  1009 MiB free,   4 MiB reserve
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online

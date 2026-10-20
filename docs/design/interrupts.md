@@ -42,7 +42,7 @@ frame. On return it restores the registers and executes `iretq`.
 | 0x20-0x2F | the 8259 PICs, remapped | spurious only (all masked); counted as a trace point |
 | 0x30 | local APIC timer | counts a tick on this CPU, EOI |
 | 0x40 | ping IPI | counts a ping, EOI |
-| 0x41 | TLB flush IPI | flushes the TLB if a mapping was removed since this CPU last did; not sent until Phase 2 |
+| 0x41 | TLB flush IPI | carries out a pending TLB shootdown (`memory.md`) |
 | 0xFE | local APIC error | reads and clears the error status, trace point |
 | 0xFF | local APIC spurious | ignored, no EOI |
 | others | nothing should send them | trace point `irq.unexpected`, EOI |
@@ -159,10 +159,14 @@ the trampoline's parameter block.
 ## Locks and interrupts
 
 `radix-sync`'s `SpinLock` does not disable interrupts. The interrupt
-handlers of Phase 1 (timer, IPIs, APIC errors) take no locks: they only
-touch atomics and the lock-free trace ring. The handlers that do take locks
+handlers (timer, IPIs including the TLB shootdown, APIC errors) take no
+locks: they only touch atomics, the TLB and the lock-free trace ring. The handlers that do take locks
 are for exceptions, which interrupt gates enter with interrupts off: `kdb`
 at a breakpoint, and the panic path. The log takes its lock with
 interrupts disabled, so a timer tick cannot interrupt a CPU that holds it,
 and the panic path's panic mode takes over locks a stopped CPU held.
-Phase 2 adds interrupt-safe locks for device interrupts.
+The memory manager takes each of its locks with interrupts disabled too,
+so an `Atomic` allocation from an interrupt handler cannot deadlock against
+the CPU it interrupted; a CPU that waits for the TLB shootdown lock, or
+for other CPUs to answer, carries out their requests meanwhile
+(`memory.md`). Device interrupts, and locks for them, come with drivers.

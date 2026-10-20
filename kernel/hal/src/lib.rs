@@ -161,6 +161,41 @@ pub trait PageTable {
     /// backed by RAM; device memory is never read, because reads can have
     /// side effects.
     fn read(virt: usize, buf: &mut [u8]) -> bool;
+
+    /// How far KASLR moved the kernel image from the address it was linked
+    /// at (0 when it did not). Symbol tables hold link addresses.
+    fn kernel_slide() -> u64;
+
+    /// Describes the address-space layout and the memory protections in
+    /// use, one line per call of `line`, for the boot report.
+    fn describe(line: &mut dyn FnMut(core::fmt::Arguments<'_>));
+
+    /// Maps `pages` pages of fresh zeroed memory, writable, at a free place
+    /// in the kernel's address space with an unmapped guard page below,
+    /// and returns the address of the first. Returns `None` when memory or
+    /// address space runs out.
+    fn map_area(pages: usize) -> Option<usize>;
+
+    /// Unmaps an area from [`PageTable::map_area`], removes it from every
+    /// CPU's TLB and frees its memory.
+    fn unmap_area(virt: usize, pages: usize);
+
+    /// Checks that TLB shootdowns reach every CPU and that switching
+    /// address spaces never uses stale TLB entries. `on_others` runs a
+    /// function on every other online CPU and returns once all have run
+    /// it. Returns what went wrong, if anything.
+    fn self_test_tlb(on_others: &dyn Fn(fn())) -> Result<(), &'static str>;
+}
+
+/// A deliberate fault for a self-test of the fault path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultTest {
+    /// Write to an address that is never mapped.
+    Unmapped,
+    /// Run code in a user page, which SMEP forbids the kernel.
+    UserCode,
+    /// Read a user page, which SMAP forbids the kernel.
+    UserData,
 }
 
 /// Register state saved when an exception or breakpoint interrupted the
@@ -237,9 +272,10 @@ pub trait Platform {
     /// `radix-ksyms`), or an empty slice.
     fn kernel_symbols() -> &'static [u8];
 
-    /// Touches an address that is never mapped, to test the fault path:
-    /// the resulting page fault panics with a full report.
-    fn self_test_fault() -> !;
+    /// Causes the fault `test` names, to test the fault path: the fault
+    /// panics with a full report. Returns, with the reason, only when this
+    /// machine cannot run the test (no SMEP or SMAP).
+    fn self_test_fault(test: FaultTest) -> &'static str;
 }
 
 /// Signature of the kernel's entry point, `radix_kernel_main`, which the

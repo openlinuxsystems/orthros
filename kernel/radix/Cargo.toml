@@ -18,6 +18,7 @@ radix-hal = { path = "../hal" }
 radix-kdb = { path = "../lib/kdb" }
 radix-klog = { path = "../lib/klog" }
 radix-ksyms = { path = "../lib/ksyms" }
+radix-mm = { path = "../mm" }
 radix-sync = { path = "../lib/sync" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

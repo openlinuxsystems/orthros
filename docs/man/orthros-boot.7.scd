@@ -6,12 +6,13 @@ orthros-boot - how OrthrOS boots, and the kernel command line
 
 # DESCRIPTION
 
-This page describes the boot path as of Phase 1 of the roadmap: the Radix
-kernel starts in the higher half of the address space, brings up its
-consoles, reads the ACPI tables, programs the interrupt controllers and
-timers, starts every CPU and reports what it found. It then idles; later
-phases continue from there. The page grows with every phase that changes
-how the system starts.
+This page describes the boot path as of Phase 2 of the roadmap: the Radix
+kernel moves itself to a random address in the higher half of the address
+space, brings up its consoles, builds its page tables, reads the ACPI
+tables, hands the machine's memory to its frame allocator and heap,
+programs the interrupt controllers and timers, starts every CPU and
+reports what it found. It then idles; later phases continue from there.
+The page grows with every phase that changes how the system starts.
 
 *radix-debug*(7) describes what happens when something goes wrong: the
 panic report, the crash log, the kernel debugger and trace points.
@@ -59,30 +60,40 @@ _/system/share/licenses/_
   address 1 MiB, in protected mode with paging off, with the Multiboot2
   magic value in EAX and the address of the boot information in EBX.
 . The trampoline checks that the CPU supports 64-bit long mode (it halts
-  silently if not), maps the first 4 GiB of physical memory three times
-  with 2 MiB pages (at 0, at the direct map and, for the first GiB, at the
-  kernel's link address), enables long mode and calls *radix_arch_entry*
-  in the higher half.
+  silently if not), maps the first 4 GiB of physical memory with 2 MiB
+  pages at 0 and at 0xFFFF800000000000, and the first GiB at the kernel's
+  link address, and enables long mode. Unless the *nokaslr* flag is given
+  it then moves the kernel (see *KASLR* below): it picks a random slide,
+  maps the image a second time that much higher, and adds the slide to
+  every absolute address in the image, using the relocation table *ob
+  build* wrote into it. It calls *radix_arch_entry* at the kernel's new
+  address.
 . *radix_arch_entry*, the first Rust function, belongs to the x86-64
   layer. It starts the serial port, loads the boot CPU's GDT, TSS and IDT
   (so every exception from here on gives a panic report), checks the magic
   value and parses the boot information. It starts recording trace points
-  if the *trace* flag is given, sets aside the memory the kernel must not
+  if the *trace* flag is given, picks random places for the direct map
+  and the mapping window, sets aside the memory the kernel must not
   reuse, applies early microcode, then replaces the trampoline's page
-  tables with the kernel's own (see *Address space* below) and calls
+  tables with the kernel's own (see *Address space* below), checks that
+  no page is both writable and executable, and calls
   *radix_kernel_main*.
 . *radix_kernel_main* is architecture-independent. It starts the
   framebuffer console, which replays everything logged so far, and the
   crash log, then reports the version, boot loader, firmware, command
-  line, memory map and the kernel's reservations. If memory held the log
-  of a previous boot, it shows how that boot ended and its last lines.
+  line, memory map, the kernel's reservations and the address-space
+  layout. If memory held the log of a previous boot, it shows how that
+  boot ended and its last lines.
 . The x86-64 layer then identifies the CPU, reads the ACPI tables (RSDP,
-  RSDT or XSDT, MADT, FADT, HPET and MCFG), masks the legacy 8259 PICs,
-  enables the local APIC in x2APIC mode where available (xAPIC
-  otherwise), masks every I/O APIC input, and calibrates the time-stamp
-  counter and the local APIC timer against the HPET, the ACPI PM timer or
-  the 8254 PIT, in that order of preference. The periodic timer
-  interrupt then runs at 100 Hz.
+  RSDT or XSDT, MADT, FADT, HPET, MCFG, and the SRAT and SLIT that
+  describe NUMA nodes), masks the legacy 8259 PICs, enables the local
+  APIC in x2APIC mode where available (xAPIC otherwise), and masks every
+  I/O APIC input. It hands the free RAM to the frame allocator (see
+  *MEMORY* below), from which the kernel heap and everything after it
+  allocate. It calibrates the time-stamp counter and the local APIC
+  timer against the HPET, the ACPI PM timer or the 8254 PIT, in that
+  order of preference. The periodic timer interrupt then runs at
+  100 Hz, and the kernel reports the frame allocator's zones.
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
@@ -108,20 +119,49 @@ kernel started; messages before timer calibration show 0):
 
 ## Address space
 
-The kernel's page tables map:
+The kernel's page tables map, in the higher half:
 
-- the kernel image at 0xFFFFFFFF80000000 plus its physical address, with
-  text read-only and executable, read-only data and the symbol table
-  read-only, and data writable but not executable;
-- every RAM range of the memory map at 0xFFFF800000000000 plus its
-  physical address (the direct map), not executable;
-- device registers, the framebuffer and the other CPUs' stacks in a window
-  at 0xFFFFC00000000000, on demand.
+- the kernel image at 0xFFFFFFFF80000000 plus its physical address plus
+  the KASLR slide, with 4 KiB pages: text read-only and executable,
+  read-only data and the symbol and relocation tables read-only, and
+  data writable but not executable;
+- every RAM range of the memory map in the direct map, at a random 1 GiB
+  boundary between 0xFFFF800000000000 and 0xFFFFC00000000000, plus the
+  physical address: writable but not executable, in 1 GiB pages where
+  the CPU and the range allow, 2 MiB pages next and 4 KiB pages at the
+  edges. The kernel image's own text and read-only data are read-only
+  there too;
+- the mapping window, 512 GiB at a random 1 GiB boundary between
+  0xFFFFC00000000000 and 0xFFFFE00000000000, where device registers, the
+  framebuffer and the CPUs' stacks are mapped on demand, each with an
+  unmapped guard page below it.
 
-Nothing is mapped at address 0, so a null pointer faults. Each CPU's stack
-has an unmapped guard page below it, and double faults, NMIs and machine
-checks run on separate stacks, so a stack overflow still produces a panic
-report.
+The lower half, below 0x0000800000000000, belongs to address spaces,
+which later phases give to processes. Nothing is mapped at address 0, so a
+null pointer faults.
+
+No page is ever writable and executable at once (W^X); the kernel checks
+this by walking its finished page tables and reports it at boot. Where
+the CPU has them, SMEP stops the kernel from running code in a user page,
+and SMAP from reading or writing one except where it says it means to;
+PCIDs tag TLB entries by address space, so switching between them does
+not flush the TLB (the *nopcid* flag turns that off). When the kernel
+removes a mapping that other CPUs may have cached, it sends them an
+inter-processor interrupt and waits until each has flushed it (a TLB
+shootdown).
+
+Each CPU's stack has an unmapped guard page below it, and double faults,
+NMIs and machine checks run on separate stacks, so a stack overflow still
+produces a panic report, which says that the stack overflowed.
+
+A boot reports the layout and the protections like this:
+
+```
+KASLR: kernel moved by 0x20200000 (one of 509 places, 2612 addresses patched); direct map one of 65533 places, mapping window one of 32257
+Layout: kernel at 0xffffffffa0300000, direct map at 0xffff962340000000, mapping window at 0xffffd0de40000000
+Paging: W^X holds: none of 1025 MiB of kernel mappings is writable and executable
+Paging: SMEP on, SMAP on, PCID on; direct map in 1 GiB pages
+```
 
 ## Reserved memory
 
@@ -130,7 +170,76 @@ first MiB (firmware data and the page that starts the other CPUs), the
 kernel image, the boot information, boot modules, and the 1 MiB crash log.
 The crash log goes at the first 2 MiB boundary above 4 GiB where there is
 RAM, or else at 64 MiB, so it is in the same place on every boot of the
-same machine; see *radix-debug*(7).
+same machine; see *radix-debug*(7). Until the frame allocator starts, a
+simple allocator hands out frames for page tables and stacks; those stay
+allocated, and the rest of RAM goes to the frame allocator.
+
+# KASLR
+
+Kernel address space layout randomization places the kernel at a
+different address on every boot, so that an attacker who finds a bug
+cannot rely on knowing where kernel code and data are. Three things move:
+
+- the kernel image, by a whole number of 2 MiB pages within the top GiB
+  of the address space (about 500 places);
+- the direct map, on a 1 GiB boundary (about 65,000 places);
+- the mapping window, on a 1 GiB boundary (about 32,000 places).
+
+The random numbers come from the CPU's *RDSEED* or *RDRAND* instruction,
+mixed with the time-stamp counter; CPUs without either fall back to the
+counter alone. To move the image, *ob build* links the kernel with its
+relocation records kept, lists every absolute address that points into
+the image in the image's _.krelocs_ section (format in the
+*radix-relocs* crate), and removes the records, which GRUB refuses to
+load. The trampoline adds the slide to each listed address before the
+kernel runs. A kernel built without *ob* has an empty table and stays
+where it was linked, and says so.
+
+The boot log shows the layout (see *Address space* above), and kernel
+addresses in panic reports and *kdb* are run-time addresses; symbol
+lookups subtract the slide (*radix-debug*(7)). The *nokaslr* flag keeps
+everything at fixed addresses: the image where it was linked, the direct
+map at 0xFFFF800000000000 and the mapping window at 0xFFFFC00000000000.
+*ob run --gdb* adds it, so that GDB's symbols match.
+
+# MEMORY
+
+Physical memory is managed in 4 KiB frames by a buddy allocator, which
+hands out blocks of 1 to 1024 contiguous frames (4 KiB to 4 MiB). Every
+frame has a 16-byte record, about 0.4% of RAM, which the boot log
+reports. RAM is divided into zones: each NUMA node has a *DMA32* zone,
+its RAM below 4 GiB for devices that can only address 32 bits, and a
+*Normal* zone for the rest. The ACPI SRAT says which node each range of
+RAM and each CPU belongs to, and the SLIT how far apart the nodes are;
+machines without them have one node. An allocation takes memory from the
+calling CPU's node first and falls back to the nearest other nodes.
+
+Every zone keeps a small reserve, between 64 KiB and 4 MiB, that only
+allocations made where the kernel cannot wait (interrupt handlers, code
+holding a spin lock) may take. On machines with memory above 4 GiB,
+allocations that can use it leave part of each DMA32 zone for the devices
+that need it.
+
+The kernel heap serves smaller objects from 32 size classes, 16 bytes to
+8 KiB, each a cache of slabs with a per-CPU cache of free objects in
+front, so most allocations never take a shared lock. Larger requests get
+frames of their own. Every allocation in the kernel says whether it may
+wait and which memory it needs, and running out of memory is an error the
+caller handles, never a panic. Freed objects are filled with a pattern
+that is checked when they are handed out again, so a write to freed
+memory is caught and reported as heap corruption (a panic).
+
+The boot log reports the frame allocator's zones:
+
+```
+Memory: frame allocator took 7 regions on 2 NUMA nodes, 1009 MiB free; 4068 KiB of frame records
+Memory: 1009 MiB free of 1009 MiB in the frame allocator's zones:
+  node 0 DMA32  0x000000100000-0x00001fffffff   502 MiB managed,   502 MiB free, 4020 KiB reserve
+  node 1 DMA32  0x000020000000-0x00003fedbfff   507 MiB managed,   507 MiB free, 4056 KiB reserve
+```
+
+*kdb*'s *mem* and *heap* commands show the same at any time
+(*radix-debug*(7)).
 
 # CONSOLES
 
@@ -188,6 +297,16 @@ flags and otherwise ignores them.
 *nosmp*
 	Start only the boot CPU.
 
+*nokaslr*
+	Keep the kernel, the direct map and the mapping window at fixed
+	addresses instead of random ones (see *KASLR*). For debugging; *ob
+	run --gdb* adds it.
+
+*nopcid*
+	Do not tag TLB entries with process-context identifiers (PCIDs), even
+	when the CPU has them: every switch between address spaces then
+	flushes the TLB. For debugging and for comparison.
+
 *nox2apic*
 	Drive the local APICs in xAPIC mode (registers in memory) even when
 	the CPUs support x2APIC mode (registers as MSRs). Ignored, with a
@@ -202,8 +321,9 @@ flags and otherwise ignores them.
 	Do not reserve the crash log, and do not show a previous boot's log.
 
 *selftest*=_name_
-	Run a self-test at the end of boot: *page-fault*, *crash-reboot* or
-	*breakpoint*. See *radix-debug*(7). *ob test* uses these.
+	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
+	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap* or *tlb*.
+	See *radix-debug*(7). *ob test* uses these.
 
 *qemu-exit*
 	When boot finishes, or when the kernel panics, leave QEMU through its

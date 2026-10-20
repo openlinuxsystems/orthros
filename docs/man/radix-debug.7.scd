@@ -14,15 +14,16 @@ finds it. With a serial port, or under QEMU, there is also *kdb*, a small
 kernel debugger, and GDB through QEMU's GDB stub. Trace points record
 frequent events cheaply, from the first Rust function on.
 
-This page describes all of them as of Phase 1. The kernel flags named here
+This page describes all of them as of Phase 2. The kernel flags named here
 are listed in *orthros-boot*(7).
 
 # PANIC REPORT
 
-The kernel panics when Rust code calls *panic!* or fails an assertion, and
+The kernel panics when Rust code calls *panic!* or fails an assertion,
 when the CPU raises an exception the kernel cannot handle, such as a page
-fault, a general protection fault or a double fault. The panicking CPU
-then:
+fault, a general protection fault or a double fault, and when the heap
+finds one of its objects damaged (see *HEAP CORRUPTION*). The panicking
+CPU then:
 
 . stops the other CPUs with a non-maskable interrupt;
 . writes the report to the serial port, the VGA text screen if in use, and
@@ -38,29 +39,37 @@ then:
 A report looks like this:
 
 ```
-Radix panic on CPU 0 at 0.327298 s: Page fault (#PF) at 0xffffffff8011416e while writing 0xdead0000: the page is not mapped
+Radix panic on CPU 0 at 0.327298 s: Page fault (#PF) at 0xffffffffa031416e while writing 0xdead0000: the page is not mapped
   Radix 0.0.1 on x86_64, boot 1; 1 of 1 other CPUs stopped
 Registers:
      rax 00000000dead0000     rbx 0000000000000000     rcx 00000000f6d8320b     rdx 000000001fcbfbfd
      ...
-     rip ffffffff8011416e  rflags 0000000000000246      cs 0000000000000008      ss 0000000000000010
-     cr2 00000000dead0000     cr3 0000000000331000     cr4 00000000000000a0   error 0000000000000002
+     rip ffffffffa031416e  rflags 0000000000000246      cs 0000000000000008      ss 0000000000000010
+     cr2 00000000dead0000     cr3 0000000000360000     cr4 00000000003000a0   error 0000000000000002
 Backtrace:
-  #0  0xffffffff8011416e  <radix_arch_x86_64::Arch as radix_hal::Platform>::self_test_fault+0x3e
-  #1  0xffffffff8010dedf  radix::selftest::page_fault+0x1f
-  #2  0xffffffff8010e1aa  radix::selftest::run+0xca
-  #3  0xffffffff8010d496  radix_kernel_main+0x1476
-  #4  0xffffffff80113221  radix_arch_entry+0x1091
+  #0  0xffffffffa031416e  <radix_arch_x86_64::Arch as radix_hal::Platform>::self_test_fault+0x3e
+  #1  0xffffffffa030dedf  radix::selftest::fault+0x5f
+  #2  0xffffffffa030e1aa  radix::selftest::run+0xca
+  #3  0xffffffffa030d496  radix_kernel_main+0x1476
+  #4  0xffffffffa0313221  radix_arch_entry+0x1091
 Press a key to restart; the log is kept in memory for the next boot.
 ```
 
 The first line gives the CPU, the time since boot and the message. For an
 exception the message names it and its address; a page fault also says
-which address was accessed, how, and why it failed, and points out an
-overflow into a stack guard page. A panic from Rust code is followed by
-the source location (*at* _file_:_line_:_column_). The second line names
-the kernel version, the architecture, the boot number from the crash log
-and how many other CPUs stopped.
+which address was accessed, how, and why it failed. It points out an
+overflow into a stack guard page (a stack overflow usually ends in a
+double fault, whose message then names the guard page), and a fault that
+SMEP or SMAP caused because the kernel ran code in, or touched, a page of
+the lower, user half. A panic from Rust code is followed by the source
+location (*at* _file_:_line_:_column_). The second line names the kernel
+version, the architecture, the boot number from the crash log and how
+many other CPUs stopped.
+
+Addresses in the report are where the code ran. With KASLR on, the
+kernel is somewhere else on every boot (see *orthros-boot*(7)); the
+boot log's *Layout* line says where, and the backtrace's function names
+are found by subtracting the slide.
 
 *Registers* appear after an exception: the general-purpose registers, the
 instruction pointer and flags, the code and stack segments, CR2 (the
@@ -78,6 +87,25 @@ are shown.
 The restart keeps memory: the kernel tries the reset register named in
 the ACPI FADT, then the keyboard controller's reset line, then the chipset
 reset control register (port 0xCF9), then a triple fault.
+
+# HEAP CORRUPTION
+
+The kernel heap fills the first two words of every free object with a
+marker, the index of the next free object and a poison pattern, and
+checks them when it hands the object out again. A mismatch means the
+memory was written after it was freed, or the slab's list of free objects
+was damaged. A free is also checked: freeing an object twice, or freeing
+an address that is not the start of an object, is caught there. The heap
+then stops using the object (or the whole slab) and the kernel panics
+with a message such as
+
+```
+heap corruption: a write after free to the 64-byte object at 0xffff962340a1c040
+```
+
+whose backtrace shows the allocation or free that found the damage, not
+the code that caused it. *kdb*'s *heap* command counts the damaged
+objects found so far.
 
 # CRASH LOG
 
@@ -173,7 +201,15 @@ with *0x*. Both may contain *\_* separators, as in *ffffffff_80100000*.
 	inter-processor interrupts received.
 
 *mem*
-	Show the firmware's memory map and the kernel's reservations.
+	Show the firmware's memory map, the kernel's reservations, the frame
+	allocator's zones with their free memory and reserves, and the
+	address-space layout (KASLR, W^X, SMEP, SMAP and PCIDs), as at boot.
+
+*heap*
+	Show the kernel heap's totals (objects in use, objects cached in the
+	per-CPU magazines, memory in slabs and in large blocks, failed
+	requests, damaged objects found) and, for each size class with
+	slabs, its slabs and objects.
 
 *acpi*
 	List the ACPI tables and what the kernel read from them.
@@ -193,7 +229,8 @@ with *0x*. Both may contain *\_* separators, as in *ffffffff_80100000*.
 
 *sym* _address_|_name_
 	Show the function containing _address_, as _function_+_offset_, or the
-	address of the function called _name_.
+	address of the function called _name_. Addresses are run-time
+	addresses, with the KASLR slide included.
 
 *panic*
 	Panic deliberately, to try the panic path. *kdb* runs again after the
@@ -239,6 +276,39 @@ complete.* *ob test* boots each of them.
 	without it the breakpoint is logged and skipped. Either way the
 	kernel must carry on after it.
 
+*mm-stress*
+	Stresses the memory manager on every CPU at once: each runs 12.5
+	million random heap operations (sizes from 1 byte to 64 KiB, both
+	allocation contexts, zeroed and not), filling every object with a
+	pattern and checking it before the free, then maps 200 areas in the
+	mapping window, checks they read as zero, and unmaps them, which
+	shoots each down on every CPU. With 4 CPUs that is over 20 million
+	objects allocated and freed. It then checks that every frame is back
+	in the frame allocator, that the free lists are consistent and that
+	no object was damaged, and reports *selftest mm-stress: passed*.
+
+*stack-overflow*
+	Recurses until the boot CPU's stack runs into its guard page. The
+	panic report must say that the kernel stack overflowed.
+
+*smep*
+	Maps a page of code in the lower, user half and calls it. With SMEP
+	the call faults and the panic report says that SMEP stopped it; on a
+	CPU without SMEP the test is skipped with a warning.
+
+*smap*
+	Maps a page of data in the lower half and reads it. With SMAP the
+	read faults and the panic report says that SMAP stopped it; on a CPU
+	without SMAP the test is skipped with a warning.
+
+*tlb*
+	Changes a kernel mapping while the other CPUs have it cached and
+	checks that each sees the change after the TLB shootdown; then runs
+	two address spaces, which map the same lower-half address to
+	different frames, on several CPUs at once, and changes one while it
+	is not running. Every CPU must always see the right frame, with and
+	without PCIDs. Reports *selftest tlb: passed*.
+
 # TRACE POINTS
 
 A trace point is a named place in the kernel code that records an event
@@ -250,7 +320,7 @@ memory read.
 
 Boot with the *trace* flag to record from the start of *radix_arch_entry*,
 or type *trace on* in *kdb*; *trace* in *kdb* prints the ring, oldest
-first. Times before timer calibration show as 0. Phase 1 has these trace
+first. Times before timer calibration show as 0. Phase 2 has these trace
 points:
 
 [[ *Name*
@@ -306,8 +376,9 @@ second terminal run
 gdb -x out/qemu/radix.gdb
 ```
 
-The script loads the kernel's symbols from _out/sysroot/boot/radix_,
-connects to QEMU, sets a hardware breakpoint on *radix_arch_entry*, the
+*ob run --gdb* adds the *nokaslr* flag, so the kernel runs at the
+addresses it was linked at and GDB's symbols match. The script loads the
+kernel's symbols from _out/sysroot/boot/radix_, connects to QEMU, sets a hardware breakpoint on *radix_arch_entry*, the
 first Rust function, and continues. A hardware breakpoint is used because
 the firmware and GRUB overwrite memory, which removes software
 breakpoints set before the kernel is loaded. From there the usual GDB
@@ -326,7 +397,9 @@ After linking, *ob build* reads the function symbols from the ELF symbol
 table, demangles them, and writes them into the section in place; nothing
 else in the image moves. A kernel linked without *ob* has an empty table,
 and its backtraces show bare addresses. The table holds symbols in the
-kernel's higher-half text only.
+kernel's higher-half text only, at their link addresses; with KASLR the
+kernel subtracts its slide from an address before looking it up, and adds
+it to the address of a symbol it found by name.
 
 All integers are little-endian:
 

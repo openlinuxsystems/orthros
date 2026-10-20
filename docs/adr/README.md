@@ -23,4 +23,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0014](0014-early-microcode-from-an-image-module.md) | Early microcode comes from a boot module added at image build time | Accepted |
 | [0015](0015-console-font-spleen.md) | The framebuffer console uses the Spleen fonts | Accepted |
 | [0016](0016-kernel-symbol-table-in-the-image.md) | The kernel carries its own symbol table, written in after linking | Accepted |
+| [0017](0017-explicit-allocation-context.md) | Every kernel allocation states its context, and the global allocator refuses | Accepted |
+| [0018](0018-kaslr-with-a-post-link-relocation-table.md) | KASLR moves the kernel at boot using a relocation table written after linking | Accepted |
+| [0019](0019-verifying-the-memory-manager.md) | The memory manager is verified with Kani proofs and proptest properties | Accepted |
+| [0020](0020-zones-nodes-and-address-space-layout.md) | Physical memory is managed in per-node DMA32 and Normal zones with per-frame records | Accepted |
 | [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted |

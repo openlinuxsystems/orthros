@@ -1,0 +1,22 @@
+[package]
+name = "radix-mm"
+description = "The Radix memory manager: frame allocator, kernel heap and virtual-memory bookkeeping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-sync = { path = "../lib/sync" }
+
+[dev-dependencies]
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

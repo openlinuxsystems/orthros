@@ -33,6 +33,16 @@ pub const FLAGS: &[Flag] = &[
     },
     Flag { name: "nosmp", value: None, summary: "start only the boot CPU" },
     Flag {
+        name: "nokaslr",
+        value: None,
+        summary: "keep the kernel, the direct map and the mapping window at fixed addresses",
+    },
+    Flag {
+        name: "nopcid",
+        value: None,
+        summary: "do not tag TLB entries with process-context identifiers (PCIDs)",
+    },
+    Flag {
         name: "nox2apic",
         value: None,
         summary: "drive the local APIC in xAPIC mode even if x2APIC is available",
@@ -50,7 +60,8 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "selftest",
         value: Some("name"),
-        summary: "run a self-test at the end of boot: page-fault, crash-reboot or breakpoint",
+        summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
+                  mm-stress, stack-overflow, smep, smap or tlb",
     },
     Flag {
         name: "qemu-exit",
@@ -60,7 +71,16 @@ pub const FLAGS: &[Flag] = &[
 ];
 
 /// The self-tests `selftest=name` runs; radix-debug(7) describes them.
-pub const SELFTESTS: &[&str] = &["page-fault", "crash-reboot", "breakpoint"];
+pub const SELFTESTS: &[&str] = &[
+    "page-fault",
+    "crash-reboot",
+    "breakpoint",
+    "mm-stress",
+    "stack-overflow",
+    "smep",
+    "smap",
+    "tlb",
+];
 
 /// A parsed view of the command line.
 #[derive(Clone, Copy, Debug)]

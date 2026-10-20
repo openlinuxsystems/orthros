@@ -3,7 +3,8 @@
 //! Phase 1 needs the tables that describe the CPUs, interrupt controllers
 //! and timers: the RSDP and its root table (RSDT or XSDT), the MADT (APIC),
 //! the HPET table, the MCFG (PCI Express configuration space) and the FADT
-//! (for the ACPI timer, the reset register and legacy devices). Everything
+//! (for the ACPI timer, the reset register and legacy devices). Phase 2
+//! adds the NUMA topology: the SRAT and the SLIT. Everything
 //! here works on byte slices and is unit-tested on the build host; the
 //! kernel supplies a [`Memory`] that maps physical addresses for it. The
 //! AML interpreter, which later phases need, is a separate decision (ADR
@@ -17,9 +18,11 @@
 
 mod fadt;
 mod madt;
+mod numa;
 
 pub use fadt::{Fadt, GenericAddress};
 pub use madt::{Madt, MadtEntry};
+pub use numa::{Slit, Srat, SratEntry};
 
 use core::fmt;
 

@@ -298,6 +298,6 @@ pub fn on_tick() {
     // No trace point here: at 100 Hz on every CPU it would push everything
     // else out of the trace ring within seconds.
     percpu::current().ticks.fetch_add(1, Ordering::Relaxed);
-    crate::paging::catch_up_tlb();
+    crate::paging::serve_shootdown();
     apic::end_of_interrupt();
 }

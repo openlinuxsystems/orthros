@@ -23,6 +23,7 @@ mod cpu;
 mod entry;
 mod interrupts;
 mod io;
+mod kaslr;
 mod memory;
 mod microcode;
 mod paging;
@@ -30,6 +31,7 @@ mod percpu;
 mod power;
 mod serial;
 mod smp;
+mod space;
 mod time;
 mod vga;
 
@@ -38,8 +40,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, Fault, InterruptController, Ipi, PageTable, Platform, Smp,
-    Timer,
+    BootParams, Cpu, CpuInfo, CpuLocal, Fault, FaultTest, InterruptController, Ipi, PageTable,
+    Platform, Smp, Timer,
 };
 
 /// The x86-64 implementation of the HAL traits.
@@ -210,6 +212,51 @@ impl PageTable for Arch {
     fn read(virt: usize, buf: &mut [u8]) -> bool {
         paging::read(virt, buf)
     }
+
+    fn kernel_slide() -> u64 {
+        kaslr::slide()
+    }
+
+    fn describe(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
+        let (places, moved) = kaslr::statistics();
+        let (map_places, window_places) = memory::layout_places();
+        match kaslr::status() {
+            kaslr::Status::On => line(format_args!(
+                "KASLR: kernel moved by {:#x} (one of {places} places, {moved} addresses \
+                 patched); direct map one of {map_places} places, mapping window one of \
+                 {window_places}",
+                kaslr::slide()
+            )),
+            kaslr::Status::Disabled => line(format_args!("KASLR: off (nokaslr)")),
+            kaslr::Status::NoTable => line(format_args!(
+                "KASLR: kernel not moved, the image has no relocation table; direct map one of \
+                 {map_places} places, mapping window one of {window_places}"
+            )),
+            kaslr::Status::NoRoom => line(format_args!(
+                "KASLR: kernel not moved, the image is too large; direct map one of \
+                 {map_places} places, mapping window one of {window_places}"
+            )),
+        }
+        line(format_args!(
+            "Layout: kernel at {:#x}, direct map at {:#x}, mapping window at {:#x}",
+            memory::kernel_base() + (1 << 20),
+            memory::direct_map(),
+            memory::window()
+        ));
+        paging::describe(line);
+    }
+
+    fn map_area(pages: usize) -> Option<usize> {
+        paging::map_area(pages).ok()
+    }
+
+    fn unmap_area(virt: usize, pages: usize) {
+        paging::unmap_area(virt, pages);
+    }
+
+    fn self_test_tlb(on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
+        space::self_test(on_others)
+    }
 }
 
 /// Physical address of the crash log region, or 0.
@@ -260,6 +307,30 @@ impl Platform for Arch {
         apic::disable_pics();
         apic::init(madt, !flags.has("nox2apic"));
         smp::discover_cpus();
+        memory::start_frame_allocator(
+            acpi.and_then(|acpi| acpi.srat.as_ref()),
+            acpi.and_then(|acpi| acpi.slit.as_ref()),
+        );
+        if let Some(report) = memory::handover() {
+            let nodes = radix_mm::FRAMES.nodes();
+            let plural = |count: usize| if count == 1 { "" } else { "s" };
+            radix_klog::info!(
+                "Memory: frame allocator took {} region{} on {} NUMA node{}, {} MiB free; {} KiB \
+                 of frame records",
+                report.regions,
+                plural(report.regions),
+                nodes,
+                plural(nodes),
+                (report.free_frames * memory::PAGE) >> 20,
+                report.record_bytes / 1024
+            );
+            if report.skipped_bytes > 0 {
+                radix_klog::warn!(
+                    "Memory: {} MiB of RAM left out: too many regions",
+                    report.skipped_bytes >> 20
+                );
+            }
+        }
         apic::init_cpu(madt, smp::acpi_uid(0));
         if let Some(madt) = madt {
             apic::init_ioapics(madt);
@@ -374,13 +445,42 @@ impl Platform for Arch {
     }
 
     #[inline(never)]
-    fn self_test_fault() -> ! {
+    fn self_test_fault(test: FaultTest) -> &'static str {
         radix_klog::tracepoint!("selftest.fault");
-        // SAFETY: deliberately writes to an address that is never mapped;
-        // the page fault handler panics and never returns here.
-        unsafe {
-            core::arch::asm!("mov qword ptr [{}], 0x5a", in(reg) 0xdead_0000usize, options(nostack));
+        match test {
+            FaultTest::Unmapped => {
+                // SAFETY: deliberately writes to an address that is never
+                // mapped; the page fault handler panics and never returns.
+                unsafe {
+                    core::arch::asm!(
+                        "mov qword ptr [{}], 0x5a",
+                        in(reg) 0xdead_0000usize,
+                        options(nostack)
+                    );
+                }
+                panic!("self-test fault: the write to an unmapped address did not fault")
+            }
+            FaultTest::UserCode => {
+                if !paging::SMEP.load(Ordering::Relaxed) {
+                    return "this CPU has no SMEP";
+                }
+                let page = paging::map_user_test_page(true);
+                // SAFETY: deliberately calls a `ret` instruction in a user
+                // page; SMEP makes the fetch fault, and the page fault
+                // handler panics. Were SMEP off, it would just return.
+                unsafe { core::arch::asm!("call {}", in(reg) page, clobber_abi("C")) };
+                panic!("self-test fault: running code in a user page did not fault")
+            }
+            FaultTest::UserData => {
+                if !paging::SMAP.load(Ordering::Relaxed) {
+                    return "this CPU has no SMAP";
+                }
+                let page = paging::map_user_test_page(false);
+                // SAFETY: deliberately reads a user page; SMAP makes the
+                // read fault, and the page fault handler panics.
+                let value = unsafe { core::ptr::read_volatile(page as *const u64) };
+                panic!("self-test fault: reading a user page did not fault (read {value:#x})")
+            }
         }
-        panic!("self-test fault: the write to an unmapped address did not fault")
     }
 }

@@ -8,124 +8,39 @@
 //! section's bytes in the file. The kernel needs no relinking, and the
 //! table is loaded with the rest of the image.
 
-use std::path::Path;
-
 use radix_ksyms::Symbol;
 
-use crate::{Context, Result, bail};
+use crate::elf::{Elf, SHF_EXECINSTR, SHT_SYMTAB, c_string, read_u16, read_u32, read_u64};
+use crate::{Result, bail};
 
-/// ELF section type of a symbol table.
-const SHT_SYMTAB: u32 = 2;
-/// ELF section flag: holds instructions.
-const SHF_EXECINSTR: u64 = 4;
 /// ELF symbol types kept: functions, and untyped labels from assembly.
 const STT_NOTYPE: u8 = 0;
 const STT_FUNC: u8 = 2;
 
-/// One section header.
-#[derive(Clone, Debug)]
-struct Section {
-    name: String,
-    kind: u32,
-    flags: u64,
-    addr: u64,
-    offset: u64,
-    size: u64,
-    link: u32,
-}
-
-/// The parts of an ELF64 little-endian file this module reads.
-struct Elf<'a> {
-    bytes: &'a [u8],
-    sections: Vec<Section>,
-}
-
-fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-}
-
-fn c_string(bytes: &[u8], at: usize) -> Option<&str> {
-    let tail = bytes.get(at..)?;
-    let len = tail.iter().position(|&b| b == 0)?;
-    std::str::from_utf8(&tail[..len]).ok()
-}
-
-impl<'a> Elf<'a> {
-    fn parse(bytes: &'a [u8]) -> Option<Elf<'a>> {
-        if bytes.get(..4)? != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
-            return None;
+/// Code symbols as (address, size, raw name, is a function).
+fn code_symbols<'a>(elf: &Elf<'a>) -> Option<Vec<(u64, u64, &'a str, bool)>> {
+    let symtab = elf.sections.iter().find(|s| s.kind == SHT_SYMTAB)?;
+    let strtab = elf.sections.get(usize::try_from(symtab.link).ok()?)?;
+    let (symbols, strings) = (elf.data(symtab)?, elf.data(strtab)?);
+    let mut out = Vec::new();
+    for entry in symbols.as_chunks::<24>().0 {
+        let name = read_u32(entry, 0)?;
+        let kind = entry[4] & 0xf;
+        let shndx = usize::from(read_u16(entry, 6)?);
+        let (value, size) = (read_u64(entry, 8)?, read_u64(entry, 16)?);
+        let in_code = elf.sections.get(shndx).is_some_and(|s| s.flags & SHF_EXECINSTR != 0);
+        if !in_code || !(kind == STT_FUNC || kind == STT_NOTYPE) || name == 0 {
+            continue;
         }
-        let shoff = usize::try_from(read_u64(bytes, 0x28)?).ok()?;
-        let shentsize = usize::from(read_u16(bytes, 0x3a)?);
-        let shnum = usize::from(read_u16(bytes, 0x3c)?);
-        let shstrndx = usize::from(read_u16(bytes, 0x3e)?);
-        let header = |index: usize| -> Option<(u32, Section)> {
-            let at = shoff + index * shentsize;
-            let section = Section {
-                name: String::new(),
-                kind: read_u32(bytes, at + 4)?,
-                flags: read_u64(bytes, at + 8)?,
-                addr: read_u64(bytes, at + 16)?,
-                offset: read_u64(bytes, at + 24)?,
-                size: read_u64(bytes, at + 32)?,
-                link: read_u32(bytes, at + 40)?,
-            };
-            Some((read_u32(bytes, at)?, section))
-        };
-        let (_, names) = header(shstrndx)?;
-        let mut sections = Vec::with_capacity(shnum);
-        for index in 0..shnum {
-            let (name_offset, mut section) = header(index)?;
-            section.name =
-                c_string(bytes, usize::try_from(names.offset + u64::from(name_offset)).ok()?)?
-                    .to_string();
-            sections.push(section);
+        let name = c_string(strings, usize::try_from(name).ok()?)?;
+        // Local labels and the section-boundary symbols of the linker
+        // script say nothing about which function an address is in.
+        if name.starts_with(".L") || name.starts_with("__kernel_") || name.is_empty() {
+            continue;
         }
-        Some(Elf { bytes, sections })
+        out.push((value, size, name, kind == STT_FUNC));
     }
-
-    fn section(&self, name: &str) -> Option<&Section> {
-        self.sections.iter().find(|s| s.name == name)
-    }
-
-    fn data(&self, section: &Section) -> Option<&'a [u8]> {
-        let start = usize::try_from(section.offset).ok()?;
-        self.bytes.get(start..start + usize::try_from(section.size).ok()?)
-    }
-
-    /// Code symbols as (address, size, raw name, is a function).
-    fn code_symbols(&self) -> Option<Vec<(u64, u64, &'a str, bool)>> {
-        let symtab = self.sections.iter().find(|s| s.kind == SHT_SYMTAB)?;
-        let strtab = self.sections.get(usize::try_from(symtab.link).ok()?)?;
-        let (symbols, strings) = (self.data(symtab)?, self.data(strtab)?);
-        let mut out = Vec::new();
-        for entry in symbols.as_chunks::<24>().0 {
-            let name = read_u32(entry, 0)?;
-            let kind = entry[4] & 0xf;
-            let shndx = usize::from(read_u16(entry, 6)?);
-            let (value, size) = (read_u64(entry, 8)?, read_u64(entry, 16)?);
-            let in_code = self.sections.get(shndx).is_some_and(|s| s.flags & SHF_EXECINSTR != 0);
-            if !in_code || !(kind == STT_FUNC || kind == STT_NOTYPE) || name == 0 {
-                continue;
-            }
-            let name = c_string(strings, usize::try_from(name).ok()?)?;
-            // Local labels and the section-boundary symbols of the linker
-            // script say nothing about which function an address is in.
-            if name.starts_with(".L") || name.starts_with("__kernel_") || name.is_empty() {
-                continue;
-            }
-            out.push((value, size, name, kind == STT_FUNC));
-        }
-        Some(out)
-    }
+    Some(out)
 }
 
 /// The demangled function symbols of `elf` in the same 4 GiB as `near`,
@@ -133,7 +48,7 @@ impl<'a> Elf<'a> {
 /// symbol or the end of its section. (The boot code that runs before the
 /// kernel's page tables, in low memory, is left out.)
 fn collect(elf: &Elf<'_>, near: u64) -> Result<Vec<(u64, u64, String)>> {
-    let Some(mut raw) = elf.code_symbols() else {
+    let Some(mut raw) = code_symbols(elf) else {
         bail!("the kernel has no readable ELF symbol table");
     };
     raw.retain(|s| s.0 >> 32 == near >> 32);
@@ -161,13 +76,12 @@ fn collect(elf: &Elf<'_>, near: u64) -> Result<Vec<(u64, u64, String)>> {
     Ok(out)
 }
 
-/// Copies the kernel at `built` to `output` with its symbol table filled
-/// in. Returns how many functions it lists.
-pub fn embed(built: &Path, output: &Path) -> Result<usize> {
-    let mut bytes = std::fs::read(built).context(|| format!("reading {}", built.display()))?;
+/// Writes the symbol table into the `.ksyms` section of the kernel image
+/// `bytes`. Returns how many functions it lists.
+pub fn embed(bytes: &mut [u8]) -> Result<usize> {
     let (count, offset, encoded) = {
-        let Some(elf) = Elf::parse(&bytes) else {
-            bail!("{} is not a 64-bit little-endian ELF file", built.display());
+        let Some(elf) = Elf::parse(bytes) else {
+            bail!("the kernel is not a 64-bit little-endian ELF file");
         };
         let Some(section) = elf.section(".ksyms").cloned() else {
             bail!("the kernel has no .ksyms section to hold its symbol table");
@@ -192,13 +106,9 @@ pub fn embed(built: &Path, output: &Path) -> Result<usize> {
         (symbols.len(), usize::try_from(section.offset).unwrap_or(usize::MAX), encoded)
     };
     let Some(target) = bytes.get_mut(offset..offset + encoded.len()) else {
-        bail!("the .ksyms section lies outside {}", built.display());
+        bail!("the .ksyms section lies outside the kernel file");
     };
     target.copy_from_slice(&encoded);
-    if let Some(parent) = output.parent() {
-        crate::process::create_dir(parent)?;
-    }
-    std::fs::write(output, &bytes).context(|| format!("writing {}", output.display()))?;
     Ok(count)
 }
 
@@ -277,13 +187,8 @@ mod tests {
             (".Ltmp0", STT_NOTYPE, 0x10a0, 0),
             ("__kernel_text_end", STT_NOTYPE, 0x1100, 0),
         ]);
-        let dir = std::env::temp_dir().join(format!("ob-ksyms-{}", std::process::id()));
-        let (input, output) = (dir.join("in"), dir.join("out"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&input, &elf).unwrap();
-        assert_eq!(embed(&input, &output).unwrap(), 2);
-
-        let patched = std::fs::read(&output).unwrap();
+        let mut patched = elf;
+        assert_eq!(embed(&mut patched).unwrap(), 2);
         let parsed = Elf::parse(&patched).unwrap();
         let section = parsed.section(".ksyms").unwrap().clone();
         let table = radix_ksyms::Symbols::parse(parsed.data(&section).unwrap()).unwrap();
@@ -291,6 +196,5 @@ mod tests {
         // The label runs to the end of the code section.
         assert_eq!(table.lookup(0x10ff).unwrap().to_string(), "isr_common+0x7f");
         assert!(table.lookup(0x1050).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
