@@ -14,8 +14,9 @@ use crate::magazine::{Loaded, Magazine, ROUNDS};
 use crate::page::{Owner, PAGE_SIZE, PageInfo, Region};
 use crate::vrange::RangeTable;
 
-/// Frames in the zone the buddy proofs use.
-const FRAMES: usize = 8;
+/// Frames in the zone the buddy proofs use: room for a block of every
+/// order up to [`MAX_ORDER`], which is 2 in the Kani build.
+const FRAMES: usize = 4;
 /// Operations in a sequence.
 const STEPS: usize = 3;
 
@@ -29,16 +30,25 @@ fn zone(pages: &[PageInfo]) -> Buddy<'_> {
 /// Any sequence of allocations and frees keeps the free lists consistent
 /// ([`Buddy::check`]), conserves frames, and hands out aligned blocks that
 /// never overlap.
+///
+/// The sequence has any length up to `STEPS`, and the free lists are
+/// checked once, at its end. Every state a longer sequence passes through
+/// is the end of a shorter one, so this covers them all, and the costly
+/// walk of the lists is modelled once instead of after every step.
 #[kani::proof]
-#[kani::unwind(12)]
+#[kani::unwind(5)]
 fn buddy_keeps_its_invariants() {
     let pages: [PageInfo; FRAMES] = Default::default();
     let mut buddy = zone(&pages);
     let mut blocks = [(0u64, 0u32); STEPS];
     let mut live = 0;
-    for _ in 0..STEPS {
+    let steps: usize = kani::any_where(|&s| (1..=STEPS).contains(&s));
+    for step in 0..STEPS {
+        if step == steps {
+            break;
+        }
         if kani::any() || live == 0 {
-            let order: u32 = kani::any_where(|&o| o <= 3);
+            let order: u32 = kani::any_where(|&o| o <= MAX_ORDER);
             if let Some(pfn) = buddy.alloc(order, Owner::Kernel, 0) {
                 assert!(pfn.is_multiple_of(1 << order));
                 assert!(pfn >= 8 && pfn + (1 << order) <= 8 + FRAMES as u64);
@@ -57,10 +67,10 @@ fn buddy_keeps_its_invariants() {
             blocks[index] = blocks[live - 1];
             live -= 1;
         }
-        assert!(buddy.check().is_ok());
         let used: u64 = blocks[..live].iter().map(|&(_, order)| 1u64 << order).sum();
         assert_eq!(buddy.free_pages() + used, FRAMES as u64);
     }
+    assert!(buddy.check().is_ok());
 }
 
 /// A free is accepted only for exactly the block that was allocated, with
@@ -68,11 +78,11 @@ fn buddy_keeps_its_invariants() {
 /// ([`Buddy::free`] checks with [`Buddy::check_free`] before it changes
 /// anything, and `buddy_keeps_its_invariants` covers accepted frees.)
 #[kani::proof]
-#[kani::unwind(12)]
+#[kani::unwind(6)]
 fn buddy_refuses_bad_frees() {
     let pages: [PageInfo; FRAMES] = Default::default();
     let mut buddy = zone(&pages);
-    let order: u32 = kani::any_where(|&o| o <= 3);
+    let order: u32 = kani::any_where(|&o| o <= MAX_ORDER);
     let block = buddy.alloc(order, Owner::Slab, 0).unwrap();
     let (pfn, freed_order): (u64, u32) = (kani::any(), kani::any());
     let owner = if kani::any() { Owner::Slab } else { Owner::Heap };

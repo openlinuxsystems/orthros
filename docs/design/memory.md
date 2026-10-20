@@ -264,7 +264,7 @@ bounds, not a sample:
 
 | Harness | Proves, within its bounds |
 | --- | --- |
-| `buddy_keeps_its_invariants` | on an 8-frame zone, every sequence of 3 operations, each an allocation of order 0 to 3 or a free of a live block, keeps `Buddy::check` true, conserves frames, and hands out aligned blocks that never overlap; an allocation fails only when no large enough block is free |
+| `buddy_keeps_its_invariants` | on a 4-frame zone, every sequence of up to 3 operations, each an allocation of order 0 to 2 or a free of a live block, keeps `Buddy::check` true, conserves frames, and hands out aligned blocks that never overlap; an allocation fails only when no large enough block is free |
 | `buddy_refuses_bad_frees` | after one allocation, a free is accepted for any frame number, order and owner exactly when they name the allocated block and its owner (`Buddy::free` checks this before changing anything) |
 | `classes_fit_requests` | for every size up to 8 KiB + 1 and alignment up to 8 KiB, the chosen class is the smallest that fits, and every class holds 4 to 65,534 objects per slab |
 | `large_orders_fit_requests` | for every size and alignment, the order chosen for a large request is the smallest block of frames that fits |
@@ -273,9 +273,15 @@ bounds, not a sample:
 | `running_spaces_never_share_an_identifier` | with 3 identifiers, 2 CPUs and 4 spaces, every sequence of 4 switches leaves the two CPUs' spaces with different identifiers, through any rollover |
 
 The bounds keep each harness within minutes; the property tests run the
-same operations at larger sizes. Kani treats atomics as plain memory
-accesses, so the proofs say nothing about concurrency; the stress test
-covers that.
+same operations at larger sizes. In the Kani build `MAX_ORDER` is 2, the
+largest order a 4-frame zone can hold, so the buddy proofs do not spend
+their time on free lists that must stay empty, and
+`buddy_keeps_its_invariants` checks the free lists once, at the end of its
+sequence: every state a longer sequence passes through is the end of a
+shorter one. `Buddy::check` bounds its walk of each list by the zone's
+size rather than by the list, which keeps the model small too. Kani treats
+atomics as plain memory accesses, so the proofs say nothing about
+concurrency; the stress test covers that.
 
 **Boot tests** run the real thing in QEMU (`ob test`): `mm-stress` has 4
 CPUs on 2 NUMA nodes allocate and free about 24 million heap objects of

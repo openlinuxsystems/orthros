@@ -22,7 +22,13 @@ use core::fmt;
 use crate::page::{NIL, Owner, PageInfo, Region, State};
 
 /// The largest block order: 2^10 frames, 4 MiB.
+#[cfg(not(kani))]
 pub const MAX_ORDER: u32 = 10;
+/// The largest block order. The Kani proofs use zones of 4 frames, where no
+/// block is larger than order 2, so they check the same code with the
+/// orders above that left out, which keeps the model small.
+#[cfg(kani)]
+pub const MAX_ORDER: u32 = 2;
 /// Number of block orders.
 pub const ORDERS: usize = MAX_ORDER as usize + 1;
 /// Most regions of RAM one zone can span.
@@ -208,7 +214,7 @@ impl<'a> Buddy<'a> {
     /// frame, or `None` if no block that large is free. `tag` is stored
     /// with the block for its owner.
     pub fn alloc(&mut self, order: u32, owner: Owner, tag: u8) -> Option<u64> {
-        let found = (order as usize..ORDERS).find(|&k| self.heads[k] != NIL)?;
+        let found = (0..ORDERS).find(|&k| k >= order as usize && self.heads[k] != NIL)?;
         let pfn = u64::from(self.heads[found]);
         self.remove(pfn, found as u32);
         let mut current = found as u32;
@@ -314,7 +320,13 @@ impl<'a> Buddy<'a> {
             let mut pfn = self.heads[order as usize];
             let mut prev = NIL;
             let mut count = 0u32;
-            while pfn != NIL {
+            // No list holds more blocks than the zone has room for, so this
+            // bound stops a walk around a cycle. (A bound that does not
+            // depend on the lists also keeps the Kani proofs small.)
+            for _ in 0..=self.managed >> order {
+                if pfn == NIL {
+                    break;
+                }
                 if count > self.counts[order as usize] {
                     return Err("a free list is longer than its count (a cycle?)");
                 }
@@ -329,8 +341,8 @@ impl<'a> Buddy<'a> {
                 if info.prev() != prev {
                     return Err("a free list's back link is wrong");
                 }
-                for tail in block + 1..block + (1 << order) {
-                    if self.info(tail).map(PageInfo::state) != Some(State::Tail) {
+                for offset in 1..1 << order {
+                    if self.info(block + offset).map(PageInfo::state) != Some(State::Tail) {
                         return Err("a frame inside a free block is not a tail");
                     }
                 }
@@ -344,6 +356,9 @@ impl<'a> Buddy<'a> {
                 count += 1;
                 prev = pfn;
                 pfn = info.next();
+            }
+            if pfn != NIL {
+                return Err("a free list is longer than the zone could hold (a cycle?)");
             }
             if count != self.counts[order as usize] {
                 return Err("a free list's count is wrong");
