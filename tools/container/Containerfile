@@ -1,0 +1,38 @@
+# The OrthrOS build container, used by `./ob --container <command>`.
+#
+# It holds every host tool `./ob doctor` checks for, at the versions CI uses,
+# so the build behaves the same on any Linux distribution, macOS or Windows
+# (through Podman Machine or Docker Desktop). The ./ob wrapper builds it on
+# first use and passes RUST_TOOLCHAIN from rust-toolchain.toml.
+
+FROM docker.io/library/ubuntu:24.04
+
+ARG RUST_TOOLCHAIN
+ARG MDBOOK_VERSION=0.4.52
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential \
+        qemu-system-x86 ovmf \
+        grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools \
+        scdoc mandoc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN test -n "$RUST_TOOLCHAIN" \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | CARGO_HOME=/usr/local/cargo sh -s -- -y --no-modify-path --profile minimal \
+            --default-toolchain "$RUST_TOOLCHAIN" \
+            --component rustfmt,clippy,rust-src,llvm-tools \
+            --target x86_64-unknown-none \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+RUN curl --proto '=https' --tlsv1.2 -sSfL \
+        "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+        | tar -xz -C /usr/local/bin mdbook \
+    && mdbook --version
+
+WORKDIR /src

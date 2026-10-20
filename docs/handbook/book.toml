@@ -1,0 +1,13 @@
+[book]
+title = "The OrthrOS Handbook"
+authors = ["The OrthrOS contributors"]
+language = "en"
+src = "src"
+
+[build]
+# Fail on a chapter missing from src/ instead of creating an empty one.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/openlinuxsystems/orthros"
+edit-url-template = "https://github.com/openlinuxsystems/orthros/edit/main/docs/handbook/{path}"

@@ -1,0 +1,7 @@
+# Build output
+/target/
+/out/
+/kernel/target/
+
+# Caches used by ./ob --container
+/.cache/

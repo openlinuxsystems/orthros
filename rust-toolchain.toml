@@ -1,0 +1,8 @@
+# The single pinned toolchain for the whole tree. `ob setup` installs it, and
+# rustup picks it up automatically in every directory below this one.
+# Bumping it is a reviewed change of its own (see docs/coding-standard.md).
+[toolchain]
+channel = "nightly-2026-10-15"
+components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
+targets = ["x86_64-unknown-none"]
+profile = "minimal"

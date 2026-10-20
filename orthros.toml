@@ -1,0 +1,17 @@
+# OrthrOS build configuration, read by ./ob. Every key is optional and
+# documented in orthros.toml(5) (`man -l out/docs/man/man5/orthros.toml.5`
+# after `./ob docs`). Command-line options override these values.
+
+[build]
+arch = "x86_64"        # the only architecture until AArch64 (Phase 17)
+profile = "release"    # "release" or "debug"
+
+[boot]
+timeout = 3            # seconds the GRUB menu waits
+cmdline = ""           # extra kernel command-line flags, see orthros-boot(7)
+
+[run]
+firmware = "uefi"      # "uefi" (OVMF) or "bios" (SeaBIOS)
+media = "usb"          # attach the image as "usb", "cdrom" or "disk"
+memory = "1G"
+cpus = 2

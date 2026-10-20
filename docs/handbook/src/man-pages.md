@@ -1,0 +1,15 @@
+# Manual pages
+
+Every OrthrOS command, file format and interface has a manual page.
+`./ob docs` compiles them into `out/docs/man/`; read one with
+`man -l out/docs/man/man1/ob.1`. The sources are in `docs/man/`.
+
+| Page | Describes |
+| --- | --- |
+| `ob(1)` | The build tool: every command and option |
+| `orthros.toml(5)` | The build configuration file |
+| `orthros-boot(7)` | How OrthrOS boots, and the kernel command line |
+
+Sections follow the usual convention: 1 user commands, 2 system calls,
+3 library interfaces, 4 devices and drivers, 5 file formats, 7 overviews
+and concepts, 8 administration.

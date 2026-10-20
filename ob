@@ -1,0 +1,87 @@
+#!/bin/sh
+# ob: the OrthrOS build tool. Run `./ob help`, or read ob(1).
+#
+# This wrapper builds tools/xtask (the real build tool) with the Rust
+# toolchain pinned in rust-toolchain.toml and runs it. With --container
+# anywhere before a `--`, it runs the whole command inside the pinned build
+# container instead, using Podman, or Docker when Podman is not installed.
+set -eu
+
+root=$(cd "$(dirname "$0")" && pwd)
+
+use_container=0
+for arg in "$@"; do
+    [ "$arg" = "--" ] && break
+    [ "$arg" = "--container" ] && use_container=1
+done
+
+if [ "$use_container" = 1 ]; then
+    # Drop --container from the arguments (only before `--`).
+    count=$#
+    passthrough=0
+    while [ "$count" -gt 0 ]; do
+        arg=$1
+        shift
+        count=$((count - 1))
+        if [ "$passthrough" = 0 ] && [ "$arg" = "--container" ]; then
+            continue
+        fi
+        [ "$arg" = "--" ] && passthrough=1
+        set -- "$@" "$arg"
+    done
+
+    engine=${OB_CONTAINER_ENGINE:-}
+    if [ -z "$engine" ]; then
+        if command -v podman >/dev/null 2>&1; then
+            engine=podman
+        elif command -v docker >/dev/null 2>&1; then
+            engine=docker
+        else
+            echo "ob: error: --container needs Podman or Docker, and neither is installed" >&2
+            echo "ob: hint: install Podman (recommended), or build on the host after ./ob setup" >&2
+            exit 1
+        fi
+    fi
+
+    # The image tag changes whenever the Containerfile or toolchain does.
+    toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$root/rust-toolchain.toml")
+    tag=$(cat "$root/tools/container/Containerfile" "$root/rust-toolchain.toml" | sha256sum | cut -c1-12)
+    image="localhost/orthros-build:$tag"
+    if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
+        echo "==> Building the build container $image (first use only)" >&2
+        "$engine" build --build-arg "RUST_TOOLCHAIN=$toolchain" -t "$image" \
+            -f "$root/tools/container/Containerfile" "$root/tools/container"
+    fi
+
+    tty_flag=
+    if [ -t 0 ] && [ -t 1 ]; then tty_flag=-t; fi
+    kvm_flag=
+    if [ -e /dev/kvm ]; then kvm_flag=--device=/dev/kvm; fi
+    case "$engine" in
+        *podman*) user_flag=--userns=keep-id ;;
+        *) user_flag=--user=$(id -u):$(id -g) ;;
+    esac
+    # Build output and caches stay in the repository, under target/container
+    # and .cache, so they survive between runs.
+    exec "$engine" run --rm -i $tty_flag $kvm_flag "$user_flag" \
+        -v "$root:/src:Z" -w /src \
+        -e HOME=/tmp \
+        -e CARGO_HOME=/src/.cache/cargo \
+        -e OB_TARGET_DIR=/src/target/container \
+        "$image" ./ob "$@"
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "ob: error: Rust is not installed" >&2
+    echo "ob: hint: install rustup (your distribution's rustup package, or https://rustup.rs)," >&2
+    echo "ob: hint: then run ./ob setup; or use ./ob --container <command> with Podman or Docker" >&2
+    exit 1
+fi
+
+target_dir=${OB_TARGET_DIR:-$root/target}
+binary="$target_dir/debug/xtask"
+if [ ! -x "$binary" ]; then
+    echo "==> Building the ob build tool (first run only)" >&2
+fi
+cargo build --quiet --manifest-path "$root/tools/xtask/Cargo.toml" --target-dir "$target_dir"
+OB_ROOT=$root OB_TARGET_DIR=$target_dir exec "$binary" "$@"

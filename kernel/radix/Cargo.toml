@@ -1,0 +1,22 @@
+[package]
+name = "radix"
+description = "The Radix kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "radix"
+test = false
+bench = false
+
+[dependencies]
+radix-bootinfo = { path = "../lib/bootinfo" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+radix-arch-x86_64 = { path = "../arch/x86_64" }
+
+[lints]
+workspace = true
