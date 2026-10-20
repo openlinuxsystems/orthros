@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{Firmware, Media};
+use crate::image::{self, Overrides};
 use crate::process::{self, step};
-use crate::{Args, Ctx, Error, Result, image};
+use crate::{Args, Context, Ctx, Error, Result, kernel};
 
 /// Locations distributions install OVMF to, as (code, variables) pairs.
 const OVMF_PATHS: &[(&str, &str)] = &[
@@ -18,6 +19,9 @@ const OVMF_PATHS: &[(&str, &str)] = &[
     ("/usr/share/edk2/x64/OVMF_CODE.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
     ("/usr/share/edk2-ovmf/x64/OVMF_CODE.fd", "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"),
 ];
+
+/// TCP port of QEMU's GDB stub for `ob run --gdb`.
+pub const GDB_PORT: u16 = 1234;
 
 /// Finds OVMF's code and variable-store images.
 pub fn find_ovmf() -> Option<(PathBuf, PathBuf)> {
@@ -41,8 +45,8 @@ pub fn kvm_available() -> bool {
 pub enum Serial {
     /// This terminal, multiplexed with the QEMU monitor (Ctrl-A C).
     Terminal,
-    /// A log file.
-    File(PathBuf),
+    /// QEMU's standard input and output, for a test that reads and types.
+    Pipe,
 }
 
 /// One virtual machine.
@@ -61,10 +65,18 @@ pub struct Machine {
     pub cpus: u32,
     /// Use KVM.
     pub kvm: bool,
+    /// CPU model instead of the default (`host` with KVM, `max` without).
+    pub cpu_model: Option<String>,
     /// Serial port destination.
     pub serial: Serial,
     /// Open a window for the screen.
     pub display: bool,
+    /// Let a guest restart instead of making QEMU exit.
+    pub reboot: bool,
+    /// Wait for GDB on [`GDB_PORT`] before running the firmware.
+    pub gdb: bool,
+    /// QMP control socket, for screenshots in the boot tests.
+    pub qmp: Option<PathBuf>,
     /// Extra arguments passed straight to QEMU.
     pub extra: Vec<String>,
 }
@@ -74,11 +86,9 @@ impl Machine {
     pub fn args(&self) -> Vec<String> {
         let mut args: Vec<String> = vec!["-M".into(), "q35".into()];
         args.extend(["-m".into(), self.memory.clone(), "-smp".into(), self.cpus.to_string()]);
-        if self.kvm {
-            args.extend(["-accel".into(), "kvm".into(), "-cpu".into(), "host".into()]);
-        } else {
-            args.extend(["-accel".into(), "tcg".into(), "-cpu".into(), "max".into()]);
-        }
+        let (accel, default_cpu) = if self.kvm { ("kvm", "host") } else { ("tcg", "max") };
+        let cpu = self.cpu_model.as_deref().unwrap_or(default_cpu);
+        args.extend(["-accel".into(), accel.into(), "-cpu".into(), cpu.into()]);
         if let (Firmware::Uefi, Some((code, vars))) = (self.firmware, &self.ovmf) {
             args.push("-drive".into());
             args.push(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
@@ -100,13 +110,21 @@ impl Machine {
         }
         // Radix leaves QEMU through this device when booted with `qemu-exit`.
         args.extend(["-device".into(), "isa-debug-exit,iobase=0xf4,iosize=0x04".into()]);
-        args.extend(["-nic".into(), "none".into(), "-no-reboot".into()]);
+        args.extend(["-nic".into(), "none".into()]);
+        if !self.reboot {
+            args.push("-no-reboot".into());
+        }
         match &self.serial {
             Serial::Terminal => args.extend(["-serial".into(), "mon:stdio".into()]),
-            Serial::File(path) => {
-                args.extend(["-serial".into(), format!("file:{}", path.display())]);
-                args.extend(["-monitor".into(), "none".into()]);
+            Serial::Pipe => {
+                args.extend(["-serial".into(), "stdio".into(), "-monitor".into(), "none".into()]);
             }
+        }
+        if let Some(socket) = &self.qmp {
+            args.extend(["-qmp".into(), format!("unix:{},server=on,wait=off", socket.display())]);
+        }
+        if self.gdb {
+            args.extend(["-gdb".into(), format!("tcp:localhost:{GDB_PORT}"), "-S".into()]);
         }
         if !self.display {
             args.extend(["-display".into(), "none".into()]);
@@ -147,6 +165,22 @@ fn has_display() -> bool {
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
+/// The GDB script `ob run --gdb` writes: it loads the kernel's symbols,
+/// connects to QEMU and stops at the first Rust function of the kernel.
+pub fn gdb_script(kernel: &Path) -> String {
+    format!(
+        "# Written by `./ob run --gdb`; see radix-debug(7).\n\
+         set architecture i386:x86-64\n\
+         file {}\n\
+         target remote localhost:{GDB_PORT}\n\
+         # A hardware breakpoint survives the switch from the boot loader to\n\
+         # the kernel's page tables.\n\
+         hbreak radix_arch_entry\n\
+         continue\n",
+        kernel.display()
+    )
+}
+
 /// `ob run`.
 pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let firmware = match (args.flag("--bios"), args.flag("--uefi")) {
@@ -160,12 +194,15 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         None => ctx.config.run.media,
     };
     let headless = args.flag("--headless") || !has_display();
+    let gdb = args.flag("--gdb");
+    let overrides =
+        Overrides { cmdline: args.value("--cmdline")?, microcode: args.value("--microcode")? };
     let profile = args.profile(&ctx.config)?;
     let extra = args.take_passthrough();
     args.finish()?;
 
     require_qemu()?;
-    let image_path = image::build_release(ctx, profile, false)?;
+    let image_path = image::build_release(ctx, profile, false, &overrides)?;
     let machine = Machine {
         firmware,
         media,
@@ -177,8 +214,14 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         memory: ctx.config.run.memory.clone(),
         cpus: ctx.config.run.cpus,
         kvm: kvm_available(),
+        cpu_model: None,
         serial: Serial::Terminal,
         display: !headless,
+        // A restart boots the image again, as on a real machine, so the
+        // next boot can show the crash log.
+        reboot: true,
+        gdb,
+        qmp: None,
         extra,
     };
     let accel = if machine.kvm { "KVM" } else { "no KVM, so it runs slower" };
@@ -186,6 +229,15 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         "Booting {} from {media} under {firmware} in QEMU ({accel})",
         ctx.display(&machine.image)
     ));
+    if gdb {
+        let script = ctx.out.join("qemu/radix.gdb");
+        process::create_dir(script.parent().expect("the script has a parent"))?;
+        std::fs::write(&script, gdb_script(&kernel::installed(ctx)))
+            .context(|| format!("writing {}", script.display()))?;
+        eprintln!("    QEMU waits for GDB on localhost:{GDB_PORT}. In another terminal run:");
+        eprintln!("        gdb -x {}", ctx.display(&script));
+        eprintln!("    GDB stops at radix_arch_entry, the kernel's first Rust function.");
+    }
     eprintln!("    Serial console follows. Press Ctrl-A then X to quit QEMU.");
     if headless {
         eprintln!("    No QEMU window: no display found or --headless given.");
@@ -198,32 +250,6 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         Some(35) => crate::bail!("the kernel panicked; the serial output above shows why"),
         _ => crate::bail!("QEMU exited with {status}"),
     }
-}
-
-/// Builds the boot-test machine for one firmware and media combination.
-pub fn test_machine(
-    ctx: &Ctx,
-    image: &Path,
-    firmware: Firmware,
-    media: Media,
-    log: PathBuf,
-) -> Result<Machine> {
-    let name = format!("test-{}-{media}", firmware.to_string().to_lowercase());
-    Ok(Machine {
-        firmware,
-        media,
-        ovmf: match firmware {
-            Firmware::Uefi => Some(prepare_ovmf(ctx, &name)?),
-            Firmware::Bios => None,
-        },
-        image: image.to_path_buf(),
-        memory: "512M".into(),
-        cpus: 1,
-        kvm: kvm_available(),
-        serial: Serial::File(log),
-        display: false,
-        extra: Vec::new(),
-    })
 }
 
 #[cfg(test)]
@@ -239,8 +265,12 @@ mod tests {
             memory: "1G".into(),
             cpus: 2,
             kvm: false,
-            serial: Serial::File("serial.log".into()),
+            cpu_model: None,
+            serial: Serial::Terminal,
             display: false,
+            reboot: false,
+            gdb: false,
+            qmp: None,
             extra: vec!["-s".into()],
         }
     }
@@ -251,7 +281,8 @@ mod tests {
         assert!(args.contains("if=pflash,format=raw,readonly=on,file=code.fd"));
         assert!(args.contains("usb-storage,bus=xhci.0,drive=boot"));
         assert!(args.contains("snapshot=on"));
-        assert!(args.contains("-serial file:serial.log -monitor none"));
+        assert!(args.contains("-no-reboot"));
+        assert!(args.contains("-serial mon:stdio"));
         assert!(args.contains("-accel tcg -cpu max"));
         assert!(args.ends_with("-display none -s"));
     }
@@ -261,5 +292,29 @@ mod tests {
         let args = machine(Firmware::Bios, Media::Cdrom).args().join(" ");
         assert!(!args.contains("pflash"));
         assert!(args.contains("ide-cd,drive=boot,bootindex=0"));
+    }
+
+    #[test]
+    fn test_options() {
+        let mut m = machine(Firmware::Bios, Media::Usb);
+        m.reboot = true;
+        m.serial = Serial::Pipe;
+        m.qmp = Some("/tmp/qmp.sock".into());
+        m.cpu_model = Some("qemu64,vendor=GenuineIntel".into());
+        m.gdb = true;
+        let args = m.args().join(" ");
+        assert!(!args.contains("-no-reboot"));
+        assert!(args.contains("-serial stdio -monitor none"));
+        assert!(args.contains("-qmp unix:/tmp/qmp.sock,server=on,wait=off"));
+        assert!(args.contains("-cpu qemu64,vendor=GenuineIntel"));
+        assert!(args.contains(&format!("-gdb tcp:localhost:{GDB_PORT} -S")));
+    }
+
+    #[test]
+    fn gdb_script_stops_in_the_kernel() {
+        let script = gdb_script(Path::new("/src/out/sysroot/boot/radix"));
+        assert!(script.contains("file /src/out/sysroot/boot/radix\n"));
+        assert!(script.contains(&format!("target remote localhost:{GDB_PORT}\n")));
+        assert!(script.contains("hbreak radix_arch_entry\n"));
     }
 }

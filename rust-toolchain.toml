@@ -4,5 +4,8 @@
 [toolchain]
 channel = "nightly-2026-10-15"
 components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
-targets = ["x86_64-unknown-none"]
+# The x86-64 kernel builds `core` from rust-src for its own target
+# (kernel/targets/); aarch64-unknown-none is for CI's check of the AArch64
+# HAL stubs.
+targets = ["aarch64-unknown-none"]
 profile = "minimal"

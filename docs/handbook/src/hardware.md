@@ -15,9 +15,9 @@ parts list for its service tag.
 
 | Component | Part | OrthrOS support |
 | --- | --- | --- |
-| Processor | Intel Core i7-8550U (4 cores, 8 threads) | Boots in Phase 0; all cores from Phase 1 |
+| Processor | Intel Core i7-8550U (4 cores, 8 threads) | All 8 threads started from Phase 1; early microcode with the optional firmware |
 | Memory | 8 GB DDR4-2400, one module | Phase 2 |
-| Graphics | Intel UHD Graphics 620 | Firmware framebuffer from Phase 1; no native GPU driver in 1.0 |
+| Graphics | Intel UHD Graphics 620 | Firmware framebuffer console from Phase 1; no native GPU driver in 1.0 |
 | SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; OrthrOS installs here |
 | Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/data` |
 | USB | Intel xHCI | Phase 11 |
@@ -26,7 +26,7 @@ parts list for its service tag.
 | Wired network | Built-in 10/100 Ethernet, likely Realtek | Phase 12, chip to be confirmed |
 | Wi-Fi and Bluetooth | Qualcomm QCA9377 (Dell Wireless 1810) | After 1.0; needs closed firmware |
 | Audio | Realtek ALC3246 | After 1.0 |
-| Serial port | None | Kernel output needs the screen |
+| Serial port | None | Kernel output goes to the screen, and to the crash log for the next boot |
 
 ### Firmware settings
 
@@ -38,11 +38,52 @@ Open the firmware setup by pressing **F2** at the Dell logo, and set:
   it was prepared for it; OrthrOS replaces Windows on this machine anyway.
 - **Secure Boot > Secure Boot Enable: off.** OrthrOS images are not signed
   for Secure Boot before 1.0.
-- To try legacy BIOS boot (the only mode with visible output in Phase 0),
-  enable **Legacy Option ROMs** and the legacy boot list under **General >
-  Boot Sequence**, if your firmware version offers them.
+- To test legacy BIOS boot as well, enable **Legacy Option ROMs** and the
+  legacy boot list under **General > Boot Sequence**, if your firmware
+  version offers them. UEFI is the normal way to boot OrthrOS.
 
 Press **F12** at the Dell logo for the one-time boot menu.
+
+### Smoke test
+
+The latest USB image is booted on the laptop at the end of Phases 1, 2, 6
+and 9, and of every later phase. For Phase 1:
+
+1. Build the image, with the laptop's microcode if the build host has
+   Intel's (the `intel-microcode` package on Debian and Ubuntu), and write
+   it to a USB stick as in [Creating USB install media](usb-media.md):
+
+   ```sh
+   ./ob image --microcode /lib/firmware/intel-ucode
+   ```
+
+2. Boot it from the F12 menu in UEFI mode. The boot log must appear on the
+   screen and end with `Boot complete.` Check, and photograph:
+   - `Firmware: UEFI` and a framebuffer of the panel's resolution, drawn
+     with the 12x24 font;
+   - the memory map, about 8 GB usable;
+   - `CPUs: 8 of 8 online`, and the timer and IPI lines saying every CPU
+     answered;
+   - the `Time:` line (TSC rate, and which timer measured it);
+   - the `microcode:` line: updated, or already current;
+   - the `APIC:` line: x2APIC mode is expected on this processor.
+3. If the firmware offers legacy boot, repeat in BIOS mode.
+4. Panic test: boot again with the `selftest=page-fault` flag. At the GRUB
+   menu, press an arrow key to stop the countdown, press **e**, add
+   ` selftest=page-fault` to the end of the `multiboot2` line, and press
+   **Ctrl-X**. (Or build a second image with
+   `./ob image --cmdline selftest=page-fault`.) The screen must show the
+   panic report with a backtrace naming `radix::selftest::page_fault`.
+5. Press a key to restart, press **F12** again and boot the stick, since
+   the restart otherwise boots the internal disk. This boot must start by
+   showing the panic of the previous one from the crash log.
+
+Record the result in the table below, with the commit tested, and open an
+issue for anything that fails, with the photos.
+
+| Phase | Date | Commit | UEFI | Legacy BIOS | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | not yet run | | | | |
 
 ### Help wanted: the Ethernet chip
 

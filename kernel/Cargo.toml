@@ -5,7 +5,20 @@
 
 [workspace]
 resolver = "3"
-members = ["radix", "arch/x86_64", "lib/bootinfo"]
+members = [
+    "radix",
+    "hal",
+    "arch/x86_64",
+    "arch/aarch64",
+    "lib/acpi",
+    "lib/bootinfo",
+    "lib/fbcon",
+    "lib/kdb",
+    "lib/klog",
+    "lib/ksyms",
+    "lib/microcode",
+    "lib/sync",
+]
 
 [workspace.package]
 version = "0.0.1"

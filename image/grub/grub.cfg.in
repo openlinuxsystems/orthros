@@ -1,6 +1,7 @@
 # GRUB configuration for the OrthrOS @VERSION@ boot image.
 # `ob image` generates boot/grub/grub.cfg from image/grub/grub.cfg.in by
-# filling in the VERSION, TIMEOUT and CMDLINE placeholders. See orthros-boot(7).
+# filling in the VERSION, TIMEOUT, CMDLINE and MODULES placeholders. See
+# orthros-boot(7).
 
 set timeout=@TIMEOUT@
 set default=0
@@ -11,7 +12,15 @@ if serial --unit=0 --speed=115200; then
     terminal_output --append serial
 fi
 
+# Radix draws its console into the framebuffer GRUB sets up. Under UEFI it
+# keeps the mode the firmware chose, which is normally the panel's own
+# resolution; under BIOS GRUB picks a VESA graphics mode.
+insmod all_video
+if [ "${grub_platform}" = "efi" ]; then
+    set gfxpayload=keep
+fi
+
 menuentry "OrthrOS @VERSION@ (Radix)" {
     multiboot2 /boot/radix @CMDLINE@
-    boot
+@MODULES@    boot
 }

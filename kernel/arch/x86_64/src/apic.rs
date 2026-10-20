@@ -1,0 +1,358 @@
+//! Interrupt controllers: the local APIC of each CPU, the I/O APICs and
+//! the legacy 8259 PICs.
+//!
+//! The local APIC runs in x2APIC mode (registers as MSRs) when the CPU
+//! supports it, unless the `nox2apic` flag is given, and in xAPIC mode
+//! (registers in memory) otherwise. The 8259 PICs are remapped away from
+//! the exception vectors and masked, and every I/O APIC input is masked:
+//! Phase 1 takes no device interrupts, only the local APIC timer and
+//! inter-processor interrupts.
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use radix_acpi::{Madt, MadtEntry};
+use radix_sync::{Once, SpinLock};
+
+use crate::cpu::{self, msr};
+use crate::interrupts::{VECTOR_APIC_ERROR, VECTOR_PIC_BASE, VECTOR_SPURIOUS};
+use crate::io::{io_delay, outb};
+use crate::paging::{self, Access, Cache};
+
+/// Register offsets, as in the xAPIC memory layout. In x2APIC mode the MSR
+/// is `0x800 + offset / 16`.
+mod reg {
+    pub const ID: u32 = 0x20;
+    pub const VERSION: u32 = 0x30;
+    pub const TPR: u32 = 0x80;
+    pub const EOI: u32 = 0xb0;
+    pub const SVR: u32 = 0xf0;
+    pub const ESR: u32 = 0x280;
+    pub const ICR_LOW: u32 = 0x300;
+    pub const ICR_HIGH: u32 = 0x310;
+    pub const LVT_TIMER: u32 = 0x320;
+    pub const LVT_LINT0: u32 = 0x350;
+    pub const LVT_LINT1: u32 = 0x360;
+    pub const LVT_ERROR: u32 = 0x370;
+    pub const TIMER_INITIAL: u32 = 0x380;
+    pub const TIMER_CURRENT: u32 = 0x390;
+    pub const TIMER_DIVIDE: u32 = 0x3e0;
+}
+
+/// LVT mask bit.
+const MASKED: u32 = 1 << 16;
+/// ICR delivery status (xAPIC only): the previous IPI is still pending.
+const ICR_PENDING: u32 = 1 << 12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    X2Apic,
+    /// xAPIC registers mapped at this virtual address.
+    XApic(usize),
+}
+
+static MODE: Once<Mode> = Once::new();
+/// Physical address of the local APIC registers.
+static PHYS_BASE: AtomicUsize = AtomicUsize::new(0);
+/// Serialises xAPIC ICR writes (the two halves must go together).
+static ICR_LOCK: SpinLock<()> = SpinLock::new(());
+
+fn read(offset: u32) -> u32 {
+    match MODE.get() {
+        Some(Mode::X2Apic) => {
+            // SAFETY: x2APIC mode is enabled on this CPU (every CPU enables
+            // it in `init_cpu` before using the APIC), so the MSRs from
+            // 0x800 exist; reading them has no side effects.
+            unsafe { cpu::rdmsr(0x800 + offset / 16) as u32 }
+        }
+        Some(&Mode::XApic(base)) => {
+            // SAFETY: `base` maps the 4 KiB register page uncached, and the
+            // offset is one of the register offsets above.
+            unsafe { ((base + offset as usize) as *const u32).read_volatile() }
+        }
+        None => 0,
+    }
+}
+
+fn write(offset: u32, value: u32) {
+    match MODE.get() {
+        Some(Mode::X2Apic) => {
+            // SAFETY: as in `read`; writes go to this CPU's own APIC.
+            unsafe { cpu::wrmsr(0x800 + offset / 16, u64::from(value)) }
+        }
+        Some(&Mode::XApic(base)) => {
+            // SAFETY: as in `read`.
+            unsafe { ((base + offset as usize) as *mut u32).write_volatile(value) }
+        }
+        None => {}
+    }
+}
+
+/// The local APIC ID of the running CPU.
+pub fn id() -> u32 {
+    match MODE.get() {
+        Some(Mode::X2Apic) => read(reg::ID),
+        Some(Mode::XApic(_)) => read(reg::ID) >> 24,
+        None => cpu::cpuid(1, 0).ebx >> 24,
+    }
+}
+
+/// Whether the local APICs run in x2APIC mode.
+pub fn is_x2apic() -> bool {
+    MODE.get() == Some(&Mode::X2Apic)
+}
+
+/// Short name of the mode, for the boot report.
+pub fn mode_name() -> &'static str {
+    match MODE.get() {
+        Some(Mode::X2Apic) => "x2APIC",
+        Some(Mode::XApic(_)) => "xAPIC",
+        None => "none",
+    }
+}
+
+/// Acknowledges the interrupt being handled.
+pub fn end_of_interrupt() {
+    write(reg::EOI, 0);
+}
+
+/// Reads and clears the error status register.
+pub fn read_error_status() -> u32 {
+    write(reg::ESR, 0);
+    read(reg::ESR)
+}
+
+/// Chooses the APIC mode and maps the registers. Called once, on the boot
+/// CPU, before [`init_cpu`].
+pub fn init(madt: Option<&Madt<'_>>, allow_x2apic: bool) {
+    // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU.
+    let msr_base = unsafe { cpu::rdmsr(msr::APIC_BASE) } & 0x000f_ffff_ffff_f000;
+    let phys = madt.map_or(msr_base, |madt| madt.local_apic_address);
+    PHYS_BASE.store(phys as usize, Ordering::Relaxed);
+    // Firmware may hand over in x2APIC mode already. Leaving it needs the
+    // APIC disabled first, so the kernel stays in it whatever the flag says.
+    // SAFETY: as above.
+    let firmware_x2apic = unsafe { cpu::rdmsr(msr::APIC_BASE) } & (1 << 10) != 0;
+    if firmware_x2apic && !allow_x2apic {
+        radix_klog::warn!("APIC: the firmware enabled x2APIC mode, so nox2apic is ignored");
+    }
+    let mode = if firmware_x2apic || (allow_x2apic && cpu::feature::x2apic()) {
+        Mode::X2Apic
+    } else {
+        Mode::XApic(paging::map_physical(phys, 4096, Access::ReadWrite, Cache::Uncached))
+    };
+    let _ = MODE.set(mode);
+}
+
+/// The NMI wiring from the MADT: LINT pin and flags for the CPU with ACPI
+/// processor UID `uid`, if the table says.
+fn nmi_pin(madt: Option<&Madt<'_>>, uid: Option<u32>) -> (u8, u16) {
+    madt.into_iter()
+        .flat_map(|madt| madt.entries())
+        .find_map(|entry| match entry {
+            MadtEntry::LocalApicNmi { processor_uid, flags, lint }
+                if processor_uid == u32::MAX || Some(processor_uid) == uid =>
+            {
+                Some((lint, flags))
+            }
+            _ => None,
+        })
+        .unwrap_or((1, 0))
+}
+
+/// Enables this CPU's local APIC: spurious vector, error vector, LINT pins
+/// (NMI on the pin the MADT names) and an open task priority. The timer
+/// stays masked until [`crate::time`] starts it.
+pub fn init_cpu(madt: Option<&Madt<'_>>, uid: Option<u32>) {
+    // SAFETY: IA32_APIC_BASE exists; setting the global enable bit (11)
+    // and, in x2APIC mode, the x2APIC bit (10) keeps the base address.
+    unsafe {
+        let base = cpu::rdmsr(msr::APIC_BASE);
+        let x2 = if MODE.get() == Some(&Mode::X2Apic) { 1 << 10 } else { 0 };
+        cpu::wrmsr(msr::APIC_BASE, base | (1 << 11) | x2);
+    }
+    write(reg::SVR, 0x100 | u32::from(VECTOR_SPURIOUS));
+    write(reg::TPR, 0);
+    write(reg::LVT_TIMER, MASKED);
+    write(reg::LVT_ERROR, u32::from(VECTOR_APIC_ERROR));
+    let (pin, flags) = nmi_pin(madt, uid);
+    // Delivery mode NMI; MPS polarity 3 means active low.
+    let nmi = 0x400 | if flags & 0x3 == 0x3 { 1 << 13 } else { 0 };
+    write(reg::LVT_LINT0, if pin == 0 { nmi } else { MASKED });
+    write(reg::LVT_LINT1, if pin == 1 { nmi } else { MASKED });
+    let _ = read_error_status();
+    end_of_interrupt();
+}
+
+/// Version register: (version, highest LVT entry).
+pub fn version() -> (u32, u32) {
+    let value = read(reg::VERSION);
+    (value & 0xff, (value >> 16) & 0xff)
+}
+
+/// Physical address of the registers.
+pub fn phys_base() -> u64 {
+    PHYS_BASE.load(Ordering::Relaxed) as u64
+}
+
+/// Sends an inter-processor interrupt: `low` is the ICR's low word
+/// (vector, delivery mode, shorthand), `dest` the target APIC ID.
+fn send(dest: u32, low: u32) {
+    match MODE.get() {
+        Some(Mode::X2Apic) => {
+            // Unlike a store to the xAPIC page, WRMSR to the x2APIC ICR is
+            // not ordered after earlier stores, which the receiver must see
+            // (a new TLB generation, the stop flag): fence first.
+            cpu::mfence();
+            cpu::lfence();
+            // SAFETY: x2APIC mode is on; the ICR MSR takes the destination
+            // in its upper half.
+            unsafe { cpu::wrmsr(0x830, (u64::from(dest) << 32) | u64::from(low)) };
+        }
+        Some(Mode::XApic(_)) => {
+            let _guard = ICR_LOCK.lock();
+            while read(reg::ICR_LOW) & ICR_PENDING != 0 {
+                cpu::pause();
+            }
+            write(reg::ICR_HIGH, dest << 24);
+            write(reg::ICR_LOW, low);
+            while read(reg::ICR_LOW) & ICR_PENDING != 0 {
+                cpu::pause();
+            }
+        }
+        None => {}
+    }
+}
+
+/// Sends interrupt `vector` to the CPU with APIC ID `dest`.
+pub fn send_fixed(dest: u32, vector: u8) {
+    send(dest, u32::from(vector));
+}
+
+/// Sends INIT to `dest`, which resets it into wait-for-SIPI.
+pub fn send_init(dest: u32) {
+    // Level-triggered assert, then (xAPIC only) de-assert, as the MP
+    // specification describes.
+    send(dest, 0xc500);
+    if !matches!(MODE.get(), Some(Mode::X2Apic)) {
+        send(dest, 0x8500);
+    }
+}
+
+/// Sends a start-up IPI telling `dest` to run real-mode code at
+/// `page * 4096`.
+pub fn send_startup(dest: u32, page: u8) {
+    send(dest, 0x0600 | u32::from(page));
+}
+
+/// Sends an NMI to every CPU except this one.
+pub fn send_nmi_to_others() {
+    // Delivery mode NMI, shorthand "all excluding self".
+    send(0, 0x000c_0400);
+}
+
+/// Local APIC timer: divide-by-16, masked one-shot from the largest count,
+/// for calibration.
+pub fn timer_start_calibration() {
+    write(reg::TIMER_DIVIDE, 0x3);
+    write(reg::LVT_TIMER, MASKED);
+    write(reg::TIMER_INITIAL, u32::MAX);
+}
+
+/// The timer's current count.
+pub fn timer_current() -> u32 {
+    read(reg::TIMER_CURRENT)
+}
+
+/// Starts the periodic timer: divide-by-16, `initial` counts per period.
+pub fn timer_start_periodic(vector: u8, initial: u32) {
+    write(reg::TIMER_DIVIDE, 0x3);
+    write(reg::LVT_TIMER, u32::from(vector) | (1 << 17));
+    write(reg::TIMER_INITIAL, initial);
+}
+
+/// Stops the timer.
+pub fn timer_stop() {
+    write(reg::LVT_TIMER, MASKED);
+    write(reg::TIMER_INITIAL, 0);
+}
+
+/// Remaps the 8259 PICs to vectors 0x20-0x2F and masks every input.
+pub fn disable_pics() {
+    let base = VECTOR_PIC_BASE;
+    let steps: [(u16, u8); 10] = [
+        (0x20, 0x11),
+        (0xa0, 0x11),
+        (0x21, base),
+        (0xa1, base + 8),
+        (0x21, 4),
+        (0xa1, 2),
+        (0x21, 1),
+        (0xa1, 1),
+        (0x21, 0xff),
+        (0xa1, 0xff),
+    ];
+    for (port, value) in steps {
+        // SAFETY: ports 0x20/0x21 and 0xA0/0xA1 belong to the 8259 PICs;
+        // this is the standard initialisation sequence followed by masking
+        // every input, which touches no memory.
+        unsafe { outb(port, value) };
+        io_delay();
+    }
+}
+
+/// An I/O APIC found in the MADT.
+#[derive(Clone, Copy, Debug)]
+pub struct IoApic {
+    /// Its ID.
+    pub id: u8,
+    /// Physical address of its registers.
+    pub address: u64,
+    /// First global system interrupt.
+    pub gsi_base: u32,
+    /// Number of inputs.
+    pub inputs: u32,
+    /// Version register.
+    pub version: u32,
+}
+
+static IOAPICS: SpinLock<([Option<IoApic>; 8], usize)> = SpinLock::new(([None; 8], 0));
+
+/// Masks every input of every I/O APIC in the MADT.
+pub fn init_ioapics(madt: &Madt<'_>) {
+    let mut list = IOAPICS.lock();
+    for entry in madt.entries() {
+        let MadtEntry::IoApic { id, address, gsi_base } = entry else { continue };
+        let base = paging::map_physical(address, 4096, Access::ReadWrite, Cache::Uncached);
+        let select = base as *mut u32;
+        let window = (base + 0x10) as *mut u32;
+        let read = |index: u32| {
+            // SAFETY: `base` maps the I/O APIC's register page uncached;
+            // IOREGSEL at offset 0 selects the register IOWIN at 0x10 shows.
+            unsafe {
+                select.write_volatile(index);
+                window.read_volatile()
+            }
+        };
+        let version = read(1);
+        let inputs = ((version >> 16) & 0xff) + 1;
+        for input in 0..inputs {
+            // SAFETY: as above; redirection entry `input` is at register
+            // 0x10 + 2 * input, and setting bit 16 masks it.
+            unsafe {
+                select.write_volatile(0x10 + 2 * input);
+                window.write_volatile(read(0x10 + 2 * input) | MASKED);
+            }
+        }
+        let count = list.1;
+        if count < list.0.len() {
+            list.0[count] = Some(IoApic { id, address, gsi_base, inputs, version: version & 0xff });
+            list.1 += 1;
+        }
+    }
+}
+
+/// The I/O APICs found.
+pub fn ioapics(mut f: impl FnMut(&IoApic)) {
+    let list = IOAPICS.lock();
+    list.0.iter().flatten().for_each(&mut f);
+}

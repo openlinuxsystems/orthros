@@ -20,9 +20,11 @@ On top of Radix, OrthrOS provides a complete, installable system:
 ## Where the project is
 
 OrthrOS is built in phases, each ending in something that runs. This
-handbook describes **Phase 0**: the build tool, documentation and CI exist,
-and a stub kernel boots through GRUB under UEFI and legacy BIOS and reports
-what it found. Chapters for later phases are listed in the table of
+handbook describes **Phase 1**: the Radix kernel boots through GRUB under
+UEFI and legacy BIOS, starts every CPU, reads the firmware's ACPI tables,
+takes timer interrupts and shows its log on the screen and the serial
+port, with crash reports, a kernel debugger and a crash log for when
+things go wrong. Chapters for later phases are listed in the table of
 contents and are written as those phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
 
@@ -31,6 +33,7 @@ contents and are written as those phases land. The full plan is in
 - **Getting started** covers building OrthrOS, making install media and
   installing it.
 - **Using OrthrOS** covers the system itself, from the shell to updates.
-- **Reference** lists supported hardware and the manual pages. Every
+- **Reference** lists supported hardware, explains how to debug the
+  kernel, and lists the manual pages. Every
   command, file format and interface has a man page; this handbook explains
   how the pieces fit together.

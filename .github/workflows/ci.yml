@@ -75,12 +75,14 @@ jobs:
           path: out/orthros-*-x86_64.img
           retention-days: 14
 
-      - name: Upload boot test logs
+      - name: Upload boot test logs and screenshots
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: boot-test-logs
-          path: out/test/*.log
+          path: |
+            out/test/*.log
+            out/test/*.ppm
           if-no-files-found: ignore
 
   container:

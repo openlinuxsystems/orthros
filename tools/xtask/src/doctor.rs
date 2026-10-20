@@ -1,6 +1,6 @@
 //! `ob setup` and `ob doctor`: preparing and checking the build host.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
@@ -124,7 +124,8 @@ fn pinned_toolchain(ctx: &Ctx) -> Option<String> {
     listed.then_some(channel)
 }
 
-fn kernel_target(ctx: &Ctx) -> Option<String> {
+/// The pinned toolchain's sysroot.
+fn sysroot(ctx: &Ctx) -> Option<PathBuf> {
     // Ask the pinned toolchain directly; `rustup run` never installs anything.
     let channel = pinned_toolchain(ctx)?;
     let out = Command::new("rustup")
@@ -132,9 +133,17 @@ fn kernel_target(ctx: &Ctx) -> Option<String> {
         .output()
         .ok()
         .filter(|out| out.status.success())?;
-    let sysroot = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let dir = Path::new(&sysroot).join("lib/rustlib").join(kernel::TARGET);
-    dir.is_dir().then(|| kernel::TARGET.to_string())
+    Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+fn rust_sources(ctx: &Ctx) -> Option<String> {
+    let core = sysroot(ctx)?.join("lib/rustlib/src/rust/library/core");
+    core.is_dir().then(|| "rust-src".to_string())
+}
+
+fn aarch64_target(ctx: &Ctx) -> Option<String> {
+    let dir = sysroot(ctx)?.join("lib/rustlib").join(kernel::AARCH64_TARGET);
+    dir.is_dir().then(|| kernel::AARCH64_TARGET.to_string())
 }
 
 fn grub_platform(dir: &'static str) -> Option<String> {
@@ -162,9 +171,16 @@ fn requirements() -> Vec<Requirement> {
             fallback: Some("./ob setup".into()),
         },
         Requirement {
-            name: "kernel target",
-            purpose: "Rust's x86_64-unknown-none standard library",
-            found: kernel_target,
+            name: "Rust sources",
+            purpose: "rust-src, from which the kernel builds `core` for its own target",
+            found: rust_sources,
+            packages: Packages { apt: None, dnf: None, pacman: None },
+            fallback: Some("./ob setup".into()),
+        },
+        Requirement {
+            name: "AArch64 target",
+            purpose: "Rust's aarch64-unknown-none library, for checking the HAL stubs",
+            found: aarch64_target,
             packages: Packages { apt: None, dnf: None, pacman: None },
             fallback: Some("./ob setup".into()),
         },
@@ -281,6 +297,13 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             }
         }
     }
+    match program_version("gdb", "--version") {
+        Some(version) => println!("  ok       {:<15} {version}", "GDB"),
+        None => println!(
+            "  note     {:<15} not installed; only `./ob run --gdb` needs it (package gdb)",
+            "GDB"
+        ),
+    }
     if qemu::kvm_available() {
         println!("  ok       {:<15} /dev/kvm is usable", "KVM");
     } else {
@@ -346,7 +369,7 @@ pub fn setup(ctx: &Ctx) -> Result<()> {
     let mut cmd = Command::new("rustup");
     cmd.args(["toolchain", "install", &channel, "--profile", "minimal"])
         .args(["--component", "rustfmt,clippy,rust-src,llvm-tools"])
-        .args(["--target", kernel::TARGET])
+        .args(["--target", kernel::AARCH64_TARGET])
         .current_dir(&ctx.root);
     process::run(ctx, &mut cmd)?;
     step("Checking host tools");

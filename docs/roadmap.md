@@ -97,7 +97,7 @@ The same driver crates also build as userspace driver processes against the `rad
 | Ported tools | GNU grep and sed, one-true-awk, less, libarchive (bsdtar, bsdunzip), gzip, bzip2, xz, Info-ZIP zip, curl, nano with ncurses, mandoc | GPL, BSD, MIT and ISC; shipped as separate programs |
 | Radix-native tools | ps, top, kill, pgrep, pkill, who, w, uptime, free, vmstat, df, ip, ss, ping, clear, which, chmod, chown, bundle, user, snap, sysupdate, rdisk | New, Rust |
 | Network libraries | smoltcp as the base of the in-kernel stack, hickory-dns for the resolver (DNS-over-TLS and HTTPS), rustls with the Mozilla CA bundle | 0BSD, MIT/Apache |
-| Hardware discovery | rust-osdev `acpi` crate for tables and AML, `multiboot2` crate | MIT/Apache |
+| Hardware discovery | Own `radix-bootinfo` and `radix-acpi` parsers for the Multiboot2 boot information and static ACPI tables (ADR 0013); the AML interpreter (rust-osdev `aml` crate, or uACPI in a compartment) is chosen when first needed | New code; MIT/Apache or MIT |
 | Graphics | Lumen built on Smithay with the pixman software renderer, wayland-rs, libxkbcommon and xkeyboard-config | MIT |
 | Boot | GRUB 2, built from pinned source | GPL-3.0 |
 
@@ -201,6 +201,8 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - CI pipeline; docs pipeline (scdoc and mandoc built for the host, mdBook).
 - **Exit:** `./ob run` boots GRUB in QEMU (UEFI and BIOS), which loads a stub kernel that prints `Radix` on the serial port, and CI is green.
 
+**Status:** done, in [pull request #1](https://github.com/openlinuxsystems/orthros/pull/1). Until the Phase 14 image pipeline, GRUB comes from the build container (Ubuntu 24.04, GRUB 2.12) instead of being built from source (ADR 0010).
+
 ### Phase 1: Boot and early hardware (M)
 
 - Multiboot2 header, 32-to-64-bit trampoline, higher-half kernel, early page tables.
@@ -209,6 +211,8 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - QEMU GDB stub workflow (`./ob run --gdb`) and a minimal serial kernel debugger (`kdb`); trace points available from the first instruction of Rust code.
 - CI compiles the HAL trait set for AArch64 (stubs only) so x86 assumptions cannot leak into common code.
 - **Exit:** on QEMU with 4 CPUs, under UEFI and BIOS, the kernel prints its memory map and CPU list, receives timer interrupts on every CPU, and turns a deliberate page fault into a readable backtrace. The same image, booted from USB, shows its boot log on the Dell's screen.
+
+**Status:** implemented. `./ob test` checks the QEMU exit criteria under UEFI and BIOS, from USB and CD-ROM, and reads the boot log and the panic report back from the framebuffer; the Dell smoke test and its result are in the handbook's Supported hardware chapter. Changes from this plan: the boot information and ACPI tables are parsed by the kernel's own safe crates (ADR 0013); microcode comes from a boot module that `ob image --microcode` adds, until the firmware package exists (ADR 0014). Decisions made in this phase: ADRs 0011 to 0016.
 
 ### Phase 2: Memory management (L)
 

@@ -32,19 +32,33 @@ override the file.
 # BOOT SECTION
 
 *[boot]* controls how GRUB starts the kernel in images built by *ob image*
-and *ob run*. Test images built by *ob test* always use a zero timeout and
-the *qemu-exit* flag.
+and *ob run*. Test images built by *ob test* ignore it: they use a zero
+timeout and the flags each test needs.
 
 *boot.timeout* = _seconds_
 	How long the GRUB menu waits before booting OrthrOS, from 0 to 600.
 	The default is 3.
 
 *boot.cmdline* = "_flags_"
-	Extra kernel command-line flags, separated by spaces. The flags the
-	kernel understands are listed in *orthros-boot*(7). Only letters,
-	digits, spaces and the characters *. \_ = , : / + -* are allowed,
-	because the value is written into GRUB's configuration. The default is
-	empty.
+	Kernel command-line flags, separated by spaces, such as
+	"loglevel=debug". The flags the kernel understands are listed in
+	*orthros-boot*(7). Only letters, digits, spaces and the characters
+	*. \_ = , : / + -* are allowed, because the value is written into
+	GRUB's configuration. The default is empty. *ob image --cmdline* and
+	*ob run --cmdline* override it.
+
+# IMAGE SECTION
+
+*[image]* adds optional files to the images *ob image* and *ob run* build.
+
+*image.microcode* = "_path_"
+	A file or directory of Intel microcode updates to load early in boot,
+	such as "/lib/firmware/intel-ucode" from the *intel-microcode*
+	package. Microcode is closed firmware, so OrthrOS does not ship it;
+	this key adds the updates of the build host to the image. *ob* checks
+	each update and fails if _path_ holds none. The default is empty: no
+	microcode. *ob image --microcode* and *ob run --microcode* override it.
+	See *MICROCODE* in *orthros-boot*(7).
 
 # RUN SECTION
 
@@ -61,11 +75,12 @@ the *qemu-exit* flag.
 
 *run.memory* = "_size_"
 	Guest memory in QEMU's notation, a number followed by *M* or *G*. The
-	default is "1G".
+	default is "1G". With more than 4 GiB the crash log moves above 4 GiB,
+	as on most real machines (see *radix-debug*(7)).
 
 *run.cpus* = _count_
-	Number of virtual CPUs, from 1 to 64. The default is 2. The Phase 0
-	kernel uses only the first.
+	Number of virtual CPUs, from 1 to 64. The default is 4. The kernel
+	starts all of them.
 
 # EXAMPLE
 
@@ -80,13 +95,16 @@ profile = "release"
 timeout = 3
 cmdline = ""
 
+[image]
+microcode = ""
+
 [run]
 firmware = "uefi"
 media = "usb"
 memory = "1G"
-cpus = 2
+cpus = 4
 ```
 
 # SEE ALSO
 
-*ob*(1), *orthros-boot*(7)
+*ob*(1), *orthros-boot*(7), *radix-debug*(7)

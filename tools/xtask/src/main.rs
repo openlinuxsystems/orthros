@@ -9,9 +9,11 @@ mod docs;
 mod doctor;
 mod image;
 mod kernel;
+mod ksyms;
 mod lint;
 mod process;
 mod qemu;
+mod screen;
 mod test;
 
 use std::fmt;
@@ -29,7 +31,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMANDS: &[(&str, &str)] = &[
     ("setup", "Install the pinned Rust toolchain, then run doctor"),
     ("doctor", "Check host tools and print the commands that install what is missing"),
-    ("build", "Build the kernel into out/sysroot"),
+    ("build", "Build the kernel, with its symbol table, into out/sysroot"),
     ("image", "Build the bootable USB image (or an ISO with --iso)"),
     ("run", "Boot the image in QEMU with the serial console on this terminal"),
     ("test", "Run unit tests, then boot the image in QEMU under UEFI and BIOS"),
@@ -67,7 +69,9 @@ fn command_usage(name: &str) -> Option<&'static str> {
             "Usage: ./ob setup
 
 Installs the Rust toolchain pinned in rust-toolchain.toml with rustup,
-including the x86_64-unknown-none target, then runs `./ob doctor`."
+including its rust-src component (the kernel builds `core` itself) and the
+aarch64-unknown-none target (CI checks the AArch64 HAL stubs), then runs
+`./ob doctor`."
         }
         "doctor" => {
             "Usage: ./ob doctor
@@ -79,41 +83,61 @@ Exits with status 1 when a required tool is missing."
         "build" => {
             "Usage: ./ob build [--debug | --release]
 
-Builds the Radix kernel and places it in out/sysroot/boot/radix.
+Builds the Radix kernel for its own target (kernel/targets/), writes the
+kernel symbol table into it, and places it in out/sysroot/boot/radix.
 
   --debug      Build without optimisation
   --release    Build with optimisation (the default from orthros.toml)"
         }
         "image" => {
-            "Usage: ./ob image [--iso] [--debug | --release]
+            "Usage: ./ob image [--iso] [--cmdline <flags>] [--microcode <path>]
+                  [--debug | --release]
 
 Builds the kernel, then a hybrid boot image that starts under UEFI and
 legacy BIOS from a USB stick, a hard disk or optical media:
   out/orthros-<version>-x86_64.img   (default)
   out/orthros-<version>-x86_64.iso   (with --iso)
 
-  --iso        Name the output .iso for virtual machines and optical media"
+  --iso                Name the output .iso for virtual machines and optical media
+  --cmdline <flags>    Kernel flags instead of boot.cmdline (orthros-boot(7))
+  --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "run" => {
-            "Usage: ./ob run [--bios | --uefi] [--media usb|cdrom|disk] [--headless]
-                [--debug | --release] [-- <extra QEMU arguments>]
+            "Usage: ./ob run [--bios | --uefi] [--media usb|cdrom|disk] [--headless] [--gdb]
+                [--cmdline <flags>] [--microcode <path>] [--debug | --release]
+                [-- <extra QEMU arguments>]
 
 Builds the image and boots it in QEMU. The serial console is this terminal;
 press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
 
-  --bios           Boot through SeaBIOS (legacy BIOS)
-  --uefi           Boot through OVMF (UEFI)
-  --media <kind>   Attach the image as a USB stick, CD-ROM or SATA disk
-  --headless       Do not open a QEMU window (automatic without a display)"
+  --bios               Boot through SeaBIOS (legacy BIOS)
+  --uefi               Boot through OVMF (UEFI)
+  --media <kind>       Attach the image as a USB stick, CD-ROM or SATA disk
+  --headless           Do not open a QEMU window (automatic without a display)
+  --gdb                Wait for GDB on localhost:1234; writes out/qemu/radix.gdb,
+                       which stops at the kernel's first Rust function
+  --cmdline <flags>    Kernel flags instead of boot.cmdline, such as \"kdb\"
+  --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "test" => {
-            "Usage: ./ob test [unit | boot] [--timeout <seconds>] [--debug | --release]
+            "Usage: ./ob test [unit | boot] [--case <name>]... [--timeout <seconds>]
+                 [--debug | --release]
 
-Runs host unit tests, then boots a test image in QEMU four times (UEFI and
-BIOS, from USB and CD-ROM) and checks the kernel's serial output. Logs go
-to out/test/. Give `unit` or `boot` to run only that part.
+Runs host unit tests, then the boot tests: QEMU boots a test image under
+UEFI and BIOS, from USB and CD-ROM, with 4 CPUs, and each test follows the
+serial console, types kdb commands and reads the framebuffer from
+screenshots. Logs go to out/test/. Give `unit` or `boot` to run only that
+part. The boot tests are:
+  uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (uefi-cdrom in xAPIC mode)
+  screen           the boot log on the UEFI framebuffer
+  page-fault       a page fault's panic report, on serial and on screen
+  crash-log-uefi   the panic report survives a restart (UEFI)
+  crash-log-bios   the same under BIOS
+  kdb              a breakpoint and every kdb command
+  microcode        a microcode module on an emulated Intel CPU
 
-  --timeout <seconds>   Limit for each boot (default 300)"
+  --case <name>         Run only this boot test; repeat for more
+  --timeout <seconds>   Limit for each boot test (default 300)"
         }
         "docs" => {
             "Usage: ./ob docs [--check]
@@ -128,7 +152,8 @@ mandoc -T lint) and the handbook from docs/handbook into out/docs/handbook.
             "Usage: ./ob lint
 
 Checks formatting with rustfmt and runs Clippy on the host tools, the kernel
-and the kernel libraries, treating every warning as an error."
+(for x86-64, and for AArch64 against the HAL stubs) and the kernel
+libraries, treating every warning as an error."
         }
         "fmt" => {
             "Usage: ./ob fmt
@@ -389,9 +414,13 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         }
         "image" => {
             let iso = args.flag("--iso");
+            let overrides = image::Overrides {
+                cmdline: args.value("--cmdline")?,
+                microcode: args.value("--microcode")?,
+            };
             let profile = args.profile(&ctx.config)?;
             args.finish()?;
-            let path = image::build_release(&ctx, profile, iso)?;
+            let path = image::build_release(&ctx, profile, iso, &overrides)?;
             println!("\nImage ready: {}", ctx.display(&path));
             println!(
                 "Write it to a USB stick as shown in ob(1), EXAMPLES, or boot it with ./ob run."

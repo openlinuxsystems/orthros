@@ -14,6 +14,7 @@ pub const KEYS: &[&str] = &[
     "build.profile",
     "boot.timeout",
     "boot.cmdline",
+    "image.microcode",
     "run.firmware",
     "run.media",
     "run.memory",
@@ -28,6 +29,8 @@ pub struct Config {
     pub build: Build,
     /// `[boot]`
     pub boot: Boot,
+    /// `[image]`
+    pub image: Image,
     /// `[run]`
     pub run: Run,
 }
@@ -58,6 +61,16 @@ impl Default for Boot {
     }
 }
 
+/// `[image]`: what goes into the boot image besides the kernel.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Image {
+    /// Intel microcode to load at boot: a file of updates, or a directory
+    /// such as `/lib/firmware/intel-ucode` whose files are all included.
+    /// Empty for none.
+    pub microcode: String,
+}
+
 /// `[run]`: the virtual machine `ob run` starts.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -74,7 +87,7 @@ pub struct Run {
 
 impl Default for Run {
     fn default() -> Self {
-        Self { firmware: Firmware::Uefi, media: Media::Usb, memory: "1G".into(), cpus: 2 }
+        Self { firmware: Firmware::Uefi, media: Media::Usb, memory: "1G".into(), cpus: 4 }
     }
 }
 
@@ -243,6 +256,8 @@ mod tests {
         assert_eq!(config.run.firmware, Firmware::Uefi);
         assert_eq!(config.run.media, Media::Usb);
         assert_eq!(config.run.memory, "1G");
+        assert_eq!(config.run.cpus, 4);
+        assert!(config.image.microcode.is_empty());
     }
 
     #[test]

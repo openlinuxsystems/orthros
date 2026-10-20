@@ -8,7 +8,8 @@ Every OrthrOS command, file format and interface has a manual page.
 | --- | --- |
 | `ob(1)` | The build tool: every command and option |
 | `orthros.toml(5)` | The build configuration file |
-| `orthros-boot(7)` | How OrthrOS boots, and the kernel command line |
+| `orthros-boot(7)` | How OrthrOS boots, its consoles, the kernel command line and microcode |
+| `radix-debug(7)` | Panic reports, the crash log, the kernel debugger, GDB and trace points |
 
 Sections follow the usual convention: 1 user commands, 2 system calls,
 3 library interfaces, 4 devices and drivers, 5 file formats, 7 overviews

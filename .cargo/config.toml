@@ -1,7 +1,0 @@
-# Cargo reads this file for every command run inside the repository, so the
-# kernel builds the same whether cargo is started here, in kernel/, or by ./ob.
-
-[target.x86_64-unknown-none]
-# The kernel is linked at a fixed address (kernel/radix/linker.ld) and keeps
-# frame pointers for the backtraces planned in Phase 1.
-rustflags = ["-C", "relocation-model=static", "-C", "force-frame-pointers=yes"]

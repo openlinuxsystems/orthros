@@ -10,8 +10,11 @@ profile = "release"    # "release" or "debug"
 timeout = 3            # seconds the GRUB menu waits
 cmdline = ""           # extra kernel command-line flags, see orthros-boot(7)
 
+[image]
+microcode = ""         # Intel microcode file or directory, e.g. "/lib/firmware/intel-ucode"
+
 [run]
 firmware = "uefi"      # "uefi" (OVMF) or "bios" (SeaBIOS)
 media = "usb"          # attach the image as "usb", "cdrom" or "disk"
 memory = "1G"
-cpus = 2
+cpus = 4

@@ -1,0 +1,11 @@
+[package]
+name = "radix-hal"
+description = "The hardware abstraction layer of the Radix kernel: the traits every architecture implements"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
