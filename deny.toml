@@ -1,0 +1,19 @@
+# cargo-deny policy for every workspace in the repository (CI runs it on
+# Cargo.toml and kernel/Cargo.toml). Dependencies must be under licenses
+# compatible with Apache-2.0 OR MIT, and come from crates.io.
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

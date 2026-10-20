@@ -1,0 +1,36 @@
+# Introduction
+
+OrthrOS is an operating system built around **Radix**, a kernel written in
+Rust. Radix is a hybrid design: a small trusted core holds the code that
+must be trusted, and everything else (drivers, file systems, the network
+stack) runs as restartable compartments that cannot use `unsafe` Rust.
+Programs reach resources through capabilities, unforgeable references that
+carry exactly the rights a program was given.
+
+On top of Radix, OrthrOS provides a complete, installable system:
+
+- **Spark**, the init and service manager, and **Nukesh**, the shell, with
+  the usual Unix utilities;
+- **Btrfs** as the native file system, with snapshots and atomic,
+  roll-back-able system updates;
+- wired networking with DHCP and DNS, users and logging;
+- **Lumen**, a Wayland compositor, without a desktop environment on top;
+- an installer with the `rdisk` partitioner, delivered as a USB image.
+
+## Where the project is
+
+OrthrOS is built in phases, each ending in something that runs. This
+handbook describes **Phase 0**: the build tool, documentation and CI exist,
+and a stub kernel boots through GRUB under UEFI and legacy BIOS and reports
+what it found. Chapters for later phases are listed in the table of
+contents and are written as those phases land. The full plan is in
+[`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
+
+## How this handbook is organised
+
+- **Getting started** covers building OrthrOS, making install media and
+  installing it.
+- **Using OrthrOS** covers the system itself, from the shell to updates.
+- **Reference** lists supported hardware and the manual pages. Every
+  command, file format and interface has a man page; this handbook explains
+  how the pieces fit together.

@@ -1,0 +1,118 @@
+# Every step is an ./ob command, so anything CI does can be run locally the
+# same way. See CONTRIBUTING.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with tools/container/Containerfile and tools/xtask/src/doctor.rs.
+  MDBOOK_VERSION: 0.4.52
+
+jobs:
+  build:
+    name: Lint, build, test, docs and image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools scdoc mandoc
+
+      - name: Install mdBook
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin mdbook
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob setup
+        run: ./ob setup
+
+      - name: ./ob lint
+        run: ./ob lint
+
+      - name: ./ob test
+        run: ./ob test
+
+      - name: ./ob docs --check
+        run: ./ob docs --check
+
+      - name: ./ob image
+        run: ./ob image
+
+      - name: Upload the boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: orthros-image
+          path: out/orthros-*-x86_64.img
+          retention-days: 14
+
+      - name: Upload boot test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-test-logs
+          path: out/test/*.log
+          if-no-files-found: ignore
+
+  container:
+    name: Build container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: ./ob --container doctor
+        run: ./ob --container doctor
+
+      - name: ./ob --container test
+        run: ./ob --container test
+
+  deny:
+    name: Licenses and advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny (build tool)
+        run: cargo deny --manifest-path Cargo.toml check
+      - name: cargo deny (kernel)
+        run: cargo deny --manifest-path kernel/Cargo.toml check

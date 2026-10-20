@@ -1,0 +1,32 @@
+# The Radix kernel workspace.
+#
+# The kernel builds for a bare-metal target, so it lives in its own workspace,
+# separate from the host tools in the repository root. Build it with `./ob build`.
+
+[workspace]
+resolver = "3"
+members = ["radix", "arch/x86_64", "lib/bootinfo"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/openlinuxsystems/orthros"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block needs a `// SAFETY:` comment (docs/coding-standard.md).
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+# Keep symbols so later phases can print symbolized backtraces.
+debug = true
