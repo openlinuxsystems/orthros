@@ -68,11 +68,21 @@ jobs:
       - name: ./ob image
         run: ./ob image
 
+      # `ob image` already refuses components outside their area's
+      # allow-list; this checks the SPDX document itself (ADR 0021).
+      - name: Validate the license manifest
+        run: |
+          python3 -m venv "$RUNNER_TEMP/spdx"
+          "$RUNNER_TEMP/spdx/bin/pip" install --quiet spdx-tools==0.8.3
+          "$RUNNER_TEMP/spdx/bin/pyspdxtools" -i out/orthros-*-x86_64.spdx
+
       - name: Upload the boot image
         uses: actions/upload-artifact@v4
         with:
           name: orthros-image
-          path: out/orthros-*-x86_64.img
+          path: |
+            out/orthros-*-x86_64.img
+            out/orthros-*-x86_64.spdx
           retention-days: 14
 
       - name: Upload boot test logs and screenshots
@@ -116,5 +126,7 @@ jobs:
           tool: cargo-deny
       - name: cargo deny (build tool)
         run: cargo deny --manifest-path Cargo.toml check
+      # cargo-deny reads ./deny.toml unless told otherwise; the kernel has
+      # its own, permissive-only policy.
       - name: cargo deny (kernel)
-        run: cargo deny --manifest-path kernel/Cargo.toml check
+        run: cargo deny --manifest-path kernel/Cargo.toml --config kernel/deny.toml check

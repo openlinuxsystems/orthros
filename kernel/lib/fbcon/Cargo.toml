@@ -3,12 +3,17 @@ name = "radix-fbcon"
 description = "Framebuffer text console for the Radix kernel, with PSF fonts"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The code is the project's; the fonts in fonts/ are Spleen 2.1.0 by
+# Frederic Cambus, BSD-2-Clause; see fonts/LICENSE-spleen and
+# docs/adr/0015-console-font-spleen.md.
+license = "(Apache-2.0 OR MIT) AND BSD-2-Clause"
 repository.workspace = true
 publish.workspace = true
-# The fonts in fonts/ are Spleen 2.1.0 by Frederic Cambus, BSD-2-Clause; see
-# fonts/LICENSE-spleen and docs/adr/0015-console-font-spleen.md.
 include = ["src/**", "fonts/**", "Cargo.toml"]
+
+# `ob image` copies these into /system/share/licenses (ADR 0021).
+[package.metadata.orthros]
+notices = ["fonts/LICENSE-spleen"]
 
 [dependencies]
 radix-hal = { path = "../../hal" }

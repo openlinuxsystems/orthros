@@ -35,9 +35,14 @@ _/boot/firmware/intel-ucode.bin_
 	*image.microcode* (see *orthros.toml*(5)) or *ob image --microcode*.
 	See *MICROCODE* below.
 
-_/licenses/_
-	The license texts of OrthrOS and of the console fonts compiled into
-	the kernel.
+_/system/share/licenses/_
+	The license manifest. _orthros.spdx_ lists every component of the
+	image (the kernel's crates, the Rust standard library crates compiled
+	into it, GRUB, and the microcode if any) with its SPDX license, in
+	the SPDX 2.3 tag-value format; _README_ summarises it, _texts/_ holds
+	the text of each license, and _notices/_ the copyright and license
+	files that came with each component, such as the Spleen font
+	license. See *ob*(1).
 
 ## Sequence
 
