@@ -19,7 +19,7 @@ RUN apt-get update \
         ca-certificates curl git build-essential \
         qemu-system-x86 ovmf \
         grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools \
-        scdoc mandoc \
+        scdoc mandoc gdb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test -n "$RUST_TOOLCHAIN" \
@@ -27,7 +27,7 @@ RUN test -n "$RUST_TOOLCHAIN" \
         | CARGO_HOME=/usr/local/cargo sh -s -- -y --no-modify-path --profile minimal \
             --default-toolchain "$RUST_TOOLCHAIN" \
             --component rustfmt,clippy,rust-src,llvm-tools \
-            --target x86_64-unknown-none \
+            --target aarch64-unknown-none \
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
 RUN curl --proto '=https' --tlsv1.2 -sSfL \

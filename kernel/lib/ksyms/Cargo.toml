@@ -1,0 +1,11 @@
+[package]
+name = "radix-ksyms"
+description = "The kernel symbol table format used to symbolize Radix backtraces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

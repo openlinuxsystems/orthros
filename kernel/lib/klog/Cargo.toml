@@ -1,0 +1,14 @@
+[package]
+name = "radix-klog"
+description = "The Radix kernel log: message ring, consoles, trace points and the crash log format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+radix-sync = { path = "../sync" }
+
+[lints]
+workspace = true

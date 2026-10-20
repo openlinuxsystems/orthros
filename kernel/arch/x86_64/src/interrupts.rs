@@ -1,0 +1,405 @@
+//! The interrupt descriptor table, exception handling and interrupt
+//! dispatch.
+//!
+//! All 256 vectors enter through small assembly stubs that push the vector
+//! number (and a zero where the CPU pushes no error code), save every
+//! general-purpose register into a [`TrapFrame`] and call [`dispatch`]. The
+//! common stub also pushes a fake stack frame record made of the
+//! interrupted RIP and RBP, so a frame-pointer backtrace taken inside a
+//! handler continues into the interrupted code.
+//!
+//! Exceptions in the kernel are fatal except breakpoints, which call the
+//! registered breakpoint handler and resume, and NMIs, which the panic path
+//! uses to stop the other CPUs. A fatal exception records a [`Fault`] for
+//! the panic report and panics with a description of what went wrong.
+
+use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use radix_hal::Fault;
+use radix_klog::TextBuf;
+use radix_sync::{Once, TakeOnce};
+
+use crate::cpu;
+use crate::percpu::{self, IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CS};
+
+/// Vector of the local APIC timer.
+pub const VECTOR_TIMER: u8 = 0x30;
+/// Vector of the ping IPI.
+pub const VECTOR_PING: u8 = 0x40;
+/// Vector of the TLB flush IPI.
+pub const VECTOR_TLB: u8 = 0x41;
+/// First vector the legacy PICs are remapped to (they stay masked).
+pub const VECTOR_PIC_BASE: u8 = 0x20;
+/// Vector of local APIC errors.
+pub const VECTOR_APIC_ERROR: u8 = 0xfe;
+/// The local APIC's spurious-interrupt vector.
+pub const VECTOR_SPURIOUS: u8 = 0xff;
+
+/// Registers saved by the entry stubs, lowest address first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TrapFrame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    pub vector: u64,
+    pub error: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+// The stubs. Each is 16 bytes long, so the stub for vector v is at
+// `isr_stubs + 16 * v`. Vectors 8, 10-14, 17, 21, 29 and 30 come with an
+// error code from the CPU; the others push a zero in its place.
+core::arch::global_asm!(
+    r#"
+    .section .text.isr, "ax"
+    .balign 16
+    .global radix_isr_stubs
+radix_isr_stubs:
+    .set vector, 0
+    .rept 256
+    .balign 16
+    .if (vector == 8) || (vector >= 10 && vector <= 14) || (vector == 17) || (vector == 21) || (vector == 29) || (vector == 30)
+    .else
+    pushq $0
+    .endif
+    pushq $vector
+    jmp radix_isr_common
+    .set vector, vector + 1
+    .endr
+
+radix_isr_common:
+    cld
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    /* Fake frame record: interrupted RIP above interrupted RBP. */
+    pushq 17*8(%rsp)
+    pushq %rbp
+    movq %rsp, %rbp
+    leaq 16(%rsp), %rdi
+    call radix_trap_dispatch
+    addq $16, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp
+    iretq
+    "#,
+    options(att_syntax)
+);
+
+unsafe extern "C" {
+    /// The first entry stub; see the assembly above.
+    static radix_isr_stubs: u8;
+}
+
+/// One IDT gate.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Gate {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    attributes: u8,
+    offset_middle: u16,
+    offset_high: u32,
+    _reserved: u32,
+}
+
+static IDT: TakeOnce<[Gate; 256]> = TakeOnce::new(
+    [Gate {
+        offset_low: 0,
+        selector: 0,
+        ist: 0,
+        attributes: 0,
+        offset_middle: 0,
+        offset_high: 0,
+        _reserved: 0,
+    }; 256],
+);
+
+/// Address of the IDT once built.
+static IDT_ADDRESS: Once<usize> = Once::new();
+
+/// Builds the IDT. Called once, by the boot CPU.
+pub fn init() {
+    let Some(idt) = IDT.take() else { return };
+    let stubs = &raw const radix_isr_stubs as usize;
+    for (vector, gate) in idt.iter_mut().enumerate() {
+        let handler = (stubs + 16 * vector) as u64;
+        let ist = match vector {
+            2 => IST_NMI,
+            8 => IST_DOUBLE_FAULT,
+            18 => IST_MACHINE_CHECK,
+            _ => 0,
+        };
+        *gate = Gate {
+            offset_low: handler as u16,
+            selector: KERNEL_CS,
+            ist,
+            // Present, ring 0, 64-bit interrupt gate (interrupts masked on
+            // entry).
+            attributes: 0x8e,
+            offset_middle: (handler >> 16) as u16,
+            offset_high: (handler >> 32) as u32,
+            _reserved: 0,
+        };
+    }
+    let _ = IDT_ADDRESS.set(idt.as_ptr() as usize);
+}
+
+/// Loads the IDT on this CPU.
+pub fn load() {
+    let Some(&base) = IDT_ADDRESS.get() else { return };
+    #[repr(C, packed)]
+    struct Pointer {
+        limit: u16,
+        base: u64,
+    }
+    let pointer = Pointer { limit: (256 * 16 - 1) as u16, base: base as u64 };
+    // SAFETY: the IDT is a fully initialised static that is never written
+    // again, and every gate points at an entry stub.
+    unsafe {
+        core::arch::asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags))
+    };
+}
+
+/// Names of the exceptions, by vector.
+const EXCEPTIONS: [(&str, &str); 32] = [
+    ("Divide error", "#DE"),
+    ("Debug exception", "#DB"),
+    ("Non-maskable interrupt", "NMI"),
+    ("Breakpoint", "#BP"),
+    ("Overflow", "#OF"),
+    ("BOUND range exceeded", "#BR"),
+    ("Invalid opcode", "#UD"),
+    ("Device not available", "#NM"),
+    ("Double fault", "#DF"),
+    ("Coprocessor segment overrun", "#9"),
+    ("Invalid TSS", "#TS"),
+    ("Segment not present", "#NP"),
+    ("Stack-segment fault", "#SS"),
+    ("General protection fault", "#GP"),
+    ("Page fault", "#PF"),
+    ("Reserved exception 15", "#15"),
+    ("x87 floating-point error", "#MF"),
+    ("Alignment check", "#AC"),
+    ("Machine check", "#MC"),
+    ("SIMD floating-point exception", "#XM"),
+    ("Virtualization exception", "#VE"),
+    ("Control protection exception", "#CP"),
+    ("Reserved exception 22", "#22"),
+    ("Reserved exception 23", "#23"),
+    ("Reserved exception 24", "#24"),
+    ("Reserved exception 25", "#25"),
+    ("Reserved exception 26", "#26"),
+    ("Reserved exception 27", "#27"),
+    ("Hypervisor injection exception", "#HV"),
+    ("VMM communication exception", "#VC"),
+    ("Security exception", "#SX"),
+    ("Reserved exception 31", "#31"),
+];
+
+/// The function breakpoints call.
+static BREAKPOINT_HANDLER: Once<fn(&Fault)> = Once::new();
+
+/// Registers the breakpoint handler.
+pub fn set_breakpoint_handler(handler: fn(&Fault)) {
+    let _ = BREAKPOINT_HANDLER.set(handler);
+}
+
+/// Set while the panic path stops the other CPUs; NMIs then halt.
+pub static STOPPING: AtomicBool = AtomicBool::new(false);
+/// CPUs that have stopped.
+pub static STOPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Converts saved registers into the HAL's fault record.
+pub fn fault_from(frame: &TrapFrame) -> Fault {
+    let regs = [
+        ("rax", frame.rax),
+        ("rbx", frame.rbx),
+        ("rcx", frame.rcx),
+        ("rdx", frame.rdx),
+        ("rsi", frame.rsi),
+        ("rdi", frame.rdi),
+        ("rbp", frame.rbp),
+        ("rsp", frame.rsp),
+        ("r8", frame.r8),
+        ("r9", frame.r9),
+        ("r10", frame.r10),
+        ("r11", frame.r11),
+        ("r12", frame.r12),
+        ("r13", frame.r13),
+        ("r14", frame.r14),
+        ("r15", frame.r15),
+        ("rip", frame.rip),
+        ("rflags", frame.rflags),
+        ("cs", frame.cs),
+        ("ss", frame.ss),
+        ("cr2", cpu::cr2()),
+        ("cr3", cpu::cr3()),
+        ("cr4", cpu::cr4()),
+        ("error", frame.error),
+    ];
+    Fault {
+        pc: frame.rip as usize,
+        frame_pointer: frame.rbp as usize,
+        stack_pointer: frame.rsp as usize,
+        registers: regs,
+        register_count: regs.len(),
+    }
+}
+
+/// Describes a page fault's error code.
+fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
+    let access = if error & (1 << 4) != 0 {
+        "executing"
+    } else if error & (1 << 1) != 0 {
+        "writing"
+    } else {
+        "reading"
+    };
+    let cause = if error & 1 != 0 {
+        "the page does not allow this access"
+    } else {
+        "the page is not mapped"
+    };
+    let _ = write!(out, " while {access} {address:#x}: {cause}");
+    if error & (1 << 3) != 0 {
+        let _ = write!(out, " (reserved bit set in a page-table entry)");
+    }
+    if let Some(stacks) = percpu::current().stacks.get()
+        && stacks.in_guard(address as usize)
+    {
+        let _ = write!(out, "; this is a stack guard page, so the kernel stack overflowed");
+    }
+}
+
+/// Called by the entry stubs with the saved registers.
+#[unsafe(no_mangle)]
+extern "C" fn radix_trap_dispatch(frame: &mut TrapFrame) {
+    let vector = frame.vector as u8;
+    match vector {
+        VECTOR_TIMER => crate::time::on_tick(),
+        VECTOR_PING => {
+            percpu::current().pings.fetch_add(1, Ordering::Relaxed);
+            radix_klog::tracepoint!("ipi.ping", percpu::current_index());
+            crate::apic::end_of_interrupt();
+        }
+        VECTOR_TLB => {
+            crate::paging::catch_up_tlb();
+            crate::apic::end_of_interrupt();
+        }
+        VECTOR_APIC_ERROR => {
+            let status = crate::apic::read_error_status();
+            radix_klog::tracepoint!("apic.error", status);
+            crate::apic::end_of_interrupt();
+        }
+        // Spurious interrupts from the local APIC or the masked PICs need
+        // no end-of-interrupt.
+        VECTOR_SPURIOUS => {}
+        v if (VECTOR_PIC_BASE..VECTOR_PIC_BASE + 16).contains(&v) => {
+            radix_klog::tracepoint!("pic.spurious", v);
+        }
+        2 => nmi(frame),
+        3 => breakpoint(frame),
+        0..32 => fatal_exception(frame),
+        v => {
+            radix_klog::tracepoint!("irq.unexpected", v);
+            crate::apic::end_of_interrupt();
+        }
+    }
+}
+
+fn nmi(frame: &TrapFrame) {
+    if STOPPING.load(Ordering::Acquire) {
+        let cpu = percpu::current();
+        cpu.online.store(false, Ordering::Relaxed);
+        cpu.stopped.store(true, Ordering::Release);
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+        cpu::halt_forever();
+    }
+    // Logging could deadlock on a lock this CPU holds, so only record it.
+    radix_klog::tracepoint!("nmi.unexpected", frame.rip);
+}
+
+fn breakpoint(frame: &mut TrapFrame) {
+    // RIP already points after the `int3`.
+    let fault = fault_from(frame);
+    match BREAKPOINT_HANDLER.get() {
+        Some(handler) => handler(&fault),
+        None => radix_klog::info!("Breakpoint at {:#x} (no debugger; continuing)", frame.rip - 1),
+    }
+}
+
+fn fatal_exception(frame: &TrapFrame) -> ! {
+    let cpu = percpu::current();
+    let vector = frame.vector as usize;
+    let (name, mnemonic) = EXCEPTIONS[vector];
+    if cpu.exception_depth.fetch_add(1, Ordering::AcqRel) > 2 {
+        // Exceptions inside the handling of exceptions: give up quietly
+        // rather than recurse until the stack is gone.
+        cpu::halt_forever();
+    }
+    *cpu.fault.lock() = Some(fault_from(frame));
+    let mut detail = TextBuf::<256>::new();
+    match vector {
+        14 => page_fault_detail(&mut detail, frame.error, cpu::cr2()),
+        10..=13 if frame.error != 0 => {
+            let _ = write!(detail, " (selector error code {:#x})", frame.error);
+        }
+        8 => {
+            let _ = write!(
+                detail,
+                ", probably after a kernel stack overflow or a fault in a fault handler"
+            );
+        }
+        _ => {}
+    }
+    if frame.cs & 3 != 0 {
+        let _ = write!(detail, " [user mode]");
+    }
+    panic!("{name} ({mnemonic}) at {:#x}{detail}", frame.rip);
+}

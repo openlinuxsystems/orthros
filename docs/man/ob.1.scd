@@ -22,7 +22,8 @@ _rust-toolchain.toml_ and runs it, so the first command takes a little
 longer. Settings come from _orthros.toml_ (see *orthros.toml*(5)); command
 options override them.
 
-Build output goes to _out/_ and Cargo's intermediate files to _target/_.
+Build output goes to _out/_ and Cargo's intermediate files to _target/_
+(the kernel's to _target/kernel/_).
 
 # GLOBAL OPTIONS
 
@@ -48,20 +49,26 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_.
 
 *setup*
 	Install the Rust toolchain pinned in _rust-toolchain.toml_ with
-	*rustup*(1), including rustfmt, Clippy and the x86_64-unknown-none
-	target, then run *doctor*. Run it once after cloning and again whenever
-	the pinned toolchain changes.
+	*rustup*(1), including rustfmt, Clippy, the Rust sources (the kernel
+	compiles its own copy of the *core* library) and the
+	aarch64-unknown-none target (*lint* checks the AArch64 stubs of the
+	hardware abstraction layer against it), then run *doctor*. Run it once
+	after cloning and again whenever the pinned toolchain changes.
 
 *doctor*
-	Check every host tool the build needs: rustup, the pinned toolchain,
-	QEMU, OVMF, GRUB for BIOS and UEFI, xorriso, mtools, scdoc, mandoc and
-	mdBook. For anything missing, print the exact install command for
-	Debian, Ubuntu, Fedora or Arch Linux. Also report whether KVM is usable;
-	without it QEMU still works, only slower. Exits with status 1 when a
-	required tool is missing.
+	Check every host tool the build needs: rustup, the pinned toolchain
+	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
+	UEFI, xorriso, mtools, scdoc, mandoc and mdBook. For anything missing,
+	print the exact install command for Debian, Ubuntu, Fedora or Arch
+	Linux. Also report whether KVM is usable (without it QEMU still works,
+	only slower) and whether GDB is installed for *run --gdb*. Exits with
+	status 1 when a required tool is missing.
 
 *build* [*--debug* | *--release*]
-	Build the Radix kernel and install it as _out/sysroot/boot/radix_.
+	Build the Radix kernel for its own target,
+	_kernel/targets/x86_64-radix-kernel.json_, write the kernel's symbol
+	table into its *.ksyms* section (see *radix-debug*(7)), and install it
+	as _out/sysroot/boot/radix_.
 
 	*--debug*
 		Build without optimisation.
@@ -70,22 +77,36 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_.
 		Build with optimisation. This is the default unless
 		*build.profile* in _orthros.toml_ says otherwise.
 
-*image* [*--iso*] [*--debug* | *--release*]
+*image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
 	_out/orthros-VERSION-x86_64.img_. The image is a hybrid: it starts
 	under UEFI and under legacy BIOS, from a USB stick, a hard disk or
 	optical media. Write it to a USB stick as shown in *EXAMPLES*.
+	*orthros-boot*(7) lists what the image contains.
 
 	*--iso*
 		Name the output _out/orthros-VERSION-x86_64.iso_ instead, for
 		virtual machines and optical media. The contents are the same.
 
-*run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--debug* | *--release*] [*--* _qemu-args_...]
-	Build the image and boot it in QEMU on a q35 machine. The guest's
-	serial port is this terminal; press *Ctrl-A* then *X* to quit QEMU, or
-	*Ctrl-A* then *C* for the QEMU monitor. A QEMU window shows the screen
-	unless there is no display. KVM is used when _/dev/kvm_ is usable. The
-	image file itself is never modified.
+	*--cmdline* _flags_
+		Kernel command-line flags instead of *boot.cmdline*, such as
+		*"kdb loglevel=debug"*. *orthros-boot*(7) lists the flags.
+
+	*--microcode* _path_
+		Add the Intel microcode updates in _path_, a file or a directory
+		such as _/lib/firmware/intel-ucode_, instead of those named by
+		*image.microcode*. Every update is checked, and the command fails
+		if _path_ holds none. See *MICROCODE* in *orthros-boot*(7).
+
+*run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--gdb*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*] [*--* _qemu-args_...]
+	Build the image and boot it in QEMU on a q35 machine with
+	*run.memory* of memory and *run.cpus* CPUs. The guest's serial port is
+	this terminal; press *Ctrl-A* then *X* to quit QEMU, or *Ctrl-A* then
+	*C* for the QEMU monitor. A QEMU window shows the screen unless there
+	is no display. KVM is used when _/dev/kvm_ is usable. When the guest
+	restarts, as after a panic, it boots the image again and shows the
+	crash log of the previous boot. The image file itself is never
+	modified.
 
 	*--uefi*
 		Boot through OVMF. This is the default unless *run.firmware* says
@@ -102,20 +123,66 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_.
 		Do not open a QEMU window. This is automatic when neither
 		*DISPLAY* nor *WAYLAND_DISPLAY* is set.
 
+	*--gdb*
+		Start QEMU paused, with its GDB stub on localhost port 1234, and
+		write the GDB script _out/qemu/radix.gdb_, which loads the
+		kernel's symbols, connects and stops at the kernel's first Rust
+		function. Run *gdb -x out/qemu/radix.gdb* in another terminal.
+		See *radix-debug*(7).
+
+	*--cmdline* _flags_, *--microcode* _path_
+		As for *image*.
+
 	*--* _qemu-args_
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
-		for example *-- -s -S* to wait for a debugger.
+		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot*] [*--timeout* _seconds_] [*--debug* | *--release*]
-	Run the host unit tests, then build a test image and boot it four times
-	in QEMU: under UEFI and BIOS, from USB and from CD-ROM. Each boot passes
-	when the kernel reports the right firmware on the serial port and exits
-	QEMU through the *qemu-exit* flag (see *orthros-boot*(7)). Serial logs
-	go to _out/test/_. Give *unit* or *boot* to run only that part.
+*test* [*unit* | *boot*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+	Run the unit tests of the build tool and the kernel libraries on this
+	machine, then the boot tests: build a test image and boot it in QEMU
+	once per case below. Each case follows the serial console, types
+	*kdb* commands where it needs to, and reads the framebuffer console's
+	text from QEMU screenshots by matching the kernel's own font. A case
+	passes when every expected line appears in order and QEMU exits as
+	expected, usually through the *qemu-exit* flag (see
+	*orthros-boot*(7)). Serial logs and screenshots go to _out/test/_.
+	Give *unit* or *boot* to run only that part. Without KVM the boot
+	tests take a few minutes.
+
+	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
+		Boot with 4 CPUs under each firmware and medium, and check the
+		memory map, the CPU list, timer interrupts on every CPU and an
+		IPI to each. *uefi-cdrom* boots with *nox2apic* and checks for
+		xAPIC mode; with KVM, which always offers x2APIC, the other three
+		check for x2APIC mode.
+
+	*screen*
+		Boot under UEFI and read the boot log back from the framebuffer.
+
+	*page-fault*
+		Boot with *selftest=page-fault* and check the panic report on the
+		serial port and on the screen, with its symbolized backtrace.
+
+	*crash-log-uefi*, *crash-log-bios*
+		Boot with *selftest=crash-reboot*, let the panic restart the
+		machine, and check that the next boot shows the panic from the
+		crash log. The UEFI case has 5 GiB of memory, so the log lies
+		above 4 GiB; the BIOS case has 1 GiB.
+
+	*kdb*
+		Boot with *kdb* and *selftest=breakpoint*, and run every *kdb*
+		command at the breakpoint and at the end of boot.
+
+	*microcode*
+		Boot an image with a generated microcode file on an emulated
+		Intel CPU, and check that the kernel finds the matching update.
+
+	*--case* _name_
+		Run only this boot test; repeat the option for more.
 
 	*--timeout* _seconds_
-		Fail a boot that has not finished after this long. The default is
-		300.
+		Fail a boot test that has not finished after this long. The
+		default is 300.
 
 *docs* [*--check*]
 	Build the man pages from _docs/man/\*.scd_ into _out/docs/man/_ and the
@@ -123,14 +190,18 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_.
 	is checked with *mandoc -T lint*, and any warning fails the command.
 
 	*--check*
-		Also fail when a man page title does not match its file name, when
-		an *ob* command is missing from this page, or when an
-		_orthros.toml_ key is missing from *orthros.toml*(5).
+		Also fail when a man page title does not match its file name, or
+		when one of these is not documented in bold in its page: an *ob*
+		command (this page), an _orthros.toml_ key (*orthros.toml*(5)), a
+		kernel flag (*orthros-boot*(7)), a *kdb* command or a self-test
+		(*radix-debug*(7)).
 
 *lint*
-	Check formatting with rustfmt and run Clippy on the build tool, the
-	kernel and the kernel libraries, treating every warning as an error.
-	CI runs the same command.
+	Check formatting with rustfmt and run Clippy, treating every warning as
+	an error, on the build tool, on the kernel for x86-64, on the
+	architecture-independent kernel against the AArch64 stubs of the
+	hardware abstraction layer, and on the kernel libraries with their
+	tests. CI runs the same command.
 
 *fmt*
 	Format all Rust code with rustfmt.
@@ -172,11 +243,20 @@ _rust-toolchain.toml_
 _image/grub/grub.cfg.in_
 	Template for the GRUB menu in every image.
 
+_kernel/targets/x86_64-radix-kernel.json_
+	The kernel's Rust target specification.
+
+_out/sysroot/boot/radix_
+	The kernel built by *ob build*.
+
 _out/orthros-VERSION-x86_64.img_
 	The boot image built by *ob image*.
 
+_out/qemu/radix.gdb_
+	The GDB script written by *ob run --gdb*.
+
 _out/test/_
-	Test image and serial logs from *ob test*.
+	Test images, serial logs and screenshots from *ob test*.
 
 # EXIT STATUS
 
@@ -199,6 +279,26 @@ Boot as a legacy BIOS machine from a virtual hard disk, without a window:
 ./ob run --bios --media disk --headless
 ```
 
+Boot with the kernel debugger and debug messages:
+
+```
+./ob run --cmdline "kdb loglevel=debug"
+```
+
+Debug the kernel with GDB, from two terminals:
+
+```
+./ob run --gdb --debug
+gdb -x out/qemu/radix.gdb
+```
+
+Build an image that loads Intel microcode, here from Debian's
+*intel-microcode* package:
+
+```
+./ob image --microcode /lib/firmware/intel-ucode
+```
+
 Build the image and write it to a USB stick. Check the device name with
 *lsblk*(8) first: everything on that device is erased.
 
@@ -219,8 +319,8 @@ Build on a host without the tools installed, using Podman or Docker:
 
 # SEE ALSO
 
-*orthros.toml*(5), *orthros-boot*(7), *qemu-system-x86_64*(1),
-*grub-mkrescue*(1), *rustup*(1), *dd*(1)
+*orthros.toml*(5), *orthros-boot*(7), *radix-debug*(7),
+*qemu-system-x86_64*(1), *grub-mkrescue*(1), *rustup*(1), *gdb*(1), *dd*(1)
 
 The OrthrOS handbook, chapter "Building OrthrOS with ob", in
 _docs/handbook/_ or _out/docs/handbook/index.html_ after *ob docs*.

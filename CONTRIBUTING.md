@@ -10,7 +10,7 @@ Everything goes through `./ob`, and CI runs exactly the same commands:
 ```sh
 ./ob setup          # once, and whenever rust-toolchain.toml changes
 ./ob lint           # rustfmt and Clippy, warnings are errors (./ob fmt fixes formatting)
-./ob test           # unit tests, then QEMU boots under UEFI and BIOS
+./ob test           # unit tests, then the QEMU boot tests (./ob help test)
 ./ob docs --check   # man pages and handbook, with completeness checks
 ```
 
@@ -24,11 +24,15 @@ A change merges when:
 - CI is green: lint, unit tests, boot tests, docs check, cargo-deny and the
   container build.
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
-  hardware lives in a crate that compiles for the host and is unit-tested
-  there, as `kernel/lib/bootinfo` is.
-- Every new command, file format, kernel command-line flag or interface has
-  a man page in `docs/man/` (see "Man pages" below), and the handbook is
-  updated where users would look.
+  hardware lives in a crate under `kernel/lib/` that compiles for the host
+  and is unit-tested there; behaviour that needs a machine gets a boot test
+  case in `tools/xtask/src/test.rs`, which can follow the serial console,
+  type `kdb` commands and read the screen.
+- Every new command, file format, kernel command-line flag, `kdb` command
+  or interface has a man page in `docs/man/` (see "Man pages" below), and
+  the handbook is updated where users would look. `./ob docs --check`
+  enforces this for `ob` commands, `orthros.toml` keys, kernel flags, `kdb`
+  commands and self-tests.
 - Any decision the specification leaves open, or any change to an earlier
   decision, has an architecture decision record in `docs/adr/`.
 - It follows the [coding standard](docs/coding-standard.md).
@@ -57,6 +61,13 @@ and fails on any `mandoc -T lint` warning. Preview a page with:
 Sections follow the usual convention: 1 user commands, 2 system calls,
 3 library interfaces, 4 devices and drivers, 5 file formats, 7 overviews,
 8 administration.
+
+## Design notes
+
+`docs/design/` explains how parts of the kernel work, for people changing
+them: start with [`boot.md`](docs/design/boot.md) and
+[`interrupts.md`](docs/design/interrupts.md). Update the note in the same
+pull request as a change that makes it wrong.
 
 ## Architecture decision records
 

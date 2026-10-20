@@ -22,12 +22,20 @@ pub mod tag_type {
     pub const COMMAND_LINE: u32 = 1;
     /// Boot loader name (NUL-terminated UTF-8).
     pub const BOOT_LOADER_NAME: u32 = 2;
+    /// A module the boot loader loaded next to the kernel.
+    pub const MODULE: u32 = 3;
     /// Memory map provided by the firmware through the boot loader.
     pub const MEMORY_MAP: u32 = 6;
+    /// The framebuffer the boot loader set up.
+    pub const FRAMEBUFFER: u32 = 8;
     /// EFI 32-bit system table pointer.
     pub const EFI32_SYSTEM_TABLE: u32 = 11;
     /// EFI 64-bit system table pointer.
     pub const EFI64_SYSTEM_TABLE: u32 = 12;
+    /// Copy of an ACPI 1.0 RSDP.
+    pub const ACPI_OLD_RSDP: u32 = 14;
+    /// Copy of an ACPI 2.0 or later RSDP.
+    pub const ACPI_NEW_RSDP: u32 = 15;
     /// EFI memory map.
     pub const EFI_MEMORY_MAP: u32 = 17;
 }
@@ -143,6 +151,87 @@ impl<'a> BootInfo<'a> {
         }
         Some(MemoryMap { entries: tag.data.get(8..)?, entry_size })
     }
+
+    /// The framebuffer, if the boot loader set one up.
+    pub fn framebuffer(&self) -> Option<FramebufferInfo> {
+        let data = self.tag(tag_type::FRAMEBUFFER)?.data;
+        let kind = *data.get(21)?;
+        let rgb = if kind == framebuffer_type::RGB {
+            let fields = data.get(24..30)?;
+            Some([(fields[0], fields[1]), (fields[2], fields[3]), (fields[4], fields[5])])
+        } else {
+            None
+        };
+        Some(FramebufferInfo {
+            address: read_u64(data, 0)?,
+            pitch: read_u32(data, 8)?,
+            width: read_u32(data, 12)?,
+            height: read_u32(data, 16)?,
+            bpp: *data.get(20)?,
+            kind,
+            rgb,
+        })
+    }
+
+    /// The copy of the ACPI RSDP the boot loader passed, preferring the
+    /// ACPI 2.0 one.
+    pub fn acpi_rsdp(&self) -> Option<&'a [u8]> {
+        self.tag(tag_type::ACPI_NEW_RSDP)
+            .or_else(|| self.tag(tag_type::ACPI_OLD_RSDP))
+            .map(|t| t.data)
+    }
+
+    /// The modules the boot loader loaded.
+    pub fn modules(&self) -> impl Iterator<Item = Module<'a>> + 'a {
+        self.tags().filter(|tag| tag.typ == tag_type::MODULE).filter_map(|tag| {
+            Some(Module {
+                start: read_u32(tag.data, 0)?,
+                end: read_u32(tag.data, 4)?,
+                command_line: c_str(tag.data.get(8..)?)?,
+            })
+        })
+    }
+}
+
+/// Framebuffer types in the framebuffer tag.
+pub mod framebuffer_type {
+    /// Indexed colour with a palette.
+    pub const INDEXED: u8 = 0;
+    /// Direct RGB colour.
+    pub const RGB: u8 = 1;
+    /// EGA-style text mode: the address is the VGA text buffer.
+    pub const EGA_TEXT: u8 = 2;
+}
+
+/// The framebuffer tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramebufferInfo {
+    /// Physical address of the first pixel (or character cell).
+    pub address: u64,
+    /// Bytes per row.
+    pub pitch: u32,
+    /// Width in pixels (or characters).
+    pub width: u32,
+    /// Height in pixels (or characters).
+    pub height: u32,
+    /// Bits per pixel.
+    pub bpp: u8,
+    /// One of [`framebuffer_type`].
+    pub kind: u8,
+    /// For RGB framebuffers, (position, size) in bits of red, green and
+    /// blue.
+    pub rgb: Option<[(u8, u8); 3]>,
+}
+
+/// A module loaded by the boot loader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Module<'a> {
+    /// Physical address of the first byte.
+    pub start: u32,
+    /// Physical address one past the last byte.
+    pub end: u32,
+    /// The rest of the module's GRUB line, such as `microcode`.
+    pub command_line: &'a str,
 }
 
 /// One tag: its type number and the bytes after its 8-byte header.
@@ -309,6 +398,39 @@ mod tests {
         let map = info.memory_map().unwrap();
         assert_eq!(map.regions().count(), 3);
         assert_eq!(map.usable_summary(), (0x9f000 + 0x7ef0000, 2));
+    }
+
+    #[test]
+    fn reads_framebuffer_rsdp_and_modules() {
+        let mut fb = Vec::new();
+        fb.extend_from_slice(&0xfd00_0000u64.to_le_bytes());
+        for value in [5120u32, 1280, 800] {
+            fb.extend_from_slice(&value.to_le_bytes());
+        }
+        fb.extend_from_slice(&[32, framebuffer_type::RGB, 0, 0, 16, 8, 8, 8, 0, 8]);
+        let mut module = Vec::new();
+        module.extend_from_slice(&0x0010_0000u32.to_le_bytes());
+        module.extend_from_slice(&0x0010_2000u32.to_le_bytes());
+        module.extend_from_slice(&c_string("microcode"));
+        let bytes = build(&[
+            (tag_type::FRAMEBUFFER, fb),
+            (tag_type::ACPI_OLD_RSDP, b"RSD PTR v1".to_vec()),
+            (tag_type::ACPI_NEW_RSDP, b"RSD PTR v2".to_vec()),
+            (tag_type::MODULE, module),
+        ]);
+        let info = BootInfo::parse(&bytes).unwrap();
+        let fb = info.framebuffer().unwrap();
+        assert_eq!(
+            (fb.address, fb.pitch, fb.width, fb.height, fb.bpp),
+            (0xfd00_0000, 5120, 1280, 800, 32)
+        );
+        assert_eq!(fb.rgb, Some([(16, 8), (8, 8), (0, 8)]));
+        assert_eq!(info.acpi_rsdp(), Some(&b"RSD PTR v2"[..]));
+        let modules: Vec<_> = info.modules().collect();
+        assert_eq!(
+            modules,
+            [Module { start: 0x0010_0000, end: 0x0010_2000, command_line: "microcode" }]
+        );
     }
 
     #[test]

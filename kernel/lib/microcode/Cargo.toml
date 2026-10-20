@@ -1,0 +1,11 @@
+[package]
+name = "radix-microcode"
+description = "Parser and matcher for Intel CPU microcode updates, for early loading by the Radix kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

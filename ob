@@ -78,6 +78,12 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v cc >/dev/null 2>&1; then
+    echo "ob: error: no C compiler (cc), which Rust needs as its linker for ob itself" >&2
+    echo "ob: hint: install build-essential (Debian, Ubuntu, Mint), gcc (Fedora) or base-devel (Arch)" >&2
+    exit 1
+fi
+
 target_dir=${OB_TARGET_DIR:-$root/target}
 binary="$target_dir/debug/xtask"
 if [ ! -x "$binary" ]; then

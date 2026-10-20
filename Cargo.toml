@@ -3,6 +3,8 @@
 [workspace]
 resolver = "3"
 members = ["tools/xtask"]
+# The kernel crates that tools/xtask uses stay members of the kernel workspace.
+exclude = ["kernel"]
 
 [workspace.package]
 # The OrthrOS release version. Keep kernel/Cargo.toml in step; a unit test

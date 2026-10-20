@@ -20,6 +20,8 @@ pub struct ImageSpec<'a> {
     pub timeout: u32,
     /// Kernel command line.
     pub cmdline: &'a str,
+    /// Intel microcode updates to load as a boot module, if any.
+    pub microcode: Option<Vec<u8>>,
     /// Staging directory, recreated on every build.
     pub staging: PathBuf,
     /// Output file.
@@ -32,15 +34,48 @@ pub fn file_name(iso: bool) -> String {
     format!("orthros-{VERSION}-x86_64.{extension}")
 }
 
+/// Path of the microcode module inside the image.
+pub const MICROCODE_PATH: &str = "/boot/firmware/intel-ucode.bin";
+
+/// License texts every image carries, as (repository path, image path).
+/// The kernel embeds the Spleen console fonts, whose BSD license asks for
+/// its notice to travel with binary copies.
+pub const NOTICES: &[(&str, &str)] = &[
+    ("LICENSE-APACHE", "licenses/LICENSE-APACHE"),
+    ("LICENSE-MIT", "licenses/LICENSE-MIT"),
+    ("kernel/lib/fbcon/fonts/LICENSE-spleen", "licenses/LICENSE-spleen"),
+];
+
+/// What `ob image` and `ob run` put into the image beyond orthros.toml.
+#[derive(Default)]
+pub struct Overrides {
+    /// Kernel flags instead of `boot.cmdline`.
+    pub cmdline: Option<String>,
+    /// Microcode file or directory instead of `image.microcode`.
+    pub microcode: Option<String>,
+}
+
 /// Builds the kernel and the release image described by orthros.toml.
-pub fn build_release(ctx: &Ctx, profile: Profile, iso: bool) -> Result<PathBuf> {
+pub fn build_release(
+    ctx: &Ctx,
+    profile: Profile,
+    iso: bool,
+    overrides: &Overrides,
+) -> Result<PathBuf> {
+    let microcode_source = overrides.microcode.as_deref().unwrap_or(&ctx.config.image.microcode);
+    let microcode = if microcode_source.is_empty() {
+        None
+    } else {
+        Some(read_microcode(ctx, Path::new(microcode_source))?)
+    };
     let kernel = kernel::build(ctx, profile)?;
     build(
         ctx,
         &ImageSpec {
             kernel: &kernel,
             timeout: ctx.config.boot.timeout,
-            cmdline: &ctx.config.boot.cmdline,
+            cmdline: overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline),
+            microcode,
             staging: ctx.out.join("image-root"),
             output: ctx.out.join(file_name(iso)),
         },
@@ -48,13 +83,68 @@ pub fn build_release(ctx: &Ctx, profile: Profile, iso: bool) -> Result<PathBuf> 
     Ok(ctx.out.join(file_name(iso)))
 }
 
-/// Fills `@VERSION@`, `@TIMEOUT@` and `@CMDLINE@` in the grub.cfg template.
-pub fn render_grub_cfg(template: &str, timeout: u32, cmdline: &str) -> Result<String> {
+/// Reads Intel microcode from a file of updates, or from every file in a
+/// directory such as `/lib/firmware/intel-ucode`, and checks that it holds
+/// at least one valid update.
+pub fn read_microcode(ctx: &Ctx, path: &Path) -> Result<Vec<u8>> {
+    let mut files = Vec::new();
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).context(|| format!("reading {}", path.display()))? {
+            let entry = entry.context(|| format!("reading {}", path.display()))?.path();
+            if entry.is_file() {
+                files.push(entry);
+            }
+        }
+        files.sort();
+    } else {
+        files.push(path.to_path_buf());
+    }
+    let mut bytes = Vec::new();
+    let (mut valid, mut invalid) = (0, 0);
+    for file in &files {
+        let data =
+            std::fs::read(file).context(|| format!("reading microcode {}", file.display()))?;
+        for update in radix_microcode::updates(&data) {
+            match update {
+                Ok(update) => {
+                    bytes.extend_from_slice(update.bytes());
+                    valid += 1;
+                }
+                Err(_) => invalid += 1,
+            }
+        }
+    }
+    if valid == 0 {
+        return Err(Error::new(format!("{} holds no Intel microcode updates", ctx.display(path)))
+            .hint(
+                "give the raw update files, such as /lib/firmware/intel-ucode from the \
+             intel-microcode package, not an initramfs image",
+            ));
+    }
+    step(&format!(
+        "Adding {valid} microcode updates from {}{}",
+        ctx.display(path),
+        if invalid > 0 { format!(" (skipped {invalid} damaged ones)") } else { String::new() }
+    ));
+    Ok(bytes)
+}
+
+/// Fills `@VERSION@`, `@TIMEOUT@`, `@CMDLINE@` and `@MODULES@` in the
+/// grub.cfg template. `modules` are (path, command line) pairs.
+pub fn render_grub_cfg(
+    template: &str,
+    timeout: u32,
+    cmdline: &str,
+    modules: &[(&str, &str)],
+) -> Result<String> {
     config::validate_cmdline(cmdline)?;
+    let modules: String =
+        modules.iter().map(|(path, args)| format!("    module2 {path} {args}\n")).collect();
     let rendered = template
         .replace("@VERSION@", VERSION)
         .replace("@TIMEOUT@", &timeout.to_string())
-        .replace("@CMDLINE@", cmdline.trim());
+        .replace("@CMDLINE@", cmdline.trim())
+        .replace("@MODULES@", &modules);
     if let Some(name) = find_placeholder(&rendered) {
         crate::bail!("image/grub/grub.cfg.in uses unknown placeholder {name}");
     }
@@ -97,10 +187,21 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
             .context(|| format!("removing {}", spec.staging.display()))?;
     }
     process::copy(spec.kernel, &spec.staging.join("boot/radix"))?;
+    for (source, target) in NOTICES {
+        process::copy(&ctx.root.join(source), &spec.staging.join(target))?;
+    }
+    let mut modules = Vec::new();
+    if let Some(microcode) = &spec.microcode {
+        let path = spec.staging.join(MICROCODE_PATH.trim_start_matches('/'));
+        process::create_dir(path.parent().expect("the microcode path has a parent"))?;
+        std::fs::write(&path, microcode).context(|| format!("writing {}", path.display()))?;
+        // The kernel recognises the module by this word on its command line.
+        modules.push((MICROCODE_PATH, "microcode"));
+    }
     let template_path = ctx.root.join("image/grub/grub.cfg.in");
     let template = std::fs::read_to_string(&template_path)
         .context(|| format!("reading {}", template_path.display()))?;
-    let grub_cfg = render_grub_cfg(&template, spec.timeout, spec.cmdline)?;
+    let grub_cfg = render_grub_cfg(&template, spec.timeout, spec.cmdline, &modules)?;
     let cfg_path = spec.staging.join("boot/grub/grub.cfg");
     process::create_dir(cfg_path.parent().expect("grub.cfg has a parent"))?;
     std::fs::write(&cfg_path, grub_cfg).context(|| format!("writing {}", cfg_path.display()))?;
@@ -152,17 +253,33 @@ mod tests {
 
     #[test]
     fn renders_the_repository_template() {
-        let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit").unwrap();
+        let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit", &[]).unwrap();
         assert!(cfg.contains("set timeout=0"));
-        assert!(cfg.contains("multiboot2 /boot/radix qemu-exit\n"));
+        assert!(cfg.contains("multiboot2 /boot/radix qemu-exit\n    boot\n"));
         assert!(cfg.contains(&format!("OrthrOS {VERSION} (Radix)")));
+        assert!(cfg.contains("set gfxpayload=keep"));
         assert!(!cfg.contains("@VERSION@"));
+        assert!(!cfg.contains("module2"));
+    }
+
+    #[test]
+    fn notices_exist() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (source, _) in NOTICES {
+            assert!(root.join(source).is_file(), "{source} is missing");
+        }
+    }
+
+    #[test]
+    fn renders_modules() {
+        let cfg = render_grub_cfg(TEMPLATE, 0, "", &[(MICROCODE_PATH, "microcode")]).unwrap();
+        assert!(cfg.contains(&format!("    module2 {MICROCODE_PATH} microcode\n    boot\n")));
     }
 
     #[test]
     fn rejects_unknown_placeholders_and_bad_cmdlines() {
-        assert!(render_grub_cfg("set x=@NOPE@", 0, "").is_err());
-        assert!(render_grub_cfg(TEMPLATE, 0, "a; reboot").is_err());
+        assert!(render_grub_cfg("set x=@NOPE@", 0, "", &[]).is_err());
+        assert!(render_grub_cfg(TEMPLATE, 0, "a; reboot", &[]).is_err());
     }
 
     #[test]

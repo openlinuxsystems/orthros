@@ -1,0 +1,11 @@
+[package]
+name = "radix-acpi"
+description = "Safe parser for the static ACPI tables the Radix kernel reads at boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

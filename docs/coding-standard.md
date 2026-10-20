@@ -13,11 +13,21 @@ workspace manifests, so `./ob lint` and CI enforce them.
 
 ## `unsafe` code
 
-Only the trusted computing base may use `unsafe`. Today that is the kernel
-crate `kernel/radix` and the architecture crate `kernel/arch/x86_64`. Every
-other crate, including kernel libraries such as `kernel/lib/bootinfo` and
-everything under `tools/`, starts with `#![forbid(unsafe_code)]` or inherits
-`unsafe_code = "forbid"` from its workspace.
+Only the trusted computing base may use `unsafe`. Today that is:
+
+- the architecture crate `kernel/arch/x86_64`, for everything that touches
+  hardware: port and MSR access, page tables, descriptor tables, assembly;
+- `kernel/lib/sync`, whose locks hand out references guarded by atomics;
+- the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
+  allows it at two marked sites: exporting its entry point, and putting the
+  locks into panic mode.
+
+Every other crate, including the kernel libraries under `kernel/lib/`, the
+HAL, the AArch64 stubs and everything under `tools/`, starts with
+`#![forbid(unsafe_code)]` or inherits `unsafe_code = "forbid"` from its
+workspace. In particular every parser of data from outside the kernel
+(boot information, ACPI tables, microcode, fonts, the symbol table, the
+crash log) is safe code.
 
 Inside the trusted computing base:
 
@@ -53,8 +63,13 @@ Inside the trusted computing base:
 ## Testing
 
 - Code that can run on the host does: parsers, data structures, policy and
-  algorithms live in crates that compile for the host and carry unit tests.
+  algorithms live in crates under `kernel/lib/` that compile for the host
+  and carry unit tests (`./ob test unit` runs them).
 - Hardware-facing code is tested by booting it in QEMU through `./ob test`.
+  A boot test can check the serial log, type `kdb` commands and read the
+  framebuffer; paths that only run on failure get a `selftest=` case.
+- Kernel code reaches hardware only through the `radix-hal` traits, so it
+  also compiles against the AArch64 stubs, which `./ob lint` checks.
 
 ## Dependencies
 

@@ -1,9 +1,14 @@
-//! 16550 UART driver for console output.
+//! 16550 UART driver: the debug console.
 //!
-//! The Dell Inspiron 15 5570 has no serial port; there the line-status
-//! register reads as 0xFF, writes go nowhere, and nothing blocks.
+//! COM1 carries the kernel log and the kernel debugger. The Dell Inspiron
+//! 15 5570 has no serial port; [`init`] notices that the UART's scratch
+//! register does not hold a value and turns the console off, so writes cost
+//! nothing there.
 
-use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use radix_klog::{Sink, Style};
+use radix_sync::SpinLock;
 
 use super::io::{inb, outb};
 
@@ -13,26 +18,37 @@ pub struct Serial {
     base: u16,
 }
 
+/// Line-status register bit: a received byte is waiting.
+const LSR_DATA_READY: u8 = 1 << 0;
 /// Line-status register bit: the transmit holding register is empty.
 const LSR_THR_EMPTY: u8 = 1 << 5;
 
 /// Polls before giving up on a byte, so a stuck UART cannot hang the kernel.
 const TX_SPIN_LIMIT: u32 = 100_000;
 
-impl Serial {
-    /// The first serial port, COM1.
-    pub const COM1: Serial = Serial { base: 0x3F8 };
+/// The first serial port.
+const COM1: Serial = Serial { base: 0x3f8 };
 
-    /// Programs 115200 baud, 8 data bits, no parity, one stop bit, with
-    /// FIFOs on and interrupts off.
-    pub fn init(self) {
+static PRESENT: AtomicBool = AtomicBool::new(false);
+/// Serialises whole writes, so lines from different CPUs do not interleave.
+static LOCK: SpinLock<()> = SpinLock::new(());
+
+impl Serial {
+    /// Checks that a UART answers, then programs 115200 baud, 8 data bits,
+    /// no parity, one stop bit, FIFOs on and interrupts off.
+    fn init(self) -> bool {
+        self.write_reg(7, 0x5a);
+        if self.read_reg(7) != 0x5a {
+            return false;
+        }
         self.write_reg(1, 0x00); // interrupt enable: none
         self.write_reg(3, 0x80); // line control: DLAB on
         self.write_reg(0, 0x01); // divisor low: 115200 / 1
         self.write_reg(1, 0x00); // divisor high
         self.write_reg(3, 0x03); // line control: 8N1, DLAB off
-        self.write_reg(2, 0xC7); // FIFO control: enable, clear, 14-byte threshold
+        self.write_reg(2, 0xc7); // FIFO control: enable, clear, 14-byte threshold
         self.write_reg(4, 0x03); // modem control: DTR and RTS
+        true
     }
 
     fn write_byte(self, byte: u8) {
@@ -43,6 +59,10 @@ impl Serial {
             core::hint::spin_loop();
         }
         self.write_reg(0, byte);
+    }
+
+    fn read_byte(self) -> Option<u8> {
+        (self.read_reg(5) & LSR_DATA_READY != 0).then(|| self.read_reg(0))
     }
 
     fn read_reg(self, offset: u16) -> u8 {
@@ -58,14 +78,49 @@ impl Serial {
     }
 }
 
-impl fmt::Write for Serial {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            if byte == b'\n' {
-                self.write_byte(b'\r');
-            }
-            self.write_byte(byte);
+/// Finds and programs COM1. Returns whether it exists.
+pub fn init() -> bool {
+    let present = COM1.init();
+    PRESENT.store(present, Ordering::Relaxed);
+    present
+}
+
+/// Whether COM1 exists.
+pub fn present() -> bool {
+    PRESENT.load(Ordering::Relaxed)
+}
+
+/// Writes `text` to COM1, turning `\n` into `\r\n`.
+pub fn write(text: &str) {
+    if !present() {
+        return;
+    }
+    // Interrupts stay off while the lock is held, so a handler on this CPU
+    // that logs cannot deadlock against it.
+    let were_enabled = crate::cpu::disable_interrupts();
+    let guard = LOCK.lock();
+    for byte in text.bytes() {
+        if byte == b'\n' {
+            COM1.write_byte(b'\r');
         }
-        Ok(())
+        COM1.write_byte(byte);
+    }
+    drop(guard);
+    if were_enabled {
+        crate::cpu::enable_interrupts();
+    }
+}
+
+/// A byte received on COM1, if one is waiting.
+pub fn read() -> Option<u8> {
+    if present() { COM1.read_byte() } else { None }
+}
+
+/// The kernel log's serial console.
+pub struct SerialSink;
+
+impl Sink for SerialSink {
+    fn write(&self, text: &str, _style: Style) {
+        write(text);
     }
 }

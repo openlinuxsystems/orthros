@@ -137,22 +137,32 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
     }
 }
 
-/// Every `ob` command and every orthros.toml key must be documented.
+/// Every `ob` command, orthros.toml key, kernel flag, kdb command and
+/// self-test must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
+    let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
+    let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
+    let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
+    let lists: [(&str, &str, &[&str]); 5] = [
+        ("docs/man/ob.1.scd", "command", &ob_commands),
+        ("docs/man/orthros.toml.5.scd", "key", config::KEYS),
+        ("docs/man/orthros-boot.7.scd", "kernel flag", &kernel_flags),
+        ("docs/man/radix-debug.7.scd", "kdb command", &kdb_commands),
+        ("docs/man/radix-debug.7.scd", "self-test", radix_hal::cmdline::SELFTESTS),
+    ];
     let mut problems = Vec::new();
-    let ob_page = read(ctx, "docs/man/ob.1.scd")?;
-    for (name, _) in COMMANDS {
-        if !ob_page.contains(&format!("*{name}*")) {
-            problems.push(format!("docs/man/ob.1.scd does not document the `{name}` command"));
-        }
-    }
-    let config_page = read(ctx, "docs/man/orthros.toml.5.scd")?;
-    for key in config::KEYS {
-        if !config_page.contains(&format!("*{key}*")) {
-            problems.push(format!("docs/man/orthros.toml.5.scd does not document `{key}`"));
+    for (page, what, names) in lists {
+        let text = read(ctx, page)?;
+        for name in undocumented(&text, names) {
+            problems.push(format!("{page} does not document the {what} `{name}`"));
         }
     }
     Ok(problems)
+}
+
+/// The names that do not appear in bold (`*name*`) in `page`.
+fn undocumented<'a>(page: &str, names: &[&'a str]) -> Vec<&'a str> {
+    names.iter().copied().filter(|name| !page.contains(&format!("*{name}*"))).collect()
 }
 
 fn read(ctx: &Ctx, relative: &str) -> Result<String> {
@@ -171,5 +181,11 @@ mod tests {
         assert_eq!(page.output(Path::new("out")), Path::new("out/man5/orthros.toml.5"));
         assert!(Page::from_path(Path::new("docs/man/README.scd")).is_none());
         assert!(Page::from_path(Path::new("docs/man/ob.x.scd")).is_none());
+    }
+
+    #[test]
+    fn finds_undocumented_names() {
+        let page = "*kdb*\n\tstart the debugger\n*trace* [*on*|*off*]";
+        assert_eq!(undocumented(page, &["kdb", "trace", "on", "regs"]), ["regs"]);
     }
 }

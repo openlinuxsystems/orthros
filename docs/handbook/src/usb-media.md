@@ -1,9 +1,11 @@
 # Creating USB install media
 
 `./ob image` builds `out/orthros-<version>-x86_64.img`. Written to a USB
-stick, it boots on UEFI and legacy BIOS computers. In Phase 0 the stick
-holds GRUB and the stub kernel, which is useful for checking that a machine
-boots OrthrOS at all; the installer arrives in Phase 14.
+stick, it boots on UEFI and legacy BIOS computers. In Phase 1 the stick
+holds GRUB and the kernel, which reports the machine's memory, processors
+and firmware tables on the screen: useful for checking that a machine
+boots OrthrOS and what the kernel finds there. The installer arrives in
+Phase 14.
 
 ## Writing the image
 
@@ -52,15 +54,19 @@ These tools write the same image and check the target is removable:
 3. GRUB shows a menu with one entry, "OrthrOS 0.0.1 (Radix)", and boots it
    after three seconds.
 
-What you see next depends on the firmware mode in Phase 0:
+The screen then shows the kernel's log, under UEFI and legacy BIOS boot
+alike, ending with "Boot complete.". The computer then idles; switch it
+off with the power button. If the kernel panics instead, the screen shows
+a report; [Debugging the kernel](debugging.md) explains it, and what to
+include when you report it.
 
-- **Legacy BIOS boot:** the screen shows the kernel's report, ending with
-  "Boot complete.". The computer then stops; switch it off with the power
-  button.
-- **UEFI boot:** GRUB prints "no suitable video mode found" and the screen
-  stays as GRUB left it, because the Phase 0 kernel has no framebuffer
-  console yet. The kernel's report goes to the serial port, which laptops
-  usually lack. Phase 1 adds the framebuffer console.
+To include the processor's microcode updates, which OrthrOS does not ship
+itself, build the image with the build host's copy, for example from
+Debian's or Ubuntu's `intel-microcode` package:
+
+```sh
+./ob image --microcode /lib/firmware/intel-ucode
+```
 
 Machine-specific settings, such as turning Secure Boot off, are in
 [Supported hardware](hardware.md).

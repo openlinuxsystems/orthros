@@ -7,9 +7,13 @@ logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 0** of its [roadmap](docs/roadmap.md): the build
-tooling, documentation pipeline and CI are in place, and a stub kernel boots
-through GRUB under UEFI and BIOS. There is nothing to install yet.
+OrthrOS is at **Phase 1** of its [roadmap](docs/roadmap.md): the Radix
+kernel boots through GRUB under UEFI and BIOS, starts every CPU, reads the
+ACPI tables, takes timer interrupts and reports all of it on the serial
+port and the screen. A panic fills the screen with a symbolized backtrace
+and is kept in memory for the next boot; a serial kernel debugger, GDB
+through QEMU and trace points help with the rest. There is nothing to
+install yet.
 
 ## Quick start
 
@@ -37,10 +41,10 @@ the pinned build container with Podman or Docker:
 | --- | --- |
 | `./ob setup` | Install the pinned Rust toolchain, then run `doctor` |
 | `./ob doctor` | Check host tools and print the commands that install what is missing |
-| `./ob build` | Build the kernel into `out/sysroot/` |
-| `./ob image` | Build the hybrid USB/disk image `out/orthros-<version>-x86_64.img` (`--iso` for an ISO) |
-| `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`) |
-| `./ob test` | Run unit tests, then boot the image in QEMU under UEFI and BIOS from USB and CD-ROM |
+| `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
+| `./ob image` | Build the hybrid USB/disk image `out/orthros-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
+| `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
+| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb` and the screen |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |
 | `./ob clean` | Remove build output |
@@ -69,14 +73,19 @@ ob                  build entry point (shell wrapper around tools/xtask)
 orthros.toml        build configuration, see orthros.toml(5)
 rust-toolchain.toml pinned nightly Rust
 kernel/             the Radix kernel workspace
-  radix/            kernel entry point, console and panic handling
-  arch/x86_64/      boot trampoline and x86-64 support
-  lib/bootinfo/     Multiboot2 boot information parser (host-tested)
+  radix/            the architecture-independent kernel: consoles, panic, kdb
+  hal/              hardware abstraction layer traits, kernel command line
+  arch/x86_64/      boot trampoline, CPU tables, paging, ACPI, APIC, SMP
+  arch/aarch64/     HAL stubs that CI compiles, so x86 cannot leak into radix/
+  lib/              host-tested kernel libraries: acpi, bootinfo, fbcon,
+                    kdb, klog, ksyms, microcode, sync
+  targets/          the kernel's Rust target specification
 image/grub/         GRUB menu template for every image
 docs/
   man/              man pages (scdoc sources)
   handbook/         user handbook (mdBook)
   adr/              architecture decision records
+  design/           design notes on how the kernel works
   roadmap.md        the implementation plan, phases 0 to 26
 tools/xtask/        the Rust program behind ./ob
 tools/container/    the pinned build container

@@ -1,6 +1,6 @@
 [package]
 name = "radix-arch-x86_64"
-description = "x86-64 support for the Radix kernel: boot trampoline, port I/O, consoles"
+description = "x86-64 support for the Radix kernel: boot, memory, interrupts, timers, SMP"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,14 @@ publish.workspace = true
 [lib]
 test = false
 bench = false
+
+[dependencies]
+radix-acpi = { path = "../../lib/acpi" }
+radix-bootinfo = { path = "../../lib/bootinfo" }
+radix-hal = { path = "../../hal" }
+radix-klog = { path = "../../lib/klog" }
+radix-microcode = { path = "../../lib/microcode" }
+radix-sync = { path = "../../lib/sync" }
 
 [lints]
 workspace = true

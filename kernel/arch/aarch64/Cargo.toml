@@ -1,0 +1,18 @@
+[package]
+name = "radix-arch-aarch64"
+description = "AArch64 stubs of the Radix hardware abstraction layer, so CI keeps the kernel portable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+radix-hal = { path = "../../hal" }
+
+[lints]
+workspace = true

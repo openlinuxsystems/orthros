@@ -23,5 +23,6 @@
 # Reference
 
 - [Supported hardware](hardware.md)
+- [Debugging the kernel](debugging.md)
 - [Manual pages](man-pages.md)
 - [For developers](developers.md)

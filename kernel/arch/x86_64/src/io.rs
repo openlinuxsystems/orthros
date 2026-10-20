@@ -41,3 +41,25 @@ pub unsafe fn outl(port: u16, value: u32) {
         asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags))
     };
 }
+
+/// Reads a 32-bit value from an I/O port.
+///
+/// # Safety
+///
+/// As for [`inb`].
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    // SAFETY: the caller upholds the contract above; `in` touches no memory.
+    unsafe {
+        asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack, preserves_flags))
+    };
+    value
+}
+
+/// Waits about a microsecond by writing to the POST diagnostic port, which
+/// nothing listens to on a running system.
+pub fn io_delay() {
+    // SAFETY: port 0x80 is the POST code port; writes have no effect once
+    // the firmware has finished.
+    unsafe { outb(0x80, 0) };
+}
