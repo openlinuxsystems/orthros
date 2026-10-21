@@ -34,6 +34,8 @@ mod kaslr;
 mod memory;
 mod microcode;
 mod paging;
+/// DIAG (temporary): shootdown timings for the benchmark.
+pub use paging::SHOOT_DIAG;
 mod percpu;
 mod power;
 mod random;

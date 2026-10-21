@@ -91,12 +91,30 @@ fn main() {
 
     if std::process::id() == 1 {
         // The init process of `ob bench`'s Linux virtual machine.
+        hypervisor_lines();
         println!("linux-bench: done");
         // SAFETY: as process 1, this program may power the machine off;
         // there is nothing to save first.
         unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
         loop {
             std::thread::park();
+        }
+    }
+}
+
+/// DIAG (temporary): the kernel log's lines about the hypervisor and the
+/// APIC, which `ob bench` prints.
+fn hypervisor_lines() {
+    let mut buf = vec![0u8; 1 << 20];
+    // SAFETY: SYSLOG_ACTION_READ_ALL (3) writes at most `len` bytes to
+    // `buf`, which has that many.
+    let len = unsafe { libc::klogctl(3, buf.as_mut_ptr().cast(), buf.len() as i32) };
+    let Ok(len) = usize::try_from(len) else { return };
+    for line in String::from_utf8_lossy(&buf[..len]).lines() {
+        let lower = line.to_ascii_lowercase();
+        if ["kvm", "apic", "hypervisor", "tlb", "paravirt", "pv "].iter().any(|k| lower.contains(k))
+        {
+            println!("KVMLOG {line}");
         }
     }
 }
@@ -284,6 +302,19 @@ fn tlb_shootdown(other: usize, rounds: u64) {
     let page = map_anonymous(PAGE);
     // SAFETY: `page` is mapped read-write; touching it makes it present.
     unsafe { page.write_volatile(1) };
+    let protect = |prot| {
+        // SAFETY: `page` is a whole page this function mapped.
+        let result = unsafe { libc::mprotect(page.cast(), PAGE, prot) };
+        assert_eq!(result, 0, "mprotect: {}", std::io::Error::last_os_error());
+    };
+    // The same system calls while no other thread runs: the shootdown is
+    // the difference.
+    let started = Instant::now();
+    for _ in 0..rounds {
+        protect(libc::PROT_NONE);
+        protect(libc::PROT_READ | libc::PROT_WRITE);
+    }
+    print_line("tlb_local", started, rounds);
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(Barrier::new(2));
     let (go, done) = (ready.clone(), stop.clone());
@@ -295,11 +326,6 @@ fn tlb_shootdown(other: usize, rounds: u64) {
         }
     });
     ready.wait();
-    let protect = |prot| {
-        // SAFETY: `page` is a whole page this function mapped.
-        let result = unsafe { libc::mprotect(page.cast(), PAGE, prot) };
-        assert_eq!(result, 0, "mprotect: {}", std::io::Error::last_os_error());
-    };
     let started = Instant::now();
     for _ in 0..rounds {
         protect(libc::PROT_NONE);

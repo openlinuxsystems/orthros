@@ -466,6 +466,21 @@ pub fn shoot_a(argument: Argument) -> u64 {
         return checks::failures();
     };
     let space = theirs.words[0] as u32;
+    // The same system calls on this program's own space, which no other
+    // CPU runs: the shootdown is the difference.
+    let start = cycles();
+    for _ in 0..argument.rounds {
+        let local = syscalls::map(&SYS, SLOT_SPACE, SLOT_SHOT, SHOOT_AT, rw, 0, 1)
+            .and_then(|()| syscalls::unmap(&SYS, SLOT_SPACE, SHOOT_AT, 1));
+        if ok!(local, "map and unmap in this space").is_none() {
+            break;
+        }
+    }
+    let end = cycles();
+    if argument.bench {
+        let ns = Nanos::per(end - start, argument.rounds);
+        println!("BENCH name=tlb_local ns={ns} iterations={}", argument.rounds);
+    }
     while flag(READY).load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
