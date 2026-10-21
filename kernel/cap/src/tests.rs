@@ -231,6 +231,33 @@ fn retyped_memory_comes_back() {
     caps.audit().unwrap();
 }
 
+/// Deleting the capability to a memory object retyped from another moves
+/// what was retyped from it up to the outer memory's capability, which
+/// still covers it (a regression the property test found).
+#[test]
+fn nested_memory_survives_deleting_the_middle() {
+    let mut caps = store();
+    let a = caps.create_space(8).unwrap();
+    caps.create_memory(at(a, 0), 0x400, 4).unwrap();
+    caps.retype(at(a, 0), ObjectKind::Memory, 1, at(a, 1), 1).unwrap();
+    caps.retype(at(a, 1), ObjectKind::Memory, 0, at(a, 2), 1).unwrap();
+    caps.retype(at(a, 2), ObjectKind::Frame, 0, at(a, 3), 1).unwrap();
+    caps.derive(at(a, 3), at(a, 4), Derivation::with_rights(Rights::READ | Rights::COPY)).unwrap();
+    let mut bin = Bin::default();
+    caps.delete(at(a, 1), &mut bin.sink()).unwrap();
+    caps.delete(at(a, 2), &mut bin.sink()).unwrap();
+    caps.delete(at(a, 3), &mut bin.sink()).unwrap();
+    assert!(bin.0.is_empty(), "the frame keeps both memories alive: {:?}", bin.0);
+    assert_eq!(caps.parent(at(a, 4)), Ok(Some(at(a, 0))));
+    caps.audit().unwrap();
+    // The outer memory still revokes it, and everything is given back.
+    assert_eq!(caps.revoke(at(a, 0), 10, &mut bin.sink()), Ok(Progress::Done));
+    assert_eq!(bin.0.len(), 3, "the frame and two memories: {:?}", bin.0);
+    let info = caps.object(caps.get(at(a, 0)).unwrap().id().unwrap()).unwrap();
+    assert_eq!((info.children, info.watermark), (0, 0));
+    caps.audit().unwrap();
+}
+
 #[test]
 fn stale_names_are_refused() {
     let mut caps = store();

@@ -174,9 +174,10 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	kani-verifier --version* _version_ and then *cargo kani setup*.
 
 	*tla* checks the TLA+ models with the TLC model checker instead: the
-	capability store's derivation tree and revocation, in
-	_kernel/cap/tla/_, once for the safety properties and once, on a
-	smaller model, for liveness. That takes about two minutes on 4 CPUs,
+	capability store's derivation tree, retyping and revocation, in
+	_kernel/cap/tla/_, twice for the safety properties (once with more
+	capabilities, once with memory nested deeper) and once, on a smaller
+	model, for liveness. That takes about five minutes on 4 CPUs,
 	so plain *ob test* leaves it out too, and CI runs it in a job of its
 	own. TLC needs Java 11 or later (the *default-jre-headless* package on
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned

@@ -57,7 +57,20 @@ Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096
 Random: ChaCha20 seeded before KASLR from timing jitter (4096 samples, 134 stuck); the CPU has no RDSEED or RDRAND
 ```
 
-Under QEMU's TCG about 1 to 3 percent of jitter samples are stuck.
+Under QEMU's TCG about 1 to 3 percent of jitter samples are stuck. Under
+KVM the guest reads the host's own counter, and how steady the work's
+timing is depends on the host. On an AMD EPYC 9V45 CI runner about half
+the samples were stuck, so the jitter sometimes failed its test while
+`RDSEED` and `RDRAND` passed:
+
+```text
+Random: ChaCha20 seeded before KASLR from RDSEED and RDRAND; failed its health test: timing jitter (4096 samples, 2079 stuck)
+```
+
+That seed is as unpredictable as the CPU's generators. The failed jitter
+was mixed in too, and more input to the hash can only add to the seed,
+never take from it. The verdict changes what the line claims, not the
+seed.
 
 ## Output
 
@@ -82,6 +95,12 @@ drawn with `below`.
   including interrupt timings.
 - The health tests catch broken sources, not predictable ones; nothing
   estimates entropy.
+- The jitter limit of half the samples is our own choice, and it is
+  strict. The `jitterentropy` library, whose stuck test this follows,
+  takes another sample in place of each stuck one and fails its start-up
+  test only when more than 9 in 10 are stuck, next to separate checks for
+  a coarse counter. If real machines, not only virtual ones, fail the
+  jitter test, the kernel should adopt those rules together.
 
 ## Verification
 
@@ -91,5 +110,8 @@ the generator's first two requests after a fixed seed against OpenSSL's
 ChaCha20; property tests check that hashing in pieces matches hashing the
 whole, that generators seeded alike agree and any change of seed changes
 the output, and that successive requests do not repeat. Every boot test
-checks the `Random:` line: the sources the seed rests on must include
-timing jitter, and, on CPUs that have them, `RDSEED` and `RDRAND`.
+checks the `Random:` line. On CPUs that have `RDSEED` and `RDRAND`, both
+must pass. Timing jitter must pass under TCG, where the counter always
+varies enough. Under KVM it may fail, provided the line says so, because
+a test cannot choose its runner's CPU and a failed jitter does not
+weaken the seed.
