@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
-use crate::{Context, Ctx, Error, Result, VERSION, kernel};
+use crate::{Context, Ctx, Error, Result, VERSION, kernel, userspace};
 
 /// Where the manifest and notices go, relative to the image root.
 pub const DIR: &str = "system/share/licenses";
@@ -98,13 +98,23 @@ pub struct Extras<'a> {
     pub mkrescue: &'a Path,
     /// Whether the image carries Intel microcode.
     pub microcode: bool,
+    /// Whether the image carries the user test programs.
+    pub usertests: bool,
 }
 
 /// Lists the image's components, checks their licenses, and writes the
 /// manifest and notices into `staging`. Returns the manifest's text.
 pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String> {
-    let mut packages = kernel_crates(ctx)?;
+    let mut packages = rust_crates(ctx, &KERNEL_PROGRAM)?;
     packages.extend(sysroot_crates(ctx)?);
+    if extras.usertests {
+        for package in rust_crates(ctx, &USER_PROGRAM)? {
+            // `core` and the like are listed once, from the kernel.
+            if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
+                packages.push(package);
+            }
+        }
+    }
     packages.push(grub(ctx, extras.mkrescue)?);
     if extras.microcode {
         packages.push(microcode());
@@ -143,16 +153,40 @@ fn write(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).context(|| format!("writing {}", path.display()))
 }
 
-/// The crates linked into the kernel, from `cargo tree`. Build scripts and
+/// A Rust program in the image: its workspace, package and target.
+struct Program {
+    what: &'static str,
+    workspace: &'static str,
+    package: &'static str,
+    target: &'static str,
+}
+
+const KERNEL_PROGRAM: Program = Program {
+    what: "the kernel",
+    workspace: "kernel",
+    package: "radix",
+    target: kernel::TARGET_SPEC,
+};
+
+/// The user programs are /system code too: permissive licenses only.
+const USER_PROGRAM: Program = Program {
+    what: "the user test programs",
+    workspace: "userspace",
+    package: "usertests",
+    target: userspace::TARGET_SPEC,
+};
+
+/// The crates linked into a program, from `cargo tree`. Build scripts and
 /// dev-dependencies never reach the image, so only normal edges count.
-fn kernel_crates(ctx: &Ctx) -> Result<Vec<Package>> {
+fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
     let mut cmd = process::cargo(ctx);
-    cmd.args(["tree", "--manifest-path", "kernel/Cargo.toml", "-p", "radix", "--target"])
-        .arg(ctx.root.join(kernel::TARGET_SPEC))
+    let manifest = format!("{}/Cargo.toml", program.workspace);
+    cmd.args(["tree", "--manifest-path", &manifest, "-p", program.package, "--target"])
+        .arg(ctx.root.join(program.target))
         .args(["-Zjson-target-spec", "-e", "normal", "--prefix", "none"])
         .args(["--format", "{p}|{l}"]);
     let output = process::output(ctx, &mut cmd)?;
-    let lock = read_lock(&ctx.root.join("kernel/Cargo.lock"))?;
+    let lock = read_lock(&ctx.root.join(program.workspace).join("Cargo.lock"))?;
     let commit = git_commit(ctx);
     let mut seen = BTreeSet::new();
     let mut packages = Vec::new();
@@ -193,8 +227,9 @@ fn kernel_crates(ctx: &Ctx) -> Result<Vec<Package>> {
             }
             Source::Other(source) => {
                 crate::bail!(
-                    "the kernel uses {} {} from {source}; only crates.io and the \
+                    "{} uses {} {} from {source}; only crates.io and the \
                      repository are allowed (deny.toml [sources])",
+                    program.what,
                     package.name,
                     package.version
                 );
@@ -203,7 +238,7 @@ fn kernel_crates(ctx: &Ctx) -> Result<Vec<Package>> {
         packages.push(package);
     }
     if packages.is_empty() {
-        crate::bail!("`cargo tree` listed no kernel crates");
+        crate::bail!("`cargo tree` listed no crates for {}", program.what);
     }
     Ok(packages)
 }

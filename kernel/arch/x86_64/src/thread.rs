@@ -10,6 +10,12 @@
 //! so an overflow faults on the guard instead of running into memory
 //! another thread uses.
 //!
+//! A context may have a program's address space attached (Phase 5): the
+//! switch then loads that space and the program's thread pointer (FS
+//! base), and otherwise the kernel's own tables, so a space is only ever
+//! loaded while a context that holds it runs. It also points this CPU's
+//! system call and interrupt stack at the incoming context's kernel stack.
+//!
 //! The switch saves the callee-saved registers on the outgoing stack,
 //! stores the stack pointer in the outgoing block, clears its `on_cpu`
 //! word, then waits until it can set the incoming block's `on_cpu` word
@@ -22,13 +28,16 @@
 //! a lock across the switch (`docs/design/scheduler.md`).
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::cpu;
+use radix_sync::Once;
+
+use crate::cpu::{self, msr};
 use crate::fpu;
 use crate::memory::PAGE;
 use crate::paging;
 use crate::percpu;
+use crate::space::{AddressSpace, UserSpace};
 
 /// Offsets in a context block.
 const RSP: usize = 0;
@@ -105,6 +114,10 @@ pub struct Context {
     stack: Range<usize>,
     /// What to unmap when the context is dropped: start and pages.
     mapping: (usize, usize),
+    /// The program's address space, for a user thread.
+    space: Once<UserSpace>,
+    /// The program's thread pointer (FS base).
+    thread_pointer: AtomicU64,
 }
 
 impl Context {
@@ -127,6 +140,8 @@ impl Context {
             block,
             stack: percpu::current().stacks.get().map_or(0..0, |s| s.kernel.clone()),
             mapping: (block, 1),
+            space: Once::new(),
+            thread_pointer: AtomicU64::new(0),
         };
         context.on_cpu().store(1, Ordering::Relaxed);
         let cpu = percpu::current();
@@ -168,7 +183,35 @@ impl Context {
             }
             ((block + RSP) as *mut usize).write(frame as usize);
         }
-        Some(Context { block, stack, mapping: (area, pages + 1) })
+        Some(Context {
+            block,
+            stack,
+            mapping: (area, pages + 1),
+            space: Once::new(),
+            thread_pointer: AtomicU64::new(0),
+        })
+    }
+
+    /// Makes the context run in `space` from its next switch on.
+    pub fn attach_space(&self, space: &UserSpace) -> bool {
+        self.space.set(space.clone()).is_ok()
+    }
+
+    /// Sets the context's thread pointer, at once if it runs here.
+    pub fn set_thread_pointer(&self, base: u64) {
+        if base >= crate::user::USER_TOP {
+            return;
+        }
+        let were = cpu::disable_interrupts();
+        self.thread_pointer.store(base, Ordering::Relaxed);
+        if percpu::current().context.load(Ordering::Relaxed) == self.block {
+            // SAFETY: FS base is the program's; the kernel never uses FS,
+            // and the value is a user address, so canonical.
+            unsafe { cpu::wrmsr(msr::FS_BASE, base) };
+        }
+        if were {
+            cpu::enable_interrupts();
+        }
     }
 
     /// Switches from `from`, which must be running on this CPU, to `to`.
@@ -189,6 +232,17 @@ impl Context {
         cpu.context.store(to.block, Ordering::Relaxed);
         cpu.thread_stack[0].store(to.stack.start, Ordering::Relaxed);
         cpu.thread_stack[1].store(to.stack.end, Ordering::Relaxed);
+        cpu.set_kernel_stack(to.stack.end);
+        match to.space.get() {
+            Some(space) => {
+                space.space().switch_to();
+                // SAFETY: as in `set_thread_pointer`.
+                unsafe {
+                    cpu::wrmsr(msr::FS_BASE, to.thread_pointer.load(Ordering::Relaxed));
+                }
+            }
+            None => AddressSpace::switch_to_kernel(),
+        }
         // SAFETY: both blocks are mapped while their contexts exist, which
         // the references guarantee for the whole switch. `from` is the
         // context this CPU runs, so saving into its block is saving this

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "linux-bench"
+description = "The Linux baseline for `ob bench`: system calls and IPC round trips on the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# MIT OR Apache-2.0: the system calls std does not wrap (futexes, CPU
+# affinity, eventfd, getrandom).
+libc = "0.2"
+
+# Not the workspace lints: those forbid `unsafe`, and every call into libc
+# is unsafe. Each such block still needs a SAFETY comment.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -13,7 +13,7 @@ use core::sync::atomic::Ordering;
 
 use radix_bootinfo::{BootInfo, MULTIBOOT2_MAGIC, framebuffer_type};
 use radix_hal::cmdline::CommandLine;
-use radix_hal::{BootParams, Channel, Firmware, Framebuffer, PixelFormat};
+use radix_hal::{BootModule, BootParams, Channel, Firmware, Framebuffer, PixelFormat};
 use radix_sync::{Once, TakeOnce};
 
 use crate::memory::{self, PAGE};
@@ -45,6 +45,12 @@ static BSP_IST: TakeOnce<IstStacks> = TakeOnce::new(IstStacks([[0; BSP_IST_SIZE]
 
 /// The RSDP copy from the boot information.
 pub static RSDP_COPY: Once<&'static [u8]> = Once::new();
+
+/// Most boot modules the kernel hands on.
+const MAX_MODULES: usize = 8;
+
+static MODULES: TakeOnce<[BootModule; MAX_MODULES]> =
+    TakeOnce::new([BootModule { command_line: "", bytes: &[] }; MAX_MODULES]);
 
 /// The kernel log's view of the machine.
 struct KlogPlatform;
@@ -243,6 +249,22 @@ extern "C" fn radix_arch_entry(magic: u32, info_phys: u32, slide: u64) -> ! {
         let _ = RSDP_COPY.set(rsdp);
     }
     let (framebuffer, text_screen) = framebuffer(&info);
+    let modules = MODULES.take().expect("the boot CPU starts once");
+    let mut count = 0;
+    for module in info.modules() {
+        if count == MAX_MODULES {
+            radix_klog::warn!("Boot: more than {MAX_MODULES} modules; the rest are ignored");
+            break;
+        }
+        let virt = memory::phys_to_virt(u64::from(module.start));
+        let len = module.end.saturating_sub(module.start) as usize;
+        // SAFETY: as for the microcode module above: GRUB loaded it below
+        // 4 GiB in RAM, which the direct map reaches, and it was reserved,
+        // so it stays as it is for the kernel's whole life.
+        let bytes = unsafe { core::slice::from_raw_parts(virt as *const u8, len) };
+        modules[count] = BootModule { command_line: module.command_line, bytes };
+        count += 1;
+    }
     let params = BootParams {
         command_line,
         boot_loader: info.boot_loader_name().unwrap_or("unknown"),
@@ -254,6 +276,7 @@ extern "C" fn radix_arch_entry(magic: u32, info_phys: u32, slide: u64) -> ! {
         reservations: memory::reservations(),
         framebuffer,
         text_screen,
+        modules: &modules[..count],
     };
     percpu::current().online.store(true, Ordering::Relaxed);
     radix_klog::tracepoint!("boot.kernel-main");

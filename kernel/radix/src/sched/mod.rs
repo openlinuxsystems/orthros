@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer};
+use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
 use radix_sched::{CpuLoad, CpuSet, Place, Topology};
@@ -200,13 +200,20 @@ pub struct Options {
     affinity: Option<CpuSet>,
     domain: Option<DomainRef>,
     stack_pages: usize,
+    user: Option<crate::user::UserRef>,
 }
 
 impl Options {
     /// Fair at nice 0, on any CPU, in the root domain, with
     /// [`STACK_PAGES`] of stack.
     pub fn new() -> Options {
-        Options { policy: Policy::DEFAULT, affinity: None, domain: None, stack_pages: STACK_PAGES }
+        Options {
+            policy: Policy::DEFAULT,
+            affinity: None,
+            domain: None,
+            stack_pages: STACK_PAGES,
+            user: None,
+        }
     }
 
     /// With this policy.
@@ -229,6 +236,12 @@ impl Options {
     /// In this resource domain.
     pub fn domain(mut self, domain: DomainRef) -> Options {
         self.domain = Some(domain);
+        self
+    }
+
+    /// A thread of a program: it runs in the program's address space.
+    pub fn user(mut self, user: crate::user::UserRef) -> Options {
+        self.user = Some(user);
         self
     }
 }
@@ -550,6 +563,11 @@ pub fn spawn(
             return Err(err);
         }
     };
+    if let Some(user) = options.user {
+        // Before its first switch, which loads the space.
+        Arch::attach_space(&thread.context, user.space().arch());
+        let _ = thread.user.set(user);
+    }
     let mut state = thread.state.lock_irq();
     state.run = Run::Ready;
     enqueue_ready(&thread, &mut state, true);
@@ -616,12 +634,44 @@ pub fn wake(thread: &ThreadRef) -> bool {
     true
 }
 
+/// Like [`wake`], for a waker that is about to block itself, as in IPC: a
+/// thread that may run on this CPU is put on it, where it runs once the
+/// waker blocks, instead of on another CPU that would have to be
+/// interrupted (the IPC fast path, `docs/design/ipc.md`).
+pub fn wake_sync(thread: &ThreadRef) -> bool {
+    thread.wake_pending.store(true, Ordering::SeqCst);
+    let mut state = thread.state.lock_irq();
+    if !matches!(state.run, Run::Blocked(_)) {
+        return false;
+    }
+    thread.wake_pending.store(false, Ordering::Relaxed);
+    state.run = Run::Ready;
+    thread.stats.wakeups.fetch_add(1, Ordering::Relaxed);
+    let here = Arch::current_cpu();
+    if state.rt_prio() == 0
+        && state.affinity.contains(here)
+        && CPUS.get(here).online.load(Ordering::Relaxed)
+    {
+        enqueue_on(thread, &mut state, false, here);
+    } else {
+        enqueue_ready(thread, &mut state, false);
+    }
+    true
+}
+
 /// Puts a thread that has just become ready on the run queue of the CPU
 /// that suits it best, and asks that CPU to switch if the thread should
 /// run at once. With the thread's lock held.
 fn enqueue_ready(thread: &ThreadRef, state: &mut State, new: bool) {
     let previous = thread.cpu.load(Ordering::Relaxed);
     let target = choose_cpu(previous, state);
+    enqueue_on(thread, state, new, target);
+}
+
+/// Puts a thread that has just become ready on CPU `target`'s run queue.
+/// With the thread's lock held.
+fn enqueue_on(thread: &ThreadRef, state: &mut State, new: bool, target: usize) {
+    let previous = thread.cpu.load(Ordering::Relaxed);
     let slot = CPUS.get(target);
     let mut guard = slot.rq.lock();
     let Some(rq) = guard.as_mut() else {
@@ -1124,7 +1174,10 @@ fn idle_loop(cpu: usize) -> ! {
             continue;
         }
         slot.wake.store(0, Ordering::Relaxed);
-        slot.polling.store(true, Ordering::SeqCst);
+        // Only an idle that watches `wake` (MWAIT) ends on the write alone;
+        // HLT needs the interrupt, so a waker must send one.
+        let (polls, _) = Arch::idle_mode();
+        slot.polling.store(polls, Ordering::SeqCst);
         let started = Arch::now_ns();
         if !slot.need_resched.load(Ordering::SeqCst) {
             Arch::idle_until(&slot.wake);

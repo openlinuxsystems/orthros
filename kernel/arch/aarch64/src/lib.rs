@@ -20,7 +20,8 @@ use core::sync::atomic::AtomicU32;
 
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
-    PageTable, Platform, Smp, Threads, Timer,
+    MapPageError, PageTable, Platform, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
+    UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -154,6 +155,89 @@ impl Timer for Arch {
 /// A placeholder thread context.
 #[derive(Debug)]
 pub struct Context;
+
+/// A placeholder address space.
+#[derive(Clone, Debug)]
+pub struct Space;
+
+/// A placeholder shared area.
+#[derive(Debug)]
+pub struct Shared;
+
+impl UserMode for Arch {
+    type Space = Space;
+    type Shared = Shared;
+
+    const USER_TOP: u64 = 0x0000_7fff_ffff_f000;
+
+    fn new_space() -> Option<Space> {
+        None
+    }
+
+    fn map_page(_: &Space, _: u64, _: u64, _: UserAccess) -> Result<(), MapPageError> {
+        Err(MapPageError::NoMemory)
+    }
+
+    fn unmap_page(_: &Space, _: u64) -> Option<u64> {
+        None
+    }
+
+    fn query_page(_: &Space, _: u64) -> Option<(u64, UserAccess)> {
+        None
+    }
+
+    fn attach_space(_: &Context, _: &Space) -> bool {
+        false
+    }
+
+    fn set_thread_pointer(_: &Context, _: u64) {}
+
+    fn enter_user(_: u64, _: u64, _: u64) -> ! {
+        Self::halt()
+    }
+
+    fn set_syscall_handler(_: fn(&mut SyscallRegs)) {}
+
+    fn set_user_fault_handler(_: fn(&UserFault) -> !) {}
+
+    fn set_user_return_handler(_: fn()) {}
+
+    fn copy_from_user(_: &mut [u8], _: u64) -> bool {
+        false
+    }
+
+    fn copy_to_user(_: u64, _: &[u8]) -> bool {
+        false
+    }
+
+    fn new_shared(_: usize) -> Option<Shared> {
+        None
+    }
+
+    fn shared_phys(_: &Shared, _: usize) -> u64 {
+        0
+    }
+
+    fn shared_load(_: &Shared, _: usize) -> u32 {
+        0
+    }
+
+    fn shared_store(_: &Shared, _: usize, _: u32) {}
+
+    fn shared_read(_: &Shared, _: usize, _: &mut [u8]) {}
+
+    fn shared_write(_: &Shared, _: usize, _: &[u8]) {}
+
+    fn zero_frames(_: u64, _: u64) {}
+
+    fn write_frames(_: u64, _: &[u8]) {}
+
+    fn cycle_counter_hz() -> u64 {
+        0
+    }
+
+    fn describe_user_mode(_: &mut dyn FnMut(core::fmt::Arguments<'_>)) {}
+}
 
 impl Threads for Arch {
     type Context = Context;

@@ -1,0 +1,113 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Capabilities: the kinds of object, the rights, and the methods every
+//! capability answers.
+//!
+//! A program names a capability by the number of the slot that holds it in
+//! its capability space. Every operation other than the twelve system
+//! calls is a method called on a capability with `cap_call`: the message's
+//! label names the interface and the method, and its data words carry the
+//! arguments. radix-capabilities(7) describes the model.
+
+module capability;
+
+/// The kind of object a capability designates.
+enum ObjectKind: u8 {
+    /// Physical memory not yet given a use, from which frames and smaller
+    /// memory objects are made.
+    memory = 0;
+    /// A block of 2^order pages of RAM that can be mapped.
+    frame = 1;
+    /// A virtual address space.
+    address_space = 2;
+    /// A thread.
+    thread = 3;
+    /// A process (from Phase 6).
+    process = 4;
+    /// An IPC endpoint.
+    endpoint = 5;
+    /// A word of flags that can be signalled and waited for.
+    notification = 6;
+    /// A range of interrupt lines.
+    irq = 7;
+    /// A range of x86 I/O ports.
+    io_ports = 8;
+    /// A range of pages of device registers.
+    mmio = 9;
+    /// Memory a device reads or writes directly.
+    dma = 10;
+    /// A resource domain.
+    resource_domain = 11;
+    /// The kernel's random number generator.
+    random = 12;
+    /// A submission and completion ring.
+    ring = 13;
+    /// The kernel log, for debugging output.
+    kernel_log = 14;
+}
+
+/// What a capability lets its holder do.
+flags Rights: u64 {
+    /// Read the object's contents or state.
+    read = 0;
+    /// Write the object's contents.
+    write = 1;
+    /// Run the object's contents as code.
+    execute = 2;
+    /// Send messages to an endpoint, or signal a notification.
+    send = 3;
+    /// Receive messages from an endpoint, or wait for a notification.
+    receive = 4;
+    /// Pass capabilities in messages sent through an endpoint.
+    grant = 5;
+    /// Signal a process.
+    signal = 6;
+    /// Change or control the object.
+    control = 7;
+    /// Seal other capabilities with an endpoint.
+    seal = 8;
+    /// Unseal capabilities sealed with an endpoint.
+    unseal = 9;
+    /// Make copies of the capability.
+    copy = 10;
+    /// Move or copy the capability into another capability space.
+    transfer = 11;
+}
+
+/// The methods every capability answers, whatever its kind. Their labels
+/// are reserved: a message with one of them is never delivered to an
+/// endpoint's receiver, so they work on endpoint capabilities too.
+interface capability = 0xffff version 1 {
+    /// Describes the capability: its kind, its rights, its badge, and the
+    /// version of the interface its kind answers.
+    method info = 1 () -> (kind: ObjectKind, rights: Rights, badge: u64, version: u32)
+        raises [no_such_slot, empty_slot];
+    /// Puts a capability derived from this one in slot `to`: with the
+    /// given rights (which must be among its own) and, for an endpoint or
+    /// notification without one, a badge (0 for none). Needs the copy
+    /// right.
+    method derive = 2 (to: slot, rights: Rights, badge: u64) -> ()
+        raises [no_such_slot, empty_slot, occupied, missing_rights, sealed, bad_badge, too_deep,
+                revoking, no_memory];
+    /// Moves the capability to slot `to`, keeping its place among the
+    /// capabilities derived from the same one.
+    method move_to = 3 (to: slot) -> ()
+        raises [no_such_slot, empty_slot, occupied, revoking];
+    /// Deletes the capability. When it was the last one to its object, the
+    /// object goes too.
+    method delete = 4 () -> ()
+        raises [no_such_slot, empty_slot];
+    /// Deletes every capability derived from this one, in every capability
+    /// space, keeping this one.
+    method revoke = 5 () -> ()
+        raises [no_such_slot, empty_slot];
+    /// Puts in slot `to` a copy of this capability sealed with the endpoint
+    /// in slot `key`, which needs the seal right.
+    method seal = 6 (key: slot, to: slot) -> ()
+        raises [no_such_slot, empty_slot, occupied, wrong_kind, missing_rights, sealed];
+    /// Puts in slot `to` an unsealed copy of this sealed capability, if
+    /// the endpoint in slot `key` sealed it and has the unseal right.
+    method unseal = 7 (key: slot, to: slot) -> ()
+        raises [no_such_slot, empty_slot, occupied, wrong_kind, missing_rights, wrong_key];
+}

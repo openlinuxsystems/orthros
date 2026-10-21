@@ -26,7 +26,8 @@ longer. Settings come from _orthros.toml_ (see *orthros.toml*(5)); command
 options override them.
 
 Build output goes to _out/_ and Cargo's intermediate files to _target/_
-(the kernel's to _target/kernel/_).
+(the kernel's to _target/kernel/_, the user programs' to
+_target/userspace/_).
 
 # GLOBAL OPTIONS
 
@@ -71,7 +72,12 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	Build the Radix kernel for its own target,
 	_kernel/targets/x86_64-radix-kernel.json_, write the kernel's symbol
 	table into its *.ksyms* section (see *radix-debug*(7)), and install it
-	as _out/sysroot/boot/radix_.
+	as _out/sysroot/boot/radix_. Then build the user programs in
+	_userspace/_ for _userspace/targets/x86_64-radix-user.json_ and install
+	their test image as _out/sysroot/boot/usertests_, which every image
+	loads as a boot module, and write the C headers of the system call
+	interface, which *ridlc* generates from _abi/\*.ridl_, into
+	_out/sysroot/include/radix/_ (see *radix-ipc*(7)).
 
 	*--debug*
 		Build without optimisation.
@@ -166,9 +172,10 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	tests take a few minutes.
 
 	*kani* checks the Kani proof harnesses of the kernel's memory manager,
-	capability core and scheduling policy instead (see *Verification* in
-	_docs/design/memory.md_, _docs/design/capabilities.md_ and
-	_docs/design/scheduler.md_). Each takes
+	capability core, scheduling policy and IPC arithmetic instead (see
+	*Verification* in _docs/design/memory.md_,
+	_docs/design/capabilities.md_, _docs/design/scheduler.md_ and
+	_docs/design/ipc.md_). Each takes
 	from seconds to several minutes, so plain *ob test* leaves them out,
 	and CI runs them in a job of their own. It needs the Kani release
 	that *ob doctor* names, installed with *cargo install --locked
@@ -180,7 +187,9 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	capabilities, once with memory nested deeper) and once, on a smaller
 	model, for liveness; and how the scheduler blocks, wakes and switches
 	threads between CPUs, in _kernel/sched/tla/_, once for safety and
-	once for liveness. That takes about eight minutes on 4 CPUs, so
+	once for liveness; and how endpoints hand messages, calls and
+	replies between threads, in _kernel/ipc/tla/_, also once for each.
+	That takes about ten minutes on 4 CPUs, so
 	plain *ob test* leaves it out too, and CI runs it in a job of its
 	own. TLC needs Java 11 or later (the *default-jre-headless* package on
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned
@@ -277,6 +286,28 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		three CPUs never see an object freed after it was replaced
 		before a grace period passed.
 
+	*user*
+		Boot 2 CPUs under UEFI with *selftest=user*. A user program
+		from the test image calls every system call and capability
+		method with good and bad arguments and checks each answer: its
+		start page, retyping memory into frames and mapping them,
+		deriving, moving, sealing and revoking capabilities, random
+		bytes, threads with their own thread pointer, the kernel log
+		(cut at 256 bytes, with control characters and bad UTF-8
+		replaced) and rings. Then eight programs each make one fault: a
+		null pointer, a write to a read-only page, code on the stack, a
+		privileged instruction, a jump into the kernel's half, an
+		undefined instruction, a breakpoint and a division by zero. The
+		case checks the kernel's report of each and that it ended only
+		that program.
+
+	*ipc*
+		Boot 2 CPUs with *selftest=ipc*: pairs of user programs, on one
+		CPU and then on two, call and answer over an endpoint, pass
+		capabilities in messages, signal each other's notifications,
+		send messages through a shared-memory channel, and post to each
+		other's rings, a thousand times each, checking every answer.
+
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit
 		refuses what passes it, and when memory runs out the kernel stops
@@ -303,9 +334,41 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		Fail a boot test that has not finished after this long. The
 		default is 300.
 
+*bench* [*--no-linux*] [*--summary* _file_] [*--debug* | *--release*]
+	Measure what system calls and IPC round trips cost. Build a test
+	image and boot it in QEMU on 2 CPUs with *selftest=bench*, where the
+	benchmark programs of the test image time the cheapest system calls
+	(an unknown number, which only enters and leaves the kernel; a
+	yield; a capability method; 64 random bytes), then round trips
+	between two programs over an endpoint, a notification, a
+	shared-memory channel and a ring, with both on one CPU and on two.
+	Then run _tools/linux-bench_ on this machine, which times the closest
+	Linux operations (*getppid*(2), *sched_yield*(2), *getrandom*(2), and
+	round trips over pipes, eventfds, futexes and Unix sockets, pinned the
+	same way) as a baseline. The report, with both columns side by side,
+	is printed and written to _out/bench/report.md_, and the numbers to
+	_out/bench/results.json_. _docs/design/ipc.md_ says how each is
+	measured. Use KVM: without it QEMU emulates every instruction, the
+	Radix numbers measure the emulator, and the boot takes minutes. CI
+	runs *ob bench* on every pull request and every merge, and shows the
+	report in the job's summary.
+
+	*--no-linux*
+		Skip the Linux baseline.
+
+	*--summary* _file_
+		Also append the Markdown report to _file_. CI passes
+		*$GITHUB_STEP_SUMMARY*.
+
+	*--debug*, *--release*
+		As for *build*.
+
 *docs* [*--check*]
 	Build the man pages from _docs/man/\*.scd_ into _out/docs/man/_ and the
-	handbook from _docs/handbook/_ into _out/docs/handbook/_. Every man page
+	handbook from _docs/handbook/_ into _out/docs/handbook/_. The pages of
+	section 2, one for each system call and one for each interface, are
+	generated from _abi/\*.ridl_ by *ridlc* (see *radix-ipc*(7)); their
+	scdoc sources go to _out/docs/man-src/_. Every man page
 	is checked with *mandoc -T lint*, and any warning fails the command.
 
 	*--check*
@@ -319,8 +382,8 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	Check formatting with rustfmt and run Clippy, treating every warning as
 	an error, on the build tool, on the kernel for x86-64, on the
 	architecture-independent kernel against the AArch64 stubs of the
-	hardware abstraction layer, and on the kernel libraries with their
-	tests. CI runs the same command.
+	hardware abstraction layer, on the kernel libraries with their
+	tests, and on the user programs. CI runs the same command.
 
 *fmt*
 	Format all Rust code with rustfmt.
@@ -337,7 +400,8 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	request; *git rebase --signoff* _base_ adds missing sign-offs.
 
 *clean* [*--all*]
-	Remove _out/_ and the kernel's build directory.
+	Remove _out/_ and the kernel's and the user programs' build
+	directories.
 
 	*--all*
 		Also remove _target/_ and _.cache/_, which hold the build tool
@@ -379,6 +443,17 @@ _kernel/targets/x86_64-radix-kernel.json_
 _out/sysroot/boot/radix_
 	The kernel built by *ob build*.
 
+_userspace/targets/x86_64-radix-user.json_
+	The user programs' Rust target specification.
+
+_out/sysroot/boot/usertests_
+	The test image of user programs built by *ob build*.
+
+_abi/\*.ridl_
+	The system call interface, from which *ridlc* generates the Rust
+	bindings, the C headers in _out/sysroot/include/radix/_ and the
+	section 2 man pages.
+
 _kernel/deny.toml_
 	The license allow-list of the kernel, used by *ob image* and by
 	cargo-deny in CI.
@@ -407,6 +482,10 @@ _out/qemu/radix.gdb_
 
 _out/test/_
 	Test images, serial logs and screenshots from *ob test*.
+
+_out/bench/_
+	The benchmark report (_report.md_), its numbers (_results.json_)
+	and the serial log of the benchmark boot, from *ob bench*.
 
 # EXIT STATUS
 
@@ -469,7 +548,7 @@ Build on a host without the tools installed, using Podman or Docker:
 
 # SEE ALSO
 
-*orthros.toml*(5), *orthros-boot*(7), *radix-debug*(7),
+*orthros.toml*(5), *orthros-boot*(7), *radix-debug*(7), *radix-ipc*(7),
 *qemu-system-x86_64*(1), *grub-mkrescue*(1), *rustup*(1), *gdb*(1), *dd*(1)
 
 The OrthrOS handbook, chapter "Building OrthrOS with ob", in

@@ -65,7 +65,7 @@ pub const FLAGS: &[Flag] = &[
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
                   mm-stress, stack-overflow, smep, smap, tlb, caps, fpu, sched-fair, sched-rt, \
-                  sched-pi, sched-balance, lockdep, rcu or oom",
+                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc or bench",
     },
     Flag {
         name: "lockdep",
@@ -98,6 +98,9 @@ pub const SELFTESTS: &[&str] = &[
     "lockdep",
     "rcu",
     "oom",
+    "user",
+    "ipc",
+    "bench",
 ];
 
 /// A parsed view of the command line.

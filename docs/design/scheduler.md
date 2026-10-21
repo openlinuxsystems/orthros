@@ -149,7 +149,9 @@ the last spin lock is let go: the guard restores the interrupt flag
 first and then drops the count, so the reschedule it may trigger runs
 with interrupts in the state the code expects. A wake-up that should
 preempt a thread on another CPU kicks it with a reschedule IPI, or,
-when that CPU is idle in MWAIT, with a write to the line it monitors.
+when that CPU is idle in MWAIT, with a write to the line it monitors. An
+idle CPU says it polls that line only when it waits with MWAIT; one
+halted with HLT always gets the IPI.
 
 **Timers.** Each CPU has a list of its sleeping threads and their
 deadlines, with room for every thread made ahead of time. The local APIC

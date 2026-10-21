@@ -6,13 +6,19 @@
 //! Every CPU has a [`PerCpu`] in a static array; its GS base register points
 //! at its own entry, so `gs:[8]` is the running CPU's index, `gs:[16]` its
 //! preemption count and `gs:[20]` its interrupt depth, each changed by one
-//! instruction that a migration cannot split. The boot CPU sets GS base
-//! first thing in [`crate::entry`], before any code that asks which CPU it
-//! is running on.
+//! instruction that a migration cannot split. `gs:[24]` is the top of the
+//! running thread's kernel stack and `gs:[32]` a scratch word, which the
+//! system call entry uses before it has a stack (`crate::user`). The boot
+//! CPU sets GS base first thing in [`crate::entry`], before any code that
+//! asks which CPU it is running on. In user mode GS base is the program's
+//! (zero); the entry paths swap it with `swapgs`.
 //!
-//! Each CPU also has its own GDT and TSS. The TSS holds the interrupt stack
-//! table: double faults, NMIs and machine checks switch to dedicated stacks,
-//! so a kernel stack overflow still produces a report.
+//! Each CPU also has its own GDT and TSS. The GDT has the kernel's code and
+//! data segments, then the user segments in the order SYSRET needs them.
+//! The TSS holds the stack an interrupt from user mode switches to (the
+//! running thread's kernel stack, set at every context switch) and the
+//! interrupt stack table: double faults, NMIs and machine checks switch to
+//! dedicated stacks, so a kernel stack overflow still produces a report.
 
 use core::arch::asm;
 use core::ops::Range;
@@ -27,8 +33,24 @@ use crate::cpu::{self, msr};
 pub const KERNEL_CS: u16 = 0x08;
 /// Data segment selector.
 pub const KERNEL_DS: u16 = 0x10;
+/// The selector SYSRET's user selectors are relative to: user data is 8
+/// above it and user code 16 above, both with RPL 3.
+pub const USER_BASE: u16 = 0x18;
+/// User data (and stack) segment selector, RPL 3.
+pub const USER_DS: u16 = 0x20 | 3;
+/// User 64-bit code segment selector, RPL 3.
+pub const USER_CS: u16 = 0x28 | 3;
 /// Task-state segment selector.
-const TSS_SELECTOR: u16 = 0x18;
+const TSS_SELECTOR: u16 = 0x30;
+
+// SYSRET loads the user selectors from `USER_BASE`; interrupt returns to
+// user mode take them from the frame, which the CPU pushed with these.
+const _: () = assert!(USER_DS == (USER_BASE + 8) | 3 && USER_CS == (USER_BASE + 16) | 3);
+
+/// Offset of [`PerCpu`]'s top-of-kernel-stack word, for the entry code.
+pub const KERNEL_RSP_OFFSET: usize = 24;
+/// Offset of [`PerCpu`]'s scratch word, for the entry code.
+pub const SCRATCH_OFFSET: usize = 32;
 
 /// Interrupt stack table slots (1-based, as the IDT names them).
 pub const IST_DOUBLE_FAULT: u8 = 1;
@@ -76,10 +98,11 @@ struct Tss {
     iomap_base: u16,
 }
 
-/// A CPU's GDT (null, code, data, then the two-slot TSS descriptor) and TSS.
+/// A CPU's GDT (null, kernel code and data, an unused slot, user data and
+/// code, then the two-slot TSS descriptor) and TSS.
 #[repr(C, align(16))]
 struct Descriptors {
-    gdt: [u64; 5],
+    gdt: [u64; 8],
     tss: Tss,
 }
 
@@ -94,6 +117,13 @@ pub struct PerCpu {
     preempt: AtomicU32,
     /// Interrupt handlers running, nested: `gs:[20]`.
     irq_depth: AtomicU32,
+    /// The top of the running thread's kernel stack: `gs:[24]`.
+    kernel_rsp: AtomicU64,
+    /// Scratch for the system call entry (the program's stack pointer):
+    /// `gs:[32]`.
+    scratch: AtomicU64,
+    /// The address of this CPU's TSS, once loaded.
+    tss: AtomicUsize,
     /// Local APIC ID.
     pub apic_id: AtomicU32,
     /// Listed in the MADT as usable.
@@ -140,6 +170,9 @@ impl PerCpu {
             index: AtomicUsize::new(0),
             preempt: AtomicU32::new(0),
             irq_depth: AtomicU32::new(0),
+            kernel_rsp: AtomicU64::new(0),
+            scratch: AtomicU64::new(0),
+            tss: AtomicUsize::new(0),
             apic_id: AtomicU32::new(0),
             present: AtomicBool::new(false),
             node: AtomicU8::new(0),
@@ -158,7 +191,7 @@ impl PerCpu {
             next_tick_ns: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(u64::MAX),
             descriptors: TakeOnce::new(Descriptors {
-                gdt: [0; 5],
+                gdt: [0; 8],
                 tss: Tss {
                     _reserved0: 0,
                     rsp: [0; 3],
@@ -175,6 +208,25 @@ impl PerCpu {
     /// The CPU's index.
     pub fn index(&self) -> usize {
         self.index.load(Ordering::Relaxed)
+    }
+
+    /// Sets the stack that system calls and interrupts from user mode
+    /// switch to: the top of the kernel stack of the thread about to run.
+    /// With interrupts masked, on this CPU.
+    pub fn set_kernel_stack(&self, top: usize) {
+        self.kernel_rsp.store(top as u64, Ordering::Relaxed);
+        let tss = self.tss.load(Ordering::Relaxed);
+        if tss != 0 {
+            // SAFETY: `tss` is this CPU's TSS, which lives in a static and
+            // is only written here, by its own CPU with interrupts masked;
+            // the CPU reads RSP0 only when an interrupt or exception
+            // arrives from user mode, which cannot happen meanwhile. The
+            // TSS is packed, so the write is unaligned.
+            unsafe {
+                let rsp0 = core::ptr::addr_of_mut!((*(tss as *mut Tss)).rsp[0]);
+                rsp0.write_unaligned(top as u64);
+            }
+        }
     }
 
     /// The running thread's stack, if it is not one of [`Stacks`].
@@ -276,6 +328,8 @@ const _: () = {
     assert!(core::mem::offset_of!(PerCpu, index) == 8);
     assert!(core::mem::offset_of!(PerCpu, preempt) == 16);
     assert!(core::mem::offset_of!(PerCpu, irq_depth) == 20);
+    assert!(core::mem::offset_of!(PerCpu, kernel_rsp) == KERNEL_RSP_OFFSET);
+    assert!(core::mem::offset_of!(PerCpu, scratch) == SCRATCH_OFFSET);
 };
 
 /// The data of CPU `index`.
@@ -339,7 +393,19 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
     };
     let tss_base = &descriptors.tss as *const Tss as u64;
     let [tss_low, tss_high] = tss_descriptor(tss_base, core::mem::size_of::<Tss>() as u32 - 1);
-    descriptors.gdt = [0, 0x00AF_9A00_0000_FFFF, 0x00CF_9200_0000_FFFF, tss_low, tss_high];
+    // The user descriptors have DPL 3 and their accessed bits set, so the
+    // CPU never writes the table to set them.
+    descriptors.gdt = [
+        0,
+        0x00AF_9A00_0000_FFFF, // 0x08: kernel code, 64-bit
+        0x00CF_9200_0000_FFFF, // 0x10: kernel data
+        0,                     // 0x18: SYSRET's 32-bit user code, unused
+        0x00CF_F300_0000_FFFF, // 0x20: user data
+        0x00AF_FB00_0000_FFFF, // 0x28: user code, 64-bit
+        tss_low,               // 0x30: the TSS
+        tss_high,
+    ];
+    cpu.tss.store(tss_base as usize, Ordering::Relaxed);
 
     #[repr(C, packed)]
     struct Pointer {
@@ -347,7 +413,7 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
         base: u64,
     }
     let pointer = Pointer {
-        limit: (core::mem::size_of::<[u64; 5]>() - 1) as u16,
+        limit: (core::mem::size_of::<[u64; 8]>() - 1) as u16,
         base: descriptors.gdt.as_ptr() as u64,
     };
     // SAFETY: the GDT lives in a static that is never written again (the
@@ -380,4 +446,5 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
     };
     // Loading GS zeroed its base; point it back at this CPU.
     set_current(cpu.index());
+    crate::user::init_cpu();
 }

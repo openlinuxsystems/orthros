@@ -10,12 +10,15 @@
 resolver = "3"
 members = [
     "radix",
+    "abi",
     "hal",
     "arch/x86_64",
     "arch/aarch64",
     "cap",
+    "ipc",
     "lib/acpi",
     "lib/bootinfo",
+    "lib/elf",
     "lib/fbcon",
     "lib/kdb",
     "lib/klog",

@@ -1,0 +1,27 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Address spaces: the mappings threads run in.
+//!
+//! The lower half of the 64-bit address space belongs to the program,
+//! from USER_START to USER_TOP; the kernel lives in the upper half, which
+//! user code cannot reach. Frames are mapped and unmapped with the `map`
+//! and `unmap` system calls.
+
+module address_space;
+
+/// The lowest address a mapping may start at; the pages below it stay
+/// unmapped, so a null pointer always faults.
+const USER_START: u64 = 0x10000;
+/// The end of the addresses a mapping may use.
+const USER_TOP: u64 = 0x7ffffffff000;
+/// The size of a page, in bytes.
+const PAGE_SIZE: u64 = 4096;
+
+/// A virtual address space.
+interface address_space = 0x0003 version 1 {
+    kind = address_space;
+    /// Whether a page is mapped at `address`, and with which rights.
+    method query = 1 (address: addr) -> (mapped: bool, rights: Rights)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+}

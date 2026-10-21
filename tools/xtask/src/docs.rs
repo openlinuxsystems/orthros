@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::process::{self, step};
-use crate::{COMMANDS, Context, Ctx, Error, Result, config, test};
+use crate::{COMMANDS, Context, Ctx, Error, Result, config, test, userspace};
 
 /// A man page source such as `docs/man/orthros.toml.5.scd`.
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +49,23 @@ fn pages(ctx: &Ctx) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
+/// The man(2) pages ridlc generates from `abi/*.ridl`, written as scdoc
+/// into `out/docs/man-src/`.
+fn generated_pages(ctx: &Ctx) -> Result<Vec<Page>> {
+    let dir = ctx.out.join("docs/man-src");
+    process::create_dir(&dir)?;
+    let mut pages = Vec::new();
+    for (name, text) in ridlc::man_pages(&userspace::abi(ctx)?) {
+        let path = dir.join(&name);
+        std::fs::write(&path, text).context(|| format!("writing {}", path.display()))?;
+        match Page::from_path(&path) {
+            Some(page) => pages.push(page),
+            None => crate::bail!("ridlc named a man page {name}, not <name>.<section>.scd"),
+        }
+    }
+    Ok(pages)
+}
+
 /// `ob docs [--check]`.
 pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
     for tool in ["scdoc", "mandoc", "mdbook"] {
@@ -57,9 +74,15 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
                 .hint("run `./ob doctor` to see what is missing"));
         }
     }
-    let pages = pages(ctx)?;
+    let mut pages = pages(ctx)?;
+    let generated = generated_pages(ctx)?;
     let man_dir = ctx.out.join("docs/man");
-    step(&format!("Building {} man pages", pages.len()));
+    step(&format!(
+        "Building {} man pages, {} of them generated from abi/*.ridl",
+        pages.len() + generated.len(),
+        generated.len()
+    ));
+    pages.extend(generated);
     let mut problems = Vec::new();
     for page in &pages {
         let output = page.output(&man_dir);

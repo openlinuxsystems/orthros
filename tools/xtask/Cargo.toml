@@ -21,6 +21,8 @@ radix-kdb = { path = "../../kernel/lib/kdb" }
 radix-ksyms = { path = "../../kernel/lib/ksyms" }
 radix-microcode = { path = "../../kernel/lib/microcode" }
 radix-relocs = { path = "../../kernel/lib/relocs" }
+# The interface compiler, for the man(2) pages and C headers of abi/*.ridl.
+ridlc = { path = "../ridlc" }
 rustc-demangle = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

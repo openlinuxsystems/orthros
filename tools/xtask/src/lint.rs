@@ -4,10 +4,10 @@
 //! `ob lint` and `ob fmt`.
 
 use crate::process::{self, step};
-use crate::{Ctx, Result, kernel, test};
+use crate::{Ctx, Result, kernel, test, userspace};
 
 /// The Cargo workspaces in the repository.
-const MANIFESTS: &[&str] = &["Cargo.toml", "kernel/Cargo.toml"];
+const MANIFESTS: &[&str] = &["Cargo.toml", "kernel/Cargo.toml", "userspace/Cargo.toml"];
 
 /// `ob fmt`.
 pub fn fmt(ctx: &Ctx) -> Result<()> {
@@ -55,5 +55,10 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
         cmd.args(["-p", library]);
     }
     cmd.args(["--all-targets", "--", "-D", "warnings"]);
+    process::run(ctx, &mut cmd)?;
+
+    step("Running Clippy on the user programs");
+    let mut cmd = userspace::cargo(ctx, "clippy");
+    cmd.arg("--workspace").args(userspace::target_args(ctx)).args(["--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)
 }

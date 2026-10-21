@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "ridlc"
+description = "The Radix interface definition compiler: abi/*.ridl to Rust, C and man(2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No dependencies: the kernel's build runs ridlc as a library from
+# kernel/abi's build script, and everything it pulls in would be part of
+# the kernel's build.
+
+[lints]
+workspace = true

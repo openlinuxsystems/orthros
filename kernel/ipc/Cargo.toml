@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-ipc"
+description = "The arithmetic of Radix IPC: message info words, user address ranges, ring layouts and ring queue accounting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-abi = { path = "../abi" }
+
+[dev-dependencies]
+# Host-side property tests (ADR 0019).
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

@@ -25,7 +25,7 @@ On top of Radix, OrthrOS provides a complete, installable system:
 ## Where the project is
 
 OrthrOS is built in phases, each ending in something that runs. This
-handbook describes **Phase 4**: the Radix kernel boots through GRUB under
+handbook describes **Phase 5**: the Radix kernel boots through GRUB under
 UEFI and legacy BIOS at a random address, chosen by a cryptographic random
 number generator seeded from several sources, manages the machine's memory
 with a frame allocator per NUMA node and a kernel heap, protects itself
@@ -38,8 +38,14 @@ resource once they arrive (see `radix-capabilities(7)`), and its
 scheduler: threads on every CPU, shared fairly or run first by real-time
 priority, grouped into resource domains with CPU weights and memory
 limits, with an out-of-memory policy that stops apps before services and
-never the system (see `radix-scheduling(7)`). Chapters for later phases are listed in the table of
-contents and are written as those phases land. The full plan is in
+never the system (see `radix-scheduling(7)`). Programs run in user mode
+and reach the kernel through twelve system calls; they talk to each other
+over endpoints, notifications, shared-memory channels and rings, and each
+gets random numbers from a capability it receives at start (see
+`radix-ipc(7)`). For now the only programs are the kernel's own tests and
+benchmarks; processes and the first services come in Phase 6. Chapters
+for later phases are listed in the table of contents and are written as
+those phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
 
 ## How this handbook is organised

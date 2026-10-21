@@ -311,7 +311,7 @@ reports, as soon as the code runs:
 
 It is on by default in debug builds and off in release builds; the
 *lockdep* kernel flag (*orthros-boot*(7)) overrides either. *ob test*
-boots *bios-usb* and every Phase 4 self-test with it on. A report is
+boots *bios-usb* and every self-test since Phase 4 with it on. A report is
 logged at the error level, each line starting *Lock checker:*, with the
 places where the locks were created and taken:
 
@@ -330,7 +330,8 @@ it off. *kdb*'s *locks* command shows its state.
 # SELF-TESTS
 
 *selftest*=_name_ runs one of these at the end of boot, before *Boot
-complete.* *ob test* boots each of them.
+complete.* *ob test* boots each of them but *bench*, which *ob bench*
+boots.
 
 *page-fault*
 	Writes to an unmapped address. The resulting panic report must name
@@ -419,6 +420,39 @@ complete.* *ob test* boots each of them.
 	stopped first, then the service, which its supervisor restarts. No
 	*system* thread may be asked to stop, and the memory must come
 	back. See *radix-scheduling*(7).
+
+*user*
+	Starts programs from the *usertests* boot module, the test image of
+	user programs that every image carries, and checks how each ends.
+	The probe calls every system call and capability method with good
+	and bad arguments and checks each answer (see *radix-ipc*(7)), and
+	must exit with 0, its count of failed checks. Then eight programs
+	each make one fault (a null pointer, a write to a read-only page,
+	code on the stack, a privileged instruction, a jump into the
+	kernel's half, an undefined instruction, a breakpoint, a division by
+	zero); each must be ended by the kernel, which logs *User: thread*
+	_id_ *(fault) ended:* and the fault, while the kernel and the other
+	programs carry on. Last, the capability store and the object
+	registry must hold what they held before the first program started.
+	Skipped with a warning when the boot loader loaded no *usertests*
+	module.
+
+*ipc*
+	Runs five pairs of user programs, first both on one CPU, then on
+	two: a call and its reply over an endpoint, capabilities copied and
+	moved in messages, notifications each side waits on, a channel of
+	messages in shared memory, and messages posted to each other's ring.
+	Each pair ping-pongs a thousand times and checks every answer; each
+	program must exit with 0, and afterwards the capability store and
+	the object registry must hold what they held before. Reports
+	*selftest ipc: passed*.
+
+*bench*
+	Runs the benchmark programs of the *usertests* image: the cost of
+	the cheapest system calls, then round trips of four pairs from *ipc*
+	(all but capabilities), 100,000 each, on one CPU and on two. Each
+	measurement is a line the program logs, *BENCH name=*_name_ *ns=*_ns_
+	*iterations=*_count_, which *ob bench* collects.
 
 *stack-overflow*
 	Recurses until the boot CPU's stack runs into its guard page. The
@@ -600,4 +634,5 @@ _out/test/_
 
 # SEE ALSO
 
-*orthros-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)
+*orthros-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *radix-ipc*(7),
+*ob*(1), *gdb*(1), *qemu-system-x86_64*(1)

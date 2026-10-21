@@ -5,13 +5,14 @@
 # workspace in kernel/ because it builds for a bare-metal target.
 [workspace]
 resolver = "3"
-members = ["tools/xtask"]
+members = ["tools/linux-bench", "tools/ridlc", "tools/xtask"]
 # The kernel crates that tools/xtask uses stay members of the kernel workspace.
 exclude = ["kernel"]
 
 [workspace.package]
-# The OrthrOS release version. Keep kernel/Cargo.toml in step; a unit test
-# in tools/xtask fails when the two differ.
+# The OrthrOS release version. Keep kernel/Cargo.toml and
+# userspace/Cargo.toml in step; a unit test in tools/xtask fails when they
+# differ.
 version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0 OR MIT"

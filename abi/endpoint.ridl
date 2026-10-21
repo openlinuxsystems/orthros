@@ -1,0 +1,53 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Endpoints and the format of messages.
+//!
+//! A message is a label, up to eight data words and up to four
+//! capabilities, all passed in registers. The info word describes it: the
+//! label in bits 0 to 31, the number of data words in bits 32 to 35, the
+//! number of capabilities in bits 36 to 38, and flags from bit 40. The
+//! capabilities travel as slot numbers in the first data words: the
+//! sender's slots on the way in, the slots the kernel put them in, inside
+//! the receiver's receive window, on the way out. radix-ipc(7) describes
+//! sending, calling and replying.
+
+module endpoint;
+
+/// The most data words a message carries.
+const MESSAGE_WORDS: u64 = 8;
+/// The most capabilities a message carries.
+const MESSAGE_CAPS: u64 = 4;
+/// Mask of the label in the info word.
+const INFO_LABEL_MASK: u64 = 0xffffffff;
+/// Shift of the data word count in the info word.
+const INFO_WORDS_SHIFT: u64 = 32;
+/// Mask of the data word count, after shifting.
+const INFO_WORDS_MASK: u64 = 0xf;
+/// Shift of the capability count in the info word.
+const INFO_CAPS_SHIFT: u64 = 36;
+/// Mask of the capability count, after shifting.
+const INFO_CAPS_MASK: u64 = 0x7;
+/// The lowest label reserved for the methods every capability answers;
+/// messages with these labels never reach a receiver.
+const RESERVED_LABELS: u64 = 0xffff0000;
+/// The slot number that names no capability: `reply_recv` with it only
+/// replies.
+const NO_SLOT: u32 = 0xffffffff;
+
+/// Flags in a message's info word, and in the flags of `recv`.
+flags MessageFlags: u64 {
+    /// Move the message's capabilities to the receiver instead of copying
+    /// them (copying needs the copy right).
+    move_caps = 40;
+    /// Fail with `would_block` instead of waiting for the other side.
+    no_block = 41;
+}
+
+/// An endpoint: a rendezvous where senders and callers meet receivers.
+/// Sending needs the send right, receiving the receive right, and passing
+/// capabilities the grant right. Endpoints have no methods of their own;
+/// they carry the methods of whatever interface their receiver serves.
+interface endpoint = 0x0006 version 1 {
+    kind = endpoint;
+}

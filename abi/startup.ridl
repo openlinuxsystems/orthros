@@ -1,0 +1,63 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! How the kernel starts a program in Phase 5.
+//!
+//! Until Phase 6 brings the ELF loader and init, the kernel itself starts
+//! the user-mode test programs in the `usertests` boot module. It maps the
+//! program's segments, a stack and a read-only start-up page, puts the
+//! capabilities below in the program's capability space, and starts its
+//! thread at the entry point with the start-up page's address in the
+//! first argument register.
+
+module startup;
+
+/// The address of the start-up page.
+const STARTUP_ADDRESS: u64 = 0x10000;
+/// The top of the initial stack.
+const STACK_TOP: u64 = 0x7ff000000000;
+/// The size of the initial stack, in bytes.
+const STACK_SIZE: u64 = 0x40000;
+/// The slot of the program's own thread (all rights).
+const SLOT_THREAD: u32 = 1;
+/// The slot of the program's address space (all rights).
+const SLOT_SPACE: u32 = 2;
+/// The slot of a memory object for the program's own use.
+const SLOT_MEMORY: u32 = 3;
+/// The slot of the random capability every program gets.
+const SLOT_RANDOM: u32 = 4;
+/// The slot of the kernel log capability.
+const SLOT_LOG: u32 = 5;
+/// The first of the slots the start-up page's `slots` describe.
+const SLOT_FIRST_EXTRA: u32 = 8;
+/// The first slot of the receive window programs start with.
+const SLOT_WINDOW: u32 = 32;
+/// The number of slots in the receive window programs start with.
+const WINDOW_SLOTS: u32 = 16;
+/// The number of slots of a program's capability space.
+const SLOTS: u32 = 256;
+/// The version of the start-up page's layout.
+const STARTUP_VERSION: u32 = 1;
+
+/// The start-up page.
+struct Startup {
+    /// STARTUP_VERSION.
+    version: u32;
+    /// The CPU the program's thread is pinned to.
+    cpu: u32;
+    /// What the program was started to do, for test programs with many
+    /// roles; the meaning is the program's own.
+    role: u64;
+    /// An argument for the role.
+    argument: u64;
+    /// The time-stamp counter's frequency, in hertz (0 if unknown).
+    tsc_hz: u64;
+    /// How many of `slots` are used.
+    extra: u32;
+    /// The number of the program's thread.
+    thread_id: u32;
+    /// What the slots from SLOT_FIRST_EXTRA hold, one ObjectKind each.
+    slots: [u8; 16];
+    /// The bytes of memory the object in SLOT_MEMORY has.
+    memory_bytes: u64;
+}

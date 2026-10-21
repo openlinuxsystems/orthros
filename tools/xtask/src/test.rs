@@ -22,10 +22,10 @@ use crate::config::{Firmware, Media};
 use crate::image::{self, ImageSpec};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
-use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen, tla};
+use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen, tla, userspace};
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
-const QEMU_EXIT_SUCCESS: i32 = 33;
+pub const QEMU_EXIT_SUCCESS: i32 = 33;
 /// QEMU's exit status after the kernel writes 0x11 (a panic).
 const QEMU_EXIT_PANIC: i32 = 35;
 /// QEMU's exit status when the guest restarts under `-no-reboot`.
@@ -33,11 +33,14 @@ const QEMU_EXIT_RESET: i32 = 0;
 
 /// Every library of the kernel workspace with host unit tests.
 pub const KERNEL_LIBRARIES: &[&str] = &[
+    "radix-abi",
     "radix-acpi",
     "radix-bootinfo",
     "radix-cap",
+    "radix-elf",
     "radix-fbcon",
     "radix-hal",
+    "radix-ipc",
     "radix-kdb",
     "radix-klog",
     "radix-lockdep",
@@ -55,7 +58,7 @@ const CMDLINE_SLOT: usize = 160;
 
 /// Which test image a case boots.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TestImage {
+pub enum TestImage {
     /// The kernel alone.
     Plain,
     /// The kernel plus a microcode module of made-up updates.
@@ -430,6 +433,34 @@ pub const CASES: &[Case] = &[
         script: rcu,
     },
     Case {
+        name: "user",
+        about: "a user program checks every system call; 8 kinds of fault end only theirs",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=user",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: user,
+    },
+    Case {
+        name: "ipc",
+        about: "user programs ping-pong over endpoints, notifications, channels and rings",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=ipc",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: ipc,
+    },
+    Case {
         name: "oom",
         about: "out of memory stops an app, then a service its supervisor restarts",
         firmware: Firmware::Bios,
@@ -493,8 +524,11 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         unit_tests(ctx)?;
     }
     if boot {
-        let kernel = kernel::build(ctx, profile)?;
-        boot_tests(ctx, &kernel, &cases, Duration::from_secs(timeout))?;
+        let built = Built {
+            kernel: kernel::build(ctx, profile)?,
+            usertests: userspace::build(ctx, profile)?,
+        };
+        boot_tests(ctx, &built, &cases, Duration::from_secs(timeout))?;
     }
     Ok(())
 }
@@ -514,7 +548,7 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched"];
+pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched", "radix-ipc"];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
@@ -563,8 +597,14 @@ pub fn test_microcode() -> Vec<u8> {
     file
 }
 
+/// The kernel and user programs a test image holds.
+pub struct Built {
+    pub kernel: PathBuf,
+    pub usertests: PathBuf,
+}
+
 /// Builds a test image whose kernel command line is a placeholder slot.
-fn build_test_image(ctx: &Ctx, kernel: &Path, dir: &Path, kind: TestImage) -> Result<Vec<u8>> {
+pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -> Result<Vec<u8>> {
     let name = match kind {
         TestImage::Plain => "orthros-test",
         TestImage::Microcode => "orthros-test-microcode",
@@ -573,10 +613,11 @@ fn build_test_image(ctx: &Ctx, kernel: &Path, dir: &Path, kind: TestImage) -> Re
     image::build(
         ctx,
         &ImageSpec {
-            kernel,
+            kernel: &built.kernel,
             timeout: 0,
             cmdline: &cmdline_slot(),
             microcode: (kind == TestImage::Microcode).then(test_microcode),
+            usertests: Some(&built.usertests),
             staging: dir.join(format!("{name}-root")),
             output: output.clone(),
         },
@@ -590,7 +631,7 @@ fn cmdline_slot() -> String {
 }
 
 /// A copy of a test image with `cmdline` in its command-line slot.
-fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
+pub fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
     let slot = cmdline_slot();
     let found: Vec<usize> = image
         .windows(slot.len())
@@ -612,13 +653,13 @@ fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
     Ok(copy)
 }
 
-fn boot_tests(ctx: &Ctx, kernel: &Path, cases: &[&Case], timeout: Duration) -> Result<()> {
+fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> Result<()> {
     qemu::require_qemu()?;
     let dir = ctx.out.join("test");
     process::create_dir(&dir)?;
-    let plain = build_test_image(ctx, kernel, &dir, TestImage::Plain)?;
+    let plain = build_test_image(ctx, built, &dir, TestImage::Plain)?;
     let microcode = if cases.iter().any(|case| case.image == TestImage::Microcode) {
-        Some(build_test_image(ctx, kernel, &dir, TestImage::Microcode)?)
+        Some(build_test_image(ctx, built, &dir, TestImage::Microcode)?)
     } else {
         None
     };
@@ -722,7 +763,7 @@ pub struct Vm {
 }
 
 impl Vm {
-    fn start(
+    pub fn start(
         ctx: &Ctx,
         machine: &Machine,
         dir: &Path,
@@ -1024,7 +1065,7 @@ fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 4)"))?;
+    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 5)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -1059,7 +1100,10 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 12 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 15 object kinds, 12 rights")?;
+    vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
+    // Every test image carries the user test programs.
+    vm.expect("User: the usertests image is ")?;
     let cpus = case.cpus;
     vm.expect(&format!("CPUs: {cpus} of {cpus} online:"))?;
     for cpu in 0..cpus {
@@ -1339,6 +1383,44 @@ fn lockdep(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Lock checker: sleeping where it is not allowed")?;
     selftest_passed(vm, "lockdep")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn user(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    selftest_passed(vm, "user")?;
+    // The kernel reports each fault as it ends the program that made it.
+    let log = vm.log();
+    for fault in [
+        "(fault) ended: page fault reading 0x0 (not mapped)",
+        "(fault) ended: page fault writing ",
+        "(fault) ended: page fault executing ",
+        "(fault) ended: protection fault",
+        "(fault) ended: invalid instruction",
+        "(fault) ended: breakpoint",
+        "(fault) ended: division error",
+    ] {
+        if !log.contains(fault) {
+            return Err(format!("no fault report \"{fault}\""));
+        }
+    }
+    // The probe's log lines: control characters and bad UTF-8 shown as
+    // `?`, and a long line cut at 256 bytes.
+    let cut = "]: probe: a line with a tab?and a bell?, cut past 256 bytes ";
+    let Some(line) = log.lines().find(|line| line.contains(cut)) else {
+        return Err("the probe's line with control characters is missing or unescaped".into());
+    };
+    let text = line.split_once("]: ").map_or("", |(_, text)| text);
+    if text.len() != 256 {
+        return Err(format!("the probe's long line is {} bytes, not cut at 256", text.len()));
+    }
+    if !log.contains("]: probe: bad UTF-8 ?? here") {
+        return Err("the probe's line with bad UTF-8 is missing or unescaped".into());
+    }
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn ipc(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "ipc", "10 pairs of programs ping-ponged")
 }
 
 fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {

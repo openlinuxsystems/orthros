@@ -219,6 +219,19 @@ pub(crate) fn user_flags(access: Access) -> u64 {
     }
 }
 
+/// The access rights a user page-table entry grants.
+pub(crate) fn access_of(entry: u64) -> Access {
+    if entry & WRITABLE != 0 {
+        Access::ReadWrite
+    } else if entry & NO_EXECUTE != 0 || !cpu::feature::nx() {
+        // Without NX every readable page is executable; it counts as
+        // read-only, since that is what was asked for.
+        Access::ReadOnly
+    } else {
+        Access::Code
+    }
+}
+
 fn map_4k(root: u64, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
     *entry(root, virt, 1, flags & USER != 0)? = phys | flags;
     Ok(())
@@ -628,10 +641,6 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         serve_shootdown();
         cpu::pause();
     };
-    let generation = SHOOTDOWN.generation.load(Ordering::Relaxed) + 1;
-    percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
-    SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
-    SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
     let mut targets = [0u64; MAX_CPUS / 64];
     for (index, cpu) in (0..MAX_CPUS).filter_map(|i| Some((i, percpu::get(i)?))) {
         if index != me
@@ -645,6 +654,13 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     if targets.iter().all(|&word| word == 0) {
         return;
     }
+    // Only a request that is sent takes a number: a CPU that marked a
+    // number as its own without sending it would take the next request
+    // under that number for one it had already served, and never flush.
+    let generation = SHOOTDOWN.generation.load(Ordering::Relaxed) + 1;
+    percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
+    SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
+    SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
     for (slot, &word) in SHOOTDOWN.pending.iter().zip(&targets) {
         slot.store(word, Ordering::Relaxed);
     }

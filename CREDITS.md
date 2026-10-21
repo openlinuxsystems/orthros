@@ -27,15 +27,16 @@ project's design, it adds the project here (see
 
 | Project | What we use | License |
 | --- | --- | --- |
-| [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel | MIT OR Apache-2.0 |
+| [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel, and `core` and `compiler_builtins` into the user test programs | MIT OR Apache-2.0 |
 | [GNU GRUB](https://www.gnu.org/software/grub/) 2 | The boot loader, as a separate program that loads the kernel | GPL-3.0-or-later |
 | [Intel microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) | CPU microcode, only in local builds that ask for it ([ADR 0007](docs/adr/0007-closed-firmware-separate-package.md)) | Intel's redistribution license |
 
 ## Rust crates
 
-The build tool (`tools/xtask`) and the kernel's host tests use these crates
-from [crates.io](https://crates.io/). None of them is linked into the
-kernel.
+The build tool (`tools/xtask`), the Linux benchmark (`tools/linux-bench`)
+and the kernel's host tests use these crates from
+[crates.io](https://crates.io/). None of them is linked into the kernel or
+the user programs.
 
 | Crate | Used by | License |
 | --- | --- | --- |
@@ -49,7 +50,8 @@ kernel.
 | [proptest](https://github.com/proptest-rs/proptest) | Property tests of radix-mm, radix-cap, radix-random and radix-sched | MIT OR Apache-2.0 |
 | [rand](https://github.com/rust-random/rand), [rand_core](https://github.com/rust-random/rand_core), [rand_xorshift](https://github.com/rust-random/rngs), [getrandom](https://github.com/rust-random/getrandom) | proptest | MIT OR Apache-2.0 |
 | [chacha20](https://github.com/RustCrypto/stream-ciphers), [cpufeatures](https://github.com/RustCrypto/utils) by the RustCrypto developers | proptest, through rand | MIT OR Apache-2.0 |
-| [regex-syntax](https://github.com/rust-lang/regex), [bitflags](https://github.com/bitflags/bitflags), [num-traits](https://github.com/rust-num/num-traits), [unarray](https://github.com/cameron1024/unarray), [cfg-if](https://github.com/rust-lang/cfg-if), [libc](https://github.com/rust-lang/libc), [autocfg](https://github.com/cuviper/autocfg), [core_detect](https://github.com/thomcc/core_detect) | proptest and its dependencies | MIT OR Apache-2.0 |
+| [libc](https://github.com/rust-lang/libc) 0.2 | `linux-bench`, for Linux's system calls (`getrandom`, `eventfd`, futexes, CPU affinity); proptest's dependencies | MIT OR Apache-2.0 |
+| [regex-syntax](https://github.com/rust-lang/regex), [bitflags](https://github.com/bitflags/bitflags), [num-traits](https://github.com/rust-num/num-traits), [unarray](https://github.com/cameron1024/unarray), [cfg-if](https://github.com/rust-lang/cfg-if), [autocfg](https://github.com/cuviper/autocfg), [core_detect](https://github.com/thomcc/core_detect) | proptest and its dependencies | MIT OR Apache-2.0 |
 | [r-efi](https://github.com/r-efi/r-efi) | getrandom, on UEFI hosts | MIT OR Apache-2.0 OR LGPL-2.1-or-later (we use it under MIT OR Apache-2.0) |
 
 ## Build, test and documentation tools
@@ -64,11 +66,12 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue | GPL-3.0-or-later |
-| [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store and scheduling policy | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
-| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability and scheduler models | MIT |
+| [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store, scheduling policy and IPC arithmetic | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
+| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler and endpoint models | MIT |
 | [mdBook](https://github.com/rust-lang/mdBook) 0.4.52 | The handbook | MPL-2.0 |
 | [scdoc](https://git.sr.ht/~sircmpwn/scdoc) | Man pages | MIT |
 | [mandoc](https://mandoc.bsd.lv/) | Checking man pages | ISC |
+| [Linux](https://kernel.org/) on the build machine and CI's runners | The baseline `ob bench` compares Radix with | GPL-2.0-only |
 | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | License and advisory checks of crates | MIT OR Apache-2.0 |
 | [RustSec advisory database](https://github.com/rustsec/advisory-db) | Advisories for cargo-deny | CC0-1.0 |
 | [spdx-tools](https://github.com/spdx/tools-python) 0.8.3 | Validating each image's license manifest | Apache-2.0 |
@@ -102,6 +105,14 @@ We implement these from their published descriptions. No code is copied.
 - Jeff Bonwick and Jonathan Adams,
   ["Magazines and Vmem"](https://www.usenix.org/conference/2001-usenix-annual-technical-conference/magazines-and-vmem-extending-slab-allocator-many),
   USENIX 2001, the design of the heap's per-CPU caches.
+- Jochen Liedtke, "Improving IPC by Kernel Design" (SOSP 1993) and "On
+  µ-Kernel Construction" (SOSP 1995): synchronous IPC with messages in
+  registers, the basis of the endpoints' fast path.
+- Larry McVoy and Carl Staelin, "lmbench: Portable Tools for Performance
+  Analysis" (USENIX 1996): the method of `ob bench`, after `lat_syscall`, `lat_pipe`
+  and `lat_unix`. We use no lmbench code.
+- Jens Axboe, ["Efficient IO with io_uring"](https://kernel.dk/io_uring.pdf)
+  (2019): the design of rings.
 - The PC Screen Font format, as described by Andries Brouwer for the
   [kbd project](https://www.win.tue.nl/~aeb/linux/kbd/font-formats-1.html).
 - The Multiboot2 specification (GNU), the UEFI and ACPI specifications (UEFI
@@ -116,9 +127,17 @@ are grateful.
 
 - [seL4](https://sel4.systems/): badges set once on derivation, and memory
   that becomes other objects, as seL4's untyped memory does
-  ([ADR 0023](docs/adr/0023-capability-model.md)).
+  ([ADR 0023](docs/adr/0023-capability-model.md)); endpoints with call and
+  reply-and-receive, notifications as words of bits, and capabilities
+  passed in messages into a receive window
+  ([ADR 0032](docs/adr/0032-endpoints-notifications-and-channels.md)).
+- The L4 family of microkernels, after Jochen Liedtke: messages in
+  registers and IPC as the kernel's central, fastest path
+  ([ADR 0032](docs/adr/0032-endpoints-notifications-and-channels.md)).
 - [Fuchsia](https://fuchsia.dev/) (Zircon handles): the duplicate and
-  transfer rights of capabilities.
+  transfer rights of capabilities. Its FIDL, with protocol buffers and Cap'n
+  Proto, was a point of comparison for ridl
+  ([ADR 0033](docs/adr/0033-ridl-interface-definitions.md)).
 - [CHERI](https://www.cl.cam.ac.uk/research/security/ctsrd/cheri/): a point
   of comparison for the capability model.
 - [Linux](https://kernel.org/) and the BSDs: allocation context flags in the
@@ -134,6 +153,10 @@ are grateful.
   ([ADR 0027](docs/adr/0027-scheduler-design.md),
   [ADR 0028](docs/adr/0028-lock-checker-in-debug-builds.md),
   [ADR 0029](docs/adr/0029-resource-domains-and-out-of-memory-policy.md)).
+  Linux's io_uring, with its `IORING_OP_MSG_RING` ring-to-ring messages,
+  shaped radix-ring ([ADR 0034](docs/adr/0034-radix-ring.md)), and its
+  `getrandom(2)` the random capability's `read`
+  ([ADR 0031](docs/adr/0031-system-call-interface.md)).
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the

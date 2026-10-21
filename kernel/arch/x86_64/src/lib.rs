@@ -13,6 +13,8 @@
 //! the interrupt controllers ([`apic`]) and timers ([`time`]), and it starts
 //! and stops the other CPUs ([`smp`]). Kernel threads' contexts and the
 //! context switch are in [`thread`], their FPU and vector state in [`fpu`].
+//! Programs' address spaces are in [`space`], and the SYSCALL entry,
+//! entering user mode and user copies in [`user`] (Phase 5).
 //!
 //! It is part of the trusted computing base, so it may use `unsafe`, and
 //! every `unsafe` block states why it is sound. docs/design/boot.md and
@@ -40,6 +42,7 @@ mod smp;
 mod space;
 mod thread;
 mod time;
+mod user;
 mod vga;
 
 use core::fmt;
@@ -49,7 +52,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
-    PageTable, Platform, Smp, Threads, Timer,
+    MapPageError, PageTable, Platform, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
+    UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -363,6 +367,116 @@ impl PageTable for Arch {
 
     fn self_test_tlb(on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
         space::self_test(on_others)
+    }
+}
+
+impl UserMode for Arch {
+    type Space = space::UserSpace;
+    type Shared = user::Shared;
+
+    const USER_TOP: u64 = user::USER_TOP;
+
+    fn new_space() -> Option<Self::Space> {
+        space::UserSpace::new()
+    }
+
+    fn map_page(
+        space: &Self::Space,
+        virt: u64,
+        phys: u64,
+        access: UserAccess,
+    ) -> Result<(), MapPageError> {
+        assert!(
+            (user::USER_START..user::USER_TOP).contains(&virt),
+            "{virt:#x} is outside the user half"
+        );
+        space.space().map_new(virt, phys, space::access(access))
+    }
+
+    fn unmap_page(space: &Self::Space, virt: u64) -> Option<u64> {
+        if virt >= user::USER_TOP {
+            return None;
+        }
+        space.space().unmap(virt)
+    }
+
+    fn query_page(space: &Self::Space, virt: u64) -> Option<(u64, UserAccess)> {
+        if virt >= user::USER_TOP {
+            return None;
+        }
+        space.space().query(virt).map(|(phys, access)| (phys, space::user_access(access)))
+    }
+
+    fn attach_space(context: &Self::Context, space: &Self::Space) -> bool {
+        context.attach_space(space)
+    }
+
+    fn set_thread_pointer(context: &Self::Context, base: u64) {
+        context.set_thread_pointer(base);
+    }
+
+    fn enter_user(entry: u64, stack_top: u64, arg: u64) -> ! {
+        user::enter_user(entry, stack_top, arg)
+    }
+
+    fn set_syscall_handler(handler: fn(&mut SyscallRegs)) {
+        user::set_syscall_handler(handler);
+    }
+
+    fn set_user_fault_handler(handler: fn(&UserFault) -> !) {
+        user::set_fault_handler(handler);
+    }
+
+    fn set_user_return_handler(handler: fn()) {
+        user::set_return_handler(handler);
+    }
+
+    fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
+        user::copy_from_user(dst, src)
+    }
+
+    fn copy_to_user(dst: u64, src: &[u8]) -> bool {
+        user::copy_to_user(dst, src)
+    }
+
+    fn new_shared(pages: usize) -> Option<Self::Shared> {
+        user::Shared::new(pages)
+    }
+
+    fn shared_phys(shared: &Self::Shared, page: usize) -> u64 {
+        shared.phys(page)
+    }
+
+    fn shared_load(shared: &Self::Shared, offset: usize) -> u32 {
+        shared.load(offset)
+    }
+
+    fn shared_store(shared: &Self::Shared, offset: usize, value: u32) {
+        shared.store(offset, value);
+    }
+
+    fn shared_read(shared: &Self::Shared, offset: usize, dst: &mut [u8]) {
+        shared.read(offset, dst);
+    }
+
+    fn shared_write(shared: &Self::Shared, offset: usize, src: &[u8]) {
+        shared.write(offset, src);
+    }
+
+    fn zero_frames(phys: u64, pages: u64) {
+        user::zero_frames(phys, pages);
+    }
+
+    fn write_frames(phys: u64, src: &[u8]) {
+        user::write_frames(phys, src);
+    }
+
+    fn cycle_counter_hz() -> u64 {
+        time::calibration().map_or(0, |c| c.tsc_hz)
+    }
+
+    fn describe_user_mode(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
+        user::describe(line);
     }
 }
 

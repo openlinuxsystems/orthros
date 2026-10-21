@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "usertests"
+description = "The user-mode test and benchmark programs the kernel's user, ipc and bench self-tests start"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "usertests"
+test = false
+bench = false
+
+[dependencies]
+libradix = { path = "../libradix" }
+radix-abi = { path = "../../kernel/abi" }
+
+[lints]
+workspace = true

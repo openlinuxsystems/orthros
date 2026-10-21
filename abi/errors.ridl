@@ -1,0 +1,75 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The errors of the kernel's system calls and interfaces.
+//!
+//! A system call returns a status word: 0 for success, otherwise the
+//! error's domain in bits 16 to 31, its code in bits 0 to 15 and a detail
+//! in bits 32 to 63 (which argument was wrong, which rights were missing).
+//! Every error maps to the POSIX errno value given after `=>`, which the C
+//! library returns.
+
+module errors;
+
+/// Errors of the kernel's own system calls and object interfaces.
+errors kernel = 1 {
+    /// The system call number is not one of the twelve.
+    no_such_syscall = 1 => ENOSYS;
+    /// The slot number is beyond the end of the caller's capability space.
+    no_such_slot = 2 => EBADF;
+    /// The slot holds no capability.
+    empty_slot = 3 => EBADF;
+    /// The capability designates another kind of object than the call
+    /// needs. The detail is the kind it designates.
+    wrong_kind = 4 => EBADF;
+    /// The capability lacks rights the call needs. The detail holds the
+    /// missing rights.
+    missing_rights = 5 => EACCES;
+    /// The capability is sealed: only the holder of its key can use it
+    /// once it is unsealed.
+    sealed = 6 => EPERM;
+    /// The destination slot already holds a capability.
+    occupied = 7 => EEXIST;
+    /// An argument is outside what the call accepts. The detail is the
+    /// argument's position, counting from 0.
+    invalid_argument = 8 => EINVAL;
+    /// The kernel ran out of memory for the call.
+    no_memory = 9 => ENOMEM;
+    /// A buffer the call reads or writes is not mapped for that access.
+    bad_address = 10 => EFAULT;
+    /// The call would have to wait, and the caller asked it not to.
+    would_block = 11 => EAGAIN;
+    /// A ring's completion queue has no room for another completion.
+    busy = 12 => EBUSY;
+    /// The receiver's receive window has no room for the capabilities in
+    /// the message.
+    no_room = 13 => ENOSPC;
+    /// The object is gone: its last capability was deleted, or the thread
+    /// at the other end of the call exited.
+    gone = 14 => EPIPE;
+    /// The thread was asked to stop while it waited.
+    interrupted = 15 => EINTR;
+    /// There is no caller to reply to.
+    no_caller = 16 => ENOTCONN;
+    /// The object does not answer this method, or the label is reserved.
+    no_such_method = 17 => EOPNOTSUPP;
+    /// The capability, or one it was derived from, is being revoked.
+    revoking = 18 => EBUSY;
+    /// A derivation would be deeper than the kernel allows.
+    too_deep = 19 => EMLINK;
+    /// The memory object has no room left for the objects asked for.
+    exhausted = 20 => ENOMEM;
+    /// A range reaches outside what the capability or object covers.
+    out_of_range = 21 => ERANGE;
+    /// Something is already mapped at the address.
+    already_mapped = 22 => EEXIST;
+    /// Nothing is mapped at the address.
+    not_mapped = 23 => ENXIO;
+    /// The wait ended because its timeout passed.
+    timed_out = 24 => ETIMEDOUT;
+    /// The key is not the endpoint the capability was sealed with.
+    wrong_key = 25 => EPERM;
+    /// The badge cannot be given: this kind takes no badge, the capability
+    /// already has one, or the badge is 0.
+    bad_badge = 26 => EINVAL;
+}
