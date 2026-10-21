@@ -1464,7 +1464,8 @@ fn fuzz(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ("fuzz: broken promise", "a failed call returned more than an error"),
         ("fuzz: undocumented error", "a call failed with an error its documentation does not list"),
     ] {
-        let starts = |line: &&str| line.split_once("]: ").is_some_and(|(_, text)| text.starts_with(marker));
+        let starts =
+            |line: &&str| line.split_once("]: ").is_some_and(|(_, text)| text.starts_with(marker));
         if let Some(line) = log.lines().find(starts) {
             return Err(format!("{what}: {}", line.trim()));
         }

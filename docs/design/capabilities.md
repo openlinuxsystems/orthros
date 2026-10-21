@@ -414,16 +414,16 @@ KVM it takes about a tenth of a second.
 
 ## Limits
 
-- Processes are objects in the table with no kernel structure behind
-  them yet; they come with Phase 6. Since Phase 5 programs use the store
-  through system calls, and threads, address spaces, endpoints,
-  notifications, rings, the random number generator and the kernel log
-  have kernel objects behind them (`docs/design/ipc.md`).
+- Since Phase 5 programs use the store through system calls, and
+  threads, address spaces, endpoints, notifications, rings, the random
+  number generator and the kernel log have kernel objects behind them
+  (`docs/design/ipc.md`); since Phase 6 so do processes
+  (`docs/design/processes.md`).
 - One store and one lock for the whole kernel. That is simple and
   obviously atomic. Lookups no longer take it when nothing has changed
   (see *In the kernel*), but every change serializes on it and empties
   every CPU's cache. Finer locking (per space, with a tree lock for
-  derivation and revocation) can come when Phase 6's processes show the
+  derivation and revocation) can come when real workloads show the
   need; the TLA+ model would have to grow with it.
 - The lock is a mutex (since Phase 4), and the store allocates under it
   with `MaySleep`. Retyping frames records them under the lock but zeroes

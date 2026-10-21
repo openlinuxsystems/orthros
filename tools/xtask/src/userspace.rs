@@ -166,7 +166,8 @@ fn write_archive(built: &Path, epoch: Option<String>) -> Result<Vec<u8>> {
             None => writer.directory(path, 0o755, mtime),
             Some(package) => {
                 let file = built.join(package);
-                let data = std::fs::read(&file).context(|| format!("reading {}", file.display()))?;
+                let data =
+                    std::fs::read(&file).context(|| format!("reading {}", file.display()))?;
                 writer.file(path, 0o755, mtime, &data)
             }
         };

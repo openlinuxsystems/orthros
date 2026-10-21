@@ -111,9 +111,8 @@ fn start_spark(
     // The kernel's own capability space for Spark: its process's original
     // capability, and the memory for the programs it starts. It is never
     // destroyed.
-    let kept = caps::with(|store| store.create_space(2))
-        .and_then(|made| made)
-        .map_err(cap_error)?;
+    let kept =
+        caps::with(|store| store.create_space(2)).and_then(|made| made).map_err(cap_error)?;
     let (at, pool) = (SlotRef::new(kept, 0), SlotRef::new(kept, 1));
     caps::create_memory(pool, MEMORY_ORDER).map_err(cap_error)?;
     let program = Program {

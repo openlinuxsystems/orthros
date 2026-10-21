@@ -31,7 +31,10 @@ impl<T> Lock<T> {
 
     /// Takes the lock, waiting while another thread holds it.
     pub fn lock(&self) -> Guard<'_, T> {
-        while self.held.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+        while self
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
         {
             while self.held.load(Ordering::Relaxed) {
                 let _ = syscalls::r#yield(&SYS);

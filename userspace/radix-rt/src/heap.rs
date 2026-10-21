@@ -89,8 +89,9 @@ fn map_frame(order: u32) -> Option<(usize, u32)> {
         return None;
     }
     let rights = Rights::READ.union(Rights::WRITE);
-    let mapped = vm::take(pages, PAGE_SIZE)
-        .filter(|&address| syscalls::map(&SYS, SLOT_SPACE, slot, address, rights, 0, pages).is_ok());
+    let mapped = vm::take(pages, PAGE_SIZE).filter(|&address| {
+        syscalls::map(&SYS, SLOT_SPACE, slot, address, rights, 0, pages).is_ok()
+    });
     match mapped {
         Some(address) => Some((address as usize, slot)),
         None => {

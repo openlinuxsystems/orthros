@@ -15,7 +15,9 @@ pub fn args() -> Args {
     let bytes: &'static [u8] = if offset.checked_add(size).is_some_and(|end| end <= PAGE_SIZE) {
         // SAFETY: the start-up page is mapped read-only for the program's
         // whole life, and the bytes lie inside it.
-        unsafe { core::slice::from_raw_parts((STARTUP_ADDRESS + offset) as *const u8, size as usize) }
+        unsafe {
+            core::slice::from_raw_parts((STARTUP_ADDRESS + offset) as *const u8, size as usize)
+        }
     } else {
         &[]
     };

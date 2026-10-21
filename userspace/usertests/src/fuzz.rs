@@ -214,7 +214,11 @@ impl Fuzzer {
             12 => u64::from(NO_SLOT),
             13 => {
                 let slot = self.rng.below(u64::from(SLOTS));
-                if (u64::from(MADE)..u64::from(MADE + MADE_SLOTS)).contains(&slot) { 0 } else { slot }
+                if (u64::from(MADE)..u64::from(MADE + MADE_SLOTS)).contains(&slot) {
+                    0
+                } else {
+                    slot
+                }
             }
             14 => self.rng.next() & 0xffff_ffff,
             _ => self.rng.next(),

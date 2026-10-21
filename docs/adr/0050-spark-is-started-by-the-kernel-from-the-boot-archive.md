@@ -46,7 +46,10 @@ starts one root task with every capability.
 
 ## Consequences
 
-- The kernel never starts another program. The `spark` boot test checks
+- The kernel never starts another program, but for the self-tests'
+  programs from the `usertests` image (ADR 0036), which stay kernel
+  scaffolding so that they test the kernel alone; they are now loaded
+  into processes by the same loader as Spark. The `spark` boot test checks
   the whole path under UEFI: the kernel starts Spark, Spark starts
   `hello` with arguments from the command line, `hello` prints, exits
   and is reaped, and all of its memory comes back.

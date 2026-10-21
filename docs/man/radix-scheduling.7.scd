@@ -20,8 +20,9 @@ This page describes the scheduler as of Phase 5 of the roadmap. Most
 threads are the kernel's own and those of the self-tests (see
 *radix-debug*(7)); from Phase 5 a thread can also run a program in user
 mode, which gives up the CPU with *radix_yield*(2) and blocks in IPC (see
-*radix-ipc*(7)). System calls for priorities and domains arrive with
-processes in Phase 6. The design, with the argument that the scheduler is
+*radix-ipc*(7)), in a process (see *radix-processes*(7)). System calls for
+priorities and domains arrive in Phase 9, when Spark supervises services
+in domains of their own. The design, with the argument that the scheduler is
 correct, is in _docs/design/scheduler.md_.
 
 # THREADS
@@ -177,8 +178,8 @@ capability to it removes it once its threads are gone. A domain has:
 	Charges to the domain and those below it may not pass it. A charge
 	that would is refused, and the allocation fails with an error: a
 	thread that cannot get its stack is not created. Nothing is killed.
-	Today a thread's stack is charged; from Phase 6 a process's memory
-	is.
+	A thread's stack is charged, and so are the kernel objects a program
+	makes with *process.create* (see *radix-processes*(7)).
 
 *out-of-memory class*: *app*, *service* or *system*
 	Which domains the out-of-memory policy may stop, and in which order.
@@ -186,7 +187,7 @@ capability to it removes it once its threads are gone. A domain has:
 
 *supervisor*
 	Optionally, what restarts the domain after an out-of-memory stop.
-	Spark, the service manager, takes this over in Phase 6; until then
+	Spark, the service manager, takes this over in Phase 9; until then
 	a kernel stand-in runs it on the *supervisor* thread.
 
 # OUT OF MEMORY

@@ -27,7 +27,7 @@ project's design, it adds the project here (see
 
 | Project | What we use | License |
 | --- | --- | --- |
-| [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel, and `core` and `compiler_builtins` into the user test programs | MIT OR Apache-2.0 |
+| [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel and the user programs | MIT OR Apache-2.0 |
 | [GNU GRUB](https://www.gnu.org/software/grub/) 2 | The boot loader, as a separate program that loads the kernel | GPL-3.0-or-later |
 | [Intel microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) | CPU microcode, only in local builds that ask for it ([ADR 0007](docs/adr/0007-closed-firmware-separate-package.md)) | Intel's redistribution license |
 
@@ -131,6 +131,13 @@ We implement these from their published descriptions. No code is copied.
   Forum), and the Intel and AMD architecture manuals.
 - [SPDX](https://spdx.dev/) and the [REUSE specification](https://reuse.software/)
   for license information.
+- The ustar interchange format of POSIX.1-1988 (IEEE Std 1003.1, the
+  `pax` utility's description in later editions), the format of the boot
+  archive ([ADR 0049](docs/adr/0049-boot-archive.md)).
+- The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,
+  Jan Hubička, Andreas Jaeger and Mark Mitchell and maintained by H.J. Lu
+  and others, which `radix-elf` reads, with its `R_X86_64_RELATIVE`
+  relocations.
 
 ## Projects whose ideas we follow
 
@@ -142,14 +149,23 @@ are grateful.
   ([ADR 0023](docs/adr/0023-capability-model.md)); endpoints with call and
   reply-and-receive, notifications as words of bits, and capabilities
   passed in messages into a receive window
-  ([ADR 0032](docs/adr/0032-endpoints-notifications-and-channels.md)).
+  ([ADR 0032](docs/adr/0032-endpoints-notifications-and-channels.md));
+  its root task, which the kernel starts with every resource, and its
+  untyped memory, whose space comes back only when everything made from
+  it has gone, which is why Spark gives each program a memory object of
+  its own ([ADR 0050](docs/adr/0050-spark-is-started-by-the-kernel-from-the-boot-archive.md)).
 - The L4 family of microkernels, after Jochen Liedtke: messages in
   registers and IPC as the kernel's central, fastest path
   ([ADR 0032](docs/adr/0032-endpoints-notifications-and-channels.md)).
 - [Fuchsia](https://fuchsia.dev/) (Zircon handles): the duplicate and
   transfer rights of capabilities. Its FIDL, with protocol buffers and Cap'n
   Proto, was a point of comparison for ridl
-  ([ADR 0033](docs/adr/0033-ridl-interface-definitions.md)).
+  ([ADR 0033](docs/adr/0033-ridl-interface-definitions.md)). Zircon's
+  processes, built from outside by whoever holds their handle and started
+  with `zx_process_start`, its bootfs, and `userboot`, the one program its
+  kernel starts, shaped our processes, boot archive and Spark's start
+  ([ADR 0047](docs/adr/0047-processes.md),
+  [ADR 0050](docs/adr/0050-spark-is-started-by-the-kernel-from-the-boot-archive.md)).
 - [CHERI](https://www.cl.cam.ac.uk/research/security/ctsrd/cheri/): a point
   of comparison for the capability model.
 - [Linux](https://kernel.org/) and the BSDs: allocation context flags in the
@@ -193,6 +209,15 @@ are grateful.
   ([ADR 0044](docs/adr/0044-objects-found-without-a-shared-lock.md)), and
   the memory clobbers on its `sti`, `cli` and `hlt` wrappers showed which
   of our interrupt instructions must be compiler barriers.
+  Linux's `init=` boot parameter and the words after `--` that it passes
+  to init, its initramfs, and its address space layout randomization with
+  `vm.mmap_rnd_bits` were the models for Spark's start, the boot archive
+  and user ASLR
+  ([ADR 0048](docs/adr/0048-static-pie-programs-and-user-aslr.md),
+  [ADR 0050](docs/adr/0050-spark-is-started-by-the-kernel-from-the-boot-archive.md));
+  `-static-pie` as GCC, glibc and musl build it, and LLVM's lld, which
+  links our programs, set what a static position-independent program
+  is. No code is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - The Rust compiler's performance suite
   ([rustc-perf](https://github.com/rust-lang/rustc-perf)) and

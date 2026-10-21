@@ -385,9 +385,10 @@ go (ADR 0029).
 
 Charges go up the tree: a charge that would pass the limit of the domain
 or of any domain above it is refused, and the caller's allocation fails
-with an error. Today a thread's stack is charged to its domain (and a
-spawn over the limit fails with `OverLimit`); from Phase 6 a process's
-memory is. A thread counts in its domain until it exits, not until its
+with an error. A thread's stack is charged to its domain (and a spawn
+over the limit fails with `OverLimit`), and since Phase 6 so are the
+kernel objects a program makes with `process.create`
+(`docs/design/processes.md`). A thread counts in its domain until it exits, not until its
 last reference goes, so "the domain has no threads" means its threads
 have stopped running.
 
@@ -417,13 +418,14 @@ that asked:
 
 The `supervisor` thread waits for queued restarts, waits up to five
 seconds for each domain to empty, clears the stopping marks and calls the
-domain's supervisor function. Spark takes this over in Phase 6 for the
-services it runs.
+domain's supervisor function. Spark takes this over for the services it
+runs in Phase 9, when it starts supervising them.
 
 Stopping is cooperative: kernel threads check `should_stop` in their
 loops, the wake gets them out of whatever they wait for, and timed sleeps
-return early once it is set. Phase 6 adds stopping user threads at their
-next kernel entry, which needs no cooperation from them.
+return early once it is set. User threads stop at their next entry into
+the kernel or return from an interrupt, which needs no cooperation from
+them, and since Phase 6 their process ends with them.
 
 ## Why the scheduler is correct
 

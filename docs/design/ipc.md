@@ -309,22 +309,24 @@ start.
 
 ## Starting the test programs
 
-Phase 6 brings the ELF loader, processes and init. Until then the kernel
-itself starts the user-mode test programs, from one statically linked
+The kernel starts the user-mode test programs from one statically linked
 ELF64 image that GRUB loads as a module named `usertests` (ADR 0036). A
 `Group` (`user/launch.rs`) starts programs from it and waits for them;
-each gets its own capability space of 256 slots, an address space with
-the image's segments, a 256 KiB stack below `STACK_TOP` and a read-only
-start-up page at 0x10000 (`radix-startup(2)`), and one thread pinned to
-the CPU asked for, which starts at the entry point with the start-up
-page's address as its argument. The start-up page names the program's
-*role*: the image holds every test program, and the role says which one
-this is. The frames come from the program's own memory object, but their
-capabilities sit in a hidden space so a program cannot unmap its own code
-by deleting a capability. When the group ends, every space goes, and with
-it everything the programs had; the `user` and `ipc` self-tests check
-that the capability store and the object registry hold what they held
-before the first program started.
+since Phase 6 each is a process of its own, loaded by the kernel's
+loader as Spark is (`docs/design/processes.md`): a capability space of
+256 slots, an address space with the image's segments, a 256 KiB stack
+below `STACK_TOP`, a read-only start-up page at 0x10000
+(`radix-startup(2)`), and one thread pinned to the CPU asked for, which
+starts at the entry point with the start-up page's address as its
+argument. The image stays a fixed executable, linked at 0x400000, so
+that its addresses are the same in every run. The start-up page names
+the program's *role*: the image holds every test program, and the role
+says which one this is. The frames come from the program's own memory
+object, but their capabilities are kept with its process so a program
+cannot unmap its own code by deleting a capability. When the group ends,
+every process goes, and with it everything the programs had; the `user`,
+`ipc` and `fuzz` self-tests check that the capability store and the
+object registry hold what they held before the first program started.
 
 The `usertests` programs (`userspace/usertests`) are:
 
@@ -383,7 +385,8 @@ happened: on Radix the kernel's count for the benchmark, which includes
 starting and stopping the two programs, and on Linux the sum of both
 processes' `ru_nvcsw` and `ru_nivcsw`.
 
-Radix has no demand paging until Phase 6's pagers, so `fresh_page` is
+Radix has no demand paging yet (the page cache comes in Phase 7 and
+copy-on-write in Phase 8), so `fresh_page` is
 how a program gets a new page: the same work as a first-touch fault
 (a zeroed page, mapped), plus giving it back.
 
@@ -448,14 +451,16 @@ whether to offer paravirtual EOI (ADR 0041).
 - Any change to the capability store empties every CPU's caches of
   capabilities and objects. Programs that change their capabilities all
   the time on many CPUs at once would queue on the store's lock; a
-  per-space store with RCU over the slots is the fix if Phase 6's
-  processes show it matters.
-- Only rings charge their memory to a resource domain. Endpoints,
-  notifications and queued messages come from the kernel heap uncharged,
-  bounded by the slots a program has; Phase 6's processes will charge
-  their kernel objects to the process's domain.
-- Programs are pinned to a CPU each, which the benchmarks need; Phase 6's
-  processes will leave placement to the scheduler.
+  per-space store with RCU over the slots is the fix if programs
+  show it matters.
+- Rings charge their memory to a resource domain, and since Phase 6 so
+  do the endpoints, notifications and processes a program makes with
+  `process.create`. Queued messages, and the endpoints and notifications
+  the self-tests' groups make, come from the kernel heap uncharged,
+  bounded by the slots a program has.
+- The self-tests' programs are pinned to a CPU each, which the
+  benchmarks need; Spark and the programs it starts are placed by the
+  scheduler.
 
 ## Correctness
 

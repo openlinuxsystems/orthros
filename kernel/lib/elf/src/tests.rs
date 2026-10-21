@@ -352,19 +352,19 @@ proptest! {
             prop_assert!(image.segments().any(|s| s.access == Access::ReadExecute
                 && s.vaddr <= image.entry && image.entry < s.vaddr + s.memsz));
             let window = 0x1000_0000_0000..0x2000_0000_0000;
-            if let Ok(bias) = image.random_bias(window.clone(), random) {
-                if let Ok(placed) = image.place(bias, window.clone()) {
-                    let limit = image.pages() * PAGE;
-                    let mut inside = true;
-                    let _ = placed.load(&bytes, &mut |at, data| {
-                        inside &= at + data.len() as u64 <= limit;
-                    });
-                    prop_assert!(inside);
-                    for m in placed.mappings().into_iter().flatten() {
-                        prop_assert!(window.start <= m.address);
-                        prop_assert!(m.address + m.pages * PAGE <= window.end);
-                        prop_assert!(m.page + m.pages <= image.pages());
-                    }
+            if let Ok(bias) = image.random_bias(window.clone(), random)
+                && let Ok(placed) = image.place(bias, window.clone())
+            {
+                let limit = image.pages() * PAGE;
+                let mut inside = true;
+                let _ = placed.load(&bytes, &mut |at, data| {
+                    inside &= at + data.len() as u64 <= limit;
+                });
+                prop_assert!(inside);
+                for m in placed.mappings().into_iter().flatten() {
+                    prop_assert!(window.start <= m.address);
+                    prop_assert!(m.address + m.pages * PAGE <= window.end);
+                    prop_assert!(m.page + m.pages <= image.pages());
                 }
             }
         }

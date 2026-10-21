@@ -691,7 +691,11 @@ fn processes() {
     ok!(process::exit(&SYS, CHILD_PROCESS, 7), "ending it");
     if let Some(info) = ok!(process::info(&SYS, GRANDCHILD_VIEW), "info on the one made for it") {
         check!(info.state == ProcessState::Exited, "the one made for it is {}", info.state.name());
-        check!(info.code == process::EXIT_STOPPED, "the one made for it ended with {:#x}", info.code);
+        check!(
+            info.code == process::EXIT_STOPPED,
+            "the one made for it ended with {:#x}",
+            info.code
+        );
     }
     if let Some(info) = ok!(process::info(&SYS, CHILD_PROCESS), "info on the ended child") {
         check!(info.state == ProcessState::Exited, "the child is {}", info.state.name());

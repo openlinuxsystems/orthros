@@ -171,7 +171,9 @@ fn build(
 
     let random = random::words(&SYS, startup::SLOT_RANDOM).map_or([0; 8], |r| r.words);
     let (range, stack_top) = match image.kind {
-        Kind::Fixed => (USER_START + PAGE_SIZE..startup::STACK_TOP - startup::STACK_SIZE, startup::STACK_TOP),
+        Kind::Fixed => {
+            (USER_START + PAGE_SIZE..startup::STACK_TOP - startup::STACK_SIZE, startup::STACK_TOP)
+        }
         Kind::Relocatable => {
             let pages = startup::STACK_WINDOW / PAGE_SIZE;
             let top = startup::STACK_TOP - (random[1] % (pages + 1)) * PAGE_SIZE;
@@ -207,15 +209,8 @@ fn build(
             Access::ReadWrite => Rights::READ.union(Rights::WRITE),
             Access::ReadExecute => Rights::READ.union(Rights::EXECUTE),
         };
-        let mapped = syscalls::map(
-            &SYS,
-            space,
-            code,
-            mapping.address,
-            rights,
-            mapping.page,
-            mapping.pages,
-        );
+        let mapped =
+            syscalls::map(&SYS, space, code, mapping.address, rights, mapping.page, mapping.pages);
         step("mapping its image", mapped)?;
     }
     let rw = Rights::READ.union(Rights::WRITE);
@@ -248,7 +243,10 @@ fn build(
     let fields = Fields { spawn, placed: &placed, kinds, free };
     write_page(page, &fields)?;
     let ro = Rights::READ;
-    step("mapping its start-up page", syscalls::map(&SYS, space, page, startup::STARTUP_ADDRESS, ro, 0, 1))?;
+    step(
+        "mapping its start-up page",
+        syscalls::map(&SYS, space, page, startup::STARTUP_ADDRESS, ro, 0, 1),
+    )?;
     step("giving it its memory", process::give(&SYS, process, memory, startup::SLOT_MEMORY))?;
     for frame in [stack, code, page] {
         step("keeping its frames", process::keep(&SYS, process, frame))?;
@@ -260,8 +258,14 @@ fn build(
     step("making its exit notification", made)?;
     step("asking to hear of its end", process::notify_exit(&SYS, process, exited))?;
     let entry = placed.entry();
-    let started =
-        process::start(&SYS, process, entry, stack_top, startup::STARTUP_ADDRESS, startup::SLOT_THREAD);
+    let started = process::start(
+        &SYS,
+        process,
+        entry,
+        stack_top,
+        startup::STARTUP_ADDRESS,
+        startup::SLOT_THREAD,
+    );
     started.map_err(|status| Error::Kernel("starting its thread", status))?;
     let number = process::info(&SYS, process).map_or(0, |info| info.number);
     Ok(Child { process, exited, number })
@@ -282,12 +286,16 @@ fn file_name(path: &str) -> &str {
 fn fill(frame: u32, pages: u64, f: impl FnOnce(&mut [u8])) -> Result<(), Error> {
     let address = vm::take(pages, PAGE_SIZE).ok_or(Error::NoRoom)?;
     let rw = Rights::READ.union(Rights::WRITE);
-    step("mapping a frame to fill", syscalls::map(&SYS, startup::SLOT_SPACE, frame, address, rw, 0, pages))?;
+    step(
+        "mapping a frame to fill",
+        syscalls::map(&SYS, startup::SLOT_SPACE, frame, address, rw, 0, pages),
+    )?;
     // SAFETY: the frame was just mapped read-write at `address`, `pages`
     // pages long, at addresses nothing else uses (`vm::take`), and stays
     // mapped until after `f` returns.
-    let bytes =
-        unsafe { core::slice::from_raw_parts_mut(address as *mut u8, (pages * PAGE_SIZE) as usize) };
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(address as *mut u8, (pages * PAGE_SIZE) as usize)
+    };
     f(bytes);
     step("unmapping a frame", syscalls::unmap(&SYS, startup::SLOT_SPACE, address, pages))
 }

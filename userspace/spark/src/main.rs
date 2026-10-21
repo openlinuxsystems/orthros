@@ -103,8 +103,12 @@ fn run() {
         Ok(info) if info.used == 0 => {
             println!("spark: reaped process {number}; all of its memory came back")
         }
-        Ok(info) => println!("spark: reaped process {number}, but {} pages are still used", info.used),
-        Err(status) => println!("spark: reaped process {number}; memory info failed: {:#x}", status.0),
+        Ok(info) => {
+            println!("spark: reaped process {number}, but {} pages are still used", info.used)
+        }
+        Err(status) => {
+            println!("spark: reaped process {number}; memory info failed: {:#x}", status.0)
+        }
     }
 }
 

@@ -42,8 +42,11 @@ never the system (see `radix-scheduling(7)`). Programs run in user mode
 and reach the kernel through twelve system calls; they talk to each other
 over endpoints, notifications, shared-memory channels and rings, and each
 gets random numbers from a capability it receives at start (see
-`radix-ipc(7)`). For now the only programs are the kernel's own tests and
-benchmarks; processes and the first services come in Phase 6. Chapters
+`radix-ipc(7)`). Each program runs in a process of its own, placed at a
+random address; the kernel starts one, Spark, from a boot archive the boot
+loader loads, and Spark starts the rest (see `radix-processes(7)` and
+`spark(8)`). For now Spark starts one test program and reaps it; file
+systems come in Phase 7 and a shell in Phase 9. Chapters
 for later phases are listed in the table of contents and are written as
 those phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
