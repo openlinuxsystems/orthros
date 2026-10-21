@@ -18,14 +18,17 @@
 //! - `bench`: measures system call and IPC round trips (`ob bench` reads
 //!   the numbers, docs/design/ipc.md says how).
 //!
-//! Each test logs `selftest NAME: passed` or `failed` lines.
+//! Each test logs `selftest NAME: passed` or `failed` lines. `user` and
+//! `ipc` also check that the capability store and the object registry hold
+//! what they held before, once every program has gone.
 
-use radix_cap::Rights;
+use radix_cap::{KINDS, Rights};
 use radix_klog::{error, info, warn};
 
 use crate::sched;
 use crate::user::launch::{self, Group, Spec};
 use crate::user::{EXIT_FAULT, EXIT_STOPPED};
+use crate::{caps, user};
 
 /// The programs of the image (`userspace/usertests/src/main.rs` numbers
 /// them the same way).
@@ -59,6 +62,8 @@ const FAULTS: [&str; 8] = [
 
 /// The flag in a program's argument that has it report its timings.
 const BENCH: u64 = 1 << 63;
+/// The flag that tells a pair of programs they run on two CPUs.
+const ACROSS: u64 = 1 << 62;
 
 /// How long a test's programs get, in nanoseconds.
 const TIMEOUT_NS: u64 = 60_000_000_000;
@@ -103,11 +108,37 @@ impl Outcome {
         }
     }
 
+    /// Fails unless the store and the registry hold what they held
+    /// `before` the test's programs started.
+    fn nothing_left(&mut self, before: Option<Census>) {
+        let after = census();
+        if before.is_none() || after != before {
+            self.fail(format_args!("objects were left behind: {before:?} before, {after:?} after"));
+        }
+    }
+
     fn end(self, summary: core::fmt::Arguments<'_>) {
         if self.failures == 0 {
             info!("selftest {}: passed; {summary}", self.name);
         }
     }
+}
+
+/// What the capability store and the user object registry hold, by kind.
+#[derive(Debug, PartialEq, Eq)]
+struct Census {
+    spaces: u32,
+    caps: [u64; KINDS],
+    objects: [u64; KINDS],
+    registered: [u32; KINDS],
+}
+
+/// The census, once every group has gone: a space, capability or object a
+/// program's end missed shows up as a difference.
+fn census() -> Option<Census> {
+    let store = caps::with(|store| store.census()).ok()?;
+    let registered = user::objects::census()?;
+    Some(Census { spaces: store.spaces, caps: store.caps, objects: store.objects, registered })
 }
 
 /// Starts the programs of `specs` in a new group.
@@ -164,6 +195,7 @@ pub fn user() {
         return;
     }
     let mut outcome = Outcome::new("user");
+    let before = census();
     if let Some(group) = group(&mut outcome, "probe", |group| {
         start(group, Spec { name: "probe", role: role::PROBE, argument: 0, cpu: 0, extra: &[] })
     }) {
@@ -181,6 +213,7 @@ pub fn user() {
             outcome.check(fault, &group, EXIT_FAULT);
         }
     }
+    outcome.nothing_left(before);
     outcome.end(format_args!(
         "the probe passed every check and {} kinds of fault each ended only their program",
         FAULTS.len()
@@ -196,6 +229,7 @@ fn pair(
     across: bool,
 ) -> Option<Group> {
     let (a, b) = cpus(across)?;
+    let argument = if across { argument | ACROSS } else { argument };
     group(outcome, what, |group| {
         let endpoint = group.endpoint().map_err(|_| ())?;
         let first = group.notification().map_err(|_| ())?;
@@ -222,6 +256,7 @@ pub fn ipc() {
         return;
     }
     let mut outcome = Outcome::new("ipc");
+    let before = census();
     let mut ran = 0;
     for across in [false, true] {
         for (what, roles) in PAIRS {
@@ -230,6 +265,7 @@ pub fn ipc() {
             ran += 1;
         }
     }
+    outcome.nothing_left(before);
     outcome.end(format_args!(
         "{ran} pairs of programs ping-ponged over endpoints, capabilities in messages, \
          notifications, shared memory and rings, on one CPU and across two"

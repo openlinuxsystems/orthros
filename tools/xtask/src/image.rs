@@ -13,7 +13,7 @@ use std::process::Command;
 
 use crate::config::{self, Profile};
 use crate::process::{self, step};
-use crate::{Context, Ctx, Error, Result, VERSION, kernel, licenses};
+use crate::{Context, Ctx, Error, Result, VERSION, kernel, licenses, userspace};
 
 /// What goes into an image and where it is written.
 pub struct ImageSpec<'a> {
@@ -25,6 +25,8 @@ pub struct ImageSpec<'a> {
     pub cmdline: &'a str,
     /// Intel microcode updates to load as a boot module, if any.
     pub microcode: Option<Vec<u8>>,
+    /// The user test programs, loaded as a boot module, if any.
+    pub usertests: Option<&'a Path>,
     /// Staging directory, recreated on every build.
     pub staging: PathBuf,
     /// Output file.
@@ -63,6 +65,7 @@ pub fn build_release(
         Some(read_microcode(ctx, Path::new(microcode_source))?)
     };
     let kernel = kernel::build(ctx, profile)?;
+    let usertests = userspace::build(ctx, profile)?;
     build(
         ctx,
         &ImageSpec {
@@ -70,6 +73,7 @@ pub fn build_release(
             timeout: ctx.config.boot.timeout,
             cmdline: overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline),
             microcode,
+            usertests: Some(&usertests),
             staging: ctx.out.join("image-root"),
             output: ctx.out.join(file_name(iso)),
         },
@@ -184,9 +188,19 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
     let manifest = licenses::install(
         ctx,
         &spec.staging,
-        &licenses::Extras { mkrescue: &mkrescue, microcode: spec.microcode.is_some() },
+        &licenses::Extras {
+            mkrescue: &mkrescue,
+            microcode: spec.microcode.is_some(),
+            usertests: spec.usertests.is_some(),
+        },
     )?;
     let mut modules = Vec::new();
+    if let Some(usertests) = spec.usertests {
+        let path = userspace::USERTESTS_PATH;
+        process::copy(usertests, &spec.staging.join(path.trim_start_matches('/')))?;
+        // The kernel finds the module by this word on its command line.
+        modules.push((path, userspace::USERTESTS_WORD));
+    }
     if let Some(microcode) = &spec.microcode {
         let path = spec.staging.join(MICROCODE_PATH.trim_start_matches('/'));
         process::create_dir(path.parent().expect("the microcode path has a parent"))?;

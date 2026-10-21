@@ -201,7 +201,7 @@ fn on_fault(fault: &UserFault) -> ! {
     let Some((thread, user)) = current() else {
         panic!("User mode: {fault} in a thread that is not a program's");
     };
-    warn!("User: thread {} ({}) ended by a {fault}", thread.id(), thread.name());
+    warn!("User: thread {} ({}) ended: {fault}", thread.id(), thread.name());
     drop(thread);
     exit_current(user, EXIT_FAULT)
 }

@@ -4,7 +4,7 @@
 //! The methods `cap_call` calls on kernel objects.
 //!
 //! A label is an interface number and a method number (`(interface << 16)
-//! | method`, radix-abi(7)). The methods of radix-capability(2), with
+//! | method`, radix-ipc(7)). The methods of radix-capability(2), with
 //! interface 0xffff, work on every capability; the others only on the kind
 //! their interface is for. Arguments and results travel in the message's
 //! data words, packed and checked by the code ridlc generates from

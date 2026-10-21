@@ -11,7 +11,7 @@
 //!
 //! - its own capability space of `startup::SLOTS` slots, holding its
 //!   thread, its address space, a memory object to make frames from, the
-//!   random number generator and the kernel log (the slots radix-abi(7)
+//!   random number generator and the kernel log (the slots radix-startup(2)
 //!   lists), and from `SLOT_FIRST_EXTRA` on the objects the group shares
 //!   with it;
 //! - its own address space, with the image's segments, a stack below
@@ -55,6 +55,10 @@ const MEMORY_ORDER: u32 = 9;
 
 /// Slots of a program's hidden space: the image, stack and start-up page.
 const KEEPER_SLOTS: u32 = 4;
+
+/// The most objects a program gets from its group: the start-up page
+/// says what each is.
+const EXTRA_MAX: usize = 16;
 
 /// Slots of a group's own space, for the objects it shares.
 const LAUNCHER_SLOTS: u32 = 64;
@@ -173,6 +177,9 @@ impl Group {
 
     /// Starts a program. Returns its number in the group.
     pub fn start(&mut self, spec: &Spec<'_>) -> Result<usize> {
+        if spec.extra.len() > EXTRA_MAX {
+            return Err(error(Kernel::InvalidArgument));
+        }
         let bytes = image().ok_or(error(Kernel::Gone))?;
         let top = startup::STACK_TOP - startup::STACK_SIZE;
         let image = radix_elf::read(bytes, USER_START + PAGE_SIZE..top).map_err(|err| {
@@ -298,12 +305,17 @@ impl Group {
         };
         put(Startup::OFFSET_VERSION, &startup::STARTUP_VERSION.to_le_bytes());
         put(Startup::OFFSET_CPU, &(spec.cpu as u32).to_le_bytes());
-        put(Startup::OFFSET_ROLE, &spec.role.to_le_bytes());
+        put(Startup::OFFSET_ROLE, &u64::from(spec.role).to_le_bytes());
         put(Startup::OFFSET_ARGUMENT, &spec.argument.to_le_bytes());
         put(Startup::OFFSET_TSC_HZ, &Arch::cycle_counter_hz().to_le_bytes());
         put(Startup::OFFSET_EXTRA, &(spec.extra.len() as u32).to_le_bytes());
         put(Startup::OFFSET_THREAD_ID, &(thread.id() as u32).to_le_bytes());
-        put(Startup::OFFSET_SLOTS, &startup::SLOTS.to_le_bytes());
+        let mut kinds = [0u8; EXTRA_MAX];
+        for (kind, &(slot, ..)) in kinds.iter_mut().zip(spec.extra) {
+            let cap = caps::with(|store| store.get(SlotRef::new(self.launcher, slot)));
+            *kind = cap.ok().and_then(|cap| cap.ok()).map_or(0, |cap| cap.kind() as u8);
+        }
+        put(Startup::OFFSET_SLOTS, &kinds);
         let free = ((1u64 << MEMORY_ORDER) - used) * PAGE_SIZE;
         put(Startup::OFFSET_MEMORY_BYTES, &free.to_le_bytes());
         Arch::write_frames(page.phys(), &bytes);

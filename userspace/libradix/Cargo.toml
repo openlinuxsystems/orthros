@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "libradix"
+description = "The Radix system call library for user programs: entry, system calls, printing, rings and shared-memory channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+radix-abi = { path = "../../kernel/abi" }
+
+[lints]
+workspace = true

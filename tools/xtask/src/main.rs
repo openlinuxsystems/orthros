@@ -7,6 +7,7 @@
 //! with the pinned toolchain and runs it. Every command is documented in
 //! ob(1); `docs/man/ob.1.scd` is the source of that page.
 
+mod bench;
 mod config;
 mod docs;
 mod doctor;
@@ -23,6 +24,7 @@ mod screen;
 mod signoff;
 mod test;
 mod tla;
+mod userspace;
 
 use std::fmt;
 use std::io;
@@ -39,10 +41,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMANDS: &[(&str, &str)] = &[
     ("setup", "Install the pinned Rust toolchain, then run doctor"),
     ("doctor", "Check host tools and print the commands that install what is missing"),
-    ("build", "Build the kernel, with its symbol table, into out/sysroot"),
+    ("build", "Build the kernel, with its symbol table, and the user programs into out/sysroot"),
     ("image", "Build the bootable USB image (or an ISO with --iso)"),
     ("run", "Boot the image in QEMU with the serial console on this terminal"),
     ("test", "Run unit tests, then boot the image in QEMU under UEFI and BIOS"),
+    ("bench", "Measure system calls and IPC round trips on Radix and on this machine's Linux"),
     ("docs", "Build the man pages and the handbook into out/docs"),
     ("lint", "Check formatting and run Clippy with warnings denied"),
     ("fmt", "Format all Rust code"),
@@ -93,7 +96,10 @@ Exits with status 1 when a required tool is missing."
             "Usage: ./ob build [--debug | --release]
 
 Builds the Radix kernel for its own target (kernel/targets/), writes the
-kernel symbol table into it, and places it in out/sysroot/boot/radix.
+kernel symbol table into it, and places it in out/sysroot/boot/radix. Then
+builds the user programs (userspace/, for userspace/targets/), places
+their test image in out/sysroot/boot/usertests, and writes the C headers
+of the system call interface (abi/*.ridl) into out/sysroot/include/radix.
 
   --debug      Build without optimisation
   --release    Build with optimisation (the default from orthros.toml)"
@@ -162,10 +168,29 @@ tests are:
   sched-balance    threads spread from one CPU over 4 CPUs and 2 NUMA nodes
   lockdep          the lock checker catches seeded deadlocks
   rcu              RCU readers never see an object retired too early
+  user             a user program checks every system call and method;
+                   8 kinds of fault each end only their program
+  ipc              user programs ping-pong over endpoints, capabilities in
+                   messages, notifications, channels and rings, on 1 and 2 CPUs
   oom              out of memory stops an app, then a restarted service
 
   --case <name>         Run only this boot test; repeat for more
   --timeout <seconds>   Limit for each boot test (default 300)"
+        }
+        "bench" => {
+            "Usage: ./ob bench [--no-linux] [--summary <file>] [--debug | --release]
+
+Boots Radix in QEMU on 2 CPUs with selftest=bench, where user programs time
+the cheapest system calls and IPC round trips over endpoints,
+notifications, shared-memory channels and rings, on one CPU and across
+two. Then measures the closest Linux operations on this machine
+(tools/linux-bench) as a baseline. Writes out/bench/report.md and
+out/bench/results.json and prints the report. Without KVM the Radix
+numbers measure QEMU's emulation and take minutes.
+
+  --no-linux          Skip the Linux baseline
+  --summary <file>    Also append the Markdown report to <file> (CI passes
+                      $GITHUB_STEP_SUMMARY)"
         }
         "docs" => {
             "Usage: ./ob docs [--check]
@@ -180,8 +205,8 @@ mandoc -T lint) and the handbook from docs/handbook into out/docs/handbook.
             "Usage: ./ob lint
 
 Checks formatting with rustfmt and runs Clippy on the host tools, the kernel
-(for x86-64, and for AArch64 against the HAL stubs) and the kernel
-libraries, treating every warning as an error."
+(for x86-64, and for AArch64 against the HAL stubs), the kernel libraries
+and the user programs, treating every warning as an error."
         }
         "fmt" => {
             "Usage: ./ob fmt
@@ -201,7 +226,7 @@ CI runs this on the commits of every pull request."
         "clean" => {
             "Usage: ./ob clean [--all]
 
-Removes out/ and the kernel's build directory.
+Removes out/ and the kernel's and user programs' build directories.
 
   --all        Also remove target/ and .cache/ (the build tool and caches)"
         }
@@ -448,7 +473,9 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         "build" => {
             let profile = args.profile(&ctx.config)?;
             args.finish()?;
-            kernel::build(&ctx, profile).map(|_| ())
+            kernel::build(&ctx, profile)?;
+            userspace::build(&ctx, profile)?;
+            userspace::install_headers(&ctx).map(|_| ())
         }
         "image" => {
             let iso = args.flag("--iso");
@@ -467,6 +494,7 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         }
         "run" => qemu::run_command(&ctx, &mut args),
         "test" => test::command(&ctx, &mut args),
+        "bench" => bench::command(&ctx, &mut args),
         "docs" => {
             let check = args.flag("--check");
             args.finish()?;
@@ -495,8 +523,12 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
 }
 
 fn clean(ctx: &Ctx, all: bool) -> Result<()> {
-    let mut paths =
-        vec![ctx.out.clone(), ctx.target.join("kernel"), ctx.root.join("kernel/target")];
+    let mut paths = vec![
+        ctx.out.clone(),
+        ctx.target.join("kernel"),
+        ctx.target.join("userspace"),
+        ctx.root.join("kernel/target"),
+    ];
     if all {
         paths.push(ctx.target.clone());
         paths.push(ctx.root.join(".cache"));
@@ -561,10 +593,14 @@ mod tests {
     }
 
     #[test]
-    fn kernel_version_matches() {
-        let manifest = include_str!("../../../kernel/Cargo.toml");
-        let table: toml::Table = manifest.parse().unwrap();
-        let version = table["workspace"]["package"]["version"].as_str().unwrap();
-        assert_eq!(version, VERSION, "kernel/Cargo.toml and Cargo.toml disagree on the version");
+    fn workspace_versions_match() {
+        for (path, manifest) in [
+            ("kernel/Cargo.toml", include_str!("../../../kernel/Cargo.toml")),
+            ("userspace/Cargo.toml", include_str!("../../../userspace/Cargo.toml")),
+        ] {
+            let table: toml::Table = manifest.parse().unwrap();
+            let version = table["workspace"]["package"]["version"].as_str().unwrap();
+            assert_eq!(version, VERSION, "{path} and Cargo.toml disagree on the version");
+        }
     }
 }

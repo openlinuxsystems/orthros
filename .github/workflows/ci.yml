@@ -102,6 +102,54 @@ jobs:
             out/test/*.ppm
           if-no-files-found: ignore
 
+  # The cost of system calls and IPC round trips on Radix, with this
+  # runner's Linux as the baseline (ADR 0035). The report goes into the
+  # job's summary on every pull request and every merge to main, and the
+  # numbers into an artifact.
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob bench
+        run: ./ob bench --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the benchmark numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: |
+            out/bench/report.md
+            out/bench/results.json
+            out/bench/boot-bench.log
+          if-no-files-found: ignore
+          retention-days: 90
+
   # Only the commits a pull request adds: history already on main is left
   # as it is (ADR 0025).
   signoff:
@@ -221,6 +269,9 @@ jobs:
       # its own, permissive-only policy.
       - name: cargo deny (kernel)
         run: cargo deny --manifest-path kernel/Cargo.toml --config kernel/deny.toml check
+      # The user programs go into /system, so they get the kernel's policy.
+      - name: cargo deny (user programs)
+        run: cargo deny --manifest-path userspace/Cargo.toml --config kernel/deny.toml check
 
   reuse:
     name: REUSE compliance

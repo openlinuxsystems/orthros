@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Programs that run in user mode on Radix, and the library they use.
+#
+# They build for their own target (targets/x86_64-radix-user.json), so they
+# live in a workspace of their own, like the kernel. Build them with
+# `./ob build`, which puts the test image in the boot image.
+
+[workspace]
+resolver = "3"
+members = ["libradix", "usertests"]
+
+[workspace.package]
+# Keep in step with the root Cargo.toml (a unit test of ob checks it).
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/openlinuxsystems/orthros"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block needs a `// SAFETY:` comment (docs/coding-standard.md).
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+# The boot loader loads the image whole: symbols yes, debug info no.
+strip = "debuginfo"
