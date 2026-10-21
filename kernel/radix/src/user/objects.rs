@@ -31,9 +31,11 @@ use radix_hal::MAX_CPUS;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Mutex;
 
+use super::account::Charge;
 use super::ipc::{Endpoint, EndpointRef};
 use super::memory::{FrameObject, FrameRef, SpaceObject, SpaceRef};
 use super::notify::{Notification, NotificationRef};
+use super::process::{ProcessObject, ProcessRef};
 use super::ring::{RingObject, RingRef};
 use super::{Result, cap_error, error};
 use crate::caps::{self, Store};
@@ -55,6 +57,8 @@ pub enum Object {
     Frame(FrameRef),
     /// A ring.
     Ring(RingRef),
+    /// A process.
+    Process(ProcessRef),
     /// The kernel's random number generator.
     Random,
     /// The kernel log.
@@ -71,6 +75,7 @@ impl Object {
             Object::Space(_) => ObjectKind::AddressSpace,
             Object::Frame(_) => ObjectKind::Frame,
             Object::Ring(_) => ObjectKind::Ring,
+            Object::Process(_) => ObjectKind::Process,
             Object::Random => ObjectKind::Random,
             Object::KernelLog => ObjectKind::KernelLog,
         }
@@ -80,6 +85,9 @@ impl Object {
 struct Entry {
     generation: u32,
     object: Object,
+    /// What the object costs, charged to the account of the process that
+    /// made it (`process.create`), and given back when it leaves.
+    charge: Option<Charge>,
 }
 
 static REGISTRY: Mutex<Option<Vec<Option<Entry>, Kmalloc>>> = Mutex::new(None);
@@ -107,7 +115,18 @@ pub fn reserve(store: &Store, count: usize) -> core::result::Result<(), NoMemory
 /// Records `object` under `id`. The store must be locked (it hands over
 /// `store` to show it), so that the store's version moves after the
 /// change.
-pub fn insert(_store: &Store, id: ObjectId, object: Object) -> core::result::Result<(), NoMemory> {
+pub fn insert(store: &Store, id: ObjectId, object: Object) -> core::result::Result<(), NoMemory> {
+    insert_charged(store, id, object, None)
+}
+
+/// Records `object` under `id`, with what it was charged, which is given
+/// back when it leaves the registry.
+pub fn insert_charged(
+    _store: &Store,
+    id: ObjectId,
+    object: Object,
+    charge: Option<Charge>,
+) -> core::result::Result<(), NoMemory> {
     let mut registry = REGISTRY.lock();
     let Some(table) = registry.as_mut() else { return Err(NoMemory) };
     let index = id.index as usize;
@@ -118,7 +137,7 @@ pub fn insert(_store: &Store, id: ObjectId, object: Object) -> core::result::Res
             let _ = table.push_within_capacity(None);
         }
     }
-    table[index] = Some(Entry { generation: id.generation, object });
+    table[index] = Some(Entry { generation: id.generation, object, charge });
     Ok(())
 }
 
@@ -180,6 +199,7 @@ enum Kept {
     Space(Weak<SpaceObject, Kmalloc>),
     Frame(Weak<FrameObject, Kmalloc>),
     Ring(Weak<RingObject, Kmalloc>),
+    Process(Weak<ProcessObject, Kmalloc>),
     Random,
     KernelLog,
 }
@@ -193,6 +213,7 @@ impl Kept {
             Object::Space(space) => Kept::Space(Arc::downgrade(space)),
             Object::Frame(frame) => Kept::Frame(Arc::downgrade(frame)),
             Object::Ring(ring) => Kept::Ring(Arc::downgrade(ring)),
+            Object::Process(process) => Kept::Process(Arc::downgrade(process)),
             Object::Random => Kept::Random,
             Object::KernelLog => Kept::KernelLog,
         }
@@ -206,6 +227,7 @@ impl Kept {
             Kept::Space(space) => Object::Space(space.upgrade()?),
             Kept::Frame(frame) => Object::Frame(frame.upgrade()?),
             Kept::Ring(ring) => Object::Ring(ring.upgrade()?),
+            Kept::Process(process) => Object::Process(process.upgrade()?),
             Kept::Random => Object::Random,
             Kept::KernelLog => Object::KernelLog,
         })
@@ -305,13 +327,20 @@ typed_lookup!(
     Thread,
     ThreadRef
 );
+typed_lookup!(
+    /// The process a capability designates.
+    process,
+    Process,
+    Process,
+    ProcessRef
+);
 
-/// Takes the object named `id` out of the registry.
-fn remove(id: ObjectId) -> Option<Object> {
+/// Takes the object named `id` out of the registry, with its charge.
+fn remove(id: ObjectId) -> Option<Entry> {
     let mut registry = REGISTRY.lock();
     let slot = registry.as_mut()?.get_mut(id.index as usize)?;
     if slot.as_ref().is_some_and(|entry| entry.generation == id.generation) {
-        slot.take().map(|entry| entry.object)
+        slot.take()
     } else {
         None
     }
@@ -321,7 +350,7 @@ fn remove(id: ObjectId) -> Option<Object> {
 /// Called with the store locked, so the store's version moves after the
 /// change.
 pub fn released(released: &Released) {
-    let Some(object) = remove(released.id) else { return };
+    let Some(Entry { object, charge, .. }) = remove(released.id) else { return };
     match object {
         Object::Endpoint(endpoint) => endpoint.close(),
         Object::Notification(notification) => notification.close(),
@@ -333,8 +362,13 @@ pub fn released(released: &Released) {
             thread.request_stop();
             crate::sched::wake(&thread);
         }
+        // It ends; with no thread left to finish it, the store does once
+        // its change is done (`process::finish_pending`).
+        Object::Process(process) => super::process::released(process),
         Object::Space(_) | Object::Random | Object::KernelLog => {}
     }
+    // What it was charged is given back once it has closed.
+    drop(charge);
 }
 
 /// How many objects of each kind the registry holds, for `kdb`. Gives up

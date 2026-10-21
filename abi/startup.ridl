@@ -1,23 +1,42 @@
 // SPDX-FileCopyrightText: 2026 The OrthrOS contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! How the kernel starts a program in Phase 5.
+//! How a program starts.
 //!
-//! Until Phase 6 brings the ELF loader and init, the kernel itself starts
-//! the user-mode test programs in the `usertests` boot module. It maps the
-//! program's segments, a stack and a read-only start-up page, puts the
-//! capabilities below in the program's capability space, and starts its
-//! thread at the entry point with the start-up page's address in the
-//! first argument register.
+//! A loader (the kernel for Spark and its own test programs, radix-rt for
+//! every other program) makes a process (radix-process(2)), maps the
+//! program's segments, a stack and a read-only start-up page into its
+//! address space, puts the capabilities below in its capability space,
+//! and starts its first thread at the entry point with the start-up
+//! page's address in the first argument register.
+//!
+//! A position-independent program is placed at a random page in the
+//! WINDOW bytes from IMAGE_BASE, and the top of its stack at a
+//! random page in the STACK_WINDOW bytes below STACK_TOP; a loader puts
+//! other mappings it makes for the program, such as Spark's view of the
+//! boot archive, at random in the window from LOADER_BASE. The addresses
+//! from PROGRAM_BASE up to the stack's are left to the program. A program
+//! linked at fixed addresses runs there, with its stack's top at
+//! STACK_TOP.
 
 module startup;
 
 /// The address of the start-up page.
 const STARTUP_ADDRESS: u64 = 0x10000;
-/// The top of the initial stack.
+/// The highest top of the initial stack.
 const STACK_TOP: u64 = 0x7ff000000000;
 /// The size of the initial stack, in bytes.
 const STACK_SIZE: u64 = 0x40000;
+/// How far below STACK_TOP a loader may put the top of the stack.
+const STACK_WINDOW: u64 = 0x1000000000;
+/// Where position-independent programs are placed, at random.
+const IMAGE_BASE: u64 = 0x100000000000;
+/// Where a loader puts other mappings it makes for a program, at random.
+const LOADER_BASE: u64 = 0x200000000000;
+/// The size of the windows from IMAGE_BASE and LOADER_BASE.
+const WINDOW: u64 = 0x10000000000;
+/// The lowest address of the space left to the program itself.
+const PROGRAM_BASE: u64 = 0x300000000000;
 /// The slot of the program's own thread (all rights).
 const SLOT_THREAD: u32 = 1;
 /// The slot of the program's address space (all rights).
@@ -28,6 +47,8 @@ const SLOT_MEMORY: u32 = 3;
 const SLOT_RANDOM: u32 = 4;
 /// The slot of the kernel log capability.
 const SLOT_LOG: u32 = 5;
+/// The slot of the program's own process (read and control rights).
+const SLOT_PROCESS: u32 = 6;
 /// The first of the slots the start-up page's `slots` describe.
 const SLOT_FIRST_EXTRA: u32 = 8;
 /// The first slot of the receive window programs start with.
@@ -36,14 +57,16 @@ const SLOT_WINDOW: u32 = 32;
 const WINDOW_SLOTS: u32 = 16;
 /// The number of slots of a program's capability space.
 const SLOTS: u32 = 256;
+/// The CPU field of a program whose thread runs on any CPU.
+const ANY_CPU: u32 = 0xffffffff;
 /// The version of the start-up page's layout.
-const STARTUP_VERSION: u32 = 1;
+const STARTUP_VERSION: u32 = 2;
 
 /// The start-up page.
 struct Startup {
     /// STARTUP_VERSION.
     version: u32;
-    /// The CPU the program's thread is pinned to.
+    /// The CPU the program's thread is pinned to, or ANY_CPU.
     cpu: u32;
     /// What the program was started to do, for test programs with many
     /// roles; the meaning is the program's own.
@@ -54,10 +77,25 @@ struct Startup {
     tsc_hz: u64;
     /// How many of `slots` are used.
     extra: u32;
-    /// The number of the program's thread.
+    /// The number of the program's thread, or 0 if its loader did not
+    /// know it (`thread.info` tells).
     thread_id: u32;
     /// What the slots from SLOT_FIRST_EXTRA hold, one ObjectKind each.
     slots: [u8; 16];
-    /// The bytes of memory the object in SLOT_MEMORY has.
+    /// The bytes of memory the object in SLOT_MEMORY has free.
     memory_bytes: u64;
+    /// How far the program's image was moved from the addresses it was
+    /// linked at: 0 for a program linked at fixed addresses.
+    image_bias: u64;
+    /// Where the program's arguments start in the start-up page, in bytes
+    /// from its first.
+    args_offset: u32;
+    /// How many bytes the arguments take: each ends with a NUL, and the
+    /// first is the program's path.
+    args_size: u32;
+    /// Where the boot archive is mapped read-only, for Spark (0 for other
+    /// programs).
+    bootfs_address: u64;
+    /// The size of the boot archive, in bytes.
+    bootfs_size: u64;
 }

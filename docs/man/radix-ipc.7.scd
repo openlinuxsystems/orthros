@@ -18,10 +18,10 @@ endpoints, signals them through notifications, shares memory with them in
 frames, batches work through rings, and gets random numbers from the
 random capability it receives at start.
 
-This page describes these mechanisms as of Phase 5 of the roadmap, where
-the only programs are the kernel's user-mode test and benchmark programs
-(see *STARTING PROGRAMS*). Each system call and each interface has its
-own page in section 2, generated from the interface definitions in
+This page describes these mechanisms as of Phase 6 of the roadmap. How
+programs are loaded and started, and the processes they run in, are in
+*radix-processes*(7). Each system call and each interface has its own
+page in section 2, generated from the interface definitions in
 _abi/\*.ridl_. The design, with the argument that the IPC mechanism is
 correct, is in _docs/design/ipc.md_.
 
@@ -35,10 +35,12 @@ writable and executable at once.
 
 An exception in user mode, such as a page fault, a protection fault, an
 invalid instruction, a breakpoint or a division by zero, ends the thread
-that made it and nothing else. The kernel logs it:
+that made it and its process, with the exit code *EXIT_FAULT*
+(0xdead0000), and nothing else. The kernel logs both:
 
 ```
 User: thread 9 (fault) ended: page fault writing 0x10000 (not allowed) at pc 0x401b51, sp 0x7feffffffed0
+User: process 3 (fault) exited with code 0xdead0000
 ```
 
 # SYSTEM CALLS
@@ -209,13 +211,13 @@ memory. Both need the *read* right. See *radix-random*(2).
 
 # STARTING PROGRAMS
 
-Until Phase 6 brings processes and init, the kernel itself starts the
-user-mode test programs, from one image that GRUB loads as a module with
-the word *usertests*. Each program gets a capability space of 256 slots,
-an address space with the image's segments, a 256 KiB stack ending at
-0x7ff000000000, a read-only *start-up page* at 0x10000, and one thread
-pinned to a CPU, which starts at the entry point with the start-up page's
-address in *rdi*. The capability space holds:
+Every program runs in a process (*radix-process*(2)): an address space,
+a capability space and its threads, which end together. The kernel starts
+only the first program, Spark (*spark*(8)), from the boot archive, and
+the self-tests' programs from the *usertests* image; every other program
+is started by another, through radix-rt's *spawn*. Either way a program
+starts with a read-only *start-up page* at 0x10000, whose address is in
+*rdi*, and these capabilities:
 
 [[ *Slot*
 :< *Capability*
@@ -229,15 +231,19 @@ address in *rdi*. The capability space holds:
 :  The random number generator
 |  5
 :  The kernel log
+|  6
+:  Its own process, with the read and control rights
 |  8 to 23
-:  What the program's group shares with it, one kind per slot as the start-up page says
+:  What its starter passes it, one kind per slot as the start-up page says
 |  32 to 47
 :  The receive window
 
-The start-up page gives the program's role, an argument, the CPU it runs
-on, the time-stamp counter's frequency and its thread number; see
-*radix-startup*(2). The programs and the self-tests that start them are
-described in *radix-debug*(7) under *user*, *ipc* and *bench*.
+The start-up page gives the program's arguments, where its image was
+placed, its role and argument (for test programs), the CPU it is pinned
+to if any, the time-stamp counter's frequency and its thread number; see
+*radix-startup*(2). *radix-processes*(7) describes loading, the address
+space layout and how processes end. The self-tests' programs are
+described in *radix-debug*(7) under *user*, *ipc*, *fuzz* and *bench*.
 
 # C AND RUST
 
@@ -270,7 +276,8 @@ an operation on one CPU takes more than its budget.
 - A *read* of the random capability fills at most 64 KiB.
 - A kernel log line is cut after *WRITE_MAX* bytes (see
   *radix-kernel-log*(2)).
-- A program has 256 slots and is pinned to the CPU it was started on.
+- A program started by the kernel or radix-rt has 256 slots; a process
+  made directly may have 16 to 4,096.
 
 # DIAGNOSTICS
 
@@ -278,7 +285,7 @@ At boot the kernel reports user mode and the test image:
 
 ```
 User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
-User: the usertests image is 96 KiB
+User: the usertests image is 152 KiB
 ```
 
 A line a program writes with *radix_debug_log*(2) appears in the kernel
@@ -288,5 +295,6 @@ log with the program's name and thread number.
 
 *radix-errors*(2), *radix-capability*(2), *radix-endpoint*(2),
 *radix-notification*(2), *radix-ring*(2), *radix-random*(2),
-*radix-startup*(2), *radix-capabilities*(7), *radix-scheduling*(7),
-*radix-debug*(7), *orthros-boot*(7), *ob*(1)
+*radix-process*(2), *radix-startup*(2), *radix-processes*(7),
+*radix-capabilities*(7), *radix-scheduling*(7), *radix-debug*(7),
+*orthros-boot*(7), *spark*(8), *ob*(1)

@@ -10,8 +10,9 @@
   "max-atomic-width": 64,
   "os": "none",
   "panic-strategy": "abort",
-  "position-independent-executables": false,
-  "relocation-model": "static",
+  "position-independent-executables": true,
+  "relocation-model": "pie",
+  "static-position-independent-executables": true,
   "stack-probes": {
     "kind": "inline"
   },

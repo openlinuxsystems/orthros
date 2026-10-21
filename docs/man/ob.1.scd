@@ -294,7 +294,10 @@ _target/userspace/_).
 		deriving, moving, sealing and revoking capabilities, random
 		bytes, threads with their own thread pointer, the kernel log
 		(cut at 256 bytes, with control characters and bad UTF-8
-		replaced) and rings. Then eight programs each make one fault: a
+		replaced), rings, and processes: making one and the objects
+		charged to it, building it from outside, ending it, hearing of
+		its end, and that a process made for it ends with it. Then eight
+		programs each make one fault: a
 		null pointer, a write to a read-only page, code on the stack, a
 		privileged instruction, a jump into the kernel's half, an
 		undefined instruction, a breakpoint and a division by zero. The
@@ -312,12 +315,23 @@ _target/userspace/_).
 		Boot 2 CPUs with *selftest=fuzz* and the lock checker on: eight
 		groups of three user programs make 4,000 random system calls,
 		methods and ring entries each, sharing endpoints, notifications
-		and memory. The case fails if the kernel panics or the lock
+		and memory, and making, building, starting and ending processes
+		of their own. The case fails if the kernel panics or the lock
 		checker reports, if a failed call returns anything but a kernel
 		error that its documentation lists with 0 in every result
 		register, or if the capability store fails its audit or keeps
 		anything afterwards. The log names the seeds; boot with
 		*fuzz-seed=*_n_ to repeat a run.
+
+	*spark*
+		Boot 2 CPUs under UEFI from USB with the command line *lockdep --
+		/system/tests/hello one two*. The kernel starts Spark from the
+		boot archive (see *spark*(8)); Spark starts _/system/tests/hello_
+		with the arguments *one two*, the program prints them, fills its
+		heap and exits, and Spark reaps it. The case checks every line
+		of both programs, that each was placed at a random page-aligned
+		address in the image window, the two apart, that the program
+		exited with 0, and that all of its memory came back.
 
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit

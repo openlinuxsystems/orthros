@@ -82,10 +82,16 @@ cargo run -p ridlc -- abi --c out/include --man out/man2
 ```
 
 The user programs are a workspace of their own, `userspace/`: `libradix`
-(entry, system calls, printing, rings and channels) and `usertests`, the
-image of test and benchmark programs that the kernel's `user`, `ipc` and
-`bench` self-tests start (ADR 0036). `./ob build` builds them with the
-kernel; `./ob test boot --case user`, `--case ipc` and `--case fuzz` run them;
+(entry, system calls, printing, rings and channels); `radix-rt`, the
+runtime of native programs on top of it (a heap, arguments, the boot
+archive as a read-only file system, and `spawn` to start other programs,
+ADR 0051); Spark, the first program, and `hello`, the test program it
+starts (`spark(8)`); and `usertests`, the image of test and benchmark
+programs that the kernel's `user`, `ipc`, `fuzz` and `bench` self-tests
+start (ADR 0036). `./ob build` builds them with the kernel and writes
+Spark and `hello` into the boot archive, `out/sysroot/boot/bootfs`;
+`./ob test boot --case spark` boots it, and `--case user`, `--case ipc`
+and `--case fuzz` run the test image;
 `fuzz` makes random system calls from seeds it logs, and
 `fuzz-seed=N` on the kernel command line repeats a run (ADR 0043).
 `./ob bench` measures system calls, IPC round trips, context switches,
@@ -103,3 +109,28 @@ one on one CPU goes over its budget in `tools/xtask/src/bench.rs`, as CI
 does (ADR 0045). A change that needs more raises the budget in the same
 pull request and says why. How it all works is in `docs/design/ipc.md`
 and `radix-ipc(7)`.
+
+### Adding a program to the boot archive
+
+Programs are static position-independent executables, placed at a random
+address each time they start (ADR 0048), and every one is /system code,
+so its dependencies must have permissive licenses. To add one:
+
+1. Make a crate in `userspace/` with a `[[bin]]` target, depending on
+   `libradix`, `radix-abi` and `radix-rt`, as `userspace/hello` does, and
+   add it to the workspace's `members`.
+2. Start it with `#![no_std]`, `#![no_main]` and `radix_rt::entry!(main)`;
+   `main` gets the start-up page and returns the exit code. `alloc` works,
+   `radix_rt::args()` gives the arguments and `println!` writes to the
+   kernel log.
+3. Add its path in the archive and its package to `ARCHIVE` in
+   `tools/xtask/src/userspace.rs`, and its package to `USER_PROGRAMS` in
+   `tools/xtask/src/licenses.rs`, so its crates go into the license
+   manifest and `cargo deny` checks them.
+4. Boot it as the program Spark starts, with arguments:
+   `./ob run --cmdline "-- /system/tests/yourprogram one two"`, or as the
+   first program itself with `init=/system/tests/yourprogram`.
+
+`tar tvf out/sysroot/boot/bootfs` lists what the archive holds. How
+processes are built, loaded and ended is in `radix-processes(7)` and
+`docs/design/processes.md`.

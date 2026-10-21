@@ -10,14 +10,17 @@
 //! data words, packed and checked by the code ridlc generates from
 //! `abi/*.ridl`, so the kernel and every program agree on them.
 
+use alloc::vec::Vec;
+
 use radix_abi::capability::{self as abi_cap, ObjectKind as AbiKind, Rights as AbiRights};
 use radix_abi::errors::Kernel;
 use radix_abi::{address_space, memory, random, ring, thread};
 use radix_cap::{CapError, Capability, Derivation, ObjectKind, Rights, SlotRef};
 use radix_ipc::info::Info;
 use radix_klog::info;
+use radix_mm::{Flags, HEAP};
 
-use super::memory::{cap_rights, frames_made};
+use super::memory::{cap_rights, frame_made};
 use super::objects;
 use super::{Result, UserRef, cap_error, error};
 use crate::caps;
@@ -32,7 +35,8 @@ pub enum Answer {
     Exit(u64),
 }
 
-fn answer(label: u32, words: usize, values: [u64; 8]) -> Result<Answer> {
+/// A reply to the method `label`, with `words` of `values`.
+pub(super) fn answer(label: u32, words: usize, values: [u64; 8]) -> Result<Answer> {
     Ok(Answer::Reply(Info::reply(label, words), values))
 }
 
@@ -44,6 +48,7 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::Frame => memory::frame::VERSION,
         ObjectKind::AddressSpace => address_space::VERSION,
         ObjectKind::Thread => thread::VERSION,
+        ObjectKind::Process => radix_abi::process::VERSION,
         ObjectKind::Endpoint => radix_abi::endpoint::VERSION,
         ObjectKind::Notification => radix_abi::notification::VERSION,
         ObjectKind::Random => random::VERSION,
@@ -118,6 +123,7 @@ pub fn call(
             answer(info.label, address_space::QueryResults::WORDS, results.encode())
         }
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
+        (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
@@ -231,6 +237,12 @@ pub fn retype(
     if count == 0 || count > radix_cap::MAX_RETYPE {
         return Err(Kernel::InvalidArgument.status(3));
     }
+    // Room to remember the new frames, to zero them once the store's lock
+    // has gone.
+    let mut frames = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    if kind == ObjectKind::Frame {
+        frames.try_reserve_exact(count as usize).map_err(|_| error(Kernel::NoMemory))?;
+    }
     caps::with(|store| -> Result<()> {
         if kind == ObjectKind::Frame {
             objects::reserve(store, count as usize).map_err(|_| error(Kernel::NoMemory))?;
@@ -239,7 +251,6 @@ pub fn retype(
         if kind != ObjectKind::Frame {
             return Ok(());
         }
-        let mut made = [(radix_cap::ObjectId { index: 0, generation: 0 }, 0, 0); 1];
         for i in 0..count {
             let at = SlotRef::new(to.space, to.slot + i);
             let found = store.get(at).ok().and_then(|cap| {
@@ -247,25 +258,33 @@ pub fn retype(
                 let extent = store.object(id)?.extent?;
                 Some((id, extent.base, extent.pages))
             });
-            let made_one = match found {
-                Some(frame) => {
-                    made[0] = frame;
-                    frames_made(store, &made)
-                }
+            let made = match found {
+                Some((id, base, pages)) => frame_made(store, id, base, pages),
                 None => Err(error(Kernel::NoMemory)),
             };
-            if let Err(err) = made_one {
-                // All or nothing: the frames made so far go again.
-                for j in 0..count {
-                    let _ = store.delete(SlotRef::new(to.space, to.slot + j), &mut caps::release);
+            match made {
+                // Room was reserved above.
+                Ok(frame) => drop(frames.push_within_capacity(frame)),
+                Err(err) => {
+                    // All or nothing: the frames made so far go again.
+                    for j in 0..count {
+                        let _ =
+                            store.delete(SlotRef::new(to.space, to.slot + j), &mut caps::release);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
         Ok(())
     })
     .map_err(cap_error)
-    .and_then(|done| done)
+    .and_then(|done| done)?;
+    // Zeroed outside the store's lock, before the call returns. A frame
+    // deleted meanwhile stops being zeroed, and is not mapped any more.
+    for frame in &frames {
+        frame.zero();
+    }
+    Ok(())
 }
 
 /// `random.read`: fills a buffer of the caller's with random bytes.

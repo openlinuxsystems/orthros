@@ -26,6 +26,7 @@ use super::ipc::{self, Delivery, Message};
 use super::memory::{FrameObject, access_of, cap_rights};
 use super::methods::{self, Answer};
 use super::objects::{self, Object};
+use super::process::Ending;
 use super::{EXIT_STOPPED, Result, UserRef, cap_error, error, exit_current};
 use crate::Arch;
 use crate::sched::{self, ThreadRef};
@@ -50,7 +51,7 @@ pub fn handle(regs: &mut SyscallRegs) {
     let (number, info) = (regs.number, regs.args[1]);
     match dispatch(me, user, number, &mut regs.args) {
         Ok(Done::Return) => regs.number = 0,
-        Ok(Done::Exit(code)) => exit_current(user.clone(), code),
+        Ok(Done::Exit(code)) => exit_current(user.clone(), code, Ending::Exit),
         Err(status) => {
             regs.number = status.0;
             regs.args = [0; 10];
@@ -58,7 +59,7 @@ pub fn handle(regs: &mut SyscallRegs) {
     }
     if me.should_stop() {
         stopped(me, number, info);
-        exit_current(user.clone(), EXIT_STOPPED);
+        exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
 }
 

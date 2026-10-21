@@ -23,7 +23,7 @@ enum ObjectKind: u8 {
     address_space = 2;
     /// A thread.
     thread = 3;
-    /// A process (from Phase 6).
+    /// A process (radix-process(2)).
     process = 4;
     /// An IPC endpoint.
     endpoint = 5;

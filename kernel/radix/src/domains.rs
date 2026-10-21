@@ -19,14 +19,15 @@
 //!   out of memory, `oom` stops whole domains, apps first and services
 //!   next, and never `system` ones, which hold the trusted computing base;
 //! - optionally a supervisor, which restarts the domain after an
-//!   out-of-memory stop: Spark's job once it runs services (Spark arrives
-//!   in Phase 6); until then a kernel stand-in does it (`oom`).
+//!   out-of-memory stop: Spark's job once it supervises services (Phase
+//!   9); until then a kernel stand-in does it (`oom`).
 //!
 //! Domains are kernel objects that capabilities name
 //! ([`radix_cap::ObjectKind::ResourceDomain`]); `caps::create_domain` makes
-//! one with its first capability. Threads are charged for their stacks
-//! today. Phase 6 charges a process's memory to its domain, and Phase 22
-//! builds containers on them.
+//! one with its first capability. Threads are charged for their stacks,
+//! and the objects a program makes with `process.create` are charged to
+//! its process's domain (`user::account`); Phase 22 builds containers on
+//! domains.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;

@@ -22,7 +22,10 @@
 //! user half. It never unmaps its own image, stack, start-up page or
 //! ring, never moves, deletes or revokes the capabilities it runs on (its
 //! thread, address space, memory, random number generator, log and ring),
-//! and never ends its own thread: everything else is fair game. After
+//! and never ends its own thread. Nor can it end its own process or start
+//! a thread in it: it first makes the processes it calls the process
+//! methods on most, then deletes its own process's capability. Everything
+//! else is fair game, and the processes it makes go when it ends. After
 //! every call it checks what radix-syscalls(2) promises of a failed one:
 //! a kernel error, and 0 in every result register. It also checks that
 //! the error is one the call's documentation lists (its `raises` list,
@@ -40,10 +43,12 @@ use libradix::abi::errors::Kernel;
 use libradix::abi::notification::WaitFlags;
 use libradix::abi::ring::{ENTRIES_MAX, RingHeader, RingIndexes, Sqe};
 use libradix::abi::startup::{
-    SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_MEMORY, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD, SLOT_WINDOW,
-    SLOTS, STARTUP_ADDRESS, WINDOW_SLOTS,
+    SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_MEMORY, SLOT_PROCESS, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD,
+    SLOT_WINDOW, SLOTS, STARTUP_ADDRESS, WINDOW_SLOTS,
 };
-use libradix::abi::{Status, address_space, memory, raises, random, ring, syscalls, thread};
+use libradix::abi::{
+    Status, address_space, memory, process, raises, random, ring, syscalls, thread,
+};
 use libradix::{println, startup, sys};
 
 /// Calls each program makes, and rounds of letting its partners go at
@@ -61,6 +66,21 @@ const SCRATCH_SLOTS: u32 = 32;
 const RING_SLOT: u32 = 100;
 const RING_AT: u64 = 0x3000_0000;
 const RING_ENTRIES: u32 = 8;
+
+/// The processes it makes at the start, in slots it may give up, and
+/// calls the process methods on most.
+const CHILD: u32 = 104;
+const CHILDREN: u32 = 2;
+
+/// Where `process.create` puts the endpoints and notifications it makes.
+/// Nobody else can reach those, and nobody would let go of a call that
+/// waited on one, so the program only ever looks at them and deletes
+/// them: no other slot it picks is one of these, and nothing is moved,
+/// copied or sent from them.
+const MADE: u32 = 108;
+const MADE_SLOTS: u32 = 2;
+/// Slots `process.create` cannot put anything in: past the end, or taken.
+const NOT_MADE: [u32; 3] = [SLOTS, u32::MAX, SLOT_THREAD];
 /// The longest a ring_enter waits for completions, in nanoseconds.
 const MAX_RING_WAIT_NS: u64 = 2_000_000;
 
@@ -77,7 +97,7 @@ const USER_TOP: u64 = address_space::USER_TOP;
 const KERNEL: u64 = 0xffff_8000_0000_0000;
 
 /// The methods it calls, by label.
-const LABELS: [u32; 17] = [
+const LABELS: [u32; 27] = [
     memory::RETYPE,
     memory::INFO,
     memory::frame::INFO,
@@ -95,6 +115,16 @@ const LABELS: [u32; 17] = [
     cap::REVOKE,
     cap::SEAL,
     cap::UNSEAL,
+    process::CREATE,
+    process::SET_NAME,
+    process::ADDRESS_SPACE,
+    process::GIVE,
+    process::SHARE,
+    process::KEEP,
+    process::START,
+    process::EXIT,
+    process::NOTIFY_EXIT,
+    process::INFO,
 ];
 
 /// xorshift64*, seeded through splitmix64 (Vigna).
@@ -176,26 +206,60 @@ impl Fuzzer {
                 SLOT_MEMORY,
                 SLOT_RANDOM,
                 SLOT_LOG,
+                SLOT_PROCESS,
                 RING_SLOT,
             ])),
             4..=10 => self.spare(),
             11 => self.rng.pick(&[0, 6, u64::from(SLOTS) - 1, u64::from(SLOTS)]),
             12 => u64::from(NO_SLOT),
-            13 => self.rng.below(u64::from(SLOTS)),
+            13 => {
+                let slot = self.rng.below(u64::from(SLOTS));
+                if (u64::from(MADE)..u64::from(MADE + MADE_SLOTS)).contains(&slot) {
+                    0
+                } else {
+                    slot
+                }
+            }
             14 => self.rng.next() & 0xffff_ffff,
             _ => self.rng.next(),
         }
     }
 
     /// A slot it may delete, move or revoke: the objects passed to it, the
-    /// receive window and its scratch slots.
+    /// receive window, the processes it made and its scratch slots.
     fn spare(&mut self) -> u64 {
         let slot = match self.rng.below(8) {
             0 | 1 => SLOT_FIRST_EXTRA + self.rng.below(u64::from(self.extra.max(1))) as u32,
             2 => SLOT_WINDOW + self.rng.below(u64::from(WINDOW_SLOTS)) as u32,
+            3 => CHILD + self.rng.below(u64::from(CHILDREN)) as u32,
             _ => SCRATCH + self.rng.below(u64::from(SCRATCH_SLOTS)) as u32,
         };
         u64::from(slot)
+    }
+
+    /// A process to call a process method on: mostly one it made, which
+    /// may be gone by now, or one a message brought.
+    fn process(&mut self) -> u64 {
+        match self.rng.below(8) {
+            0..=4 => u64::from(CHILD + self.rng.below(u64::from(CHILDREN)) as u32),
+            5 => self.spare(),
+            _ => self.slot(),
+        }
+    }
+
+    /// One of the slots `process.create` puts endpoints and notifications
+    /// in.
+    fn made(&mut self) -> u64 {
+        u64::from(MADE + self.rng.below(u64::from(MADE_SLOTS)) as u32)
+    }
+
+    /// A slot in a process it made, to give or start something in.
+    fn child_slot(&mut self) -> u64 {
+        match self.rng.below(8) {
+            0..=5 => self.rng.below(u64::from(process::MIN_SLOTS) + 4),
+            6 => self.rng.pick(&[u64::from(SLOTS), u64::from(process::MAX_SLOTS), u32::MAX.into()]),
+            _ => self.rng.next(),
+        }
     }
 
     /// An address the kernel may read or write: never memory the program
@@ -362,6 +426,53 @@ impl Fuzzer {
                 args[0] = self.slot();
                 args[1] = self.slot();
             }
+            process::CREATE => {
+                // Mostly a process, an endpoint or a notification; the
+                // kinds are those of radix-capability(2).
+                args[0] = self.rng.pick(&[4, 4, 5, 6, 0, 3, 14, 255]);
+                args[1] = match args[0] {
+                    4 => self.rng.pick(&[16, 16, 32, 256, 4096, 15, 4097, 0]),
+                    _ => self.rng.pick(&[0, 0, 0, 1, 16]),
+                };
+                args[2] = match args[0] {
+                    4 => self.spare(),
+                    // A slot that is not there, or taken, will do too.
+                    _ if self.rng.one_in(4) => self.rng.pick(&NOT_MADE).into(),
+                    _ => self.made(),
+                };
+            }
+            process::SET_NAME => {
+                (args[0], args[1]) = if self.rng.one_in(2) {
+                    (TEXT.as_ptr() as u64, self.rng.below(20))
+                } else {
+                    (self.address(), self.length())
+                };
+            }
+            process::ADDRESS_SPACE | process::KEEP => args[0] = self.spare(),
+            process::GIVE => {
+                args[0] = self.spare();
+                args[1] = self.child_slot();
+            }
+            process::SHARE => {
+                args[0] = self.slot();
+                args[1] = self.child_slot();
+                args[2] = self.rights();
+                args[3] = self.badge();
+            }
+            process::START => {
+                // Nothing runs at these in a process it made but what it
+                // mapped there: the thread soon faults, which ends the
+                // process.
+                args[0] = self.page_address();
+                args[1] = self.page_address();
+                args[2] = self.rng.next();
+                args[3] = self.child_slot();
+            }
+            process::EXIT => {
+                // 0 mostly, which the kernel log does not report.
+                args[0] = if self.rng.one_in(8) { self.rng.next() } else { 0 };
+            }
+            process::NOTIFY_EXIT => args[0] = self.notification(),
             _ => {
                 for word in &mut args {
                     *word = self.word();
@@ -371,6 +482,18 @@ impl Fuzzer {
         // Now and then, one word of any kind in place of a good one.
         if self.rng.one_in(8) {
             args[self.rng.below(8) as usize] = self.word();
+        }
+        // But `give` and `keep` move only capabilities it may give up,
+        if matches!(label, process::GIVE | process::KEEP) {
+            args[0] = self.spare();
+        }
+        // and whatever `process.create` makes other than a process goes
+        // where `MADE` says.
+        let to = args[2];
+        let kept_apart = (u64::from(MADE)..u64::from(MADE + MADE_SLOTS)).contains(&to)
+            || NOT_MADE.iter().any(|&slot| u64::from(slot) == to);
+        if label == process::CREATE && args[0] != 4 && !kept_apart {
+            args[2] = self.made();
         }
         args
     }
@@ -384,10 +507,22 @@ impl Fuzzer {
             return (syscalls::YIELD, [0; 10]);
         }
         let gives_up = matches!(label, cap::MOVE_TO | cap::DELETE | cap::REVOKE);
-        let target = if gives_up { self.spare() } else { self.slot() };
+        let target = if matches!(label, cap::DELETE | cap::INFO) && self.rng.one_in(4) {
+            self.made()
+        } else if gives_up {
+            self.spare()
+        } else if label >> 16 == process::CREATE >> 16 {
+            self.process()
+        } else {
+            self.slot()
+        };
         let mut words = self.rng.below(9);
         if self.rng.one_in(16) {
             words = self.rng.below(16);
+        }
+        // With no words, `give` and `keep` would move what is in slot 0.
+        if matches!(label, process::GIVE | process::KEEP) {
+            words = words.max(1);
         }
         let mut info = u64::from(label) | (words << INFO_WORDS_SHIFT);
         if self.rng.one_in(16) {
@@ -519,6 +654,11 @@ impl Fuzzer {
         };
         if self.rng.one_in(32) {
             args[self.rng.below(10) as usize] = self.word();
+        }
+        // Its own text, but never what follows it, which holds the lines
+        // the boot test looks for.
+        if number == syscalls::DEBUG_LOG && args[1] == TEXT.as_ptr() as u64 {
+            args[2] = args[2].min(TEXT.len() as u64);
         }
         // Nobody else completes a fuzzer's ring entries, so a ring_enter
         // that waits for completions gives up soon (and never waits for
@@ -661,6 +801,27 @@ fn documented(number: u64, info: u64, error: Kernel) -> bool {
             && raises::method(info as u32).is_some_and(|method| method.contains(&name)))
 }
 
+/// Makes the processes the fuzzer calls the process methods on, then
+/// deletes its own process's capability (which cannot be copied), so that
+/// no call it makes can end its process or start a thread in it. Its
+/// `exit` then ends it through its thread (radix-process(2)).
+///
+/// Slot 0, and `SLOT_PROCESS` once it is empty, get processes too, which
+/// stay there: a method called with fewer words than it takes reads 0 for
+/// the rest, so `process.create` would otherwise put endpoints there, in
+/// slots the program waits on.
+fn make_children() -> Result<(), Status> {
+    use libradix::SYS;
+    let make = |slots, to| process::create(&SYS, SLOT_PROCESS, cap::ObjectKind::Process, slots, to);
+    for k in 0..CHILDREN {
+        make(process::MIN_SLOTS << k, CHILD + k)?;
+    }
+    make(process::MIN_SLOTS, 0)?;
+    make(process::MIN_SLOTS, SCRATCH)?;
+    cap::delete(&SYS, SLOT_PROCESS)?;
+    cap::move_to(&SYS, SCRATCH, SLOT_PROCESS)
+}
+
 /// A word of the ring's header.
 fn ring_word(offset: usize) -> &'static AtomicU32 {
     // SAFETY: the ring is mapped read-write at RING_AT for as long as its
@@ -706,6 +867,10 @@ pub fn janitor() -> u64 {
 pub fn run(argument: u64) -> u64 {
     let seed = argument & 0xffff_ffff;
     let mut fuzzer = Fuzzer::new(seed, startup().extra);
+    if let Err(status) = make_children() {
+        println!("fuzz: no processes to call methods on: {status:#x?}");
+        return 1;
+    }
     if let Err(status) =
         syscalls::ring_setup(&libradix::SYS, SLOT_SPACE, RING_AT, RING_ENTRIES, RING_SLOT)
     {

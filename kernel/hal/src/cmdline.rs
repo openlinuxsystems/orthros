@@ -6,8 +6,10 @@
 //! GRUB passes everything after the kernel path on its `multiboot2` line.
 //! Flags are separated by spaces and are either a bare name (`kdb`) or
 //! `name=value` (`loglevel=debug`). Unknown flags are reported and
-//! otherwise ignored. Every flag in [`FLAGS`] is documented in
-//! orthros-boot(7); `ob docs --check` enforces that.
+//! otherwise ignored. A lone `--` ends the flags: the words after it are
+//! the first program's arguments ([`CommandLine::init_args`]), as on
+//! Linux. Every flag in [`FLAGS`] is documented in orthros-boot(7); `ob
+//! docs --check` enforces that.
 
 /// One flag the kernel understands.
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +81,12 @@ pub const FLAGS: &[Flag] = &[
         summary: "turn the lock-order checker on or off; it is on by default in debug builds only",
     },
     Flag {
+        name: "init",
+        value: Some("path"),
+        summary: "the first program, from the boot archive (/system/bin/spark if not given); \
+                  the words after a lone -- are its arguments",
+    },
+    Flag {
         name: "qemu-exit",
         value: None,
         summary: "leave QEMU through isa-debug-exit when boot finishes or the kernel panics",
@@ -127,12 +135,19 @@ impl<'a> CommandLine<'a> {
         self.text
     }
 
-    /// Every flag as (name, value).
+    /// Every flag as (name, value): the words up to a lone `--`.
     pub fn flags(&self) -> impl Iterator<Item = (&'a str, Option<&'a str>)> + 'a {
-        self.text.split_ascii_whitespace().map(|flag| match flag.split_once('=') {
-            Some((name, value)) => (name, Some(value)),
-            None => (flag, None),
+        self.text.split_ascii_whitespace().take_while(|&word| word != "--").map(|flag| {
+            match flag.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (flag, None),
+            }
         })
+    }
+
+    /// The words after a lone `--`: the first program's arguments.
+    pub fn init_args(&self) -> impl Iterator<Item = &'a str> + 'a {
+        self.text.split_ascii_whitespace().skip_while(|&word| word != "--").skip(1)
     }
 
     /// Whether the bare flag `name` is present.
@@ -166,6 +181,17 @@ mod tests {
         assert_eq!(line.value("loglevel"), Some("warn"));
         assert_eq!(line.value("kdb"), None);
         assert_eq!(line.unknown().collect::<Vec<_>>(), ["x"]);
+        assert_eq!(line.init_args().count(), 0);
+    }
+
+    #[test]
+    fn words_after_a_lone_dash_dash_are_arguments() {
+        let line = CommandLine::new("kdb init=/a -- /system/tests/hello -- kdb x=1");
+        assert!(line.has("kdb"));
+        assert_eq!(line.value("init"), Some("/a"));
+        assert_eq!(line.unknown().count(), 0);
+        let args: Vec<_> = line.init_args().collect();
+        assert_eq!(args, ["/system/tests/hello", "--", "kdb", "x=1"]);
     }
 
     #[test]

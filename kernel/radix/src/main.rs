@@ -162,7 +162,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 5)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (OrthrOS Phase 6)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -196,6 +196,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     caps::init();
     user::init();
     user::launch::set_modules(params.modules);
+    user::init::set_modules(params.modules);
 
     let online = if flags.has("nosmp") {
         info!("SMP: disabled by the nosmp flag");
@@ -215,6 +216,11 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
 
     info!("Boot complete.");
+    // The first program, unless a self-test has the machine to itself.
+    if settings.selftest.is_none() && user::init::has_archive() {
+        let path = flags.value("init").unwrap_or(user::init::DEFAULT_INIT);
+        user::init::start(path, flags.init_args());
+    }
     if settings.kdb {
         kdb::run_at_boot();
     }

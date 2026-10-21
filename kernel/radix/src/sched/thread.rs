@@ -340,9 +340,10 @@ impl Thread {
     }
 
     /// Asks it to stop: it sees [`Thread::should_stop`] and exits. Kernel
-    /// threads check for it where they can stop cleanly; the out-of-memory
-    /// policy uses it (threads of user programs, from Phase 6, are stopped
-    /// at the kernel boundary instead).
+    /// threads check for it where they can stop cleanly; threads of user
+    /// programs are stopped at their next entry into the kernel or return
+    /// from an interrupt. The out-of-memory policy and a process's end use
+    /// it.
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
     }

@@ -8,14 +8,13 @@
 //! - [`entry!`] and [`startup`]: where a program starts, and its start-up
 //!   page (radix-startup(2));
 //! - [`println!`], [`exit`] and the panic handler, through the kernel log
-//!   capability every program has;
+//!   and process capabilities every program has;
 //! - [`time`]: the time-stamp counter, for benchmarks;
 //! - [`ring`]: a radix-ring(2) ring's two queues;
 //! - [`channel`]: a shared-memory channel between two programs, a frame
 //!   both map and two notifications.
 //!
-//! Until Phase 6 there are no processes and no heap here: a program is
-//! one thread with what the kernel gave it.
+//! It has no heap and starts no programs: radix-rt, built on it, does.
 
 #![no_std]
 
@@ -42,8 +41,11 @@ pub fn startup() -> &'static Startup {
     unsafe { &*(startup::STARTUP_ADDRESS as *const Startup) }
 }
 
-/// Ends the program's thread with `code`.
+/// Ends the program, all its threads, with `code`: its process exits
+/// (radix-process(2)). Should its process capability be gone, only the
+/// calling thread ends, with `code` too.
 pub fn exit(code: u64) -> ! {
+    let _ = radix_abi::process::exit(&SYS, startup::SLOT_PROCESS, code);
     let _ = radix_abi::thread::exit(&SYS, startup::SLOT_THREAD, code);
     // The kernel does not return from a thread's own exit.
     loop {

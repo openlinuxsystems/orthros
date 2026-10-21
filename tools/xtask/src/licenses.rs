@@ -98,8 +98,9 @@ pub struct Extras<'a> {
     pub mkrescue: &'a Path,
     /// Whether the image carries Intel microcode.
     pub microcode: bool,
-    /// Whether the image carries the user test programs.
-    pub usertests: bool,
+    /// Whether the image carries the user programs: the test image and
+    /// the boot archive.
+    pub programs: bool,
 }
 
 /// Lists the image's components, checks their licenses, and writes the
@@ -107,11 +108,14 @@ pub struct Extras<'a> {
 pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String> {
     let mut packages = rust_crates(ctx, &KERNEL_PROGRAM)?;
     packages.extend(sysroot_crates(ctx)?);
-    if extras.usertests {
-        for package in rust_crates(ctx, &USER_PROGRAM)? {
-            // `core` and the like are listed once, from the kernel.
-            if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
-                packages.push(package);
+    if extras.programs {
+        for program in &USER_PROGRAMS {
+            for package in rust_crates(ctx, program)? {
+                // `core` and the like are listed once, from the kernel.
+                if !packages.iter().any(|p| p.name == package.name && p.version == package.version)
+                {
+                    packages.push(package);
+                }
             }
         }
     }
@@ -169,12 +173,26 @@ const KERNEL_PROGRAM: Program = Program {
 };
 
 /// The user programs are /system code too: permissive licenses only.
-const USER_PROGRAM: Program = Program {
-    what: "the user test programs",
-    workspace: "userspace",
-    package: "usertests",
-    target: userspace::TARGET_SPEC,
-};
+const USER_PROGRAMS: [Program; 3] = [
+    Program {
+        what: "the user test programs",
+        workspace: "userspace",
+        package: "usertests",
+        target: userspace::TARGET_SPEC,
+    },
+    Program {
+        what: "Spark",
+        workspace: "userspace",
+        package: "spark",
+        target: userspace::TARGET_SPEC,
+    },
+    Program {
+        what: "the hello test program",
+        workspace: "userspace",
+        package: "hello",
+        target: userspace::TARGET_SPEC,
+    },
+];
 
 /// The crates linked into a program, from `cargo tree`. Build scripts and
 /// dev-dependencies never reach the image, so only normal edges count.

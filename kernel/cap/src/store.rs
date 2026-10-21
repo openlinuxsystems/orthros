@@ -46,6 +46,10 @@ pub const MAX_SLOTS: u32 = 1 << 16;
 /// The most objects one retype can make.
 pub const MAX_RETYPE: u32 = 1024;
 
+/// The bytes each slot of a capability space takes, for charging spaces
+/// to whoever asked for them.
+pub const SLOT_BYTES: usize = core::mem::size_of::<Slot>();
+
 /// The name of a capability space: its index in the store and that
 /// index's generation, so a name stays wrong once the space is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

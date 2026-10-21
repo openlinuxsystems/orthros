@@ -102,6 +102,7 @@ dependencies = [
  "radix-abi",
  "radix-arch-aarch64",
  "radix-arch-x86_64",
+ "radix-bootfs",
  "radix-cap",
  "radix-elf",
  "radix-fbcon",
@@ -148,6 +149,13 @@ dependencies = [
  "radix-random",
  "radix-relocs",
  "radix-sync",
+]
+
+[[package]]
+name = "radix-bootfs"
+version = "0.0.1"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

@@ -58,3 +58,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0044](0044-objects-found-without-a-shared-lock.md) | Objects are found through a per-CPU cache of weak references, and endpoint calls on both CPUs at once are held to Linux | Accepted |
 | [0045](0045-instruction-budgets-in-ci.md) | CI holds every operation on one CPU to an instruction budget, counted by QEMU | Accepted |
 | [0046](0046-performance-gate-on-the-fastest-of-three-runs.md) | The performance gate measures Radix and Linux three times in turn and counts each operation's fastest run | Accepted |
+| [0047](0047-processes.md) | A process is a capability-named object that its maker builds, that ends with its threads or its maker, and that is reaped by deleting its last capability | Accepted |
+| [0048](0048-static-pie-programs-and-user-aslr.md) | Programs are static position-independent executables, placed at random addresses by whoever loads them | Accepted |
+| [0049](0049-boot-archive.md) | The programs a machine starts with come in a ustar boot archive that GRUB loads as a module, checked whole before use | Accepted |
+| [0050](0050-spark-is-started-by-the-kernel-from-the-boot-archive.md) | The kernel starts one program, Spark, from the boot archive, gives it the archive and a pool of memory, and stops if it ends | Accepted |
+| [0051](0051-radix-rt-runtime.md) | radix-rt is the Rust runtime of native programs: a heap, arguments, the boot archive and spawning, on top of libradix | Accepted |

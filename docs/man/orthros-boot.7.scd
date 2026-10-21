@@ -54,9 +54,11 @@ _/system/share/licenses/_
 . GRUB shows its menu for *boot.timeout* seconds, on the screen and on the
   first serial port.
 . GRUB loads _/boot/radix_ through the Multiboot2 protocol, the
-  microcode file as a module if the image has one, and the user test
-  programs (_/boot/usertests_) as a module with the word *usertests* if
-  the image has them. The kernel's header
+  microcode file as a module if the image has one, the boot archive
+  (_/boot/bootfs_, the programs the system starts with) as a module with
+  the word *bootfs*, and the self-tests' programs (_/boot/usertests_) as
+  a module with the word *usertests* if the image has them. The kernel's
+  header
   asks for a linear framebuffer of any size with 32 bits per pixel. Under
   UEFI, GRUB keeps the firmware's graphics mode (*gfxpayload=keep*), which
   is normally the screen's native resolution; under BIOS it sets a VESA
@@ -111,9 +113,8 @@ _/system/share/licenses/_
 . The kernel sets up user mode: the *User mode:* line gives the system
   call entry, the user half of every address space and whether SMEP and
   SMAP protect the kernel from it, and the *User:* line the size of the
-  *usertests* image, if GRUB loaded one. Until Phase 6 brings processes,
-  the only programs are those the *user*, *ipc* and *bench* self-tests
-  start from that image (see *radix-ipc*(7)).
+  *usertests* image, if GRUB loaded one, which only the self-tests start
+  programs from (see *radix-debug*(7)).
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
@@ -123,9 +124,16 @@ _/system/share/licenses/_
   stacks of threads that have exited, and the out-of-memory *supervisor*
   (see *radix-scheduling*(7)). It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
-  named by *selftest* if any, and prints *Boot complete.* With the *kdb*
-  flag it then waits for debugger commands; otherwise *kmain* exits and
-  the CPUs idle until a thread has work.
+  named by *selftest* if any, and prints *Boot complete.*
+. Unless a self-test ran, the kernel starts the first program: it checks
+  the boot archive, finds the program *init* names in it
+  (_/system/bin/spark_ by default) and starts it in a process of its
+  own, with the words after *--* on the command line as its arguments.
+  The *Init:* lines name the program and its process. That program,
+  Spark, starts every other one, and the kernel stops if it ends; see
+  *spark*(8) and *radix-processes*(7).
+. With the *kdb* flag the kernel then waits for debugger commands;
+  otherwise *kmain* exits and the CPUs idle until a thread has work.
 
 A boot on QEMU with four CPUs ends like this (times in seconds since the
 kernel started; messages before timer calibration show 0):
@@ -136,7 +144,7 @@ kernel started; messages before timer calibration show 0):
 [    0.399102] Lock checker: off (the lockdep flag turns it on)
 [    0.401388] Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.427524] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
-[    0.468681] User: the usertests image is 96 KiB
+[    0.468681] User: the usertests image is 152 KiB
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online
@@ -339,7 +347,18 @@ GRUB passes everything after the kernel path on the *multiboot2* line.
 *ob* fills it from *boot.cmdline* in _orthros.toml_, or from
 *--cmdline* on *ob image* and *ob run*. Flags are separated by spaces and
 are either a bare name or _name_=_value_. The kernel warns about unknown
-flags and otherwise ignores them.
+flags and otherwise ignores them. A lone *--* ends the kernel's flags:
+the words after it are the first program's arguments, as Linux passes
+them to *init*, and the kernel does not read them.
+
+*init*=_path_
+	Start the program at _path_ in the boot archive as the first
+	program, instead of _/system/bin/spark_. See *spark*(8).
+
+*--* _arguments_...
+	Pass _arguments_ to the first program, after its path; at most 32
+	are passed. For example *-- /system/tests/hello one two* has Spark
+	start _/system/tests/hello_ with the arguments *one* and *two*.
 
 *loglevel*=_level_
 	The lowest level of message shown on the serial port and the screen:
@@ -442,7 +461,7 @@ the steps of a smoke test and its results.
 
 # SEE ALSO
 
-*radix-debug*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
+*spark*(8), *radix-processes*(7), *radix-debug*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
 
 The Multiboot2 specification:
 https://www.gnu.org/software/grub/manual/multiboot2/

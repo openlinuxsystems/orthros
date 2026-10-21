@@ -8,15 +8,24 @@
 //! it, so that when its last capability goes (and its memory returns to
 //! the memory object it came from) it is unmapped from every one of them
 //! first: a program never keeps a mapping of memory the kernel has handed
-//! to someone else. Frames are zeroed when they are made, so a program
-//! never sees what the memory held before.
+//! to someone else.
 //!
-//! Lock order: a frame's state, then an address space's regions (then the
+//! A program never sees what a frame's memory held before: frames are
+//! zeroed before anything maps them. Retyping records new frames under the
+//! capability store's lock, and the thread that retyped them zeroes them
+//! after letting go of it, in steps of [`ZERO_STEP`] pages, before its
+//! call returns; a thread that maps one sooner zeroes what is left itself
+//! ([`FrameObject::zero`]). Deleting a frame part-way waits for the step
+//! under way and stops the rest, before its memory can go back. So a large
+//! retype holds up no other change to the store.
+//!
+//! Lock order: the capability store, then a frame's zeroing step, then its
+//! list of address spaces, then an address space's regions (then the
 //! architecture's page-table lock).
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_abi::address_space::PAGE_SIZE;
 use radix_abi::capability::Rights as AbiRights;
@@ -91,12 +100,22 @@ pub struct SpaceObject {
     regions: Mutex<Vec<Region, Kmalloc>>,
 }
 
+/// Pages a step of zeroing a new frame clears: 256 KiB, a few tens of
+/// microseconds, which is as long as deleting the frame may wait for it.
+pub const ZERO_STEP: u64 = 64;
+
 /// A frame object: 2^order pages of RAM a memory object was retyped into.
 pub struct FrameObject {
     phys: u64,
     pages: u64,
     /// Set when its last capability is gone; nothing maps it after.
     closed: AtomicBool,
+    /// How many of its pages, from the first, are zero: all of them before
+    /// anything maps it.
+    zeroed: AtomicU64,
+    /// Held while a step of zeroing runs, so that closing waits for the
+    /// step under way and no step starts after it.
+    zeroing: Mutex<()>,
     /// The address spaces that map it, or did.
     spaces: Mutex<Vec<Weak<SpaceObject, Kmalloc>, Kmalloc>>,
 }
@@ -245,21 +264,53 @@ impl Drop for SpaceObject {
 }
 
 impl FrameObject {
-    /// A frame for the `pages` pages from `phys`; zeroes them.
+    /// A frame for the `pages` pages from `phys`, which are not zeroed yet:
+    /// [`FrameObject::zero`] does that, and nothing maps the frame before.
     pub fn new(phys: u64, pages: u64) -> Option<FrameRef> {
-        Arch::zero_frames(phys, pages);
         let frame = FrameObject {
             phys,
             pages,
             closed: AtomicBool::new(false),
+            zeroed: AtomicU64::new(0),
+            zeroing: Mutex::new(()),
             spaces: Mutex::new(Vec::new_in(kmalloc())),
         };
         Arc::try_new_in(frame, kmalloc()).ok()
     }
 
-    /// Its first page's physical address.
-    pub fn phys(&self) -> u64 {
-        self.phys
+    /// Zeroes the pages not zeroed yet, a step of [`ZERO_STEP`] pages at a
+    /// time, unless the frame closes first. Returns whether every page is
+    /// zero. Never called with the capability store's lock held: closing
+    /// holds it and waits for the step under way.
+    pub fn zero(&self) -> bool {
+        loop {
+            if self.zeroed.load(Ordering::Acquire) == self.pages {
+                return true;
+            }
+            let _step = self.zeroing.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            // Another thread may have taken a step while this one waited.
+            let done = self.zeroed.load(Ordering::Relaxed);
+            let pages = (self.pages - done).min(ZERO_STEP);
+            Arch::zero_frames(self.phys + done * PAGE_SIZE, pages);
+            self.zeroed.store(done + pages, Ordering::Release);
+        }
+    }
+
+    /// Copies `bytes` into the frame from byte `offset`, zeroing it first:
+    /// for the kernel's loader, which fills frames before mapping them.
+    pub fn write(&self, offset: u64, bytes: &[u8]) -> Result<()> {
+        let end = offset.checked_add(bytes.len() as u64).ok_or(error(Kernel::OutOfRange))?;
+        if end > self.pages * PAGE_SIZE {
+            return Err(error(Kernel::OutOfRange));
+        }
+        if !self.zero() {
+            return Err(error(Kernel::EmptySlot));
+        }
+        Arch::write_frames(self.phys + offset, bytes);
+        Ok(())
     }
 
     /// How many pages it has.
@@ -280,6 +331,10 @@ impl FrameObject {
         if offset.checked_add(pages).is_none_or(|end| end > frame.pages) {
             return Err(error(Kernel::OutOfRange));
         }
+        // Its old contents are never mapped.
+        if !frame.zero() {
+            return Err(error(Kernel::EmptySlot));
+        }
         // Held across the mapping, so that `close` waits for it and then
         // finds the space in the list.
         let mut spaces = frame.spaces.lock();
@@ -294,11 +349,20 @@ impl FrameObject {
         space.map(start, pages, &Backing::Frame(frame.clone()), offset, access)
     }
 
-    /// Its last capability is gone: unmaps it from every address space.
+    /// Its last capability is gone: stops zeroing it, then unmaps it from
+    /// every address space. Called with the capability store's lock held,
+    /// before its memory can go back to be retyped again.
     pub fn close(frame: &FrameRef) {
-        let spaces = {
-            let mut spaces = frame.spaces.lock();
+        // A step of zeroing under way ends first, and none starts after:
+        // nothing writes to the memory once it has gone back.
+        {
+            let _step = frame.zeroing.lock();
             frame.closed.store(true, Ordering::Release);
+        }
+        let spaces = {
+            // A mapping under way when the frame closed has added its
+            // space to the list by the time this lock is taken.
+            let mut spaces = frame.spaces.lock();
             core::mem::replace(&mut *spaces, Vec::new_in(kmalloc()))
         };
         let backing = Backing::Frame(frame.clone());
@@ -343,14 +407,13 @@ pub fn cap_rights(rights: AbiRights) -> radix_cap::Rights {
     radix_cap::Rights::from_bits_truncate(rights.bits() as u16)
 }
 
-/// Makes frame objects for the frames `store` just retyped: `ids` and
-/// their extents (first page frame, pages). Called with the store locked,
-/// so no capability to them is used before they are zeroed and recorded.
-pub fn frames_made(store: &Store, ids: &[(ObjectId, u64, u64)]) -> Result<()> {
-    for &(id, base, pages) in ids {
-        let frame = FrameObject::new(base * PAGE_SIZE, pages).ok_or(error(Kernel::NoMemory))?;
-        super::objects::insert(store, id, super::objects::Object::Frame(frame))
-            .map_err(|_| error(Kernel::NoMemory))?;
-    }
-    Ok(())
+/// Makes the frame object for a frame `store` just retyped: `id`, and
+/// its extent's first page frame and pages. Called with the store locked,
+/// so the object is recorded before any capability to it can be used; it
+/// is zeroed later ([`FrameObject::zero`]), and returned for that.
+pub fn frame_made(store: &Store, id: ObjectId, base: u64, pages: u64) -> Result<FrameRef> {
+    let frame = FrameObject::new(base * PAGE_SIZE, pages).ok_or(error(Kernel::NoMemory))?;
+    super::objects::insert(store, id, super::objects::Object::Frame(frame.clone()))
+        .map_err(|_| error(Kernel::NoMemory))?;
+    Ok(frame)
 }

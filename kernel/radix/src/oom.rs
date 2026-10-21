@@ -24,7 +24,7 @@
 //!    again.
 //! 4. A domain with a supervisor is restarted once its threads are gone:
 //!    the supervisor function runs on the `supervisor` thread. Spark takes
-//!    this over for the services it runs (Phase 6).
+//!    this over for the services it supervises (Phase 9).
 //!
 //! One thread runs the policy at a time. A thread that comes in while
 //! another stop is under way, or whose own domain is being stopped, does
