@@ -481,6 +481,15 @@ fn copy_fixup(vector: u8, frame: &TrapFrame) -> Option<u64> {
 fn nmi(frame: &TrapFrame) {
     if STOPPING.load(Ordering::Acquire) {
         let cpu = percpu::current();
+        // Where it was, for the panic report: a CPU that did not answer a
+        // request may be stuck there.
+        let mut trace = [0; percpu::STOPPED_FRAMES];
+        trace[0] = frame.rip as usize;
+        let len =
+            1 + <crate::Arch as radix_hal::Cpu>::backtrace(frame.rbp as usize, &mut trace[1..]);
+        for (slot, &address) in cpu.stopped_at.iter().zip(&trace[..len]) {
+            slot.store(address, Ordering::Relaxed);
+        }
         cpu.online.store(false, Ordering::Relaxed);
         cpu.stopped.store(true, Ordering::Release);
         STOPPED.fetch_add(1, Ordering::AcqRel);

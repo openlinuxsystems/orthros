@@ -15,14 +15,21 @@
 //! - `ipc`: user-mode programs ping-pong over an endpoint (on one CPU and
 //!   across two), pass capabilities in messages, signal notifications,
 //!   talk through a shared-memory channel, and ping-pong over two rings.
+//! - `fuzz`: groups of three programs make random system calls, methods
+//!   and ring entries, with arguments at the edges of what the kernel
+//!   accepts, sharing endpoints, notifications and memory; whatever still
+//!   waits at the end is stopped. The kernel must not panic or trip the
+//!   lock checker, every failed call must return a kernel error that its
+//!   documentation lists and nothing else, and the capability store must
+//!   pass its audit.
 //! - `bench`: measures system calls, IPC round trips, context switches,
 //!   fresh pages, memory bandwidth, TLB shootdowns and system calls on two
 //!   CPUs at once (`ob bench` reads the numbers, docs/design/ipc.md says
 //!   how).
 //!
-//! Each test logs `selftest NAME: passed` or `failed` lines. `user` and
-//! `ipc` also check that the capability store and the object registry hold
-//! what they held before, once every program has gone.
+//! Each test logs `selftest NAME: passed` or `failed` lines. `user`, `ipc`
+//! and `fuzz` also check that the capability store and the object registry
+//! hold what they held before, once every program has gone.
 
 use radix_cap::{KINDS, Rights};
 use radix_klog::{error, info, warn};
@@ -55,6 +62,8 @@ mod role {
     pub const SHOOT_B: u32 = 18;
     pub const PARALLEL_A: u32 = 19;
     pub const PARALLEL_B: u32 = 20;
+    pub const FUZZ: u32 = 21;
+    pub const FUZZ_JANITOR: u32 = 22;
 }
 
 /// The faults the fault program makes, by its argument.
@@ -250,6 +259,113 @@ fn pair(
     })
 }
 
+/// Groups of fuzzers `fuzz` runs, and the fuzzers in each; each group also
+/// has a janitor.
+const FUZZ_GROUPS: u64 = 8;
+const FUZZERS: u64 = 3;
+/// How long a group gets at most, in nanoseconds; then the kernel stops the
+/// fuzzers still waiting. The janitor keeps any from waiting long, so they
+/// all finish well before.
+const FUZZ_TIME_NS: u64 = 30_000_000_000;
+/// How often the kernel looks at a group of fuzzers.
+const FUZZ_POLL_NS: u64 = 50_000_000;
+/// The memory object a group's fuzzers share: 2^order pages.
+const FUZZ_MEMORY_ORDER: u32 = 6;
+
+/// `selftest=fuzz`.
+pub fn fuzz() {
+    if !has_image("fuzz") {
+        return;
+    }
+    let mut outcome = Outcome::new("fuzz");
+    let before = census();
+    let first = crate::settings().fuzz_seed.unwrap_or_else(radix_random::u64) & 0xffff_ffff;
+    let seed = |n: u64| first.wrapping_add(n) & 0xffff_ffff;
+    let last = seed(FUZZ_GROUPS * FUZZERS - 1);
+    info!(
+        "selftest fuzz: seeds {first:#x} to {last:#x}; boot with fuzz-seed={first} to repeat them"
+    );
+    let (mut finished, mut stopped) = (0, 0);
+    for round in 0..FUZZ_GROUPS {
+        let made = group(&mut outcome, "fuzzers", |group| {
+            let endpoints = [group.endpoint().map_err(|_| ())?, group.endpoint().map_err(|_| ())?];
+            let notifications =
+                [group.notification().map_err(|_| ())?, group.notification().map_err(|_| ())?];
+            let memory = group.memory(FUZZ_MEMORY_ORDER).map_err(|_| ())?;
+            // Badged and unbadged capabilities, as the programs' slots 8 to
+            // 12 (`userspace/usertests/src/fuzz.rs` counts on that order).
+            let extra = [
+                (endpoints[0], ALL, 0),
+                (endpoints[1], ALL, 7),
+                (notifications[0], ALL, 0),
+                (notifications[1], ALL, 0x30),
+                (memory, ALL, 0),
+            ];
+            for k in 0..FUZZERS {
+                let argument = seed(round * FUZZERS + k);
+                let cpu = k as usize % online().max(1);
+                start(
+                    group,
+                    Spec { name: "fuzz", role: role::FUZZ, argument, cpu, extra: &extra },
+                )?;
+            }
+            let cpu = FUZZERS as usize % online().max(1);
+            let janitor =
+                Spec { name: "janitor", role: role::FUZZ_JANITOR, argument: 0, cpu, extra: &extra };
+            start(group, janitor)
+        });
+        let Some(group) = made else { continue };
+        let fuzzers = 0..FUZZERS as usize;
+        let started = sched::now_ns();
+        while !fuzzers.clone().all(|index| group.status(index).is_some())
+            && sched::now_ns() - started < FUZZ_TIME_NS
+        {
+            group.wait(FUZZ_POLL_NS);
+        }
+        if !fuzzers.clone().all(|index| group.status(index).is_some()) {
+            // What the fuzzers wait for, for whoever reads the log.
+            info!("selftest fuzz: fuzzers still running after {} s:", FUZZ_TIME_NS / 1_000_000_000);
+            sched::write_threads(&mut |line| info!("{line}"));
+            sched::write_queues(&mut |line| info!("{line}"));
+        }
+        group.stop();
+        for index in fuzzers {
+            let argument = seed(round * FUZZERS + index as u64);
+            match group.status(index) {
+                Some(0) => finished += 1,
+                Some(EXIT_STOPPED) => stopped += 1,
+                Some(status) => outcome.fail(format_args!(
+                    "the fuzzer with seed {argument:#x} exited with {status:#x}"
+                )),
+                None => {
+                    outcome.fail(format_args!("the fuzzer with seed {argument:#x} did not exit"))
+                }
+            }
+        }
+        match group.status(FUZZERS as usize) {
+            Some(EXIT_STOPPED) => {}
+            status => outcome.fail(format_args!("the janitor ended with {status:#x?}")),
+        }
+    }
+    // Waiting fuzzers can be stopped, but the janitor lets go of each soon
+    // enough that most should get through.
+    let fuzzers = FUZZ_GROUPS * FUZZERS;
+    if finished < fuzzers / 2 {
+        outcome.fail(format_args!("only {finished} of {fuzzers} fuzzers got through their calls"));
+    }
+    match caps::with(|store| store.audit().map(|_| ())) {
+        Ok(Ok(())) => {}
+        Ok(Err(problem)) => outcome.fail(format_args!("the capability store's audit: {problem}")),
+        Err(err) => outcome.fail(format_args!("no capability store: {err}")),
+    }
+    outcome.nothing_left(before);
+    outcome.end(format_args!(
+        "{finished} of {fuzzers} fuzzers got through their calls and {stopped} were stopped while \
+         waiting; every failed call returned a kernel error its documentation lists and nothing \
+         else, the store passed its audit and nothing was left behind"
+    ));
+}
+
 /// The pairs of programs the `ipc` and `bench` tests run.
 const PAIRS: [(&str, (u32, u32)); 5] = [
     ("endpoint", (role::CALL, role::ECHO)),
@@ -329,10 +445,36 @@ pub fn bench() {
     if online() >= 2 {
         let shoot = (role::SHOOT_A, role::SHOOT_B);
         bench_pair(&mut outcome, "tlb_shootdown", shoot, SHOOT_ROUNDS, true);
-        let parallel = (role::PARALLEL_A, role::PARALLEL_B);
-        bench_pair(&mut outcome, "parallel", parallel, SYSCALL_ROUNDS, true);
+        parallel(&mut outcome);
     }
     outcome.end(format_args!("the numbers are above, one BENCH line each"));
+}
+
+/// The parallel benchmarks: a pair of programs, one on each of the first
+/// two CPUs, making system calls at once, then each calling an echo
+/// server of its own on its own CPU.
+fn parallel(outcome: &mut Outcome) {
+    let before = sched::counters();
+    let argument = BENCH | ACROSS | SYSCALL_ROUNDS;
+    let made = group(outcome, "parallel", |group| {
+        let endpoints = [group.endpoint().map_err(|_| ())?, group.endpoint().map_err(|_| ())?];
+        let first = group.notification().map_err(|_| ())?;
+        let second = group.notification().map_err(|_| ())?;
+        let extra_a = [(endpoints[0], ALL, 0), (first, ALL, 0), (second, ALL, 0)];
+        let extra_b = [(endpoints[1], ALL, 0), (second, ALL, 0), (first, ALL, 0)];
+        let (role_a, role_b) = (role::PARALLEL_A, role::PARALLEL_B);
+        start(group, Spec { name: "a", role: role_a, argument, cpu: 0, extra: &extra_a })?;
+        start(group, Spec { name: "b", role: role_b, argument, cpu: 1, extra: &extra_b })?;
+        for (cpu, endpoint) in endpoints.into_iter().enumerate() {
+            let extra = [(endpoint, ALL, 0)];
+            start(group, Spec { name: "echo", role: role::ECHO, argument: 0, cpu, extra: &extra })?;
+        }
+        Ok(())
+    });
+    if let Some(group) = made {
+        outcome.check("parallel", &group, 0);
+        report_counters("parallel", SYSCALL_ROUNDS, &before);
+    }
 }
 
 /// Runs a pair of benchmark programs and reports what the kernel did.

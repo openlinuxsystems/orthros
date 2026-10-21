@@ -11,10 +11,9 @@
 //! system call entry uses before it has a stack (`crate::user`); `gs:[40]`
 //! is the scheduler's word for the running thread, which it reads in one
 //! instruction to find the running thread without holding preemption off.
-//! The boot
-//! CPU sets GS base first thing in [`crate::entry`], before any code that
-//! asks which CPU it is running on. In user mode GS base is the program's
-//! (zero); the entry paths swap it with `swapgs`.
+//! The boot CPU sets GS base first thing in [`crate::entry`], before any
+//! code that asks which CPU it is running on. In user mode GS base is the
+//! program's (zero); the entry paths swap it with `swapgs`.
 //!
 //! Each CPU also has its own GDT and TSS. The GDT has the kernel's code and
 //! data segments, then the user segments in the order SYSRET needs them.
@@ -31,6 +30,9 @@ use radix_hal::{Fault, MAX_CPUS};
 use radix_sync::{Once, SpinLock, TakeOnce};
 
 use crate::cpu::{self, msr};
+
+/// Frames of a stopped CPU's backtrace that the panic report shows.
+pub const STOPPED_FRAMES: usize = 12;
 
 /// Code segment selector.
 pub const KERNEL_CS: u16 = 0x08;
@@ -143,6 +145,9 @@ pub struct PerCpu {
     pub online: AtomicBool,
     /// Stopped by the panic path.
     pub stopped: AtomicBool,
+    /// Where the panic path's NMI stopped this CPU: the interrupted
+    /// instruction and its callers, 0 past the last.
+    pub stopped_at: [AtomicUsize; STOPPED_FRAMES],
     /// Timer interrupts taken.
     pub ticks: AtomicU64,
     /// Ping IPIs received.
@@ -198,6 +203,7 @@ impl PerCpu {
             node: AtomicU8::new(0),
             online: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
+            stopped_at: [const { AtomicUsize::new(0) }; STOPPED_FRAMES],
             ticks: AtomicU64::new(0),
             pings: AtomicU64::new(0),
             tlb_generation: AtomicU64::new(0),
@@ -462,8 +468,9 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
     // `TakeOnce` was just claimed), its code and data descriptors match the
     // flat 64-bit model the kernel runs in, and the TSS descriptor points
     // at the TSS next to it. Reloading CS through a far return and the data
-    // segments keeps every address the same. GS base is restored by the
-    // caller's earlier `set_current` value below, since loading GS clears it.
+    // segments keeps every address the same. Loading GS clears its base,
+    // which `set_current` sets again right after; this runs before the CPU
+    // loads its IDT and takes interrupts, so nothing uses GS meanwhile.
     unsafe {
         asm!(
             "lgdt [{pointer}]",

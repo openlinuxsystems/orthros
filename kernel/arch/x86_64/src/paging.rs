@@ -143,14 +143,22 @@ static HUGE_DIRECT_MAP: AtomicBool = AtomicBool::new(false);
 /// writable and executable.
 static WX_AUDIT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-/// A page table, reached through the direct map.
-pub(crate) fn table(phys: u64) -> &'static mut [u64; 512] {
+/// A page table, reached through the direct map. Its entries are atomics
+/// because the CPU writes them too (the accessed and dirty bits) and other
+/// CPUs read them without the lock (a new address space copies the
+/// kernel's half); every change the kernel makes still holds `STATE` or
+/// its address space's lock. Relaxed loads and stores are plain moves.
+/// Nothing reads the accessed and dirty bits yet, so a store may lose one
+/// the MMU set since the load; whatever comes to use them (writing pages
+/// back) must clear entries with an exchange instead.
+pub(crate) fn table(phys: u64) -> &'static [AtomicU64; 512] {
     // SAFETY: `phys` is a page-table page the kernel allocated, in RAM
     // that the direct map (or the boot alias of its first 4 GiB, where
-    // tables come from before the kernel's tables are live) reaches. Page
-    // tables are only changed with `STATE` (or their address space's
-    // lock) held, and no other Rust reference to them exists.
-    unsafe { &mut *(memory::phys_to_virt(phys) as *mut [u64; 512]) }
+    // tables come from before the kernel's tables are live) reaches, and
+    // it stays allocated while the table is in use. `AtomicU64` has the
+    // size and alignment of `u64`, and every access goes through it, so
+    // the MMU's writes and other CPUs' reads are not data races.
+    unsafe { &*(memory::phys_to_virt(phys) as *const [AtomicU64; 512]) }
 }
 
 /// A zeroed page for a page table. A PML4 must be below 4 GiB (the AP
@@ -169,36 +177,39 @@ pub(crate) fn entry(
     virt: u64,
     level: u32,
     user: bool,
-) -> Result<&'static mut u64, MapError> {
+) -> Result<&'static AtomicU64, MapError> {
     let mut table_phys = root;
     for current in ((level + 1)..=4).rev() {
         let index = ((virt >> (12 + 9 * (current - 1))) & 0x1ff) as usize;
-        let slot = &mut table(table_phys)[index];
-        if *slot & PRESENT == 0 {
-            *slot = new_table(false)? | PRESENT | WRITABLE | if user { USER } else { 0 };
-        } else if *slot & LARGE != 0 {
+        let slot = &table(table_phys)[index];
+        let mut value = slot.load(Ordering::Relaxed);
+        if value & PRESENT == 0 {
+            value = new_table(false)? | PRESENT | WRITABLE | if user { USER } else { 0 };
+            slot.store(value, Ordering::Relaxed);
+        } else if value & LARGE != 0 {
             return Err(MapError::LargePage);
-        } else if user {
-            *slot |= USER;
+        } else if user && value & USER == 0 {
+            value |= USER;
+            slot.store(value, Ordering::Relaxed);
         }
-        table_phys = *slot & ADDRESS;
+        table_phys = value & ADDRESS;
     }
     let index = ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
-    Ok(&mut table(table_phys)[index])
+    Ok(&table(table_phys)[index])
 }
 
 /// The 4 KiB leaf entry for `virt` under `root`, if its tables exist.
-pub(crate) fn leaf(root: u64, virt: u64) -> Option<&'static mut u64> {
+pub(crate) fn leaf(root: u64, virt: u64) -> Option<&'static AtomicU64> {
     let mut table_phys = root;
     for level in (1..4).rev() {
         let index = ((virt >> (12 + 9 * level)) & 0x1ff) as usize;
-        let slot = table(table_phys)[index];
+        let slot = table(table_phys)[index].load(Ordering::Relaxed);
         if slot & PRESENT == 0 || slot & LARGE != 0 {
             return None;
         }
         table_phys = slot & ADDRESS;
     }
-    Some(&mut table(table_phys)[((virt >> 12) & 0x1ff) as usize])
+    Some(&table(table_phys)[((virt >> 12) & 0x1ff) as usize])
 }
 
 fn leaf_flags(state: &State, access: Access, cache: Cache) -> u64 {
@@ -236,14 +247,14 @@ pub(crate) fn access_of(entry: u64) -> Access {
 }
 
 fn map_4k(root: u64, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
-    *entry(root, virt, 1, flags & USER != 0)? = phys | flags;
+    entry(root, virt, 1, flags & USER != 0)?.store(phys | flags, Ordering::Relaxed);
     Ok(())
 }
 
 fn map_large(root: u64, virt: u64, phys: u64, flags: u64, level: u32) -> Result<(), MapError> {
     // In large-page entries the PAT bit moves to bit 12; the kernel only
     // maps write-back memory with large pages, so it stays clear.
-    *entry(root, virt, level, false)? = phys | flags | LARGE;
+    entry(root, virt, level, false)?.store(phys | flags | LARGE, Ordering::Relaxed);
     Ok(())
 }
 
@@ -421,7 +432,8 @@ pub fn build_and_switch(use_pcid: bool) {
 /// `nx` is the no-execute bit in use.
 fn audit(phys: u64, level: u32, base: u64, above: (bool, bool), nx: u64) -> (u64, u64) {
     let (mut checked, mut bad) = (0, 0);
-    for (index, &entry) in table(phys).iter().enumerate() {
+    for (index, entry) in table(phys).iter().enumerate() {
+        let entry = entry.load(Ordering::Relaxed);
         if entry & PRESENT == 0 {
             continue;
         }
@@ -525,8 +537,12 @@ pub fn unmap_area(virt: usize, pages: usize) {
     let root = {
         let state = STATE.lock();
         for page in 0..pages {
-            match leaf(state.pml4, area + page * PAGE) {
-                Some(slot) if *slot & PRESENT != 0 => *slot &= !PRESENT,
+            let slot = leaf(state.pml4, area + page * PAGE);
+            let entry = slot.map_or(0, |slot| slot.load(Ordering::Relaxed));
+            match slot {
+                Some(slot) if entry & PRESENT != 0 => {
+                    slot.store(entry & !PRESENT, Ordering::Relaxed)
+                }
                 _ => panic!("unmapping {:#x}: not a mapped area", area + page * PAGE),
             }
         }
@@ -536,8 +552,8 @@ pub fn unmap_area(virt: usize, pages: usize) {
     let mut state = STATE.lock();
     for page in 0..pages {
         if let Some(slot) = leaf(root, area + page * PAGE) {
-            let phys = *slot & ADDRESS;
-            *slot = 0;
+            let phys = slot.load(Ordering::Relaxed) & ADDRESS;
+            slot.store(0, Ordering::Relaxed);
             memory::free_pages(phys, 1, Owner::Area);
         }
     }
@@ -550,9 +566,11 @@ pub fn unmap_area(virt: usize, pages: usize) {
 /// CPU and returns the frame it mapped before, for the `tlb` self-test.
 pub fn remap(virt: u64, phys: u64) -> u64 {
     let state = STATE.lock();
-    let slot = leaf(state.pml4, virt).filter(|slot| **slot & PRESENT != 0);
+    let slot = leaf(state.pml4, virt).filter(|slot| slot.load(Ordering::Relaxed) & PRESENT != 0);
     let Some(slot) = slot else { panic!("remapping {virt:#x}: not mapped") };
-    let old = core::mem::replace(slot, (*slot & !ADDRESS) | phys) & ADDRESS;
+    let entry = slot.load(Ordering::Relaxed);
+    slot.store((entry & !ADDRESS) | phys, Ordering::Relaxed);
+    let old = entry & ADDRESS;
     drop(state);
     shootdown(virt..virt + PAGE);
     old
@@ -569,7 +587,7 @@ pub fn map_identity(phys: u64) {
 pub fn unmap_identity(phys: u64) {
     let state = STATE.lock();
     if let Some(slot) = leaf(state.pml4, phys) {
-        *slot = 0;
+        slot.store(0, Ordering::Relaxed);
     }
     drop(state);
     shootdown(phys..phys + PAGE);
@@ -717,7 +735,7 @@ pub fn walk(virt: usize) -> [u64; 4] {
     let mut table_phys = cpu::cr3() & ADDRESS;
     for (slot, level) in entries.iter_mut().zip((0..=3).rev()) {
         let index = ((virt as u64 >> (12 + 9 * level)) & 0x1ff) as usize;
-        *slot = table(table_phys)[index];
+        *slot = table(table_phys)[index].load(Ordering::Relaxed);
         if *slot & PRESENT == 0 || *slot & LARGE != 0 {
             break;
         }
@@ -736,7 +754,7 @@ pub fn translate(virt: usize) -> Option<u64> {
     let mut table_phys = state.pml4;
     for level in (0..=3).rev() {
         let index = ((virt >> (12 + 9 * level)) & 0x1ff) as usize;
-        let entry = table(table_phys)[index];
+        let entry = table(table_phys)[index].load(Ordering::Relaxed);
         if entry & PRESENT == 0 {
             return None;
         }

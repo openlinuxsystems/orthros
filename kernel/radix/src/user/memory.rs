@@ -30,6 +30,7 @@ use radix_sync::Mutex;
 use super::ring::RingRef;
 use super::{Result, error};
 use crate::Arch;
+use crate::caps::Store;
 
 /// An address space, shared.
 pub type SpaceRef = Arc<SpaceObject, Kmalloc>;
@@ -244,8 +245,7 @@ impl Drop for SpaceObject {
 }
 
 impl FrameObject {
-    /// A frame for the `pages` pages from `phys`, which the store gave
-    /// object `_id`; zeroes them.
+    /// A frame for the `pages` pages from `phys`; zeroes them.
     pub fn new(phys: u64, pages: u64) -> Option<FrameRef> {
         Arch::zero_frames(phys, pages);
         let frame = FrameObject {
@@ -343,13 +343,13 @@ pub fn cap_rights(rights: AbiRights) -> radix_cap::Rights {
     radix_cap::Rights::from_bits_truncate(rights.bits() as u16)
 }
 
-/// Makes frame objects for the frames the store just retyped: `ids` and
+/// Makes frame objects for the frames `store` just retyped: `ids` and
 /// their extents (first page frame, pages). Called with the store locked,
 /// so no capability to them is used before they are zeroed and recorded.
-pub fn frames_made(ids: &[(ObjectId, u64, u64)]) -> Result<()> {
+pub fn frames_made(store: &Store, ids: &[(ObjectId, u64, u64)]) -> Result<()> {
     for &(id, base, pages) in ids {
         let frame = FrameObject::new(base * PAGE_SIZE, pages).ok_or(error(Kernel::NoMemory))?;
-        super::objects::insert(id, super::objects::Object::Frame(frame))
+        super::objects::insert(store, id, super::objects::Object::Frame(frame))
             .map_err(|_| error(Kernel::NoMemory))?;
     }
     Ok(())

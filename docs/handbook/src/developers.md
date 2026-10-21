@@ -85,13 +85,21 @@ The user programs are a workspace of their own, `userspace/`: `libradix`
 (entry, system calls, printing, rings and channels) and `usertests`, the
 image of test and benchmark programs that the kernel's `user`, `ipc` and
 `bench` self-tests start (ADR 0036). `./ob build` builds them with the
-kernel; `./ob test boot --case user` and `--case ipc` run them.
+kernel; `./ob test boot --case user`, `--case ipc` and `--case fuzz` run them;
+`fuzz` makes random system calls from seeds it logs, and
+`fuzz-seed=N` on the kernel command line repeats a run (ADR 0043).
 `./ob bench` measures system calls, IPC round trips, context switches,
 fresh pages, TLB shootdowns and memory copies on Radix and the closest
 operations of Linux in a virtual machine set up the same way, and writes
 a report to `out/bench/report.md` (ADR 0039). It needs KVM, and a Linux
 kernel it may read: on Debian, Ubuntu and Mint, copy your own once with
 `sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz` and run
-`./ob bench --linux-kernel .cache/vmlinuz`. CI runs it with `--gate` on
-every pull request and merge, and fails if Radix is slower than Linux at
-any operation. How it all works is in `docs/design/ipc.md` and `radix-ipc(7)`.
+`./ob bench --linux-kernel .cache/vmlinuz`. It measures both systems
+three times in turn and keeps each operation's fastest run (ADR 0046).
+CI runs it with `--gate` on every pull request and merge, and fails if
+Radix is slower than Linux at any operation. `./ob bench --instructions` needs neither: it counts the
+instructions each operation takes under QEMU, and with `--gate` fails if
+one on one CPU goes over its budget in `tools/xtask/src/bench.rs`, as CI
+does (ADR 0045). A change that needs more raises the budget in the same
+pull request and says why. How it all works is in `docs/design/ipc.md`
+and `radix-ipc(7)`.

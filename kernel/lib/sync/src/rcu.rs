@@ -60,7 +60,8 @@ pub fn synchronize() {
 }
 
 /// A heap-allocated value that readers reach without locks and writers
-/// replace whole.
+/// replace whole. Every value it holds is in memory from its own
+/// allocator, which frees it.
 pub struct RcuCell<T, A: Allocator + Clone> {
     ptr: AtomicPtr<T>,
     alloc: A,
@@ -73,10 +74,11 @@ unsafe impl<T: Send + Sync, A: Allocator + Clone + Send + Sync> Sync for RcuCell
 unsafe impl<T: Send + Sync, A: Allocator + Clone + Send> Send for RcuCell<T, A> {}
 
 impl<T, A: Allocator + Clone> RcuCell<T, A> {
-    /// A cell holding `value`.
-    pub fn new(value: Box<T, A>) -> Self {
-        let (ptr, alloc) = Box::into_raw_with_allocator(value);
-        Self { ptr: AtomicPtr::new(ptr), alloc }
+    /// A cell holding `value`, in memory from `alloc`. Gives `value` back
+    /// if there is no memory for it.
+    pub fn new_in(value: T, alloc: A) -> Result<Self, T> {
+        let ptr = boxed(value, &alloc)?;
+        Ok(Self { ptr: AtomicPtr::new(ptr), alloc })
     }
 
     /// Runs `f` on the current value inside a read section. `f` must not
@@ -96,16 +98,17 @@ impl<T, A: Allocator + Clone> RcuCell<T, A> {
 
     /// Publishes `value` and returns the old value once no reader can see
     /// it any more. It waits for a grace period, so it sleeps: not inside a
-    /// read section, and not with a spin lock held.
-    pub fn replace(&self, value: Box<T, A>) -> Box<T, A> {
-        let (new, _) = Box::into_raw_with_allocator(value);
+    /// read section, and not with a spin lock held. Gives `value` back if
+    /// there is no memory for it.
+    pub fn replace(&self, value: T) -> Result<Box<T, A>, T> {
+        let new = boxed(value, &self.alloc)?;
         let old = self.ptr.swap(new, Ordering::AcqRel);
         synchronize();
-        // SAFETY: `old` came from `Box::into_raw_with_allocator` with this
-        // cell's allocator (every value is boxed with a clone of it, see
-        // `new`), the swap made this the only caller holding it, and the
-        // grace period means no reader still has a reference to it.
-        unsafe { Box::from_raw_in(old, self.alloc.clone()) }
+        // SAFETY: `old` came from `boxed` with a clone of this cell's
+        // allocator (every value does, see `new_in`), the swap made this
+        // the only caller holding it, and the grace period means no reader
+        // still has a reference to it.
+        Ok(unsafe { Box::from_raw_in(old, self.alloc.clone()) })
     }
 
     /// The current value, through `&mut`, which proves no reader or writer
@@ -117,12 +120,21 @@ impl<T, A: Allocator + Clone> RcuCell<T, A> {
     }
 }
 
+/// Moves `value` into memory from `alloc`, and returns where; gives it
+/// back if there is no memory.
+fn boxed<T, A: Allocator + Clone>(value: T, alloc: &A) -> Result<*mut T, T> {
+    match Box::try_new_uninit_in(alloc.clone()) {
+        Ok(slot) => Ok(Box::into_raw_with_allocator(Box::write(slot, value)).0),
+        Err(_) => Err(value),
+    }
+}
+
 impl<T, A: Allocator + Clone> Drop for RcuCell<T, A> {
     fn drop(&mut self) {
         let ptr = *self.ptr.get_mut();
         // SAFETY: `&mut self` means no reader can hold a reference (they
-        // borrow the cell), and the pointer is a live box from this cell's
-        // allocator.
+        // borrow the cell), and the pointer is a live box from a clone of
+        // this cell's allocator.
         drop(unsafe { Box::from_raw_in(ptr, self.alloc.clone()) });
     }
 }
@@ -149,14 +161,14 @@ mod tests {
         }
     }
 
-    fn pair(n: u64) -> Box<Pair, Global> {
-        Box::new_in(Pair { a: AtomicU64::new(n), b: AtomicU64::new(n) }, Global)
+    fn pair(n: u64) -> Pair {
+        Pair { a: AtomicU64::new(n), b: AtomicU64::new(n) }
     }
 
     #[test]
     fn readers_never_see_freed_values() {
         crate::testing::install();
-        let cell = Arc::new(RcuCell::new(pair(0)));
+        let cell = Arc::new(RcuCell::new_in(pair(0), Global).ok().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicU64::new(0));
         let readers: Vec<_> = (0..3)
@@ -185,7 +197,7 @@ mod tests {
             std::thread::yield_now();
         }
         for n in 1..200 {
-            let old = cell.replace(pair(n));
+            let old = cell.replace(pair(n)).ok().unwrap();
             assert_eq!(old.a.load(Ordering::SeqCst), n - 1);
         }
         stop.store(true, Ordering::Relaxed);
@@ -196,7 +208,7 @@ mod tests {
 
     #[test]
     fn get_mut_and_drop() {
-        let mut cell = RcuCell::new(pair(5));
+        let mut cell = RcuCell::new_in(pair(5), Global).ok().unwrap();
         *cell.get_mut().a.get_mut() = 6;
         cell.read(|p| assert_eq!(p.a.load(Ordering::Relaxed), 6));
     }

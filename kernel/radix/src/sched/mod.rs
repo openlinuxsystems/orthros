@@ -929,7 +929,12 @@ pub fn exit() -> ! {
     let Some(me) = current() else {
         panic!("sched::exit called before the scheduler runs");
     };
-    if !me.lockdep.lock().is_empty() {
+    // With interrupts off: a tick that preempted us while we held the lock
+    // would switch us out, and switching out takes the same lock.
+    let were = Arch::disable_interrupts();
+    let holds_mutexes = !me.lockdep.lock().is_empty();
+    Arch::restore_interrupts(were);
+    if holds_mutexes {
         error!("Threads: `{}` exits holding mutexes", me.name());
     }
     me.leave_domain();
@@ -1487,7 +1492,8 @@ pub fn write_threads(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
     }
 }
 
-/// Writes every CPU's run queue, for `kdb`.
+/// Writes every CPU's run queue and the threads asleep on its timer, for
+/// `kdb` and the self-tests' reports.
 pub fn write_queues(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
     let (wakeups, handoffs, boosts) = wait::stats();
     let mut waiting = radix_klog::TextBuf::<16>::new();
@@ -1546,5 +1552,49 @@ pub fn write_queues(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
                 how
             ));
         });
+        drop(guard);
+        // Copied out first: the CPU's timer interrupt takes the list, and
+        // writing a line can take a while.
+        let mut sleepers: [Option<(u64, ThreadRef)>; REPORTED_SLEEPERS] = Default::default();
+        let more = {
+            let Some(timers) = slot.timers.try_lock_irq() else {
+                line(format_args!("    (another CPU holds its timer list)"));
+                continue;
+            };
+            let list = timers.as_deref().unwrap_or(&[]);
+            for (copy, (at, thread)) in sleepers.iter_mut().zip(list) {
+                *copy = Some((*at, thread.clone()));
+            }
+            list.len().saturating_sub(REPORTED_SLEEPERS)
+        };
+        let now = Arch::now_ns();
+        for (at, thread) in sleepers.iter().flatten() {
+            line(format_args!(
+                "    sleeping: {} {:<16} {}",
+                thread.id(),
+                thread.name(),
+                At(*at, now)
+            ));
+        }
+        if more > 0 {
+            line(format_args!("    sleeping: {more} more"));
+        }
+    }
+}
+
+/// Sleepers a report lists per CPU.
+const REPORTED_SLEEPERS: usize = 16;
+
+/// A timer's deadline, as the reports show it: how far ahead, or how late.
+struct At(u64, u64);
+
+impl fmt::Display for At {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(at, now) = *self;
+        match at.checked_sub(now) {
+            _ if at == u64::MAX => f.write_str("until woken"),
+            Some(ahead) => write!(f, "wakes in {} µs", ahead / 1_000),
+            None => write!(f, "{} µs late", (now - at) / 1_000),
+        }
     }
 }

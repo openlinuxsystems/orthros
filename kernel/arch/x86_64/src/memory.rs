@@ -254,10 +254,13 @@ static RESERVATIONS: SpinLock<Reservations> = SpinLock::new(Reservations {
 pub fn reserve(name: &'static str, start: u64, end: u64) {
     let mut reservations = RESERVATIONS.lock();
     let len = reservations.len;
-    if len < MAX_RESERVATIONS && end > start {
-        reservations.list[len] = Reservation { name, start, end };
-        reservations.len += 1;
+    if end <= start {
+        return;
     }
+    // Dropping one would hand out memory in use (a boot module, say).
+    assert!(len < MAX_RESERVATIONS, "more than {MAX_RESERVATIONS} memory reservations at boot");
+    reservations.list[len] = Reservation { name, start, end };
+    reservations.len += 1;
 }
 
 static RESERVATIONS_SNAPSHOT: Once<Reservations> = Once::new();
@@ -310,6 +313,7 @@ fn subtract(free: &mut [Range<u64>; 64], count: &mut usize, cut: &Range<u64>) {
             (true, false) => free[i] = above,
             (false, false) => {
                 free[i] = below;
+                // With the table full, the part above is left unused.
                 if *count < free.len() {
                     free[*count] = above;
                     *count += 1;

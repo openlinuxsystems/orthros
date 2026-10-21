@@ -303,12 +303,15 @@ and every normal boot checks the KASLR layout, W^X and the zones.
 
 ## Limits
 
-- Phase 2 has no user programs; address spaces are exercised only by the
-  `tlb` self-test. The capability core (Phase 3, `docs/design/capabilities.md`)
-  is the heap's first user besides the stress test, and takes the pages of
-  its memory objects from the frame allocator.
-- Reclaim only drains the heap's caches. Waiting for memory, and swapping,
-  come with the scheduler (Phase 4) and Phase 10.
+- Address spaces carry the programs of Phase 5 (`docs/design/ipc.md`)
+  and the `tlb` self-test. Nothing reads the accessed and dirty bits of
+  page-table entries yet, and the kernel changes entries with plain
+  stores, which may lose a bit the MMU set meanwhile; whatever comes to
+  use them (writing pages back, swapping) must clear entries with an
+  exchange instead.
+- Reclaim drains the heap's caches, and for callers that may sleep the
+  out-of-memory policy then stops a resource domain (Phase 4,
+  `docs/design/scheduler.md`). Swapping comes with Phase 10.
 - NUMA has been tested only on QEMU's emulated nodes. Memory hot-plug is
   not supported; the frame records are sized for the memory map at boot.
 - The kernel image's slide has about 9 bits of entropy, which is typical

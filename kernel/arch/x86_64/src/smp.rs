@@ -377,6 +377,9 @@ pub fn start_all(entry: fn(usize) -> !) -> usize {
             online += 1;
             radix_klog::debug!("SMP: CPU {index} (APIC ID {apic_id}) is online");
         } else {
+            // Hold it in reset: one that started after all would read the
+            // next CPU's stack and index from the shared parameter block.
+            apic::send_init(apic_id);
             STARTING.store(false, Ordering::Release);
             radix_klog::error!("SMP: CPU {index} (APIC ID {apic_id}) did not start");
         }

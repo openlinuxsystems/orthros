@@ -65,7 +65,13 @@ pub const FLAGS: &[Flag] = &[
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
                   mm-stress, stack-overflow, smep, smap, tlb, caps, fpu, sched-fair, sched-rt, \
-                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc or bench",
+                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz or bench",
+    },
+    Flag {
+        name: "fuzz-seed",
+        value: Some("number"),
+        summary: "the first seed selftest=fuzz gives its programs, to repeat a run; random by \
+                  default",
     },
     Flag {
         name: "lockdep",
@@ -100,6 +106,7 @@ pub const SELFTESTS: &[&str] = &[
     "oom",
     "user",
     "ipc",
+    "fuzz",
     "bench",
 ];
 

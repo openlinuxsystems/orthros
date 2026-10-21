@@ -53,9 +53,10 @@ fn version(kind: ObjectKind) -> u32 {
     }
 }
 
-/// Calls the method `info`'s label names on the capability in `slot`,
-/// which does not designate an endpoint: `cap`, if the caller has just
-/// looked it up.
+/// Calls the method `info`'s label names on the capability in `slot`:
+/// `cap`, if the caller has just looked it up. Only the methods of
+/// radix-capability(2) reach an endpoint here; others on one are messages
+/// (`syscall`).
 pub fn call(
     me: &ThreadRef,
     user: &UserRef,
@@ -225,10 +226,15 @@ pub fn retype(
     if order > 20 {
         return Err(Kernel::InvalidArgument.status(1));
     }
-    if kind == ObjectKind::Frame {
-        objects::reserve(count as usize).map_err(|_| error(Kernel::NoMemory))?;
+    // Checked before the registry makes room for `count` frames, which
+    // would otherwise ask the heap for room for any number a program wrote.
+    if count == 0 || count > radix_cap::MAX_RETYPE {
+        return Err(Kernel::InvalidArgument.status(3));
     }
     caps::with(|store| -> Result<()> {
+        if kind == ObjectKind::Frame {
+            objects::reserve(store, count as usize).map_err(|_| error(Kernel::NoMemory))?;
+        }
         store.retype(memory, kind, order, to, count).map_err(cap_error)?;
         if kind != ObjectKind::Frame {
             return Ok(());
@@ -244,7 +250,7 @@ pub fn retype(
             let made_one = match found {
                 Some(frame) => {
                     made[0] = frame;
-                    frames_made(&made)
+                    frames_made(store, &made)
                 }
                 None => Err(error(Kernel::NoMemory)),
             };

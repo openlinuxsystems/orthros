@@ -645,5 +645,6 @@ picking, `AllFinish` fails.
 - MWAIT idle is used where CPUID offers it and works. QEMU does not offer
   it by default, so the boot tests exercise HLT; the first boot on real
   hardware is its first run.
-- Stopping is cooperative for kernel threads until Phase 6 adds user
-  threads.
+- Stopping is cooperative for kernel threads. A program's thread (Phase
+  5) stops on its next way back to user mode, at the latest after the
+  next tick, or when a wait it is in ends.

@@ -13,8 +13,8 @@
 //!   give back cached memory, and may dig into the small reserve each zone
 //!   keeps for them. `MaySleep` callers leave the reserve alone, and before
 //!   failing the allocator asks every CPU to return its cached objects and
-//!   tries again. Once the scheduler exists (Phase 4) they may also wait for
-//!   reclaim.
+//!   tries again; for a small block it then has the out-of-memory policy
+//!   stop a domain and tries again (`frames`, radix-scheduling(7)).
 //! - [`ZoneLimit`]: `Dma32` for memory a 32-bit device must reach.
 //! - [`NodePolicy`]: which NUMA node to take memory from: the calling CPU's
 //!   (the default), a preferred one with fallback to the nearest others, or

@@ -8,8 +8,8 @@
 //! supports it, unless the `nox2apic` flag is given, and in xAPIC mode
 //! (registers in memory) otherwise. The 8259 PICs are remapped away from
 //! the exception vectors and masked, and every I/O APIC input is masked:
-//! Phase 1 takes no device interrupts, only the local APIC timer and
-//! inter-processor interrupts.
+//! the kernel takes no device interrupts yet (drivers come with Phase 7),
+//! only the local APIC timer and inter-processor interrupts.
 //!
 //! Under KVM, an EOI written to the APIC leaves the virtual machine, as
 //! most APIC writes do. KVM offers a cheaper way, which Linux guests use

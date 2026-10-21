@@ -375,6 +375,7 @@ vulnerabilities yet. The method follows lmbench's `lat_syscall`,
 | `channel_roundtrip_*`: a message each way through a channel | a futex ping-pong |
 | `ring_roundtrip_*`: `msg_ring` each way between two rings | a Unix socket round trip |
 | `syscall_null_parallel`, `cap_info_parallel`, `random_words_parallel`: the same on both CPUs at once | `getppid`, `fcntl` and `getrandom` on two threads |
+| `endpoint_call_parallel`: `endpoint_call_same_cpu` on both CPUs at once, each pair with its own endpoint | a pipe round trip, a pair of threads on each CPU at once |
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that
@@ -390,6 +391,9 @@ The report shows each Radix number, the Linux one from the virtual
 machine, their ratio and the host's Linux. Under KVM a system call does
 not leave the guest, and a wake-up on another CPU is an interrupt the
 host delivers on both systems alike, so the ratio compares the kernels.
+Under KVM, `ob bench` boots Radix and the Linux virtual machine three
+times in turn and keeps each row's fastest run on each side (ADR 0046):
+the host only ever adds time, and rarely to the same row in every run.
 `ob bench --gate` fails if a row is missing or Radix takes more than
 1.05 times as long as Linux in the virtual machine; CI's `bench` job runs
 it on every pull request and every merge to main and shows the report in
@@ -402,13 +406,31 @@ operation: switches, timer writes, interprocessor interrupts sent, halts
 and wake-ups caught while polling. Under a hypervisor each timer write,
 interrupt sent and halt is an exit to the host (ADR 0037).
 
+Timings on shared runners vary by a few percent from run to run, so a
+hot path that grows a little can pass the gate for a while. `ob bench
+--instructions` counts instead (ADR 0045): it boots the same image under
+QEMU's instruction counting (`-icount shift=0,align=off`), where each
+instruction moves the guest's clock by one nanosecond, so every `BENCH`
+line gives the user and kernel instructions an operation took, the same
+on every machine. Each operation on one CPU has a budget in
+`tools/xtask/src/bench.rs` (what it took when the budget was set, plus
+a tenth), and CI's `instructions` job fails when one goes over. A
+change that needs more raises the budget in the same pull request and
+says why. Operations on two CPUs depend on how QEMU interleaves the
+CPUs, so they have no budget.
+
 **Where the time goes.** A system call enters with `syscall`, saves the
 registers, finds the running thread with one read of a per-CPU word
 without touching its reference count (`sched::running`), and writes its
 results straight into the saved registers (ADR 0042). A capability
 method looks the capability up in this CPU's cache when the store has
 not changed since (`caps::get`), so it takes no lock and writes nothing
-shared, and CPUs using capabilities at once do not contend. Random bytes
+shared, and CPUs using capabilities at once do not contend. The object a
+capability names (an endpoint, say) comes from a second cache of the
+same kind (`user::objects::get`), which keeps weak references, so it
+holds no object alive; a hit writes only the object's own reference
+count, so pairs of programs calling different endpoints on different
+CPUs share no lock (`endpoint_call_parallel`). Random bytes
 come from this CPU's generator, a batch of ChaCha20 blocks at a time. A
 same-CPU round trip is two context switches and no timer write, and
 waking a thread pinned to a CPU, or one whose last CPU is idle, reads no
@@ -423,10 +445,9 @@ whether to offer paravirtual EOI (ADR 0041).
 
 ## Known limits
 
-- Any change to the capability store empties every CPU's cache of
-  capabilities, and finding the object a capability names still takes
-  the object registry's lock. Programs that change their capabilities
-  all the time on many CPUs at once would queue on the store's lock; a
+- Any change to the capability store empties every CPU's caches of
+  capabilities and objects. Programs that change their capabilities all
+  the time on many CPUs at once would queue on the store's lock; a
   per-space store with RCU over the slots is the fix if Phase 6's
   processes show it matters.
 - Only rings charge their memory to a resource domain. Endpoints,
@@ -483,6 +504,16 @@ The claims, each with the check that backs it:
    a thousand rounds each on one CPU and two).
 9. **A program's fault ends that program only.** *(The `user` boot test's
    eight faults.)*
+10. **Nothing a program passes harms the kernel, and a failed call says
+    only what its documentation says.** Whatever arguments, ring entries
+    and shared indexes a program writes, the kernel does not panic, trip
+    the lock checker or keep an object afterwards, and a failed call
+    returns an error from its `raises` list (for a method, its own or
+    `cap_call`'s), with 0 in every result register. *(The `fuzz` boot
+    test: eight groups of three programs make 4,000 random calls each,
+    sharing endpoints, notifications and memory, and check every failed
+    call against the lists `ridlc` generates from `abi/*.ridl`; then the
+    capability store must pass its audit and hold what it held before.)*
 
 | Check | What it establishes | Where |
 | --- | --- | --- |
@@ -492,6 +523,7 @@ The claims, each with the check that backs it:
 | Kani `ring_layouts_are_sound`, `ring_completions_never_overflow` | Claim 7 | `ob test kani` |
 | Host and property tests of `radix-ipc`, `radix-abi`, `radix-elf` and `ridlc` | Claims 2, 3, 7 and 8; generated bindings agree with the definitions; the ELF reader refuses what it cannot map safely | `ob test unit` |
 | Boot tests `user` and `ipc` | Claims 1, 5, 6, 8 and 9, under QEMU with KVM in CI | `ob test boot` |
+| Boot test `fuzz` | Claims 1 and 10, with random seeds that the log names (`fuzz-seed` repeats them) | `ob test boot` |
 
 **The TLA+ model.** `kernel/ipc/tla/Endpoint.tla` models callers that
 send or call several times, servers that receive in a loop and either

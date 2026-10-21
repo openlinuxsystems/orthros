@@ -414,18 +414,25 @@ KVM it takes about a tenth of a second.
 
 ## Limits
 
-- Phase 3 has no programs and no system calls: the kernel and the
-  self-test are the store's only users. Threads, processes, address
-  spaces, endpoints and notifications are objects in the table with no
-  kernel structures behind them yet; those come with Phases 4 to 6, and
-  endpoints are used only as sealing keys for now.
+- Processes are objects in the table with no kernel structure behind
+  them yet; they come with Phase 6. Since Phase 5 programs use the store
+  through system calls, and threads, address spaces, endpoints,
+  notifications, rings, the random number generator and the kernel log
+  have kernel objects behind them (`docs/design/ipc.md`).
 - One store and one lock for the whole kernel. That is simple and
   obviously atomic. Lookups no longer take it when nothing has changed
   (see *In the kernel*), but every change serializes on it and empties
   every CPU's cache. Finer locking (per space, with a tree lock for
   derivation and revocation) can come when Phase 6's processes show the
   need; the TLA+ model would have to grow with it.
-- The lock is a spin lock until Phase 4, and the store allocates under it.
+- The lock is a mutex (since Phase 4), and the store allocates under it
+  with `MaySleep`. Retyping frames from a memory object zeroes them with
+  the lock held, so a large retype (up to 1,024 frames of up to 2^20
+  pages each) holds up every other change to the store while it runs;
+  lookups do not wait, since they take no lock. The fix, before Phase 6's
+  init retypes large amounts of memory, is to zero frames in steps with
+  the lock let go in between, as revokes do, keeping each new frame's
+  capability out of reach until its pages are zero.
 - Only memory, frames and DMA buffers are retyped. Kernel objects that
   need memory of their own (threads, page tables) will be retyped from
   memory objects too, so that a process pays for its kernel objects.

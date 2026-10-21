@@ -46,7 +46,9 @@ pub fn handle(regs: &mut SyscallRegs) {
     let Some((me, user)) = running.as_deref().and_then(|me| Some((me, me.user()?))) else {
         panic!("User mode: a system call from a thread that is not a program's");
     };
-    match dispatch(me, user, regs.number, &mut regs.args) {
+    // Kept for the log line of a thread stopped in the call.
+    let (number, info) = (regs.number, regs.args[1]);
+    match dispatch(me, user, number, &mut regs.args) {
         Ok(Done::Return) => regs.number = 0,
         Ok(Done::Exit(code)) => exit_current(user.clone(), code),
         Err(status) => {
@@ -55,8 +57,22 @@ pub fn handle(regs: &mut SyscallRegs) {
         }
     }
     if me.should_stop() {
-        info!("User: thread {} ({}) stopped", me.id(), me.name());
+        stopped(me, number, info);
         exit_current(user.clone(), EXIT_STOPPED);
+    }
+}
+
+/// Logs that thread `me` was stopped in system call `number`, with info
+/// word `info` (which names a method `cap_call` called).
+#[cold]
+fn stopped(me: &ThreadRef, number: u64, info: u64) {
+    let name = sys::name(number).unwrap_or("an unknown system call");
+    if number == sys::CAP_CALL {
+        // The label is the info word's low half.
+        let label = info as u32;
+        info!("User: thread {} ({}) stopped in {name} (label {label:#x})", me.id(), me.name());
+    } else {
+        info!("User: thread {} ({}) stopped in {name}", me.id(), me.name());
     }
 }
 

@@ -49,7 +49,7 @@ static TSC_START: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 /// Nanoseconds per TSC tick, times 2^32.
 static NS_PER_TICK: AtomicU64 = AtomicU64::new(0);
-/// Local APIC timer input frequency (after divide-by-16), in Hz.
+/// Local APIC timer input frequency in Hz, before its divide-by-16.
 static APIC_TIMER_HZ: AtomicU64 = AtomicU64::new(0);
 /// Whether the periodic tick runs.
 static TICKING: AtomicBool = AtomicBool::new(false);

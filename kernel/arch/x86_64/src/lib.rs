@@ -5,16 +5,19 @@
 //! layer on PC hardware.
 //!
 //! This crate owns the machine from GRUB's jump to `_start` until it calls
-//! the kernel's `radix_kernel_main`: the boot trampoline ([`boot`]), the
-//! CPU's descriptor tables ([`percpu`], [`interrupts`]), physical memory and
-//! the kernel's page tables ([`memory`], [`paging`]), the consoles it knows
-//! about ([`serial`], [`vga`]) and early microcode ([`microcode`]). Later,
+//! the kernel's `radix_kernel_main`: the boot trampoline ([`boot`]), which
+//! seeds the random number generator ([`random`]) and moves the kernel
+//! ([`kaslr`]) before jumping to [`entry`], the CPU's descriptor tables
+//! ([`percpu`], [`interrupts`]), physical memory and the kernel's page
+//! tables ([`memory`], [`paging`]), the consoles it knows about
+//! ([`serial`], [`vga`]) and early microcode ([`microcode`]). Later,
 //! through [`Platform::init`], it reads the ACPI tables ([`acpi`]), sets up
 //! the interrupt controllers ([`apic`]) and timers ([`time`]), and it starts
 //! and stops the other CPUs ([`smp`]). Kernel threads' contexts and the
 //! context switch are in [`thread`], their FPU and vector state in [`fpu`].
 //! Programs' address spaces are in [`space`], and the SYSCALL entry,
-//! entering user mode and user copies in [`user`] (Phase 5).
+//! entering user mode and user copies in [`user`] (Phase 5). [`power`]
+//! restarts the machine, and [`cpu`] and [`io`] wrap single instructions.
 //!
 //! It is part of the trusted computing base, so it may use `unsafe`, and
 //! every `unsafe` block states why it is sound. docs/design/boot.md and
@@ -230,6 +233,19 @@ impl Smp for Arch {
 
     fn stop_other_cpus() -> usize {
         smp::stop_others()
+    }
+
+    fn stopped_trace(index: usize, out: &mut [usize]) -> usize {
+        let Some(cpu) = percpu::get(index).filter(|cpu| cpu.stopped.load(Ordering::Acquire)) else {
+            return 0;
+        };
+        let frames = cpu.stopped_at.iter().map(|slot| slot.load(Ordering::Relaxed));
+        let mut len = 0;
+        for (out, address) in out.iter_mut().zip(frames.take_while(|&address| address != 0)) {
+            *out = address;
+            len += 1;
+        }
+        len
     }
 
     fn cpu_place(index: usize) -> Option<CpuPlace> {

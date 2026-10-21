@@ -25,8 +25,9 @@
 //!
 //! Most of the crate is safe code. The exceptions are the functions that
 //! touch memory the allocators manage, each `unsafe` with its contract
-//! written down: the `raw` module, the slab layer's free-object pattern,
-//! the heap's `free`, the [`Platform`] trait and the stress test.
+//! written down: the `raw` module, the frame allocator's zeroing of the
+//! blocks it hands out, the slab layer's free-object pattern, the heap's
+//! `free`, the [`Platform`] trait and the stress test.
 //! The crate builds for the host too, where its unit and property tests
 //! run, and for Kani, which proves the allocators' invariants
 //! (`docs/design/memory.md`).
