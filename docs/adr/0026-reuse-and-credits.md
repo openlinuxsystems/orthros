@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: 2026 The OrthrOS contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# 0025. The repository follows REUSE and credits every upstream project
+# 0026. The repository follows REUSE and credits every upstream project
 
 - Status: Accepted
 - Date: 2026-10-21
@@ -35,7 +35,8 @@ uses, so the texts that only image components need cannot all move there.
   covered by `REUSE.toml`. Copyright is held by "The OrthrOS contributors",
   who keep the copyright in what they contribute.
 - `LICENSES/` holds the licenses that files in the repository use, now
-  Apache-2.0, MIT and BSD-2-Clause. `image/licenses/LICENSE-<id>.txt`
+  Apache-2.0, MIT, BSD-2-Clause (the fonts), CC-BY-4.0 (the code of
+  conduct) and LicenseRef-DCO (the verbatim DCO text). `image/licenses/LICENSE-<id>.txt`
   holds the other texts the image needs; REUSE treats files named
   `LICENSE-*` as license files. `ob image` takes a text from `LICENSES/`
   when it is there and from `image/licenses/` otherwise, and a unit test

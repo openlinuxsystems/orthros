@@ -1085,13 +1085,28 @@ impl<A: Allocator + Clone> Capabilities<A> {
     }
 
     /// Whether `cap` names an object retyped from the memory `parent`
-    /// names, with no more of its rights.
+    /// names, directly or through smaller memory retyped from it, with no
+    /// more of its rights. Deleting the capability to that smaller memory
+    /// moves the objects retyped from it up to `parent`.
     fn retyped_from(&self, cap: &Capability, parent: &Capability) -> bool {
         let (Some(id), Some(memory)) = (cap.id(), parent.id()) else { return false };
-        parent.kind() == ObjectKind::Memory
-            && cap.kind().from_memory()
-            && parent.rights.contains(cap.rights)
-            && cap.badge == 0
-            && self.entry(id).is_some_and(|entry| entry.origin == Some(memory))
+        if parent.kind() != ObjectKind::Memory
+            || !cap.kind().from_memory()
+            || !parent.rights.contains(cap.rights)
+            || cap.badge != 0
+        {
+            return false;
+        }
+        // Every object on the way stays while something retyped from it
+        // does; the bound only guards a corrupt store against a cycle.
+        let mut origin = self.entry(id).and_then(|entry| entry.origin);
+        for _ in 0..self.objects.len() {
+            match origin {
+                Some(above) if above == memory => return true,
+                Some(above) => origin = self.entry(above).and_then(|entry| entry.origin),
+                None => return false,
+            }
+        }
+        false
     }
 }

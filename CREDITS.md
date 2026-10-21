@@ -20,6 +20,8 @@ project's design, it adds the project here (see
 | Project | What we use | License |
 | --- | --- | --- |
 | [Spleen](https://github.com/fcambus/spleen) 2.1.0 by Frederic Cambus | The kernel's console fonts, unmodified, in `kernel/lib/fbcon/fonts/` | BSD-2-Clause |
+| [Contributor Covenant](https://www.contributor-covenant.org/) 2.1 | `CODE_OF_CONDUCT.md`, with our contact details | CC-BY-4.0 |
+| [Developer Certificate of Origin](https://developercertificate.org/) 1.1 by the Linux Foundation | `DCO`, verbatim | Verbatim copying permitted |
 
 ## In every image
 

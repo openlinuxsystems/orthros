@@ -29,8 +29,9 @@ If your host lacks tools, `./ob doctor` names them, or use
 A change merges when:
 
 - CI is green: lint, unit tests, boot tests, docs check, Kani proofs, TLA+
-  models,
-  cargo-deny, the REUSE check and the container build.
+  models, cargo-deny, the REUSE check, the container build and the DCO
+  sign-off check.
+- Every commit is signed off (see "Developer Certificate of Origin" below).
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
   hardware lives in a crate under `kernel/lib/` that compiles for the host
   and is unit-tested there; behaviour that needs a machine gets a boot test
@@ -54,6 +55,42 @@ A change merges when:
 - Changing the pinned toolchain in `rust-toolchain.toml` is its own pull
   request, so any fallout is easy to find.
 - Update `docs/roadmap.md` when a phase's scope changes.
+
+## Developer Certificate of Origin
+
+Every commit must be signed off. A `Signed-off-by:` line at the end of the
+commit message certifies the [Developer Certificate of Origin](DCO)
+(DCO), version 1.1: that you wrote the change or otherwise have the right
+to submit it under the project's licenses, and that a record of it,
+including your sign-off, is kept public. There is no contributor license
+agreement; the sign-off is all OrthrOS asks.
+
+```sh
+git commit -s                  # adds Signed-off-by: Your Name <you@example.org>
+git rebase --signoff main      # signs off every commit on your branch
+./ob signoff                   # checks the commits your branch adds
+```
+
+The line uses your real name or the name you are known by, and the same
+email address as the commit's author. Anonymous sign-offs are not accepted.
+CI runs `./ob signoff` on the commits each pull request adds; commits that
+were on `main` before the rule began
+([ADR 0025](docs/adr/0025-dco-sign-off-and-project-policies.md)) are not
+checked or rewritten.
+
+**AI assistants.** Only a person can make the DCO's promises. An AI tool
+never signs off a commit in its own name, and `./ob signoff` ignores
+sign-offs from tool identities such as `noreply@anthropic.com` or GitHub
+Apps. When a tool writes a commit, it stays the commit's author or is
+credited with a `Co-Authored-By:` line, and the person who directed it,
+reviewed the change and submits it adds their own `Signed-off-by:`. That
+person is responsible for the change as if they had written it, including
+its licensing.
+The maintainer has told the AI assistant working for them to add the
+maintainer's own sign-off to the commits it writes for them. That is the
+maintainer's certification, given standing for those commits and backed by
+reviewing each pull request before it merges; no assistant adds anyone
+else's sign-off.
 
 ## Man pages
 
@@ -83,6 +120,13 @@ pull request as a change that makes it wrong.
 Copy [`0000-template.md`](docs/adr/0000-template.md), take the next number,
 and add it to the index in [`docs/adr/README.md`](docs/adr/README.md). A
 decision is never edited away: a later record supersedes it.
+
+## Conduct, governance and security
+
+Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+[GOVERNANCE.md](GOVERNANCE.md) says who maintains OrthrOS and how
+decisions are made. Report security problems privately as described in
+[SECURITY.md](SECURITY.md), never in a public issue or pull request.
 
 ## License of contributions
 
@@ -117,7 +161,7 @@ comments right after the title line. A file that cannot hold a comment, such
 as JSON, a font or a generated lock file, is listed in
 [`REUSE.toml`](REUSE.toml) instead. The text of every license a file uses is
 in `LICENSES/`; other license texts that images need are in
-`image/licenses/` (see [ADR 0025](docs/adr/0025-reuse-and-credits.md)). To
+`image/licenses/` (see [ADR 0026](docs/adr/0026-reuse-and-credits.md)). To
 check locally, run `reuse lint` (for example with `pipx run reuse lint`).
 The REUSE tool is GPL-3.0-or-later; it only checks the repository and is
 never part of an image.

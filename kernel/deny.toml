@@ -11,7 +11,7 @@
 # licenses only. GPL and LGPL code is allowed only in ported programs and
 # bundle-private libraries, which have allow-lists of their own; never add a
 # copyleft license here. Every license listed needs its text in the image:
-# LICENSES/<id>.txt or image/licenses/LICENSE-<id>.txt (ADR 0025).
+# LICENSES/<id>.txt or image/licenses/LICENSE-<id>.txt (ADR 0026).
 
 [advisories]
 yanked = "deny"

@@ -269,6 +269,17 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 *fmt*
 	Format all Rust code with rustfmt.
 
+*signoff* [_base_]
+	Check that every commit after _base_ carries a *Signed-off-by:* line,
+	which certifies the Developer Certificate of Origin (see
+	_CONTRIBUTING.md_). Without _base_, the check starts where the current
+	branch left _origin/main_. A person signs off their own commits, with
+	the email address they are the author under. A commit written by a
+	tool, such as an AI assistant or a GitHub App, needs the sign-off of
+	the person who submits it, and a tool's own sign-off does not count.
+	Merge commits are skipped. CI runs this on the commits of every pull
+	request; *git rebase --signoff* _base_ adds missing sign-offs.
+
 *clean* [*--all*]
 	Remove _out/_ and the kernel's build directory.
 

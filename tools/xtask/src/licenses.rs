@@ -514,7 +514,7 @@ fn license_ids(packages: &[Package]) -> Result<BTreeSet<String>> {
 /// Licenses that files in the repository use are in LICENSES/, as the REUSE
 /// specification asks; every other text is in image/licenses as
 /// `LICENSE-<id>.txt`. Each text is kept once, verbatim from the SPDX
-/// license list (ADR 0025).
+/// license list (ADR 0026).
 pub fn text_source(root: &Path, id: &str) -> PathBuf {
     let reuse = root.join("LICENSES").join(format!("{id}.txt"));
     if reuse.is_file() {

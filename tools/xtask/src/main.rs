@@ -20,6 +20,7 @@ mod lint;
 mod process;
 mod qemu;
 mod screen;
+mod signoff;
 mod test;
 mod tla;
 
@@ -45,6 +46,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("docs", "Build the man pages and the handbook into out/docs"),
     ("lint", "Check formatting and run Clippy with warnings denied"),
     ("fmt", "Format all Rust code"),
+    ("signoff", "Check new commits for a Developer Certificate of Origin sign-off"),
     ("clean", "Remove build output"),
     ("help", "Show help for ob or for one command"),
 ];
@@ -176,6 +178,16 @@ libraries, treating every warning as an error."
             "Usage: ./ob fmt
 
 Formats every Rust source file in the repository with rustfmt."
+        }
+        "signoff" => {
+            "Usage: ./ob signoff [<base>]
+
+Checks that every commit after <base> (by default, where HEAD left
+origin/main) has a Signed-off-by line certifying the Developer Certificate
+of Origin. A person signs off their own commits; a commit written by a tool,
+such as an AI assistant, needs the sign-off of the person submitting it,
+and a tool's own sign-off does not count. Merge commits are skipped.
+CI runs this on the commits of every pull request."
         }
         "clean" => {
             "Usage: ./ob clean [--all]
@@ -458,6 +470,11 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         "fmt" => {
             args.finish()?;
             lint::fmt(&ctx)
+        }
+        "signoff" => {
+            let base = args.positional();
+            args.finish()?;
+            signoff::check(&ctx, base.as_deref())
         }
         "clean" => {
             let all = args.flag("--all");

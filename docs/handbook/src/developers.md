@@ -9,6 +9,10 @@ These documents live in the repository rather than in this handbook:
 
 - [`CONTRIBUTING.md`](https://github.com/openlinuxsystems/orthros/blob/main/CONTRIBUTING.md):
   how to build and test, and what a change needs before it merges.
+- [`CODE_OF_CONDUCT.md`](https://github.com/openlinuxsystems/orthros/blob/main/CODE_OF_CONDUCT.md),
+  [`GOVERNANCE.md`](https://github.com/openlinuxsystems/orthros/blob/main/GOVERNANCE.md)
+  and [`SECURITY.md`](https://github.com/openlinuxsystems/orthros/blob/main/SECURITY.md):
+  how people work together, who decides, and how to report a vulnerability.
 - [`docs/coding-standard.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/coding-standard.md):
   rules for Rust code, including where `unsafe` is allowed.
 - [`docs/adr/`](https://github.com/openlinuxsystems/orthros/tree/main/docs/adr):

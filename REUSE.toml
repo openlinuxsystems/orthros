@@ -4,7 +4,7 @@
 # Copyright and license information for files that cannot carry an SPDX
 # header of their own (https://reuse.software/spec-3.3/). Every other file
 # starts with SPDX-FileCopyrightText and SPDX-License-Identifier lines, and
-# CI runs `reuse lint`. See CONTRIBUTING.md and ADR 0025.
+# CI runs `reuse lint`. See CONTRIBUTING.md and ADR 0026.
 
 version = 1
 
@@ -26,3 +26,10 @@ SPDX-License-Identifier = "Apache-2.0 OR MIT"
 path = "kernel/lib/fbcon/fonts/*.psfu"
 SPDX-FileCopyrightText = "2018-2024 Frederic Cambus"
 SPDX-License-Identifier = "BSD-2-Clause"
+
+# The Developer Certificate of Origin 1.1, https://developercertificate.org/,
+# verbatim. Its own notice allows verbatim copies only.
+[[annotations]]
+path = "DCO"
+SPDX-FileCopyrightText = "2004, 2006 The Linux Foundation and its contributors"
+SPDX-License-Identifier = "LicenseRef-DCO"
