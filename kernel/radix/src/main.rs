@@ -5,8 +5,9 @@
 //! brings up the consoles (serial, the framebuffer, and the crash log kept
 //! in RAM across a restart), reports the memory map and the address-space
 //! layout, starts the interrupt controllers, timers and the frame
-//! allocator (Phase 2, `radix-mm`), starts every other CPU and checks that
-//! each one takes timer interrupts and answers IPIs. A panic stops the
+//! allocator (Phase 2, `radix-mm`), sets up the capability store (Phase 3,
+//! `radix-cap`, in `caps`), starts every other CPU and checks that each one
+//! takes timer interrupts and answers IPIs. A panic stops the
 //! other CPUs and shows a full-screen report with a symbolized backtrace;
 //! `kdb` debugs the kernel over the serial port.
 //!
@@ -31,6 +32,8 @@
 
 extern crate alloc;
 
+mod caps;
+mod captest;
 mod console;
 mod crashlog;
 mod kdb;
@@ -126,7 +129,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 2)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (OrthrOS Phase 3)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -143,6 +146,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     HEAP.set_corruption_handler(on_heap_corruption);
     Arch::init(&params);
     report::frames();
+    caps::init();
     if settings.kdb {
         Arch::set_breakpoint_handler(kdb::on_breakpoint);
     }

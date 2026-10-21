@@ -10,6 +10,7 @@ members = [
     "hal",
     "arch/x86_64",
     "arch/aarch64",
+    "cap",
     "lib/acpi",
     "lib/bootinfo",
     "lib/fbcon",
@@ -33,7 +34,7 @@ publish = false
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
-# radix-mm's proofs build with `--cfg kani` (`ob test kani`).
+# radix-mm's and radix-cap's proofs build with `--cfg kani` (`ob test kani`).
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [workspace.lints.clippy]

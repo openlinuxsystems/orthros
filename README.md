@@ -7,13 +7,17 @@ logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 2** of its [roadmap](docs/roadmap.md): the Radix
+OrthrOS is at **Phase 3** of its [roadmap](docs/roadmap.md): the Radix
 kernel boots through GRUB under UEFI and BIOS at a random address, chosen
 by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
 memory with a frame allocator per NUMA node and a slab heap with per-CPU
 caches (with Kani proofs of their invariants), protects itself with W^X,
 guard pages, SMEP and SMAP, starts every CPU, reads the ACPI tables, takes
 timer interrupts and reports all of it on the serial port and the screen.
+Its capability core holds the capabilities through which every resource
+will be reached, with delegation, badges, sealing and revocation; Kani
+proofs, a TLA+ model and an in-kernel test suite check that no capability
+can be forged or have its rights widened.
 A panic fills the screen with a symbolized backtrace and is kept in memory
 for the next boot; a serial kernel debugger, GDB through QEMU and trace
 points help with the rest. There is nothing to install yet.

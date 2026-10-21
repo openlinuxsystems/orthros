@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
-use crate::{Ctx, Error, Result, kernel, qemu};
+use crate::{Ctx, Error, Result, kernel, qemu, tla};
 
 /// mdBook release the handbook is built and tested with.
 pub const MDBOOK_VERSION: &str = "0.4.52";
@@ -338,6 +338,15 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             "  note     {:<15} not installed; only `./ob test kani` needs it (cargo install \
              --locked kani-verifier --version {KANI_VERSION})",
             "Kani"
+        ),
+    }
+    match program_version("java", "--version") {
+        Some(version) => println!("  ok       {:<15} {version}", "Java"),
+        None => println!(
+            "  note     {:<15} not installed; only `./ob test tla` needs it (package \
+             default-jre-headless; ob downloads the TLA+ tools {} itself)",
+            "Java",
+            tla::TLA_VERSION
         ),
     }
     if qemu::kvm_available() {

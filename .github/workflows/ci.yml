@@ -21,6 +21,8 @@ env:
   MDBOOK_VERSION: 0.4.52
   # Keep in step with tools/xtask/src/doctor.rs (ADR 0019).
   KANI_VERSION: 0.68.0
+  # Keep in step with tools/xtask/src/tla.rs (ADR 0024).
+  TLA_VERSION: 1.7.4
 
 jobs:
   build:
@@ -132,6 +134,33 @@ jobs:
 
       - name: ./ob test kani
         run: ./ob test kani
+
+  tla:
+    name: TLA+ models
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache the TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: .cache/tla
+          key: tla-${{ env.TLA_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob test tla
+        run: ./ob test tla
 
   container:
     name: Build container

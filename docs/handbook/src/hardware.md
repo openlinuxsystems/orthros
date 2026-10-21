@@ -93,6 +93,10 @@ checks of every phase so far:
    CPUs it allocates and frees about 50 million objects, and the log must
    end with `selftest mm-stress: passed` before `Boot complete.` Note the
    time it reports.
+7. From Phase 3: boot with `selftest=caps` the same way. The log must end
+   with `selftest caps: passed` before `Boot complete.`, and the line
+   before it must say how many derivations the 7 other CPUs tried during
+   the revoke.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.
