@@ -150,15 +150,34 @@ first and then drops the count, so the reschedule it may trigger runs
 with interrupts in the state the code expects. A wake-up that should
 preempt a thread on another CPU kicks it with a reschedule IPI, or,
 when that CPU is idle in MWAIT, with a write to the line it monitors. An
-idle CPU says it polls that line only when it waits with MWAIT; one
-halted with HLT always gets the IPI.
+idle CPU says it polls that line only when it waits with MWAIT, or while
+it polls `need_resched` in a virtual machine (below); one halted with
+HLT always gets the IPI.
+
+**Idle in a virtual machine** (ADR 0037). Under a hypervisor, halting is
+an exit to the host and so is the IPI that ends the halt. A virtual CPU
+without MWAIT therefore first polls `need_resched`, with interrupts on
+and preemption off, and says so in `polling`, so that a waker writes
+the flag instead of sending an IPI. How long it polls adapts as Linux's
+cpuidle-haltpoll governor does (`radix_sched::haltpoll`): the limit
+starts at 0, doubles (from 50 µs, up to 200 µs) when an idle period
+outlasted it but ended within 200 µs, and halves when one lasted longer.
+The waker sets `need_resched` before it reads `polling`; the poller
+clears `polling` before it reads `need_resched` again; both are
+sequentially consistent, so one of them sees the other. The TLA+ model
+`kernel/sched/tla/IdleWake.tla` checks that no wake-up is lost with
+polling, MWAIT and HLT, and that either ordering reversed loses one.
 
 **Timers.** Each CPU has a list of its sleeping threads and their
 deadlines, with room for every thread made ahead of time. The local APIC
-timer runs one-shot (TSC-deadline where available) and is
-re-armed for the earliest of the next sleeper's deadline, the running
-thread's slice end and the 100 Hz tick, so sleeps end on time without a
-fast tick.
+timer runs one-shot (TSC-deadline where available) and is armed for
+the earliest of the next sleeper's deadline, the running thread's slice
+end and the 100 Hz tick, so sleeps end on time without a fast tick. It is
+written only when that deadline is earlier than the one it is armed for
+(ADR 0037): a write is an exit under a hypervisor, and a switch usually
+leaves the next deadline where it was. A timer armed too early fires,
+finds nothing due and is armed again. Each CPU counts its timer writes,
+and `ob bench` reports them per operation.
 
 ## Blocking and waking
 

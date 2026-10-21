@@ -737,6 +737,7 @@ fn run_case(
         gdb: false,
         qmp: Some(qmp),
         extra: case.qemu.iter().map(|arg| arg.to_string()).collect(),
+        direct: None,
     };
     let mut vm = Vm::start(ctx, &machine, dir, case.name, timeout)?;
     let result = (case.script)(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));

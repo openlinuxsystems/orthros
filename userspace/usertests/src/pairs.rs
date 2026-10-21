@@ -7,18 +7,22 @@
 //! the same endpoint, and two notifications: its own to wait on, and the
 //! other program's to signal.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use libradix::abi::capability::{self, ObjectKind, Rights};
 use libradix::abi::endpoint::{
     INFO_CAPS_MASK, INFO_CAPS_SHIFT, INFO_LABEL_MASK, INFO_WORDS_SHIFT, MessageFlags, NO_SLOT,
 };
 use libradix::abi::notification::WaitFlags;
 use libradix::abi::ring::Opcode;
-use libradix::abi::startup::{SLOT_FIRST_EXTRA, SLOT_MEMORY, SLOT_SPACE, SLOT_THREAD, SLOT_WINDOW};
-use libradix::abi::{memory, syscalls, thread};
+use libradix::abi::startup::{
+    SLOT_FIRST_EXTRA, SLOT_MEMORY, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD, SLOT_WINDOW,
+};
+use libradix::abi::{memory, random, syscalls, thread};
 use libradix::channel::{CHANNEL_BYTES, Channel};
 use libradix::ring::Ring;
 use libradix::time::{Nanos, cycles};
-use libradix::{SYS, println};
+use libradix::{SYS, println, sys};
 
 use crate::{Argument, checks};
 use crate::{check, fails, ok};
@@ -385,6 +389,145 @@ pub fn ring_b() -> u64 {
                     check!(false, "completion {c:?}");
                 }
             }
+        }
+    }
+    checks::failures()
+}
+
+/// Waits until the other program of the pair is here too: each signals
+/// the other's notification, then waits on its own.
+fn meet() -> bool {
+    ok!(syscalls::notify(&SYS, THEIRS), "notify").is_some()
+        && ok!(syscalls::wait(&SYS, MINE, WaitFlags::NONE, 0), "wait").is_some()
+}
+
+/// Two programs on one CPU, each yielding to the other: every yield is a
+/// switch to the other program, in another address space.
+pub fn yield_a(argument: Argument) -> u64 {
+    if !meet() {
+        return checks::failures();
+    }
+    let start = cycles();
+    for _ in 0..argument.rounds {
+        if ok!(syscalls::r#yield(&SYS), "yield").is_none() {
+            break;
+        }
+    }
+    let switches = 2 * argument.rounds;
+    if argument.bench {
+        let ns = Nanos::per(cycles() - start, switches);
+        println!("BENCH name=context_switch ns={ns} iterations={switches}");
+    }
+    checks::failures()
+}
+
+/// The other program of [`yield_a`].
+pub fn yield_b(argument: Argument) -> u64 {
+    if meet() {
+        for _ in 0..argument.rounds {
+            if ok!(syscalls::r#yield(&SYS), "yield").is_none() {
+                break;
+            }
+        }
+    }
+    checks::failures()
+}
+
+/// Where the shootdown pair maps the page they share, and where the
+/// first maps a page into the second's address space and out again.
+const FLAG_AT: u64 = 0x6000_0000;
+const SHOOT_AT: u64 = 0x6100_0000;
+
+/// Words of the shared page: the second program is spinning, and should
+/// stop.
+const READY: u64 = 0;
+const STOP: u64 = 8;
+
+/// The slots of the shared page, and of the page mapped in and out.
+const SLOT_FLAG: u32 = SLOT_A;
+const SLOT_SHOT: u32 = SLOT_B;
+
+fn flag(word: u64) -> &'static AtomicU64 {
+    // SAFETY: both programs keep the shared page mapped read-write at
+    // FLAG_AT until they exit, and its words are only used atomically.
+    unsafe { &*((FLAG_AT + word) as *const AtomicU64) }
+}
+
+/// A TLB shootdown: the first program, on one CPU, maps a page into the
+/// second's address space and unmaps it again, while the second runs on
+/// another CPU; every unmap must reach that CPU's TLB.
+pub fn shoot_a(argument: Argument) -> u64 {
+    let rw = Rights::READ.union(Rights::WRITE);
+    ok!(memory::retype(&SYS, SLOT_MEMORY, ObjectKind::Frame, 0, SLOT_FLAG, 1), "retype");
+    ok!(memory::retype(&SYS, SLOT_MEMORY, ObjectKind::Frame, 0, SLOT_SHOT, 1), "retype");
+    ok!(syscalls::map(&SYS, SLOT_SPACE, SLOT_FLAG, FLAG_AT, rw, 0, 1), "map");
+    ok!(syscalls::send(&SYS, ENDPOINT, info(0x400, 1, 1), word(SLOT_FLAG)), "pass the page");
+    let Some(theirs) = ok!(syscalls::recv(&SYS, ENDPOINT, 0), "receive the space") else {
+        return checks::failures();
+    };
+    let space = theirs.words[0] as u32;
+    while flag(READY).load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let start = cycles();
+    for _ in 0..argument.rounds {
+        let shot = syscalls::map(&SYS, space, SLOT_SHOT, SHOOT_AT, rw, 0, 1)
+            .and_then(|()| syscalls::unmap(&SYS, space, SHOOT_AT, 1));
+        if ok!(shot, "map and unmap in the other space").is_none() {
+            break;
+        }
+    }
+    let end = cycles();
+    flag(STOP).store(1, Ordering::Release);
+    if argument.bench {
+        let ns = Nanos::per(end - start, argument.rounds);
+        println!("BENCH name=tlb_shootdown ns={ns} iterations={}", argument.rounds);
+    }
+    checks::failures()
+}
+
+/// The other program of [`shoot_a`]: maps the shared page, hands over its
+/// address space, and spins in user mode until told to stop.
+pub fn shoot_b() -> u64 {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let Some(passed) = ok!(syscalls::recv(&SYS, ENDPOINT, 0), "receive the page") else {
+        return checks::failures();
+    };
+    let page = passed.words[0] as u32;
+    if ok!(syscalls::map(&SYS, SLOT_SPACE, page, FLAG_AT, rw, 0, 1), "map").is_none() {
+        return checks::failures();
+    }
+    ok!(syscalls::send(&SYS, ENDPOINT, info(0x401, 1, 1), word(SLOT_SPACE)), "pass the space");
+    flag(READY).store(1, Ordering::Release);
+    while flag(STOP).load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    checks::failures()
+}
+
+/// The cheapest system calls on both CPUs at once: each program of the
+/// pair runs them; the first reports.
+pub fn parallel(argument: Argument, report: bool) -> u64 {
+    let rounds = argument.rounds;
+    let tests: [(&str, u64, &dyn Fn() -> bool); 3] = [
+        ("syscall_null_parallel", rounds, &|| sys::syscall(99, [0; 10]).0 != 0),
+        ("cap_info_parallel", rounds, &|| capability::info(&SYS, SLOT_RANDOM).is_ok()),
+        ("random_words_parallel", rounds / 4, &|| random::words(&SYS, SLOT_RANDOM).is_ok()),
+    ];
+    for (name, count, body) in tests {
+        if !meet() {
+            break;
+        }
+        let start = cycles();
+        for _ in 0..count {
+            if !body() {
+                checks::that(false, format_args!("{name} failed"));
+                return checks::failures();
+            }
+        }
+        if report && argument.bench {
+            let ns = Nanos::per(cycles() - start, count);
+            println!("BENCH name={name} ns={ns} iterations={count}");
         }
     }
     checks::failures()

@@ -52,6 +52,14 @@ pub enum Serial {
     Pipe,
 }
 
+/// A kernel QEMU loads itself, with an initramfs and a command line,
+/// instead of an image booted through firmware: how `ob bench` runs Linux.
+pub struct DirectBoot {
+    pub kernel: PathBuf,
+    pub initrd: PathBuf,
+    pub cmdline: String,
+}
+
 /// One virtual machine.
 pub struct Machine {
     /// Firmware to boot through.
@@ -82,6 +90,9 @@ pub struct Machine {
     pub qmp: Option<PathBuf>,
     /// Extra arguments passed straight to QEMU.
     pub extra: Vec<String>,
+    /// Boot this kernel directly; `firmware`, `media` and `image` are then
+    /// not used.
+    pub direct: Option<DirectBoot>,
 }
 
 impl Machine {
@@ -92,24 +103,12 @@ impl Machine {
         let (accel, default_cpu) = if self.kvm { ("kvm", "host") } else { ("tcg", "max") };
         let cpu = self.cpu_model.as_deref().unwrap_or(default_cpu);
         args.extend(["-accel".into(), accel.into(), "-cpu".into(), cpu.into()]);
-        if let (Firmware::Uefi, Some((code, vars))) = (self.firmware, &self.ovmf) {
-            args.push("-drive".into());
-            args.push(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
-            args.push("-drive".into());
-            args.push(format!("if=pflash,format=raw,file={}", vars.display()));
-        }
-        // `snapshot=on` keeps the image file unchanged whatever the guest writes.
-        let drive = format!("if=none,id=boot,format=raw,snapshot=on,file={}", self.image.display());
-        args.extend(["-drive".into(), drive]);
-        match self.media {
-            Media::Usb => args.extend([
-                "-device".into(),
-                "qemu-xhci,id=xhci".into(),
-                "-device".into(),
-                "usb-storage,bus=xhci.0,drive=boot,removable=on,bootindex=0".into(),
-            ]),
-            Media::Cdrom => args.extend(["-device".into(), "ide-cd,drive=boot,bootindex=0".into()]),
-            Media::Disk => args.extend(["-device".into(), "ide-hd,drive=boot,bootindex=0".into()]),
+        if let Some(direct) = &self.direct {
+            args.extend(["-kernel".into(), direct.kernel.display().to_string()]);
+            args.extend(["-initrd".into(), direct.initrd.display().to_string()]);
+            args.extend(["-append".into(), direct.cmdline.clone()]);
+        } else {
+            self.image_args(&mut args);
         }
         // Radix leaves QEMU through this device when booted with `qemu-exit`.
         args.extend(["-device".into(), "isa-debug-exit,iobase=0xf4,iosize=0x04".into()]);
@@ -134,6 +133,29 @@ impl Machine {
         }
         args.extend(self.extra.iter().cloned());
         args
+    }
+
+    /// The firmware and the boot image.
+    fn image_args(&self, args: &mut Vec<String>) {
+        if let (Firmware::Uefi, Some((code, vars))) = (self.firmware, &self.ovmf) {
+            args.push("-drive".into());
+            args.push(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
+            args.push("-drive".into());
+            args.push(format!("if=pflash,format=raw,file={}", vars.display()));
+        }
+        // `snapshot=on` keeps the image file unchanged whatever the guest writes.
+        let drive = format!("if=none,id=boot,format=raw,snapshot=on,file={}", self.image.display());
+        args.extend(["-drive".into(), drive]);
+        match self.media {
+            Media::Usb => args.extend([
+                "-device".into(),
+                "qemu-xhci,id=xhci".into(),
+                "-device".into(),
+                "usb-storage,bus=xhci.0,drive=boot,removable=on,bootindex=0".into(),
+            ]),
+            Media::Cdrom => args.extend(["-device".into(), "ide-cd,drive=boot,bootindex=0".into()]),
+            Media::Disk => args.extend(["-device".into(), "ide-hd,drive=boot,bootindex=0".into()]),
+        }
     }
 
     /// A ready-to-spawn QEMU command.
@@ -241,6 +263,7 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         gdb,
         qmp: None,
         extra,
+        direct: None,
     };
     let accel = if machine.kvm { "KVM" } else { "no KVM, so it runs slower" };
     step(&format!(
@@ -291,6 +314,7 @@ mod tests {
             gdb: false,
             qmp: None,
             extra: vec!["-s".into()],
+            direct: None,
         }
     }
 
@@ -327,6 +351,22 @@ mod tests {
         assert!(args.contains("-qmp unix:/tmp/qmp.sock,server=on,wait=off"));
         assert!(args.contains("-cpu qemu64,vendor=GenuineIntel"));
         assert!(args.contains(&format!("-gdb tcp:localhost:{GDB_PORT} -S")));
+    }
+
+    #[test]
+    fn direct_boot_skips_the_image() {
+        let mut m = machine(Firmware::Uefi, Media::Usb);
+        m.direct = Some(DirectBoot {
+            kernel: "/tmp/vmlinuz".into(),
+            initrd: "/tmp/init.cpio".into(),
+            cmdline: "console=ttyS0 panic=-1".into(),
+        });
+        let args = m.args();
+        let joined = args.join(" ");
+        assert!(joined.contains("-kernel /tmp/vmlinuz -initrd /tmp/init.cpio -append"));
+        assert!(args.contains(&"console=ttyS0 panic=-1".to_string()));
+        assert!(!joined.contains("pflash"));
+        assert!(!joined.contains("out/test.img"));
     }
 
     #[test]

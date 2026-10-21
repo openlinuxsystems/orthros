@@ -67,11 +67,11 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue | GPL-3.0-or-later |
 | [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store, scheduling policy and IPC arithmetic | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
-| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler and endpoint models | MIT |
+| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler, idle wake-up, endpoint and channel models | MIT |
 | [mdBook](https://github.com/rust-lang/mdBook) 0.4.52 | The handbook | MPL-2.0 |
 | [scdoc](https://git.sr.ht/~sircmpwn/scdoc) | Man pages | MIT |
 | [mandoc](https://mandoc.bsd.lv/) | Checking man pages | ISC |
-| [Linux](https://kernel.org/) on the build machine and CI's runners | The baseline `ob bench` compares Radix with | GPL-2.0-only |
+| [Linux](https://kernel.org/) on the build machine and CI's runners | The baseline `ob bench` compares Radix with: the runner's own kernel, booted unchanged in a virtual machine, and the host itself | GPL-2.0-only |
 | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | License and advisory checks of crates | MIT OR Apache-2.0 |
 | [RustSec advisory database](https://github.com/rustsec/advisory-db) | Advisories for cargo-deny | CC0-1.0 |
 | [spdx-tools](https://github.com/spdx/tools-python) 0.8.3 | Validating each image's license manifest | Apache-2.0 |
@@ -97,7 +97,8 @@ We implement these from their published descriptions. No code is copied.
   Aumasson.
 - Daniel J. Bernstein's
   ["Fast-key-erasure random-number generators"](https://blog.cr.yp.to/20170723-random.html),
-  the design of the kernel's random number generator.
+  the design of the kernel's random number generator and its per-CPU
+  generators.
 - Ion Stoica and Hussein Abdel-Wahab,
   "Earliest Eligible Virtual Deadline First: A Flexible and Accurate
   Mechanism for Proportional Share Resource Allocation" (Old Dominion
@@ -109,8 +110,8 @@ We implement these from their published descriptions. No code is copied.
   µ-Kernel Construction" (SOSP 1995): synchronous IPC with messages in
   registers, the basis of the endpoints' fast path.
 - Larry McVoy and Carl Staelin, "lmbench: Portable Tools for Performance
-  Analysis" (USENIX 1996): the method of `ob bench`, after `lat_syscall`, `lat_pipe`
-  and `lat_unix`. We use no lmbench code.
+  Analysis" (USENIX 1996): the method of `ob bench`, after `lat_syscall`,
+  `lat_ctx`, `lat_pipe` and `lat_unix`. We use no lmbench code.
 - Jens Axboe, ["Efficient IO with io_uring"](https://kernel.dk/io_uring.pdf)
   (2019): the design of rings.
 - The PC Screen Font format, as described by Andries Brouwer for the
@@ -157,6 +158,15 @@ are grateful.
   shaped radix-ring ([ADR 0034](docs/adr/0034-radix-ring.md)), and its
   `getrandom(2)` the random capability's `read`
   ([ADR 0031](docs/adr/0031-system-call-interface.md)).
+  Linux's cpuidle-haltpoll governor (`Documentation/virt/guest-halt-polling.rst`)
+  is the policy idle virtual CPUs poll by, with its defaults
+  ([ADR 0037](docs/adr/0037-lazy-timer-and-guest-halt-polling.md)); its
+  futexes, which only enter the kernel when a waiter has said it is there,
+  shaped how channels wake each other
+  ([ADR 0038](docs/adr/0038-channel-wake-ups-per-direction.md)); its
+  per-CPU random generators keyed from a base generator shaped ours; and
+  its workaround for AMD's SYSRET erratum (`X86_BUG_SYSRET_SS_ATTRS`)
+  showed us why to reload SS at a context switch.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the

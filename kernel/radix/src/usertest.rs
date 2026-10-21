@@ -15,8 +15,10 @@
 //! - `ipc`: user-mode programs ping-pong over an endpoint (on one CPU and
 //!   across two), pass capabilities in messages, signal notifications,
 //!   talk through a shared-memory channel, and ping-pong over two rings.
-//! - `bench`: measures system call and IPC round trips (`ob bench` reads
-//!   the numbers, docs/design/ipc.md says how).
+//! - `bench`: measures system calls, IPC round trips, context switches,
+//!   fresh pages, memory bandwidth, TLB shootdowns and system calls on two
+//!   CPUs at once (`ob bench` reads the numbers, docs/design/ipc.md says
+//!   how).
 //!
 //! Each test logs `selftest NAME: passed` or `failed` lines. `user` and
 //! `ipc` also check that the capability store and the object registry hold
@@ -46,6 +48,13 @@ mod role {
     pub const RING_A: u32 = 11;
     pub const RING_B: u32 = 12;
     pub const SYSCALL_BENCH: u32 = 13;
+    pub const MEMORY_BENCH: u32 = 14;
+    pub const YIELD_A: u32 = 15;
+    pub const YIELD_B: u32 = 16;
+    pub const SHOOT_A: u32 = 17;
+    pub const SHOOT_B: u32 = 18;
+    pub const PARALLEL_A: u32 = 19;
+    pub const PARALLEL_B: u32 = 20;
 }
 
 /// The faults the fault program makes, by its argument.
@@ -289,29 +298,62 @@ pub fn bench() {
         outcome.check("syscalls", &group, 0);
         report_counters("syscalls", SYSCALL_ROUNDS, &before);
     }
+    let before = sched::counters();
+    if let Some(group) = group(&mut outcome, "memory", |group| {
+        let mut extra = [(0, ALL, 0); COPY_OBJECTS];
+        for (slot, ..) in &mut extra {
+            *slot = group.memory(COPY_ORDER).map_err(|_| ())?;
+        }
+        let argument = BENCH | PAGE_ROUNDS;
+        start(
+            group,
+            Spec { name: "memory", role: role::MEMORY_BENCH, argument, cpu: 0, extra: &extra },
+        )
+    }) {
+        outcome.check("memory", &group, 0);
+        report_counters("memory", PAGE_ROUNDS, &before);
+    }
     for across in [false, true] {
         for (what, roles) in PAIRS {
             if roles.0 == role::CAP_SEND {
                 continue;
             }
-            let before = sched::counters();
-            let Some(group) = pair(&mut outcome, what, roles, BENCH | PAIR_ROUNDS, across) else {
-                continue;
-            };
-            outcome.check(what, &group, 0);
             let place = if across { "cross_cpu" } else { "same_cpu" };
             let mut name = radix_klog::TextBuf::<32>::new();
             let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{what}_{place}"));
-            report_counters(name.as_str(), PAIR_ROUNDS, &before);
+            bench_pair(&mut outcome, name.as_str(), roles, PAIR_ROUNDS, across);
         }
+    }
+    let yields = (role::YIELD_A, role::YIELD_B);
+    bench_pair(&mut outcome, "context_switch", yields, PAIR_ROUNDS, false);
+    if online() >= 2 {
+        let shoot = (role::SHOOT_A, role::SHOOT_B);
+        bench_pair(&mut outcome, "tlb_shootdown", shoot, SHOOT_ROUNDS, true);
+        let parallel = (role::PARALLEL_A, role::PARALLEL_B);
+        bench_pair(&mut outcome, "parallel", parallel, SYSCALL_ROUNDS, true);
     }
     outcome.end(format_args!("the numbers are above, one BENCH line each"));
 }
 
-/// Rounds of each system call the benchmark makes, and of each pair's
-/// round trips.
+/// Runs a pair of benchmark programs and reports what the kernel did.
+fn bench_pair(outcome: &mut Outcome, name: &str, roles: (u32, u32), rounds: u64, across: bool) {
+    let before = sched::counters();
+    let Some(group) = pair(outcome, name, roles, BENCH | rounds, across) else { return };
+    outcome.check(name, &group, 0);
+    report_counters(name, rounds, &before);
+}
+
+/// Rounds of each system call the benchmark makes, of each pair's round
+/// trips, of fresh pages, and of TLB shootdowns.
 const SYSCALL_ROUNDS: u64 = 200_000;
 const PAIR_ROUNDS: u64 = 100_000;
+const PAGE_ROUNDS: u64 = 50_000;
+const SHOOT_ROUNDS: u64 = 50_000;
+
+/// The memory objects the memory benchmark copies between: 16 of 4 MiB,
+/// two 32 MiB buffers, more than the caches of the CPUs CI runs on.
+const COPY_OBJECTS: usize = 16;
+const COPY_ORDER: u32 = 10;
 
 /// Logs what the kernel did for a benchmark since `before`: switches,
 /// timer writes, interrupts sent, halts and polls, which `ob bench` divides

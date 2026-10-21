@@ -75,6 +75,19 @@ a program may hold. Interrupts and exceptions from user mode reach the
 same kernel stack through the TSS; their stub swaps GS when the saved CS
 is the user's.
 
+**AMD's SYSRET.** STAR's user selector base carries privilege level 3
+(`USER_BASE` is 0x1b), so the stack selector SYSRET loads is 0x23. Intel
+CPUs force the low bits of SS to 3 whatever STAR says, and QEMU's
+emulator does too, but AMD CPUs load them as written: with a base of
+0x18, a program ran with SS 0x20, and the first `iretq` back to it (after
+an interrupt) raised a general protection fault on that selector. CI's
+runners are a mix of Intel and AMD machines, which is why the benchmark
+boot failed only some of the time. AMD CPUs also keep SS's hidden
+attributes from before a SYSRET, so a thread switched in after one may
+run kernel code with an SS that is not quite the kernel's; the context
+switch reloads SS with the kernel's selector when it differs, as Linux
+does for the same erratum (`X86_BUG_SYSRET_SS_ATTRS`).
+
 **Faults.** An exception in user mode never reaches the kernel's panic
 path: the architecture hands it to the kernel's user fault handler, which
 logs it (`User: thread 9 (fault) ended: page fault writing 0x10000 (not
@@ -231,11 +244,30 @@ to a waiting ring before the word.
 Channels are built from the pieces above, entirely in `libradix`: two
 programs map the same 4 KiB frame, which holds two single-producer,
 single-consumer queues of sixteen 64-byte messages, one each way, and
-each program has a notification to sleep on. A writer copies the message
-in, publishes its tail with release ordering and signals the reader's
-notification; a reader that finds its queue empty waits on its own
-notification, which keeps a signal that came first, so no wake-up is lost.
-The messages never pass through the kernel.
+each program has a notification to sleep on. The messages never pass
+through the kernel, and an end that never has to wait makes no system
+call at all (ADR 0038):
+
+- Each queue has a reader's word beside its head and a writer's word
+  beside its tail, each on the cache line its owner writes anyway.
+- An end that finds its queue empty (to receive) or full (to send) sets
+  its word on that queue, looks at the indexes again, and only then waits
+  on its notification, which keeps a signal that came first; it clears
+  the word once it is done.
+- After writing a message (moving the tail), a writer signals the
+  reader's notification only if the reader's word is set; after reading
+  one (moving the head), a reader signals the writer only if the
+  writer's word is set.
+- The word's store and the second look, and the index's store and the
+  word's load, are sequentially consistent: either the waiter sees the
+  index move, or the other end sees the word and signals. This is the
+  pattern of Linux's futexes.
+
+A round trip on one CPU therefore takes two context switches. The TLA+
+model `userspace/libradix/tla/Channel.tla` checks the protocol with
+one-message queues, for ping-pong, bursts that fill the queue and both
+ends sending first: no deadlock, and both ends always finish (about
+4,900 states).
 
 ## Rings
 
@@ -309,9 +341,14 @@ The `usertests` programs (`userspace/usertests`) are:
 ## Benchmarks
 
 `ob bench` boots a test image with `selftest=bench` on 2 CPUs and reads
-the `BENCH` lines the programs log, then runs `tools/linux-bench` on the
-host for the closest Linux operations (ADR 0035). The method follows
-lmbench's `lat_syscall`, `lat_pipe` and `lat_unix`:
+the `BENCH` lines the programs log. Then it boots Linux in a virtual
+machine set up the same way (q35, 2 CPUs, 1 GiB, KVM, `-cpu host`), with
+a static `tools/linux-bench` as its only process, for the closest Linux
+operations, and runs `linux-bench` on the host too, for reference
+(ADR 0039). The Linux in the virtual machine is the runner's own kernel,
+booted with `mitigations=off`, since Radix has no mitigations of CPU
+vulnerabilities yet. The method follows lmbench's `lat_syscall`,
+`lat_ctx`, `lat_pipe` and `lat_unix`:
 
 - each measurement times a loop of many operations (200,000 system calls,
   100,000 round trips) with the TSC, read with `lfence; rdtsc` before and
@@ -319,36 +356,69 @@ lmbench's `lat_syscall`, `lat_pipe` and `lat_unix`:
   disappears; the kernel gives the TSC's frequency in the start-up page;
 - a round trip is one message there and back between two programs, both
   pinned to one CPU or to two;
-- on Linux, the same with two threads pinned with `sched_setaffinity`, and
-  `std::time::Instant` around the loop.
+- on Linux, the same with two threads (or processes) pinned with
+  `sched_setaffinity`, and `std::time::Instant` around the loop.
 
 | Radix | Linux baseline |
 | --- | --- |
 | `syscall_null`: an unknown system call number, which only enters and leaves the kernel | `getppid` through `syscall(2)` |
 | `syscall_yield`: `yield` with nothing else to run | `sched_yield` |
-| `cap_info`: the `info` method of a capability | none |
+| `cap_info`: the `info` method of a capability | `fcntl(F_GETFD)`: a look-up in the file table |
 | `random_words`: 64 random bytes in registers | `getrandom`, 64 bytes |
+| `context_switch`: two programs on one CPU yielding to each other, per switch the kernel counts | two processes calling `sched_yield`, per switch `getrusage` counts |
+| `fresh_page`: a page made from memory, mapped, written, unmapped and given back | `mmap`, a first-touch fault, `munmap` |
+| `tlb_shootdown`: a page mapped and unmapped while the address space runs on the other CPU | `mprotect` to none and back while a thread spins on the other CPU |
+| `memory_copy`: `rep movsb` between two 32 MiB buffers, per MiB | the same copy |
 | `endpoint_call_*`: `cap_call` answered with `reply_recv` | a pipe round trip |
 | `notification_pingpong_*`: `notify` and `wait` each way | an eventfd round trip |
 | `channel_roundtrip_*`: a message each way through a channel | a futex ping-pong |
 | `ring_roundtrip_*`: `msg_ring` each way between two rings | a Unix socket round trip |
+| `syscall_null_parallel`, `cap_info_parallel`, `random_words_parallel`: the same on both CPUs at once | `getppid`, `fcntl` and `getrandom` on two threads |
 
-The Radix numbers come from a virtual machine and the Linux ones from the
-host. Under KVM a system call does not leave the guest, so single-CPU
-numbers compare fairly; a wake-up on another CPU is an interrupt the
-host delivers, so two-CPU numbers carry the hypervisor's cost on top.
-Without KVM the Radix numbers measure QEMU's emulation and say nothing
-about the kernel; `ob bench` says so. CI runs `ob bench` on every pull
-request and every merge to main and shows the report in the job's
-summary, with the numbers as an artifact (`results.json`).
+A yield switches only when the other program may run first (EEVDF on
+both systems), so `context_switch` divides the time by the switches that
+happened: on Radix the kernel's count for the benchmark, which includes
+starting and stopping the two programs, and on Linux the sum of both
+processes' `ru_nvcsw` and `ru_nivcsw`.
+
+Radix has no demand paging until Phase 6's pagers, so `fresh_page` is
+how a program gets a new page: the same work as a first-touch fault
+(a zeroed page, mapped), plus giving it back.
+
+The report shows each Radix number, the Linux one from the virtual
+machine, their ratio and the host's Linux. Under KVM a system call does
+not leave the guest, and a wake-up on another CPU is an interrupt the
+host delivers on both systems alike, so the ratio compares the kernels.
+`ob bench --gate` fails if a row is missing or Radix takes more than
+1.05 times as long as Linux in the virtual machine; CI's `bench` job runs
+it on every pull request and every merge to main and shows the report in
+the job's summary, with the numbers as an artifact (`results.json`).
+Without KVM nothing is comparable: the Linux virtual machine does not
+run, the report says so, and `--gate` fails.
+
+The report also gives, for each benchmark, what the kernel did per
+operation: switches, timer writes, interprocessor interrupts sent, halts
+and wake-ups caught while polling. Under a hypervisor each timer write,
+interrupt sent and halt is an exit to the host (ADR 0037).
+
+**Where the time goes.** A system call enters with `syscall`, saves the
+registers, and finds the running thread through the CPU's data without
+touching its reference count (`sched::running`). A capability method
+looks the capability up in this CPU's cache when the store has not
+changed since (`caps::get`), so it takes no lock and writes nothing
+shared, and CPUs using capabilities at once do not contend. Random bytes
+come from this CPU's generator. A same-CPU round trip is two context
+switches and no timer write; a cross-CPU wake-up finds the other CPU
+polling (ADR 0037) and costs a write instead of an interrupt.
 
 ## Known limits
 
-- Every capability lookup takes the capability store's lock, a mutex, so
-  lookups from many CPUs at once queue there. The fast path keeps the
-  store out of register-only messages, but the lookup of the endpoint
-  itself still takes it. A per-space read path (RCU over the slots) is
-  the planned fix when Phase 6's processes make this matter.
+- Any change to the capability store empties every CPU's cache of
+  capabilities, and finding the object a capability names still takes
+  the object registry's lock. Programs that change their capabilities
+  all the time on many CPUs at once would queue on the store's lock; a
+  per-space store with RCU over the slots is the fix if Phase 6's
+  processes show it matters.
 - Only rings charge their memory to a resource domain. Endpoints,
   notifications and queued messages come from the kernel heap uncharged,
   bounded by the slots a program has; Phase 6's processes will charge

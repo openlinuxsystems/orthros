@@ -175,6 +175,17 @@ impl Group {
         self.make(ObjectKind::Notification, Object::Notification(notification))
     }
 
+    /// Makes a memory object of 2^`order` pages for the group's programs.
+    pub fn memory(&mut self, order: u32) -> Result<u32> {
+        if self.next == LAUNCHER_SLOTS {
+            return Err(error(Kernel::NoRoom));
+        }
+        let slot = self.next;
+        caps::create_memory(SlotRef::new(self.launcher, slot), order).map_err(cap_error)?;
+        self.next += 1;
+        Ok(slot)
+    }
+
     /// Starts a program. Returns its number in the group.
     pub fn start(&mut self, spec: &Spec<'_>) -> Result<usize> {
         if spec.extra.len() > EXTRA_MAX {

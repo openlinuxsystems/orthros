@@ -46,5 +46,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0032](0032-endpoints-notifications-and-channels.md) | IPC is synchronous endpoints with a register-only fast path, seL4-style notifications, and channels built on shared memory | Accepted |
 | [0033](0033-ridl-interface-definitions.md) | The system call interface is defined once in ridl, and ridlc generates the Rust bindings, C headers and man(2) pages | Accepted |
 | [0034](0034-radix-ring.md) | radix-ring batches operations through shared submission and completion queues, after io_uring, and trusts nothing the program writes | Accepted |
-| [0035](0035-benchmarks-with-a-linux-baseline.md) | System call and IPC costs are measured on every merge, next to the closest Linux operations on the same machine | Accepted |
+| [0035](0035-benchmarks-with-a-linux-baseline.md) | System call and IPC costs are measured on every merge, next to the closest Linux operations on the same machine | Superseded by [0039](0039-linux-in-the-same-virtual-machine-and-a-performance-gate.md) |
 | [0036](0036-kernel-started-user-test-programs.md) | Until Phase 6, the kernel starts user-mode test programs from one image the boot loader loads, and the store gains random, ring and kernel_log objects | Accepted |
+| [0037](0037-lazy-timer-and-guest-halt-polling.md) | The timer is written only to fire earlier, and idle virtual CPUs poll before they halt | Accepted |
+| [0038](0038-channel-wake-ups-per-direction.md) | A channel signals the other end only when it says it may sleep, with one word for each way of waiting | Accepted |
+| [0039](0039-linux-in-the-same-virtual-machine-and-a-performance-gate.md) | Radix is held to Linux in the same kind of virtual machine, and CI fails when it is slower | Accepted |
