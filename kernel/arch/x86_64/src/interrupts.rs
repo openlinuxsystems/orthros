@@ -27,8 +27,13 @@
 //! data, and back on the way out, when the saved CS says the interrupted
 //! code ran in user mode. NMIs, double faults and machine checks can also
 //! arrive in kernel mode before the SYSCALL entry has swapped GS, or after
-//! the exit has swapped it back, so for them the stub reads GS base itself
-//! and swaps only if it is not a kernel address. With SMAP on, the stub
+//! the exit has swapped it back, so for them, and for every other
+//! exception (which is rare, unlike interrupts), the stub reads GS base
+//! itself and swaps only if it is not a kernel address. An exception in
+//! kernel mode with the program's GS base is a bug; the stub marks the
+//! frame so that the report says so, instead of faulting again on the
+//! first access to this CPU's data, and again, until the stack runs out.
+//! With SMAP on, the stub
 //! clears RFLAGS.AC, so a handler never runs with user pages open (the
 //! interrupted code gets its flags back with `iretq`). Exceptions in user
 //! mode end the thread through the user fault handler (`crate::user`); a
@@ -130,25 +135,24 @@ radix_isr_common:
        base was swapped on the way in. */
     xorl %ebx, %ebx
     movq 15*8(%rsp), %rax
-    cmpq $2, %rax
-    je 1f
-    cmpq $8, %rax
-    je 1f
-    cmpq $18, %rax
-    je 1f
+    cmpq $32, %rax
+    jb 1f
     testb $3, 18*8(%rsp)
     jz 3f
     swapgs
     movl $1, %ebx
     jmp 3f
 1:
-    /* Paranoid: GS base is the kernel's when its top bit is set. */
+    /* Exceptions: GS base is the kernel's when its top bit is set. */
     movl $0xc0000101, %ecx
     rdmsr
     testl %edx, %edx
     js 3f
     swapgs
     movl $1, %ebx
+    testb $3, 18*8(%rsp)
+    jnz 3f
+    orq ${user_gs}, 15*8(%rsp)
 3:
     cmpb $0, {smap}(%rip)
     je 4f
@@ -184,8 +188,13 @@ radix_isr_common:
     iretq
     "#,
     smap = sym crate::paging::SMAP,
+    user_gs = const USER_GS_IN_KERNEL,
     options(att_syntax)
 );
+
+/// Set in a frame's vector word by the entry stub: the exception came in
+/// kernel mode while GS base was the program's.
+const USER_GS_IN_KERNEL: u64 = 1 << 8;
 
 unsafe extern "C" {
     /// The first entry stub; see the assembly above.
@@ -489,7 +498,7 @@ fn breakpoint(frame: &mut TrapFrame) {
 
 fn fatal_exception(frame: &TrapFrame) -> ! {
     let cpu = percpu::current();
-    let vector = frame.vector as usize;
+    let vector = (frame.vector & 0xff) as usize;
     let (name, mnemonic) = EXCEPTIONS[vector];
     if cpu.exception_depth.fetch_add(1, Ordering::AcqRel) > 2 {
         // Exceptions inside the handling of exceptions: give up quietly
@@ -520,6 +529,9 @@ fn fatal_exception(frame: &TrapFrame) -> ! {
     }
     if frame.cs & 3 != 0 {
         let _ = write!(detail, " [user mode]");
+    }
+    if frame.vector & USER_GS_IN_KERNEL != 0 {
+        let _ = write!(detail, " [kernel mode with the program's GS base]");
     }
     panic!("{name} ({mnemonic}) at {:#x}{detail}", frame.rip);
 }
