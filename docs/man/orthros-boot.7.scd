@@ -229,6 +229,11 @@ it. The boot log names the sources the seed rests on:
 Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096 samples, 37 stuck)
 ```
 
+In a virtual machine the time-stamp counter is the host's, and on some
+hosts the timing jitter fails its test while *RDSEED* and *RDRAND* pass.
+The line then says so, and the seed is as unpredictable as the CPU's
+generators.
+
 A line that says no source passed means the kernel's random numbers, and
 so its layout, may be predictable on that machine. From Phase 5, programs
 get random numbers from the same generator through their *getrandom*
