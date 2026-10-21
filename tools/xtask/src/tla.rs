@@ -30,6 +30,7 @@ pub const MODELS: &[(&str, &str)] = &[
     ("kernel/sched/tla/IdleWake.tla", "IdleWake.cfg"),
     ("kernel/ipc/tla/Endpoint.tla", "Endpoint.cfg"),
     ("kernel/ipc/tla/Endpoint.tla", "EndpointLiveness.cfg"),
+    ("userspace/libradix/tla/Channel.tla", "Channel.cfg"),
 ];
 
 /// How to install Java.

@@ -22,7 +22,24 @@ kernel/arch/x86_64      random.rs: RDSEED, RDRAND and timing jitter; seeds
 `radix-random` is architecture-independent, `#![forbid(unsafe_code)]`,
 and builds for the host, where its tests run. The kernel has one
 generator, a static behind a `radix-sync` spin lock, used through
-`radix_random::fill`, `u64` and `below`.
+`radix_random::fill`, `u64` and `below`. Programs' requests (the random
+capability's `read` and `words`, and a ring's `random` operation) go to
+a generator per CPU instead (`radix_random::Local`, kept in
+`kernel/radix/src/user/random.rs`), so that CPUs asking at once never
+wait for each other.
+
+## Per-CPU generators
+
+A `Local` generator is the same ChaCha20 generator with fast key
+erasure. On first use, and whenever the kernel's generator has been
+seeded again since (a generation number the seeding moves, under the
+generator's lock), it takes 32 bytes from the kernel's generator and
+mixes them into its key with the reseeding hash. Its output is therefore
+as unpredictable as the kernel generator's, and once a request returns
+the key that made it is gone, as before. Only its own CPU uses it, with
+preemption off, and no interrupt handler does; the lock around it is
+never contended. Linux keys its per-CPU generators from a base generator
+the same way.
 
 ## Seeding
 
@@ -90,9 +107,9 @@ drawn with `below`.
 
 - The spin lock does not mask interrupts, so interrupt handlers must not
   use the generator.
-- The generator is seeded once per boot. Phase 5 adds the `getrandom`
-  capability, per-CPU generators and reseeding from fresh entropy,
-  including interrupt timings.
+- The generator is seeded once per boot. Reseeding from fresh entropy,
+  including interrupt timings, is still to come; the per-CPU generators
+  already follow a reseed.
 - The health tests catch broken sources, not predictable ones; nothing
   estimates entropy.
 - The jitter limit of half the samples is our own choice, and it is

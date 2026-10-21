@@ -586,10 +586,49 @@ pub fn spawn(
 
 /// The running thread, once the scheduler runs on this CPU.
 pub fn current() -> Option<ThreadRef> {
-    let were = Arch::disable_interrupts();
-    let thread = CPUS.this().rq.lock().as_ref().map(|rq| rq.current.clone());
-    Arch::restore_interrupts(were);
-    thread
+    running().map(|me| ThreadRef::clone(&me))
+}
+
+/// The running thread, borrowed: finding it takes no lock and leaves its
+/// reference count alone, which matters on the system call path.
+///
+/// A thread lives at least as long as it runs: the run queue holds it
+/// while it is current, and the reaper frees it only once its CPU has
+/// switched away for good. So the running code may look at itself through
+/// a borrowed reference, wherever it moves meanwhile, as long as the
+/// reference stays with it: [`Running`] can be neither sent to another
+/// thread nor kept past the code that took it, and cloning the
+/// [`ThreadRef`] it derefs to makes a counted reference as usual.
+pub fn running() -> Option<Running> {
+    // Preemption held off: the CPU's current thread is this code's.
+    let token = CPUS.with(|slot| slot.current.load(Ordering::Relaxed));
+    if token == 0 {
+        return None;
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: `token` is the address of the running thread's `Thread`
+    // inside the allocation of its `ThreadRef` (`Thread::token`), alive as
+    // said above. The reference made here is never dropped, so it never
+    // gives back a count it did not take; the allocator handle it carries
+    // frees through the same heap as any other (`Kmalloc`).
+    let thread =
+        unsafe { ThreadRef::from_raw_in(token as *const Thread, HEAP.with(Flags::ATOMIC)) };
+    Some(Running { thread: core::mem::ManuallyDrop::new(thread), _here: core::marker::PhantomData })
+}
+
+/// The running thread, borrowed ([`running`]).
+pub struct Running {
+    thread: core::mem::ManuallyDrop<ThreadRef>,
+    /// Neither `Send` nor `Sync`: it stays with the code that took it.
+    _here: core::marker::PhantomData<*const ()>,
+}
+
+impl core::ops::Deref for Running {
+    type Target = ThreadRef;
+
+    fn deref(&self) -> &ThreadRef {
+        &self.thread
+    }
 }
 
 /// The running thread's token (its address), or 0 before threads run.
@@ -613,7 +652,7 @@ pub fn can_sleep() -> bool {
 /// policy asks every thread of a domain it stops): long-running kernel
 /// threads check it and return.
 pub fn should_stop() -> bool {
-    current().is_some_and(|me| me.should_stop())
+    running().is_some_and(|me| me.should_stop())
 }
 
 /// Gives the CPU to another thread of the same class, if one waits.

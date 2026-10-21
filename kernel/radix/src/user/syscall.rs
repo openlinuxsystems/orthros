@@ -17,7 +17,7 @@ use radix_abi::errors::Kernel;
 use radix_abi::kernel_log::WRITE_MAX;
 use radix_abi::notification::WaitFlags;
 use radix_abi::syscalls as sys;
-use radix_cap::{ObjectKind, Rights};
+use radix_cap::{CapError, ObjectKind, Rights};
 use radix_hal::{Cpu, SyscallRegs, UserMode};
 use radix_ipc::info::Info;
 use radix_klog::info;
@@ -25,7 +25,8 @@ use radix_klog::info;
 use super::ipc::{self, Delivery, Message};
 use super::memory::{FrameObject, access_of, cap_rights};
 use super::methods::{self, Answer};
-use super::{EXIT_STOPPED, Result, UserRef, error, exit_current, objects};
+use super::objects::{self, Object};
+use super::{EXIT_STOPPED, Result, UserRef, cap_error, error, exit_current};
 use crate::Arch;
 use crate::sched::{self, ThreadRef};
 
@@ -40,18 +41,17 @@ enum Done {
 /// Handles a system call from user mode.
 pub fn handle(regs: &mut SyscallRegs) {
     Arch::enable_interrupts();
-    let Some((me, user)) = super::current() else {
+    // Borrowed, not counted: the call runs as this thread throughout.
+    let running = sched::running();
+    let Some((me, user)) = running.as_deref().and_then(|me| Some((me, me.user()?))) else {
         panic!("User mode: a system call from a thread that is not a program's");
     };
-    match dispatch(&me, &user, regs.number, &regs.args) {
+    match dispatch(me, user, regs.number, &regs.args) {
         Ok(Done::Results(results)) => {
             regs.number = 0;
             regs.args = results;
         }
-        Ok(Done::Exit(code)) => {
-            drop(me);
-            exit_current(user, code);
-        }
+        Ok(Done::Exit(code)) => exit_current(user.clone(), code),
         Err(status) => {
             regs.number = status.0;
             regs.args = [0; 10];
@@ -59,8 +59,7 @@ pub fn handle(regs: &mut SyscallRegs) {
     }
     if me.should_stop() {
         info!("User: thread {} ({}) stopped", me.id(), me.name());
-        drop(me);
-        exit_current(user, EXIT_STOPPED);
+        exit_current(user.clone(), EXIT_STOPPED);
     }
 }
 
@@ -83,9 +82,16 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
         sys::CAP_CALL => {
             let a = sys::CapCallArgs::decode(args)?;
             let info = message_info(a.info)?;
+            // One look at the slot serves both an endpoint and a method.
+            let mut cap = None;
             if !info.is_reserved() {
-                match objects::endpoint(cspace, a.cap, Rights::SEND) {
-                    Ok((cap, endpoint)) => {
+                let found = objects::capability(cspace, a.cap)?;
+                match found.check(ObjectKind::Endpoint, Rights::SEND) {
+                    Ok(()) => {
+                        let Object::Endpoint(endpoint) = objects::object_of(&found)? else {
+                            return Err(error(Kernel::Gone));
+                        };
+                        let cap = found;
                         let message = Message {
                             info,
                             words: a.words,
@@ -98,14 +104,14 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
                         let reply = reply.expect("a call ends with a reply or an error");
                         return results(delivered(reply));
                     }
-                    Err(status) if Kernel::from_status(status) == Some(Kernel::WrongKind) => {}
-                    Err(status) => return Err(status),
+                    Err(CapError::WrongKind { .. }) => cap = Some(found),
+                    Err(err) => return Err(cap_error(err)),
                 }
             }
             if info.caps > 0 || info.move_caps || info.no_block {
                 return Err(Kernel::InvalidArgument.status(1));
             }
-            match methods::call(me, user, a.cap, info, a.words)? {
+            match methods::call(me, user, a.cap, cap, info, a.words)? {
                 Answer::Reply(info, words) => {
                     results(sys::CapCallResults { badge: 0, info, words }.encode())
                 }

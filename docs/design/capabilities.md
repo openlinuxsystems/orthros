@@ -175,6 +175,23 @@ Lock order: the store's lock, then the heap's locks, then the frame
 allocator's. The `Released` callback runs with the store locked and only
 calls the frame allocator.
 
+**Looking up without the lock.** Looking a capability up (`caps::get`,
+`caps::lookup`) is the most frequent use of the store: every system call
+on a capability does it. Each CPU keeps the last capabilities it found,
+sixteen of them indexed by slot, with the store's version number at the
+time; every operation on the store, under its lock, moves the version
+before the lock goes. A lookup that finds the slot in this CPU's cache at
+the current version returns it without taking the lock or writing
+anything another CPU reads. That is correct because the version did not
+move: nothing changed the store since the capability was read from it,
+and an operation that has changed it but not moved the version yet has
+not returned either, so the lookup counts as coming before it, which a
+lookup that took the lock first could also have done. A revoke that has
+returned has moved the version, and any thread that learns of it (through
+a lock, an IPC or any other synchronization) sees the new version, so it
+cannot use what was revoked. The cache keeps capabilities only, never
+objects, so it keeps nothing alive.
+
 ## Why no capability can be forged or widened
 
 This is the semi-formal argument the roadmap asks for. Each step names the
@@ -401,10 +418,11 @@ KVM it takes about a tenth of a second.
   kernel structures behind them yet; those come with Phases 4 to 6, and
   endpoints are used only as sealing keys for now.
 - One store and one lock for the whole kernel. That is simple and
-  obviously atomic, but every capability operation on every CPU
-  serializes on it. Finer locking (per space, with a tree lock for
-  derivation and revocation) can come when IPC benchmarks (Phase 5) show
-  the need; the TLA+ model would have to grow with it.
+  obviously atomic. Lookups no longer take it when nothing has changed
+  (see *In the kernel*), but every change serializes on it and empties
+  every CPU's cache. Finer locking (per space, with a tree lock for
+  derivation and revocation) can come when Phase 6's processes show the
+  need; the TLA+ model would have to grow with it.
 - The lock is a spin lock until Phase 4, and the store allocates under it.
 - Only memory, frames and DMA buffers are retyped. Kernel objects that
   need memory of their own (threads, page tables) will be retyped from

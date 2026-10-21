@@ -39,6 +39,7 @@ mod memory;
 mod methods;
 mod notify;
 pub mod objects;
+mod random;
 mod ring;
 mod syscall;
 

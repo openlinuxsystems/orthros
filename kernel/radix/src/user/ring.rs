@@ -380,7 +380,7 @@ fn execute(user: &UserThread, ring: &RingRef, entry: &[u8; Sqe::SIZE]) {
         Some(Opcode::MsgRing) => objects::ring(user.cspace, cap, Rights::SEND)
             .and_then(|(_, target)| target.post(arg(0), [arg(1), arg(2)]))
             .map(|()| [0; 2]),
-        Some(Opcode::Random) => Ok([radix_random::u64(), radix_random::u64()]),
+        Some(Opcode::Random) => Ok([super::random::u64(), super::random::u64()]),
         Some(Opcode::Timeout) => {
             let deadline = sched::now_ns().saturating_add(arg(0));
             let mut timeouts = ring.timeouts.lock();

@@ -14,21 +14,31 @@
 //! steps of [`REVOKE_STEP`] deletions and let go of the lock between
 //! steps, yielding the CPU, so other threads are not shut out for long.
 //!
+//! Looking a capability up takes no lock and writes nothing shared when
+//! the store has not changed since this CPU last looked at that slot
+//! ([`get`]): every change to the store moves a version number, and each
+//! CPU keeps the capabilities it found, with the version they were found
+//! at. So programs on different CPUs using their capabilities at once do
+//! not contend, as long as nothing changes the store.
+//!
 //! Resource domains (`domains`) are objects in the store too: a domain
 //! lives while a capability to it does, and goes when the last one is
 //! deleted or revoked.
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use radix_cap::{
-    CapError, Capabilities, MAX_DEPTH, MAX_SLOTS, ObjectId, ObjectKind, Progress, Released, Rights,
-    SlotRef,
+    CapError, Capabilities, Capability, MAX_DEPTH, MAX_SLOTS, ObjectId, ObjectKind, Progress,
+    Released, Rights, SlotRef,
 };
+use radix_hal::MAX_CPUS;
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
-use radix_sync::Mutex;
+use radix_sync::{Mutex, SpinLock};
 
 use crate::domains::{self, DomainError, DomainRef, Settings};
+use crate::percpu::{PerCpu, Slot};
 
 /// The store's type in the kernel.
 pub type Store = Capabilities<Kmalloc>;
@@ -53,10 +63,73 @@ pub fn init() {
 /// Runs `f` on the store with its lock held, if the store is set up.
 pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     let mut store = STORE.lock();
-    match store.as_mut() {
+    let result = match store.as_mut() {
         Some(store) => Ok(f(store)),
         None => Err(CapError::NoSuchSpace),
+    };
+    // `f` may have changed anything, so every capability a CPU has cached
+    // is stale from now on: before the lock goes, so that whoever sees the
+    // change through the store sees the new version too.
+    VERSION.fetch_add(1, Ordering::Release);
+    result
+}
+
+/// Moves on every change to the store, under its lock.
+static VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Capabilities a CPU keeps, in a table indexed by slot.
+const CACHED: usize = 16;
+
+/// A capability this CPU found in a slot, and the store's version then.
+#[derive(Clone, Copy)]
+struct Cached {
+    at: SlotRef,
+    version: u64,
+    cap: Capability,
+}
+
+/// Each CPU's capabilities. Only its own CPU takes the lock, with
+/// preemption off, so it is never contended.
+static CACHE: PerCpu<SpinLock<[Option<Cached>; CACHED]>> =
+    PerCpu::new([const { Slot::new(SpinLock::new([None; CACHED])) }; MAX_CPUS]);
+
+fn cache_index(at: SlotRef) -> usize {
+    (at.slot as usize ^ at.space.index as usize) % CACHED
+}
+
+/// The capability in `at`, as [`Store::get`] gives it.
+///
+/// If this CPU found it at the version the store has now, nothing has
+/// changed since, and it is still there: no lock, no shared write. A
+/// change under way that has not moved the version yet has not returned
+/// either, so a lookup that misses it happened before it. Otherwise the
+/// store is asked under its lock, and the answer kept with the version,
+/// which cannot move while the lock is held.
+pub fn get(at: SlotRef) -> Result<Capability, CapError> {
+    let now = VERSION.load(Ordering::Acquire);
+    let index = cache_index(at);
+    let hit = CACHE
+        .with(|cache| cache.lock()[index].filter(|entry| entry.at == at && entry.version == now));
+    if let Some(entry) = hit {
+        return Ok(entry.cap);
     }
+    let (found, version) = {
+        let store = STORE.lock();
+        let found = store.as_ref().ok_or(CapError::NoSuchSpace)?.get(at);
+        (found, VERSION.load(Ordering::Relaxed))
+    };
+    if let Ok(cap) = found {
+        CACHE.with(|cache| cache.lock()[index] = Some(Cached { at, version, cap }));
+    }
+    found
+}
+
+/// The capability in `at`, if it may be used on a `kind` with the rights
+/// `needs`, as [`Store::lookup`] decides it, through [`get`].
+pub fn lookup(at: SlotRef, kind: ObjectKind, needs: Rights) -> Result<Capability, CapError> {
+    let cap = get(at)?;
+    cap.check(kind, needs)?;
+    Ok(cap)
 }
 
 /// Like [`with`], but gives up instead of waiting for the lock: for `kdb`,
@@ -160,7 +233,7 @@ pub fn create_domain(
 
 /// The domain the capability in `at` names, if it has `needs` on it.
 pub fn domain_at(at: SlotRef, needs: Rights) -> Result<DomainRef, CapError> {
-    let cap = with(|store| store.lookup(at, ObjectKind::ResourceDomain, needs))??;
+    let cap = lookup(at, ObjectKind::ResourceDomain, needs)?;
     cap.id().and_then(domains::by_object).ok_or(CapError::Empty)
 }
 
