@@ -54,6 +54,7 @@ the pinned build container with Podman or Docker:
 | `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen and the memory manager (`kani` for the Kani proofs instead) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |
+| `./ob signoff` | Check that your new commits carry a Developer Certificate of Origin sign-off |
 | `./ob clean` | Remove build output |
 
 Settings live in [`orthros.toml`](orthros.toml). The full manual is
@@ -104,8 +105,13 @@ described in the roadmap.
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and the
-[coding standard](docs/coding-standard.md). Decisions that shape the system
-are recorded as [architecture decision records](docs/adr/README.md).
+[coding standard](docs/coding-standard.md). Every commit is signed off under
+the [Developer Certificate of Origin](CONTRIBUTING.md#developer-certificate-of-origin),
+and everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+[GOVERNANCE.md](GOVERNANCE.md) says who decides what, and
+[SECURITY.md](SECURITY.md) how to report a vulnerability privately.
+Decisions that shape the system are recorded as
+[architecture decision records](docs/adr/README.md).
 
 ## License
 
