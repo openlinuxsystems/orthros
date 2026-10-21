@@ -47,9 +47,9 @@ cargo kani setup
 ./ob test kani
 ```
 
-The capability core's derivation tree and revocation are also modelled in
-TLA+ (`kernel/cap/tla/`, ADR 0024). `./ob test tla` checks the model with
-the TLC model checker in about two minutes. It needs Java; `ob` downloads
+The capability core's derivation tree, retyping and revocation are also
+modelled in TLA+ (`kernel/cap/tla/`, ADR 0024). `./ob test tla` checks the
+model with the TLC model checker in about five minutes. It needs Java; `ob` downloads
 the pinned TLA+ tools itself:
 
 ```sh
