@@ -170,6 +170,14 @@ name = "radix-hal"
 version = "0.0.1"
 
 [[package]]
+name = "radix-ipc"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-abi",
+]
+
+[[package]]
 name = "radix-kdb"
 version = "0.0.1"
 

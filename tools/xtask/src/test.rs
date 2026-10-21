@@ -33,11 +33,13 @@ const QEMU_EXIT_RESET: i32 = 0;
 
 /// Every library of the kernel workspace with host unit tests.
 pub const KERNEL_LIBRARIES: &[&str] = &[
+    "radix-abi",
     "radix-acpi",
     "radix-bootinfo",
     "radix-cap",
     "radix-fbcon",
     "radix-hal",
+    "radix-ipc",
     "radix-kdb",
     "radix-klog",
     "radix-lockdep",
@@ -514,7 +516,7 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched"];
+pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched", "radix-ipc"];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
