@@ -4,9 +4,11 @@
 //! Per-CPU data, the global descriptor table and the task-state segment.
 //!
 //! Every CPU has a [`PerCpu`] in a static array; its GS base register points
-//! at its own entry, so `gs:[8]` is the running CPU's index. The boot CPU
-//! sets GS base first thing in [`crate::entry`], before any code that asks
-//! which CPU it is running on.
+//! at its own entry, so `gs:[8]` is the running CPU's index, `gs:[16]` its
+//! preemption count and `gs:[20]` its interrupt depth, each changed by one
+//! instruction that a migration cannot split. The boot CPU sets GS base
+//! first thing in [`crate::entry`], before any code that asks which CPU it
+//! is running on.
 //!
 //! Each CPU also has its own GDT and TSS. The TSS holds the interrupt stack
 //! table: double faults, NMIs and machine checks switch to dedicated stacks,
@@ -88,6 +90,10 @@ pub struct PerCpu {
     self_addr: AtomicUsize,
     /// The CPU's index: `gs:[8]`.
     index: AtomicUsize,
+    /// The preemption count: `gs:[16]`.
+    preempt: AtomicU32,
+    /// Interrupt handlers running, nested: `gs:[20]`.
+    irq_depth: AtomicU32,
     /// Local APIC ID.
     pub apic_id: AtomicU32,
     /// Listed in the MADT as usable.
@@ -113,6 +119,17 @@ pub struct PerCpu {
     pub fault: SpinLock<Option<Fault>>,
     /// The CPU's stacks.
     pub stacks: Once<Stacks>,
+    /// The stack of the thread running here (start and end), set by the
+    /// context switch; both 0 before threads.
+    pub thread_stack: [AtomicUsize; 2],
+    /// The address of the running thread's context block, or 0.
+    pub context: AtomicUsize,
+    /// Reschedule IPIs received.
+    pub reschedules: AtomicU64,
+    /// When the next periodic tick is due, in nanoseconds.
+    pub next_tick_ns: AtomicU64,
+    /// The deadline the kernel asked for, or `u64::MAX`.
+    pub deadline_ns: AtomicU64,
     descriptors: TakeOnce<Descriptors>,
 }
 
@@ -121,6 +138,8 @@ impl PerCpu {
         Self {
             self_addr: AtomicUsize::new(0),
             index: AtomicUsize::new(0),
+            preempt: AtomicU32::new(0),
+            irq_depth: AtomicU32::new(0),
             apic_id: AtomicU32::new(0),
             present: AtomicBool::new(false),
             node: AtomicU8::new(0),
@@ -133,6 +152,11 @@ impl PerCpu {
             exception_depth: AtomicU32::new(0),
             fault: SpinLock::new(None),
             stacks: Once::new(),
+            thread_stack: [const { AtomicUsize::new(0) }; 2],
+            context: AtomicUsize::new(0),
+            reschedules: AtomicU64::new(0),
+            next_tick_ns: AtomicU64::new(0),
+            deadline_ns: AtomicU64::new(u64::MAX),
             descriptors: TakeOnce::new(Descriptors {
                 gdt: [0; 5],
                 tss: Tss {
@@ -152,9 +176,107 @@ impl PerCpu {
     pub fn index(&self) -> usize {
         self.index.load(Ordering::Relaxed)
     }
+
+    /// The running thread's stack, if it is not one of [`Stacks`].
+    pub fn thread_stack(&self) -> Option<Range<usize>> {
+        let [start, end] = &self.thread_stack;
+        let (start, end) = (start.load(Ordering::Relaxed), end.load(Ordering::Relaxed));
+        let stacks = self.stacks.get();
+        (start < end && !stacks.is_some_and(|s| s.containing(start).is_some()))
+            .then_some(start..end)
+    }
+
+    /// The stack containing `addr`: one of this CPU's own, or the running
+    /// thread's.
+    pub fn stack_containing(&self, addr: usize) -> Option<Range<usize>> {
+        self.stacks
+            .get()
+            .and_then(|stacks| stacks.containing(addr))
+            .or_else(|| self.thread_stack().filter(|stack| stack.contains(&addr)))
+    }
+
+    /// Whether `addr` is in the guard page of one of this CPU's stacks or
+    /// of the running thread's.
+    pub fn in_stack_guard(&self, addr: usize) -> bool {
+        self.stacks.get().is_some_and(|stacks| stacks.in_guard(addr))
+            || self.thread_stack().is_some_and(|stack| {
+                (stack.start.saturating_sub(4096)..stack.start).contains(&addr)
+            })
+    }
+}
+
+/// Adds one to the running CPU's preemption count.
+#[inline(always)]
+pub fn preempt_disable() {
+    // SAFETY: GS base points at this CPU's `PerCpu` (see `current_index`),
+    // and offset 16 is its `preempt` field, an `AtomicU32` only ever
+    // changed by its own CPU. One instruction, so it cannot be split by an
+    // interrupt or a migration; the asm is a compiler barrier.
+    unsafe { asm!("inc dword ptr gs:[16]", options(nostack)) };
+}
+
+/// Takes one from the running CPU's preemption count and returns the rest.
+#[inline(always)]
+pub fn preempt_enable() -> u32 {
+    let left: u32;
+    // SAFETY: as in `preempt_disable`. Reading the result back separately
+    // is fine: a thread is only preempted while the count is 0, and then
+    // whichever CPU it runs on next has a count of 0 too.
+    unsafe { asm!("dec dword ptr gs:[16]", "mov {:e}, gs:[16]", out(reg) left, options(nostack)) };
+    left
+}
+
+/// The running CPU's preemption count.
+#[inline(always)]
+pub fn preempt_count() -> u32 {
+    let count: u32;
+    // SAFETY: as in `preempt_disable`, reading only.
+    unsafe {
+        asm!("mov {:e}, gs:[16]", out(reg) count, options(nostack, readonly, preserves_flags))
+    };
+    count
+}
+
+/// Sets the running CPU's preemption count.
+pub fn set_preempt_count(count: u32) {
+    // SAFETY: as in `preempt_disable`.
+    unsafe { asm!("mov gs:[16], {:e}", in(reg) count, options(nostack, preserves_flags)) };
+}
+
+/// Notes that an interrupt handler starts on this CPU.
+#[inline(always)]
+pub fn interrupt_enter() {
+    // SAFETY: as in `preempt_disable`, for the `irq_depth` field at 20.
+    unsafe { asm!("inc dword ptr gs:[20]", options(nostack)) };
+}
+
+/// Notes that an interrupt handler is done, and returns the depth left.
+#[inline(always)]
+pub fn interrupt_exit() -> u32 {
+    let left: u32;
+    // SAFETY: as in `interrupt_enter`.
+    unsafe { asm!("dec dword ptr gs:[20]", "mov {:e}, gs:[20]", out(reg) left, options(nostack)) };
+    left
+}
+
+/// The running CPU's interrupt depth.
+#[inline(always)]
+pub fn interrupt_depth() -> u32 {
+    let depth: u32;
+    // SAFETY: as in `interrupt_enter`, reading only.
+    unsafe {
+        asm!("mov {:e}, gs:[20]", out(reg) depth, options(nostack, readonly, preserves_flags))
+    };
+    depth
 }
 
 static CPUS: [PerCpu; MAX_CPUS] = [const { PerCpu::new() }; MAX_CPUS];
+
+const _: () = {
+    assert!(core::mem::offset_of!(PerCpu, index) == 8);
+    assert!(core::mem::offset_of!(PerCpu, preempt) == 16);
+    assert!(core::mem::offset_of!(PerCpu, irq_depth) == 20);
+};
 
 /// The data of CPU `index`.
 pub fn get(index: usize) -> Option<&'static PerCpu> {

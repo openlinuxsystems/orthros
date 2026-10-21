@@ -42,8 +42,9 @@ how `./ob test unit` runs their tests:
 cargo test --manifest-path kernel/Cargo.toml -p radix-acpi
 ```
 
-The memory manager, `radix-mm`, and the capability core, `radix-cap`, also
-have Kani proof harnesses (ADR 0019), which `./ob test kani` checks; they
+The memory manager, `radix-mm`, the capability core, `radix-cap`, and the
+scheduling policy, `radix-sched`, also have Kani proof harnesses (ADRs
+0019 and 0030), which `./ob test kani` checks; they
 take about ten minutes and need the Kani release `./ob doctor` names:
 
 ```sh
@@ -53,9 +54,11 @@ cargo kani setup
 ```
 
 The capability core's derivation tree, retyping and revocation are also
-modelled in TLA+ (`kernel/cap/tla/`, ADR 0024). `./ob test tla` checks the
-model with the TLC model checker in about five minutes. It needs Java; `ob` downloads
-the pinned TLA+ tools itself:
+modelled in TLA+ (`kernel/cap/tla/`, ADR 0024), and so is how the scheduler
+blocks, wakes and switches threads between CPUs (`kernel/sched/tla/`, ADR
+0030). `./ob test tla` checks both models with the TLC model checker in
+about eight minutes. It needs Java; `ob` downloads the pinned TLA+ tools
+itself:
 
 ```sh
 sudo apt install default-jre-headless

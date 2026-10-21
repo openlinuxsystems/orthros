@@ -25,6 +25,8 @@ pub const MODELS: &[(&str, &str)] = &[
     ("kernel/cap/tla/Capabilities.tla", "Capabilities.cfg"),
     ("kernel/cap/tla/Capabilities.tla", "CapabilitiesRetype.cfg"),
     ("kernel/cap/tla/Capabilities.tla", "CapabilitiesLiveness.cfg"),
+    ("kernel/sched/tla/Scheduler.tla", "Scheduler.cfg"),
+    ("kernel/sched/tla/Scheduler.tla", "SchedulerLiveness.cfg"),
 ];
 
 /// How to install Java.

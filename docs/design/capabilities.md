@@ -43,7 +43,7 @@ I/O ports or MMIO pages), a set of `Rights`, a badge (0 for none) and the
 `ObjectId` of the endpoint it is sealed with, if it is sealed. Its fields
 are private to the crate, and it has no public constructor.
 
-The eleven object kinds and their rights are listed in
+The twelve object kinds and their rights are listed in
 `radix-capabilities(7)`; `ObjectKind::rights` is the table. Every kind has
 the two rights about capabilities themselves: `copy`, needed to make
 anything from a capability, and `transfer`, needed to place what is made,

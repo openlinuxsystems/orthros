@@ -15,6 +15,12 @@
 //! registered breakpoint handler and resume, and NMIs, which the panic path
 //! uses to stop the other CPUs. A fatal exception records a [`Fault`] for
 //! the panic report and panics with a description of what went wrong.
+//!
+//! Interrupts (vectors 32 and up) count the CPU's interrupt depth. On the
+//! way out of one that came in from thread context with interrupts on and
+//! preemption allowed, the registered preemption handler runs, still with
+//! interrupts masked: that is where the scheduler switches threads when a
+//! tick or a reschedule IPI asked for it.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -32,6 +38,8 @@ pub const VECTOR_TIMER: u8 = 0x30;
 pub const VECTOR_PING: u8 = 0x40;
 /// Vector of the TLB flush IPI.
 pub const VECTOR_TLB: u8 = 0x41;
+/// Vector of the reschedule IPI.
+pub const VECTOR_RESCHEDULE: u8 = 0x42;
 /// First vector the legacy PICs are remapped to (they stay masked).
 pub const VECTOR_PIC_BASE: u8 = 0x20;
 /// Vector of local APIC errors.
@@ -253,6 +261,17 @@ pub fn set_breakpoint_handler(handler: fn(&Fault)) {
     let _ = BREAKPOINT_HANDLER.set(handler);
 }
 
+/// The function called on the way back to a preemptible thread.
+static PREEMPT_HANDLER: Once<fn()> = Once::new();
+
+/// Registers the preemption handler.
+pub fn set_preempt_handler(handler: fn()) {
+    let _ = PREEMPT_HANDLER.set(handler);
+}
+
+/// RFLAGS.IF.
+const INTERRUPT_FLAG: u64 = 1 << 9;
+
 /// Set while the panic path stops the other CPUs; NMIs then halt.
 pub static STOPPING: AtomicBool = AtomicBool::new(false);
 /// CPUs that have stopped.
@@ -321,9 +340,7 @@ fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
             let _ = write!(out, "; SMAP stopped the kernel from touching a user page");
         }
     }
-    if let Some(stacks) = percpu::current().stacks.get()
-        && stacks.in_guard(address as usize)
-    {
+    if percpu::current().in_stack_guard(address as usize) {
         let _ = write!(out, "; this is a stack guard page, so the kernel stack overflowed");
     }
 }
@@ -332,8 +349,29 @@ fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn radix_trap_dispatch(frame: &mut TrapFrame) {
     let vector = frame.vector as u8;
+    let interrupt = vector >= 32;
+    if interrupt {
+        percpu::interrupt_enter();
+    }
+    handle(vector, frame);
+    if interrupt
+        && percpu::interrupt_exit() == 0
+        && frame.rflags & INTERRUPT_FLAG != 0
+        && frame.cs & 3 == 0
+        && percpu::preempt_count() == 0
+        && let Some(handler) = PREEMPT_HANDLER.get()
+    {
+        handler();
+    }
+}
+
+fn handle(vector: u8, frame: &mut TrapFrame) {
     match vector {
         VECTOR_TIMER => crate::time::on_tick(),
+        VECTOR_RESCHEDULE => {
+            percpu::current().reschedules.fetch_add(1, Ordering::Relaxed);
+            crate::apic::end_of_interrupt();
+        }
         VECTOR_PING => {
             percpu::current().pings.fetch_add(1, Ordering::Relaxed);
             radix_klog::tracepoint!("ipi.ping", percpu::current_index());
@@ -401,21 +439,19 @@ fn fatal_exception(frame: &TrapFrame) -> ! {
         10..=13 if frame.error != 0 => {
             let _ = write!(detail, " (selector error code {:#x})", frame.error);
         }
-        8 => match cpu.stacks.get() {
-            Some(stacks) if stacks.in_guard(cpu::cr2() as usize) => {
-                let _ = write!(
-                    detail,
-                    " after touching {:#x}, a stack guard page: the kernel stack overflowed",
-                    cpu::cr2()
-                );
-            }
-            _ => {
-                let _ = write!(
-                    detail,
-                    ", probably after a kernel stack overflow or a fault in a fault handler"
-                );
-            }
-        },
+        8 if cpu.in_stack_guard(cpu::cr2() as usize) => {
+            let _ = write!(
+                detail,
+                " after touching {:#x}, a stack guard page: the kernel stack overflowed",
+                cpu::cr2()
+            );
+        }
+        8 => {
+            let _ = write!(
+                detail,
+                ", probably after a kernel stack overflow or a fault in a fault handler"
+            );
+        }
         _ => {}
     }
     if frame.cs & 3 != 0 {

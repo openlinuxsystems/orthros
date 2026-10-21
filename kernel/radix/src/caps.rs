@@ -8,12 +8,15 @@
 //! take their pages from the frame allocator, owned by
 //! [`Owner::Memory`], and give them back when the store releases them.
 //!
-//! Until the scheduler arrives (Phase 4) the lock is a spin lock, and the
-//! store allocates with `MaySleep` while holding it: nothing sleeps yet,
-//! and the heap's reclaim takes only its own locks. Phase 4 turns it into
-//! a lock that sleeps. Revokes run in steps of [`REVOKE_STEP`] deletions
-//! and let go of the lock between steps, so other CPUs are not shut out
-//! for long.
+//! The lock is a mutex, so a thread waiting for the store sleeps, and the
+//! store may allocate with `MaySleep` while holding it (the out-of-memory
+//! policy may then sleep too; it never needs the store). Revokes run in
+//! steps of [`REVOKE_STEP`] deletions and let go of the lock between
+//! steps, yielding the CPU, so other threads are not shut out for long.
+//!
+//! Resource domains (`domains`) are objects in the store too: a domain
+//! lives while a capability to it does, and goes when the last one is
+//! deleted or revoked.
 
 use core::fmt;
 
@@ -23,13 +26,15 @@ use radix_cap::{
 };
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
-use radix_sync::SpinLock;
+use radix_sync::Mutex;
+
+use crate::domains::{self, DomainError, DomainRef, Settings};
 
 /// The store's type in the kernel.
 pub type Store = Capabilities<Kmalloc>;
 
 /// The store, once [`init`] has run.
-static STORE: SpinLock<Option<Store>> = SpinLock::new(None);
+static STORE: Mutex<Option<Store>> = Mutex::new(None);
 
 /// Capabilities a revoke deletes before it lets go of the lock.
 pub const REVOKE_STEP: usize = 64;
@@ -91,8 +96,11 @@ pub fn write_census(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
 }
 
 /// Gives back what the store released: memory objects' pages return to
-/// the frame allocator.
+/// the frame allocator, and domains leave the domain table.
 pub fn release(released: Released) {
+    if released.kind == ObjectKind::ResourceDomain {
+        domains::released(released.id);
+    }
     let Some(memory) = released.memory else { return };
     let order = memory.pages.trailing_zeros();
     if let Err(err) = FRAMES.free(memory.base << PAGE_SHIFT, order, Owner::Memory) {
@@ -113,6 +121,38 @@ pub fn create_memory(at: SlotRef, order: u32) -> Result<ObjectId, CapError> {
     made
 }
 
+/// Makes a resource domain under `parent` and puts its original capability
+/// in `at`.
+pub fn create_domain(
+    at: SlotRef,
+    parent: &DomainRef,
+    name: &str,
+    settings: Settings,
+) -> Result<DomainRef, CapError> {
+    with(|store| {
+        let id = store.create(at, ObjectKind::ResourceDomain)?;
+        match domains::create(name, parent, settings, Some(id)) {
+            Ok(domain) => Ok(domain),
+            Err(err) => {
+                // The capability goes again; nothing was made.
+                let _ = store.delete(at, &mut |_| {});
+                Err(match err {
+                    DomainError::NoMemory => CapError::NoMemory,
+                    DomainError::InvalidArgument | DomainError::OverLimit => {
+                        CapError::InvalidArgument
+                    }
+                })
+            }
+        }
+    })?
+}
+
+/// The domain the capability in `at` names, if it has `needs` on it.
+pub fn domain_at(at: SlotRef, needs: Rights) -> Result<DomainRef, CapError> {
+    let cap = with(|store| store.lookup(at, ObjectKind::ResourceDomain, needs))??;
+    cap.id().and_then(domains::by_object).ok_or(CapError::Empty)
+}
+
 /// Deletes the capability in `at`.
 pub fn delete(at: SlotRef) -> Result<(), CapError> {
     with(|store| store.delete(at, &mut release))?
@@ -127,7 +167,7 @@ pub fn revoke(at: SlotRef) -> Result<u32, CapError> {
         steps += 1;
         match with(|store| store.revoke(at, REVOKE_STEP, &mut release))?? {
             Progress::Done => return Ok(steps),
-            Progress::More => core::hint::spin_loop(),
+            Progress::More => crate::sched::yield_now(),
         }
     }
 }

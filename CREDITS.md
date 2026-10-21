@@ -46,7 +46,7 @@ kernel.
 | [winnow](https://github.com/winnow-rs/winnow) | `ob`, through toml | MIT |
 | [syn](https://github.com/dtolnay/syn), [quote](https://github.com/dtolnay/quote), [proc-macro2](https://github.com/dtolnay/proc-macro2), [unicode-ident](https://github.com/dtolnay/unicode-ident) by David Tolnay | `ob`, through serde_derive | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) |
 | [rustc-demangle](https://github.com/rust-lang/rustc-demangle) | `ob`, to name kernel symbols | MIT OR Apache-2.0 |
-| [proptest](https://github.com/proptest-rs/proptest) | Property tests of radix-mm, radix-cap and radix-random | MIT OR Apache-2.0 |
+| [proptest](https://github.com/proptest-rs/proptest) | Property tests of radix-mm, radix-cap, radix-random and radix-sched | MIT OR Apache-2.0 |
 | [rand](https://github.com/rust-random/rand), [rand_core](https://github.com/rust-random/rand_core), [rand_xorshift](https://github.com/rust-random/rngs), [getrandom](https://github.com/rust-random/getrandom) | proptest | MIT OR Apache-2.0 |
 | [chacha20](https://github.com/RustCrypto/stream-ciphers), [cpufeatures](https://github.com/RustCrypto/utils) by the RustCrypto developers | proptest, through rand | MIT OR Apache-2.0 |
 | [regex-syntax](https://github.com/rust-lang/regex), [bitflags](https://github.com/bitflags/bitflags), [num-traits](https://github.com/rust-num/num-traits), [unarray](https://github.com/cameron1024/unarray), [cfg-if](https://github.com/rust-lang/cfg-if), [libc](https://github.com/rust-lang/libc), [autocfg](https://github.com/cuviper/autocfg), [core_detect](https://github.com/thomcc/core_detect) | proptest and its dependencies | MIT OR Apache-2.0 |
@@ -64,8 +64,8 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue | GPL-3.0-or-later |
-| [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager and capability store | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
-| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability model | MIT |
+| [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store and scheduling policy | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
+| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability and scheduler models | MIT |
 | [mdBook](https://github.com/rust-lang/mdBook) 0.4.52 | The handbook | MPL-2.0 |
 | [scdoc](https://git.sr.ht/~sircmpwn/scdoc) | Man pages | MIT |
 | [mandoc](https://mandoc.bsd.lv/) | Checking man pages | ISC |
@@ -95,6 +95,10 @@ We implement these from their published descriptions. No code is copied.
 - Daniel J. Bernstein's
   ["Fast-key-erasure random-number generators"](https://blog.cr.yp.to/20170723-random.html),
   the design of the kernel's random number generator.
+- Ion Stoica and Hussein Abdel-Wahab,
+  "Earliest Eligible Virtual Deadline First: A Flexible and Accurate
+  Mechanism for Proportional Share Resource Allocation" (Old Dominion
+  University, TR-95-22, 1995), the fair class's scheduling algorithm.
 - Jeff Bonwick and Jonathan Adams,
   ["Magazines and Vmem"](https://www.usenix.org/conference/2001-usenix-annual-technical-conference/magazines-and-vmem-extending-slab-allocator-many),
   USENIX 2001, the design of the heap's per-CPU caches.
@@ -124,6 +128,12 @@ are grateful.
   ([ADR 0022](docs/adr/0022-kernel-random-number-generator.md)), and Linux's
   KASLR, which ours is compared with
   ([ADR 0018](docs/adr/0018-kaslr-with-a-post-link-relocation-table.md)).
+  Linux's EEVDF fair class (since 6.6) and its scheduling domains, its
+  lockdep lock-order checker, its quiescent-state-based RCU and cgroups v2
+  shaped our scheduler, lock checker, RCU and resource domains
+  ([ADR 0027](docs/adr/0027-scheduler-design.md),
+  [ADR 0028](docs/adr/0028-lock-checker-in-debug-builds.md),
+  [ADR 0029](docs/adr/0029-resource-domains-and-out-of-memory-policy.md)).
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the

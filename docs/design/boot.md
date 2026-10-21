@@ -50,7 +50,8 @@ in the top 2 GiB so it can use the `kernel` code model (32-bit signed
 absolute addresses). Sections are page-aligned so the kernel can map them
 with different permissions; `__kernel_*` symbols mark their bounds.
 
-`.ksyms` is a 1 MiB read-only section of zeros, defined in `boot.rs`. After
+`.ksyms` is a 2 MiB read-only section of zeros, defined in `boot.rs` (1 MiB
+until Phase 4, when the debug kernel's table grew past it). After
 linking, `ob build` writes the symbol table into it in place (format in
 `radix-debug(7)`), so backtraces need no debug information and no address
 in the image moves. Only symbols within 4 GiB of the section are kept,

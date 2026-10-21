@@ -33,6 +33,8 @@
 
 #![cfg_attr(not(any(test, kani)), no_std)]
 #![deny(unsafe_code)]
+// `AllocatorClone`, which `Arc`s in the heap need to be cloned.
+#![cfg_attr(not(kani), feature(allocator_ext))]
 
 pub mod asid;
 pub mod buddy;
@@ -54,7 +56,7 @@ mod proofs;
 pub use asid::Pcids;
 pub use buddy::{FreeError, MAX_ORDER};
 pub use context::{AllocError, Context, Flags, NodePolicy, ZoneLimit};
-pub use frames::{Frames, MAX_NODES, SetupError, ZoneKind, ZoneStats};
+pub use frames::{Frames, MAX_NODES, OOM_MAX_ORDER, SetupError, ZoneKind, ZoneStats};
 pub use heap::{ClassStats, ExplicitOnly, Heap, HeapStats, Kmalloc};
 pub use page::{Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region};
 pub use platform::{MAX_CPUS, Platform};

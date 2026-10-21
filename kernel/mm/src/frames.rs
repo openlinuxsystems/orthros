@@ -21,7 +21,12 @@
 //!   need it.
 //!
 //! Before giving up, a `MaySleep` allocation runs the reclaim hook (the
-//! heap's [`crate::Heap::drain`]) and tries once more.
+//! heap's [`crate::Heap::drain`]) and tries once more. If that fails too
+//! and the block is small (at most [`OOM_MAX_ORDER`]), it runs the kernel's
+//! out-of-memory hook, which may free memory by stopping a resource domain
+//! and asks for another try (Phase 4; `docs/design/scheduler.md`). Larger
+//! blocks fail instead: running out of contiguous memory is not running out
+//! of memory.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -40,6 +45,12 @@ pub const MAX_REGIONS: usize = 64;
 const DMA32_END_PFN: u64 = 1 << (32 - PAGE_SHIFT);
 /// Zones per node.
 const KINDS: usize = 2;
+/// The largest order whose failure runs the out-of-memory hook: 32 KiB,
+/// Linux's "costly" boundary.
+pub const OOM_MAX_ORDER: u32 = 3;
+/// How many times one allocation asks the out-of-memory hook for memory
+/// before it fails.
+const OOM_ATTEMPTS: u32 = 4;
 
 /// What memory a zone holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +182,8 @@ pub struct Frames {
     owner_pages: [AtomicU64; Owner::ALL.len()],
     failures: AtomicU64,
     reclaim: Once<fn()>,
+    oom: Once<fn(u32) -> bool>,
+    oom_calls: AtomicU64,
     /// Whether any `Normal` zone has memory.
     has_normal: AtomicBool,
 }
@@ -191,6 +204,8 @@ impl Frames {
             owner_pages: [const { AtomicU64::new(0) }; Owner::ALL.len()],
             failures: AtomicU64::new(0),
             reclaim: Once::new(),
+            oom: Once::new(),
+            oom_calls: AtomicU64::new(0),
             has_normal: AtomicBool::new(false),
         }
     }
@@ -318,6 +333,19 @@ impl Frames {
         let _ = self.reclaim.set(reclaim);
     }
 
+    /// Registers the function a `MaySleep` allocation of at most
+    /// [`OOM_MAX_ORDER`] calls, with the order, once reclaim has not helped:
+    /// it returns whether memory was freed and the allocation should try
+    /// again. It must work out for itself whether its caller can wait.
+    pub fn set_oom(&self, oom: fn(u32) -> bool) {
+        let _ = self.oom.set(oom);
+    }
+
+    /// How many times the out-of-memory hook has run.
+    pub fn oom_calls(&self) -> u64 {
+        self.oom_calls.load(Ordering::Relaxed)
+    }
+
     /// Allocates a block of 2^`order` frames for `owner` and returns its
     /// physical address.
     pub fn alloc(&self, order: u32, flags: Flags, owner: Owner) -> Result<u64, AllocError> {
@@ -360,7 +388,7 @@ impl Frames {
             NodePolicy::Prefer(node) | NodePolicy::Only(node) => usize::from(node),
         }
         .min(self.nodes() - 1);
-        for attempt in 0..2 {
+        for attempt in 0..2 + OOM_ATTEMPTS {
             if let Some(pfn) = self.try_zones(origin, order, flags, owner, tag) {
                 self.owner_pages[owner as usize].fetch_add(1 << order, Ordering::Relaxed);
                 let phys = pfn << PAGE_SHIFT;
@@ -375,8 +403,17 @@ impl Frames {
                 }
                 return Ok(phys);
             }
-            match (attempt, flags.context, self.reclaim.get()) {
-                (0, Context::MaySleep, Some(hook)) if reclaim => hook(),
+            if flags.context != Context::MaySleep || !reclaim {
+                break;
+            }
+            match (attempt, self.reclaim.get(), self.oom.get()) {
+                (0, Some(hook), _) => hook(),
+                (_, _, Some(oom)) if order <= OOM_MAX_ORDER => {
+                    self.oom_calls.fetch_add(1, Ordering::Relaxed);
+                    if !oom(order) {
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
@@ -548,6 +585,39 @@ mod tests {
             frames.free(phys, 0, Owner::Kernel).unwrap();
         }
         assert_eq!(frames.owner_pages(Owner::Kernel), 0);
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn the_out_of_memory_hook_frees_memory_for_small_blocks() {
+        use std::sync::Mutex;
+        // The hook gives back one page that a stand-in victim held.
+        static HELD: Mutex<Vec<(&'static Frames, u64)>> = Mutex::new(Vec::new());
+        fn oom(_order: u32) -> bool {
+            match HELD.lock().unwrap().pop() {
+                Some((frames, phys)) => frames.free(phys, 0, Owner::Kernel).is_ok(),
+                None => false,
+            }
+        }
+        let frames = frames_with(&[(0, 256, 2048)]);
+        frames.set_oom(oom);
+        let mut taken = Vec::new();
+        while let Ok(phys) = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel) {
+            taken.push(phys);
+        }
+        let calls = frames.oom_calls();
+        assert!(calls >= 1);
+        // A victim's page comes back, and the next allocation gets it.
+        HELD.lock().unwrap().push((frames, taken.pop().unwrap()));
+        let again = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        assert!(frames.oom_calls() > calls);
+        // Large blocks fail without asking.
+        let before = frames.oom_calls();
+        assert!(frames.alloc(OOM_MAX_ORDER + 1, Flags::MAY_SLEEP, Owner::Kernel).is_err());
+        assert_eq!(frames.oom_calls(), before);
+        for phys in taken.into_iter().chain([again]) {
+            frames.free(phys, 0, Owner::Kernel).unwrap();
+        }
         frames.check().unwrap();
     }
 

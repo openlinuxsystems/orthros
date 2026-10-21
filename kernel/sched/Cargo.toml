@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-sched"
+description = "The Radix scheduler's policy: EEVDF fair queues, real-time queues, CPU sets, weights, and placement and load-balancing decisions over the CPU topology"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

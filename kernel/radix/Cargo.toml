@@ -21,8 +21,10 @@ radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }
 radix-kdb = { path = "../lib/kdb" }
 radix-klog = { path = "../lib/klog" }
+radix-lockdep = { path = "../lib/lockdep" }
 radix-ksyms = { path = "../lib/ksyms" }
 radix-mm = { path = "../mm" }
+radix-sched = { path = "../sched" }
 radix-sync = { path = "../lib/sync" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

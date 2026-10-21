@@ -391,7 +391,7 @@ impl<A: Allocator + Clone> Capabilities<A> {
     // ---- Making objects (the kernel only) ----
 
     /// Makes a new kernel object of `kind` (an address space, thread,
-    /// process, endpoint or notification) and puts its original
+    /// process, endpoint, notification or resource domain) and puts its original
     /// capability, with every right of its kind, in `at`.
     pub fn create(&mut self, at: SlotRef, kind: ObjectKind) -> Result<ObjectId, CapError> {
         if kind.is_range() || kind.from_memory() {

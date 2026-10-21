@@ -9,7 +9,14 @@
 //! 0x15 when the processor reports it exactly, and is otherwise measured
 //! against the best reference timer the machine has: the HPET, the ACPI PM
 //! timer, or the 8254 PIT. The local APIC timer is measured in the same
-//! window and then runs periodically at [`TICK_HZ`] on every CPU.
+//! window.
+//!
+//! The timer then runs one-shot on every CPU, in TSC-deadline mode where
+//! the CPU has it and counting down otherwise, and is re-armed on every
+//! interrupt for whichever comes first: the next periodic tick (at
+//! [`TICK_HZ`]) or the deadline the scheduler asked for
+//! ([`set_deadline`]), so slices and sleeps end on time without a faster
+//! tick.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -41,6 +48,12 @@ static APIC_TIMER_HZ: AtomicU64 = AtomicU64::new(0);
 static TICKING: AtomicBool = AtomicBool::new(false);
 /// The initial count for one tick period.
 static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Whether the timer runs in TSC-deadline mode.
+static DEADLINE_MODE: AtomicBool = AtomicBool::new(false);
+/// The kernel's timer handler.
+static HANDLER: Once<fn(bool)> = Once::new();
+/// One tick period.
+const TICK_NS: u64 = 1_000_000_000 / TICK_HZ as u64;
 
 /// How the TSC rate was found, for the boot report.
 #[derive(Clone, Copy, Debug)]
@@ -281,14 +294,68 @@ pub fn calibrate(hpet: Option<&Hpet>, fadt: Option<&Fadt>) {
     });
 }
 
-/// Starts the periodic tick on this CPU.
+/// Starts the tick on this CPU.
 pub fn start_tick() {
     let count = TICK_COUNT.load(Ordering::Relaxed);
-    if count != 0 {
-        radix_klog::tracepoint!("timer.start", percpu::current_index(), count);
-        apic::timer_start_periodic(VECTOR_TIMER, count);
-        TICKING.store(true, Ordering::Relaxed);
+    if count == 0 {
+        return;
     }
+    let deadline = cpu::feature::tsc_deadline();
+    if percpu::current_index() == 0 {
+        DEADLINE_MODE.store(deadline, Ordering::Relaxed);
+    }
+    radix_klog::tracepoint!("timer.start", percpu::current_index(), count);
+    let cpu = percpu::current();
+    cpu.next_tick_ns.store(now_ns() + TICK_NS, Ordering::Relaxed);
+    cpu.deadline_ns.store(u64::MAX, Ordering::Relaxed);
+    if DEADLINE_MODE.load(Ordering::Relaxed) {
+        apic::timer_start_tsc_deadline(VECTOR_TIMER);
+    } else {
+        apic::timer_start_one_shot(VECTOR_TIMER);
+    }
+    program(cpu.next_tick_ns.load(Ordering::Relaxed));
+    TICKING.store(true, Ordering::Relaxed);
+}
+
+/// How the timer is programmed.
+pub fn mode_name() -> &'static str {
+    if !TICKING.load(Ordering::Relaxed) {
+        "not running"
+    } else if DEADLINE_MODE.load(Ordering::Relaxed) {
+        "TSC deadline"
+    } else {
+        "APIC one-shot"
+    }
+}
+
+/// Arms this CPU's timer for `at_ns`.
+fn program(at_ns: u64) {
+    if DEADLINE_MODE.load(Ordering::Relaxed) {
+        let hz = TSC_HZ.load(Ordering::Relaxed);
+        let ticks = (u128::from(at_ns) * u128::from(hz) / 1_000_000_000) as u64;
+        apic::timer_arm_deadline(TSC_START.load(Ordering::Relaxed).wrapping_add(ticks));
+    } else {
+        let delta = at_ns.saturating_sub(now_ns()).max(1_000);
+        let rate = APIC_TIMER_HZ.load(Ordering::Relaxed) / 16;
+        let count = u128::from(delta) * u128::from(rate) / 1_000_000_000;
+        apic::timer_arm(count.clamp(1, u128::from(u32::MAX)) as u32);
+    }
+}
+
+/// Registers the kernel's timer handler.
+pub fn set_handler(handler: fn(bool)) {
+    let _ = HANDLER.set(handler);
+}
+
+/// Asks for a timer interrupt on this CPU at `deadline_ns`, or cancels
+/// the request with `u64::MAX`. Call with interrupts masked.
+pub fn set_deadline(deadline_ns: u64) {
+    if !TICKING.load(Ordering::Relaxed) {
+        return;
+    }
+    let cpu = percpu::current();
+    cpu.deadline_ns.store(deadline_ns, Ordering::Relaxed);
+    program(cpu.next_tick_ns.load(Ordering::Relaxed).min(deadline_ns));
 }
 
 /// Rate of the tick, or 0 when it is not running.
@@ -296,11 +363,32 @@ pub fn tick_hz() -> u32 {
     if TICKING.load(Ordering::Relaxed) { TICK_HZ } else { 0 }
 }
 
-/// The timer interrupt.
+/// The timer interrupt: counts a tick if one is due, re-arms the timer,
+/// and calls the kernel's handler.
 pub fn on_tick() {
     // No trace point here: at 100 Hz on every CPU it would push everything
     // else out of the trace ring within seconds.
-    percpu::current().ticks.fetch_add(1, Ordering::Relaxed);
+    let cpu = percpu::current();
+    let now = now_ns();
+    let next = cpu.next_tick_ns.load(Ordering::Relaxed);
+    let tick = now >= next;
+    if tick {
+        cpu.ticks.fetch_add(1, Ordering::Relaxed);
+        // Ticks missed while interrupts were off are not made up.
+        let after = if next + TICK_NS > now { next + TICK_NS } else { now + TICK_NS };
+        cpu.next_tick_ns.store(after, Ordering::Relaxed);
+    }
+    let deadline = cpu.deadline_ns.load(Ordering::Relaxed);
+    let due = deadline <= now;
+    if due {
+        cpu.deadline_ns.store(u64::MAX, Ordering::Relaxed);
+    }
     crate::paging::serve_shootdown();
+    program(cpu.next_tick_ns.load(Ordering::Relaxed).min(cpu.deadline_ns.load(Ordering::Relaxed)));
     apic::end_of_interrupt();
+    if (tick || due)
+        && let Some(handler) = HANDLER.get()
+    {
+        handler(tick);
+    }
 }

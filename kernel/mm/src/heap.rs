@@ -646,6 +646,12 @@ unsafe impl core::alloc::Allocator for Kmalloc {
     }
 }
 
+// SAFETY: every clone or copy of a `Kmalloc` uses the same `'static` heap,
+// so memory one allocates can be freed through another, and dropping one
+// frees nothing.
+#[cfg(not(kani))]
+unsafe impl core::alloc::AllocatorClone for Kmalloc {}
+
 /// The kernel's global allocator: it refuses every request, so that every
 /// allocation names its context through [`Heap::with`].
 pub struct ExplicitOnly;

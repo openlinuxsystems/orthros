@@ -12,7 +12,7 @@ logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 3** of its [roadmap](docs/roadmap.md): the Radix
+OrthrOS is at **Phase 4** of its [roadmap](docs/roadmap.md): the Radix
 kernel boots through GRUB under UEFI and BIOS at a random address, chosen
 by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
 memory with a frame allocator per NUMA node and a slab heap with per-CPU
@@ -22,7 +22,13 @@ timer interrupts and reports all of it on the serial port and the screen.
 Its capability core holds the capabilities through which every resource
 will be reached, with delegation, badges, sealing and revocation; Kani
 proofs, a TLA+ model and an in-kernel test suite check that no capability
-can be forged or have its rights widened.
+can be forged or have its rights widened. It runs threads on every CPU with
+an EEVDF fair class and FIFO and round-robin real-time classes, priority
+inheritance, and load balancing that keeps threads near their caches and
+NUMA nodes; groups them into resource domains with CPU weights and memory
+limits; and, when memory runs out, stops whole app domains before services
+and never the system's own. A lock checker reports locking bugs the first
+time they run, and RCU lets readers go without locks.
 A panic fills the screen with a symbolized backtrace and is kept in memory
 for the next boot; a serial kernel debugger, GDB through QEMU and trace
 points help with the rest. There is nothing to install yet.
@@ -56,7 +62,7 @@ the pinned build container with Podman or Docker:
 | `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
 | `./ob image` | Build the hybrid USB/disk image `out/orthros-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
-| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen and the memory manager (`kani` for the Kani proofs instead) |
+| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen, the memory manager, capabilities and the scheduler (`kani` for the Kani proofs, `tla` for the TLA+ models instead) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |
 | `./ob signoff` | Check that your new commits carry a Developer Certificate of Origin sign-off |

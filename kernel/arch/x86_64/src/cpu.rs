@@ -166,6 +166,31 @@ pub mod feature {
     pub fn huge_pages() -> bool {
         super::max_extended_leaf() >= 0x8000_0001 && cpuid(0x8000_0001, 0).edx & (1 << 26) != 0
     }
+
+    /// FXSAVE and FXRSTOR (CPUID 1, EDX bit 24).
+    pub fn fxsr() -> bool {
+        cpuid(1, 0).edx & (1 << 24) != 0
+    }
+
+    /// XSAVE, XRSTOR and XCR0 (CPUID 1, ECX bit 26).
+    pub fn xsave() -> bool {
+        cpuid(1, 0).ecx & (1 << 26) != 0
+    }
+
+    /// XSAVEOPT (CPUID 0xD subleaf 1, EAX bit 0).
+    pub fn xsaveopt() -> bool {
+        xsave() && super::max_leaf() >= 0xd && cpuid(0xd, 1).eax & 1 != 0
+    }
+
+    /// MONITOR and MWAIT (CPUID 1, ECX bit 3).
+    pub fn monitor() -> bool {
+        cpuid(1, 0).ecx & (1 << 3) != 0
+    }
+
+    /// The local APIC timer's TSC-deadline mode (CPUID 1, ECX bit 24).
+    pub fn tsc_deadline() -> bool {
+        cpuid(1, 0).ecx & (1 << 24) != 0
+    }
 }
 
 /// A 64-bit word from the CPU's entropy source (`rdseed`), if it has one
@@ -218,6 +243,7 @@ pub mod msr {
     pub const PAT: u32 = 0x277;
     pub const EFER: u32 = 0xc000_0080;
     pub const GS_BASE: u32 = 0xc000_0101;
+    pub const TSC_DEADLINE: u32 = 0x6e0;
 }
 
 /// Reads a model-specific register.
@@ -452,4 +478,44 @@ pub fn breakpoint() {
 /// Hints to the CPU that it is spinning.
 pub fn pause() {
     core::hint::spin_loop();
+}
+
+/// Writes extended control register `index`.
+///
+/// # Safety
+///
+/// CR4.OSXSAVE must be set, and `value` may only enable state components
+/// the processor supports (with x87 always on, and AVX only with SSE).
+pub unsafe fn xsetbv(index: u32, value: u64) {
+    // SAFETY: the caller guarantees the value is valid.
+    unsafe {
+        asm!("xsetbv", in("ecx") index, in("eax") value as u32, in("edx") (value >> 32) as u32,
+             options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// Arms address monitoring on the cache line holding `addr`, for
+/// [`sti_mwait`].
+pub fn monitor(addr: usize) {
+    // SAFETY: MONITOR only arms the monitoring hardware; callers check the
+    // CPU has it and pass the address of an object they hold.
+    unsafe {
+        asm!("monitor", in("rax") addr, in("ecx") 0u32, in("edx") 0u32,
+             options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// Enables interrupts and waits in C1 until an interrupt arrives or the
+/// monitored line is written. The `sti` takes effect only once MWAIT has
+/// started, so an interrupt cannot slip in between and be missed.
+pub fn sti_mwait() {
+    // SAFETY: MWAIT only waits; the interrupt handlers are installed.
+    unsafe { asm!("sti", "mwait", in("eax") 0u32, in("ecx") 0u32, options(nomem, nostack)) };
+}
+
+/// Enables interrupts and halts until one arrives, without the window
+/// between the two in which an interrupt would be missed.
+pub fn sti_hlt() {
+    // SAFETY: HLT only waits; the interrupt handlers are installed.
+    unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
 }

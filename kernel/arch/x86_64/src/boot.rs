@@ -246,7 +246,8 @@ bsp_stack_top:
     .balign 16
     .global __ksyms_start
 __ksyms_start:
-    .skip 1024 * 1024
+    /* Debug builds need about 1.6 MiB. */
+    .skip 2 * 1024 * 1024
     .global __ksyms_end
 __ksyms_end:
 

@@ -23,6 +23,9 @@
 //! - `caps` runs the capability store's test suite (`captest`): no
 //!   capability can be forged or its rights widened, revocation reaches
 //!   everything derived, also while other CPUs derive, and nothing leaks.
+//! - `fpu`, `sched-fair`, `sched-rt`, `sched-pi`, `sched-balance`,
+//!   `lockdep`, `rcu` and `oom` test the scheduler, the lock checker, RCU
+//!   and the out-of-memory policy (`schedtest`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,7 +37,7 @@ use radix_mm::stress::{self, StressReport};
 use radix_mm::{FRAMES, HEAP, Owner};
 
 use crate::panic::SELFTEST_MARKER;
-use crate::{Arch, captest, crashlog, work};
+use crate::{Arch, captest, crashlog, schedtest, work};
 
 /// Runs the self-test called `name`.
 pub fn run(name: &str) {
@@ -48,6 +51,14 @@ pub fn run(name: &str) {
         "smap" => fault("smap", FaultTest::UserData, "reading a user page"),
         "tlb" => tlb(),
         "caps" => captest::run(),
+        "fpu" => schedtest::fpu(),
+        "sched-fair" => schedtest::fair(),
+        "sched-rt" => schedtest::rt(),
+        "sched-pi" => schedtest::pi(),
+        "sched-balance" => schedtest::balance(),
+        "lockdep" => schedtest::lockdep(),
+        "rcu" => schedtest::rcu(),
+        "oom" => schedtest::oom(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

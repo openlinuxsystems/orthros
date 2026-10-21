@@ -98,28 +98,43 @@ _/system/share/licenses/_
   timer against the HPET, the ACPI PM timer or the 8254 PIT, in that
   order of preference. The periodic timer interrupt then runs at
   100 Hz, and the kernel reports the frame allocator's zones.
+. The kernel sets up the root resource domain, *system*, and the
+  scheduler: from here on the boot code runs as the thread *kmain*, and
+  the *Scheduler:* line names the classes, the timer, how idle CPUs wait
+  and which extended processor state every switch saves. The *Lock
+  checker:* line says whether the lock checker runs (see *lockdep*
+  below). The kernel then turns interrupts on.
 . The kernel sets up its capability store (see *radix-capabilities*(7))
   and reports its limits on a *Capabilities: ready* line. Until user
-  programs arrive in Phase 6, only the *caps* self-test makes
+  programs arrive in Phase 6, only the *caps* and *oom* self-tests make
   capabilities.
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
-. The kernel prints the CPU list, checks that every CPU takes timer
+. The kernel prints the CPU list. Every CPU then runs threads: each gets
+  its run queue and its idle thread, and the kernel starts its own
+  threads, one *work/*_N_ worker per CPU, the *reaper* that frees the
+  stacks of threads that have exited, and the out-of-memory *supervisor*
+  (see *radix-scheduling*(7)). It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.* With the *kdb*
-  flag it then waits for debugger commands; otherwise all CPUs idle.
+  flag it then waits for debugger commands; otherwise *kmain* exits and
+  the CPUs idle until a thread has work.
 
 A boot on QEMU with four CPUs ends like this (times in seconds since the
 kernel started; messages before timer calibration show 0):
 
 ```
 [    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
+[    0.398210] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.399102] Lock checker: off (the lockdep flag turns it on)
+[    0.401388] Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online
 [    0.485571]   cpu2: APIC ID 2, online
 [    0.510992]   cpu3: APIC ID 3, online
+[    0.524816] Scheduler: 4 CPUs run threads, on 1 NUMA node
 [    0.539507] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 9, cpu1 16, cpu2 15, cpu3 14)
 [    0.558527] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    0.572421] Boot complete.
@@ -330,6 +345,15 @@ flags and otherwise ignores them.
 	Record trace points from the start of *radix_arch_entry*. See
 	*radix-debug*(7).
 
+*lockdep*[=on|off]
+	Turn the lock checker on (*lockdep* or *lockdep=on*) or off
+	(*lockdep=off*). It watches every spin lock and mutex and reports
+	locks taken in orders that can deadlock, locks an interrupt handler
+	shares with code that runs with interrupts on, and sleeping where
+	that is not allowed. It is on by default in debug builds and off in
+	release builds, since it adds work to every lock taken. See
+	*radix-debug*(7) and *radix-scheduling*(7).
+
 *panic*=_seconds_
 	After a panic, restart the machine after this many seconds instead of
 	waiting for a key press. *panic=0* restarts at once.
@@ -362,8 +386,9 @@ flags and otherwise ignores them.
 
 *selftest*=_name_
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
-	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb* or
-	*caps*.
+	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
+	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
+	*lockdep*, *rcu* or *oom*.
 	See *radix-debug*(7). *ob test* uses these.
 
 *qemu-exit*
@@ -404,7 +429,7 @@ the steps of a smoke test and its results.
 
 # SEE ALSO
 
-*radix-debug*(7), *radix-capabilities*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
+*radix-debug*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
 
 The Multiboot2 specification:
 https://www.gnu.org/software/grub/manual/multiboot2/
