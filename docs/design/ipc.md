@@ -367,6 +367,7 @@ vulnerabilities yet. The method follows lmbench's `lat_syscall`,
 | `random_words`: 64 random bytes in registers | `getrandom`, 64 bytes |
 | `context_switch`: two programs on one CPU yielding to each other, per switch the kernel counts | two processes calling `sched_yield`, per switch `getrusage` counts |
 | `fresh_page`: a page made from memory, mapped, written, unmapped and given back | `mmap`, a first-touch fault, `munmap` |
+| `tlb_local`: a page mapped and unmapped in an address space no other CPU runs | `mprotect` to none and back, with no other thread |
 | `tlb_shootdown`: a page mapped and unmapped while the address space runs on the other CPU | `mprotect` to none and back while a thread spins on the other CPU |
 | `memory_copy`: `rep movsb` between two 32 MiB buffers, per MiB, in the fastest of 5 batches of 6 copies | the same copy, the same way |
 | `endpoint_call_*`: `cap_call` answered with `reply_recv` | a pipe round trip |
@@ -410,6 +411,12 @@ shared, and CPUs using capabilities at once do not contend. Random bytes
 come from this CPU's generator. A same-CPU round trip is two context
 switches and no timer write; a cross-CPU wake-up finds the other CPU
 polling (ADR 0037) and costs a write instead of an interrupt.
+A TLB shootdown is the same system calls as `tlb_local` plus an
+interrupt to the other CPU and its answer; under KVM most of that time
+is the host sending and delivering the interrupt, which Linux pays too.
+The receiving CPU ends the interrupt before it flushes, so the
+initiator's next request is not yet pending when the hypervisor decides
+whether to offer paravirtual EOI (ADR 0041).
 
 ## Known limits
 

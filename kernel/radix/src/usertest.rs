@@ -328,28 +328,7 @@ pub fn bench() {
     bench_pair(&mut outcome, "context_switch", yields, PAIR_ROUNDS, false);
     if online() >= 2 {
         let shoot = (role::SHOOT_A, role::SHOOT_B);
-        #[cfg(target_arch = "x86_64")]
-        for slot in &radix_arch_x86_64::SHOOT_DIAG {
-            slot.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
         bench_pair(&mut outcome, "tlb_shootdown", shoot, SHOOT_ROUNDS, true);
-        #[cfg(target_arch = "x86_64")]
-        {
-            let d: [u64; 7] = core::array::from_fn(|i| {
-                radix_arch_x86_64::SHOOT_DIAG[i].load(core::sync::atomic::Ordering::Relaxed)
-            });
-            let n = d[0].max(1);
-            info!(
-                "SHOOTDIAG n={} send={} wait={} deliver={} flush={} eoi={} pv_eoi={}",
-                d[0],
-                d[1] / n,
-                d[2] / n,
-                d[3] / n,
-                d[4] / n,
-                d[5] / n,
-                d[6]
-            );
-        }
         let parallel = (role::PARALLEL_A, role::PARALLEL_B);
         bench_pair(&mut outcome, "parallel", parallel, SYSCALL_ROUNDS, true);
     }

@@ -259,18 +259,6 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         file.write_all(report.as_bytes()).context(|| format!("writing {path}"))?;
     }
     eprintln!("\n{report}");
-    // DIAG (temporary): what each kernel says about the hypervisor, and
-    // where a shootdown's time goes.
-    for (file, keys) in [
-        ("boot-bench.log", &["SHOOTDIAG", "APIC", "CPU:"][..]),
-        ("boot-linux.log", &["KVMLOG"][..]),
-    ] {
-        if let Ok(text) = std::fs::read_to_string(dir.join(file)) {
-            for line in text.lines().filter(|line| keys.iter().any(|key| line.contains(key))) {
-                eprintln!("    DIAG {file}: {}", line.trim());
-            }
-        }
-    }
     step(&format!("Benchmark report in {} and {}", ctx.display(&markdown), ctx.display(&json)));
     if gate {
         check_gate(&numbers)?;

@@ -614,14 +614,6 @@ static SHOOTDOWN: Shootdown = Shootdown {
     pending: [const { AtomicU64::new(0) }; MAX_CPUS / 64],
 };
 
-/// DIAG (temporary, removed before merge): shootdowns sent; nanoseconds
-/// in the IPI writes, waiting for the targets, from before the write to a
-/// target's handler, in the target's flush, in its EOI; EOIs the
-/// hypervisor said needed no write.
-pub static SHOOT_DIAG: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
-/// DIAG: when the last TLB interrupt handler started.
-pub static SHOOT_SEEN: AtomicU64 = AtomicU64::new(0);
-
 /// Flushes `range` from this CPU's TLB.
 pub(crate) fn flush_local(range: Range<u64>) {
     if (range.end - range.start) / PAGE > FLUSH_ALL_PAGES {
@@ -677,7 +669,6 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         slot.store(word, Ordering::Relaxed);
     }
     SHOOTDOWN.generation.store(generation, Ordering::Release);
-    let t0 = time::now_ns();
     for index in (0..MAX_CPUS).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
         if let Some(cpu) = percpu::get(index) {
             apic::send_fixed(cpu.apic_id.load(Ordering::Relaxed), interrupts::VECTOR_TLB);
@@ -696,12 +687,6 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         }
         cpu::pause();
     }
-    let t2 = time::now_ns();
-    SHOOT_DIAG[0].fetch_add(1, Ordering::Relaxed);
-    SHOOT_DIAG[1].fetch_add(started - t0, Ordering::Relaxed);
-    SHOOT_DIAG[2].fetch_add(t2 - started, Ordering::Relaxed);
-    SHOOT_DIAG[3]
-        .fetch_add(SHOOT_SEEN.load(Ordering::Relaxed).saturating_sub(t0), Ordering::Relaxed);
     drop(guard);
 }
 

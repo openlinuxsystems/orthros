@@ -171,7 +171,13 @@ are grateful.
   (`Documentation/virt/kvm/x86/msr.rst`) and Linux guests use it, is how
   Radix acknowledges interrupts under KVM
   ([ADR 0040](docs/adr/0040-hot-paths-without-hidden-costs.md)); no code
-  is taken.
+  is taken. Linux's EEVDF yield, which since Linux 6.18 gives up the rest
+  of the slice ("sched/fair: Forfeit vruntime on yield", by Fernand Sieber
+  after a suggestion by Peter Zijlstra), is how a Radix yield works, and
+  Linux's handlers of interprocessor interrupts, which end the interrupt
+  before their work, set the order of ours
+  ([ADR 0041](docs/adr/0041-yield-forfeits-its-slice-and-ipis-end-first.md));
+  no code is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the

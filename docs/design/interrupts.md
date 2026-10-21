@@ -63,6 +63,10 @@ the hypervisor may clear the bit at any time, the test and the clear are
 one locked instruction, after a plain load that keeps bare metal from
 paying for it. Linux guests do the same; the boot report's APIC line says
 `paravirtual EOI` when it is on (ADR 0040).
+KVM offers paravirtual EOI only when no other interrupt is pending as it
+enters the guest, so a handler whose work lets another interrupt be sent,
+such as answering a TLB shootdown, ends the interrupt first, as Linux's
+handlers of interprocessor interrupts do (ADR 0041).
 
 ## Exceptions
 

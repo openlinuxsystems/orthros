@@ -91,6 +91,15 @@ earliest deadline. An entity that leaves takes its lag along, clamped to
 about two slices, and comes back with it. A new entity starts at lag 0
 with half a slice.
 
+A fair thread that yields gives up the rest of its slice, as in Linux
+since 6.18: if it is eligible, its `v` moves on to its deadline and it
+gets a new deadline a slice later, and until the next pick it loses ties
+of deadline to the others (otherwise the running entity wins them, which
+saves needless switches). Moving only the deadline, as Radix did before
+ADR 0041, kept the CPU with a thread that was owed time while it was the
+only eligible one: two programs yielding to each other on one CPU could
+make tens of thousands of yields without a switch, up to the lag limit.
+
 The queue keeps `W = Σ w` and `S = Σ w (v − v₀)` for a base `v₀`, the
 smallest `v` (moved by `rebase`), so `V = v₀ + S / W` and eligibility,
 `(v − v₀) · W ≤ S`, are exact integer arithmetic in `i128`. Virtual times
@@ -464,8 +473,9 @@ because lags are clamped and slices are short, and their products with
 `W` fit `i128`. *(Host tests: `the_queue_stays_consistent`, a property
 test that runs random enqueues, dequeues, charges and reweights and
 asserts after every step that the books are exact and some entity is
-eligible. The product of symbolic 64-bit values is beyond Kani in
-reasonable time, so this step is algebra plus tests; see ADR 0030.)*
+eligible, now with yields among the steps. The product of symbolic
+64-bit values is beyond Kani in reasonable time, so this step is algebra
+plus tests; see ADR 0030.)*
 
 **6. Fair threads get their share.** Stoica and Abdel-Wahab show that
 under EEVDF, for entities that stay runnable, every entity's lag stays

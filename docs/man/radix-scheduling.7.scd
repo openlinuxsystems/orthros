@@ -73,7 +73,8 @@ thread.
 	slice of 3 ms before the next eligible thread with an earlier
 	deadline takes over. A thread that sleeps keeps the service it was
 	owed or had in advance (its lag, within about two slices), so
-	sleeping neither earns credit nor costs any.
+	sleeping neither earns credit nor costs any. A thread that yields
+	gives up the rest of its slice, so the others run first.
 
 *FIFO*, priority _1_ to _99_
 	Runs ahead of every fair thread. The highest priority runs; among

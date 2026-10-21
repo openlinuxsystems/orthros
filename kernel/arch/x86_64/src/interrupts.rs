@@ -438,17 +438,13 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             crate::apic::end_of_interrupt();
         }
         VECTOR_TLB => {
-            use crate::paging::{SHOOT_DIAG, SHOOT_SEEN};
-            let h0 = crate::time::now_ns();
-            SHOOT_SEEN.store(h0, Ordering::Relaxed);
-            let pv = percpu::current().pv_eoi.load(Ordering::Relaxed) & 1;
+            // End the interrupt first, as Linux's IPI handlers do: once
+            // the flush is answered, the initiator may send the next
+            // request, and with it pending at the EOI the hypervisor
+            // cannot offer paravirtual EOI, so the EOI would leave the
+            // virtual machine.
             crate::apic::end_of_interrupt();
-            let h1 = crate::time::now_ns();
             crate::paging::serve_shootdown();
-            let h2 = crate::time::now_ns();
-            SHOOT_DIAG[4].fetch_add(h2 - h1, Ordering::Relaxed);
-            SHOOT_DIAG[5].fetch_add(h1 - h0, Ordering::Relaxed);
-            SHOOT_DIAG[6].fetch_add(u64::from(pv), Ordering::Relaxed);
         }
         VECTOR_APIC_ERROR => {
             let status = crate::apic::read_error_status();
