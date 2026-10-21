@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Kani proof harnesses for the rights checks.
 //!
 //! Kani checks each harness for every value its `kani::any()` inputs can

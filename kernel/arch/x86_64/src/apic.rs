@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Interrupt controllers: the local APIC of each CPU, the I/O APICs and
 //! the legacy 8259 PICs.
 //!

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0020. Physical memory is managed in per-node DMA32 and Normal zones with per-frame records
 
 - Status: Accepted

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The ChaCha20 block function (RFC 8439, section 2.3), which turns a key
 //! and a block number into 64 bytes of key stream.
 

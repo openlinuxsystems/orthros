@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "radix-mm"
 description = "The Radix memory manager: frame allocator, kernel heap and virtual-memory bookkeeping"

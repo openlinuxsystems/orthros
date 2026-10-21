@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Safe parser for the Multiboot2 boot information structure.
 //!
 //! The kernel turns the address it receives from the boot loader into a byte

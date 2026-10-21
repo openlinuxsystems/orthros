@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The generator: ChaCha20 with fast key erasure.
 //!
 //! Each request runs ChaCha20 under the current key. The first 32 bytes of

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Creating USB install media
 
 `./ob image` builds `out/orthros-<version>-x86_64.img`. Written to a USB

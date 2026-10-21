@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The framebuffer console: the kernel log on the screen, and the screen
 //! the panic report takes over.
 

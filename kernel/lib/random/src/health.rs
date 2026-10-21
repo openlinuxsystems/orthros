@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Health tests for the entropy sources.
 //!
 //! The kernel mixes every source into the seed whether or not it passes,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! VGA text-mode screen (80 x 25), used when the boot loader leaves the PC
 //! in text mode instead of setting up a framebuffer.
 

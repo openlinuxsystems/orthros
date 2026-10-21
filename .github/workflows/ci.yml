@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # Every step is an ./ob command, so anything CI does can be run locally the
 # same way. See CONTRIBUTING.md.
 name: CI
@@ -197,3 +200,16 @@ jobs:
       # its own, permissive-only policy.
       - name: cargo deny (kernel)
         run: cargo deny --manifest-path kernel/Cargo.toml --config kernel/deny.toml check
+
+  reuse:
+    name: REUSE compliance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Every file needs copyright and license information (ADR 0025). The
+      # REUSE tool is GPL-3.0-or-later and only checks the repository.
+      - name: reuse lint
+        run: |
+          python3 -m venv "$RUNNER_TEMP/reuse"
+          "$RUNNER_TEMP/reuse/bin/pip" install --quiet reuse==6.2.0
+          "$RUNNER_TEMP/reuse/bin/reuse" lint

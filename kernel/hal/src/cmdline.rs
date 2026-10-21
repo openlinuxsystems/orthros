@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The kernel command line.
 //!
 //! GRUB passes everything after the kernel path on its `multiboot2` line.

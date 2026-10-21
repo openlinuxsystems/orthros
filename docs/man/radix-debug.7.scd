@@ -1,5 +1,8 @@
 radix-debug(7) "OrthrOS" "OrthrOS Manual"
 
+; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # NAME
 
 radix-debug - panic reports, the crash log, the kernel debugger, GDB and

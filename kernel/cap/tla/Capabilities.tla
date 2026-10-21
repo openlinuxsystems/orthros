@@ -1,3 +1,6 @@
+\* SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+\* SPDX-License-Identifier: Apache-2.0 OR MIT
+
 ---------------------------- MODULE Capabilities ----------------------------
 (***************************************************************************)
 (* A model of the Radix capability store's derivation tree (radix-cap,    *)

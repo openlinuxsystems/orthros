@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # NNNN. Title of the decision
 
 - Status: Proposed | Accepted | Superseded by [NNNN](NNNN-title.md)

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The Multiple APIC Description Table (signature `APIC`).
 
 use crate::{Error, Sdt, u16_at, u32_at, u64_at};

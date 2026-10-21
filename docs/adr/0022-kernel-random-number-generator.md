@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0022. The kernel's random numbers come from ChaCha20 seeded through BLAKE2s from every source
 
 - Status: Accepted

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The hardware abstraction layer (HAL) of the Radix kernel.
 //!
 //! The arch-independent kernel (`kernel/radix`) reaches the hardware only

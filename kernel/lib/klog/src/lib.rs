@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `klog`, the kernel log.
 //!
 //! Every kernel message goes through [`log`] (usually through the [`error!`],

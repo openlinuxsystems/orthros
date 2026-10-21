@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The slab layer: one cache of slabs per size class.
 //!
 //! A slab is a block of frames cut into objects of one class. Its

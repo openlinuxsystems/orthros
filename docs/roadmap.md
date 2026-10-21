@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # OrthrOS roadmap: Radix implementation plan
 
 This is the implementation plan for OrthrOS, from the Radix kernel

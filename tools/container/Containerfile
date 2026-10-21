@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # The OrthrOS build container, used by `./ob --container <command>`.
 #
 # It holds every host tool `./ob doctor` checks for, at the versions CI uses,

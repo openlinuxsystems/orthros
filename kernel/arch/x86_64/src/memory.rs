@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Physical memory: the memory map, the kernel's reservations, the layout
 //! of the kernel's address space, and the frame allocators.
 //!

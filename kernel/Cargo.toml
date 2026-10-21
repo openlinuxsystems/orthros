@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # The Radix kernel workspace.
 #
 # The kernel builds for a bare-metal target, so it lives in its own workspace,

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "radix-arch-aarch64"
 description = "AArch64 stubs of the Radix hardware abstraction layer, so CI keeps the kernel portable"

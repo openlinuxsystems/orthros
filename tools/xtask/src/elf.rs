@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Reading ELF64 little-endian files: the kernel `ob` post-processes after
 //! linking (its symbol table, `ksyms`, and its relocation table, `krelocs`).
 

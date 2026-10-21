@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Restarting the machine, leaving QEMU, and polling the keyboard.
 
 use radix_acpi::GenericAddress;

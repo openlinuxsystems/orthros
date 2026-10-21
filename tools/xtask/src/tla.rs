@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `ob test tla`: checks the TLA+ models with TLC (ADR 0024).
 //!
 //! TLC comes from the TLA+ tools release pinned here, which `ob` downloads

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! What a capability designates: kernel objects and hardware resources.
 //!
 //! Eight kinds are kernel objects with an entry in the store's object

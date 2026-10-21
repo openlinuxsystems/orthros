@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Running a function on the other CPUs.
 //!
 //! Until Phase 4 brings threads, the other CPUs only sleep in [`idle`].

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Rights: what a capability lets its holder do with its object.
 //!
 //! A capability's rights are a set of the twelve [`Rights`] below. Which of

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "radix-relocs"
 description = "The relocation table format that lets the Radix kernel move itself at boot (KASLR)"

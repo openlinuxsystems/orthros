@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Spin locks and one-time initialisation for the Radix kernel.
 //!
 //! Phase 1 needs three primitives: [`SpinLock`], for state shared between
