@@ -20,14 +20,16 @@ On top of Radix, OrthrOS provides a complete, installable system:
 ## Where the project is
 
 OrthrOS is built in phases, each ending in something that runs. This
-handbook describes **Phase 2**: the Radix kernel boots through GRUB under
+handbook describes **Phase 3**: the Radix kernel boots through GRUB under
 UEFI and legacy BIOS at a random address, chosen by a cryptographic random
 number generator seeded from several sources, manages the machine's memory
 with a frame allocator per NUMA node and a kernel heap, protects itself
 with W^X page tables, guard pages, SMEP and SMAP, starts every CPU, reads
 the firmware's ACPI tables, takes timer interrupts and shows its log on
 the screen and the serial port, with crash reports, a kernel debugger and
-a crash log for when things go wrong. Chapters for later phases are listed in the table of
+a crash log for when things go wrong. It also has its capability core, the
+store of unforgeable capabilities through which programs will reach every
+resource once they arrive (see `radix-capabilities(7)`). Chapters for later phases are listed in the table of
 contents and are written as those phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
 

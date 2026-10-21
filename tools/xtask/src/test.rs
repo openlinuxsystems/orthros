@@ -19,7 +19,7 @@ use crate::config::{Firmware, Media};
 use crate::image::{self, ImageSpec};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
-use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen};
+use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen, tla};
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
 const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -32,6 +32,7 @@ const QEMU_EXIT_RESET: i32 = 0;
 pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-acpi",
     "radix-bootinfo",
+    "radix-cap",
     "radix-fbcon",
     "radix-hal",
     "radix-kdb",
@@ -256,6 +257,20 @@ pub const CASES: &[Case] = &[
         script: tlb,
     },
     Case {
+        name: "caps",
+        about: "no capability can be forged or widened, and revokes win against 3 other CPUs",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=caps",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: caps,
+    },
+    Case {
         name: "stack-overflow",
         about: "a kernel stack overflow hits its guard page and panics saying so",
         firmware: Firmware::Bios,
@@ -333,10 +348,13 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         None | Some("boot") => (false, true),
         Some("unit") if selected.is_empty() => (true, false),
         Some("kani") if selected.is_empty() => return kani(ctx),
-        Some(suite @ ("unit" | "kani")) => {
+        Some("tla") if selected.is_empty() => return tla::check(ctx),
+        Some(suite @ ("unit" | "kani" | "tla")) => {
             crate::bail!("--case selects boot tests; it cannot be used with `{suite}`")
         }
-        Some(other) => crate::bail!("unknown test suite `{other}`; use `unit`, `boot` or `kani`"),
+        Some(other) => {
+            crate::bail!("unknown test suite `{other}`; use `unit`, `boot`, `kani` or `tla`")
+        }
     };
     let cases: Vec<&Case> = if selected.is_empty() {
         CASES.iter().collect()
@@ -379,7 +397,7 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] = &["radix-mm"];
+pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap"];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
@@ -862,7 +880,7 @@ fn screen_shows(screen: &[String], needles: &[&str]) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 2)"))?;
+    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 3)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -896,6 +914,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("APIC: ")?;
     vm.expect("Time: TSC at ")?;
     vm.expect(" in the frame allocator's zones:")?;
+    vm.expect("Capabilities: ready; 11 object kinds, 12 rights")?;
     let cpus = case.cpus;
     vm.expect(&format!("CPUs: {cpus} of {cpus} online:"))?;
     for cpu in 0..cpus {
@@ -967,6 +986,15 @@ fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     selftest_passed(vm, "tlb")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn caps(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("selftest caps: ")?;
+    vm.expect(" forgeries and ")?;
+    vm.expect(" derivations by 3 other CPUs during a ")?;
+    selftest_passed(vm, "caps")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
@@ -1076,6 +1104,7 @@ fn kdb(vm: &mut Vm, _case: &Case) -> Result<(), String> {
         ],
     )?;
     vm.kdb("heap", &["Heap: ", " objects in use"])?;
+    vm.kdb("caps", &["Capabilities: 0 spaces with 0 slots, 0 capabilities to 0 objects"])?;
     vm.kdb("acpi", &["ACPI: RSDP", "APIC"])?;
     vm.kdb("log 4", &["Boot complete."])?;
     vm.kdb("trace", &["boot.entry", "events shown"])?;

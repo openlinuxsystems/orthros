@@ -6,12 +6,12 @@ orthros-boot - how OrthrOS boots, and the kernel command line
 
 # DESCRIPTION
 
-This page describes the boot path as of Phase 2 of the roadmap: the Radix
+This page describes the boot path as of Phase 3 of the roadmap: the Radix
 kernel moves itself to a random address in the higher half of the address
 space, brings up its consoles, builds its page tables, reads the ACPI
 tables, hands the machine's memory to its frame allocator and heap,
-programs the interrupt controllers and timers, starts every CPU and
-reports what it found. It then idles; later phases continue from there.
+programs the interrupt controllers and timers, sets up its capability
+store, starts every CPU and reports what it found. It then idles; later phases continue from there.
 The page grows with every phase that changes how the system starts.
 
 *radix-debug*(7) describes what happens when something goes wrong: the
@@ -95,6 +95,10 @@ _/system/share/licenses/_
   timer against the HPET, the ACPI PM timer or the 8254 PIT, in that
   order of preference. The periodic timer interrupt then runs at
   100 Hz, and the kernel reports the frame allocator's zones.
+. The kernel sets up its capability store (see *radix-capabilities*(7))
+  and reports its limits on a *Capabilities: ready* line. Until user
+  programs arrive in Phase 6, only the *caps* self-test makes
+  capabilities.
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
@@ -350,7 +354,8 @@ flags and otherwise ignores them.
 
 *selftest*=_name_
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
-	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap* or *tlb*.
+	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb* or
+	*caps*.
 	See *radix-debug*(7). *ob test* uses these.
 
 *qemu-exit*
@@ -391,7 +396,7 @@ the steps of a smoke test and its results.
 
 # SEE ALSO
 
-*radix-debug*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
+*radix-debug*(7), *radix-capabilities*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
 
 The Multiboot2 specification:
 https://www.gnu.org/software/grub/manual/multiboot2/

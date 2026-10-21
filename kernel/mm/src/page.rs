@@ -66,12 +66,22 @@ pub enum Owner {
     Area = 4,
     /// The allocator's own per-CPU caches.
     PerCpu = 5,
+    /// Memory handed to the capability store as a memory object
+    /// (`radix-cap`), from which frames and other objects are retyped.
+    Memory = 6,
 }
 
 impl Owner {
     /// Every owner, in the order of their numbers.
-    pub const ALL: [Owner; 6] =
-        [Owner::Kernel, Owner::PageTable, Owner::Slab, Owner::Heap, Owner::Area, Owner::PerCpu];
+    pub const ALL: [Owner; 7] = [
+        Owner::Kernel,
+        Owner::PageTable,
+        Owner::Slab,
+        Owner::Heap,
+        Owner::Area,
+        Owner::PerCpu,
+        Owner::Memory,
+    ];
 
     fn from_bits(bits: u32) -> Owner {
         Owner::ALL.get(bits as usize & 0xff).copied().unwrap_or(Owner::Kernel)
@@ -86,6 +96,7 @@ impl Owner {
             Owner::Heap => "large heap blocks",
             Owner::Area => "mapped areas",
             Owner::PerCpu => "per-CPU caches",
+            Owner::Memory => "memory objects",
         }
     }
 }

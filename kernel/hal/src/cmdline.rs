@@ -61,7 +61,7 @@ pub const FLAGS: &[Flag] = &[
         name: "selftest",
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
-                  mm-stress, stack-overflow, smep, smap or tlb",
+                  mm-stress, stack-overflow, smep, smap, tlb or caps",
     },
     Flag {
         name: "qemu-exit",
@@ -80,6 +80,7 @@ pub const SELFTESTS: &[&str] = &[
     "smep",
     "smap",
     "tlb",
+    "caps",
 ];
 
 /// A parsed view of the command line.

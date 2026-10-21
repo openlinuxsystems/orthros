@@ -18,7 +18,7 @@ use radix_klog::crashlog::Ending;
 use radix_klog::{info, trace, warn};
 
 use crate::symbols::{self, Backtrace};
-use crate::{Arch, crashlog, report};
+use crate::{Arch, caps, crashlog, report};
 
 /// Set while a session runs, so a breakpoint inside `kdb` does not nest.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -145,6 +145,7 @@ fn run(session: &Session, command: Command<'_>) {
         Command::Cpus => show_cpus(),
         Command::Memory => show_memory(),
         Command::Heap => report::write_heap(&mut |args| say(args)),
+        Command::Capabilities => caps::write_census(&mut |args| say(args)),
         Command::Acpi => Arch::describe_firmware(&mut |args| say(args)),
         Command::Backtrace => {
             let backtrace = match (&session.panic_backtrace, &session.fault) {
