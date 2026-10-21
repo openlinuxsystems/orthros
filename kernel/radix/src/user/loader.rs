@@ -104,7 +104,7 @@ pub fn start(at: SlotRef, program: &Program<'_>) -> Result<ProcessRef> {
         return Err(failed(name, "checking its capabilities", error(Kernel::InvalidArgument)));
     }
     let account = Account::new(program.domain.clone()).ok_or(error(Kernel::NoMemory))?;
-    let process = process::create(at, name, startup::SLOTS, account, None, program.on_exit)
+    let process = process::create(at, name, startup::SLOTS, account, None, None, program.on_exit)
         .map_err(|err| failed(name, "making its process", err))?;
     match build(at, &process, program) {
         Ok(()) => Ok(process),

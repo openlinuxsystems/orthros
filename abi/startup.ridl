@@ -11,7 +11,7 @@
 //! page's address in the first argument register.
 //!
 //! A position-independent program is placed at a random page in the
-//! IMAGE_WINDOW bytes from IMAGE_BASE, and the top of its stack at a
+//! WINDOW bytes from IMAGE_BASE, and the top of its stack at a
 //! random page in the STACK_WINDOW bytes below STACK_TOP; a loader puts
 //! other mappings it makes for the program, such as Spark's view of the
 //! boot archive, at random in the window from LOADER_BASE. The addresses

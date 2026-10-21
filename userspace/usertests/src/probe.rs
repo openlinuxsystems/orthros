@@ -34,6 +34,8 @@ const CHILD_PROCESS: u32 = 73;
 const NOTE: u32 = 74;
 const ENDPOINT: u32 = 75;
 const CHILD_SPACE: u32 = 76;
+const GRANDCHILD: u32 = 77;
+const GRANDCHILD_VIEW: u32 = 78;
 
 /// Free addresses for its mappings.
 const MAP_AT: u64 = 0x2000_0000;
@@ -677,8 +679,20 @@ fn processes() {
         InvalidArgument,
         "a thread in the kernel's half"
     );
+    // A process made for the child, which holds the only capability to
+    // itself that can end it: it ends with the child.
+    ok!(
+        process::create(&SYS, CHILD_PROCESS, ObjectKind::Process, process::MIN_SLOTS, GRANDCHILD),
+        "a process made for the child"
+    );
+    ok!(capability::derive(&SYS, GRANDCHILD, GRANDCHILD_VIEW, Rights::READ, 0), "a view of it");
+    ok!(process::give(&SYS, GRANDCHILD, GRANDCHILD, 1), "giving it itself");
     ok!(process::notify_exit(&SYS, CHILD_PROCESS, NOTE), "asking to hear of its end");
     ok!(process::exit(&SYS, CHILD_PROCESS, 7), "ending it");
+    if let Some(info) = ok!(process::info(&SYS, GRANDCHILD_VIEW), "info on the one made for it") {
+        check!(info.state == ProcessState::Exited, "the one made for it is {}", info.state.name());
+        check!(info.code == process::EXIT_STOPPED, "the one made for it ended with {:#x}", info.code);
+    }
     if let Some(info) = ok!(process::info(&SYS, CHILD_PROCESS), "info on the ended child") {
         check!(info.state == ProcessState::Exited, "the child is {}", info.state.name());
         check!(info.code == 7, "the child's code is {:#x}", info.code);
@@ -705,7 +719,7 @@ fn processes() {
     {
         check!(bits == 1, "set bits {bits:#x}");
     }
-    for slot in [CHILD_SPACE, CHILD_PROCESS, NOTE] {
+    for slot in [CHILD_SPACE, CHILD_PROCESS, NOTE, GRANDCHILD_VIEW] {
         ok!(capability::delete(&SYS, slot), "deleting slot {slot}");
     }
 }

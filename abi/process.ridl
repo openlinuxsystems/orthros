@@ -21,8 +21,11 @@
 //! Deleting the creator's capability does not end a process that holds
 //! its own; revoking the creator's capability first takes that one too.
 //!
-//! Kernel objects a program makes with `create` are charged to its
-//! process's resource domain, by the bytes the kernel uses for them.
+//! A process made with `create` belongs to the process `create` was called
+//! on, and ends (EXIT_STOPPED) when that one ends: whatever a program makes
+//! goes when it ends, even a process that holds the only capability to
+//! itself. Kernel objects made with `create` are charged to that process's
+//! resource domain, by the bytes the kernel uses for them.
 
 module process;
 
@@ -59,8 +62,8 @@ interface process = 0x000a version 1 {
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
     /// with a capability space of `size` slots (MIN_SLOTS to MAX_SLOTS),
-    /// an endpoint, or a notification (`size` 0 for both). Needs the
-    /// control right.
+    /// which ends when this one does, an endpoint, or a notification
+    /// (`size` 0 for both). Needs the control right.
     method create = 1 (kind: ObjectKind, size: u32, to: slot) -> ()
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 gone];

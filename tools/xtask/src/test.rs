@@ -1458,12 +1458,14 @@ fn fuzz(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let passed = selftest_passed(vm, "fuzz");
     let log = vm.log();
     // The fuzzers' lines name the call (and a fuzzer stopped while waiting
-    // cannot report through its exit status).
+    // cannot report through its exit status). Only a line that starts with
+    // the marker counts: the fuzzers also log text of their own.
     for (marker, what) in [
         ("fuzz: broken promise", "a failed call returned more than an error"),
         ("fuzz: undocumented error", "a call failed with an error its documentation does not list"),
     ] {
-        if let Some(line) = log.lines().find(|line| line.contains(marker)) {
+        let starts = |line: &&str| line.split_once("]: ").is_some_and(|(_, text)| text.starts_with(marker));
+        if let Some(line) = log.lines().find(starts) {
             return Err(format!("{what}: {}", line.trim()));
         }
     }

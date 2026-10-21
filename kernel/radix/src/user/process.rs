@@ -21,6 +21,12 @@
 //! notification `notify_exit` named is signalled. What is left is its
 //! number and exit code until its last capability is deleted.
 //!
+//! A process made with `process.create` belongs to the process it was made
+//! for, and ends when that one does ([`ProcessObject::finish`] ends the
+//! processes it made). So whatever a program makes goes when it ends, even
+//! a process that holds the only capability to itself, which nothing could
+//! reach or end otherwise.
+//!
 //! Finishing needs the capability store, so a process that ends because
 //! the store released it (its last capability went, under the store's
 //! lock) is finished when the store's current change is done, before the
@@ -31,7 +37,7 @@
 //! Lock order: the capability store, then a process's state, then a
 //! thread's scheduler state (`sched::wake`).
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -95,6 +101,9 @@ pub struct ProcessObject {
     on_exit: Option<fn(&ProcessObject, u64)>,
     /// The next process waiting to be finished, while it waits.
     pending: SpinLock<Option<ProcessRef>>,
+    /// The processes made for it, which end when it does; `None` once it
+    /// has ended, when no more can be made for it.
+    made: SpinLock<Option<Vec<Weak<ProcessObject, Kmalloc>, Kmalloc>>>,
 }
 
 struct State {
@@ -136,13 +145,15 @@ pub fn bytes_of(slots: u32) -> u64 {
 /// `name`, whose objects and threads are charged to `account`, and puts
 /// its original capability, with every right, in `at`. `charge` is what
 /// the process itself is charged to its maker; the registry keeps it
-/// until the process goes.
+/// until the process goes. A process made for `maker` ends when `maker`
+/// does; if `maker` has ended already, this fails with `gone`.
 pub fn create(
     at: SlotRef,
     name: &str,
     slots: u32,
     account: AccountRef,
     charge: Option<Charge>,
+    maker: Option<&ProcessObject>,
     on_exit: Option<fn(&ProcessObject, u64)>,
 ) -> Result<ProcessRef> {
     if !(MIN_SLOTS..=MAX_SLOTS).contains(&slots) {
@@ -186,9 +197,15 @@ pub fn create(
                 }),
                 on_exit,
                 pending: SpinLock::new(None),
+                made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
             };
             let process: ProcessRef =
                 Arc::try_new_in(process, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
+            // Before its capability exists, so that a failure leaves
+            // nothing to undo but the spaces.
+            if let Some(maker) = maker {
+                maker.made_one(&process)?;
+            }
             let id = store.create(at, ObjectKind::Process).map_err(cap_error)?;
             // Room was reserved above, so this cannot fail.
             if objects::insert_charged(store, id, Object::Process(process.clone()), charge).is_err()
@@ -221,6 +238,20 @@ impl ProcessObject {
     /// Its hidden capability space.
     pub fn keep_space(&self) -> SpaceId {
         self.keep
+    }
+
+    /// Records `process` as made for it, forgetting those that have gone.
+    /// Fails with `gone` once it has ended.
+    fn made_one(&self, process: &ProcessRef) -> Result<()> {
+        let mut made = self.made.lock();
+        let list = made.as_mut().ok_or(error(Kernel::Gone))?;
+        // Only the record of one that has gone is let go of here: never the
+        // last reference to a process, whose end may need to sleep.
+        list.retain(|made| made.strong_count() > 0);
+        list.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+        // Room was reserved above.
+        let _ = list.push_within_capacity(Arc::downgrade(process));
+        Ok(())
     }
 
     /// Its address space, unless it has ended.
@@ -389,10 +420,24 @@ impl ProcessObject {
         }
     }
 
-    /// Finishes ending it: empties both its capability spaces, lets go of
-    /// its address space, and tells whoever asked. With `store`, the
-    /// caller holds the store's lock (`finish_pending`).
+    /// Finishes ending it: ends the processes made for it, empties both
+    /// its capability spaces, lets go of its address space, and tells
+    /// whoever asked. With `store`, the caller holds the store's lock
+    /// (`finish_pending`).
     fn finish(&self, store: Option<&mut Store>) {
+        // The processes made for it end too. Those with no thread left are
+        // finished through the pending list, as released ones are, so that
+        // a long line of processes made for each other is finished one
+        // after another and never in a deepening recursion: the store's
+        // next change finishes them (here `caps::destroy_space` below, or
+        // with the store's lock held, the rest of `finish_pending`).
+        let made = self.made.lock().take();
+        for process in made.iter().flatten().filter_map(Weak::upgrade) {
+            if process.end(EXIT_STOPPED) {
+                push_pending(process);
+            }
+        }
+        drop(made);
         match store {
             Some(store) => {
                 let _ = store.destroy_space(self.cspace, &mut caps::release);
@@ -431,9 +476,14 @@ impl ProcessObject {
 /// the store locked: if it is to be finished now, [`finish_pending`]
 /// does that before the lock goes.
 pub fn released(process: ProcessRef) {
-    if !process.end(EXIT_STOPPED) {
-        return;
+    if process.end(EXIT_STOPPED) {
+        push_pending(process);
     }
+}
+
+/// Puts `process`, which has ended with no thread left, on the list of
+/// those [`finish_pending`] finishes.
+fn push_pending(process: ProcessRef) {
     let mut first = PENDING.lock();
     *process.pending.lock() = first.take();
     *first = Some(process);
@@ -618,7 +668,7 @@ fn create_for(target: &ProcessRef, kind: AbiKind, size: u32, to: SlotRef) -> Res
             let charge = Account::charge(&target.account, bytes_of(size))?;
             let account =
                 Account::new(target.account.domain().clone()).ok_or(error(Kernel::NoMemory))?;
-            create(to, "process", size, account, Some(charge), None).map(|_| ())
+            create(to, "process", size, account, Some(charge), Some(&**target), None).map(|_| ())
         }
         AbiKind::Endpoint => {
             if size != 0 {

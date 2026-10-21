@@ -14,9 +14,10 @@
 //! size inside the file, every path relative and made of names other than
 //! `.` and `..`, and the paths in order, each once (so checking takes one
 //! pass, and a name cannot mean two files). After that, looking a file up
-//! or listing a directory cannot fail. Any input gives a result or an error, never a
-//! panic: the property tests feed it garbage. Only regular files and
-//! directories are allowed; links and devices are refused.
+//! or listing a directory cannot fail; both read the headers in turn,
+//! which suits an archive of a few files. Any input gives a result or an
+//! error, never a panic: the property tests feed it garbage. Only regular
+//! files and directories are allowed; links and devices are refused.
 //!
 //! With the `write` feature, [`write::Writer`] makes archives, for `ob`
 //! and the tests.
