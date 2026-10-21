@@ -51,7 +51,7 @@ mod once;
 pub mod rcu;
 mod spin;
 
-pub use hooks::{Acquire, Hooks, LockKind, LockSite, set_hooks};
+pub use hooks::{Acquire, Hooks, LockKind, LockSite, set_checking, set_hooks};
 pub use mutex::{Mutex, MutexGuard, RawMutex};
 pub use once::{Once, TakeOnce};
 pub use spin::{RawSpinLock, RawSpinLockGuard, SpinLock, SpinLockGuard};

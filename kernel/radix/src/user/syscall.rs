@@ -49,7 +49,12 @@ pub fn handle(regs: &mut SyscallRegs) {
     match dispatch(me, user, regs.number, &regs.args) {
         Ok(Done::Results(results)) => {
             regs.number = 0;
-            regs.args = results;
+            // Without SSE, a copy of more than 64 bytes compiles to a
+            // string move, whose start-up costs more than the whole system
+            // call's work on some CPUs; two smaller copies are plain moves.
+            let (low, high) = results.split_at(8);
+            regs.args[..8].copy_from_slice(low);
+            regs.args[8..].copy_from_slice(high);
         }
         Ok(Done::Exit(code)) => exit_current(user.clone(), code),
         Err(status) => {

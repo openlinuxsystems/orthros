@@ -166,7 +166,12 @@ are grateful.
   ([ADR 0038](docs/adr/0038-channel-wake-ups-per-direction.md)); its
   per-CPU random generators keyed from a base generator shaped ours; and
   its workaround for AMD's SYSRET erratum (`X86_BUG_SYSRET_SS_ATTRS`)
-  showed us why to reload SS at a context switch.
+  showed us why to reload SS at a context switch. KVM's paravirtual end
+  of interrupt, as Linux's documentation describes it
+  (`Documentation/virt/kvm/x86/msr.rst`) and Linux guests use it, is how
+  Radix acknowledges interrupts under KVM
+  ([ADR 0040](docs/adr/0040-hot-paths-without-hidden-costs.md)); no code
+  is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the

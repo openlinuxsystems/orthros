@@ -170,6 +170,9 @@ pub struct PerCpu {
     pub timer_writes: AtomicU64,
     /// Interprocessor interrupts this CPU sent.
     pub ipis_sent: AtomicU64,
+    /// KVM's paravirtual end-of-interrupt word: the hypervisor sets bit 0
+    /// when the interrupt it delivers needs no EOI write (`apic`).
+    pub pv_eoi: AtomicU32,
     descriptors: TakeOnce<Descriptors>,
 }
 
@@ -203,6 +206,7 @@ impl PerCpu {
             armed_ns: AtomicU64::new(u64::MAX),
             timer_writes: AtomicU64::new(0),
             ipis_sent: AtomicU64::new(0),
+            pv_eoi: AtomicU32::new(0),
             descriptors: TakeOnce::new(Descriptors {
                 gdt: [0; 8],
                 tss: Tss {

@@ -44,7 +44,9 @@ pub mod weight;
 mod proofs;
 
 pub use cpuset::{CpuSet, MAX_CPUS};
-pub use fair::{BASE_SLICE_NS, Entity, FairQueue, Placement, virtual_ns};
+pub use fair::{
+    BASE_SLICE_NS, Entity, FairQueue, Placement, mul_div, mul_div_unsigned, virtual_ns,
+};
 pub use haltpoll::HaltPoll;
 pub use rt::{RR_QUANTUM_NS, RtEntry, RtQueue};
 pub use topology::{

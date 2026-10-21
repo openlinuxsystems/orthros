@@ -35,10 +35,10 @@ use radix_cap::{
 use radix_hal::MAX_CPUS;
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
-use radix_sync::{Mutex, RawSpinLock};
+use radix_sync::Mutex;
 
 use crate::domains::{self, DomainError, DomainRef, Settings};
-use crate::percpu::{PerCpu, Slot};
+use crate::percpu::{Own, PerCpu, Slot};
 
 /// The store's type in the kernel.
 pub type Store = Capabilities<Kmalloc>;
@@ -88,12 +88,9 @@ struct Cached {
     cap: Capability,
 }
 
-/// Each CPU's capabilities. Only its own CPU takes the lock, inside
-/// `PerCpu::with`, which holds off preemption, and no interrupt handler
-/// looks capabilities up, so it is never contended and a raw lock, which
-/// skips the lock checker's hooks, is enough.
-static CACHE: PerCpu<RawSpinLock<[Option<Cached>; CACHED]>> =
-    PerCpu::new([const { Slot::new(RawSpinLock::new([None; CACHED])) }; MAX_CPUS]);
+/// Each CPU's capabilities, which only its own CPU uses.
+static CACHE: PerCpu<Own<[Option<Cached>; CACHED]>> =
+    PerCpu::new([const { Slot::new(Own::new([None; CACHED])) }; MAX_CPUS]);
 
 fn cache_index(at: SlotRef) -> usize {
     (at.slot as usize ^ at.space.index as usize) % CACHED
@@ -110,10 +107,12 @@ fn cache_index(at: SlotRef) -> usize {
 pub fn get(at: SlotRef) -> Result<Capability, CapError> {
     let now = VERSION.load(Ordering::Acquire);
     let index = cache_index(at);
-    let hit = CACHE
-        .with(|cache| cache.lock()[index].filter(|entry| entry.at == at && entry.version == now));
-    if let Some(entry) = hit {
-        return Ok(entry.cap);
+    let hit = CACHE.with_own(|cache| match &cache[index] {
+        Some(entry) if entry.at == at && entry.version == now => Some(entry.cap),
+        _ => None,
+    });
+    if let Some(Some(cap)) = hit {
+        return Ok(cap);
     }
     let (found, version) = {
         let store = STORE.lock();
@@ -121,7 +120,7 @@ pub fn get(at: SlotRef) -> Result<Capability, CapError> {
         (found, VERSION.load(Ordering::Relaxed))
     };
     if let Ok(cap) = found {
-        CACHE.with(|cache| cache.lock()[index] = Some(Cached { at, version, cap }));
+        CACHE.with_own(|cache| cache[index] = Some(Cached { at, version, cap }));
     }
     found
 }

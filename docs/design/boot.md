@@ -35,6 +35,12 @@ untrusted data (Multiboot2 boot information, ACPI tables, microcode files,
 PSF fonts, the symbol table and the crash log) are plain byte-slice code
 with unit tests on the build host (ADR 0013).
 
+The release kernel is built with link-time optimisation over all its
+crates and one code generation unit (`kernel/Cargo.toml`), so small
+functions of one crate (a lock, an ABI decoder) are inlined into the hot
+paths of another, as C kernels get from inline functions in headers. It
+took a quarter of the instructions off a capability call (ADR 0040).
+
 ## Image layout
 
 `kernel/arch/x86_64/linker.ld` produces an ELF executable (`ET_EXEC`) with

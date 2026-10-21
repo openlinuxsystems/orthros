@@ -11,7 +11,7 @@
 //! lock-order checker, and lets a contended [`crate::Mutex`] sleep.
 
 use core::panic::Location;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::Once;
 use crate::mutex::RawMutex;
@@ -163,4 +163,21 @@ pub(crate) fn active() -> Option<&'static dyn Hooks> {
         return None;
     }
     HOOKS.get().copied()
+}
+
+/// Whether the locks tell the hooks about each acquisition and release.
+static CHECKING: AtomicBool = AtomicBool::new(true);
+
+/// Tells the locks whether anything listens to [`Hooks::lock_acquire`] and
+/// [`Hooks::lock_release`]: the kernel turns this off while its lock-order
+/// checker is off, so a lock costs a load instead of two calls that return
+/// at once. Change it only while no CPU holds a lock, as for turning the
+/// checker on or off.
+pub fn set_checking(on: bool) {
+    CHECKING.store(on, Ordering::Relaxed);
+}
+
+/// The hooks to tell about an acquisition or release, if they listen.
+pub(crate) fn checking(hooks: Option<&'static dyn Hooks>) -> Option<&'static dyn Hooks> {
+    hooks.filter(|_| CHECKING.load(Ordering::Relaxed))
 }

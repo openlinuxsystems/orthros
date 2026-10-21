@@ -190,7 +190,9 @@ lookup that took the lock first could also have done. A revoke that has
 returned has moved the version, and any thread that learns of it (through
 a lock, an IPC or any other synchronization) sees the new version, so it
 cannot use what was revoked. The cache keeps capabilities only, never
-objects, so it keeps nothing alive.
+objects, so it keeps nothing alive. It is a per-CPU value that only its
+own CPU touches, with preemption off (`percpu::Own`), so a hit takes no
+lock and no locked instruction at all (ADR 0040).
 
 ## Why no capability can be forged or widened
 

@@ -601,7 +601,12 @@ pub fn current() -> Option<ThreadRef> {
 /// [`ThreadRef`] it derefs to makes a counted reference as usual.
 pub fn running() -> Option<Running> {
     // Preemption held off: the CPU's current thread is this code's.
-    let token = CPUS.with(|slot| slot.current.load(Ordering::Relaxed));
+    borrow(CPUS.with(|slot| slot.current.load(Ordering::Relaxed)))
+}
+
+/// The running thread from its token, read from its CPU's `current` with
+/// the thread unable to move ([`running`]).
+fn borrow(token: usize) -> Option<Running> {
     if token == 0 {
         return None;
     }
@@ -1030,7 +1035,11 @@ fn reschedule(why: Switch) {
     Arch::set_preempt_count(count + 1);
     let cpu = Arch::current_cpu();
     let slot = CPUS.get(cpu);
-    let Some(me) = slot.rq.lock().as_ref().map(|rq| rq.current.clone()) else {
+    // Once the CPU is online its run queue is there for good, and `current`
+    // names the thread it runs: this one, borrowed, which saves a lock and
+    // two atomic counts on every switch.
+    let ready = slot.online.load(Ordering::Acquire) || slot.rq.lock().is_some();
+    let Some(me) = ready.then(|| borrow(slot.current.load(Ordering::Relaxed))).flatten() else {
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
@@ -1046,7 +1055,6 @@ fn reschedule(why: Switch) {
     if matches!(why, Switch::Block(_)) && me.wake_pending.swap(false, Ordering::AcqRel) {
         // Woken since it decided to sleep: carry on.
         drop(state);
-        drop(me);
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
@@ -1104,13 +1112,11 @@ fn reschedule(why: Switch) {
         enqueue_ready(&me, &mut state, false);
     }
     if !switching {
-        drop(me);
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
     }
     hooks::switch_out(cpu, &me);
-    drop(me);
     switch(prev_ptr, next_ptr);
     // Back on this thread, maybe on another CPU.
     after_switch();
@@ -1135,6 +1141,9 @@ fn switch(prev: *const Thread, next: *const Thread) {
 
 /// What a thread does when a switch brings it back, or first starts it.
 fn after_switch() {
+    if !hooks::lockdep_enabled() {
+        return;
+    }
     let cpu = Arch::current_cpu();
     if let Some(me) = CPUS.get(cpu).rq.lock().as_ref().map(|rq| rq.current.clone()) {
         hooks::switch_in(cpu, &me);

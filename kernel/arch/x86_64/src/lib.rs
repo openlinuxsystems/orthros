@@ -571,11 +571,12 @@ impl Platform for Arch {
         let (version, lvts) = apic::version();
         radix_klog::info!(
             "APIC: {} mode, local APIC at {:#x} (version {version:#x}, {} LVT entries), boot CPU \
-             APIC ID {}",
+             APIC ID {}{}",
             apic::mode_name(),
             apic::phys_base(),
             lvts + 1,
-            apic::id()
+            apic::id(),
+            if apic::pv_eoi() { ", paravirtual EOI" } else { "" }
         );
         apic::ioapics(|io| {
             radix_klog::info!(

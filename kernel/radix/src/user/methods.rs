@@ -64,9 +64,10 @@ pub fn call(
     info: Info,
     words: [u64; 8],
 ) -> Result<Answer> {
-    // The data words past the count are not the caller's arguments.
-    let mut args = [0u64; 8];
-    args[..info.words].copy_from_slice(&words[..info.words]);
+    // The data words past the count are not the caller's arguments. A
+    // copy of a fixed size compiles to moves; one of `info.words` words
+    // would call `memcpy`, whose string moves cost more than the words.
+    let args: [u64; 8] = core::array::from_fn(|i| if i < info.words { words[i] } else { 0 });
     let at = SlotRef::new(user.cspace, slot);
     if info.is_reserved() {
         return capability(at, info.label, &args);

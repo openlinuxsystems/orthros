@@ -55,5 +55,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = "fat"
+codegen-units = 1
 # Keep symbols so later phases can print symbolized backtraces.
 debug = true

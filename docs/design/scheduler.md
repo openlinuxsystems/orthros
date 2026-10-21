@@ -94,7 +94,11 @@ with half a slice.
 The queue keeps `W = Σ w` and `S = Σ w (v − v₀)` for a base `v₀`, the
 smallest `v` (moved by `rebase`), so `V = v₀ + S / W` and eligibility,
 `(v − v₀) · W ≤ S`, are exact integer arithmetic in `i128`. Virtual times
-are `u64` that may wrap; only differences, as `i64`, are compared.
+are `u64` that may wrap; only differences, as `i64`, are compared. The
+divisions (`mul_div`, `avg_vruntime`) are done in 64 bits whenever the
+numbers fit, which they nearly always do, and in 128 bits otherwise: the
+answer is the same, and x86-64 divides 128-bit numbers in a library call
+several times dearer, on every switch (ADR 0040).
 
 **Real-time classes.** `RtQueue` (`rt.rs`) holds FIFO and round-robin
 threads, priorities 1 to 99. The highest priority runs; among equals the
@@ -111,7 +115,10 @@ and its child domains in proportion to their weights, its own threads
 together counting as one child of the default weight 100. `Rq::reweigh`
 works the shares out again whenever the fair queue's membership changes,
 and `FairQueue::reweight` keeps each entity's lag across the change. The
-weights are scaled to sum to 1024 per queued thread. This is a flat
+weights are scaled to sum to 1024 per queued thread. When every queued
+thread is in one domain, as is usual, the domain's branch of the tree
+cancels out and each thread's weight is its part of their nice weights,
+which `reweigh` works out without building the tree. This is a flat
 approximation of a hierarchy of queues: it gives the right shares among
 the threads that are runnable on one CPU, and the balancer evens the
 thread counts between CPUs, but it does not move time between CPUs to
@@ -137,7 +144,11 @@ thread that another CPU picks while this CPU is still switching away from
 it (it was woken, or pulled by a balancer, meanwhile) is simply waited
 for. Before the switch the CPU records an RCU quiescent state and hands
 the outgoing thread's held mutexes to the lock checker (`switch_out`);
-after it, the incoming thread takes its own back (`switch_in`). A thread
+after it, the incoming thread takes its own back (`switch_in`); with the
+checker off, neither does anything. `reschedule` finds the running
+thread through its CPU's `current` word, borrowed, rather than cloning
+the run queue's reference, which would cost a lock and two atomic counts
+per switch. A thread
 that exits is put on the reaper's list before its last switch, and the
 reaper frees its stack only once its `on_cpu` word is clear, that is once
 the switch away from it has saved it.
@@ -316,7 +327,10 @@ and lock other CPUs' run queues.
 
 `radix-lockdep` is a lock-order checker after Linux's lockdep. Every spin
 lock and mutex acquisition goes through `radix_sync`'s hooks to the
-checker when it is on. It keeps a graph over lock *classes* (every lock
+checker when it is on. When it is off, the kernel tells `radix_sync`
+(`set_checking`), and the locks skip those two calls altogether: a
+same-CPU round trip takes some twenty locks, and the calls were a sixth
+of its instructions (ADR 0040). It keeps a graph over lock *classes* (every lock
 created at one source location, plus the subclass `lock_nested` names)
 with an edge `A → B` when `B` was taken while `A` was held, in the same
 context. Taking a lock whose class would close a cycle is reported at

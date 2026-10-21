@@ -37,9 +37,10 @@ generator's lock), it takes 32 bytes from the kernel's generator and
 mixes them into its key with the reseeding hash. Its output is therefore
 as unpredictable as the kernel generator's, and once a request returns
 the key that made it is gone, as before. Only its own CPU uses it, with
-preemption off, and no interrupt handler does; the lock around it is
-never contended. Linux keys its per-CPU generators from a base generator
-the same way.
+preemption off, so it needs no lock (`percpu::Own`, ADR 0040); an
+interrupt handler that came in during a request would find it busy and
+use the kernel's generator, though none asks. Linux keys its per-CPU
+generators from a base generator the same way.
 
 ## Seeding
 
