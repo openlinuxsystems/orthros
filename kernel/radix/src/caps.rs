@@ -84,23 +84,34 @@ pub fn write_census(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
         census.deepest,
         census.revoking
     ));
+    let registered = crate::user::objects::census();
     for kind in ObjectKind::ALL {
         let (caps, objects) = (census.caps[kind.index()], census.objects[kind.index()]);
         if caps > 0 || objects > 0 {
-            line(format_args!(
-                "  {:>13}: {caps:>6} capabilities, {objects:>6} objects",
-                kind.name()
-            ));
+            match registered.map(|counts| counts[kind.index()]).filter(|&n| n > 0) {
+                Some(n) => line(format_args!(
+                    "  {:>13}: {caps:>6} capabilities, {objects:>6} objects, {n:>6} kernel objects",
+                    kind.name()
+                )),
+                None => line(format_args!(
+                    "  {:>13}: {caps:>6} capabilities, {objects:>6} objects",
+                    kind.name()
+                )),
+            }
         }
     }
 }
 
-/// Gives back what the store released: memory objects' pages return to
-/// the frame allocator, and domains leave the domain table.
+/// Gives back what the store released: kernel objects leave the registry
+/// and close (`user::objects`), memory objects' pages return to the frame
+/// allocator, and domains leave the domain table.
 pub fn release(released: Released) {
     if released.kind == ObjectKind::ResourceDomain {
         domains::released(released.id);
     }
+    // Kernel objects close first: a frame is unmapped before its memory
+    // can go back.
+    crate::user::objects::released(&released);
     let Some(memory) = released.memory else { return };
     let order = memory.pages.trailing_zeros();
     if let Err(err) = FRAMES.free(memory.base << PAGE_SHIFT, order, Owner::Memory) {

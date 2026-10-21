@@ -22,9 +22,9 @@
 //!
 //! Phase 2 has no user processes yet; the `tlb` self-test exercises this.
 
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 
-use radix_hal::MAX_CPUS;
+use radix_hal::{MAX_CPUS, MapPageError, UserAccess};
 use radix_mm::{AllocError, Owner, Pcids};
 use radix_sync::SpinLock;
 
@@ -57,6 +57,8 @@ pub struct AddressSpace {
     seen: [AtomicU64; MAX_CPUS],
     /// Held while the lower half's tables change.
     lock: SpinLock<()>,
+    /// [`UserSpace`] handles to it.
+    handles: AtomicUsize,
 }
 
 const _: () = assert!(core::mem::size_of::<AddressSpace>() <= PAGE as usize);
@@ -86,6 +88,7 @@ impl AddressSpace {
                 active: [const { AtomicU64::new(0) }; MAX_CPUS / 64],
                 seen: [const { AtomicU64::new(0) }; MAX_CPUS],
                 lock: SpinLock::new(()),
+                handles: AtomicUsize::new(0),
             });
             Ok(&*space)
         }
@@ -116,6 +119,30 @@ impl AddressSpace {
             self.flush(virt);
         }
         Ok(())
+    }
+
+    /// Maps the page at `virt` (in the lower half) to frame `phys`, for
+    /// user mode, unless something is mapped there already.
+    pub fn map_new(&self, virt: u64, phys: u64, access: Access) -> Result<(), MapPageError> {
+        assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
+        let _guard = self.lock.lock();
+        let slot = paging::entry(self.pml4, virt, 1, true).map_err(|_| MapPageError::NoMemory)?;
+        if *slot & PRESENT != 0 {
+            return Err(MapPageError::AlreadyMapped);
+        }
+        // Not present before, so no CPU has it cached: no flush.
+        *slot = phys | paging::user_flags(access);
+        Ok(())
+    }
+
+    /// The frame `virt` maps and how, if it is mapped.
+    pub fn query(&self, virt: u64) -> Option<(u64, Access)> {
+        let _guard = self.lock.lock();
+        let entry = *paging::leaf(self.pml4, virt)?;
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        Some((entry & ADDRESS, paging::access_of(entry)))
     }
 
     /// Removes the mapping of `virt` from every CPU and returns the frame
@@ -213,6 +240,63 @@ impl AddressSpace {
     }
 }
 
+/// A shared handle to a program's address space; the space is destroyed
+/// when the last handle goes. Only threads' contexts switch to it, and
+/// each keeps a handle, so no CPU runs a space whose last handle is gone.
+pub struct UserSpace(&'static AddressSpace);
+
+impl UserSpace {
+    /// A new, empty address space.
+    pub fn new() -> Option<UserSpace> {
+        let space = AddressSpace::new().ok()?;
+        space.handles.store(1, Ordering::Relaxed);
+        Some(UserSpace(space))
+    }
+
+    /// The space.
+    pub fn space(&self) -> &'static AddressSpace {
+        self.0
+    }
+}
+
+impl Clone for UserSpace {
+    fn clone(&self) -> UserSpace {
+        self.0.handles.fetch_add(1, Ordering::Relaxed);
+        UserSpace(self.0)
+    }
+}
+
+impl Drop for UserSpace {
+    fn drop(&mut self) {
+        if self.0.handles.fetch_sub(1, Ordering::Release) == 1 {
+            fence(Ordering::Acquire);
+            // SAFETY: this was the last handle, and only holders of a
+            // handle reach the space: nothing uses it afterwards. A context
+            // keeps a handle while it may run, so no CPU runs the space
+            // (which `destroy` checks).
+            unsafe { self.0.destroy() };
+        }
+    }
+}
+
+/// The HAL's access rights as a mapping's.
+pub fn access(access: UserAccess) -> Access {
+    match access {
+        UserAccess::Read => Access::ReadOnly,
+        UserAccess::ReadWrite => Access::ReadWrite,
+        UserAccess::ReadExecute => Access::Code,
+    }
+}
+
+/// A mapping's access rights as the HAL's.
+pub fn user_access(access: Access) -> UserAccess {
+    match access {
+        Access::ReadOnly => UserAccess::Read,
+        Access::ReadWrite => UserAccess::ReadWrite,
+        Access::Code => UserAccess::ReadExecute,
+    }
+}
+
 /// Frees the page tables below entries `range` of the table at `phys`.
 fn free_tables(phys: u64, level: u32, range: core::ops::Range<usize>) {
     if level == 1 {
@@ -274,8 +358,10 @@ fn check_kernel_page() {
 }
 
 /// Switches between the two test spaces and reads the test page in each
-/// (run on every CPU).
+/// (run on every CPU). With interrupts masked: a context switch loads the
+/// incoming context's own tables, which a kernel thread's are not.
 fn check_spaces() {
+    let were_enabled = cpu::disable_interrupts();
     for round in [0, 1, 0, 1] {
         let space = TEST.spaces[round].load(Ordering::Acquire) as *const AddressSpace;
         // SAFETY: the self-test keeps both spaces alive until every CPU is
@@ -287,6 +373,9 @@ fn check_spaces() {
         }
     }
     AddressSpace::switch_to_kernel();
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
 }
 
 /// Fills a fresh frame with `pattern`.

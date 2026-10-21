@@ -18,9 +18,22 @@
 //!
 //! Interrupts (vectors 32 and up) count the CPU's interrupt depth. On the
 //! way out of one that came in from thread context with interrupts on and
-//! preemption allowed, the registered preemption handler runs, still with
-//! interrupts masked: that is where the scheduler switches threads when a
-//! tick or a reschedule IPI asked for it.
+//! preemption allowed, or from user mode, the registered preemption handler
+//! runs, still with interrupts masked: that is where the scheduler switches
+//! threads when a tick or a reschedule IPI asked for it.
+//!
+//! From user mode (Phase 5) the CPU switches to the running thread's kernel
+//! stack (the TSS's RSP0), and the common stub swaps GS base to this CPU's
+//! data, and back on the way out, when the saved CS says the interrupted
+//! code ran in user mode. NMIs, double faults and machine checks can also
+//! arrive in kernel mode before the SYSCALL entry has swapped GS, or after
+//! the exit has swapped it back, so for them the stub reads GS base itself
+//! and swaps only if it is not a kernel address. With SMAP on, the stub
+//! clears RFLAGS.AC, so a handler never runs with user pages open (the
+//! interrupted code gets its flags back with `iretq`). Exceptions in user
+//! mode end the thread through the user fault handler (`crate::user`); a
+//! page fault on the copy instruction of a user copy moves on to the end
+//! of the copy instead.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -113,6 +126,34 @@ radix_isr_common:
     pushq %r13
     pushq %r14
     pushq %r15
+    /* RBX (saved above, callee-saved across the call) says whether GS
+       base was swapped on the way in. */
+    xorl %ebx, %ebx
+    movq 15*8(%rsp), %rax
+    cmpq $2, %rax
+    je 1f
+    cmpq $8, %rax
+    je 1f
+    cmpq $18, %rax
+    je 1f
+    testb $3, 18*8(%rsp)
+    jz 3f
+    swapgs
+    movl $1, %ebx
+    jmp 3f
+1:
+    /* Paranoid: GS base is the kernel's when its top bit is set. */
+    movl $0xc0000101, %ecx
+    rdmsr
+    testl %edx, %edx
+    js 3f
+    swapgs
+    movl $1, %ebx
+3:
+    cmpb $0, {smap}(%rip)
+    je 4f
+    clac
+4:
     /* Fake frame record: interrupted RIP above interrupted RBP. */
     pushq 17*8(%rsp)
     pushq %rbp
@@ -120,6 +161,10 @@ radix_isr_common:
     leaq 16(%rsp), %rdi
     call radix_trap_dispatch
     addq $16, %rsp
+    testl %ebx, %ebx
+    jz 5f
+    swapgs
+5:
     popq %r15
     popq %r14
     popq %r13
@@ -138,6 +183,7 @@ radix_isr_common:
     addq $16, %rsp
     iretq
     "#,
+    smap = sym crate::paging::SMAP,
     options(att_syntax)
 );
 
@@ -350,18 +396,23 @@ fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
 extern "C" fn radix_trap_dispatch(frame: &mut TrapFrame) {
     let vector = frame.vector as u8;
     let interrupt = vector >= 32;
+    let from_user = frame.cs & 3 != 0;
+    if from_user && !interrupt && !matches!(vector, 2 | 8 | 18) {
+        crate::user::exception(vector, frame);
+    }
     if interrupt {
         percpu::interrupt_enter();
     }
     handle(vector, frame);
     if interrupt
         && percpu::interrupt_exit() == 0
-        && frame.rflags & INTERRUPT_FLAG != 0
-        && frame.cs & 3 == 0
-        && percpu::preempt_count() == 0
+        && (from_user || (frame.rflags & INTERRUPT_FLAG != 0 && percpu::preempt_count() == 0))
         && let Some(handler) = PREEMPT_HANDLER.get()
     {
         handler();
+    }
+    if from_user {
+        crate::user::on_return();
     }
 }
 
@@ -394,12 +445,23 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
         }
         2 => nmi(frame),
         3 => breakpoint(frame),
+        13 | 14 => match copy_fixup(vector, frame) {
+            Some(resume) => frame.rip = resume,
+            None => fatal_exception(frame),
+        },
         0..32 => fatal_exception(frame),
         v => {
             radix_klog::tracepoint!("irq.unexpected", v);
             crate::apic::end_of_interrupt();
         }
     }
+}
+
+/// Where a kernel-mode page or protection fault resumes, if it hit a user
+/// copy's copy instruction (on a user address, for a page fault).
+fn copy_fixup(vector: u8, frame: &TrapFrame) -> Option<u64> {
+    let address = (vector == 14).then(cpu::cr2);
+    crate::user::fixup(frame.rip, address)
 }
 
 fn nmi(frame: &TrapFrame) {

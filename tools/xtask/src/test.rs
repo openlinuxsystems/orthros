@@ -37,6 +37,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-acpi",
     "radix-bootinfo",
     "radix-cap",
+    "radix-elf",
     "radix-fbcon",
     "radix-hal",
     "radix-ipc",

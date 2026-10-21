@@ -54,13 +54,9 @@ fn errors_keep_their_status() {
 
 #[test]
 fn decoding_checks_every_argument() {
-    let mut words = memory::RetypeArgs {
-        kind: capability::ObjectKind::Frame,
-        order: 0,
-        to: 1,
-        count: 1,
-    }
-    .encode();
+    let mut words =
+        memory::RetypeArgs { kind: capability::ObjectKind::Frame, order: 0, to: 1, count: 1 }
+            .encode();
     assert!(memory::RetypeArgs::decode(&words).is_ok());
     words[2] = 1 << 32;
     assert_eq!(memory::RetypeArgs::decode(&words), Err(Invalid(2)), "a slot is 32 bits");

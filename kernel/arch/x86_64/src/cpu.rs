@@ -242,7 +242,12 @@ pub mod msr {
     pub const BIOS_SIGN_ID: u32 = 0x8b;
     pub const PAT: u32 = 0x277;
     pub const EFER: u32 = 0xc000_0080;
+    pub const STAR: u32 = 0xc000_0081;
+    pub const LSTAR: u32 = 0xc000_0082;
+    pub const FMASK: u32 = 0xc000_0084;
+    pub const FS_BASE: u32 = 0xc000_0100;
     pub const GS_BASE: u32 = 0xc000_0101;
+    pub const KERNEL_GS_BASE: u32 = 0xc000_0102;
     pub const TSC_DEADLINE: u32 = 0x6e0;
 }
 

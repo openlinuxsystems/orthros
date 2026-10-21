@@ -20,10 +20,11 @@ use radix_lockdep::Saved;
 use radix_mm::Kmalloc;
 use radix_sched::cpuset::WORDS;
 use radix_sched::{CpuSet, nice_valid, rt_prio_valid, weight};
-use radix_sync::{RawSpinLock, SpinLock};
+use radix_sync::{Once, RawSpinLock, SpinLock};
 
 use crate::Arch;
 use crate::domains::DomainRef;
+use crate::user::UserRef;
 
 /// A thread, shared.
 pub type ThreadRef = Arc<Thread, Kmalloc>;
@@ -238,6 +239,9 @@ pub struct Thread {
     /// Set once it no longer counts among its domain's threads.
     left: AtomicBool,
     pub(super) stats: Stats,
+    /// What a thread of a program has besides (Phase 5): set before it
+    /// first runs, never for kernel threads.
+    pub(super) user: Once<UserRef>,
 }
 
 impl Thread {
@@ -277,12 +281,24 @@ impl Thread {
             reaped: AtomicBool::new(false),
             left: AtomicBool::new(false),
             stats: Stats::default(),
+            user: Once::new(),
         }
     }
 
     /// Its number, unique for as long as the kernel runs.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Its program's side, if it is a thread of a program.
+    pub fn user(&self) -> Option<&UserRef> {
+        self.user.get()
+    }
+
+    /// Sets its program's thread pointer (Phase 5): at once if it runs
+    /// on this CPU, otherwise from its next switch in.
+    pub fn set_thread_pointer(&self, base: u64) {
+        <crate::Arch as radix_hal::UserMode>::set_thread_pointer(&self.context, base);
     }
 
     /// Its name.

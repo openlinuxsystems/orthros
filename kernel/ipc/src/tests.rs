@@ -7,9 +7,9 @@ use radix_abi::endpoint::{MessageFlags, RESERVED_LABELS};
 use radix_abi::ring::{Cqe, ENTRIES_MAX, Sqe};
 
 use crate::info::{Info, InfoError};
+use crate::notify;
 use crate::range::{user_bytes, user_pages};
 use crate::ring::{Layout, Queues};
-use crate::notify;
 
 #[test]
 fn info_words_round_trip() {

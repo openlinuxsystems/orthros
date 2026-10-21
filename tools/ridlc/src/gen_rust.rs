@@ -563,7 +563,9 @@ fn encode_field(out: &mut String, abi: &Abi, field: &Field, value: &str, at: usi
         Type::Prim(Prim::I32) => format!("words[{at}] = {name} as i64 as u64;"),
         Type::Prim(_) | Type::Slot => format!("words[{at}] = {name} as u64;"),
         Type::Named(other) => match abi.find(other).map(|(_, item)| &item.kind) {
-            Some(ItemKind::Flags { repr: Prim::U64, .. }) => format!("words[{at}] = {name}.bits();"),
+            Some(ItemKind::Flags { repr: Prim::U64, .. }) => {
+                format!("words[{at}] = {name}.bits();")
+            }
             Some(ItemKind::Flags { .. }) => format!("words[{at}] = {name}.bits() as u64;"),
             Some(ItemKind::Enum { repr: Prim::U64, .. }) => format!("words[{at}] = {name}.raw();"),
             _ => format!("words[{at}] = {name}.raw() as u64;"),

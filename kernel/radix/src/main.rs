@@ -11,7 +11,8 @@
 //! allocator (Phase 2, `radix-mm`), turns itself into the first thread and
 //! starts the scheduler (Phase 4, `sched`, with resource domains in
 //! `domains` and the out-of-memory policy in `oom`), sets up the capability
-//! store (Phase 3, `radix-cap`, in `caps`), starts every other CPU and
+//! store (Phase 3, `radix-cap`, in `caps`) and user mode with its system
+//! calls and IPC (Phase 5, `user`), starts every other CPU and
 //! checks that each one takes timer interrupts and answers IPIs. A panic
 //! stops the other CPUs and shows a full-screen report with a symbolized
 //! backtrace; `kdb` debugs the kernel over the serial port.
@@ -54,6 +55,8 @@ mod sched;
 mod schedtest;
 mod selftest;
 mod symbols;
+mod user;
+mod usertest;
 mod work;
 
 #[cfg(target_arch = "aarch64")]
@@ -151,7 +154,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 4)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (OrthrOS Phase 5)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -183,6 +186,8 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     Arch::enable_interrupts();
     // With interrupts on: the store's lock is a mutex.
     caps::init();
+    user::init();
+    user::launch::set_modules(params.modules);
 
     let online = if flags.has("nosmp") {
         info!("SMP: disabled by the nosmp flag");

@@ -24,6 +24,26 @@ pub struct BootParams {
     /// Whether the architecture already shows the console on a text-mode
     /// screen (the VGA text buffer on a PC booted through BIOS).
     pub text_screen: bool,
+    /// The files the boot loader loaded next to the kernel, such as the
+    /// user-mode test programs (Phase 5).
+    pub modules: &'static [BootModule],
+}
+
+/// A file the boot loader loaded next to the kernel.
+#[derive(Clone, Copy, Debug)]
+pub struct BootModule {
+    /// What follows the file's name on its boot loader line, such as
+    /// `/boot/usertests` or `microcode`.
+    pub command_line: &'static str,
+    /// Its contents, which stay in memory for the kernel's whole life.
+    pub bytes: &'static [u8],
+}
+
+impl BootModule {
+    /// Whether `word` is one of the words of its command line.
+    pub fn has_word(&self, word: &str) -> bool {
+        self.command_line.split_ascii_whitespace().any(|w| w == word)
+    }
 }
 
 /// The firmware a machine boots through.

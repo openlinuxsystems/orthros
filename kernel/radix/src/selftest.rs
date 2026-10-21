@@ -26,6 +26,9 @@
 //! - `fpu`, `sched-fair`, `sched-rt`, `sched-pi`, `sched-balance`,
 //!   `lockdep`, `rcu` and `oom` test the scheduler, the lock checker, RCU
 //!   and the out-of-memory policy (`schedtest`).
+//! - `user`, `ipc` and `bench` start user-mode programs from the
+//!   `usertests` boot module: system calls and faults, IPC between
+//!   programs, and the benchmarks (`usertest`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,7 +40,7 @@ use radix_mm::stress::{self, StressReport};
 use radix_mm::{FRAMES, HEAP, Owner};
 
 use crate::panic::SELFTEST_MARKER;
-use crate::{Arch, captest, crashlog, schedtest, work};
+use crate::{Arch, captest, crashlog, schedtest, usertest, work};
 
 /// Runs the self-test called `name`.
 pub fn run(name: &str) {
@@ -59,6 +62,9 @@ pub fn run(name: &str) {
         "lockdep" => schedtest::lockdep(),
         "rcu" => schedtest::rcu(),
         "oom" => schedtest::oom(),
+        "user" => usertest::user(),
+        "ipc" => usertest::ipc(),
+        "bench" => usertest::bench(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

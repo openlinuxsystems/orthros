@@ -3,11 +3,12 @@
 
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Nine kinds are kernel objects with an entry in the store's object
+//! Twelve kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
-//! spaces, threads, processes, endpoints, notifications and resource
-//! domains (Phase 4: a CPU weight and a memory limit that threads and
-//! their memory are charged to, after Linux's cgroups). Three kinds are
+//! spaces, threads, processes, endpoints, notifications, resource domains
+//! (Phase 4: a CPU weight and a memory limit that threads and their memory
+//! are charged to, after Linux's cgroups), and from Phase 5 the kernel's
+//! random number generator, rings and the kernel log. Three kinds are
 //! ranges of hardware resources, named by the range itself: interrupt
 //! lines, I/O ports and device registers (MMIO). The kernel creates the
 //! first capability to each; every other capability is derived from one.
@@ -46,10 +47,16 @@ pub enum ObjectKind {
     /// A resource domain: the CPU weight and memory limit its threads
     /// share, and its class for the out-of-memory policy.
     ResourceDomain = 11,
+    /// The kernel's random number generator, which every program gets.
+    Random = 12,
+    /// A submission and completion ring shared with a program.
+    Ring = 13,
+    /// The kernel log, for debugging output.
+    KernelLog = 14,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 12;
+pub const KINDS: usize = 15;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -66,6 +73,9 @@ impl ObjectKind {
         ObjectKind::Mmio,
         ObjectKind::Dma,
         ObjectKind::ResourceDomain,
+        ObjectKind::Random,
+        ObjectKind::Ring,
+        ObjectKind::KernelLog,
     ];
 
     /// The kind numbered `n`.
@@ -101,6 +111,9 @@ impl ObjectKind {
             ObjectKind::IoPorts | ObjectKind::Mmio | ObjectKind::Dma => {
                 Rights::READ.union(Rights::WRITE)
             }
+            ObjectKind::Random => Rights::READ,
+            ObjectKind::Ring => Rights::CONTROL.union(Rights::SEND),
+            ObjectKind::KernelLog => Rights::WRITE,
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -150,6 +163,9 @@ impl ObjectKind {
             ObjectKind::Mmio => "MMIO",
             ObjectKind::Dma => "DMA",
             ObjectKind::ResourceDomain => "domain",
+            ObjectKind::Random => "random",
+            ObjectKind::Ring => "ring",
+            ObjectKind::KernelLog => "kernel log",
         }
     }
 }

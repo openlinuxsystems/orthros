@@ -14,7 +14,8 @@
 //! [`InterruptController`], [`Timer`] and [`CpuLocal`], plus [`Cpu`] for the
 //! processor itself, [`Smp`] for starting and stopping the other CPUs,
 //! [`Threads`] for kernel threads' contexts and switching between them
-//! (Phase 4), and [`Platform`] for machine-wide services such as
+//! (Phase 4), [`UserMode`] for programs' address spaces, system calls and
+//! faults (Phase 5), and [`Platform`] for machine-wide services such as
 //! restarting. All methods are associated functions: there is exactly one
 //! machine.
 //!
@@ -27,13 +28,16 @@
 
 pub mod boot;
 pub mod cmdline;
+pub mod user;
 
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
 pub use boot::{
-    BootParams, Channel, Firmware, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, Reservation,
+    BootModule, BootParams, Channel, Firmware, Framebuffer, MemoryKind, MemoryRegion, PixelFormat,
+    Reservation,
 };
+pub use user::{MapPageError, SyscallRegs, UserAccess, UserFault, UserFaultKind, UserMode};
 
 /// Most CPUs the kernel manages. Per-CPU tables are sized by this.
 pub const MAX_CPUS: usize = 256;

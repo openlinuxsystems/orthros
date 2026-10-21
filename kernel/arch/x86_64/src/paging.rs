@@ -219,6 +219,19 @@ pub(crate) fn user_flags(access: Access) -> u64 {
     }
 }
 
+/// The access rights a user page-table entry grants.
+pub(crate) fn access_of(entry: u64) -> Access {
+    if entry & WRITABLE != 0 {
+        Access::ReadWrite
+    } else if entry & NO_EXECUTE != 0 || !cpu::feature::nx() {
+        // Without NX every readable page is executable; it counts as
+        // read-only, since that is what was asked for.
+        Access::ReadOnly
+    } else {
+        Access::Code
+    }
+}
+
 fn map_4k(root: u64, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
     *entry(root, virt, 1, flags & USER != 0)? = phys | flags;
     Ok(())

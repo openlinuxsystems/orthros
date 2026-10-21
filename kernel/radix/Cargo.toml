@@ -16,14 +16,18 @@ test = false
 bench = false
 
 [dependencies]
+radix-abi = { path = "../abi" }
 radix-cap = { path = "../cap" }
+radix-elf = { path = "../lib/elf" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }
+radix-ipc = { path = "../ipc" }
 radix-kdb = { path = "../lib/kdb" }
 radix-klog = { path = "../lib/klog" }
 radix-lockdep = { path = "../lib/lockdep" }
 radix-ksyms = { path = "../lib/ksyms" }
 radix-mm = { path = "../mm" }
+radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-sync = { path = "../lib/sync" }
 

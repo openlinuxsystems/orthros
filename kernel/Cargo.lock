@@ -99,16 +99,20 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "radix"
 version = "0.0.1"
 dependencies = [
+ "radix-abi",
  "radix-arch-aarch64",
  "radix-arch-x86_64",
  "radix-cap",
+ "radix-elf",
  "radix-fbcon",
  "radix-hal",
+ "radix-ipc",
  "radix-kdb",
  "radix-klog",
  "radix-ksyms",
  "radix-lockdep",
  "radix-mm",
+ "radix-random",
  "radix-sched",
  "radix-sync",
 ]
@@ -152,6 +156,13 @@ version = "0.0.1"
 
 [[package]]
 name = "radix-cap"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "radix-elf"
 version = "0.0.1"
 dependencies = [
  "proptest",
