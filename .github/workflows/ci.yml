@@ -106,21 +106,25 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
+      # Kani's binaries go outside ~/.cargo/bin, which rust-cache prunes of
+      # anything it did not restore before the Kani cache is saved.
       - name: Cache Kani
         id: kani-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.kani
-            ~/.cargo/bin/kani
-            ~/.cargo/bin/cargo-kani
-          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}
+            ~/.kani-bin
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}-v2
 
       - name: Install Kani
         if: steps.kani-cache.outputs.cache-hit != 'true'
         run: |
-          cargo +stable install --locked kani-verifier --version "$KANI_VERSION"
-          cargo kani setup
+          cargo +stable install --locked --root ~/.kani-bin kani-verifier --version "$KANI_VERSION"
+          PATH="$HOME/.kani-bin/bin:$PATH" cargo kani setup
+
+      - name: Put Kani on the PATH
+        run: echo "$HOME/.kani-bin/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
