@@ -63,8 +63,9 @@ array of frame records.
 frame records of the blocks' first frames, so the allocator never reads or
 writes the memory it manages. A frame record (`page.rs`) holds the frame's
 state (`Reserved`, `Free`, `Allocated` or `Tail`), the block's order, its
-owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area` or
-`PerCpu`, used for accounting and for checking frees), a tag byte and two links; the slab
+owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area`,
+`PerCpu` or `Memory`, the last for the capability store's memory objects,
+used for accounting and for checking frees), a tag byte and two links; the slab
 layer reuses the links and an auxiliary word for its own bookkeeping. A free
 names the block's order and owner, and is refused, changing nothing, unless
 exactly that block is allocated to that owner.
@@ -294,8 +295,9 @@ and every normal boot checks the KASLR layout, W^X and the zones.
 ## Limits
 
 - Phase 2 has no user programs; address spaces are exercised only by the
-  `tlb` self-test, and nothing in the kernel uses the heap yet besides the stress
-  test. The capability core (Phase 3) is its first user.
+  `tlb` self-test. The capability core (Phase 3, `docs/design/capabilities.md`)
+  is the heap's first user besides the stress test, and takes the pages of
+  its memory objects from the frame allocator.
 - Reclaim only drains the heap's caches. Waiting for memory, and swapping,
   come with the scheduler (Phase 4) and Phase 10.
 - NUMA has been tested only on QEMU's emulated nodes. Memory hot-plug is

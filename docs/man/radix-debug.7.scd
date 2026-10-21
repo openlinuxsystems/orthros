@@ -14,7 +14,7 @@ finds it. With a serial port, or under QEMU, there is also *kdb*, a small
 kernel debugger, and GDB through QEMU's GDB stub. Trace points record
 frequent events cheaply, from the first Rust function on.
 
-This page describes all of them as of Phase 2. The kernel flags named here
+This page describes all of them as of Phase 3. The kernel flags named here
 are listed in *orthros-boot*(7).
 
 # PANIC REPORT
@@ -211,6 +211,13 @@ with *0x*. Both may contain *\_* separators, as in *ffffffff_80100000*.
 	requests, damaged objects found) and, for each size class with
 	slabs, its slabs and objects.
 
+*caps*
+	Count the capability spaces and their slots, the capabilities and
+	the kernel objects, in all and by object kind, with the pages held by
+	memory objects, the deepest derivation and the revokes under way (see
+	*radix-capabilities*(7)). If another CPU holds the capability store's
+	lock, it says so instead of waiting.
+
 *acpi*
 	List the ACPI tables and what the kernel read from them.
 
@@ -308,6 +315,29 @@ complete.* *ob test* boots each of them.
 	different frames, on several CPUs at once, and changes one while it
 	is not running. Every CPU must always see the right frame, with and
 	without PCIDs. Reports *selftest tlb: passed*.
+
+*caps*
+	Runs the capability store's test suite in spaces of its own (see
+	*radix-capabilities*(7)). It tries to use or copy capabilities it
+	does not hold: empty slots, slots past the end, made-up and stale
+	space names, deleted and moved capabilities, objects of another
+	kind. It derives a capability with each of the 4,096 rights masks and
+	checks that the result, and anything copied from it, has exactly the
+	rights of the original and the mask, and that every use needing
+	another right, and every handover to another space without
+	*transfer*, is refused. It checks that badges are set once, that a
+	sealed capability is useless without its key, that ranges only
+	shrink, and that frames, DMA buffers and memory retyped from a memory
+	object stay inside it, never overlap, and go back to the frame
+	allocator. It revokes a tree spread over three spaces, with
+	capabilities deleted from its middle, in steps, and checks that
+	nothing can be derived below it in between; checks the depth limit;
+	runs 100,000 random operations with the store's full audit every
+	1,024; and has every other CPU derive from a tree of 4,096
+	capabilities while the boot CPU revokes it, after which nothing they
+	derived may be left. It finally checks that no capability, object,
+	heap object or page of memory was leaked, and reports *selftest caps:
+	passed*.
 
 # TRACE POINTS
 
@@ -444,4 +474,4 @@ _out/test/_
 
 # SEE ALSO
 
-*orthros-boot*(7), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)
+*orthros-boot*(7), *radix-capabilities*(7), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)

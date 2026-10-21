@@ -17,6 +17,9 @@
 //!   fault (or report that the CPU lacks the feature).
 //! - `tlb` checks TLB shootdowns and address-space switches (with PCIDs
 //!   when the CPU has them) on every CPU.
+//! - `caps` runs the capability store's test suite (`captest`): no
+//!   capability can be forged or its rights widened, revocation reaches
+//!   everything derived, also while other CPUs derive, and nothing leaks.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,7 +31,7 @@ use radix_mm::stress::{self, StressReport};
 use radix_mm::{FRAMES, HEAP, Owner};
 
 use crate::panic::SELFTEST_MARKER;
-use crate::{Arch, crashlog, work};
+use crate::{Arch, captest, crashlog, work};
 
 /// Runs the self-test called `name`.
 pub fn run(name: &str) {
@@ -41,6 +44,7 @@ pub fn run(name: &str) {
         "smep" => fault("smep", FaultTest::UserCode, "running code in a user page"),
         "smap" => fault("smap", FaultTest::UserData, "reading a user page"),
         "tlb" => tlb(),
+        "caps" => captest::run(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

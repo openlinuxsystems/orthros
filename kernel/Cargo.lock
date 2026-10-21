@@ -101,6 +101,7 @@ version = "0.0.1"
 dependencies = [
  "radix-arch-aarch64",
  "radix-arch-x86_64",
+ "radix-cap",
  "radix-fbcon",
  "radix-hal",
  "radix-kdb",
@@ -139,6 +140,13 @@ dependencies = [
 [[package]]
 name = "radix-bootinfo"
 version = "0.0.1"
+
+[[package]]
+name = "radix-cap"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "radix-fbcon"

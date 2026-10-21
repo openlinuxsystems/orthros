@@ -54,6 +54,11 @@ pub const COMMANDS: &[CommandInfo] = &[
         args: "",
         summary: "show the kernel heap's totals and its size classes",
     },
+    CommandInfo {
+        name: "caps",
+        args: "",
+        summary: "count the capability spaces, capabilities and kernel objects, by kind",
+    },
     CommandInfo { name: "acpi", args: "", summary: "list the ACPI tables" },
     CommandInfo { name: "bt", args: "", summary: "show the backtrace where kdb was entered" },
     CommandInfo {
@@ -116,6 +121,8 @@ pub enum Command<'a> {
     Memory,
     /// `heap`.
     Heap,
+    /// `caps`.
+    Capabilities,
     /// `acpi`.
     Acpi,
     /// `bt`.
@@ -233,6 +240,7 @@ pub fn parse(line: &str) -> Result<Command<'_>, ParseError<'_>> {
         ("cpus", [None, ..]) => Command::Cpus,
         ("mem", [None, ..]) => Command::Memory,
         ("heap", [None, ..]) => Command::Heap,
+        ("caps", [None, ..]) => Command::Capabilities,
         ("acpi", [None, ..]) => Command::Acpi,
         ("bt", [None, ..]) => Command::Backtrace,
         ("regs", [None, ..]) => Command::Registers,

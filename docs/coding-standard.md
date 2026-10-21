@@ -32,7 +32,8 @@ HAL, the AArch64 stubs and everything under `tools/`, starts with
 `#![forbid(unsafe_code)]` or inherits `unsafe_code = "forbid"` from its
 workspace. In particular every parser of data from outside the kernel
 (boot information, ACPI tables, microcode, fonts, the symbol table, the
-crash log) is safe code.
+crash log) is safe code, and so is the capability core `kernel/cap`, which
+decides who may use what.
 
 Inside the trusted computing base:
 

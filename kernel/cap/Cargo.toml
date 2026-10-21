@@ -1,0 +1,19 @@
+[package]
+name = "radix-cap"
+description = "The Radix capability core: capability spaces, rights, badges, sealing, and the derivation tree with delegation and revocation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

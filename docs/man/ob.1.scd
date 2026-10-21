@@ -150,7 +150,7 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot* | *kani*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+*test* [*unit* | *boot* | *kani* | *tla*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -163,11 +163,22 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	tests take a few minutes.
 
 	*kani* checks the Kani proof harnesses of the kernel's memory manager
-	instead (see *Verification* in _docs/design/memory.md_). Each takes
+	and capability core instead (see *Verification* in
+	_docs/design/memory.md_ and _docs/design/capabilities.md_). Each takes
 	from seconds to several minutes, so plain *ob test* leaves them out,
 	and CI runs them in a job of their own. It needs the Kani release
 	that *ob doctor* names, installed with *cargo install --locked
 	kani-verifier --version* _version_ and then *cargo kani setup*.
+
+	*tla* checks the TLA+ models with the TLC model checker instead: the
+	capability store's derivation tree and revocation, in
+	_kernel/cap/tla/_, once for the safety properties and once, on a
+	smaller model, for liveness. That takes about two minutes on 4 CPUs,
+	so plain *ob test* leaves it out too, and CI runs it in a job of its
+	own. TLC needs Java 11 or later (the *default-jre-headless* package on
+	Debian, Ubuntu and Linux Mint). The first run downloads the pinned
+	release of the TLA+ tools from GitHub into _.cache/tla/_ and checks
+	its SHA-256; TLC's working files go to _out/tla/_.
 
 	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
 		Boot with 4 CPUs under each firmware and medium, and check the
@@ -206,6 +217,12 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		Boot 4 CPUs with *selftest=tlb*, which checks that every CPU
 		sees a changed kernel mapping after a TLB shootdown and that
 		address spaces switched on several CPUs keep their own mappings.
+
+	*caps*
+		Boot 4 CPUs with *selftest=caps*, the capability store's test
+		suite: no capability can be forged or have its rights widened,
+		revokes reach everything derived even while 3 other CPUs keep
+		deriving, and nothing leaks.
 
 	*stack-overflow*
 		Boot with *selftest=stack-overflow* and check that the panic

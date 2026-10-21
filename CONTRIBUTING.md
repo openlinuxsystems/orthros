@@ -12,7 +12,8 @@ Everything goes through `./ob`, and CI runs exactly the same commands:
 ./ob lint           # rustfmt and Clippy, warnings are errors (./ob fmt fixes formatting)
 ./ob test           # unit tests, then the QEMU boot tests (./ob help test)
 ./ob docs --check   # man pages and handbook, with completeness checks
-./ob test kani      # Kani proofs of the memory manager, when kernel/mm changes
+./ob test kani      # Kani proofs, when kernel/mm or kernel/cap changes
+./ob test tla       # TLA+ models (needs Java), when kernel/cap changes
 ```
 
 If your host lacks tools, `./ob doctor` names them, or use
@@ -22,8 +23,8 @@ If your host lacks tools, `./ob doctor` names them, or use
 
 A change merges when:
 
-- CI is green: lint, unit tests, boot tests, docs check, Kani proofs,
-  cargo-deny, the container build and the DCO sign-off check.
+- CI is green: lint, unit tests, boot tests, docs check, Kani proofs, TLA+
+  models, cargo-deny, the container build and the DCO sign-off check.
 - Every commit is signed off (see "Developer Certificate of Origin" below).
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
   hardware lives in a crate under `kernel/lib/` that compiles for the host
@@ -68,7 +69,7 @@ The line uses your real name or the name you are known by, and the same
 email address as the commit's author. Anonymous sign-offs are not accepted.
 CI runs `./ob signoff` on the commits each pull request adds; commits that
 were on `main` before the rule began
-([ADR 0023](docs/adr/0023-dco-sign-off-and-project-policies.md)) are not
+([ADR 0025](docs/adr/0025-dco-sign-off-and-project-policies.md)) are not
 checked or rewritten.
 
 **AI assistants.** Only a person can make the DCO's promises. An AI tool

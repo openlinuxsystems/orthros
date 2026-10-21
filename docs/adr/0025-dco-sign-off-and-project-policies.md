@@ -1,4 +1,4 @@
-# 0023. Contributions are signed off under the DCO, with a code of conduct, governance and security policy
+# 0025. Contributions are signed off under the DCO, with a code of conduct, governance and security policy
 
 - Status: Accepted
 - Date: 2026-10-21

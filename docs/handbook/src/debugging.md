@@ -91,8 +91,9 @@ kdb> sym 0xffffffffa030dedf
 ```
 
 `help` lists the commands: the log, trace points, CPUs, the memory map
-and the memory manager's state (`mem`, `heap`), ACPI tables, backtraces,
-registers, memory dumps and symbol lookups.
+and the memory manager's state (`mem`, `heap`), the capability store
+(`caps`), ACPI tables, backtraces, registers, memory dumps and symbol
+lookups.
 `kdb` also stops at breakpoints and after a panic. `continue` leaves it.
 
 ## Debugging with GDB

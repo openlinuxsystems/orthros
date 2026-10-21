@@ -19,6 +19,7 @@ mod qemu;
 mod screen;
 mod signoff;
 mod test;
+mod tla;
 
 use std::fmt;
 use std::io;
@@ -126,15 +127,17 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
   --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "test" => {
-            "Usage: ./ob test [unit | boot | kani] [--case <name>]... [--timeout <seconds>]
-                 [--debug | --release]
+            "Usage: ./ob test [unit | boot | kani | tla] [--case <name>]...
+                 [--timeout <seconds>] [--debug | --release]
 
 Runs host unit tests, then the boot tests: QEMU boots a test image under
 UEFI and BIOS, from USB and CD-ROM, with 4 CPUs, and each test follows the
 serial console, types kdb commands and reads the framebuffer from
 screenshots. Logs go to out/test/. Give `unit` or `boot` to run only that
-part; `kani` checks the Kani proof harnesses instead (minutes each, so
-plain `ob test` leaves them out). The boot tests are:
+part; `kani` checks the Kani proof harnesses instead, and `tla` the TLA+
+models with TLC (minutes each, so plain `ob test` leaves them out; TLC needs
+Java, and ob downloads the pinned TLA+ tools into .cache/tla). The boot
+tests are:
   uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (uefi-cdrom in xAPIC
                    mode, bios-cdrom without KASLR and PCIDs)
   screen           the boot log on the UEFI framebuffer
@@ -144,6 +147,7 @@ plain `ob test` leaves them out). The boot tests are:
   kdb              a breakpoint and every kdb command
   mm-stress        tens of millions of heap objects on 4 CPUs and 2 NUMA nodes
   tlb              TLB shootdowns and address-space switches
+  caps             no capability forged or widened; revokes against 3 CPUs
   stack-overflow   a kernel stack overflow stops at its guard page
   smep, smap       the kernel cannot run or read a user page
   microcode        a microcode module on an emulated Intel CPU

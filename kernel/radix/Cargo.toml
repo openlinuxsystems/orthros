@@ -13,6 +13,7 @@ test = false
 bench = false
 
 [dependencies]
+radix-cap = { path = "../cap" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }
 radix-kdb = { path = "../lib/kdb" }

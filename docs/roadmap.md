@@ -231,6 +231,8 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - TLA+ model of derivation and revocation, Kani proofs of the rights checks, and a written semi-formal argument in `docs/design/capabilities.md` (spec 15).
 - **Exit:** the in-kernel test suite shows no capability can be forged or its rights widened, and the model checks pass.
 
+**Status:** implemented. The `caps` boot test runs the in-kernel suite on 4 CPUs: it tries every way of using or copying a capability not held, derives with each of the 4,096 rights masks and checks every use left out, checks badges, sealing, ranges and retyping, revokes across spaces and in steps, runs 100,000 random operations under the store's audit, races a revoke against derivations on the other CPUs, and checks that nothing leaked. Eight Kani harnesses prove the rights checks for every capability (`./ob test kani`), and TLC checks the TLA+ model of derivation and revocation, liveness included (`./ob test tla`, in its own CI job). The semi-formal argument is in `docs/design/capabilities.md`, and `radix-capabilities(7)` describes the model. Changes from this plan: rights include `copy` and `transfer`, sealing uses an endpoint as its key, deleting a capability moves its children up to its parent, and revocation works in budgeted steps under a mark that blocks new derivations (ADR 0023); the model is checked with the pinned TLA+ tools 1.7.4 (ADR 0024). Decisions made in this phase: ADRs 0023 and 0024.
+
 ### Phase 4: Threads and scheduling (L)
 
 - Context switch with eager XSAVE, kernel threads, per-CPU run queues, idle with MWAIT or HLT.

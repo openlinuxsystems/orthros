@@ -1,5 +1,5 @@
 //! `ob signoff`: every commit carries a Developer Certificate of Origin
-//! sign-off from a person (ADR 0023, CONTRIBUTING.md).
+//! sign-off from a person (ADR 0025, CONTRIBUTING.md).
 
 use std::process::Command;
 
