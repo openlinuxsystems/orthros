@@ -27,9 +27,13 @@
 //! data, and back on the way out, when the saved CS says the interrupted
 //! code ran in user mode. NMIs, double faults and machine checks can also
 //! arrive in kernel mode before the SYSCALL entry has swapped GS, or after
-//! the exit has swapped it back, so for them the stub reads GS base itself
-//! and swaps only if it is not a kernel address. With SMAP on, the stub
-//! clears RFLAGS.AC, so a handler never runs with user pages open (the
+//! the exit has swapped it back, and an `iretq` to user mode that faults
+//! does so in kernel mode after the swap, so for an exception in kernel
+//! mode (rare, unlike interrupts) the stub reads GS base itself and swaps
+//! only if it is not a kernel address. It then marks the frame, so that a
+//! fatal report says so, instead of faulting again on the first access to
+//! this CPU's data, and again, until the stack runs out. With SMAP on, the
+//! stub clears RFLAGS.AC, so a handler never runs with user pages open (the
 //! interrupted code gets its flags back with `iretq`). Exceptions in user
 //! mode end the thread through the user fault handler (`crate::user`); a
 //! page fault on the copy instruction of a user copy moves on to the end
@@ -129,26 +133,24 @@ radix_isr_common:
     /* RBX (saved above, callee-saved across the call) says whether GS
        base was swapped on the way in. */
     xorl %ebx, %ebx
-    movq 15*8(%rsp), %rax
-    cmpq $2, %rax
-    je 1f
-    cmpq $8, %rax
-    je 1f
-    cmpq $18, %rax
-    je 1f
     testb $3, 18*8(%rsp)
-    jz 3f
+    jz 1f
     swapgs
     movl $1, %ebx
     jmp 3f
 1:
-    /* Paranoid: GS base is the kernel's when its top bit is set. */
+    /* Kernel mode: an interrupt finds the kernel's GS base, but an
+       exception may not, so it reads GS base, which is the kernel's when
+       its top bit is set. */
+    cmpq $32, 15*8(%rsp)
+    jae 3f
     movl $0xc0000101, %ecx
     rdmsr
     testl %edx, %edx
     js 3f
     swapgs
     movl $1, %ebx
+    orq ${user_gs}, 15*8(%rsp)
 3:
     cmpb $0, {smap}(%rip)
     je 4f
@@ -184,8 +186,13 @@ radix_isr_common:
     iretq
     "#,
     smap = sym crate::paging::SMAP,
+    user_gs = const USER_GS_IN_KERNEL,
     options(att_syntax)
 );
+
+/// Set in a frame's vector word by the entry stub: the exception came in
+/// kernel mode while GS base was the program's.
+const USER_GS_IN_KERNEL: u64 = 1 << 8;
 
 unsafe extern "C" {
     /// The first entry stub; see the assembly above.
@@ -431,8 +438,13 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             crate::apic::end_of_interrupt();
         }
         VECTOR_TLB => {
-            crate::paging::serve_shootdown();
+            // End the interrupt first, as Linux's IPI handlers do: once
+            // the flush is answered, the initiator may send the next
+            // request, and with it pending at the EOI the hypervisor
+            // cannot offer paravirtual EOI, so the EOI would leave the
+            // virtual machine.
             crate::apic::end_of_interrupt();
+            crate::paging::serve_shootdown();
         }
         VECTOR_APIC_ERROR => {
             let status = crate::apic::read_error_status();
@@ -489,7 +501,7 @@ fn breakpoint(frame: &mut TrapFrame) {
 
 fn fatal_exception(frame: &TrapFrame) -> ! {
     let cpu = percpu::current();
-    let vector = frame.vector as usize;
+    let vector = (frame.vector & 0xff) as usize;
     let (name, mnemonic) = EXCEPTIONS[vector];
     if cpu.exception_depth.fetch_add(1, Ordering::AcqRel) > 2 {
         // Exceptions inside the handling of exceptions: give up quietly
@@ -520,6 +532,9 @@ fn fatal_exception(frame: &TrapFrame) -> ! {
     }
     if frame.cs & 3 != 0 {
         let _ = write!(detail, " [user mode]");
+    }
+    if frame.vector & USER_GS_IN_KERNEL != 0 {
+        let _ = write!(detail, " [kernel mode with the program's GS base]");
     }
     panic!("{name} ({mnemonic}) at {:#x}{detail}", frame.rip);
 }

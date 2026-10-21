@@ -18,6 +18,10 @@
 //! The [`health`] tests decide which sources the boot log says the seed
 //! rests on; they never keep a source out of the pool.
 //!
+//! Requests from programs go to a generator per CPU ([`Local`]), keyed
+//! from the kernel's generator and keyed again whenever that one is
+//! seeded, so that CPUs asking at once never wait for each other.
+//!
 //! The lock around the generator does not mask interrupts, so interrupt
 //! handlers must not use it (`docs/design/random.md`).
 
@@ -29,7 +33,7 @@ mod chacha;
 mod generator;
 pub mod health;
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use radix_sync::SpinLock;
 
@@ -40,6 +44,9 @@ pub use generator::{CHUNK, Generator};
 static GENERATOR: SpinLock<Generator> = SpinLock::new(Generator::new());
 /// The sources the last seed rested on, as [`Sources`] bits.
 static SOURCES: AtomicU8 = AtomicU8::new(0);
+/// How many times the kernel's generator has been seeded: a [`Local`]
+/// generator takes a new key when this moves.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 /// A kind of entropy source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +134,12 @@ impl Pool {
 /// key, and returns the sources that passed their health tests.
 pub fn seed(pool: Pool) -> Sources {
     let (mut seed, sources) = pool.finish();
-    GENERATOR.lock().reseed(&seed);
+    let mut generator = GENERATOR.lock();
+    generator.reseed(&seed);
+    // Under the lock, so a `Local` that sees the new generation takes its
+    // key from the new seed.
+    GENERATION.fetch_add(1, Ordering::Release);
+    drop(generator);
     wipe(&mut seed);
     SOURCES.store(sources.0, Ordering::Relaxed);
     sources
@@ -151,6 +163,50 @@ pub fn fill(out: &mut [u8]) {
 /// 64 random bits from the kernel's generator.
 pub fn u64() -> u64 {
     GENERATOR.lock().next_u64()
+}
+
+/// A generator for one CPU, for the requests of programs: its key comes
+/// from the kernel's generator, and it takes a new one, mixed into the
+/// old, whenever the kernel's generator is seeded again. Its output is as
+/// unpredictable as the kernel's, and fast key erasure makes it forward
+/// secret the same way.
+pub struct Local {
+    generator: Generator,
+    /// The [`GENERATION`] its key came from.
+    generation: Option<u32>,
+}
+
+impl Local {
+    /// A generator that takes its key on first use.
+    pub const fn new() -> Local {
+        Local { generator: Generator::new(), generation: None }
+    }
+
+    /// Fills `out` with random bytes and replaces the key.
+    pub fn fill(&mut self, out: &mut [u8]) {
+        let generation = GENERATION.load(Ordering::Acquire);
+        if self.generation != Some(generation) {
+            let mut key = [0u8; 32];
+            GENERATOR.lock().fill(&mut key);
+            self.generator.reseed(&key);
+            wipe(&mut key);
+            self.generation = Some(generation);
+        }
+        self.generator.fill(out);
+    }
+
+    /// 64 random bits.
+    pub fn u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+}
+
+impl Default for Local {
+    fn default() -> Local {
+        Local::new()
+    }
 }
 
 /// A random number below `bound`, each equally likely; 0 if `bound` is 0.
@@ -226,6 +282,24 @@ pub(crate) mod tests {
         fill(&mut b);
         assert_ne!(a, b);
         assert_ne!(u64(), u64());
+    }
+
+    #[test]
+    fn local_generators_differ_and_follow_reseeds() {
+        let mut pool = Pool::new();
+        pool.mix_u64(Source::Jitter, 0x5678);
+        seed(pool);
+        let (mut a, mut b) = (Local::new(), Local::new());
+        let (x, y) = (a.u64(), b.u64());
+        assert_ne!(x, y);
+        assert_ne!(a.u64(), x);
+        let before = a.generation;
+        let mut pool = Pool::new();
+        pool.mix_u64(Source::Jitter, 0x9abc);
+        seed(pool);
+        a.u64();
+        // Other tests may seed it too, so only "newer" is certain.
+        assert!(a.generation > before);
     }
 
     #[test]

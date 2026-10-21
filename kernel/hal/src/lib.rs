@@ -65,6 +65,10 @@ pub trait Cpu {
     /// interrupt (MWAIT), and its name for the boot report.
     fn idle_mode() -> (bool, &'static str);
 
+    /// Whether the kernel runs in a virtual machine, where halting and
+    /// interprocessor interrupts are exits to the hypervisor.
+    fn virtualized() -> bool;
+
     /// Whether this CPU accepts interrupts.
     fn interrupts_enabled() -> bool;
 
@@ -193,6 +197,9 @@ pub trait InterruptController {
 
     /// How many [`Ipi::Ping`] interrupts CPU `cpu` has handled.
     fn pings_received(cpu: usize) -> u64;
+
+    /// How many interprocessor interrupts CPU `cpu` has sent, of any kind.
+    fn ipis_sent(cpu: usize) -> u64;
 }
 
 /// Clocks and the periodic timer interrupt.
@@ -220,6 +227,11 @@ pub trait Timer {
     /// [`Timer::now_ns`] clock), besides the periodic tick. A later call
     /// replaces it; `u64::MAX` cancels it. Call with interrupts masked.
     fn set_deadline(deadline_ns: u64);
+
+    /// How many times CPU `cpu` wrote its timer hardware to arm it. Under
+    /// a hypervisor each write is usually a VM exit, so the benchmarks
+    /// report it.
+    fn timer_writes(cpu: usize) -> u64;
 
     /// How the timer is programmed, for the boot report.
     fn timer_mode() -> &'static str;

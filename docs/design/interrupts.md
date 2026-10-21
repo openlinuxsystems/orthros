@@ -52,6 +52,22 @@ frame. On return it restores the registers and executes `iretq`.
 | 0xFF | local APIC spurious | ignored, no EOI |
 | others | nothing should send them | trace point `irq.unexpected`, EOI |
 
+**Paravirtual EOI.** Under KVM an EOI written to the local APIC leaves
+the virtual machine, which costs about a microsecond on the CI runners.
+When KVM offers it (CPUID `KVM_FEATURE_PV_EOI`), each CPU gives the
+hypervisor the physical address of a word in its per-CPU block
+(`MSR_KVM_PV_EOI_EN`, Linux's `Documentation/virt/kvm/x86/msr.rst`);
+the hypervisor sets bit 0 when the interrupt it delivers needs no EOI
+write, and `apic::end_of_interrupt` then clears the bit instead. Because
+the hypervisor may clear the bit at any time, the test and the clear are
+one locked instruction, after a plain load that keeps bare metal from
+paying for it. Linux guests do the same; the boot report's APIC line says
+`paravirtual EOI` when it is on (ADR 0040).
+KVM offers paravirtual EOI only when no other interrupt is pending as it
+enters the guest, so a handler whose work lets another interrupt be sent,
+such as answering a TLB shootdown, ends the interrupt first, as Linux's
+handlers of interprocessor interrupts do (ADR 0041).
+
 ## Exceptions
 
 Every exception in kernel code is fatal except two:

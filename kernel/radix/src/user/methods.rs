@@ -54,22 +54,28 @@ fn version(kind: ObjectKind) -> u32 {
 }
 
 /// Calls the method `info`'s label names on the capability in `slot`,
-/// which does not designate an endpoint.
+/// which does not designate an endpoint: `cap`, if the caller has just
+/// looked it up.
 pub fn call(
     me: &ThreadRef,
     user: &UserRef,
     slot: u32,
+    cap: Option<Capability>,
     info: Info,
     words: [u64; 8],
 ) -> Result<Answer> {
-    // The data words past the count are not the caller's arguments.
-    let mut args = [0u64; 8];
-    args[..info.words].copy_from_slice(&words[..info.words]);
+    // The data words past the count are not the caller's arguments. A
+    // copy of a fixed size compiles to moves; one of `info.words` words
+    // would call `memcpy`, whose string moves cost more than the words.
+    let args: [u64; 8] = core::array::from_fn(|i| if i < info.words { words[i] } else { 0 });
     let at = SlotRef::new(user.cspace, slot);
     if info.is_reserved() {
         return capability(at, info.label, &args);
     }
-    let cap = caps::with(|store| store.get(at)).and_then(|cap| cap).map_err(cap_error)?;
+    let cap = match cap {
+        Some(cap) => cap,
+        None => objects::capability(user.cspace, slot)?,
+    };
     let kind = cap.kind();
     match (kind, info.label) {
         (ObjectKind::Memory, memory::RETYPE) => {
@@ -113,15 +119,15 @@ pub fn call(
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
-            objects::lookup(user.cspace, slot, ObjectKind::Random, Rights::READ)?;
+            cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
             read_random(a.buffer.address, a.buffer.len)?;
             answer(info.label, 0, [0; 8])
         }
         (ObjectKind::Random, random::WORDS) => {
             random::WordsArgs::decode(&args)?;
-            objects::lookup(user.cspace, slot, ObjectKind::Random, Rights::READ)?;
+            cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
             let mut bytes = [0u8; 64];
-            radix_random::fill(&mut bytes);
+            super::random::fill(&mut bytes);
             let mut values = [0u64; 8];
             for (value, chunk) in values.iter_mut().zip(bytes.as_chunks::<8>().0) {
                 *value = u64::from_le_bytes(*chunk);
@@ -145,8 +151,7 @@ fn capability(at: SlotRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
     match label {
         abi_cap::INFO => {
             abi_cap::InfoArgs::decode(args)?;
-            let cap: Capability =
-                caps::with(|store| store.get(at)).and_then(|cap| cap).map_err(cap_error)?;
+            let cap: Capability = caps::get(at).map_err(cap_error)?;
             let kind = AbiKind::from_raw(cap.kind() as u8).ok_or(error(Kernel::WrongKind))?;
             let results = abi_cap::InfoResults {
                 kind,
@@ -275,7 +280,7 @@ fn read_random(address: u64, len: u64) -> Result<()> {
     let mut done = 0;
     while done < len {
         let n = (len - done).min(chunk.len() as u64) as usize;
-        radix_random::fill(&mut chunk[..n]);
+        super::random::fill(&mut chunk[..n]);
         let copied =
             <crate::Arch as radix_hal::UserMode>::copy_to_user(address + done, &chunk[..n]);
         chunk.fill(0);

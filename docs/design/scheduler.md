@@ -91,10 +91,23 @@ earliest deadline. An entity that leaves takes its lag along, clamped to
 about two slices, and comes back with it. A new entity starts at lag 0
 with half a slice.
 
+A fair thread that yields gives up the rest of its slice, as in Linux
+since 6.18: if it is eligible, its `v` moves on to its deadline and it
+gets a new deadline a slice later, and until the next pick it loses ties
+of deadline to the others (otherwise the running entity wins them, which
+saves needless switches). Moving only the deadline, as Radix did before
+ADR 0041, kept the CPU with a thread that was owed time while it was the
+only eligible one: two programs yielding to each other on one CPU could
+make tens of thousands of yields without a switch, up to the lag limit.
+
 The queue keeps `W = Σ w` and `S = Σ w (v − v₀)` for a base `v₀`, the
 smallest `v` (moved by `rebase`), so `V = v₀ + S / W` and eligibility,
 `(v − v₀) · W ≤ S`, are exact integer arithmetic in `i128`. Virtual times
-are `u64` that may wrap; only differences, as `i64`, are compared.
+are `u64` that may wrap; only differences, as `i64`, are compared. The
+divisions (`mul_div`, `avg_vruntime`) are done in 64 bits whenever the
+numbers fit, which they nearly always do, and in 128 bits otherwise: the
+answer is the same, and x86-64 divides 128-bit numbers in a library call
+several times dearer, on every switch (ADR 0040).
 
 **Real-time classes.** `RtQueue` (`rt.rs`) holds FIFO and round-robin
 threads, priorities 1 to 99. The highest priority runs; among equals the
@@ -111,7 +124,10 @@ and its child domains in proportion to their weights, its own threads
 together counting as one child of the default weight 100. `Rq::reweigh`
 works the shares out again whenever the fair queue's membership changes,
 and `FairQueue::reweight` keeps each entity's lag across the change. The
-weights are scaled to sum to 1024 per queued thread. This is a flat
+weights are scaled to sum to 1024 per queued thread. When every queued
+thread is in one domain, as is usual, the domain's branch of the tree
+cancels out and each thread's weight is its part of their nice weights,
+which `reweigh` works out without building the tree. This is a flat
 approximation of a hierarchy of queues: it gives the right shares among
 the threads that are runnable on one CPU, and the balancer evens the
 thread counts between CPUs, but it does not move time between CPUs to
@@ -137,7 +153,11 @@ thread that another CPU picks while this CPU is still switching away from
 it (it was woken, or pulled by a balancer, meanwhile) is simply waited
 for. Before the switch the CPU records an RCU quiescent state and hands
 the outgoing thread's held mutexes to the lock checker (`switch_out`);
-after it, the incoming thread takes its own back (`switch_in`). A thread
+after it, the incoming thread takes its own back (`switch_in`); with the
+checker off, neither does anything. `reschedule` finds the running
+thread through its CPU's `current` word, borrowed, rather than cloning
+the run queue's reference, which would cost a lock and two atomic counts
+per switch. A thread
 that exits is put on the reaper's list before its last switch, and the
 reaper frees its stack only once its `on_cpu` word is clear, that is once
 the switch away from it has saved it.
@@ -150,15 +170,34 @@ first and then drops the count, so the reschedule it may trigger runs
 with interrupts in the state the code expects. A wake-up that should
 preempt a thread on another CPU kicks it with a reschedule IPI, or,
 when that CPU is idle in MWAIT, with a write to the line it monitors. An
-idle CPU says it polls that line only when it waits with MWAIT; one
-halted with HLT always gets the IPI.
+idle CPU says it polls that line only when it waits with MWAIT, or while
+it polls `need_resched` in a virtual machine (below); one halted with
+HLT always gets the IPI.
+
+**Idle in a virtual machine** (ADR 0037). Under a hypervisor, halting is
+an exit to the host and so is the IPI that ends the halt. A virtual CPU
+without MWAIT therefore first polls `need_resched`, with interrupts on
+and preemption off, and says so in `polling`, so that a waker writes
+the flag instead of sending an IPI. How long it polls adapts as Linux's
+cpuidle-haltpoll governor does (`radix_sched::haltpoll`): the limit
+starts at 0, doubles (from 50 µs, up to 200 µs) when an idle period
+outlasted it but ended within 200 µs, and halves when one lasted longer.
+The waker sets `need_resched` before it reads `polling`; the poller
+clears `polling` before it reads `need_resched` again; both are
+sequentially consistent, so one of them sees the other. The TLA+ model
+`kernel/sched/tla/IdleWake.tla` checks that no wake-up is lost with
+polling, MWAIT and HLT, and that either ordering reversed loses one.
 
 **Timers.** Each CPU has a list of its sleeping threads and their
 deadlines, with room for every thread made ahead of time. The local APIC
-timer runs one-shot (TSC-deadline where available) and is
-re-armed for the earliest of the next sleeper's deadline, the running
-thread's slice end and the 100 Hz tick, so sleeps end on time without a
-fast tick.
+timer runs one-shot (TSC-deadline where available) and is armed for
+the earliest of the next sleeper's deadline, the running thread's slice
+end and the 100 Hz tick, so sleeps end on time without a fast tick. It is
+written only when that deadline is earlier than the one it is armed for
+(ADR 0037): a write is an exit under a hypervisor, and a switch usually
+leaves the next deadline where it was. A timer armed too early fires,
+finds nothing due and is armed again. Each CPU counts its timer writes,
+and `ob bench` reports them per operation.
 
 ## Blocking and waking
 
@@ -297,7 +336,10 @@ and lock other CPUs' run queues.
 
 `radix-lockdep` is a lock-order checker after Linux's lockdep. Every spin
 lock and mutex acquisition goes through `radix_sync`'s hooks to the
-checker when it is on. It keeps a graph over lock *classes* (every lock
+checker when it is on. When it is off, the kernel tells `radix_sync`
+(`set_checking`), and the locks skip those two calls altogether: a
+same-CPU round trip takes some twenty locks, and the calls were a sixth
+of its instructions (ADR 0040). It keeps a graph over lock *classes* (every lock
 created at one source location, plus the subclass `lock_nested` names)
 with an edge `A → B` when `B` was taken while `A` was held, in the same
 context. Taking a lock whose class would close a cycle is reported at
@@ -431,8 +473,9 @@ because lags are clamped and slices are short, and their products with
 `W` fit `i128`. *(Host tests: `the_queue_stays_consistent`, a property
 test that runs random enqueues, dequeues, charges and reweights and
 asserts after every step that the books are exact and some entity is
-eligible. The product of symbolic 64-bit values is beyond Kani in
-reasonable time, so this step is algebra plus tests; see ADR 0030.)*
+eligible, now with yields among the steps. The product of symbolic
+64-bit values is beyond Kani in reasonable time, so this step is algebra
+plus tests; see ADR 0030.)*
 
 **6. Fair threads get their share.** Stoica and Abdel-Wahab show that
 under EEVDF, for entities that stay runnable, every entity's lag stays

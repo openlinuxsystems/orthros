@@ -12,7 +12,12 @@
 //! - `fault`: one fault of the kind its argument names, which must end it;
 //! - pairs that ping-pong over an endpoint, pass capabilities, signal
 //!   notifications, share a channel, and post to each other's rings;
-//! - `syscall-bench`: the cost of the cheapest system calls.
+//! - `syscall-bench`: the cost of the cheapest system calls;
+//! - `memory-bench`: fresh pages, and memory bandwidth between buffers in
+//!   the memory objects the kernel passes;
+//! - pairs that yield to each other (context switches), that map pages in
+//!   and out of the other's address space while it runs on another CPU
+//!   (TLB shootdowns), and that make system calls on both CPUs at once.
 //!
 //! A pair's programs get the same endpoint and two notifications: the
 //! first notification is the one each waits on, the second the other's.
@@ -44,6 +49,13 @@ mod role {
     pub const RING_A: u64 = 11;
     pub const RING_B: u64 = 12;
     pub const SYSCALL_BENCH: u64 = 13;
+    pub const MEMORY_BENCH: u64 = 14;
+    pub const YIELD_A: u64 = 15;
+    pub const YIELD_B: u64 = 16;
+    pub const SHOOT_A: u64 = 17;
+    pub const SHOOT_B: u64 = 18;
+    pub const PARALLEL_A: u64 = 19;
+    pub const PARALLEL_B: u64 = 20;
 }
 
 /// The flag in the argument that asks for timings.
@@ -93,6 +105,13 @@ fn main(start: &Startup) -> u64 {
         role::RING_A => pairs::ring_a(argument),
         role::RING_B => pairs::ring_b(),
         role::SYSCALL_BENCH => bench::syscalls(argument),
+        role::MEMORY_BENCH => bench::memory(argument),
+        role::YIELD_A => pairs::yield_a(argument),
+        role::YIELD_B => pairs::yield_b(argument),
+        role::SHOOT_A => pairs::shoot_a(argument),
+        role::SHOOT_B => pairs::shoot_b(),
+        role::PARALLEL_A => pairs::parallel(argument, true),
+        role::PARALLEL_B => pairs::parallel(argument, false),
         other => {
             println!("no role {other}");
             1

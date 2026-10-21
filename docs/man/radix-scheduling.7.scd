@@ -73,7 +73,8 @@ thread.
 	slice of 3 ms before the next eligible thread with an earlier
 	deadline takes over. A thread that sleeps keeps the service it was
 	owed or had in advance (its lag, within about two slices), so
-	sleeping neither earns credit nor costs any.
+	sleeping neither earns credit nor costs any. A thread that yields
+	gives up the rest of its slice, so the others run first.
 
 *FIFO*, priority _1_ to _99_
 	Runs ahead of every fair thread. The highest priority runs; among
@@ -93,8 +94,10 @@ lag through the change.
 A CPU switches threads when the running one blocks, yields or exits, and
 when something more urgent waits: a woken thread of higher priority, a
 fair thread with an earlier deadline, or the end of a slice. The timer is
-re-armed for the next of these, a sleeper's deadline and the tick
-(100 Hz), so sleeps end on time without a faster tick. The switch happens
+armed for the next of these, a sleeper's deadline and the tick (100 Hz),
+so sleeps end on time without a faster tick; it is written only when it
+must fire earlier than it is armed to, since in a virtual machine every
+write leaves the guest. The switch happens
 as the interrupt that asked for it returns, or as the last spin lock is
 let go: spin locks and RCU read sections hold off preemption, nothing
 else does.
@@ -221,6 +224,15 @@ anything.
   checker turns itself off.
 - 16 mutexes along a chain that priority is lent through.
 - 8 restarts waiting for the supervisor at once.
+
+# IDLE
+
+An idle CPU waits with MWAIT where the CPU offers it, else with HLT. In a
+virtual machine without MWAIT it first polls for a wake-up, for as long
+as its recent idle periods suggest (up to 200 µs, adapting as Linux's
+cpuidle-haltpoll does), because halting and the interrupt that ends a
+halt each leave the guest. A CPU that wakes another one that is polling
+or in MWAIT writes a word instead of sending an interrupt.
 
 # DIAGNOSTICS
 

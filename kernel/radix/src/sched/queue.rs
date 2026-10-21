@@ -34,7 +34,7 @@ use core::sync::atomic::Ordering;
 use radix_mm::Kmalloc;
 use radix_sched::{
     BASE_SLICE_NS, CpuLoad, DOMAIN_WEIGHT_DEFAULT, Entity, FairQueue, Level, NICE_0_WEIGHT,
-    Placement, RR_QUANTUM_NS, RtEntry, RtQueue, is_cache_hot,
+    Placement, RR_QUANTUM_NS, RtEntry, RtQueue, is_cache_hot, mul_div, mul_div_unsigned,
 };
 
 use super::thread::{FAIR, NOT_QUEUED, Policy, REAL_TIME, State, Thread, ThreadRef};
@@ -81,12 +81,12 @@ impl Class {
 /// Lag in virtual time for an entity of weight `weight`, from nanoseconds
 /// at nice 0.
 fn to_virtual(lag_ns: i64, weight: u64) -> i64 {
-    (i128::from(lag_ns) * i128::from(NICE_0_WEIGHT) / i128::from(weight.max(1))) as i64
+    mul_div(lag_ns.into(), NICE_0_WEIGHT.into(), weight.max(1).into()) as i64
 }
 
 /// The reverse of [`to_virtual`].
 fn to_real(lag: i64, weight: u64) -> i64 {
-    (i128::from(lag) * i128::from(weight) / i128::from(NICE_0_WEIGHT)) as i64
+    mul_div(lag.into(), weight.into(), NICE_0_WEIGHT.into()) as i64
 }
 
 /// A CPU's run queue.
@@ -375,12 +375,30 @@ impl Rq {
         if count == 0 {
             return;
         }
+        let scale = NICE_0_WEIGHT as u128 * count as u128;
+        let entities = self.fair.entities();
+        let first: &Domain = entities[0].key().domain();
+        if entities.iter().all(|entity| core::ptr::eq::<Domain>(&**entity.key().domain(), first)) {
+            // The usual case: every thread in one domain. Its branch of the
+            // tree has nothing beside it, so its weights cancel out of
+            // `Shares::weight` and each thread gets its part of the nice
+            // weights, the same answer without building the tree.
+            let total: u64 =
+                entities.iter().map(|entity| entity.key().weight.load(Ordering::Relaxed)).sum();
+            for index in 0..count {
+                let Some(thread) = self.fair.key_of(index) else { continue };
+                let base = u128::from(thread.weight.load(Ordering::Relaxed));
+                let weight = mul_div_unsigned(scale, base, u128::from(total.max(1)))
+                    .clamp(2, u128::from(u32::MAX)) as u64;
+                self.fair.reweight(index, weight);
+            }
+            return;
+        }
         let mut shares = Shares::new();
         for entity in self.fair.entities() {
             let thread = entity.key();
             shares.add(thread.domain(), thread.weight.load(Ordering::Relaxed));
         }
-        let scale = NICE_0_WEIGHT as u128 * count as u128;
         for index in 0..count {
             let Some(thread) = self.fair.key_of(index) else { continue };
             let base = thread.weight.load(Ordering::Relaxed);
@@ -481,6 +499,6 @@ impl Shares {
             den *= u128::from(above.children) + own_part;
             at = parent;
         }
-        (scale * num / den.max(1)).clamp(2, u128::from(u32::MAX)) as u64
+        mul_div_unsigned(scale, num, den.max(1)).clamp(2, u128::from(u32::MAX)) as u64
     }
 }

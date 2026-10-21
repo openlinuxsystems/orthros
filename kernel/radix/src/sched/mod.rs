@@ -30,7 +30,10 @@
 //! sharing caches first, then one on the same node. A CPU balances its
 //! load against the others, level by level, at every tick (less often for
 //! farther levels) and whenever it is about to go idle. Idle CPUs wait with
-//! MWAIT where it works (and wakers then need no interrupt), else HLT.
+//! MWAIT where it works (and wakers then need no interrupt), else HLT; in a
+//! virtual machine they poll for a while first, for as long as recent idle
+//! periods suggest (`radix_sched::haltpoll`), since halting and the
+//! interrupt that ends it are each an exit to the hypervisor.
 //!
 //! Exited threads are freed by the reaper thread once their CPU has
 //! switched away. The correctness argument, and the TLA+ model of blocking
@@ -55,7 +58,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
-use radix_sched::{CpuLoad, CpuSet, Place, Topology};
+use radix_sched::{CpuLoad, CpuSet, HaltPoll, Place, Topology};
 use radix_sync::{Mutex, Once, SpinLock};
 
 use crate::Arch;
@@ -83,7 +86,8 @@ struct CpuSched {
     need_resched: AtomicBool,
     /// Written by wakers while the CPU idles in MWAIT.
     wake: AtomicU32,
-    /// Whether the idle thread is waiting in `idle_until`.
+    /// Whether the idle thread watches `need_resched` or `wake` without
+    /// needing an interrupt: polling, or waiting in MWAIT.
     polling: AtomicBool,
     /// The token of the running thread.
     current: AtomicUsize,
@@ -101,6 +105,9 @@ struct CpuSched {
     ticks: AtomicU64,
     preemptions: AtomicU64,
     idle_ns: AtomicU64,
+    /// Idle periods that ended while polling, and that halted.
+    polls: AtomicU64,
+    halts: AtomicU64,
     /// Balancing attempts that found nothing to move, by level.
     balance_failures: [AtomicU32; 4],
 }
@@ -122,6 +129,8 @@ impl CpuSched {
             ticks: AtomicU64::new(0),
             preemptions: AtomicU64::new(0),
             idle_ns: AtomicU64::new(0),
+            polls: AtomicU64::new(0),
+            halts: AtomicU64::new(0),
             balance_failures: [const { AtomicU32::new(0) }; 4],
         }
     }
@@ -577,10 +586,54 @@ pub fn spawn(
 
 /// The running thread, once the scheduler runs on this CPU.
 pub fn current() -> Option<ThreadRef> {
-    let were = Arch::disable_interrupts();
-    let thread = CPUS.this().rq.lock().as_ref().map(|rq| rq.current.clone());
-    Arch::restore_interrupts(were);
-    thread
+    running().map(|me| ThreadRef::clone(&me))
+}
+
+/// The running thread, borrowed: finding it takes no lock and leaves its
+/// reference count alone, which matters on the system call path.
+///
+/// A thread lives at least as long as it runs: the run queue holds it
+/// while it is current, and the reaper frees it only once its CPU has
+/// switched away for good. So the running code may look at itself through
+/// a borrowed reference, wherever it moves meanwhile, as long as the
+/// reference stays with it: [`Running`] can be neither sent to another
+/// thread nor kept past the code that took it, and cloning the
+/// [`ThreadRef`] it derefs to makes a counted reference as usual.
+pub fn running() -> Option<Running> {
+    // Preemption held off: the CPU's current thread is this code's.
+    borrow(CPUS.with(|slot| slot.current.load(Ordering::Relaxed)))
+}
+
+/// The running thread from its token, read from its CPU's `current` with
+/// the thread unable to move ([`running`]).
+fn borrow(token: usize) -> Option<Running> {
+    if token == 0 {
+        return None;
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: `token` is the address of the running thread's `Thread`
+    // inside the allocation of its `ThreadRef` (`Thread::token`), alive as
+    // said above. The reference made here is never dropped, so it never
+    // gives back a count it did not take; the allocator handle it carries
+    // frees through the same heap as any other (`Kmalloc`).
+    let thread =
+        unsafe { ThreadRef::from_raw_in(token as *const Thread, HEAP.with(Flags::ATOMIC)) };
+    Some(Running { thread: core::mem::ManuallyDrop::new(thread), _here: core::marker::PhantomData })
+}
+
+/// The running thread, borrowed ([`running`]).
+pub struct Running {
+    thread: core::mem::ManuallyDrop<ThreadRef>,
+    /// Neither `Send` nor `Sync`: it stays with the code that took it.
+    _here: core::marker::PhantomData<*const ()>,
+}
+
+impl core::ops::Deref for Running {
+    type Target = ThreadRef;
+
+    fn deref(&self) -> &ThreadRef {
+        &self.thread
+    }
 }
 
 /// The running thread's token (its address), or 0 before threads run.
@@ -604,7 +657,7 @@ pub fn can_sleep() -> bool {
 /// policy asks every thread of a domain it stops): long-running kernel
 /// threads check it and return.
 pub fn should_stop() -> bool {
-    current().is_some_and(|me| me.should_stop())
+    running().is_some_and(|me| me.should_stop())
 }
 
 /// Gives the CPU to another thread of the same class, if one waits.
@@ -982,7 +1035,11 @@ fn reschedule(why: Switch) {
     Arch::set_preempt_count(count + 1);
     let cpu = Arch::current_cpu();
     let slot = CPUS.get(cpu);
-    let Some(me) = slot.rq.lock().as_ref().map(|rq| rq.current.clone()) else {
+    // Once the CPU is online its run queue is there for good, and `current`
+    // names the thread it runs: this one, borrowed, which saves a lock and
+    // two atomic counts on every switch.
+    let ready = slot.online.load(Ordering::Acquire) || slot.rq.lock().is_some();
+    let Some(me) = ready.then(|| borrow(slot.current.load(Ordering::Relaxed))).flatten() else {
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
@@ -998,7 +1055,6 @@ fn reschedule(why: Switch) {
     if matches!(why, Switch::Block(_)) && me.wake_pending.swap(false, Ordering::AcqRel) {
         // Woken since it decided to sleep: carry on.
         drop(state);
-        drop(me);
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
@@ -1056,13 +1112,11 @@ fn reschedule(why: Switch) {
         enqueue_ready(&me, &mut state, false);
     }
     if !switching {
-        drop(me);
         Arch::set_preempt_count(count);
         Arch::restore_interrupts(were);
         return;
     }
     hooks::switch_out(cpu, &me);
-    drop(me);
     switch(prev_ptr, next_ptr);
     // Back on this thread, maybe on another CPU.
     after_switch();
@@ -1087,6 +1141,9 @@ fn switch(prev: *const Thread, next: *const Thread) {
 
 /// What a thread does when a switch brings it back, or first starts it.
 fn after_switch() {
+    if !hooks::lockdep_enabled() {
+        return;
+    }
     let cpu = Arch::current_cpu();
     if let Some(me) = CPUS.get(cpu).rq.lock().as_ref().map(|rq| rq.current.clone()) {
         hooks::switch_in(cpu, &me);
@@ -1163,6 +1220,9 @@ fn idle_main(cpu: usize) {
 /// CPUs, else waits for an interrupt or a waker's write.
 fn idle_loop(cpu: usize) -> ! {
     let slot = CPUS.get(cpu);
+    let (mwait, _) = Arch::idle_mode();
+    let poll_first = !mwait && Arch::virtualized();
+    let mut haltpoll = HaltPoll::new();
     loop {
         Arch::disable_interrupts();
         rcu::quiescent(cpu);
@@ -1174,17 +1234,49 @@ fn idle_loop(cpu: usize) -> ! {
             continue;
         }
         slot.wake.store(0, Ordering::Relaxed);
-        // Only an idle that watches `wake` (MWAIT) ends on the write alone;
-        // HLT needs the interrupt, so a waker must send one.
-        let (polls, _) = Arch::idle_mode();
-        slot.polling.store(polls, Ordering::SeqCst);
         let started = Arch::now_ns();
-        if !slot.need_resched.load(Ordering::SeqCst) {
-            Arch::idle_until(&slot.wake);
+        if poll_first && poll(slot, started.saturating_add(haltpoll.limit_ns())) {
+            slot.polls.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Only an idle that watches `wake` (MWAIT) ends on the write
+            // alone; HLT needs the interrupt, so a waker must send one.
+            slot.polling.store(mwait, Ordering::SeqCst);
+            if !slot.need_resched.load(Ordering::SeqCst) {
+                slot.halts.fetch_add(1, Ordering::Relaxed);
+                Arch::idle_until(&slot.wake);
+            }
+            slot.polling.store(false, Ordering::SeqCst);
         }
-        slot.polling.store(false, Ordering::SeqCst);
-        slot.idle_ns.fetch_add(Arch::now_ns().saturating_sub(started), Ordering::Relaxed);
+        let idle = Arch::now_ns().saturating_sub(started);
+        slot.idle_ns.fetch_add(idle, Ordering::Relaxed);
+        if poll_first {
+            haltpoll.record(idle);
+        }
     }
+}
+
+/// Polls `need_resched` until `until`, and returns whether it was set.
+/// Wakers see `polling` and skip the interrupt. Interrupts are on while it
+/// polls, so timers and devices are served, but preemption is off: the
+/// idle loop switches, not the interrupt's way out.
+fn poll(slot: &CpuSched, until: u64) -> bool {
+    if until <= Arch::now_ns() {
+        return false;
+    }
+    slot.polling.store(true, Ordering::SeqCst);
+    Arch::preempt_disable();
+    Arch::enable_interrupts();
+    while !slot.need_resched.load(Ordering::Relaxed) && Arch::now_ns() < until {
+        core::hint::spin_loop();
+    }
+    Arch::disable_interrupts();
+    Arch::preempt_enable();
+    // A waker sets `need_resched` before it reads `polling`; this clears
+    // `polling` before it reads `need_resched` (both sequentially
+    // consistent). So either the waker sees `polling` cleared and sends
+    // the interrupt, or this sees its wake-up and does not halt.
+    slot.polling.store(false, Ordering::SeqCst);
+    slot.need_resched.load(Ordering::SeqCst)
 }
 
 // ---- The reaper ----
@@ -1276,6 +1368,48 @@ pub fn pulled(cpu: usize) -> Option<[u64; 4]> {
         return None;
     }
     CPUS.get(cpu).rq.lock_irq().as_ref().map(|rq| rq.pulled)
+}
+
+/// Events that cost the most under a hypervisor, summed over the online
+/// CPUs, for the benchmarks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Context switches.
+    pub switches: u64,
+    /// Writes of the timer hardware.
+    pub timer_writes: u64,
+    /// Interprocessor interrupts sent.
+    pub ipis: u64,
+    /// Idle periods that halted, and that a wake-up ended while polling.
+    pub halts: u64,
+    pub polls: u64,
+}
+
+impl Counters {
+    /// What happened between `earlier` and this.
+    pub fn since(&self, earlier: &Counters) -> Counters {
+        Counters {
+            switches: self.switches.wrapping_sub(earlier.switches),
+            timer_writes: self.timer_writes.wrapping_sub(earlier.timer_writes),
+            ipis: self.ipis.wrapping_sub(earlier.ipis),
+            halts: self.halts.wrapping_sub(earlier.halts),
+            polls: self.polls.wrapping_sub(earlier.polls),
+        }
+    }
+}
+
+/// The counters now.
+pub fn counters() -> Counters {
+    let mut total = Counters::default();
+    for cpu in online().iter() {
+        let slot = CPUS.get(cpu);
+        total.switches += slot.rq.lock_irq().as_ref().map_or(0, |rq| rq.switches);
+        total.timer_writes += Arch::timer_writes(cpu);
+        total.ipis += Arch::ipis_sent(cpu);
+        total.halts += slot.halts.load(Ordering::Relaxed);
+        total.polls += slot.polls.load(Ordering::Relaxed);
+    }
+    total
 }
 
 /// Checks the fair queue of every CPU, for the self-tests.

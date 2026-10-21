@@ -134,6 +134,9 @@ pub static SMEP: AtomicBool = AtomicBool::new(false);
 pub static SMAP: AtomicBool = AtomicBool::new(false);
 /// See [`SMEP`].
 pub static PCID: AtomicBool = AtomicBool::new(false);
+/// The no-execute bit of user pages, or 0 without NX. Kept here because
+/// asking CPUID is a VM exit under a hypervisor, too slow for every page.
+static USER_NX: AtomicU64 = AtomicU64::new(0);
 /// Whether the direct map uses 1 GiB pages.
 static HUGE_DIRECT_MAP: AtomicBool = AtomicBool::new(false);
 /// The W^X check: 4 KiB pages checked, and how many of them were both
@@ -211,7 +214,7 @@ fn leaf_flags(state: &State, access: Access, cache: Cache) -> u64 {
 /// The flags of a user page: no global bit, so that it is tagged with its
 /// address space.
 pub(crate) fn user_flags(access: Access) -> u64 {
-    let nx = if cpu::feature::nx() { NO_EXECUTE } else { 0 };
+    let nx = USER_NX.load(Ordering::Relaxed);
     match access {
         Access::Code => PRESENT | USER,
         Access::ReadOnly => PRESENT | USER | nx,
@@ -223,7 +226,7 @@ pub(crate) fn user_flags(access: Access) -> u64 {
 pub(crate) fn access_of(entry: u64) -> Access {
     if entry & WRITABLE != 0 {
         Access::ReadWrite
-    } else if entry & NO_EXECUTE != 0 || !cpu::feature::nx() {
+    } else if entry & NO_EXECUTE != 0 || USER_NX.load(Ordering::Relaxed) == 0 {
         // Without NX every readable page is executable; it counts as
         // read-only, since that is what was asked for.
         Access::ReadOnly
@@ -320,6 +323,7 @@ pub fn init_cpu() {
 pub fn build_and_switch(use_pcid: bool) {
     let mut state = STATE.lock();
     state.nx = if cpu::feature::nx() { NO_EXECUTE } else { 0 };
+    USER_NX.store(state.nx, Ordering::Relaxed);
     state.global = if cpu::feature::pge() { GLOBAL } else { 0 };
     SMEP.store(cpu::feature::smep(), Ordering::Relaxed);
     SMAP.store(cpu::feature::smap(), Ordering::Relaxed);

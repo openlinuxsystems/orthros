@@ -15,7 +15,8 @@
 //!   one per resource domain per CPU for the domains' CPU weights);
 //! - [`RtQueue`], the FIFO and round-robin real-time classes;
 //! - [`Topology`]: the CPUs' cores, packages and NUMA nodes, and from them
-//!   where a waking thread runs and what load balancing moves.
+//!   where a waking thread runs and what load balancing moves;
+//! - [`HaltPoll`]: how long an idle virtual CPU polls before it halts.
 //!
 //! The queues never allocate on their own: the kernel grows them ahead of
 //! time, outside its locks. `docs/design/scheduler.md` describes the
@@ -34,6 +35,7 @@ extern crate alloc;
 
 pub mod cpuset;
 pub mod fair;
+pub mod haltpoll;
 pub mod rt;
 pub mod topology;
 pub mod weight;
@@ -42,7 +44,10 @@ pub mod weight;
 mod proofs;
 
 pub use cpuset::{CpuSet, MAX_CPUS};
-pub use fair::{BASE_SLICE_NS, Entity, FairQueue, Placement, virtual_ns};
+pub use fair::{
+    BASE_SLICE_NS, Entity, FairQueue, Placement, mul_div, mul_div_unsigned, virtual_ns,
+};
+pub use haltpoll::HaltPoll;
 pub use rt::{RR_QUANTUM_NS, RtEntry, RtQueue};
 pub use topology::{
     CpuLoad, Level, MAX_NODES, Place, Topology, interval_ticks, is_cache_hot, should_pull,

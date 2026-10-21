@@ -133,7 +133,7 @@ impl<T: ?Sized> SpinLock<T> {
     ) -> SpinLockGuard<'_, T> {
         let hooks = hooks::active();
         let irq_state = enter(hooks, irq);
-        if let Some(hooks) = hooks {
+        if let Some(hooks) = hooks::checking(hooks) {
             hooks.lock_acquire(self.acquire_info(subclass, at, false));
         }
         self.flag.acquire();
@@ -180,7 +180,7 @@ impl<T: ?Sized> SpinLock<T> {
             leave(hooks, irq_state);
             return None;
         }
-        if let Some(hooks) = hooks {
+        if let Some(hooks) = hooks::checking(hooks) {
             hooks.lock_acquire(self.acquire_info(0, at, true));
         }
         Some(SpinLockGuard { lock: self, hooks, irq: irq_state, _not_send: PhantomData })
@@ -264,7 +264,7 @@ impl<T: ?Sized> DerefMut for SpinLockGuard<'_, T> {
 impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.flag.release();
-        if let Some(hooks) = self.hooks {
+        if let Some(hooks) = hooks::checking(self.hooks) {
             hooks.lock_release(
                 &self.lock.site,
                 self.lock as *const SpinLock<T> as *const () as usize,

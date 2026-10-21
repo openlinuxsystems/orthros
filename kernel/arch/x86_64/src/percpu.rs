@@ -34,8 +34,11 @@ pub const KERNEL_CS: u16 = 0x08;
 /// Data segment selector.
 pub const KERNEL_DS: u16 = 0x10;
 /// The selector SYSRET's user selectors are relative to: user data is 8
-/// above it and user code 16 above, both with RPL 3.
-pub const USER_BASE: u16 = 0x18;
+/// above it and user code 16 above. It carries RPL 3 itself, because only
+/// Intel CPUs force SYSRET's SS selector to RPL 3: AMD ones load it as it
+/// is, and a program's SS of 0x20 (RPL 0) under a CS of RPL 3 makes the
+/// `iretq` that ends the next interrupt from user mode fault.
+pub const USER_BASE: u16 = 0x18 | 3;
 /// User data (and stack) segment selector, RPL 3.
 pub const USER_DS: u16 = 0x20 | 3;
 /// User 64-bit code segment selector, RPL 3.
@@ -45,7 +48,7 @@ const TSS_SELECTOR: u16 = 0x30;
 
 // SYSRET loads the user selectors from `USER_BASE`; interrupt returns to
 // user mode take them from the frame, which the CPU pushed with these.
-const _: () = assert!(USER_DS == (USER_BASE + 8) | 3 && USER_CS == (USER_BASE + 16) | 3);
+const _: () = assert!(USER_DS == USER_BASE + 8 && USER_CS == USER_BASE + 16);
 
 /// Offset of [`PerCpu`]'s top-of-kernel-stack word, for the entry code.
 pub const KERNEL_RSP_OFFSET: usize = 24;
@@ -160,6 +163,16 @@ pub struct PerCpu {
     pub next_tick_ns: AtomicU64,
     /// The deadline the kernel asked for, or `u64::MAX`.
     pub deadline_ns: AtomicU64,
+    /// When the timer is armed to fire, or `u64::MAX` when it is not (or
+    /// has fired and its interrupt is not handled yet).
+    pub armed_ns: AtomicU64,
+    /// Times the timer was written to arm it.
+    pub timer_writes: AtomicU64,
+    /// Interprocessor interrupts this CPU sent.
+    pub ipis_sent: AtomicU64,
+    /// KVM's paravirtual end-of-interrupt word: the hypervisor sets bit 0
+    /// when the interrupt it delivers needs no EOI write (`apic`).
+    pub pv_eoi: AtomicU32,
     descriptors: TakeOnce<Descriptors>,
 }
 
@@ -190,6 +203,10 @@ impl PerCpu {
             reschedules: AtomicU64::new(0),
             next_tick_ns: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(u64::MAX),
+            armed_ns: AtomicU64::new(u64::MAX),
+            timer_writes: AtomicU64::new(0),
+            ipis_sent: AtomicU64::new(0),
+            pv_eoi: AtomicU32::new(0),
             descriptors: TakeOnce::new(Descriptors {
                 gdt: [0; 8],
                 tss: Tss {

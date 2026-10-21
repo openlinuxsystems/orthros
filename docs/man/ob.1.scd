@@ -334,27 +334,56 @@ _target/userspace/_).
 		Fail a boot test that has not finished after this long. The
 		default is 300.
 
-*bench* [*--no-linux*] [*--summary* _file_] [*--debug* | *--release*]
-	Measure what system calls and IPC round trips cost. Build a test
-	image and boot it in QEMU on 2 CPUs with *selftest=bench*, where the
-	benchmark programs of the test image time the cheapest system calls
-	(an unknown number, which only enters and leaves the kernel; a
-	yield; a capability method; 64 random bytes), then round trips
-	between two programs over an endpoint, a notification, a
-	shared-memory channel and a ring, with both on one CPU and on two.
-	Then run _tools/linux-bench_ on this machine, which times the closest
-	Linux operations (*getppid*(2), *sched_yield*(2), *getrandom*(2), and
-	round trips over pipes, eventfds, futexes and Unix sockets, pinned the
-	same way) as a baseline. The report, with both columns side by side,
+*bench* [*--gate*] [*--linux-kernel* _file_] [*--no-linux*] [*--summary* _file_] [*--debug* | *--release*]
+	Measure what system calls, IPC round trips, context switches, fresh
+	pages, TLB shootdowns and memory copies cost on Radix, next to Linux.
+	Build a test image and boot it in QEMU on 2 CPUs with
+	*selftest=bench*, where the benchmark programs of the test image time
+	the cheapest system calls (an unknown number, which only enters and
+	leaves the kernel; a yield; a capability method; 64 random bytes), a
+	switch between two programs, a fresh page made, mapped, written and
+	given back, a page unmapped while its address space runs on the other
+	CPU, a copy between two 32 MiB buffers, round trips between two
+	programs over an endpoint, a notification, a shared-memory channel and
+	a ring, with both on one CPU and on two, and three of the system calls
+	on both CPUs at once.
+
+	Then boot Linux in a virtual machine set up the same way, with
+	_tools/linux-bench_ built as a static program and run as its only
+	process, which times the closest Linux operations (*getppid*(2),
+	*sched_yield*(2), *fcntl*(2), *getrandom*(2), *mmap*(2) with a
+	first-touch fault, *mprotect*(2), the same copy, and round trips over
+	pipes, eventfds, futexes and Unix sockets, pinned the same way). This
+	Linux boots with *mitigations=off*, since Radix has no mitigations of
+	CPU vulnerabilities yet. Last, run _tools/linux-bench_ on this machine
+	too, for reference.
+
+	The report gives Radix, Linux in the virtual machine, their ratio and
+	this machine's Linux side by side, with what the kernel did per
+	operation (switches, timer writes, interrupts sent, halts, polls). It
 	is printed and written to _out/bench/report.md_, and the numbers to
 	_out/bench/results.json_. _docs/design/ipc.md_ says how each is
 	measured. Use KVM: without it QEMU emulates every instruction, the
-	Radix numbers measure the emulator, and the boot takes minutes. CI
-	runs *ob bench* on every pull request and every merge, and shows the
-	report in the job's summary.
+	Radix numbers measure the emulator, the Linux virtual machine does not
+	run, and the boot takes minutes. CI runs *ob bench --gate* on every
+	pull request and every merge, and shows the report in the job's
+	summary.
+
+	*--gate*
+		Fail if any operation was not measured on both systems, or Radix
+		takes more than 1.05 times as long as Linux in the virtual
+		machine: the performance gate of the plan.
+
+	*--linux-kernel* _file_
+		The Linux kernel to boot. Without it, *ob* uses
+		*OB_LINUX_KERNEL*, else this machine's own
+		_/boot/vmlinuz-$(uname -r)_ if it may read it. Debian, Ubuntu
+		and Mint make that file readable only by root; copy it once with
+		*sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz*
+		and pass *--linux-kernel .cache/vmlinuz*.
 
 	*--no-linux*
-		Skip the Linux baseline.
+		Skip both Linux baselines.
 
 	*--summary* _file_
 		Also append the Markdown report to _file_. CI passes
@@ -414,6 +443,9 @@ _target/userspace/_).
 
 *OB_CONTAINER_ENGINE*
 	Program to use for *--container*, such as *podman* or *docker*.
+
+*OB_LINUX_KERNEL*
+	The Linux kernel *bench* boots, when *--linux-kernel* is not given.
 
 *OB_OVMF_CODE*, *OB_OVMF_VARS*
 	Paths to OVMF's code and variable-store images, when they are installed
@@ -484,8 +516,10 @@ _out/test/_
 	Test images, serial logs and screenshots from *ob test*.
 
 _out/bench/_
-	The benchmark report (_report.md_), its numbers (_results.json_)
-	and the serial log of the benchmark boot, from *ob bench*.
+	The benchmark report (_report.md_), its numbers (_results.json_),
+	the serial logs of the benchmark boot and the Linux virtual machine
+	(_boot-bench.log_, _boot-linux.log_) and that machine's initramfs
+	(_linux-bench.cpio_), from *ob bench*.
 
 # EXIT STATUS
 

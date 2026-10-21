@@ -123,12 +123,20 @@ pub fn lookup(
     kind: ObjectKind,
     needs: Rights,
 ) -> Result<(Capability, Object)> {
-    let cap = caps::with(|store| store.lookup(SlotRef::new(cspace, slot), kind, needs))
-        .and_then(|found| found)
-        .map_err(cap_error)?;
-    // Released since the lookup: as good as gone.
-    let object = cap.id().and_then(get).ok_or(error(Kernel::Gone))?;
+    let cap = caps::lookup(SlotRef::new(cspace, slot), kind, needs).map_err(cap_error)?;
+    let object = object_of(&cap)?;
     Ok((cap, object))
+}
+
+/// The capability in slot `slot` of `cspace`, whatever it designates.
+pub fn capability(cspace: SpaceId, slot: u32) -> Result<Capability> {
+    caps::get(SlotRef::new(cspace, slot)).map_err(cap_error)
+}
+
+/// The object `cap`, looked up a moment ago, designates.
+pub fn object_of(cap: &Capability) -> Result<Object> {
+    // Released since the lookup: as good as gone.
+    cap.id().and_then(get).ok_or(error(Kernel::Gone))
 }
 
 macro_rules! typed_lookup {

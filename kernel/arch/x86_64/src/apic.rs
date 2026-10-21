@@ -10,8 +10,17 @@
 //! the exception vectors and masked, and every I/O APIC input is masked:
 //! Phase 1 takes no device interrupts, only the local APIC timer and
 //! inter-processor interrupts.
+//!
+//! Under KVM, an EOI written to the APIC leaves the virtual machine, as
+//! most APIC writes do. KVM offers a cheaper way, which Linux guests use
+//! and so does Radix: paravirtual EOI (`MSR_KVM_PV_EOI_EN` in Linux's
+//! `Documentation/virt/kvm/x86/msr.rst`). Each CPU gives the hypervisor
+//! the physical address of a word; when the hypervisor delivers an
+//! interrupt that needs no EOI write, it sets bit 0, and the handler clears
+//! the bit instead of writing the register. The hypervisor may clear the
+//! bit itself at any time, so testing and clearing it is one instruction.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use radix_acpi::{Madt, MadtEntry};
 use radix_sync::{Once, SpinLock};
@@ -20,6 +29,7 @@ use crate::cpu::{self, msr};
 use crate::interrupts::{VECTOR_APIC_ERROR, VECTOR_PIC_BASE, VECTOR_SPURIOUS};
 use crate::io::{io_delay, outb};
 use crate::paging::{self, Access, Cache};
+use crate::percpu;
 
 /// Register offsets, as in the xAPIC memory layout. In x2APIC mode the MSR
 /// is `0x800 + offset / 16`.
@@ -122,7 +132,70 @@ pub fn mode_name() -> &'static str {
 
 /// Acknowledges the interrupt being handled.
 pub fn end_of_interrupt() {
+    // A plain load first, so that only a CPU with paravirtual EOI pays for
+    // the locked instruction; if the hypervisor clears the bit in between,
+    // the instruction finds it clear and the register is written.
+    let word = &percpu::current().pv_eoi;
+    if word.load(Ordering::Relaxed) & 1 != 0 && word.fetch_and(!1, Ordering::Relaxed) & 1 != 0 {
+        return;
+    }
     write(reg::EOI, 0);
+}
+
+/// KVM's CPUID signature and the feature and MSR of paravirtual EOI.
+mod kvm {
+    pub const SIGNATURE: [u8; 12] = *b"KVMKVMKVM\0\0\0";
+    /// CPUID `base + 1`, EAX: `KVM_FEATURE_PV_EOI`.
+    pub const FEATURE_PV_EOI: u32 = 1 << 6;
+    pub const MSR_PV_EOI_EN: u32 = 0x4b56_4d04;
+}
+
+/// KVM's feature bits (CPUID `base + 1`, EAX), or 0 outside KVM. KVM's
+/// leaves start at 0x4000_0000, or at a multiple of 0x100 above it when
+/// another hypervisor's come first, so every base is tried, as Linux does.
+fn kvm_features() -> u32 {
+    static FEATURES: Once<u32> = Once::new();
+    *FEATURES.call_once(|| {
+        if !cpu::feature::hypervisor() {
+            return 0;
+        }
+        (0x4000_0000..0x4001_0000u32)
+            .step_by(0x100)
+            .find(|&base| {
+                let id = cpu::cpuid(base, 0);
+                let mut signature = [0u8; 12];
+                signature[..4].copy_from_slice(&id.ebx.to_le_bytes());
+                signature[4..8].copy_from_slice(&id.ecx.to_le_bytes());
+                signature[8..].copy_from_slice(&id.edx.to_le_bytes());
+                signature == kvm::SIGNATURE
+            })
+            .map_or(0, |base| cpu::cpuid(base + 1, 0).eax)
+    })
+}
+
+/// Whether the CPUs use paravirtual EOI.
+static PV_EOI: AtomicBool = AtomicBool::new(false);
+
+/// Turns on paravirtual EOI for this CPU if KVM offers it.
+fn enable_pv_eoi() {
+    if kvm_features() & kvm::FEATURE_PV_EOI == 0 {
+        return;
+    }
+    let word = &percpu::current().pv_eoi;
+    // The word must be zero when the hypervisor is given it.
+    word.store(0, Ordering::Relaxed);
+    let Some(phys) = paging::translate(word as *const _ as usize) else { return };
+    // SAFETY: KVM advertised the MSR. It takes the physical address of a
+    // 4-byte aligned word in RAM, this CPU's own, which lives as long as
+    // the kernel and which the hypervisor only changes from this CPU.
+    unsafe { cpu::wrmsr(kvm::MSR_PV_EOI_EN, phys | 1) };
+    PV_EOI.store(true, Ordering::Relaxed);
+}
+
+/// Whether the CPUs acknowledge interrupts through KVM's paravirtual EOI,
+/// for the boot report.
+pub fn pv_eoi() -> bool {
+    PV_EOI.load(Ordering::Relaxed)
 }
 
 /// Reads and clears the error status register.
@@ -208,6 +281,7 @@ pub fn init_cpu(madt: Option<&Madt<'_>>, uid: Option<u32>) {
     write(reg::LVT_LINT1, if pin == 1 { nmi } else { MASKED });
     let _ = read_error_status();
     end_of_interrupt();
+    enable_pv_eoi();
 }
 
 /// Version register: (version, highest LVT entry).
@@ -259,6 +333,7 @@ fn send(dest: u32, low: u32) {
 
 /// Sends interrupt `vector` to the CPU with APIC ID `dest`.
 pub fn send_fixed(dest: u32, vector: u8) {
+    crate::percpu::current().ipis_sent.fetch_add(1, Ordering::Relaxed);
     send(dest, u32::from(vector));
 }
 

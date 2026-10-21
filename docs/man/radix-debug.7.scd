@@ -449,10 +449,15 @@ boots.
 
 *bench*
 	Runs the benchmark programs of the *usertests* image: the cost of
-	the cheapest system calls, then round trips of four pairs from *ipc*
-	(all but capabilities), 100,000 each, on one CPU and on two. Each
+	the cheapest system calls, a fresh page and a memory copy, then round
+	trips of four pairs from *ipc* (all but capabilities), 100,000 each,
+	on one CPU and on two, a context switch between two programs, a TLB
+	shootdown, and three system calls on both CPUs at once. Each
 	measurement is a line the program logs, *BENCH name=*_name_ *ns=*_ns_
-	*iterations=*_count_, which *ob bench* collects.
+	*iterations=*_count_, and after each benchmark the kernel logs what
+	it did meanwhile, *BENCHCOUNT group=*_name_ *rounds=*_count_ followed
+	by its switches, timer writes, interrupts sent, halts and polls; *ob
+	bench* collects both.
 
 *stack-overflow*
 	Recurses until the boot CPU's stack runs into its guard page. The

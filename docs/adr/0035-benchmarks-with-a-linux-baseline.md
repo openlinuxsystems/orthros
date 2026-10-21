@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0035. System call and IPC costs are measured on every merge, next to the closest Linux operations on the same machine
 
-- Status: Accepted
+- Status: Superseded by [0039](0039-linux-in-the-same-virtual-machine-and-a-performance-gate.md)
 - Date: 2026-10-21
 
 ## Context

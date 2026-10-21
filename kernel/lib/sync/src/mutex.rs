@@ -94,7 +94,7 @@ impl<T: ?Sized> Mutex<T> {
     #[track_caller]
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let hooks = hooks::active();
-        if let Some(hooks) = hooks {
+        if let Some(hooks) = hooks::checking(hooks) {
             hooks.lock_acquire(self.acquire_info(hooks::caller(), false));
         }
         let me = hooks.map_or(0, |h| h.current_thread());
@@ -118,7 +118,7 @@ impl<T: ?Sized> Mutex<T> {
         if !self.claim(token) {
             return None;
         }
-        if let Some(hooks) = hooks {
+        if let Some(hooks) = hooks::checking(hooks) {
             hooks.lock_acquire(self.acquire_info(hooks::caller(), true));
         }
         Some(self.guard(hooks, token))
@@ -223,7 +223,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
                 _ => raw.word.store(0, Ordering::Release),
             }
         }
-        if let Some(hooks) = self.hooks {
+        if let Some(hooks) = hooks::checking(self.hooks) {
             hooks.lock_release(&raw.site, raw.key());
         }
     }

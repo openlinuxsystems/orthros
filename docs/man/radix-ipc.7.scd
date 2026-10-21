@@ -175,7 +175,10 @@ lost, though several of the same bit count as one. See
 A shared-memory channel is two programs mapping the same frame, which
 holds a queue of sixteen 64-byte messages each way, and each program
 waiting on a notification of its own when its queue is empty or the
-other's is full. The messages never pass through the kernel, which takes
+other's is full. A program about to wait says so in a word of the queue
+and looks again first; the other end signals its notification only when
+that word is set, so a program that never has to wait makes no system
+call at all. The messages never pass through the kernel, which takes
 part only to wake a program. Channels are part of _libradix_, not of the
 kernel.
 
@@ -246,12 +249,16 @@ _libradix_.
 
 # BENCHMARKS
 
-*ob bench* (see *ob*(1)) measures what the system calls and each kind of
+*ob bench* (see *ob*(1)) measures what the system calls, a context
+switch, a fresh page, a TLB shootdown, a memory copy and each kind of
 round trip cost, on one CPU and across two, and the closest operations of
-the host's Linux beside them: a pipe for an endpoint call, an eventfd for
-a notification, a futex for a channel and a Unix socket for a ring. CI
-publishes the report on every merge. Numbers measured without KVM say
-nothing about the kernel, and the report says so.
+Linux beside them, in a virtual machine set up the same way: *getppid*,
+*fcntl*, *getrandom*, *sched_yield*, *mmap* and *mprotect*, a pipe for an
+endpoint call, an eventfd for a notification, a futex for a channel and a
+Unix socket for a ring. CI runs it with *--gate* on every pull request
+and merge, and fails if Radix is slower than Linux at any of them.
+Numbers measured without KVM say nothing about the kernel, and the
+report says so.
 
 # LIMITS
 

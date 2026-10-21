@@ -87,7 +87,33 @@ impl<K> Entity<K> {
 
 /// `ns` of real time for an entity of weight `weight`, in virtual time.
 pub fn virtual_ns(ns: u64, weight: u64) -> u64 {
-    (u128::from(ns) * u128::from(NICE_0_WEIGHT) / u128::from(weight.max(1))) as u64
+    mul_div_unsigned(ns.into(), NICE_0_WEIGHT.into(), weight.max(1).into()) as u64
+}
+
+/// `a * b / c`, rounded towards zero, without overflowing. When all three
+/// fit in 64 bits and so does the product, which is almost always, it is
+/// worked out in 64 bits: x86-64 divides 128-bit numbers in a library
+/// call that costs several times one division instruction, and the
+/// scheduler divides on every switch.
+pub fn mul_div(a: i128, b: i128, c: i128) -> i128 {
+    if let (Ok(a), Ok(b), Ok(c)) = (i64::try_from(a), i64::try_from(b), i64::try_from(c))
+        && let Some(product) = a.checked_mul(b)
+        && c > 0
+    {
+        return i128::from(product / c);
+    }
+    a * b / c
+}
+
+/// [`mul_div`] for unsigned numbers.
+pub fn mul_div_unsigned(a: u128, b: u128, c: u128) -> u128 {
+    if let (Ok(a), Ok(b), Ok(c)) = (u64::try_from(a), u64::try_from(b), u64::try_from(c))
+        && let Some(product) = a.checked_mul(b)
+        && c > 0
+    {
+        return u128::from(product / c);
+    }
+    a * b / c
 }
 
 /// An EEVDF run queue of entities named by `K`.
@@ -103,6 +129,8 @@ pub struct FairQueue<K, A: Allocator> {
     sum: i128,
     slice_ns: u64,
     tick_ns: u64,
+    /// The running entity has yielded since it was picked.
+    yielded: bool,
 }
 
 impl<K, A: Allocator> FairQueue<K, A> {
@@ -117,6 +145,7 @@ impl<K, A: Allocator> FairQueue<K, A> {
             sum: 0,
             slice_ns: slice_ns.max(1),
             tick_ns,
+            yielded: false,
         }
     }
 
@@ -178,7 +207,10 @@ impl<K, A: Allocator> FairQueue<K, A> {
         }
         // Round towards minus infinity, so `V` never passes an entity
         // that is exactly on it.
-        let avg = self.sum.div_euclid(i128::from(self.load));
+        let avg = match (i64::try_from(self.sum), i64::try_from(self.load)) {
+            (Ok(sum), Ok(load)) => i128::from(sum.div_euclid(load)),
+            _ => self.sum.div_euclid(i128::from(self.load)),
+        };
         self.zero.wrapping_add(avg as i64 as u64)
     }
 
@@ -248,7 +280,7 @@ impl<K, A: Allocator> FairQueue<K, A> {
             // scaling the lag by (W + w) / W makes the lag it has once it
             // is in the queue the one it left with.
             Placement::Lag(lag) if self.load > 0 => {
-                (i128::from(lag) * i128::from(self.load + weight) / i128::from(self.load)) as i64
+                mul_div(lag.into(), (self.load + weight).into(), self.load.into()) as i64
             }
             Placement::Lag(lag) => lag,
         };
@@ -283,6 +315,7 @@ impl<K, A: Allocator> FairQueue<K, A> {
     /// Marks entity `index` as the one on the CPU, or none.
     pub fn set_running(&mut self, index: Option<usize>) {
         self.running = index.filter(|&i| i < self.entities.len());
+        self.yielded = false;
     }
 
     /// The index of the running entity.
@@ -317,21 +350,34 @@ impl<K, A: Allocator> FairQueue<K, A> {
         if left <= 0 {
             return Some(0);
         }
-        Some(
-            (u128::from(left as u64) * u128::from(entity.weight) / u128::from(NICE_0_WEIGHT))
-                as u64,
-        )
+        Some(mul_div_unsigned((left as u64).into(), entity.weight.into(), NICE_0_WEIGHT.into())
+            as u64)
     }
 
-    /// The running entity gives way: its deadline moves one slice later,
-    /// so every other eligible entity with an earlier deadline runs first
-    /// (as Linux's `sched_yield` does for EEVDF). Its virtual runtime, and
-    /// so its share, is unchanged.
+    /// The running entity gives way, as Linux's `sched_yield` does since
+    /// 6.18: if it is eligible, it forfeits the rest of its slice (its
+    /// virtual runtime moves on to its deadline) and its next deadline is
+    /// a slice after that. Moving only the deadline, as before, left an
+    /// entity that was owed time the only eligible one, so it kept the CPU
+    /// through yield after yield, for up to the lag limit. Until the next
+    /// pick it also loses ties of deadline. Alone in the queue, it keeps
+    /// everything.
     pub fn yield_running(&mut self) {
         let Some(index) = self.running else { return };
-        let slice = virtual_ns(self.slice_ns, self.entities[index].weight);
+        if self.entities.len() < 2 {
+            return;
+        }
+        self.yielded = true;
+        if !self.eligible(&self.entities[index]) {
+            return;
+        }
+        let slice_ns = self.slice_ns;
         let entity = &mut self.entities[index];
-        entity.deadline = entity.deadline.wrapping_add(slice);
+        let left = (entity.deadline.wrapping_sub(entity.vruntime) as i64).max(0);
+        entity.vruntime = entity.vruntime.wrapping_add(left as u64);
+        entity.deadline = entity.vruntime.wrapping_add(virtual_ns(slice_ns, entity.weight));
+        self.sum += i128::from(entity.weight) * i128::from(left);
+        self.rebase();
     }
 
     /// Changes the weight of entity `index`, keeping its lag and the time
@@ -350,7 +396,7 @@ impl<K, A: Allocator> FairQueue<K, A> {
         let key = self.key(entity.vruntime);
         self.load -= old;
         self.sum -= i128::from(old) * i128::from(key);
-        let scale = |value: i64| (i128::from(value) * i128::from(old) / i128::from(weight)) as i64;
+        let scale = |value: i64| mul_div(value.into(), old.into(), weight.into()) as i64;
         let vruntime = avg.wrapping_sub(scale(lag) as u64);
         let entity = &mut self.entities[index];
         entity.weight = weight;
@@ -363,7 +409,8 @@ impl<K, A: Allocator> FairQueue<K, A> {
     }
 
     /// The eligible entity with the earliest deadline. Ties go to the
-    /// running entity, then to the lower index.
+    /// running entity (away from it if it has just yielded), then to the
+    /// lower index.
     pub fn pick(&self) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (index, entity) in self.entities.iter().enumerate() {
@@ -374,11 +421,14 @@ impl<K, A: Allocator> FairQueue<K, A> {
                 None => Some(index),
                 Some(b) => {
                     let order = (entity.deadline.wrapping_sub(self.entities[b].deadline)) as i64;
-                    if order < 0 || (order == 0 && self.running == Some(index)) {
-                        Some(index)
+                    // A tie goes to the running entity, or away from it
+                    // once it has yielded.
+                    let takes_tie = if self.yielded {
+                        self.running == Some(b)
                     } else {
-                        Some(b)
-                    }
+                        self.running == Some(index)
+                    };
+                    if order < 0 || (order == 0 && takes_tie) { Some(index) } else { Some(b) }
                 }
             };
         }
@@ -543,6 +593,66 @@ mod tests {
         queue.check().unwrap();
     }
 
+    /// Two entities yielding to each other in turns, each running a
+    /// little first, as two programs calling `yield` do.
+    fn yield_in_turns(queue: &mut FairQueue<u32, Global>, rounds: usize) -> usize {
+        let mut switches = 0;
+        for _ in 0..rounds {
+            let before = queue.running();
+            queue.charge(80);
+            queue.yield_running();
+            let pick = queue.pick();
+            switches += usize::from(pick != before);
+            queue.set_running(pick);
+        }
+        switches
+    }
+
+    #[test]
+    fn yields_in_turns_switch_every_time() {
+        let mut queue = queue();
+        let a = queue.enqueue(1, 1024, Placement::New).unwrap();
+        queue.enqueue(2, 1024, Placement::New).unwrap();
+        queue.set_running(Some(a));
+        assert_eq!(yield_in_turns(&mut queue, 1000), 1000);
+        queue.check().unwrap();
+    }
+
+    #[test]
+    fn an_entity_owed_time_still_gives_way_when_it_yields() {
+        // The other came back from a sleep far ahead of its share, so only
+        // the running one is eligible: moving its deadline alone kept the
+        // CPU with it for the whole lag, thousands of yields.
+        let mut queue = queue();
+        let a = queue.enqueue(1, 1024, Placement::New).unwrap();
+        let limit = queue.lag_limit(1024);
+        queue.enqueue(2, 1024, Placement::Lag(-limit)).unwrap();
+        queue.set_running(Some(a));
+        let mut yields = 0;
+        while queue.running() == Some(a) {
+            queue.charge(80);
+            queue.yield_running();
+            let pick = queue.pick();
+            queue.set_running(pick);
+            yields += 1;
+            assert!(yields <= 8, "still running after {yields} yields");
+        }
+        // From then on they take turns.
+        assert_eq!(yield_in_turns(&mut queue, 100), 100);
+        queue.check().unwrap();
+    }
+
+    #[test]
+    fn an_entity_alone_keeps_its_slice_when_it_yields() {
+        let mut queue = queue();
+        let a = queue.enqueue(1, 1024, Placement::New).unwrap();
+        queue.set_running(Some(a));
+        let before = (queue.entities()[a].vruntime(), queue.entities()[a].deadline());
+        queue.yield_running();
+        assert_eq!((queue.entities()[a].vruntime(), queue.entities()[a].deadline()), before);
+        assert_eq!(queue.pick(), Some(a));
+    }
+
     #[test]
     fn lag_survives_leaving_and_coming_back() {
         let mut queue = queue();
@@ -612,6 +722,7 @@ mod tests {
         Dequeue(usize),
         Run(u64),
         Reweight(usize, i8),
+        Yield,
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -620,10 +731,46 @@ mod tests {
             (0usize..16).prop_map(Op::Dequeue),
             (1u64..20_000_000).prop_map(Op::Run),
             (0usize..16, -20i8..20).prop_map(|(i, n)| Op::Reweight(i, n)),
+            Just(Op::Yield),
         ]
     }
 
+    #[test]
+    fn mul_div_takes_the_short_way_only_when_it_gives_the_same_answer() {
+        let edges = [0, 1, -1, i64::MAX, i64::MIN, i64::MAX / 3, 1 << 32, -(1 << 40)];
+        for a in edges {
+            for b in edges {
+                for c in [1, 3, NICE_0_WEIGHT as i64, i64::MAX] {
+                    let (a, b, c) = (i128::from(a), i128::from(b), i128::from(c));
+                    assert_eq!(mul_div(a, b, c), a * b / c, "{a} * {b} / {c}");
+                }
+            }
+        }
+        let big = i128::from(i64::MAX) * 4;
+        assert_eq!(mul_div(big, 3, 5), big * 3 / 5);
+        assert_eq!(mul_div(7, 3, -2), -10);
+        for a in [0, 1, u64::MAX, u64::MAX / 7, 1 << 33] {
+            for b in [0, 1, u64::MAX, 1024, 1 << 31] {
+                for c in [1, 7, u64::MAX] {
+                    let (a, b, c) = (u128::from(a), u128::from(b), u128::from(c));
+                    assert_eq!(mul_div_unsigned(a, b, c), a * b / c, "{a} * {b} / {c}");
+                }
+            }
+        }
+    }
+
     proptest! {
+
+        #[test]
+        fn mul_div_matches_128_bit_arithmetic(
+            a in any::<i64>(), b in any::<i64>(), c in 1..=i64::MAX, wide in any::<bool>()
+        ) {
+            // Wide: `a` past 64 bits, `b` small enough for the product to
+            // fit in 128.
+            let (a, b) = if wide { (i128::from(a) << 20, i128::from(b >> 30)) } else { (a.into(), b.into()) };
+            let c = i128::from(c);
+            prop_assert_eq!(mul_div(a, b, c), a * b / c);
+        }
         /// Whatever happens, the bookkeeping stays exact, some entity is
         /// always eligible, and nobody's lag grows past what the slices
         /// and the clamp allow.
@@ -661,6 +808,11 @@ mod tests {
                         if i < queue.len() {
                             queue.reweight(i, weight(nice));
                         }
+                    }
+                    Op::Yield => {
+                        queue.yield_running();
+                        let pick = queue.pick();
+                        queue.set_running(pick);
                     }
                 }
                 prop_assert_eq!(queue.check(), Ok(()));

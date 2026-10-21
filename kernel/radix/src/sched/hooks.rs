@@ -39,7 +39,7 @@ static HOOKS: KernelHooks = KernelHooks;
 pub(super) fn init(lockdep: bool) {
     WANTED.store(lockdep, Ordering::Relaxed);
     CHECKER.set_reporter(report);
-    CHECKER.set_enabled(lockdep);
+    set_checker(lockdep);
     radix_sync::set_hooks(&HOOKS);
 }
 
@@ -62,11 +62,13 @@ pub fn lockdep_last_problem() -> Option<radix_lockdep::Problem> {
 /// report (and turn itself on for that).
 pub fn set_lockdep_expecting(expecting: bool) {
     CHECKER.expect_reports(expecting);
-    if expecting {
-        CHECKER.set_enabled(true);
-    } else {
-        CHECKER.set_enabled(WANTED.load(Ordering::Relaxed));
-    }
+    set_checker(expecting || WANTED.load(Ordering::Relaxed));
+}
+
+/// Turns the checker on or off, and the locks' reports to it with it.
+fn set_checker(on: bool) {
+    CHECKER.set_enabled(on);
+    radix_sync::set_checking(on);
 }
 
 fn report(report: &Report) {

@@ -17,6 +17,13 @@
 //! [`TICK_HZ`]) or the deadline the scheduler asked for
 //! ([`set_deadline`]), so slices and sleeps end on time without a faster
 //! tick.
+//!
+//! Arming is lazy: the timer is written only when it must fire earlier
+//! than it is armed to. The scheduler asks for a deadline at every context
+//! switch, usually the same one or a later one, and under a hypervisor
+//! each write of the timer is a VM exit costing microseconds. A timer
+//! armed too early fires, finds nothing due, and is armed again, at most
+//! once per deadline; it is never armed too late (ADR 0037).
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -308,6 +315,8 @@ pub fn start_tick() {
     let cpu = percpu::current();
     cpu.next_tick_ns.store(now_ns() + TICK_NS, Ordering::Relaxed);
     cpu.deadline_ns.store(u64::MAX, Ordering::Relaxed);
+    // Setting the mode disarms the timer.
+    cpu.armed_ns.store(u64::MAX, Ordering::Relaxed);
     if DEADLINE_MODE.load(Ordering::Relaxed) {
         apic::timer_start_tsc_deadline(VECTOR_TIMER);
     } else {
@@ -328,8 +337,15 @@ pub fn mode_name() -> &'static str {
     }
 }
 
-/// Arms this CPU's timer for `at_ns`.
+/// Arms this CPU's timer for `at_ns`, unless it is armed for that time or
+/// earlier already. With interrupts masked.
 fn program(at_ns: u64) {
+    let cpu = percpu::current();
+    if cpu.armed_ns.load(Ordering::Relaxed) <= at_ns {
+        return;
+    }
+    cpu.armed_ns.store(at_ns, Ordering::Relaxed);
+    cpu.timer_writes.fetch_add(1, Ordering::Relaxed);
     if DEADLINE_MODE.load(Ordering::Relaxed) {
         let hz = TSC_HZ.load(Ordering::Relaxed);
         let ticks = (u128::from(at_ns) * u128::from(hz) / 1_000_000_000) as u64;
@@ -358,6 +374,11 @@ pub fn set_deadline(deadline_ns: u64) {
     program(cpu.next_tick_ns.load(Ordering::Relaxed).min(deadline_ns));
 }
 
+/// Times CPU `cpu` wrote its timer.
+pub fn writes(cpu: usize) -> u64 {
+    percpu::get(cpu).map_or(0, |c| c.timer_writes.load(Ordering::Relaxed))
+}
+
 /// Rate of the tick, or 0 when it is not running.
 pub fn tick_hz() -> u32 {
     if TICKING.load(Ordering::Relaxed) { TICK_HZ } else { 0 }
@@ -369,6 +390,10 @@ pub fn on_tick() {
     // No trace point here: at 100 Hz on every CPU it would push everything
     // else out of the trace ring within seconds.
     let cpu = percpu::current();
+    // The timer fired, so it is no longer armed. (If this interrupt was
+    // already pending when the timer was armed again, that costs one
+    // needless write below, never a missed deadline.)
+    cpu.armed_ns.store(u64::MAX, Ordering::Relaxed);
     let now = now_ns();
     let next = cpu.next_tick_ns.load(Ordering::Relaxed);
     let tick = now >= next;
