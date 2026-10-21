@@ -23,3 +23,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0014](0014-early-microcode-from-an-image-module.md) | Early microcode comes from a boot module added at image build time | Accepted |
 | [0015](0015-console-font-spleen.md) | The framebuffer console uses the Spleen fonts | Accepted |
 | [0016](0016-kernel-symbol-table-in-the-image.md) | The kernel carries its own symbol table, written in after linking | Accepted |
+| [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted |

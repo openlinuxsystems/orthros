@@ -10,6 +10,7 @@ mod doctor;
 mod image;
 mod kernel;
 mod ksyms;
+mod licenses;
 mod lint;
 mod process;
 mod qemu;

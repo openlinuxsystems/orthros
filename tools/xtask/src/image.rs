@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::config::{self, Profile};
 use crate::process::{self, step};
-use crate::{Context, Ctx, Error, Result, VERSION, kernel};
+use crate::{Context, Ctx, Error, Result, VERSION, kernel, licenses};
 
 /// What goes into an image and where it is written.
 pub struct ImageSpec<'a> {
@@ -36,15 +36,6 @@ pub fn file_name(iso: bool) -> String {
 
 /// Path of the microcode module inside the image.
 pub const MICROCODE_PATH: &str = "/boot/firmware/intel-ucode.bin";
-
-/// License texts every image carries, as (repository path, image path).
-/// The kernel embeds the Spleen console fonts, whose BSD license asks for
-/// its notice to travel with binary copies.
-pub const NOTICES: &[(&str, &str)] = &[
-    ("LICENSE-APACHE", "licenses/LICENSE-APACHE"),
-    ("LICENSE-MIT", "licenses/LICENSE-MIT"),
-    ("kernel/lib/fbcon/fonts/LICENSE-spleen", "licenses/LICENSE-spleen"),
-];
 
 /// What `ob image` and `ob run` put into the image beyond orthros.toml.
 #[derive(Default)]
@@ -187,9 +178,11 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
             .context(|| format!("removing {}", spec.staging.display()))?;
     }
     process::copy(spec.kernel, &spec.staging.join("boot/radix"))?;
-    for (source, target) in NOTICES {
-        process::copy(&ctx.root.join(source), &spec.staging.join(target))?;
-    }
+    let manifest = licenses::install(
+        ctx,
+        &spec.staging,
+        &licenses::Extras { mkrescue: &mkrescue, microcode: spec.microcode.is_some() },
+    )?;
     let mut modules = Vec::new();
     if let Some(microcode) = &spec.microcode {
         let path = spec.staging.join(MICROCODE_PATH.trim_start_matches('/'));
@@ -209,7 +202,11 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
         process::create_dir(parent)?;
     }
 
-    let mut cmd = Command::new(mkrescue);
+    let mut cmd = Command::new(&mkrescue);
+    // The menu uses GRUB's text terminals, so no font, translation or theme
+    // is needed; leaving them out keeps the image's GRUB files to GRUB's own
+    // code, which the license manifest lists.
+    cmd.args(["--fonts=", "--locales=", "--themes="]);
     cmd.arg("-o").arg(&spec.output).arg(&spec.staging);
     // Arguments after `--` go to xorriso. The volume label lets installers
     // and udev rules recognise the medium.
@@ -221,6 +218,9 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
     if ctx.verbose {
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
+    // A copy of the manifest next to the image, for release pages and CI.
+    let sidecar = spec.output.with_extension("spdx");
+    std::fs::write(&sidecar, manifest).context(|| format!("writing {}", sidecar.display()))?;
     Ok(())
 }
 
@@ -232,7 +232,7 @@ pub fn volume_id() -> String {
 /// Commit time of HEAD, which xorriso uses for the ISO timestamps instead of
 /// the clock. An existing `SOURCE_DATE_EPOCH` wins. Images are not yet
 /// bit-for-bit reproducible: grub-mkrescue adds random UUIDs.
-fn source_date_epoch(ctx: &Ctx) -> Option<String> {
+pub fn source_date_epoch(ctx: &Ctx) -> Option<String> {
     if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH") {
         return Some(epoch);
     }
@@ -260,14 +260,6 @@ mod tests {
         assert!(cfg.contains("set gfxpayload=keep"));
         assert!(!cfg.contains("@VERSION@"));
         assert!(!cfg.contains("module2"));
-    }
-
-    #[test]
-    fn notices_exist() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for (source, _) in NOTICES {
-            assert!(root.join(source).is_file(), "{source} is missing");
-        }
     }
 
     #[test]

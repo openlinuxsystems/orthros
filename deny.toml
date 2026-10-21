@@ -1,12 +1,16 @@
-# cargo-deny policy for every workspace in the repository (CI runs it on
-# Cargo.toml and kernel/Cargo.toml). Dependencies must be under licenses
-# compatible with Apache-2.0 OR MIT, and come from crates.io.
+# cargo-deny policy for the build tool workspace (tools/xtask, `./ob`). CI
+# runs it on Cargo.toml; the kernel workspace has its own, stricter policy in
+# kernel/deny.toml. Dependencies must be under permissive licenses compatible
+# with Apache-2.0 OR MIT, and come from crates.io (BSD-2-Clause comes with the
+# Spleen fonts in radix-fbcon, which ob reads). The build tool never ships
+# in an image, but it stays under the same terms as the rest of the tree
+# (docs/adr/0021-license-manifest-in-every-image.md).
 
 [advisories]
 yanked = "deny"
 
 [licenses]
-allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "Unicode-3.0"]
 confidence-threshold = 0.9
 
 [bans]

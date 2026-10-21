@@ -1,0 +1,38 @@
+# cargo-deny policy for the kernel workspace. CI runs
+# `cargo deny --manifest-path kernel/Cargo.toml check --config kernel/deny.toml`,
+# and `ob image` checks every crate linked into the kernel, including the
+# standard library crates built with -Zbuild-std, against the same
+# [licenses] allow list (docs/adr/0021-license-manifest-in-every-image.md).
+#
+# Kernel code (and, from Phase 6, /system Rust code) may use permissive
+# licenses only. GPL and LGPL code is allowed only in ported programs and
+# bundle-private libraries, which have allow-lists of their own; never add a
+# copyleft license here. Every license listed needs its text in the image:
+# the files at the top of the repository or image/licenses/<id>.txt.
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# The list is the policy, not an inventory of what is in use today.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

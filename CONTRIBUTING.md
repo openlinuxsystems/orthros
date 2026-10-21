@@ -82,4 +82,10 @@ OrthrOS is dual licensed under the Apache License 2.0 and the MIT license.
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in OrthrOS by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
-conditions. New dependencies must use licenses that `deny.toml` allows.
+conditions. New dependencies must use licenses that `deny.toml` allows;
+kernel crates must use the permissive licenses in `kernel/deny.toml`, and
+`ob image` refuses to build an image otherwise (see
+[ADR 0021](docs/adr/0021-license-manifest-in-every-image.md)). A crate that
+embeds third-party files under another license declares it in its
+`license` field and lists the notice files under
+`[package.metadata.orthros] notices`, as `kernel/lib/fbcon` does.

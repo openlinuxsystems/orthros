@@ -84,6 +84,18 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	optical media. Write it to a USB stick as shown in *EXAMPLES*.
 	*orthros-boot*(7) lists what the image contains.
 
+	Every image carries a license manifest. *ob* lists each component
+	that goes into it: the crates linked into the kernel (from *cargo
+	tree*), the standard library crates built from the Rust sources, GRUB,
+	and the microcode if any. It checks each component's SPDX license
+	against the allow-list of its area, and fails if a component declares
+	no license or one outside that list. Kernel crates follow
+	_kernel/deny.toml_, which allows permissive licenses only; GRUB, a
+	separate program, may be GPL-3.0-or-later. It then writes an SPDX 2.3
+	document, the text of every license it names, and each component's
+	own notice files to _/system/share/licenses/_ in the image, and a copy
+	of the document next to the image.
+
 	*--iso*
 		Name the output _out/orthros-VERSION-x86_64.iso_ instead, for
 		virtual machines and optical media. The contents are the same.
@@ -249,8 +261,20 @@ _kernel/targets/x86_64-radix-kernel.json_
 _out/sysroot/boot/radix_
 	The kernel built by *ob build*.
 
+_kernel/deny.toml_
+	The license allow-list of the kernel, used by *ob image* and by
+	cargo-deny in CI.
+
+_image/licenses/_
+	License texts, copied verbatim from the SPDX license list, that
+	*ob image* puts into the image beside _LICENSE-APACHE_ and
+	_LICENSE-MIT_.
+
 _out/orthros-VERSION-x86_64.img_
 	The boot image built by *ob image*.
+
+_out/orthros-VERSION-x86_64.spdx_
+	The image's license manifest (SPDX 2.3 tag-value).
 
 _out/qemu/radix.gdb_
 	The GDB script written by *ob run --gdb*.

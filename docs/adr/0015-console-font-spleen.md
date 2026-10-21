@@ -31,7 +31,9 @@ picks the largest size that still gives at least 100 columns and 40 rows
 - The fonts add about 72 KiB to the kernel image.
 - BSD-2-Clause requires the copyright notice to accompany binary copies,
   so every image built by `ob image` carries `/licenses/LICENSE-spleen`,
-  and the kernel crate's manifest points to it.
+  and the kernel crate's manifest points to it. (Since
+  [0021](0021-license-manifest-in-every-image.md) the file is at
+  `/system/share/licenses/notices/radix-fbcon-<version>/LICENSE-spleen`.)
 - The boot tests read the screen back by matching cells against the same
   font files, so a font change only needs the tests rebuilt, not updated.
 - Revisit for non-Latin scripts, which Spleen does not cover; a console
