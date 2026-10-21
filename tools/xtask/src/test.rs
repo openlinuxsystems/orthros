@@ -867,8 +867,14 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
     vm.expect("Random: ChaCha20 seeded before KASLR from ")?;
-    // Every machine has timing jitter, and the CPUs the cases use unless
-    // they emulate a model of their own also have RDSEED and RDRAND.
+    if case.cmdline.split_ascii_whitespace().any(|flag| flag == "nokaslr") {
+        vm.expect("KASLR: off (nokaslr)")?;
+    } else {
+        vm.expect("KASLR: kernel moved by 0x")?;
+    }
+    // The whole `Random:` line has arrived now. Every machine has timing
+    // jitter, and the CPUs the cases use unless they emulate a model of
+    // their own also have RDSEED and RDRAND.
     let sources = match case.cpu_model {
         Some(_) => "from timing jitter (",
         None => "from RDSEED, RDRAND and timing jitter (",
@@ -880,11 +886,6 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
             "the seed should rest on {sources}...), but the log says: Random: {}",
             random.unwrap_or_default()
         ));
-    }
-    if case.cmdline.split_ascii_whitespace().any(|flag| flag == "nokaslr") {
-        vm.expect("KASLR: off (nokaslr)")?;
-    } else {
-        vm.expect("KASLR: kernel moved by 0x")?;
     }
     vm.expect("Layout: kernel at 0x")?;
     vm.expect("Paging: W^X holds")?;
