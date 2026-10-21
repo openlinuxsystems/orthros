@@ -426,13 +426,13 @@ KVM it takes about a tenth of a second.
   derivation and revocation) can come when Phase 6's processes show the
   need; the TLA+ model would have to grow with it.
 - The lock is a mutex (since Phase 4), and the store allocates under it
-  with `MaySleep`. Retyping frames from a memory object zeroes them with
-  the lock held, so a large retype (up to 1,024 frames of up to 2^20
-  pages each) holds up every other change to the store while it runs;
-  lookups do not wait, since they take no lock. The fix, before Phase 6's
-  init retypes large amounts of memory, is to zero frames in steps with
-  the lock let go in between, as revokes do, keeping each new frame's
-  capability out of reach until its pages are zero.
+  with `MaySleep`. Retyping frames records them under the lock but zeroes
+  them after it is let go (since Phase 6): the retyping thread zeroes
+  them in steps of 64 pages before its call returns, a thread that maps
+  one sooner zeroes the rest itself, and deleting a frame part-way waits
+  only for the step under way, so its memory never goes back while it is
+  being written. So a large retype (up to 1,024 frames of up to 2^20
+  pages each) no longer holds up other changes to the store.
 - Only memory, frames and DMA buffers are retyped. Kernel objects that
   need memory of their own (threads, page tables) will be retyped from
   memory objects too, so that a process pays for its kernel objects.

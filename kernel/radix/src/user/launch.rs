@@ -330,7 +330,7 @@ impl Group {
         put(Startup::OFFSET_SLOTS, &kinds);
         let free = ((1u64 << MEMORY_ORDER) - used) * PAGE_SIZE;
         put(Startup::OFFSET_MEMORY_BYTES, &free.to_le_bytes());
-        Arch::write_frames(page.phys(), &bytes);
+        page.write(0, &bytes).map_err(|err| failed("writing its start-up page", err))?;
 
         set_ready(&user);
         Ok(index)
@@ -410,8 +410,7 @@ fn load(image: &radix_elf::Image, bytes: &[u8], code: &FrameRef, space: &SpaceRe
     let mut page = 0;
     for segment in image.segments() {
         let file = &bytes[segment.offset as usize..][..segment.filesz as usize];
-        let start = code.phys() + page * PAGE_SIZE + segment.vaddr % PAGE_SIZE;
-        Arch::write_frames(start, file);
+        code.write(page * PAGE_SIZE + segment.vaddr % PAGE_SIZE, file)?;
         let access = match segment.access {
             Access::Read => UserAccess::Read,
             Access::ReadWrite => UserAccess::ReadWrite,

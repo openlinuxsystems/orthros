@@ -360,6 +360,46 @@ fn memory() {
         InvalidArgument,
         "querying the kernel's half"
     );
+    reused_memory();
+}
+
+/// Memory that goes back to its memory object and is retyped again comes
+/// back zero, past the kernel's first step of zeroing too: a frame of 128
+/// pages, written all over, deleted, and made again from the same memory.
+fn reused_memory() {
+    const ORDER: u32 = 7;
+    const PAGES: u64 = 1 << ORDER;
+    let made = ok!(
+        memory::retype(&SYS, SLOT_MEMORY, ObjectKind::Memory, ORDER, BIG, 1),
+        "retype a memory object"
+    );
+    if made.is_none() {
+        return;
+    }
+    for round in 0..2 {
+        if ok!(memory::retype(&SYS, BIG, ObjectKind::Frame, ORDER, FRAME, 1), "retype").is_none()
+            || ok!(syscalls::map(&SYS, SLOT_SPACE, FRAME, MAP_AT, RW, 0, PAGES), "map").is_none()
+        {
+            break;
+        }
+        let mut dirty = 0;
+        for page in 0..PAGES {
+            let words = (MAP_AT + page * 4096) as *mut u64;
+            for at in [0, 511] {
+                // SAFETY: the frame is mapped read-write at MAP_AT, PAGES
+                // pages long.
+                let word = unsafe { words.add(at) };
+                // SAFETY: as above.
+                dirty += u64::from(unsafe { word.read_volatile() } != 0);
+                // SAFETY: as above.
+                unsafe { word.write_volatile(0x5a5a_5a5a_5a5a_5a5a) };
+            }
+        }
+        check!(dirty == 0, "round {round}: {dirty} words of a new frame are not zero");
+        ok!(syscalls::unmap(&SYS, SLOT_SPACE, MAP_AT, PAGES), "unmap");
+        ok!(capability::delete(&SYS, FRAME), "delete the frame");
+    }
+    ok!(capability::delete(&SYS, BIG), "delete the memory object");
 }
 
 fn derivation() {
