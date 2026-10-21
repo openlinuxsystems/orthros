@@ -1,9 +1,9 @@
 # Creating USB install media
 
 `./ob image` builds `out/orthros-<version>-x86_64.img`. Written to a USB
-stick, it boots on UEFI and legacy BIOS computers. In Phase 1 the stick
-holds GRUB and the kernel, which reports the machine's memory, processors
-and firmware tables on the screen: useful for checking that a machine
+stick, it boots on UEFI and legacy BIOS computers. Until the installer the
+stick holds GRUB and the kernel, which reports the machine's memory,
+processors and firmware tables on the screen: useful for checking that a machine
 boots OrthrOS and what the kernel finds there. The installer arrives in
 Phase 14.
 

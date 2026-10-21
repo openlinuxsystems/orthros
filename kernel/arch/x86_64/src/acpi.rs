@@ -7,7 +7,9 @@
 
 use core::fmt;
 
-use radix_acpi::{Fadt, Hpet, Madt, MadtEntry, Memory, Rsdp, Sdt, Tables, mcfg_entries};
+use radix_acpi::{
+    Fadt, Hpet, Madt, MadtEntry, Memory, Rsdp, Sdt, Slit, Srat, SratEntry, Tables, mcfg_entries,
+};
 use radix_sync::Once;
 
 use crate::memory;
@@ -50,6 +52,10 @@ pub struct Acpi {
     pub hpet: Option<Hpet>,
     /// The MCFG table.
     pub mcfg: Option<Sdt<'static>>,
+    /// The SRAT: which NUMA domain each CPU and range of memory is in.
+    pub srat: Option<Srat<'static>>,
+    /// The SLIT: distances between NUMA domains.
+    pub slit: Option<Slit<'static>>,
 }
 
 static ACPI: Once<Acpi> = Once::new();
@@ -96,7 +102,9 @@ pub fn init(copy: Option<&[u8]>) -> Result<&'static Acpi, &'static str> {
     let fadt = tables.find(&memory, b"FACP").and_then(|sdt| Fadt::parse(&sdt).ok());
     let hpet = tables.find(&memory, b"HPET").and_then(|sdt| Hpet::parse(&sdt).ok());
     let mcfg = tables.find(&memory, b"MCFG");
-    let acpi = Acpi { rsdp_address, rsdp, tables, madt, fadt, hpet, mcfg };
+    let srat = tables.find(&memory, b"SRAT").and_then(|sdt| Srat::parse(&sdt).ok());
+    let slit = tables.find(&memory, b"SLIT").and_then(|sdt| Slit::parse(&sdt).ok());
+    let acpi = Acpi { rsdp_address, rsdp, tables, madt, fadt, hpet, mcfg, srat, slit };
     Ok(ACPI.call_once(|| acpi))
 }
 
@@ -185,6 +193,29 @@ pub fn describe(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
     }
     if let Some(hpet) = &acpi.hpet {
         line(format_args!("ACPI: HPET {} at {:#x}", hpet.number, hpet.address));
+    }
+    if let Some(srat) = &acpi.srat {
+        let (mut cpus, mut ranges, mut domains) = (0, 0, 0u64);
+        for entry in srat.entries() {
+            let domain = match entry {
+                SratEntry::Cpu { domain, .. } => {
+                    cpus += 1;
+                    domain
+                }
+                SratEntry::Memory { domain, .. } => {
+                    ranges += 1;
+                    domain
+                }
+            };
+            domains |= 1u64.checked_shl(domain).unwrap_or(0);
+        }
+        line(format_args!(
+            "ACPI: SRAT: {cpus} CPUs and {ranges} memory ranges in {} proximity domains",
+            domains.count_ones()
+        ));
+    }
+    if let Some(slit) = &acpi.slit {
+        line(format_args!("ACPI: SLIT: distances between {} localities", slit.localities));
     }
     if let Some(mcfg) = &acpi.mcfg {
         for window in mcfg_entries(mcfg) {

@@ -7,7 +7,9 @@
  * 1 MiB with equal virtual and physical addresses. Everything else is
  * linked in the top 2 GiB of the address space (the higher half, at
  * KERNEL_OFFSET + physical address), where the boot trampoline maps it
- * before calling into Rust.
+ * before calling into Rust. With KASLR the trampoline then moves it up by
+ * a random multiple of 2 MiB (src/kaslr.rs), patching the addresses that
+ * `ob build` lists in .krelocs (the kernel is linked with --emit-relocs).
  *
  * The section boundaries below are read by the kernel to map the image with
  * the right permissions: text executable, rodata and the symbol table
@@ -67,6 +69,11 @@ SECTIONS
     .ksyms : AT(ADDR(.ksyms) - KERNEL_OFFSET) ALIGN(16)
     {
         KEEP(*(.ksyms))
+    }
+    /* The KASLR relocation table, filled the same way. */
+    .krelocs : AT(ADDR(.krelocs) - KERNEL_OFFSET) ALIGN(16)
+    {
+        KEEP(*(.krelocs))
     }
     . = ALIGN(4K);
     __kernel_rodata_end = .;

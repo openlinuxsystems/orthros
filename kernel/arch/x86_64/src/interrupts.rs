@@ -310,6 +310,14 @@ fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
     if error & (1 << 3) != 0 {
         let _ = write!(out, " (reserved bit set in a page-table entry)");
     }
+    // A protection fault on a lower-half (user) page in kernel mode.
+    if error & 1 != 0 && error & (1 << 2) == 0 && address < crate::space::USER_END {
+        if error & (1 << 4) != 0 && crate::paging::SMEP.load(Ordering::Relaxed) {
+            let _ = write!(out, "; SMEP stopped the kernel from running code in a user page");
+        } else if crate::paging::SMAP.load(Ordering::Relaxed) {
+            let _ = write!(out, "; SMAP stopped the kernel from touching a user page");
+        }
+    }
     if let Some(stacks) = percpu::current().stacks.get()
         && stacks.in_guard(address as usize)
     {
@@ -329,7 +337,7 @@ extern "C" fn radix_trap_dispatch(frame: &mut TrapFrame) {
             crate::apic::end_of_interrupt();
         }
         VECTOR_TLB => {
-            crate::paging::catch_up_tlb();
+            crate::paging::serve_shootdown();
             crate::apic::end_of_interrupt();
         }
         VECTOR_APIC_ERROR => {
@@ -390,12 +398,21 @@ fn fatal_exception(frame: &TrapFrame) -> ! {
         10..=13 if frame.error != 0 => {
             let _ = write!(detail, " (selector error code {:#x})", frame.error);
         }
-        8 => {
-            let _ = write!(
-                detail,
-                ", probably after a kernel stack overflow or a fault in a fault handler"
-            );
-        }
+        8 => match cpu.stacks.get() {
+            Some(stacks) if stacks.in_guard(cpu::cr2() as usize) => {
+                let _ = write!(
+                    detail,
+                    " after touching {:#x}, a stack guard page: the kernel stack overflowed",
+                    cpu::cr2()
+                );
+            }
+            _ => {
+                let _ = write!(
+                    detail,
+                    ", probably after a kernel stack overflow or a fault in a fault handler"
+                );
+            }
+        },
         _ => {}
     }
     if frame.cs & 3 != 0 {

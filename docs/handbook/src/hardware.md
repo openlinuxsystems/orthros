@@ -16,7 +16,7 @@ parts list for its service tag.
 | Component | Part | OrthrOS support |
 | --- | --- | --- |
 | Processor | Intel Core i7-8550U (4 cores, 8 threads) | All 8 threads started from Phase 1; early microcode with the optional firmware |
-| Memory | 8 GB DDR4-2400, one module | Phase 2 |
+| Memory | 8 GB DDR4-2400, one module | Managed by the frame allocator and kernel heap from Phase 2 (one NUMA node) |
 | Graphics | Intel UHD Graphics 620 | Firmware framebuffer console from Phase 1; no native GPU driver in 1.0 |
 | SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; OrthrOS installs here |
 | Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/data` |
@@ -47,7 +47,8 @@ Press **F12** at the Dell logo for the one-time boot menu.
 ### Smoke test
 
 The latest USB image is booted on the laptop at the end of Phases 1, 2, 6
-and 9, and of every later phase. For Phase 1:
+and 9, and of every later phase. Each run does these steps, with the
+checks of every phase so far:
 
 1. Build the image, with the laptop's microcode if the build host has
    Intel's (the `intel-microcode` package on Debian and Ubuntu), and write
@@ -67,16 +68,31 @@ and 9, and of every later phase. For Phase 1:
    - the `Time:` line (TSC rate, and which timer measured it);
    - the `microcode:` line: updated, or already current;
    - the `APIC:` line: x2APIC mode is expected on this processor.
+
+   From Phase 2, also:
+   - the `Random:` line: seeded from RDSEED, RDRAND and timing jitter
+     (the i7-8550U has both instructions), with nothing failing its
+     health test;
+   - the `KASLR:` line: the kernel moved, and a different `Layout:` line
+     on each boot;
+   - `Paging: W^X holds`, and `SMEP on, SMAP on, PCID on; direct map in
+     1 GiB pages` (the i7-8550U has all four);
+   - the frame allocator's zones: one node, a `DMA32` zone below 4 GiB and
+     a `Normal` zone above, about 7.8 GB free in all.
 3. If the firmware offers legacy boot, repeat in BIOS mode.
 4. Panic test: boot again with the `selftest=page-fault` flag. At the GRUB
    menu, press an arrow key to stop the countdown, press **e**, add
    ` selftest=page-fault` to the end of the `multiboot2` line, and press
    **Ctrl-X**. (Or build a second image with
    `./ob image --cmdline selftest=page-fault`.) The screen must show the
-   panic report with a backtrace naming `radix::selftest::page_fault`.
+   panic report with a backtrace naming `radix::selftest::fault`.
 5. Press a key to restart, press **F12** again and boot the stick, since
    the restart otherwise boots the internal disk. This boot must start by
    showing the panic of the previous one from the crash log.
+6. From Phase 2: boot with `selftest=mm-stress` the same way. With 8
+   CPUs it allocates and frees about 50 million objects, and the log must
+   end with `selftest mm-stress: passed` before `Boot complete.` Note the
+   time it reports.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.
@@ -84,6 +100,7 @@ issue for anything that fails, with the photos.
 | Phase | Date | Commit | UEFI | Legacy BIOS | Notes |
 | --- | --- | --- | --- | --- | --- |
 | 1 | not yet run | | | | |
+| 2 | not yet run | | | | |
 
 ### Help wanted: the Ethernet chip
 

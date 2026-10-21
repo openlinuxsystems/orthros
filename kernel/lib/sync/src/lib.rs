@@ -78,6 +78,12 @@ impl<T: ?Sized> SpinLock<T> {
     /// Spins until the lock is free, then takes it. In panic mode, takes it
     /// after a bounded wait even if it is still held.
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
+        // Kani proofs are single-threaded: a lock that is already held can
+        // only mean a deadlock, which the proof should report rather than
+        // unwind the spin loop to its bound.
+        if cfg!(kani) {
+            return self.try_lock().expect("deadlock: the lock is already held");
+        }
         let mut spins: u32 = 0;
         loop {
             if let Some(guard) = self.try_lock() {

@@ -18,6 +18,11 @@ Only the trusted computing base may use `unsafe`. Today that is:
 - the architecture crate `kernel/arch/x86_64`, for everything that touches
   hardware: port and MSR access, page tables, descriptor tables, assembly;
 - `kernel/lib/sync`, whose locks hand out references guarded by atomics;
+- the memory manager `kernel/mm`, which is `#![deny(unsafe_code)]` and
+  allows it only in the modules that touch the memory it manages (its raw
+  accesses, the slab free-object pattern, the heap's `free`, its
+  `Platform` trait and the stress test); its allocators' logic is safe
+  code, checked on the host and by Kani;
 - the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
   allows it at two marked sites: exporting its entry point, and putting the
   locks into panic mode.

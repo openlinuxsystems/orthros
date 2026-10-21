@@ -181,6 +181,15 @@ pub fn gdb_script(kernel: &Path) -> String {
     )
 }
 
+/// `cmdline` with `flag` added, unless it is there already.
+fn with_flag(cmdline: &str, flag: &str) -> String {
+    if cmdline.split_ascii_whitespace().any(|word| word == flag) {
+        cmdline.to_string()
+    } else {
+        format!("{} {flag}", cmdline.trim()).trim_start().to_string()
+    }
+}
+
 /// `ob run`.
 pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let firmware = match (args.flag("--bios"), args.flag("--uefi")) {
@@ -195,8 +204,14 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     };
     let headless = args.flag("--headless") || !has_display();
     let gdb = args.flag("--gdb");
-    let overrides =
+    let mut overrides =
         Overrides { cmdline: args.value("--cmdline")?, microcode: args.value("--microcode")? };
+    if gdb {
+        // GDB's symbols are at the link address, so the kernel must stay
+        // there.
+        let cmdline = overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline);
+        overrides.cmdline = Some(with_flag(cmdline, "nokaslr"));
+    }
     let profile = args.profile(&ctx.config)?;
     let extra = args.take_passthrough();
     args.finish()?;
@@ -237,6 +252,7 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         eprintln!("    QEMU waits for GDB on localhost:{GDB_PORT}. In another terminal run:");
         eprintln!("        gdb -x {}", ctx.display(&script));
         eprintln!("    GDB stops at radix_arch_entry, the kernel's first Rust function.");
+        eprintln!("    KASLR is off (nokaslr), so the kernel runs where GDB's symbols say.");
     }
     eprintln!("    Serial console follows. Press Ctrl-A then X to quit QEMU.");
     if headless {
@@ -308,6 +324,13 @@ mod tests {
         assert!(args.contains("-qmp unix:/tmp/qmp.sock,server=on,wait=off"));
         assert!(args.contains("-cpu qemu64,vendor=GenuineIntel"));
         assert!(args.contains(&format!("-gdb tcp:localhost:{GDB_PORT} -S")));
+    }
+
+    #[test]
+    fn gdb_turns_kaslr_off_once() {
+        assert_eq!(with_flag("", "nokaslr"), "nokaslr");
+        assert_eq!(with_flag("loglevel=debug", "nokaslr"), "loglevel=debug nokaslr");
+        assert_eq!(with_flag("nokaslr kdb", "nokaslr"), "nokaslr kdb");
     }
 
     #[test]

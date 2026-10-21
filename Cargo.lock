@@ -74,6 +74,10 @@ name = "radix-microcode"
 version = "0.0.1"
 
 [[package]]
+name = "radix-relocs"
+version = "0.0.1"
+
+[[package]]
 name = "radix-sync"
 version = "0.0.1"
 
@@ -199,6 +203,7 @@ dependencies = [
  "radix-kdb",
  "radix-ksyms",
  "radix-microcode",
+ "radix-relocs",
  "rustc-demangle",
  "serde",
  "toml",

@@ -140,7 +140,8 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		write the GDB script _out/qemu/radix.gdb_, which loads the
 		kernel's symbols, connects and stops at the kernel's first Rust
 		function. Run *gdb -x out/qemu/radix.gdb* in another terminal.
-		See *radix-debug*(7).
+		The kernel is booted with *nokaslr* added to its flags, so it
+		runs at the addresses GDB's symbols name. See *radix-debug*(7).
 
 	*--cmdline* _flags_, *--microcode* _path_
 		As for *image*.
@@ -149,7 +150,7 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+*test* [*unit* | *boot* | *kani*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -161,12 +162,21 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	Give *unit* or *boot* to run only that part. Without KVM the boot
 	tests take a few minutes.
 
+	*kani* checks the Kani proof harnesses of the kernel's memory manager
+	instead (see *Verification* in _docs/design/memory.md_). Each takes
+	from seconds to several minutes, so plain *ob test* leaves them out,
+	and CI runs them in a job of their own. It needs the Kani release
+	that *ob doctor* names, installed with *cargo install --locked
+	kani-verifier --version* _version_ and then *cargo kani setup*.
+
 	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
 		Boot with 4 CPUs under each firmware and medium, and check the
-		memory map, the CPU list, timer interrupts on every CPU and an
-		IPI to each. *uefi-cdrom* boots with *nox2apic* and checks for
-		xAPIC mode; with KVM, which always offers x2APIC, the other three
-		check for x2APIC mode.
+		memory map, the KASLR layout, that W^X holds, the frame
+		allocator's zones, the CPU list, timer interrupts on every CPU
+		and an IPI to each. *uefi-cdrom* boots with *nox2apic* and checks
+		for xAPIC mode; with KVM, which always offers x2APIC, the other
+		three check for x2APIC mode. *bios-cdrom* boots with *nokaslr*
+		and *nopcid*.
 
 	*screen*
 		Boot under UEFI and read the boot log back from the framebuffer.
@@ -184,6 +194,27 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	*kdb*
 		Boot with *kdb* and *selftest=breakpoint*, and run every *kdb*
 		command at the breakpoint and at the end of boot.
+
+	*mm-stress*
+		Boot 4 CPUs on 2 NUMA nodes (QEMU's *-numa* options), check that
+		the kernel reads both nodes from the SRAT and SLIT, and run
+		*selftest=mm-stress*: tens of millions of heap allocations and
+		frees, and areas mapped and unmapped, on every CPU at once, with
+		nothing leaked or damaged at the end.
+
+	*tlb*
+		Boot 4 CPUs with *selftest=tlb*, which checks that every CPU
+		sees a changed kernel mapping after a TLB shootdown and that
+		address spaces switched on several CPUs keep their own mappings.
+
+	*stack-overflow*
+		Boot with *selftest=stack-overflow* and check that the panic
+		report names the stack guard page.
+
+	*smep*, *smap*
+		Boot with *selftest=smep* or *selftest=smap* and check that the
+		page fault is reported as SMEP or SMAP stopping the kernel from
+		running, or reading, a user page.
 
 	*microcode*
 		Boot an image with a generated microcode file on an emulated

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::process::{self, step};
-use crate::{COMMANDS, Context, Ctx, Error, Result, config};
+use crate::{COMMANDS, Context, Ctx, Error, Result, config, test};
 
 /// A man page source such as `docs/man/orthros.toml.5.scd`.
 #[derive(Debug, PartialEq, Eq)]
@@ -137,14 +137,16 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
     }
 }
 
-/// Every `ob` command, orthros.toml key, kernel flag, kdb command and
-/// self-test must be documented, in bold, in its man page.
+/// Every `ob` command, boot test, orthros.toml key, kernel flag, kdb
+/// command and self-test must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
+    let boot_tests: Vec<&str> = test::CASES.iter().map(|case| case.name).collect();
     let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
     let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
-    let lists: [(&str, &str, &[&str]); 5] = [
+    let lists: [(&str, &str, &[&str]); 6] = [
         ("docs/man/ob.1.scd", "command", &ob_commands),
+        ("docs/man/ob.1.scd", "boot test", &boot_tests),
         ("docs/man/orthros.toml.5.scd", "key", config::KEYS),
         ("docs/man/orthros-boot.7.scd", "kernel flag", &kernel_flags),
         ("docs/man/radix-debug.7.scd", "kdb command", &kdb_commands),

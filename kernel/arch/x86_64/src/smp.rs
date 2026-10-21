@@ -76,10 +76,12 @@ ap_trampoline_64:
     .balign 8
     .global ap_gdt
 ap_gdt:
+    /* The accessed bits are set, so loading a segment never writes here:
+       the page is mapped read-only once paging is on. */
     .quad 0
-    .quad 0x00CF9A000000FFFF    /* 0x08: 32-bit code */
-    .quad 0x00CF92000000FFFF    /* 0x10: data */
-    .quad 0x00AF9A000000FFFF    /* 0x18: 64-bit code */
+    .quad 0x00CF9B000000FFFF    /* 0x08: 32-bit code */
+    .quad 0x00CF93000000FFFF    /* 0x10: data */
+    .quad 0x00AF9B000000FFFF    /* 0x18: 64-bit code */
 ap_gdt_end:
     .balign 8
     .global ap_gdt_ptr

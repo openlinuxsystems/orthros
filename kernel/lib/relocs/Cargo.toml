@@ -1,0 +1,11 @@
+[package]
+name = "radix-relocs"
+description = "The relocation table format that lets the Radix kernel move itself at boot (KASLR)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

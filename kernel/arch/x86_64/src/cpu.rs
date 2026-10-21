@@ -128,6 +128,82 @@ pub mod feature {
     pub fn hypervisor() -> bool {
         cpuid(1, 0).ecx & (1 << 31) != 0
     }
+
+    /// Structured extended features (CPUID 7, subleaf 0), EBX.
+    fn leaf7_ebx() -> u32 {
+        if super::max_leaf() >= 7 { cpuid(7, 0).ebx } else { 0 }
+    }
+
+    /// Process-context identifiers (CPUID 1, ECX bit 17).
+    pub fn pcid() -> bool {
+        cpuid(1, 0).ecx & (1 << 17) != 0
+    }
+
+    /// Supervisor-mode execution prevention (CPUID 7, EBX bit 7).
+    pub fn smep() -> bool {
+        leaf7_ebx() & (1 << 7) != 0
+    }
+
+    /// Supervisor-mode access prevention (CPUID 7, EBX bit 20).
+    pub fn smap() -> bool {
+        leaf7_ebx() & (1 << 20) != 0
+    }
+
+    /// The `rdrand` instruction (CPUID 1, ECX bit 30).
+    pub fn rdrand() -> bool {
+        cpuid(1, 0).ecx & (1 << 30) != 0
+    }
+
+    /// The `rdseed` instruction (CPUID 7, EBX bit 18).
+    pub fn rdseed() -> bool {
+        leaf7_ebx() & (1 << 18) != 0
+    }
+
+    /// 1 GiB pages (CPUID 0x80000001, EDX bit 26).
+    pub fn huge_pages() -> bool {
+        super::max_extended_leaf() >= 0x8000_0001 && cpuid(0x8000_0001, 0).edx & (1 << 26) != 0
+    }
+}
+
+/// A 64-bit word from the CPU's entropy source (`rdseed`), if it has one
+/// and it answers within a few tries. RDSEED fails when the source has
+/// not refilled yet, so it is retried with a pause.
+pub fn rdseed() -> Option<u64> {
+    if !feature::rdseed() {
+        return None;
+    }
+    for _ in 0..64 {
+        let (value, ok): (u64, u8);
+        // SAFETY: CPUID says the instruction exists; it only returns a
+        // number and sets the carry flag.
+        unsafe {
+            asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+        };
+        if ok != 0 {
+            return Some(value);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+/// A 64-bit word from the CPU's random number generator (`rdrand`), if it
+/// has one and it answers within ten tries, as Intel recommends.
+pub fn rdrand() -> Option<u64> {
+    if !feature::rdrand() {
+        return None;
+    }
+    for _ in 0..10 {
+        let (value, ok): (u64, u8);
+        // SAFETY: as for `rdseed`.
+        unsafe {
+            asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+        };
+        if ok != 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Model-specific register numbers.
@@ -246,10 +322,41 @@ pub fn invlpg(addr: usize) {
     unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
 }
 
-/// Flushes all non-global TLB entries by reloading CR3.
+/// Flushes the non-global TLB entries of the current address space by
+/// reloading CR3.
 pub fn flush_tlb() {
-    // SAFETY: reloading the current CR3 keeps the same mappings.
+    // SAFETY: reloading the current CR3 keeps the same mappings; bit 63
+    // (keep the TLB) is never set in the value CR3 reads back.
     unsafe { write_cr3(cr3()) };
+}
+
+/// Flushes every TLB entry, global ones and those of every PCID, by
+/// toggling CR4.PGE (or reloading CR3 when global pages are off).
+pub fn flush_tlb_all() {
+    let cr4 = cr4();
+    if cr4 & (1 << 7) != 0 {
+        // SAFETY: clearing and setting PGE again changes no mapping; the
+        // SDM specifies that either write flushes the whole TLB.
+        unsafe {
+            write_cr4(cr4 & !(1 << 7));
+            write_cr4(cr4);
+        }
+    } else {
+        flush_tlb();
+    }
+}
+
+/// Lets the kernel touch user pages despite SMAP (sets RFLAGS.AC). Only
+/// for code that means to, such as the SMAP self-test.
+pub fn stac() {
+    // SAFETY: setting AC only relaxes SMAP checks for this CPU.
+    unsafe { asm!("stac", options(nomem, nostack)) };
+}
+
+/// Undoes [`stac`].
+pub fn clac() {
+    // SAFETY: clearing AC only restores SMAP checks.
+    unsafe { asm!("clac", options(nomem, nostack)) };
 }
 
 /// Reads the time-stamp counter.

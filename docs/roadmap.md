@@ -218,9 +218,11 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 - Buddy frame allocator with zones and per-NUMA-node pools; page-table manager with PCID and TLB shootdown IPIs.
 - Kernel heap: slab caches with per-CPU magazines, explicit allocation context, graceful failure everywhere.
-- KASLR (relocatable kernel), guard pages, W^X, SMEP and SMAP.
+- KASLR (relocatable kernel), guard pages, W^X, SMEP and SMAP. A kernel CSPRNG (ChaCha20) seeded from RDSEED and RDRAND plus timing jitter, never trusting a single source, ready before KASLR picks its offset.
 - Kani proof harnesses for allocator invariants; host-side property tests with proptest.
 - **Exit:** a multi-CPU stress test allocates and frees tens of millions of objects with no leaks or corruption, and the Kani harnesses pass in CI.
+
+**Status:** implemented. The `mm-stress` boot test has 4 CPUs on 2 emulated NUMA nodes allocate and free about 24 million heap objects and map and unmap 800 areas, then checks that no frame leaked and no object was damaged; seven Kani harnesses run in their own CI job (`./ob test kani`), and proptest properties run with the unit tests. Design notes: `docs/design/memory.md`. Changes from this plan: the kernel builds `alloc` without its infallible APIs, so the compiler enforces the explicit allocation context (ADR 0017); KASLR uses a relocation table that `ob build` writes into the image after linking, and also randomizes the direct map and the mapping window (ADR 0018). The CSPRNG, added to this phase on 2026-10-20, hashes all three sources with BLAKE2s and reports their health tests in the boot log (ADR 0022, `docs/design/random.md`). Decisions made in this phase: ADRs 0017 to 0020 and 0022.
 
 ### Phase 3: Capability core (M)
 
@@ -239,7 +241,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 ### Phase 5: System calls and IPC (L)
 
-- `SYSCALL` entry and exit with safe user-copy primitives; the dozen core syscalls.
+- `SYSCALL` entry and exit with safe user-copy primitives; the dozen core syscalls; a random capability (`getrandom`) that every process receives at start, backed by the kernel CSPRNG, for ASLR, TLS, SSH keys, password salts and signing.
 - `ridlc` IDL compiler generating Rust, C and man(2) output.
 - Endpoints with a register-only fast path, notifications, shared-memory channels, `radix-ring`.
 - Benchmark harness for syscall and IPC round trips, recording Linux numbers on the same machine as a baseline.

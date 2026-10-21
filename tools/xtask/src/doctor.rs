@@ -9,6 +9,28 @@ use crate::{Ctx, Error, Result, kernel, qemu};
 /// mdBook release the handbook is built and tested with.
 pub const MDBOOK_VERSION: &str = "0.4.52";
 
+/// Kani release the proof harnesses are checked with (ADR 0019).
+pub const KANI_VERSION: &str = "0.68.0";
+
+/// The installed Kani's version, if any.
+pub fn kani_version() -> Option<String> {
+    process::find_program("cargo-kani")?;
+    let out = Command::new("cargo-kani").arg("--version").output().ok()?;
+    // "Kani Rust Verifier 0.68.0 (cargo plugin)"
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+/// How to install the pinned Kani.
+pub fn kani_install() -> String {
+    format!(
+        "install it with `cargo install --locked kani-verifier --version {KANI_VERSION}`, then \
+         run `cargo kani setup`"
+    )
+}
+
 /// Package names on the distributions `ob doctor` knows.
 #[derive(Clone, Copy)]
 struct Packages {
@@ -125,7 +147,7 @@ fn pinned_toolchain(ctx: &Ctx) -> Option<String> {
 }
 
 /// The pinned toolchain's sysroot.
-fn sysroot(ctx: &Ctx) -> Option<PathBuf> {
+pub fn sysroot(ctx: &Ctx) -> Option<PathBuf> {
     // Ask the pinned toolchain directly; `rustup run` never installs anything.
     let channel = pinned_toolchain(ctx)?;
     let out = Command::new("rustup")
@@ -304,6 +326,20 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             "GDB"
         ),
     }
+    match kani_version() {
+        Some(version) if version == KANI_VERSION => {
+            println!("  ok       {:<15} {version}", "Kani");
+        }
+        Some(version) => println!(
+            "  note     {:<15} {version} installed; `./ob test kani` needs {KANI_VERSION}",
+            "Kani"
+        ),
+        None => println!(
+            "  note     {:<15} not installed; only `./ob test kani` needs it (cargo install \
+             --locked kani-verifier --version {KANI_VERSION})",
+            "Kani"
+        ),
+    }
     if qemu::kvm_available() {
         println!("  ok       {:<15} /dev/kvm is usable", "KVM");
     } else {
@@ -405,5 +441,12 @@ mod tests {
         assert!(containerfile.contains(&pin), "tools/container/Containerfile pins another mdBook");
         let ci = include_str!("../../../.github/workflows/ci.yml").replace(": ", "=");
         assert!(ci.contains(&pin), ".github/workflows/ci.yml pins another mdBook");
+    }
+
+    #[test]
+    fn ci_pins_the_same_kani() {
+        let ci = include_str!("../../../.github/workflows/ci.yml").replace(": ", "=");
+        let pin = format!("KANI_VERSION={KANI_VERSION}");
+        assert!(ci.contains(&pin), ".github/workflows/ci.yml pins another Kani");
     }
 }

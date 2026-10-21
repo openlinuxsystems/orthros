@@ -7,13 +7,16 @@ logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 1** of its [roadmap](docs/roadmap.md): the Radix
-kernel boots through GRUB under UEFI and BIOS, starts every CPU, reads the
-ACPI tables, takes timer interrupts and reports all of it on the serial
-port and the screen. A panic fills the screen with a symbolized backtrace
-and is kept in memory for the next boot; a serial kernel debugger, GDB
-through QEMU and trace points help with the rest. There is nothing to
-install yet.
+OrthrOS is at **Phase 2** of its [roadmap](docs/roadmap.md): the Radix
+kernel boots through GRUB under UEFI and BIOS at a random address, chosen
+by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
+memory with a frame allocator per NUMA node and a slab heap with per-CPU
+caches (with Kani proofs of their invariants), protects itself with W^X,
+guard pages, SMEP and SMAP, starts every CPU, reads the ACPI tables, takes
+timer interrupts and reports all of it on the serial port and the screen.
+A panic fills the screen with a symbolized backtrace and is kept in memory
+for the next boot; a serial kernel debugger, GDB through QEMU and trace
+points help with the rest. There is nothing to install yet.
 
 ## Quick start
 
@@ -44,7 +47,7 @@ the pinned build container with Podman or Docker:
 | `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
 | `./ob image` | Build the hybrid USB/disk image `out/orthros-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
-| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb` and the screen |
+| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen and the memory manager (`kani` for the Kani proofs instead) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |
 | `./ob clean` | Remove build output |

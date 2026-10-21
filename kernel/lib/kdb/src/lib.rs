@@ -46,7 +46,13 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "mem",
         args: "",
-        summary: "show the memory map and the kernel's reservations",
+        summary: "show the memory map, the kernel's reservations, the frame allocator's zones and \
+                  the address-space layout",
+    },
+    CommandInfo {
+        name: "heap",
+        args: "",
+        summary: "show the kernel heap's totals and its size classes",
     },
     CommandInfo { name: "acpi", args: "", summary: "list the ACPI tables" },
     CommandInfo { name: "bt", args: "", summary: "show the backtrace where kdb was entered" },
@@ -108,6 +114,8 @@ pub enum Command<'a> {
     Cpus,
     /// `mem`.
     Memory,
+    /// `heap`.
+    Heap,
     /// `acpi`.
     Acpi,
     /// `bt`.
@@ -224,6 +232,7 @@ pub fn parse(line: &str) -> Result<Command<'_>, ParseError<'_>> {
         ("trace", [Some("off"), None, _]) => Command::Trace(TraceAction::Off),
         ("cpus", [None, ..]) => Command::Cpus,
         ("mem", [None, ..]) => Command::Memory,
+        ("heap", [None, ..]) => Command::Heap,
         ("acpi", [None, ..]) => Command::Acpi,
         ("bt", [None, ..]) => Command::Backtrace,
         ("regs", [None, ..]) => Command::Registers,

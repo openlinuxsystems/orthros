@@ -1,9 +1,11 @@
-//! The boot report: memory map, reservations and CPUs.
+//! The boot report: memory map, reservations, frame allocator zones, the
+//! heap and CPUs.
 
 use core::fmt;
 
 use radix_hal::{BootParams, CpuInfo, MemoryKind, MemoryRegion, Reservation, Smp};
 use radix_klog::info;
+use radix_mm::{FRAMES, HEAP, PAGE_SIZE};
 
 use crate::Arch;
 
@@ -70,6 +72,64 @@ pub fn memory(params: &BootParams) {
     write_memory_map(params.memory_map, &mut |args| info!("{args}"));
     info!("Memory: reserved by the kernel:");
     write_reservations(params.reservations, &mut |args| info!("{args}"));
+}
+
+/// Writes the frame allocator's zones, one line each.
+pub fn write_zones(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
+    FRAMES.zone_stats(|zone| {
+        line(format_args!(
+            "  node {} {:<6} {:#014x}-{:#014x} {:>9} managed, {:>9} free, {:>7} reserve",
+            zone.node,
+            zone.kind.name(),
+            zone.span.0,
+            zone.span.1.saturating_sub(1),
+            Size(zone.managed * PAGE_SIZE as u64).to_string_buf().as_str(),
+            Size(zone.free * PAGE_SIZE as u64).to_string_buf().as_str(),
+            Size(zone.reserve * PAGE_SIZE as u64).to_string_buf().as_str(),
+        ));
+    });
+}
+
+/// Writes the heap's totals and its size classes, one line each.
+pub fn write_heap(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
+    let stats = HEAP.stats();
+    line(format_args!(
+        "Heap: {} objects in use ({}), {} cached in magazines, {} of slabs, {} large blocks \
+         ({}); {} failed requests, {} damaged objects found",
+        stats.objects,
+        Size(stats.object_bytes).to_string_buf().as_str(),
+        stats.cached,
+        Size(stats.slab_bytes).to_string_buf().as_str(),
+        stats.large_blocks,
+        Size(stats.large_bytes).to_string_buf().as_str(),
+        stats.failures,
+        stats.corruptions
+    ));
+    HEAP.class_stats(|class| {
+        line(format_args!(
+            "  {:>5} bytes: {:>5} slabs ({:>9}), {:>7} in use, {:>6} cached{}",
+            class.size,
+            class.slabs,
+            Size(class.slab_bytes).to_string_buf().as_str(),
+            class.in_use,
+            class.cached,
+            if class.quarantined > 0 { ", has quarantined slabs" } else { "" }
+        ));
+    });
+}
+
+/// Logs the frame allocator's zones once it has started.
+pub fn frames() {
+    if !FRAMES.is_running() {
+        info!("Memory: the frame allocator did not start");
+        return;
+    }
+    info!(
+        "Memory: {} free of {} in the frame allocator's zones:",
+        Size(FRAMES.free_pages() * PAGE_SIZE as u64),
+        Size(FRAMES.managed_pages() * PAGE_SIZE as u64)
+    );
+    write_zones(&mut |args| info!("{args}"));
 }
 
 /// Writes one line per CPU.

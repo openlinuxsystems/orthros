@@ -144,6 +144,7 @@ fn run(session: &Session, command: Command<'_>) {
         Command::Trace(action) => show_trace(action),
         Command::Cpus => show_cpus(),
         Command::Memory => show_memory(),
+        Command::Heap => report::write_heap(&mut |args| say(args)),
         Command::Acpi => Arch::describe_firmware(&mut |args| say(args)),
         Command::Backtrace => {
             let backtrace = match (&session.panic_backtrace, &session.fault) {
@@ -254,6 +255,9 @@ fn show_memory() {
     report::write_memory_map(boot.memory_map, &mut |args| say(args));
     say(format_args!("Reserved by the kernel:"));
     report::write_reservations(boot.reservations, &mut |args| say(args));
+    say(format_args!("Frame allocator zones:"));
+    report::write_zones(&mut |args| say(args));
+    Arch::describe(&mut |args| say(args));
 }
 
 fn examine(address: u64, len: usize) {
@@ -278,11 +282,11 @@ fn symbol(query: SymbolQuery<'_>) {
         return;
     };
     match query {
-        SymbolQuery::Address(address) => match table.lookup(address) {
+        SymbolQuery::Address(address) => match table.lookup(symbols::link_address(address)) {
             Some(location) => say(format_args!("{address:#x} is {location}")),
             None => say(format_args!("{address:#x} is not in any kernel function")),
         },
-        SymbolQuery::Name(name) => match table.address_of(name) {
+        SymbolQuery::Name(name) => match table.address_of(name).map(symbols::run_address) {
             Some(address) => say(format_args!("{name} is at {address:#x}")),
             None => say(format_args!("no function named `{name}`")),
         },
