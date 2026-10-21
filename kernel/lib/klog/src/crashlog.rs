@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The crash log: console output kept in RAM for the next boot.
 //!
 //! A machine without a serial port, such as the reference laptop, loses a

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # Host-side workspace: the `ob` build tool. The kernel is a separate
 # workspace in kernel/ because it builds for a bare-metal target.
 [workspace]

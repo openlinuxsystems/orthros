@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! NUMA topology: the System Resource Affinity Table (`SRAT`) and the
 //! System Locality Information Table (`SLIT`).
 //!

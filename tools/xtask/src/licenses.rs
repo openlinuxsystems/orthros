@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The license manifest and notices that every image carries.
 //!
 //! `ob image` lists every component that ends up in the image, checks each
@@ -508,13 +511,16 @@ fn license_ids(packages: &[Package]) -> Result<BTreeSet<String>> {
 }
 
 /// Where the text of a license or exception is kept in the repository.
-/// OrthrOS's own licenses are the files at the top; every other text is
-/// copied verbatim from the SPDX license list into image/licenses.
+/// Licenses that files in the repository use are in LICENSES/, as the REUSE
+/// specification asks; every other text is in image/licenses as
+/// `LICENSE-<id>.txt`. Each text is kept once, verbatim from the SPDX
+/// license list (ADR 0026).
 pub fn text_source(root: &Path, id: &str) -> PathBuf {
-    match id {
-        "Apache-2.0" => root.join("LICENSE-APACHE"),
-        "MIT" => root.join("LICENSE-MIT"),
-        _ => root.join("image/licenses").join(format!("{id}.txt")),
+    let reuse = root.join("LICENSES").join(format!("{id}.txt"));
+    if reuse.is_file() {
+        reuse
+    } else {
+        root.join("image/licenses").join(format!("LICENSE-{id}.txt"))
     }
 }
 
@@ -840,6 +846,23 @@ mod tests {
         for id in ids {
             let path = text_source(&root(), &id);
             assert!(path.is_file(), "{} is missing", path.display());
+        }
+    }
+
+    /// No license text is kept twice, and the copies at the top of the
+    /// repository, which GitHub and crate tools look for, match LICENSES/.
+    #[test]
+    fn license_texts_are_kept_once() {
+        let root = root();
+        for entry in std::fs::read_dir(root.join("LICENSES")).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let id = name.strip_suffix(".txt").unwrap();
+            let other = root.join("image/licenses").join(format!("LICENSE-{id}.txt"));
+            assert!(!other.exists(), "{} duplicates LICENSES/{name}", other.display());
+        }
+        for (top, id) in [("LICENSE-APACHE", "Apache-2.0"), ("LICENSE-MIT", "MIT")] {
+            let top = std::fs::read(root.join(top)).unwrap();
+            assert!(top == std::fs::read(text_source(&root, id)).unwrap(), "{id} differs");
         }
     }
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Virtual address ranges: the kernel's mapping window.
 //!
 //! Kernel stacks, device memory (MMIO) and other areas that need virtually

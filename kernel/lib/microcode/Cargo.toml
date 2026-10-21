@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "radix-microcode"
 description = "Parser and matcher for Intel CPU microcode updates, for early loading by the Radix kernel"

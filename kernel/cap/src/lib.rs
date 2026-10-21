@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The Radix capability core.
 //!
 //! Every resource in Radix is reached through a capability (spec 2.3), and

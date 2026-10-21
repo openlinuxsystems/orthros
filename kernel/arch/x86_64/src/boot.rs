@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Multiboot2 header and the 32-bit to 64-bit boot trampoline.
 //!
 //! GRUB enters `_start` in 32-bit protected mode with paging disabled, the

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0025. Contributions are signed off under the DCO, with a code of conduct, governance and security policy
 
 - Status: Accepted

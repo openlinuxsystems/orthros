@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `ob test`: host unit tests and QEMU boot tests.
 //!
 //! Each boot test is a [`Case`]: a machine (firmware, media, CPUs, memory),

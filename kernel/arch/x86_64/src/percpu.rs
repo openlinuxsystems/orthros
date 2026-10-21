@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Per-CPU data, the global descriptor table and the task-state segment.
 //!
 //! Every CPU has a [`PerCpu`] in a static array; its GS base register points

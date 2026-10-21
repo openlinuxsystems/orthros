@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Building the hybrid boot image with grub-mkrescue.
 //!
 //! The image carries GRUB for both legacy BIOS (El Torito plus an MBR boot

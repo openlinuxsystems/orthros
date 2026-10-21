@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Capabilities
 
 This note describes the Radix capability core as of Phase 3: the objects

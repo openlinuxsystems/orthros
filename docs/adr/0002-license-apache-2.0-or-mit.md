@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0002. License OrthrOS under Apache-2.0 OR MIT
 
 - Status: Accepted

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # cargo-deny policy for the build tool workspace (tools/xtask, `./ob`). CI
 # runs it on Cargo.toml; the kernel workspace has its own, stricter policy in
 # kernel/deny.toml. Dependencies must be under permissive licenses compatible

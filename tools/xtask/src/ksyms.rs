@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Writing the kernel symbol table into the linked kernel.
 //!
 //! The kernel turns code addresses into function names for its backtraces

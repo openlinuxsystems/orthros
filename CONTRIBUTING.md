@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Contributing to OrthrOS
 
 Thank you for helping. This guide covers how to build and test, what a
@@ -24,7 +29,8 @@ If your host lacks tools, `./ob doctor` names them, or use
 A change merges when:
 
 - CI is green: lint, unit tests, boot tests, docs check, Kani proofs, TLA+
-  models, cargo-deny, the container build and the DCO sign-off check.
+  models, cargo-deny, the REUSE check, the container build and the DCO
+  sign-off check.
 - Every commit is signed off (see "Developer Certificate of Origin" below).
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
   hardware lives in a crate under `kernel/lib/` that compiles for the host
@@ -135,3 +141,46 @@ kernel crates must use the permissive licenses in `kernel/deny.toml`, and
 embeds third-party files under another license declares it in its
 `license` field and lists the notice files under
 `[package.metadata.orthros] notices`, as `kernel/lib/fbcon` does.
+
+## Copyright and license headers
+
+The repository follows the [REUSE specification](https://reuse.software/):
+every file says who holds its copyright and under which license it is
+available, and CI checks this with `reuse lint`. A new file starts with
+these two lines, in the file's comment syntax:
+
+<!-- REUSE-IgnoreStart -->
+```rust
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+```
+<!-- REUSE-IgnoreEnd -->
+
+Markdown files use an HTML comment, and man pages put the lines as `;`
+comments right after the title line. A file that cannot hold a comment, such
+as JSON, a font or a generated lock file, is listed in
+[`REUSE.toml`](REUSE.toml) instead. The text of every license a file uses is
+in `LICENSES/`; other license texts that images need are in
+`image/licenses/` (see [ADR 0026](docs/adr/0026-reuse-and-credits.md)). To
+check locally, run `reuse lint` (for example with `pipx run reuse lint`).
+The REUSE tool is GPL-3.0-or-later; it only checks the repository and is
+never part of an image.
+
+## Third-party code and credits
+
+OrthrOS gives credit to every project it uses, beyond what the licenses
+require. When you add code, data or files from another project:
+
+- Check that its license is allowed where it goes (see above).
+- Keep its original copyright and license headers unchanged. Add an
+  `SPDX-FileCopyrightText` line for the original authors, and one for
+  OrthrOS if you change the file, and an `SPDX-License-Identifier` for its
+  license; put its license text in `LICENSES/` if it is not there yet.
+- Name the source in the commit message: the project, the exact version or
+  commit, and the URL, for example
+  `Copied from Spleen 2.1.0, https://github.com/fcambus/spleen`.
+- Add the project to [CREDITS.md](CREDITS.md), with what we use it for and
+  its license. Do the same for a new crate, build tool or CI action, and
+  for a project whose design you follow without using its code; also name
+  that project in the design note or ADR that draws on it.
+- Send fixes we make to upstream code back upstream.

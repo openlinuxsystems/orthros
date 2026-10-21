@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! PC Screen Font (PSF) parsing, versions 1 and 2.
 //!
 //! PSF is the bitmap font format of the Linux console. Each glyph is a

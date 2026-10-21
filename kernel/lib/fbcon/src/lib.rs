@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Framebuffer text console for the Radix kernel.
 //!
 //! A machine without a serial port, such as the reference laptop, shows the

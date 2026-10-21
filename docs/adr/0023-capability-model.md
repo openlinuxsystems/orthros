@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0023. Capabilities carry copy and transfer rights, seal with endpoints, and revoke in marked steps
 
 - Status: Accepted

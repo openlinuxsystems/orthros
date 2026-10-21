@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Passes the architecture's linker script to the linker for bare-metal
 //! builds, and asks it to keep the relocations, from which `ob build`
 //! makes the table that moves the kernel at boot (KASLR, `radix-relocs`).

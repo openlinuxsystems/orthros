@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Intel CPU microcode updates: parsing, checking and matching.
 //!
 //! Processors ship with microcode that later updates fix; firmware applies

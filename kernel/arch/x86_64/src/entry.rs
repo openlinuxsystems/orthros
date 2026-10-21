@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The boot CPU's path from the trampoline to the kernel's main function.
 //!
 //! The order matters. GS base comes first, because the kernel log asks

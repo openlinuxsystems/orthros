@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Address-space identifiers: x86-64 PCIDs.
 //!
 //! With PCIDs, the TLB tags each entry with the identifier of the address

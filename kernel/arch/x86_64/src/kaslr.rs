@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Kernel address space layout randomization (KASLR).
 //!
 //! At every boot the kernel picks a random place for three things, so an

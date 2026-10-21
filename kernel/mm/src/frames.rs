@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The frame allocator: buddy zones per NUMA node.
 //!
 //! Physical memory is split into zones by node and by what devices can

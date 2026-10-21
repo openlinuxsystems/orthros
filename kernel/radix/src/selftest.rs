@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Self-tests chosen with `selftest=name`, which `ob test` boots to check
 //! the paths that only run when something goes wrong.
 //!

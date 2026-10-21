@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The heap stress test.
 //!
 //! Each worker (a CPU in the kernel's `mm-stress` self-test, a thread in

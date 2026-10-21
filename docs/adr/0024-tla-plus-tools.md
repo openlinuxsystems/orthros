@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0024. The TLA+ models are checked with TLC from the pinned TLA+ tools 1.7.4
 
 - Status: Accepted

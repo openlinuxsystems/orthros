@@ -1,5 +1,8 @@
 ob(1) "OrthrOS" "OrthrOS Manual"
 
+; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # NAME
 
 ob - build, run and test OrthrOS
@@ -325,10 +328,18 @@ _kernel/deny.toml_
 	The license allow-list of the kernel, used by *ob image* and by
 	cargo-deny in CI.
 
+_LICENSES/_
+	The texts of the licenses that files in the repository use, as the
+	REUSE specification asks. *ob image* copies the ones the image needs.
+
 _image/licenses/_
-	License texts, copied verbatim from the SPDX license list, that
-	*ob image* puts into the image beside _LICENSE-APACHE_ and
-	_LICENSE-MIT_.
+	The other license texts that *ob image* puts into the image, named
+	_LICENSE-<id>.txt_. Each text is kept in only one of the two
+	directories, verbatim from the SPDX license list.
+
+_REUSE.toml_
+	Copyright and license information for files that cannot carry an SPDX
+	header; see *CONTRIBUTING.md*.
 
 _out/orthros-VERSION-x86_64.img_
 	The boot image built by *ob image*.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Writing the kernel relocation table into the linked kernel (KASLR).
 //!
 //! The kernel is linked at a fixed address with `--emit-relocs`, so its

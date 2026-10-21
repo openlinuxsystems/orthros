@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Capabilities and the checks that guard them.
 //!
 //! A [`Capability`] is a value: the object it designates, the rights it

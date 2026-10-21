@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The panic handler and the panic report.
 //!
 //! A panic stops the other CPUs, then writes a report to every console: the

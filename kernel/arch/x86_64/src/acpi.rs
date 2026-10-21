@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Finding and reading the ACPI tables.
 //!
 //! GRUB passes a copy of the RSDP in the boot information; on a BIOS machine

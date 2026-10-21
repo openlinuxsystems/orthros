@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Address spaces: page tables for the lower half of the address space,
 //! tagged with PCIDs.
 //!

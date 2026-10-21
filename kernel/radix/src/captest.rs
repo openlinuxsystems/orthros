@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The `caps` self-test: the capability core's test suite, run in the
 //! kernel on its own store and heap.
 //!

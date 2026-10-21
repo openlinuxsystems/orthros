@@ -1,5 +1,8 @@
 radix-capabilities(7) "OrthrOS" "OrthrOS Manual"
 
+; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # NAME
 
 radix-capabilities - capabilities, rights, badges, sealing, delegation
