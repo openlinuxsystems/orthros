@@ -4,9 +4,10 @@
 //! this crate is where capabilities live:
 //!
 //! - [`Rights`], the twelve rights a capability can grant, and
-//!   [`ObjectKind`], the eleven kinds of object it can designate: memory,
+//!   [`ObjectKind`], the twelve kinds of object it can designate: memory,
 //!   frames, address spaces, threads, processes, endpoints, notifications,
-//!   interrupt lines, I/O ports, device registers and DMA buffers;
+//!   interrupt lines, I/O ports, device registers, DMA buffers and resource
+//!   domains;
 //! - [`Capability`], a value holding an object, its rights, a badge and
 //!   the key it is sealed with, together with the checks that decide what
 //!   it may be used for and what may be made from it;

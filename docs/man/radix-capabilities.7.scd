@@ -68,6 +68,11 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	A block of memory a device may read or write. Rights: *read*,
 	*write*.
 
+*domain*
+	A resource domain: a CPU weight and a memory limit shared by the
+	threads in it, and its class for the out-of-memory policy (see
+	*radix-scheduling*(7)). Rights: *read*, *control*.
+
 # RIGHTS
 
 The twelve rights are *read*, *write*, *execute*, *send*, *receive*,
@@ -207,7 +212,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 11 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by

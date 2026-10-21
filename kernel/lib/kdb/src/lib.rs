@@ -59,6 +59,26 @@ pub const COMMANDS: &[CommandInfo] = &[
         args: "",
         summary: "count the capability spaces, capabilities and kernel objects, by kind",
     },
+    CommandInfo {
+        name: "threads",
+        args: "",
+        summary: "list the threads with their state, policy, CPU time and resource domain",
+    },
+    CommandInfo {
+        name: "sched",
+        args: "",
+        summary: "show every CPU's run queue, and the wait table's and RCU's counters",
+    },
+    CommandInfo {
+        name: "domains",
+        args: "",
+        summary: "list the resource domains with their CPU weight, memory use and limit",
+    },
+    CommandInfo {
+        name: "locks",
+        args: "",
+        summary: "show the lock checker's lock classes and the locks each CPU holds",
+    },
     CommandInfo { name: "acpi", args: "", summary: "list the ACPI tables" },
     CommandInfo { name: "bt", args: "", summary: "show the backtrace where kdb was entered" },
     CommandInfo {
@@ -123,6 +143,14 @@ pub enum Command<'a> {
     Heap,
     /// `caps`.
     Capabilities,
+    /// `threads`.
+    Threads,
+    /// `sched`.
+    Scheduler,
+    /// `domains`.
+    Domains,
+    /// `locks`.
+    Locks,
     /// `acpi`.
     Acpi,
     /// `bt`.
@@ -241,6 +269,10 @@ pub fn parse(line: &str) -> Result<Command<'_>, ParseError<'_>> {
         ("mem", [None, ..]) => Command::Memory,
         ("heap", [None, ..]) => Command::Heap,
         ("caps", [None, ..]) => Command::Capabilities,
+        ("threads", [None, ..]) => Command::Threads,
+        ("sched", [None, ..]) => Command::Scheduler,
+        ("domains", [None, ..]) => Command::Domains,
+        ("locks", [None, ..]) => Command::Locks,
         ("acpi", [None, ..]) => Command::Acpi,
         ("bt", [None, ..]) => Command::Backtrace,
         ("regs", [None, ..]) => Command::Registers,
@@ -469,6 +501,15 @@ mod tests {
             Ok(Command::Symbol(SymbolQuery::Name("radix::kernel_main")))
         );
         assert_eq!(parse("c"), Ok(Command::Continue));
+    }
+
+    #[test]
+    fn parses_scheduler_commands() {
+        assert_eq!(parse("threads"), Ok(Command::Threads));
+        assert_eq!(parse(" sched "), Ok(Command::Scheduler));
+        assert_eq!(parse("domains"), Ok(Command::Domains));
+        assert_eq!(parse("locks"), Ok(Command::Locks));
+        assert_eq!(parse("threads all").unwrap_err().to_string(), "usage: threads (no arguments)");
     }
 
     #[test]

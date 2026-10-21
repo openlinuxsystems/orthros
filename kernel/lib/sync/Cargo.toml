@@ -1,6 +1,6 @@
 [package]
 name = "radix-sync"
-description = "Spin locks and one-time initialisation for the Radix kernel"
+description = "Locks, one-time initialisation and RCU for the Radix kernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -8,7 +8,8 @@
 //! about ([`serial`], [`vga`]) and early microcode ([`microcode`]). Later,
 //! through [`Platform::init`], it reads the ACPI tables ([`acpi`]), sets up
 //! the interrupt controllers ([`apic`]) and timers ([`time`]), and it starts
-//! and stops the other CPUs ([`smp`]).
+//! and stops the other CPUs ([`smp`]). Kernel threads' contexts and the
+//! context switch are in [`thread`], their FPU and vector state in [`fpu`].
 //!
 //! It is part of the trusted computing base, so it may use `unsafe`, and
 //! every `unsafe` block states why it is sound. docs/design/boot.md and
@@ -21,6 +22,7 @@ mod apic;
 mod boot;
 mod cpu;
 mod entry;
+mod fpu;
 mod interrupts;
 mod io;
 mod kaslr;
@@ -33,17 +35,22 @@ mod random;
 mod serial;
 mod smp;
 mod space;
+mod thread;
 mod time;
 mod vga;
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::ops::Range;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, Fault, FaultTest, InterruptController, Ipi, PageTable,
-    Platform, Smp, Timer,
+    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
+    PageTable, Platform, Smp, Threads, Timer,
 };
+
+/// Whether idle CPUs wait with MONITOR and MWAIT.
+static IDLE_MWAIT: AtomicBool = AtomicBool::new(false);
 
 /// The x86-64 implementation of the HAL traits.
 #[derive(Clone, Copy, Debug)]
@@ -58,6 +65,24 @@ impl Cpu for Arch {
 
     fn wait_for_interrupt() {
         cpu::halt();
+    }
+
+    fn idle_until(wake: &AtomicU32) {
+        if IDLE_MWAIT.load(Ordering::Relaxed) {
+            cpu::monitor(wake as *const AtomicU32 as usize);
+            // A write between the check and MWAIT still ends the wait: the
+            // monitor is armed already.
+            if wake.load(Ordering::Acquire) == 0 {
+                cpu::sti_mwait();
+            }
+        } else if wake.load(Ordering::Acquire) == 0 {
+            cpu::sti_hlt();
+        }
+        cpu::disable_interrupts();
+    }
+
+    fn idle_mode() -> (bool, &'static str) {
+        if IDLE_MWAIT.load(Ordering::Relaxed) { (true, "MWAIT") } else { (false, "HLT") }
     }
 
     fn interrupts_enabled() -> bool {
@@ -77,17 +102,18 @@ impl Cpu for Arch {
     }
 
     fn backtrace(frame_pointer: usize, out: &mut [usize]) -> usize {
-        let Some(stacks) = percpu::current().stacks.get() else { return 0 };
+        let cpu = percpu::current();
         let mut fp = frame_pointer;
         let mut count = 0;
         while count < out.len() {
-            let Some(stack) = stacks.containing(fp) else { break };
+            let Some(stack) = cpu.stack_containing(fp) else { break };
             if !fp.is_multiple_of(8) || fp + 16 > stack.end {
                 break;
             }
             // SAFETY: `fp` and `fp + 8` lie inside one of this CPU's kernel
-            // stacks (checked above), which are mapped for the kernel's
-            // whole life; volatile reads of them have no side effects.
+            // stacks, which are mapped for the kernel's whole life, or the
+            // running thread's, which stays mapped while it runs (checked
+            // above); volatile reads of them have no side effects.
             let (next, return_address) = unsafe {
                 (
                     core::ptr::read_volatile(fp as *const usize),
@@ -103,7 +129,7 @@ impl Cpu for Arch {
             count += 1;
             // Frames move up the stack; a frame record pointing down or
             // sideways on the same stack ends the walk.
-            if next <= fp && stacks.containing(next) == Some(stack.clone()) {
+            if next <= fp && cpu.stack_containing(next) == Some(stack.clone()) {
                 break;
             }
             fp = next;
@@ -136,6 +162,26 @@ impl CpuLocal for Arch {
     fn current_cpu() -> usize {
         percpu::current_index()
     }
+
+    fn preempt_disable() {
+        percpu::preempt_disable();
+    }
+
+    fn preempt_enable() -> u32 {
+        percpu::preempt_enable()
+    }
+
+    fn preempt_count() -> u32 {
+        percpu::preempt_count()
+    }
+
+    fn set_preempt_count(count: u32) {
+        percpu::set_preempt_count(count);
+    }
+
+    fn interrupt_depth() -> u32 {
+        percpu::interrupt_depth()
+    }
 }
 
 impl Smp for Arch {
@@ -166,6 +212,10 @@ impl Smp for Arch {
     fn stop_other_cpus() -> usize {
         smp::stop_others()
     }
+
+    fn cpu_place(index: usize) -> Option<CpuPlace> {
+        smp::place(index)
+    }
 }
 
 impl InterruptController for Arch {
@@ -175,11 +225,11 @@ impl InterruptController for Arch {
 
     fn send_ipi(cpu: usize, ipi: Ipi) {
         let Some(target) = percpu::get(cpu) else { return };
-        match ipi {
-            Ipi::Ping => {
-                apic::send_fixed(target.apic_id.load(Ordering::Relaxed), interrupts::VECTOR_PING)
-            }
-        }
+        let vector = match ipi {
+            Ipi::Ping => interrupts::VECTOR_PING,
+            Ipi::Reschedule => interrupts::VECTOR_RESCHEDULE,
+        };
+        apic::send_fixed(target.apic_id.load(Ordering::Relaxed), vector);
     }
 
     fn pings_received(cpu: usize) -> u64 {
@@ -202,6 +252,58 @@ impl Timer for Arch {
 
     fn delay_us(us: u64) {
         time::delay_us(us);
+    }
+
+    fn set_timer_handler(handler: fn(bool)) {
+        time::set_handler(handler);
+    }
+
+    fn set_deadline(deadline_ns: u64) {
+        time::set_deadline(deadline_ns);
+    }
+
+    fn timer_mode() -> &'static str {
+        time::mode_name()
+    }
+}
+
+impl Threads for Arch {
+    type Context = thread::Context;
+
+    fn adopt_current() -> Option<Self::Context> {
+        thread::Context::adopt_current()
+    }
+
+    fn new_context(entry: fn(usize) -> !, arg: usize, stack_pages: usize) -> Option<Self::Context> {
+        thread::Context::new(entry, arg, stack_pages)
+    }
+
+    fn switch(from: &Self::Context, to: &Self::Context) {
+        thread::Context::switch(from, to);
+    }
+
+    fn is_running(context: &Self::Context) -> bool {
+        context.is_running()
+    }
+
+    fn stack(context: &Self::Context) -> Range<usize> {
+        context.stack()
+    }
+
+    fn set_preempt_handler(handler: fn()) {
+        interrupts::set_preempt_handler(handler);
+    }
+
+    fn extended_state() -> &'static str {
+        fpu::describe()
+    }
+
+    fn self_test_fill_vectors(seed: u64) {
+        fpu::fill(seed);
+    }
+
+    fn self_test_vectors_hold(seed: u64) -> bool {
+        fpu::holds(seed)
     }
 }
 
@@ -382,6 +484,9 @@ impl Platform for Arch {
             );
         }
         time::start_tick();
+        // Under a hypervisor MWAIT is usually not passed through, and when
+        // it is emulated it may spin; HLT lets the host run something else.
+        IDLE_MWAIT.store(cpu::feature::monitor() && !cpu::feature::hypervisor(), Ordering::Relaxed);
     }
 
     fn current_fault() -> Option<Fault> {

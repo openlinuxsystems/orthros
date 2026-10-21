@@ -46,6 +46,8 @@ const BASE_ENABLE: u64 = 1 << 11;
 const MASKED: u32 = 1 << 16;
 /// ICR delivery status (xAPIC only): the previous IPI is still pending.
 const ICR_PENDING: u32 = 1 << 12;
+/// LVT timer mode: TSC deadline.
+const TIMER_TSC_DEADLINE: u32 = 2 << 17;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -231,7 +233,10 @@ fn send(dest: u32, low: u32) {
             unsafe { cpu::wrmsr(0x830, (u64::from(dest) << 32) | u64::from(low)) };
         }
         Some(Mode::XApic(_)) => {
-            let _guard = ICR_LOCK.lock();
+            // Interrupt handlers send IPIs too (a tick waking a thread on
+            // another CPU), so the lock is never held with interrupts on.
+            let were_enabled = cpu::disable_interrupts();
+            let guard = ICR_LOCK.lock();
             while read(reg::ICR_LOW) & ICR_PENDING != 0 {
                 cpu::pause();
             }
@@ -239,6 +244,10 @@ fn send(dest: u32, low: u32) {
             write(reg::ICR_LOW, low);
             while read(reg::ICR_LOW) & ICR_PENDING != 0 {
                 cpu::pause();
+            }
+            drop(guard);
+            if were_enabled {
+                cpu::enable_interrupts();
             }
         }
         None => {}
@@ -285,11 +294,32 @@ pub fn timer_current() -> u32 {
     read(reg::TIMER_CURRENT)
 }
 
-/// Starts the periodic timer: divide-by-16, `initial` counts per period.
-pub fn timer_start_periodic(vector: u8, initial: u32) {
+/// Sets the timer up for one-shot interrupts on `vector`, divide-by-16,
+/// armed by [`timer_arm`].
+pub fn timer_start_one_shot(vector: u8) {
     write(reg::TIMER_DIVIDE, 0x3);
-    write(reg::LVT_TIMER, u32::from(vector) | (1 << 17));
-    write(reg::TIMER_INITIAL, initial);
+    write(reg::LVT_TIMER, u32::from(vector));
+}
+
+/// Arms the one-shot timer to fire after `count` input clocks (divided).
+pub fn timer_arm(count: u32) {
+    write(reg::TIMER_INITIAL, count.max(1));
+}
+
+/// Sets the timer up for TSC-deadline interrupts on `vector`, armed by
+/// [`timer_arm_deadline`].
+pub fn timer_start_tsc_deadline(vector: u8) {
+    write(reg::LVT_TIMER, u32::from(vector) | TIMER_TSC_DEADLINE);
+    // The SDM asks for a fence between switching the LVT to TSC-deadline
+    // mode and the first write of the deadline MSR.
+    cpu::mfence();
+}
+
+/// Arms the TSC-deadline timer to fire when the TSC reaches `tsc`.
+pub fn timer_arm_deadline(tsc: u64) {
+    // SAFETY: the caller set TSC-deadline mode (which CPUID says exists);
+    // the MSR only schedules a timer interrupt.
+    unsafe { cpu::wrmsr(msr::TSC_DEADLINE, tsc.max(1)) };
 }
 
 /// Stops the timer.

@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use radix_hal::{CpuInfo, MAX_CPUS};
 use radix_sync::Once;
 
+use crate::fpu;
 use crate::memory::{self, PAGE};
 use crate::paging;
 use crate::percpu::{self, IST_STACKS};
@@ -207,6 +208,57 @@ pub fn discover_cpus() {
     let _ = CPUS.set(table);
 }
 
+/// How APIC IDs split into hardware thread, core and package: the number
+/// of low bits for the thread, and for thread and core together.
+static SHIFTS: Once<(u32, u32)> = Once::new();
+
+/// Reads the APIC ID layout from CPUID: leaf 0xB where the CPU has it,
+/// else leaf 1's count of logical CPUs per package.
+fn topology_shifts() -> (u32, u32) {
+    if cpu::max_leaf() >= 0xb {
+        let (mut thread, mut package) = (0, None);
+        for level in 0..8 {
+            let leaf = cpu::cpuid(0xb, level);
+            let kind = (leaf.ecx >> 8) & 0xff;
+            if kind == 0 {
+                break;
+            }
+            let shift = leaf.eax & 0x1f;
+            if kind == 1 {
+                thread = shift;
+            } else {
+                package = Some(shift);
+            }
+        }
+        if let Some(package) = package {
+            return (thread, package.max(thread));
+        }
+    }
+    let leaf = cpu::cpuid(1, 0);
+    if leaf.edx & (1 << 28) != 0 {
+        let logical = ((leaf.ebx >> 16) & 0xff).max(1);
+        return (0, logical.next_power_of_two().trailing_zeros());
+    }
+    (0, 0)
+}
+
+/// The package, core, thread and node of CPU `index`.
+pub fn place(index: usize) -> Option<radix_hal::CpuPlace> {
+    if index >= count() {
+        return None;
+    }
+    let cpu = percpu::get(index)?;
+    let apic_id = cpu.apic_id.load(Ordering::Relaxed);
+    let &(thread, package) = SHIFTS.call_once(topology_shifts);
+    let mask = |bits: u32| if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 };
+    Some(radix_hal::CpuPlace {
+        package: if package >= 32 { 0 } else { apic_id >> package },
+        core: (apic_id >> thread) & mask(package - thread),
+        thread: apic_id & mask(thread),
+        node: cpu.node.load(Ordering::Relaxed),
+    })
+}
+
 /// Number of CPUs the firmware lists as usable.
 pub fn count() -> usize {
     CPUS.get().map_or(1, |table| table.count)
@@ -343,6 +395,7 @@ extern "C" fn ap_entry(index: usize) -> ! {
     // included: in x2APIC mode its registers do not exist until then.
     apic::enable();
     paging::init_cpu();
+    fpu::init_cpu();
     microcode::load(false);
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
     apic::init_cpu(madt, acpi_uid(index));

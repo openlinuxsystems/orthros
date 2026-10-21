@@ -92,9 +92,25 @@ kdb> sym 0xffffffffa030dedf
 
 `help` lists the commands: the log, trace points, CPUs, the memory map
 and the memory manager's state (`mem`, `heap`), the capability store
-(`caps`), ACPI tables, backtraces, registers, memory dumps and symbol
-lookups.
+(`caps`), the threads, run queues, resource domains and lock checker
+(`threads`, `sched`, `domains`, `locks`), ACPI tables, backtraces,
+registers, memory dumps and symbol lookups.
 `kdb` also stops at breakpoints and after a panic. `continue` leaves it.
+
+## The lock checker
+
+Boot with `lockdep` to have the kernel check every lock it takes (debug
+builds, `./ob run --debug`, do this by default):
+
+```sh
+./ob run --cmdline lockdep
+```
+
+A deadlock waiting to happen, such as two locks taken in opposite orders
+by different code, is then reported the first time both orders have run,
+as error lines starting `Lock checker:` that name where each lock was
+created and taken. `radix-debug(7)` explains the reports; `kdb`'s `locks`
+command shows what the checker has seen.
 
 ## Debugging with GDB
 

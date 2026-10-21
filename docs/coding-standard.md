@@ -24,16 +24,17 @@ Only the trusted computing base may use `unsafe`. Today that is:
   `Platform` trait and the stress test); its allocators' logic is safe
   code, checked on the host and by Kani;
 - the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
-  allows it at two marked sites: exporting its entry point, and putting the
-  locks into panic mode.
+  allows it at three marked sites: exporting its entry point, putting the
+  locks into panic mode, and calling the context switch.
 
 Every other crate, including the kernel libraries under `kernel/lib/`, the
 HAL, the AArch64 stubs and everything under `tools/`, starts with
 `#![forbid(unsafe_code)]` or inherits `unsafe_code = "forbid"` from its
 workspace. In particular every parser of data from outside the kernel
 (boot information, ACPI tables, microcode, fonts, the symbol table, the
-crash log) is safe code, and so is the capability core `kernel/cap`, which
-decides who may use what.
+crash log) is safe code, and so are the capability core `kernel/cap`, which
+decides who may use what, the scheduling policy `kernel/sched`, and the
+lock checker `kernel/lib/lockdep`.
 
 Inside the trusted computing base:
 

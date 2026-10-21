@@ -86,6 +86,7 @@ fn init_boot_cpu() {
     percpu::load_descriptors(ranges.map(|range| range.end));
     interrupts::init();
     interrupts::load();
+    crate::fpu::init_boot_cpu();
 }
 
 /// Turns the boot information address into a byte slice, through the

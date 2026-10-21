@@ -5,11 +5,13 @@
 //! brings up the consoles (serial, the framebuffer, and the crash log kept
 //! in RAM across a restart), reports the memory map and the address-space
 //! layout, starts the interrupt controllers, timers and the frame
-//! allocator (Phase 2, `radix-mm`), sets up the capability store (Phase 3,
-//! `radix-cap`, in `caps`), starts every other CPU and checks that each one
-//! takes timer interrupts and answers IPIs. A panic stops the
-//! other CPUs and shows a full-screen report with a symbolized backtrace;
-//! `kdb` debugs the kernel over the serial port.
+//! allocator (Phase 2, `radix-mm`), turns itself into the first thread and
+//! starts the scheduler (Phase 4, `sched`, with resource domains in
+//! `domains` and the out-of-memory policy in `oom`), sets up the capability
+//! store (Phase 3, `radix-cap`, in `caps`), starts every other CPU and
+//! checks that each one takes timer interrupts and answers IPIs. A panic
+//! stops the other CPUs and shows a full-screen report with a symbolized
+//! backtrace; `kdb` debugs the kernel over the serial port.
 //!
 //! Memory comes from `radix_mm::HEAP` with explicit flags: the global
 //! allocator refuses every request (ADR 0017), and `alloc` is built without
@@ -22,13 +24,16 @@
 //! crate stays portable). The command-line flags are listed in
 //! `radix_hal::cmdline::FLAGS` and documented in orthros-boot(7).
 //!
-//! The crate needs `unsafe` in two places only, each allowed where it is
-//! used: exporting the entry point under a fixed name, and switching the
-//! locks into panic mode.
+//! The crate needs `unsafe` in three places only, each allowed where it is
+//! used: exporting the entry point under a fixed name, switching the locks
+//! into panic mode, and the context switch (`sched::switch`), which reaches
+//! the two threads' contexts through pointers the scheduler keeps valid.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
+#![feature(allocator_ext)]
+#![feature(vec_push_within_capacity)]
 
 extern crate alloc;
 
@@ -36,9 +41,14 @@ mod caps;
 mod captest;
 mod console;
 mod crashlog;
+mod domains;
 mod kdb;
+mod oom;
 mod panic;
+mod percpu;
 mod report;
+mod sched;
+mod schedtest;
 mod selftest;
 mod symbols;
 mod work;
@@ -70,6 +80,8 @@ pub struct Settings {
     pub panic_restart: Option<u64>,
     /// `selftest=name`.
     pub selftest: Option<&'static str>,
+    /// `lockdep=on|off`, or the bare `lockdep` for on.
+    pub lockdep: Option<bool>,
 }
 
 static SETTINGS: Once<Settings> = Once::new();
@@ -81,6 +93,7 @@ pub fn settings() -> Settings {
         kdb: false,
         panic_restart: None,
         selftest: None,
+        lockdep: None,
     })
 }
 
@@ -113,6 +126,12 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
         kdb: flags.has("kdb"),
         panic_restart: flags.value("panic").and_then(|v| v.parse().ok()),
         selftest: flags.value("selftest"),
+        lockdep: match flags.value("lockdep") {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ if flags.has("lockdep") => Some(true),
+            _ => None,
+        },
     };
     let _ = SETTINGS.set(settings);
     if let Some(level) = flags.value("loglevel") {
@@ -129,7 +148,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 3)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (OrthrOS Phase 4)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -143,14 +162,24 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     console::report();
     crashlog::report_previous();
 
+    if let Some(value) = flags.value("lockdep")
+        && !matches!(value, "on" | "off")
+    {
+        warn!("Unknown lockdep setting `{value}`; it is on or off");
+    }
+
     HEAP.set_corruption_handler(on_heap_corruption);
     Arch::init(&params);
     report::frames();
-    caps::init();
+    domains::init();
+    sched::init(settings.lockdep);
+    oom::init();
     if settings.kdb {
         Arch::set_breakpoint_handler(kdb::on_breakpoint);
     }
     Arch::enable_interrupts();
+    // With interrupts on: the store's lock is a mutex.
+    caps::init();
 
     let online = if flags.has("nosmp") {
         info!("SMP: disabled by the nosmp flag");
@@ -159,6 +188,9 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
         Arch::start_secondary_cpus(ap_main)
     };
     report::cpus(online);
+    sched::start_threads();
+    work::start();
+    oom::start();
     check_timers(online);
     check_ipis(online);
 
@@ -173,31 +205,20 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     if settings.qemu_exit {
         Arch::emulator_exit(true);
     }
-    idle()
+    // Boot is done; the other threads carry on.
+    sched::exit()
 }
 
-/// Where the other CPUs start, with interrupts off. They sleep, running
-/// the jobs [`work`] posts.
+/// Where the other CPUs start, with interrupts off: each becomes a
+/// scheduler CPU, its start-up code its idle thread.
 fn ap_main(index: usize) -> ! {
-    Arch::enable_interrupts();
-    loop {
-        work::run_pending(index);
-        Arch::wait_for_interrupt();
-    }
+    sched::run_cpu(index)
 }
 
 /// The heap found damage it could not explain: the kernel cannot trust its
 /// memory any more.
 fn on_heap_corruption(corruption: &Corruption) {
     panic!("{corruption}");
-}
-
-/// Sleeps between interrupts forever.
-fn idle() -> ! {
-    Arch::enable_interrupts();
-    loop {
-        Arch::wait_for_interrupt();
-    }
 }
 
 /// Waits until every online CPU has taken timer interrupts.

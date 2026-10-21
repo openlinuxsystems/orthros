@@ -78,7 +78,7 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (OrthrOS Phase 3)
+[    0.000000] Radix 0.0.1 (OrthrOS Phase 4)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:
@@ -92,18 +92,22 @@ found and ends like this:
 [    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
 [    0.343077] Memory: 1009 MiB free of 1009 MiB in the frame allocator's zones:
 [    0.344198]   node 0 DMA32  0x000000100000-0x00003fedbfff  1009 MiB managed,  1009 MiB free,   4 MiB reserve
-[    0.358712] Capabilities: ready; 11 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.355310] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.356021] Lock checker: off (the lockdep flag turns it on)
+[    0.358712] Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online
 [    0.485571]   cpu2: APIC ID 2, online
 [    0.510992]   cpu3: APIC ID 3, online
+[    0.524816] Scheduler: 4 CPUs run threads, on 1 NUMA node
 [    0.539507] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 9, cpu1 16, cpu2 15, cpu3 14)
 [    0.558527] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    0.572421] Boot complete.
 ```
 
-The kernel then idles. `orthros-boot(7)` explains each step. Press
+The kernel then idles until a thread has work. `orthros-boot(7)` explains
+each step. Press
 **Ctrl-A** then **X** to quit QEMU. Useful variations:
 
 | Command | Effect |

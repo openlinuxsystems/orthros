@@ -1,8 +1,10 @@
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Eight kinds are kernel objects with an entry in the store's object
+//! Nine kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
-//! spaces, threads, processes, endpoints and notifications. Three kinds are
+//! spaces, threads, processes, endpoints, notifications and resource
+//! domains (Phase 4: a CPU weight and a memory limit that threads and
+//! their memory are charged to, after Linux's cgroups). Three kinds are
 //! ranges of hardware resources, named by the range itself: interrupt
 //! lines, I/O ports and device registers (MMIO). The kernel creates the
 //! first capability to each; every other capability is derived from one.
@@ -38,10 +40,13 @@ pub enum ObjectKind {
     Mmio = 9,
     /// Memory a device reads or writes directly.
     Dma = 10,
+    /// A resource domain: the CPU weight and memory limit its threads
+    /// share, and its class for the out-of-memory policy.
+    ResourceDomain = 11,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 11;
+pub const KINDS: usize = 12;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -57,6 +62,7 @@ impl ObjectKind {
         ObjectKind::IoPorts,
         ObjectKind::Mmio,
         ObjectKind::Dma,
+        ObjectKind::ResourceDomain,
     ];
 
     /// The kind numbered `n`.
@@ -78,7 +84,9 @@ impl ObjectKind {
                 Rights::READ.union(Rights::WRITE).union(Rights::EXECUTE).union(Rights::CONTROL)
             }
             ObjectKind::Frame => Rights::READ.union(Rights::WRITE).union(Rights::EXECUTE),
-            ObjectKind::AddressSpace | ObjectKind::Thread => Rights::READ.union(Rights::CONTROL),
+            ObjectKind::AddressSpace | ObjectKind::Thread | ObjectKind::ResourceDomain => {
+                Rights::READ.union(Rights::CONTROL)
+            }
             ObjectKind::Process => Rights::READ.union(Rights::CONTROL).union(Rights::SIGNAL),
             ObjectKind::Endpoint => Rights::SEND
                 .union(Rights::RECEIVE)
@@ -138,6 +146,7 @@ impl ObjectKind {
             ObjectKind::IoPorts => "I/O ports",
             ObjectKind::Mmio => "MMIO",
             ObjectKind::Dma => "DMA",
+            ObjectKind::ResourceDomain => "domain",
         }
     }
 }

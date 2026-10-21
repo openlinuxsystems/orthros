@@ -61,7 +61,13 @@ pub const FLAGS: &[Flag] = &[
         name: "selftest",
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
-                  mm-stress, stack-overflow, smep, smap, tlb or caps",
+                  mm-stress, stack-overflow, smep, smap, tlb, caps, fpu, sched-fair, sched-rt, \
+                  sched-pi, sched-balance, lockdep, rcu or oom",
+    },
+    Flag {
+        name: "lockdep",
+        value: Some("on|off"),
+        summary: "turn the lock-order checker on or off; it is on by default in debug builds only",
     },
     Flag {
         name: "qemu-exit",
@@ -81,6 +87,14 @@ pub const SELFTESTS: &[&str] = &[
     "smap",
     "tlb",
     "caps",
+    "fpu",
+    "sched-fair",
+    "sched-rt",
+    "sched-pi",
+    "sched-balance",
+    "lockdep",
+    "rcu",
+    "oom",
 ];
 
 /// A parsed view of the command line.

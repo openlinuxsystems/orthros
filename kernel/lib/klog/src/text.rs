@@ -71,7 +71,8 @@ impl<const N: usize> fmt::Write for TextBuf<N> {
 
 impl<const N: usize> fmt::Display for TextBuf<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // `pad`, so widths and alignment in format strings apply.
+        f.pad(self.as_str())
     }
 }
 

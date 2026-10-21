@@ -97,6 +97,11 @@ checks of every phase so far:
    with `selftest caps: passed` before `Boot complete.`, and the line
    before it must say how many derivations the 7 other CPUs tried during
    the revoke.
+8. From Phase 4: check that the first `Scheduler:` line says `idle with
+   MWAIT` (the i7-8550U has it) and the second `8 CPUs run threads, on 1
+   NUMA node`. Then boot with `selftest=sched-rt`, then with
+   `selftest=sched-balance`. Each log must end with `passed` before `Boot
+   complete.`; note the timer latency `sched-rt` reports.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.

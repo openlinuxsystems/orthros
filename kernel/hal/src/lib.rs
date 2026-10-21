@@ -9,9 +9,11 @@
 //!
 //! The traits follow the plan's trait set: [`PageTable`],
 //! [`InterruptController`], [`Timer`] and [`CpuLocal`], plus [`Cpu`] for the
-//! processor itself, [`Smp`] for starting and stopping the other CPUs, and
-//! [`Platform`] for machine-wide services such as restarting. All methods
-//! are associated functions: there is exactly one machine.
+//! processor itself, [`Smp`] for starting and stopping the other CPUs,
+//! [`Threads`] for kernel threads' contexts and switching between them
+//! (Phase 4), and [`Platform`] for machine-wide services such as
+//! restarting. All methods are associated functions: there is exactly one
+//! machine.
 //!
 //! The architecture owns the entry point. It sets up the CPU, the consoles it
 //! knows about and the kernel's page tables, then calls the kernel's
@@ -22,6 +24,9 @@
 
 pub mod boot;
 pub mod cmdline;
+
+use core::ops::Range;
+use core::sync::atomic::AtomicU32;
 
 pub use boot::{
     BootParams, Channel, Firmware, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, Reservation,
@@ -40,6 +45,18 @@ pub trait Cpu {
 
     /// Sleeps until the next interrupt arrives.
     fn wait_for_interrupt();
+
+    /// Sleeps until an interrupt arrives or another CPU writes to `wake`
+    /// (which must then be non-zero), in the CPU's light sleep state:
+    /// MONITOR and MWAIT on x86-64 when it has them, so a waker need not
+    /// send an interrupt, else HLT. Call with interrupts masked; it returns
+    /// with them masked, after any interrupt that woke it was handled.
+    /// Returns at once if `wake` is already non-zero.
+    fn idle_until(wake: &AtomicU32);
+
+    /// Whether [`Cpu::idle_until`] notices writes to `wake` without an
+    /// interrupt (MWAIT), and its name for the boot report.
+    fn idle_mode() -> (bool, &'static str);
 
     /// Whether this CPU accepts interrupts.
     fn interrupts_enabled() -> bool;
@@ -81,6 +98,25 @@ pub trait CpuLocal {
     /// Index of the CPU running this code; the boot CPU is 0, and the
     /// others are numbered in the order the firmware lists them.
     fn current_cpu() -> usize;
+
+    /// Adds one to this CPU's preemption count. While it is not zero the
+    /// running thread is not preempted (spin-lock holders, RCU readers).
+    /// A single instruction, so it cannot be split by a migration.
+    fn preempt_disable();
+
+    /// Takes one from this CPU's preemption count and returns what is left.
+    fn preempt_enable() -> u32;
+
+    /// This CPU's preemption count.
+    fn preempt_count() -> u32;
+
+    /// Sets this CPU's preemption count: the scheduler saves and restores
+    /// it with each thread.
+    fn set_preempt_count(count: u32);
+
+    /// How many interrupt handlers this CPU is running, nested (0 in thread
+    /// context).
+    fn interrupt_depth() -> u32;
 }
 
 /// One CPU known to the kernel.
@@ -94,6 +130,19 @@ pub struct CpuInfo {
     pub boot_cpu: bool,
     /// Whether the CPU is running kernel code.
     pub online: bool,
+}
+
+/// Where one CPU sits in the machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct CpuPlace {
+    /// Its package (socket).
+    pub package: u32,
+    /// Its core, unique within the package.
+    pub core: u32,
+    /// Its hardware thread, unique within the core.
+    pub thread: u32,
+    /// Its NUMA node.
+    pub node: u8,
 }
 
 /// Starting and stopping the other CPUs.
@@ -112,6 +161,9 @@ pub trait Smp {
     /// Asks every other online CPU to stop and waits briefly for them.
     /// Returns how many confirmed. Used on the panic path.
     fn stop_other_cpus() -> usize;
+
+    /// The package, core, hardware thread and NUMA node of CPU `index`.
+    fn cpu_place(index: usize) -> Option<CpuPlace>;
 }
 
 /// Kinds of inter-processor interrupt the common kernel sends.
@@ -119,6 +171,9 @@ pub trait Smp {
 pub enum Ipi {
     /// Does nothing but count; used to test that IPIs arrive.
     Ping,
+    /// Makes the target check whether it should switch threads, on its way
+    /// back from the interrupt (see [`Threads::set_preempt_handler`]).
+    Reschedule,
 }
 
 /// The interrupt controllers.
@@ -148,6 +203,74 @@ pub trait Timer {
 
     /// Waits at least `us` microseconds without sleeping.
     fn delay_us(us: u64);
+
+    /// Registers the function the timer interrupt calls, with interrupts
+    /// masked: on every periodic tick (with `true`), and when the deadline
+    /// set by [`Timer::set_deadline`] has passed.
+    fn set_timer_handler(handler: fn(tick: bool));
+
+    /// Asks for a timer interrupt on this CPU at `deadline_ns` (on the
+    /// [`Timer::now_ns`] clock), besides the periodic tick. A later call
+    /// replaces it; `u64::MAX` cancels it. Call with interrupts masked.
+    fn set_deadline(deadline_ns: u64);
+
+    /// How the timer is programmed, for the boot report.
+    fn timer_mode() -> &'static str;
+}
+
+/// Kernel threads: their saved contexts and switching between them.
+///
+/// A context is what a thread leaves behind while another runs on its CPU:
+/// its stack, its saved registers and its extended state (the FPU and
+/// vector registers, saved eagerly on every switch). The scheduler decides
+/// what runs; this trait only switches, so it knows nothing of run queues.
+pub trait Threads {
+    /// A saved execution context. Dropping one frees its stack, unless it
+    /// is running on a CPU, in which case the memory is leaked and a
+    /// warning logged.
+    type Context: Send + Sync;
+
+    /// Makes a context of the code this CPU runs now, on the stack it runs
+    /// on (the boot thread, or a CPU's start-up code that becomes its idle
+    /// thread). Its stack is not freed when the context is dropped.
+    fn adopt_current() -> Option<Self::Context>;
+
+    /// A new context that, when first switched to, runs `entry(arg)` on a
+    /// fresh stack of `stack_pages` pages with an unmapped guard page
+    /// below. `entry` starts with interrupts masked and a preemption count
+    /// of 1, as if it had just returned from [`Threads::switch`]. `None`
+    /// when memory runs out.
+    fn new_context(entry: fn(usize) -> !, arg: usize, stack_pages: usize) -> Option<Self::Context>;
+
+    /// Saves the running context `from` and continues `to`, waiting first
+    /// if another CPU is still switching away from `to`. Returns when some
+    /// CPU switches back to `from`. Call with interrupts masked; panics if
+    /// `from` is not the context running on this CPU.
+    fn switch(from: &Self::Context, to: &Self::Context);
+
+    /// Whether `context` is on a CPU: from the switch to it until the
+    /// switch away from it has saved everything.
+    fn is_running(context: &Self::Context) -> bool;
+
+    /// The stack of `context`.
+    fn stack(context: &Self::Context) -> Range<usize>;
+
+    /// Registers the function called on the way out of an interrupt that
+    /// came in from thread context with interrupts on and a preemption
+    /// count of 0, with interrupts masked: the scheduler switches threads
+    /// there if it must.
+    fn set_preempt_handler(handler: fn());
+
+    /// Describes how extended state is saved, for the boot report.
+    fn extended_state() -> &'static str;
+
+    /// Fills the vector registers with a pattern made from `seed`, for the
+    /// self-test that checks every switch keeps them.
+    fn self_test_fill_vectors(seed: u64);
+
+    /// Whether the vector registers still hold the pattern made from
+    /// `seed`.
+    fn self_test_vectors_hold(seed: u64) -> bool;
 }
 
 /// The kernel's page tables.

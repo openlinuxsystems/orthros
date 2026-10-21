@@ -138,8 +138,9 @@ part; `kani` checks the Kani proof harnesses instead, and `tla` the TLA+
 models with TLC (minutes each, so plain `ob test` leaves them out; TLC needs
 Java, and ob downloads the pinned TLA+ tools into .cache/tla). The boot
 tests are:
-  uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (uefi-cdrom in xAPIC
-                   mode, bios-cdrom without KASLR and PCIDs)
+  uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (bios-usb with the
+                   lock checker on, uefi-cdrom in xAPIC mode, bios-cdrom
+                   without KASLR and PCIDs)
   screen           the boot log on the UEFI framebuffer
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
@@ -151,6 +152,14 @@ tests are:
   stack-overflow   a kernel stack overflow stops at its guard page
   smep, smap       the kernel cannot run or read a user page
   microcode        a microcode module on an emulated Intel CPU
+  fpu              vector registers survive thousands of thread switches
+  sched-fair       fair shares by nice level and resource-domain CPU weight
+  sched-rt         real-time preemption and timer latency, FIFO and round robin
+  sched-pi         priority inheritance, plain and through a chain of mutexes
+  sched-balance    threads spread from one CPU over 4 CPUs and 2 NUMA nodes
+  lockdep          the lock checker catches seeded deadlocks
+  rcu              RCU readers never see an object retired too early
+  oom              out of memory stops an app, then a restarted service
 
   --case <name>         Run only this boot test; repeat for more
   --timeout <seconds>   Limit for each boot test (default 300)"

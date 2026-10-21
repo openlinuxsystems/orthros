@@ -1,0 +1,391 @@
+//! Threads: what the scheduler runs.
+//!
+//! A [`Thread`] is shared ([`ThreadRef`]): the registry holds every thread
+//! until the reaper frees it, and run queues, wait queues and timers hold
+//! it while it is queued on them. Its scheduling state ([`State`]) is under
+//! its own lock, which is taken before any run-queue lock. What a run
+//! queue needs while it holds only its own lock (which class the thread is
+//! queued in, its weight, where it may run) is copied into atomics that
+//! are written with both locks held.
+
+use alloc::sync::Arc;
+use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+
+use radix_hal::Threads;
+use radix_lockdep::Saved;
+use radix_mm::Kmalloc;
+use radix_sched::cpuset::WORDS;
+use radix_sched::{CpuSet, nice_valid, rt_prio_valid, weight};
+use radix_sync::{RawSpinLock, SpinLock};
+
+use crate::Arch;
+use crate::domains::DomainRef;
+
+/// A thread, shared.
+pub type ThreadRef = Arc<Thread, Kmalloc>;
+
+/// A thread's saved registers and stack.
+pub(super) type Context = <Arch as Threads>::Context;
+
+/// Longest thread name kept, in bytes.
+pub const NAME_LEN: usize = 23;
+
+/// A short name, for logs and the debugger.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Name {
+    bytes: [u8; NAME_LEN],
+    len: u8,
+}
+
+impl Name {
+    /// `name`, cut to [`NAME_LEN`] bytes at a character boundary.
+    pub fn new(name: &str) -> Name {
+        let mut len = name.len().min(NAME_LEN);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut bytes = [0; NAME_LEN];
+        bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+        Name { bytes, len: len as u8 }
+    }
+
+    /// `prefix` followed by a number, such as `idle/3`.
+    pub fn numbered(prefix: &str, number: usize) -> Name {
+        let mut text = radix_klog::TextBuf::<NAME_LEN>::new();
+        let _ = fmt::Write::write_fmt(&mut text, format_args!("{prefix}{number}"));
+        Name::new(text.as_str())
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("?")
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// How a thread is scheduled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Policy {
+    /// The fair class, at a nice level from -20 (the largest share) to 19.
+    Fair {
+        /// The nice level.
+        nice: i8,
+    },
+    /// Real-time, first in first out, at priority 1 to 99 (99 the most
+    /// urgent): runs until it blocks or yields, or a more urgent thread
+    /// wants its CPU.
+    Fifo {
+        /// The priority.
+        prio: u8,
+    },
+    /// Real-time round robin: like [`Policy::Fifo`], but after
+    /// `RR_QUANTUM_NS` of running it goes behind the other threads of its
+    /// priority.
+    RoundRobin {
+        /// The priority.
+        prio: u8,
+    },
+}
+
+impl Policy {
+    /// The policy threads start with: fair, nice 0.
+    pub const DEFAULT: Policy = Policy::Fair { nice: 0 };
+
+    /// Whether the nice level or priority is in range.
+    pub fn is_valid(self) -> bool {
+        match self {
+            Policy::Fair { nice } => nice_valid(nice),
+            Policy::Fifo { prio } | Policy::RoundRobin { prio } => rt_prio_valid(prio),
+        }
+    }
+
+    /// The real-time priority, 0 for the fair class.
+    pub fn rt_prio(self) -> u8 {
+        match self {
+            Policy::Fair { .. } => 0,
+            Policy::Fifo { prio } | Policy::RoundRobin { prio } => prio,
+        }
+    }
+
+    /// The fair-class weight of its nice level (that of nice 0 for
+    /// real-time threads, which use it only while not real-time).
+    pub fn weight(self) -> u64 {
+        match self {
+            Policy::Fair { nice } => weight(nice),
+            _ => weight(0),
+        }
+    }
+}
+
+impl fmt::Display for Policy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Policy::Fair { nice } => write!(f, "fair, nice {nice}"),
+            Policy::Fifo { prio } => write!(f, "FIFO {prio}"),
+            Policy::RoundRobin { prio } => write!(f, "round robin {prio}"),
+        }
+    }
+}
+
+/// Where a thread is in its life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Run {
+    /// Made, not yet started.
+    New,
+    /// On a run queue: running, or waiting for its turn.
+    Ready,
+    /// Asleep, for the reason given, until something wakes it.
+    Blocked(&'static str),
+    /// Exited; the reaper frees it once its CPU has switched away.
+    Dead,
+}
+
+impl fmt::Display for Run {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Run::New => f.write_str("new"),
+            Run::Ready => f.write_str("ready"),
+            Run::Blocked(reason) => write!(f, "blocked ({reason})"),
+            Run::Dead => f.write_str("dead"),
+        }
+    }
+}
+
+/// A thread's scheduling state, under its lock.
+pub(super) struct State {
+    pub(super) run: Run,
+    pub(super) policy: Policy,
+    /// The real-time priority lent by the most urgent thread waiting for a
+    /// mutex it holds (priority inheritance); 0 for none.
+    pub(super) boost: u8,
+    pub(super) affinity: CpuSet,
+    /// The service the fair class owes it (its lag, in nanoseconds of
+    /// running at nice 0), kept while it is off the fair queues.
+    pub(super) lag_ns: i64,
+}
+
+impl State {
+    /// The real-time priority it runs at: its own or a lent one, whichever
+    /// is higher; 0 for the fair class.
+    pub(super) fn rt_prio(&self) -> u8 {
+        self.policy.rt_prio().max(self.boost)
+    }
+}
+
+/// Which queue a thread is on, in [`Thread::queued`].
+pub(super) const NOT_QUEUED: u8 = 0;
+/// On a fair queue.
+pub(super) const FAIR: u8 = 1;
+/// On a real-time queue.
+pub(super) const REAL_TIME: u8 = 2;
+
+/// Counters for the debugger and the self-tests.
+#[derive(Default)]
+pub(super) struct Stats {
+    pub(super) runtime_ns: AtomicU64,
+    pub(super) switches: AtomicU64,
+    pub(super) migrations: AtomicU64,
+    pub(super) wakeups: AtomicU64,
+    pub(super) last_ran_ns: AtomicU64,
+}
+
+/// A kernel thread.
+pub struct Thread {
+    id: u64,
+    name: Name,
+    pub(super) context: Context,
+    pub(super) entry: fn(usize),
+    pub(super) arg: usize,
+    pub(super) state: SpinLock<State>,
+    /// The CPU whose run queue it is on, or last ran on.
+    pub(super) cpu: AtomicUsize,
+    /// Set by [`super::wake`]; a thread that blocks with it set does not
+    /// sleep, so a wake that comes before the block is not lost.
+    pub(super) wake_pending: AtomicBool,
+    stop: AtomicBool,
+    domain: DomainRef,
+    /// Stack pages charged to the domain, given back when it is freed.
+    pub(super) charged: u64,
+    /// Mutexes the lock checker saw it holding when it was switched out.
+    pub(super) lockdep: RawSpinLock<Saved>,
+    // The rest is written under its run queue's lock (and, but for the
+    // balancer's moves, its own).
+    /// [`NOT_QUEUED`], [`FAIR`] or [`REAL_TIME`].
+    pub(super) queued: AtomicU8,
+    /// The real-time priority it is queued at.
+    pub(super) queued_prio: AtomicU8,
+    /// Whether it is round robin, while queued real-time.
+    pub(super) round_robin: AtomicBool,
+    /// Its nice level's weight.
+    pub(super) weight: AtomicU64,
+    /// Where it may run.
+    allowed: [AtomicU64; WORDS],
+    /// What is left of its round-robin quantum.
+    pub(super) quantum_left_ns: AtomicU64,
+    /// The mutex it waits for, by key, for priority inheritance.
+    pub(super) blocked_on: AtomicUsize,
+    /// Set once the reaper is done with it.
+    pub(super) reaped: AtomicBool,
+    /// Set once it no longer counts among its domain's threads.
+    left: AtomicBool,
+    pub(super) stats: Stats,
+}
+
+impl Thread {
+    /// A thread that is not yet running, from its parts.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        id: u64,
+        name: Name,
+        context: Context,
+        entry: fn(usize),
+        arg: usize,
+        policy: Policy,
+        affinity: CpuSet,
+        domain: DomainRef,
+        charged: u64,
+    ) -> Thread {
+        Thread {
+            id,
+            name,
+            context,
+            entry,
+            arg,
+            state: SpinLock::new(State { run: Run::New, policy, boost: 0, affinity, lag_ns: 0 }),
+            cpu: AtomicUsize::new(affinity.lowest().unwrap_or(0)),
+            wake_pending: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            domain,
+            charged,
+            lockdep: RawSpinLock::new(Saved::new()),
+            queued: AtomicU8::new(NOT_QUEUED),
+            queued_prio: AtomicU8::new(0),
+            round_robin: AtomicBool::new(false),
+            weight: AtomicU64::new(policy.weight()),
+            allowed: affinity.words().map(AtomicU64::new),
+            quantum_left_ns: AtomicU64::new(radix_sched::RR_QUANTUM_NS),
+            blocked_on: AtomicUsize::new(0),
+            reaped: AtomicBool::new(false),
+            left: AtomicBool::new(false),
+            stats: Stats::default(),
+        }
+    }
+
+    /// Its number, unique for as long as the kernel runs.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Its name.
+    pub fn name(&self) -> &Name {
+        &self.name
+    }
+
+    /// The resource domain it is charged to.
+    pub fn domain(&self) -> &DomainRef {
+        &self.domain
+    }
+
+    /// The token that names it in mutex words: its address, which is
+    /// non-zero and even.
+    pub fn token(&self) -> usize {
+        self as *const Thread as usize
+    }
+
+    /// The CPU it runs on, or last ran or queued on.
+    pub fn cpu(&self) -> usize {
+        self.cpu.load(Ordering::Relaxed)
+    }
+
+    /// Nanoseconds it has run.
+    pub fn runtime_ns(&self) -> u64 {
+        self.stats.runtime_ns.load(Ordering::Relaxed)
+    }
+
+    /// How many times it was switched to.
+    pub fn switches(&self) -> u64 {
+        self.stats.switches.load(Ordering::Relaxed)
+    }
+
+    /// How many times it moved to another CPU.
+    pub fn migrations(&self) -> u64 {
+        self.stats.migrations.load(Ordering::Relaxed)
+    }
+
+    /// Asks it to stop: it sees [`Thread::should_stop`] and exits. Kernel
+    /// threads check for it where they can stop cleanly; the out-of-memory
+    /// policy uses it (threads of user programs, from Phase 6, are stopped
+    /// at the kernel boundary instead).
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    /// Whether it has been asked to stop.
+    pub fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    /// Stops counting it among its domain's threads: when it exits, so a
+    /// domain's thread count falls although others still hold references.
+    pub(super) fn leave_domain(&self) {
+        if !self.left.swap(true, Ordering::AcqRel) && self.domain.thread_left() {
+            // Its last thread: wake whoever waits for the domain to empty.
+            super::wait::wake_all(self.domain.key());
+        }
+    }
+
+    /// Whether the reaper has finished with it: it has exited and no CPU
+    /// runs it any more.
+    pub fn is_reaped(&self) -> bool {
+        self.reaped.load(Ordering::Acquire)
+    }
+
+    /// Its scheduling state, for reports. Gives up if the lock is held.
+    pub fn info(&self) -> Option<ThreadInfo> {
+        let state = self.state.try_lock_irq()?;
+        Some(ThreadInfo {
+            run: state.run,
+            policy: state.policy,
+            boost: state.boost,
+            affinity: state.affinity,
+        })
+    }
+
+    /// Where it may run, from the copy a run queue reads.
+    pub(super) fn allowed(&self) -> CpuSet {
+        CpuSet::from_words(self.allowed.each_ref().map(|w| w.load(Ordering::Relaxed)))
+    }
+
+    /// Updates that copy; with its lock held.
+    pub(super) fn set_allowed(&self, set: &CpuSet) {
+        for (word, value) in self.allowed.iter().zip(set.words()) {
+            word.store(value, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A snapshot of a thread's scheduling state.
+#[derive(Clone, Copy, Debug)]
+pub struct ThreadInfo {
+    /// Where it is in its life.
+    pub run: Run,
+    /// Its own policy.
+    pub policy: Policy,
+    /// A lent real-time priority, 0 for none.
+    pub boost: u8,
+    /// Where it may run.
+    pub affinity: CpuSet,
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        self.domain.uncharge(self.charged);
+        self.leave_domain();
+    }
+}

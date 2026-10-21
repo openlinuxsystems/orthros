@@ -2,8 +2,8 @@ radix-debug(7) "OrthrOS" "OrthrOS Manual"
 
 # NAME
 
-radix-debug - panic reports, the crash log, the kernel debugger, GDB and
-trace points in the Radix kernel
+radix-debug - panic reports, the crash log, the kernel debugger, the lock
+checker, GDB and trace points in the Radix kernel
 
 # DESCRIPTION
 
@@ -12,9 +12,11 @@ port. So a panic fills the screen with its report, and the console output
 is also kept in memory that survives a warm restart, where the next boot
 finds it. With a serial port, or under QEMU, there is also *kdb*, a small
 kernel debugger, and GDB through QEMU's GDB stub. Trace points record
-frequent events cheaply, from the first Rust function on.
+frequent events cheaply, from the first Rust function on. The lock
+checker reports locking bugs the first time the code that has them runs,
+long before they deadlock.
 
-This page describes all of them as of Phase 3. The kernel flags named here
+This page describes all of them as of Phase 4. The kernel flags named here
 are listed in *orthros-boot*(7).
 
 # PANIC REPORT
@@ -218,6 +220,32 @@ with *0x*. Both may contain *\_* separators, as in *ffffffff_80100000*.
 	*radix-capabilities*(7)). If another CPU holds the capability store's
 	lock, it says so instead of waiting.
 
+*threads*
+	List every thread: its number, name, CPU, state (and, when
+	blocked, what for), scheduling policy, the real-time priority lent
+	to it through priority inheritance, the CPUs it may run on, its run
+	time, switches, moves between CPUs, and its resource domain. See
+	*radix-scheduling*(7).
+
+*sched*
+	Show the scheduler's totals (threads, waiters in the wait table,
+	wake-ups, mutex handoffs, priority loans, RCU grace periods and
+	their average length) and each CPU's run queue: how many threads
+	are queued, which one runs, switches, preemptions, time idle, the
+	threads pulled from other CPUs at each topology level, and the
+	queued threads with their weights or priorities.
+
+*domains*
+	List the resource domains as a tree: class, CPU weight, memory used
+	and its limit in pages, peak use, charges refused, threads and
+	out-of-memory stops; then what the out-of-memory policy has done.
+
+*locks*
+	Show whether the lock checker is on, the lock classes it has seen
+	(where each was created, and whether it is taken in interrupt
+	handlers or with interrupts on), the lock-order edges and the
+	problems reported. See *LOCK CHECKER*.
+
 *acpi*
 	List the ACPI tables and what the kernel read from them.
 
@@ -262,6 +290,40 @@ kdb> continue
 kdb: continuing
 ```
 
+# LOCK CHECKER
+
+The lock checker (*radix-lockdep*) watches every spin lock and mutex the
+kernel takes and keeps a graph of which lock classes were taken while
+holding which. A class is every lock created by one line of code. It
+reports, as soon as the code runs:
+
+- two classes taken in both orders, a deadlock waiting for the wrong
+  interleaving (*possible deadlock*);
+- a class taken while one of the same class is held (*recursion*);
+- a lock taken in an interrupt handler that is also taken with
+  interrupts on, directly or through a chain of other locks;
+- a mutex taken, or a thread switched out, while sleeping is not
+  allowed: with a spin lock held, with interrupts off or in an interrupt
+  handler (*sleeping where it is not allowed*).
+
+It is on by default in debug builds and off in release builds; the
+*lockdep* kernel flag (*orthros-boot*(7)) overrides either. *ob test*
+boots *bios-usb* and every Phase 4 self-test with it on. A report is
+logged at the error level, each line starting *Lock checker:*, with the
+places where the locks were created and taken:
+
+```
+cpu1: Lock checker: possible deadlock: two locks are taken in both orders (CPU 1)
+cpu1: Lock checker:   taking spin lock created at radix/src/schedtest.rs:817:30, taken at radix/src/schedtest.rs:835:30
+cpu1: Lock checker:   while holding spin lock created at radix/src/schedtest.rs:818:30, taken at radix/src/schedtest.rs:834:30
+cpu1: Lock checker:   the other order was seen before: the lock being taken now at radix/src/schedtest.rs:828:30, then the held one at radix/src/schedtest.rs:829:30
+```
+
+After its first report the checker turns itself off, since later reports
+may only follow from the first. Its tables are fixed (512 classes, 32
+locks held per CPU); running out of room is reported once and also turns
+it off. *kdb*'s *locks* command shows its state.
+
 # SELF-TESTS
 
 *selftest*=_name_ runs one of these at the end of boot, before *Boot
@@ -293,6 +355,67 @@ complete.* *ob test* boots each of them.
 	objects allocated and freed. It then checks that every frame is back
 	in the frame allocator, that the free lists are consistent and that
 	no object was damaged, and reports *selftest mm-stress: passed*.
+
+*fpu*
+	Runs three threads on every CPU that fill the x87, SSE and AVX
+	registers with values of their own and check them after each of a
+	thousand yields, so every switch must save and restore them.
+	Reports *selftest fpu: passed* with the number of switches.
+
+*sched-fair*
+	On the last CPU, runs four fair threads of equal weight for 600 ms
+	and checks that each got a quarter, within 20 %; then threads at
+	nice 0 and nice 5 (reniced while running), which must split the CPU
+	in proportion to their weights, 1024 to 335; then threads in two
+	resource domains of CPU weights 200 and 100 next to a thread of the
+	*system* domain, which must get 2:1:1. It then checks that every run
+	queue's books balance.
+
+*sched-rt*
+	Checks that a real-time thread woken by one of lower priority runs
+	at once, and one of lower priority waits, in 200 rounds; that a
+	FIFO thread sleeping on a timer on a CPU busy with a fair thread
+	wakes less than 1 ms late (median) and less than 3 ms late (90th
+	percentile) over 200 sleeps; that FIFO threads of one priority run
+	one after the other; and that round-robin threads of one priority
+	each get at least 30 % of a CPU they share with two others.
+
+*sched-pi*
+	A FIFO thread of priority 10 holds a mutex that one of priority 30
+	wants, while one of priority 20 spins on the same CPU. With priority
+	inheritance the holder runs at 30, lets go, and the waiter gets the
+	mutex within 150 ms and before the spinner finishes. It runs again
+	with a chain of two mutexes, the holder itself waiting for a third
+	thread's mutex. Needs two CPUs.
+
+*sched-balance*
+	Starts two threads per CPU, all allowed only on the last CPU, then
+	allows them every CPU and checks after a second that every CPU runs
+	some, no CPU runs more than two more than another, and, on a machine
+	of more than one NUMA node, some moved to another node.
+
+*lockdep*
+	Seeds three bugs, each in threads of its own: two spin locks taken
+	in opposite orders, two mutexes taken in opposite orders, and a
+	mutex taken under a spin lock. The lock checker must report each
+	(see *LOCK CHECKER*); the test asks it to keep going after the first.
+
+*rcu*
+	Readers on every other CPU follow a pointer under RCU while the
+	test replaces its object and frees the old one after *synchronize*,
+	100 times; a reader that ever sees a freed object fails the test.
+	Reports the number of read sections and the average grace period.
+
+*oom*
+	Gives a resource domain a limit of 64 pages and checks that its
+	threads' stacks fill it and the next thread is refused with an
+	error. Then a thread in an app domain (made through a capability,
+	as programs will get theirs) allocates until memory runs out: the
+	policy must stop that app and not the service domain next to it.
+	Then the service allocates while another app idles: the idle app is
+	stopped first, then the service, which its supervisor restarts. No
+	*system* thread may be asked to stop, and the memory must come
+	back. See *radix-scheduling*(7).
 
 *stack-overflow*
 	Recurses until the boot CPU's stack runs into its guard page. The
@@ -421,7 +544,7 @@ GDB must support x86-64; on Debian and Ubuntu the *gdb* package does.
 
 # SYMBOL TABLE
 
-The kernel image reserves a 1 MiB section, *.ksyms*, for its own symbol
+The kernel image reserves a 2 MiB section, *.ksyms*, for its own symbol
 table, so a panic can name functions without reading debug information.
 After linking, *ob build* reads the function symbols from the ELF symbol
 table, demangles them, and writes them into the section in place; nothing
@@ -474,4 +597,4 @@ _out/test/_
 
 # SEE ALSO
 
-*orthros-boot*(7), *radix-capabilities*(7), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)
+*orthros-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)

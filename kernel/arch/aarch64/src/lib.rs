@@ -12,9 +12,12 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+use core::ops::Range;
+use core::sync::atomic::AtomicU32;
+
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, Fault, FaultTest, InterruptController, Ipi, PageTable,
-    Platform, Smp, Timer,
+    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
+    PageTable, Platform, Smp, Threads, Timer,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -32,6 +35,14 @@ impl Cpu for Arch {
 
     fn wait_for_interrupt() {
         core::hint::spin_loop();
+    }
+
+    fn idle_until(_wake: &AtomicU32) {
+        core::hint::spin_loop();
+    }
+
+    fn idle_mode() -> (bool, &'static str) {
+        (false, "none")
     }
 
     fn interrupts_enabled() -> bool {
@@ -61,6 +72,22 @@ impl CpuLocal for Arch {
     fn current_cpu() -> usize {
         0
     }
+
+    fn preempt_disable() {}
+
+    fn preempt_enable() -> u32 {
+        0
+    }
+
+    fn preempt_count() -> u32 {
+        0
+    }
+
+    fn set_preempt_count(_count: u32) {}
+
+    fn interrupt_depth() -> u32 {
+        0
+    }
 }
 
 impl Smp for Arch {
@@ -78,6 +105,10 @@ impl Smp for Arch {
 
     fn stop_other_cpus() -> usize {
         0
+    }
+
+    fn cpu_place(index: usize) -> Option<CpuPlace> {
+        (index == 0).then_some(CpuPlace::default())
     }
 }
 
@@ -107,6 +138,52 @@ impl Timer for Arch {
     }
 
     fn delay_us(_us: u64) {}
+
+    fn set_timer_handler(_handler: fn(bool)) {}
+
+    fn set_deadline(_deadline_ns: u64) {}
+
+    fn timer_mode() -> &'static str {
+        "none"
+    }
+}
+
+/// A placeholder thread context.
+#[derive(Debug)]
+pub struct Context;
+
+impl Threads for Arch {
+    type Context = Context;
+
+    fn adopt_current() -> Option<Context> {
+        None
+    }
+
+    fn new_context(_entry: fn(usize) -> !, _arg: usize, _stack_pages: usize) -> Option<Context> {
+        None
+    }
+
+    fn switch(_from: &Context, _to: &Context) {}
+
+    fn is_running(_context: &Context) -> bool {
+        false
+    }
+
+    fn stack(_context: &Context) -> Range<usize> {
+        0..0
+    }
+
+    fn set_preempt_handler(_handler: fn()) {}
+
+    fn extended_state() -> &'static str {
+        "none"
+    }
+
+    fn self_test_fill_vectors(_seed: u64) {}
+
+    fn self_test_vectors_hold(_seed: u64) -> bool {
+        true
+    }
 }
 
 impl PageTable for Arch {

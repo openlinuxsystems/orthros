@@ -37,11 +37,13 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-hal",
     "radix-kdb",
     "radix-klog",
+    "radix-lockdep",
     "radix-ksyms",
     "radix-microcode",
     "radix-mm",
     "radix-random",
     "radix-relocs",
+    "radix-sched",
     "radix-sync",
 ];
 
@@ -116,10 +118,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "bios-usb",
-        about: "4 CPUs boot under BIOS from USB",
+        about: "4 CPUs boot under BIOS from USB, with the lock checker on",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "qemu-exit",
+        cmdline: "qemu-exit lockdep",
         cpus: 4,
         memory: "1G",
         reboot: false,
@@ -326,6 +328,118 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: microcode,
     },
+    Case {
+        name: "fpu",
+        about: "vector registers survive thousands of switches on 4 CPUs",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=fpu",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: fpu,
+    },
+    Case {
+        name: "sched-fair",
+        about: "fair threads share a CPU by nice level and domain CPU weight",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=sched-fair",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: sched_fair,
+    },
+    Case {
+        name: "sched-rt",
+        about: "real-time threads preempt at once, on time, FIFO and round robin",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=sched-rt",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: sched_rt,
+    },
+    Case {
+        name: "sched-pi",
+        about: "priority inheritance ends priority inversion, also through a chain",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=sched-pi",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: sched_pi,
+    },
+    Case {
+        name: "sched-balance",
+        about: "threads started on one CPU spread over 4 CPUs on 2 NUMA nodes",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=sched-balance",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: TWO_NODES,
+        script: sched_balance,
+    },
+    Case {
+        name: "lockdep",
+        about: "the lock checker catches seeded deadlocks between spin locks and mutexes",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=lockdep",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: lockdep,
+    },
+    Case {
+        name: "rcu",
+        about: "RCU readers on 3 CPUs never see an object retired too early",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=rcu",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: rcu,
+    },
+    Case {
+        name: "oom",
+        about: "out of memory stops an app, then a service its supervisor restarts",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=oom",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: oom,
+    },
 ];
 
 /// `ob test`.
@@ -397,7 +511,7 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap"];
+pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched"];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
@@ -581,7 +695,7 @@ fn run_case(
         extra: case.qemu.iter().map(|arg| arg.to_string()).collect(),
     };
     let mut vm = Vm::start(ctx, &machine, dir, case.name, timeout)?;
-    let result = (case.script)(&mut vm, case);
+    let result = (case.script)(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));
     vm.stop();
     let _ = std::fs::remove_file(&image);
     result
@@ -880,7 +994,7 @@ fn screen_shows(screen: &[String], needles: &[&str]) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 3)"))?;
+    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 4)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -914,17 +1028,46 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("APIC: ")?;
     vm.expect("Time: TSC at ")?;
     vm.expect(" in the frame allocator's zones:")?;
-    vm.expect("Capabilities: ready; 11 object kinds, 12 rights")?;
+    vm.expect(
+        "Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes",
+    )?;
+    let flags: Vec<&str> = case.cmdline.split_ascii_whitespace().collect();
+    if flags.contains(&"lockdep") || flags.contains(&"lockdep=on") {
+        vm.expect("Lock checker: on; every spin lock and mutex is checked")?;
+    } else if flags.contains(&"lockdep=off") {
+        vm.expect("Lock checker: off")?;
+    } else {
+        vm.expect("Lock checker: ")?;
+    }
+    vm.expect("Capabilities: ready; 12 object kinds, 12 rights")?;
     let cpus = case.cpus;
     vm.expect(&format!("CPUs: {cpus} of {cpus} online:"))?;
     for cpu in 0..cpus {
         vm.expect(&format!("cpu{cpu}: APIC ID "))?;
     }
+    vm.expect(&format!("Scheduler: {cpus} CPUs run threads, on "))?;
     vm.expect(&format!("Timer: all {cpus} CPUs take timer interrupts at 100 Hz"))?;
     if cpus > 1 {
         vm.expect(&format!("IPI: all {} other CPUs answered a ping", cpus - 1))?;
     }
     Ok(())
+}
+
+/// Fails if the kernel logged a problem no case looks for: a lock-checker
+/// report (but in the case that seeds them) or a thread that slept where
+/// it must not.
+fn kernel_complaints(vm: &Vm, case: &Case) -> Result<(), String> {
+    let log = vm.log();
+    let complaint = log.lines().find(|line| {
+        let checker = line.contains("Lock checker: ")
+            && !line.contains("Lock checker: on; ")
+            && !line.contains("Lock checker: off");
+        (checker && case.name != "lockdep") || line.contains("with preemption held off")
+    });
+    match complaint {
+        Some(line) => Err(format!("the kernel complained: {}", line.trim())),
+        None => Ok(()),
+    }
 }
 
 /// Waits for the end of boot and checks that self-test `name` passed.
@@ -1105,6 +1248,13 @@ fn kdb(vm: &mut Vm, _case: &Case) -> Result<(), String> {
     )?;
     vm.kdb("heap", &["Heap: ", " objects in use"])?;
     vm.kdb("caps", &["Capabilities: 0 spaces with 0 slots, 0 capabilities to 0 objects"])?;
+    vm.kdb("threads", &[" threads (id, name, CPU, state", "kmain", "idle/0", "reaper", "work/1"])?;
+    vm.kdb("sched", &["Scheduler: ", "grace periods", "cpu0: ", "cpu1: "])?;
+    vm.kdb(
+        "domains",
+        &["Domains (class, CPU weight", "system", "Out of memory: 0 domains stopped"],
+    )?;
+    vm.kdb("locks", &["Lock checker: "])?;
     vm.kdb("acpi", &["ACPI: RSDP", "APIC"])?;
     vm.kdb("log 4", &["Boot complete."])?;
     vm.kdb("trace", &["boot.entry", "events shown"])?;
@@ -1123,6 +1273,67 @@ fn kdb(vm: &mut Vm, _case: &Case) -> Result<(), String> {
     vm.kdb("frobnicate", &["unknown command `frobnicate`"])?;
     vm.send("continue\r")?;
     vm.expect("kdb: continuing")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+/// A scheduler self-test: the boot report, `what` in the result, a pass.
+fn sched_case(vm: &mut Vm, case: &Case, name: &str, what: &str) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect(&format!("selftest {name}: "))?;
+    selftest_passed(vm, name)?;
+    if !vm.log().contains(what) {
+        return Err(format!("selftest {name} passed, but its report lacks \"{what}\""));
+    }
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn fpu(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "fpu", "threads kept their vector registers through ")
+}
+
+fn sched_fair(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "sched-fair", "4 equal threads got ")
+}
+
+fn sched_rt(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "sched-rt", "wake-ups preempt by priority in 200 of 200 rounds")
+}
+
+fn sched_pi(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "sched-pi", "the holder was lent priority 30")
+}
+
+fn sched_balance(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "sched-balance", "threads started on CPU 3 spread ")
+}
+
+fn lockdep(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("selftest lockdep: seeding an AB-BA deadlock between spin locks")?;
+    vm.expect("Lock checker: possible deadlock: two locks are taken in both orders")?;
+    vm.expect("Lock checker:   taking ")?;
+    vm.expect("Lock checker:   while holding ")?;
+    vm.expect("selftest lockdep: seeding an AB-BA deadlock between mutexes")?;
+    vm.expect("Lock checker: possible deadlock: two locks are taken in both orders")?;
+    vm.expect("selftest lockdep: seeding a mutex taken under a spin lock")?;
+    vm.expect("Lock checker: sleeping where it is not allowed")?;
+    selftest_passed(vm, "lockdep")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    sched_case(vm, case, "rcu", "objects were retired, none too early")
+}
+
+fn oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("selftest oom: an app runs the machine out of memory")?;
+    vm.expect("Out of memory: stopped domain `oom-app` (app class")?;
+    vm.expect("selftest oom: a service runs the machine out of memory while another app runs")?;
+    vm.expect("Out of memory: stopped domain `oom-app2` (app class")?;
+    vm.expect("Out of memory: stopped domain `oom-service` (service class")?;
+    vm.expect("Out of memory: restarting domain `oom-service`")?;
+    selftest_passed(vm, "oom")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

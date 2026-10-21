@@ -107,7 +107,9 @@ dependencies = [
  "radix-kdb",
  "radix-klog",
  "radix-ksyms",
+ "radix-lockdep",
  "radix-mm",
+ "radix-sched",
  "radix-sync",
 ]
 
@@ -176,6 +178,13 @@ name = "radix-ksyms"
 version = "0.0.1"
 
 [[package]]
+name = "radix-lockdep"
+version = "0.0.1"
+dependencies = [
+ "radix-sync",
+]
+
+[[package]]
 name = "radix-microcode"
 version = "0.0.1"
 
@@ -198,6 +207,13 @@ dependencies = [
 [[package]]
 name = "radix-relocs"
 version = "0.0.1"
+
+[[package]]
+name = "radix-sched"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "radix-sync"

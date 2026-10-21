@@ -162,9 +162,10 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	Give *unit* or *boot* to run only that part. Without KVM the boot
 	tests take a few minutes.
 
-	*kani* checks the Kani proof harnesses of the kernel's memory manager
-	and capability core instead (see *Verification* in
-	_docs/design/memory.md_ and _docs/design/capabilities.md_). Each takes
+	*kani* checks the Kani proof harnesses of the kernel's memory manager,
+	capability core and scheduling policy instead (see *Verification* in
+	_docs/design/memory.md_, _docs/design/capabilities.md_ and
+	_docs/design/scheduler.md_). Each takes
 	from seconds to several minutes, so plain *ob test* leaves them out,
 	and CI runs them in a job of their own. It needs the Kani release
 	that *ob doctor* names, installed with *cargo install --locked
@@ -172,10 +173,11 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 
 	*tla* checks the TLA+ models with the TLC model checker instead: the
 	capability store's derivation tree and revocation, in
-	_kernel/cap/tla/_, once for the safety properties and once, on a
-	smaller model, for liveness. That takes about two minutes on 4 CPUs,
-	so plain *ob test* leaves it out too, and CI runs it in a job of its
-	own. TLC needs Java 11 or later (the *default-jre-headless* package on
+	_kernel/cap/tla/_, and how the scheduler blocks, wakes and switches
+	threads between CPUs, in _kernel/sched/tla/_. Each is checked once
+	for the safety properties and once, on a smaller model, for liveness.
+	That takes about five minutes on 4 CPUs, so plain *ob test* leaves it
+	out too, and CI runs it in a job of its own. TLC needs Java 11 or later (the *default-jre-headless* package on
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned
 	release of the TLA+ tools from GitHub into _.cache/tla/_ and checks
 	its SHA-256; TLC's working files go to _out/tla/_.
@@ -187,7 +189,12 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		and an IPI to each. *uefi-cdrom* boots with *nox2apic* and checks
 		for xAPIC mode; with KVM, which always offers x2APIC, the other
 		three check for x2APIC mode. *bios-cdrom* boots with *nokaslr*
-		and *nopcid*.
+		and *nopcid*, and *bios-usb* with *lockdep*, so the lock checker
+		watches a whole boot of a release build.
+
+	Every boot test also fails if the kernel logs a lock checker report
+	(*Lock checker:* lines), except in the *lockdep* case that seeds
+	them, or a thread that would sleep with preemption held off.
 
 	*screen*
 		Boot under UEFI and read the boot log back from the framebuffer.
@@ -223,6 +230,53 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 		suite: no capability can be forged or have its rights widened,
 		revokes reach everything derived even while 3 other CPUs keep
 		deriving, and nothing leaks.
+
+	*fpu*
+		Boot 4 CPUs with *selftest=fpu*: three threads per CPU fill the
+		vector registers with their own values and check them after
+		every switch, a thousand times each.
+
+	*sched-fair*
+		Boot 4 CPUs under UEFI with *selftest=sched-fair*: fair threads
+		on one CPU get equal shares, a thread reniced to nice 5 gets the
+		share its weight gives, and two resource domains of CPU weights
+		200 and 100 get two thirds and one third of what they share.
+
+	*sched-rt*
+		Boot 4 CPUs with *selftest=sched-rt*: a woken real-time thread of
+		higher priority runs at once, a timer wakes a real-time thread
+		within a millisecond (median) even on a busy CPU, FIFO threads of
+		one priority run in turn and round-robin ones share the CPU.
+
+	*sched-pi*
+		Boot 4 CPUs under UEFI with *selftest=sched-pi*: a low-priority
+		thread holding a mutex that a high-priority thread wants runs at
+		the high priority until it lets go, so a thread of middle
+		priority cannot keep both waiting, also when the owner itself
+		waits for a mutex held by a third thread.
+
+	*sched-balance*
+		Boot 4 CPUs on 2 NUMA nodes under UEFI with
+		*selftest=sched-balance*: eight threads started on one CPU spread
+		out evenly over all four, across both nodes.
+
+	*lockdep*
+		Boot 4 CPUs with *selftest=lockdep*, which seeds deadlocks: two
+		spin locks and two mutexes taken in opposite orders on different
+		CPUs, and a mutex taken under a spin lock. The case checks that
+		the lock checker reports each one, with the places where both
+		orders were seen.
+
+	*rcu*
+		Boot 4 CPUs under UEFI with *selftest=rcu*: readers on the other
+		three CPUs never see an object freed after it was replaced
+		before a grace period passed.
+
+	*oom*
+		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit
+		refuses what passes it, and when memory runs out the kernel stops
+		an app domain, then a service domain that its supervisor
+		restarts, and never a system domain.
 
 	*stack-overflow*
 		Boot with *selftest=stack-overflow* and check that the panic

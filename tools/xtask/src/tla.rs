@@ -21,6 +21,8 @@ const TLA_SHA256: &str = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23
 pub const MODELS: &[(&str, &str)] = &[
     ("kernel/cap/tla/Capabilities.tla", "Capabilities.cfg"),
     ("kernel/cap/tla/Capabilities.tla", "CapabilitiesLiveness.cfg"),
+    ("kernel/sched/tla/Scheduler.tla", "Scheduler.cfg"),
+    ("kernel/sched/tla/Scheduler.tla", "SchedulerLiveness.cfg"),
 ];
 
 /// How to install Java.
