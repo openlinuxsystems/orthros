@@ -27,14 +27,13 @@
 //! data, and back on the way out, when the saved CS says the interrupted
 //! code ran in user mode. NMIs, double faults and machine checks can also
 //! arrive in kernel mode before the SYSCALL entry has swapped GS, or after
-//! the exit has swapped it back, so for them, and for every other
-//! exception (which is rare, unlike interrupts), the stub reads GS base
-//! itself and swaps only if it is not a kernel address. An exception in
-//! kernel mode with the program's GS base is a bug; the stub marks the
-//! frame so that the report says so, instead of faulting again on the
-//! first access to this CPU's data, and again, until the stack runs out.
-//! With SMAP on, the stub
-//! clears RFLAGS.AC, so a handler never runs with user pages open (the
+//! the exit has swapped it back, and an `iretq` to user mode that faults
+//! does so in kernel mode after the swap, so for an exception in kernel
+//! mode (rare, unlike interrupts) the stub reads GS base itself and swaps
+//! only if it is not a kernel address. It then marks the frame, so that a
+//! fatal report says so, instead of faulting again on the first access to
+//! this CPU's data, and again, until the stack runs out. With SMAP on, the
+//! stub clears RFLAGS.AC, so a handler never runs with user pages open (the
 //! interrupted code gets its flags back with `iretq`). Exceptions in user
 //! mode end the thread through the user fault handler (`crate::user`); a
 //! page fault on the copy instruction of a user copy moves on to the end
@@ -134,24 +133,23 @@ radix_isr_common:
     /* RBX (saved above, callee-saved across the call) says whether GS
        base was swapped on the way in. */
     xorl %ebx, %ebx
-    movq 15*8(%rsp), %rax
-    cmpq $32, %rax
-    jb 1f
     testb $3, 18*8(%rsp)
-    jz 3f
+    jz 1f
     swapgs
     movl $1, %ebx
     jmp 3f
 1:
-    /* Exceptions: GS base is the kernel's when its top bit is set. */
+    /* Kernel mode: an interrupt finds the kernel's GS base, but an
+       exception may not, so it reads GS base, which is the kernel's when
+       its top bit is set. */
+    cmpq $32, 15*8(%rsp)
+    jae 3f
     movl $0xc0000101, %ecx
     rdmsr
     testl %edx, %edx
     js 3f
     swapgs
     movl $1, %ebx
-    testb $3, 18*8(%rsp)
-    jnz 3f
     orq ${user_gs}, 15*8(%rsp)
 3:
     cmpb $0, {smap}(%rip)

@@ -380,6 +380,32 @@ pub fn flush_tlb_all() {
     }
 }
 
+/// Makes sure SS holds the kernel's data selector, not the null selector
+/// an interrupt from user mode leaves in it. AMD CPUs keep SS's hidden
+/// attributes across SYSRET, so a SYSRET with a null SS would hand the
+/// program an unusable stack segment. SYSCALL loads a proper SS, so only
+/// a thread that came in through an interrupt can leave SS null, and it
+/// leaves with `iretq`; but another thread switched to on this CPU may
+/// leave with SYSRET, so the context switch calls this (as Linux does for
+/// `X86_BUG_SYSRET_SS_ATTRS`). Reading SS is cheap; writing it is rare.
+pub fn ensure_kernel_ss() {
+    let ss: u16;
+    // SAFETY: reading a segment register has no side effects.
+    unsafe { asm!("mov {0:x}, ss", out(reg) ss, options(nomem, nostack, preserves_flags)) };
+    if ss != crate::percpu::KERNEL_DS {
+        // SAFETY: KERNEL_DS is the GDT's flat ring-0 data segment, a valid
+        // stack segment for the kernel, with the same base and limit (none,
+        // in 64-bit mode) as the null SS it replaces.
+        unsafe {
+            asm!(
+                "mov ss, {0:x}",
+                in(reg) crate::percpu::KERNEL_DS,
+                options(nomem, nostack, preserves_flags)
+            )
+        };
+    }
+}
+
 /// Lets the kernel touch user pages despite SMAP (sets RFLAGS.AC). Only
 /// for code that means to, such as the SMAP self-test.
 pub fn stac() {

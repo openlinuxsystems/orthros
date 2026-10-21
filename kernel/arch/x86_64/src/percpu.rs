@@ -34,8 +34,11 @@ pub const KERNEL_CS: u16 = 0x08;
 /// Data segment selector.
 pub const KERNEL_DS: u16 = 0x10;
 /// The selector SYSRET's user selectors are relative to: user data is 8
-/// above it and user code 16 above, both with RPL 3.
-pub const USER_BASE: u16 = 0x18;
+/// above it and user code 16 above. It carries RPL 3 itself, because only
+/// Intel CPUs force SYSRET's SS selector to RPL 3: AMD ones load it as it
+/// is, and a program's SS of 0x20 (RPL 0) under a CS of RPL 3 makes the
+/// `iretq` that ends the next interrupt from user mode fault.
+pub const USER_BASE: u16 = 0x18 | 3;
 /// User data (and stack) segment selector, RPL 3.
 pub const USER_DS: u16 = 0x20 | 3;
 /// User 64-bit code segment selector, RPL 3.
@@ -45,7 +48,7 @@ const TSS_SELECTOR: u16 = 0x30;
 
 // SYSRET loads the user selectors from `USER_BASE`; interrupt returns to
 // user mode take them from the frame, which the CPU pushed with these.
-const _: () = assert!(USER_DS == (USER_BASE + 8) | 3 && USER_CS == (USER_BASE + 16) | 3);
+const _: () = assert!(USER_DS == USER_BASE + 8 && USER_CS == USER_BASE + 16);
 
 /// Offset of [`PerCpu`]'s top-of-kernel-stack word, for the entry code.
 pub const KERNEL_RSP_OFFSET: usize = 24;

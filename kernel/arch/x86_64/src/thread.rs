@@ -233,6 +233,7 @@ impl Context {
         cpu.thread_stack[0].store(to.stack.start, Ordering::Relaxed);
         cpu.thread_stack[1].store(to.stack.end, Ordering::Relaxed);
         cpu.set_kernel_stack(to.stack.end);
+        cpu::ensure_kernel_ss();
         match to.space.get() {
             Some(space) => {
                 space.space().switch_to();
