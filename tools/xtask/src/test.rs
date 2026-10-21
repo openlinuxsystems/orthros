@@ -875,6 +875,33 @@ fn screen_shows(screen: &[String], needles: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks the `Random:` line (after "Random: "). RDSEED and RDRAND must
+/// pass their health tests when the CPU has them (`hardware`). Timing
+/// jitter must pass under QEMU's emulation, whose counter always varies
+/// enough. Under KVM the counter is the host's, and some hosts keep the
+/// work's timing so steady that the jitter fails its test (about half the
+/// samples were stuck on an AMD EPYC 9V45), so there a failed jitter is
+/// accepted as long as the line says so. Mixing it in does no harm either
+/// way (see "Seeding" in docs/design/random.md).
+fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
+    let (passed, failed) = if hardware {
+        (
+            "from RDSEED, RDRAND and timing jitter (",
+            "from RDSEED and RDRAND; failed its health test: timing jitter (",
+        )
+    } else {
+        (
+            "from timing jitter (",
+            ", but no source passed its health test; failed its health test: timing jitter (",
+        )
+    };
+    if line.contains(passed) || kvm && line.contains(failed) {
+        return Ok(());
+    }
+    let or_failed = if kvm { format!(" or \"{failed}...)\"") } else { String::new() };
+    Err(format!("the Random line should say \"{passed}...)\"{or_failed}, but it says: {line}"))
+}
+
 // ---- The test scripts ----
 
 /// The checks every normal boot passes, in the order the kernel logs them,
@@ -884,27 +911,17 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
-    vm.expect("Random: ChaCha20 seeded before KASLR from ")?;
+    vm.expect("Random: ChaCha20 seeded before KASLR")?;
     if case.cmdline.split_ascii_whitespace().any(|flag| flag == "nokaslr") {
         vm.expect("KASLR: off (nokaslr)")?;
     } else {
         vm.expect("KASLR: kernel moved by 0x")?;
     }
-    // The whole `Random:` line has arrived now. Every machine has timing
-    // jitter, and the CPUs the cases use unless they emulate a model of
-    // their own also have RDSEED and RDRAND.
-    let sources = match case.cpu_model {
-        Some(_) => "from timing jitter (",
-        None => "from RDSEED, RDRAND and timing jitter (",
-    };
+    // The whole `Random:` line has arrived now. The CPUs the cases use have
+    // RDSEED and RDRAND unless the case emulates a model of its own.
     let log = vm.log();
     let random = log.split("Random: ").nth(1).and_then(|rest| rest.lines().next());
-    if !random.is_some_and(|line| line.contains(sources)) {
-        return Err(format!(
-            "the seed should rest on {sources}...), but the log says: Random: {}",
-            random.unwrap_or_default()
-        ));
-    }
+    check_random(random.unwrap_or_default(), case.cpu_model.is_none(), vm.kvm)?;
     vm.expect("Layout: kernel at 0x")?;
     vm.expect("Paging: W^X holds")?;
     vm.expect("CPU: ")?;
@@ -1172,6 +1189,39 @@ mod tests {
             assert!(case.cmdline.len() <= CMDLINE_SLOT);
             crate::config::validate_cmdline(case.cmdline).unwrap();
         }
+    }
+
+    #[test]
+    fn a_failed_jitter_test_is_accepted_only_under_kvm() {
+        let all = "ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter \
+                   (4096 samples, 37 stuck)";
+        // From a boot test on an AMD EPYC 9V45 CI runner.
+        let steady = "ChaCha20 seeded before KASLR from RDSEED and RDRAND; failed its \
+                      health test: timing jitter (4096 samples, 2079 stuck)";
+        for kvm in [false, true] {
+            assert!(check_random(all, true, kvm).is_ok());
+        }
+        assert!(check_random(steady, true, true).is_ok());
+        assert!(check_random(steady, true, false).is_err());
+
+        // RDSEED and RDRAND must pass wherever the CPU has them.
+        let bad_rdrand = "ChaCha20 seeded before KASLR from RDSEED and timing jitter \
+                          (4096 samples, 37 stuck); failed its health test: RDRAND";
+        let missing = "ChaCha20 seeded before KASLR from timing jitter (4096 samples, \
+                       134 stuck); the CPU has no RDSEED or RDRAND";
+        for kvm in [false, true] {
+            assert!(check_random(bad_rdrand, true, kvm).is_err());
+            assert!(check_random(missing, true, kvm).is_err());
+            assert!(check_random("", true, kvm).is_err());
+        }
+
+        // An emulated CPU without them seeds from the jitter alone.
+        assert!(check_random(missing, false, false).is_ok());
+        let none = "ChaCha20 seeded before KASLR, but no source passed its health test; \
+                    failed its health test: timing jitter (4096 samples, 2079 stuck); the \
+                    CPU has no RDSEED or RDRAND";
+        assert!(check_random(none, false, false).is_err());
+        assert!(check_random(none, false, true).is_ok());
     }
 
     #[test]
