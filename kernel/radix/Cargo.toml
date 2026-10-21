@@ -17,6 +17,7 @@ bench = false
 
 [dependencies]
 radix-abi = { path = "../abi" }
+radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-elf = { path = "../lib/elf" }
 radix-fbcon = { path = "../lib/fbcon" }

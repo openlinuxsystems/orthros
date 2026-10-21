@@ -228,11 +228,6 @@ impl ProcessObject {
         self.space.lock().clone()
     }
 
-    /// Its account.
-    pub fn account(&self) -> &AccountRef {
-        &self.account
-    }
-
     /// Where it is in its life, and its exit code once it has exited.
     pub fn state(&self) -> (ProcessState, Option<u64>) {
         let state = self.state.lock();

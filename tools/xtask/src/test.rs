@@ -476,6 +476,20 @@ pub const CASES: &[Case] = &[
         script: fuzz,
     },
     Case {
+        name: "spark",
+        about: "the kernel starts Spark from the boot archive; Spark starts a program, reaps it",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/hello one two",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: spark,
+    },
+    Case {
         name: "oom",
         about: "out of memory stops an app, then a service its supervisor restarts",
         firmware: Firmware::Bios,
@@ -541,7 +555,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     if boot {
         let built = Built {
             kernel: kernel::build(ctx, profile)?,
-            usertests: userspace::build(ctx, profile)?,
+            programs: userspace::build(ctx, profile)?,
         };
         boot_tests(ctx, &built, &cases, Duration::from_secs(timeout))?;
     }
@@ -615,7 +629,7 @@ pub fn test_microcode() -> Vec<u8> {
 /// The kernel and user programs a test image holds.
 pub struct Built {
     pub kernel: PathBuf,
-    pub usertests: PathBuf,
+    pub programs: userspace::Programs,
 }
 
 /// Builds a test image whose kernel command line is a placeholder slot.
@@ -632,7 +646,7 @@ pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -
             timeout: 0,
             cmdline: &cmdline_slot(),
             microcode: (kind == TestImage::Microcode).then(test_microcode),
-            usertests: Some(&built.usertests),
+            programs: Some(&built.programs),
             staging: dir.join(format!("{name}-root")),
             output: output.clone(),
         },
@@ -1081,7 +1095,7 @@ fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 5)"))?;
+    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 6)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -1458,6 +1472,54 @@ fn fuzz(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err("selftest fuzz passed, but its report lacks the fuzzers' count".into());
     }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+/// Spark's line or hello's that starts with `start`: the rest of it, once
+/// the line has ended.
+fn program_line(vm: &mut Vm, start: &str) -> Result<String, String> {
+    vm.expect(start)?;
+    let from = vm.cursor;
+    vm.expect("\n")?;
+    Ok(vm.log()[from..vm.cursor].trim().to_string())
+}
+
+/// A program's bias from its "moved by 0x..." line: it must put the
+/// program, linked at 0, in the image window of radix-startup(2).
+fn image_bias(rest: &str, who: &str) -> Result<u64, String> {
+    const IMAGE_BASE: u64 = 0x1000_0000_0000;
+    const WINDOW: u64 = 0x100_0000_0000;
+    let hex = rest.rsplit("0x").next().unwrap_or_default();
+    let bias = u64::from_str_radix(hex.trim(), 16).map_err(|_| format!("{who}: bias `{rest}`"))?;
+    if !(IMAGE_BASE..IMAGE_BASE + WINDOW).contains(&bias) || bias % 4096 != 0 {
+        return Err(format!("{who} was placed at {bias:#x}, outside the image window"));
+    }
+    Ok(bias)
+}
+
+fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("Init: the boot archive is ")?;
+    vm.expect("Init: /system/bin/spark is process ")?;
+    let rest = program_line(vm, "spark: Spark v0 is process ")?;
+    let spark = image_bias(&rest, "Spark")?;
+    vm.expect("spark: boot archive of ")?;
+    vm.expect(" KiB with 2 files at 0x")?;
+    let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
+    let args = program_line(vm, "hello: process ")?;
+    if args != format!("{number}, arguments: /system/tests/hello one two") {
+        return Err(format!("hello got `{args}`, not process {number} with its arguments"));
+    }
+    let rest = program_line(vm, "hello: placed at a random address, moved by ")?;
+    let hello = image_bias(&rest, "hello")?;
+    if hello == spark {
+        return Err(format!("Spark and hello were both placed at {hello:#x}"));
+    }
+    vm.expect("hello: the heap holds 1000 numbers summing to 500500 and 458752 bytes of sevens")?;
+    vm.expect("hello: goodbye")?;
+    vm.expect(&format!("spark: process {number} (/system/tests/hello) exited with code 0x0"))?;
+    vm.expect(&format!("spark: reaped process {number}; all of its memory came back"))?;
+    vm.expect("spark: nothing more to do; waiting")
 }
 
 fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {

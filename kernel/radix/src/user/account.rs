@@ -54,11 +54,6 @@ impl Account {
         &self.domain
     }
 
-    /// The bytes charged now.
-    pub fn bytes(&self) -> u64 {
-        *self.bytes.lock()
-    }
-
     /// Charges `bytes`, unless the domain or one above it would pass its
     /// limit.
     pub fn charge(account: &AccountRef, bytes: u64) -> Result<Charge> {

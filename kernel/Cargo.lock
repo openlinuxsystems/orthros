@@ -102,6 +102,7 @@ dependencies = [
  "radix-abi",
  "radix-arch-aarch64",
  "radix-arch-x86_64",
+ "radix-bootfs",
  "radix-cap",
  "radix-elf",
  "radix-fbcon",

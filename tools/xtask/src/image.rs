@@ -25,8 +25,9 @@ pub struct ImageSpec<'a> {
     pub cmdline: &'a str,
     /// Intel microcode updates to load as a boot module, if any.
     pub microcode: Option<Vec<u8>>,
-    /// The user test programs, loaded as a boot module, if any.
-    pub usertests: Option<&'a Path>,
+    /// The user programs: the test image and the boot archive, each
+    /// loaded as a boot module.
+    pub programs: Option<&'a userspace::Programs>,
     /// Staging directory, recreated on every build.
     pub staging: PathBuf,
     /// Output file.
@@ -65,7 +66,7 @@ pub fn build_release(
         Some(read_microcode(ctx, Path::new(microcode_source))?)
     };
     let kernel = kernel::build(ctx, profile)?;
-    let usertests = userspace::build(ctx, profile)?;
+    let programs = userspace::build(ctx, profile)?;
     build(
         ctx,
         &ImageSpec {
@@ -73,7 +74,7 @@ pub fn build_release(
             timeout: ctx.config.boot.timeout,
             cmdline: overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline),
             microcode,
-            usertests: Some(&usertests),
+            programs: Some(&programs),
             staging: ctx.out.join("image-root"),
             output: ctx.out.join(file_name(iso)),
         },
@@ -191,15 +192,19 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
         &licenses::Extras {
             mkrescue: &mkrescue,
             microcode: spec.microcode.is_some(),
-            usertests: spec.usertests.is_some(),
+            programs: spec.programs.is_some(),
         },
     )?;
     let mut modules = Vec::new();
-    if let Some(usertests) = spec.usertests {
-        let path = userspace::USERTESTS_PATH;
-        process::copy(usertests, &spec.staging.join(path.trim_start_matches('/')))?;
-        // The kernel finds the module by this word on its command line.
-        modules.push((path, userspace::USERTESTS_WORD));
+    if let Some(programs) = spec.programs {
+        // The kernel finds each module by the word on its command line.
+        for (from, path, word) in [
+            (&programs.usertests, userspace::USERTESTS_PATH, userspace::USERTESTS_WORD),
+            (&programs.bootfs, userspace::BOOTFS_PATH, userspace::BOOTFS_WORD),
+        ] {
+            process::copy(from, &spec.staging.join(path.trim_start_matches('/')))?;
+            modules.push((path, word));
+        }
     }
     if let Some(microcode) = &spec.microcode {
         let path = spec.staging.join(MICROCODE_PATH.trim_start_matches('/'));

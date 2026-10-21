@@ -40,6 +40,7 @@
 //! a thread's IPC state; a ring's queues. None is held across a block.
 
 mod account;
+pub mod init;
 mod ipc;
 pub mod launch;
 mod loader;

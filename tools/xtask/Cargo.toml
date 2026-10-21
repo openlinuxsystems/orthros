@@ -12,9 +12,11 @@ publish.workspace = true
 
 [dependencies]
 # Kernel libraries shared with the build tool: the symbol and relocation
-# table formats, the console fonts (to read the screen in boot tests), the
-# microcode format (to build test updates), and the lists of kernel flags
-# and kdb commands that `ob docs --check` compares with the manual pages.
+# table formats, the boot archive's format (to write it), the console fonts
+# (to read the screen in boot tests), the microcode format (to build test
+# updates), and the lists of kernel flags and kdb commands that `ob docs
+# --check` compares with the manual pages.
+radix-bootfs = { path = "../../kernel/lib/bootfs", features = ["write"] }
 radix-fbcon = { path = "../../kernel/lib/fbcon" }
 radix-hal = { path = "../../kernel/hal" }
 radix-kdb = { path = "../../kernel/lib/kdb" }

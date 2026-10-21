@@ -226,7 +226,7 @@ impl<'a> Archive<'a> {
     }
 
     /// The entries directly inside the directory `dir`.
-    pub fn list(&self, dir: &'a str) -> impl Iterator<Item = Entry<'a>> + use<'a> {
+    pub fn list<'d>(&self, dir: &'d str) -> impl Iterator<Item = Entry<'a>> + use<'a, 'd> {
         self.entries().filter(move |entry| entry.path.is_in(dir))
     }
 
