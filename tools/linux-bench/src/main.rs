@@ -168,7 +168,10 @@ fn fresh_page() {
 /// The bytes of each of the two buffers memory bandwidth is measured
 /// between, and how many times it copies one into the other.
 const COPY_BYTES: usize = 32 << 20;
-const COPY_ROUNDS: u64 = 30;
+/// Copies in a batch, and batches: the fastest batch counts, as on Radix,
+/// so that a moment of contention on a shared machine does not.
+const COPY_BATCH: u64 = 6;
+const COPY_BATCHES: usize = 5;
 
 /// Copies `len` bytes with `rep movsb`, as the Radix benchmark does.
 ///
@@ -188,7 +191,8 @@ unsafe fn copy(from: *const u8, to: *mut u8, len: usize) {
     }
 }
 
-/// Memory bandwidth: nanoseconds per MiB copied.
+/// Memory bandwidth: nanoseconds per MiB copied, in the fastest of a few
+/// batches of copies.
 fn memory_copy() {
     let (from, to) = (map_anonymous(COPY_BYTES), map_anonymous(COPY_BYTES));
     // Fill the source, and copy once, so that no page is touched for the
@@ -198,12 +202,20 @@ fn memory_copy() {
         from.write_bytes(0x5a, COPY_BYTES);
         copy(from, to, COPY_BYTES);
     }
-    let started = Instant::now();
-    for _ in 0..COPY_ROUNDS {
-        // SAFETY: as above.
-        unsafe { copy(from, to, COPY_BYTES) };
-    }
-    print_line("memory_copy", started, COPY_ROUNDS * (COPY_BYTES >> 20) as u64);
+    let mib = COPY_BATCH * (COPY_BYTES >> 20) as u64;
+    let fastest = (0..COPY_BATCHES)
+        .map(|_| {
+            let started = Instant::now();
+            for _ in 0..COPY_BATCH {
+                // SAFETY: as above.
+                unsafe { copy(from, to, COPY_BYTES) };
+            }
+            started.elapsed()
+        })
+        .min()
+        .expect("at least one batch");
+    let ns = fastest.as_nanos() as f64 / mib as f64;
+    println!("BENCH name=memory_copy ns={ns:.2} iterations={mib}");
     for at in [from, to] {
         // SAFETY: mapped above, and no longer used.
         unsafe { libc::munmap(at.cast(), COPY_BYTES) };

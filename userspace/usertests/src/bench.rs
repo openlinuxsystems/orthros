@@ -38,8 +38,11 @@ pub fn syscalls(argument: Argument) -> u64 {
     checks::failures()
 }
 
-/// The copies that measure memory bandwidth.
-const COPY_ROUNDS: u64 = 30;
+/// The copies that measure memory bandwidth: batches of them, of which
+/// the fastest counts, as in tools/linux-bench, so that a moment of
+/// contention on a shared machine does not.
+const COPY_BATCH: u64 = 6;
+const COPY_BATCHES: usize = 5;
 
 /// Where the memory benchmark maps its pages: one fresh page, then the
 /// buffers it copies between, one memory object's frame after another.
@@ -99,13 +102,17 @@ pub fn memory(argument: Argument) -> u64 {
     // A first copy, so that no page is touched for the first time below.
     // SAFETY: both halves were mapped read-write above and do not overlap.
     unsafe { copy(from, to, half) };
-    let start = cycles();
-    for _ in 0..COPY_ROUNDS {
-        // SAFETY: as above.
-        unsafe { copy(from, to, half) };
+    let mut fastest = u64::MAX;
+    for _ in 0..COPY_BATCHES {
+        let start = cycles();
+        for _ in 0..COPY_BATCH {
+            // SAFETY: as above.
+            unsafe { copy(from, to, half) };
+        }
+        fastest = fastest.min(cycles() - start);
     }
-    let mib = COPY_ROUNDS * (half >> 20);
-    println!("BENCH name=memory_copy ns={} iterations={mib}", Nanos::per(cycles() - start, mib));
+    let mib = COPY_BATCH * (half >> 20);
+    println!("BENCH name=memory_copy ns={} iterations={mib}", Nanos::per(fastest, mib));
     checks::failures()
 }
 

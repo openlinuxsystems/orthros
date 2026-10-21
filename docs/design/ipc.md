@@ -368,7 +368,7 @@ vulnerabilities yet. The method follows lmbench's `lat_syscall`,
 | `context_switch`: two programs on one CPU yielding to each other, per switch the kernel counts | two processes calling `sched_yield`, per switch `getrusage` counts |
 | `fresh_page`: a page made from memory, mapped, written, unmapped and given back | `mmap`, a first-touch fault, `munmap` |
 | `tlb_shootdown`: a page mapped and unmapped while the address space runs on the other CPU | `mprotect` to none and back while a thread spins on the other CPU |
-| `memory_copy`: `rep movsb` between two 32 MiB buffers, per MiB | the same copy |
+| `memory_copy`: `rep movsb` between two 32 MiB buffers, per MiB, in the fastest of 5 batches of 6 copies | the same copy, the same way |
 | `endpoint_call_*`: `cap_call` answered with `reply_recv` | a pipe round trip |
 | `notification_pingpong_*`: `notify` and `wait` each way | an eventfd round trip |
 | `channel_roundtrip_*`: a message each way through a channel | a futex ping-pong |
