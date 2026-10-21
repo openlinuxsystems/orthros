@@ -208,9 +208,16 @@ fn radix_numbers(
     let _ = std::fs::remove_file(&image);
     if let Err(reason) = outcome {
         // CI keeps the log as an artifact, but the job's own output is
-        // where people look first.
+        // where people look first: from the first sign of trouble, or the
+        // last lines.
         let text = test::clean_log(&log);
-        for line in text.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
+        let lines: Vec<&str> = text.lines().collect();
+        let trouble = lines.iter().position(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("panic") || lower.contains("exception") || lower.contains("failed")
+        });
+        let from = trouble.map_or(lines.len().saturating_sub(40), |i| i.saturating_sub(10));
+        for line in lines.iter().skip(from).take(60) {
             eprintln!("    | {line}");
         }
         let said: Vec<&str> = log.lines().filter(|line| line.contains("selftest bench")).collect();
