@@ -16,12 +16,13 @@ into resource domains, which share a CPU weight and a memory limit, and
 when the machine runs out of memory the kernel stops whole domains, apps
 first, and never the system's own.
 
-This page describes the scheduler as of Phase 4 of the roadmap, where
-every thread is a kernel thread: the kernel's own and those of the
-self-tests (see *radix-debug*(7)). Programs and their system calls for
-threads, priorities and domains arrive in Phases 5 and 6, and their pages
-in section 2 will refer to this one. The design, with the argument that
-the scheduler is correct, is in _docs/design/scheduler.md_.
+This page describes the scheduler as of Phase 5 of the roadmap. Most
+threads are the kernel's own and those of the self-tests (see
+*radix-debug*(7)); from Phase 5 a thread can also run a program in user
+mode, which gives up the CPU with *radix_yield*(2) and blocks in IPC (see
+*radix-ipc*(7)). System calls for priorities and domains arrive with
+processes in Phase 6. The design, with the argument that the scheduler is
+correct, is in _docs/design/scheduler.md_.
 
 # THREADS
 
@@ -232,4 +233,4 @@ checker at any time (see *radix-debug*(7)).
 
 # SEE ALSO
 
-*radix-debug*(7), *radix-capabilities*(7), *orthros-boot*(7), *ob*(1)
+*radix-ipc*(7), *radix-debug*(7), *radix-capabilities*(7), *orthros-boot*(7), *ob*(1)

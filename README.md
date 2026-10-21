@@ -12,7 +12,7 @@ logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 4** of its [roadmap](docs/roadmap.md): the Radix
+OrthrOS is at **Phase 5** of its [roadmap](docs/roadmap.md): the Radix
 kernel boots through GRUB under UEFI and BIOS at a random address, chosen
 by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
 memory with a frame allocator per NUMA node and a slab heap with per-CPU
@@ -29,6 +29,13 @@ NUMA nodes; groups them into resource domains with CPU weights and memory
 limits; and, when memory runs out, stops whole app domains before services
 and never the system's own. A lock checker reports locking bugs the first
 time they run, and RCU lets readers go without locks.
+Programs run in user mode and reach the kernel through twelve system
+calls, defined once in an interface language that generates the Rust
+bindings, C headers and man pages. They talk over synchronous endpoints
+with a register-only fast path, notifications, shared-memory channels and
+io_uring-style rings, all checked by a TLA+ model, Kani proofs and
+user-mode test programs, and CI publishes what each costs next to Linux
+on the same machine.
 A panic fills the screen with a symbolized backtrace and is kept in memory
 for the next boot; a serial kernel debugger, GDB through QEMU and trace
 points help with the rest. There is nothing to install yet.
@@ -91,14 +98,21 @@ covers booting it on real hardware.
 ob                  build entry point (shell wrapper around tools/xtask)
 orthros.toml        build configuration, see orthros.toml(5)
 rust-toolchain.toml pinned nightly Rust
+abi/                the system call interface, in ridl (see radix-ipc(7))
 kernel/             the Radix kernel workspace
-  radix/            the architecture-independent kernel: consoles, panic, kdb
+  radix/            the architecture-independent kernel: consoles, panic, kdb,
+                    threads, user mode, system calls and IPC objects
   hal/              hardware abstraction layer traits, kernel command line
-  arch/x86_64/      boot trampoline, CPU tables, paging, ACPI, APIC, SMP
+  arch/x86_64/      boot trampoline, CPU tables, paging, ACPI, APIC, SMP,
+                    SYSCALL entry and user copies
   arch/aarch64/     HAL stubs that CI compiles, so x86 cannot leak into radix/
-  lib/              host-tested kernel libraries: acpi, bootinfo, fbcon,
-                    kdb, klog, ksyms, microcode, sync
+  mm/, cap/, sched/ the memory manager, capability core and scheduling policy
+  ipc/              IPC arithmetic: info words, user ranges, ring accounting
+  abi/              radix-abi, the Rust bindings generated from abi/
+  lib/              host-tested kernel libraries: acpi, bootinfo, elf, fbcon,
+                    kdb, klog, ksyms, lockdep, microcode, random, relocs, sync
   targets/          the kernel's Rust target specification
+userspace/          the user programs: libradix and the usertests image
 image/grub/         GRUB menu template for every image
 docs/
   man/              man pages (scdoc sources)
@@ -107,11 +121,13 @@ docs/
   design/           design notes on how the kernel works
   roadmap.md        the implementation plan, phases 0 to 26
 tools/xtask/        the Rust program behind ./ob
+tools/ridlc/        the interface compiler: abi/ to Rust, C and man(2)
+tools/linux-bench/  the Linux baseline for ./ob bench
 tools/container/    the pinned build container
 ```
 
-Later phases add `abi/`, `userspace/`, `libs/`, `ports/` and `tests/`, as
-described in the roadmap.
+Later phases add `libs/`, `ports/` and `tests/`, as described in the
+roadmap.
 
 ## Contributing
 

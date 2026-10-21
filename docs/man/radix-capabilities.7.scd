@@ -17,13 +17,12 @@ them by slot number; it never sees or makes a capability itself. To give
 another program access, it hands over a copy, perhaps with fewer rights,
 and it can later take back everything it handed out by revoking.
 
-This page describes the model as of Phase 3 of the roadmap, where the
-kernel has its capability store but no programs yet: the store is used by
-the kernel and by the *caps* self-test (see *radix-debug*(7)). System
-calls that work on capabilities arrive in Phase 5, and their pages in
-section 2 will refer to this one. The design, with the argument that
-capabilities cannot be forged or widened, is in
-_docs/design/capabilities.md_.
+This page describes the model as of Phase 5 of the roadmap. Programs
+use their capabilities through system calls: the methods every
+capability has, such as *derive*, *move_to* and *revoke*, are in
+*radix-capability*(2), and the others with the kind they work on (see
+*radix-ipc*(7)). The design, with the argument that capabilities cannot
+be forged or widened, is in _docs/design/capabilities.md_.
 
 # OBJECT KINDS
 
@@ -75,6 +74,18 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	A resource domain: a CPU weight and a memory limit shared by the
 	threads in it, and its class for the out-of-memory policy (see
 	*radix-scheduling*(7)). Rights: *read*, *control*.
+
+*random*
+	The kernel's random number generator, which every program receives
+	at start (see *radix-random*(2)). Rights: *read*.
+
+*ring*
+	A submission and completion ring shared with a program (see
+	*radix-ring*(2)). Rights: *control*, *send*.
+
+*kernel log*
+	Permission to write lines to the kernel log (see
+	*radix-kernel-log*(2)). Rights: *write*.
 
 # RIGHTS
 
@@ -215,7 +226,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by
@@ -224,4 +235,5 @@ are described in *radix-debug*(7).
 
 # SEE ALSO
 
-*radix-debug*(7), *orthros-boot*(7), *ob*(1)
+*radix-ipc*(7), *radix-capability*(2), *radix-errors*(2), *radix-debug*(7),
+*orthros-boot*(7), *ob*(1)

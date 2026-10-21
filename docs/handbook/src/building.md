@@ -83,7 +83,7 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (OrthrOS Phase 4)
+[    0.000000] Radix 0.0.1 (OrthrOS Phase 5)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:
@@ -99,7 +99,9 @@ found and ends like this:
 [    0.344198]   node 0 DMA32  0x000000100000-0x00003fedbfff  1009 MiB managed,  1009 MiB free,   4 MiB reserve
 [    0.355310] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
 [    0.356021] Lock checker: off (the lockdep flag turns it on)
-[    0.358712] Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.358712] Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.384891] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
+[    0.402551] User: the usertests image is 96 KiB
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online

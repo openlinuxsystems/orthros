@@ -256,6 +256,8 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - Benchmark harness for syscall and IPC round trips, recording Linux numbers on the same machine as a baseline.
 - **Exit:** user-mode test programs ping-pong over IPC and rings, and CI publishes the benchmark numbers on every merge.
 
+**Status:** implemented. Programs run in user mode and reach the kernel through twelve system calls, defined with every object's methods and the kernel's errors in `abi/*.ridl`; `ridlc` generates the Rust bindings, C headers and 23 man(2) pages from them. Two boot tests run user-mode programs on 2 CPUs with the lock checker on: in `user` a probe calls every system call and method with good and bad arguments, including a check that registers are preserved and failed calls return nothing, and eight kinds of fault each end only their program; in `ipc` five pairs of programs ping-pong over an endpoint, pass capabilities in messages, signal notifications, talk through a shared-memory channel and exchange `msg_ring` completions between two rings, on one CPU and across two. Both check that the capability store holds nothing more afterwards. TLC checks a TLA+ model of calls, replies, cancellation and closing, liveness included, and five Kani harnesses prove the info words, the user-range checks and the ring accounting against anything a program writes. `ob bench` measures system calls and IPC round trips next to the host's Linux (pipes, eventfds, futexes and Unix sockets), and CI's `bench` job publishes the report in its summary on every pull request and merge. The semi-formal argument is in `docs/design/ipc.md`, and `radix-ipc(7)` describes the mechanisms. Changes from this plan: the random capability is an object with `read` and `words` methods in slot 4 of every program, and rings have a `random` operation too (ADR 0031); channels are a library over a shared frame and two notifications rather than a kernel object (ADR 0032); until Phase 6's loader, the kernel starts the test programs from a `usertests` boot module, and the store gains `random`, `ring` and `kernel_log` objects (ADR 0036); the benchmark job reports without failing on numbers until there is a quiet machine to set thresholds on (ADR 0035). The user-mode tests found two bugs of earlier phases, fixed here: a TLB shootdown with no other CPU to ask still took a request number, so its CPU skipped the next real request under that number and that request's initiator panicked waiting for it; and idle CPUs halted with HLT claimed to poll for wake-ups, so a wake-up from another CPU waited for the next timer tick. Decisions made in this phase: ADRs 0031 to 0036.
+
 ### Phase 6: First userspace (M)
 
 - ELF64 loader (static and position-independent), user ASLR, process objects.
@@ -460,7 +462,7 @@ Every shipped command, service, file format, system call and library interface g
 | Section | Contents | Examples |
 | --- | --- | --- |
 | 1 | User commands | `nukesh(1)`, `bundle(1)`, `snap(1)`, `lumen(1)`, `ps(1)` |
-| 2 | System calls, generated from `.ridl` files | `cap_call(2)`, `ring_setup(2)`, `map(2)` |
+| 2 | System calls and kernel interfaces, generated from `.ridl` files | `radix_cap_call(2)`, `radix_ring_setup(2)`, `radix-capability(2)` |
 | 3 | Library interfaces | `libradix(3)`, `radix_ring(3)` |
 | 4 | Devices and drivers | `nvme(4)`, `xhci(4)`, `e1000(4)`, `virtio-gpu(4)` |
 | 5 | File formats | `manifest.json(5)`, `spark.service(5)`, `install.json(5)`, `lumen.json(5)`, `network.json(5)`, `grants(5)` |

@@ -107,6 +107,11 @@ checks of every phase so far:
    NUMA node`. Then boot with `selftest=sched-rt`, then with
    `selftest=sched-balance`. Each log must end with `passed` before `Boot
    complete.`; note the timer latency `sched-rt` reports.
+9. From Phase 5: check that the `User mode:` line says `SMEP on, SMAP on`.
+   Then boot with `selftest=user`, then with `selftest=ipc`. Each log must
+   end with `passed` before `Boot complete.` Then boot with
+   `selftest=bench` and note the `BENCH` lines, which are the first
+   numbers from real hardware.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.

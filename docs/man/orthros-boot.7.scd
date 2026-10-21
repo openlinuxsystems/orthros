@@ -53,8 +53,10 @@ _/system/share/licenses/_
 . The firmware loads GRUB from the boot medium.
 . GRUB shows its menu for *boot.timeout* seconds, on the screen and on the
   first serial port.
-. GRUB loads _/boot/radix_ through the Multiboot2 protocol, and the
-  microcode file as a module if the image has one. The kernel's header
+. GRUB loads _/boot/radix_ through the Multiboot2 protocol, the
+  microcode file as a module if the image has one, and the user test
+  programs (_/boot/usertests_) as a module with the word *usertests* if
+  the image has them. The kernel's header
   asks for a linear framebuffer of any size with 32 bits per pixel. Under
   UEFI, GRUB keeps the firmware's graphics mode (*gfxpayload=keep*), which
   is normally the screen's native resolution; under BIOS it sets a VESA
@@ -105,9 +107,13 @@ _/system/share/licenses/_
   checker:* line says whether the lock checker runs (see *lockdep*
   below). The kernel then turns interrupts on.
 . The kernel sets up its capability store (see *radix-capabilities*(7))
-  and reports its limits on a *Capabilities: ready* line. Until user
-  programs arrive in Phase 6, only the *caps* and *oom* self-tests make
-  capabilities.
+  and reports its limits on a *Capabilities: ready* line.
+. The kernel sets up user mode: the *User mode:* line gives the system
+  call entry, the user half of every address space and whether SMEP and
+  SMAP protect the kernel from it, and the *User:* line the size of the
+  *usertests* image, if GRUB loaded one. Until Phase 6 brings processes,
+  the only programs are those the *user*, *ipc* and *bench* self-tests
+  start from that image (see *radix-ipc*(7)).
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
@@ -128,7 +134,9 @@ kernel started; messages before timer calibration show 0):
 [    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
 [    0.398210] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
 [    0.399102] Lock checker: off (the lockdep flag turns it on)
-[    0.401388] Capabilities: ready; 12 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.401388] Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.427524] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
+[    0.468681] User: the usertests image is 96 KiB
 [    0.409872] CPUs: 4 of 4 online:
 [    0.425233]   cpu0: APIC ID 0, boot CPU, online
 [    0.456580]   cpu1: APIC ID 1, online
@@ -160,8 +168,9 @@ The kernel's page tables map, in the higher half:
   unmapped guard page below it.
 
 The lower half, below 0x0000800000000000, belongs to address spaces,
-which later phases give to processes. Nothing is mapped at address 0, so a
-null pointer faults.
+which hold programs from Phase 5 on; a program may use it from 0x10000 to
+one page below its end (see *radix-ipc*(7)). Nothing is mapped at address
+0, so a null pointer faults.
 
 No page is ever writable and executable at once (W^X); the kernel checks
 this by walking its finished page tables and reports it at boot. Where
@@ -253,9 +262,9 @@ The line then says so, and the seed is as unpredictable as the CPU's
 generators.
 
 A line that says no source passed means the kernel's random numbers, and
-so its layout, may be predictable on that machine. From Phase 5, programs
-get random numbers from the same generator through their *getrandom*
-capability.
+so its layout, may be predictable on that machine. Programs get random
+numbers from the same generator through the random capability every one
+of them receives (see *radix-random*(2)).
 
 # MEMORY
 
@@ -388,7 +397,7 @@ flags and otherwise ignores them.
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
 	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
-	*lockdep*, *rcu* or *oom*.
+	*lockdep*, *rcu*, *oom*, *user*, *ipc* or *bench*.
 	See *radix-debug*(7). *ob test* uses these.
 
 *qemu-exit*
