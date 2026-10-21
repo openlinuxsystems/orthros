@@ -35,7 +35,7 @@ use radix_cap::{
 use radix_hal::MAX_CPUS;
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
-use radix_sync::{Mutex, SpinLock};
+use radix_sync::{Mutex, RawSpinLock};
 
 use crate::domains::{self, DomainError, DomainRef, Settings};
 use crate::percpu::{PerCpu, Slot};
@@ -88,10 +88,12 @@ struct Cached {
     cap: Capability,
 }
 
-/// Each CPU's capabilities. Only its own CPU takes the lock, with
-/// preemption off, so it is never contended.
-static CACHE: PerCpu<SpinLock<[Option<Cached>; CACHED]>> =
-    PerCpu::new([const { Slot::new(SpinLock::new([None; CACHED])) }; MAX_CPUS]);
+/// Each CPU's capabilities. Only its own CPU takes the lock, inside
+/// `PerCpu::with`, which holds off preemption, and no interrupt handler
+/// looks capabilities up, so it is never contended and a raw lock, which
+/// skips the lock checker's hooks, is enough.
+static CACHE: PerCpu<RawSpinLock<[Option<Cached>; CACHED]>> =
+    PerCpu::new([const { Slot::new(RawSpinLock::new([None; CACHED])) }; MAX_CPUS]);
 
 fn cache_index(at: SlotRef) -> usize {
     (at.slot as usize ^ at.space.index as usize) % CACHED
