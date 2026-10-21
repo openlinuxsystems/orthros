@@ -1,4 +1,9 @@
-# 0027. The lock checker is on in debug builds, off in release builds, and switchable at boot
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+# 0028. The lock checker is on in debug builds, off in release builds, and switchable at boot
 
 - Status: Accepted
 - Date: 2026-10-21

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! One CPU's run queue: the threads that may run there.
 //!
 //! Real-time threads wait in a [`RtQueue`] and run before any fair thread;

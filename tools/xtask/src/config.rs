@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `orthros.toml`, the build configuration. Documented in orthros.toml(5).
 
 use std::fmt;

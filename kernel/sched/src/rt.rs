@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The real-time classes: FIFO and round-robin queues by priority.
 //!
 //! A real-time thread runs ahead of every fair thread. Among real-time

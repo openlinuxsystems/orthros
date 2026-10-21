@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # For developers
 
 These documents live in the repository rather than in this handbook:
@@ -39,7 +44,7 @@ cargo test --manifest-path kernel/Cargo.toml -p radix-acpi
 
 The memory manager, `radix-mm`, the capability core, `radix-cap`, and the
 scheduling policy, `radix-sched`, also have Kani proof harnesses (ADRs
-0019 and 0029), which `./ob test kani` checks; they
+0019 and 0030), which `./ob test kani` checks; they
 take about ten minutes and need the Kani release `./ob doctor` names:
 
 ```sh
@@ -48,11 +53,12 @@ cargo kani setup
 ./ob test kani
 ```
 
-The capability core's derivation tree and revocation are also modelled in
-TLA+ (`kernel/cap/tla/`, ADR 0024), and so is how the scheduler blocks,
-wakes and switches threads between CPUs (`kernel/sched/tla/`, ADR 0029).
-`./ob test tla` checks both models with the TLC model checker in about
-five minutes. It needs Java; `ob` downloads the pinned TLA+ tools itself:
+The capability core's derivation tree, retyping and revocation are also
+modelled in TLA+ (`kernel/cap/tla/`, ADR 0024), and so is how the scheduler
+blocks, wakes and switches threads between CPUs (`kernel/sched/tla/`, ADR
+0030). `./ob test tla` checks both models with the TLC model checker in
+about eight minutes. It needs Java; `ob` downloads the pinned TLA+ tools
+itself:
 
 ```sh
 sudo apt install default-jre-headless

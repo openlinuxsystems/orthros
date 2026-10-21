@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The buddy allocator of one zone.
 //!
 //! A zone hands out blocks of 2^order contiguous frames, order 0 (4 KiB) to

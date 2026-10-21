@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The scheduler's self-tests (Phase 4), which `selftest` runs by name:
 //!
 //! - `fpu`: three threads on every CPU fill the vector registers with their

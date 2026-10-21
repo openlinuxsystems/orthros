@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Interrupts, timers and SMP
 
 This note describes how the x86-64 layer of Radix handles exceptions and

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Trace points: a lock-free recorder for events too frequent to log.
 //!
 //! A trace point is a static at its call site, created by the

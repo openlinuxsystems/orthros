@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Threads and scheduling (Phase 4).
 //!
 //! Every CPU has a run queue (`queue`) of the threads that may run there:

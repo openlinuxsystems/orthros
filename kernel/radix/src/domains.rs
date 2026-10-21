@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Resource domains: groups of threads that share a CPU weight and a
 //! memory limit, after Linux's cgroups (v2), and their class for the
 //! out-of-memory policy (spec 4.1).

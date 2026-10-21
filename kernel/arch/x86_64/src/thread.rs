@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Thread contexts and the context switch.
 //!
 //! A context is a stack and a *context block*: one page holding the saved

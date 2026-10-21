@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The heap's size classes.
 //!
 //! Requests up to [`MAX_SMALL`] bytes are rounded up to one of

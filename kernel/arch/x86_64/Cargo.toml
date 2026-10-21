@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "radix-arch-x86_64"
 description = "x86-64 support for the Radix kernel: boot, memory, interrupts, timers, SMP"

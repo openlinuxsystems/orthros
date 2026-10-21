@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Threads: what the scheduler runs.
 //!
 //! A [`Thread`] is shared ([`ThreadRef`]): the registry holds every thread

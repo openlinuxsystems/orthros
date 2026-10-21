@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `ob test tla`: checks the TLA+ models with TLC (ADR 0024).
 //!
 //! TLC comes from the TLA+ tools release pinned here, which `ob` downloads
@@ -20,6 +23,7 @@ const TLA_SHA256: &str = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23
 /// The models: a specification and a TLC configuration beside it.
 pub const MODELS: &[(&str, &str)] = &[
     ("kernel/cap/tla/Capabilities.tla", "Capabilities.cfg"),
+    ("kernel/cap/tla/Capabilities.tla", "CapabilitiesRetype.cfg"),
     ("kernel/cap/tla/Capabilities.tla", "CapabilitiesLiveness.cfg"),
     ("kernel/sched/tla/Scheduler.tla", "Scheduler.cfg"),
     ("kernel/sched/tla/Scheduler.tla", "SchedulerLiveness.cfg"),

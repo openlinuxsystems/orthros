@@ -1,4 +1,9 @@
-# 0029. The scheduler is verified with a TLA+ model of its switch protocol, Kani, and algebra backed by tests
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+# 0030. The scheduler is verified with a TLA+ model of its switch protocol, Kani, and algebra backed by tests
 
 - Status: Accepted
 - Date: 2026-10-21

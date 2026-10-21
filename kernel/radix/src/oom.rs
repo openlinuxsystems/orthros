@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The out-of-memory policy (spec 4.1).
 //!
 //! When the frame allocator cannot find a block of up to 2^3 pages for an

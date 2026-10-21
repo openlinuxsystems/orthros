@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Read-copy-update: readers that never wait or write shared memory.
 //!
 //! A read section ([`read_lock`], or [`RcuCell::read`]) holds off

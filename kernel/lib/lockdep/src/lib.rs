@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The Radix lock-order checker, after Linux's lockdep.
 //!
 //! A deadlock between locks needs two pieces of code that take the same

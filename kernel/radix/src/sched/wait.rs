@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Waiting: the wait table, mutexes, and priority inheritance.
 //!
 //! One table holds every thread that waits for something, keyed by the

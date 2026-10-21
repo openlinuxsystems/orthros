@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `ob`, the OrthrOS build tool.
 //!
 //! The `./ob` shell wrapper at the top of the repository builds this program

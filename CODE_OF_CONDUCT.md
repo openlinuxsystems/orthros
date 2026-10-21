@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2014-2021 The Contributor Covenant contributors <https://www.contributor-covenant.org>
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 # Contributor Covenant Code of Conduct
 
 ## Our Pledge

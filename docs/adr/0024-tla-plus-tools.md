@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # 0024. The TLA+ models are checked with TLC from the pinned TLA+ tools 1.7.4
 
 - Status: Accepted
@@ -25,8 +30,8 @@ how long a check may take.
 - TLC needs Java 11 or later, which `ob doctor` notes (only `ob test tla`
   needs it) and the build container installs (`default-jre-headless`). CI
   checks the models in a job of their own on Temurin 21.
-- Each model has configurations sized to finish in about two minutes on 4
-  CPUs: a larger one for safety properties, using symmetry, and a smaller
+- Each model has configurations sized to finish in a few minutes on 4
+  CPUs: larger ones for safety properties, using symmetry, and a smaller
   one without symmetry for liveness, because symmetry is unsound for
   liveness in TLC.
 - The tools run only on the build host. Nothing from them is part of an

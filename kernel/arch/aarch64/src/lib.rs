@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! AArch64 stubs of the Radix hardware abstraction layer.
 //!
 //! OrthrOS 1.0 runs on x86-64 only, but the kernel is meant to be portable.

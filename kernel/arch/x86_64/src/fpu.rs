@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Extended processor state: the x87 FPU and the SSE, AVX and AVX-512
 //! registers.
 //!

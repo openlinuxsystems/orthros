@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The CPU topology, and the decisions that depend on it: where a waking
 //! thread should run, and which CPU an underloaded one should pull from.
 //!

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Scheduler
 
 This note describes the Radix scheduler as of Phase 4: threads and their
@@ -9,7 +14,7 @@ scheduler is correct (spec 15) and the checks behind it. The user-facing
 description is `radix-scheduling(7)`; `radix-debug(7)` covers the
 self-tests, the lock checker's reports and the `threads`, `sched`,
 `domains` and `locks` commands of `kdb`. The decisions behind the design
-are ADRs 0026 to 0029.
+are ADRs 0027 to 0030.
 
 ## Crates
 
@@ -257,7 +262,7 @@ would have no clean meaning across domains.
 Because a handoff goes to the most urgent waiter, a real-time waiter
 always wins over a fair one. The `work/N` workers are therefore fair
 (nice −20), not real-time: a real-time worker taking a mutex in a loop
-would starve a fair thread waiting for the same mutex (ADR 0026).
+would starve a fair thread waiting for the same mutex (ADR 0027).
 
 ## RCU
 
@@ -307,7 +312,7 @@ classes, 32 held locks per CPU, 8 saved mutexes per thread). The first
 report, or running out of room, turns the checker off: after one report
 the graph may be inconsistent, and follow-on reports would hide the first.
 It is on by default in debug builds and off in release builds; the
-`lockdep` flag overrides either (ADR 0027). The boot tests run every
+`lockdep` flag overrides either (ADR 0028). The boot tests run every
 Phase 4 case and `bios-usb` with it on, and fail on any report except in
 the `lockdep` case, which seeds them.
 
@@ -323,7 +328,7 @@ are kernel objects of kind `ResourceDomain`: `caps::create_domain` makes
 one together with its first capability, `caps::domain_at` finds the
 domain a capability names, and deleting the last capability takes the
 domain off the table; it is freed once its last thread and reference let
-go (ADR 0028).
+go (ADR 0029).
 
 Charges go up the tree: a charge that would pass the limit of the domain
 or of any domain above it is refused, and the caller's allocation fails
@@ -425,7 +430,7 @@ because lags are clamped and slices are short, and their products with
 test that runs random enqueues, dequeues, charges and reweights and
 asserts after every step that the books are exact and some entity is
 eligible. The product of symbolic 64-bit values is beyond Kani in
-reasonable time, so this step is algebra plus tests; see ADR 0029.)*
+reasonable time, so this step is algebra plus tests; see ADR 0030.)*
 
 **6. Fair threads get their share.** Stoica and Abdel-Wahab show that
 under EEVDF, for entities that stay runnable, every entity's lag stays

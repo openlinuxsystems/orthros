@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! What the locks need from the kernel once it runs threads.
 //!
 //! Before the scheduler starts there is one thread per CPU and nothing to

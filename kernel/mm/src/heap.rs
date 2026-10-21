@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The kernel heap: slab caches with per-CPU magazines.
 //!
 //! Requests up to 8 KiB are served from the size classes of

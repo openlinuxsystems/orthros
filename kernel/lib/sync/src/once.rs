@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! One-time initialisation: [`Once`] and [`TakeOnce`].
 
 use core::cell::UnsafeCell;

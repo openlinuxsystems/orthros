@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `kdb`, the kernel debugger, on the serial port.
 //!
 //! With the `kdb` flag the kernel enters it at the end of boot, at every

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # OrthrOS
 
 OrthrOS is an operating system built around **Radix**, a capability-based
@@ -130,3 +135,9 @@ at your option. Unless you explicitly state otherwise, any contribution
 intentionally submitted for inclusion in OrthrOS by you, as defined in the
 Apache-2.0 license, shall be dual licensed as above, without any additional
 terms or conditions.
+
+Some files come from other projects under their own licenses, such as the
+console fonts (BSD-2-Clause). Every file names its copyright holders and
+license, following the [REUSE specification](https://reuse.software/), and
+`LICENSES/` holds the license texts. [CREDITS.md](CREDITS.md) thanks the
+projects OrthrOS is built on.

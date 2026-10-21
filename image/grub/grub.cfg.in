@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # GRUB configuration for the OrthrOS @VERSION@ boot image.
 # `ob image` generates boot/grub/grub.cfg from image/grub/grub.cfg.in by
 # filling in the VERSION, TIMEOUT, CMDLINE and MODULES placeholders. See

@@ -1,3 +1,6 @@
+\* SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+\* SPDX-License-Identifier: Apache-2.0 OR MIT
+
 ----------------------------- MODULE Scheduler -----------------------------
 (***************************************************************************)
 (* A model of how the Radix kernel blocks, wakes and switches threads     *)

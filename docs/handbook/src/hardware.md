@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Supported hardware
 
 OrthrOS 1.0 targets 64-bit x86 computers. Two systems are tested on every

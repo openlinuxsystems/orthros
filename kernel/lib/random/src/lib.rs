@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The Radix kernel's random number generator.
 //!
 //! One ChaCha20 generator with fast key erasure ([`Generator`]) serves the

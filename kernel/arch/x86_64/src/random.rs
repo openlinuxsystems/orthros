@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Seeding the kernel's random number generator (`radix-random`) from the
 //! CPU: RDSEED, RDRAND, and the timing jitter of the time-stamp counter.
 //!

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Architecture decision records
 
 Each file records one decision: its context, what was decided and what
@@ -32,7 +37,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0023](0023-capability-model.md) | Capabilities carry copy and transfer rights, seal with endpoints, and revoke in marked steps | Accepted |
 | [0024](0024-tla-plus-tools.md) | The TLA+ models are checked with TLC from the pinned TLA+ tools 1.7.4 | Accepted |
 | [0025](0025-dco-sign-off-and-project-policies.md) | Contributions are signed off under the DCO, with a code of conduct, governance and security policy | Accepted |
-| [0026](0026-scheduler-design.md) | The scheduler is EEVDF with FIFO and round-robin classes, per-CPU queues and no lock across a switch | Accepted |
-| [0027](0027-lock-checker-in-debug-builds.md) | The lock checker is on in debug builds, off in release builds, and switchable at boot | Accepted |
-| [0028](0028-resource-domains-and-out-of-memory-policy.md) | Resource domains are capability-named kernel objects, and running out of memory stops whole domains | Accepted |
-| [0029](0029-verifying-the-scheduler.md) | The scheduler is verified with a TLA+ model of its switch protocol, Kani, and algebra backed by tests | Accepted |
+| [0026](0026-reuse-and-credits.md) | The repository follows REUSE and credits every upstream project | Accepted |
+| [0027](0027-scheduler-design.md) | The scheduler is EEVDF with FIFO and round-robin classes, per-CPU queues and no lock across a switch | Accepted |
+| [0028](0028-lock-checker-in-debug-builds.md) | The lock checker is on in debug builds, off in release builds, and switchable at boot | Accepted |
+| [0029](0029-resource-domains-and-out-of-memory-policy.md) | Resource domains are capability-named kernel objects, and running out of memory stops whole domains | Accepted |
+| [0030](0030-verifying-the-scheduler.md) | The scheduler is verified with a TLA+ model of its switch protocol, Kani, and algebra backed by tests | Accepted |

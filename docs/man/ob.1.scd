@@ -1,5 +1,8 @@
 ob(1) "OrthrOS" "OrthrOS Manual"
 
+; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-License-Identifier: Apache-2.0 OR MIT
+
 # NAME
 
 ob - build, run and test OrthrOS
@@ -172,12 +175,14 @@ Build output goes to _out/_ and Cargo's intermediate files to _target/_
 	kani-verifier --version* _version_ and then *cargo kani setup*.
 
 	*tla* checks the TLA+ models with the TLC model checker instead: the
-	capability store's derivation tree and revocation, in
-	_kernel/cap/tla/_, and how the scheduler blocks, wakes and switches
-	threads between CPUs, in _kernel/sched/tla/_. Each is checked once
-	for the safety properties and once, on a smaller model, for liveness.
-	That takes about five minutes on 4 CPUs, so plain *ob test* leaves it
-	out too, and CI runs it in a job of its own. TLC needs Java 11 or later (the *default-jre-headless* package on
+	capability store's derivation tree, retyping and revocation, in
+	_kernel/cap/tla/_, twice for the safety properties (once with more
+	capabilities, once with memory nested deeper) and once, on a smaller
+	model, for liveness; and how the scheduler blocks, wakes and switches
+	threads between CPUs, in _kernel/sched/tla/_, once for safety and
+	once for liveness. That takes about eight minutes on 4 CPUs, so
+	plain *ob test* leaves it out too, and CI runs it in a job of its
+	own. TLC needs Java 11 or later (the *default-jre-headless* package on
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned
 	release of the TLA+ tools from GitHub into _.cache/tla/_ and checks
 	its SHA-256; TLC's working files go to _out/tla/_.
@@ -378,10 +383,18 @@ _kernel/deny.toml_
 	The license allow-list of the kernel, used by *ob image* and by
 	cargo-deny in CI.
 
+_LICENSES/_
+	The texts of the licenses that files in the repository use, as the
+	REUSE specification asks. *ob image* copies the ones the image needs.
+
 _image/licenses/_
-	License texts, copied verbatim from the SPDX license list, that
-	*ob image* puts into the image beside _LICENSE-APACHE_ and
-	_LICENSE-MIT_.
+	The other license texts that *ob image* puts into the image, named
+	_LICENSE-<id>.txt_. Each text is kept in only one of the two
+	directories, verbatim from the SPDX license list.
+
+_REUSE.toml_
+	Copyright and license information for files that cannot carry an SPDX
+	header; see *CONTRIBUTING.md*.
 
 _out/orthros-VERSION-x86_64.img_
 	The boot image built by *ob image*.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Running a function on the other CPUs.
 //!
 //! Every CPU has a worker thread, `work/N`, pinned to it in the fair class

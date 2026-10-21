@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Spin locks: [`SpinLock`], which the kernel's hooks see, and
 //! [`RawSpinLock`], which they do not.
 

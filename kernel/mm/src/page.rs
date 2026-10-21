@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Per-frame metadata.
 //!
 //! Every frame of RAM the allocator manages has a 16-byte [`PageInfo`] in an

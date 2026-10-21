@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Nice levels, weights and real-time priorities.
 //!
 //! A fair thread's share of a CPU is its weight over the sum of the

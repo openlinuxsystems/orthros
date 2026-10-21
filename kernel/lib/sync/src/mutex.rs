@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! [`Mutex`], a lock whose waiters sleep.
 //!
 //! The lock is one word: 0 when free, otherwise the owner's thread token

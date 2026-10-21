@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Early microcode loading on Intel processors.
 //!
 //! When the image includes a microcode file (`ob image --microcode`), GRUB

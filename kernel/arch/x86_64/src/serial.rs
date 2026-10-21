@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! 16550 UART driver: the debug console.
 //!
 //! COM1 carries the kernel log and the kernel debugger. The Dell Inspiron

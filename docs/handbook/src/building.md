@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Building OrthrOS with ob
 
 One command, `./ob`, builds everything: the kernel, the boot image, the

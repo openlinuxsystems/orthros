@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Magazines: the per-CPU object caches of the heap (Bonwick and Adams,
 //! "Magazines and Vmem", USENIX 2001).
 //!

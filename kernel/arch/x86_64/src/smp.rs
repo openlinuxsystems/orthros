@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Starting the other CPUs (application processors, APs).
 //!
 //! The boot CPU copies a small trampoline to a page below 1 MiB and wakes

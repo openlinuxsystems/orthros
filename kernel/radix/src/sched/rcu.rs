@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! RCU grace periods, quiescent-state based.
 //!
 //! An RCU read section (`radix_sync::rcu`) only holds off preemption, so a

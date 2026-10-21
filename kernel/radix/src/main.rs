@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Radix, the OrthrOS kernel.
 //!
 //! The architecture crate boots the CPU, moves the kernel to a random

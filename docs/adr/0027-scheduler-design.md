@@ -1,4 +1,9 @@
-# 0026. The scheduler is EEVDF with FIFO and round-robin classes, per-CPU queues and no lock across a switch
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+# 0027. The scheduler is EEVDF with FIFO and round-robin classes, per-CPU queues and no lock across a switch
 
 - Status: Accepted
 - Date: 2026-10-21
@@ -31,7 +36,7 @@ kernel's own helper threads are scheduled.
   waiting if another CPU still holds it, and touches no stack in
   between. Blocking and waking meet under the thread's lock with a
   `wake_pending` flag set before that lock is taken. The TLA+ model in
-  `kernel/sched/tla` checks this protocol (ADR 0029).
+  `kernel/sched/tla` checks this protocol (ADR 0030).
 - Extended state is switched eagerly on every switch, with XSAVEOPT where
   available.
 - Domain CPU weights scale each thread's weight in its CPU's fair queue:

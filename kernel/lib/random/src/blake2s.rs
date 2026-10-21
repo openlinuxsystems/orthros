@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! BLAKE2s-256 (RFC 7693), the hash that condenses everything the entropy
 //! sources produce into a seed.
 

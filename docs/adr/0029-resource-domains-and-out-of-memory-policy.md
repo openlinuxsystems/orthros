@@ -1,4 +1,9 @@
-# 0028. Resource domains are capability-named kernel objects, and running out of memory stops whole domains
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+# 0029. Resource domains are capability-named kernel objects, and running out of memory stops whole domains
 
 - Status: Accepted
 - Date: 2026-10-21

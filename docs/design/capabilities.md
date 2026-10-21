@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
 # Capabilities
 
 This note describes the Radix capability core as of Phase 3: the objects
@@ -14,8 +19,9 @@ behind the design are ADR 0023 (the model) and ADR 0024 (the TLA+ tools).
 kernel/cap              radix-cap: rights, object kinds, capabilities and their
                         checks (cap.rs), the store (store.rs); host tests,
                         property tests and Kani proofs
-kernel/cap/tla          Capabilities.tla: the TLA+ model of derivation and
-                        revocation, with two TLC configurations
+kernel/cap/tla          Capabilities.tla: the TLA+ model of derivation,
+                        retyping and revocation, with three TLC
+                        configurations
 kernel/radix            caps.rs: the kernel's one store, its lock and the
                         frame allocator behind memory objects; captest.rs:
                         the `caps` self-test
@@ -141,14 +147,19 @@ The kernel calls `revoke` in steps of 64 deletions and lets go of the lock
 in between (`caps::revoke`), so a revoke of a million capabilities does not
 shut out other CPUs.
 
-**Audit.** `audit` checks every invariant of the store in time linear in
-its size: the tree's links agree with each other and only join full
-slots, depths fall towards the roots, every capability holds only rights
-of its kind and a badge only if its kind has them, every child is
-`within` its parent or retyped from it, every capability names a live
-object of its kind, every object's two counts are right, and no object
-retyped from a memory object lies above its watermark. The tests run it
-after operations; the kernel does not run it on its own.
+**Audit.** `audit` checks every invariant of the store: the tree's links
+agree with each other and only join full slots, depths fall towards the
+roots, every capability holds only rights of its kind and a badge only if
+its kind has them, every child is `within` its parent or retyped from the
+memory its parent names, every capability names a live object of its
+kind, every object's two counts are right, and no object retyped from a
+memory object lies above its watermark. "Retyped from" counts memory
+retyped in turn from that memory: when the capability to an inner memory
+object is deleted, what was retyped from it moves up to the outer
+memory's capability, which still covers it. The audit takes time in
+proportion to the store's size, times the nesting of memory objects for
+retyped capabilities. The tests run it after operations; the kernel does
+not run it on its own.
 
 ## In the kernel
 
@@ -329,16 +340,19 @@ limit. The harnesses take about ten seconds together.
 **The TLA+ model** (`kernel/cap/tla/Capabilities.tla`, run by `ob test
 tla` and the CI job "TLA+ models") describes the derivation tree as the
 store keeps it: slots holding capabilities of an object, rights and a
-badge, with `Create`, `Derive`, `Delete` (children move up), `Move`, and a
-revoke split into `RevokeStart`, single-leaf `RevokeStep`s and
-`RevokeDone`. A ghost variable records each capability's derivation
-history. TLC checks:
+badge, with `Create`, `Derive`, `Retype` (a new object inside the
+source's), `Delete` (children move up), `Move`, and a revoke split into
+`RevokeStart`, single-leaf `RevokeStep`s and `RevokeDone`. Each object
+records the object it was retyped from, and lives while a capability
+names it or anything retyped from it lives. A ghost variable records each
+capability's derivation history. TLC checks:
 
 | Property | Kind | Says |
 | --- | --- | --- |
 | `TypeOK`, `EmptySlotsAreBlank`, `TreeWellFormed` | invariant | the tree joins only full slots, depths fall towards the roots, so it has no cycles |
 | `TreeIsDerivation` | invariant | the tree ancestors of each capability are exactly its derivation history |
-| `RightsNeverWiden`, `SameObject`, `BadgesFixed`, `CopiedOnlyWithCopy` | invariant | along every derivation history: rights only shrink, the object stays, a badge once set stays, and every capability copied from held `copy` |
+| `RightsNeverWiden`, `SameOrInnerObject`, `BadgesFixed`, `CopiedOnlyWithCopy` | invariant | along every derivation history: rights only shrink, the object stays or is one retyped from it, a badge once set stays, and every capability copied from held `copy` |
+| `ParentCovers`, `OriginsAcyclic` | invariant | each capability names its tree parent's object or one retyped from it, through any number of retypes (the audit's check on each edge); no object lies inside itself |
 | `CapsImmutable` | step | a capability never changes in its slot |
 | `NoDerivationUnderRevoke` | step | nothing new is derived from a marked capability or below it |
 | `RevokeIsComplete` | step | when a revoke ends, nothing derived from its capability exists |
@@ -346,19 +360,27 @@ history. TLC checks:
 
 `Capabilities.cfg` checks the safety properties with 4 slots, 2 objects,
 2 rights and derivations 3 deep, using the symmetry of slots and objects:
-about 1.3 million distinct states, a minute and a half on 4 CPUs.
-`CapabilitiesLiveness.cfg` checks everything, liveness included, with 3
-slots and depth 2 and no symmetry (TLC cannot use symmetry for liveness):
-about 110,000 states, twenty seconds. To check that the properties have
-teeth, each guard of the model was removed in turn and TLC found the
-violation: deriving under a revoke (`NoDerivationUnderRevoke`), deleting
-without moving children up (`TreeIsDerivation`), deriving with the mask
-alone (`RightsNeverWiden`), moving a marked capability
-(`EmptySlotsAreBlank`), and a spec without fairness (`RevokeTerminates`).
+about 2.8 million distinct states, four minutes on 4 CPUs.
+`CapabilitiesRetype.cfg` checks them with 3 slots and 3 objects, so that
+memory can be retyped from memory that was itself retyped: about 190,000
+states, ten seconds. `CapabilitiesLiveness.cfg` checks everything,
+liveness included, with 3 slots, 2 objects and depth 2 and no symmetry
+(TLC cannot use symmetry for liveness): about 220,000 states, half a
+minute. To check that the properties have teeth, each guard of the model
+was removed in turn and TLC found the violation: deriving under a revoke
+(`NoDerivationUnderRevoke`), deleting without moving children up
+(`TreeIsDerivation`), deriving with the mask alone (`RightsNeverWiden`),
+moving a marked capability (`EmptySlotsAreBlank`), and a spec without
+fairness (`RevokeTerminates`). An edge check that accepts only the object
+a capability was retyped from directly, as the store's audit first did,
+fails `ParentCovers` in four steps: retype memory twice, then delete the
+capability in the middle. The property tests found that bug in the audit
+before retyping was in the model.
 
-The model leaves out spaces, `transfer`, sealing, ranges and retyping:
-those are checks on single capabilities, which the Kani proofs cover, and
-the property tests run them inside the store.
+The model leaves out spaces, `transfer`, sealing, ranges, kinds and the
+memory blocks themselves: those are checks on single capabilities, which
+the Kani proofs cover, and the property tests run them inside the store.
+It lets any object be retyped, a superset of what the store allows.
 
 **The `caps` boot test** runs the `caps` self-test on 4 CPUs in QEMU
 (`kernel/radix/src/captest.rs`; `radix-debug(7)` lists its parts). It is
