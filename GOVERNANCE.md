@@ -9,6 +9,9 @@ what today and how that is meant to grow.
 | --- | --- | --- |
 | Chase | [@openlinuxsystems](https://github.com/openlinuxsystems) | Project lead and maintainer |
 
+Code of conduct reports go to chase@openlinuxsystems.com. Security reports
+go through GitHub instead, as [SECURITY.md](SECURITY.md) describes.
+
 The maintainer reviews and merges pull requests, decides the roadmap and
 when each phase starts, cuts releases, handles security reports
 ([SECURITY.md](SECURITY.md)) and enforces the
