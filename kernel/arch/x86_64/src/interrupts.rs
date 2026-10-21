@@ -232,13 +232,15 @@ pub fn init() {
             18 => IST_MACHINE_CHECK,
             _ => 0,
         };
+        // Present, 64-bit interrupt gate (interrupts masked on entry),
+        // which only ring 0 may raise with `int`, except the breakpoint:
+        // a program's `int3` is a breakpoint, not a protection fault.
+        let attributes = if vector == 3 { 0xee } else { 0x8e };
         *gate = Gate {
             offset_low: handler as u16,
             selector: KERNEL_CS,
             ist,
-            // Present, ring 0, 64-bit interrupt gate (interrupts masked on
-            // entry).
-            attributes: 0x8e,
+            attributes,
             offset_middle: (handler >> 16) as u16,
             offset_high: (handler >> 32) as u32,
             _reserved: 0,

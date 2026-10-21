@@ -641,10 +641,6 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         serve_shootdown();
         cpu::pause();
     };
-    let generation = SHOOTDOWN.generation.load(Ordering::Relaxed) + 1;
-    percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
-    SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
-    SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
     let mut targets = [0u64; MAX_CPUS / 64];
     for (index, cpu) in (0..MAX_CPUS).filter_map(|i| Some((i, percpu::get(i)?))) {
         if index != me
@@ -658,6 +654,13 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     if targets.iter().all(|&word| word == 0) {
         return;
     }
+    // Only a request that is sent takes a number: a CPU that marked a
+    // number as its own without sending it would take the next request
+    // under that number for one it had already served, and never flush.
+    let generation = SHOOTDOWN.generation.load(Ordering::Relaxed) + 1;
+    percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
+    SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
+    SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
     for (slot, &word) in SHOOTDOWN.pending.iter().zip(&targets) {
         slot.store(word, Ordering::Relaxed);
     }

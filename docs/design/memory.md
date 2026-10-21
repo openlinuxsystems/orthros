@@ -206,8 +206,12 @@ TLB and waits for the pending bits to clear; each target flushes the range
 (the whole TLB above 32 pages) and clears its bit. Two CPUs may start
 shootdowns at once with interrupts disabled, so a CPU waiting for the lock,
 or for its targets, serves pending requests itself; the timer tick serves
-them too, in case an IPI was missed. A shootdown that is not answered
-within 2 seconds panics, naming a CPU that did not answer.
+them too, in case an IPI was missed. A shootdown with no target CPU
+returns before it takes a request number: a CPU marks the number of each
+request it sends as served for itself, so a number it took without
+sending would make it skip the next real request under that number, and
+that request's initiator would wait for it in vain. A shootdown that is
+not answered within 2 seconds panics, naming a CPU that did not answer.
 
 ## KASLR
 

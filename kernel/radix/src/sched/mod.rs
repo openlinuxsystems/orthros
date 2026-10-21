@@ -1174,7 +1174,10 @@ fn idle_loop(cpu: usize) -> ! {
             continue;
         }
         slot.wake.store(0, Ordering::Relaxed);
-        slot.polling.store(true, Ordering::SeqCst);
+        // Only an idle that watches `wake` (MWAIT) ends on the write alone;
+        // HLT needs the interrupt, so a waker must send one.
+        let (polls, _) = Arch::idle_mode();
+        slot.polling.store(polls, Ordering::SeqCst);
         let started = Arch::now_ns();
         if !slot.need_resched.load(Ordering::SeqCst) {
             Arch::idle_until(&slot.wake);
