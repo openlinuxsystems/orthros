@@ -1,0 +1,30 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Threads.
+//!
+//! A thread runs in one address space with one capability space. A thread
+//! that faults (touches memory it may not, runs an instruction it may not)
+//! is stopped and the kernel logs why.
+
+module thread;
+
+/// A thread.
+interface thread = 0x0004 version 1 {
+    kind = thread;
+    /// Ends the thread, with an exit code the kernel logs when it is not
+    /// 0. Called on the caller's own thread, it does not return.
+    method exit = 1 (code: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Sets the base of the thread's thread-local storage: the FS base on
+    /// x86-64.
+    method set_tls = 2 (base: addr) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Sets the thread's receive window: the `count` slots from `first`
+    /// where capabilities it receives are put, into the first empty ones.
+    method set_receive_window = 3 (first: slot, count: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// The thread's number and the CPU it runs on.
+    method info = 4 () -> (id: u64, cpu: u32)
+        raises [no_such_slot, empty_slot, missing_rights];
+}

@@ -1,0 +1,35 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Memory objects and frames.
+//!
+//! A memory object is physical memory with no use yet. Retyping carves
+//! frames (memory that can be mapped) or smaller memory objects out of it;
+//! the memory comes back when every object made from it is gone. A frame
+//! is mapped into an address space with the `map` system call.
+
+module memory;
+
+/// Physical memory from which frames and smaller memory objects are made.
+interface memory = 0x0001 version 1 {
+    kind = memory;
+    /// Makes `count` objects of `kind` (memory or frame) of 2^`order`
+    /// pages each from this memory, and puts their capabilities in the
+    /// `count` slots from `to`, which must be empty. Needs the control and
+    /// copy rights. Frames start filled with zeroes.
+    method retype = 1 (kind: ObjectKind, order: u32, to: slot, count: u32) -> ()
+        raises [no_such_slot, empty_slot, occupied, missing_rights, invalid_argument, exhausted,
+                no_memory, too_deep, revoking];
+    /// How many pages the memory has, and how many of them objects made
+    /// from it use.
+    method info = 2 () -> (pages: u64, used: u64)
+        raises [no_such_slot, empty_slot, missing_rights];
+}
+
+/// A block of 2^order pages of RAM that can be mapped.
+interface frame = 0x0002 version 1 {
+    kind = frame;
+    /// How many pages the frame has.
+    method info = 1 () -> (pages: u64)
+        raises [no_such_slot, empty_slot];
+}

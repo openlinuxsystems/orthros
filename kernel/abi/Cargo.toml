@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-abi"
+description = "The Radix system call interface, generated from abi/*.ridl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+# The interface compiler, from the host workspace (tools/ridlc).
+ridlc = { path = "../../tools/ridlc" }
+
+[lints]
+workspace = true

@@ -10,6 +10,7 @@
 resolver = "3"
 members = [
     "radix",
+    "abi",
     "hal",
     "arch/x86_64",
     "arch/aarch64",

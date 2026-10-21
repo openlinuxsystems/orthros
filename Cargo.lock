@@ -82,6 +82,10 @@ name = "radix-sync"
 version = "0.0.1"
 
 [[package]]
+name = "ridlc"
+version = "0.0.1"
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,117 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! radix-ring: submission and completion rings shared with the kernel.
+//!
+//! A ring is memory shared between a program and the kernel, after Linux's
+//! io_uring: the program writes entries into the submission queue and
+//! moves its tail; `ring_enter` has the kernel take them, carry them out
+//! and write a completion for each into the completion queue, whose head
+//! the program moves as it reads them. Batching many operations into one
+//! system call is what rings are for.
+//!
+//! The mapping starts with a RingHeader; the submission entries start at
+//! its `sqes` offset and the completion entries at its `cqes` offset. The
+//! kernel reads each submission entry once, so changing it afterwards
+//! changes nothing, and masks every index it reads, so a bad index only
+//! confuses the program that wrote it. The completion queue has twice as
+//! many entries as the submission queue, and the kernel takes an entry
+//! only when a completion for it is sure to fit, so completions are never
+//! lost: when the queue is full, `ring_enter` takes nothing more and says
+//! so.
+
+module ring;
+
+/// The most submission entries a ring has.
+const ENTRIES_MAX: u32 = 4096;
+/// The version of the shared memory layout, in RingHeader's `version`.
+const LAYOUT_VERSION: u32 = 1;
+
+/// What a submission entry asks for.
+enum Opcode: u8 {
+    /// Nothing: completes at once, with `args[0]` as its first value.
+    nop = 0;
+    /// Signals the notification in `cap`, as the notify system call does.
+    notify = 1;
+    /// Waits for the notification in `cap` without blocking the thread:
+    /// completes when it is signalled, with its word as the first value.
+    wait = 2;
+    /// Posts a completion to the ring in `cap` (which needs the send
+    /// right) with `args[0]` as its user data and `args[1]` and `args[2]`
+    /// as its values; fails with busy when that ring's completion queue is
+    /// full. The sender's own completion says how it went.
+    msg_ring = 3;
+    /// Completes with 16 random bytes in its values.
+    random = 4;
+    /// Completes `args[0]` nanoseconds after it is taken. Timeouts end
+    /// while a thread waits in ring_enter, or at the next ring_enter.
+    timeout = 5;
+}
+
+/// The indexes of one queue. Each queue's indexes have a cache line of
+/// their own.
+struct RingIndexes {
+    /// The first entry not yet consumed: moved by the kernel for the
+    /// submission queue, by the program for the completion queue.
+    head: u32;
+    /// One past the last entry produced: moved by the program for the
+    /// submission queue, by the kernel for the completion queue.
+    tail: u32;
+    /// The number of entries minus one; an index is masked with it.
+    mask: u32;
+    /// The number of entries.
+    entries: u32;
+    /// Padding to the end of the cache line.
+    reserved: [u32; 12];
+}
+
+/// The start of a ring's shared memory.
+struct RingHeader {
+    /// The submission queue's indexes.
+    sq: RingIndexes;
+    /// The completion queue's indexes.
+    cq: RingIndexes;
+    /// Offset of the submission entries from the start of the mapping.
+    sqes: u32;
+    /// Offset of the completion entries from the start of the mapping.
+    cqes: u32;
+    /// Size of the whole mapping, in bytes.
+    size: u32;
+    /// The layout version, LAYOUT_VERSION.
+    version: u32;
+}
+
+/// A submission entry.
+struct Sqe {
+    /// What to do: an Opcode.
+    opcode: u8;
+    /// Flags; none are defined yet, so 0.
+    flags: u8;
+    /// Must be 0.
+    reserved: u16;
+    /// The capability the operation works on, if any.
+    cap: u32;
+    /// Copied into the completion, to tell completions apart.
+    user_data: u64;
+    /// The operation's arguments.
+    args: [u64; 6];
+}
+
+/// A completion entry.
+struct Cqe {
+    /// The user data of the submission entry.
+    user_data: u64;
+    /// 0 for success, otherwise an error status (radix-errors(2)).
+    status: u64;
+    /// What the operation returned.
+    values: [u64; 2];
+}
+
+/// A ring. Entering it needs the control right; posting completions into
+/// it with msg_ring needs the send right.
+interface ring = 0x0008 version 1 {
+    kind = ring;
+    /// How many submission and completion entries the ring has.
+    method info = 1 () -> (entries: u32, completions: u32)
+        raises [no_such_slot, empty_slot, missing_rights];
+}

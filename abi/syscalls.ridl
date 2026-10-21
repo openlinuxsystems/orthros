@@ -1,0 +1,105 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The twelve system calls.
+//!
+//! Radix has twelve system calls; every other operation is a method called
+//! on a capability with `cap_call`. On x86-64 a program enters the kernel
+//! with the `syscall` instruction: the call's number in `rax`, its
+//! arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, `r12`, `r13`,
+//! `r14` and `r15`, in that order. It returns its status in `rax` (see
+//! radix-errors(2)) and its results in the same ten registers. `rcx` and
+//! `r11` are overwritten; every other register keeps its value.
+
+module syscalls;
+
+/// Calls the object a capability designates and waits for the answer. On
+/// an endpoint this sends the message and waits for the receiver's reply,
+/// which the kernel delivers to this thread alone. On any other object it
+/// calls the method the label names (see the interface pages, such as
+/// radix-memory(2)), and the methods of radix-capability(2) work on every
+/// capability. The answer has the receiver's badge (0 from the kernel),
+/// its info word and its data words.
+syscall cap_call = 0 (cap: slot, info: u64, words: [u64; 8])
+    -> (badge: u64, info: u64, words: [u64; 8])
+    raises [no_such_slot, empty_slot, missing_rights, sealed, invalid_argument, no_room, gone,
+            interrupted, no_such_method, would_block];
+
+/// Sends a message on an endpoint, waiting until a receiver takes it,
+/// unless the info word has the no_block flag.
+syscall send = 1 (cap: slot, info: u64, words: [u64; 8]) -> ()
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            no_room, gone, interrupted, would_block];
+
+/// Receives a message from an endpoint, waiting for one unless `flags`
+/// has no_block. When the sender called, this thread owes it a reply
+/// (see `reply_recv`). Returns the sender's badge, its info word with the
+/// capability count it passed, and its data words.
+syscall recv = 2 (cap: slot, flags: u64) -> (badge: u64, info: u64, words: [u64; 8])
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument, gone,
+            interrupted, would_block];
+
+/// Replies to the thread whose call this thread received last, then
+/// receives the next message from the endpoint in `cap`, as `recv` does.
+/// With `cap` set to NO_SLOT it only replies. A caller that has gone is
+/// skipped without an error.
+syscall reply_recv = 3 (cap: slot, info: u64, words: [u64; 8])
+    -> (badge: u64, info: u64, words: [u64; 8])
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            no_caller, gone, interrupted];
+
+/// Signals a notification: sets the bits of the capability's badge (bit 0
+/// when it has none) in the notification's word, waking a waiter.
+syscall notify = 4 (cap: slot) -> ()
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed];
+
+/// Waits until a notification's word is not 0, then returns it and clears
+/// it. With the poll flag it returns at once, failing with would_block if
+/// the word is 0; a non-zero `timeout_ns` gives up after that many
+/// nanoseconds with timed_out.
+syscall wait = 5 (cap: slot, flags: WaitFlags, timeout_ns: u64) -> (bits: u64)
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            would_block, timed_out, interrupted, gone];
+
+/// Gives the CPU to another thread that is ready to run, if there is one.
+syscall yield = 6 () -> ();
+
+/// Maps `pages` pages of a frame, from page `offset` within it, into an
+/// address space at `address`, with `rights` (read, write and execute;
+/// never write and execute together). The address space needs the
+/// control right, and the frame every right asked for.
+syscall map = 7 (space: slot, frame: slot, address: addr, rights: Rights, offset: u64, pages: u64)
+    -> ()
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            out_of_range, already_mapped, no_memory];
+
+/// Unmaps `pages` pages from `address` in an address space, which needs
+/// the control right.
+syscall unmap = 8 (space: slot, address: addr, pages: u64) -> ()
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            not_mapped];
+
+/// Makes a ring with `entries` submission entries (a power of two up to
+/// ENTRIES_MAX, see radix-ring(2)) and twice as many completion entries, maps
+/// its shared pages read-write at `address` in an address space (control
+/// right needed), and puts its capability in slot `to`. Returns how many
+/// bytes it mapped.
+syscall ring_setup = 9 (space: slot, address: addr, entries: u32, to: slot) -> (size: u64)
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            occupied, already_mapped, no_memory];
+
+/// Takes up to `submit` new entries from a ring's submission queue and
+/// carries them out, then waits until at least `min_complete` completions
+/// are waiting to be read, or until `timeout_ns` nanoseconds have passed
+/// when it is not 0. Returns how many entries it took and how many
+/// completions are waiting.
+syscall ring_enter = 10 (ring: slot, submit: u32, min_complete: u32, timeout_ns: u64)
+    -> (submitted: u32, ready: u32)
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument, busy,
+            timed_out, interrupted, bad_address];
+
+/// Writes a line of text to the kernel log, through a kernel_log
+/// capability. Control characters are shown as `?`, and text past
+/// WRITE_MAX bytes (see radix-kernel-log(2)) is cut.
+syscall debug_log = 11 (log: slot, text: in bytes) -> ()
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, bad_address];

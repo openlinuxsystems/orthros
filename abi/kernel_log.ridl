@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The kernel log capability.
+//!
+//! The kernel log is how early programs, before there are consoles and
+//! log services (Phase 6), report what they do: `debug_log` writes a line
+//! to it, prefixed with the thread's name.
+
+module kernel_log;
+
+/// The most bytes of one line `debug_log` keeps.
+const WRITE_MAX: u64 = 256;
+
+/// The kernel log. Writing needs the write right.
+interface kernel_log = 0x0009 version 1 {
+    kind = kernel_log;
+}

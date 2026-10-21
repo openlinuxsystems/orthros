@@ -5,7 +5,7 @@
 # workspace in kernel/ because it builds for a bare-metal target.
 [workspace]
 resolver = "3"
-members = ["tools/xtask"]
+members = ["tools/ridlc", "tools/xtask"]
 # The kernel crates that tools/xtask uses stay members of the kernel workspace.
 exclude = ["kernel"]
 

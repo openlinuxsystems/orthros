@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Notifications.
+//!
+//! A notification is a word of flags. `notify` sets the bits of the
+//! capability's badge in it and wakes a waiter; `wait` returns the word
+//! and clears it, waiting while it is 0. A ring can wait for one too,
+//! posting a completion when it is signalled (see radix-ring(2)).
+
+module notification;
+
+/// Flags of the `wait` system call.
+flags WaitFlags: u64 {
+    /// Return at once, with would_block if the word is 0.
+    poll = 0;
+}
+
+/// A word of flags that can be signalled and waited for. Signalling needs
+/// the send right, waiting the receive right.
+interface notification = 0x0005 version 1 {
+    kind = notification;
+}

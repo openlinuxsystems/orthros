@@ -1,0 +1,27 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The random capability.
+//!
+//! Every program gets a capability to the kernel's random number
+//! generator when it starts: a ChaCha20 generator seeded from every
+//! source of entropy the machine has (radix-random(7)). It is what
+//! address space randomisation, TLS, SSH keys, password salts and
+//! signatures draw from, as getrandom(2) is on Linux.
+
+module random;
+
+/// The most bytes one `read` fills.
+const READ_MAX: u64 = 65536;
+
+/// The kernel's random number generator. Both methods need the read
+/// right.
+interface random = 0x0007 version 1 {
+    kind = random;
+    /// Fills `buffer` with random bytes (at most READ_MAX).
+    method read = 1 (buffer: out bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address];
+    /// Returns 64 random bytes in registers, without touching memory.
+    method words = 2 () -> (words: [u64; 8])
+        raises [no_such_slot, empty_slot, missing_rights];
+}
