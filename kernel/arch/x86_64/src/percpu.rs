@@ -160,6 +160,13 @@ pub struct PerCpu {
     pub next_tick_ns: AtomicU64,
     /// The deadline the kernel asked for, or `u64::MAX`.
     pub deadline_ns: AtomicU64,
+    /// When the timer is armed to fire, or `u64::MAX` when it is not (or
+    /// has fired and its interrupt is not handled yet).
+    pub armed_ns: AtomicU64,
+    /// Times the timer was written to arm it.
+    pub timer_writes: AtomicU64,
+    /// Interprocessor interrupts this CPU sent.
+    pub ipis_sent: AtomicU64,
     descriptors: TakeOnce<Descriptors>,
 }
 
@@ -190,6 +197,9 @@ impl PerCpu {
             reschedules: AtomicU64::new(0),
             next_tick_ns: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(u64::MAX),
+            armed_ns: AtomicU64::new(u64::MAX),
+            timer_writes: AtomicU64::new(0),
+            ipis_sent: AtomicU64::new(0),
             descriptors: TakeOnce::new(Descriptors {
                 gdt: [0; 8],
                 tss: Tss {

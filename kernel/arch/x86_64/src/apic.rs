@@ -259,6 +259,7 @@ fn send(dest: u32, low: u32) {
 
 /// Sends interrupt `vector` to the CPU with APIC ID `dest`.
 pub fn send_fixed(dest: u32, vector: u8) {
+    crate::percpu::current().ipis_sent.fetch_add(1, Ordering::Relaxed);
     send(dest, u32::from(vector));
 }
 

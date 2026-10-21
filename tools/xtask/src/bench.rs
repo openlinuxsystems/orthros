@@ -35,6 +35,24 @@ pub struct Measurement {
     pub iterations: u64,
 }
 
+/// What the kernel did during one benchmark group: a `BENCHCOUNT
+/// group=... rounds=... switches=... ...` line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Counts {
+    pub group: String,
+    pub rounds: u64,
+    pub events: Vec<(String, u64)>,
+}
+
+/// The events of [`Counts`], in the report's order, with their headings.
+const EVENTS: &[(&str, &str)] = &[
+    ("switches", "Switches"),
+    ("timer_writes", "Timer writes"),
+    ("ipis", "IPIs"),
+    ("halts", "Halts"),
+    ("polls", "Polls"),
+];
+
 /// A row of the report: a Radix benchmark and the Linux one closest to it.
 struct Row {
     radix: &'static str,
@@ -131,10 +149,10 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         "Booting Radix with selftest=bench on 2 CPUs ({})",
         if kvm { "KVM" } else { "no KVM, which takes minutes" }
     ));
-    let radix = radix_numbers(ctx, &dir, &image, kvm)?;
+    let (radix, counts) = radix_numbers(ctx, &dir, &image, kvm)?;
     let linux = if linux { linux_numbers(ctx)? } else { Vec::new() };
 
-    let report = report(ctx, &radix, &linux, kvm);
+    let report = report(ctx, &radix, &counts, &linux, kvm);
     let markdown = dir.join("report.md");
     let json = dir.join("results.json");
     std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
@@ -155,7 +173,12 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
 }
 
 /// Boots the benchmark image and reads its `BENCH` lines.
-fn radix_numbers(ctx: &Ctx, dir: &Path, base: &[u8], kvm: bool) -> Result<Vec<Measurement>> {
+fn radix_numbers(
+    ctx: &Ctx,
+    dir: &Path,
+    base: &[u8],
+    kvm: bool,
+) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let image = dir.join("bench.img");
     let bytes = test::with_cmdline(base, CMDLINE).map_err(crate::Error::new)?;
     std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
@@ -198,7 +221,7 @@ fn radix_numbers(ctx: &Ctx, dir: &Path, base: &[u8], kvm: bool) -> Result<Vec<Me
             ctx.display(&dir.join("boot-bench.log"))
         );
     }
-    Ok(parse(&log))
+    Ok((parse(&log), parse_counts(&log)))
 }
 
 /// Builds and runs the Linux baseline.
@@ -226,6 +249,24 @@ pub fn parse(text: &str) -> Vec<Measurement> {
                 }
             }
             Some(Measurement { name: name?, ns: ns?, iterations: iterations? })
+        })
+        .collect()
+}
+
+/// The kernel's event counts in `text`.
+pub fn parse_counts(text: &str) -> Vec<Counts> {
+    text.lines()
+        .filter_map(|line| {
+            let fields = line.split_once("BENCHCOUNT ")?.1;
+            let (mut group, mut rounds, mut events) = (None, None, Vec::new());
+            for field in fields.split_whitespace() {
+                match field.split_once('=')? {
+                    ("group", value) => group = Some(value.to_string()),
+                    ("rounds", value) => rounds = value.parse::<u64>().ok(),
+                    (name, value) => events.push((name.to_string(), value.parse::<u64>().ok()?)),
+                }
+            }
+            Some(Counts { group: group?, rounds: rounds?.max(1), events })
         })
         .collect()
 }
@@ -271,7 +312,13 @@ fn host_kernel() -> String {
 }
 
 /// The Markdown report.
-fn report(ctx: &Ctx, radix: &[Measurement], linux: &[Measurement], kvm: bool) -> String {
+fn report(
+    ctx: &Ctx,
+    radix: &[Measurement],
+    counts: &[Counts],
+    linux: &[Measurement],
+    kvm: bool,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## Radix benchmarks\n");
     let _ = writeln!(
@@ -303,7 +350,45 @@ fn report(ctx: &Ctx, radix: &[Measurement], linux: &[Measurement], kvm: bool) ->
          CPU is an interrupt the host delivers, so two-CPU numbers in the virtual machine \
          carry the host's cost on top. docs/design/ipc.md describes each measurement."
     );
+    if !counts.is_empty() {
+        counts_table(&mut out, counts);
+    }
     out
+}
+
+/// What the kernel did per operation: under a hypervisor each timer write,
+/// interrupt sent and halt is an exit to the host, so these explain most
+/// of the numbers above.
+fn counts_table(out: &mut String, counts: &[Counts]) {
+    let _ = writeln!(out, "\n### Kernel events per operation\n");
+    let _ = write!(out, "| Benchmark |");
+    for (_, heading) in EVENTS {
+        let _ = write!(out, " {heading} |");
+    }
+    let _ = write!(out, "\n| --- |");
+    for _ in EVENTS {
+        let _ = write!(out, " ---: |");
+    }
+    out.push('\n');
+    for group in counts {
+        let _ = write!(out, "| {} |", group.group.replace('_', " "));
+        for (name, _) in EVENTS {
+            let value = group.events.iter().find(|(event, _)| event == name).map(|(_, v)| *v);
+            match value {
+                Some(value) => {
+                    let _ = write!(out, " {:.2} |", value as f64 / group.rounds as f64);
+                }
+                None => out.push_str(" |"),
+            }
+        }
+        out.push('\n');
+    }
+    let _ = writeln!(
+        out,
+        "\nCounted over all CPUs while each benchmark ran, including starting and stopping its \
+         programs, and divided by its rounds. A round trip on one CPU needs two switches; \
+         anything else is overhead."
+    );
 }
 
 fn json_list(out: &mut String, measurements: &[Measurement]) {
@@ -368,6 +453,20 @@ mod tests {
                 Measurement { name: "syscall_null".into(), ns: 965.01, iterations: 200_000 },
                 Measurement { name: "getppid".into(), ns: 98.0, iterations: 40_000 },
             ]
+        );
+    }
+
+    #[test]
+    fn reads_count_lines() {
+        let log = "[ 1.2] BENCHCOUNT group=endpoint_same_cpu rounds=100 switches=200 ipis=0\n\
+                   BENCHCOUNT group=broken rounds=1 switches=x\n";
+        assert_eq!(
+            parse_counts(log),
+            [Counts {
+                group: "endpoint_same_cpu".into(),
+                rounds: 100,
+                events: vec![("switches".into(), 200), ("ipis".into(), 0)],
+            }]
         );
     }
 

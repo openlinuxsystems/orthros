@@ -49,6 +49,10 @@ impl Cpu for Arch {
         (false, "none")
     }
 
+    fn virtualized() -> bool {
+        false
+    }
+
     fn interrupts_enabled() -> bool {
         false
     }
@@ -126,6 +130,10 @@ impl InterruptController for Arch {
     fn pings_received(_cpu: usize) -> u64 {
         0
     }
+
+    fn ipis_sent(_cpu: usize) -> u64 {
+        0
+    }
 }
 
 impl Timer for Arch {
@@ -146,6 +154,10 @@ impl Timer for Arch {
     fn set_timer_handler(_handler: fn(bool)) {}
 
     fn set_deadline(_deadline_ns: u64) {}
+
+    fn timer_writes(_cpu: usize) -> u64 {
+        0
+    }
 
     fn timer_mode() -> &'static str {
         "none"

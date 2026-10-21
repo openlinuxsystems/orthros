@@ -278,25 +278,50 @@ pub fn bench() {
         return;
     }
     let mut outcome = Outcome::new("bench");
+    let before = sched::counters();
     if let Some(group) = group(&mut outcome, "syscalls", |group| {
-        let argument = BENCH | 200_000;
+        let argument = BENCH | SYSCALL_ROUNDS;
         start(
             group,
             Spec { name: "bench", role: role::SYSCALL_BENCH, argument, cpu: 0, extra: &[] },
         )
     }) {
         outcome.check("syscalls", &group, 0);
+        report_counters("syscalls", SYSCALL_ROUNDS, &before);
     }
     for across in [false, true] {
         for (what, roles) in PAIRS {
             if roles.0 == role::CAP_SEND {
                 continue;
             }
-            let Some(group) = pair(&mut outcome, what, roles, BENCH | 100_000, across) else {
+            let before = sched::counters();
+            let Some(group) = pair(&mut outcome, what, roles, BENCH | PAIR_ROUNDS, across) else {
                 continue;
             };
             outcome.check(what, &group, 0);
+            let place = if across { "cross_cpu" } else { "same_cpu" };
+            let mut name = radix_klog::TextBuf::<32>::new();
+            let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{what}_{place}"));
+            report_counters(name.as_str(), PAIR_ROUNDS, &before);
         }
     }
     outcome.end(format_args!("the numbers are above, one BENCH line each"));
+}
+
+/// Rounds of each system call the benchmark makes, and of each pair's
+/// round trips.
+const SYSCALL_ROUNDS: u64 = 200_000;
+const PAIR_ROUNDS: u64 = 100_000;
+
+/// Logs what the kernel did for a benchmark since `before`: switches,
+/// timer writes, interrupts sent, halts and polls, which `ob bench` divides
+/// by the rounds. Each is a VM exit or more under a hypervisor, so they
+/// explain the numbers.
+fn report_counters(group: &str, rounds: u64, before: &sched::Counters) {
+    let counts = sched::counters().since(before);
+    info!(
+        "BENCHCOUNT group={group} rounds={rounds} switches={} timer_writes={} ipis={} halts={} \
+         polls={}",
+        counts.switches, counts.timer_writes, counts.ipis, counts.halts, counts.polls
+    );
 }

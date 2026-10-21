@@ -92,6 +92,10 @@ impl Cpu for Arch {
         if IDLE_MWAIT.load(Ordering::Relaxed) { (true, "MWAIT") } else { (false, "HLT") }
     }
 
+    fn virtualized() -> bool {
+        cpu::feature::hypervisor()
+    }
+
     fn interrupts_enabled() -> bool {
         cpu::interrupts_enabled()
     }
@@ -242,6 +246,10 @@ impl InterruptController for Arch {
     fn pings_received(cpu: usize) -> u64 {
         percpu::get(cpu).map_or(0, |c| c.pings.load(Ordering::Relaxed))
     }
+
+    fn ipis_sent(cpu: usize) -> u64 {
+        percpu::get(cpu).map_or(0, |c| c.ipis_sent.load(Ordering::Relaxed))
+    }
 }
 
 impl Timer for Arch {
@@ -267,6 +275,10 @@ impl Timer for Arch {
 
     fn set_deadline(deadline_ns: u64) {
         time::set_deadline(deadline_ns);
+    }
+
+    fn timer_writes(cpu: usize) -> u64 {
+        time::writes(cpu)
     }
 
     fn timer_mode() -> &'static str {
