@@ -8,6 +8,25 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 OrthrOS is a young project with one maintainer. This file says who decides
 what today and how that is meant to grow.
 
+## Guiding principle: favor the user
+
+When a decision reaches a fork in the road, OrthrOS favors the user. It is a
+users-first system, not a platform run for a company's benefit. Freedom is
+at the core of its philosophy: the freedom to use, study, change and share
+the system, to run any software the user chooses, and to decide everything
+about one's own machine. In practice:
+
+- The user owns the machine. Updates and restarts happen only when the user
+  chooses, and nothing is forced.
+- Warn and confirm, never forbid. Risky choices, such as a weak password or
+  sideloading an unsigned app, get a plain warning and a confirmation, and
+  then the user decides.
+- No telemetry, no ads, no required online accounts, and no data leaves the
+  machine unless the user sends it.
+- Secure defaults, all of which the owner can change.
+- Legal and fair to others: every license is honored, and every project we
+  build on is credited.
+
 ## Maintainer
 
 | Name | GitHub | Role |
@@ -32,13 +51,17 @@ when each phase starts, cuts releases, handles security reports
   one in a pull request; the maintainer accepts or rejects it.
 - The order of work is set by [docs/roadmap.md](docs/roadmap.md), which the
   maintainer keeps.
+- Every decision is weighed against the
+  [guiding principle](#guiding-principle-favor-the-user): at a fork in the
+  road, the choice that favors the user wins.
 - Where discussion does not reach agreement, the maintainer decides and
   records the reasons.
 
 ## Contributions
 
 Contributions are made under Apache-2.0 OR MIT and signed off under the
-[Developer Certificate of Origin](CONTRIBUTING.md#developer-certificate-of-origin).
+[Developer Certificate of Origin](CONTRIBUTING.md#developer-certificate-of-
+origin).
 There is no contributor license agreement, and no contributor assigns
 copyright to the project.
 

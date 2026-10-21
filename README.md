@@ -140,6 +140,11 @@ and everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
 Decisions that shape the system are recorded as
 [architecture decision records](docs/adr/README.md).
 
+Every decision follows the project's
+[guiding principle](GOVERNANCE.md#guiding-principle-favor-the-user): at a
+fork in the road, OrthrOS favors the user. Freedom is at the core of its
+philosophy, and the user owns the machine.
+
 ## License
 
 OrthrOS is licensed under either of

@@ -130,7 +130,10 @@ decision is never edited away: a later record supersedes it.
 
 Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
 [GOVERNANCE.md](GOVERNANCE.md) says who maintains OrthrOS and how
-decisions are made. Report security problems privately as described in
+decisions are made, including the project's
+[guiding principle](GOVERNANCE.md#guiding-principle-favor-the-user): when a
+change reaches a fork in the road, choose the option that favors the user.
+Report security problems privately as described in
 [SECURITY.md](SECURITY.md), never in a public issue or pull request.
 
 ## License of contributions
