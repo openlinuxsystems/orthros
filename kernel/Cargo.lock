@@ -151,6 +151,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-bootfs"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "radix-bootinfo"
 version = "0.0.1"
 

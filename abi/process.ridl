@@ -1,0 +1,124 @@
+// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Processes.
+//!
+//! A process is an address space, a capability space and the threads that
+//! run in them, which end together. Whoever holds its capability with the
+//! control right builds it: maps frames into its address space, gives it
+//! capabilities, and starts its threads. A program holds its own process
+//! in slot SLOT_PROCESS (radix-startup(2)), with the read and control
+//! rights.
+//!
+//! A process ends when its last thread exits (with that thread's code),
+//! when a fault stops one of its threads (EXIT_FAULT), when a holder of
+//! the control right calls `exit`, or when its last capability is deleted
+//! (EXIT_STOPPED). Its threads stop at their next entry into the kernel
+//! or return from an interrupt; then its capability space is emptied,
+//! which frees everything it held, and its address space goes. What is
+//! left is its number and exit code, which `info` reads and `notify_exit`
+//! announces, until its last capability is deleted: that reaps it.
+//! Deleting the creator's capability does not end a process that holds
+//! its own; revoking the creator's capability first takes that one too.
+//!
+//! Kernel objects a program makes with `create` are charged to its
+//! process's resource domain, by the bytes the kernel uses for them.
+
+module process;
+
+/// The exit code of a process that a fault ended: one of its threads
+/// touched memory it may not, or ran an instruction it may not.
+const EXIT_FAULT: u64 = 0xdead0000;
+/// The exit code of a process that was stopped: its last capability was
+/// deleted, or the kernel stopped it.
+const EXIT_STOPPED: u64 = 0xdead0001;
+/// The fewest slots a process's capability space may have.
+const MIN_SLOTS: u32 = 16;
+/// The most slots a process's capability space may have.
+const MAX_SLOTS: u32 = 4096;
+/// How many capabilities a process keeps for its maker (see `keep`).
+const KEEP_SLOTS: u32 = 32;
+/// The longest name a process may have, in bytes.
+const NAME_MAX: u64 = 15;
+
+/// Where a process is in its life.
+enum ProcessState: u8 {
+    /// Made, with no thread started yet.
+    created = 0;
+    /// Its first thread has started, and it has not begun to end.
+    running = 1;
+    /// Ending: its threads are stopping.
+    ending = 2;
+    /// Ended, with an exit code. Deleting its last capability reaps it.
+    exited = 3;
+}
+
+/// A process.
+interface process = 0x000a version 1 {
+    kind = process;
+    /// Makes a kernel object, charged to this process's resource domain,
+    /// and puts its capability, with every right, in slot `to`: a process
+    /// with a capability space of `size` slots (MIN_SLOTS to MAX_SLOTS),
+    /// an endpoint, or a notification (`size` 0 for both). Needs the
+    /// control right.
+    method create = 1 (kind: ObjectKind, size: u32, to: slot) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
+                gone];
+    /// Names the process: up to NAME_MAX bytes of UTF-8, which the kernel
+    /// log shows, and its threads started after. Needs the control right.
+    method set_name = 2 (name: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address];
+    /// Puts a capability to the process's address space, with every
+    /// right, in slot `to`, so that its maker can map frames into it.
+    /// Needs the control right.
+    method address_space = 3 (to: slot) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, occupied, no_memory, gone];
+    /// Moves the capability in slot `from` to slot `to` of the process's
+    /// capability space. Needs the control right on the process, and the
+    /// transfer right on the capability.
+    method give = 4 (from: slot, to: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, occupied, revoking, gone];
+    /// Puts a capability derived from the one in slot `from` in slot `to`
+    /// of the process's capability space: with `rights` (among its own)
+    /// and, for an endpoint or notification without one, a badge (0 for
+    /// none), as radix-capability(2)'s derive does. Needs the control
+    /// right on the process, and the copy and transfer rights on the
+    /// capability.
+    method share = 5 (from: slot, to: u32, rights: Rights, badge: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, occupied, sealed, bad_badge, too_deep,
+                revoking, no_memory, gone];
+    /// Moves the capability in slot `from` among the process's kept
+    /// capabilities: KEEP_SLOTS slots that its threads cannot reach,
+    /// emptied when it ends. A loader keeps the frames of a program's
+    /// image, stack and start-up page there, so that the program cannot
+    /// unmap them by deleting their capabilities. Needs the control right
+    /// on the process, and the transfer right on the capability.
+    method keep = 6 (from: slot) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, no_room, revoking, gone];
+    /// Starts a thread in the process at `entry`, with its stack pointer
+    /// at `stack` and `argument` in its first argument register, and puts
+    /// its capability, with every right, in slot `to` of the process's
+    /// capability space. The first thread takes the process from created
+    /// to running. Returns the thread's number. Needs the control right.
+    method start = 7 (entry: addr, stack: addr, argument: u64, to: u32) -> (thread: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, occupied, no_memory,
+                gone];
+    /// Ends the process with exit code `code`: its threads stop, its
+    /// capability space is emptied and its address space goes. A process
+    /// that is ending or has exited keeps its first code. Called on the
+    /// caller's own process, it does not return. Needs the control right.
+    method exit = 8 (code: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights];
+    /// Signals the notification in slot `notification` when the process
+    /// exits, with the bits of that capability's badge (bit 0 if it has
+    /// none), or at once if it has exited already. A later call replaces
+    /// the notification. Needs the control right on the process, and the
+    /// send right on the notification.
+    method notify_exit = 9 (notification: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed];
+    /// Where the process is in its life, its exit code once it has exited
+    /// (0 before), its number, and how many of its threads have not ended.
+    /// Needs the read right.
+    method info = 10 () -> (state: ProcessState, code: u64, number: u64, threads: u32)
+        raises [no_such_slot, empty_slot, missing_rights];
+}

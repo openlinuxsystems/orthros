@@ -86,7 +86,9 @@ fn layouts_match_their_definitions() {
     assert_eq!(ring::Cqe::SIZE, 32);
     assert_eq!(ring::RingIndexes::SIZE, 64);
     assert_eq!(ring::RingHeader::OFFSET_CQ, 64);
-    assert_eq!(startup::Startup::SIZE, 64);
+    assert_eq!(startup::Startup::SIZE, 96);
+    assert_eq!(startup::Startup::OFFSET_IMAGE_BIAS, 64);
+    assert_eq!(startup::Startup::OFFSET_BOOTFS_SIZE, 88);
 }
 
 #[test]

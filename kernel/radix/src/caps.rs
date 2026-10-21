@@ -61,10 +61,16 @@ pub fn init() {
 }
 
 /// Runs `f` on the store with its lock held, if the store is set up.
+/// Processes that `f` released and that have no thread left to finish
+/// them are finished before the lock goes (`user::process`).
 pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     let mut store = STORE.lock();
     let result = match store.as_mut() {
-        Some(store) => Ok(f(store)),
+        Some(store) => {
+            let result = f(store);
+            crate::user::process::finish_pending(store);
+            Ok(result)
+        }
         None => Err(CapError::NoSuchSpace),
     };
     // `f` may have changed anything, so every capability a CPU has cached

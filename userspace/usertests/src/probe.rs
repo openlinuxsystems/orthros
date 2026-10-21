@@ -9,9 +9,11 @@ use libradix::abi::capability::{self, ObjectKind, Rights};
 use libradix::abi::endpoint::{INFO_WORDS_SHIFT, NO_SLOT};
 use libradix::abi::errors::Kernel;
 use libradix::abi::notification::WaitFlags;
+use libradix::abi::process::{self, ProcessState};
 use libradix::abi::ring::Opcode;
 use libradix::abi::startup::{
-    self, SLOT_LOG, SLOT_MEMORY, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD, STARTUP_VERSION,
+    self, SLOT_LOG, SLOT_MEMORY, SLOT_PROCESS, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD,
+    STARTUP_VERSION,
 };
 use libradix::abi::{Status, address_space, memory, random, ring, syscalls, thread};
 use libradix::ring::Ring;
@@ -27,6 +29,11 @@ const MOVED: u32 = 66;
 const CHILD: u32 = 67;
 const RING: u32 = 70;
 const BIG: u32 = 71;
+const REUSED: u32 = 72;
+const CHILD_PROCESS: u32 = 73;
+const NOTE: u32 = 74;
+const ENDPOINT: u32 = 75;
+const CHILD_SPACE: u32 = 76;
 
 /// Free addresses for its mappings.
 const MAP_AT: u64 = 0x2000_0000;
@@ -50,6 +57,7 @@ pub fn run() -> u64 {
     log();
     methods();
     rings();
+    processes();
     println!("probe: {} checks failed", checks::failures());
     checks::failures()
 }
@@ -89,6 +97,7 @@ fn capabilities() {
         (SLOT_MEMORY, ObjectKind::Memory, Rights::CONTROL),
         (SLOT_RANDOM, ObjectKind::Random, Rights::READ),
         (SLOT_LOG, ObjectKind::KernelLog, Rights::WRITE),
+        (SLOT_PROCESS, ObjectKind::Process, Rights::CONTROL),
     ];
     for (slot, kind, right) in slots {
         if let Some(info) = ok!(capability::info(&SYS, slot), "info on slot {slot}") {
@@ -377,8 +386,8 @@ fn reused_memory() {
         return;
     }
     for round in 0..2 {
-        if ok!(memory::retype(&SYS, BIG, ObjectKind::Frame, ORDER, FRAME, 1), "retype").is_none()
-            || ok!(syscalls::map(&SYS, SLOT_SPACE, FRAME, MAP_AT, RW, 0, PAGES), "map").is_none()
+        if ok!(memory::retype(&SYS, BIG, ObjectKind::Frame, ORDER, REUSED, 1), "retype").is_none()
+            || ok!(syscalls::map(&SYS, SLOT_SPACE, REUSED, MAP_AT, RW, 0, PAGES), "map").is_none()
         {
             break;
         }
@@ -397,7 +406,7 @@ fn reused_memory() {
         }
         check!(dirty == 0, "round {round}: {dirty} words of a new frame are not zero");
         ok!(syscalls::unmap(&SYS, SLOT_SPACE, MAP_AT, PAGES), "unmap");
-        ok!(capability::delete(&SYS, FRAME), "delete the frame");
+        ok!(capability::delete(&SYS, REUSED), "delete the frame");
     }
     ok!(capability::delete(&SYS, BIG), "delete the memory object");
 }
@@ -581,4 +590,122 @@ fn raw_opcode(ring: &Ring, opcode: u8) {
     // at RING_AT (its entries start one page in), which the kernel has
     // not taken yet.
     unsafe { (entry as *mut u8).write_volatile(opcode) };
+}
+
+/// Processes: its own, the objects it makes charged to it, and a child it
+/// builds and ends before any thread of the child runs.
+fn processes() {
+    if let Some(info) = ok!(process::info(&SYS, SLOT_PROCESS), "info on its process") {
+        check!(info.state == ProcessState::Running, "its process is {}", info.state.name());
+        check!(info.threads == 1, "its process has {} threads", info.threads);
+        check!(info.code == 0 && info.number > 0, "code {:#x}, number {}", info.code, info.number);
+    }
+    ok!(process::set_name(&SYS, SLOT_PROCESS, b"probe"), "naming its process");
+    fails!(process::set_name(&SYS, SLOT_PROCESS, b"a name far too long"), InvalidArgument, "long");
+    fails!(process::set_name(&SYS, SLOT_PROCESS, b"\xff"), InvalidArgument, "not UTF-8");
+    fails!(
+        raw_call(SLOT_PROCESS, process::SET_NAME, &[KERNEL, 4]).map(|_| ()),
+        BadAddress,
+        "a name in the kernel's half"
+    );
+    fails!(raw_call(SLOT_THREAD, process::INFO, &[]).map(|_| ()), NoSuchMethod, "on a thread");
+
+    // Objects charged to its process.
+    ok!(process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, NOTE), "a notification");
+    ok!(process::create(&SYS, SLOT_PROCESS, ObjectKind::Endpoint, 0, ENDPOINT), "an endpoint");
+    if let Some(info) = ok!(capability::info(&SYS, ENDPOINT), "info on the endpoint") {
+        check!(info.kind == ObjectKind::Endpoint, "made a {}", info.kind.name());
+        check!(info.rights.contains(Rights::GRANT), "the endpoint lacks a right");
+    }
+    fails!(
+        process::create(&SYS, SLOT_PROCESS, ObjectKind::Frame, 0, BIG),
+        InvalidArgument,
+        "frame"
+    );
+    fails!(
+        process::create(&SYS, SLOT_PROCESS, ObjectKind::Endpoint, 1, BIG),
+        InvalidArgument,
+        "an endpoint with a size"
+    );
+    fails!(
+        process::create(&SYS, SLOT_PROCESS, ObjectKind::Process, process::MIN_SLOTS - 1, BIG),
+        InvalidArgument,
+        "a process with too few slots"
+    );
+    fails!(
+        process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, NOTE),
+        Occupied,
+        "into a full slot"
+    );
+
+    // A child: built, then ended before it ever ran.
+    if ok!(
+        process::create(&SYS, SLOT_PROCESS, ObjectKind::Process, process::MIN_SLOTS, CHILD_PROCESS),
+        "making a process"
+    )
+    .is_none()
+    {
+        return;
+    }
+    if let Some(info) = ok!(process::info(&SYS, CHILD_PROCESS), "info on the child") {
+        check!(info.state == ProcessState::Created, "the child is {}", info.state.name());
+        check!(info.threads == 0 && info.number > 0, "{} threads", info.threads);
+    }
+    ok!(process::address_space(&SYS, CHILD_PROCESS, CHILD_SPACE), "the child's address space");
+    if let Some(info) = ok!(capability::info(&SYS, CHILD_SPACE), "info on its space") {
+        check!(info.kind == ObjectKind::AddressSpace, "its space is a {}", info.kind.name());
+    }
+    ok!(process::share(&SYS, CHILD_PROCESS, NOTE, 3, Rights::SEND, 4), "sharing");
+    fails!(process::share(&SYS, CHILD_PROCESS, NOTE, 3, Rights::SEND, 0), Occupied, "twice");
+    fails!(
+        process::share(&SYS, CHILD_PROCESS, SLOT_LOG, 5, Rights::WRITE, 9),
+        BadBadge,
+        "a badge on the log"
+    );
+    fails!(process::give(&SYS, CHILD_PROCESS, ENDPOINT, 99), NoSuchSlot, "past its slots");
+    ok!(process::give(&SYS, CHILD_PROCESS, ENDPOINT, 4), "giving it the endpoint");
+    fails!(capability::info(&SYS, ENDPOINT), EmptySlot, "the given endpoint is still here");
+    ok!(capability::derive(&SYS, NOTE, BIG, Rights::SEND, 0), "a copy that cannot move");
+    fails!(process::keep(&SYS, CHILD_PROCESS, BIG), MissingRights, "keeping it");
+    ok!(capability::delete(&SYS, BIG), "deleting it");
+    ok!(capability::derive(&SYS, NOTE, BIG, Rights::SEND.union(Rights::TRANSFER), 0), "a copy");
+    ok!(process::keep(&SYS, CHILD_PROCESS, BIG), "keeping it");
+    fails!(capability::info(&SYS, BIG), EmptySlot, "the kept copy is still here");
+    fails!(process::keep(&SYS, CHILD_PROCESS, BIG), EmptySlot, "keeping nothing");
+    fails!(
+        process::start(&SYS, CHILD_PROCESS, KERNEL, MAP_AT, 0, 1),
+        InvalidArgument,
+        "a thread in the kernel's half"
+    );
+    ok!(process::notify_exit(&SYS, CHILD_PROCESS, NOTE), "asking to hear of its end");
+    ok!(process::exit(&SYS, CHILD_PROCESS, 7), "ending it");
+    if let Some(info) = ok!(process::info(&SYS, CHILD_PROCESS), "info on the ended child") {
+        check!(info.state == ProcessState::Exited, "the child is {}", info.state.name());
+        check!(info.code == 7, "the child's code is {:#x}", info.code);
+    }
+    if let Some(bits) =
+        ok!(syscalls::wait(&SYS, NOTE, WaitFlags::POLL, 0).map(|r| r.bits), "its end signalled")
+    {
+        check!(bits == 1, "its end set bits {bits:#x}");
+    }
+    fails!(process::start(&SYS, CHILD_PROCESS, MAP_AT, MAP_AT, 0, 1), Gone, "starting it after");
+    fails!(
+        process::create(&SYS, CHILD_PROCESS, ObjectKind::Notification, 0, BIG),
+        Gone,
+        "charging it after"
+    );
+    fails!(process::give(&SYS, CHILD_PROCESS, NOTE, 5), Gone, "giving it something after");
+    // Its address space outlives it, empty, while a capability holds it.
+    if let Some(q) = ok!(address_space::query(&SYS, CHILD_SPACE, MAP_AT), "query its space") {
+        check!(!q.mapped, "its space has a mapping");
+    }
+    ok!(process::notify_exit(&SYS, CHILD_PROCESS, NOTE), "asking again after");
+    if let Some(bits) =
+        ok!(syscalls::wait(&SYS, NOTE, WaitFlags::POLL, 0).map(|r| r.bits), "signalled at once")
+    {
+        check!(bits == 1, "set bits {bits:#x}");
+    }
+    for slot in [CHILD_SPACE, CHILD_PROCESS, NOTE] {
+        ok!(capability::delete(&SYS, slot), "deleting slot {slot}");
+    }
 }

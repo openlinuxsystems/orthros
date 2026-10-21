@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2026 The OrthrOS contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Programs in user mode (Phase 5): their threads, the twelve system
-//! calls, and the kernel objects they work with.
+//! Programs in user mode (Phases 5 and 6): their processes and threads,
+//! the twelve system calls, and the kernel objects they work with.
 //!
-//! A program's thread is a scheduler thread with a [`UserThread`] attached:
-//! the capability space it names capabilities in, the address space it
-//! runs in, and its IPC state. The architecture takes it into user mode
+//! A program runs as a process (`process`): an address space, a
+//! capability space and threads, which end together. A program's thread
+//! is a scheduler thread with a [`UserThread`] attached: its process, the
+//! capability space it names capabilities in, the address space it runs
+//! in, and its IPC state. The architecture takes it into user mode
 //! once ([`UserMode::enter_user`]) and back into the kernel through system
 //! calls (`syscall`), interrupts and faults. A fault in user mode ends the
 //! thread; nothing a program does stops the kernel.
@@ -22,23 +24,30 @@
 //!   for;
 //! - `memory`: address spaces and frames, mapped and unmapped;
 //! - `ring`: rings shared with programs (radix-ring);
+//! - `process`: processes, and the kernel memory their objects take,
+//!   charged to resource domains (`account`);
 //! - `methods`: the methods called on capabilities with `cap_call`.
 //!
-//! Until Phase 6 brings processes and init, the kernel itself starts
-//! programs from the `usertests` boot module (`launch`), for the `user`,
-//! `ipc`, `fuzz` and `bench` self-tests (`usertest`).
-//! `docs/design/ipc.md` describes the design.
+//! The kernel itself starts one program, Spark, from the boot archive
+//! (`init`), and the test programs of the `usertests` boot module
+//! (`launch`) for the `user`, `ipc`, `fuzz` and `bench` self-tests
+//! (`usertest`); Spark and its runtime start every other program.
+//! `docs/design/ipc.md` and `docs/design/processes.md` describe the
+//! design.
 //!
-//! Lock order: the capability store, the object registry, a frame's state,
-//! an address space's regions; an endpoint, then a thread's IPC state; a
-//! ring's queues. None is held across a block.
+//! Lock order: the capability store, the object registry, a process's
+//! state, a frame's state, an address space's regions; an endpoint, then
+//! a thread's IPC state; a ring's queues. None is held across a block.
 
+mod account;
 mod ipc;
 pub mod launch;
+mod loader;
 mod memory;
 mod methods;
 mod notify;
 pub mod objects;
+pub mod process;
 mod random;
 mod ring;
 mod syscall;
@@ -46,6 +55,8 @@ mod syscall;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+pub use radix_abi::process::{EXIT_FAULT, EXIT_STOPPED};
 
 use radix_abi::Status;
 use radix_abi::errors::Kernel;
@@ -57,16 +68,12 @@ use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
 
 use crate::Arch;
-use crate::sched::{self, ThreadRef};
+use crate::sched::{self, ThreadRef, wait};
 use memory::SpaceObject;
+use process::{Ending, ProcessRef};
 
 /// A program thread's side, shared.
 pub type UserRef = Arc<UserThread, Kmalloc>;
-
-/// The exit status of a thread a fault ended.
-pub const EXIT_FAULT: u64 = 0xdead_0000;
-/// The exit status of a thread the kernel stopped.
-pub const EXIT_STOPPED: u64 = 0xdead_0001;
 
 /// What a thread of a program has besides its scheduler side.
 pub struct UserThread {
@@ -76,7 +83,7 @@ pub struct UserThread {
     space: memory::SpaceRef,
     /// Where it starts in user mode: entry point, stack top, argument.
     start: [u64; 3],
-    /// Set once the launcher has finished setting it up.
+    /// Set once whoever started it has finished setting it up.
     ready: AtomicBool,
     /// Its IPC state.
     ipc: SpinLock<ipc::IpcState>,
@@ -84,22 +91,14 @@ pub struct UserThread {
     reply: SpinLock<Option<ipc::Caller>>,
     /// Its receive window: first slot (high half) and count (low half).
     window: AtomicU64,
-    /// Its exit status, once it has exited.
-    exit: AtomicU64,
-    exited: AtomicBool,
-    /// Woken when it exits.
-    program: Arc<launch::Program, Kmalloc>,
+    /// The process it is a thread of.
+    process: ProcessRef,
 }
 
 impl UserThread {
     /// The address space.
     pub fn space(&self) -> &SpaceObject {
         &self.space
-    }
-
-    /// Its exit status, if it has exited.
-    pub fn exit_status(&self) -> Option<u64> {
-        self.exited.load(Ordering::Acquire).then(|| self.exit.load(Ordering::Relaxed))
     }
 
     /// The receive window: first slot and count.
@@ -165,17 +164,17 @@ pub fn init() {
     assert!(radix_abi::capability::ObjectKind::from_raw(radix_cap::KINDS as u8).is_none());
 }
 
-/// Where a program's thread starts: waits until the launcher is done with
-/// it, then leaves for user mode.
+/// Where a program's thread starts: waits until whoever started it is
+/// done with it, then leaves for user mode.
 fn thread_main(_: usize) {
     let Some((thread, user)) = current() else { return };
     let key = Arc::as_ptr(&user) as usize;
-    sched::wait::wait_until(key, "starting", || {
+    wait::wait_until(key, "starting", || {
         user.ready.load(Ordering::Acquire) || thread.should_stop()
     });
     if thread.should_stop() {
         drop(thread);
-        exit_current(user, EXIT_STOPPED);
+        exit_current(user, EXIT_STOPPED, Ending::Stop);
     }
     let [entry, stack, arg] = user.start;
     // Nothing may stay on this stack: user mode abandons it.
@@ -184,15 +183,23 @@ fn thread_main(_: usize) {
     Arch::enter_user(entry, stack, arg)
 }
 
-/// Ends the running program thread with exit status `status`.
-fn exit_current(user: UserRef, status: u64) -> ! {
+/// Lets a thread that waits to start go: it was set up, or is to stop.
+fn set_ready(user: &UserThread) {
+    user.ready.store(true, Ordering::Release);
+    wait::wake_all(user as *const UserThread as usize);
+}
+
+/// Ends the running program thread with exit status `status`, which
+/// ended `how`; its process hears of it (`ProcessObject::thread_exited`),
+/// and may end with it.
+fn exit_current(user: UserRef, status: u64, how: Ending) -> ! {
     ipc::exiting(&user);
-    user.exit.store(status, Ordering::Relaxed);
-    user.exited.store(true, Ordering::Release);
-    let program = user.program.clone();
+    let process = user.process.clone();
     drop(user);
-    program.thread_exited();
-    drop(program);
+    if let Some(me) = sched::current() {
+        process.thread_exited(&me, status, how);
+    }
+    drop(process);
     sched::exit()
 }
 
@@ -204,7 +211,7 @@ fn on_fault(fault: &UserFault) -> ! {
     };
     warn!("User: thread {} ({}) ended: {fault}", thread.id(), thread.name());
     drop(thread);
-    exit_current(user, EXIT_FAULT)
+    exit_current(user, EXIT_FAULT, Ending::Fault)
 }
 
 /// On the way back to user mode from an interrupt: a thread asked to stop
@@ -217,7 +224,7 @@ fn on_return() {
     if let Some((thread, user)) = current() {
         info!("User: thread {} ({}) stopped", thread.id(), thread.name());
         drop(thread);
-        exit_current(user, EXIT_STOPPED);
+        exit_current(user, EXIT_STOPPED, Ending::Stop);
     }
 }
 

@@ -35,7 +35,8 @@ pub enum Answer {
     Exit(u64),
 }
 
-fn answer(label: u32, words: usize, values: [u64; 8]) -> Result<Answer> {
+/// A reply to the method `label`, with `words` of `values`.
+pub(super) fn answer(label: u32, words: usize, values: [u64; 8]) -> Result<Answer> {
     Ok(Answer::Reply(Info::reply(label, words), values))
 }
 
@@ -47,6 +48,7 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::Frame => memory::frame::VERSION,
         ObjectKind::AddressSpace => address_space::VERSION,
         ObjectKind::Thread => thread::VERSION,
+        ObjectKind::Process => radix_abi::process::VERSION,
         ObjectKind::Endpoint => radix_abi::endpoint::VERSION,
         ObjectKind::Notification => radix_abi::notification::VERSION,
         ObjectKind::Random => random::VERSION,
@@ -121,6 +123,7 @@ pub fn call(
             answer(info.label, address_space::QueryResults::WORDS, results.encode())
         }
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
+        (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;

@@ -35,6 +35,7 @@ const QEMU_EXIT_RESET: i32 = 0;
 pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-abi",
     "radix-acpi",
+    "radix-bootfs",
     "radix-bootinfo",
     "radix-cap",
     "radix-elf",

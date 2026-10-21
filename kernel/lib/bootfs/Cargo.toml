@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-bootfs"
+description = "A checked reader, and a writer, for the boot archive: the ustar file GRUB loads and Spark serves files from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# The writer, for ob, which builds the archive.
+write = []
+
+[dependencies]
+
+[dev-dependencies]
+# Host-side property tests: no input makes the reader panic.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
