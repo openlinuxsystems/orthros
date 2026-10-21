@@ -461,6 +461,20 @@ pub const CASES: &[Case] = &[
         script: ipc,
     },
     Case {
+        name: "fuzz",
+        about: "groups of user programs make random system calls; the kernel stands and leaks nothing",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=fuzz",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: fuzz,
+    },
+    Case {
         name: "oom",
         about: "out of memory stops an app, then a service its supervisor restarts",
         firmware: Firmware::Bios,
@@ -1422,6 +1436,27 @@ fn user(vm: &mut Vm, case: &Case) -> Result<(), String> {
 
 fn ipc(vm: &mut Vm, case: &Case) -> Result<(), String> {
     sched_case(vm, case, "ipc", "10 pairs of programs ping-ponged")
+}
+
+fn fuzz(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    let passed = selftest_passed(vm, "fuzz");
+    let log = vm.log();
+    // The fuzzers' lines name the call (and a fuzzer stopped while waiting
+    // cannot report through its exit status).
+    for (marker, what) in [
+        ("fuzz: broken promise", "a failed call returned more than an error"),
+        ("fuzz: undocumented error", "a call failed with an error its documentation does not list"),
+    ] {
+        if let Some(line) = log.lines().find(|line| line.contains(marker)) {
+            return Err(format!("{what}: {}", line.trim()));
+        }
+    }
+    passed?;
+    if !log.contains("fuzzers got through their calls") {
+        return Err("selftest fuzz passed, but its report lacks the fuzzers' count".into());
+    }
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
 fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {

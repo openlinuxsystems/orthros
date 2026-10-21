@@ -22,36 +22,38 @@ module syscalls;
 /// its info word and its data words.
 syscall cap_call = 0 (cap: slot, info: u64, words: [u64; 8])
     -> (badge: u64, info: u64, words: [u64; 8])
-    raises [no_such_slot, empty_slot, missing_rights, sealed, invalid_argument, no_room, gone,
-            interrupted, no_such_method, would_block];
+    raises [no_such_slot, empty_slot, missing_rights, sealed, invalid_argument, no_memory,
+            no_room, gone, interrupted, no_such_method, would_block, revoking, too_deep];
 
 /// Sends a message on an endpoint, waiting until a receiver takes it,
 /// unless the info word has the no_block flag.
 syscall send = 1 (cap: slot, info: u64, words: [u64; 8]) -> ()
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
-            no_room, gone, interrupted, would_block];
+            no_memory, no_room, gone, interrupted, would_block, revoking, too_deep];
 
 /// Receives a message from an endpoint, waiting for one unless `flags`
 /// has no_block. When the sender called, this thread owes it a reply
 /// (see `reply_recv`). Returns the sender's badge, its info word with the
 /// capability count it passed, and its data words.
 syscall recv = 2 (cap: slot, flags: u64) -> (badge: u64, info: u64, words: [u64; 8])
-    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument, gone,
-            interrupted, would_block];
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            no_memory, gone, interrupted, would_block];
 
 /// Replies to the thread whose call this thread received last, then
-/// receives the next message from the endpoint in `cap`, as `recv` does.
-/// With `cap` set to NO_SLOT it only replies. A caller that has gone is
-/// skipped without an error.
+/// receives the next message from the endpoint in `cap`, as `recv` does,
+/// waiting for one unless the info word has the no_block flag. With `cap`
+/// set to NO_SLOT it only replies. A caller that has gone is skipped
+/// without an error. A reply that fails reaches nobody: nothing is
+/// received, and the caller still waits for a reply.
 syscall reply_recv = 3 (cap: slot, info: u64, words: [u64; 8])
     -> (badge: u64, info: u64, words: [u64; 8])
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
-            no_caller, gone, interrupted];
+            no_memory, no_room, no_caller, gone, interrupted, would_block, revoking, too_deep];
 
 /// Signals a notification: sets the bits of the capability's badge (bit 0
 /// when it has none) in the notification's word, waking a waiter.
 syscall notify = 4 (cap: slot) -> ()
-    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed];
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument, gone];
 
 /// Waits until a notification's word is not 0, then returns it and clears
 /// it. With the poll flag it returns at once, failing with would_block if
@@ -71,13 +73,13 @@ syscall yield = 6 () -> ();
 syscall map = 7 (space: slot, frame: slot, address: addr, rights: Rights, offset: u64, pages: u64)
     -> ()
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
-            out_of_range, already_mapped, no_memory];
+            out_of_range, already_mapped, no_memory, gone];
 
 /// Unmaps `pages` pages from `address` in an address space, which needs
 /// the control right.
 syscall unmap = 8 (space: slot, address: addr, pages: u64) -> ()
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
-            not_mapped];
+            not_mapped, no_memory, gone];
 
 /// Makes a ring with `entries` submission entries (a power of two up to
 /// ENTRIES_MAX, see radix-ring(2)) and twice as many completion entries, maps
@@ -86,7 +88,7 @@ syscall unmap = 8 (space: slot, address: addr, pages: u64) -> ()
 /// bytes it mapped.
 syscall ring_setup = 9 (space: slot, address: addr, entries: u32, to: slot) -> (size: u64)
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
-            occupied, already_mapped, no_memory];
+            occupied, already_mapped, no_memory, gone];
 
 /// Takes up to `submit` new entries from a ring's submission queue and
 /// carries them out, then waits until at least `min_complete` completions
@@ -96,10 +98,11 @@ syscall ring_setup = 9 (space: slot, address: addr, entries: u32, to: slot) -> (
 syscall ring_enter = 10 (ring: slot, submit: u32, min_complete: u32, timeout_ns: u64)
     -> (submitted: u32, ready: u32)
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument, busy,
-            timed_out, interrupted, bad_address];
+            timed_out, interrupted, bad_address, gone];
 
 /// Writes a line of text to the kernel log, through a kernel_log
 /// capability. Control characters are shown as `?`, and text past
 /// WRITE_MAX bytes (see radix-kernel-log(2)) is cut.
 syscall debug_log = 11 (log: slot, text: in bytes) -> ()
-    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, bad_address];
+    raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
+            bad_address, gone];

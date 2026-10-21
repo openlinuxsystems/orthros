@@ -77,6 +77,13 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
 /// Moves on every change to the store, under its lock.
 static VERSION: AtomicU64 = AtomicU64::new(0);
 
+/// The store's version: it moves on every change to the store, and to the
+/// object registry (`user::objects`), which changes only under the store's
+/// lock. A version read with that lock held stays current until it goes.
+pub fn version() -> u64 {
+    VERSION.load(Ordering::Acquire)
+}
+
 /// Capabilities a CPU keeps, in a table indexed by slot.
 const CACHED: usize = 16;
 

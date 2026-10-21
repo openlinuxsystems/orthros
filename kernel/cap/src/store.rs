@@ -20,8 +20,8 @@
 //!   anything below it, so the work only shrinks and always ends.
 //! - Moving a capability keeps its place in the tree.
 //!
-//! Kernel objects (memory, frames, DMA buffers, address spaces, threads,
-//! processes, endpoints, notifications) have an entry in the object table
+//! Kernel objects (every kind but the hardware ranges: interrupt lines,
+//! I/O ports and device registers) have an entry in the object table
 //! that counts the capabilities naming them and the objects retyped from
 //! them. When both counts reach zero the object is gone, and the store
 //! tells the caller through a [`Released`], so the kernel can give its
@@ -386,6 +386,14 @@ impl<A: Allocator + Clone> Capabilities<A> {
             watermark: entry.watermark,
             origin: entry.origin,
         })
+    }
+
+    /// How many records the object table has, in use or free. Every
+    /// object's index is below it, and `n` objects made from now on have
+    /// indexes below it plus `n`: a table kept beside this one, indexed the
+    /// same way, needs no more room than that.
+    pub fn object_records(&self) -> usize {
+        self.objects.len()
     }
 
     // ---- Making objects (the kernel only) ----

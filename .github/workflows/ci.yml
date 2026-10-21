@@ -102,10 +102,11 @@ jobs:
             out/test/*.ppm
           if-no-files-found: ignore
 
-  # The cost of system calls and IPC round trips on Radix, with this
-  # runner's Linux as the baseline (ADR 0035). The report goes into the
-  # job's summary on every pull request and every merge to main, and the
-  # numbers into an artifact.
+  # The cost of system calls and IPC round trips on Radix, held to Linux
+  # in the same kind of virtual machine (ADR 0039), each operation's
+  # fastest of three runs on each side (ADR 0046). The report goes into
+  # the job's summary on every pull request and every merge to main, and
+  # the numbers into an artifact.
   bench:
     name: Benchmarks
     runs-on: ubuntu-24.04
@@ -156,6 +157,43 @@ jobs:
             out/bench/results.json
             out/bench/boot-bench.log
             out/bench/boot-linux.log
+          if-no-files-found: ignore
+          retention-days: 90
+
+  # Instructions per operation, counted by QEMU (`ob bench --instructions`,
+  # ADR 0045): the same on every runner, so a hot path that grows fails
+  # here even when the timings above are within their noise.
+  instructions:
+    name: Instruction budgets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob bench --instructions
+        run: ./ob bench --instructions --gate --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the instruction counts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instructions
+          path: |
+            out/bench/instructions.md
+            out/bench/boot-bench.log
           if-no-files-found: ignore
           retention-days: 90
 

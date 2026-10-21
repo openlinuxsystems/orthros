@@ -28,12 +28,14 @@
 //! crate stays portable). The command-line flags are listed in
 //! `radix_hal::cmdline::FLAGS` and documented in orthros-boot(7).
 //!
-//! The crate needs `unsafe` in four places only, each allowed where it is
+//! The crate needs `unsafe` in five places only, each allowed where it is
 //! used: exporting the entry point under a fixed name, switching the locks
 //! into panic mode, the context switch (`sched::switch`), which reaches
 //! the two threads' contexts through pointers the scheduler keeps valid,
-//! and per-CPU values only their own CPU uses (`percpu::Own`), which need
-//! no lock because no other CPU reaches them.
+//! borrowing the running thread from its CPU's record without counting a
+//! reference (`sched::running`), and per-CPU values only their own CPU
+//! uses (`percpu::Own`), which need no lock because no other CPU reaches
+//! them.
 
 #![no_std]
 #![no_main]
@@ -90,6 +92,8 @@ pub struct Settings {
     pub selftest: Option<&'static str>,
     /// `lockdep=on|off`, or the bare `lockdep` for on.
     pub lockdep: Option<bool>,
+    /// `fuzz-seed=number`: the first seed of `selftest=fuzz`.
+    pub fuzz_seed: Option<u64>,
 }
 
 static SETTINGS: Once<Settings> = Once::new();
@@ -102,6 +106,7 @@ pub fn settings() -> Settings {
         panic_restart: None,
         selftest: None,
         lockdep: None,
+        fuzz_seed: None,
     })
 }
 
@@ -140,6 +145,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
             _ if flags.has("lockdep") => Some(true),
             _ => None,
         },
+        fuzz_seed: flags.value("fuzz-seed").and_then(|v| v.parse().ok()),
     };
     let _ = SETTINGS.set(settings);
     if let Some(level) = flags.value("loglevel") {

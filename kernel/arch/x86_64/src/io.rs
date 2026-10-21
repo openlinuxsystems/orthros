@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Port I/O instructions.
+//!
+//! They are `nomem`, like Linux's, which have no memory clobber: the
+//! compiler may move memory accesses across them. A driver whose device
+//! reads memory the CPU wrote (DMA) puts a fence before the port write
+//! that tells the device to look.
 
 use core::arch::asm;
 

@@ -143,7 +143,48 @@ pub fn rust(abi: &Abi) -> String {
         }
         out.push_str("}\n");
     }
+    raises_module(&mut out, abi);
     out
+}
+
+/// Writes the `raises` module: the errors each call is documented to raise,
+/// by name, for tests that check the kernel keeps to its documentation.
+fn raises_module(out: &mut String, abi: &Abi) {
+    fn list(raises: &[String]) -> String {
+        let names: Vec<String> = raises.iter().map(|name| format!("\"{name}\"")).collect();
+        format!("Some(&[{}])", names.join(", "))
+    }
+    out.push_str(
+        "\n/// The errors each call is documented to raise, by name (the `raises`\n\
+         /// lists of the interface definitions).\n\
+         pub mod raises {\n",
+    );
+    out.push_str(
+        "    /// The errors the system call numbered `number` may fail with.\n    \
+         pub const fn syscall(number: u64) -> Option<&'static [&'static str]> {\n        \
+         match number {\n",
+    );
+    for (_, call) in abi.syscalls() {
+        let _ = writeln!(out, "            {} => {},", call.number, list(&call.raises));
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+    out.push_str(
+        "    /// The errors the method labelled `label` may fail with, besides those\n    \
+         /// of the system call that called it.\n    \
+         pub const fn method(label: u32) -> Option<&'static [&'static str]> {\n        \
+         match label {\n",
+    );
+    for module in &abi.modules {
+        for item in &module.items {
+            if let ItemKind::Interface { id, methods, .. } = &item.kind {
+                for method in methods {
+                    let label = (id << 16) | method.number;
+                    let _ = writeln!(out, "            {label:#010x} => {},", list(&method.raises));
+                }
+            }
+        }
+    }
+    out.push_str("            _ => None,\n        }\n    }\n}\n");
 }
 
 fn error_set_of(abi: &Abi, error: &str) -> String {

@@ -217,6 +217,8 @@ pub struct Thread {
     /// Stack pages charged to the domain, given back when it is freed.
     pub(super) charged: u64,
     /// Mutexes the lock checker saw it holding when it was switched out.
+    /// Switching threads takes this lock, so anyone else takes it with
+    /// interrupts off.
     pub(super) lockdep: RawSpinLock<Saved>,
     // The rest is written under its run queue's lock (and, but for the
     // balancer's moves, its own).

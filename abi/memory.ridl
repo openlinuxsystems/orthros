@@ -15,8 +15,9 @@ interface memory = 0x0001 version 1 {
     kind = memory;
     /// Makes `count` objects of `kind` (memory or frame) of 2^`order`
     /// pages each from this memory, and puts their capabilities in the
-    /// `count` slots from `to`, which must be empty. Needs the control and
-    /// copy rights. Frames start filled with zeroes.
+    /// `count` slots from `to`, which must be empty. `order` is at most 20
+    /// and `count` from 1 to 1024. Needs the control and copy rights.
+    /// Frames start filled with zeroes.
     method retype = 1 (kind: ObjectKind, order: u32, to: slot, count: u32) -> ()
         raises [no_such_slot, empty_slot, occupied, missing_rights, invalid_argument, exhausted,
                 no_memory, too_deep, revoking];

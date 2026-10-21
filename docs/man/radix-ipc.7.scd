@@ -251,14 +251,17 @@ _libradix_.
 
 *ob bench* (see *ob*(1)) measures what the system calls, a context
 switch, a fresh page, a TLB shootdown, a memory copy and each kind of
-round trip cost, on one CPU and across two, and the closest operations of
+round trip cost, on one CPU, across two, and (for system calls and
+endpoint calls) on both CPUs at once, and the closest operations of
 Linux beside them, in a virtual machine set up the same way: *getppid*,
 *fcntl*, *getrandom*, *sched_yield*, *mmap* and *mprotect*, a pipe for an
 endpoint call, an eventfd for a notification, a futex for a channel and a
 Unix socket for a ring. CI runs it with *--gate* on every pull request
 and merge, and fails if Radix is slower than Linux at any of them.
 Numbers measured without KVM say nothing about the kernel, and the
-report says so.
+report says so. *ob bench --instructions* counts the instructions of each
+operation under QEMU instead, the same on every machine, and CI fails if
+an operation on one CPU takes more than its budget.
 
 # LIMITS
 

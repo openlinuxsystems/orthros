@@ -40,8 +40,10 @@
 //! the hooks are no longer called.
 
 #![cfg_attr(not(test), no_std)]
-// Kani's own, older nightly has the allocator API unstable still.
+// Kani's own, older nightly has the allocator API unstable still; the
+// pinned nightly has `Box::try_new_uninit_in` (for `RcuCell`) unstable.
 #![cfg_attr(kani, feature(allocator_api))]
+#![cfg_attr(not(kani), feature(allocator_ext))]
 
 extern crate alloc;
 

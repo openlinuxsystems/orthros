@@ -270,8 +270,10 @@ extern "C" fn radix_syscall_dispatch(frame: &mut SyscallFrame) {
     // Back to the program with interrupts masked from here to SYSRET.
     cpu::disable_interrupts();
     if frame.rip >= USER_TOP {
-        // Only an address the program ran at reaches here, so this cannot
-        // happen; were it to, SYSRET would fault in kernel mode.
+        // Only a `syscall` that ends exactly at the top of the user half
+        // gets here. Returning would be safe (the page above is never
+        // mapped), but ending the thread keeps every SYSRET well below the
+        // non-canonical addresses where it would fault in kernel mode.
         fault(UserFault { kind: UserFaultKind::Protection, pc: frame.rip, sp: frame.rsp, code: 0 });
     }
     frame.rflags = (frame.rflags & USER_FLAGS) | FLAG_INTERRUPT | FLAG_RESERVED;

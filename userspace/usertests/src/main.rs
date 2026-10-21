@@ -3,10 +3,11 @@
 
 //! The user-mode test and benchmark programs.
 //!
-//! One image holds them all; the kernel's `user`, `ipc` and `bench`
-//! self-tests (`kernel/radix/src/usertest.rs`, which numbers the roles the
-//! same way) start a program for each role they need, and check its exit
-//! code: 0 when every check passed, otherwise the number that failed.
+//! One image holds them all; the kernel's `user`, `ipc`, `fuzz` and
+//! `bench` self-tests (`kernel/radix/src/usertest.rs`, which numbers the
+//! roles the same way) start a program for each role they need, and check
+//! its exit code: 0 when every check passed, otherwise the number that
+//! failed.
 //!
 //! - `probe`: every system call and method, with good and bad arguments;
 //! - `fault`: one fault of the kind its argument names, which must end it;
@@ -17,7 +18,11 @@
 //!   the memory objects the kernel passes;
 //! - pairs that yield to each other (context switches), that map pages in
 //!   and out of the other's address space while it runs on another CPU
-//!   (TLB shootdowns), and that make system calls on both CPUs at once.
+//!   (TLB shootdowns), and that make system calls and endpoint calls (each
+//!   to an echo server on its own CPU) on both CPUs at once;
+//! - `fuzz`: random system calls, methods and ring entries from a seed,
+//!   three at a time with a janitor that lets go of those that wait, for
+//!   the `fuzz` self-test.
 //!
 //! A pair's programs get the same endpoint and two notifications: the
 //! first notification is the one each waits on, the second the other's.
@@ -28,6 +33,7 @@
 mod bench;
 mod checks;
 mod fault;
+mod fuzz;
 mod pairs;
 mod probe;
 
@@ -56,6 +62,8 @@ mod role {
     pub const SHOOT_B: u64 = 18;
     pub const PARALLEL_A: u64 = 19;
     pub const PARALLEL_B: u64 = 20;
+    pub const FUZZ: u64 = 21;
+    pub const FUZZ_JANITOR: u64 = 22;
 }
 
 /// The flag in the argument that asks for timings.
@@ -112,6 +120,8 @@ fn main(start: &Startup) -> u64 {
         role::SHOOT_B => pairs::shoot_b(),
         role::PARALLEL_A => pairs::parallel(argument, true),
         role::PARALLEL_B => pairs::parallel(argument, false),
+        role::FUZZ => fuzz::run(start.argument),
+        role::FUZZ_JANITOR => fuzz::janitor(),
         other => {
             println!("no role {other}");
             1

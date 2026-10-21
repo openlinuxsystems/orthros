@@ -397,8 +397,12 @@ flags and otherwise ignores them.
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
 	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
-	*lockdep*, *rcu*, *oom*, *user*, *ipc* or *bench*.
+	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz* or *bench*.
 	See *radix-debug*(7). *ob test* uses these.
+
+*fuzz-seed*=_number_
+	Give the programs of *selftest=fuzz* the seeds from _number_ on, to
+	repeat a run whose log named that first seed. Random by default.
 
 *qemu-exit*
 	When boot finishes, or when the kernel panics, leave QEMU through its

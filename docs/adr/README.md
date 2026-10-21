@@ -54,3 +54,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0040](0040-hot-paths-without-hidden-costs.md) | The release kernel is built with link-time optimisation, and its hot paths avoid locked instructions, string moves and 128-bit division | Accepted |
 | [0041](0041-yield-forfeits-its-slice-and-ipis-end-first.md) | A yield gives up the rest of its slice, and a TLB shootdown's interrupt ends before the flush | Accepted |
 | [0042](0042-batched-random-and-lighter-system-calls.md) | Per-CPU random generators work a batch at a time, and system calls and wake-ups skip work they do not need | Accepted |
+| [0043](0043-system-call-fuzzing-and-documented-errors.md) | System calls are fuzzed from user mode on every push, and every error a call returns must be in its documentation | Accepted |
+| [0044](0044-objects-found-without-a-shared-lock.md) | Objects are found through a per-CPU cache of weak references, and endpoint calls on both CPUs at once are held to Linux | Accepted |
+| [0045](0045-instruction-budgets-in-ci.md) | CI holds every operation on one CPU to an instruction budget, counted by QEMU | Accepted |
+| [0046](0046-performance-gate-on-the-fastest-of-three-runs.md) | The performance gate measures Radix and Linux three times in turn and counts each operation's fastest run | Accepted |

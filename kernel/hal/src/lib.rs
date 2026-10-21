@@ -183,6 +183,12 @@ pub trait Smp {
     /// Returns how many confirmed. Used on the panic path.
     fn stop_other_cpus() -> usize;
 
+    /// Where CPU `index` was when [`Smp::stop_other_cpus`] stopped it: the
+    /// interrupted instruction, then the return addresses of its callers,
+    /// as many as fit in `out`. Returns how many it stored: 0 for a CPU
+    /// that did not stop.
+    fn stopped_trace(index: usize, out: &mut [usize]) -> usize;
+
     /// The package, core, hardware thread and NUMA node of CPU `index`.
     fn cpu_place(index: usize) -> Option<CpuPlace>;
 }

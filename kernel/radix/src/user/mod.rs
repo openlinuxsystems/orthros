@@ -25,9 +25,9 @@
 //! - `methods`: the methods called on capabilities with `cap_call`.
 //!
 //! Until Phase 6 brings processes and init, the kernel itself starts
-//! programs from the `usertests` boot module (`launch`), for the
-//! `user`, `ipc` and `bench` self-tests (`usertest`). `docs/design/ipc.md`
-//! describes the design.
+//! programs from the `usertests` boot module (`launch`), for the `user`,
+//! `ipc`, `fuzz` and `bench` self-tests (`usertest`).
+//! `docs/design/ipc.md` describes the design.
 //!
 //! Lock order: the capability store, the object registry, a frame's state,
 //! an address space's regions; an endpoint, then a thread's IPC state; a
@@ -227,54 +227,90 @@ const fn default_window() -> u64 {
 }
 
 /// A first-in, first-out queue of waiters, which grows under spin locks
-/// (with atomic allocations) and only ever says so when it cannot.
-pub(crate) struct Fifo<T>(Vec<T, Kmalloc>);
+/// (with atomic allocations) and only ever says so when it cannot. Taking
+/// from the front costs the same however many wait. (`VecDeque` is not
+/// built into the kernel's `alloc`, which leaves out what allocates
+/// without saying so when it cannot.)
+pub(crate) struct Fifo<T> {
+    /// The items from `head` on; the slots before it were taken.
+    items: Vec<Option<T>, Kmalloc>,
+    head: usize,
+}
 
 impl<T> Fifo<T> {
     pub(crate) fn new() -> Fifo<T> {
-        Fifo(Vec::new_in(HEAP.with(Flags::ATOMIC)))
+        Fifo { items: Vec::new_in(HEAP.with(Flags::ATOMIC)), head: 0 }
     }
 
     /// Adds `item` at the back; gives it back if there is no memory.
     pub(crate) fn push_back(&mut self, item: T) -> core::result::Result<(), T> {
-        if self.0.try_reserve(1).is_err() {
+        // Reuse the taken slots before growing: each item moves once per
+        // time the queue fills, so a push costs the same on average.
+        if self.items.len() == self.items.capacity() {
+            self.compact();
+        }
+        if self.items.try_reserve(1).is_err() {
             return Err(item);
         }
-        self.0.push_within_capacity(item).map(|_| ())
+        self.items
+            .push_within_capacity(Some(item))
+            .map(|_| ())
+            .map_err(|item| item.expect("it was pushed as `Some`"))
     }
 
-    /// Puts `item` back at the front.
+    /// Puts `item` back at the front; right after `pop_front` this needs
+    /// no memory. Gives it back if there is no memory.
     pub(crate) fn push_front(&mut self, item: T) -> core::result::Result<(), T> {
+        if self.head > 0 {
+            self.head -= 1;
+            self.items[self.head] = Some(item);
+            return Ok(());
+        }
         self.push_back(item)?;
-        self.0.rotate_right(1);
+        self.items.rotate_right(1);
         Ok(())
     }
 
     /// Takes the item at the front.
     pub(crate) fn pop_front(&mut self) -> Option<T> {
-        if self.0.is_empty() { None } else { Some(self.0.remove(0)) }
+        let item = self.items.get_mut(self.head)?.take();
+        self.head += 1;
+        if self.head == self.items.len() {
+            self.items.clear();
+            self.head = 0;
+        }
+        item
     }
 
     /// Keeps only the items `keep` says to.
-    pub(crate) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
-        self.0.retain(keep);
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        self.compact();
+        self.items.retain(|item| item.as_ref().is_some_and(&mut keep));
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.items.len() - self.head
     }
 
     /// Takes every item, leaving it empty.
     pub(crate) fn take(&mut self) -> Fifo<T> {
         core::mem::replace(self, Fifo::new())
     }
+
+    /// Drops the taken slots before `head`.
+    fn compact(&mut self) {
+        let live = self.len();
+        self.items.rotate_left(self.head);
+        self.items.truncate(live);
+        self.head = 0;
+    }
 }
 
 impl<T> IntoIterator for Fifo<T> {
     type Item = T;
-    type IntoIter = alloc::vec::IntoIter<T, Kmalloc>;
+    type IntoIter = core::iter::Flatten<alloc::vec::IntoIter<Option<T>, Kmalloc>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.items.into_iter().flatten()
     }
 }
