@@ -100,7 +100,7 @@ impl<T: ?Sized> SpinLock<T> {
     /// after a bounded wait even if it is still held.
     #[track_caller]
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        self.acquire(0, false, Location::caller())
+        self.acquire(0, false, hooks::caller())
     }
 
     /// Like [`SpinLock::lock`], for code that holds another lock of the same
@@ -108,21 +108,21 @@ impl<T: ?Sized> SpinLock<T> {
     /// deliberate and always in this order.
     #[track_caller]
     pub fn lock_nested(&self, subclass: u8) -> SpinLockGuard<'_, T> {
-        self.acquire(subclass, false, Location::caller())
+        self.acquire(subclass, false, hooks::caller())
     }
 
     /// Masks interrupts on this CPU, then takes the lock; the guard unmasks
     /// them again (if they were on). For locks interrupt handlers take.
     #[track_caller]
     pub fn lock_irq(&self) -> SpinLockGuard<'_, T> {
-        self.acquire(0, true, Location::caller())
+        self.acquire(0, true, hooks::caller())
     }
 
     /// [`SpinLock::lock_irq`] with a subclass, as for
     /// [`SpinLock::lock_nested`].
     #[track_caller]
     pub fn lock_irq_nested(&self, subclass: u8) -> SpinLockGuard<'_, T> {
-        self.acquire(subclass, true, Location::caller())
+        self.acquire(subclass, true, hooks::caller())
     }
 
     fn acquire(
@@ -159,14 +159,14 @@ impl<T: ?Sized> SpinLock<T> {
     /// Takes the lock if it is free.
     #[track_caller]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        self.try_acquire(false, Location::caller())
+        self.try_acquire(false, hooks::caller())
     }
 
     /// Masks interrupts and takes the lock if it is free; unmasks them
     /// again if it is not.
     #[track_caller]
     pub fn try_lock_irq(&self) -> Option<SpinLockGuard<'_, T>> {
-        self.try_acquire(true, Location::caller())
+        self.try_acquire(true, hooks::caller())
     }
 
     fn try_acquire(

@@ -24,11 +24,27 @@ pub struct LockSite {
     class: AtomicU32,
 }
 
+/// The location of the code that called the `#[track_caller]` function
+/// this is called from. Kani cannot model the `caller_location` intrinsic,
+/// so its proofs see one location fixed at compile time instead, which
+/// needs no intrinsic at run time.
+#[track_caller]
+#[inline(always)]
+pub(crate) const fn caller() -> &'static Location<'static> {
+    #[cfg(kani)]
+    {
+        const FIXED: &Location<'static> = Location::caller();
+        FIXED
+    }
+    #[cfg(not(kani))]
+    Location::caller()
+}
+
 impl LockSite {
     /// The site of the caller's caller: the code that creates the lock.
     #[track_caller]
     pub const fn here() -> LockSite {
-        LockSite { location: Location::caller(), class: AtomicU32::new(0) }
+        LockSite { location: caller(), class: AtomicU32::new(0) }
     }
 
     /// The file, line and column of the code that created the lock.

@@ -95,7 +95,7 @@ impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let hooks = hooks::active();
         if let Some(hooks) = hooks {
-            hooks.lock_acquire(self.acquire_info(Location::caller(), false));
+            hooks.lock_acquire(self.acquire_info(hooks::caller(), false));
         }
         let me = hooks.map_or(0, |h| h.current_thread());
         let token = if me == 0 { NO_THREAD } else { me };
@@ -119,7 +119,7 @@ impl<T: ?Sized> Mutex<T> {
             return None;
         }
         if let Some(hooks) = hooks {
-            hooks.lock_acquire(self.acquire_info(Location::caller(), true));
+            hooks.lock_acquire(self.acquire_info(hooks::caller(), true));
         }
         Some(self.guard(hooks, token))
     }
