@@ -124,7 +124,7 @@ pub fn choose_layout(randomize: bool) {
     if !randomize {
         return;
     }
-    let pick = |places: u64| (cpu::random_u64() % places) * HUGE_PAGE;
+    let pick = |places: u64| radix_random::below(places) * HUGE_PAGE;
     DIRECT_MAP.store(DIRECT_MAP_AREA.start + pick(places[0]), Ordering::Relaxed);
     WINDOW.store(WINDOW_AREA.start + pick(places[1]), Ordering::Relaxed);
     PLACES[0].store(places[0], Ordering::Relaxed);

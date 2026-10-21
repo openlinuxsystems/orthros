@@ -8,7 +8,8 @@ the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
 OrthrOS is at **Phase 2** of its [roadmap](docs/roadmap.md): the Radix
-kernel boots through GRUB under UEFI and BIOS at a random address, manages
+kernel boots through GRUB under UEFI and BIOS at a random address, chosen
+by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
 memory with a frame allocator per NUMA node and a slab heap with per-CPU
 caches (with Kani proofs of their invariants), protects itself with W^X,
 guard pages, SMEP and SMAP, starts every CPU, reads the ACPI tables, takes

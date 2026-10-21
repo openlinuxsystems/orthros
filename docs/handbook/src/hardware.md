@@ -70,6 +70,9 @@ checks of every phase so far:
    - the `APIC:` line: x2APIC mode is expected on this processor.
 
    From Phase 2, also:
+   - the `Random:` line: seeded from RDSEED, RDRAND and timing jitter
+     (the i7-8550U has both instructions), with nothing failing its
+     health test;
    - the `KASLR:` line: the kernel moved, and a different `Layout:` line
      on each boot;
    - `Paging: W^X holds`, and `SMEP on, SMAP on, PCID on; direct map in

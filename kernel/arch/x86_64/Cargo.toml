@@ -18,6 +18,7 @@ radix-hal = { path = "../../hal" }
 radix-klog = { path = "../../lib/klog" }
 radix-microcode = { path = "../../lib/microcode" }
 radix-mm = { path = "../../mm" }
+radix-random = { path = "../../lib/random" }
 radix-relocs = { path = "../../lib/relocs" }
 radix-sync = { path = "../../lib/sync" }
 

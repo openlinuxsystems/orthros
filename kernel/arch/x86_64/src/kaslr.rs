@@ -22,6 +22,9 @@
 //! (`radix-relocs`). Both functions run before the image has moved, so
 //! they store no pointers and cannot panic.
 //!
+//! The places are drawn from the kernel's random number generator, which
+//! [`radix_kaslr_choose`] seeds before anything else (`random.rs`).
+//!
 //! The `nokaslr` flag turns all of it off, which `ob run --gdb` uses so
 //! that the debugger's symbols match.
 
@@ -30,8 +33,6 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use radix_bootinfo::BootInfo;
 use radix_hal::cmdline::CommandLine;
 use radix_relocs::{Kind, Table};
-
-use crate::cpu;
 
 /// Granularity of the slide: one large page.
 pub const STEP: u64 = 2 << 20;
@@ -99,6 +100,9 @@ fn disabled(info_phys: u32) -> bool {
 /// with the physical address of the boot information; returns 0 to stay.
 #[unsafe(no_mangle)]
 extern "C" fn radix_kaslr_choose(info_phys: u32) -> u64 {
+    // The random number generator is needed below and by everything after
+    // it, so it is seeded first, with KASLR on or off.
+    crate::random::seed();
     let status = if disabled(info_phys) {
         Status::Disabled
     } else if table().is_none() {
@@ -121,7 +125,7 @@ extern "C" fn radix_kaslr_choose(info_phys: u32) -> u64 {
         return 0;
     };
     PLACES.store(places, Ordering::Relaxed);
-    (first + cpu::random_u64() % places) * STEP
+    (first + radix_random::below(places)) * STEP
 }
 
 /// Adds `slide` to every location the relocation table lists. Called by

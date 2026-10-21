@@ -21,7 +21,8 @@ On top of Radix, OrthrOS provides a complete, installable system:
 
 OrthrOS is built in phases, each ending in something that runs. This
 handbook describes **Phase 2**: the Radix kernel boots through GRUB under
-UEFI and legacy BIOS at a random address, manages the machine's memory
+UEFI and legacy BIOS at a random address, chosen by a cryptographic random
+number generator seeded from several sources, manages the machine's memory
 with a frame allocator per NUMA node and a kernel heap, protects itself
 with W^X page tables, guard pages, SMEP and SMAP, starts every CPU, reads
 the firmware's ACPI tables, takes timer interrupts and shows its log on

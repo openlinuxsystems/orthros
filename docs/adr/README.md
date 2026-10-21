@@ -28,3 +28,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0019](0019-verifying-the-memory-manager.md) | The memory manager is verified with Kani proofs and proptest properties | Accepted |
 | [0020](0020-zones-nodes-and-address-space-layout.md) | Physical memory is managed in per-node DMA32 and Normal zones with per-frame records | Accepted |
 | [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted |
+| [0022](0022-kernel-random-number-generator.md) | The kernel's random numbers come from ChaCha20 seeded through BLAKE2s from every source | Accepted |

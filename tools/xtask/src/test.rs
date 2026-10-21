@@ -39,6 +39,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-ksyms",
     "radix-microcode",
     "radix-mm",
+    "radix-random",
     "radix-relocs",
     "radix-sync",
 ];
@@ -865,6 +866,21 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
+    vm.expect("Random: ChaCha20 seeded before KASLR from ")?;
+    // Every machine has timing jitter, and the CPUs the cases use unless
+    // they emulate a model of their own also have RDSEED and RDRAND.
+    let sources = match case.cpu_model {
+        Some(_) => "from timing jitter (",
+        None => "from RDSEED, RDRAND and timing jitter (",
+    };
+    let log = vm.log();
+    let random = log.split("Random: ").nth(1).and_then(|rest| rest.lines().next());
+    if !random.is_some_and(|line| line.contains(sources)) {
+        return Err(format!(
+            "the seed should rest on {sources}...), but the log says: Random: {}",
+            random.unwrap_or_default()
+        ));
+    }
     if case.cmdline.split_ascii_whitespace().any(|flag| flag == "nokaslr") {
         vm.expect("KASLR: off (nokaslr)")?;
     } else {

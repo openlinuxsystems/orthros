@@ -231,10 +231,11 @@ symbol lookups subtract (`radix/src/symbols.rs`). The direct map and the
 mapping window are placed later, by `memory::choose_layout`, on 1 GiB
 boundaries anywhere in their areas.
 
-Random numbers come from `RDSEED` or `RDRAND`, mixed with the time-stamp
-counter through a 64-bit finaliser; a CPU without either uses the counter
-alone. The boot log prints the layout, which is acceptable while the kernel
-has no unprivileged users; ADR 0018 records when that must change.
+The places are drawn from the kernel's random number generator, which
+`radix_kaslr_choose` seeds before anything else from `RDSEED`, `RDRAND` and
+timing jitter (`random.md`, ADR 0022). The boot log prints the layout,
+which is acceptable while the kernel has no unprivileged users; ADR 0018
+records when that must change.
 
 ## Verification
 

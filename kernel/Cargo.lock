@@ -131,6 +131,7 @@ dependencies = [
  "radix-klog",
  "radix-microcode",
  "radix-mm",
+ "radix-random",
  "radix-relocs",
  "radix-sync",
 ]
@@ -172,6 +173,14 @@ version = "0.0.1"
 
 [[package]]
 name = "radix-mm"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-sync",
+]
+
+[[package]]
+name = "radix-random"
 version = "0.0.1"
 dependencies = [
  "proptest",

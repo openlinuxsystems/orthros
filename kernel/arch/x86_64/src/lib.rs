@@ -29,6 +29,7 @@ mod microcode;
 mod paging;
 mod percpu;
 mod power;
+mod random;
 mod serial;
 mod smp;
 mod space;
@@ -220,6 +221,7 @@ impl PageTable for Arch {
     fn describe(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
         let (places, moved) = kaslr::statistics();
         let (map_places, window_places) = memory::layout_places();
+        line(format_args!("Random: {}", random::Summary));
         match kaslr::status() {
             kaslr::Status::On => line(format_args!(
                 "KASLR: kernel moved by {:#x} (one of {places} places, {moved} addresses \

@@ -1,0 +1,22 @@
+[package]
+name = "radix-random"
+description = "The Radix kernel's random number generator: ChaCha20 with fast key erasure, seeded through BLAKE2s"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-sync = { path = "../sync" }
+
+[dev-dependencies]
+# Host-side property tests. Without default features it needs neither
+# forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

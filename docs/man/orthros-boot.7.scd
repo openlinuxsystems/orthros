@@ -62,8 +62,9 @@ _/system/share/licenses/_
 . The trampoline checks that the CPU supports 64-bit long mode (it halts
   silently if not), maps the first 4 GiB of physical memory with 2 MiB
   pages at 0 and at 0xFFFF800000000000, and the first GiB at the kernel's
-  link address, and enables long mode. Unless the *nokaslr* flag is given
-  it then moves the kernel (see *KASLR* below): it picks a random slide,
+  link address, and enables long mode. It seeds the random number
+  generator (see *RANDOM NUMBERS* below). Unless the *nokaslr* flag is
+  given it then moves the kernel (see *KASLR* below): it picks a random slide,
   maps the image a second time that much higher, and adds the slide to
   every absolute address in the image, using the relocation table *ob
   build* wrote into it. It calls *radix_arch_entry* at the kernel's new
@@ -185,9 +186,9 @@ cannot rely on knowing where kernel code and data are. Three things move:
 - the direct map, on a 1 GiB boundary (about 65,000 places);
 - the mapping window, on a 1 GiB boundary (about 32,000 places).
 
-The random numbers come from the CPU's *RDSEED* or *RDRAND* instruction,
-mixed with the time-stamp counter; CPUs without either fall back to the
-counter alone. To move the image, *ob build* links the kernel with its
+The random numbers come from the kernel's random number generator (see
+*RANDOM NUMBERS* below), which is seeded before the kernel moves. To move
+the image, *ob build* links the kernel with its
 relocation records kept, lists every absolute address that points into
 the image in the image's _.krelocs_ section (format in the
 *radix-relocs* crate), and removes the records, which GRUB refuses to
@@ -201,6 +202,33 @@ lookups subtract the slide (*radix-debug*(7)). The *nokaslr* flag keeps
 everything at fixed addresses: the image where it was linked, the direct
 map at 0xFFFF800000000000 and the mapping window at 0xFFFFC00000000000.
 *ob run --gdb* adds it, so that GDB's symbols match.
+
+# RANDOM NUMBERS
+
+The kernel has one cryptographically secure random number generator,
+ChaCha20 with fast key erasure: each request replaces the key, so the
+numbers it already gave out cannot be worked out from the generator's
+state afterwards. It is seeded first thing at boot, before KASLR picks
+the kernel's address, from every source the machine has: on x86-64, 256
+bits from the CPU's *RDSEED* instruction, 256 bits from *RDRAND*, and
+4096 readings of the time-stamp counter around a small piece of work,
+whose timing varies (jitter). All of it is hashed together with BLAKE2s,
+so the seed is unpredictable if any one source is; no source is trusted
+alone.
+
+Each source also gets a health test: a hardware word that is zero, all
+ones or a repeat fails it, and so does timing that changes too rarely.
+A source that fails is still mixed in, but the boot log stops counting on
+it. The boot log names the sources the seed rests on:
+
+```
+Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096 samples, 37 stuck)
+```
+
+A line that says no source passed means the kernel's random numbers, and
+so its layout, may be predictable on that machine. From Phase 5, programs
+get random numbers from the same generator through their *getrandom*
+capability.
 
 # MEMORY
 

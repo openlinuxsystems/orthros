@@ -41,6 +41,7 @@ table, and early boot code applies it.
 - The direct map and the mapping window are randomized too, on 1 GiB
   boundaries, in a 64 TiB and a 32 TiB area of the higher half.
 - Random numbers come from `RDSEED` or `RDRAND`, mixed with the TSC.
+  (Replaced by the kernel's random number generator, ADR 0022.)
 - The `nokaslr` kernel flag turns all of it off; `ob run --gdb` adds it.
 - The boot log and `kdb` show the layout; panic reports show run-time
   addresses, and symbol lookups subtract the slide.

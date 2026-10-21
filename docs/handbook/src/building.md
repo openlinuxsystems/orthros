@@ -84,6 +84,7 @@ found and ends like this:
 [    0.000000] Command line:
 [    0.000000] Memory: 1017 MiB usable in 7 regions; memory map:
 ...
+[    0.000000] Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096 samples, 37 stuck)
 [    0.000000] KASLR: kernel moved by 0x20200000 (one of 509 places, 2612 addresses patched); direct map one of 65533 places, mapping window one of 32257
 [    0.000000] Layout: kernel at 0xffffffffa0300000, direct map at 0xffff962340000000, mapping window at 0xffffd0de40000000
 [    0.000000] Paging: W^X holds: none of 1025 MiB of kernel mappings is writable and executable

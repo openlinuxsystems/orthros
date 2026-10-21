@@ -165,40 +165,45 @@ pub mod feature {
     }
 }
 
-/// A random number from the CPU's generator (`rdseed`, else `rdrand`), if
-/// it has one and it delivers.
-pub fn hardware_random() -> Option<u64> {
-    let try_instruction = |seed: bool| {
-        for _ in 0..16 {
-            let (value, ok): (u64, u8);
-            // SAFETY: the caller checked CPUID for the instruction; it only
-            // returns a number and sets the carry flag.
-            unsafe {
-                if seed {
-                    asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
-                } else {
-                    asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
-                }
-            }
-            if ok != 0 {
-                return Some(value);
-            }
+/// A 64-bit word from the CPU's entropy source (`rdseed`), if it has one
+/// and it answers within a few tries. RDSEED fails when the source has
+/// not refilled yet, so it is retried with a pause.
+pub fn rdseed() -> Option<u64> {
+    if !feature::rdseed() {
+        return None;
+    }
+    for _ in 0..64 {
+        let (value, ok): (u64, u8);
+        // SAFETY: CPUID says the instruction exists; it only returns a
+        // number and sets the carry flag.
+        unsafe {
+            asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+        };
+        if ok != 0 {
+            return Some(value);
         }
-        None
-    };
-    let seeded = if feature::rdseed() { try_instruction(true) } else { None };
-    seeded.or_else(|| if feature::rdrand() { try_instruction(false) } else { None })
+        core::hint::spin_loop();
+    }
+    None
 }
 
-/// 64 random bits: the hardware generator mixed with the time-stamp
-/// counter, or the counter alone on CPUs without a generator.
-pub fn random_u64() -> u64 {
-    let tsc = rdtsc();
-    // A 64-bit finaliser (splitmix64) spreads the counter's low bits.
-    let mut x = hardware_random().unwrap_or(0) ^ tsc.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15;
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
+/// A 64-bit word from the CPU's random number generator (`rdrand`), if it
+/// has one and it answers within ten tries, as Intel recommends.
+pub fn rdrand() -> Option<u64> {
+    if !feature::rdrand() {
+        return None;
+    }
+    for _ in 0..10 {
+        let (value, ok): (u64, u8);
+        // SAFETY: as for `rdseed`.
+        unsafe {
+            asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+        };
+        if ok != 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Model-specific register numbers.
