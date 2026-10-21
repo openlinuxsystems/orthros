@@ -111,9 +111,17 @@ pub fn get(at: SlotRef) -> Result<Capability, CapError> {
         Some(entry) if entry.at == at && entry.version == now => Some(entry.cap),
         _ => None,
     });
-    if let Some(Some(cap)) = hit {
-        return Ok(cap);
+    match hit {
+        Some(Some(cap)) => Ok(cap),
+        _ => get_from_store(at, index),
     }
+}
+
+/// [`get`] when this CPU's cache cannot answer: kept apart, so that a hit
+/// needs neither its registers nor its stack.
+#[cold]
+#[inline(never)]
+fn get_from_store(at: SlotRef, index: usize) -> Result<Capability, CapError> {
     let (found, version) = {
         let store = STORE.lock();
         let found = store.as_ref().ok_or(CapError::NoSuchSpace)?.get(at);

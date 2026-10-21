@@ -8,7 +8,10 @@
 //! preemption count and `gs:[20]` its interrupt depth, each changed by one
 //! instruction that a migration cannot split. `gs:[24]` is the top of the
 //! running thread's kernel stack and `gs:[32]` a scratch word, which the
-//! system call entry uses before it has a stack (`crate::user`). The boot
+//! system call entry uses before it has a stack (`crate::user`); `gs:[40]`
+//! is the scheduler's word for the running thread, which it reads in one
+//! instruction to find the running thread without holding preemption off.
+//! The boot
 //! CPU sets GS base first thing in [`crate::entry`], before any code that
 //! asks which CPU it is running on. In user mode GS base is the program's
 //! (zero); the entry paths swap it with `swapgs`.
@@ -125,6 +128,9 @@ pub struct PerCpu {
     /// Scratch for the system call entry (the program's stack pointer):
     /// `gs:[32]`.
     scratch: AtomicU64,
+    /// The scheduler's word for the thread running on this CPU:
+    /// `gs:[40]`.
+    running: AtomicUsize,
     /// The address of this CPU's TSS, once loaded.
     tss: AtomicUsize,
     /// Local APIC ID.
@@ -185,6 +191,7 @@ impl PerCpu {
             irq_depth: AtomicU32::new(0),
             kernel_rsp: AtomicU64::new(0),
             scratch: AtomicU64::new(0),
+            running: AtomicUsize::new(0),
             tss: AtomicUsize::new(0),
             apic_id: AtomicU32::new(0),
             present: AtomicBool::new(false),
@@ -312,6 +319,23 @@ pub fn set_preempt_count(count: u32) {
     unsafe { asm!("mov gs:[16], {:e}", in(reg) count, options(nostack, preserves_flags)) };
 }
 
+/// The scheduler's word for the thread running on this CPU.
+#[inline(always)]
+pub fn running_word() -> usize {
+    let word: usize;
+    // SAFETY: as in `preempt_disable`, reading only the `running` field at
+    // 40, which only its own CPU writes.
+    unsafe { asm!("mov {}, gs:[40]", out(reg) word, options(nostack, readonly, preserves_flags)) };
+    word
+}
+
+/// Sets the scheduler's word for the thread running on this CPU.
+#[inline(always)]
+pub fn set_running_word(word: usize) {
+    // SAFETY: as in `preempt_disable`, for the `running` field at 40.
+    unsafe { asm!("mov gs:[40], {}", in(reg) word, options(nostack, preserves_flags)) };
+}
+
 /// Notes that an interrupt handler starts on this CPU.
 #[inline(always)]
 pub fn interrupt_enter() {
@@ -347,6 +371,7 @@ const _: () = {
     assert!(core::mem::offset_of!(PerCpu, irq_depth) == 20);
     assert!(core::mem::offset_of!(PerCpu, kernel_rsp) == KERNEL_RSP_OFFSET);
     assert!(core::mem::offset_of!(PerCpu, scratch) == SCRATCH_OFFSET);
+    assert!(core::mem::offset_of!(PerCpu, running) == 40);
 };
 
 /// The data of CPU `index`.

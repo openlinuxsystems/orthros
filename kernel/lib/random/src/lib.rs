@@ -38,7 +38,7 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use radix_sync::SpinLock;
 
 pub use blake2s::{Blake2s, hash};
-pub use generator::{CHUNK, Generator};
+pub use generator::{BATCH, Batch, CHUNK, Generator};
 
 /// The kernel's generator.
 static GENERATOR: SpinLock<Generator> = SpinLock::new(Generator::new());
@@ -169,9 +169,9 @@ pub fn u64() -> u64 {
 /// from the kernel's generator, and it takes a new one, mixed into the
 /// old, whenever the kernel's generator is seeded again. Its output is as
 /// unpredictable as the kernel's, and fast key erasure makes it forward
-/// secret the same way.
+/// secret the same way; it makes its key stream a [`Batch`] at a time.
 pub struct Local {
-    generator: Generator,
+    batch: Batch,
     /// The [`GENERATION`] its key came from.
     generation: Option<u32>,
 }
@@ -179,27 +179,38 @@ pub struct Local {
 impl Local {
     /// A generator that takes its key on first use.
     pub const fn new() -> Local {
-        Local { generator: Generator::new(), generation: None }
+        Local { batch: Batch::new(), generation: None }
     }
 
-    /// Fills `out` with random bytes and replaces the key.
+    /// Fills `out` with random bytes.
     pub fn fill(&mut self, out: &mut [u8]) {
-        let generation = GENERATION.load(Ordering::Acquire);
-        if self.generation != Some(generation) {
-            let mut key = [0u8; 32];
-            GENERATOR.lock().fill(&mut key);
-            self.generator.reseed(&key);
-            wipe(&mut key);
-            self.generation = Some(generation);
-        }
-        self.generator.fill(out);
+        self.follow_reseeds();
+        self.batch.fill(out);
+    }
+
+    /// `N` random words, of at most [`BATCH`] bytes together.
+    pub fn words<const N: usize>(&mut self) -> [u64; N] {
+        self.follow_reseeds();
+        self.batch.words()
     }
 
     /// 64 random bits.
     pub fn u64(&mut self) -> u64 {
-        let mut bytes = [0u8; 8];
-        self.fill(&mut bytes);
-        u64::from_le_bytes(bytes)
+        let [word] = self.words();
+        word
+    }
+
+    /// Takes a new key if the kernel's generator has been seeded since the
+    /// last one; the batch then throws away what the old key made.
+    fn follow_reseeds(&mut self) {
+        let generation = GENERATION.load(Ordering::Acquire);
+        if self.generation != Some(generation) {
+            let mut key = [0u8; 32];
+            GENERATOR.lock().fill(&mut key);
+            self.batch.reseed(&key);
+            wipe(&mut key);
+            self.generation = Some(generation);
+        }
     }
 }
 

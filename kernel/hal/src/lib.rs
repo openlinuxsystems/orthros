@@ -128,6 +128,16 @@ pub trait CpuLocal {
     /// How many interrupt handlers this CPU is running, nested (0 in thread
     /// context).
     fn interrupt_depth() -> u32;
+
+    /// The word the scheduler keeps for the thread running on this CPU (0
+    /// before it has one), read in one instruction that a migration cannot
+    /// split: whatever CPU the code is on, the thread running there is the
+    /// code's own.
+    fn running_word() -> usize;
+
+    /// Sets this CPU's running-thread word: the scheduler does at each
+    /// switch.
+    fn set_running_word(word: usize);
 }
 
 /// One CPU known to the kernel.
