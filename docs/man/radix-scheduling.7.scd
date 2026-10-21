@@ -158,7 +158,7 @@ share one grace period.
 Resource domains group threads, after Linux's cgroups (v2). They form a
 tree under the root domain, *system*, which holds the kernel's own
 threads. Each domain is a kernel object that a capability names (kind
-*resource domain*, see *radix-capabilities*(7)); deleting the last
+*domain*, see *radix-capabilities*(7)); deleting the last
 capability to it removes it once its threads are gone. A domain has:
 
 *CPU weight*, _1_ to _10000_ (default _100_)
