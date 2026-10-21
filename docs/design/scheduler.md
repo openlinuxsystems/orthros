@@ -246,6 +246,10 @@ else back there, else to the least busy CPU it may use
 (`select_cpu`). A real-time thread goes to an idle CPU near its last one,
 else its last one if that runs something less urgent, else the CPU
 running the least urgent thing below its priority (`select_rt_cpu`).
+Two cases need none of that and skip it (ADR 0042): a thread allowed on
+one CPU goes there if it is online, and a thread whose last CPU is idle
+and allowed goes back to it, which is what both functions would choose
+first; only otherwise does the waker read every CPU's load.
 
 **Balancing.** Each CPU walks its levels from the closest out
 (`sched/balance.rs`). At a level it compares its own group (the level
@@ -327,10 +331,15 @@ is nothing safe to do; such callers are bugs.
 ## Per-CPU data
 
 `PerCpu<T>` (`percpu.rs`) holds one value per CPU, each on its own cache
-line. `PerCpu::with` gives the current CPU's value with preemption held
-off for as long as the closure runs, so the value stays the CPU's own.
-Values can also be reached by index, which the scheduler uses to look at
-and lock other CPUs' run queues.
+line. `PerCpu::this` gives the current CPU's value to code that cannot
+move meanwhile (interrupts off, a spin lock held or preemption held
+off), and `PerCpu::with_own` holds preemption off itself. Values can also
+be reached by index, which the scheduler uses to look at and lock other
+CPUs' run queues. The running thread is found another way: each switch
+also writes it to a word of the architecture's per-CPU block (`gs:[40]`
+on x86-64), which one instruction reads, so finding it, as every system
+call does, holds nothing off; whatever CPU the code is on when it reads
+the word, the thread running there is its own (ADR 0042).
 
 ## The lock checker
 

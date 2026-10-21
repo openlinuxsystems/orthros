@@ -96,7 +96,18 @@ impl CpuLocal for Arch {
     fn interrupt_depth() -> u32 {
         0
     }
+
+    fn running_word() -> usize {
+        RUNNING.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_running_word(word: usize) {
+        RUNNING.store(word, core::sync::atomic::Ordering::Relaxed);
+    }
 }
+
+/// The running-thread word of the stubs' single CPU.
+static RUNNING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 impl Smp for Arch {
     fn cpu_count() -> usize {

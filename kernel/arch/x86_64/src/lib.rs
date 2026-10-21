@@ -193,6 +193,14 @@ impl CpuLocal for Arch {
     fn interrupt_depth() -> u32 {
         percpu::interrupt_depth()
     }
+
+    fn running_word() -> usize {
+        percpu::running_word()
+    }
+
+    fn set_running_word(word: usize) {
+        percpu::set_running_word(word);
+    }
 }
 
 impl Smp for Arch {

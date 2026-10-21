@@ -104,6 +104,92 @@ impl Drop for Generator {
     }
 }
 
+/// The bytes a [`Batch`] makes at a time: one request of eight ChaCha20
+/// blocks, less the 32 bytes that become the next key.
+pub const BATCH: usize = 8 * 64 - 32;
+
+/// A [`Generator`] that runs a batch of blocks at a time and gives the
+/// bytes out as they are asked for, wiping each as it goes.
+///
+/// This is the buffered form of fast key erasure in Bernstein's design,
+/// which OpenBSD's `arc4random` and Linux's batched `get_random_u64` and
+/// `vgetrandom` also use. Forward secrecy holds as before: the key that
+/// made a batch is gone once the batch is made, and the bytes already
+/// given out are zero in memory, so a later look at it finds only the
+/// bytes still to come, which the generator's key could make anyway. A
+/// request of 64 bytes costs a little more than one block instead of two.
+pub struct Batch {
+    generator: Generator,
+    /// The bytes not given out yet are `bytes[next..]`; those before are zero.
+    bytes: [u8; BATCH],
+    next: usize,
+}
+
+impl Batch {
+    /// An empty batch on an unseeded generator.
+    pub const fn new() -> Batch {
+        Batch { generator: Generator::new(), bytes: [0; BATCH], next: BATCH }
+    }
+
+    /// Reseeds the generator, as [`Generator::reseed`], and throws away
+    /// what the old key made, so that nothing made before a reseed is
+    /// given out after it.
+    pub fn reseed(&mut self, seed: &[u8; 32]) {
+        self.generator.reseed(seed);
+        wipe(&mut self.bytes);
+        self.next = BATCH;
+    }
+
+    /// Fills `out` with random bytes: from the batch, or straight from the
+    /// generator if `out` is larger than a batch.
+    pub fn fill(&mut self, out: &mut [u8]) {
+        if out.len() > BATCH {
+            self.generator.fill(out);
+            return;
+        }
+        let given = self.take(out.len());
+        out.copy_from_slice(given);
+        wipe(given);
+    }
+
+    /// `N` random words, of at most a batch together. The copy and the
+    /// wipe have a fixed size, so they compile to moves.
+    pub fn words<const N: usize>(&mut self) -> [u64; N] {
+        const { assert!(N * 8 <= BATCH) };
+        let given = self.take(N * 8);
+        let mut words = [0u64; N];
+        for (word, bytes) in words.iter_mut().zip(given.as_chunks_mut::<8>().0) {
+            *word = u64::from_le_bytes(*bytes);
+            *bytes = [0; 8];
+        }
+        words
+    }
+
+    /// The next `len` bytes of the batch, which the caller wipes; a new
+    /// batch, over what was left of the old one, if fewer remain.
+    fn take(&mut self, len: usize) -> &mut [u8] {
+        if BATCH - self.next < len {
+            self.generator.fill(&mut self.bytes);
+            self.next = 0;
+        }
+        let start = self.next;
+        self.next += len;
+        &mut self.bytes[start..start + len]
+    }
+}
+
+impl Default for Batch {
+    fn default() -> Batch {
+        Batch::new()
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        wipe(&mut self.bytes);
+    }
+}
+
 /// A 32-byte key as ChaCha20's eight little-endian words.
 fn key_words(bytes: &[u8; 32]) -> [u32; 8] {
     let mut key = [0u32; 8];
@@ -170,6 +256,85 @@ mod tests {
         let (mut a, mut b) = (seeded(), seeded());
         a.fill(&mut []);
         assert_eq!(a.next_u64(), b.next_u64());
+    }
+
+    /// A batch seeded as [`seeded`] is.
+    fn seeded_batch() -> Batch {
+        let mut batch = Batch::new();
+        batch.reseed(&[0x42; 32]);
+        batch
+    }
+
+    #[test]
+    fn a_batch_gives_out_the_generators_key_stream_in_order() {
+        let mut generator = seeded();
+        let mut stream = vec![0u8; 3 * BATCH];
+        for batch in stream.chunks_mut(BATCH) {
+            generator.fill(batch);
+        }
+        let mut batch = seeded_batch();
+        let mut out = Vec::new();
+        // 64-byte requests, then a 13-byte one, then words again: each
+        // takes the next bytes, and one that no longer fits starts a new
+        // batch, throwing the rest of the old one away.
+        let mut expected = Vec::new();
+        let mut at = 0;
+        for len in [64, 64, 64, 13, 64, 64, 64, 64, 64, 64, 8, 64] {
+            if (at % BATCH) + len > BATCH {
+                at = (at / BATCH + 1) * BATCH;
+            }
+            expected.extend_from_slice(&stream[at..at + len]);
+            at += len;
+            match len {
+                64 => out.extend(batch.words::<8>().iter().flat_map(|w| w.to_le_bytes())),
+                _ => {
+                    let mut bytes = vec![0u8; len];
+                    batch.fill(&mut bytes);
+                    out.extend_from_slice(&bytes);
+                }
+            }
+        }
+        assert_eq!(hex(&out), hex(&expected));
+    }
+
+    #[test]
+    fn a_batch_wipes_what_it_gives_out() {
+        let mut batch = seeded_batch();
+        for len in [64, 1, 100, 64, 7, BATCH, 64] {
+            let mut out = vec![0u8; len];
+            batch.fill(&mut out);
+            assert!(out.iter().any(|&b| b != 0));
+            assert!(batch.bytes[..batch.next].iter().all(|&b| b == 0));
+            assert!(batch.bytes[batch.next..].iter().any(|&b| b != 0) || batch.next == BATCH);
+        }
+    }
+
+    #[test]
+    fn a_batch_throws_away_its_bytes_when_reseeded() {
+        let mut batch = seeded_batch();
+        batch.words::<8>();
+        batch.reseed(&[7; 32]);
+        assert_eq!(batch.next, BATCH);
+        assert!(batch.bytes.iter().all(|&b| b == 0));
+        // Its next words come from the new key, which mixes the seed into
+        // the key the first batch left.
+        let mut generator = seeded();
+        generator.fill(&mut [0; BATCH]);
+        generator.reseed(&[7; 32]);
+        let mut stream = [0u8; 64];
+        generator.fill(&mut stream);
+        let words = batch.words::<8>();
+        assert_eq!(hex(&words.map(u64::to_le_bytes).concat()), hex(&stream));
+    }
+
+    #[test]
+    fn requests_larger_than_a_batch_go_to_the_generator() {
+        let (mut batch, mut generator) = (seeded_batch(), seeded());
+        let (mut a, mut b) = (vec![0u8; BATCH + 1], vec![0u8; BATCH + 1]);
+        batch.fill(&mut a);
+        generator.fill(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(batch.next, BATCH);
     }
 
     proptest! {

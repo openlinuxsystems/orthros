@@ -126,13 +126,7 @@ pub fn call(
         (ObjectKind::Random, random::WORDS) => {
             random::WordsArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
-            let mut bytes = [0u8; 64];
-            super::random::fill(&mut bytes);
-            let mut values = [0u64; 8];
-            for (value, chunk) in values.iter_mut().zip(bytes.as_chunks::<8>().0) {
-                *value = u64::from_le_bytes(*chunk);
-            }
-            answer(info.label, random::WordsResults::WORDS, values)
+            answer(info.label, random::WordsResults::WORDS, super::random::words())
         }
         (ObjectKind::Ring, ring::INFO) => {
             ring::InfoArgs::decode(&args)?;

@@ -403,14 +403,17 @@ and wake-ups caught while polling. Under a hypervisor each timer write,
 interrupt sent and halt is an exit to the host (ADR 0037).
 
 **Where the time goes.** A system call enters with `syscall`, saves the
-registers, and finds the running thread through the CPU's data without
-touching its reference count (`sched::running`). A capability method
-looks the capability up in this CPU's cache when the store has not
-changed since (`caps::get`), so it takes no lock and writes nothing
+registers, finds the running thread with one read of a per-CPU word
+without touching its reference count (`sched::running`), and writes its
+results straight into the saved registers (ADR 0042). A capability
+method looks the capability up in this CPU's cache when the store has
+not changed since (`caps::get`), so it takes no lock and writes nothing
 shared, and CPUs using capabilities at once do not contend. Random bytes
-come from this CPU's generator. A same-CPU round trip is two context
-switches and no timer write; a cross-CPU wake-up finds the other CPU
-polling (ADR 0037) and costs a write instead of an interrupt.
+come from this CPU's generator, a batch of ChaCha20 blocks at a time. A
+same-CPU round trip is two context switches and no timer write, and
+waking a thread pinned to a CPU, or one whose last CPU is idle, reads no
+other CPU's load; a cross-CPU wake-up finds the other CPU polling (ADR
+0037) and costs a write instead of an interrupt.
 A TLB shootdown is the same system calls as `tlb_local` plus an
 interrupt to the other CPU and its answer; under KVM most of that time
 is the host sending and delivering the interrupt, which Linux pays too.

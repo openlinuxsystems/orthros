@@ -5,9 +5,9 @@
 //! CPUs updating their own values never contend for a line.
 //!
 //! A CPU's own value is only meaningfully "its own" while the code using
-//! it stays on that CPU: [`PerCpu::with`] holds off preemption for as long
-//! as it runs. Values are reached by index from anywhere, which the
-//! scheduler uses to look at, and lock, other CPUs' run queues.
+//! it stays on that CPU: with interrupts off, a spin lock held or
+//! preemption held off. Values are reached by index from anywhere, which
+//! the scheduler uses to look at, and lock, other CPUs' run queues.
 //!
 //! A value only its own CPU ever uses needs no lock: an [`Own`] value is
 //! reached only through [`PerCpu::with_own`], on the CPU it belongs to.
@@ -49,18 +49,9 @@ impl<T> PerCpu<T> {
 
     /// The value of the CPU running this code. The caller must not move to
     /// another CPU while it uses it: interrupts off, a spin lock held, or
-    /// inside [`PerCpu::with`].
+    /// preemption held off.
     pub fn this(&self) -> &T {
         self.get(Arch::current_cpu())
-    }
-
-    /// Runs `f` on this CPU's value with preemption held off, so the code
-    /// stays on this CPU until `f` returns.
-    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        Arch::preempt_disable();
-        let result = f(self.this());
-        crate::sched::preempt_enable();
-        result
     }
 }
 

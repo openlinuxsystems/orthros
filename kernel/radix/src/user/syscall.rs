@@ -32,8 +32,8 @@ use crate::sched::{self, ThreadRef};
 
 /// What a system call did.
 enum Done {
-    /// It returned these results.
-    Results([u64; 10]),
+    /// It returned, with its results in the argument registers.
+    Return,
     /// The caller exits.
     Exit(u64),
 }
@@ -46,16 +46,8 @@ pub fn handle(regs: &mut SyscallRegs) {
     let Some((me, user)) = running.as_deref().and_then(|me| Some((me, me.user()?))) else {
         panic!("User mode: a system call from a thread that is not a program's");
     };
-    match dispatch(me, user, regs.number, &regs.args) {
-        Ok(Done::Results(results)) => {
-            regs.number = 0;
-            // Without SSE, a copy of more than 64 bytes compiles to a
-            // string move, whose start-up costs more than the whole system
-            // call's work on some CPUs; two smaller copies are plain moves.
-            let (low, high) = results.split_at(8);
-            regs.args[..8].copy_from_slice(low);
-            regs.args[8..].copy_from_slice(high);
-        }
+    match dispatch(me, user, regs.number, &mut regs.args) {
+        Ok(Done::Return) => regs.number = 0,
         Ok(Done::Exit(code)) => exit_current(user.clone(), code),
         Err(status) => {
             regs.number = status.0;
@@ -68,8 +60,16 @@ pub fn handle(regs: &mut SyscallRegs) {
     }
 }
 
-fn results(words: [u64; 10]) -> Result<Done> {
-    Ok(Done::Results(words))
+/// Puts a system call's results in the argument registers, whose
+/// arguments it has read, and returns.
+fn results(registers: &mut [u64; 10], words: [u64; 10]) -> Result<Done> {
+    // Without SSE, a copy of more than 64 bytes compiles to a string move,
+    // whose start-up costs more than the whole system call's work on some
+    // CPUs; two smaller copies are plain moves.
+    let (low, high) = words.split_at(8);
+    registers[..8].copy_from_slice(low);
+    registers[8..].copy_from_slice(high);
+    Ok(Done::Return)
 }
 
 /// The info word of a message a program sends.
@@ -81,7 +81,9 @@ fn delivered(delivery: Delivery) -> [u64; 10] {
     sys::RecvResults { badge: delivery.badge, info: delivery.info, words: delivery.words }.encode()
 }
 
-fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Result<Done> {
+/// Runs system call `number` on the arguments in `args`, and leaves its
+/// results there.
+fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -> Result<Done> {
     let cspace = user.cspace;
     match number {
         sys::CAP_CALL => {
@@ -107,7 +109,7 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
                         };
                         let reply = ipc::send(me, user, &endpoint, message)?;
                         let reply = reply.expect("a call ends with a reply or an error");
-                        return results(delivered(reply));
+                        return results(args, delivered(reply));
                     }
                     Err(CapError::WrongKind { .. }) => cap = Some(found),
                     Err(err) => return Err(cap_error(err)),
@@ -116,11 +118,14 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             if info.caps > 0 || info.move_caps || info.no_block {
                 return Err(Kernel::InvalidArgument.status(1));
             }
-            match methods::call(me, user, a.cap, cap, info, a.words)? {
-                Answer::Reply(info, words) => {
-                    results(sys::CapCallResults { badge: 0, info, words }.encode())
+            // Matched in place rather than through `?`, which would copy
+            // the answer first.
+            match methods::call(me, user, a.cap, cap, info, a.words) {
+                Ok(Answer::Reply(info, words)) => {
+                    results(args, sys::CapCallResults { badge: 0, info, words }.encode())
                 }
-                Answer::Exit(code) => Ok(Done::Exit(code)),
+                Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
+                Err(status) => Err(status),
             }
         }
         sys::SEND => {
@@ -139,7 +144,7 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
                 cspace,
             };
             ipc::send(me, user, &endpoint, message)?;
-            results([0; 10])
+            results(args, [0; 10])
         }
         sys::RECV => {
             let a = sys::RecvArgs::decode(args)?;
@@ -148,7 +153,7 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             }
             let (_, endpoint) = objects::endpoint(cspace, a.cap, Rights::RECEIVE)?;
             let no_block = a.flags & MessageFlags::NO_BLOCK.bits() != 0;
-            results(delivered(ipc::recv(me, user, &endpoint, no_block)?))
+            results(args, delivered(ipc::recv(me, user, &endpoint, no_block)?))
         }
         sys::REPLY_RECV => {
             let a = sys::ReplyRecvArgs::decode(args)?;
@@ -160,9 +165,9 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             };
             ipc::reply(user, info, a.words)?;
             match endpoint {
-                None => results([0; 10]),
+                None => results(args, [0; 10]),
                 Some(endpoint) => {
-                    results(delivered(ipc::recv(me, user, &endpoint, info.no_block)?))
+                    results(args, delivered(ipc::recv(me, user, &endpoint, info.no_block)?))
                 }
             }
         }
@@ -170,7 +175,7 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             let a = sys::NotifyArgs::decode(args)?;
             let (cap, notification) = objects::notification(cspace, a.cap, Rights::SEND)?;
             notification.notify(cap.badge());
-            results([0; 10])
+            results(args, [0; 10])
         }
         sys::WAIT => {
             let a = sys::WaitArgs::decode(args)?;
@@ -178,12 +183,12 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             let deadline =
                 (a.timeout_ns != 0).then(|| sched::now_ns().saturating_add(a.timeout_ns));
             let bits = notification.wait(a.flags.contains(WaitFlags::POLL), deadline)?;
-            results(sys::WaitResults { bits }.encode())
+            results(args, sys::WaitResults { bits }.encode())
         }
         sys::YIELD => {
             sys::YieldArgs::decode(args)?;
             sched::yield_now();
-            results([0; 10])
+            results(args, [0; 10])
         }
         sys::MAP => {
             let a = sys::MapArgs::decode(args)?;
@@ -191,24 +196,24 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
             let (_, space) = objects::space(cspace, a.space, Rights::CONTROL)?;
             let (_, frame) = objects::frame(cspace, a.frame, cap_rights(a.rights))?;
             FrameObject::map_into(&frame, &space, a.address, a.offset, a.pages, access)?;
-            results([0; 10])
+            results(args, [0; 10])
         }
         sys::UNMAP => {
             let a = sys::UnmapArgs::decode(args)?;
             let (_, space) = objects::space(cspace, a.space, Rights::CONTROL)?;
             space.unmap(a.address, a.pages)?;
-            results([0; 10])
+            results(args, [0; 10])
         }
         sys::RING_SETUP => {
             let a = sys::RingSetupArgs::decode(args)?;
             let size = super::ring::setup(user, a.space, a.address, a.entries, a.to)?;
-            results(sys::RingSetupResults { size }.encode())
+            results(args, sys::RingSetupResults { size }.encode())
         }
         sys::RING_ENTER => {
             let a = sys::RingEnterArgs::decode(args)?;
             let (submitted, ready) =
                 super::ring::enter(user, a.ring, a.submit, a.min_complete, a.timeout_ns)?;
-            results(sys::RingEnterResults { submitted, ready }.encode())
+            results(args, sys::RingEnterResults { submitted, ready }.encode())
         }
         sys::DEBUG_LOG => {
             let a = sys::DebugLogArgs::decode(args)?;
@@ -225,7 +230,7 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &[u64; 10]) -> Re
                 text = rest;
             }
             info!("{}[{}]: {}", me.name(), me.id(), Shown(text));
-            results([0; 10])
+            results(args, [0; 10])
         }
         _ => Err(error(Kernel::NoSuchSyscall)),
     }

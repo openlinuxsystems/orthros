@@ -98,7 +98,9 @@ We implement these from their published descriptions. No code is copied.
 - Daniel J. Bernstein's
   ["Fast-key-erasure random-number generators"](https://blog.cr.yp.to/20170723-random.html),
   the design of the kernel's random number generator and its per-CPU
-  generators.
+  generators, which work a batch of blocks at a time as the post
+  describes and as OpenBSD's `arc4random` and Linux's `vgetrandom` do
+  ([ADR 0042](docs/adr/0042-batched-random-and-lighter-system-calls.md)).
 - Ion Stoica and Hussein Abdel-Wahab,
   "Earliest Eligible Virtual Deadline First: A Flexible and Accurate
   Mechanism for Proportional Share Resource Allocation" (Old Dominion

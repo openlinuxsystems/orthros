@@ -434,6 +434,8 @@ fn start_cpu_with(cpu: usize, current: ThreadRef, idle: ThreadRef, boot: bool) -
     let slot = CPUS.get(cpu);
     *slot.timers.lock_irq() = Some(timers);
     slot.current.store(current.token(), Ordering::Relaxed);
+    // Each CPU starts its own scheduling, so this is that CPU's word.
+    Arch::set_running_word(current.token());
     {
         let mut guard = slot.rq.lock_irq();
         slot.publish(&rq);
@@ -600,8 +602,7 @@ pub fn current() -> Option<ThreadRef> {
 /// thread nor kept past the code that took it, and cloning the
 /// [`ThreadRef`] it derefs to makes a counted reference as usual.
 pub fn running() -> Option<Running> {
-    // Preemption held off: the CPU's current thread is this code's.
-    borrow(CPUS.with(|slot| slot.current.load(Ordering::Relaxed)))
+    borrow(current_token())
 }
 
 /// The running thread from its token, read from its CPU's `current` with
@@ -638,9 +639,9 @@ impl core::ops::Deref for Running {
 
 /// The running thread's token (its address), or 0 before threads run.
 pub fn current_token() -> usize {
-    // Preemption held off, so the thread cannot move to another CPU
-    // between finding its CPU and reading what runs there.
-    CPUS.with(|slot| slot.current.load(Ordering::Relaxed))
+    // One read of this CPU's word, which a migration cannot split, so no
+    // need to hold preemption off between finding the CPU and reading it.
+    Arch::running_word()
 }
 
 /// Whether the running code may sleep: it is a thread, with interrupts on
@@ -746,9 +747,25 @@ fn enqueue_on(thread: &ThreadRef, state: &mut State, new: bool, target: usize) {
 
 /// The CPU a ready thread should go to.
 fn choose_cpu(previous: usize, state: &State) -> usize {
+    // A thread allowed on one CPU can only go there: no loads to weigh,
+    // and no need for the online set's lock.
+    if state.affinity.len() == 1
+        && let Some(only) = state.affinity.lowest()
+    {
+        return if CPUS.get(only).online.load(Ordering::Acquire) { only } else { previous };
+    }
     let allowed = state.affinity.and(&online());
     let Some(first) = allowed.lowest() else { return previous };
     let Some(topology) = TOPOLOGY.get() else { return first };
+    // The CPU it ran on last, if idle, is what the topology would choose
+    // first anyway: no need to gather every CPU's load for it.
+    let slot = CPUS.get(previous);
+    if allowed.contains(previous)
+        && slot.online.load(Ordering::Relaxed)
+        && slot.running.load(Ordering::Relaxed) == 0
+    {
+        return previous;
+    }
     let loads = loads();
     let cpu = match state.rt_prio() {
         0 => topology.select_cpu(previous, &allowed, &loads),
@@ -1097,6 +1114,7 @@ fn reschedule(why: Switch) {
     let next_ptr = ThreadRef::as_ptr(&next);
     rq.current = next;
     slot.current.store(next_ptr as usize, Ordering::Relaxed);
+    Arch::set_running_word(next_ptr as usize);
     slot.slice_end.store(rq.slice_end(now), Ordering::Relaxed);
     slot.publish(rq);
     drop(guard);

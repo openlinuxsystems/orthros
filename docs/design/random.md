@@ -35,8 +35,21 @@ erasure. On first use, and whenever the kernel's generator has been
 seeded again since (a generation number the seeding moves, under the
 generator's lock), it takes 32 bytes from the kernel's generator and
 mixes them into its key with the reseeding hash. Its output is therefore
-as unpredictable as the kernel generator's, and once a request returns
-the key that made it is gone, as before. Only its own CPU uses it, with
+as unpredictable as the kernel generator's.
+
+It runs its generator a batch at a time (`radix_random::Batch`, ADR
+0042): one request of eight ChaCha20 blocks, whose first 32 bytes become
+the next key and whose other 480 it keeps and gives out as programs ask,
+zeroing each byte as it goes. This is the buffered form of Bernstein's
+fast key erasure, which OpenBSD's `arc4random` and Linux's
+`get_random_u64` and `vgetrandom` use too, and forward secrecy holds as
+before: the key that made a batch is gone once the batch is made, and
+the bytes given out are zero in memory, so a later look at it finds only
+bytes still to come, which the key could have made anyway. A seeding of
+the kernel's generator throws the rest of the batch away, so nothing
+made before it is given out after it. The 64 bytes of `words` then cost
+a little over one block instead of two. Requests larger than a batch go
+to the generator directly. Only its own CPU uses it, with
 preemption off, so it needs no lock (`percpu::Own`, ADR 0040); an
 interrupt handler that came in during a request would find it busy and
 use the kernel's generator, though none asks. Linux keys its per-CPU

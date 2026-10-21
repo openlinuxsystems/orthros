@@ -23,9 +23,12 @@ pub fn fill(out: &mut [u8]) {
     }
 }
 
+/// Eight random words, from where [`fill`] takes them.
+pub fn words() -> [u64; 8] {
+    LOCAL.with_own(Local::words).unwrap_or_else(|| core::array::from_fn(|_| radix_random::u64()))
+}
+
 /// 64 random bits, from where [`fill`] takes them.
 pub fn u64() -> u64 {
-    let mut bytes = [0u8; 8];
-    fill(&mut bytes);
-    u64::from_le_bytes(bytes)
+    LOCAL.with_own(Local::u64).unwrap_or_else(radix_random::u64)
 }
