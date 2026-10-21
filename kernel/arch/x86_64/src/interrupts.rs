@@ -441,13 +441,13 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             use crate::paging::{SHOOT_DIAG, SHOOT_SEEN};
             let h0 = crate::time::now_ns();
             SHOOT_SEEN.store(h0, Ordering::Relaxed);
-            crate::paging::serve_shootdown();
-            let h1 = crate::time::now_ns();
             let pv = percpu::current().pv_eoi.load(Ordering::Relaxed) & 1;
             crate::apic::end_of_interrupt();
+            let h1 = crate::time::now_ns();
+            crate::paging::serve_shootdown();
             let h2 = crate::time::now_ns();
-            SHOOT_DIAG[4].fetch_add(h1 - h0, Ordering::Relaxed);
-            SHOOT_DIAG[5].fetch_add(h2 - h1, Ordering::Relaxed);
+            SHOOT_DIAG[4].fetch_add(h2 - h1, Ordering::Relaxed);
+            SHOOT_DIAG[5].fetch_add(h1 - h0, Ordering::Relaxed);
             SHOOT_DIAG[6].fetch_add(u64::from(pv), Ordering::Relaxed);
         }
         VECTOR_APIC_ERROR => {
