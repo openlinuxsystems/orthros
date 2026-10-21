@@ -184,6 +184,12 @@ fn radix_numbers(ctx: &Ctx, dir: &Path, base: &[u8], kvm: bool) -> Result<Vec<Me
     drop(vm);
     let _ = std::fs::remove_file(&image);
     if let Err(reason) = outcome {
+        // CI keeps the log as an artifact, but the job's own output is
+        // where people look first.
+        let text = test::clean_log(&log);
+        for line in text.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
+            eprintln!("    | {line}");
+        }
         let said: Vec<&str> = log.lines().filter(|line| line.contains("selftest bench")).collect();
         crate::bail!(
             "the benchmark boot failed: {reason}{}{}; serial log: {}",
