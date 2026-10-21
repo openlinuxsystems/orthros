@@ -126,6 +126,10 @@ impl Smp for Arch {
         0
     }
 
+    fn stopped_trace(_index: usize, _out: &mut [usize]) -> usize {
+        0
+    }
+
     fn cpu_place(index: usize) -> Option<CpuPlace> {
         (index == 0).then_some(CpuPlace::default())
     }

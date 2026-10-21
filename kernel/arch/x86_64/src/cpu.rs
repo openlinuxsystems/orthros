@@ -3,6 +3,12 @@
 
 //! Processor instructions: CPUID, model-specific registers, control
 //! registers, interrupts and cache control.
+//!
+//! The instructions that let interrupts in or keep them out, or wait for
+//! one (`sti`, `cli`, `hlt`, `monitor`, `mwait`), are not marked `nomem`:
+//! an interrupt handler is other code reaching the same memory, so the
+//! compiler must neither move memory accesses across them nor keep values
+//! in registers over them, as Linux's `"memory"` clobbers ensure.
 
 use core::arch::asm;
 
@@ -441,28 +447,28 @@ pub fn interrupts_enabled() -> bool {
 pub fn enable_interrupts() {
     // SAFETY: the kernel's interrupt handlers are installed before this is
     // first called (`Platform::init` runs first).
-    unsafe { asm!("sti", options(nomem, nostack)) };
+    unsafe { asm!("sti", options(nostack)) };
 }
 
 /// Disables interrupts and returns whether they were enabled.
 pub fn disable_interrupts() -> bool {
     let were = interrupts_enabled();
     // SAFETY: masking interrupts cannot break memory safety.
-    unsafe { asm!("cli", options(nomem, nostack)) };
+    unsafe { asm!("cli", options(nostack)) };
     were
 }
 
 /// Halts until the next interrupt, leaving the interrupt flag as it is.
 pub fn halt() {
     // SAFETY: HLT only waits.
-    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("hlt", options(nostack, preserves_flags)) };
 }
 
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     loop {
         // SAFETY: `cli; hlt` only stops this CPU.
-        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
+        unsafe { asm!("cli", "hlt", options(nostack)) };
     }
 }
 
@@ -529,10 +535,11 @@ pub unsafe fn xsetbv(index: u32, value: u64) {
 /// [`sti_mwait`].
 pub fn monitor(addr: usize) {
     // SAFETY: MONITOR only arms the monitoring hardware; callers check the
-    // CPU has it and pass the address of an object they hold.
+    // CPU has it and pass the address of an object they hold. Not `nomem`,
+    // so the caller's check of the line comes after it.
     unsafe {
         asm!("monitor", in("rax") addr, in("ecx") 0u32, in("edx") 0u32,
-             options(nomem, nostack, preserves_flags))
+             options(nostack, preserves_flags))
     };
 }
 
@@ -541,12 +548,12 @@ pub fn monitor(addr: usize) {
 /// started, so an interrupt cannot slip in between and be missed.
 pub fn sti_mwait() {
     // SAFETY: MWAIT only waits; the interrupt handlers are installed.
-    unsafe { asm!("sti", "mwait", in("eax") 0u32, in("ecx") 0u32, options(nomem, nostack)) };
+    unsafe { asm!("sti", "mwait", in("eax") 0u32, in("ecx") 0u32, options(nostack)) };
 }
 
 /// Enables interrupts and halts until one arrives, without the window
 /// between the two in which an interrupt would be missed.
 pub fn sti_hlt() {
     // SAFETY: HLT only waits; the interrupt handlers are installed.
-    unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+    unsafe { asm!("sti", "hlt", options(nostack)) };
 }

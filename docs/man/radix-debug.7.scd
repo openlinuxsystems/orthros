@@ -447,6 +447,27 @@ boots.
 	the object registry must hold what they held before. Reports
 	*selftest ipc: passed*.
 
+*fuzz*
+	Runs eight groups of three fuzzers from the *usertests* image, one
+	group at a time. Each makes 4,000 random system calls, capability
+	methods and ring entries, with arguments at the edges of what the
+	kernel accepts (slots past the end, addresses in the kernel's half
+	or not mapped, lengths that wrap, rights and flags that do not
+	exist), sharing two endpoints, two notifications and a memory
+	object with the other two, so calls meet partners and capabilities
+	travel. A fourth program in each group, the janitor, keeps answering
+	and signalling so that the fuzzers cannot all end up waiting for
+	each other; whatever still waits after 30 seconds is stopped, and
+	the log says in which call. After every call a fuzzer checks the
+	promise of *radix-syscalls*(2): a failed call returns a kernel error
+	that the call's documentation lists, and 0 in every result
+	register. It logs each broken promise as *fuzz: broken promise* or
+	*fuzz: undocumented error*, and exits with their count. At least
+	half the fuzzers must finish, the capability store must pass its
+	audit, and the store and the object registry must hold what they
+	held before. The log names the seeds (*selftest fuzz: seeds* _a_
+	*to* _b_); the *fuzz-seed* flag (*orthros-boot*(7)) repeats them.
+
 *bench*
 	Runs the benchmark programs of the *usertests* image: the cost of
 	the cheapest system calls, a fresh page and a memory copy, then round

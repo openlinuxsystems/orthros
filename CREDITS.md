@@ -61,7 +61,7 @@ These run on the build machine or in CI and are never part of an image.
 | Project | What we use it for | License |
 | --- | --- | --- |
 | [Rust](https://www.rust-lang.org/) toolchain (rustc, Cargo, rustfmt, Clippy, LLVM tools), nightly-2026-10-15 | Building and checking everything | MIT OR Apache-2.0 (LLVM: Apache-2.0 WITH LLVM-exception) |
-| [QEMU](https://www.qemu.org/) | Running OrthrOS and the boot tests | GPL-2.0-only |
+| [QEMU](https://www.qemu.org/) | Running OrthrOS and the boot tests, and counting instructions for `ob bench --instructions` (`-icount`) | GPL-2.0-only |
 | [OVMF](https://github.com/tianocore/tianocore.github.io/wiki/OVMF) from [EDK II](https://github.com/tianocore/edk2) | UEFI firmware for QEMU | BSD-2-Clause-Patent |
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
@@ -116,6 +116,15 @@ We implement these from their published descriptions. No code is copied.
   `lat_ctx`, `lat_pipe` and `lat_unix`. We use no lmbench code.
 - Jens Axboe, ["Efficient IO with io_uring"](https://kernel.dk/io_uring.pdf)
   (2019): the design of rings.
+- George Marsaglia, "Xorshift RNGs" (Journal of Statistical Software,
+  2003), and Sebastiano Vigna's xorshift64\* and
+  [SplitMix64](https://prng.di.unimi.it/): the small generators of the
+  kernel's stress tests and the system-call fuzzer.
+- The system-call fuzzers of Dave Jones's
+  [Trinity](https://github.com/kernelslacker/trinity) and Google's
+  [syzkaller](https://github.com/google/syzkaller): the idea of the `fuzz`
+  boot test, arguments drawn from values at the edges of what the kernel
+  accepts. We use no code from either.
 - The PC Screen Font format, as described by Andries Brouwer for the
   [kbd project](https://www.win.tue.nl/~aeb/linux/kbd/font-formats-1.html).
 - The Multiboot2 specification (GNU), the UEFI and ACPI specifications (UEFI
@@ -179,8 +188,23 @@ are grateful.
   Linux's handlers of interprocessor interrupts, which end the interrupt
   before their work, set the order of ours
   ([ADR 0041](docs/adr/0041-yield-forfeits-its-slice-and-ipis-end-first.md));
-  no code is taken.
+  no code is taken. Linux's file-descriptor lookups, which take no shared
+  lock, were the bar for finding IPC objects without one
+  ([ADR 0044](docs/adr/0044-objects-found-without-a-shared-lock.md)), and
+  the memory clobbers on its `sti`, `cli` and `hlt` wrappers showed which
+  of our interrupt instructions must be compiler barriers.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
+- The Rust compiler's performance suite
+  ([rustc-perf](https://github.com/rust-lang/rustc-perf)) and
+  [SQLite](https://sqlite.org/cpu.html), which track performance by
+  counting instructions because the counts hold still where timings do
+  not: the idea of CI's instruction budgets
+  ([ADR 0045](docs/adr/0045-instruction-budgets-in-ci.md)).
+- Python's [`timeit`](https://docs.python.org/3/library/timeit.html),
+  whose documentation advises taking the fastest of several runs, since
+  the slower ones are slowed by other processes rather than by the code
+  measured: the idea of the performance gate's fastest of three runs
+  ([ADR 0046](docs/adr/0046-performance-gate-on-the-fastest-of-three-runs.md)).
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the
   roadmap's sizing.

@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use radix_hal::{Cpu, PageTable, Platform};
+use radix_hal::{Cpu, PageTable, Platform, Smp};
 use radix_ksyms::{Location, Symbols};
 
 use crate::Arch;
@@ -59,6 +59,14 @@ impl Backtrace {
         frames[0] = pc;
         let len = 1 + Arch::backtrace(frame_pointer, &mut frames[1..]);
         Backtrace { frames, len, exact_first: true }
+    }
+
+    /// The backtrace another CPU recorded when it stopped
+    /// (`Smp::stopped_trace`), if it recorded one.
+    pub fn of_stopped_cpu(index: usize) -> Option<Backtrace> {
+        let mut frames = [0; MAX_FRAMES];
+        let len = Arch::stopped_trace(index, &mut frames);
+        (len > 0).then_some(Backtrace { frames, len, exact_first: true })
     }
 
     /// The backtrace of the caller.

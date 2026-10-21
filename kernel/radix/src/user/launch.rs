@@ -153,9 +153,9 @@ impl Group {
         }
         let slot = self.next;
         caps::with(|store| -> Result<()> {
-            objects::reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+            objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
             let id = store.create(SlotRef::new(self.launcher, slot), kind).map_err(cap_error)?;
-            objects::insert(id, object).map_err(|_| error(Kernel::NoMemory))
+            objects::insert(store, id, object).map_err(|_| error(Kernel::NoMemory))
         })
         .map_err(cap_error)
         .and_then(|made| made)?;
@@ -242,7 +242,8 @@ impl Group {
         // memory on alignment.
         let stack_pages = startup::STACK_SIZE / PAGE_SIZE;
         let image_order = image.pages().next_power_of_two().trailing_zeros();
-        let frames = [(stack_pages.trailing_zeros(), 0), (image_order, 1), (0, 2)];
+        let mut frames = [(stack_pages.trailing_zeros(), 0), (image_order, 1), (0, 2)];
+        frames.sort_unstable_by_key(|frame| core::cmp::Reverse(frame.0));
         for (order, slot) in frames {
             retype(
                 at(startup::SLOT_MEMORY),
@@ -338,9 +339,9 @@ impl Group {
     /// Makes an object of `kind` with its original capability in `at`.
     fn install(&self, at: SlotRef, kind: ObjectKind, object: Object) -> Result<()> {
         caps::with(|store| -> Result<()> {
-            objects::reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+            objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
             let id = store.create(at, kind).map_err(cap_error)?;
-            objects::insert(id, object).map_err(|_| error(Kernel::NoMemory))
+            objects::insert(store, id, object).map_err(|_| error(Kernel::NoMemory))
         })
         .map_err(cap_error)
         .and_then(|made| made)

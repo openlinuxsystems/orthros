@@ -18,7 +18,8 @@
 //! The system calls are timed in a loop, as lmbench's lat_syscall does.
 //! Each round trip is a pair of threads passing an 8-byte message there
 //! and back, as in lmbench's lat_pipe and lat_unix, once with both threads
-//! on one CPU and once on two. A context switch is two processes on one
+//! on one CPU, once on two, and (for pipes) once with a pair on each of
+//! two CPUs at once. A context switch is two processes on one
 //! CPU yielding to each other, as in lmbench's lat_ctx; a fresh page is an
 //! anonymous mapping, its first touch and its removal; a TLB shootdown is
 //! a page losing its access while another thread of the process runs on
@@ -87,6 +88,7 @@ fn main() {
         ] {
             parallel(name, other, count, body);
         }
+        pipe_roundtrip_parallel(first, other, rounds);
     }
 
     if std::process::id() == 1 {
@@ -379,21 +381,11 @@ impl Pair {
         let answerer = std::thread::spawn(move || {
             pin(other);
             go.wait();
-            let mut word = [0u8; 8];
-            for _ in 0..rounds {
-                answer_read.read_exact(&mut word).expect("reading the question");
-                answer_write.write_all(&word).expect("writing the answer");
-            }
+            answer(&mut answer_read, &mut answer_write, rounds);
         });
         ready.wait();
-        let mut word = [0u8; 8];
         let started = Instant::now();
-        // Never 0, which an eventfd would not pass on.
-        for message in 1..=self.rounds {
-            ask_write.write_all(&message.to_le_bytes()).expect("writing the question");
-            ask_read.read_exact(&mut word).expect("reading the answer");
-            assert_eq!(u64::from_le_bytes(word), message, "a wrong answer");
-        }
+        ask(&mut ask_read, &mut ask_write, self.rounds);
         print_line(name, started, self.rounds);
         answerer.join().expect("the answering thread panicked");
     }
@@ -426,6 +418,60 @@ impl Pair {
         }
         print_line(name, started, self.rounds);
         answerer.join().expect("the answering thread panicked");
+    }
+}
+
+/// Asks `rounds` 8-byte questions and checks each answer.
+fn ask(read: &mut impl Read, write: &mut impl Write, rounds: u64) {
+    let mut word = [0u8; 8];
+    // Never 0, which an eventfd would not pass on.
+    for message in 1..=rounds {
+        write.write_all(&message.to_le_bytes()).expect("writing the question");
+        read.read_exact(&mut word).expect("reading the answer");
+        assert_eq!(u64::from_le_bytes(word), message, "a wrong answer");
+    }
+}
+
+/// Answers `rounds` 8-byte questions with themselves.
+fn answer(read: &mut impl Read, write: &mut impl Write, rounds: u64) {
+    let mut word = [0u8; 8];
+    for _ in 0..rounds {
+        read.read_exact(&mut word).expect("reading the question");
+        write.write_all(&word).expect("writing the answer");
+    }
+}
+
+/// Pipe round trips on both CPUs at once, a pair of threads on each, so
+/// the pairs share nothing; prints what a round trip of the pair here
+/// cost. Radix's `endpoint_call_parallel` does the same with endpoints.
+fn pipe_roundtrip_parallel(here: usize, other: usize, rounds: u64) {
+    let ready = Arc::new(Barrier::new(4));
+    let mut threads = Vec::new();
+    let mut askers = Vec::new();
+    for cpu in [here, other] {
+        let (asker, (mut read, mut write)) = pipes();
+        let go = ready.clone();
+        threads.push(std::thread::spawn(move || {
+            pin(cpu);
+            go.wait();
+            answer(&mut read, &mut write, rounds);
+        }));
+        askers.push(asker);
+    }
+    let [(mut read, mut write), (mut other_read, mut other_write)] =
+        <[_; 2]>::try_from(askers).expect("one asker per CPU");
+    let go = ready.clone();
+    threads.push(std::thread::spawn(move || {
+        pin(other);
+        go.wait();
+        ask(&mut other_read, &mut other_write, rounds);
+    }));
+    ready.wait();
+    let started = Instant::now();
+    ask(&mut read, &mut write, rounds);
+    print_line("pipe_roundtrip_parallel", started, rounds);
+    for thread in threads {
+        thread.join().expect("a round-trip thread panicked");
     }
 }
 

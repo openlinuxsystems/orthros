@@ -22,6 +22,8 @@ Everything goes through `./ob`, and CI runs exactly the same commands:
 ./ob test tla       # TLA+ models (needs Java), when kernel/cap, kernel/sched, the
                     # kernel's block, wake or switch code, or its endpoints change
 ./ob bench          # system call and IPC costs, next to this machine's Linux
+./ob bench --instructions --gate
+                    # instructions per operation against their budgets
 ```
 
 If your host lacks tools, `./ob doctor` names them, or use
@@ -32,8 +34,8 @@ If your host lacks tools, `./ob doctor` names them, or use
 A change merges when:
 
 - CI is green: lint, unit tests, boot tests, docs check, Kani proofs, TLA+
-  models, the benchmarks, cargo-deny, the REUSE check, the container build
-  and the DCO sign-off check.
+  models, the benchmarks and instruction budgets, cargo-deny, the REUSE
+  check, the container build and the DCO sign-off check.
 - Every commit is signed off (see "Developer Certificate of Origin" below).
 - New behaviour has tests that `./ob test` runs. Logic that does not touch
   hardware lives in a crate under `kernel/lib/` that compiles for the host

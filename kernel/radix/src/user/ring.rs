@@ -191,10 +191,11 @@ pub fn setup(user: &UserThread, space: u32, address: u64, entries: u32, to: u32)
     let ring = new(&space, layout)?;
     space.map(address, pages, &Backing::Ring(ring.clone()), 0, UserAccess::ReadWrite)?;
     let made = caps::with(|store| -> Result<()> {
-        objects::reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+        objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
         let id =
             store.create(SlotRef::new(user.cspace, to), ObjectKind::Ring).map_err(cap_error)?;
-        objects::insert(id, Object::Ring(ring.clone())).map_err(|_| error(Kernel::NoMemory))?;
+        objects::insert(store, id, Object::Ring(ring.clone()))
+            .map_err(|_| error(Kernel::NoMemory))?;
         Ok(())
     })
     .map_err(cap_error)
@@ -215,7 +216,9 @@ fn new(space: &SpaceRef, layout: Layout) -> Result<RingRef> {
         uncharge();
         return Err(error(Kernel::NoMemory));
     };
-    let mut timeouts = Vec::new_in(HEAP.with(Flags::ATOMIC));
+    // Made here, where it may sleep; under the spin lock it only takes
+    // pushes into the room made now.
+    let mut timeouts = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
     if timeouts.try_reserve_exact(layout.completions as usize).is_err() {
         uncharge();
         return Err(error(Kernel::NoMemory));

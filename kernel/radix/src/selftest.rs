@@ -26,9 +26,9 @@
 //! - `fpu`, `sched-fair`, `sched-rt`, `sched-pi`, `sched-balance`,
 //!   `lockdep`, `rcu` and `oom` test the scheduler, the lock checker, RCU
 //!   and the out-of-memory policy (`schedtest`).
-//! - `user`, `ipc` and `bench` start user-mode programs from the
+//! - `user`, `ipc`, `fuzz` and `bench` start user-mode programs from the
 //!   `usertests` boot module: system calls and faults, IPC between
-//!   programs, and the benchmarks (`usertest`).
+//!   programs, random system calls, and the benchmarks (`usertest`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -64,6 +64,7 @@ pub fn run(name: &str) {
         "oom" => schedtest::oom(),
         "user" => usertest::user(),
         "ipc" => usertest::ipc(),
+        "fuzz" => usertest::fuzz(),
         "bench" => usertest::bench(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }

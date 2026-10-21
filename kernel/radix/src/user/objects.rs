@@ -15,21 +15,30 @@
 //! every address space. Holders of a reference (a thread blocked on an
 //! endpoint, a region of an address space) keep the memory alive until
 //! they let go.
+//!
+//! The registry changes only with the store's lock held, so the store's
+//! version (`caps::version`) moves on every change. Finding an object
+//! takes no lock when this CPU found it before at the version the store
+//! has now ([`get`]), as finding a capability does (`caps::get`): system
+//! calls on different CPUs share no lock to reach their objects.
 
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use radix_abi::errors::Kernel;
 use radix_cap::{Capability, ObjectId, ObjectKind, Released, Rights, SlotRef, SpaceId};
+use radix_hal::MAX_CPUS;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Mutex;
 
-use super::ipc::EndpointRef;
-use super::memory::{FrameRef, SpaceRef};
-use super::notify::NotificationRef;
-use super::ring::RingRef;
+use super::ipc::{Endpoint, EndpointRef};
+use super::memory::{FrameObject, FrameRef, SpaceObject, SpaceRef};
+use super::notify::{Notification, NotificationRef};
+use super::ring::{RingObject, RingRef};
 use super::{Result, cap_error, error};
-use crate::caps;
-use crate::sched::ThreadRef;
+use crate::caps::{self, Store};
+use crate::percpu::{Own, PerCpu, Slot};
+use crate::sched::{Thread, ThreadRef};
 
 /// A kernel object.
 #[derive(Clone)]
@@ -84,16 +93,21 @@ pub fn init() {
 #[derive(Clone, Copy, Debug)]
 pub struct NoMemory;
 
-/// Makes room for `count` more objects past the highest index now used,
-/// so that inserting them cannot fail.
-pub fn reserve(count: usize) -> core::result::Result<(), NoMemory> {
+/// Makes room for the next `count` objects `store` makes, whatever their
+/// indexes (`Store::object_records`), so that inserting them cannot fail.
+/// Called with the store locked, which every insertion also holds, so
+/// nothing else takes the room first.
+pub fn reserve(store: &Store, count: usize) -> core::result::Result<(), NoMemory> {
     let mut registry = REGISTRY.lock();
     let Some(table) = registry.as_mut() else { return Err(NoMemory) };
-    table.try_reserve(count).map_err(|_| NoMemory)
+    let needed = store.object_records().saturating_add(count);
+    table.try_reserve(needed.saturating_sub(table.len())).map_err(|_| NoMemory)
 }
 
-/// Records `object` under `id`.
-pub fn insert(id: ObjectId, object: Object) -> core::result::Result<(), NoMemory> {
+/// Records `object` under `id`. The store must be locked (it hands over
+/// `store` to show it), so that the store's version moves after the
+/// change.
+pub fn insert(_store: &Store, id: ObjectId, object: Object) -> core::result::Result<(), NoMemory> {
     let mut registry = REGISTRY.lock();
     let Some(table) = registry.as_mut() else { return Err(NoMemory) };
     let index = id.index as usize;
@@ -109,10 +123,108 @@ pub fn insert(id: ObjectId, object: Object) -> core::result::Result<(), NoMemory
 }
 
 /// The object named `id`, if it exists.
+///
+/// If this CPU found it at the version the store has now, the registry
+/// has not changed since, and the object is still there: no lock, and
+/// nothing shared written but the object's reference count. A change
+/// under way that has not moved the version yet has not returned either,
+/// so a lookup that misses it happened before it. Otherwise the registry
+/// is asked under its lock, and the answer kept with the version.
 pub fn get(id: ObjectId) -> Option<Object> {
-    let registry = REGISTRY.lock();
-    let entry = registry.as_ref()?.get(id.index as usize)?.as_ref()?;
-    (entry.generation == id.generation).then(|| entry.object.clone())
+    let now = caps::version();
+    let index = cache_index(id);
+    let hit = CACHE.with_own(|cache| match &cache[index] {
+        Some(entry) if entry.id == id && entry.version == now => entry.object.upgrade(),
+        _ => None,
+    });
+    match hit {
+        Some(Some(object)) => Some(object),
+        _ => get_from_registry(id, index),
+    }
+}
+
+/// [`get`] when this CPU's cache cannot answer: kept apart, so that a hit
+/// needs neither its registers nor its stack.
+#[cold]
+#[inline(never)]
+fn get_from_registry(id: ObjectId, index: usize) -> Option<Object> {
+    let (object, version) = {
+        let registry = REGISTRY.lock();
+        let entry = registry.as_ref()?.get(id.index as usize)?.as_ref()?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        // Read under the registry's lock: a change to the entry after it
+        // lets go moves the version past this one.
+        (entry.object.clone(), caps::version())
+    };
+    let kept = Cached { id, version, object: Kept::of(&object) };
+    // What the entry held before goes once preemption is back on: it may
+    // be the last reference to an object's memory.
+    let before = CACHE.with_own(|cache| cache[index].replace(kept));
+    drop(before);
+    Some(object)
+}
+
+/// Objects a CPU keeps, in a table indexed by object.
+const CACHED: usize = 16;
+
+/// An object as a CPU's cache keeps it: a weak reference, which keeps its
+/// memory but not the object, so a cache never holds on to an object the
+/// registry has let go of. A hit takes a strong reference again, which
+/// fails once the object is gone.
+enum Kept {
+    Endpoint(Weak<Endpoint, Kmalloc>),
+    Notification(Weak<Notification, Kmalloc>),
+    Thread(Weak<Thread, Kmalloc>),
+    Space(Weak<SpaceObject, Kmalloc>),
+    Frame(Weak<FrameObject, Kmalloc>),
+    Ring(Weak<RingObject, Kmalloc>),
+    Random,
+    KernelLog,
+}
+
+impl Kept {
+    fn of(object: &Object) -> Kept {
+        match object {
+            Object::Endpoint(endpoint) => Kept::Endpoint(Arc::downgrade(endpoint)),
+            Object::Notification(notification) => Kept::Notification(Arc::downgrade(notification)),
+            Object::Thread(thread) => Kept::Thread(Arc::downgrade(thread)),
+            Object::Space(space) => Kept::Space(Arc::downgrade(space)),
+            Object::Frame(frame) => Kept::Frame(Arc::downgrade(frame)),
+            Object::Ring(ring) => Kept::Ring(Arc::downgrade(ring)),
+            Object::Random => Kept::Random,
+            Object::KernelLog => Kept::KernelLog,
+        }
+    }
+
+    fn upgrade(&self) -> Option<Object> {
+        Some(match self {
+            Kept::Endpoint(endpoint) => Object::Endpoint(endpoint.upgrade()?),
+            Kept::Notification(notification) => Object::Notification(notification.upgrade()?),
+            Kept::Thread(thread) => Object::Thread(thread.upgrade()?),
+            Kept::Space(space) => Object::Space(space.upgrade()?),
+            Kept::Frame(frame) => Object::Frame(frame.upgrade()?),
+            Kept::Ring(ring) => Object::Ring(ring.upgrade()?),
+            Kept::Random => Object::Random,
+            Kept::KernelLog => Object::KernelLog,
+        })
+    }
+}
+
+/// An object this CPU found, and the store's version then.
+struct Cached {
+    id: ObjectId,
+    version: u64,
+    object: Kept,
+}
+
+/// Each CPU's objects, which only its own CPU uses.
+static CACHE: PerCpu<Own<[Option<Cached>; CACHED]>> =
+    PerCpu::new([const { Slot::new(Own::new([const { None }; CACHED])) }; MAX_CPUS]);
+
+fn cache_index(id: ObjectId) -> usize {
+    (id.index ^ id.generation) as usize % CACHED
 }
 
 /// The capability in slot `slot` of `cspace`, if it may be used on a
@@ -206,7 +318,8 @@ fn remove(id: ObjectId) -> Option<Object> {
 }
 
 /// The store released an object: it leaves the registry and is closed.
-/// Called with the store locked.
+/// Called with the store locked, so the store's version moves after the
+/// change.
 pub fn released(released: &Released) {
     let Some(object) = remove(released.id) else { return };
     match object {

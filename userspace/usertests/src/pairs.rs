@@ -520,30 +520,39 @@ pub fn shoot_b() -> u64 {
     checks::failures()
 }
 
-/// The cheapest system calls on both CPUs at once: each program of the
-/// pair runs them; the first reports.
+/// A benchmark of [`parallel`]: its name, how many rounds, and one round,
+/// which says whether it went right.
+type Parallel<'a> = (&'a str, u64, &'a dyn Fn(u64) -> bool);
+
+/// The cheapest system calls, then endpoint calls, on both CPUs at once:
+/// each program of the pair runs them, the first reports. Each calls an
+/// echo server of its own on its own CPU, so the two share no endpoint.
 pub fn parallel(argument: Argument, report: bool) -> u64 {
     let rounds = argument.rounds;
-    let tests: [(&str, u64, &dyn Fn() -> bool); 3] = [
-        ("syscall_null_parallel", rounds, &|| sys::syscall(99, [0; 10]).0 != 0),
-        ("cap_info_parallel", rounds, &|| capability::info(&SYS, SLOT_RANDOM).is_ok()),
-        ("random_words_parallel", rounds / 4, &|| random::words(&SYS, SLOT_RANDOM).is_ok()),
+    let echo = |i: u64| {
+        let words = [i; 8];
+        syscalls::cap_call(&SYS, ENDPOINT, info(ECHO, 8, 0), words)
+            .is_ok_and(|reply| reply.words == [i + 1; 8])
+    };
+    let tests: [Parallel<'_>; 4] = [
+        ("syscall_null_parallel", rounds, &|_| sys::syscall(99, [0; 10]).0 != 0),
+        ("cap_info_parallel", rounds, &|_| capability::info(&SYS, SLOT_RANDOM).is_ok()),
+        ("random_words_parallel", rounds / 4, &|_| random::words(&SYS, SLOT_RANDOM).is_ok()),
+        ("endpoint_call_parallel", rounds / 2, &echo),
     ];
     for (name, count, body) in tests {
         if !meet() {
             break;
         }
         let start = cycles();
-        for _ in 0..count {
-            if !body() {
-                checks::that(false, format_args!("{name} failed"));
-                return checks::failures();
-            }
-        }
-        if report && argument.bench {
+        if !(0..count).all(body) {
+            checks::that(false, format_args!("{name} failed"));
+        } else if report && argument.bench {
             let ns = Nanos::per(cycles() - start, count);
             println!("BENCH name={name} ns={ns} iterations={count}");
         }
     }
+    // The echo server stops at this, whatever happened above.
+    ok!(syscalls::cap_call(&SYS, ENDPOINT, info(QUIT, 0, 0), [0; 8]), "parallel: quit");
     checks::failures()
 }

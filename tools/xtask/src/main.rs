@@ -178,17 +178,29 @@ tests are:
   --timeout <seconds>   Limit for each boot test (default 300)"
         }
         "bench" => {
-            "Usage: ./ob bench [--no-linux] [--summary <file>] [--debug | --release]
+            "Usage: ./ob bench [--no-linux] [--gate] [--linux-kernel <file>] [--runs <n>]
+                [--instructions] [--summary <file>] [--debug | --release]
 
 Boots Radix in QEMU on 2 CPUs with selftest=bench, where user programs time
 the cheapest system calls and IPC round trips over endpoints,
 notifications, shared-memory channels and rings, on one CPU and across
-two. Then measures the closest Linux operations on this machine
-(tools/linux-bench) as a baseline. Writes out/bench/report.md and
-out/bench/results.json and prints the report. Without KVM the Radix
-numbers measure QEMU's emulation and take minutes.
+two. Then measures the closest Linux operations (tools/linux-bench) in a
+virtual machine set up the same way, the baseline, and on this machine
+for reference. Writes out/bench/report.md and out/bench/results.json and
+prints the report. Without KVM the Radix numbers measure QEMU's emulation
+and take minutes.
 
   --no-linux          Skip the Linux baseline
+  --gate              Fail if Radix takes more than 1.05 times as long as
+                      Linux in the same virtual machine at any operation
+  --linux-kernel <file>
+                      The Linux kernel to boot for the baseline
+  --runs <n>          Measure Radix and Linux in turn this many times and
+                      keep each operation's fastest run (default 3; one
+                      without KVM)
+  --instructions      Count the instructions each operation takes instead,
+                      under QEMU's instruction counting; with --gate, fail
+                      if an operation on one CPU goes over its budget
   --summary <file>    Also append the Markdown report to <file> (CI passes
                       $GITHUB_STEP_SUMMARY)"
         }

@@ -11,10 +11,18 @@
 //! `tools/linux-bench` twice: as the init process of a Linux virtual
 //! machine set up exactly like Radix's (same QEMU machine, CPUs, memory
 //! and KVM), the baseline that counts, and on the host, for reference.
-//! The report goes to `out/bench/` as Markdown and JSON, and CI appends
-//! the Markdown to its job summary. With `--gate`, `ob bench` fails if
-//! Radix is slower than Linux in the virtual machine at any operation
-//! (beyond [`GATE_RATIO`]): the performance gate of the plan.
+//! Under KVM it measures Radix and the Linux virtual machine in turn
+//! [`RUNS`] times, and each operation counts its fastest run on each side
+//! (ADR 0046). The report goes to `out/bench/` as Markdown and JSON, and
+//! CI appends the Markdown to its job summary. With `--gate`, `ob bench`
+//! fails if Radix is slower than Linux in the virtual machine at any
+//! operation (beyond [`GATE_RATIO`]): the performance gate of the plan.
+//!
+//! With `--instructions` it boots Radix under QEMU's instruction counting
+//! instead, where every instruction takes one nanosecond of the guest's
+//! time, so each `BENCH` line gives the instructions an operation took:
+//! the same on every machine, unlike the timings. With `--gate` it fails
+//! if an operation on one CPU takes more than its [`BUDGETS`].
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -44,9 +52,44 @@ const VM_CPUS: u32 = 2;
 /// plus the run-to-run noise of a shared CI runner.
 pub const GATE_RATIO: f64 = 1.05;
 
+/// How many times `ob bench` measures Radix and Linux in turn under KVM,
+/// unless `--runs` says otherwise. Each operation counts its fastest run
+/// on each side: what the host adds (another job on the machine, two
+/// virtual CPUs placed on one core, a virtual CPU waking up late) only
+/// ever makes a run slower, and rarely hits the same operation every
+/// time, while what the kernel costs is there in every run.
+const RUNS: u32 = 3;
+
 /// How long the benchmark boot may take: minutes under KVM, about three
 /// without it.
 const TIMEOUT: Duration = Duration::from_secs(900);
+
+/// QEMU's instruction counting: each instruction advances the guest's
+/// clock by 2^0 ns, and the clock does not run ahead to catch up with the
+/// host's.
+const ICOUNT: &str = "shift=0,align=off";
+
+/// The most instructions, user and kernel, that an operation on one CPU
+/// may take under `--instructions` before `--gate` fails: what it took
+/// when the budget was set, plus a tenth, rounded up to two significant
+/// figures (the count it was set from is in the comment). Operations on
+/// two CPUs depend on how QEMU interleaves the CPUs, and its clock runs on
+/// while one waits, so they have no budget. A change that makes an
+/// operation longer raises its budget in the same pull request, and says
+/// why.
+pub const BUDGETS: &[(&str, u64)] = &[
+    ("syscall_null", 190),                     // 165
+    ("syscall_yield", 670),                    // 603
+    ("cap_info", 470),                         // 425
+    ("random_words", 2_500),                   // 2,221
+    ("context_switch", 1_100),                 // 959
+    ("fresh_page", 11_000),                    // 9,868
+    ("tlb_local", 5_600),                      // 5,024
+    ("endpoint_call_same_cpu", 6_200),         // 5,549
+    ("notification_pingpong_same_cpu", 6_200), // 5,566
+    ("channel_roundtrip_same_cpu", 5_100),     // 4,587
+    ("ring_roundtrip_same_cpu", 9_400),        // 8,489
+];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.
 #[derive(Clone, Debug, PartialEq)]
@@ -192,18 +235,35 @@ const ROWS: &[Row] = &[
         "getrandom_64_parallel",
         "getrandom(2) on two threads",
     ),
+    row(
+        "endpoint_call_parallel",
+        "Endpoint call and reply, a pair on each CPU at once",
+        "pipe_roundtrip_parallel",
+        "pipe round trip, a pair of threads on each CPU",
+    ),
 ];
 
 /// `ob bench`.
 pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let linux = !args.flag("--no-linux");
+    let instructions = args.flag("--instructions");
     let gate = args.flag("--gate");
+    let runs = match args.value("--runs")? {
+        Some(value) => value.parse::<u32>().ok().filter(|&runs| runs > 0).ok_or_else(|| {
+            crate::Error::new(format!("--runs takes a number of runs, not `{value}`"))
+        })?,
+        None if instructions => 1,
+        None => RUNS,
+    };
     let summary = args.value("--summary")?;
     let given_kernel = args.value("--linux-kernel")?;
     let profile = args.profile(&ctx.config)?;
     args.finish()?;
-    if gate && !linux {
+    if gate && !linux && !instructions {
         crate::bail!("--gate compares with Linux, so it cannot go with --no-linux");
+    }
+    if instructions && runs > 1 {
+        crate::bail!("--instructions counts the same every run, so it takes no --runs");
     }
 
     qemu::require_qemu()?;
@@ -212,34 +272,69 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let dir = ctx.out.join("bench");
     process::create_dir(&dir)?;
     let image = test::build_test_image(ctx, &built, &dir, TestImage::Plain)?;
+    if instructions {
+        return count_instructions(ctx, &dir, &image, gate, summary.as_deref());
+    }
     let kvm = qemu::kvm_available();
     if !kvm {
         eprintln!(
             "    No KVM: QEMU emulates every instruction, so the Radix numbers measure the \
-             emulator, not the kernel."
+             emulator, not the kernel. One run only."
         );
     }
-    step(&format!(
-        "Booting Radix with selftest=bench on 2 CPUs ({})",
-        if kvm { "KVM" } else { "no KVM, which takes minutes" }
-    ));
-    let (mut radix, counts) = radix_numbers(ctx, &dir, &image, kvm)?;
-    per_switch(&mut radix, &counts);
-    let mut numbers = Numbers { radix, counts, linux_vm: Vec::new(), linux_host: Vec::new() };
-    if linux {
+    let runs = if kvm { runs } else { 1 };
+    let vm_kernel = if linux {
         match linux_kernel(given_kernel)? {
-            Some(kernel) if kvm => numbers.linux_vm = linux_vm_numbers(ctx, &dir, &kernel)?,
-            Some(_) => eprintln!(
-                "    No KVM: the Linux virtual machine would measure the emulator too, so it \
-                 does not run."
-            ),
-            None => eprintln!(
-                "    No Linux kernel to boot: the baseline that counts is missing. Give one \
-                 with --linux-kernel (on Debian, Ubuntu and Mint: `sudo install -m 644 \
-                 /boot/vmlinuz-$(uname -r) .cache/vmlinuz`, then `--linux-kernel \
-                 .cache/vmlinuz`)."
-            ),
+            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir)?)),
+            Some(_) => {
+                eprintln!(
+                    "    No KVM: the Linux virtual machine would measure the emulator too, so \
+                     it does not run."
+                );
+                None
+            }
+            None => {
+                eprintln!(
+                    "    No Linux kernel to boot: the baseline that counts is missing. Give one \
+                     with --linux-kernel (on Debian, Ubuntu and Mint: `sudo install -m 644 \
+                     /boot/vmlinuz-$(uname -r) .cache/vmlinuz`, then `--linux-kernel \
+                     .cache/vmlinuz`)."
+                );
+                None
+            }
         }
+    } else {
+        None
+    };
+    let mut numbers = Numbers {
+        runs,
+        radix: Vec::new(),
+        counts: Vec::new(),
+        linux_vm: Vec::new(),
+        linux_host: Vec::new(),
+    };
+    for run in 1..=runs {
+        let of = if runs > 1 { format!(", run {run} of {runs}") } else { String::new() };
+        step(&format!(
+            "Booting Radix with selftest=bench on 2 CPUs ({}{of})",
+            if kvm { "KVM" } else { "no KVM, which takes minutes" }
+        ));
+        let (mut radix, counts) = radix_numbers(ctx, &dir, &image, Accel::of(kvm))?;
+        per_switch(&mut radix, &counts);
+        keep_best(&mut numbers.radix, radix);
+        if numbers.counts.is_empty() {
+            numbers.counts = counts;
+        }
+        if let Some((kernel, initrd)) = &vm_kernel {
+            step(&format!(
+                "Measuring the same operations on Linux ({}) in a virtual machine like \
+                 Radix's{of}",
+                ctx.display(kernel)
+            ));
+            keep_best(&mut numbers.linux_vm, linux_vm_numbers(ctx, &dir, kernel, initrd)?);
+        }
+    }
+    if linux {
         numbers.linux_host = linux_numbers(ctx)?;
     }
 
@@ -250,13 +345,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     std::fs::write(&json, results_json(ctx, &numbers, kvm))
         .context(|| format!("writing {}", json.display()))?;
     if let Some(path) = summary {
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .context(|| format!("opening {path}"))?;
-        file.write_all(report.as_bytes()).context(|| format!("writing {path}"))?;
+        append(&path, &report)?;
     }
     eprintln!("\n{report}");
     step(&format!("Benchmark report in {} and {}", ctx.display(&markdown), ctx.display(&json)));
@@ -268,6 +357,110 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Adds the measurements of one run to `best`, keeping the fastest of
+/// each operation.
+fn keep_best(best: &mut Vec<Measurement>, run: Vec<Measurement>) {
+    for measured in run {
+        match best.iter_mut().find(|kept| kept.name == measured.name) {
+            Some(kept) if measured.ns < kept.ns => *kept = measured,
+            Some(_) => {}
+            None => best.push(measured),
+        }
+    }
+}
+
+/// `ob bench --instructions`: boots Radix counting instructions, reports
+/// what each operation took against its budget, and with `gate` fails if
+/// one went over.
+fn count_instructions(
+    ctx: &Ctx,
+    dir: &Path,
+    image: &[u8],
+    gate: bool,
+    summary: Option<&str>,
+) -> Result<()> {
+    step("Booting Radix with selftest=bench on 2 CPUs, counting instructions (minutes)");
+    let (mut radix, counts) = radix_numbers(ctx, dir, image, Accel::Count)?;
+    per_switch(&mut radix, &counts);
+    let report = budget_report(&radix);
+    let markdown = dir.join("instructions.md");
+    std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
+    if let Some(path) = summary {
+        append(path, &report)?;
+    }
+    eprintln!("\n{report}");
+    step(&format!("Instruction report in {}", ctx.display(&markdown)));
+    if gate {
+        check_budgets(&radix)?;
+        step("Instruction budgets met: no operation on one CPU takes more than its budget");
+    }
+    Ok(())
+}
+
+/// The instructions each operation took, against its budget, in Markdown.
+fn budget_report(radix: &[Measurement]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## Radix instructions per operation\n");
+    let _ = writeln!(
+        out,
+        "Counted by QEMU (`-icount {ICOUNT}`): user and kernel instructions, the same on any \
+         machine. Operations on one CPU have a budget; `--gate` fails beyond it.\n"
+    );
+    let _ = writeln!(out, "| Operation | Instructions | Budget | Of the budget |");
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: |");
+    for row in ROWS {
+        let Some(measured) = find(radix, row.radix) else { continue };
+        let count = measured.ns.round() as u64;
+        match budget(row.radix) {
+            Some(budget) => {
+                let share = count as f64 / budget as f64;
+                let shown = if share > 1.0 {
+                    format!("**{:.0}%**", share * 100.0)
+                } else {
+                    format!("{:.0}%", share * 100.0)
+                };
+                let _ = writeln!(out, "| {} | {count} | {budget} | {shown} |", row.what);
+            }
+            None => {
+                let _ = writeln!(out, "| {} | {count} | | |", row.what);
+            }
+        }
+    }
+    out
+}
+
+/// The budget of the operation `name`, if it has one.
+fn budget(name: &str) -> Option<u64> {
+    BUDGETS.iter().find(|(row, _)| *row == name).map(|&(_, budget)| budget)
+}
+
+/// Fails unless every operation with a budget was counted and kept to it.
+fn check_budgets(radix: &[Measurement]) -> Result<()> {
+    let mut failed = Vec::new();
+    for &(name, budget) in BUDGETS {
+        match find(radix, name).map(|m| m.ns.round() as u64) {
+            Some(count) if count <= budget => {}
+            Some(count) => failed.push(format!("{name} ({count} instructions, budget {budget})")),
+            None => failed.push(format!("{name} (not measured)")),
+        }
+    }
+    if !failed.is_empty() {
+        crate::bail!("instruction budgets exceeded: {}", failed.join("; "));
+    }
+    Ok(())
+}
+
+/// Appends `text` to the file at `path`.
+fn append(path: &str, text: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .context(|| format!("opening {path}"))?;
+    file.write_all(text.as_bytes()).context(|| format!("writing {path}"))
 }
 
 /// Turns the time per yield of Radix's `context_switch` into the time per
@@ -289,9 +482,12 @@ fn per_switch(radix: &mut [Measurement], counts: &[Counts]) {
     }
 }
 
-/// Everything one run measured.
+/// Everything `ob bench` measured: each operation's fastest run.
 struct Numbers {
+    /// How many times Radix and the Linux virtual machine were measured.
+    runs: u32,
     radix: Vec<Measurement>,
+    /// What the kernel did, in the first run.
     counts: Vec<Counts>,
     /// Linux in a virtual machine like Radix's: the baseline that counts.
     linux_vm: Vec<Measurement>,
@@ -350,9 +546,9 @@ fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
     Ok(std::fs::File::open(&own).is_ok().then_some(own))
 }
 
-/// Boots `kernel` in a virtual machine set up like Radix's, with a static
-/// `linux-bench` as its init process, and reads its `BENCH` lines.
-fn linux_vm_numbers(ctx: &Ctx, dir: &Path, kernel: &Path) -> Result<Vec<Measurement>> {
+/// Builds `linux-bench` as a static program and writes the initramfs
+/// that makes it the Linux virtual machine's init process.
+fn linux_init(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
     let target = ctx.target.join("linux-guest");
     let mut cmd = process::cargo(ctx);
@@ -366,11 +562,18 @@ fn linux_vm_numbers(ctx: &Ctx, dir: &Path, kernel: &Path) -> Result<Vec<Measurem
     let initrd = dir.join("linux-bench.cpio");
     std::fs::write(&initrd, initramfs(&init))
         .context(|| format!("writing {}", initrd.display()))?;
+    Ok(initrd)
+}
 
-    step(&format!(
-        "Measuring the same operations on Linux ({}) in a virtual machine like Radix's",
-        ctx.display(kernel)
-    ));
+/// Boots `kernel` in a virtual machine set up like Radix's, with the
+/// `initrd` of [`linux_init`], and reads the `BENCH` lines of
+/// `linux-bench`.
+fn linux_vm_numbers(
+    ctx: &Ctx,
+    dir: &Path,
+    kernel: &Path,
+    initrd: &Path,
+) -> Result<Vec<Measurement>> {
     let machine = Machine {
         firmware: Firmware::Bios,
         media: Media::Usb,
@@ -388,7 +591,7 @@ fn linux_vm_numbers(ctx: &Ctx, dir: &Path, kernel: &Path) -> Result<Vec<Measurem
         extra: Vec::new(),
         direct: Some(DirectBoot {
             kernel: kernel.to_path_buf(),
-            initrd: initrd.clone(),
+            initrd: initrd.to_path_buf(),
             cmdline: LINUX_CMDLINE.into(),
         }),
     };
@@ -462,12 +665,30 @@ fn show_trouble(log: &str) {
     }
 }
 
-/// Boots the benchmark image and reads its `BENCH` lines.
+/// How QEMU runs Radix for the benchmarks.
+#[derive(Clone, Copy, PartialEq)]
+enum Accel {
+    /// Under KVM: the timings that count.
+    Kvm,
+    /// Emulated: timings of the emulator.
+    Tcg,
+    /// Emulated, counting instructions (`--instructions`).
+    Count,
+}
+
+impl Accel {
+    fn of(kvm: bool) -> Accel {
+        if kvm { Accel::Kvm } else { Accel::Tcg }
+    }
+}
+
+/// Boots the benchmark image and reads its `BENCH` and `BENCHCOUNT`
+/// lines.
 fn radix_numbers(
     ctx: &Ctx,
     dir: &Path,
     base: &[u8],
-    kvm: bool,
+    accel: Accel,
 ) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let image = dir.join("bench.img");
     let bytes = test::with_cmdline(base, CMDLINE).map_err(crate::Error::new)?;
@@ -479,14 +700,17 @@ fn radix_numbers(
         image: image.clone(),
         memory: VM_MEMORY.into(),
         cpus: VM_CPUS,
-        kvm,
+        kvm: accel == Accel::Kvm,
         cpu_model: None,
         serial: Serial::Pipe,
         display: false,
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: Vec::new(),
+        extra: match accel {
+            Accel::Count => vec!["-icount".into(), ICOUNT.into()],
+            Accel::Kvm | Accel::Tcg => Vec::new(),
+        },
         direct: None,
     };
     let mut vm = Vm::start(ctx, &machine, dir, "bench", TIMEOUT).map_err(crate::Error::new)?;
@@ -602,20 +826,31 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## Radix benchmarks\n");
     let baseline = if numbers.linux_vm.is_empty() {
-        "Linux was not measured in a virtual machine this time, so there is no ratio"
+        "Linux was not measured in a virtual machine this time, so there is no ratio".to_string()
     } else {
-        "Linux (VM) is Linux in a virtual machine set up the same way, the baseline Radix must \
-         match (ratio at most 1.00, lower is better)"
+        format!(
+            "Linux (VM) is Linux in a virtual machine set up the same way, the baseline Radix \
+             must match: the goal is a ratio of at most 1.00 (lower is better), and the gate \
+             fails beyond {GATE_RATIO}, room for the noise of a shared runner"
+        )
     };
     let _ = writeln!(
         out,
         "Radix {VERSION} at {}, in QEMU {} with {VM_CPUS} CPUs, on {}. {baseline}. Linux (host) \
          is Linux {} on the same machine, outside any virtual machine, for reference. Each \
-         number is the average cost of one operation; lower is better.\n",
+         number is the average cost of one operation{}; lower is better.\n",
         commit(ctx),
         if kvm { "under KVM" } else { "without KVM (emulated, so not comparable)" },
         host_cpu(),
         host_kernel(),
+        if numbers.runs > 1 {
+            format!(
+                ", in the fastest of {} runs (Radix and Linux (VM) measured in turn)",
+                numbers.runs
+            )
+        } else {
+            String::new()
+        },
     );
     let _ = writeln!(
         out,
@@ -647,7 +882,7 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
          gate's {GATE_RATIO}. docs/design/ipc.md describes each measurement."
     );
     if !numbers.counts.is_empty() {
-        counts_table(&mut out, &numbers.counts);
+        counts_table(&mut out, &numbers.counts, numbers.runs > 1);
     }
     out
 }
@@ -655,7 +890,7 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
 /// What the kernel did per operation: under a hypervisor each timer write,
 /// interrupt sent and halt is an exit to the host, so these explain most
 /// of the numbers above.
-fn counts_table(out: &mut String, counts: &[Counts]) {
+fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
     let _ = writeln!(out, "\n### Kernel events per operation\n");
     let _ = write!(out, "| Benchmark |");
     for (_, heading) in EVENTS {
@@ -681,9 +916,10 @@ fn counts_table(out: &mut String, counts: &[Counts]) {
     }
     let _ = writeln!(
         out,
-        "\nCounted over all CPUs while each benchmark ran, including starting and stopping its \
-         programs, and divided by its rounds. A round trip on one CPU needs two switches; \
-         anything else is overhead."
+        "\nCounted over all CPUs while each benchmark ran{}, including starting and stopping \
+         its programs, and divided by its rounds. A round trip on one CPU needs two switches; \
+         anything else is overhead.",
+        if first_of_several { " in the first run" } else { "" }
     );
 }
 
@@ -726,6 +962,7 @@ fn results_json(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
     let _ = writeln!(out, "  \"host_cpu\": {},", json_string(&host_cpu()));
     let _ = writeln!(out, "  \"host_kernel\": {},", json_string(&host_kernel()));
     let _ = writeln!(out, "  \"gate_ratio\": {GATE_RATIO},");
+    let _ = writeln!(out, "  \"runs\": {},", numbers.runs);
     out.push_str("  \"radix\": ");
     json_list(&mut out, &numbers.radix);
     out.push_str(",\n  \"linux_vm\": ");
@@ -810,6 +1047,7 @@ mod tests {
 
     fn numbers(radix_ns: f64, linux_ns: f64) -> Numbers {
         let mut numbers = Numbers {
+            runs: 1,
             radix: Vec::new(),
             counts: Vec::new(),
             linux_vm: Vec::new(),
@@ -833,6 +1071,39 @@ mod tests {
         let mut no_vm = numbers(90.0, 100.0);
         no_vm.linux_vm.clear();
         assert!(check_gate(&no_vm).is_err());
+    }
+
+    #[test]
+    fn each_operation_keeps_its_fastest_run() {
+        let mut best = Vec::new();
+        keep_best(&mut best, vec![measurement("a", 100.0), measurement("b", 50.0)]);
+        keep_best(&mut best, vec![measurement("a", 90.0), measurement("b", 70.0)]);
+        keep_best(&mut best, vec![measurement("c", 10.0), measurement("a", 95.0)]);
+        assert_eq!(best, [measurement("a", 90.0), measurement("b", 50.0), measurement("c", 10.0)]);
+    }
+
+    #[test]
+    fn budgets_name_rows_on_one_cpu() {
+        for &(name, budget) in BUDGETS {
+            assert!(ROWS.iter().any(|row| row.radix == name), "{name}");
+            assert!(!name.ends_with("_cross_cpu") && !name.ends_with("_parallel"), "{name}");
+            assert!(budget > 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn budgets_pass_up_to_the_budget() {
+        let counts = |extra: u64| -> Vec<Measurement> {
+            BUDGETS
+                .iter()
+                .map(|&(name, budget)| measurement(name, (budget + extra) as f64))
+                .collect()
+        };
+        assert!(check_budgets(&counts(0)).is_ok());
+        assert!(check_budgets(&counts(1)).is_err());
+        let mut missing = counts(0);
+        missing.pop();
+        assert!(check_budgets(&missing).is_err());
     }
 
     #[test]

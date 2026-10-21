@@ -24,9 +24,9 @@
 //! those slot numbers in place of the sender's. That happens under the
 //! capability store's lock, which register-only messages never take.
 //!
-//! The fast path: a register-only message to a waiting receiver, and every
-//! reply, wakes the other thread on this CPU (`sched::wake_sync`), where it
-//! runs as soon as this thread blocks, without an interrupt to another CPU.
+//! The fast path: a message to a waiting receiver, and every reply, wakes
+//! the other thread on this CPU (`sched::wake_sync`), where it runs as soon
+//! as this thread blocks, without an interrupt to another CPU.
 //!
 //! Lock order: the store, an endpoint, a thread's IPC state (never two of
 //! either at once).
@@ -351,11 +351,26 @@ fn take(
 }
 
 /// Replies to the caller the running thread holds. A caller that stopped
-/// waiting is skipped.
+/// waiting is skipped. A reply that fails reaches nobody: the caller still
+/// waits, and this thread still holds it.
 pub fn reply(user: &UserRef, info: Info, words: [u64; MESSAGE_WORDS as usize]) -> Result<()> {
     let Some(caller) = user.reply.lock().take() else {
         return Err(error(Kernel::NoCaller));
     };
+    let replied = answer(user, &caller, info, words);
+    if replied.is_err() {
+        *user.reply.lock() = Some(caller);
+    }
+    replied
+}
+
+/// Gives `caller` the reply, with its capabilities.
+fn answer(
+    user: &UserRef,
+    caller: &Caller,
+    info: Info,
+    words: [u64; MESSAGE_WORDS as usize],
+) -> Result<()> {
     let caller_user = user_of(&caller.thread).clone();
     let mut words = words;
     if info.caps > 0 {
@@ -366,7 +381,7 @@ pub fn reply(user: &UserRef, info: Info, words: [u64; MESSAGE_WORDS as usize]) -
             Message { info, words, badge: 0, call: false, grant: true, cspace: user.cspace };
         caps::with(|store| -> Result<()> {
             let slots = transfer(store, &message, &caller_user)?;
-            if !deliver_reply(&caller, &caller_user, info, {
+            if !deliver_reply(caller, &caller_user, info, {
                 words[..info.caps].copy_from_slice(&slots[..info.caps]);
                 words
             }) {
@@ -377,7 +392,7 @@ pub fn reply(user: &UserRef, info: Info, words: [u64; MESSAGE_WORDS as usize]) -
         })
         .map_err(cap_error)??;
     } else {
-        deliver_reply(&caller, &caller_user, info, words);
+        deliver_reply(caller, &caller_user, info, words);
     }
     Ok(())
 }

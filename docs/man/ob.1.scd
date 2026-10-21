@@ -308,6 +308,17 @@ _target/userspace/_).
 		send messages through a shared-memory channel, and post to each
 		other's rings, a thousand times each, checking every answer.
 
+	*fuzz*
+		Boot 2 CPUs with *selftest=fuzz* and the lock checker on: eight
+		groups of three user programs make 4,000 random system calls,
+		methods and ring entries each, sharing endpoints, notifications
+		and memory. The case fails if the kernel panics or the lock
+		checker reports, if a failed call returns anything but a kernel
+		error that its documentation lists with 0 in every result
+		register, or if the capability store fails its audit or keeps
+		anything afterwards. The log names the seeds; boot with
+		*fuzz-seed=*_n_ to repeat a run.
+
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit
 		refuses what passes it, and when memory runs out the kernel stops
@@ -334,7 +345,7 @@ _target/userspace/_).
 		Fail a boot test that has not finished after this long. The
 		default is 300.
 
-*bench* [*--gate*] [*--linux-kernel* _file_] [*--no-linux*] [*--summary* _file_] [*--debug* | *--release*]
+*bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--summary* _file_] [*--debug* | *--release*]
 	Measure what system calls, IPC round trips, context switches, fresh
 	pages, TLB shootdowns and memory copies cost on Radix, next to Linux.
 	Build a test image and boot it in QEMU on 2 CPUs with
@@ -346,17 +357,21 @@ _target/userspace/_).
 	CPU, a copy between two 32 MiB buffers, round trips between two
 	programs over an endpoint, a notification, a shared-memory channel and
 	a ring, with both on one CPU and on two, and three of the system calls
-	on both CPUs at once.
+	and endpoint round trips (a pair of programs on each CPU) on both CPUs
+	at once.
 
 	Then boot Linux in a virtual machine set up the same way, with
 	_tools/linux-bench_ built as a static program and run as its only
 	process, which times the closest Linux operations (*getppid*(2),
 	*sched_yield*(2), *fcntl*(2), *getrandom*(2), *mmap*(2) with a
 	first-touch fault, *mprotect*(2), the same copy, and round trips over
-	pipes, eventfds, futexes and Unix sockets, pinned the same way). This
+	pipes, eventfds, futexes and Unix sockets, pinned the same way, and
+	pipe round trips with a pair of threads on each CPU at once). This
 	Linux boots with *mitigations=off*, since Radix has no mitigations of
-	CPU vulnerabilities yet. Last, run _tools/linux-bench_ on this machine
-	too, for reference.
+	CPU vulnerabilities yet. Under KVM, Radix and this Linux are measured
+	three times in turn, and each operation counts its fastest run on
+	each side. Last, run _tools/linux-bench_ on this machine too, for
+	reference.
 
 	The report gives Radix, Linux in the virtual machine, their ratio and
 	this machine's Linux side by side, with what the kernel did per
@@ -382,8 +397,27 @@ _target/userspace/_).
 		*sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz*
 		and pass *--linux-kernel .cache/vmlinuz*.
 
+	*--runs* _n_
+		Measure Radix and the Linux virtual machine in turn _n_ times
+		instead of three, keeping each operation's fastest run. Without
+		KVM there is always one run.
+
 	*--no-linux*
 		Skip both Linux baselines.
+
+	*--instructions*
+		Count instead of time: boot Radix under QEMU's instruction
+		counting (*-icount shift=0,align=off*, no KVM), where each
+		instruction moves the guest's clock by a nanosecond, so each
+		benchmark gives the user and kernel instructions an operation
+		took, the same on every machine. The report goes to
+		_out/bench/instructions.md_; no Linux runs. With *--gate*, fail
+		if an operation on one CPU takes more instructions than its
+		budget (*BUDGETS* in _tools/xtask/src/bench.rs_: what it took
+		when the budget was set, plus a tenth). CI runs
+		*ob bench --instructions --gate* on every pull request and every
+		merge, so a longer hot path fails there even when the timings are
+		noisy.
 
 	*--summary* _file_
 		Also append the Markdown report to _file_. CI passes
@@ -517,6 +551,7 @@ _out/test/_
 
 _out/bench/_
 	The benchmark report (_report.md_), its numbers (_results.json_),
+	the instruction counts of *--instructions* (_instructions.md_),
 	the serial logs of the benchmark boot and the Linux virtual machine
 	(_boot-bench.log_, _boot-linux.log_) and that machine's initramfs
 	(_linux-bench.cpio_), from *ob bench*.

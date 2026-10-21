@@ -20,7 +20,9 @@
 //! before it reads which CPUs run the space, so every CPU either gets the
 //! IPI or sees the new generation. PCIDs come from [`radix_mm::Pcids`].
 //!
-//! Phase 2 has no user processes yet; the `tlb` self-test exercises this.
+//! User programs run in these spaces (Phase 5's `UserSpace` handles); the
+//! `tlb` self-test also checks the shootdowns and PCID switches on every
+//! CPU.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 
@@ -72,7 +74,9 @@ impl AddressSpace {
             return Err(AllocError);
         };
         let kernel = paging::table(paging::kernel_pml4());
-        paging::table(pml4)[256..].copy_from_slice(&kernel[256..]);
+        for (mine, theirs) in paging::table(pml4)[256..].iter().zip(&kernel[256..]) {
+            mine.store(theirs.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         let space = memory::phys_to_virt(frame) as *mut AddressSpace;
         // SAFETY: `frame` is a fresh page in the direct map, large enough
         // (checked above) and aligned for the structure; it stays allocated
@@ -113,7 +117,8 @@ impl AddressSpace {
         assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
         let guard = self.lock.lock();
         let slot = paging::entry(self.pml4, virt, 1, true)?;
-        let old = core::mem::replace(slot, phys | paging::user_flags(access));
+        let old = slot.load(Ordering::Relaxed);
+        slot.store(phys | paging::user_flags(access), Ordering::Relaxed);
         drop(guard);
         if old & PRESENT != 0 {
             self.flush(virt);
@@ -127,18 +132,18 @@ impl AddressSpace {
         assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
         let _guard = self.lock.lock();
         let slot = paging::entry(self.pml4, virt, 1, true).map_err(|_| MapPageError::NoMemory)?;
-        if *slot & PRESENT != 0 {
+        if slot.load(Ordering::Relaxed) & PRESENT != 0 {
             return Err(MapPageError::AlreadyMapped);
         }
         // Not present before, so no CPU has it cached: no flush.
-        *slot = phys | paging::user_flags(access);
+        slot.store(phys | paging::user_flags(access), Ordering::Relaxed);
         Ok(())
     }
 
     /// The frame `virt` maps and how, if it is mapped.
     pub fn query(&self, virt: u64) -> Option<(u64, Access)> {
         let _guard = self.lock.lock();
-        let entry = *paging::leaf(self.pml4, virt)?;
+        let entry = paging::leaf(self.pml4, virt)?.load(Ordering::Relaxed);
         if entry & PRESENT == 0 {
             return None;
         }
@@ -149,8 +154,13 @@ impl AddressSpace {
     /// it mapped, which the caller may then free.
     pub fn unmap(&self, virt: u64) -> Option<u64> {
         let guard = self.lock.lock();
-        let slot = paging::leaf(self.pml4, virt).filter(|slot| **slot & PRESENT != 0)?;
-        let phys = core::mem::replace(slot, 0) & ADDRESS;
+        let slot = paging::leaf(self.pml4, virt)?;
+        let entry = slot.load(Ordering::Relaxed);
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        slot.store(0, Ordering::Relaxed);
+        let phys = entry & ADDRESS;
         drop(guard);
         self.flush(virt);
         Some(phys)
@@ -303,7 +313,7 @@ fn free_tables(phys: u64, level: u32, range: core::ops::Range<usize>) {
         return;
     }
     for index in range {
-        let entry = paging::table(phys)[index];
+        let entry = paging::table(phys)[index].load(Ordering::Relaxed);
         if entry & PRESENT != 0 && entry & (1 << 7) == 0 {
             free_tables(entry & ADDRESS, level - 1, 0..512);
             memory::free_pages(entry & ADDRESS, 1, Owner::PageTable);

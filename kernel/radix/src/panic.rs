@@ -5,9 +5,10 @@
 //!
 //! A panic stops the other CPUs, then writes a report to every console: the
 //! message, where it happened, the registers when an exception caused it,
-//! and a symbolized backtrace. On the framebuffer the report fills the
-//! screen, with the most recent log messages below it, because on a laptop
-//! without a serial port the screen is all there is. The crash log keeps
+//! a symbolized backtrace, and where each other CPU was when it stopped.
+//! On the framebuffer the report fills the screen, with the most recent
+//! log messages below it, because on a laptop without a serial port the
+//! screen is all there is. The crash log keeps
 //! the report for the next boot. Then the kernel debugger runs if it was
 //! asked for, and finally the machine restarts after a key press, or after
 //! the delay given with `panic=seconds`.
@@ -102,8 +103,19 @@ impl Report<'_> {
         }
         line(Style::Emphasis, format_args!("Backtrace:"));
         self.backtrace.write(&mut |args| line(Style::Plain, args));
+        // What the other CPUs were doing: one that did not answer a
+        // request (a TLB shootdown, say) shows where it was stuck.
+        let others = (0..Arch::cpu_count()).filter(|&index| index != self.cpu);
+        let traces = others.filter_map(|index| Some((index, Backtrace::of_stopped_cpu(index)?)));
+        for (index, trace) in traces.take(OTHER_TRACES) {
+            line(Style::Emphasis, format_args!("CPU {index} when it stopped:"));
+            trace.write(&mut |args| line(Style::Plain, args));
+        }
     }
 }
+
+/// Other CPUs whose backtraces the report shows, at most.
+const OTHER_TRACES: usize = 8;
 
 /// The last line of the report: what happens next.
 fn next_step(text: &mut TextBuf<160>) {
