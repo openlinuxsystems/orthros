@@ -29,3 +29,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0020](0020-zones-nodes-and-address-space-layout.md) | Physical memory is managed in per-node DMA32 and Normal zones with per-frame records | Accepted |
 | [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted |
 | [0022](0022-kernel-random-number-generator.md) | The kernel's random numbers come from ChaCha20 seeded through BLAKE2s from every source | Accepted |
+| [0023](0023-dco-sign-off-and-project-policies.md) | Contributions are signed off under the DCO, with a code of conduct, governance and security policy | Accepted |

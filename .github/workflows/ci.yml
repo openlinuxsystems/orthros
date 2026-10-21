@@ -97,6 +97,27 @@ jobs:
             out/test/*.ppm
           if-no-files-found: ignore
 
+  # Only the commits a pull request adds: history already on main is left
+  # as it is (ADR 0023).
+  signoff:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob signoff
+        run: ./ob signoff "${{ github.event.pull_request.base.sha }}"
+
   kani:
     name: Kani proofs
     runs-on: ubuntu-24.04
