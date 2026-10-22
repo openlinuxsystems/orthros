@@ -546,6 +546,14 @@ fn replace_own(
     if me.should_stop() {
         return Err(super::signal::interrupted(super::signal::Restart::Never));
     }
+    // Its parent may no longer move it to another group (EACCES) once a
+    // descriptor that closes on exec has closed, which a parent can wait
+    // for: mark it before they close.
+    with_tree(|tree| {
+        if let Some(member) = tree.get_mut(process.number()) {
+            member.execed = true;
+        }
+    });
     if let Err(err) = install_space(process, &space, true) {
         // Past saving: the old program's capabilities may be gone.
         warn!("User: process {} could not run its new program: {:#x}", process.number(), err.0);
@@ -567,11 +575,6 @@ fn replace_own(
         (signals.mask, pending)
     };
     process.posix.lock().actions.reset_for_exec();
-    with_tree(|tree| {
-        if let Some(member) = tree.get_mut(process.number()) {
-            member.execed = true;
-        }
-    });
     process.set_name(name);
     // The new program's thread has the process's number, as on Linux,
     // whichever thread called exec; the caller, which has it if it was the
