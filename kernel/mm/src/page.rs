@@ -18,7 +18,7 @@
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
 /// Size of a frame (a page) in bytes.
 pub const PAGE_SIZE: usize = 4096;
@@ -75,11 +75,16 @@ pub enum Owner {
     /// A page of the page cache: file data and filesystem metadata
     /// (`radix-vfs`, `radix-block`), which can be dropped and read again.
     PageCache = 7,
+    /// A page of a program's anonymous memory, which the kernel hands out
+    /// when the program first touches it; `aux` counts the address spaces
+    /// that map it ([`PageInfo::share_count`]), more than one after a fork
+    /// until each has written to it.
+    Anon = 8,
 }
 
 impl Owner {
     /// Every owner, in the order of their numbers.
-    pub const ALL: [Owner; 8] = [
+    pub const ALL: [Owner; 9] = [
         Owner::Kernel,
         Owner::PageTable,
         Owner::Slab,
@@ -88,6 +93,7 @@ impl Owner {
         Owner::PerCpu,
         Owner::Memory,
         Owner::PageCache,
+        Owner::Anon,
     ];
 
     fn from_bits(bits: u32) -> Owner {
@@ -105,6 +111,7 @@ impl Owner {
             Owner::PerCpu => "per-CPU caches",
             Owner::Memory => "memory objects",
             Owner::PageCache => "page cache",
+            Owner::Anon => "anonymous memory",
         }
     }
 }
@@ -191,6 +198,31 @@ impl PageInfo {
 
     pub(crate) fn set_aux(&self, value: u32) {
         self.aux.store(value, Relaxed);
+    }
+
+    /// For a page of anonymous memory ([`Owner::Anon`]): how many address
+    /// spaces map it. Unlike the other fields it is changed by atomic
+    /// read-modify-writes, since two spaces that share a page after a fork
+    /// let go of it under locks of their own.
+    pub fn share_count(&self) -> u32 {
+        self.aux.load(Acquire)
+    }
+
+    /// Sets the count of a page of anonymous memory just allocated, which
+    /// nothing else can see yet.
+    pub fn set_share_count(&self, count: u32) {
+        self.aux.store(count, Release);
+    }
+
+    /// One more address space maps a page of anonymous memory.
+    pub fn share(&self) {
+        self.aux.fetch_add(1, AcqRel);
+    }
+
+    /// One address space fewer maps a page of anonymous memory: returns
+    /// how many still do. The one that sees 0 frees the page.
+    pub fn unshare(&self) -> u32 {
+        self.aux.fetch_sub(1, AcqRel) - 1
     }
 }
 

@@ -7,6 +7,21 @@
 //! from USER_START to USER_TOP; the kernel lives in the upper half, which
 //! user code cannot reach. Frames are mapped and unmapped with the `map`
 //! and `unmap` system calls.
+//!
+//! Since Phase 8 an address space also holds anonymous memory, as POSIX's
+//! `mmap` makes it: zeroed pages the kernel makes when they are first
+//! touched (`map_anonymous`), or filled from a file when they are mapped
+//! (`map_file`). Each page of it is charged to the resource domain of the
+//! process the space belongs to while the space maps it, so a domain's
+//! limit bounds its programs' memory. A forked process (radix-process(2))
+//! gets the same pages, shared until either side writes to one, which
+//! then gets a copy of its own, unless the mapping is SHARED, when both
+//! keep writing to the same pages.
+//!
+//! Futexes (`futex_wait`, `futex_wake`) are the waiting that a C library's
+//! locks and condition variables are built on, as Linux's: a thread waits
+//! on a 32-bit word of this address space while it holds a value, until a
+//! thread wakes the word's waiters.
 
 module address_space;
 
@@ -17,11 +32,73 @@ const USER_START: u64 = 0x10000;
 const USER_TOP: u64 = 0x7ffffffff000;
 /// The size of a page, in bytes.
 const PAGE_SIZE: u64 = 4096;
+/// Where the kernel puts anonymous memory it chooses the place of: the
+/// highest free range below this address.
+const ANONYMOUS_TOP: u64 = 0x7fe000000000;
+
+/// How `map_anonymous` and `map_file` place and share what they map.
+flags MapFlags: u32 {
+    /// Map at `address` exactly, replacing whatever is mapped there.
+    fixed = 0;
+    /// Map at `address` exactly, failing with already_mapped if anything
+    /// is mapped there.
+    fixed_no_replace = 1;
+    /// Keep the pages shared with processes forked from this one, rather
+    /// than giving each side a copy when it writes (anonymous memory
+    /// only).
+    shared = 2;
+}
 
 /// A virtual address space.
-interface address_space = 0x0003 version 1 {
+interface address_space = 0x0003 version 2 {
     kind = address_space;
     /// Whether a page is mapped at `address`, and with which rights.
     method query = 1 (address: addr) -> (mapped: bool, rights: Rights)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Maps `size` bytes (rounded up to whole pages) of zeroed anonymous
+    /// memory with `rights`: any of read, write and execute, write and
+    /// execute never together, and none for memory that cannot be touched
+    /// yet. With fixed or fixed_no_replace it goes at `address` (a page
+    /// boundary); otherwise `address` is a hint, and the kernel takes the
+    /// highest free range below it, or below ANONYMOUS_TOP, that fits.
+    /// Returns where it went. Needs the control right.
+    method map_anonymous = 2 (address: addr, size: u64, rights: Rights, flags: MapFlags)
+        -> (address: addr)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                already_mapped];
+    /// Gives the anonymous memory in the `size` bytes from `address` (a
+    /// page boundary) the access `rights` allows, as `map_anonymous`
+    /// takes them. Every page must be anonymous memory. Needs the control
+    /// right.
+    method protect = 3 (address: addr, size: u64, rights: Rights) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                not_mapped];
+    /// Unmaps whatever is mapped in the `size` bytes from `address` (a
+    /// page boundary): anonymous memory and frames alike; pages that hold
+    /// nothing are passed over. Needs the control right.
+    method discard = 4 (address: addr, size: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory];
+    /// Maps `size` bytes of the file in slot `file`, from byte `offset` (a
+    /// multiple of the page size), as `map_anonymous` does, filled with
+    /// the file's contents from there and zeros past its end. The pages
+    /// are the process's own copy: neither side sees what the other
+    /// writes later. Needs the control right, and the read right on the
+    /// file.
+    method map_file = 5 (address: addr, size: u64, rights: Rights, flags: MapFlags, file: slot,
+                         offset: u64) -> (address: addr)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, already_mapped, is_directory, io, corrupt];
+    /// Waits while the 32-bit word at `address` (4-byte aligned) holds
+    /// `expected`, until `futex_wake` wakes it, for at most `timeout_ns`
+    /// nanoseconds (0: no limit). Fails with would_block at once if the
+    /// word holds another value, timed_out once the time has passed, and
+    /// interrupted when a signal comes. Needs the control right.
+    method futex_wait = 6 (address: addr, expected: u32, timeout_ns: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                would_block, timed_out, interrupted];
+    /// Wakes up to `count` of the threads waiting on the word at `address`
+    /// in this address space, first come first woken, and returns how many
+    /// it woke. Needs the control right.
+    method futex_wake = 7 (address: addr, count: u32) -> (woken: u32)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
 }

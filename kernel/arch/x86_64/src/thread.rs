@@ -42,7 +42,82 @@ use crate::space::{AddressSpace, UserSpace};
 /// Offsets in a context block.
 const RSP: usize = 0;
 const ON_CPU: usize = 8;
+/// How the thread last came into the kernel from user mode
+/// ([`UserEntry`]), and for a system call that is to return with every
+/// register restored, whether it is and its RCX and R11 (`crate::user`).
+const USER_ENTRY: usize = 16;
+const FULL_RETURN: usize = 24;
+const FULL_RCX: usize = 32;
+const FULL_R11: usize = 40;
 const AREA: usize = 64;
+
+/// How a thread last came into the kernel from user mode, which says
+/// where on its kernel stack its user registers are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum UserEntry {
+    /// Not since it was made: it has not been in user mode.
+    None = 0,
+    /// A system call: a `SyscallFrame` at the top of its stack.
+    Syscall = 1,
+    /// An interrupt or an exception: a `TrapFrame` at the top.
+    Trap = 2,
+}
+
+/// A word of the running context's block.
+fn current_word(offset: usize) -> &'static AtomicU64 {
+    let block = percpu::current().context.load(Ordering::Relaxed);
+    assert!(block != 0, "no context runs on this CPU");
+    // SAFETY: the block of the context running on this CPU is a mapped
+    // page for as long as it runs, `offset` is one of the 8-aligned words
+    // above, and those words are only ever accessed atomically, by the
+    // context itself.
+    unsafe { &*((block + offset) as *const AtomicU64) }
+}
+
+/// Records how the running context came in from user mode.
+pub fn set_user_entry(entry: UserEntry) {
+    current_word(USER_ENTRY).store(entry as u64, Ordering::Relaxed);
+}
+
+/// How the running context last came in from user mode.
+pub fn user_entry() -> UserEntry {
+    match current_word(USER_ENTRY).load(Ordering::Relaxed) {
+        1 => UserEntry::Syscall,
+        2 => UserEntry::Trap,
+        _ => UserEntry::None,
+    }
+}
+
+/// Asks that the running context's system call return with every
+/// register restored, RCX and R11 among them.
+pub fn request_full_return(rcx: u64, r11: u64) {
+    current_word(FULL_RCX).store(rcx, Ordering::Relaxed);
+    current_word(FULL_R11).store(r11, Ordering::Relaxed);
+    current_word(FULL_RETURN).store(1, Ordering::Relaxed);
+}
+
+/// The RCX and R11 the running context's system call is to return with,
+/// if it asked for a full return.
+pub fn full_return() -> Option<(u64, u64)> {
+    if current_word(FULL_RETURN).load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    Some((current_word(FULL_RCX).load(Ordering::Relaxed), current_word(FULL_R11).load(Ordering::Relaxed)))
+}
+
+/// Takes the running context's request for a full return: its RCX and
+/// R11, if it made one.
+pub fn take_full_return() -> Option<(u64, u64)> {
+    let full = full_return();
+    current_word(FULL_RETURN).store(0, Ordering::Relaxed);
+    full
+}
+
+/// The running context's extended-state save area.
+pub fn current_area() -> usize {
+    percpu::current().context.load(Ordering::Relaxed) + AREA
+}
 
 core::arch::global_asm!(
     r#"
@@ -256,6 +331,26 @@ impl Context {
         // Back in `from`, possibly on another CPU.
         // SAFETY: `from` runs here again; its area holds what `save` wrote.
         unsafe { fpu::restore(from.block + AREA) };
+    }
+
+    /// The context's thread pointer in user mode.
+    pub fn thread_pointer(&self) -> u64 {
+        self.thread_pointer.load(Ordering::Relaxed)
+    }
+
+    /// Gives the context, which has not run yet, the running thread's
+    /// extended state: a forked program's thread starts with its parent's.
+    pub fn copy_extended_state(&self) {
+        assert!(!self.is_running(), "copying extended state into a context that runs");
+        let were = cpu::disable_interrupts();
+        // SAFETY: `self`'s area is a save area set up by `init_area` that
+        // nothing uses until the context first runs (checked above: it
+        // has not), and saving the running thread's registers into it
+        // changes nothing else.
+        unsafe { fpu::save(self.block + AREA) };
+        if were {
+            cpu::enable_interrupts();
+        }
     }
 
     /// Whether the context is on a CPU.

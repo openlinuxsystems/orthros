@@ -35,8 +35,10 @@ enum FileKind: u8 {
     directory = 1;
     /// A block device, which filesystems are mounted from.
     block_device = 2;
-    /// A character device: `null`, `zero` and the like.
+    /// A character device: `null`, `zero`, terminals and the like.
     char_device = 3;
+    /// A pipe (radix-process(2)'s `pipe`).
+    pipe = 4;
 }
 
 /// What kind of filesystem one is.
@@ -53,6 +55,9 @@ enum FilesystemKind: u8 {
     dev = 4;
     /// The boot archive, read-only: `bootfs`.
     bootfs = 5;
+    /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
+    /// `pipefs`.
+    pipe = 6;
 }
 
 /// How `open` opens.
@@ -65,6 +70,15 @@ flags OpenFlags: u32 {
     truncate = 2;
     /// Fail with not_directory unless it is a directory.
     directory = 3;
+    /// The description appends (radix-file(2)'s DescriptionFlags).
+    append = 4;
+    /// The description does not wait (radix-file(2)'s DescriptionFlags).
+    non_blocking = 5;
+    /// Opening a terminal does not make it the controlling terminal of
+    /// the caller's session.
+    no_terminal = 6;
+    /// The slot is emptied by radix-process(2)'s `exec`.
+    close_on_exec = 7;
 }
 
 /// How a filesystem is mounted.
@@ -89,7 +103,7 @@ struct DirEntry {
 }
 
 /// A directory.
-interface directory = 0x000b version 1 {
+interface directory = 0x000b version 2 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.

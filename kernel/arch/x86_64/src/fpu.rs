@@ -209,6 +209,81 @@ pub unsafe fn restore(area: usize) {
     }
 }
 
+/// Loads the initial state, as a new thread starts with, through the save
+/// area at `area`: what a signal handler starts with.
+///
+/// # Safety
+///
+/// As for [`save`]; interrupts must be masked, so that no context switch
+/// saves into the area meanwhile.
+pub unsafe fn load_initial(area: usize) {
+    // SAFETY: the caller guarantees the area, and that nothing else writes
+    // it before the restore; the legacy region and the XSAVE header (the
+    // first 576 bytes) are what `init_area` expects zeroed.
+    unsafe {
+        core::ptr::write_bytes(area as *mut u8, 0, 576);
+        init_area(area);
+        restore(area);
+    }
+}
+
+/// The size of a save area's image: what [`save`] writes and [`restore`]
+/// reads, and what a signal frame holds.
+pub fn image_size() -> usize {
+    SIZE.load(Ordering::Relaxed) as usize
+}
+
+/// Makes an image that came from user memory (a signal frame's) safe to
+/// load: MXCSR without reserved bits and, for XSAVE, a header naming only
+/// the components this kernel enables in the standard format, with its
+/// reserved bytes zero. Loading anything else would fault in the kernel.
+pub fn sanitize(image: &mut [u8]) {
+    if image.len() < 512 {
+        return;
+    }
+    let word = |image: &[u8], at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+    let mask = match word(image, 28) {
+        // A zero MXCSR_MASK means the default mask.
+        0 => 0xffbf,
+        mask => mask,
+    };
+    // The mask this CPU accepts is what FXSAVE reports on it; a program's
+    // image may claim any mask, so only the bits of both are kept.
+    let mxcsr = word(image, 24) & mask & cpu_mxcsr_mask();
+    image[24..28].copy_from_slice(&mxcsr.to_le_bytes());
+    if MODE.load(Ordering::Relaxed) >= XSAVE && image.len() >= 576 {
+        let bv = u64::from_le_bytes(image[512..520].try_into().unwrap());
+        let bv = bv & XCR0.load(Ordering::Relaxed);
+        image[512..520].copy_from_slice(&bv.to_le_bytes());
+        image[520..576].fill(0);
+    }
+}
+
+/// The MXCSR bits this CPU accepts, from FXSAVE's MXCSR_MASK.
+fn cpu_mxcsr_mask() -> u32 {
+    static MASK: AtomicU32 = AtomicU32::new(0);
+    let known = MASK.load(Ordering::Relaxed);
+    if known != 0 {
+        return known;
+    }
+    #[repr(C, align(16))]
+    struct Legacy([u8; 512]);
+    let mut legacy = Legacy([0; 512]);
+    if MODE.load(Ordering::Relaxed) != NONE {
+        // SAFETY: FXSAVE writes 512 bytes at a 16-byte aligned address,
+        // which `legacy` is; it reads the FPU and changes nothing.
+        unsafe {
+            asm!("fxsave64 [{}]", in(reg) legacy.0.as_mut_ptr(), options(nostack, preserves_flags))
+        };
+    }
+    let mask = match u32::from_le_bytes(legacy.0[28..32].try_into().unwrap()) {
+        0 => 0xffbf,
+        mask => mask,
+    };
+    MASK.store(mask, Ordering::Relaxed);
+    mask
+}
+
 /// Whether the AVX registers' upper halves are saved, so the self-test
 /// checks them too.
 fn avx() -> bool {

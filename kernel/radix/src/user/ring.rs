@@ -315,7 +315,7 @@ pub fn enter(
         if ready >= min_complete {
             return Ok((submitted, ready));
         }
-        if sched::should_stop() {
+        if sched::interrupted() {
             return Err(error(Kernel::Interrupted));
         }
         if ring.closed.load(Ordering::Acquire) {
@@ -331,7 +331,7 @@ pub fn enter(
         let done = || {
             ring.ready() >= min_complete
                 || ring.closed.load(Ordering::Relaxed)
-                || sched::should_stop()
+                || sched::interrupted()
         };
         ring.waiting.fetch_add(1, Ordering::AcqRel);
         match until {

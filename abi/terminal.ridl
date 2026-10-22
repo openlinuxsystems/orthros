@@ -1,0 +1,183 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Terminals (Phase 8): the line discipline, pseudo-terminals, and the
+//! requests radix-file(2)'s `control` takes for them.
+//!
+//! A terminal is a file whose reads and writes go through a line
+//! discipline, as POSIX's general terminal interface describes it: what
+//! is typed (written to a pseudo-terminal's master) is edited into lines
+//! (ICANON), echoed (ECHO), and turned into signals for the terminal's
+//! foreground process group (ISIG: Ctrl-C SIGINT, Ctrl-\ SIGQUIT, Ctrl-Z
+//! SIGTSTP); what programs write is turned into what the screen needs
+//! (OPOST, ONLCR). The settings are a Termios, laid out as the C
+//! library's `struct termios` for Linux, and the flags and `c_cc`
+//! indices are Linux's.
+//!
+//! Opening `/dev/ptmx` makes a pseudo-terminal: the file it opens is the
+//! master, and the terminal itself appears as `/dev/pts/N`, where N is
+//! what GET_PTY_NUMBER says. Opening a terminal (other than with
+//! no_terminal) makes it the controlling terminal of a session leader that
+//! has none; `/dev/tty` opens the caller's controlling terminal. A
+//! process of a background process group that reads its controlling
+//! terminal gets SIGTTIN, and with TOSTOP one that writes gets SIGTTOU,
+//! so that a shell's jobs share the terminal (radix-process(2)).
+
+module terminal;
+
+/// Reads the settings into a Termios at `buffer`.
+const GET_ATTRIBUTES: u32 = 0x5401;
+/// Sets the settings from a Termios at `buffer`, at once.
+const SET_ATTRIBUTES: u32 = 0x5402;
+/// Sets the settings once what was written has been sent.
+const SET_ATTRIBUTES_DRAIN: u32 = 0x5403;
+/// Sets the settings once what was written has been sent, dropping the
+/// input not read yet.
+const SET_ATTRIBUTES_FLUSH: u32 = 0x5404;
+/// Starts (`argument` 1 or 3) or stops (0 or 2) output or input: POSIX's
+/// `tcflow`.
+const FLOW: u32 = 0x540a;
+/// Drops input (`argument` 0), output (1) or both (2) not read or sent
+/// yet: POSIX's `tcflush`.
+const FLUSH: u32 = 0x540b;
+/// Makes the terminal the controlling terminal of the caller's session,
+/// whose leader the caller must be.
+const SET_CONTROLLING: u32 = 0x540e;
+/// The foreground process group, as a 32-bit number at `buffer`.
+const GET_FOREGROUND: u32 = 0x540f;
+/// Sets the foreground process group from a 32-bit number at `buffer`: a
+/// process group of the terminal's session.
+const SET_FOREGROUND: u32 = 0x5410;
+/// The window size, as a WindowSize at `buffer`.
+const GET_WINDOW_SIZE: u32 = 0x5413;
+/// Sets the window size from a WindowSize at `buffer`; the foreground
+/// process group gets SIGWINCH when it changes.
+const SET_WINDOW_SIZE: u32 = 0x5414;
+/// How many bytes can be read now, as a 32-bit number at `buffer` (also
+/// for pipes).
+const READABLE: u32 = 0x541b;
+/// The caller's session gives up its controlling terminal.
+const DETACH: u32 = 0x5422;
+/// The session the terminal controls, as a 32-bit number at `buffer`.
+const GET_SESSION: u32 = 0x5429;
+/// On a master: the pseudo-terminal's number N, as a 32-bit number at
+/// `buffer`.
+const GET_PTY_NUMBER: u32 = 0x80045430;
+/// On a master: locks (non-zero 32-bit number at `buffer`) or unlocks
+/// `/dev/pts/N`; it starts unlocked.
+const SET_PTY_LOCK: u32 = 0x40045431;
+
+/// The number of `c_cc` entries.
+const NCCS: u32 = 32;
+/// `c_cc` index of the interrupt character (Ctrl-C).
+const VINTR: u32 = 0;
+/// `c_cc` index of the quit character (Ctrl-\).
+const VQUIT: u32 = 1;
+/// `c_cc` index of the erase character (DEL).
+const VERASE: u32 = 2;
+/// `c_cc` index of the kill-line character (Ctrl-U).
+const VKILL: u32 = 3;
+/// `c_cc` index of the end-of-file character (Ctrl-D).
+const VEOF: u32 = 4;
+/// `c_cc` index of the non-canonical read timeout, in tenths of a second.
+const VTIME: u32 = 5;
+/// `c_cc` index of the non-canonical read minimum.
+const VMIN: u32 = 6;
+/// `c_cc` index of the start character (Ctrl-Q).
+const VSTART: u32 = 8;
+/// `c_cc` index of the stop character (Ctrl-S).
+const VSTOP: u32 = 9;
+/// `c_cc` index of the suspend character (Ctrl-Z).
+const VSUSP: u32 = 10;
+/// `c_cc` index of an extra end-of-line character.
+const VEOL: u32 = 11;
+/// `c_cc` index of the reprint character (Ctrl-R).
+const VREPRINT: u32 = 12;
+/// `c_cc` index of the word-erase character (Ctrl-W).
+const VWERASE: u32 = 14;
+/// `c_cc` index of the literal-next character (Ctrl-V).
+const VLNEXT: u32 = 15;
+/// `c_cc` index of a second extra end-of-line character.
+const VEOL2: u32 = 16;
+
+/// `c_iflag`: drop the high bit of input.
+const ISTRIP: u32 = 0x20;
+/// `c_iflag`: turn NL into CR.
+const INLCR: u32 = 0x40;
+/// `c_iflag`: drop CR.
+const IGNCR: u32 = 0x80;
+/// `c_iflag`: turn CR into NL.
+const ICRNL: u32 = 0x100;
+/// `c_iflag`: Ctrl-S and Ctrl-Q stop and start output.
+const IXON: u32 = 0x400;
+/// `c_iflag`: any character starts output again.
+const IXANY: u32 = 0x800;
+/// `c_iflag`: input is UTF-8, so erasing takes a whole character.
+const IUTF8: u32 = 0x4000;
+/// `c_oflag`: process output.
+const OPOST: u32 = 0x1;
+/// `c_oflag`: turn NL into CR NL.
+const ONLCR: u32 = 0x4;
+/// `c_oflag`: turn CR into NL.
+const OCRNL: u32 = 0x8;
+/// `c_cflag`: eight bits a character.
+const CS8: u32 = 0x30;
+/// `c_cflag`: receive.
+const CREAD: u32 = 0x80;
+/// `c_lflag`: the INTR, QUIT and SUSP characters send signals.
+const ISIG: u32 = 0x1;
+/// `c_lflag`: canonical input, edited a line at a time.
+const ICANON: u32 = 0x2;
+/// `c_lflag`: echo input.
+const ECHO: u32 = 0x8;
+/// `c_lflag`: ERASE and WERASE erase on the screen.
+const ECHOE: u32 = 0x10;
+/// `c_lflag`: KILL is echoed as erasing the line (with ECHOKE) or a NL.
+const ECHOK: u32 = 0x20;
+/// `c_lflag`: echo NL even without ECHO.
+const ECHONL: u32 = 0x40;
+/// `c_lflag`: signals do not drop input and output.
+const NOFLSH: u32 = 0x80;
+/// `c_lflag`: background writes get SIGTTOU.
+const TOSTOP: u32 = 0x100;
+/// `c_lflag`: control characters are echoed as `^X`.
+const ECHOCTL: u32 = 0x200;
+/// `c_lflag`: KILL erases the line on the screen.
+const ECHOKE: u32 = 0x800;
+/// `c_lflag`: WERASE, REPRINT and LNEXT work.
+const IEXTEN: u32 = 0x8000;
+
+/// A terminal's settings: the C library's `struct termios` for Linux.
+struct Termios {
+    /// Input flags.
+    iflag: u32;
+    /// Output flags.
+    oflag: u32;
+    /// Control flags.
+    cflag: u32;
+    /// Local flags.
+    lflag: u32;
+    /// The line discipline (0).
+    line: u8;
+    /// The special characters, by the V indices.
+    cc: [u8; 32];
+    /// Zero.
+    pad: [u8; 3];
+    /// The input speed (Linux's B38400 by default; a pseudo-terminal has
+    /// none of its own).
+    ispeed: u32;
+    /// The output speed.
+    ospeed: u32;
+}
+
+/// A terminal's window size: Linux's `struct winsize`.
+struct WindowSize {
+    /// Rows of characters.
+    rows: u16;
+    /// Columns of characters.
+    columns: u16;
+    /// Width in pixels (0 if unknown).
+    x_pixels: u16;
+    /// Height in pixels (0 if unknown).
+    y_pixels: u16;
+}

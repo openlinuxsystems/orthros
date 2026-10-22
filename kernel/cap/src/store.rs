@@ -206,6 +206,10 @@ struct Slot {
     depth: u8,
     /// A revoke of this capability is under way.
     revoking: bool,
+    /// The slot's own flags (Phase 8), which stay with the slot rather
+    /// than the capability: the kernel's close-on-exec. Clear in an empty
+    /// slot, and in one a capability was just put in.
+    flags: u8,
 }
 
 impl Slot {
@@ -217,6 +221,7 @@ impl Slot {
         next: None,
         depth: 0,
         revoking: false,
+        flags: 0,
     };
 }
 
@@ -337,6 +342,69 @@ impl<A: Allocator + Clone> Capabilities<A> {
     /// How many slots `space` has.
     pub fn slots(&self, space: SpaceId) -> Result<u32, CapError> {
         Ok(self.space(space)?.slots.len() as u32)
+    }
+
+    /// Grows `space` to `slots` empty slots in all (at most
+    /// [`MAX_SLOTS`]); a space never shrinks, so asking for fewer than it
+    /// has changes nothing. Returns how many it has.
+    pub fn grow_space(&mut self, space: SpaceId, slots: u32) -> Result<u32, CapError> {
+        if slots > MAX_SLOTS {
+            return Err(CapError::InvalidArgument);
+        }
+        // Checked before the space is borrowed mutably.
+        self.space(space)?;
+        let array = &mut self.spaces[space.index as usize].slots;
+        let more = (slots as usize).saturating_sub(array.len());
+        array.try_reserve_exact(more).map_err(|_| CapError::NoMemory)?;
+        for _ in 0..more {
+            // Cannot fail: the capacity was reserved.
+            let _ = array.push_within_capacity(Slot::EMPTY);
+        }
+        Ok(array.len() as u32)
+    }
+
+    /// The flags of the slot `at`, which must hold a capability.
+    pub fn slot_flags(&self, at: SlotRef) -> Result<u8, CapError> {
+        let link = self.full(at)?;
+        Ok(self.slot(link).flags)
+    }
+
+    /// Sets the flags of the slot `at`, which must hold a capability, and
+    /// returns them as they were.
+    pub fn set_slot_flags(&mut self, at: SlotRef, flags: u8) -> Result<u8, CapError> {
+        let link = self.full(at)?;
+        Ok(core::mem::replace(&mut self.slot_mut(link).flags, flags))
+    }
+
+    /// The first slot of `space` from `from` on that holds a capability
+    /// and has any of the flags in `mask`, if one does.
+    pub fn find_flagged(
+        &self,
+        space: SpaceId,
+        mask: u8,
+        from: u32,
+    ) -> Result<Option<u32>, CapError> {
+        let slots = &self.space(space)?.slots;
+        let found = slots
+            .iter()
+            .enumerate()
+            .skip(from as usize)
+            .find(|(_, slot)| slot.cap.is_some() && slot.flags & mask != 0);
+        Ok(found.map(|(index, _)| index as u32))
+    }
+
+    /// Which of the 64 slots of `space` from `first` on hold a
+    /// capability, one bit each from bit 0; slots past the end count as
+    /// empty.
+    pub fn used_slots(&self, space: SpaceId, first: u32) -> Result<u64, CapError> {
+        let slots = &self.space(space)?.slots;
+        let mut used = 0u64;
+        for (bit, slot) in slots.iter().skip(first as usize).take(64).enumerate() {
+            if slot.cap.is_some() {
+                used |= 1 << bit;
+            }
+        }
+        Ok(used)
     }
 
     // ---- Looking capabilities up ----
@@ -603,7 +671,8 @@ impl<A: Allocator + Clone> Capabilities<A> {
         if node.revoking {
             return Err(CapError::Revoking);
         }
-        *self.slot_mut(dst) = node;
+        // The flags stay behind: they belong to the slot.
+        *self.slot_mut(dst) = Slot { flags: 0, ..node };
         *self.slot_mut(src) = Slot::EMPTY;
         match node.prev {
             Some(prev) => self.slot_mut(prev).next = Some(dst),

@@ -39,6 +39,28 @@ pub const USER_END: u64 = 0x0000_8000_0000_0000;
 
 const PRESENT: u64 = 1;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
+/// A software bit of a leaf entry that is not present: the entry still
+/// holds its frame, which a program may not reach for now (a page of
+/// anonymous memory under `PROT_NONE`). The CPU ignores every other bit
+/// of an entry that is not present.
+const HELD: u64 = 1 << 9;
+/// A large page (in a page-directory or page-directory-pointer entry).
+const LARGE: u64 = 1 << 7;
+
+/// The most cleared entries [`AddressSpace::edit`] keeps before it flushes
+/// the TLB and hands their frames back.
+const EDIT_BATCH: usize = 64;
+
+/// What [`AddressSpace::edit`] does with an entry that holds a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    /// Leaves it as it is.
+    Keep,
+    /// Gives it this access, or none (keeping the frame) for `None`.
+    Set(Option<Access>),
+    /// Removes it; the frame is handed back once no CPU can reach it.
+    Clear,
+}
 
 static PCIDS: Pcids = Pcids::new();
 
@@ -138,6 +160,102 @@ impl AddressSpace {
         // Not present before, so no CPU has it cached: no flush.
         slot.store(phys | paging::user_flags(access), Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The frame the entry for `virt` holds, and the access it gives
+    /// (`None` for an entry that holds its frame without giving access).
+    pub fn entry(&self, virt: u64) -> Option<(u64, Option<Access>)> {
+        let _guard = self.lock.lock();
+        let entry = paging::leaf(self.pml4, virt)?.load(Ordering::Relaxed);
+        if entry & PRESENT != 0 {
+            Some((entry & ADDRESS, Some(paging::access_of(entry))))
+        } else if entry & HELD != 0 {
+            Some((entry & ADDRESS, None))
+        } else {
+            None
+        }
+    }
+
+    /// Points the entry for `virt` at `phys` with `access`, or holds the
+    /// frame without access for `None`, replacing whatever was there. A
+    /// CPU that cached the old entry is shot down, unless `upgrade` says
+    /// the change only gives more access to the same frame: a stale entry
+    /// then costs at most a fault that finds the new one.
+    pub fn set(
+        &self,
+        virt: u64,
+        phys: u64,
+        access: Option<Access>,
+        upgrade: bool,
+    ) -> Result<(), MapPageError> {
+        assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
+        let guard = self.lock.lock();
+        let slot = paging::entry(self.pml4, virt, 1, true).map_err(|_| MapPageError::NoMemory)?;
+        let old = slot.load(Ordering::Relaxed);
+        slot.store(leaf_entry(phys, access), Ordering::Relaxed);
+        drop(guard);
+        if old & PRESENT != 0 {
+            if upgrade && old & ADDRESS == phys {
+                paging::flush_local(virt..virt + PAGE);
+            } else {
+                self.flush(virt);
+            }
+        }
+        Ok(())
+    }
+
+    /// Visits every entry from `start` to `end` that holds a frame, in
+    /// order, and does what `decide` says with it, given its address, its
+    /// frame and its access. The TLB is flushed once for every
+    /// [`EDIT_BATCH`] entries cleared, and at the end if any present entry
+    /// changed; `released` gets each cleared entry's frame after the
+    /// flush, when no CPU can reach it any more. Both run with the
+    /// space's page-table lock held, so they must not sleep; `decide` may
+    /// map pages into another space.
+    pub fn edit(
+        &self,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(u64, u64, Option<Access>) -> Edit,
+        released: &mut dyn FnMut(u64),
+    ) {
+        assert!(start <= end && end <= USER_END, "editing {start:#x}-{end:#x}");
+        if start == end {
+            return;
+        }
+        let mut decide = |virt, frame, access| (decide(virt, frame, access), None);
+        let _guard = self.lock.lock();
+        let mut walk = Walk::new(start, end, &mut decide, released, None);
+        walk.table(self, self.pml4, 4, 0);
+        walk.flush(self, end);
+    }
+
+    /// Like [`AddressSpace::edit`], and gives `to` an entry for the same
+    /// frame wherever `decide` says, with that access (`None`: holding the
+    /// frame without access): how a forked program's pages are shared.
+    /// `to` must be a space no CPU runs, which gets no flush. If `to`
+    /// cannot get a page table for an entry, the walk stops there and
+    /// returns that entry's address: `to` has the entries before it.
+    pub fn copy_into(
+        &self,
+        to: &AddressSpace,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(u64, u64, Option<Access>) -> (Edit, Option<Option<Access>>),
+    ) -> Result<(), u64> {
+        assert!(start <= end && end <= USER_END, "copying {start:#x}-{end:#x}");
+        assert!(!core::ptr::eq(self, to), "copying an address space into itself");
+        if start == end {
+            return Ok(());
+        }
+        let mut released = |_| {};
+        let _guard = self.lock.lock();
+        // Two spaces' locks, always the source's first.
+        let _target = to.lock.lock_nested(1);
+        let mut walk = Walk::new(start, end, decide, &mut released, Some(to));
+        walk.table(self, self.pml4, 4, 0);
+        walk.flush(self, end);
+        walk.failed.map_or(Ok(()), Err)
     }
 
     /// The frame `virt` maps and how, if it is mapped.
@@ -247,6 +365,133 @@ impl AddressSpace {
         // Its PCID stays taken until the next rollover, so no CPU uses the
         // PCID's stale entries before they are flushed.
         memory::free_pages(self.frame, 1, Owner::Kernel);
+    }
+}
+
+/// What [`Walk`]'s callback decides for an entry: its edit, and the entry
+/// the copy's target gets for the same frame, if any.
+type Decision = (Edit, Option<Option<Access>>);
+
+/// The state of one [`AddressSpace::edit`] or [`AddressSpace::copy_into`].
+struct Walk<'a> {
+    start: u64,
+    end: u64,
+    decide: &'a mut dyn FnMut(u64, u64, Option<Access>) -> Decision,
+    released: &'a mut dyn FnMut(u64),
+    /// The space a copy gives entries to, whose lock the walk holds.
+    to: Option<&'a AddressSpace>,
+    /// Where a copy stopped, for want of a page table in `to`.
+    failed: Option<u64>,
+    /// Frames of cleared entries, handed back after the next flush.
+    batch: [u64; EDIT_BATCH],
+    batched: usize,
+    /// Whether a present entry changed since the last flush.
+    changed: bool,
+    /// Where the range not yet flushed starts.
+    flushed_to: u64,
+}
+
+/// The entry that holds `frame` with `access`, or without access.
+fn leaf_entry(frame: u64, access: Option<Access>) -> u64 {
+    match access {
+        Some(access) => frame | paging::user_flags(access),
+        None => frame | HELD,
+    }
+}
+
+impl<'a> Walk<'a> {
+    fn new(
+        start: u64,
+        end: u64,
+        decide: &'a mut dyn FnMut(u64, u64, Option<Access>) -> Decision,
+        released: &'a mut dyn FnMut(u64),
+        to: Option<&'a AddressSpace>,
+    ) -> Walk<'a> {
+        Walk {
+            start,
+            end,
+            decide,
+            released,
+            to,
+            failed: None,
+            batch: [0; EDIT_BATCH],
+            batched: 0,
+            changed: false,
+            flushed_to: start,
+        }
+    }
+
+    /// Walks the entries of the table at `phys`, of `level` (4 for the
+    /// PML4), that cover the range; the table maps from `base`.
+    fn table(&mut self, space: &AddressSpace, phys: u64, level: u32, base: u64) {
+        let span = 1u64 << (12 + 9 * (level - 1));
+        let first = (self.start.max(base) - base) / span;
+        let last = ((self.end - 1 - base) / span).min(511);
+        for index in first..=last {
+            if self.failed.is_some() {
+                return;
+            }
+            let virt = base + index * span;
+            let slot = &paging::table(phys)[index as usize];
+            let entry = slot.load(Ordering::Relaxed);
+            if level > 1 {
+                // Programs' pages are all 4 KiB ones.
+                if entry & PRESENT != 0 && entry & LARGE == 0 {
+                    self.table(space, entry & ADDRESS, level - 1, virt);
+                }
+                continue;
+            }
+            let present = entry & PRESENT != 0;
+            if !present && entry & HELD == 0 {
+                continue;
+            }
+            let frame = entry & ADDRESS;
+            let access = present.then(|| paging::access_of(entry));
+            let (edit, copy) = (self.decide)(virt, frame, access);
+            if let (Some(to), Some(access)) = (self.to, copy) {
+                // The target's lock is held (`copy_into`), and no CPU runs
+                // it, so its new entry needs no flush.
+                match paging::entry(to.pml4, virt, 1, true) {
+                    Ok(target) => target.store(leaf_entry(frame, access), Ordering::Relaxed),
+                    Err(_) => {
+                        self.failed = Some(virt);
+                        return;
+                    }
+                }
+            }
+            match edit {
+                Edit::Keep => {}
+                Edit::Set(access) => {
+                    let new = leaf_entry(frame, access);
+                    slot.store(new, Ordering::Relaxed);
+                    self.changed |= present && new != entry;
+                }
+                Edit::Clear => {
+                    slot.store(0, Ordering::Relaxed);
+                    self.changed |= present;
+                    self.batch[self.batched] = frame;
+                    self.batched += 1;
+                    if self.batched == EDIT_BATCH {
+                        self.flush(space, virt + PAGE);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flushes what changed below `to` and hands back the cleared frames.
+    fn flush(&mut self, space: &AddressSpace, to: u64) {
+        if self.changed {
+            space.tlb_generation.fetch_add(1, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            paging::shootdown_on(self.flushed_to..to, |cpu| space.is_active(cpu.index()));
+            self.changed = false;
+        }
+        self.flushed_to = to;
+        for &frame in &self.batch[..self.batched] {
+            (self.released)(frame);
+        }
+        self.batched = 0;
     }
 }
 

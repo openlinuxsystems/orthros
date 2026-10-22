@@ -47,7 +47,8 @@ errors kernel = 1 {
     /// The object is gone: its last capability was deleted, or the thread
     /// at the other end of the call exited.
     gone = 14 => EPIPE;
-    /// The thread was asked to stop while it waited.
+    /// The thread was asked to stop while it waited, or a signal came
+    /// for it (radix-signal(2)).
     interrupted = 15 => EINTR;
     /// There is no caller to reply to.
     no_caller = 16 => ENOTCONN;
@@ -72,6 +73,25 @@ errors kernel = 1 {
     /// The badge cannot be given: this kind takes no badge, the capability
     /// already has one, or the badge is 0.
     bad_badge = 26 => EINVAL;
+    /// No process has the number given, or none of those it stands for
+    /// (a process group, a session) exists.
+    no_such_process = 27 => ESRCH;
+    /// The caller has no child the call could wait for.
+    no_child = 28 => ECHILD;
+    /// The caller may not do this to that process: it is neither the
+    /// caller, nor one of its descendants, nor in its session.
+    not_permitted = 29 => EPERM;
+    /// The file is not a terminal, or not the caller's controlling
+    /// terminal.
+    not_terminal = 30 => ENOTTY;
+    /// The file is not a program the kernel can run: not an ELF
+    /// executable for this machine, nor a script that names one.
+    not_executable = 31 => ENOEXEC;
+    /// A program's arguments and environment are larger than the kernel
+    /// takes.
+    arguments_too_long = 32 => E2BIG;
+    /// The file has no offset to move: it is a pipe or a terminal.
+    not_seekable = 33 => ESPIPE;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).

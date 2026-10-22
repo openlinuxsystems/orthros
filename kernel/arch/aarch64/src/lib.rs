@@ -21,7 +21,7 @@ use core::sync::atomic::AtomicU32;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
     InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageTable, PciSegment, Platform, Smp,
-    SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
+    PageEdit, SignalFrame, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -224,6 +224,7 @@ pub struct Shared;
 impl UserMode for Arch {
     type Space = Space;
     type Shared = Shared;
+    type UserRegisters = ();
 
     const USER_TOP: u64 = 0x0000_7fff_ffff_f000;
 
@@ -243,6 +244,33 @@ impl UserMode for Arch {
         None
     }
 
+    fn query_entry(_: &Space, _: u64) -> Option<(u64, Option<UserAccess>)> {
+        None
+    }
+
+    fn set_entry(_: &Space, _: u64, _: u64, _: Option<UserAccess>, _: bool) -> Result<(), MapPageError> {
+        Err(MapPageError::NoMemory)
+    }
+
+    fn edit_pages(
+        _: &Space,
+        _: u64,
+        _: u64,
+        _: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> PageEdit,
+        _: &mut dyn FnMut(u64),
+    ) {
+    }
+
+    fn copy_pages(
+        _: &Space,
+        _: &Space,
+        _: u64,
+        _: u64,
+        _: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> (PageEdit, Option<Option<UserAccess>>),
+    ) -> Result<(), u64> {
+        Ok(())
+    }
+
     fn attach_space(_: &Context, _: &Space) -> bool {
         false
     }
@@ -255,9 +283,37 @@ impl UserMode for Arch {
 
     fn set_syscall_handler(_: fn(&mut SyscallRegs)) {}
 
-    fn set_user_fault_handler(_: fn(&UserFault) -> !) {}
+    fn set_user_fault_handler(_: fn(&UserFault)) {}
+
+    fn set_user_page_handler(_: fn(u64, bool) -> bool) {}
 
     fn set_user_return_handler(_: fn()) {}
+
+    fn user_registers() -> Option<()> {
+        None
+    }
+
+    fn set_results(_: &mut (), _: &SyscallRegs) {}
+
+    fn enter_user_registers(_: &()) -> ! {
+        Self::halt()
+    }
+
+    fn copy_extended_state(_: &Context) {}
+
+    fn user_stack_pointer() -> u64 {
+        0
+    }
+
+    fn push_signal_frame(_: &SignalFrame<'_>) -> bool {
+        false
+    }
+
+    fn pop_signal_frame(_: u64, _: &mut SyscallRegs) -> Option<u64> {
+        None
+    }
+
+    fn restart_syscall(_: &SyscallRegs) {}
 
     fn copy_from_user(_: &mut [u8], _: u64) -> bool {
         false
@@ -288,6 +344,10 @@ impl UserMode for Arch {
     fn zero_frames(_: u64, _: u64) {}
 
     fn write_frames(_: u64, _: &[u8]) {}
+
+    fn copy_frame(_: u64, _: u64) {}
+
+    fn read_frames(_: u64, _: &mut [u8]) {}
 
     fn cycle_counter_hz() -> u64 {
         0

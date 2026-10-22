@@ -213,6 +213,11 @@ pub struct Thread {
     /// sleep, so a wake that comes before the block is not lost.
     pub(super) wake_pending: AtomicBool,
     stop: AtomicBool,
+    /// Set while it has a signal to take, or a stop to make for job
+    /// control, on its way back to user mode (Phase 8): with `stop`, what
+    /// the return path and interruptible waits look at
+    /// ([`Thread::interrupted`]).
+    signalled: AtomicBool,
     domain: DomainRef,
     /// Stack pages charged to the domain, given back when it is freed.
     pub(super) charged: u64,
@@ -270,6 +275,7 @@ impl Thread {
             cpu: AtomicUsize::new(affinity.lowest().unwrap_or(0)),
             wake_pending: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            signalled: AtomicBool::new(false),
             domain,
             charged,
             lockdep: RawSpinLock::new(Saved::new()),
@@ -351,6 +357,25 @@ impl Thread {
     /// Whether it has been asked to stop.
     pub fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Marks that it has a signal to take (or a stop to make for job
+    /// control) on its way back to user mode, or clears that. Whoever sets
+    /// it then wakes the thread ([`super::wake`]), so that a wait it is in
+    /// ends as interrupted.
+    pub fn set_signalled(&self, signalled: bool) {
+        self.signalled.store(signalled, Ordering::Release);
+    }
+
+    /// Whether it has a signal to take ([`Thread::set_signalled`]).
+    pub fn is_signalled(&self) -> bool {
+        self.signalled.load(Ordering::Acquire)
+    }
+
+    /// Whether a wait it is in should end early: it has been asked to stop,
+    /// or has a signal to take.
+    pub fn interrupted(&self) -> bool {
+        self.should_stop() || self.is_signalled()
     }
 
     /// Stops counting it among its domain's threads: when it exits, so a

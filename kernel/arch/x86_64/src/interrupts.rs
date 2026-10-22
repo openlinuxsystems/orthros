@@ -35,9 +35,11 @@
 //! this CPU's data, and again, until the stack runs out. With SMAP on, the
 //! stub clears RFLAGS.AC, so a handler never runs with user pages open (the
 //! interrupted code gets its flags back with `iretq`). Exceptions in user
-//! mode end the thread through the user fault handler (`crate::user`); a
-//! page fault on the copy instruction of a user copy moves on to the end
-//! of the copy instead.
+//! mode go to the user fault handler (`crate::user`), and every return to
+//! user mode but an NMI's (which runs on its own stack) runs the user
+//! return handler, which delivers signals. A page fault on the copy
+//! instruction of a user copy lets the user page handler make the page,
+//! or moves on to the end of the copy instead.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -401,21 +403,36 @@ fn page_fault_detail(out: &mut TextBuf<256>, error: u64, address: u64) {
 }
 
 /// Called by the entry stubs with the saved registers.
+///
+/// From user mode the frame is at the top of the thread's kernel stack,
+/// where the return handler reads and writes it too, to deliver signals,
+/// so it is only borrowed for as long as each step needs it.
 #[unsafe(no_mangle)]
-extern "C" fn radix_trap_dispatch(frame: &mut TrapFrame) {
-    let vector = frame.vector as u8;
+extern "C" fn radix_trap_dispatch(frame: *mut TrapFrame) {
+    // SAFETY: the stub passes the frame it has just saved on this stack,
+    // which nothing else uses until this returns but the steps below.
+    let (vector, cs, rflags) = unsafe { ((*frame).vector as u8, (*frame).cs, (*frame).rflags) };
     let interrupt = vector >= 32;
-    let from_user = frame.cs & 3 != 0;
-    if from_user && !interrupt && !matches!(vector, 2 | 8 | 18) {
-        crate::user::exception(vector, frame);
+    // NMIs, double faults and machine checks run on stacks of their own.
+    let own_stack = matches!(vector, 2 | 8 | 18);
+    let from_user = cs & 3 != 0 && !own_stack;
+    if from_user {
+        crate::thread::set_user_entry(crate::thread::UserEntry::Trap);
+        if !interrupt {
+            // SAFETY: as above, borrowed for the call.
+            crate::user::exception(vector, unsafe { &*frame });
+            crate::user::on_return();
+            return;
+        }
     }
     if interrupt {
         percpu::interrupt_enter();
     }
-    handle(vector, frame);
+    // SAFETY: as above.
+    handle(vector, unsafe { &mut *frame });
     if interrupt
         && percpu::interrupt_exit() == 0
-        && (from_user || (frame.rflags & INTERRUPT_FLAG != 0 && percpu::preempt_count() == 0))
+        && (from_user || (rflags & INTERRUPT_FLAG != 0 && percpu::preempt_count() == 0))
         && let Some(handler) = PREEMPT_HANDLER.get()
     {
         handler();
@@ -475,10 +492,13 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
 }
 
 /// Where a kernel-mode page or protection fault resumes, if it hit a user
-/// copy's copy instruction (on a user address, for a page fault).
+/// copy's copy instruction (on a user address, for a page fault): the
+/// instruction again if the page was made, which the copy may sleep for
+/// when it ran with interrupts on and preemption allowed.
 fn copy_fixup(vector: u8, frame: &TrapFrame) -> Option<u64> {
-    let address = (vector == 14).then(cpu::cr2);
-    crate::user::fixup(frame.rip, address)
+    let page = (vector == 14).then(|| (cpu::cr2(), frame.error & (1 << 1) != 0));
+    let may_sleep = frame.rflags & INTERRUPT_FLAG != 0 && percpu::preempt_count() == 0;
+    crate::user::fixup(frame.rip, page, may_sleep)
 }
 
 fn nmi(frame: &TrapFrame) {

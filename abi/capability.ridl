@@ -79,10 +79,17 @@ flags Rights: u64 {
     transfer = 11;
 }
 
+/// The flags of a slot, which stay with the slot rather than the
+/// capability (since Phase 8).
+flags SlotFlags: u32 {
+    /// radix-process(2)'s `exec` empties the slot: POSIX's FD_CLOEXEC.
+    close_on_exec = 0;
+}
+
 /// The methods every capability answers, whatever its kind. Their labels
 /// are reserved: a message with one of them is never delivered to an
 /// endpoint's receiver, so they work on endpoint capabilities too.
-interface capability = 0xffff version 1 {
+interface capability = 0xffff version 2 {
     /// Describes the capability: its kind, its rights, its badge, and the
     /// version of the interface its kind answers.
     method info = 1 () -> (kind: ObjectKind, rights: Rights, badge: u64, version: u32)
@@ -114,4 +121,10 @@ interface capability = 0xffff version 1 {
     /// the endpoint in slot `key` sealed it and has the unseal right.
     method unseal = 7 (key: slot, to: slot) -> ()
         raises [no_such_slot, empty_slot, occupied, wrong_kind, missing_rights, wrong_key];
+    /// Reads, and with `set` changes, the flags of the capability's slot,
+    /// and returns them as they were. A slot's flags are cleared when its
+    /// capability is deleted or moved away; `derive` and `move_to` leave
+    /// the new slot's clear.
+    method flags = 8 (set: bool, flags: SlotFlags) -> (flags: SlotFlags)
+        raises [no_such_slot, empty_slot];
 }

@@ -265,6 +265,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-posix"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-abi",
+]
+
+[[package]]
 name = "radix-random"
 version = "0.0.1"
 dependencies = [
@@ -286,6 +294,14 @@ dependencies = [
 [[package]]
 name = "radix-sync"
 version = "0.0.1"
+
+[[package]]
+name = "radix-tty"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-abi",
+]
 
 [[package]]
 name = "radix-vfs"

@@ -1,0 +1,182 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Signals (Phase 8): POSIX's asynchronous notifications, kept by the
+//! kernel.
+//!
+//! Signals are numbered as on Linux (SIGHUP is 1, SIGKILL 9, SIGRTMIN
+//! 32 and the last 64), so that a C library's headers for Linux describe
+//! them, and a set of them is a 64-bit word with bit `n - 1` for signal
+//! `n`. A process has one action per signal (radix-process(2)'s
+//! `signal_action`); each of its threads has a signal mask, a set of
+//! pending signals and an alternate stack. A signal sent to a process
+//! (`kill`) is delivered to one of its threads that does not block it; one
+//! a fault raises, or one sent to a thread (`signal_thread`), to that
+//! thread.
+//!
+//! A thread takes its pending signals on its way back to user mode, after
+//! every system call, interrupt and fault. For a signal with a handler, the
+//! kernel writes a frame on the thread's stack (or its alternate stack, for
+//! a handler with ONSTACK), as Linux does on x86-64: at the handler's stack
+//! pointer the address it returns to (the action's restorer), above it a
+//! `ucontext_t` with the thread's registers, signal mask and alternate
+//! stack, then the SignalInfo, then the extended state (x87, SSE, AVX) as
+//! XSAVE writes it, 64-byte aligned, which the context's `fpregs` points
+//! at; the 128 bytes below the interrupted stack pointer are left alone.
+//! The handler runs with `rdi` the signal, `rsi` the SignalInfo and `rdx`
+//! the context, with the action's mask and (unless NODEFER) the signal
+//! itself added to the thread's mask, and its extended state as a new
+//! thread's. The restorer calls `signal_return` with the context, which
+//! restores every register, the mask and the extended state from it.
+//!
+//! A system call that waits and is interrupted by a signal fails with
+//! `interrupted`, unless the signal's handler has RESTART (or no handler
+//! runs, because the signal is ignored or stops the process), when it runs
+//! again from the start once the handler returns. Default actions are as
+//! POSIX gives them: ending the process (with the signal in its wait
+//! status), stopping it, continuing it, or nothing. SIGKILL and SIGSTOP
+//! cannot be caught, blocked or ignored.
+
+module signal;
+
+/// The number of signals: 1 to SIGNALS.
+const SIGNALS: u32 = 64;
+/// The terminal hung up, or its session leader ended (ends the process).
+const SIGHUP: u32 = 1;
+/// Interrupt from the keyboard, Ctrl-C (ends the process).
+const SIGINT: u32 = 2;
+/// Quit from the keyboard, Ctrl-\\ (ends the process).
+const SIGQUIT: u32 = 3;
+/// An instruction the CPU refused (ends the process).
+const SIGILL: u32 = 4;
+/// A breakpoint or trap (ends the process).
+const SIGTRAP: u32 = 5;
+/// Raised by `abort` (ends the process).
+const SIGABRT: u32 = 6;
+/// A bad memory access, such as past the end of a mapped file (ends the process).
+const SIGBUS: u32 = 7;
+/// An arithmetic fault, such as dividing by zero (ends the process).
+const SIGFPE: u32 = 8;
+/// Ends the process; cannot be caught, blocked or ignored.
+const SIGKILL: u32 = 9;
+/// For the program's own use (ends the process).
+const SIGUSR1: u32 = 10;
+/// A memory access the mapping does not allow (ends the process).
+const SIGSEGV: u32 = 11;
+/// For the program's own use (ends the process).
+const SIGUSR2: u32 = 12;
+/// A write to a pipe no one reads (ends the process).
+const SIGPIPE: u32 = 13;
+/// The real-time timer expired (ends the process).
+const SIGALRM: u32 = 14;
+/// Asks the process to end (ends the process).
+const SIGTERM: u32 = 15;
+/// Unused, kept for Linux's numbering (ends the process).
+const SIGSTKFLT: u32 = 16;
+/// A child ended, stopped or continued (ignored).
+const SIGCHLD: u32 = 17;
+/// Continues a stopped process (continues it).
+const SIGCONT: u32 = 18;
+/// Stops the process; cannot be caught, blocked or ignored.
+const SIGSTOP: u32 = 19;
+/// Stop from the keyboard, Ctrl-Z (stops the process).
+const SIGTSTP: u32 = 20;
+/// A background process read from its terminal (stops the process).
+const SIGTTIN: u32 = 21;
+/// A background process wrote to its terminal, with TOSTOP (stops the process).
+const SIGTTOU: u32 = 22;
+/// Urgent data on a socket (ignored).
+const SIGURG: u32 = 23;
+/// The CPU time limit passed (ends the process).
+const SIGXCPU: u32 = 24;
+/// The file size limit passed (ends the process).
+const SIGXFSZ: u32 = 25;
+/// The user-time timer expired (ends the process).
+const SIGVTALRM: u32 = 26;
+/// The profiling timer expired (ends the process).
+const SIGPROF: u32 = 27;
+/// The terminal's window size changed (ignored).
+const SIGWINCH: u32 = 28;
+/// Input or output is possible (ends the process).
+const SIGIO: u32 = 29;
+/// Power is failing (ends the process).
+const SIGPWR: u32 = 30;
+/// A bad system call (ends the process).
+const SIGSYS: u32 = 31;
+/// The first real-time signal. Real-time signals are queued: each one
+/// sent is delivered, with its value, where other signals pending twice
+/// are delivered once.
+const SIGRTMIN: u32 = 32;
+/// The last real-time signal.
+const SIGRTMAX: u32 = 64;
+
+/// The handler of a signal's default action.
+const DEFAULT: u64 = 0;
+/// The handler that ignores a signal.
+const IGNORE: u64 = 1;
+
+/// How a signal action behaves, as Linux's `sa_flags`.
+flags ActionFlags: u64 {
+    /// SIGCHLD is not sent when a child stops or continues.
+    no_child_stop = 0;
+    /// Children that end are reaped at once instead of waiting to be
+    /// waited for (for SIGCHLD).
+    no_child_wait = 1;
+    /// The handler takes the SignalInfo and context (always passed).
+    info = 2;
+    /// The action names its restorer (always needed).
+    restorer = 26;
+    /// The handler runs on the thread's alternate stack.
+    on_stack = 27;
+    /// An interrupted system call runs again after the handler.
+    restart = 28;
+    /// The signal is not blocked while its handler runs.
+    no_defer = 30;
+    /// The action goes back to the default once the handler has run.
+    reset_hand = 31;
+}
+
+/// How `signal_mask` changes the calling thread's mask.
+enum MaskHow: u32 {
+    /// Adds the set to the mask.
+    block = 0;
+    /// Takes the set out of the mask.
+    unblock = 1;
+    /// Makes the set the mask.
+    set = 2;
+    /// Only reads the mask.
+    query = 3;
+}
+
+/// The flags of an alternate signal stack, as Linux's `ss_flags`.
+flags StackFlags: u32 {
+    /// The thread runs on the stack now (read only).
+    on_stack = 0;
+    /// The stack is turned off.
+    disabled = 1;
+}
+
+/// What a signal handler gets about its signal: the layout of Linux's
+/// `siginfo_t` on x86-64, 128 bytes.
+struct SignalInfo {
+    /// The signal.
+    signal: i32;
+    /// Unused (0).
+    error: i32;
+    /// Where it came from, as Linux's `si_code`: 0 sent with `kill`, -6
+    /// with `signal_thread`, -2 by a timer, 128 by the kernel; for SIGCHLD
+    /// how the child changed (1 exited, 2 killed, 5 stopped, 6
+    /// continued); for a fault's signal its kind (SIGSEGV: 1 no mapping, 2
+    /// not allowed).
+    code: i32;
+    /// Zero.
+    pad: u32;
+    /// The sender's process number in the low half (the high half,
+    /// Linux's user id, is 0); for a fault, the address it faulted on.
+    pid: u64;
+    /// For SIGCHLD, the child's exit code or signal; for a real-time
+    /// signal, the value it carries.
+    status: u64;
+    /// More of the sender's data (unused yet).
+    reserved: [u64; 12];
+}

@@ -83,13 +83,13 @@ impl Notification {
             if poll {
                 return Err(error(Kernel::WouldBlock));
             }
-            if sched::should_stop() {
+            if sched::interrupted() {
                 return Err(error(Kernel::Interrupted));
             }
             let ready = || {
                 self.word.load(Ordering::Relaxed) != 0
                     || self.closed.load(Ordering::Relaxed)
-                    || sched::should_stop()
+                    || sched::interrupted()
             };
             match deadline_ns {
                 None => wait::wait_until(self.key(), "notification", ready),

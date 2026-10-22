@@ -41,7 +41,10 @@ pub use boot::{
     Reservation,
 };
 pub use radix_hw::{Dma, Mmio, MsiMessage, Page};
-pub use user::{MapPageError, SyscallRegs, UserAccess, UserFault, UserFaultKind, UserMode};
+pub use user::{
+    MapPageError, PageEdit, SignalFrame, SyscallRegs, UserAccess, UserFault, UserFaultKind,
+    UserMode,
+};
 
 /// Most CPUs the kernel manages. Per-CPU tables are sized by this.
 pub const MAX_CPUS: usize = 256;

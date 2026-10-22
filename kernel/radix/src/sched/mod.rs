@@ -661,6 +661,13 @@ pub fn should_stop() -> bool {
     running().is_some_and(|me| me.should_stop())
 }
 
+/// Whether the running thread's wait should end early: it has been asked
+/// to stop, or has a signal to take (Phase 8). Waits a signal may cut
+/// short return `Interrupted` when it holds.
+pub fn interrupted() -> bool {
+    running().is_some_and(|me| me.interrupted())
+}
+
 /// Gives the CPU to another thread of the same class, if one waits.
 pub fn yield_now() {
     reschedule(Switch::Yield);

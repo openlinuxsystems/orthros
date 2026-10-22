@@ -31,9 +31,11 @@ members = [
     "lib/lockdep",
     "lib/ksyms",
     "lib/microcode",
+    "lib/posix",
     "lib/random",
     "lib/relocs",
     "lib/sync",
+    "lib/tty",
     "mm",
     "sched",
 ]
