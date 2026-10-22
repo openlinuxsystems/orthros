@@ -290,7 +290,14 @@ queue stops submission: `ring_enter` takes nothing more, and fails with
 length ahead of the kernel's head is an `invalid_argument`. Entries are
 copied out of shared memory once, in batches of 16 under the ring's lock,
 carried out without it, and completed under it again, the completion
-written before its tail is published with release ordering.
+written before its tail is published with release ordering. A waiter
+counts itself in the ring's `waiting` before it looks at the tail, and
+whoever publishes a completion looks at `waiting` before it wakes
+anyone; a full barrier on each side, between the write and the read,
+makes sure that one of them sees the other. Until Phase 8 neither side
+had one, and on x86 a store can wait in the store buffer while a later
+load goes ahead, so a ring round trip between two CPUs could lose a
+wake-up and hang; `ob bench` on a CI runner found it.
 
 The operations are `nop`, `notify`, `wait` (completes when a notification
 is signalled), `msg_ring` (posts a completion to another ring, the
