@@ -14,7 +14,7 @@ paths never leave their directory and that freed clusters are never
 written by their old owner, the lock order, and the known limits. The
 user-facing descriptions are radix-directory(2), radix-file(2),
 radix-files(7), radix-proc(5), radix-sysfs(5) and spark(8); the decisions
-behind the design are ADRs 0052 to 0058.
+behind the design are ADRs 0052 to 0059.
 
 ## Crates
 
@@ -132,6 +132,10 @@ which reads and writes the disk. The capability store releases objects
 with its lock held, so file objects are queued (`fs::defer_drop`, linked
 through the objects themselves, so queueing needs no memory) and dropped
 once the store's lock has gone (`fs::drop_deferred`, from `caps::with`).
+An object whose filesystem says that its nodes only free memory when they
+go (`FileSystem::light_drops`: tmpfs, the boot archive and the generated
+trees) is dropped at once instead (`fs::release`). Only its node can go
+with it: no mount is unmounted while a handle holds a place on it.
 
 ## The page cache
 

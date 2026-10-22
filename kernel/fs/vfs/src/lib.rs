@@ -412,6 +412,13 @@ pub trait FileSystem: Send + Sync {
     fn shrink(&self, _max: usize) -> usize {
         0
     }
+    /// Whether letting go of the last reference to one of its nodes only
+    /// frees memory, so that it may happen with any lock held. A FAT file
+    /// removed while open frees its clusters on the disk then, so FAT
+    /// says no, as does any filesystem that does not say.
+    fn light_drops(&self) -> bool {
+        false
+    }
 }
 
 /// A filesystem, shared.

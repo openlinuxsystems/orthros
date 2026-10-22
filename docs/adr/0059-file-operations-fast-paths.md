@@ -37,6 +37,9 @@ ADR 0040), showed where the time went:
 - Making the file's object took the object registry's lock twice, a
   read looked its page up twice, and splitting a path on `/` went
   through the standard library's general string searcher.
+- Closing queued the released object on a list behind two spin locks,
+  to drop it once the capability store's lock had gone, though dropping a
+  tmpfs file's object only frees memory.
 
 ## Decision
 
@@ -70,12 +73,23 @@ ADR 0040), showed where the time went:
   one hold of the registry's lock (`objects::create_with_rights`); a
   read looks a page in memory up once; `path::components` finds each
   `/` itself.
+- A filesystem says whether its nodes only free memory when their last
+  reference goes (`FileSystem::light_drops`: tmpfs, the boot archive and
+  the generated trees do; FAT, and any filesystem that does not say,
+  does not). A released object on one is dropped at once, under the
+  store's lock (`fs::release`); the others are queued as before. Only
+  the object's node can go with it, since no mount is unmounted while a
+  handle holds a place on it.
 
 ## Consequences
 
-- An open and close of a file in a tmpfs takes 4,200 instructions, from
-  6,049; its status by name 1,600, from 2,872; a 4 KiB read 880 besides
-  the copy, from 1,160.
+- Instructions per operation, user and kernel: an open and close of a
+  file in a tmpfs 3,865, from 6,049; its status by name 1,512, from
+  2,872; a 4 KiB read 877 besides the copy, from 1,161. Their budgets
+  (ADR 0045) come down with them.
+- On the CI runners, before the immediate drops: an open and close 616
+  ns against Linux's 599 (1.03), a status 285 against 376 (0.76), a read
+  204 against 226 (0.91), a write 224 against 252 (0.89).
 - Paths with `..` cost what they did. A mount on a filesystem whose
   filter bit for a node is already taken by another mount point sends
   walks past that node to the table; the root, with a dozen mounts, has

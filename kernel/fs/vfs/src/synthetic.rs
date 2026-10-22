@@ -438,4 +438,8 @@ impl FileSystem for SyntheticFs {
         // devfs's devices are written to, but its tree never changes.
         self.kind != FsKind::Dev
     }
+
+    fn light_drops(&self) -> bool {
+        true
+    }
 }

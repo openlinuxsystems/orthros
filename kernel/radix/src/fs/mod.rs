@@ -76,8 +76,20 @@ static DROPPED: SpinLock<Option<FileRef>> = SpinLock::new(None);
 /// need not take its lock to see that none does.
 static ANY_DROPPED: AtomicBool = AtomicBool::new(false);
 
+/// Lets go of a released object, with the store's lock held: at once if
+/// that can only free memory, or else queued until the lock has gone.
+/// Only its node can be the last reference that goes: no mount is ever
+/// unmounted while a handle holds a place on it.
+pub fn release(file: FileRef) {
+    if file.at.mount.fs.light_drops() {
+        drop(file);
+    } else {
+        defer_drop(file);
+    }
+}
+
 /// Queues a released object to be dropped once the store's lock has gone.
-pub fn defer_drop(file: FileRef) {
+fn defer_drop(file: FileRef) {
     let mut head = DROPPED.lock();
     *file.next.lock() = head.take();
     *head = Some(file);
@@ -253,6 +265,10 @@ impl FileSystem for Subtree {
 
     fn shrink(&self, max: usize) -> usize {
         self.inner.shrink(max)
+    }
+
+    fn light_drops(&self) -> bool {
+        self.inner.light_drops()
     }
 }
 

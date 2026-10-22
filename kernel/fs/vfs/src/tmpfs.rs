@@ -103,6 +103,10 @@ impl FileSystem for Tmpfs {
         self.root.clone()
     }
 
+    fn light_drops(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> FsInfo {
         let page = radix_block::PAGE_SIZE as u64;
         FsInfo {

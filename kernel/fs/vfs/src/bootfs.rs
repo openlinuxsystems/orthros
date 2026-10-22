@@ -97,6 +97,10 @@ impl FileSystem for BootFs {
     fn read_only(&self) -> bool {
         true
     }
+
+    fn light_drops(&self) -> bool {
+        true
+    }
 }
 
 impl BootNode {

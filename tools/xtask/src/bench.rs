@@ -85,10 +85,10 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("context_switch", 1_100),                 // 959
     ("fresh_page", 11_000),                    // 9,868
     ("tlb_local", 5_600),                      // 5,024
-    ("file_open_close", 6_800),                // 6,049
-    ("file_stat", 3_300),                      // 2,872
-    ("file_read_4k", 5_900),                   // 5,257
-    ("file_write_4k", 6_000),                  // 5,364
+    ("file_open_close", 4_300),                // 3,865
+    ("file_stat", 1_700),                      // 1,512
+    ("file_read_4k", 5_500),                   // 4,973
+    ("file_write_4k", 5_700),                  // 5,169
     ("endpoint_call_same_cpu", 6_200),         // 5,549
     ("notification_pingpong_same_cpu", 6_200), // 5,566
     ("channel_roundtrip_same_cpu", 5_100),     // 4,587

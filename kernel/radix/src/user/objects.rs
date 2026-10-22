@@ -425,8 +425,8 @@ pub fn released(released: &Released) {
         Object::Process(process) => super::process::released(process),
         // It may be the last reference to a file removed while open,
         // whose space is freed on the disk when it goes: that waits until
-        // the store's lock has gone (`fs::drop_deferred`).
-        Object::File(file) | Object::Directory(file) => crate::fs::defer_drop(file),
+        // the store's lock has gone (`fs::release`, `fs::drop_deferred`).
+        Object::File(file) | Object::Directory(file) => crate::fs::release(file),
         Object::Space(_) | Object::Random | Object::KernelLog => {}
     }
     // What it was charged is given back once it has closed.
