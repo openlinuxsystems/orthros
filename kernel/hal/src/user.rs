@@ -64,7 +64,7 @@ pub enum PageEdit {
 /// A signal handler's frame: what [`UserMode::push_signal_frame`] writes on
 /// a program's stack, so that its thread runs `handler(signal, &info,
 /// &context)` and returns through `restorer`, which calls the kernel to
-/// restore what was saved (radix-signal(7) describes the layout).
+/// restore what was saved (radix-signal(2) describes the layout).
 pub struct SignalFrame<'a> {
     /// The signal's number.
     pub signal: u32,

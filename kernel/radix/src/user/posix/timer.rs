@@ -32,7 +32,7 @@ use radix_abi::signal::{SIGALRM, SIGNALS, SIGPROF, SIGVTALRM};
 use radix_klog::error;
 use radix_mm::Kmalloc;
 use radix_posix::signal::{Info, SI_KERNEL, SI_TIMER, bit};
-use radix_sync::Mutex;
+use radix_sync::{Mutex, MutexGuard};
 
 use super::signal::Sent;
 use super::{PosixState, cpu_ns, find_thread, kmalloc, signal};
@@ -170,10 +170,12 @@ pub fn set(
     if index >= ITIMER_SIGNALS.len() {
         return Err(Kernel::InvalidArgument.status(0));
     }
-    if value_ns != 0 {
+    let armed = if value_ns != 0 {
         start()?;
-        register(process)?;
-    }
+        Some(register(process)?)
+    } else {
+        None
+    };
     let now = now_for(process, index);
     let old = {
         let mut posix = process.posix.lock();
@@ -186,6 +188,7 @@ pub fn set(
         };
         old
     };
+    drop(armed);
     changed();
     // A timer due now is still a little way off.
     let left = if old.expires == 0 { 0 } else { old.expires.saturating_sub(now).max(1) };
@@ -333,10 +336,12 @@ fn set_posix(
     value_ns: u64,
     interval_ns: u64,
 ) -> Result<(u64, u64)> {
-    if value_ns != 0 {
+    let armed = if value_ns != 0 {
         start()?;
-        register(process)?;
-    }
+        Some(register(process)?)
+    } else {
+        None
+    };
     let wall = <Arch as radix_hal::Timer>::wall_clock_ns().unwrap_or(0);
     let old = {
         let mut posix = process.posix.lock();
@@ -358,6 +363,7 @@ fn set_posix(
         timer.overrun = 0;
         old
     };
+    drop(armed);
     changed();
     Ok(old)
 }
@@ -454,18 +460,26 @@ pub fn discarded(process: &ProcessObject, posix: &mut PosixState, set: u64) {
     }
 }
 
-/// Puts `process` in [`ARMED`], unless it is there.
-fn register(process: &ProcessRef) -> Result<()> {
+/// The list of [`ARMED`], locked.
+type ArmedGuard = MutexGuard<'static, Option<Vec<Weak<ProcessObject, Kmalloc>, Kmalloc>>>;
+
+/// Puts `process` in [`ARMED`], unless it is there, and returns the list
+/// still locked: the caller sets the timer before letting go of it.
+/// Otherwise the timer thread, which takes a process whose timers are
+/// all off out of the list under the same lock ([`unregister`]), could
+/// look at its timers before the new one is set and take it out after it
+/// was put in, and the timer would never expire.
+fn register(process: &ProcessRef) -> Result<ArmedGuard> {
     let mut armed = ARMED.lock();
     let list = armed.get_or_insert_with(|| Vec::new_in(kmalloc()));
     if list.iter().any(|weak| core::ptr::eq(weak.as_ptr(), Arc::as_ptr(process))) {
-        return Ok(());
+        return Ok(armed);
     }
     list.retain(|weak| weak.strong_count() > 0);
     list.try_reserve(1).map_err(|_| Kernel::NoMemory.status(0))?;
     // Room was reserved above.
     let _ = list.push_within_capacity(Arc::downgrade(process));
-    Ok(())
+    Ok(armed)
 }
 
 /// Starts the timer thread, once.

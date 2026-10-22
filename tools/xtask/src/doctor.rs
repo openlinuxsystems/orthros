@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
-use crate::{Ctx, Error, Result, kernel, qemu, tla};
+use crate::{Ctx, Error, Result, kernel, ports, qemu, tla};
 
 /// mdBook release the handbook is built and tested with.
 pub const MDBOOK_VERSION: &str = "0.4.52";
@@ -294,6 +294,93 @@ fn requirements() -> Vec<Requirement> {
                     .map(|path| path.display().to_string())
             },
             packages: all("dosfstools"),
+            fallback: None,
+        },
+        Requirement {
+            name: "Clang",
+            purpose: "compiles the C library and the ports (version 20 or later)",
+            found: |_| ports::find_clang().map(|(_, version)| version),
+            packages: Packages { apt: Some("clang-20"), dnf: Some("clang"), pacman: Some("clang") },
+            fallback: None,
+        },
+        Requirement {
+            name: "compiler-rt",
+            purpose: "Clang's builtins, which every C program links",
+            found: |_| {
+                let (clang, _) = ports::find_clang()?;
+                ports::find_builtins(&clang).map(|(_, builtins)| builtins.display().to_string())
+            },
+            packages: Packages {
+                apt: Some("libclang-rt-20-dev"),
+                dnf: Some("compiler-rt"),
+                pacman: Some("compiler-rt"),
+            },
+            fallback: None,
+        },
+        Requirement {
+            name: "LLD",
+            purpose: "links the C library and the ports",
+            found: |_| ports::find_llvm("ld.lld").map(|path| path.display().to_string()),
+            packages: Packages { apt: Some("lld-20"), dnf: Some("lld"), pacman: Some("lld") },
+            fallback: None,
+        },
+        Requirement {
+            name: "LLVM tools",
+            purpose: "llvm-ar, llvm-nm and the other tools the ports' toolchain wraps",
+            found: |_| {
+                let mut found = ports::TOOLS.iter().map(|(_, program)| ports::find_llvm(program));
+                let first = found.next()??;
+                found.all(|path| path.is_some()).then(|| first.display().to_string())
+            },
+            packages: Packages { apt: Some("llvm-20"), dnf: Some("llvm"), pacman: Some("llvm") },
+            fallback: None,
+        },
+        Requirement {
+            name: "Meson",
+            purpose: "builds the C library (version 1.3 or later)",
+            found: |_| {
+                let version = program_version("meson", "--version")?;
+                let mut parts = version.split('.').map(|part| part.parse::<u32>().unwrap_or(0));
+                let (major, minor) = (parts.next()?, parts.next().unwrap_or(0));
+                ((major, minor) >= (1, 3)).then_some(version)
+            },
+            packages: all("meson"),
+            fallback: None,
+        },
+        Requirement {
+            name: "Ninja",
+            purpose: "runs Meson's builds",
+            found: |_| program_version("ninja", "--version"),
+            packages: Packages {
+                apt: Some("ninja-build"),
+                dnf: Some("ninja-build"),
+                pacman: Some("ninja"),
+            },
+            fallback: None,
+        },
+        Requirement {
+            name: "localedef",
+            purpose: "compiles the C.UTF-8 locale",
+            found: |_| process::find_program("localedef").map(|p| p.display().to_string()),
+            packages: Packages {
+                apt: Some("libc-bin"),
+                dnf: Some("glibc-common"),
+                pacman: Some("glibc"),
+            },
+            fallback: None,
+        },
+        Requirement {
+            name: "git",
+            purpose: "fetches the ports' sources",
+            found: |_| program_version("git", "--version"),
+            packages: all("git"),
+            fallback: None,
+        },
+        Requirement {
+            name: "patch",
+            purpose: "applies the ports' patches",
+            found: |_| program_version("patch", "--version"),
+            packages: all("patch"),
             fallback: None,
         },
         Requirement {

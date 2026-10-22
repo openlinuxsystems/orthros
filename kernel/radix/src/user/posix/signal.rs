@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Signals (Phase 8, radix-signal(7)): sending them, and delivering them
+//! Signals (Phase 8, radix-signal(2)): sending them, and delivering them
 //! on a thread's way back to user mode.
 //!
 //! Sending ([`send_process`], [`send_thread`]) does what the signal does at
@@ -292,7 +292,7 @@ pub fn raise_current(signal: u32) {
     send_thread(&me, user, signal, info);
 }
 
-/// Job control on a terminal (radix-terminal(4)): `user`'s thread, of
+/// Job control on a terminal (radix-terminal(2)): `user`'s thread, of
 /// background process group `group`, reads its controlling terminal
 /// (`signal` SIGTTIN) or writes to it or changes it (SIGTTOU). If the
 /// thread ignores or blocks the signal, a read fails with io and a write

@@ -46,7 +46,7 @@
 //! copy on to its end ([`fixup`]), and the copy reports how much was left.
 //!
 //! A signal frame has Linux's layout on x86-64, so that a C library's
-//! `ucontext_t` and `siginfo_t` describe it (radix-signal(7)): at the
+//! `ucontext_t` and `siginfo_t` describe it (radix-signal(2)): at the
 //! handler's stack pointer the address it returns to, above it the
 //! `ucontext_t` (968 bytes, as glibc declares it, which musl's and mlibc's
 //! begin with), the `siginfo_t` (128 bytes) and, 64-byte aligned, the

@@ -3,7 +3,7 @@
 
 // Terminals on Radix (ADR 0066): termios, window sizes, job control and
 // pseudo-terminals, all through a terminal's `control` method, which
-// takes Linux's ioctl requests (radix-terminal(4)).
+// takes Linux's ioctl requests (radix-terminal(2)).
 
 #include <asm/ioctls.h>
 #include <bits/ensure.h>

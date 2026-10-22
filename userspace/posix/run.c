@@ -6,7 +6,8 @@
 // that terminal as the controlling one, then runs each test (those its
 // arguments name, or all of them) as a shell runs a job: in a process
 // group of its own, in the foreground, with fork and exec. The tests are
-// the programs of this directory, the test of Rust's standard library
+// the programs of this directory and the dynamically linked one of
+// dynamic/, the test of Rust's standard library
 // (std-test, userspace/programs), the C library's own tests (libc) and
 // Lua's test suite (lua); libc:<name> runs only the C library's test
 // <name>, with its output as it goes. It prints "posix: <test> passed" or
@@ -58,6 +59,7 @@ static const struct test TESTS[] = {
 		{"spawn", NULL, NULL},
 		{"limits", NULL, NULL},
 		{"format", NULL, NULL},
+		{"dynamic", NULL, NULL},
 		{"std-test", NULL, NULL},
 		{"libc", NULL, LIBC},
 		{"lua", "/system/tests/lua/testes", LUA},

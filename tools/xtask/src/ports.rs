@@ -24,7 +24,9 @@
 //! The toolchain is the host's Clang and LLD, [`CLANG_MIN`] or later,
 //! made to target Radix by the wrapper scripts and Meson cross files ob
 //! writes into `out/toolchain`: C for Radix against the C library in the
-//! sysroot, linked into static position-independent programs.
+//! sysroot, linked into static position-independent programs, or, for
+//! bundles that ship libraries of their own, into programs and libraries
+//! on the shared C library and its dynamic linker (ADR 0071).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -215,7 +217,7 @@ pub struct Toolchain {
 }
 
 /// The LLVM tools the toolchain wraps, by the name the wrapper gets.
-const TOOLS: &[(&str, &str)] = &[
+pub const TOOLS: &[(&str, &str)] = &[
     ("ar", "llvm-ar"),
     ("ranlib", "llvm-ranlib"),
     ("nm", "llvm-nm"),
@@ -227,7 +229,7 @@ const TOOLS: &[(&str, &str)] = &[
 
 /// The first of `name-N` for N from the newest down to [`CLANG_MIN`], or
 /// `name`, that is on `PATH`.
-fn find_llvm(name: &str) -> Option<PathBuf> {
+pub fn find_llvm(name: &str) -> Option<PathBuf> {
     (CLANG_MIN..CLANG_MIN + 10)
         .rev()
         .find_map(|major| process::find_program(format!("{name}-{major}")))
@@ -240,28 +242,19 @@ fn clang_major(line: &str) -> Option<u32> {
     after.split('.').next()?.parse().ok()
 }
 
-/// Finds Clang, LLD and the LLVM tools, and compiler-rt's builtins.
-pub fn find_toolchain(ctx: &Ctx) -> Result<Toolchain> {
-    let missing = || {
-        Error::new(format!("ports need Clang {CLANG_MIN} or later, LLD and compiler-rt"))
-            .hint("run `./ob doctor` to see what is missing")
-    };
-    let clang = find_llvm("clang").ok_or_else(missing)?;
-    let out = process::output(ctx, Command::new(&clang).arg("--version"))?;
-    let version = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string();
-    match clang_major(&version) {
-        Some(major) if major >= CLANG_MIN => {}
-        _ => {
-            return Err(Error::new(format!(
-                "{} is `{version}`; ports need Clang {CLANG_MIN} or later",
-                clang.display()
-            ))
-            .hint("run `./ob doctor` to see what to install"));
-        }
-    }
-    let out = process::output(ctx, Command::new(&clang).arg("-print-resource-dir"))?;
+/// Clang, [`CLANG_MIN`] or later, and the first line of its `--version`.
+pub fn find_clang() -> Option<(PathBuf, String)> {
+    let clang = find_llvm("clang")?;
+    let out = Command::new(&clang).arg("--version").output().ok()?;
+    let version = String::from_utf8_lossy(&out.stdout).lines().next()?.to_string();
+    (clang_major(&version)? >= CLANG_MIN).then_some((clang, version))
+}
+
+/// `clang`'s resource directory, and compiler-rt's x86-64 builtins in it.
+pub fn find_builtins(clang: &Path) -> Option<(PathBuf, PathBuf)> {
+    let out = Command::new(clang).arg("-print-resource-dir").output().ok()?;
     let resource = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    // Distributions put compiler-rt's x86-64 builtins in one of these.
+    // Distributions put them in one of these.
     let builtins = [
         "lib/linux/libclang_rt.builtins-x86_64.a",
         "lib/x86_64-pc-linux-gnu/libclang_rt.builtins.a",
@@ -270,11 +263,20 @@ pub fn find_toolchain(ctx: &Ctx) -> Result<Toolchain> {
     ]
     .iter()
     .map(|path| resource.join(path))
-    .find(|path| path.is_file())
-    .ok_or_else(|| {
-        Error::new(format!("compiler-rt's builtins are not in {}", resource.display()))
-            .hint("run `./ob doctor` to see what to install")
-    })?;
+    .find(|path| path.is_file())?;
+    Some((resource, builtins))
+}
+
+/// Finds Clang, LLD and the LLVM tools, and compiler-rt's builtins.
+pub fn find_toolchain(ctx: &Ctx) -> Result<Toolchain> {
+    let missing = || {
+        Error::new(format!(
+            "ports need Clang {CLANG_MIN} or later, LLD, compiler-rt and LLVM's tools"
+        ))
+        .hint("run `./ob doctor` to see what to install")
+    };
+    let (clang, version) = find_clang().ok_or_else(missing)?;
+    let (resource, builtins) = find_builtins(&clang).ok_or_else(missing)?;
     let mut tools = BTreeMap::new();
     for (name, program) in TOOLS {
         let path = find_llvm(program).ok_or_else(missing)?;
@@ -342,11 +344,15 @@ impl Toolchain {
     /// (radix-posix(7)), with Linux's own macros taken away and Radix's
     /// given, the sysroot's headers only, and, when it links, the C
     /// library's start files, the C library and compiler-rt's builtins,
-    /// into a static position-independent program, without the functions
-    /// and data it never uses (each is in a section of its own, as the C
-    /// library's are, for the linker to drop). Linux's target, rather
-    /// than none, makes Clang link with LLD itself (for no OS it hands
-    /// linking to the host's GCC).
+    /// without the functions and data it never uses (each is in a section
+    /// of its own, as the C library's are, for the linker to drop). It
+    /// links a static position-independent program, as system programs
+    /// are; with `-dynamic`, which it takes away, a program that the
+    /// dynamic linker starts (`/system/lib/ld.so`), and with `-shared` a
+    /// shared library, both on the shared C library, for bundles that ship
+    /// libraries of their own (ADR 0071). Linux's target, rather than
+    /// none, makes Clang link with LLD itself (for no OS it hands linking
+    /// to the host's GCC).
     fn cc_script(&self, sysroot: &Path) -> String {
         let lib = sysroot.join("system/lib");
         let mut s = String::new();
@@ -356,14 +362,19 @@ impl Toolchain {
 # Written by ob (ob(1), PORTS): the Radix toolchain's C compiler.
 # {version}
 link=yes
+mode=static
 for arg do
+	shift
 	case $arg in
 	-c | -S | -E | -M | -MM | -fsyntax-only | -print-* | -dump* | --version | -v | -'###')
 		link= ;;
 	-shared)
-		echo "{TRIPLE}-cc: shared libraries are not supported yet" >&2
-		exit 1 ;;
+		mode=shared ;;
+	-dynamic)
+		mode=dynamic
+		continue ;;
 	esac
+	set -- "$@" "$arg"
 done
 set -- --target=x86_64-unknown-linux-musl \
 	-U__linux__ -U__linux -Ulinux -U__gnu_linux__ \
@@ -372,9 +383,17 @@ set -- --target=x86_64-unknown-linux-musl \
 	-isystem '{sysroot}/system/include' -isystem '{resource}/include' \
 	-fPIE -ffunction-sections -fdata-sections "$@"
 if [ -n "$link" ]; then
-	set -- -fuse-ld=lld -nostdlib -static-pie -Wl,-z,max-page-size=4096 -Wl,--gc-sections \
-		'{lib}/Scrt1.o' '{lib}/crti.o' "$@" \
-		-L'{lib}' -lc '{builtins}' '{lib}/crtn.o'
+	# The C library goes in as the program does, whichever way the
+	# arguments left the linker (rustc's end with -Bdynamic).
+	case $mode in
+	static) start='{lib}/Scrt1.o' libc=-Bstatic; set -- -static-pie "$@" ;;
+	dynamic) start='{lib}/Scrt1.o' libc=-Bdynamic
+		set -- -pie -Wl,--dynamic-linker=/system/lib/ld.so -Wl,--as-needed "$@" ;;
+	shared) start= libc=-Bdynamic; set -- -Wl,--as-needed "$@" ;;
+	esac
+	set -- -fuse-ld=lld -nostdlib -Wl,-z,max-page-size=4096 -Wl,--gc-sections \
+		${{start:+"$start"}} '{lib}/crti.o' "$@" \
+		-L'{lib}' -Wl,$libc -lc '{builtins}' '{lib}/crtn.o'
 fi
 exec '{clang}' "$@"
 "#,
@@ -414,8 +433,8 @@ exec '{clang}' "$@"
              cpp_args = ['-fPIC', '-ffunction-sections', '-fdata-sections', \
              '-Werror=unknown-attributes', '-D__radix__', '-D__dukovo__', '-D__unix__', \
              '-idirafter', '{radix}']\n\
-             c_link_args = ['-nostdlib']\n\
-             cpp_link_args = ['-nostdlib']\n\
+             c_link_args = ['-nostdlib', '{builtins}']\n\
+             cpp_link_args = ['-nostdlib', '{builtins}']\n\
              \n{host}",
             clang = self.clang.display(),
             clangxx = clangxx.display(),
@@ -424,6 +443,7 @@ exec '{clang}' "$@"
             ar = self.tools["ar"].display(),
             strip = self.tools["strip"].display(),
             radix = sysroot.join("system/include").display(),
+            builtins = self.builtins.display(),
             host = HOST_MACHINE,
         )
     }

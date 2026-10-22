@@ -1,7 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 The Dukovo contributors */
 /* SPDX-License-Identifier: Apache-2.0 OR MIT */
 
-/* How an ioctl request number is made, as on Linux (radix-terminal(4)):
+/* How an ioctl request number is made, as on Linux (radix-terminal(2)):
  * from its direction, type, number and the size of what it passes. */
 
 #ifndef _ASM_IOCTL_H

@@ -15,7 +15,7 @@
 //! description: it has an offset, which reads and writes at CURRENT use
 //! and move, and status flags. Copies of the capability (`derive`, and
 //! `fork`'s copies) share them; each `open` makes a new one. Pipes
-//! (radix-process(2)'s `pipe`) and terminals (radix-terminal(4)) are
+//! (radix-process(2)'s `pipe`) and terminals (radix-terminal(2)) are
 //! files too, which have no offset: their reads and writes take any
 //! offset, and their reads return what has come, waiting while nothing
 //! has unless the description is non_blocking.
@@ -117,7 +117,7 @@ interface file = 0x000c version 2 {
     /// A device's own request, as Linux's `ioctl`: `request` with its
     /// `argument`, and `size` bytes at `buffer` it reads or writes.
     /// Terminals take the termios, window size, process group and
-    /// controlling terminal requests radix-terminal(4) lists; other files
+    /// controlling terminal requests radix-terminal(2) lists; other files
     /// fail with not_terminal.
     method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,

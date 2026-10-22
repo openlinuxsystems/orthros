@@ -20,7 +20,10 @@ radix_sources = files(
 	'generic/radix.cpp',
 )
 
-rtld_sources += radix_sources
+# The dynamic linker's own copy, built with MLIBC_BUILDING_RTLD; a static
+# program's C library has the dynamic linker's code too, and uses its own
+# copy of these, as Linux's sysdeps do.
+rtld_dso_sources += radix_sources
 
 libc_sources += radix_sources + files(
 	'generic/entry.cpp',

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Terminals' line discipline and the byte rings pipes and terminals
-//! buffer through (Phase 8, radix-terminal(4)).
+//! buffer through (Phase 8, radix-terminal(2)).
 //!
 //! [`Ring`] is a fixed ring of bytes: a pipe's 64 KiB, a terminal's input
 //! line and its output. [`Ldisc`] is POSIX's general terminal interface
@@ -10,7 +10,7 @@
 //! echoes (ECHO), and says which signal a signal character asks for
 //! (ISIG); given what programs write, it makes what the screen needs
 //! (OPOST). Its settings are a [`Settings`], which reads and writes the C
-//! library's `struct termios` (radix-terminal(4)'s Termios).
+//! library's `struct termios` (radix-terminal(2)'s Termios).
 //!
 //! The crate knows nothing of processes, locks or user memory: the kernel
 //! (`radix::fs::tty`) holds an `Ldisc` behind a lock, feeds it, sends the

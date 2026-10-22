@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Terminals (Phase 8, radix-terminal(4)): pseudo-terminals, and the
+//! Terminals (Phase 8, radix-terminal(2)): pseudo-terminals, and the
 //! controlling terminal of a session.
 //!
 //! A pseudo-terminal ([`Tty`]) is a line discipline (`radix_tty::Ldisc`)

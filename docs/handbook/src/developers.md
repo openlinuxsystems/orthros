@@ -74,7 +74,7 @@ sudo apt install default-jre-headless
 The system calls, the methods of every kind of object and the kernel's
 errors are defined once, in `abi/*.ridl` (ADR 0033). `tools/ridlc`
 compiles them into the Rust bindings of `radix-abi`, the C headers that
-`./ob build` installs under `out/sysroot/include/radix/`, and the
+`./ob build` installs under `out/sysroot/system/include/radix/`, and the
 section 2 man pages that `./ob docs` builds; `ridlc` also runs on its own:
 
 ```sh

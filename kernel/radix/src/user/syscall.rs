@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The twelve system calls (radix-syscalls(2)).
+//! The twelve system calls (radix-ipc(7)).
 //!
 //! The architecture saves the caller's registers and calls [`handle`]
 //! with interrupts off, on the thread's kernel stack. The call runs with

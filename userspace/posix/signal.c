@@ -3,8 +3,9 @@
 
 // Signals: handlers and what they are told, masks, pending signals,
 // sigsuspend, sigtimedwait, default actions, stopping and continuing,
-// faults, interrupted calls, the alternate stack, timers, and the values
-// sigqueue sends and real-time signals queue.
+// faults, interrupted calls, timers set again just after being
+// cancelled, the alternate stack, timers, and the values sigqueue sends
+// and real-time signals queue.
 
 #include <setjmp.h>
 #include <stdint.h>
@@ -332,6 +333,24 @@ static void interrupts(void) {
 	close(fds[1]);
 }
 
+// A timer set just after one was cancelled expires: the kernel's timer
+// thread, taking the process off its list as it had no timer set, once
+// lost it. The time between the two grows each round, to meet the
+// thread at each point of its look at the timers.
+static void rearms(void) {
+	handle(SIGALRM, on_signal, 0);
+	struct itimerval later = {{0, 0}, {1, 0}}, off = {{0, 0}, {0, 0}}, soon = {{0, 0}, {0, 1000}};
+	for(int i = 0; i < 300; i++) {
+		CHECK(setitimer(ITIMER_REAL, &later, NULL) == 0);
+		CHECK(setitimer(ITIMER_REAL, &off, NULL) == 0);
+		for(volatile int spin = 0; spin < i * 20; spin++) {
+		}
+		CHECK(setitimer(ITIMER_REAL, &soon, NULL) == 0);
+		CHECK_ERROR(pause(), EINTR);
+	}
+	signal(SIGALRM, SIG_DFL);
+}
+
 static char alternate[65536];
 static volatile int on_alternate;
 
@@ -486,6 +505,7 @@ int main(void) {
 	RUN(children);
 	RUN(faults);
 	RUN(interrupts);
+	RUN(rearms);
 	RUN(stacks);
 	RUN(floats);
 	RUN(nested);

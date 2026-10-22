@@ -2,7 +2,7 @@
 /* SPDX-License-Identifier: Apache-2.0 OR MIT */
 
 /* The ioctl requests <sys/ioctl.h> has: the terminal ones, with Linux's
- * numbers (radix-terminal(4)). */
+ * numbers (radix-terminal(2)). */
 
 #ifndef _ABIBITS_IOCTLS_H
 #define _ABIBITS_IOCTLS_H

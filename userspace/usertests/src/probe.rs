@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The probe: every system call and method the kernel has, with good
-//! arguments and bad ones, checking each answer against radix-syscalls(2)
+//! arguments and bad ones, checking each answer against radix-ipc(7)
 //! and the interface pages.
 
 use libradix::abi::capability::{self, ObjectKind, Rights};

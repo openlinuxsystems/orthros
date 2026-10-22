@@ -1,7 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 The Dukovo contributors */
 /* SPDX-License-Identifier: Apache-2.0 OR MIT */
 
-/* The terminal ioctl requests, with Linux's numbers. radix-terminal(4)
+/* The terminal ioctl requests, with Linux's numbers. radix-terminal(2)
  * lists the ones the kernel takes; the rest fail with ENOTTY. */
 
 #ifndef _ASM_IOCTLS_H

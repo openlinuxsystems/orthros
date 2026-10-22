@@ -28,15 +28,17 @@ sed -n "s|^		'include/abi-bits/\(.*\)',$|\1|p" "$PORT_SRC/sysdeps/radix/meson.bu
 # floating-point conversions, strftime and the calendar arithmetic.
 cp "$PORT_DIR"/musl/*.hpp "$PORT_SRC/options/internal/include/mlibc/"
 
-# A static C library with the POSIX, glibc and BSD interfaces, using
-# Clang's C headers and, to build, libstdc++'s freestanding C++ headers
-# (which the cross file names). Programs link compiler-rt's builtins
-# themselves.
+# The C library with the POSIX, glibc and BSD interfaces, using Clang's C
+# headers and, to build, libstdc++'s freestanding C++ headers (which the
+# cross file names): static, for system programs, and shared, with the
+# dynamic linker (/system/lib/ld.so), for bundles' programs (ADR 0071).
+# Static programs link compiler-rt's builtins themselves; the cross file
+# links them into the shared library and the dynamic linker.
 meson setup "$PORT_BUILD" "$PORT_SRC" \
 	--cross-file "$LIBC_CROSS_FILE" \
 	--prefix=/system --libdir=lib --includedir=include \
 	--buildtype=release \
-	-Ddefault_library=static \
+	-Ddefault_library=both \
 	-Duse_freestnd_hdrs=disabled \
 	-Dlibgcc_dependency=false \
 	-Ddefault_library_paths=/system/lib

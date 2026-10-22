@@ -10,6 +10,9 @@ summary = "the C library"
 license = "MIT"
 homepage = "https://github.com/managarm/mlibc"
 depends = ["freestnd-cxx-hdrs"]
+# The dynamic linker and the shared C library, for bundles (ADR 0071);
+# system programs are static.
+image = ["system/lib/ld.so", "system/lib/libc.so"]
 
 [source]
 git = "https://github.com/managarm/mlibc.git"

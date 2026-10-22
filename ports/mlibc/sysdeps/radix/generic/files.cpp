@@ -703,6 +703,8 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 	return stat_path(resolved, statbuf);
 }
 
+// Not in the dynamic linker, which has no strnlen (core.cpp).
+#ifndef MLIBC_BUILDING_RTLD
 int Sysdeps<Statvfs>::operator()(const char *path, struct statvfs *out) {
 	int fd;
 	if(int e = sysdep<Open>(path, O_RDONLY | O_CLOEXEC, 0, &fd); e)
@@ -733,6 +735,7 @@ int Sysdeps<Statvfs>::operator()(const char *path, struct statvfs *out) {
 	sysdep<Close>(fd);
 	return e;
 }
+#endif
 
 int Sysdeps<Fstatvfs>::operator()(int fd, struct statvfs *out) {
 	uint32_t slot = radix::slot_of(fd);

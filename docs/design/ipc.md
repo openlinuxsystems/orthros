@@ -165,7 +165,7 @@ them and writes three outputs:
   (decoding checks every argument, so the kernel never sees an invalid
   enum value or flag), wrappers generic over a `Syscalls` trait for
   programs, and `#[repr(C)]` structures with their sizes checked;
-- C headers (`out/sysroot/include/radix/`, written by `ob build`), with
+- C headers (`out/sysroot/system/include/radix/`, written by `ob build`), with
   `static inline` wrappers around the system call instruction;
 - man(2) pages in scdoc (`out/docs/man-src/`, built by `ob docs`), one per
   system call with its registers and errors, one per module.

@@ -21,7 +21,9 @@
 #include "radix.hpp"
 
 // Where new threads start (x86_64/thread-entry.S).
+#ifndef MLIBC_BUILDING_RTLD
 extern "C" void __mlibc_thread_entry();
+#endif
 
 // frigg's assertions call frg_panic (options/internal/generic/frigg.cpp)
 // through a weak reference, which does not take it out of a static
@@ -76,6 +78,10 @@ pid_t Sysdeps<GetTid>::operator()() {
 	return sysdep<FutexTid>();
 }
 
+// The dynamic linker is built from this file too, but without the rest of
+// the C library: it starts no threads, and has none of the string
+// functions what follows uses.
+#ifndef MLIBC_BUILDING_RTLD
 int Sysdeps<Clone>::operator()(void *tcb, pid_t *pid_out, void *stack) {
 	(void)tcb;
 	struct radix_process_start_results r;
@@ -87,6 +93,7 @@ int Sysdeps<Clone>::operator()(void *tcb, pid_t *pid_out, void *stack) {
 	*pid_out = static_cast<pid_t>(r.thread);
 	return 0;
 }
+#endif
 
 void Sysdeps<Yield>::operator()() {
 	radix_yield();
@@ -291,6 +298,7 @@ int Sysdeps<GetEntropy>::operator()(void *buffer, size_t length) {
 	return 0;
 }
 
+#ifndef MLIBC_BUILDING_RTLD
 namespace {
 
 // Reads the first line of a file of /sys into `out` (`size` bytes, with
@@ -368,6 +376,7 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 		return EINVAL;
 	}
 }
+#endif
 
 int Sysdeps<GetRlimit>::operator()(int resource, struct rlimit *limit) {
 	// The RLIMIT_ numbers are the kernel's LimitKind, and RLIM_INFINITY

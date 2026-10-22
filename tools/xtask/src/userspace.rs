@@ -229,6 +229,7 @@ fn build_std(
 
 /// Builds each C test program of [`POSIX_SOURCES`] (one per `.c` file,
 /// with the headers there) into `out/sysroot/system/tests/posix`, and
+/// the dynamically linked one of its `dynamic` directory (ADR 0071), and
 /// returns each one's place in the boot archive and file.
 fn build_posix(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, PathBuf)>> {
     let sources = ctx.root.join(POSIX_SOURCES);
@@ -254,6 +255,46 @@ fn build_posix(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, P
             .arg(&source);
         process::run(ctx, &mut cmd)?;
         files.push((format!("{POSIX_DIR}/{name}"), program));
+    }
+    files.extend(build_dynamic(ctx, toolchain)?);
+    Ok(files)
+}
+
+/// Builds the `dynamic` test as a bundle's program is built (ADR 0071):
+/// the program, on the shared C library, with its private library in
+/// `lib` beside it, found through its run path, and a library it opens
+/// with dlopen there too.
+fn build_dynamic(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, PathBuf)>> {
+    let posix = ctx.root.join(POSIX_SOURCES);
+    let sources = posix.join("dynamic");
+    let out = ctx.out.join("sysroot").join(POSIX_DIR);
+    let lib = out.join("lib");
+    process::create_dir(&lib)?;
+    step("Building the dynamically linked C test program and its libraries");
+    // Each one's file, mode, source and further arguments.
+    let parts: [(PathBuf, &str, &str, &[&str]); 3] = [
+        (lib.join("libgreet.so"), "-shared", "greet.c", &["-fPIC", "-Wl,-soname,libgreet.so"]),
+        (lib.join("plugin.so"), "-shared", "plugin.c", &["-fPIC", "-lgreet", "-Wl,-rpath,$ORIGIN"]),
+        (out.join("dynamic"), "-dynamic", "main.c", &["-lgreet", "-Wl,-rpath,$ORIGIN/lib"]),
+    ];
+    let mut files = Vec::new();
+    for (file, mode, source, args) in parts {
+        let mut cmd = Command::new(toolchain.cc());
+        cmd.arg(mode)
+            .args(["-std=c11", "-D_GNU_SOURCE"])
+            .args(["-O2", "-g", "-Wall", "-Wextra", "-Werror", "-I"])
+            .arg(&posix)
+            .arg("-I")
+            .arg(&sources)
+            .arg("-o")
+            .arg(&file)
+            .arg(sources.join(source))
+            .arg("-L")
+            .arg(&lib)
+            .args(args);
+        process::run(ctx, &mut cmd)?;
+        let inside = file.strip_prefix(ctx.out.join("sysroot")).unwrap_or(&file);
+        files.push((inside.to_string_lossy().into_owned(), file));
     }
     Ok(files)
 }

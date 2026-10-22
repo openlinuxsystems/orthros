@@ -35,7 +35,7 @@
 //! zombie, with its exit status, until its parent waits; the children of
 //! a process that ends go to Spark, which reaps them. Every process is in
 //! a process group and a session, numbered by the process that made them;
-//! a session may have a controlling terminal (radix-terminal(4)). The
+//! a session may have a controlling terminal (radix-terminal(2)). The
 //! methods from `fork` on are called on the caller's own process
 //! (SLOT_PROCESS), with the control right, and the ones that name a
 //! signal mask or stack act on the calling thread.
