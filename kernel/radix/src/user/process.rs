@@ -475,6 +475,7 @@ impl ProcessObject {
         }
         let space = process.space().ok_or(error(Kernel::Gone))?;
         let signals = ThreadSignals::new(mask).ok_or(error(Kernel::NoMemory))?;
+        let scheduling = posix::priority::inherited();
         let user = UserThread {
             cspace: process.cspace,
             space,
@@ -486,13 +487,17 @@ impl ProcessObject {
             process: process.clone(),
             signals: SpinLock::new(signals),
             futex_woken: AtomicBool::new(false),
+            scheduling: Mutex::new(scheduling),
         };
         let user: UserRef =
             Arc::try_new_in(user, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
         // Held until it is set up, so that no CPU switches to it before
         // its thread pointer and extended state are in its context.
-        let mut options =
-            Options::new().domain(process.account.domain().clone()).user(user.clone()).held();
+        let mut options = Options::new()
+            .domain(process.account.domain().clone())
+            .user(user.clone())
+            .policy(scheduling.policy())
+            .held();
         if let Some(cpu) = cpu {
             options = options.pinned(cpu);
         }

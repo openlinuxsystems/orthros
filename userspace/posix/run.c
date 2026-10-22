@@ -7,8 +7,10 @@
 // arguments name, or all of them) as a shell runs a job: in a process
 // group of its own, in the foreground, with fork and exec. The tests are
 // the programs of this directory, the C library's own tests (libc) and
-// Lua's test suite (lua). It prints "posix: <test> passed" or "FAILED"
-// for each, and exits with 0 only if every test passed (radix-posix(7)).
+// Lua's test suite (lua); libc:<name> runs only the C library's test
+// <name>, with its output as it goes. It prints "posix: <test> passed" or
+// "FAILED" for each, and exits with 0 only if every test passed
+// (radix-posix(7)).
 
 #include <errno.h>
 #include <signal.h>
@@ -52,6 +54,7 @@ static const struct test TESTS[] = {
 		{"files", NULL, NULL},
 		{"thread", NULL, NULL},
 		{"spawn", NULL, NULL},
+		{"limits", NULL, NULL},
 		{"format", NULL, NULL},
 		{"libc", NULL, LIBC},
 		{"lua", "/system/tests/lua/testes", LUA},
@@ -133,7 +136,13 @@ int main(int argc, char **argv) {
 	int passed = 0;
 	for(int i = 0; i < count; i++) {
 		const struct test *test = &TESTS[i];
-		if(argc > 1) {
+		const char *one[] = {LIBC[0], NULL, NULL};
+		struct test libc_one = {NULL, NULL, one};
+		if(argc > 1 && !strncmp(argv[i + 1], "libc:", 5)) {
+			libc_one.name = argv[i + 1];
+			one[1] = argv[i + 1] + 5;
+			test = &libc_one;
+		} else if(argc > 1) {
 			test = NULL;
 			for(int j = 0; j < COUNT && !test; j++)
 				if(!strcmp(TESTS[j].name, argv[i + 1]))

@@ -37,7 +37,8 @@ use radix_posix::signal::{
 use radix_posix::status;
 
 use super::{
-    PendingSignals, PosixState, children_changed, new_pending, signal_key, stop_key, with_tree,
+    PendingSignals, PosixState, children_changed, new_pending, signal_key, stop_key, timer,
+    with_tree,
 };
 use crate::Arch;
 use crate::sched::{self, ThreadRef, wait};
@@ -149,28 +150,52 @@ fn kill_process(process: &ProcessObject, signal: u32) {
     process.exit(code);
 }
 
+/// What became of a signal sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// It is pending with what it carries, or it ended the process.
+    Queued,
+    /// Nothing of it is pending: it is ignored, or the same standard
+    /// signal was pending already, or the process is ending.
+    Dropped,
+    /// A real-time signal for which there was no room (QUEUE_MAX).
+    Full,
+}
+
+/// What [`Pending::add`] answering `added` for `signal` means.
+fn sent(signal: u32, added: bool) -> Sent {
+    match (added, bit(signal) & rules::REAL_TIME != 0) {
+        (true, _) => Sent::Queued,
+        (false, true) => Sent::Full,
+        (false, false) => Sent::Dropped,
+    }
+}
+
 /// Sends `signal` (1 to SIGNALS) to `process`, from `info`.
-pub fn send_process(process: &ProcessRef, signal: u32, info: Info) {
+pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
     if signal == 0 || signal > SIGNALS || ending(process) {
-        return;
+        return Sent::Dropped;
     }
     if signal == SIGKILL {
         continue_process(process);
-        return kill_process(process, signal);
+        kill_process(process, signal);
+        return Sent::Queued;
     }
     let on = rules::on_send(signal);
     // A stop signal to a process group no shell can continue is dropped.
     if bit(signal) & rules::STOPPING != 0 && signal != SIGSTOP && orphaned(process) {
-        return;
+        return Sent::Dropped;
     }
     if on.resume {
         continue_process(process);
     }
     let mut fatal = false;
+    let result;
     {
         let mut posix = process.posix.lock();
         posix.pending.discard(on.discard);
         process.for_each_thread(&mut |_, user| user.signals.lock().pending.discard(on.discard));
+        timer::discarded(process, &mut posix, on.discard);
         let disposition = posix.actions.disposition(signal);
         let ignored = posix.actions.ignores(signal);
         // An ignored signal is dropped, unless every thread blocks it (its
@@ -182,64 +207,80 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) {
             }
         });
         if ignored && target.is_some() {
-            return;
+            return Sent::Dropped;
         }
         if disposition == Disposition::Terminate && target.is_some() {
             // Nothing would run before it ends the process: end it now,
             // even if its threads are in waits a signal cannot cut short.
             fatal = true;
+            result = Sent::Queued;
         } else {
-            posix.pending.add(signal, info);
-            if let Some(thread) = target {
+            result = sent(signal, posix.pending.add(signal, info));
+            if result == Sent::Queued
+                && let Some(thread) = target
+            {
                 kick(&thread);
             }
         }
     }
     if fatal {
-        return kill_process(process, signal);
+        kill_process(process, signal);
+        return result;
     }
-    process.signal_events.fetch_add(1, Ordering::AcqRel);
-    wait::wake_all(signal_key(process));
+    if result == Sent::Queued {
+        process.signal_events.fetch_add(1, Ordering::AcqRel);
+        wait::wake_all(signal_key(process));
+    }
+    result
 }
 
-/// Sends `signal` to `thread`, `user`'s, alone: a fault's, or
-/// `signal_thread`'s.
-pub fn send_thread(thread: &ThreadRef, user: &UserThread, signal: u32, info: Info) {
+/// Sends `signal` to `thread`, `user`'s, alone: a fault's, `signal_thread`'s
+/// or a timer's.
+pub fn send_thread(thread: &ThreadRef, user: &UserThread, signal: u32, info: Info) -> Sent {
     let process = &user.process;
     if signal == 0 || signal > SIGNALS || ending(process) {
-        return;
+        return Sent::Dropped;
     }
     if signal == SIGKILL {
         continue_process(process);
-        return kill_process(process, signal);
+        kill_process(process, signal);
+        return Sent::Queued;
     }
     let on = rules::on_send(signal);
     if on.resume {
         continue_process(process);
     }
-    let fatal = {
-        let posix = process.posix.lock();
+    let result = {
+        let mut posix = process.posix.lock();
         let mut signals = user.signals.lock();
         signals.pending.discard(on.discard);
         let blocked = signals.mask & bit(signal) != 0;
         if posix.actions.ignores(signal) && !blocked {
-            return;
+            drop(signals);
+            timer::discarded(process, &mut posix, on.discard);
+            return Sent::Dropped;
         }
         if posix.actions.disposition(signal) == Disposition::Terminate && !blocked {
-            true
+            None
         } else {
-            signals.pending.add(signal, info);
-            if !blocked {
+            let result = sent(signal, signals.pending.add(signal, info));
+            if result == Sent::Queued && !blocked {
                 kick(thread);
             }
-            false
+            drop(signals);
+            timer::discarded(process, &mut posix, on.discard);
+            Some(result)
         }
     };
-    if fatal {
-        return kill_process(process, signal);
+    let Some(result) = result else {
+        kill_process(process, signal);
+        return Sent::Queued;
+    };
+    if result == Sent::Queued {
+        process.signal_events.fetch_add(1, Ordering::AcqRel);
+        wait::wake_all(signal_key(process));
     }
-    process.signal_events.fetch_add(1, Ordering::AcqRel);
-    wait::wake_all(signal_key(process));
+    result
 }
 
 /// Raises `signal` for the running thread, as the kernel does for a
@@ -502,15 +543,21 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                         }
                         return;
                     }
-                    Some((signal, info)) => match posix.actions.disposition(signal) {
-                        Disposition::Ignore => continue,
-                        Disposition::Stop => Step::Stop(signal),
-                        Disposition::Terminate => Step::Kill(signal),
-                        Disposition::Handle(action) => {
-                            posix.actions.handled(signal);
-                            Step::Handle { signal, info, action }
+                    Some((signal, info)) => {
+                        // A timer's signal: the timer is set again, with
+                        // its process's lock (and not the thread's) held.
+                        drop(signals);
+                        let info = timer::taken(process, &mut posix, signal, info);
+                        match posix.actions.disposition(signal) {
+                            Disposition::Ignore => continue,
+                            Disposition::Stop => Step::Stop(signal),
+                            Disposition::Terminate => Step::Kill(signal),
+                            Disposition::Handle(action) => {
+                                posix.actions.handled(signal);
+                                Step::Handle { signal, info, action }
+                            }
                         }
-                    },
+                    }
                 }
             }
         };
@@ -631,6 +678,7 @@ pub fn method(user: &UserRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
                         process.for_each_thread(&mut |_, user| {
                             user.signals.lock().pending.discard(bit(a.signal));
                         });
+                        timer::discarded(process, &mut posix, bit(a.signal));
                     }
                     old
                 } else {
@@ -743,7 +791,10 @@ pub fn method(user: &UserRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
                     if let Some(me) = sched::running() {
                         me.set_signalled(has_work(&posix, &signals));
                     }
-                    taken
+                    drop(signals);
+                    taken.map(|(signal, info)| {
+                        (signal, timer::taken(process, &mut posix, signal, info))
+                    })
                 };
                 if let Some((signal, info)) = taken {
                     let results = process::SignalWaitResults {

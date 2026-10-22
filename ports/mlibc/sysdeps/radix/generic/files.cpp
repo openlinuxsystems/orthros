@@ -36,12 +36,20 @@ bool is(uint64_t status, uint16_t code) {
 			&& RADIX_STATUS_CODE(status) == code;
 }
 
-// The errno of a read or write that failed with `status`: a directory
-// is not read or written as a file, and a descriptor not open for
-// reading or writing is a bad one for it.
-int io_errno(uint64_t status) {
-	if(is(status, RADIX_KERNEL_WRONG_KIND))
-		return EISDIR;
+// Whether a call failed because its capability is of another kind than
+// the call is for: a file's method on a directory, or the other way
+// round, fails with no_such_method (radix-ipc(7)).
+bool other_kind(uint64_t status) {
+	return is(status, RADIX_KERNEL_NO_SUCH_METHOD) || is(status, RADIX_KERNEL_WRONG_KIND);
+}
+
+// The errno of a read (or with `writing` a write) that failed with
+// `status`: a directory is not read as a file, and is never open for
+// writing, and a descriptor not open for reading or writing is a bad one
+// for it, as on Linux.
+int io_errno(uint64_t status, bool writing) {
+	if(other_kind(status))
+		return writing ? EBADF : EISDIR;
 	if(is(status, RADIX_KERNEL_MISSING_RIGHTS))
 		return EBADF;
 	return radix::to_errno(status);
@@ -150,7 +158,7 @@ int stat_fd(int fd, struct stat *st) {
 		radix::fill_stat(st, f.kind, f.size, f.allocated, f.id, f.created, f.modified);
 		return 0;
 	}
-	if(!is(status, RADIX_KERNEL_WRONG_KIND))
+	if(!other_kind(status))
 		return radix::to_errno(status);
 	// A directory.
 	struct radix_directory_stat_results d;
@@ -223,10 +231,6 @@ int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 	return 0;
 }
 
-// The umask: only kept, as files have no permissions until users come
-// (Phase 13).
-mode_t file_mask = 022;
-
 } // namespace
 
 namespace mlibc {
@@ -284,7 +288,7 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 		// Only a directory lists.
 		struct radix_directory_stat_results d;
 		if(uint64_t status = radix_directory_stat(slot, ".", 1, &d); status)
-			return is(status, RADIX_KERNEL_WRONG_KIND) ? ENOTDIR : radix::to_errno(status);
+			return other_kind(status) ? ENOTDIR : radix::to_errno(status);
 		if(!put_entry(out, max_size, used, ".", 1, DOTDOT_CURSOR, DT_DIR))
 			return EINVAL;
 		cursor = DOTDOT_CURSOR;
@@ -337,7 +341,7 @@ int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_re
 	struct radix_file_read_results r;
 	uint64_t status = radix_file_read(slot, RADIX_FILE_CURRENT, buf, count, &r);
 	if(status)
-		return io_errno(status);
+		return io_errno(status, false);
 	*bytes_read = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -349,7 +353,7 @@ int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *b
 	struct radix_file_write_results r;
 	uint64_t status = radix_file_write(slot, RADIX_FILE_CURRENT, buf, count, &r);
 	if(status)
-		return io_errno(status);
+		return io_errno(status, true);
 	*bytes_written = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -363,7 +367,7 @@ int Sysdeps<Pread>::operator()(int fd, void *buf, size_t n, off_t off, ssize_t *
 	struct radix_file_read_results r;
 	uint64_t status = radix_file_read(slot, static_cast<uint64_t>(off), buf, n, &r);
 	if(status)
-		return io_errno(status);
+		return io_errno(status, false);
 	*bytes_read = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -378,7 +382,7 @@ int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t n, off_t off,
 	struct radix_file_write_results r;
 	uint64_t status = radix_file_write(slot, static_cast<uint64_t>(off), buf, n, &r);
 	if(status)
-		return io_errno(status);
+		return io_errno(status, true);
 	*bytes_written = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -452,7 +456,7 @@ int Sysdeps<Seek>::operator()(int fd, off_t offset, int whence, off_t *new_offse
 		*new_offset = static_cast<off_t>(r.offset);
 		return 0;
 	}
-	if(!is(status, RADIX_KERNEL_WRONG_KIND))
+	if(!other_kind(status))
 		return radix::to_errno(status);
 	// A directory: its listing's cursor, which readdir's offsets are
 	// (rewinddir and seekdir).
@@ -477,7 +481,7 @@ int Sysdeps<Dup>::operator()(int fd, int flags, int *newfd) {
 int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 	uint32_t from = radix::slot_of(fd);
 	uint32_t to = radix::slot_of(newfd);
-	if(from == radix::NO_SLOT || to == radix::NO_SLOT)
+	if(from == radix::NO_SLOT || to == radix::NO_SLOT || newfd >= radix::files_limit())
 		return EBADF;
 	uint64_t rights;
 	if(int e = rights_of(fd, &rights); e)
@@ -518,7 +522,7 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 	case F_DUPFD:
 	case F_DUPFD_CLOEXEC: {
 		int min_fd = va_arg(args, int);
-		if(min_fd < 0 || min_fd >= radix::MAX_FDS)
+		if(min_fd < 0 || min_fd >= radix::files_limit())
 			return EINVAL;
 		return dup_from(fd, min_fd, request == F_DUPFD_CLOEXEC, result);
 	}
@@ -550,10 +554,12 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 				flags |= O_APPEND;
 			if(r.flags & RADIX_DESCRIPTION_FLAGS_NON_BLOCKING)
 				flags |= O_NONBLOCK;
-		} else if(!is(status, RADIX_KERNEL_WRONG_KIND)) {
+		} else if(!other_kind(status)) {
 			return radix::to_errno(status);
 		} else {
-			flags |= O_DIRECTORY;
+			// A directory is open for reading only, though its capability
+			// may have the write right, for making files beneath it.
+			flags = O_RDONLY | O_DIRECTORY;
 		}
 		*result = flags;
 		return 0;
@@ -569,7 +575,7 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 		uint64_t status = radix_file_status_flags(slot, true, flags, &r);
 		*result = 0;
 		// Directories have no status flags to set.
-		if(is(status, RADIX_KERNEL_WRONG_KIND))
+		if(other_kind(status))
 			return 0;
 		return radix::to_errno(status);
 	}
@@ -620,6 +626,28 @@ int Sysdeps<Statvfs>::operator()(const char *path, struct statvfs *out) {
 		return e;
 	int e = sysdep<Fstatvfs>(fd, out);
 	sysdep<Close>(fd);
+	if(e != ENOSYS)
+		return e;
+	// A file: its directory is on the same filesystem.
+	char dir[PATH_MAX];
+	size_t len = strnlen(path, sizeof(dir));
+	if(len == sizeof(dir))
+		return ENAMETOOLONG;
+	while(len > 1 && path[len - 1] == '/')
+		len--;
+	while(len && path[len - 1] != '/')
+		len--;
+	if(!len) {
+		dir[0] = '.';
+		len = 1;
+	} else {
+		memcpy(dir, path, len);
+	}
+	dir[len] = 0;
+	if((e = sysdep<Open>(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, &fd)))
+		return e;
+	e = sysdep<Fstatvfs>(fd, out);
+	sysdep<Close>(fd);
 	return e;
 }
 
@@ -629,7 +657,7 @@ int Sysdeps<Fstatvfs>::operator()(int fd, struct statvfs *out) {
 		return EBADF;
 	struct radix_directory_info_results r;
 	uint64_t status = radix_directory_info(slot, &r);
-	if(is(status, RADIX_KERNEL_WRONG_KIND))
+	if(other_kind(status))
 		// A file: the kernel tells about its filesystem only through
 		// directories, yet.
 		return ENOSYS;
@@ -717,7 +745,7 @@ int Sysdeps<Ftruncate>::operator()(int fd, size_t size) {
 	if(slot == radix::NO_SLOT)
 		return EBADF;
 	uint64_t status = radix_file_set_size(slot, size);
-	if(is(status, RADIX_KERNEL_WRONG_KIND))
+	if(other_kind(status))
 		return EINVAL;
 	return radix::to_errno(status);
 }
@@ -739,7 +767,7 @@ int Sysdeps<Fsync>::operator()(int fd) {
 	if(slot == radix::NO_SLOT)
 		return EBADF;
 	uint64_t status = radix_file_sync(slot);
-	if(is(status, RADIX_KERNEL_WRONG_KIND))
+	if(other_kind(status))
 		status = radix_directory_sync(slot);
 	// Pipes and terminals have nothing to write back.
 	if(is(status, RADIX_KERNEL_MISSING_RIGHTS))
@@ -887,7 +915,13 @@ int Sysdeps<Utimensat>::operator()(int dirfd, const char *pathname, const struct
 }
 
 int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
-	*old = __atomic_exchange_n(&file_mask, mode & 0777, __ATOMIC_RELAXED);
+	// Kept by the kernel, so that exec keeps it; only kept, as files have
+	// no permissions until users come (Phase 13).
+	struct radix_process_file_mask_results r;
+	if(uint64_t status = radix_process_file_mask(radix::SLOT_PROCESS, true, mode & 0777, &r);
+			status)
+		return radix::to_errno(status);
+	*old = static_cast<mode_t>(r.mask);
 	return 0;
 }
 

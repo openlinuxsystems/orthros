@@ -355,7 +355,7 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 		return 0;
 	}
 	case _SC_OPEN_MAX:
-		*ret = radix::MAX_FDS;
+		*ret = radix::files_limit();
 		return 0;
 	case _SC_PAGESIZE:
 		*ret = 4096;
@@ -370,39 +370,29 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 }
 
 int Sysdeps<GetRlimit>::operator()(int resource, struct rlimit *limit) {
-	switch(resource) {
-	case RLIMIT_NOFILE: {
-		struct radix_process_slots_used_results used;
-		if(uint64_t status = radix_process_slots_used(radix::SLOT_PROCESS, 0, &used); status)
-			return radix::to_errno(status);
-		// The space grows to MAX_SLOTS as descriptors are opened.
-		limit->rlim_cur = radix::MAX_FDS;
-		limit->rlim_max = radix::MAX_FDS;
-		return 0;
-	}
-	case RLIMIT_STACK:
-		// The room exec gives the first thread's stack.
-		limit->rlim_cur = 8 << 20;
-		limit->rlim_max = RLIM_INFINITY;
-		return 0;
-	case RLIMIT_CORE:
-		limit->rlim_cur = 0;
-		limit->rlim_max = 0;
-		return 0;
-	default:
-		limit->rlim_cur = RLIM_INFINITY;
-		limit->rlim_max = RLIM_INFINITY;
-		return 0;
-	}
+	// The RLIMIT_ numbers are the kernel's LimitKind, and RLIM_INFINITY
+	// its UNLIMITED.
+	if(resource < 0)
+		return EINVAL;
+	struct radix_process_limits_results r;
+	if(uint64_t status = radix_process_limits(radix::SLOT_PROCESS,
+			static_cast<enum radix_limit_kind>(resource), false, 0, 0, &r); status)
+		return radix::to_errno(status);
+	limit->rlim_cur = r.current;
+	limit->rlim_max = r.max;
+	return 0;
 }
 
 int Sysdeps<SetRlimit>::operator()(int resource, const struct rlimit *limit) {
-	struct rlimit now;
-	if(int e = sysdep<GetRlimit>(resource, &now); e)
-		return e;
-	// Lowering is taken and not enforced; raising past the most is not.
-	if(now.rlim_max != RLIM_INFINITY && limit->rlim_max > now.rlim_max)
-		return EPERM;
+	if(resource < 0)
+		return EINVAL;
+	struct radix_process_limits_results r;
+	if(uint64_t status = radix_process_limits(radix::SLOT_PROCESS,
+			static_cast<enum radix_limit_kind>(resource), true, limit->rlim_cur,
+			limit->rlim_max, &r); status)
+		return radix::to_errno(status);
+	if(resource == RLIMIT_NOFILE)
+		radix::set_files_limit(limit->rlim_cur);
 	return 0;
 }
 

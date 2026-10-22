@@ -1,0 +1,205 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Chooses temporary files' names at random, from getentropy, as glibc and
+musl do: mkstemp, mkostemps, mkdtemp and their kin tried 000000,
+000001 and on in turn, so the next name could be guessed and taken
+first, and finding a free one took a call per name already used.
+tmpnam used rand(). mktemp, which ended the program, now works too.
+On failure the X's are put back, as glibc does.
+
+diff -ruN a/options/ansi/generic/stdio.cpp b/options/ansi/generic/stdio.cpp
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -832,8 +832,11 @@
+ 	static thread_local char internalBuffer[L_tmpnam];
+ 	char *result = buf ? buf : internalBuffer;
+ 
+-	for (size_t i = 0; i < 100; i++) {
+-		int ret = snprintf(result, L_tmpnam, "/tmp/tmpnam_%06X", rand() & 0xFFFFFF);
++	for (int i = 0; i < mlibc::TEMP_TRIES; i++) {
++		char x[6];
++		if (mlibc::random_name(x))
++			return nullptr;
++		int ret = snprintf(result, L_tmpnam, "/tmp/tmpnam_%.6s", x);
+ 		if (ret < 18)
+ 			return nullptr;
+ 
+diff -ruN a/options/ansi/generic/stdlib.cpp b/options/ansi/generic/stdlib.cpp
+--- a/options/ansi/generic/stdlib.cpp
++++ b/options/ansi/generic/stdlib.cpp
+@@ -14,11 +14,14 @@
+ #include <mlibc/debug.hpp>
+ #include <bits/ensure.h>
+ #include <bits/sigset_t.h>
++#include <abi-bits/fcntl.h>
++#include <abi-bits/stat.h>
+ 
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/allocator.hpp>
+ #include <mlibc/charcode.hpp>
+ #include <mlibc/strtofp.hpp>
++#include <mlibc/stdlib.hpp>
+ #include <mlibc/strtol.hpp>
+ #include <mlibc/threads.hpp>
+ #include <mlibc/global-config.hpp>
+@@ -316,9 +319,36 @@
+ 	return status;
+ }
+ 
+-char *mktemp(char *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// A name no file has yet, chosen at random as mkstemp's are; but another
++// may take it before the caller does, so mkstemp is the one to use.
++char *mktemp(char *pattern) {
++	auto n = strlen(pattern);
++	char *x = pattern + (n < 6 ? 0 : n - 6);
++	if(n < 6 || memcmp(x, "XXXXXX", 6)) {
++		errno = EINVAL;
++		pattern[0] = 0;
++		return pattern;
++	}
++	for(int i = 0; i < mlibc::TEMP_TRIES; i++) {
++		if(int e = mlibc::random_name(x); e) {
++			errno = e;
++			pattern[0] = 0;
++			return pattern;
++		}
++		struct stat st;
++		int e = mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, pattern,
++				AT_SYMLINK_NOFOLLOW, &st);
++		if(e == ENOENT)
++			return pattern;
++		if(e) {
++			errno = e;
++			pattern[0] = 0;
++			return pattern;
++		}
++	}
++	errno = EEXIST;
++	pattern[0] = 0;
++	return pattern;
+ }
+ 
+ void *bsearch(const void *key, const void *base, size_t count, size_t size,
+diff -ruN a/options/internal/generic/stdlib.cpp b/options/internal/generic/stdlib.cpp
+--- a/options/internal/generic/stdlib.cpp
++++ b/options/internal/generic/stdlib.cpp
+@@ -9,33 +9,49 @@
+ 
+ namespace mlibc {
+ 
++int random_name(char *x) {
++	static const char letters[] =
++		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
++	unsigned char bytes[6];
++	if(int e = mlibc::sysdep_or_enosys<GetEntropy>(bytes, sizeof(bytes)); e)
++		return e;
++	// 62 does not divide 256, so the first letters come up a little more
++	// often (by 4 in 256): no matter for a name that only has to be new.
++	for(size_t i = 0; i < 6; i++)
++		x[i] = letters[bytes[i] % 62];
++	return 0;
++}
++
++// Names chosen at random rather than in turn, as glibc's and musl's are,
++// so that the next one cannot be guessed and taken first.
+ int mkostemps(char *pattern, int suffixlen, int flags, int *fd) {
+ 	auto n = strlen(pattern);
+-	if(n < (6 + static_cast<size_t>(suffixlen))) {
++	if(suffixlen < 0 || n < (6 + static_cast<size_t>(suffixlen))) {
+ 		return EINVAL;
+ 	}
+ 
+ 	flags &= ~O_WRONLY;
+ 
++	char *x = pattern + (n - (6 + suffixlen));
+ 	for(size_t i = 0; i < 6; i++) {
+-		if(pattern[n - (6 + suffixlen) + i] == 'X')
++		if(x[i] == 'X')
+ 			continue;
+ 		return EINVAL;
+ 	}
+ 
+-	// TODO: Do an exponential search.
+-	for(size_t i = 0; i < 999999; i++) {
+-		char sfx = pattern[n - suffixlen];
+-		__ensure(sprintf(pattern + (n - (6 + suffixlen)), "%06zu", i) == 6);
+-		pattern[n - suffixlen] = sfx;
++	for(int i = 0; i < TEMP_TRIES; i++) {
++		if(int e = random_name(x); e)
++			return e;
+ 
+ 		if(int e = mlibc::sysdep<Open>(pattern, O_RDWR | O_CREAT | O_EXCL | flags, S_IRUSR | S_IWUSR, fd); !e) {
+ 			return 0;
+ 		}else if(e != EEXIST) {
++			memset(x, 'X', 6);
+ 			return e;
+ 		}
+ 	}
+ 
++	memset(x, 'X', 6);
+ 	return EEXIST;
+ }
+ 
+diff -ruN a/options/internal/include/mlibc/stdlib.hpp b/options/internal/include/mlibc/stdlib.hpp
+--- a/options/internal/include/mlibc/stdlib.hpp
++++ b/options/internal/include/mlibc/stdlib.hpp
+@@ -2,6 +2,14 @@
+ 
+ namespace mlibc {
+ 
++// How many names mkostemps, mkdtemp, mktemp and tmpnam try before they
++// give up: with 62^6 names, a clash at all is unlikely.
++inline constexpr int TEMP_TRIES = 100;
++
++// Fills `x`, 6 characters, with letters and digits chosen at random
++// (getentropy), as a temporary file's name; returns an errno value.
++int random_name(char *x);
++
+ int mkostemps(char *pattern, int suffixlen, int flags, int *fd);
+ 
+ } // namespace mlibc
+diff -ruN a/options/posix/generic/posix_stdlib.cpp b/options/posix/generic/posix_stdlib.cpp
+--- a/options/posix/generic/posix_stdlib.cpp
++++ b/options/posix/generic/posix_stdlib.cpp
+@@ -202,29 +202,33 @@
+ 
+ char *mkdtemp(char *pattern) {
+ 	auto n = strlen(pattern);
+-	__ensure(n >= 6);
+ 	if(n < 6) {
+ 		errno = EINVAL;
+ 		return nullptr;
+ 	}
++	char *x = pattern + (n - 6);
+ 	for(size_t i = 0; i < 6; i++) {
+-		if(pattern[n - 6 + i] == 'X')
++		if(x[i] == 'X')
+ 			continue;
+ 		errno = EINVAL;
+ 		return nullptr;
+ 	}
+ 
+-	// TODO: Do an exponential search.
+-	for(size_t i = 0; i < 999999; i++) {
+-		__ensure(sprintf(pattern + (n - 6), "%06zu", i) == 6);
++	for(int i = 0; i < mlibc::TEMP_TRIES; i++) {
++		if(int e = mlibc::random_name(x); e) {
++			errno = e;
++			return nullptr;
++		}
+ 		if(int e = mlibc::sysdep_or_enosys<Mkdir>(pattern, S_IRWXU); !e) {
+ 			return pattern;
+ 		}else if(e != EEXIST) {
++			memset(x, 'X', 6);
+ 			errno = e;
+ 			return nullptr;
+ 		}
+ 	}
+ 
++	memset(x, 'X', 6);
+ 	errno = EEXIST;
+ 	return nullptr;
+ }

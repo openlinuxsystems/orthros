@@ -66,8 +66,9 @@ const ARGS_MAX: usize = 16;
 /// 960 file descriptors, and it can grow.
 const POSIX_SLOTS: u32 = 1024;
 
-/// The environment a POSIX program starts with.
-const POSIX_ENV: [&str; 3] = ["PATH=/system/bin", "HOME=/", "TERM=dumb"];
+/// The environment a POSIX program starts with: text is UTF-8 (the
+/// C.UTF-8 locale, radix-posix(7)).
+const POSIX_ENV: [&str; 4] = ["PATH=/system/bin", "HOME=/", "TERM=dumb", "LANG=C.UTF-8"];
 
 /// How long Spark waits for a POSIX program's output before it looks
 /// whether the program has ended: 50 ms.

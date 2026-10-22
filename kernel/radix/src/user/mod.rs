@@ -73,12 +73,13 @@ use radix_cap::{CapError, SpaceId};
 use radix_hal::{Cpu, UserFault, UserFaultKind, UserMode};
 use radix_klog::{info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
-use radix_sync::SpinLock;
+use radix_sync::{Mutex, SpinLock};
 
 use crate::Arch;
 use crate::sched::{self, ThreadRef, wait};
 use memory::{Fault, SpaceObject};
 use posix::ThreadSignals;
+use posix::priority::Scheduling;
 use process::{Ending, ProcessRef, Start};
 
 /// A program thread's side, shared.
@@ -107,6 +108,9 @@ pub struct UserThread {
     pub(crate) signals: SpinLock<ThreadSignals>,
     /// Set by the `futex_wake` that takes it off a futex's waiters.
     pub(crate) futex_woken: AtomicBool,
+    /// Its scheduling as POSIX names it, which its scheduler side follows
+    /// (Phase 8).
+    pub(crate) scheduling: Mutex<Scheduling>,
 }
 
 impl UserThread {

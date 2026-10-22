@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! POSIX processes (Phase 8, radix-posix(7)): the process tree, signals,
-//! `fork`, `exec`, `wait`, process groups and sessions, timers, clocks and
-//! `poll`, as the methods from 11 on of radix-process(2).
+//! `fork`, `exec`, `wait`, process groups and sessions, timers, clocks,
+//! `poll`, scheduling and resource limits, as the methods from 11 on of
+//! radix-process(2).
 //!
 //! The rules live in `radix-posix`, which knows nothing of the kernel and
 //! is tested on the host: the tree ([`radix_posix::tree::Tree`]), signal
@@ -17,11 +18,13 @@
 //!   one, or when it first calls a method that needs it, as the root of a
 //!   session of its own (Spark and what it starts the Phase 6 way);
 //! - each process has a [`PosixState`]: its signal actions and pending
-//!   signals, its job-control stop, its timers and children's times, and
-//!   its controlling terminal; each thread its [`ThreadSignals`];
+//!   signals, its job-control stop, its timers and children's times, its
+//!   controlling terminal, its resource limits and file mode mask; each
+//!   thread its [`ThreadSignals`] and its [`priority::Scheduling`];
 //! - `signal` sends and delivers signals, `fork` and `exec` make and
 //!   replace programs, `timer` runs the timers, `poll` waits on many
-//!   capabilities at once.
+//!   capabilities at once, `priority` carries POSIX's scheduling calls
+//!   to the scheduler, and `limits` keeps the resource limits.
 //!
 //! A process is reported to its parent when it finishes
 //! ([`exited`], from `ProcessObject::finish`), which may run with the
@@ -35,10 +38,13 @@
 
 mod exec;
 mod fork;
+pub mod limits;
 pub mod poll;
+pub mod priority;
 pub mod signal;
 pub mod timer;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
@@ -57,7 +63,7 @@ pub use signal::ThreadSignals;
 use super::methods::{Answer, answer};
 use super::process::{ProcessObject, ProcessRef};
 use super::{Result, UserRef, cap_error, error};
-use crate::sched::{self, wait};
+use crate::sched::{self, ThreadRef, wait};
 use crate::{Arch, caps};
 
 /// The process tree, made when first needed.
@@ -77,8 +83,10 @@ fn with_tree<R>(f: impl FnOnce(&mut Tree<ProcessRef, Kmalloc>) -> R) -> R {
 /// are too small for them.
 pub type SignalActions = Actions<Vec<Action, Kmalloc>>;
 
-/// Pending signals, kept on the kernel's heap like [`SignalActions`].
-pub type PendingSignals = Pending<Vec<Info, Kmalloc>>;
+/// Pending signals, kept on the kernel's heap like [`SignalActions`]. The
+/// real-time ones are queued as they are sent, often with a lock held
+/// that may not sleep: their memory is taken without sleeping.
+pub type PendingSignals = Pending<Vec<Info, Kmalloc>, Kmalloc>;
 
 /// `count` copies of `value` on the kernel's heap.
 fn filled<T: Copy>(value: T, count: usize) -> Option<Vec<T, Kmalloc>> {
@@ -98,7 +106,7 @@ pub fn new_actions() -> Option<SignalActions> {
 
 /// Nothing pending. `None` if there is no memory.
 pub fn new_pending() -> Option<PendingSignals> {
-    Pending::in_storage(filled(Info::default(), SIGNALS as usize)?)
+    Pending::in_storage(filled(Info::default(), SIGNALS as usize)?, HEAP.with(Flags::ATOMIC))
 }
 
 /// A process's POSIX side.
@@ -117,11 +125,18 @@ pub struct PosixState {
     /// The CPU time of the children it waited for, and theirs (user mode
     /// and in all).
     pub children_ns: (u64, u64),
-    /// Its timers: real, user and profiling time.
+    /// Its interval timers: real, user and profiling time.
     pub timers: [timer::Timer; 3],
+    /// Its POSIX timers (`timer_create`), by number.
+    pub posix_timers: Vec<Option<timer::PosixTimer>, Kmalloc>,
     /// Its session's controlling terminal, as it was when it last looked:
     /// the terminal says whose it is now (`crate::fs::tty`).
     pub terminal: Option<crate::fs::tty::TtyRef>,
+    /// Its resource limits, by LimitKind (on the heap: the kernel's stack
+    /// frames are too small for them).
+    pub limits: Box<limits::Limits, Kmalloc>,
+    /// Its file mode creation mask (`umask`).
+    pub file_mask: u32,
 }
 
 impl PosixState {
@@ -137,8 +152,18 @@ impl PosixState {
             in_tree: false,
             children_ns: (0, 0),
             timers: [timer::Timer::OFF; 3],
+            posix_timers: Vec::new_in(kmalloc()),
             terminal: None,
+            limits: Box::try_new_in(limits::Limits::DEFAULT, kmalloc()).ok()?,
+            file_mask: 0o022,
         })
+    }
+
+    /// Takes what a child has of its parent's `parent` (`fork`, or `exec`
+    /// on a created process): its resource limits and file mode mask.
+    pub fn inherit(&mut self, parent: &PosixState) {
+        *self.limits = *parent.limits;
+        self.file_mask = parent.file_mask;
     }
 }
 
@@ -208,6 +233,19 @@ fn find(tree: &Tree<ProcessRef, Kmalloc>, pid: u64) -> Option<ProcessRef> {
     (!matches!(member.life, radix_posix::tree::Life::Zombie { .. })).then(|| member.handle.clone())
 }
 
+/// The thread of `process` numbered `number`, and its program side. The
+/// last match: a thread that ran exec, ending, has the number of the one
+/// that runs the new program.
+pub(super) fn find_thread(process: &ProcessObject, number: u64) -> Option<(ThreadRef, UserRef)> {
+    let mut found = None;
+    process.for_each_thread(&mut |thread, user| {
+        if thread.id() == number {
+            found = Some((thread.clone(), user.clone()));
+        }
+    });
+    found
+}
+
 /// `process`'s CPU time so far: its threads', live and exited.
 pub fn cpu_ns(process: &ProcessObject) -> u64 {
     process.cpu_ns()
@@ -222,6 +260,7 @@ pub fn exited(process: &ProcessObject) {
     let (in_tree, ended, terminal) = {
         let mut posix = process.posix.lock();
         posix.timers = [timer::Timer::OFF; 3];
+        posix.posix_timers.clear();
         let (_, code) = process.state();
         let code = code.unwrap_or(0);
         let ended = match posix.ended_by {
@@ -353,7 +392,18 @@ pub fn method(
         }
         process::KILL => {
             let a = process::KillArgs::decode(args)?;
-            kill(me, a.pid, a.signal)?;
+            let info = Info { code: radix_posix::signal::SI_USER, pid: me.number(), status: 0 };
+            kill(me, a.pid, a.signal, info)?;
+            answer(label, 0, [0; 8])
+        }
+        process::SIGNAL_QUEUE => {
+            let a = process::SignalQueueArgs::decode(args)?;
+            // One process, as `sigqueue` names it.
+            let pid = i64::try_from(a.pid).ok().filter(|&pid| pid > 0);
+            let pid = pid.ok_or(error(Kernel::NoSuchProcess))?;
+            let info =
+                Info { code: radix_posix::signal::SI_QUEUE, pid: me.number(), status: a.value };
+            kill(me, pid, a.signal, info)?;
             answer(label, 0, [0; 8])
         }
         process::IDS => {
@@ -402,6 +452,11 @@ pub fn method(
         | process::SIGNAL_SUSPEND
         | process::SIGNAL_WAIT
         | process::SIGNAL_THREAD => signal::method(user, label, args),
+        process::TIMER_CREATE | process::TIMER_SET | process::TIMER_GET | process::TIMER_DELETE => {
+            timer::method(user, label, args)
+        }
+        process::PRIORITY | process::SCHEDULING => priority::method(user, label, args),
+        process::LIMITS | process::FILE_MASK => limits::method(user, label, args),
         process::TIMES => {
             process::TimesArgs::decode(args)?;
             let own = cpu_ns(me);
@@ -519,9 +574,11 @@ fn wait_child(me: &ProcessRef, pid: i64, flags: ChildWaitFlags) -> Result<(u64, 
     }
 }
 
-/// `kill`: sends `signal` to the processes `pid` names, as `me` may.
+/// `kill`: sends `signal` to the processes `pid` names, as `me` may,
+/// carrying `info`. A `sigqueue` signal (SI_QUEUE) for which there is no
+/// room fails with would_block.
 #[inline(never)]
-fn kill(me: &ProcessRef, pid: i64, sig: u32) -> Result<()> {
+fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
     if sig > SIGNALS || pid == i64::MIN {
         return Err(Kernel::InvalidArgument.status(1));
     }
@@ -563,9 +620,12 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32) -> Result<()> {
     if sig == 0 {
         return Ok(());
     }
-    let info = Info { code: radix_posix::signal::SI_USER, pid: me.number(), status: 0 };
+    let mut full = false;
     for target in &targets {
-        signal::send_process(target, sig, info);
+        full |= signal::send_process(target, sig, info) == signal::Sent::Full;
+    }
+    if full && info.code == radix_posix::signal::SI_QUEUE {
+        return Err(error(Kernel::WouldBlock));
     }
     Ok(())
 }

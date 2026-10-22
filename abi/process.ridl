@@ -61,6 +61,11 @@ const KEEP_SLOTS: u32 = 32;
 /// The longest name a process may have, in bytes.
 const NAME_MAX: u64 = 15;
 
+/// The most POSIX timers a process may have (`timer_create`).
+const TIMERS_MAX: u32 = 256;
+/// A resource limit that is no limit (RLIM_INFINITY).
+const UNLIMITED: u64 = 0xffffffffffffffff;
+
 /// The version of the block `exec` takes.
 const EXEC_VERSION: u32 = 1;
 /// The most bytes an `exec` block may hold.
@@ -150,6 +155,86 @@ enum ClockKind: u32 {
     monotonic_coarse = 6;
     /// As monotonic (the kernel does not suspend yet).
     boottime = 7;
+}
+
+/// What a POSIX timer does when it expires, as `timer_create`'s
+/// `sigevent` says.
+enum TimerNotify: u32 {
+    /// Sends its signal to the process (SIGEV_SIGNAL).
+    signal = 0;
+    /// Nothing: it is only read (SIGEV_NONE).
+    none = 1;
+    /// Sends its signal to one thread of the process (SIGEV_THREAD_ID).
+    thread = 2;
+    /// Sends SIGALRM to the process, carrying the timer's number: what
+    /// `timer_create` does without a `sigevent`.
+    alarm = 3;
+}
+
+/// Whose nice level `priority` reads or sets, as `setpriority`'s `which`.
+enum PriorityWhich: u32 {
+    /// A thread: the first of a process when named by the process's
+    /// number (PRIO_PROCESS).
+    process = 0;
+    /// Every thread of every process of a process group (PRIO_PGRP).
+    group = 1;
+    /// Every thread of every process of a user (PRIO_USER).
+    user = 2;
+}
+
+/// A thread's scheduling policy, as `sched_setscheduler`'s (with Linux's
+/// numbers): radix-scheduling(7) says what each does.
+enum SchedulingPolicy: u32 {
+    /// The fair class at the thread's nice level (SCHED_OTHER).
+    other = 0;
+    /// Real-time, first in first out, at priority 1 to 99 (SCHED_FIFO).
+    fifo = 1;
+    /// Real-time round robin, at priority 1 to 99 (SCHED_RR).
+    round_robin = 2;
+    /// The fair class at the thread's nice level, for work that is not
+    /// interactive (SCHED_BATCH).
+    batch = 3;
+    /// The fair class at its smallest share, nice 19 (SCHED_IDLE).
+    idle = 5;
+}
+
+/// The resource limits `limits` reads and sets, as `setrlimit`'s (with
+/// Linux's numbers). radix-posix(7) says which ones the system enforces.
+enum LimitKind: u32 {
+    /// CPU time, in seconds (RLIMIT_CPU).
+    cpu = 0;
+    /// The size of a file written, in bytes (RLIMIT_FSIZE).
+    file_size = 1;
+    /// The size of the data segment, in bytes (RLIMIT_DATA).
+    data = 2;
+    /// The size of a new program's stack, in bytes (RLIMIT_STACK).
+    stack = 3;
+    /// The size of a core file, in bytes (RLIMIT_CORE).
+    core = 4;
+    /// The resident set, in bytes (RLIMIT_RSS).
+    resident = 5;
+    /// The processes of the user (RLIMIT_NPROC).
+    processes = 6;
+    /// One more than the highest file descriptor (RLIMIT_NOFILE).
+    files = 7;
+    /// Locked memory, in bytes (RLIMIT_MEMLOCK).
+    locked_memory = 8;
+    /// The address space, in bytes (RLIMIT_AS).
+    address_space = 9;
+    /// File locks (RLIMIT_LOCKS).
+    locks = 10;
+    /// Signals queued (RLIMIT_SIGPENDING).
+    pending_signals = 11;
+    /// Bytes in message queues (RLIMIT_MSGQUEUE).
+    message_queues = 12;
+    /// The lowest nice level the thread may ask for, as 20 less it
+    /// (RLIMIT_NICE).
+    nice = 13;
+    /// The highest real-time priority it may ask for (RLIMIT_RTPRIO).
+    realtime_priority = 14;
+    /// Real-time CPU time without blocking, in microseconds
+    /// (RLIMIT_RTTIME).
+    realtime_time = 15;
 }
 
 /// The start of the block `exec` takes: then the arguments, the
@@ -258,7 +343,9 @@ interface process = 0x000a version 2 {
     /// thread, which goes on from this call with the calling thread's
     /// registers and returns 0. The caller gets the child's number. The
     /// child has the caller's signal actions, mask and process group and
-    /// session, and no pending signals or timers.
+    /// session, its resource limits and file mode mask, and the calling
+    /// thread's scheduling policy and nice level, and no pending signals
+    /// or timers.
     method fork = 11 () -> (child: u64)
         raises [no_such_slot, empty_slot, missing_rights, no_memory, gone];
     /// Runs the program in the file in slot `file`, in the process: a new
@@ -270,8 +357,10 @@ interface process = 0x000a version 2 {
     /// process's SLOT_ROOT. `block` is an ExecHeader and its strings, at
     /// most EXEC_MAX bytes. Called on the caller's own process, the
     /// caller's other threads end, its slots with close_on_exec are
-    /// emptied, its signals with handlers go back to their defaults, and
-    /// it does not return. Called on a process `create` made that has not
+    /// emptied, its signals with handlers go back to their defaults, its
+    /// POSIX timers are deleted, and it does not return. The new program's
+    /// stack has room for as much as RLIMIT_STACK says, from 128 KiB to
+    /// 1 GiB. Called on a process `create` made that has not
     /// started, the process starts. Needs the control right, and the read
     /// right on the file.
     method exec = 12 (file: slot, block: in bytes) -> ()
@@ -407,4 +496,75 @@ interface process = 0x000a version 2 {
     /// The calling thread's number.
     method thread_id = 35 () -> (thread: u64)
         raises [no_such_slot, empty_slot, missing_rights];
+    /// Sends `signal` (or with 0, only checks that it could) to process
+    /// `pid`, as `kill` would, with `value` (`sigqueue`): its SignalInfo
+    /// has code SI_QUEUE and `value` as its status. A real-time signal
+    /// sent this way is delivered as many times as it was sent, each with
+    /// its own value; one that would be the 1025th pending fails with
+    /// would_block.
+    method signal_queue = 36 (pid: u64, signal: u32, value: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
+                not_permitted, would_block];
+    /// Makes a POSIX timer (`timer_create`) on clock `clock`: realtime,
+    /// monotonic or boottime, or process for the process's CPU time.
+    /// When it expires it does what `notify` says, with `signal` and
+    /// `value` (its SignalInfo has code SI_TIMER, the timer's number and
+    /// overrun where a sender's number would be, and `value` as its
+    /// status); `thread` names the thread for TimerNotify::thread. It
+    /// starts unset. Returns its number; a process may have TIMERS_MAX.
+    /// Timers go with `exec`, and a forked child has none.
+    method timer_create = 37 (clock: ClockKind, notify: TimerNotify, signal: u32, value: u64,
+                              thread: u64) -> (timer: u32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, would_block,
+                no_memory];
+    /// Sets timer `timer` to expire in `value_ns` nanoseconds (with
+    /// `absolute`, when its clock reads `value_ns`; 0: never), then every
+    /// `interval_ns`, and returns what was left of it and its interval.
+    /// A time already past expires it at once. An expiry while its signal
+    /// is still pending is counted in the signal's overrun instead.
+    method timer_set = 38 (timer: u32, absolute: bool, value_ns: u64, interval_ns: u64)
+        -> (value_ns: u64, interval_ns: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Reads timer `timer`: how long until it expires (0: it is not set),
+    /// its interval, and the overrun of its signal last taken.
+    method timer_get = 39 (timer: u32) -> (value_ns: u64, interval_ns: u64, overrun: u32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Deletes timer `timer`.
+    method timer_delete = 40 (timer: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Reads, and with `set` changes, the nice level (-20 to 19) of the
+    /// threads `which` and `who` name (`setpriority`): thread `who` (0:
+    /// the calling one), the threads of process group `who` (0: the
+    /// caller's), or those of user `who` (0: the caller's; every process
+    /// is user 0's until Phase 13). A nice level out of range is clamped.
+    /// Returns the lowest nice level among them, after the change.
+    /// Changing another process's needs what `kill` needs, and lowering a
+    /// nice level needs RLIMIT_NICE to allow it.
+    method priority = 41 (which: PriorityWhich, who: u64, set: bool, nice: i32) -> (nice: i32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
+                not_permitted, over_limit];
+    /// Reads, and with `set` changes, the scheduling policy and real-time
+    /// priority (0 for the fair policies) of thread `thread` (0: the
+    /// calling one), as `sched_setscheduler` does, and returns them as
+    /// they were. Changing another process's needs what `kill` needs, and
+    /// a real-time priority above the thread's needs RLIMIT_RTPRIO to
+    /// allow it.
+    method scheduling = 42 (thread: u64, set: bool, policy: SchedulingPolicy, priority: u32)
+        -> (policy: SchedulingPolicy, priority: u32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
+                not_permitted];
+    /// Reads, and with `set` changes, the caller's resource limit
+    /// `resource`: its soft limit `current` and its hard limit `max`
+    /// (UNLIMITED: none). The soft limit may not pass the hard one, and a
+    /// hard limit may only be lowered (raising one needs privileges, which
+    /// come with users in Phase 13). A forked child has its parent's
+    /// limits, and `exec` keeps them. Returns the limit as it was.
+    method limits = 43 (resource: LimitKind, set: bool, current: u64, max: u64)
+        -> (current: u64, max: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, not_permitted];
+    /// Reads, and with `set` changes, the caller's file mode creation
+    /// mask (`umask`, 9 bits), and returns it as it was. A forked child
+    /// has its parent's, and `exec` keeps it.
+    method file_mask = 44 (set: bool, mask: u32) -> (mask: u32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
 }

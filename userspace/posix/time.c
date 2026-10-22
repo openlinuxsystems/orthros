@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Clocks and timers: the clocks clock_gettime reads, sleeping, CPU time
-// as times and getrusage count it, and the interval timers.
+// as times and getrusage count it, the interval timers, and POSIX's
+// timers (timer_create), with their overruns.
 
+#include <pthread.h>
+#include <stdint.h>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/times.h>
@@ -174,11 +177,149 @@ static void timers(void) {
 	signal(SIGPROF, SIG_DFL);
 }
 
+// A timer on `clock` that sends `signal` carrying `value`.
+static timer_t timer_for(clockid_t clock, int signal, int value) {
+	struct sigevent event = {0};
+	event.sigev_notify = SIGEV_SIGNAL;
+	event.sigev_signo = signal;
+	event.sigev_value.sival_int = value;
+	timer_t timer = 0;
+	CHECK(timer_create(clock, &event, &timer) == 0);
+	return timer;
+}
+
+// Sets `timer` to expire in `value_ms`, then every `interval_ms`.
+static int timer_ms(timer_t timer, int flags, long value_ms, long interval_ms) {
+	struct itimerspec spec = {{interval_ms / 1000, interval_ms % 1000 * 1000000L},
+			{value_ms / 1000, value_ms % 1000 * 1000000L}};
+	return timer_settime(timer, flags, &spec, NULL);
+}
+
+static volatile int thread_calls;
+static volatile int thread_value;
+
+static void on_timer(union sigval value) {
+	thread_value = value.sival_int;
+	__atomic_add_fetch(&thread_calls, 1, __ATOMIC_RELAXED);
+}
+
+static void posix_timers(void) {
+	int rt = SIGRTMIN + 2;
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, rt);
+	sigaddset(&set, SIGALRM);
+	sigprocmask(SIG_BLOCK, &set, NULL);
+	siginfo_t info;
+	// One expiry: its signal carries the value and says it is a timer's.
+	timer_t timer = timer_for(CLOCK_MONOTONIC, rt, 42);
+	long long start = check_now_ns();
+	CHECK(timer_ms(timer, 0, 20, 0) == 0);
+	struct itimerspec left;
+	CHECK(timer_gettime(timer, &left) == 0);
+	CHECK(left.it_value.tv_sec == 0 && left.it_value.tv_nsec > 0);
+	CHECK(left.it_value.tv_nsec <= 20000000);
+	CHECK(sigwaitinfo(&set, &info) == rt);
+	CHECK(check_now_ns() - start >= 20000000);
+	CHECK(info.si_code == SI_TIMER && info.si_value.sival_int == 42 && info.si_overrun == 0);
+	CHECK(timer_gettime(timer, &left) == 0 && left.it_value.tv_sec == 0);
+	CHECK(left.it_value.tv_nsec == 0);
+	// Expiries while its signal waits count as its overrun.
+	CHECK(timer_ms(timer, 0, 1, 1) == 0);
+	check_sleep_ms(50);
+	CHECK(sigwaitinfo(&set, &info) == rt);
+	CHECK(info.si_overrun >= 20);
+	CHECK(timer_getoverrun(timer) == info.si_overrun);
+	CHECK(timer_gettime(timer, &left) == 0 && left.it_interval.tv_nsec == 1000000);
+	// A deleted timer's signal goes with it.
+	CHECK(timer_ms(timer, 0, 1, 0) == 0);
+	check_sleep_ms(10);
+	sigset_t pending;
+	CHECK(sigpending(&pending) == 0 && sigismember(&pending, rt));
+	CHECK(timer_delete(timer) == 0);
+	CHECK(sigpending(&pending) == 0 && !sigismember(&pending, rt));
+	CHECK_ERROR(timer_gettime(timer, &left), EINVAL);
+	// An absolute time on the wall clock.
+	timer = timer_for(CLOCK_REALTIME, rt, 7);
+	struct timespec wall;
+	clock_gettime(CLOCK_REALTIME, &wall);
+	wall.tv_nsec += 20000000;
+	if(wall.tv_nsec >= 1000000000) {
+		wall.tv_sec++;
+		wall.tv_nsec -= 1000000000;
+	}
+	struct itimerspec at = {{0, 0}, wall};
+	start = check_now_ns();
+	CHECK(timer_settime(timer, TIMER_ABSTIME, &at, NULL) == 0);
+	CHECK(sigwaitinfo(&set, &info) == rt && info.si_value.sival_int == 7);
+	CHECK(check_now_ns() - start >= 15000000);
+	// A time already past expires at once.
+	at.it_value.tv_sec -= 10;
+	CHECK(timer_settime(timer, TIMER_ABSTIME, &at, NULL) == 0);
+	CHECK(sigwaitinfo(&set, &info) == rt);
+	CHECK(timer_delete(timer) == 0);
+	// One counting the process's CPU time.
+	timer = timer_for(CLOCK_PROCESS_CPUTIME_ID, rt, 9);
+	CHECK(timer_ms(timer, 0, 20, 0) == 0);
+	struct timespec none = {0, 0};
+	start = check_now_ns();
+	int fired = 0;
+	while(!fired && check_now_ns() - start < 2000000000LL)
+		fired = sigtimedwait(&set, &info, &none) == rt;
+	CHECK(fired && info.si_value.sival_int == 9);
+	CHECK(timer_delete(timer) == 0);
+	// Without a sigevent: SIGALRM, carrying the timer's number.
+	CHECK(timer_create(CLOCK_MONOTONIC, NULL, &timer) == 0);
+	CHECK(timer_ms(timer, 0, 5, 0) == 0);
+	CHECK(sigwaitinfo(&set, &info) == SIGALRM && info.si_code == SI_TIMER);
+	CHECK(info.si_value.sival_int == (int)(intptr_t)timer);
+	CHECK(timer_delete(timer) == 0);
+	// SIGEV_NONE: only read.
+	struct sigevent quiet = {0};
+	quiet.sigev_notify = SIGEV_NONE;
+	CHECK(timer_create(CLOCK_MONOTONIC, &quiet, &timer) == 0);
+	CHECK(timer_ms(timer, 0, 30, 10) == 0);
+	check_sleep_ms(45);
+	CHECK(timer_gettime(timer, &left) == 0 && left.it_value.tv_nsec > 0);
+	CHECK(left.it_value.tv_nsec <= 10000000);
+	CHECK(sigtimedwait(&set, &info, &none) < 0);
+	CHECK(timer_delete(timer) == 0);
+	// SIGEV_THREAD: a thread calls the function for each expiry.
+	struct sigevent call = {0};
+	call.sigev_notify = SIGEV_THREAD;
+	call.sigev_notify_function = on_timer;
+	call.sigev_value.sival_int = 77;
+	CHECK(timer_create(CLOCK_MONOTONIC, &call, &timer) == 0);
+	CHECK(timer_ms(timer, 0, 5, 5) == 0);
+	start = check_now_ns();
+	while(__atomic_load_n(&thread_calls, __ATOMIC_RELAXED) < 3 &&
+			check_now_ns() - start < 2000000000LL)
+		check_sleep_ms(5);
+	CHECK(thread_calls >= 3 && thread_value == 77);
+	CHECK(timer_delete(timer) == 0);
+	int calls = thread_calls;
+	check_sleep_ms(30);
+	CHECK(thread_calls == calls);
+	// A forked child has none of its parent's timers.
+	timer = timer_for(CLOCK_MONOTONIC, rt, 1);
+	pid_t child = check_fork();
+	if(child == 0) {
+		CHECK_ERROR(timer_gettime(timer, &left), EINVAL);
+		check_exit_child();
+	}
+	CHECK_CHILD(child);
+	CHECK(timer_delete(timer) == 0);
+	CHECK_ERROR(timer_delete(timer), EINVAL);
+	CHECK_ERROR(timer_create(CLOCK_MONOTONIC_RAW, NULL, &timer), EINVAL);
+	sigprocmask(SIG_UNBLOCK, &set, NULL);
+}
+
 int main(void) {
 	check_start("time");
 	RUN(clocks);
 	RUN(sleeps);
 	RUN(cpu_time);
 	RUN(timers);
+	RUN(posix_timers);
 	return check_end();
 }

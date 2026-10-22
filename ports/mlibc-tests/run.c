@@ -7,10 +7,13 @@
 // that is shown only if it fails, and exits with how many failed. A test
 // passes when it exits with 0; the two that check failing on purpose
 // pass when they do not. One program rather than 160 keeps the boot
-// archive small: each would carry its own copy of the C library.
+// archive small: each would carry its own copy of the C library. The one
+// test that is a program of its own (its main NULL in TESTS) is beside
+// run, and runs as itself.
 
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,8 +25,20 @@
 
 #define OUTPUT "/tmp/libc-test.out"
 
-// How long a test may take, in seconds, before SIGALRM ends it.
+// How long a test may take, in seconds, before it is ended.
 enum { LIMIT = 120 };
+
+// The test running, and whether it ran out of time: the runner's own
+// alarm ends it, since a test's own alarms are its to set (and one set
+// before exec would last into it).
+static volatile pid_t running;
+static volatile sig_atomic_t timed_out;
+
+static void out_of_time(int signal) {
+	(void)signal;
+	timed_out = 1;
+	kill(running, SIGKILL);
+}
 
 // The tests that pass by ending abnormally: abort() raises SIGABRT, and
 // error() with a status exits with it.
@@ -48,8 +63,10 @@ static void show_output(const char *name) {
 		printf("libc: %s: | %s\n", name, line);
 }
 
-// Runs test `name` in a child, as `self name`; returns whether it passed.
-static int run(const char *self, const char *name) {
+// Runs `test` in a child, as `self name` or as the program beside self;
+// returns whether it passed.
+static int run(const char *self, const struct test *test) {
+	const char *name = test->name;
 	fflush(stdout);
 	pid_t pid = fork();
 	if(pid < 0) {
@@ -63,17 +80,28 @@ static int run(const char *self, const char *name) {
 			dup2(out, STDERR_FILENO);
 			close(out);
 		}
-		// A pending alarm lasts through exec.
-		alarm(LIMIT);
-		char *argv[] = {(char *)self, (char *)name, NULL};
-		execv(self, argv);
+		if(test->main) {
+			char *argv[] = {(char *)self, (char *)name, NULL};
+			execv(self, argv);
+		} else {
+			char path[256];
+			char directory[256];
+			snprintf(directory, sizeof(directory), "%s", self);
+			snprintf(path, sizeof(path), "%s/%s", dirname(directory), name);
+			char *argv[] = {path, NULL};
+			execv(path, argv);
+		}
 		_exit(127);
 	}
+	running = pid;
+	timed_out = 0;
+	alarm(LIMIT);
 	int status;
 	pid_t got;
 	do {
 		got = waitpid(pid, &status, 0);
 	} while(got < 0 && errno == EINTR);
+	alarm(0);
 	if(got != pid) {
 		printf("libc: FAILED: %s: waitpid: %s\n", name, strerror(errno));
 		return 0;
@@ -83,7 +111,9 @@ static int run(const char *self, const char *name) {
 				     : exited && WEXITSTATUS(status) == 0;
 	if(passed)
 		return 1;
-	if(must_fail(name))
+	if(timed_out)
+		printf("libc: FAILED: %s took more than %d seconds\n", name, LIMIT);
+	else if(must_fail(name))
 		printf("libc: FAILED: %s passed, but should have failed\n", name);
 	else if(exited)
 		printf("libc: FAILED: %s exited with %d\n", name, WEXITSTATUS(status));
@@ -101,16 +131,23 @@ int main(int argc, char **argv) {
 		const char *name = argv[1];
 		for(int i = 1; i < argc; i++)
 			argv[i] = argv[i + 1];
-		for(size_t i = 0; i < TEST_COUNT; i++)
-			if(!strcmp(name, TESTS[i].name))
-				return TESTS[i].main(argc - 1, argv);
+		for(size_t i = 0; i < TEST_COUNT; i++) {
+			if(strcmp(name, TESTS[i].name))
+				continue;
+			if(!TESTS[i].main)
+				return run(argv[0], &TESTS[i]) ? 0 : 1;
+			return TESTS[i].main(argc - 1, argv);
+		}
 		fprintf(stderr, "run: there is no test %s\n", name);
 		return 127;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	// Not restarted: the wait for the test ends with EINTR and goes on.
+	struct sigaction action = {.sa_handler = out_of_time};
+	sigaction(SIGALRM, &action, NULL);
 	size_t passed = 0;
 	for(size_t i = 0; i < TEST_COUNT; i++)
-		passed += run(argv[0], TESTS[i].name);
+		passed += run(argv[0], &TESTS[i]);
 	unlink(OUTPUT);
 	printf("libc: %zu of %zu tests passed\n", passed, (size_t)TEST_COUNT);
 	if(passed == TEST_COUNT)

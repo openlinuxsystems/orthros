@@ -131,7 +131,8 @@ int main(void) {
 		0x80000000LL, 4102444800LL, -2208988800LL, 253402300799LL};
 	const char *tfs[] = {"%a %A %b %B %h", "%c", "%C %d %D %e %F", "%g %G %V", "%H %I %j %m %M %p",
 		"%r %R %S %T", "%u %U %w %W", "%x %X", "%y %Y %z %%", "%s", "%n%t|", "%Ey %Od %OH",
-		"%-d %_d %0e %-j", "[%10Y]"};
+		"%-d %_d %0e %-j", "[%10Y]", "%k %l %P", "%-k|%0l|%_H|%-l", "%^a %^B %#a %#b %#h %#p %#P",
+		"%^c", "%^#A", "%Q|%Eq|%^Q", "100%"};
 	printf("static const struct time_case time_cases[] = {\n");
 	for (size_t i = 0; i < sizeof times / sizeof *times; i++) {
 		time_t t = times[i];

@@ -51,10 +51,18 @@ inline uint32_t slot_of(int fd) {
 	return FD_BASE + static_cast<uint32_t>(fd);
 }
 
+// One more than the highest file descriptor the program may have: the
+// soft RLIMIT_NOFILE, at most MAX_FDS (radix-posix(7)).
+int files_limit();
+
+// Notes that setrlimit made `limit` the soft RLIMIT_NOFILE.
+void set_files_limit(uint64_t limit);
+
 // Finds the lowest free file descriptor from `min_fd`, growing the
 // capability space when every slot is taken. Returns 0 and the slot, or
-// EMFILE. The slot may be taken by another thread before it is used:
-// callers that get `occupied` look again (`place`).
+// EMFILE if there is none below files_limit(). The slot may be taken by
+// another thread before it is used: callers that get `occupied` look
+// again (`place`).
 int free_slot(int min_fd, uint32_t *slot);
 
 // Runs `put(slot)`, which puts a capability in an empty slot, on the

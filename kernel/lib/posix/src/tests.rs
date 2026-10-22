@@ -9,8 +9,8 @@ use std::alloc::Global;
 use proptest::prelude::*;
 use radix_abi::process::{EXEC_VERSION, ExecHeader};
 use radix_abi::signal::{
-    ActionFlags, IGNORE, SIGCHLD, SIGCONT, SIGINT, SIGKILL, SIGRTMIN, SIGSEGV, SIGSTOP, SIGTERM,
-    SIGTSTP, SIGUSR1,
+    ActionFlags, IGNORE, SIGCHLD, SIGCONT, SIGINT, SIGKILL, SIGNALS, SIGRTMIN, SIGSEGV, SIGSTOP,
+    SIGTERM, SIGTSTP, SIGUSR1,
 };
 
 use crate::exec::{Block, BlockError, Shebang, Stack, aux, shebang};
@@ -86,9 +86,14 @@ fn reset_hand_runs_a_handler_once() {
     assert_eq!(actions.get(SIGUSR1), Action::default());
 }
 
+/// Nothing pending, kept on the host's heap.
+fn pending() -> Pending<[Info; SIGNALS as usize], Global> {
+    Pending::in_storage([Info::default(); SIGNALS as usize], Global).unwrap()
+}
+
 #[test]
 fn faults_come_first_and_real_time_signals_queue() {
-    let mut pending = Pending::new();
+    let mut pending = pending();
     let info = |pid| Info { code: signal::SI_USER, pid, status: 0 };
     assert!(pending.add(SIGTERM, info(1)));
     assert!(!pending.add(SIGTERM, info(2)), "a standard signal pending twice is one");
@@ -99,9 +104,9 @@ fn faults_come_first_and_real_time_signals_queue() {
     // SIGSEGV is a fault's: first, although SIGINT has a lower number.
     assert_eq!(pending.take(u64::MAX), Some((SIGSEGV, info(3))));
     assert_eq!(pending.take(u64::MAX), Some((SIGINT, info(6))));
-    // A blocked one stays.
-    assert_eq!(pending.take(!signal::bit(SIGTERM)).map(|(s, _)| s), Some(SIGRTMIN));
-    assert_eq!(pending.take(!signal::bit(SIGTERM)).map(|(s, _)| s), Some(SIGRTMIN));
+    // A blocked one stays; each real-time signal keeps what it carries.
+    assert_eq!(pending.take(!signal::bit(SIGTERM)), Some((SIGRTMIN, info(4))));
+    assert_eq!(pending.take(!signal::bit(SIGTERM)), Some((SIGRTMIN, info(5))));
     assert_eq!(pending.take(!signal::bit(SIGTERM)), None);
     assert_eq!(pending.take(u64::MAX), Some((SIGTERM, info(1))));
     assert_eq!(pending.set(), 0);
@@ -112,6 +117,41 @@ fn faults_come_first_and_real_time_signals_queue() {
     pending.add(SIGRTMIN + 1, info(7));
     pending.discard(signal::REAL_TIME);
     assert_eq!(pending.take(u64::MAX), None);
+}
+
+#[test]
+fn real_time_signals_go_lowest_first_and_queue_up_to_the_limit() {
+    let mut pending = pending();
+    let info = |status| Info { code: signal::SI_QUEUE, pid: 1, status };
+    assert!(pending.add(SIGRTMIN + 2, info(1)));
+    assert!(pending.add(SIGRTMIN, info(2)));
+    assert!(pending.add(SIGRTMIN + 2, info(3)));
+    assert_eq!(pending.take(u64::MAX), Some((SIGRTMIN, info(2))));
+    assert_eq!(pending.take(u64::MAX), Some((SIGRTMIN + 2, info(1))));
+    assert_eq!(pending.set(), signal::bit(SIGRTMIN + 2));
+    // Discarding one real-time signal leaves the others queued.
+    assert!(pending.add(SIGRTMIN + 1, info(4)));
+    pending.discard(signal::bit(SIGRTMIN + 2));
+    assert_eq!(pending.take(u64::MAX), Some((SIGRTMIN + 1, info(4))));
+    assert_eq!(pending.set(), 0);
+    for n in 0..signal::QUEUE_MAX as u64 {
+        assert!(pending.add(SIGRTMIN + (n % 3) as u32, info(n)));
+    }
+    assert!(!pending.add(SIGRTMIN, info(0)), "the queue is full");
+    assert!(pending.holds(SIGRTMIN + 1, &info(4)));
+    assert!(!pending.holds(SIGRTMIN + 1, &info(5)), "that one is SIGRTMIN + 2's");
+    assert!(pending.remove(SIGRTMIN + 1, &info(4)), "a timer's signal goes with the timer");
+    assert!(!pending.holds(SIGRTMIN + 1, &info(4)));
+    assert!(!pending.remove(SIGRTMIN + 1, &info(4)), "it was queued once");
+    assert!(pending.add(SIGRTMIN, info(0)), "there is room for one again");
+    assert!(pending.add(SIGUSR1, info(0)), "standard signals do not queue");
+    assert!(!pending.remove(SIGUSR1, &info(1)), "another sender's SIGUSR1 stays");
+    assert_eq!(pending.set() & signal::bit(SIGUSR1), signal::bit(SIGUSR1));
+    let mut taken = 0;
+    while pending.take(u64::MAX).is_some() {
+        taken += 1;
+    }
+    assert_eq!(taken, signal::QUEUE_MAX + 1);
 }
 
 /// A block as a C library writes it.

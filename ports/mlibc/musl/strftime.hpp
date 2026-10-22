@@ -4,15 +4,19 @@
 
 // strftime(3) and wcsftime(3): musl 1.2.5's (src/time/strftime.c and
 // src/time/wcsftime.c, https://musl.libc.org, MIT), with mlibc's
-// locales. They have every
-// conversion C and POSIX name (mlibc's had no %u, %w, %V, %G, %g, %W
-// or %s and ended the program on them), the '-', '_', '0' and '+' flags
-// and widths, and keep the text around %c, %x and %X, which mlibc's
-// dropped. An unknown conversion makes them return 0, as musl's do.
+// locales. They have every conversion C and POSIX name (mlibc's had no
+// %u, %w, %V, %G, %g, %W or %s and ended the program on them), the '-',
+// '_', '0' and '+' flags and widths, and keep the text around %c, %x and
+// %X, which mlibc's dropped. To these, as glibc has them: %k and %l (the
+// hour on 24 and 12 hours, padded with a space), %P (am or pm), the '^'
+// flag (upper case) and the '#' flag (upper case for names, lower case
+// for %p and %Z), and an unknown conversion is copied as it stands,
+// where musl's would make them return 0.
 
 #ifndef MLIBC_MUSL_STRFTIME_HPP
 #define MLIBC_MUSL_STRFTIME_HPP
 
+#include <ctype.h>
 #include <langinfo.h>
 #include <limits.h>
 #include <stdio.h>
@@ -20,6 +24,7 @@
 #include <string.h>
 #include <time.h>
 #include <wchar.h>
+#include <wctype.h>
 #include <mlibc/calendar.hpp>
 #include <mlibc/locale.hpp>
 
@@ -66,6 +71,21 @@ inline int week_num(const struct tm *tm)
 
 inline size_t strftime_l(char *__restrict s, size_t n, const char *__restrict f,
 		const struct tm *__restrict tm, localeinfo *loc);
+
+// Whether `c` is a conversion fmt_1 knows.
+inline bool is_conversion(int c)
+{
+	return c > 0 && c < 128 && strchr("aAbBcCdDeFgGhHIjklmMnpPrRsStTuUVwWxXyYzZ%", c);
+}
+
+// The case glibc's '^' (`upper`) and '#' (`swap`) flags give conversion
+// `c`: 1 for upper case, -1 for lower case, 0 to leave it.
+inline int case_of(int c, bool upper, bool swap)
+{
+	if (swap && c < 128 && strchr("aAbBh", c)) return 1;
+	if (swap && (c == 'p' || c == 'Z')) return -1;
+	return upper ? 1 : 0;
+}
 
 inline const char *fmt_1(char (*s)[100], size_t *l, int f, const struct tm *tm, localeinfo *loc, int pad)
 {
@@ -118,9 +138,15 @@ inline const char *fmt_1(char (*s)[100], size_t *l, int f, const struct tm *tm, 
 		if (f=='g') val %= 100;
 		else width = 4;
 		goto number;
+	case 'k':
+		def_pad = '_';
+		[[fallthrough]];
 	case 'H':
 		val = tm->tm_hour;
 		goto number;
+	case 'l':
+		def_pad = '_';
+		[[fallthrough]];
 	case 'I':
 		val = tm->tm_hour;
 		if (!val) val = 12;
@@ -142,6 +168,12 @@ inline const char *fmt_1(char (*s)[100], size_t *l, int f, const struct tm *tm, 
 	case 'p':
 		item = tm->tm_hour >= 12 ? PM_STR : AM_STR;
 		goto nl_strcat;
+	case 'P':
+		// glibc's: %p in lower case.
+		fmt = mlibc::nl_langinfo_l(tm->tm_hour >= 12 ? PM_STR : AM_STR, loc);
+		for (*l = 0; fmt[*l] && *l < sizeof *s; ++*l)
+			(*s)[*l] = static_cast<char>(tolower(static_cast<unsigned char>(fmt[*l])));
+		return *s;
 	case 'r':
 		item = T_FMT_AMPM;
 		goto nl_strftime;
@@ -258,10 +290,17 @@ inline size_t strftime_l(char *__restrict s, size_t n, const char *__restrict f,
 			s[l++] = *f;
 			continue;
 		}
-		f++;
+		const char *start = f++;
 		pad = 0;
-		if (*f == '-' || *f == '_' || *f == '0') pad = *f++;
-		if ((plus = (*f == '+'))) f++;
+		plus = 0;
+		bool upper = false, swap = false;
+		for (;; f++) {
+			if (*f == '-' || *f == '_' || *f == '0') pad = *f;
+			else if (*f == '+') plus = 1;
+			else if (*f == '^') upper = true;
+			else if (*f == '#') swap = true;
+			else break;
+		}
 		if (*f-'0'<10U) {
 			width = strtoul(f, &p, 10);
 		} else {
@@ -275,8 +314,28 @@ inline size_t strftime_l(char *__restrict s, size_t n, const char *__restrict f,
 		}
 		f = p;
 		if (*f == 'E' || *f == 'O') f++;
+		if (!is_conversion(*f)) {
+			// glibc's way: the text from the '%' as it stands, and a '%'
+			// that ends the format is copied too.
+			k = (*f ? f + 1 : f) - start;
+			if (k > n-l) k = n-l;
+			memcpy(s+l, start, k);
+			l += k;
+			if (!*f) f--;
+			continue;
+		}
 		t = fmt_1(&buf, &k, *f, tm, loc, pad);
 		if (!t) break;
+		if (int c = case_of(*f, upper, swap); c) {
+			if (t != buf) {
+				if (k > sizeof buf) k = sizeof buf;
+				memcpy(buf, t, k);
+				t = buf;
+			}
+			for (size_t i = 0; i < k; i++)
+				buf[i] = static_cast<char>(c > 0 ? toupper(static_cast<unsigned char>(buf[i]))
+						: tolower(static_cast<unsigned char>(buf[i])));
+		}
 		if (width) {
 			/* Trim off any sign and leading zeros, then
 			 * count remaining digits to determine behavior
@@ -327,10 +386,17 @@ inline size_t wcsftime_l(wchar_t *__restrict s, size_t n, const wchar_t *__restr
 			s[l++] = *f;
 			continue;
 		}
-		f++;
+		const wchar_t *start = f++;
 		pad = 0;
-		if (*f == '-' || *f == '_' || *f == '0') pad = *f++;
-		if ((plus = (*f == '+'))) f++;
+		plus = 0;
+		bool upper = false, swap = false;
+		for (;; f++) {
+			if (*f == '-' || *f == '_' || *f == '0') pad = *f;
+			else if (*f == '+') plus = 1;
+			else if (*f == '^') upper = true;
+			else if (*f == '#') swap = true;
+			else break;
+		}
 		width = wcstoul(f, &p, 10);
 		if (*p == 'C' || *p == 'F' || *p == 'G' || *p == 'Y') {
 			if (!width && p!=f) width = 1;
@@ -339,11 +405,22 @@ inline size_t wcsftime_l(wchar_t *__restrict s, size_t n, const wchar_t *__restr
 		}
 		f = p;
 		if (*f == 'E' || *f == 'O') f++;
+		if (!is_conversion(*f)) {
+			k = (*f ? f + 1 : f) - start;
+			if (k > n-l) k = n-l;
+			wmemcpy(s+l, start, k);
+			l += k;
+			if (!*f) f--;
+			continue;
+		}
 		t_mb = fmt_1(&buf, &k, *f, tm, loc, pad);
 		if (!t_mb) break;
 		k = mbstowcs(wbuf, t_mb, sizeof wbuf / sizeof *wbuf);
 		if (k == (size_t)-1) return 0;
 		t = wbuf;
+		if (int c = case_of(*f, upper, swap); c)
+			for (size_t i = 0; i < k; i++)
+				wbuf[i] = static_cast<wchar_t>(c > 0 ? towupper(wbuf[i]) : towlower(wbuf[i]));
 		if (width) {
 			for (; *t=='+' || *t=='-' || (*t=='0'&&t[1]); t++, k--);
 			width--;

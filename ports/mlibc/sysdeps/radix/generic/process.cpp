@@ -10,6 +10,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/tcb.hpp>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -235,9 +238,12 @@ int Sysdeps<Tgkill>::operator()(int tgid, int tid, int sig) {
 }
 
 int Sysdeps<Sigqueue>::operator()(pid_t pid, int sig, const union sigval val) {
-	// The value is not carried yet (docs/design/posix.md): the signal is.
-	(void)val;
-	return sysdep<Kill>(pid, sig);
+	if(sig < 0 || sig > 64)
+		return EINVAL;
+	uint64_t value = 0;
+	memcpy(&value, &val, sizeof(val));
+	return radix::to_errno(radix_process_signal_queue(radix::SLOT_PROCESS,
+			static_cast<uint64_t>(static_cast<int64_t>(pid)), static_cast<uint32_t>(sig), value));
 }
 
 pid_t Sysdeps<GetPid>::operator()() {
@@ -339,25 +345,151 @@ int Sysdeps<SetGroups>::operator()(size_t size, const gid_t *list) {
 }
 
 int Sysdeps<GetPriority>::operator()(int which, id_t who, int *value) {
-	(void)which;
-	(void)who;
-	// Nice levels are the scheduler's (radix-scheduling(7)), not yet
-	// reachable from POSIX's calls (docs/design/posix.md).
-	*value = 0;
+	// PRIO_PROCESS, PRIO_PGRP and PRIO_USER are the kernel's
+	// PriorityWhich; as on Linux, a process's number names its first
+	// thread (radix-posix(7)).
+	struct radix_process_priority_results r;
+	if(uint64_t status = radix_process_priority(radix::SLOT_PROCESS,
+			static_cast<enum radix_priority_which>(which), who, false, 0, &r); status)
+		return radix::to_errno(status);
+	*value = r.nice;
 	return 0;
 }
 
 int Sysdeps<SetPriority>::operator()(int which, id_t who, int prio) {
-	(void)which;
-	(void)who;
-	return prio < 0 ? EACCES : 0;
+	struct radix_process_priority_results r;
+	return radix::to_errno(radix_process_priority(radix::SLOT_PROCESS,
+			static_cast<enum radix_priority_which>(which), who, true, prio, &r));
 }
 
 int Sysdeps<Nice>::operator()(int nice, int *new_nice) {
-	if(nice < 0)
-		return EPERM;
-	*new_nice = 0;
+	int now;
+	if(int e = sysdep<GetPriority>(PRIO_PROCESS, 0, &now); e)
+		return e;
+	// The kernel clamps the level to -20 to 19.
+	long wanted = static_cast<long>(now) + nice;
+	if(wanted < -20)
+		wanted = -20;
+	if(wanted > 19)
+		wanted = 19;
+	if(int e = sysdep<SetPriority>(PRIO_PROCESS, 0, static_cast<int>(wanted)); e)
+		// POSIX's nice fails with EPERM where setpriority has EACCES.
+		return e == EACCES ? EPERM : e;
+	return sysdep<GetPriority>(PRIO_PROCESS, 0, new_nice);
+}
+
+namespace {
+
+// Reads, and with `set` changes, the policy and priority of thread
+// `thread` (0: the calling one): radix-process(2)'s `scheduling`, with
+// POSIX's policies, which are the kernel's (with Linux's numbers).
+int scheduling(uint64_t thread, bool set, int *policy, int *priority) {
+	if(set && (*policy < 0 || *priority < 0))
+		return EINVAL;
+	struct radix_process_scheduling_results r;
+	if(uint64_t status = radix_process_scheduling(radix::SLOT_PROCESS, thread, set,
+			static_cast<enum radix_scheduling_policy>(set ? *policy : 0),
+			set ? static_cast<uint32_t>(*priority) : 0, &r); status)
+		return radix::to_errno(status);
+	if(!set) {
+		*policy = static_cast<int>(r.policy);
+		*priority = static_cast<int>(r.priority);
+	}
 	return 0;
+}
+
+// The thread a process number names for the sched_ calls: 0 the calling
+// one; or else the process's first thread, which has its number.
+int thread_of(pid_t pid, uint64_t *thread) {
+	if(pid < 0)
+		return EINVAL;
+	*thread = static_cast<uint64_t>(pid);
+	return 0;
+}
+
+} // namespace
+
+int Sysdeps<GetScheduler>::operator()(pid_t pid, int *policy) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	int priority;
+	return scheduling(thread, false, policy, &priority);
+}
+
+int Sysdeps<SetScheduler>::operator()(pid_t pid, int policy, const struct sched_param *param) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	if(!param)
+		return EINVAL;
+	int priority = param->sched_priority;
+	return scheduling(thread, true, &policy, &priority);
+}
+
+int Sysdeps<GetParam>::operator()(pid_t pid, struct sched_param *param) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	int policy;
+	return scheduling(thread, false, &policy, &param->sched_priority);
+}
+
+int Sysdeps<SetParam>::operator()(pid_t pid, const struct sched_param *param) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	if(!param)
+		return EINVAL;
+	int policy;
+	int priority;
+	if(int e = scheduling(thread, false, &policy, &priority); e)
+		return e;
+	priority = param->sched_priority;
+	return scheduling(thread, true, &policy, &priority);
+}
+
+int Sysdeps<GetSchedparam>::operator()(void *tcb, int *policy, struct sched_param *param) {
+	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
+	return scheduling(thread, false, policy, &param->sched_priority);
+}
+
+int Sysdeps<SetSchedparam>::operator()(void *tcb, int policy, const struct sched_param *param) {
+	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
+	int priority = param->sched_priority;
+	return scheduling(thread, true, &policy, &priority);
+}
+
+int Sysdeps<GetMaxPriority>::operator()(int policy, int *out) {
+	switch(policy) {
+	case SCHED_FIFO:
+	case SCHED_RR:
+		*out = 99;
+		return 0;
+	case SCHED_OTHER:
+	case SCHED_BATCH:
+	case SCHED_IDLE:
+		*out = 0;
+		return 0;
+	default:
+		return EINVAL;
+	}
+}
+
+int Sysdeps<GetMinPriority>::operator()(int policy, int *out) {
+	switch(policy) {
+	case SCHED_FIFO:
+	case SCHED_RR:
+		*out = 1;
+		return 0;
+	case SCHED_OTHER:
+	case SCHED_BATCH:
+	case SCHED_IDLE:
+		*out = 0;
+		return 0;
+	default:
+		return EINVAL;
+	}
 }
 
 int Sysdeps<Sigaction>::operator()(int signum, const struct sigaction *__restrict act,
@@ -466,13 +598,228 @@ int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
 		return e == ETIMEDOUT ? EAGAIN : e;
 	}
 	if(info) {
+		// As the kernel lays a SignalInfo out for a handler
+		// (radix-signal(2)): the sender's number (or a timer's number and
+		// overrun) at 16, the status or value at 24.
 		memset(info, 0, sizeof(*info));
 		info->si_signo = static_cast<int>(r.signal);
 		info->si_code = r.code;
-		info->si_pid = static_cast<pid_t>(r.pid);
-		info->si_status = static_cast<int>(r.status);
+		memcpy(reinterpret_cast<char *>(info) + 16, &r.pid, sizeof(r.pid));
+		memcpy(reinterpret_cast<char *>(info) + 24, &r.status, sizeof(r.status));
 	}
 	*out_signal = static_cast<int>(r.signal);
+	return 0;
+}
+
+namespace {
+
+// Nanoseconds in `ts`, or EINVAL if it is not a time.
+int timespec_ns(const struct timespec &ts, uint64_t *ns) {
+	if(ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= static_cast<long>(NS_PER_SEC))
+		return EINVAL;
+	*ns = static_cast<uint64_t>(ts.tv_sec) * NS_PER_SEC + static_cast<uint64_t>(ts.tv_nsec);
+	return 0;
+}
+
+struct timespec timespec_of(uint64_t ns) {
+	struct timespec ts;
+	ts.tv_sec = static_cast<time_t>(ns / NS_PER_SEC);
+	ts.tv_nsec = static_cast<long>(ns % NS_PER_SEC);
+	return ts;
+}
+
+// A SIGEV_THREAD timer: a thread of the C library's own waits for the
+// timer's signal, SIGTIMER, which no program sees, and calls the
+// timer's function for each expiry.
+struct TimerThread {
+	void (*function)(union sigval);
+	union sigval value;
+	// Its number.
+	pid_t thread;
+	// Set by timer_delete: the thread ends.
+	int deleted;
+};
+
+// The threads of the SIGEV_THREAD timers, by timer number.
+TimerThread *timer_threads[RADIX_PROCESS_TIMERS_MAX];
+
+void *run_timer_thread(void *argument) {
+	auto timer = static_cast<TimerThread *>(argument);
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGTIMER);
+	for(;;) {
+		siginfo_t info;
+		int signal;
+		if(sysdep<Sigtimedwait>(&set, &info, nullptr, &signal))
+			continue;
+		if(__atomic_load_n(&timer->deleted, __ATOMIC_ACQUIRE))
+			break;
+		if(info.si_code == SI_TIMER)
+			timer->function(timer->value);
+	}
+	free(timer);
+	return nullptr;
+}
+
+// Ends the thread of `timer`, which timer_delete deleted or
+// timer_create could not make. The thread frees `timer`.
+void end_timer_thread(TimerThread *timer) {
+	pid_t thread = timer->thread;
+	__atomic_store_n(&timer->deleted, 1, __ATOMIC_RELEASE);
+	sysdep<Tgkill>(sysdep<GetPid>(), thread, SIGTIMER);
+}
+
+// Starts the thread of a SIGEV_THREAD timer `event` asks for; returns its
+// number in `thread`.
+int start_timer_thread(const struct sigevent *event, TimerThread **made, pid_t *thread) {
+	auto timer = static_cast<TimerThread *>(calloc(1, sizeof(TimerThread)));
+	if(!timer)
+		return EAGAIN;
+	timer->function = event->sigev_notify_function;
+	timer->value = event->sigev_value;
+	pthread_attr_t attr;
+	if(event->sigev_notify_attributes)
+		attr = *event->sigev_notify_attributes;
+	else
+		pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	// It starts with every signal blocked: it takes SIGTIMER alone, and
+	// only by waiting for it.
+	sigset_t all;
+	sigset_t old;
+	sigfillset(&all);
+	pthread_sigmask(SIG_BLOCK, &all, &old);
+	pthread_t handle;
+	int e = pthread_create(&handle, &attr, run_timer_thread, timer);
+	pthread_sigmask(SIG_SETMASK, &old, nullptr);
+	if(!event->sigev_notify_attributes)
+		pthread_attr_destroy(&attr);
+	if(e) {
+		free(timer);
+		return e;
+	}
+	timer->thread = reinterpret_cast<Tcb *>(handle)->tid;
+	*made = timer;
+	*thread = timer->thread;
+	return 0;
+}
+
+// The number of timer `t`, or EINVAL if it cannot be one.
+int timer_number(timer_t t, uint32_t *number) {
+	auto n = reinterpret_cast<uintptr_t>(t);
+	if(n >= RADIX_PROCESS_TIMERS_MAX)
+		return EINVAL;
+	*number = static_cast<uint32_t>(n);
+	return 0;
+}
+
+} // namespace
+
+int Sysdeps<TimerCreate>::operator()(clockid_t clk, struct sigevent *__restrict evp,
+		timer_t *__restrict res) {
+	// The kernel's ClockKind numbers the clocks as Linux does.
+	if(clk < 0)
+		return EINVAL;
+	// Without a sigevent, SIGALRM carrying the timer's number.
+	enum radix_timer_notify notify = RADIX_TIMER_NOTIFY_ALARM;
+	uint32_t signal = 0;
+	uint64_t value = 0;
+	pid_t thread = 0;
+	TimerThread *helper = nullptr;
+	if(evp) {
+		signal = static_cast<uint32_t>(evp->sigev_signo);
+		memcpy(&value, &evp->sigev_value, sizeof(evp->sigev_value));
+		switch(evp->sigev_notify) {
+		case SIGEV_SIGNAL:
+			notify = RADIX_TIMER_NOTIFY_SIGNAL;
+			break;
+		case SIGEV_NONE:
+			notify = RADIX_TIMER_NOTIFY_NONE;
+			break;
+		case SIGEV_THREAD_ID:
+			notify = RADIX_TIMER_NOTIFY_THREAD;
+			thread = evp->sigev_notify_thread_id;
+			break;
+		case SIGEV_THREAD:
+			if(int e = start_timer_thread(evp, &helper, &thread); e)
+				return e;
+			notify = RADIX_TIMER_NOTIFY_THREAD;
+			signal = SIGTIMER;
+			value = 0;
+			break;
+		default:
+			return EINVAL;
+		}
+	}
+	struct radix_process_timer_create_results r;
+	uint64_t status = radix_process_timer_create(radix::SLOT_PROCESS,
+			static_cast<enum radix_clock_kind>(clk), notify, signal, value,
+			static_cast<uint64_t>(thread), &r);
+	if(status) {
+		if(helper)
+			end_timer_thread(helper);
+		return radix::to_errno(status);
+	}
+	if(helper)
+		__atomic_store_n(&timer_threads[r.timer], helper, __ATOMIC_RELEASE);
+	*res = reinterpret_cast<timer_t>(static_cast<uintptr_t>(r.timer));
+	return 0;
+}
+
+int Sysdeps<TimerSettime>::operator()(timer_t t, int flags,
+		const struct itimerspec *__restrict val, struct itimerspec *__restrict old) {
+	uint32_t number;
+	uint64_t value_ns;
+	uint64_t interval_ns;
+	if(int e = timer_number(t, &number); e)
+		return e;
+	if(int e = timespec_ns(val->it_value, &value_ns); e)
+		return e;
+	if(int e = timespec_ns(val->it_interval, &interval_ns); e)
+		return e;
+	struct radix_process_timer_set_results r;
+	if(uint64_t status = radix_process_timer_set(radix::SLOT_PROCESS, number,
+			(flags & TIMER_ABSTIME) != 0, value_ns, interval_ns, &r); status)
+		return radix::to_errno(status);
+	if(old) {
+		old->it_value = timespec_of(r.value_ns);
+		old->it_interval = timespec_of(r.interval_ns);
+	}
+	return 0;
+}
+
+int Sysdeps<TimerGettime>::operator()(timer_t t, struct itimerspec *val) {
+	uint32_t number;
+	if(int e = timer_number(t, &number); e)
+		return e;
+	struct radix_process_timer_get_results r;
+	if(uint64_t status = radix_process_timer_get(radix::SLOT_PROCESS, number, &r); status)
+		return radix::to_errno(status);
+	val->it_value = timespec_of(r.value_ns);
+	val->it_interval = timespec_of(r.interval_ns);
+	return 0;
+}
+
+int Sysdeps<TimerGetoverrun>::operator()(timer_t t, int *out) {
+	uint32_t number;
+	if(int e = timer_number(t, &number); e)
+		return e;
+	struct radix_process_timer_get_results r;
+	if(uint64_t status = radix_process_timer_get(radix::SLOT_PROCESS, number, &r); status)
+		return radix::to_errno(status);
+	*out = static_cast<int>(r.overrun);
+	return 0;
+}
+
+int Sysdeps<TimerDelete>::operator()(timer_t t) {
+	uint32_t number;
+	if(int e = timer_number(t, &number); e)
+		return e;
+	if(uint64_t status = radix_process_timer_delete(radix::SLOT_PROCESS, number); status)
+		return radix::to_errno(status);
+	if(auto helper = __atomic_exchange_n(&timer_threads[number], nullptr, __ATOMIC_ACQ_REL))
+		end_timer_thread(helper);
 	return 0;
 }
 

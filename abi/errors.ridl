@@ -95,6 +95,9 @@ errors kernel = 1 {
     /// The process has run `exec` since its parent forked it, so the
     /// parent can no longer move it to another process group.
     execed = 34 => EACCES;
+    /// A resource limit does not allow it: a nice level below the one
+    /// RLIMIT_NICE allows (radix-process(2)'s `priority`).
+    over_limit = 35 => EACCES;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).

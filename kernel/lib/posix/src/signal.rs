@@ -6,9 +6,12 @@
 //!
 //! Signals are numbered as on Linux, from 1 to [`SIGNALS`]; a set of them
 //! is a 64-bit word with bit `n - 1` for signal `n`. Signals from SIGRTMIN
-//! on are real-time: each one sent is delivered (up to [`QUEUE_MAX`]
-//! pending at once), where another signal sent while it is pending is
-//! delivered once.
+//! on are real-time: each one sent is delivered, with what it carries (up
+//! to [`QUEUE_MAX`] pending at once), where another signal sent while it
+//! is pending is delivered once.
+
+use alloc::vec::Vec;
+use core::alloc::Allocator;
 
 use radix_abi::signal::{
     ActionFlags, DEFAULT, IGNORE, SIGABRT, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL,
@@ -17,9 +20,9 @@ use radix_abi::signal::{
 
 pub use radix_abi::signal::SIGNALS;
 
-/// The most times one real-time signal may be pending at once; sending it
-/// again then fails, as `sigqueue` fails with EAGAIN.
-pub const QUEUE_MAX: u16 = 1024;
+/// The most real-time signals a thread or process may have pending at
+/// once; sending another then fails, as `sigqueue` fails with EAGAIN.
+pub const QUEUE_MAX: usize = 1024;
 
 /// The bit of signal `signal` in a set, or 0 for a number that is not a
 /// signal.
@@ -228,18 +231,22 @@ impl<S: AsRef<[Action]> + AsMut<[Action]>> Actions<S> {
 pub struct Info {
     /// Where it came from: `si_code`.
     pub code: i32,
-    /// The sender's process number, or the address a fault was on.
+    /// The sender's process number, or the address a fault was on; for a
+    /// timer's signal, the timer's number, and in the high half how many
+    /// times it expired again before the signal was taken (its overrun).
     pub pid: u64,
-    /// For SIGCHLD the child's code or signal; for a real-time signal its
-    /// value.
+    /// For SIGCHLD the child's code or signal; for `sigqueue`'s signals
+    /// and timers' the value they carry.
     pub status: u64,
 }
 
 /// `si_code` of a signal sent with `kill`.
 pub const SI_USER: i32 = 0;
+/// `si_code` of a signal sent with `sigqueue`.
+pub const SI_QUEUE: i32 = -1;
 /// `si_code` of a signal the kernel sent.
 pub const SI_KERNEL: i32 = 0x80;
-/// `si_code` of a timer's signal.
+/// `si_code` of a POSIX timer's signal (`timer_create`).
 pub const SI_TIMER: i32 = -2;
 /// `si_code` of a signal sent to a thread.
 pub const SI_TKILL: i32 = -6;
@@ -268,44 +275,29 @@ pub const BUS_ADRERR: i32 = 2;
 pub const TRAP_BRKPT: i32 = 1;
 
 /// The signals pending for a thread, or for a process (taken by whichever
-/// of its threads does not block them first), with what each carries
-/// kept in `S`, as [`Actions`] keeps its actions.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending<S = [Info; SIGNALS as usize]> {
+/// of its threads does not block them first): what each standard signal
+/// carries is kept in `S`, as [`Actions`] keeps its actions, and the
+/// real-time signals in a queue in `A`'s memory, each with its own.
+#[derive(Debug)]
+pub struct Pending<S, A: Allocator> {
     /// The signals pending.
     set: u64,
-    /// What each pending signal carries: for a real-time signal sent more
-    /// than once, the last one's.
+    /// What each pending standard signal carries.
     info: S,
-    /// How many times each real-time signal is pending.
-    queued: [u16; (SIGNALS - SIGRTMIN + 1) as usize],
+    /// The real-time signals pending, in the order they were sent, each
+    /// with what it carries.
+    queue: Vec<(u32, Info), A>,
 }
 
-impl Default for Pending {
-    fn default() -> Pending {
-        Pending::new()
-    }
-}
-
-impl Pending {
-    /// Nothing pending.
-    pub const fn new() -> Pending {
-        Pending {
-            set: 0,
-            info: [Info { code: 0, pid: 0, status: 0 }; SIGNALS as usize],
-            queued: [0; (SIGNALS - SIGRTMIN + 1) as usize],
-        }
-    }
-}
-
-impl<S: AsRef<[Info]> + AsMut<[Info]>> Pending<S> {
-    /// Nothing pending, with what signals carry kept in `storage`, which
-    /// must hold [`SIGNALS`] entries (`None` otherwise).
-    pub fn in_storage(storage: S) -> Option<Pending<S>> {
+impl<S: AsRef<[Info]> + AsMut<[Info]>, A: Allocator> Pending<S, A> {
+    /// Nothing pending, with what standard signals carry kept in
+    /// `storage`, which must hold [`SIGNALS`] entries (`None` otherwise),
+    /// and real-time signals queued in `alloc`'s memory.
+    pub fn in_storage(storage: S, alloc: A) -> Option<Pending<S, A>> {
         (storage.as_ref().len() == SIGNALS as usize).then_some(Pending {
             set: 0,
             info: storage,
-            queued: [0; (SIGNALS - SIGRTMIN + 1) as usize],
+            queue: Vec::new_in(alloc),
         })
     }
 
@@ -315,29 +307,32 @@ impl<S: AsRef<[Info]> + AsMut<[Info]>> Pending<S> {
     }
 
     /// Makes `signal` pending with `info`. Returns `false` if it was
-    /// pending already and is not real-time, or a real-time signal is
-    /// pending [`QUEUE_MAX`] times: then nothing changes.
+    /// pending already and is not real-time, or [`QUEUE_MAX`] real-time
+    /// signals are pending, or there is no memory to queue one: then
+    /// nothing changes.
     pub fn add(&mut self, signal: u32, info: Info) -> bool {
         let bit = bit(signal);
         if bit == 0 {
             return false;
         }
         if bit & REAL_TIME != 0 {
-            let queued = &mut self.queued[(signal - SIGRTMIN) as usize];
-            if *queued >= QUEUE_MAX {
+            if self.queue.len() >= QUEUE_MAX || self.queue.try_reserve(1).is_err() {
                 return false;
             }
-            *queued += 1;
+            // Room was reserved above.
+            let _ = self.queue.push_within_capacity((signal, info));
         } else if self.set & bit != 0 {
             return false;
+        } else {
+            self.info.as_mut()[(signal - 1) as usize] = info;
         }
         self.set |= bit;
-        self.info.as_mut()[(signal - 1) as usize] = info;
         true
     }
 
     /// Takes the signal to deliver next among those in `allowed`: a fault's
-    /// first, then the lowest-numbered, as Linux does.
+    /// first, then the lowest-numbered, as Linux does; of a real-time
+    /// signal pending more than once, the one sent first.
     pub fn take(&mut self, allowed: u64) -> Option<(u32, Info)> {
         let ready = self.set & allowed;
         if ready == 0 {
@@ -346,28 +341,63 @@ impl<S: AsRef<[Info]> + AsMut<[Info]>> Pending<S> {
         let synchronous = ready & SYNCHRONOUS;
         let from = if synchronous != 0 { synchronous } else { ready };
         let signal = from.trailing_zeros() + 1;
-        let info = self.info.as_ref()[(signal - 1) as usize];
         let bit = bit(signal);
-        if bit & REAL_TIME != 0 {
-            let queued = &mut self.queued[(signal - SIGRTMIN) as usize];
-            *queued = queued.saturating_sub(1);
-            if *queued == 0 {
-                self.set &= !bit;
-            }
-        } else {
+        if bit & REAL_TIME == 0 {
+            self.set &= !bit;
+            return Some((signal, self.info.as_ref()[(signal - 1) as usize]));
+        }
+        let mut found = self.queue.iter().enumerate().filter(|(_, (s, _))| *s == signal);
+        let first = found.next().map(|(at, _)| at);
+        if found.next().is_none() {
             self.set &= !bit;
         }
-        Some((signal, info))
+        // The set says one is queued; if none were, it is gone now.
+        first.map(|at| (signal, self.queue.remove(at).1))
+    }
+
+    /// Whether `signal` is pending with `info` (for a real-time signal,
+    /// one of those sent).
+    pub fn holds(&self, signal: u32, info: &Info) -> bool {
+        let bit = bit(signal);
+        if self.set & bit == 0 {
+            false
+        } else if bit & REAL_TIME == 0 {
+            self.info.as_ref()[(signal - 1) as usize] == *info
+        } else {
+            self.queue.contains(&(signal, *info))
+        }
+    }
+
+    /// Drops `signal` if it is pending with `info` (for a real-time
+    /// signal, the first one sent with it). Returns whether it was.
+    pub fn remove(&mut self, signal: u32, info: &Info) -> bool {
+        let bit = bit(signal);
+        if self.set & bit == 0 {
+            return false;
+        }
+        if bit & REAL_TIME == 0 {
+            if self.info.as_ref()[(signal - 1) as usize] != *info {
+                return false;
+            }
+            self.set &= !bit;
+            return true;
+        }
+        let Some(at) = self.queue.iter().position(|entry| *entry == (signal, *info)) else {
+            return false;
+        };
+        self.queue.remove(at);
+        if !self.queue.iter().any(|(s, _)| *s == signal) {
+            self.set &= !bit;
+        }
+        true
     }
 
     /// Drops every signal of `set` that is pending.
     pub fn discard(&mut self, set: u64) {
         let gone = self.set & set;
         self.set &= !gone;
-        for signal in SIGRTMIN..=SIGNALS {
-            if gone & bit(signal) != 0 {
-                self.queued[(signal - SIGRTMIN) as usize] = 0;
-            }
+        if gone & REAL_TIME != 0 {
+            self.queue.retain(|(signal, _)| gone & bit(*signal) == 0);
         }
     }
 

@@ -163,19 +163,21 @@ struct SignalInfo {
     signal: i32;
     /// Unused (0).
     error: i32;
-    /// Where it came from, as Linux's `si_code`: 0 sent with `kill`, -6
-    /// with `signal_thread`, -2 by a timer, 128 by the kernel; for SIGCHLD
-    /// how the child changed (1 exited, 2 killed, 5 stopped, 6
-    /// continued); for a fault's signal its kind (SIGSEGV: 1 no mapping, 2
-    /// not allowed).
+    /// Where it came from, as Linux's `si_code`: 0 sent with `kill`, -1
+    /// with `signal_queue`, -6 with `signal_thread`, -2 by a POSIX timer,
+    /// 128 by the kernel (an interval timer, a hang-up); for SIGCHLD how
+    /// the child changed (1 exited, 2 killed, 5 stopped, 6 continued); for
+    /// a fault's signal its kind (SIGSEGV: 1 no mapping, 2 not allowed).
     code: i32;
     /// Zero.
     pad: u32;
     /// The sender's process number in the low half (the high half,
-    /// Linux's user id, is 0); for a fault, the address it faulted on.
+    /// Linux's user id, is 0); for a fault, the address it faulted on;
+    /// for a POSIX timer's, the timer's number in the low half and its
+    /// overrun in the high half.
     pid: u64;
-    /// For SIGCHLD, the child's exit code or signal; for a real-time
-    /// signal, the value it carries.
+    /// For SIGCHLD, the child's exit code or signal; for `signal_queue`'s
+    /// and timers' signals, the value they carry.
     status: u64;
     /// More of the sender's data (unused yet).
     reserved: [u64; 12];

@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Files through the C library: open and its flags, reading, writing and
-// seeking, descriptions that share an offset, stdio, directories, and
-// renaming and removing, on the tmpfs at /tmp and the read-only /system.
+// seeking, descriptions that share an offset, stdio, directories and
+// their descriptors, temporary files, and renaming and removing, on the
+// tmpfs at /tmp and the read-only /system.
 
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <ctype.h>
+#include <ftw.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/uio.h>
 
 #include "check.h"
@@ -152,11 +156,138 @@ static void directories(void) {
 	CHECK_ERROR(access("/nowhere", F_OK), ENOENT);
 }
 
+// A descriptor of a directory, opened with or without O_DIRECTORY, as
+// the calls that take one see it: nftw and fdopendir open directories
+// so.
+static void directory_descriptors(void) {
+	CHECK(mkdir("/tmp/files-dd", 0755) == 0);
+	CHECK(mkdir("/tmp/files-dd/sub", 0755) == 0);
+	int made = open("/tmp/files-dd/sub/f", O_WRONLY | O_CREAT, 0644);
+	CHECK(made >= 0);
+	close(made);
+	for(int flags = O_RDONLY; flags <= (O_RDONLY | O_DIRECTORY); flags += O_DIRECTORY) {
+		int fd = open("/tmp/files-dd", flags);
+		CHECK(fd >= 0);
+		struct stat st;
+		CHECK(fstat(fd, &st) == 0 && S_ISDIR(st.st_mode));
+		char byte;
+		CHECK_ERROR(read(fd, &byte, 1), EISDIR);
+		CHECK_ERROR(write(fd, "x", 1), EBADF);
+		CHECK((fcntl(fd, F_GETFL) & O_ACCMODE) == O_RDONLY);
+		CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+		CHECK(fsync(fd) == 0);
+		CHECK_ERROR(ftruncate(fd, 0), EINVAL);
+		struct statvfs vfs;
+		CHECK(fstatvfs(fd, &vfs) == 0 && vfs.f_bsize > 0);
+		CHECK(fstatat(fd, "sub", &st, 0) == 0 && S_ISDIR(st.st_mode));
+		DIR *dir = fdopendir(fd);
+		CHECK(dir != NULL);
+		int entries = 0;
+		while(dir && readdir(dir))
+			entries++;
+		CHECK(entries == 3);
+		// Again from the start.
+		if(dir)
+			rewinddir(dir);
+		while(dir && readdir(dir))
+			entries--;
+		CHECK(entries == 0);
+		if(dir)
+			closedir(dir);
+		else
+			close(fd);
+	}
+	// statvfs of a file tells of its filesystem.
+	struct statvfs vfs;
+	CHECK(statvfs("/tmp/files-dd/sub/f", &vfs) == 0 && vfs.f_bsize > 0);
+	CHECK(unlink("/tmp/files-dd/sub/f") == 0);
+	CHECK(rmdir("/tmp/files-dd/sub") == 0 && rmdir("/tmp/files-dd") == 0);
+}
+
+static int visited;
+
+static int count_entry(const char *path, const struct stat *st, int type, struct FTW *ftw) {
+	(void)path;
+	(void)st;
+	(void)ftw;
+	visited += type == FTW_F ? 1 : type == FTW_D ? 100 : 10000;
+	return 0;
+}
+
+static int remove_entry(const char *path, const struct stat *st, int type, struct FTW *ftw) {
+	(void)st;
+	(void)type;
+	(void)ftw;
+	return remove(path);
+}
+
+// Whether the 6 characters at `x` are letters and digits.
+static int letters_and_digits(const char *x) {
+	for(int i = 0; i < 6; i++)
+		if(!isalnum((unsigned char)x[i]))
+			return 0;
+	return 1;
+}
+
+// Temporary files and directories get names no one can guess: two in a
+// row differ, and neither is 000000.
+static void temporary_files(void) {
+	char first[] = "/tmp/files-XXXXXX";
+	char second[] = "/tmp/files-XXXXXX";
+	int a = mkstemp(first);
+	int b = mkstemp(second);
+	CHECK(a >= 0 && b >= 0 && strcmp(first, second));
+	CHECK(letters_and_digits(first + 11) && strcmp(first + 11, "000000"));
+	close(a);
+	close(b);
+	CHECK(unlink(first) == 0 && unlink(second) == 0);
+	char suffixed[] = "/tmp/files-XXXXXX.txt";
+	a = mkstemps(suffixed, 4);
+	CHECK(a >= 0 && !strcmp(suffixed + 17, ".txt") && letters_and_digits(suffixed + 11));
+	close(a);
+	CHECK(unlink(suffixed) == 0);
+	char bad[] = "/tmp/files-XXXXX";
+	CHECK_ERROR(mkstemp(bad), EINVAL);
+	char unused[] = "/tmp/files-XXXXXX";
+	CHECK(mktemp(unused) == unused && letters_and_digits(unused + 11));
+	struct stat st;
+	CHECK_ERROR(stat(unused, &st), ENOENT);
+	char dir[] = "/tmp/files-XXXXXX";
+	CHECK(mkdtemp(dir) == dir && letters_and_digits(dir + 11));
+	// A tree to walk: the directory, a file in it, and a directory with a
+	// file in it.
+	char path[64];
+	snprintf(path, sizeof(path), "%s/file", dir);
+	a = creat(path, 0644);
+	CHECK(a >= 0);
+	close(a);
+	snprintf(path, sizeof(path), "%s/sub", dir);
+	CHECK(mkdir(path, 0755) == 0);
+	snprintf(path, sizeof(path), "%s/sub/file", dir);
+	a = creat(path, 0644);
+	CHECK(a >= 0);
+	close(a);
+	visited = 0;
+	CHECK(nftw(dir, count_entry, 8, FTW_PHYS) == 0 && visited == 202);
+	CHECK(nftw(dir, remove_entry, 8, FTW_DEPTH | FTW_PHYS) == 0);
+	CHECK_ERROR(stat(dir, &st), ENOENT);
+	FILE *file = tmpfile();
+	CHECK(file != NULL);
+	if(file) {
+		CHECK(fputs("scratch", file) >= 0 && fseek(file, 0, SEEK_SET) == 0);
+		char text[8] = {0};
+		CHECK(fgets(text, sizeof(text), file) && !strcmp(text, "scratch"));
+		fclose(file);
+	}
+}
+
 int main(void) {
 	check_start("files");
 	RUN(basics);
 	RUN(descriptions);
 	RUN(standard_io);
 	RUN(directories);
+	RUN(directory_descriptors);
+	RUN(temporary_files);
 	return check_end();
 }

@@ -52,11 +52,38 @@ int to_errno(uint64_t status) {
 	}
 }
 
+namespace {
+
+// The soft RLIMIT_NOFILE, once read (-1 before): only this program's
+// setrlimit changes it, and exec reads it again.
+int files_soft = -1;
+
+} // namespace
+
+int files_limit() {
+	int limit = __atomic_load_n(&files_soft, __ATOMIC_RELAXED);
+	if(limit >= 0)
+		return limit;
+	struct radix_process_limits_results r;
+	if(radix_process_limits(SLOT_PROCESS, RADIX_LIMIT_KIND_FILES, false, 0, 0, &r))
+		return MAX_FDS;
+	set_files_limit(r.current);
+	return __atomic_load_n(&files_soft, __ATOMIC_RELAXED);
+}
+
+void set_files_limit(uint64_t limit) {
+	int fds = limit < static_cast<uint64_t>(MAX_FDS) ? static_cast<int>(limit) : MAX_FDS;
+	__atomic_store_n(&files_soft, fds, __ATOMIC_RELAXED);
+}
+
 int free_slot(int min_fd, uint32_t *slot) {
 	if(min_fd < 0 || min_fd >= MAX_FDS)
 		return EINVAL;
 	uint32_t first = FD_BASE + static_cast<uint32_t>(min_fd);
+	uint32_t end = FD_BASE + static_cast<uint32_t>(files_limit());
 	for(;;) {
+		if(first >= end)
+			return EMFILE;
 		struct radix_process_slots_used_results used;
 		if(uint64_t status = radix_process_slots_used(SLOT_PROCESS, first, &used); status)
 			return to_errno(status);
@@ -68,11 +95,13 @@ int free_slot(int min_fd, uint32_t *slot) {
 				free &= (UINT64_C(1) << room) - 1;
 			if(free) {
 				*slot = first + static_cast<uint32_t>(__builtin_ctzll(free));
-				return 0;
+				return *slot < end ? 0 : EMFILE;
 			}
 			first += 64;
 			if(first < used.slots)
 				continue;
+			if(first >= end)
+				return EMFILE;
 		}
 		// Every slot is taken: twice as many, up to the most there may be.
 		if(used.slots >= MAX_SLOTS)

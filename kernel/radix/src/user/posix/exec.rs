@@ -62,10 +62,6 @@ use crate::user::process::{ProcessObject, ProcessRef, Start};
 use crate::user::{Result, UserRef, cap_error, error};
 use crate::{Arch, caps};
 
-/// The room a new program's stack has, made as it is touched: Linux's
-/// default limit.
-const STACK_BYTES: u64 = 8 << 20;
-
 /// The most bytes of a file read to find its program headers.
 const HEAD_MAX: usize = 65536;
 
@@ -369,14 +365,16 @@ pub fn exec(
     }
     map_startup(&space, main.bias)?;
 
+    // The room RLIMIT_STACK gives it, made as it is touched.
+    let stack_bytes = super::limits::stack_bytes(&user.process.posix.lock().limits, PAGE_SIZE);
     let sp = build_stack(
         &space,
         &block,
         script.as_ref(),
         (cwd, execfn),
         &program,
-        &main,
-        loader.as_ref(),
+        (&main, loader.as_ref()),
+        stack_bytes,
     )?;
     let entry = loader.as_ref().map_or(main.entry, |loader| loader.entry);
     let run_as = execfn.or(block.args().next()).unwrap_or(b"");
@@ -399,7 +397,8 @@ type Script = (Vec<u8, Kmalloc>, Option<Vec<u8, Kmalloc>>);
 /// Lays out the new program's stack in `space` as the System V ABI says:
 /// its arguments (the script's interpreter's first, for a script), its
 /// environment and its auxiliary vector, below a random top with
-/// [`STACK_BYTES`] of room. Returns the stack pointer it starts with.
+/// `stack_bytes` of room, of which they may take a quarter, as on Linux.
+/// Returns the stack pointer it starts with.
 #[inline(never)]
 fn build_stack(
     space: &SpaceObject,
@@ -407,8 +406,8 @@ fn build_stack(
     script: Option<&Script>,
     (cwd, execfn): (Option<&[u8]>, Option<&[u8]>),
     program: &Program,
-    main: &Mapped,
-    loader: Option<&Mapped>,
+    (main, loader): (&Mapped, Option<&Mapped>),
+    stack_bytes: u64,
 ) -> Result<u64> {
     let mut args: Vec<&[u8], Kmalloc> = Vec::new_in(kmalloc());
     let mut env: Vec<&[u8], Kmalloc> = Vec::new_in(kmalloc());
@@ -463,14 +462,14 @@ fn build_stack(
         random,
     };
     let room = stack.size().next_multiple_of(16);
-    if room > STACK_BYTES / 4 {
+    if room > stack_bytes / 4 {
         return Err(error(Kernel::ArgumentsTooLong));
     }
-    let windows = startup::STACK_WINDOW / PAGE_SIZE - STACK_BYTES / PAGE_SIZE;
+    let windows = startup::STACK_WINDOW / PAGE_SIZE - stack_bytes / PAGE_SIZE;
     let top = startup::STACK_TOP - radix_random::below(windows) * PAGE_SIZE;
     let anon = Anon { access: Some(UserAccess::ReadWrite), shared: false, file: None };
     space
-        .map_anonymous(STACK_BYTES / PAGE_SIZE, anon, Placement::FixedNoReplace(top - STACK_BYTES))
+        .map_anonymous(stack_bytes / PAGE_SIZE, anon, Placement::FixedNoReplace(top - stack_bytes))
         .map_err(|_| error(Kernel::NoMemory))?;
     let mut out = zeroed(room as usize)?;
     let sp = stack.write(top, &mut out).map_err(|_| error(Kernel::ArgumentsTooLong))?;
@@ -540,6 +539,11 @@ fn replace_own(
         process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
         process.exit(EXIT_STOPPED);
         return Ok(Answer::Exit(EXIT_STOPPED));
+    }
+    {
+        // Its POSIX timers go, and their signals with them.
+        let mut posix = process.posix.lock();
+        super::timer::delete_all(process, &mut posix);
     }
     let (mask, mut pending) = {
         let mut signals = user.signals.lock();
@@ -618,10 +622,12 @@ fn start_created(
     })?;
     process.make_posix_child();
     {
-        let terminal = me.posix.lock().terminal.clone();
-        let mut posix = process.posix.lock();
+        let parent = me.posix.lock();
+        // The new process is not in use yet: nothing else takes its lock.
+        let mut posix = process.posix.lock_nested(1);
         posix.in_tree = true;
-        posix.terminal = terminal;
+        posix.terminal = parent.terminal.clone();
+        posix.inherit(&parent);
     }
     process.set_name(name);
     let mask = user.signals.lock().mask;

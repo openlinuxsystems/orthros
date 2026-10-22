@@ -3,7 +3,8 @@
 
 // Signals: handlers and what they are told, masks, pending signals,
 // sigsuspend, sigtimedwait, default actions, stopping and continuing,
-// faults, interrupted calls, the alternate stack, and timers.
+// faults, interrupted calls, the alternate stack, timers, and the values
+// sigqueue sends and real-time signals queue.
 
 #include <setjmp.h>
 #include <stdint.h>
@@ -409,6 +410,73 @@ static void nested(void) {
 	signal(SIGUSR2, SIG_DFL);
 }
 
+static volatile sig_atomic_t queued_seen;
+static volatile int queued_value;
+static volatile int queued_code;
+static volatile pid_t queued_pid;
+
+static void on_queued(int signal, siginfo_t *info, void *context) {
+	(void)signal;
+	(void)context;
+	queued_seen++;
+	queued_value = info->si_value.sival_int;
+	queued_code = info->si_code;
+	queued_pid = info->si_pid;
+}
+
+static void queued(void) {
+	// A handler gets sigqueue's value, and who sent it.
+	struct sigaction action = {0};
+	action.sa_sigaction = on_queued;
+	action.sa_flags = SA_SIGINFO;
+	sigemptyset(&action.sa_mask);
+	CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+	union sigval value = {.sival_int = 1234};
+	CHECK(sigqueue(getpid(), SIGUSR1, value) == 0);
+	CHECK(queued_seen == 1 && queued_value == 1234);
+	CHECK(queued_code == SI_QUEUE && queued_pid == getpid());
+	signal(SIGUSR1, SIG_DFL);
+	// Each real-time signal sent is taken, in order, with its own value.
+	int rt = SIGRTMIN + 1;
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, rt);
+	sigprocmask(SIG_BLOCK, &set, NULL);
+	for(int i = 0; i < 3; i++) {
+		value.sival_int = 100 + i;
+		CHECK(sigqueue(getpid(), rt, value) == 0);
+	}
+	CHECK(kill(getpid(), rt) == 0);
+	for(int i = 0; i < 3; i++) {
+		siginfo_t info;
+		CHECK(sigwaitinfo(&set, &info) == rt);
+		CHECK(info.si_code == SI_QUEUE && info.si_value.sival_int == 100 + i);
+	}
+	siginfo_t info;
+	CHECK(sigwaitinfo(&set, &info) == rt && info.si_code == SI_USER);
+	struct timespec none = {0, 0};
+	CHECK_ERROR(sigtimedwait(&set, &info, &none), EAGAIN);
+	// A pointer goes through whole.
+	value.sival_ptr = (void *)(uintptr_t)0x123456789abcULL;
+	CHECK(sigqueue(getpid(), rt, value) == 0);
+	CHECK(sigwaitinfo(&set, &info) == rt && info.si_value.sival_ptr == value.sival_ptr);
+	// 1024 may wait; the next is refused, as Linux's EAGAIN says.
+	int sent = 0;
+	value.sival_int = 0;
+	while(sent < 2000 && sigqueue(getpid(), rt, value) == 0)
+		sent++;
+	CHECK(sent == 1024 && errno == EAGAIN);
+	int taken = 0;
+	while(sigtimedwait(&set, &info, &none) == rt)
+		taken++;
+	CHECK(taken == 1024);
+	sigprocmask(SIG_UNBLOCK, &set, NULL);
+	// Signal 0 only checks; a process that is not there is not found.
+	CHECK(sigqueue(getpid(), 0, value) == 0);
+	CHECK_ERROR(sigqueue(99999, SIGUSR1, value), ESRCH);
+	CHECK_ERROR(sigqueue(getpid(), 65, value), EINVAL);
+}
+
 int main(void) {
 	check_start("signal");
 	RUN(handlers);
@@ -421,5 +489,6 @@ int main(void) {
 	RUN(stacks);
 	RUN(floats);
 	RUN(nested);
+	RUN(queued);
 	return check_end();
 }

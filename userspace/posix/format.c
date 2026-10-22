@@ -4,13 +4,16 @@
 // Numbers and times as text, against what glibc answers
 // (format-cases.h): printf's integer and floating-point conversions,
 // strtod, strtof, strtold and scanf, strftime, and the broken-down
-// times localtime, gmtime, mktime and timegm make.
+// times localtime, gmtime, mktime and timegm make; and characters in the
+// C.UTF-8 locale, the one programs start in.
 
 #include <float.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 #include <stdint.h>
 #include <wchar.h>
+#include <wctype.h>
 
 #include "check.h"
 
@@ -271,6 +274,37 @@ static void broken_down(void) {
 			&& tm.tm_yday == 31);
 }
 
+// UTF-8 in the C.UTF-8 locale, which LANG names for every program, with
+// Unicode's character classes; the C locale's characters are bytes.
+static void characters(void) {
+	const char *name = setlocale(LC_ALL, "");
+	CHECK(name && !strcmp(name, "C.UTF-8"));
+	CHECK(MB_CUR_MAX == 4);
+	mbstate_t state = {0};
+	wchar_t wide;
+	CHECK(mbrtowc(&wide, "\xc3\xa9!", 3, &state) == 2 && wide == 0xe9);
+	CHECK(mbrtowc(&wide, "\xf0\x9f\x8d\x8c", 4, &state) == 4 && wide == 0x1f34c);
+	errno = 0;
+	CHECK(mbrtowc(&wide, "\xc3(", 2, &state) == (size_t)-1 && errno == EILSEQ);
+	memset(&state, 0, sizeof(state));
+	char bytes[8];
+	CHECK(wcrtomb(bytes, 0x6c34, &state) == 3 && !memcmp(bytes, "\xe6\xb0\xb4", 3));
+	CHECK(mbstowcs(NULL, "z\xc3\x9f\xe6\xb0\xb4\xf0\x9f\x8d\x8c", 0) == 4);
+	CHECK(iswalpha(0xe9) && iswupper(0xc9) && towupper(0xe9) == 0xc9);
+	CHECK(iswalpha(0x4e00) && !iswalpha(0x2603) && iswspace(0x3000));
+	CHECK(towlower(0x0394) == 0x03b4 && towupper(0x0434) == 0x0414);
+	// printf's %lc and %ls make UTF-8.
+	char text[32];
+	CHECK(snprintf(text, sizeof(text), "%lc|%ls", (wint_t)0x3c0, L"\u00e9t\u00e9") == 8);
+	CHECK(!strcmp(text, "\xcf\x80|\xc3\xa9t\xc3\xa9"));
+	// Named locales come with Phase 12; C is still there.
+	CHECK(setlocale(LC_ALL, "en_US.UTF-8") == NULL);
+	CHECK(setlocale(LC_ALL, "C") && !strcmp(setlocale(LC_ALL, NULL), "C"));
+	CHECK(MB_CUR_MAX == 1);
+	CHECK(setlocale(LC_ALL, "C.utf8") != NULL && MB_CUR_MAX == 4);
+	setlocale(LC_ALL, "C");
+}
+
 int main(void) {
 	check_start("format");
 	RUN(integers);
@@ -278,5 +312,6 @@ int main(void) {
 	RUN(scanning);
 	RUN(dates);
 	RUN(broken_down);
+	RUN(characters);
 	return check_end();
 }

@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The C.UTF-8 locale (ADR 0073): the C locale with UTF-8 characters,
+# Unicode's character classes and case mappings, compiled from the GNU C
+# Library's locale data into the files the C library reads, in
+# /system/lib/locale. Named locales come with Phase 12.
+#
+# Only data is taken, no code: the locale sources, of which the Free
+# Software Foundation claims no copyright, and their character tables,
+# made from the Unicode Character Database under the Unicode License v3
+# (localedata/unicode-gen/unicode-license.txt). glibc 2.42's tables are
+# Unicode 16.0's.
+name = "locales"
+version = "2.42"
+summary = "the C.UTF-8 locale, compiled from glibc's locale data"
+license = "Unicode-3.0"
+homepage = "https://www.gnu.org/software/libc/"
+image = ["system/lib/locale/"]
+notices = ["localedata/unicode-gen/unicode-license.txt"]
+
+# The GitHub mirror of https://sourceware.org/git/glibc.git.
+[source]
+git = "https://github.com/bminor/glibc.git"
+commit = "d2097651cc57834dbfcaa102ddfacae0d86cfb66"
+tag = "glibc-2.42"

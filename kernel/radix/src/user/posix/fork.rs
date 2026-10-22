@@ -17,8 +17,9 @@
 //!   image, which the child maps too) and a capability to its own address
 //!   space in SLOT_SPACE;
 //! - an address space with the caller's memory (`SpaceObject::fork_into`);
-//! - the caller's signal actions and controlling terminal, the calling
-//!   thread's signal mask and alternate stack, and nothing pending;
+//! - the caller's signal actions, controlling terminal, resource limits
+//!   and file mode mask, the calling thread's signal mask, alternate stack
+//!   and scheduling, and nothing pending and no POSIX timers;
 //! - one thread, in SLOT_THREAD, which goes on from the call with the
 //!   calling thread's registers, extended state and thread pointer, and
 //!   gets 0 where the caller gets the child's number.
@@ -74,6 +75,7 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
             let mut posix = child.posix.lock_nested(1);
             posix.actions.copy_from(&parent.actions);
             posix.terminal = parent.terminal.clone();
+            posix.inherit(&parent);
         }
         with_tree(|tree| -> Result<()> {
             join(tree, parent)?;
