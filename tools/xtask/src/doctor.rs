@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! `ob setup` and `ob doctor`: preparing and checking the build host.
@@ -308,10 +308,10 @@ fn requirements() -> Vec<Requirement> {
 /// `ob doctor`.
 pub fn doctor(ctx: &Ctx) -> Result<()> {
     if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
-        return Err(Error::new("ob builds OrthrOS on x86-64 Linux hosts")
+        return Err(Error::new("ob builds Dukovo on x86-64 Linux hosts")
             .hint("on macOS or Windows, use `./ob --container <command>` with Podman or Docker"));
     }
-    println!("Checking the build host for OrthrOS {}\n", crate::VERSION);
+    println!("Checking the build host for Dukovo {}\n", crate::VERSION);
     let mut missing = Vec::new();
     for req in requirements() {
         match (req.found)(ctx) {

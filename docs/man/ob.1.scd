@@ -1,11 +1,11 @@
-ob(1) "OrthrOS" "OrthrOS Manual"
+ob(1) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
 
-ob - build, run and test OrthrOS
+ob - build, run and test Dukovo
 
 # SYNOPSIS
 
@@ -15,14 +15,14 @@ ob - build, run and test OrthrOS
 
 # DESCRIPTION
 
-*ob* is the single entry point for building OrthrOS. It compiles the Radix
+*ob* is the single entry point for building Dukovo. It compiles the Radix
 kernel, assembles bootable images, boots them in QEMU, runs the test suites
 and builds the documentation. It needs no root access.
 
 *./ob* at the top of the repository is a small shell script. It builds the
 real tool from _tools/xtask_ with the Rust toolchain pinned in
 _rust-toolchain.toml_ and runs it, so the first command takes a little
-longer. Settings come from _orthros.toml_ (see *orthros.toml*(5)); command
+longer. Settings come from _dukovo.toml_ (see *dukovo.toml*(5)); command
 options override them.
 
 Build output goes to _out/_ and Cargo's intermediate files to _target/_
@@ -47,7 +47,7 @@ _target/userspace/_).
 	help.
 
 *-V*, *--version*
-	Print the OrthrOS version.
+	Print the Dukovo version.
 
 # COMMANDS
 
@@ -84,14 +84,14 @@ _target/userspace/_).
 
 	*--release*
 		Build with optimisation. This is the default unless
-		*build.profile* in _orthros.toml_ says otherwise.
+		*build.profile* in _dukovo.toml_ says otherwise.
 
 *image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
-	_out/orthros-VERSION-x86_64.img_. The image is a hybrid: it starts
+	_out/dukovo-VERSION-x86_64.img_. The image is a hybrid: it starts
 	under UEFI and under legacy BIOS, from a USB stick, a hard disk or
 	optical media. Write it to a USB stick as shown in *EXAMPLES*.
-	*orthros-boot*(7) lists what the image contains.
+	*dukovo-boot*(7) lists what the image contains.
 
 	Every image carries a license manifest. *ob* lists each component
 	that goes into it: the crates linked into the kernel (from *cargo
@@ -106,18 +106,18 @@ _target/userspace/_).
 	of the document next to the image.
 
 	*--iso*
-		Name the output _out/orthros-VERSION-x86_64.iso_ instead, for
+		Name the output _out/dukovo-VERSION-x86_64.iso_ instead, for
 		virtual machines and optical media. The contents are the same.
 
 	*--cmdline* _flags_
 		Kernel command-line flags instead of *boot.cmdline*, such as
-		*"kdb loglevel=debug"*. *orthros-boot*(7) lists the flags.
+		*"kdb loglevel=debug"*. *dukovo-boot*(7) lists the flags.
 
 	*--microcode* _path_
 		Add the Intel microcode updates in _path_, a file or a directory
 		such as _/lib/firmware/intel-ucode_, instead of those named by
 		*image.microcode*. Every update is checked, and the command fails
-		if _path_ holds none. See *MICROCODE* in *orthros-boot*(7).
+		if _path_ holds none. See *MICROCODE* in *dukovo-boot*(7).
 
 *run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--gdb*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*] [*--* _qemu-args_...]
 	Build the image and boot it in QEMU on a q35 machine with
@@ -167,7 +167,7 @@ _target/userspace/_).
 	text from QEMU screenshots by matching the kernel's own font. A case
 	passes when every expected line appears in order and QEMU exits as
 	expected, usually through the *qemu-exit* flag (see
-	*orthros-boot*(7)). Serial logs and screenshots go to _out/test/_.
+	*dukovo-boot*(7)). Serial logs and screenshots go to _out/test/_.
 	Give *unit* or *boot* to run only that part. Without KVM the boot
 	tests take a few minutes.
 
@@ -451,8 +451,8 @@ _target/userspace/_).
 	*--check*
 		Also fail when a man page title does not match its file name, or
 		when one of these is not documented in bold in its page: an *ob*
-		command (this page), an _orthros.toml_ key (*orthros.toml*(5)), a
-		kernel flag (*orthros-boot*(7)), a *kdb* command or a self-test
+		command (this page), an _dukovo.toml_ key (*dukovo.toml*(5)), a
+		kernel flag (*dukovo-boot*(7)), a *kdb* command or a self-test
 		(*radix-debug*(7)).
 
 *lint*
@@ -508,8 +508,8 @@ _target/userspace/_).
 
 # FILES
 
-_orthros.toml_
-	Build configuration; see *orthros.toml*(5).
+_dukovo.toml_
+	Build configuration; see *dukovo.toml*(5).
 
 _rust-toolchain.toml_
 	The pinned Rust toolchain.
@@ -551,10 +551,10 @@ _REUSE.toml_
 	Copyright and license information for files that cannot carry an SPDX
 	header; see *CONTRIBUTING.md*.
 
-_out/orthros-VERSION-x86_64.img_
+_out/dukovo-VERSION-x86_64.img_
 	The boot image built by *ob image*.
 
-_out/orthros-VERSION-x86_64.spdx_
+_out/dukovo-VERSION-x86_64.spdx_
 	The image's license manifest (SPDX 2.3 tag-value).
 
 _out/qemu/radix.gdb_
@@ -578,7 +578,7 @@ to do next.
 
 # EXAMPLES
 
-Prepare a new machine, then boot OrthrOS in QEMU:
+Prepare a new machine, then boot Dukovo in QEMU:
 
 ```
 ./ob setup
@@ -617,7 +617,7 @@ Build the image and write it to a USB stick. Check the device name with
 ```
 ./ob image
 lsblk -d -o NAME,SIZE,MODEL,TRAN
-sudo dd if=out/orthros-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=out/dukovo-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 Graphical alternatives that write the same image are balenaEtcher, GNOME
@@ -631,8 +631,8 @@ Build on a host without the tools installed, using Podman or Docker:
 
 # SEE ALSO
 
-*orthros.toml*(5), *orthros-boot*(7), *radix-debug*(7), *radix-ipc*(7),
+*dukovo.toml*(5), *dukovo-boot*(7), *radix-debug*(7), *radix-ipc*(7),
 *qemu-system-x86_64*(1), *grub-mkrescue*(1), *rustup*(1), *gdb*(1), *dd*(1)
 
-The OrthrOS handbook, chapter "Building OrthrOS with ob", in
+The Dukovo handbook, chapter "Building Dukovo with ob", in
 _docs/handbook/_ or _out/docs/handbook/index.html_ after *ob docs*.

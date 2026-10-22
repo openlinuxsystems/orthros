@@ -1,8 +1,8 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 #
-# ob: the OrthrOS build tool. Run `./ob help`, or read ob(1).
+# ob: the Dukovo build tool. Run `./ob help`, or read ob(1).
 #
 # This wrapper builds tools/xtask (the real build tool) with the Rust
 # toolchain pinned in rust-toolchain.toml and runs it. With --container
@@ -49,7 +49,7 @@ if [ "$use_container" = 1 ]; then
     # The image tag changes whenever the Containerfile or toolchain does.
     toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$root/rust-toolchain.toml")
     tag=$(cat "$root/tools/container/Containerfile" "$root/rust-toolchain.toml" | sha256sum | cut -c1-12)
-    image="localhost/orthros-build:$tag"
+    image="localhost/dukovo-build:$tag"
     if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
         echo "==> Building the build container $image (first use only)" >&2
         "$engine" build --build-arg "RUST_TOOLCHAIN=$toolchain" -t "$image" \

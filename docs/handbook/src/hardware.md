@@ -1,11 +1,11 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Supported hardware
 
-OrthrOS 1.0 targets 64-bit x86 computers. Two systems are tested on every
+Dukovo 1.0 targets 64-bit x86 computers. Two systems are tested on every
 change or release:
 
 - **QEMU** (q35 machine, UEFI through OVMF and BIOS through SeaBIOS), in
@@ -18,12 +18,12 @@ change or release:
 This is the factory configuration of the reference machine, from Dell's
 parts list for its service tag.
 
-| Component | Part | OrthrOS support |
+| Component | Part | Dukovo support |
 | --- | --- | --- |
 | Processor | Intel Core i7-8550U (4 cores, 8 threads) | All 8 threads started from Phase 1; early microcode with the optional firmware |
 | Memory | 8 GB DDR4-2400, one module | Managed by the frame allocator and kernel heap from Phase 2 (one NUMA node) |
 | Graphics | Intel UHD Graphics 620 | Firmware framebuffer console from Phase 1; no native GPU driver in 1.0 |
-| SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; OrthrOS installs here |
+| SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; Dukovo installs here |
 | Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/data` |
 | USB | Intel xHCI | Phase 11 |
 | Keyboard | Built-in, PS/2 (i8042) | Phase 11 |
@@ -40,12 +40,12 @@ Open the firmware setup by pressing **F2** at the Dell logo, and set:
 - **System Configuration > SATA Operation: AHCI.** The laptop ships with
   "RAID On" for Intel Rapid Storage, which hides the disks from standard
   AHCI drivers. Windows on the SSD will not boot after this change unless
-  it was prepared for it; OrthrOS replaces Windows on this machine anyway.
-- **Secure Boot > Secure Boot Enable: off.** OrthrOS images are not signed
+  it was prepared for it; Dukovo replaces Windows on this machine anyway.
+- **Secure Boot > Secure Boot Enable: off.** Dukovo images are not signed
   for Secure Boot before 1.0.
 - To test legacy BIOS boot as well, enable **Legacy Option ROMs** and the
   legacy boot list under **General > Boot Sequence**, if your firmware
-  version offers them. UEFI is the normal way to boot OrthrOS.
+  version offers them. UEFI is the normal way to boot Dukovo.
 
 Press **F12** at the Dell logo for the one-time boot menu.
 

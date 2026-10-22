@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Intel CPU microcode updates: parsing, checking and matching.
 //!
 //! Processors ship with microcode that later updates fix; firmware applies
 //! some, and the operating system loads newer ones early in boot. Updates
-//! are closed firmware, so OrthrOS never includes them in the base system
+//! are closed firmware, so Dukovo never includes them in the base system
 //! (ADR 0007); `ob image --microcode` adds a file of them to an image, GRUB
 //! loads it as a module, and the kernel looks for an update for each CPU
 //! here before writing it to the processor.

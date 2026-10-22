@@ -1,11 +1,11 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Credits
 
-OrthrOS is built on the work of many other projects. This file thanks them,
+Dukovo is built on the work of many other projects. This file thanks them,
 beyond what their licenses require. The license manifest in every image
 (`/system/share/licenses`, [ADR 0021](docs/adr/0021-license-manifest-in-every-image.md))
 is the legal record of what an image contains; this is the human one, and it
@@ -40,7 +40,7 @@ the user programs.
 
 | Crate | Used by | License |
 | --- | --- | --- |
-| [toml](https://github.com/toml-rs/toml) (with toml_parser, toml_datetime, toml_writer, serde_spanned) | `ob`, to read `orthros.toml` and Cargo files | MIT OR Apache-2.0 |
+| [toml](https://github.com/toml-rs/toml) (with toml_parser, toml_datetime, toml_writer, serde_spanned) | `ob`, to read `dukovo.toml` and Cargo files | MIT OR Apache-2.0 |
 | [serde](https://github.com/serde-rs/serde) (with serde_core, serde_derive) | `ob` | MIT OR Apache-2.0 |
 | [indexmap](https://github.com/indexmap-rs/indexmap), [equivalent](https://github.com/indexmap-rs/equivalent) | `ob`, through toml | Apache-2.0 OR MIT |
 | [hashbrown](https://github.com/rust-lang/hashbrown) | `ob`, through indexmap | MIT OR Apache-2.0 |
@@ -61,7 +61,7 @@ These run on the build machine or in CI and are never part of an image.
 | Project | What we use it for | License |
 | --- | --- | --- |
 | [Rust](https://www.rust-lang.org/) toolchain (rustc, Cargo, rustfmt, Clippy, LLVM tools), nightly-2026-10-15 | Building and checking everything | MIT OR Apache-2.0 (LLVM: Apache-2.0 WITH LLVM-exception) |
-| [QEMU](https://www.qemu.org/) | Running OrthrOS and the boot tests, and counting instructions for `ob bench --instructions` (`-icount`) | GPL-2.0-only |
+| [QEMU](https://www.qemu.org/) | Running Dukovo and the boot tests, and counting instructions for `ob bench --instructions` (`-icount`) | GPL-2.0-only |
 | [OVMF](https://github.com/tianocore/tianocore.github.io/wiki/OVMF) from [EDK II](https://github.com/tianocore/edk2) | UEFI firmware for QEMU | BSD-2-Clause-Patent |
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |

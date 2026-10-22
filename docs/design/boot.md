@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -9,7 +9,7 @@ This note describes how the Radix kernel gets from GRUB to
 `radix_kernel_main`, how its image and address space are laid out, and how
 its consoles and logs fit together. It reflects Phase 2; the memory
 manager itself is described in `memory.md`. The user-facing description is
-`orthros-boot(7)`; debugging aids are in `radix-debug(7)`.
+`dukovo-boot(7)`; debugging aids are in `radix-debug(7)`.
 
 ## Crates
 

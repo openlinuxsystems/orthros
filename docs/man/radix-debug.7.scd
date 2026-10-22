@@ -1,6 +1,6 @@
-radix-debug(7) "OrthrOS" "OrthrOS Manual"
+radix-debug(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -20,7 +20,7 @@ checker reports locking bugs the first time the code that has them runs,
 long before they deadlock.
 
 This page describes all of them as of Phase 4. The kernel flags named here
-are listed in *orthros-boot*(7).
+are listed in *dukovo-boot*(7).
 
 # PANIC REPORT
 
@@ -72,7 +72,7 @@ version, the architecture, the boot number from the crash log and how
 many other CPUs stopped.
 
 Addresses in the report are where the code ran. With KASLR on, the
-kernel is somewhere else on every boot (see *orthros-boot*(7)); the
+kernel is somewhere else on every boot (see *dukovo-boot*(7)); the
 boot log's *Layout* line says where, and the backtrace's function names
 are found by subtracting the slide.
 
@@ -310,7 +310,7 @@ reports, as soon as the code runs:
   handler (*sleeping where it is not allowed*).
 
 It is on by default in debug builds and off in release builds; the
-*lockdep* kernel flag (*orthros-boot*(7)) overrides either. *ob test*
+*lockdep* kernel flag (*dukovo-boot*(7)) overrides either. *ob test*
 boots *bios-usb* and every self-test since Phase 4 with it on. A report is
 logged at the error level, each line starting *Lock checker:*, with the
 places where the locks were created and taken:
@@ -466,7 +466,7 @@ boots.
 	half the fuzzers must finish, the capability store must pass its
 	audit, and the store and the object registry must hold what they
 	held before. The log names the seeds (*selftest fuzz: seeds* _a_
-	*to* _b_); the *fuzz-seed* flag (*orthros-boot*(7)) repeats them.
+	*to* _b_); the *fuzz-seed* flag (*dukovo-boot*(7)) repeats them.
 
 *bench*
 	Runs the benchmark programs of the *usertests* image: the cost of
@@ -660,5 +660,5 @@ _out/test/_
 
 # SEE ALSO
 
-*orthros-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *radix-ipc*(7),
+*dukovo-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *radix-ipc*(7),
 *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)

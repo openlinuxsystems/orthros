@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-# GRUB configuration for the OrthrOS @VERSION@ boot image.
+# GRUB configuration for the Dukovo @VERSION@ boot image.
 # `ob image` generates boot/grub/grub.cfg from image/grub/grub.cfg.in by
 # filling in the VERSION, TIMEOUT, CMDLINE and MODULES placeholders. See
-# orthros-boot(7).
+# dukovo-boot(7).
 
 set timeout=@TIMEOUT@
 set default=0
@@ -29,7 +29,7 @@ else
     insmod vbe
 fi
 
-menuentry "OrthrOS @VERSION@ (Radix)" {
+menuentry "Dukovo @VERSION@ (Radix)" {
     multiboot2 /boot/radix @CMDLINE@
 @MODULES@    boot
 }

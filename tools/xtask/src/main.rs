@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `ob`, the OrthrOS build tool.
+//! `ob`, the Dukovo build tool.
 //!
 //! The `./ob` shell wrapper at the top of the repository builds this program
 //! with the pinned toolchain and runs it. Every command is documented in
@@ -33,7 +33,7 @@ use std::process::ExitCode;
 
 use config::{Config, Profile};
 
-/// The OrthrOS version, shared by the kernel and every image.
+/// The Dukovo version, shared by the kernel and every image.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Every command with a one-line summary, in the order `ob help` lists them.
@@ -58,7 +58,7 @@ const USAGE: &str = "\
 Usage: ./ob [--verbose] <command> [options]
        ./ob --container <command> [options]
 
-The OrthrOS build tool. Settings come from orthros.toml; options override them.
+The Dukovo build tool. Settings come from dukovo.toml; options override them.
 
 Commands:
 ";
@@ -69,7 +69,7 @@ Global options:
   --container      Run the command inside the pinned build container
                    (Podman or Docker); handled by the ./ob wrapper
   -h, --help       Show this help, or a command's help after its name
-  -V, --version    Print the OrthrOS version
+  -V, --version    Print the Dukovo version
 
 Start with `./ob setup`, then `./ob run`. Full manual: ob(1), or
 `man -l out/docs/man/man1/ob.1` after `./ob docs`.";
@@ -102,7 +102,7 @@ their test image in out/sysroot/boot/usertests, and writes the C headers
 of the system call interface (abi/*.ridl) into out/sysroot/include/radix.
 
   --debug      Build without optimisation
-  --release    Build with optimisation (the default from orthros.toml)"
+  --release    Build with optimisation (the default from dukovo.toml)"
         }
         "image" => {
             "Usage: ./ob image [--iso] [--cmdline <flags>] [--microcode <path>]
@@ -110,11 +110,11 @@ of the system call interface (abi/*.ridl) into out/sysroot/include/radix.
 
 Builds the kernel, then a hybrid boot image that starts under UEFI and
 legacy BIOS from a USB stick, a hard disk or optical media:
-  out/orthros-<version>-x86_64.img   (default)
-  out/orthros-<version>-x86_64.iso   (with --iso)
+  out/dukovo-<version>-x86_64.img   (default)
+  out/dukovo-<version>-x86_64.iso   (with --iso)
 
   --iso                Name the output .iso for virtual machines and optical media
-  --cmdline <flags>    Kernel flags instead of boot.cmdline (orthros-boot(7))
+  --cmdline <flags>    Kernel flags instead of boot.cmdline (dukovo-boot(7))
   --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "run" => {
@@ -210,7 +210,7 @@ and take minutes.
 Builds the man pages from docs/man/*.scd into out/docs/man (checked with
 mandoc -T lint) and the handbook from docs/handbook into out/docs/handbook.
 
-  --check      Also fail when an ob command or orthros.toml key is not
+  --check      Also fail when an ob command or dukovo.toml key is not
                documented in its man page"
         }
         "lint" => {
@@ -316,7 +316,7 @@ pub struct Ctx {
     pub out: PathBuf,
     /// Cargo output (`target/`, or `$OB_TARGET_DIR`).
     pub target: PathBuf,
-    /// Contents of `orthros.toml`.
+    /// Contents of `dukovo.toml`.
     pub config: Config,
     /// Print external commands before running them.
     pub verbose: bool,
@@ -333,7 +333,7 @@ impl Ctx {
         let target = std::env::var_os("OB_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
-        let config = Config::load(&root.join("orthros.toml"))?;
+        let config = Config::load(&root.join("dukovo.toml"))?;
         Ok(Self { out: root.join("out"), target, config, verbose, root })
     }
 
@@ -395,7 +395,7 @@ impl Args {
         Some(self.args.remove(index))
     }
 
-    /// Reads `--debug` / `--release`, falling back to orthros.toml.
+    /// Reads `--debug` / `--release`, falling back to dukovo.toml.
     pub fn profile(&mut self, config: &Config) -> Result<Profile> {
         match (self.flag("--debug"), self.flag("--release")) {
             (true, true) => bail!("--debug and --release cannot be combined"),

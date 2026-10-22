@@ -1,9 +1,9 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# Contributing to OrthrOS
+# Contributing to Dukovo
 
 Thank you for helping. This guide covers how to build and test, what a
 change needs before it can merge, and where decisions are recorded.
@@ -45,7 +45,7 @@ A change merges when:
 - Every new command, file format, kernel command-line flag, `kdb` command
   or interface has a man page in `docs/man/` (see "Man pages" below), and
   the handbook is updated where users would look. `./ob docs --check`
-  enforces this for `ob` commands and boot tests, `orthros.toml` keys,
+  enforces this for `ob` commands and boot tests, `dukovo.toml` keys,
   kernel flags, `kdb` commands and self-tests.
 - Any decision the specification leaves open, or any change to an earlier
   decision, has an architecture decision record in `docs/adr/`.
@@ -68,7 +68,7 @@ commit message certifies the [Developer Certificate of Origin](DCO)
 (DCO), version 1.1: that you wrote the change or otherwise have the right
 to submit it under the project's licenses, and that a record of it,
 including your sign-off, is kept public. There is no contributor license
-agreement; the sign-off is all OrthrOS asks.
+agreement; the sign-off is all Dukovo asks.
 
 ```sh
 git commit -s                  # adds Signed-off-by: Your Name <you@example.org>
@@ -129,7 +129,7 @@ decision is never edited away: a later record supersedes it.
 ## Conduct, governance and security
 
 Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
-[GOVERNANCE.md](GOVERNANCE.md) says who maintains OrthrOS and how
+[GOVERNANCE.md](GOVERNANCE.md) says who maintains Dukovo and how
 decisions are made, including the project's
 [guiding principle](GOVERNANCE.md#guiding-principle-favor-the-user): when a
 change reaches a fork in the road, choose the option that favors the user.
@@ -138,9 +138,9 @@ Report security problems privately as described in
 
 ## License of contributions
 
-OrthrOS is dual licensed under the Apache License 2.0 and the MIT license.
+Dukovo is dual licensed under the Apache License 2.0 and the MIT license.
 Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in OrthrOS by you, as defined in the Apache-2.0
+submitted for inclusion in Dukovo by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
 conditions. New dependencies must use licenses that `deny.toml` allows;
 kernel crates must use the permissive licenses in `kernel/deny.toml`, and
@@ -148,7 +148,7 @@ kernel crates must use the permissive licenses in `kernel/deny.toml`, and
 [ADR 0021](docs/adr/0021-license-manifest-in-every-image.md)). A crate that
 embeds third-party files under another license declares it in its
 `license` field and lists the notice files under
-`[package.metadata.orthros] notices`, as `kernel/lib/fbcon` does.
+`[package.metadata.dukovo] notices`, as `kernel/lib/fbcon` does.
 
 ## Copyright and license headers
 
@@ -159,7 +159,7 @@ these two lines, in the file's comment syntax:
 
 <!-- REUSE-IgnoreStart -->
 ```rust
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 ```
 <!-- REUSE-IgnoreEnd -->
@@ -176,13 +176,13 @@ never part of an image.
 
 ## Third-party code and credits
 
-OrthrOS gives credit to every project it uses, beyond what the licenses
+Dukovo gives credit to every project it uses, beyond what the licenses
 require. When you add code, data or files from another project:
 
 - Check that its license is allowed where it goes (see above).
 - Keep its original copyright and license headers unchanged. Add an
   `SPDX-FileCopyrightText` line for the original authors, and one for
-  OrthrOS if you change the file, and an `SPDX-License-Identifier` for its
+  Dukovo if you change the file, and an `SPDX-License-Identifier` for its
   license; put its license text in `LICENSES/` if it is not there yet.
 - Name the source in the commit message: the project, the exact version or
   commit, and the URL, for example

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 [package]
@@ -15,7 +15,7 @@ publish.workspace = true
 include = ["src/**", "fonts/**", "Cargo.toml"]
 
 # `ob image` copies these into /system/share/licenses (ADR 0021).
-[package.metadata.orthros]
+[package.metadata.dukovo]
 notices = ["fonts/LICENSE-spleen"]
 
 [dependencies]

@@ -1,11 +1,11 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Manual pages
 
-Every OrthrOS command, file format and interface has a manual page.
+Every Dukovo command, file format and interface has a manual page.
 `./ob docs` compiles them into `out/docs/man/`; read one with
 `man -l out/docs/man/man1/ob.1`. The sources are in `docs/man/`, except
 for section 2, which `ridlc` generates from the interface definitions in
@@ -14,8 +14,8 @@ for section 2, which `ridlc` generates from the interface definitions in
 | Page | Describes |
 | --- | --- |
 | `ob(1)` | The build tool: every command and option |
-| `orthros.toml(5)` | The build configuration file |
-| `orthros-boot(7)` | How OrthrOS boots, its consoles, the kernel command line and microcode |
+| `dukovo.toml(5)` | The build configuration file |
+| `dukovo-boot(7)` | How Dukovo boots, its consoles, the kernel command line and microcode |
 | `radix-debug(7)` | Panic reports, the crash log, the kernel debugger, the lock checker, GDB and trace points |
 | `radix-capabilities(7)` | Capabilities: object kinds, rights, badges, sealing, delegation and revocation |
 | `radix-scheduling(7)` | Threads, scheduling classes, priority inheritance, RCU, resource domains and the out-of-memory policy |

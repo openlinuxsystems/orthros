@@ -1,19 +1,19 @@
-orthros.toml(5) "OrthrOS" "OrthrOS Manual"
+dukovo.toml(5) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
 
-orthros.toml - OrthrOS build configuration
+dukovo.toml - Dukovo build configuration
 
 # SYNOPSIS
 
-_orthros.toml_ at the top of the repository
+_dukovo.toml_ at the top of the repository
 
 # DESCRIPTION
 
-*ob*(1) reads _orthros.toml_ for the few choices a builder makes. The file
+*ob*(1) reads _dukovo.toml_ for the few choices a builder makes. The file
 is TOML (https://toml.io). Every key is optional; a missing key, section or
 file means the default shown below. Unknown keys and invalid values are
 errors, so a typo cannot be silently ignored. Command-line options of *ob*
@@ -39,13 +39,13 @@ and *ob run*. Test images built by *ob test* ignore it: they use a zero
 timeout and the flags each test needs.
 
 *boot.timeout* = _seconds_
-	How long the GRUB menu waits before booting OrthrOS, from 0 to 600.
+	How long the GRUB menu waits before booting Dukovo, from 0 to 600.
 	The default is 3.
 
 *boot.cmdline* = "_flags_"
 	Kernel command-line flags, separated by spaces, such as
 	"loglevel=debug". The flags the kernel understands are listed in
-	*orthros-boot*(7). Only letters, digits, spaces and the characters
+	*dukovo-boot*(7). Only letters, digits, spaces and the characters
 	*. \_ = , : / + -* are allowed, because the value is written into
 	GRUB's configuration. The default is empty. *ob image --cmdline* and
 	*ob run --cmdline* override it.
@@ -57,11 +57,11 @@ timeout and the flags each test needs.
 *image.microcode* = "_path_"
 	A file or directory of Intel microcode updates to load early in boot,
 	such as "/lib/firmware/intel-ucode" from the *intel-microcode*
-	package. Microcode is closed firmware, so OrthrOS does not ship it;
+	package. Microcode is closed firmware, so Dukovo does not ship it;
 	this key adds the updates of the build host to the image. *ob* checks
 	each update and fails if _path_ holds none. The default is empty: no
 	microcode. *ob image --microcode* and *ob run --microcode* override it.
-	See *MICROCODE* in *orthros-boot*(7).
+	See *MICROCODE* in *dukovo-boot*(7).
 
 # RUN SECTION
 
@@ -110,4 +110,4 @@ cpus = 4
 
 # SEE ALSO
 
-*ob*(1), *orthros-boot*(7), *radix-debug*(7)
+*ob*(1), *dukovo-boot*(7), *radix-debug*(7)

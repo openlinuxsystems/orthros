@@ -1,15 +1,15 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Creating USB install media
 
-`./ob image` builds `out/orthros-<version>-x86_64.img`. Written to a USB
+`./ob image` builds `out/dukovo-<version>-x86_64.img`. Written to a USB
 stick, it boots on UEFI and legacy BIOS computers. Until the installer the
 stick holds GRUB and the kernel, which reports the machine's memory,
 processors and firmware tables on the screen: useful for checking that a machine
-boots OrthrOS and what the kernel finds there. The installer arrives in
+boots Dukovo and what the kernel finds there. The installer arrives in
 Phase 14.
 
 ## Writing the image
@@ -36,7 +36,7 @@ Any USB stick works; writing the image **erases everything on it**.
 
    ```sh
    sudo umount /dev/sdX?* 2>/dev/null
-   sudo dd if=out/orthros-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+   sudo dd if=out/dukovo-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
    ```
 
 `conv=fsync` makes `dd` wait until the data is on the stick, so it is safe
@@ -56,7 +56,7 @@ These tools write the same image and check the target is removable:
 1. Plug the stick in and switch the computer on.
 2. Open the one-time boot menu (F12 on Dell computers) and choose the USB
    stick. It may be listed twice, once for UEFI and once for legacy boot.
-3. GRUB shows a menu with one entry, "OrthrOS 0.0.1 (Radix)", and boots it
+3. GRUB shows a menu with one entry, "Dukovo 0.0.1 (Radix)", and boots it
    after three seconds.
 
 The screen then shows the kernel's log, under UEFI and legacy BIOS boot
@@ -65,7 +65,7 @@ off with the power button. If the kernel panics instead, the screen shows
 a report; [Debugging the kernel](debugging.md) explains it, and what to
 include when you report it.
 
-To include the processor's microcode updates, which OrthrOS does not ship
+To include the processor's microcode updates, which Dukovo does not ship
 itself, build the image with the build host's copy, for example from
 Debian's or Ubuntu's `intel-microcode` package:
 

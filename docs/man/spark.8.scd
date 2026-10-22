@@ -1,6 +1,6 @@
-spark(8) "OrthrOS" "OrthrOS Manual"
+spark(8) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -13,7 +13,7 @@ Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [_program_ [_argument_ 
 
 # DESCRIPTION
 
-Spark is the first program OrthrOS runs. At the end of boot the Radix
+Spark is the first program Dukovo runs. At the end of boot the Radix
 kernel finds it in the boot archive, starts it in a process of its own,
 and starts nothing else: every other program is started by Spark, or by
 a program Spark started. The kernel keeps Spark's process for good, and
@@ -30,7 +30,7 @@ system's services, with restarts and resource domains (Phase 9).
 # STARTING
 
 The kernel starts Spark when the boot loader loaded a boot archive (a
-module with the word *bootfs*, see *orthros-boot*(7)) and no self-test
+module with the word *bootfs*, see *dukovo-boot*(7)) and no self-test
 was asked for. It looks for the program at *init=*_path_ in the archive,
 _/system/bin/spark_ by default, so another program can be tried as the
 first one without rebuilding anything. Its arguments are its path and
@@ -127,5 +127,5 @@ _/system/tests/hello_
 
 # SEE ALSO
 
-*orthros-boot*(7), *radix-processes*(7), *radix-process*(2),
+*dukovo-boot*(7), *radix-processes*(7), *radix-process*(2),
 *radix-startup*(2), *ob*(1)

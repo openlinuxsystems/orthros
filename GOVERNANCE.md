@@ -1,16 +1,16 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Governance
 
-OrthrOS is a young project with one maintainer. This file says who decides
+Dukovo is a young project with one maintainer. This file says who decides
 what today and how that is meant to grow.
 
 ## Guiding principle: favor the user
 
-When a decision reaches a fork in the road, OrthrOS favors the user. It is a
+When a decision reaches a fork in the road, Dukovo favors the user. It is a
 users-first system, not a platform run for a company's benefit. Freedom is
 at the core of its philosophy: the freedom to use, study, change and share
 the system, to run any software the user chooses, and to decide everything

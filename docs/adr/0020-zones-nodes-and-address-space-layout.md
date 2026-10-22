@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -15,7 +15,7 @@ per-NUMA-node pools", a kernel heap of slab caches with per-CPU magazines,
 and a page-table manager with PCIDs. The spec leaves open which zones,
 where per-frame metadata lives, how large blocks get, and how the kernel's
 half of the address space is laid out. The reference laptop has one NUMA
-node and 8 GiB or more of RAM; servers that may run OrthrOS later have
+node and 8 GiB or more of RAM; servers that may run Dukovo later have
 several nodes and devices that can only address 32 bits.
 
 ## Decision

@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -11,13 +11,13 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 ## Context
 
 `ob image` can build a console-only image or one that also includes the
-Lumen compositor and its test terminal. OrthrOS ships a compositor but no
+Lumen compositor and its test terminal. Dukovo ships a compositor but no
 desktop environment.
 
 ## Decision
 
 The default image is the full 4 GiB USB image with Lumen included. Setting
-`lumen = false` in `orthros.toml` (from Phase 16) builds a console-only
+`lumen = false` in `dukovo.toml` (from Phase 16) builds a console-only
 image.
 
 ## Consequences

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Running external programs and reporting progress.
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn renders_shell_quoting() {
         let mut cmd = Command::new("qemu-system-x86_64");
-        cmd.args(["-m", "1G", "-name", "OrthrOS test", "it's"]);
-        assert_eq!(render(&cmd), r"qemu-system-x86_64 -m 1G -name 'OrthrOS test' 'it'\''s'");
+        cmd.args(["-m", "1G", "-name", "Dukovo test", "it's"]);
+        assert_eq!(render(&cmd), r"qemu-system-x86_64 -m 1G -name 'Dukovo test' 'it'\''s'");
     }
 }

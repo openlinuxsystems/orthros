@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! `ob docs`: man pages and the handbook.
@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use crate::process::{self, step};
 use crate::{COMMANDS, Context, Ctx, Error, Result, config, test, userspace};
 
-/// A man page source such as `docs/man/orthros.toml.5.scd`.
+/// A man page source such as `docs/man/dukovo.toml.5.scd`.
 #[derive(Debug, PartialEq, Eq)]
 struct Page {
     name: String,
@@ -163,7 +163,7 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
     }
 }
 
-/// Every `ob` command, boot test, orthros.toml key, kernel flag, kdb
+/// Every `ob` command, boot test, dukovo.toml key, kernel flag, kdb
 /// command and self-test must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
@@ -173,8 +173,8 @@ fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let lists: [(&str, &str, &[&str]); 6] = [
         ("docs/man/ob.1.scd", "command", &ob_commands),
         ("docs/man/ob.1.scd", "boot test", &boot_tests),
-        ("docs/man/orthros.toml.5.scd", "key", config::KEYS),
-        ("docs/man/orthros-boot.7.scd", "kernel flag", &kernel_flags),
+        ("docs/man/dukovo.toml.5.scd", "key", config::KEYS),
+        ("docs/man/dukovo-boot.7.scd", "kernel flag", &kernel_flags),
         ("docs/man/radix-debug.7.scd", "kdb command", &kdb_commands),
         ("docs/man/radix-debug.7.scd", "self-test", radix_hal::cmdline::SELFTESTS),
     ];
@@ -204,9 +204,9 @@ mod tests {
 
     #[test]
     fn splits_page_names() {
-        let page = Page::from_path(Path::new("docs/man/orthros.toml.5.scd")).unwrap();
-        assert_eq!((page.name.as_str(), page.section.as_str()), ("orthros.toml", "5"));
-        assert_eq!(page.output(Path::new("out")), Path::new("out/man5/orthros.toml.5"));
+        let page = Page::from_path(Path::new("docs/man/dukovo.toml.5.scd")).unwrap();
+        assert_eq!((page.name.as_str(), page.section.as_str()), ("dukovo.toml", "5"));
+        assert_eq!(page.output(Path::new("out")), Path::new("out/man5/dukovo.toml.5"));
         assert!(Page::from_path(Path::new("docs/man/README.scd")).is_none());
         assert!(Page::from_path(Path::new("docs/man/ob.x.scd")).is_none());
     }

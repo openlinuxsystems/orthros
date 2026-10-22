@@ -1,6 +1,6 @@
-radix-ipc(7) "OrthrOS" "OrthrOS Manual"
+radix-ipc(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -204,7 +204,7 @@ to another ring), *random* (16 random bytes) and *timeout*. See
 # RANDOM NUMBERS
 
 Every program receives a capability to the kernel's random number
-generator, the one the kernel seeds at boot (see *orthros-boot*(7)), in
+generator, the one the kernel seeds at boot (see *dukovo-boot*(7)), in
 slot 4. Its *read* method fills a buffer of up to 64 KiB, as *getrandom*(2)
 does on Linux, and *words* returns 64 bytes in registers without touching
 memory. Both need the *read* right. See *radix-random*(2).
@@ -297,4 +297,4 @@ log with the program's name and thread number.
 *radix-notification*(2), *radix-ring*(2), *radix-random*(2),
 *radix-process*(2), *radix-startup*(2), *radix-processes*(7),
 *radix-capabilities*(7), *radix-scheduling*(7), *radix-debug*(7),
-*orthros-boot*(7), *spark*(8), *ob*(1)
+*dukovo-boot*(7), *spark*(8), *ob*(1)

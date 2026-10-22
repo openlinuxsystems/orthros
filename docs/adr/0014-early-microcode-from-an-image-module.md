@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -21,7 +21,7 @@ have.
 ## Decision
 
 The microcode file is a separate GRUB module. `ob image` and `ob run` add
-one when given `--microcode PATH` or `image.microcode` in `orthros.toml`:
+one when given `--microcode PATH` or `image.microcode` in `dukovo.toml`:
 a file or directory of Intel microcode updates, such as
 `/lib/firmware/intel-ucode` from the build host's `intel-microcode`
 package. `ob` validates every update (header, size, checksums) and
@@ -38,7 +38,7 @@ Only Intel's format is supported; AMD's comes with AMD hardware in testing.
 - Default images contain no closed firmware, as ADR 0007 requires; a
   builder opts in explicitly, with firmware from their own distribution.
 - The same module mechanism will carry the optional firmware package's
-  microcode once OrthrOS installs to disk: the installer or `sysupdate`
+  microcode once Dukovo installs to disk: the installer or `sysupdate`
   adds the module line when the package is installed.
 - QEMU ignores microcode writes, so the boot test checks matching and
   validation only; applying an update is confirmed on the reference laptop.

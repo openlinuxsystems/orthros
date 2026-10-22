@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -11,7 +11,7 @@ random addresses, the boot archive, how the kernel starts Spark, and the
 radix-rt runtime that Spark and later programs are built on. It ends with
 the semi-formal argument that a process's end frees everything it held,
 and the known limits. The user-facing descriptions are radix-process(2),
-radix-startup(2), spark(8) and orthros-boot(7); the decisions behind the
+radix-startup(2), spark(8) and dukovo-boot(7); the decisions behind the
 design are ADRs 0047 to 0051.
 
 ## Crates

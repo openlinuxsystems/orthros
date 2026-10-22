@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Every step is an ./ob command, so anything CI does can be run locally the
@@ -81,15 +81,15 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/spdx"
           "$RUNNER_TEMP/spdx/bin/pip" install --quiet spdx-tools==0.8.3
-          "$RUNNER_TEMP/spdx/bin/pyspdxtools" -i out/orthros-*-x86_64.spdx
+          "$RUNNER_TEMP/spdx/bin/pyspdxtools" -i out/dukovo-*-x86_64.spdx
 
       - name: Upload the boot image
         uses: actions/upload-artifact@v4
         with:
-          name: orthros-image
+          name: dukovo-image
           path: |
-            out/orthros-*-x86_64.img
-            out/orthros-*-x86_64.spdx
+            out/dukovo-*-x86_64.img
+            out/dukovo-*-x86_64.spdx
           retention-days: 14
 
       - name: Upload boot test logs and screenshots

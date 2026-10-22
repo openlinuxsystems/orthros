@@ -1,9 +1,9 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# 0002. License OrthrOS under Apache-2.0 OR MIT
+# 0002. License Dukovo under Apache-2.0 OR MIT
 
 - Status: Accepted
 - Date: 2026-10-20
@@ -16,14 +16,14 @@ repository started with only an MIT license.
 
 ## Decision
 
-All OrthrOS code is dual licensed as `Apache-2.0 OR MIT`, at the user's
+All Dukovo code is dual licensed as `Apache-2.0 OR MIT`, at the user's
 option. The repository carries `LICENSE-APACHE` and `LICENSE-MIT`, every
 crate sets `license = "Apache-2.0 OR MIT"`, and contributions are accepted
 under the same terms (see `CONTRIBUTING.md`).
 
 ## Consequences
 
-- Crates can move between OrthrOS and the wider Rust ecosystem without
+- Crates can move between Dukovo and the wider Rust ecosystem without
   relicensing.
 - Apache-2.0 adds an explicit patent grant; MIT keeps compatibility with
   GPLv2 projects.

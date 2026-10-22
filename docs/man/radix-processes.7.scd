@@ -1,6 +1,6 @@
-radix-processes(7) "OrthrOS" "OrthrOS Manual"
+radix-processes(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -114,7 +114,7 @@ program how far its image moved, for debuggers and crash reports.
 
 The programs the system starts with come in the boot archive, a POSIX
 ustar file that *ob build* writes to _/boot/bootfs_ and GRUB loads as a
-module with the word *bootfs* (see *orthros-boot*(7)). It holds
+module with the word *bootfs* (see *dukovo-boot*(7)). It holds
 _/system/bin/spark_ and the programs Spark starts, owned by root, mode
 0755, dated from the commit, so the same programs make the same bytes.
 List it with *tar tvf out/sysroot/boot/bootfs*.
@@ -171,4 +171,4 @@ logs.
 
 *radix-process*(2), *radix-startup*(2), *radix-memory*(2),
 *radix-capabilities*(7), *radix-ipc*(7), *radix-scheduling*(7),
-*spark*(8), *orthros-boot*(7)
+*spark*(8), *dukovo-boot*(7)

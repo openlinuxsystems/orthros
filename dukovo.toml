@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-# OrthrOS build configuration, read by ./ob. Every key is optional and
-# documented in orthros.toml(5) (`man -l out/docs/man/man5/orthros.toml.5`
+# Dukovo build configuration, read by ./ob. Every key is optional and
+# documented in dukovo.toml(5) (`man -l out/docs/man/man5/dukovo.toml.5`
 # after `./ob docs`). Command-line options override these values.
 
 [build]
@@ -11,7 +11,7 @@ profile = "release"    # "release" or "debug"
 
 [boot]
 timeout = 3            # seconds the GRUB menu waits
-cmdline = ""           # extra kernel command-line flags, see orthros-boot(7)
+cmdline = ""           # extra kernel command-line flags, see dukovo-boot(7)
 
 [image]
 microcode = ""         # Intel microcode file or directory, e.g. "/lib/firmware/intel-ucode"

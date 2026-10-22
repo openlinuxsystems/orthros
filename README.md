@@ -1,18 +1,18 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# OrthrOS
+# Dukovo
 
-OrthrOS is an operating system built around **Radix**, a capability-based
+Dukovo is an operating system built around **Radix**, a capability-based
 kernel written in Rust. The goal is a complete, installable system: the
 kernel, a shell and core utilities, Btrfs storage, networking, users and
 logging, atomic updates, the **Lumen** Wayland compositor, an installer with
 the `rdisk` partitioner, and a USB install image. Every command and file
 format comes with a man page.
 
-OrthrOS is at **Phase 5** of its [roadmap](docs/roadmap.md): the Radix
+Dukovo is at **Phase 5** of its [roadmap](docs/roadmap.md): the Radix
 kernel boots through GRUB under UEFI and BIOS at a random address, chosen
 by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
 memory with a frame allocator per NUMA node and a slab heap with per-CPU
@@ -67,7 +67,7 @@ the pinned build container with Podman or Docker:
 | `./ob setup` | Install the pinned Rust toolchain, then run `doctor` |
 | `./ob doctor` | Check host tools and print the commands that install what is missing |
 | `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
-| `./ob image` | Build the hybrid USB/disk image `out/orthros-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
+| `./ob image` | Build the hybrid USB/disk image `out/dukovo-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
 | `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen, the memory manager, capabilities and the scheduler (`kani` for the Kani proofs, `tla` for the TLA+ models instead) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
@@ -75,7 +75,7 @@ the pinned build container with Podman or Docker:
 | `./ob signoff` | Check that your new commits carry a Developer Certificate of Origin sign-off |
 | `./ob clean` | Remove build output |
 
-Settings live in [`orthros.toml`](orthros.toml). The full manual is
+Settings live in [`dukovo.toml`](dukovo.toml). The full manual is
 [`ob(1)`](docs/man/ob.1.scd); after `./ob docs`, read it with
 `man -l out/docs/man/man1/ob.1`.
 
@@ -84,7 +84,7 @@ Settings live in [`orthros.toml`](orthros.toml). The full manual is
 ```sh
 ./ob image
 lsblk -d -o NAME,SIZE,MODEL,TRAN          # find your stick, for example sdb
-sudo dd if=out/orthros-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=out/dukovo-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 Everything on the target device is erased. balenaEtcher, GNOME Disks
@@ -96,7 +96,7 @@ covers booting it on real hardware.
 
 ```
 ob                  build entry point (shell wrapper around tools/xtask)
-orthros.toml        build configuration, see orthros.toml(5)
+dukovo.toml        build configuration, see dukovo.toml(5)
 rust-toolchain.toml pinned nightly Rust
 abi/                the system call interface, in ridl (see radix-ipc(7))
 kernel/             the Radix kernel workspace
@@ -142,18 +142,18 @@ Decisions that shape the system are recorded as
 
 Every decision follows the project's
 [guiding principle](GOVERNANCE.md#guiding-principle-favor-the-user): at a
-fork in the road, OrthrOS favors the user. Freedom is at the core of its
+fork in the road, Dukovo favors the user. Freedom is at the core of its
 philosophy, and the user owns the machine.
 
 ## License
 
-OrthrOS is licensed under either of
+Dukovo is licensed under either of
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option. Unless you explicitly state otherwise, any contribution
-intentionally submitted for inclusion in OrthrOS by you, as defined in the
+intentionally submitted for inclusion in Dukovo by you, as defined in the
 Apache-2.0 license, shall be dual licensed as above, without any additional
 terms or conditions.
 
@@ -161,4 +161,4 @@ Some files come from other projects under their own licenses, such as the
 console fonts (BSD-2-Clause). Every file names its copyright holders and
 license, following the [REUSE specification](https://reuse.software/), and
 `LICENSES/` holds the license texts. [CREDITS.md](CREDITS.md) thanks the
-projects OrthrOS is built on.
+projects Dukovo is built on.

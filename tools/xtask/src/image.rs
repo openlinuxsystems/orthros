@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Building the hybrid boot image with grub-mkrescue.
@@ -6,7 +6,7 @@
 //! The image carries GRUB for both legacy BIOS (El Torito plus an MBR boot
 //! record) and UEFI (an EFI system partition), so the same file boots from
 //! a USB stick, a hard disk or optical media. Phase 14 replaces it with the
-//! GPT disk image assembled by OrthrOS's own rdisk and mkfs tools.
+//! GPT disk image assembled by Dukovo's own rdisk and mkfs tools.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,13 +37,13 @@ pub struct ImageSpec<'a> {
 /// File name of a release image.
 pub fn file_name(iso: bool) -> String {
     let extension = if iso { "iso" } else { "img" };
-    format!("orthros-{VERSION}-x86_64.{extension}")
+    format!("dukovo-{VERSION}-x86_64.{extension}")
 }
 
 /// Path of the microcode module inside the image.
 pub const MICROCODE_PATH: &str = "/boot/firmware/intel-ucode.bin";
 
-/// What `ob image` and `ob run` put into the image beyond orthros.toml.
+/// What `ob image` and `ob run` put into the image beyond dukovo.toml.
 #[derive(Default)]
 pub struct Overrides {
     /// Kernel flags instead of `boot.cmdline`.
@@ -52,7 +52,7 @@ pub struct Overrides {
     pub microcode: Option<String>,
 }
 
-/// Builds the kernel and the release image described by orthros.toml.
+/// Builds the kernel and the release image described by dukovo.toml.
 pub fn build_release(
     ctx: &Ctx,
     profile: Profile,
@@ -246,9 +246,9 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
     Ok(())
 }
 
-/// ISO 9660 volume label, such as `ORTHROS_0_0_1`.
+/// ISO 9660 volume label, such as `DUKOVO_0_0_1`.
 pub fn volume_id() -> String {
-    format!("ORTHROS_{}", VERSION.replace(['.', '-'], "_")).to_ascii_uppercase()
+    format!("DUKOVO_{}", VERSION.replace(['.', '-'], "_")).to_ascii_uppercase()
 }
 
 /// Commit time of HEAD, which xorriso uses for the ISO timestamps instead of
@@ -278,7 +278,7 @@ mod tests {
         let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit", &[]).unwrap();
         assert!(cfg.contains("set timeout=0"));
         assert!(cfg.contains("multiboot2 /boot/radix qemu-exit\n    boot\n"));
-        assert!(cfg.contains(&format!("OrthrOS {VERSION} (Radix)")));
+        assert!(cfg.contains(&format!("Dukovo {VERSION} (Radix)")));
         assert!(cfg.contains("set gfxpayload=keep"));
         assert!(!cfg.contains("@VERSION@"));
         assert!(!cfg.contains("module2"));
@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn names_follow_the_version() {
-        assert_eq!(file_name(false), format!("orthros-{VERSION}-x86_64.img"));
-        assert_eq!(file_name(true), format!("orthros-{VERSION}-x86_64.iso"));
+        assert_eq!(file_name(false), format!("dukovo-{VERSION}-x86_64.img"));
+        assert_eq!(file_name(true), format!("dukovo-{VERSION}-x86_64.iso"));
         let label = volume_id();
         assert!(label.len() <= 32);
         assert!(label.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'));
