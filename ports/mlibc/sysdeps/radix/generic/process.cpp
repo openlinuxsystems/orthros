@@ -170,6 +170,54 @@ int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusag
 	return 0;
 }
 
+int Sysdeps<Waitid>::operator()(idtype_t idtype, id_t id, siginfo_t *info, int options) {
+	pid_t pid;
+	switch(idtype) {
+	case P_ALL:
+		pid = -1;
+		break;
+	case P_PID:
+		pid = static_cast<pid_t>(id);
+		break;
+	case P_PGID:
+		// Group 0 is the caller's, as waitpid's 0.
+		pid = -static_cast<pid_t>(id);
+		break;
+	default:
+		return EINVAL;
+	}
+	// The kernel always reports children that ended: waitid without
+	// WEXITED is not supported (docs/design/posix.md).
+	if(!(options & WEXITED) || (options & ~(WEXITED | WSTOPPED | WCONTINUED | WNOHANG | WNOWAIT)))
+		return EINVAL;
+	int status;
+	pid_t found;
+	int flags = options & (WNOHANG | WCONTINUED | WNOWAIT);
+	if(options & WSTOPPED)
+		flags |= WUNTRACED;
+	if(int e = sysdep<Waitpid>(pid, &status, flags, nullptr, &found); e)
+		return e;
+	memset(info, 0, sizeof(*info));
+	if(!found)
+		return 0;
+	info->si_signo = SIGCHLD;
+	info->si_pid = found;
+	if(WIFEXITED(status)) {
+		info->si_code = CLD_EXITED;
+		info->si_status = WEXITSTATUS(status);
+	} else if(WIFSIGNALED(status)) {
+		info->si_code = WCOREDUMP(status) ? CLD_DUMPED : CLD_KILLED;
+		info->si_status = WTERMSIG(status);
+	} else if(WIFSTOPPED(status)) {
+		info->si_code = CLD_STOPPED;
+		info->si_status = WSTOPSIG(status);
+	} else {
+		info->si_code = CLD_CONTINUED;
+		info->si_status = SIGCONT;
+	}
+	return 0;
+}
+
 int Sysdeps<Kill>::operator()(pid_t pid, int sig) {
 	if(sig < 0 || sig > 64)
 		return EINVAL;

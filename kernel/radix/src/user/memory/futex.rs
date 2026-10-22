@@ -31,6 +31,7 @@ use radix_sync::Mutex;
 use super::{SpaceObject, kmalloc};
 use crate::Arch;
 use crate::sched::{self, ThreadRef, wait};
+use crate::user::posix::signal::{Restart, interrupted};
 use crate::user::{Result, UserRef, error};
 
 /// How many lists waiters are spread over.
@@ -115,7 +116,14 @@ pub fn wait(
     if waiters.len() == before {
         return Ok(());
     }
-    Err(error(if in_time { Kernel::Interrupted } else { Kernel::TimedOut }))
+    if !in_time {
+        return Err(error(Kernel::TimedOut));
+    }
+    // As Linux's: a wait with a deadline runs again only if no handler
+    // ran, so that a sleep a handler cuts short says so; one without runs
+    // again unless the handler lacks SA_RESTART.
+    let restart = if deadline_ns.is_some() { Restart::NoHandler } else { Restart::Always };
+    Err(interrupted(restart))
 }
 
 /// Wakes up to `count` of the threads waiting on the word at `address` of

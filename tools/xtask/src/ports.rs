@@ -453,12 +453,13 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
     let mut stamps: BTreeMap<String, u64> = BTreeMap::new();
     let mut ports = Vec::new();
     for (recipe, dir) in recipes(ctx)? {
-        let mut sources = vec![fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?];
+        let mut sources =
+            vec![fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?];
         for extra in &recipe.extra {
             let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
             sources.push(fetch(ctx, name, &extra.git, &extra.commit)?);
         }
-        let stamp = inputs_hash(&dir, &toolchain, &recipe, &stamps)?;
+        let stamp = inputs_hash(ctx, &dir, &toolchain, &recipe, &stamps)?;
         let stamp_file = ctx.out.join("ports").join(format!("{}.stamp", recipe.name));
         let built = std::fs::read_to_string(&stamp_file).ok() == Some(format!("{stamp:016x}\n"));
         if built && !rebuild.contains(&recipe.name) {
@@ -481,20 +482,26 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
 }
 
 /// What went into a port's build: its directory's files, the toolchain,
-/// and the builds of the ports it needs.
+/// the kernel's system call headers, and the builds of the ports it needs.
 fn inputs_hash(
+    ctx: &Ctx,
     dir: &Path,
     toolchain: &Toolchain,
     recipe: &Recipe,
     stamps: &BTreeMap<String, u64>,
 ) -> Result<u64> {
     let mut hasher = DefaultHasher::new();
-    let mut files = Vec::new();
-    list_files(dir, &mut files)?;
-    files.sort();
-    for file in &files {
-        file.strip_prefix(dir).unwrap_or(file).hash(&mut hasher);
-        std::fs::read(file).context(|| format!("reading {}", file.display()))?.hash(&mut hasher);
+    let headers = ctx.out.join("sysroot/system/include/radix");
+    for dir in [dir, headers.as_path()] {
+        let mut files = Vec::new();
+        list_files(dir, &mut files)?;
+        files.sort();
+        for file in &files {
+            file.strip_prefix(dir).unwrap_or(file).hash(&mut hasher);
+            std::fs::read(file)
+                .context(|| format!("reading {}", file.display()))?
+                .hash(&mut hasher);
+        }
     }
     toolchain.version.hash(&mut hasher);
     toolchain.builtins.hash(&mut hasher);
@@ -522,9 +529,9 @@ fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
     let dir = ctx.target.join("ports/sources").join(format!("{name}-{}", &commit[..12]));
     let head = |dir: &Path| -> Option<String> {
         let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output();
-        out.ok().filter(|o| o.status.success()).map(|o| {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        })
+        out.ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
     if dir.join(".git").is_dir() && head(&dir).as_deref() == Some(commit) {
         return Ok(dir);
@@ -606,7 +613,10 @@ fn build(
         list.sort();
         for patch in list {
             let mut cmd = Command::new("patch");
-            cmd.args(["-p1", "--batch", "--forward", "--quiet", "-d"]).arg(&src).arg("-i").arg(&patch);
+            cmd.args(["-p1", "--batch", "--forward", "--quiet", "-d"])
+                .arg(&src)
+                .arg("-i")
+                .arg(&patch);
             process::run(ctx, &mut cmd)?;
         }
     }
@@ -621,7 +631,11 @@ fn build(
     let mut cmd = Command::new("sh");
     cmd.arg(dir.join("build.sh"))
         .current_dir(&work)
-        .env("PATH", std::env::join_paths(paths).map_err(|err| Error::new(format!("building PATH: {err}")))?)
+        .env(
+            "PATH",
+            std::env::join_paths(paths)
+                .map_err(|err| Error::new(format!("building PATH: {err}")))?,
+        )
         .env("PORT_DIR", dir)
         .env("PORT_SRC", &src)
         .env("PORT_BUILD", &build_dir)

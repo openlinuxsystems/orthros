@@ -556,6 +556,10 @@ fn replace_own(
         }
     });
     process.set_name(name);
+    // The new program's thread has the process's number, as on Linux,
+    // whichever thread called exec; the caller, which has it if it was the
+    // first, exits as the new one starts.
+    process.number_next_thread();
     let started = ProcessObject::start(
         process,
         Start::Fresh(start),

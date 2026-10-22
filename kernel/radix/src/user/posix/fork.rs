@@ -70,7 +70,8 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
         from.fork_into(&to)?;
         {
             let parent = parent.posix.lock();
-            let mut posix = child.posix.lock();
+            // The child is new: nothing else takes its lock yet.
+            let mut posix = child.posix.lock_nested(1);
             posix.actions.copy_from(&parent.actions);
             posix.terminal = parent.terminal.clone();
         }

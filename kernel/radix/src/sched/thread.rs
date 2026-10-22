@@ -293,7 +293,10 @@ impl Thread {
         }
     }
 
-    /// Its number, unique for as long as the kernel runs.
+    /// Its number, from the count processes take theirs from. A
+    /// process's first thread has the process's number, and so does the
+    /// thread that runs a program `exec` gave the process, while the
+    /// thread that called `exec` ends; no other two threads share one.
     pub fn id(&self) -> u64 {
         self.id
     }

@@ -165,8 +165,8 @@ Errors of files and directories are in the *file* domain (2) of the
 status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
 *is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
 *bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
-*too_big*, *unknown_filesystem* and *not_block_device*, each with the
-POSIX errno it maps to.
+*too_big*, *unknown_filesystem*, *not_block_device* and *no_device*,
+each with the POSIX errno it maps to.
 
 The kernel logs each disk, partition and mount:
 

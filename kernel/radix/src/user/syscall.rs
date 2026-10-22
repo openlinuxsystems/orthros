@@ -72,7 +72,10 @@ pub fn handle(regs: &mut SyscallRegs) {
         }
     }
     if me.should_stop() {
-        stopped(me, number, info);
+        // A signal that ends a POSIX process is its parent's to report.
+        if user.process.posix.lock().ended_by.is_none() {
+            stopped(me, number, info);
+        }
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
 }

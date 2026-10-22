@@ -304,10 +304,11 @@ interface process = 0x000a version 2 {
     /// Puts process `pid` (0: the caller), the caller or one of its
     /// children that has not called `exec`, in process group `group` (0:
     /// one numbered after it), which must exist in the caller's session
-    /// unless it is the new one.
+    /// unless it is the new one. A child that has called `exec` gives
+    /// execed.
     method set_group = 16 (pid: u64, group: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
-                not_permitted];
+                not_permitted, execed];
     /// Makes a new session and process group, numbered after the caller,
     /// with the caller in them and no controlling terminal. Fails if the
     /// caller leads a process group.

@@ -300,6 +300,29 @@ fn renames() {
     assert_eq!(vfs.rename(&root, "c", &root, "c/b/c"), Err(Error::BadName));
 }
 
+/// Lists `dir` one entry at a time, calling `each` with every name.
+fn list_one_by_one(vfs: &Vfs, dir: &Location, mut each: impl FnMut(&str)) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let mut got = None;
+        vfs.list(dir, cursor, &mut |next, name, _| {
+            got = Some((next, String::from(name)));
+            false
+        })
+        .unwrap();
+        match got {
+            Some((next, name)) => {
+                each(&name);
+                seen.push(name);
+                cursor = next;
+            }
+            None => break,
+        }
+    }
+    seen
+}
+
 #[test]
 fn listing_with_cursors() {
     let vfs = vfs();
@@ -307,24 +330,31 @@ fn listing_with_cursors() {
     for name in ["b", "a", "c", "d"] {
         write(&vfs, &root, name, b"").unwrap();
     }
-    let mut seen = Vec::new();
-    let mut cursor = 0;
-    loop {
-        let mut got = None;
-        vfs.list(&root, cursor, &mut |next, name, _| {
-            got = Some((next, String::from(name)));
-            false
-        })
-        .unwrap();
-        match got {
-            Some((next, name)) => {
-                seen.push(name);
-                cursor = next;
-            }
-            None => break,
-        }
+    // A tmpfs lists its entries in the order they were made.
+    assert_eq!(list_one_by_one(&vfs, &root, |_| {}), ["b", "a", "c", "d"]);
+    // Renamed in place, an entry keeps its place; replacing one, it takes
+    // the place of the one it replaces.
+    vfs.rename(&root, "a", &root, "e").unwrap();
+    assert_eq!(list_one_by_one(&vfs, &root, |_| {}), ["b", "e", "c", "d"]);
+    vfs.rename(&root, "d", &root, "b").unwrap();
+    assert_eq!(list_one_by_one(&vfs, &root, |_| {}), ["b", "e", "c"]);
+    assert_eq!(vfs.stat(&root, "d").err(), Some(Error::NotFound));
+}
+
+#[test]
+fn removing_while_listing_skips_nothing() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "dir").unwrap();
+    let dir = vfs.resolve(&root, "dir").unwrap();
+    let names: Vec<String> = (0..50).map(|i| format!("f{i:02}")).collect();
+    for name in names.iter().rev() {
+        write(&vfs, &dir, name, b"x").unwrap();
     }
-    assert_eq!(seen, ["a", "b", "c", "d"]);
+    // As `rm -r` does: each entry is removed as soon as it is listed.
+    let seen = list_one_by_one(&vfs, &dir, |name| vfs.remove(&dir, name).unwrap());
+    assert_eq!(seen.len(), 50);
+    vfs.remove(&root, "dir").unwrap();
 }
 
 #[test]

@@ -162,7 +162,8 @@ pub(super) fn signal_key(process: &ProcessObject) -> usize {
 fn tree_error(err: TreeError) -> radix_abi::Status {
     error(match err {
         TreeError::NoSuchProcess => Kernel::NoSuchProcess,
-        TreeError::NotPermitted | TreeError::Execed => Kernel::NotPermitted,
+        TreeError::NotPermitted => Kernel::NotPermitted,
+        TreeError::Execed => Kernel::Execed,
         TreeError::Invalid => Kernel::InvalidArgument,
         TreeError::NoMemory => Kernel::NoMemory,
         TreeError::Exists => Kernel::Occupied,
@@ -249,7 +250,8 @@ pub fn exited(process: &ProcessObject) {
         let Some(me) = tree.get(pid) else { return (None, None) };
         let session = me.session;
         let parent = find(tree, me.parent);
-        let auto_reap = parent.as_ref().is_some_and(|parent| parent.posix.lock().actions.reaps_children());
+        let auto_reap =
+            parent.as_ref().is_some_and(|parent| parent.posix.lock().actions.reaps_children());
         // Groups this end may leave orphaned with stopped members: its
         // own, and its children's.
         let mut groups = [0u64; 8];

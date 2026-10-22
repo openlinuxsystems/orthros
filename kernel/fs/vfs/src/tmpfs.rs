@@ -3,7 +3,8 @@
 
 //! tmpfs: a filesystem in memory.
 //!
-//! Directories are sorted lists of names; files are page caches with no
+//! Directories list their entries in the order they were made, with an
+//! index sorted by name for lookups; files are page caches with no
 //! disk below ([`FileCache`] with a non-persistent backing), so a file's
 //! pages are its data and holes read as zeros. A filesystem has a size
 //! limit, charged by the bytes its files are long, and its files' memory
@@ -47,6 +48,8 @@ pub struct Tmpfs {
 }
 
 struct Entry {
+    /// When it was made, in its directory: a listing goes in this order.
+    seq: u64,
     name: KVec<u8>,
     node: KArc<TmpNode>,
 }
@@ -58,9 +61,66 @@ impl Entry {
 }
 
 struct DirState {
-    /// Sorted by name.
+    /// In the order they were made in, which listings follow. A listing's
+    /// cursor is the sequence number to go on from, so an entry removed
+    /// while a program lists the directory never makes it skip another,
+    /// as POSIX `readdir` needs (`rm -r` removes as it lists).
     entries: KVec<Entry>,
+    /// Indexes into `entries`, sorted by the entries' names.
+    by_name: KVec<u32>,
+    /// The sequence number of the next entry made.
+    next_seq: u64,
     modified: u64,
+}
+
+impl DirState {
+    fn new(modified: u64) -> DirState {
+        DirState { entries: mem::vec(), by_name: mem::vec(), next_seq: 1, modified }
+    }
+
+    /// Where `name` is in `by_name`, or would go.
+    fn find(&self, name: &str) -> core::result::Result<usize, usize> {
+        self.by_name
+            .binary_search_by(|&i| self.entries[i as usize].name.as_slice().cmp(name.as_bytes()))
+    }
+
+    /// The entry `name`.
+    fn get(&self, name: &str) -> Result<&Entry> {
+        let at = self.find(name).map_err(|_| Error::NotFound)?;
+        Ok(self.at(at))
+    }
+
+    /// Adds `node` as `name`, which [`DirState::find`] said goes at `at`.
+    fn insert(&mut self, at: usize, name: KVec<u8>, node: KArc<TmpNode>) -> Result<()> {
+        let index = u32::try_from(self.entries.len()).map_err(|_| Error::NoSpace)?;
+        // Room in both first, so that a failure changes nothing.
+        self.by_name.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        mem::push(&mut self.entries, Entry { seq: self.next_seq, name, node })?;
+        self.next_seq += 1;
+        mem::insert(&mut self.by_name, at, index)?;
+        Ok(())
+    }
+
+    /// Takes out the entry at `at` in `by_name`.
+    fn remove(&mut self, at: usize) -> Entry {
+        let index = self.by_name.remove(at);
+        for i in &mut self.by_name {
+            if *i > index {
+                *i -= 1;
+            }
+        }
+        self.entries.remove(index as usize)
+    }
+
+    /// The entry at `at` in `by_name`.
+    fn at(&self, at: usize) -> &Entry {
+        &self.entries[self.by_name[at] as usize]
+    }
+
+    /// The entry at `at` in `by_name`, to change.
+    fn at_mut(&mut self, at: usize) -> &mut Entry {
+        &mut self.entries[self.by_name[at] as usize]
+    }
 }
 
 enum Body {
@@ -121,9 +181,7 @@ impl TmpNode {
     fn new(id: u64, shared: KArc<Shared>, kind: Kind) -> Result<KArc<TmpNode>> {
         let created = now();
         let body = match kind {
-            Kind::Directory => {
-                Body::Dir(Mutex::new(DirState { entries: mem::vec(), modified: created }))
-            }
+            Kind::Directory => Body::Dir(Mutex::new(DirState::new(created))),
             Kind::File => {
                 Body::File { cache: FileCache::new(0, created), charged: AtomicU64::new(0) }
             }
@@ -215,11 +273,6 @@ impl Drop for TmpNode {
     }
 }
 
-/// Where `name` is, or would go, in sorted `entries`.
-fn find(entries: &[Entry], name: &str) -> core::result::Result<usize, usize> {
-    entries.binary_search_by(|entry| entry.name.as_slice().cmp(name.as_bytes()))
-}
-
 impl Node for TmpNode {
     fn stat(&self) -> Stat {
         let (size, modified, pages) = match &self.body {
@@ -239,10 +292,7 @@ impl Node for TmpNode {
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
         let dir = self.dir()?.lock();
-        match find(&dir.entries, name) {
-            Ok(i) => Ok(dir.entries[i].node.clone()),
-            Err(_) => Err(Error::NotFound),
-        }
+        Ok(dir.get(name)?.node.clone())
     }
 
     fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
@@ -253,12 +303,12 @@ impl Node for TmpNode {
         let name_bytes = mem::copy(name.as_bytes())?;
         let _namespace = self.shared.namespace.lock();
         let mut dir = dir.lock();
-        let at = match find(&dir.entries, name) {
+        let at = match dir.find(name) {
             Ok(_) => return Err(Error::Exists),
             Err(at) => at,
         };
         *node.parent.lock() = self.weak();
-        mem::insert(&mut dir.entries, at, Entry { name: name_bytes, node: node.clone() })?;
+        dir.insert(at, name_bytes, node.clone())?;
         dir.modified = now();
         Ok(node)
     }
@@ -267,13 +317,13 @@ impl Node for TmpNode {
         check_name(name)?;
         let _namespace = self.shared.namespace.lock();
         let mut dir = self.dir()?.lock();
-        let at = find(&dir.entries, name).map_err(|_| Error::NotFound)?;
-        let node = &dir.entries[at].node;
+        let at = dir.find(name).map_err(|_| Error::NotFound)?;
+        let node = &dir.at(at).node;
         if matches!(node.body, Body::Dir(_)) && !node.is_empty_dir() {
             return Err(Error::NotEmpty);
         }
         *node.parent.lock() = None;
-        dir.entries.remove(at);
+        dir.remove(at);
         dir.modified = now();
         Ok(())
     }
@@ -293,8 +343,7 @@ impl Node for TmpNode {
         // The entry to move, checked against what it would replace.
         let moving = {
             let source = self.dir()?.lock();
-            let at = find(&source.entries, from).map_err(|_| Error::NotFound)?;
-            source.entries[at].node.clone()
+            source.get(from)?.node.clone()
         };
         // A directory cannot move under itself.
         let target_ref = target.weak().and_then(|weak| weak.upgrade()).ok_or(Error::NotFound)?;
@@ -304,23 +353,22 @@ impl Node for TmpNode {
         let name = mem::copy(to.as_bytes())?;
         {
             let mut dest = target.dir()?.lock();
-            match find(&dest.entries, to) {
-                Ok(i) => {
-                    check_replace(&moving, &dest.entries[i].node)?;
-                    *dest.entries[i].node.parent.lock() = None;
-                    dest.entries[i] = Entry { name, node: moving.clone() };
+            match dest.find(to) {
+                Ok(at) => {
+                    let entry = dest.at_mut(at);
+                    check_replace(&moving, &entry.node)?;
+                    *entry.node.parent.lock() = None;
+                    entry.node = moving.clone();
                 }
-                Err(at) => {
-                    mem::insert(&mut dest.entries, at, Entry { name, node: moving.clone() })?;
-                }
+                Err(at) => dest.insert(at, name, moving.clone())?,
             }
             dest.modified = now();
         }
         *moving.parent.lock() = target.weak();
         // The namespace lock kept the entry where it was.
         let mut source = self.dir()?.lock();
-        if let Ok(at) = find(&source.entries, from) {
-            source.entries.remove(at);
+        if let Ok(at) = source.find(from) {
+            source.remove(at);
         }
         source.modified = now();
         Ok(())
@@ -328,8 +376,9 @@ impl Node for TmpNode {
 
     fn list(&self, cursor: u64, f: ListFn<'_>) -> Result<()> {
         let dir = self.dir()?.lock();
-        for (i, entry) in dir.entries.iter().enumerate().skip(cursor as usize) {
-            if !f(i as u64 + 1, entry.name(), entry.node.kind()) {
+        let from = dir.entries.partition_point(|entry| entry.seq < cursor);
+        for entry in &dir.entries[from..] {
+            if !f(entry.seq + 1, entry.name(), entry.node.kind()) {
                 break;
             }
         }
@@ -382,22 +431,32 @@ fn check_replace(moving: &TmpNode, old: &TmpNode) -> Result<()> {
     }
 }
 
-/// A rename inside one directory.
+/// A rename inside one directory. The entry keeps its place in listings
+/// unless it replaces another, whose place it takes.
 fn rename_within(dir: &mut DirState, from: &str, to: &str) -> Result<()> {
-    let at = find(&dir.entries, from).map_err(|_| Error::NotFound)?;
+    let at = dir.find(from).map_err(|_| Error::NotFound)?;
     if from == to {
         return Ok(());
     }
-    let name = mem::copy(to.as_bytes())?;
-    if let Ok(i) = find(&dir.entries, to) {
-        check_replace(&dir.entries[at].node, &dir.entries[i].node)?;
-        *dir.entries[i].node.parent.lock() = None;
-        dir.entries.remove(i);
+    let mut name = mem::copy(to.as_bytes())?;
+    match dir.find(to) {
+        Ok(old) => {
+            let moving = dir.at_mut(at).node.clone();
+            let entry = dir.at_mut(old);
+            check_replace(&moving, &entry.node)?;
+            *entry.node.parent.lock() = None;
+            entry.node = moving;
+            dir.remove(at);
+        }
+        Err(to_at) => {
+            // The index changes, and the entry's name with it; the index
+            // has room already, as it loses one entry and gains one.
+            let index = dir.by_name.remove(at);
+            let to_at = if to_at > at { to_at - 1 } else { to_at };
+            mem::insert(&mut dir.by_name, to_at, index)?;
+            core::mem::swap(&mut dir.entries[index as usize].name, &mut name);
+        }
     }
-    let at = find(&dir.entries, from).map_err(|_| Error::NotFound)?;
-    let entry = dir.entries.remove(at);
-    let at = find(&dir.entries, to).unwrap_or_else(|at| at);
-    mem::insert(&mut dir.entries, at, Entry { name, node: entry.node })?;
     dir.modified = now();
     Ok(())
 }

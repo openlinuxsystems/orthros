@@ -98,6 +98,8 @@ pub enum Error {
     UnknownFilesystem,
     /// A mount needs a block device and was given something else.
     NotBlockDevice,
+    /// The device the node stands for is not there.
+    NoDevice,
     /// The node does not do this.
     NotSupported,
     /// Out of memory.
@@ -126,6 +128,7 @@ impl fmt::Display for Error {
             Error::TooBig => "the file would be too big",
             Error::UnknownFilesystem => "unknown filesystem",
             Error::NotBlockDevice => "not a block device",
+            Error::NoDevice => "no such device",
             Error::NotSupported => "not supported",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",

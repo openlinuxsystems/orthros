@@ -190,7 +190,6 @@ fn run() {
 /// Spark's child, on a new pseudo-terminal whose output goes to the
 /// kernel log, and waits for it to end.
 fn run_posix(root: &Dir, path: &str, args: &[&str]) {
-    let rw = Rights::READ.union(Rights::WRITE);
     let (master, terminal) = match open_pty(root) {
         Ok(pair) => pair,
         Err(what) => return println!("spark: cannot make a pseudo-terminal: {what}"),
@@ -208,13 +207,14 @@ fn run_posix(root: &Dir, path: &str, args: &[&str]) {
         return println!("spark: cannot make a process for {path}: {:#x}", status.0);
     }
     // The root, the random source and the log as Spark has them, and the
-    // terminal as descriptors 0, 1 and 2.
-    let mut shares = [(root.slot(), SLOT_ROOT, rw), (SLOT_RANDOM, SLOT_RANDOM, Rights::ALL)]
+    // terminal as descriptors 0, 1 and 2, all with the copy right, which
+    // `fork` needs to copy them.
+    let mut shares = [root.slot(), SLOT_RANDOM, SLOT_LOG]
         .into_iter()
-        .chain([(SLOT_LOG, SLOT_LOG, Rights::ALL)])
-        .chain((0..3).map(|fd| (terminal.slot(), SLOT_FD_BASE + fd, rw)));
-    let shared = shares.try_for_each(|(from, to, rights)| {
-        process::share(&SYS, child, from, to, rights, 0).map_err(|status| (to, status))
+        .zip([SLOT_ROOT, SLOT_RANDOM, SLOT_LOG])
+        .chain((0..3).map(|fd| (terminal.slot(), SLOT_FD_BASE + fd)));
+    let shared = shares.try_for_each(|(from, to)| {
+        process::share(&SYS, child, from, to, Rights::ALL, 0).map_err(|status| (to, status))
     });
     let started = shared
         .map_err(|(to, status)| alloc::format!("sharing slot {to} failed: {:#x}", status.0))

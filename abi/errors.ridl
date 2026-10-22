@@ -92,6 +92,9 @@ errors kernel = 1 {
     arguments_too_long = 32 => E2BIG;
     /// The file has no offset to move: it is a pipe or a terminal.
     not_seekable = 33 => ESPIPE;
+    /// The process has run `exec` since its parent forked it, so the
+    /// parent can no longer move it to another process group.
+    execed = 34 => EACCES;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).
@@ -133,4 +136,7 @@ errors file = 2 {
     unknown_filesystem = 16 => ENODEV;
     /// A mount needs a block device and was given another file.
     not_block_device = 17 => ENOTBLK;
+    /// The device the file stands for is not there: `/dev/tty` opened by
+    /// a process whose session has no controlling terminal.
+    no_device = 18 => ENXIO;
 }

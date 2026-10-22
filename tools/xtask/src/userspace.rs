@@ -189,7 +189,7 @@ fn build_posix(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, P
         let name = source.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
         let program = out.join(&name);
         let mut cmd = Command::new(toolchain.cc());
-        cmd.args(["-std=c11", "-D_POSIX_C_SOURCE=200809L", "-D_DEFAULT_SOURCE"])
+        cmd.args(["-std=c11", "-D_GNU_SOURCE"])
             .args(["-O2", "-g", "-Wall", "-Wextra", "-Werror", "-I"])
             .arg(&sources)
             .arg("-o")

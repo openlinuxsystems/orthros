@@ -795,9 +795,9 @@ impl Node for Current {
     }
 
     fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
-        let thread = sched::current().ok_or(radix_vfs::Error::NotFound)?;
-        let user = thread.user().ok_or(radix_vfs::Error::NotFound)?;
-        let tty = controlling(&user.process).ok_or(radix_vfs::Error::NotFound)?;
+        let thread = sched::current().ok_or(radix_vfs::Error::NoDevice)?;
+        let user = thread.user().ok_or(radix_vfs::Error::NoDevice)?;
+        let tty = controlling(&user.process).ok_or(radix_vfs::Error::NoDevice)?;
         open_side(&tty, false)
     }
 

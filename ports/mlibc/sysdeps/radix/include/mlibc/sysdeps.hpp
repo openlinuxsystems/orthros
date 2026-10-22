@@ -153,6 +153,7 @@ struct RadixSysdepTags :
 	VmMap,
 	VmProtect,
 	VmUnmap,
+	Waitid,
 	Waitpid,
 	Write,
 	Writev,

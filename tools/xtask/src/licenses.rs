@@ -511,7 +511,10 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
                 download: format!("git+{}@{}", extra.git, extra.commit),
                 sha256: None,
                 notices: notice_files(source),
-                comment: format!("Built into {} {} from its {}.", recipe.name, recipe.version, extra.path),
+                comment: format!(
+                    "Built into {} {} from its {}.",
+                    recipe.name, recipe.version, extra.path
+                ),
             });
         }
     }

@@ -112,7 +112,7 @@ interface directory = 0x000b version 2 {
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
-                name_too_long, bad_name, outside, io, corrupt];
+                name_too_long, bad_name, outside, io, corrupt, no_device];
     /// Makes an empty directory at `path`. Needs the write right.
     method make_directory = 2 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,

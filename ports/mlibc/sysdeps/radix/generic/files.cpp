@@ -36,6 +36,17 @@ bool is(uint64_t status, uint16_t code) {
 			&& RADIX_STATUS_CODE(status) == code;
 }
 
+// The errno of a read or write that failed with `status`: a directory
+// is not read or written as a file, and a descriptor not open for
+// reading or writing is a bad one for it.
+int io_errno(uint64_t status) {
+	if(is(status, RADIX_KERNEL_WRONG_KIND))
+		return EISDIR;
+	if(is(status, RADIX_KERNEL_MISSING_RIGHTS))
+		return EBADF;
+	return radix::to_errno(status);
+}
+
 // The kernel's OpenFlags for `flags`.
 uint32_t open_flags(int flags) {
 	uint32_t out = 0;
@@ -105,8 +116,14 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 		return e;
 	if(kind != RADIX_FILE_KIND_DIRECTORY)
 		return 0;
+	if(!read_only) {
+		// POSIX opens a directory for reading only; the write right a
+		// directory capability has is for making files beneath it.
+		radix_capability_delete(radix::slot_of(*fd));
+		return EISDIR;
+	}
 	radix::set_dir_cursor(*fd, 0);
-	if(read_only && !(flags & O_DIRECTORY)) {
+	if(!(flags & O_DIRECTORY)) {
 		// It turned out to be a directory: again, with the write right if
 		// it may have it, in the same descriptor.
 		int wider;
@@ -230,50 +247,83 @@ int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
 	return sysdep<Open>(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, handle);
 }
 
+// readdir lists `.` and `..` first, as Linux does, though the kernel's
+// listings leave them out: their cursors are above any a filesystem gives.
+constexpr uint64_t DOTDOT_CURSOR = (uint64_t(1) << 62) | 1;
+constexpr uint64_t LISTING_CURSOR = (uint64_t(1) << 62) | 2;
+
+// Appends a dirent for `name` to the `max_size` bytes at `out`, of which
+// `used` are taken; false if it does not fit.
+static bool put_entry(char *out, size_t max_size, size_t &used, const char *name, size_t len,
+		uint64_t next, unsigned char type) {
+	size_t reclen = (offsetof(struct dirent, d_name) + len + 1 + 7) & ~size_t(7);
+	if(used + reclen > max_size)
+		return false;
+	struct dirent *d = reinterpret_cast<struct dirent *>(out + used);
+	// Listings carry no file numbers; the cursor is unique in the
+	// directory, and never 0, which some programs skip.
+	d->d_ino = next;
+	d->d_off = static_cast<off_t>(next);
+	d->d_reclen = static_cast<unsigned short>(reclen);
+	d->d_type = type;
+	memcpy(d->d_name, name, len);
+	d->d_name[len] = 0;
+	used += reclen;
+	return true;
+}
+
 int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 		size_t *bytes_read) {
 	uint32_t slot = radix::slot_of(handle);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
+	auto out = static_cast<char *>(buffer);
+	size_t used = 0;
+	uint64_t cursor = radix::dir_cursor(handle);
+	if(cursor == 0) {
+		// Only a directory lists.
+		struct radix_directory_stat_results d;
+		if(uint64_t status = radix_directory_stat(slot, ".", 1, &d); status)
+			return is(status, RADIX_KERNEL_WRONG_KIND) ? ENOTDIR : radix::to_errno(status);
+		if(!put_entry(out, max_size, used, ".", 1, DOTDOT_CURSOR, DT_DIR))
+			return EINVAL;
+		cursor = DOTDOT_CURSOR;
+	}
+	if(cursor == DOTDOT_CURSOR && put_entry(out, max_size, used, "..", 2, LISTING_CURSOR, DT_DIR))
+		cursor = LISTING_CURSOR;
 	// A record here is at most 8 bytes longer than the kernel's (16 bytes
 	// and the name, 8-byte aligned), so asking for two thirds of the room
 	// always fits.
 	char listed[1536];
-	size_t ask = max_size * 2 / 3;
+	size_t ask = (max_size - used) * 2 / 3;
 	if(ask > sizeof(listed))
 		ask = sizeof(listed);
-	uint64_t cursor = radix::dir_cursor(handle);
-	struct radix_directory_list_results r;
-	if(uint64_t status = radix_directory_list(slot, cursor, listed, ask, &r); status)
-		return radix::to_errno(status);
-	auto out = static_cast<char *>(buffer);
-	size_t used = 0;
-	size_t at = 0;
-	for(uint32_t i = 0; i < r.count; i++) {
-		struct radix_dir_entry entry;
-		memcpy(&entry, listed + at, sizeof(entry));
-		const char *name = listed + at + sizeof(entry);
-		at += (sizeof(entry) + entry.name_len + 7) & ~size_t(7);
-		size_t reclen = (offsetof(struct dirent, d_name) + entry.name_len + 1 + 7) & ~size_t(7);
-		if(used + reclen > max_size)
-			break;
-		struct dirent *d = reinterpret_cast<struct dirent *>(out + used);
-		// Listings carry no file numbers; the cursor is unique in the
-		// directory, and never 0, which some programs skip.
-		d->d_ino = entry.next;
-		d->d_off = static_cast<off_t>(entry.next);
-		d->d_reclen = static_cast<unsigned short>(reclen);
-		switch(entry.kind) {
-		case RADIX_FILE_KIND_DIRECTORY: d->d_type = DT_DIR; break;
-		case RADIX_FILE_KIND_BLOCK_DEVICE: d->d_type = DT_BLK; break;
-		case RADIX_FILE_KIND_CHAR_DEVICE: d->d_type = DT_CHR; break;
-		case RADIX_FILE_KIND_PIPE: d->d_type = DT_FIFO; break;
-		default: d->d_type = DT_REG; break;
+	if(cursor != DOTDOT_CURSOR) {
+		struct radix_directory_list_results r;
+		uint64_t from = cursor == LISTING_CURSOR ? 0 : cursor;
+		if(uint64_t status = radix_directory_list(slot, from, listed, ask, &r); status) {
+			if(!used)
+				return radix::to_errno(status);
+			r.count = 0;
 		}
-		memcpy(d->d_name, name, entry.name_len);
-		d->d_name[entry.name_len] = 0;
-		used += reclen;
-		cursor = entry.next;
+		size_t at = 0;
+		for(uint32_t i = 0; i < r.count; i++) {
+			struct radix_dir_entry entry;
+			memcpy(&entry, listed + at, sizeof(entry));
+			const char *name = listed + at + sizeof(entry);
+			at += (sizeof(entry) + entry.name_len + 7) & ~size_t(7);
+			unsigned char type;
+			switch(entry.kind) {
+			case RADIX_FILE_KIND_DIRECTORY: type = DT_DIR; break;
+			case RADIX_FILE_KIND_BLOCK_DEVICE: type = DT_BLK; break;
+			case RADIX_FILE_KIND_CHAR_DEVICE: type = DT_CHR; break;
+			case RADIX_FILE_KIND_PIPE: type = DT_FIFO; break;
+			default: type = DT_REG; break;
+			}
+			if(!put_entry(out, max_size, used, name, entry.name_len, entry.next, type))
+				break;
+			cursor = entry.next;
+		}
 	}
 	radix::set_dir_cursor(handle, cursor);
 	*bytes_read = used;
@@ -287,7 +337,7 @@ int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_re
 	struct radix_file_read_results r;
 	uint64_t status = radix_file_read(slot, RADIX_FILE_CURRENT, buf, count, &r);
 	if(status)
-		return is(status, RADIX_KERNEL_WRONG_KIND) ? EISDIR : radix::to_errno(status);
+		return io_errno(status);
 	*bytes_read = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -299,7 +349,7 @@ int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *b
 	struct radix_file_write_results r;
 	uint64_t status = radix_file_write(slot, RADIX_FILE_CURRENT, buf, count, &r);
 	if(status)
-		return is(status, RADIX_KERNEL_WRONG_KIND) ? EISDIR : radix::to_errno(status);
+		return io_errno(status);
 	*bytes_written = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -313,7 +363,7 @@ int Sysdeps<Pread>::operator()(int fd, void *buf, size_t n, off_t off, ssize_t *
 	struct radix_file_read_results r;
 	uint64_t status = radix_file_read(slot, static_cast<uint64_t>(off), buf, n, &r);
 	if(status)
-		return is(status, RADIX_KERNEL_WRONG_KIND) ? EISDIR : radix::to_errno(status);
+		return io_errno(status);
 	*bytes_read = static_cast<ssize_t>(r.count);
 	return 0;
 }
@@ -328,7 +378,7 @@ int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t n, off_t off,
 	struct radix_file_write_results r;
 	uint64_t status = radix_file_write(slot, static_cast<uint64_t>(off), buf, n, &r);
 	if(status)
-		return is(status, RADIX_KERNEL_WRONG_KIND) ? EISDIR : radix::to_errno(status);
+		return io_errno(status);
 	*bytes_written = static_cast<ssize_t>(r.count);
 	return 0;
 }

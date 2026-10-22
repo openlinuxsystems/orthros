@@ -780,6 +780,8 @@ pub fn method(user: &UserRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
             if a.signal > SIGNALS {
                 return Err(Kernel::InvalidArgument.status(1));
             }
+            // The last match: a thread that ran exec, ending, has the
+            // number of the thread that runs the new program.
             let mut found = None;
             process.for_each_thread(&mut |thread, user| {
                 if thread.id() == a.thread {

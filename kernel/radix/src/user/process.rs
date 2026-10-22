@@ -107,8 +107,10 @@ pub enum Start {
 
 /// A process.
 pub struct ProcessObject {
-    /// Its number, unique since boot.
+    /// Its number, unique among processes and threads since boot.
     number: u64,
+    /// Whether a thread of it has had its number: its first thread does.
+    numbered: AtomicBool,
     /// Its name, which its threads take when they start.
     name: SpinLock<Name>,
     /// The capability space its threads use.
@@ -158,8 +160,10 @@ struct State {
     finishing: bool,
 }
 
-/// Numbers processes, from 1.
-static NUMBERS: AtomicU64 = AtomicU64::new(1);
+/// Whether the first process, numbered 1, has been made; the others take
+/// their numbers from the count threads have theirs from
+/// ([`sched::take_number`]).
+static FIRST_MADE: AtomicBool = AtomicBool::new(false);
 
 /// The first of the processes waiting to be finished, linked through
 /// their `pending`.
@@ -224,7 +228,12 @@ pub fn create(
             objects::insert(store, id, Object::Space(space.clone()))
                 .map_err(|_| error(Kernel::NoMemory))?;
             let process = ProcessObject {
-                number: NUMBERS.fetch_add(1, Ordering::Relaxed),
+                number: if FIRST_MADE.swap(true, Ordering::Relaxed) {
+                    sched::take_number()
+                } else {
+                    1
+                },
+                numbered: AtomicBool::new(false),
                 name: SpinLock::new(Name::new(name)),
                 cspace,
                 keep,
@@ -278,6 +287,12 @@ impl ProcessObject {
     /// Its number.
     pub fn number(&self) -> u64 {
         self.number
+    }
+
+    /// The next thread it starts has its number, as its first did: the
+    /// thread that runs the program `exec` gave it (Phase 8).
+    pub fn number_next_thread(&self) {
+        self.numbered.store(false, Ordering::Relaxed);
     }
 
     /// The capability space its threads use.
@@ -474,10 +489,15 @@ impl ProcessObject {
         };
         let user: UserRef =
             Arc::try_new_in(user, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
+        // Held until it is set up, so that no CPU switches to it before
+        // its thread pointer and extended state are in its context.
         let mut options =
-            Options::new().domain(process.account.domain().clone()).user(user.clone());
+            Options::new().domain(process.account.domain().clone()).user(user.clone()).held();
         if let Some(cpu) = cpu {
             options = options.pinned(cpu);
+        }
+        if !process.numbered.swap(true, Ordering::Relaxed) {
+            options = options.number(process.number);
         }
         let name = *process.name.lock();
         let thread =
@@ -486,11 +506,12 @@ impl ProcessObject {
                 SpawnError::NoCpu | SpawnError::InvalidPolicy => Kernel::InvalidArgument.status(0),
                 _ => error(Kernel::NoMemory),
             })?;
-        // From here on the thread waits in the kernel: on a failure it is
-        // let go to stop at once.
+        // From here on the thread is the process's: on a failure it is let
+        // go to stop at once.
         let fail = |err| {
             thread.request_stop();
             set_ready(&user);
+            sched::release(&thread);
             err
         };
         prepare(&thread).map_err(fail)?;
@@ -517,6 +538,7 @@ impl ProcessObject {
             state.phase = ProcessState::Running;
         }
         set_ready(&user);
+        sched::release(&thread);
         Ok(thread)
     }
 
@@ -635,7 +657,8 @@ impl ProcessObject {
         if let Some((notification, badge)) = notify {
             notification.notify(badge);
         }
-        if code != 0 {
+        // A POSIX process's parent hears how it ended from `wait`.
+        if code != 0 && !self.posix.lock().in_tree {
             let name = *self.name.lock();
             info!("User: process {} ({name}) exited with code {code:#x}", self.number);
         }
