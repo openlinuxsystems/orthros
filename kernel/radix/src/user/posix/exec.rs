@@ -486,6 +486,20 @@ fn install_space(process: &ProcessRef, space: &SpaceRef, empty_thread: bool) -> 
     // Every capability to the old space goes with its original.
     caps::revoke(kept).map_err(cap_error)?;
     let cspace = process.cspace();
+    let mask = SlotFlags::CLOSE_ON_EXEC.0 as u8;
+    if process.has_record_locks() {
+        // Closing a descriptor of a file lets go of the process's record
+        // locks on it, as `capability.delete` does.
+        let mut from = 0;
+        while let Ok(Ok(Some(slot))) = caps::with(|store| store.find_flagged(cspace, mask, from)) {
+            if let Ok(cap) = objects::capability(cspace, slot)
+                && let Ok(Object::File(file) | Object::Directory(file)) = objects::object_of(&cap)
+            {
+                fs::locks::process_gone(process.number(), Some(&file.at.node));
+            }
+            from = slot + 1;
+        }
+    }
     caps::with(|store| -> Result<()> {
         objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
         store.delete(kept, &mut caps::release).map_err(cap_error)?;
@@ -496,7 +510,6 @@ fn install_space(process: &ProcessRef, space: &SpaceRef, empty_thread: bool) -> 
         let _ = store.delete(at, &mut caps::release);
         let how = Derivation { rights: ObjectKind::AddressSpace.rights(), ..Derivation::COPY };
         store.derive(kept, at, how).map_err(cap_error)?;
-        let mask = SlotFlags::CLOSE_ON_EXEC.0 as u8;
         let mut from = 0;
         while let Some(slot) = store.find_flagged(cspace, mask, from).map_err(cap_error)? {
             let _ = store.delete(SlotRef::new(cspace, slot), &mut caps::release);

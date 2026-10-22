@@ -667,3 +667,148 @@ proptest! {
         }
     }
 }
+
+// File locks: the list a lock's owner leaves, and what stands in whose way.
+
+mod lock_lists {
+    use std::vec::Vec;
+
+    use proptest::prelude::*;
+
+    use crate::locks::{Kind, Lock, Owner, Space, blocker, set};
+
+    const ONE: Owner = Owner::Process(1);
+    const TWO: Owner = Owner::Process(2);
+
+    fn lock(owner: Owner, kind: Kind, start: u64, end: u64) -> Lock {
+        Lock { owner, space: Space::Range, kind, start, end }
+    }
+
+    /// The list sorted, to compare with what is expected.
+    fn sorted(locks: &[Lock]) -> Vec<Lock> {
+        let mut locks = locks.to_vec();
+        locks.sort_by_key(|lock| (lock.start, lock.end));
+        locks
+    }
+
+    fn take(locks: &mut Vec<Lock>, owner: Owner, kind: Option<Kind>, start: u64, end: u64) -> bool {
+        set(locks, owner, Space::Range, kind, (start, end)).unwrap()
+    }
+
+    #[test]
+    fn locks_of_a_kind_join_and_others_split() {
+        let mut locks = Vec::new();
+        take(&mut locks, ONE, Some(Kind::Exclusive), 0, 9);
+        // Bordering, of the same kind: one lock.
+        take(&mut locks, ONE, Some(Kind::Exclusive), 10, 19);
+        assert_eq!(locks, [lock(ONE, Kind::Exclusive, 0, 19)]);
+        // A shared lock in the middle leaves the exclusive ends.
+        assert!(take(&mut locks, ONE, Some(Kind::Shared), 5, 9));
+        assert_eq!(
+            sorted(&locks),
+            [
+                lock(ONE, Kind::Exclusive, 0, 4),
+                lock(ONE, Kind::Shared, 5, 9),
+                lock(ONE, Kind::Exclusive, 10, 19)
+            ]
+        );
+        // Turned exclusive again, it joins both: nothing was freed.
+        assert!(!take(&mut locks, ONE, Some(Kind::Exclusive), 5, 9));
+        assert_eq!(locks, [lock(ONE, Kind::Exclusive, 0, 19)]);
+        // Letting go of the middle splits it.
+        assert!(take(&mut locks, ONE, None, 8, 11));
+        assert_eq!(
+            sorted(&locks),
+            [lock(ONE, Kind::Exclusive, 0, 7), lock(ONE, Kind::Exclusive, 12, 19)]
+        );
+        // To the end of the file, however far it grows.
+        take(&mut locks, ONE, Some(Kind::Shared), 15, u64::MAX);
+        assert_eq!(
+            sorted(&locks),
+            [
+                lock(ONE, Kind::Exclusive, 0, 7),
+                lock(ONE, Kind::Exclusive, 12, 14),
+                lock(ONE, Kind::Shared, 15, u64::MAX)
+            ]
+        );
+        assert!(take(&mut locks, ONE, None, 0, u64::MAX));
+        assert!(locks.is_empty());
+    }
+
+    #[test]
+    fn owners_and_spaces_stay_apart() {
+        let mut locks = Vec::new();
+        take(&mut locks, ONE, Some(Kind::Shared), 0, 9);
+        take(&mut locks, TWO, Some(Kind::Shared), 5, 14);
+        // Another owner's lock neither joins nor splits.
+        assert_eq!(locks.len(), 2);
+        let wants = |owner, kind, start, end| blocker(&locks, &lock(owner, kind, start, end));
+        assert_eq!(wants(ONE, Kind::Shared, 0, 20), None);
+        assert_eq!(wants(ONE, Kind::Exclusive, 0, 4), None);
+        assert_eq!(wants(ONE, Kind::Exclusive, 0, 5), Some(lock(TWO, Kind::Shared, 5, 14)));
+        assert_eq!(wants(TWO, Kind::Exclusive, 10, 20), None);
+        assert_eq!(wants(Owner::Process(3), Kind::Exclusive, 14, 14), Some(locks[1]));
+        // A lock on the whole file meets only those.
+        let whole = Lock { space: Space::Whole, ..lock(TWO, Kind::Exclusive, 0, u64::MAX) };
+        assert_eq!(blocker(&locks, &whole), None);
+        set(&mut locks, Owner::Description(8), Space::Whole, Some(Kind::Exclusive), (0, u64::MAX))
+            .unwrap();
+        assert_eq!(blocker(&locks, &whole), Some(locks[2]));
+        let ranged = lock(Owner::Description(8), Kind::Exclusive, 20, 30);
+        assert_eq!(blocker(&locks, &ranged), None);
+    }
+
+    /// A step of the model test: an owner (of three), a kind (or none) and
+    /// a range of the first 32 bytes.
+    fn step() -> impl Strategy<Value = (u64, Option<bool>, u64, u64)> {
+        (0..3u64, prop::option::of(any::<bool>()), 0..32u64, 0..32u64)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// Against a model that keeps each owner's kind for each byte:
+        /// the list covers the same bytes with the same kinds, one owner's
+        /// locks never overlap or border others of their kind, and a lock
+        /// is in another's way just when the model says.
+        #[test]
+        fn lists_match_a_model(steps in prop::collection::vec(step(), 1..40)) {
+            let mut locks = Vec::new();
+            let mut model = [[None::<Kind>; 32]; 3];
+            for (owner, kind, a, b) in steps {
+                let (start, end) = (a.min(b), a.max(b));
+                let kind = kind.map(|exclusive| if exclusive { Kind::Exclusive } else { Kind::Shared });
+                let process = Owner::Process(owner);
+                let wanted = lock(process, kind.unwrap_or(Kind::Shared), start, end);
+                let in_way = (0..3).filter(|&other| other != owner).any(|other| {
+                    (start..=end).any(|byte| {
+                        let held = model[other as usize][byte as usize];
+                        held.is_some() && kind.is_some()
+                            && (held == Some(Kind::Exclusive) || kind == Some(Kind::Exclusive))
+                    })
+                });
+                prop_assert_eq!(kind.is_some() && blocker(&locks, &wanted).is_some(), in_way);
+                take(&mut locks, process, kind, start, end);
+                for byte in start..=end {
+                    model[owner as usize][byte as usize] = kind;
+                }
+                for owner in 0..3u64 {
+                    let mine: Vec<&Lock> =
+                        locks.iter().filter(|l| l.owner == Owner::Process(owner)).collect();
+                    for byte in 0..32u64 {
+                        let covering: Vec<&&Lock> =
+                            mine.iter().filter(|l| l.start <= byte && byte <= l.end).collect();
+                        prop_assert!(covering.len() <= 1);
+                        prop_assert_eq!(covering.first().map(|l| l.kind), model[owner as usize][byte as usize]);
+                    }
+                    for (i, x) in mine.iter().enumerate() {
+                        for y in &mine[i + 1..] {
+                            let borders = x.end + 1 == y.start || y.end + 1 == x.start;
+                            prop_assert!(!(borders && x.kind == y.kind), "{:?} and {:?} did not join", x, y);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

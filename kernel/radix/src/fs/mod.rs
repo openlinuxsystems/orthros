@@ -24,7 +24,9 @@
 //!   in the tree, and since Phase 8 an open file description's offset and
 //!   flags. `user::files` carries out their methods;
 //! - `pipe` and `tty` are pipes and terminals (Phase 8), files outside the
-//!   tree's filesystems.
+//!   tree's filesystems;
+//! - `locks` keeps files' advisory locks (Phase 8): `flock`'s, POSIX's
+//!   record locks and open file descriptions' range locks.
 //!
 //! A file object's last reference can be the last one to a FAT file
 //! removed while open, whose clusters are freed when it goes, which
@@ -35,6 +37,7 @@
 
 pub mod devfs;
 pub mod disk;
+pub mod locks;
 pub mod pipe;
 pub mod procfs;
 pub mod sysfs;
@@ -102,6 +105,9 @@ pub struct FileObject {
     pub offset: Mutex<u64>,
     /// Its [`Description`], as bits.
     flags: AtomicU32,
+    /// Whether it has taken a lock (`locks`), which it lets go of when it
+    /// goes.
+    locked: AtomicBool,
     /// The next released object to drop, while it waits in [`DROPPED`].
     next: SpinLock<Option<FileRef>>,
 }
@@ -118,6 +124,7 @@ impl FileObject {
             at,
             offset: Mutex::new(0),
             flags: AtomicU32::new(description.bits()),
+            locked: AtomicBool::new(false),
             next: SpinLock::new(None),
         };
         alloc::sync::Arc::try_new_in(object, radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)).ok()
@@ -131,6 +138,24 @@ impl FileObject {
     /// Changes its status flags.
     pub fn set_description(&self, description: Description) {
         self.flags.store(description.bits(), Ordering::Release);
+    }
+
+    /// Its address, which owns its locks.
+    pub fn address(&self) -> usize {
+        core::ptr::from_ref(self).addr()
+    }
+
+    /// Notes that it has taken a lock, which goes when it does.
+    pub fn note_locked(&self) {
+        self.locked.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for FileObject {
+    fn drop(&mut self) {
+        if self.locked.load(Ordering::Acquire) {
+            locks::description_gone(&self.at.node, self.address());
+        }
     }
 }
 

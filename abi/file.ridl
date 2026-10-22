@@ -40,6 +40,36 @@ enum Whence: u32 {
     end = 2;
 }
 
+/// Whose a file lock is, which decides which other locks it meets and
+/// when it goes. Locks are advisory: they stand in the way of other
+/// locks, never of reads and writes.
+enum LockOwner: u32 {
+    /// The open file description's lock on the whole file, as BSD's
+    /// `flock`: it meets only other such locks, and goes with the
+    /// description's last capability.
+    description = 0;
+    /// The calling process's lock on a range of bytes, as POSIX's record
+    /// locks (`fcntl`'s F_SETLK): it goes when the process ends, or
+    /// deletes any capability of the file, and `fork`'s child has none of
+    /// them.
+    process = 1;
+    /// The open file description's lock on a range of bytes, as Linux's
+    /// open file description locks (F_OFD_SETLK): it meets process locks
+    /// too, and goes with the description's last capability.
+    description_range = 2;
+}
+
+/// What a file lock lets others do.
+enum LockKind: u32 {
+    /// No lock: `lock` lets go of the range, and `lock_holder` finds none
+    /// in the way.
+    none = 0;
+    /// Others may hold shared locks on the range too, as readers do.
+    shared = 1;
+    /// Nobody else may lock the range, as a writer does.
+    exclusive = 2;
+}
+
 /// An open file description's status flags.
 flags DescriptionFlags: u32 {
     /// Writes at CURRENT go at the end of the file.
@@ -92,4 +122,24 @@ interface file = 0x000c version 2 {
     method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
                 not_terminal, not_permitted, interrupted, io];
+    /// Takes, changes or lets go of (`kind` none) a lock of `owner`'s on
+    /// the `length` bytes from `start` (0: all those past it, however the
+    /// file grows); a description lock always covers the whole file. A
+    /// lock its owner holds on part of the range already gives way to the
+    /// new one, which joins those of the same kind it touches. Another
+    /// owner's lock in the way fails it with would_block, or with `wait`
+    /// is waited for, until a signal interrupts the wait; a process lock
+    /// whose holder waits, in a chain, for one the caller's process holds
+    /// fails it with deadlock instead. A shared range lock needs the read
+    /// right and an exclusive one the write right.
+    method lock = 9 (owner: LockOwner, kind: LockKind, start: u64, length: u64, wait: bool) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                would_block, interrupted, deadlock];
+    /// Finds a lock that would stand in the way of a `kind` lock of
+    /// `owner`'s on the range `lock` takes, and returns its kind (none if
+    /// there is none), its range, and the number of the process holding
+    /// it (a description's: 0xffffffffffffffff).
+    method lock_holder = 10 (owner: LockOwner, kind: LockKind, start: u64, length: u64)
+        -> (kind: LockKind, start: u64, length: u64, process: u64)
+        raises [no_such_slot, empty_slot, invalid_argument];
 }

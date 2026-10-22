@@ -142,4 +142,8 @@ errors file = 2 {
     /// The device the file stands for is not there: `/dev/tty` opened by
     /// a process whose session has no controlling terminal.
     no_device = 18 => ENXIO;
+    /// Waiting for a file lock would never end: its holder waits, in a
+    /// chain, for a lock the caller's process holds (radix-file(2)'s
+    /// `lock`).
+    deadlock = 19 => EDEADLK;
 }

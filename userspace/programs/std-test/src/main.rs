@@ -208,6 +208,16 @@ fn files() -> Outcome {
     let modified = metadata.modified()?;
     check!(modified > UNIX_EPOCH);
     check!(SystemTime::now().duration_since(modified).is_ok_and(|d| d < Duration::from_secs(60)));
+    // Locks: two opens of a file are two owners.
+    let (first, second) = (File::open(&file)?, File::open(&file)?);
+    first.lock()?;
+    check!(matches!(second.try_lock_shared(), Err(fs::TryLockError::WouldBlock)));
+    first.unlock()?;
+    second.lock_shared()?;
+    first.lock_shared()?;
+    check!(matches!(first.try_lock(), Err(fs::TryLockError::WouldBlock)));
+    drop(second);
+    check!(first.try_lock().is_ok());
     // Copying and renaming.
     check!(fs::copy(&file, dir.join("copy"))? == 11);
     check!(fs::read_to_string(dir.join("copy"))? == "hello again");

@@ -21,7 +21,7 @@ use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 
 use super::memory::{Anon, FileSource, Placement, cap_rights, frame_made, futex};
-use super::objects;
+use super::objects::{self, Object};
 use super::{Result, UserRef, cap_error, error};
 use crate::caps;
 use crate::sched::ThreadRef;
@@ -81,7 +81,7 @@ pub fn call(
     let args: [u64; 8] = core::array::from_fn(|i| if i < info.words { words[i] } else { 0 });
     let at = SlotRef::new(user.cspace, slot);
     if info.is_reserved() {
-        return capability(at, info.label, &args);
+        return capability(user, at, info.label, &args);
     }
     let cap = match cap {
         Some(cap) => cap,
@@ -154,8 +154,8 @@ pub fn call(
     }
 }
 
-/// The methods every capability answers.
-fn capability(at: SlotRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
+/// The methods every capability answers, called by `user`'s thread.
+fn capability(user: &UserRef, at: SlotRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
     let space = at.space;
     match label {
         abi_cap::INFO => {
@@ -192,7 +192,20 @@ fn capability(at: SlotRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
         }
         abi_cap::DELETE => {
             abi_cap::DeleteArgs::decode(args)?;
+            // As POSIX has it, a process's record locks on a file go when
+            // it closes any descriptor of the file.
+            let process = &user.process;
+            let file = match process.has_record_locks().then(|| caps::get(at)) {
+                Some(Ok(cap)) => match objects::object_of(&cap) {
+                    Ok(Object::File(file) | Object::Directory(file)) => Some(file),
+                    _ => None,
+                },
+                _ => None,
+            };
             caps::delete(at).map_err(cap_error)?;
+            if let Some(file) = file {
+                crate::fs::locks::process_gone(process.number(), Some(&file.at.node));
+            }
             answer(label, 0, [0; 8])
         }
         abi_cap::REVOKE => {

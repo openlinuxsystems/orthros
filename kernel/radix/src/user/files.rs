@@ -24,7 +24,7 @@ use core::mem::size_of;
 use radix_abi::capability::SlotFlags;
 use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags};
 use radix_abi::errors::Kernel;
-use radix_abi::file::{DescriptionFlags, Whence};
+use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, Whence};
 use radix_abi::{UserBuffer, file, terminal};
 use radix_cap::{CapError, Capability, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
@@ -38,7 +38,7 @@ use super::memory::cap_rights;
 use super::methods::{Answer, answer};
 use super::objects::{self, Object};
 use super::{Result, UserRef, UserThread, cap_error, error};
-use crate::fs::{self, Description, FileObject, FileRef, pipe, tty};
+use crate::fs::{self, Description, FileObject, FileRef, locks, pipe, tty};
 use crate::{Arch, caps};
 
 /// The most bytes one read or write moves, as on Linux.
@@ -376,6 +376,9 @@ pub fn directory_method(
             };
             answer(label, directory::InfoResults::WORDS, results.encode())
         }
+        file::LOCK | file::LOCK_HOLDER => {
+            lock_method(user, cap, ObjectKind::Directory, label, args)
+        }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }
@@ -558,8 +561,91 @@ pub fn file_method(
             };
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
         }
+        file::LOCK | file::LOCK_HOLDER => lock_method(user, cap, ObjectKind::File, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),
     }
+}
+
+/// radix-file(2)'s `lock` and `lock_holder`, on the file or directory
+/// (of kind `kind`) `cap` designates: `flock` locks directories too.
+fn lock_method(
+    user: &UserRef,
+    cap: &Capability,
+    kind: ObjectKind,
+    label: u32,
+    args: &[u64; 8],
+) -> Result<Answer> {
+    let (owner, lock_kind, start, length, wait) = if label == file::LOCK {
+        let a = file::LockArgs::decode(args)?;
+        (a.owner, a.kind, a.start, a.length, a.wait)
+    } else {
+        let a = file::LockHolderArgs::decode(args)?;
+        (a.owner, a.kind, a.start, a.length, false)
+    };
+    let space = match owner {
+        LockOwner::Description => locks::Space::Whole,
+        LockOwner::Process | LockOwner::DescriptionRange => locks::Space::Range,
+    };
+    let wanted = match lock_kind {
+        LockKind::None => None,
+        LockKind::Shared => Some(locks::Kind::Shared),
+        LockKind::Exclusive => Some(locks::Kind::Exclusive),
+    };
+    // A range lock needs the right to do what it guards, as POSIX's need
+    // the descriptor open for reading or writing.
+    let needs = match (space, wanted) {
+        (locks::Space::Range, Some(locks::Kind::Shared)) if label == file::LOCK => Rights::READ,
+        (locks::Space::Range, Some(locks::Kind::Exclusive)) if label == file::LOCK => Rights::WRITE,
+        _ => Rights::NONE,
+    };
+    let file = match kind {
+        ObjectKind::File => file_of(cap, needs)?,
+        _ => directory_of(cap, needs)?,
+    };
+    let (start, end) = match space {
+        locks::Space::Whole => (0, u64::MAX),
+        locks::Space::Range if length == 0 => (start, u64::MAX),
+        locks::Space::Range => {
+            (start, start.checked_add(length - 1).ok_or(Kernel::InvalidArgument.status(3))?)
+        }
+    };
+    let process = &user.process;
+    let lock = locks::Lock {
+        owner: match owner {
+            LockOwner::Process => locks::Owner::Process(process.number()),
+            _ => locks::Owner::Description(file.address()),
+        },
+        space,
+        kind: wanted.unwrap_or(locks::Kind::Shared),
+        start,
+        end,
+    };
+    if label == file::LOCK {
+        if wanted.is_some() {
+            match lock.owner {
+                locks::Owner::Process(_) => process.note_record_locks(),
+                locks::Owner::Description(_) => file.note_locked(),
+            }
+        }
+        locks::lock(&file.at.node, lock, wanted, wait, process.number())?;
+        return answer(label, 0, [0; 8]);
+    }
+    let results = match wanted.and_then(|_| locks::holder(&file.at.node, &lock)) {
+        None => file::LockHolderResults { kind: LockKind::None, start: 0, length: 0, process: 0 },
+        Some(held) => file::LockHolderResults {
+            kind: match held.kind {
+                locks::Kind::Shared => LockKind::Shared,
+                locks::Kind::Exclusive => LockKind::Exclusive,
+            },
+            start: held.start,
+            length: if held.end == u64::MAX { 0 } else { held.end - held.start + 1 },
+            process: match held.owner {
+                locks::Owner::Process(number) => number,
+                locks::Owner::Description(_) => u64::MAX,
+            },
+        },
+    };
+    answer(label, file::LockHolderResults::WORDS, results.encode())
 }
 
 /// What a file's reads and writes go to.

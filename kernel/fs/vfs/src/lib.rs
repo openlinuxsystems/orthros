@@ -21,7 +21,8 @@
 //! disks fill and empty by DMA, and dirty pages reach the disk when the
 //! filesystem syncs. tmpfs ([`tmpfs`]) is a page cache with nothing below
 //! it. [`synthetic`] makes the generated files of procfs, sysfs and devfs,
-//! and [`bootfs`] serves the boot archive.
+//! and [`bootfs`] serves the boot archive. [`locks`] is what a file's
+//! advisory locks do (Phase 8).
 //!
 //! The crate is a compartment: it has no `unsafe` code. It builds for the
 //! host (feature `host`), where its tests run.
@@ -37,6 +38,7 @@ extern crate alloc;
 
 pub mod bootfs;
 pub mod cache;
+pub mod locks;
 pub mod mount;
 pub mod path;
 pub mod synthetic;

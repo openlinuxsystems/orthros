@@ -146,6 +146,9 @@ pub struct ProcessObject {
     /// Whether it is a POSIX child: `exec` started it after `create`, so
     /// it does not end with its maker.
     posix_child: AtomicBool,
+    /// Whether it has taken a POSIX record lock (`fs::locks`), which go
+    /// when it ends or deletes a capability of their file.
+    record_locks: AtomicBool,
 }
 
 struct State {
@@ -256,6 +259,7 @@ pub fn create(
                 signal_events: AtomicU64::new(0),
                 stopped: AtomicBool::new(false),
                 posix_child: AtomicBool::new(false),
+                record_locks: AtomicBool::new(false),
             };
             let process: ProcessRef =
                 Arc::try_new_in(process, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
@@ -287,6 +291,16 @@ impl ProcessObject {
     /// Its number.
     pub fn number(&self) -> u64 {
         self.number
+    }
+
+    /// Notes that it has taken a POSIX record lock.
+    pub fn note_record_locks(&self) {
+        self.record_locks.store(true, Ordering::Release);
+    }
+
+    /// Whether it may hold POSIX record locks.
+    pub fn has_record_locks(&self) -> bool {
+        self.record_locks.load(Ordering::Acquire)
     }
 
     /// The next thread it starts has its number, as its first did: the
@@ -625,6 +639,9 @@ impl ProcessObject {
     /// (`finish_pending`).
     fn finish(&self, store: Option<&mut Store>) {
         let locked = store.is_some();
+        if self.has_record_locks() {
+            crate::fs::locks::process_gone(self.number, None);
+        }
         // The processes made for it end too. Those with no thread left are
         // finished through the pending list, as released ones are, so that
         // a long line of processes made for each other is finished one

@@ -19,7 +19,9 @@
 #include <mlibc/all-sysdeps.hpp>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/socket.h>
@@ -214,6 +216,94 @@ int rights_of(int fd, uint64_t *rights) {
 }
 
 // Copies descriptor `fd` into the lowest free descriptor from `min_fd`.
+// The errno of a lock that failed with `status`, as POSIX has it: a
+// descriptor not open for what the lock guards is a bad one for it, and
+// no memory for it is no locks.
+int lock_errno(uint64_t status) {
+	if(is(status, RADIX_KERNEL_MISSING_RIGHTS))
+		return EBADF;
+	if(is(status, RADIX_KERNEL_NO_MEMORY))
+		return ENOLCK;
+	return radix::to_errno(status);
+}
+
+// fcntl's record lock requests (F_GETLK, F_SETLK, F_SETLKW) and their
+// open file description forms (F_OFD_...) with `lock` (radix-file(2)'s
+// `lock` and `lock_holder`).
+int record_lock(int fd, int request, struct flock *lock) {
+	uint32_t slot = radix::slot_of(fd);
+	bool ofd = request == F_OFD_GETLK || request == F_OFD_SETLK || request == F_OFD_SETLKW;
+	bool testing = request == F_GETLK || request == F_OFD_GETLK;
+	enum radix_lock_kind kind;
+	switch(lock->l_type) {
+	case F_RDLCK: kind = RADIX_LOCK_KIND_SHARED; break;
+	case F_WRLCK: kind = RADIX_LOCK_KIND_EXCLUSIVE; break;
+	case F_UNLCK:
+		if(testing)
+			return EINVAL;
+		kind = RADIX_LOCK_KIND_NONE;
+		break;
+	default:
+		return EINVAL;
+	}
+	// Linux asks open file description locks for a process number of 0.
+	if(ofd && lock->l_pid)
+		return EINVAL;
+	// Where the range starts: counted from the start, the description's
+	// offset or the end of the file.
+	off_t base = 0;
+	switch(lock->l_whence) {
+	case SEEK_SET:
+		break;
+	case SEEK_CUR:
+	case SEEK_END: {
+		struct radix_file_seek_results r;
+		uint64_t status = radix_file_seek(slot, 0, static_cast<enum radix_whence>(lock->l_whence),
+				&r);
+		if(status)
+			return other_kind(status) ? EINVAL : radix::to_errno(status);
+		base = static_cast<off_t>(r.offset);
+		break;
+	}
+	default:
+		return EINVAL;
+	}
+	// A negative length is the bytes before the start.
+	off_t start, length = lock->l_len;
+	if(__builtin_add_overflow(base, lock->l_start, &start))
+		return EOVERFLOW;
+	if(length < 0) {
+		if(length == INT64_MIN || __builtin_add_overflow(start, length, &start))
+			return EINVAL;
+		length = -length;
+	}
+	if(start < 0)
+		return EINVAL;
+	off_t last;
+	if(length && __builtin_add_overflow(start, length - 1, &last))
+		return EOVERFLOW;
+	auto owner = ofd ? RADIX_LOCK_OWNER_DESCRIPTION_RANGE : RADIX_LOCK_OWNER_PROCESS;
+	if(!testing) {
+		bool wait = request == F_SETLKW || request == F_OFD_SETLKW;
+		uint64_t status = radix_file_lock(slot, owner, kind, start, length, wait);
+		return status ? lock_errno(status) : 0;
+	}
+	struct radix_file_lock_holder_results r;
+	if(uint64_t status = radix_file_lock_holder(slot, owner, kind, start, length, &r); status)
+		return lock_errno(status);
+	if(r.kind == RADIX_LOCK_KIND_NONE) {
+		lock->l_type = F_UNLCK;
+		return 0;
+	}
+	lock->l_type = r.kind == RADIX_LOCK_KIND_SHARED ? F_RDLCK : F_WRLCK;
+	lock->l_whence = SEEK_SET;
+	lock->l_start = static_cast<off_t>(r.start);
+	lock->l_len = static_cast<off_t>(r.length);
+	// An open file description's lock has no process: -1, as on Linux.
+	lock->l_pid = r.process == UINT64_MAX ? -1 : static_cast<pid_t>(r.process);
+	return 0;
+}
+
 int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 	uint64_t rights;
 	if(int e = rights_of(fd, &rights); e)
@@ -580,20 +670,13 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 		return radix::to_errno(status);
 	}
 	case F_GETLK:
-	case F_OFD_GETLK: {
-		// No locks are kept yet (docs/design/posix.md): nothing stands in
-		// a lock's way.
-		auto lock = va_arg(args, struct flock *);
-		lock->l_type = F_UNLCK;
-		*result = 0;
-		return 0;
-	}
+	case F_OFD_GETLK:
 	case F_SETLK:
 	case F_SETLKW:
 	case F_OFD_SETLK:
 	case F_OFD_SETLKW:
 		*result = 0;
-		return 0;
+		return record_lock(fd, request, va_arg(args, struct flock *));
 	default:
 		return EINVAL;
 	}
@@ -972,10 +1055,20 @@ int Sysdeps<Pipe>::operator()(int *fds, int flags) {
 }
 
 int Sysdeps<Flock>::operator()(int fd, int options) {
-	(void)options;
-	// No locks are kept yet (docs/design/posix.md).
-	struct stat st;
-	return stat_fd(fd, &st);
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	enum radix_lock_kind kind;
+	switch(options & ~LOCK_NB) {
+	case LOCK_SH: kind = RADIX_LOCK_KIND_SHARED; break;
+	case LOCK_EX: kind = RADIX_LOCK_KIND_EXCLUSIVE; break;
+	case LOCK_UN: kind = RADIX_LOCK_KIND_NONE; break;
+	default: return EINVAL;
+	}
+	// The description's lock on the whole file (radix-file(2)'s `lock`).
+	uint64_t status = radix_file_lock(slot, RADIX_LOCK_OWNER_DESCRIPTION, kind, 0, 0,
+			!(options & LOCK_NB));
+	return status ? lock_errno(status) : 0;
 }
 
 int Sysdeps<Fadvise>::operator()(int fd, off_t offset, off_t length, int advice) {
