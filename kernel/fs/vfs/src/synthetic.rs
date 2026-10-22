@@ -169,7 +169,7 @@ impl FixedDir {
 }
 
 fn kind_of(node: &NodeRef) -> Kind {
-    node.stat().kind
+    node.kind()
 }
 
 impl Node for FixedDir {
@@ -383,6 +383,10 @@ impl Node for BlockNode {
     fn stat(&self) -> Stat {
         let size = self.device.info().sectors * radix_block::SECTOR;
         device_stat(self.id, Kind::BlockDevice, size)
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::BlockDevice
     }
 
     fn read(&self, _offset: u64, _out: &mut dyn Out) -> Result<usize> {

@@ -57,13 +57,41 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The components of `path`, which [`parse`] checked, each name checked.
-pub fn components(path: &str) -> impl Iterator<Item = Result<Component<'_>>> {
-    path.split('/').filter(|part| !part.is_empty()).map(|part| match part {
-        "." => Ok(Component::Current),
-        ".." => Ok(Component::Parent),
-        name => check_name(name).map(|()| Component::Name(name)),
-    })
+/// The components of `path`, which [`parse`] checked, each name checked:
+/// what [`check_name`] would check, but that splitting on `/` and
+/// [`parse`] have already ruled out a `/` or a NUL in it.
+pub fn components(path: &str) -> Components<'_> {
+    Components { rest: path }
+}
+
+/// The iterator [`components`] returns. It looks for each `/` itself, a
+/// byte at a time: `str::split`'s general searcher costs more than the
+/// short names of a path.
+pub struct Components<'a> {
+    rest: &'a str,
+}
+
+impl<'a> Iterator for Components<'a> {
+    type Item = Result<Component<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.rest.is_empty() {
+                return None;
+            }
+            let end = self.rest.bytes().position(|b| b == b'/').unwrap_or(self.rest.len());
+            // `/` is one byte of UTF-8, so both sides of it are text.
+            let (part, rest) = self.rest.split_at(end);
+            self.rest = rest.get(1..).unwrap_or("");
+            return Some(match part {
+                "" => continue,
+                "." => Ok(Component::Current),
+                ".." => Ok(Component::Parent),
+                name if name.len() > NAME_MAX => Err(Error::NameTooLong),
+                name => Ok(Component::Name(name)),
+            });
+        }
+    }
 }
 
 /// Splits `path` into the path of its directory and its last name, for

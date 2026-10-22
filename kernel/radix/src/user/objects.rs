@@ -148,6 +148,37 @@ pub fn insert_charged(
     Ok(())
 }
 
+/// Makes an object of `kind` in `store`, with its original capability,
+/// holding only `rights`, in `at`, and records `object` under its name
+/// with what it was charged: one hold of the registry's lock for what
+/// [`reserve`], `Store::create_with_rights` and [`insert_charged`] do
+/// apart. `object` is taken only once nothing can fail; on a failure it is
+/// left to the caller, to drop once the store's lock has gone, since it
+/// may hold the last reference to something whose drop takes locks (a
+/// removed file frees its space on the disk).
+pub fn create_with_rights(
+    store: &mut Store,
+    at: SlotRef,
+    kind: ObjectKind,
+    rights: Rights,
+    object: &mut Option<Object>,
+    charge: Option<Charge>,
+) -> Result<()> {
+    let mut registry = REGISTRY.lock();
+    let Some(table) = registry.as_mut() else { return Err(error(Kernel::NoMemory)) };
+    let needed = store.object_records().saturating_add(1);
+    table.try_reserve(needed.saturating_sub(table.len())).map_err(|_| error(Kernel::NoMemory))?;
+    let id = store.create_with_rights(at, kind, rights).map_err(cap_error)?;
+    let index = id.index as usize;
+    while table.len() <= index {
+        // Room was reserved above, for every index the store can give.
+        let _ = table.push_within_capacity(None);
+    }
+    let Some(object) = object.take() else { return Err(error(Kernel::Gone)) };
+    table[index] = Some(Entry { generation: id.generation, object, charge });
+    Ok(())
+}
+
 /// The object named `id`, if it exists.
 ///
 /// If this CPU found it at the version the store has now, the registry

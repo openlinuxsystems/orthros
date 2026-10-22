@@ -70,3 +70,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0056](0056-own-fat-implementation.md) | FAT is our own implementation from Microsoft's specification, checked against dosfstools and mtools | Accepted |
 | [0057](0057-hierarchy-proc-and-sys.md) | Spark builds the directory hierarchy; /proc and /sys are plain text, with Linux's layout where both have a thing | Accepted |
 | [0058](0058-kernel-stack-frame-budget.md) | Every kernel function's stack frame is held to 2 KiB, checked after every release build | Accepted |
+| [0059](0059-file-operations-fast-paths.md) | A path with no `..` is walked without a chain, each mount filters its mount points, and a file method looks its capability up once | Accepted |

@@ -67,6 +67,12 @@ fn paths_are_checked() {
         parts,
         [Component::Name("a"), Component::Current, Component::Parent, Component::Name("b")]
     );
+    assert_eq!(path::components("").count(), 0);
+    assert_eq!(path::components("//").count(), 0);
+    let parts: Vec<_> = path::components("é/x.y/.../").collect::<Result<_>>().unwrap();
+    assert_eq!(parts, [Component::Name("é"), Component::Name("x.y"), Component::Name("...")]);
+    let long = std::format!("a/{}/b", "x".repeat(256));
+    assert_eq!(path::components(&long).nth(1), Some(Err(Error::NameTooLong)));
     assert_eq!(path::split_last("a/b/c"), Ok(("a/b", "c")));
     assert_eq!(path::split_last("c/"), Ok(("", "c")));
     assert_eq!(path::split_last("a/.."), Err(Error::BadName));
@@ -223,6 +229,47 @@ fn mounts_join_filesystems() {
     let mut count = 0;
     vfs.mounts(|_| count += 1);
     assert_eq!(count, 1);
+}
+
+/// Many mount points on one filesystem share bits of its filter: each
+/// must still be crossed, nothing else must be, and unmounting some must
+/// leave the others found.
+#[test]
+fn mount_points_are_found_through_their_filter() {
+    let vfs = vfs();
+    let root = vfs.root();
+    let dirs: Vec<String> = (0..200).map(|i| std::format!("d{i}")).collect();
+    let mounted = |i: usize| i.is_multiple_of(3);
+    for (i, dir) in dirs.iter().enumerate() {
+        vfs.make_directory(&root, dir).unwrap();
+        write(&vfs, &root, &std::format!("{dir}/under"), b"u").unwrap();
+        if mounted(i) {
+            vfs.mount(&root, dir, tmpfs(1 << 16), "tmpfs", false).unwrap();
+        }
+    }
+    let covered = |vfs: &Vfs, dir: &str| vfs.stat(&root, &std::format!("{dir}/under")).is_err();
+    for (i, dir) in dirs.iter().enumerate() {
+        assert_eq!(covered(&vfs, dir), mounted(i), "{dir}");
+        // The walk with a chain, for `..`, finds the same.
+        let around = std::format!("{dir}/../{dir}/under");
+        assert_eq!(vfs.stat(&root, &around).is_err(), mounted(i), "{around}");
+    }
+    // Half the mounts go; the filter must still lead to the rest.
+    for (i, dir) in dirs.iter().enumerate() {
+        if mounted(i) && i.is_multiple_of(2) {
+            vfs.unmount(&root, dir).unwrap();
+        }
+    }
+    for (i, dir) in dirs.iter().enumerate() {
+        assert_eq!(covered(&vfs, dir), mounted(i) && i % 2 == 1, "{dir}");
+    }
+    for (i, dir) in dirs.iter().enumerate() {
+        if mounted(i) && i % 2 == 1 {
+            assert_eq!(vfs.remove(&root, dir), Err(Error::InUse));
+            vfs.unmount(&root, dir).unwrap();
+        }
+    }
+    assert!(dirs.iter().all(|dir| !covered(&vfs, dir)));
 }
 
 #[test]

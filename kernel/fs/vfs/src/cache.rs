@@ -120,6 +120,13 @@ impl FileCache {
         self.state.lock().pages.len()
     }
 
+    /// The file's size, when its data last changed, and how many pages it
+    /// holds, read together under one lock, for `stat`.
+    pub fn status(&self) -> (u64, u64, usize) {
+        let state = self.state.lock();
+        (state.size, state.modified, state.pages.len())
+    }
+
     /// Whether some pages wait to be written back.
     pub fn is_dirty(&self) -> bool {
         self.state.lock().dirty > 0
@@ -137,10 +144,15 @@ impl FileCache {
             let at = offset + done as u64;
             let (index, within) = (at / PAGE, (at % PAGE) as usize);
             let n = (PAGE_SIZE - within).min(len - done);
-            match load(&mut state, index, backing, false, true)? {
-                Some(slot) => out.put(done, &slot.page.bytes()[within..within + n])?,
-                // A hole.
-                None => out.zero(done, n)?,
+            // A page in memory, the common case, is looked up once.
+            if let Some(slot) = state.pages.get(index) {
+                out.put(done, &slot.page.bytes()[within..within + n])?;
+            } else {
+                match load(&mut state, index, backing, false, true)? {
+                    Some(slot) => out.put(done, &slot.page.bytes()[within..within + n])?,
+                    // A hole.
+                    None => out.zero(done, n)?,
+                }
             }
             done += n;
         }

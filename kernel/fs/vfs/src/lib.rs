@@ -265,6 +265,12 @@ pub trait Node: Send + Sync + Any {
     /// What it is.
     fn stat(&self) -> Stat;
 
+    /// What kind of node it is: what [`Node::stat`] says, without the
+    /// rest, which a filesystem may need locks for.
+    fn kind(&self) -> Kind {
+        self.stat().kind
+    }
+
     /// The node a new handle to it uses: itself, or for a generated file a
     /// snapshot of its contents taken now, which reads see unchanged.
     fn open(&self, this: &NodeRef) -> Result<NodeRef> {

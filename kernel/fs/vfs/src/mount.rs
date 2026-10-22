@@ -14,12 +14,20 @@
 //! chain of locations it passed: a name looks the next node up, and moves
 //! onto the root of whatever is mounted there; `..` steps back along the
 //! chain, so it never leaves the location the walk began at (an attempt
-//! is [`Error::Outside`]); `.` stays. Mount points are told by the node's
-//! address: every filesystem keeps one node per file while it is
-//! referenced, and the mount keeps its mount point referenced.
+//! is [`Error::Outside`]); `.` stays. A path with no `..`, the common
+//! case, needs no chain: the walk then holds only where it is, and takes
+//! no references to the places it passes.
+//!
+//! Mount points are told by the node's address: every filesystem keeps
+//! one node per file while it is referenced, and the mount keeps its
+//! mount point referenced. Each mount also keeps a filter of the nodes
+//! mounted on (a bit for each, chosen by address, as in a Bloom filter),
+//! so that a walk past a node whose bit is clear knows, without the mount
+//! table or its lock, that nothing is mounted there; Linux marks mount
+//! points in its directory cache for the same reason (`DCACHE_MOUNTED`).
 
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use radix_sync::Mutex;
 
@@ -43,6 +51,23 @@ pub struct Mount {
     path: KVec<u8>,
     /// What it was mounted from: a device's name, or the filesystem's.
     source: KVec<u8>,
+    /// The filter of its nodes that something is mounted on: bit
+    /// [`filter_bit`] of each is set. Changed only under the table's lock;
+    /// a bit is set before its mount is in the table, and cleared after it
+    /// has left.
+    covered: [AtomicU64; FILTER_WORDS],
+}
+
+/// The words of a mount's filter of mount points: 128 bits, enough that
+/// the root, with a dozen mounts on it, rarely sends a walk to the table.
+const FILTER_WORDS: usize = 2;
+
+/// The bit of a mount's filter that stands for the node at `address`:
+/// Fibonacci hashing of the address, whose low bits are the same for
+/// every node of a type.
+fn filter_bit(address: usize) -> (usize, u64) {
+    let hash = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 57;
+    ((hash >> 6) as usize % FILTER_WORDS, 1 << (hash & 63))
 }
 
 /// A mount, shared.
@@ -62,6 +87,13 @@ impl Mount {
     /// What it was mounted from.
     pub fn source(&self) -> &str {
         core::str::from_utf8(&self.source).unwrap_or("?")
+    }
+
+    /// Whether something may be mounted on its node at `address`: false
+    /// means nothing is.
+    fn may_cover(&self, address: usize) -> bool {
+        let (word, bit) = filter_bit(address);
+        self.covered[word].load(Ordering::Acquire) & bit != 0
     }
 }
 
@@ -103,9 +135,6 @@ pub struct OpenFlags {
 pub struct Vfs {
     root: Location,
     mounts: Mutex<KVec<MountRef>>,
-    /// How many mounts there are: while only the root, resolution skips
-    /// the table.
-    count: AtomicUsize,
 }
 
 /// One step of a resolution: where it is, and the name that led there.
@@ -123,14 +152,11 @@ impl Vfs {
             read_only: false,
             path: mem::vec(),
             source: mem::copy(source.as_bytes())?,
+            covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
         let mut mounts = mem::vec();
         mem::push(&mut mounts, mount.clone())?;
-        Ok(Vfs {
-            root: Location { mount, node: root },
-            mounts: Mutex::new(mounts),
-            count: AtomicUsize::new(1),
-        })
+        Ok(Vfs { root: Location { mount, node: root }, mounts: Mutex::new(mounts) })
     }
 
     /// The root of the tree.
@@ -138,30 +164,37 @@ impl Vfs {
         self.root.clone()
     }
 
-    /// What is mounted on `at`, if anything.
-    fn mounted_on(&self, at: &Location) -> Option<MountRef> {
-        if self.count.load(Ordering::Acquire) <= 1 {
+    /// What is mounted on `node` of `mount`, if anything.
+    fn mounted_on(&self, mount: &Mount, node: &NodeRef) -> Option<MountRef> {
+        let node = address(node);
+        if !mount.may_cover(node) {
             return None;
         }
         let mounts = self.mounts.lock();
-        let node = address(&at.node);
         mounts
             .iter()
             .find(|m| {
                 m.on.as_ref().is_some_and(|(on, covered)| {
-                    KArc::ptr_eq(on, &at.mount) && address(covered) == node
+                    core::ptr::eq(KArc::as_ptr(on), mount) && address(covered) == node
                 })
             })
             .cloned()
     }
 
+    /// The root of what is mounted on `node` of `mount`, and so on up a
+    /// stack of mounts; none if nothing is.
+    fn mounted_root(&self, mount: &Mount, node: &NodeRef) -> Option<Location> {
+        let mut top = self.mounted_on(mount, node)?;
+        while let Some(next) = self.mounted_on(&top, &top.root) {
+            top = next;
+        }
+        Some(Location { node: top.root.clone(), mount: top })
+    }
+
     /// `at`, or the root of what is mounted there, and so on up a stack of
     /// mounts.
-    fn cross(&self, mut at: Location) -> Location {
-        while let Some(mount) = self.mounted_on(&at) {
-            at = Location { node: mount.root.clone(), mount };
-        }
-        at
+    fn cross(&self, at: Location) -> Location {
+        self.mounted_root(&at.mount, &at.node).unwrap_or(at)
     }
 
     /// Walks `path` from `base`, calling `f` with the chain of steps.
@@ -195,7 +228,35 @@ impl Vfs {
 
     /// Where `path` leads from `base`.
     pub fn resolve(&self, base: &Location, path: &str) -> Result<Location> {
-        self.walk(base, path, |chain| chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside))
+        // Where the walk is, when it has left `base`: a name moves the
+        // node on, and a mount there the mount too.
+        let mut mount: Option<MountRef> = None;
+        let mut node: Option<NodeRef> = None;
+        for component in path::components(path) {
+            match component? {
+                Component::Current => {}
+                // Only `..` needs the chain, to step back along.
+                Component::Parent => {
+                    return self.walk(base, path, |chain| {
+                        chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)
+                    });
+                }
+                Component::Name(name) => {
+                    let found = node.as_ref().unwrap_or(&base.node).lookup(name)?;
+                    match self.mounted_root(mount.as_ref().unwrap_or(&base.mount), &found) {
+                        Some(top) => {
+                            mount = Some(top.mount);
+                            node = Some(top.node);
+                        }
+                        None => node = Some(found),
+                    }
+                }
+            }
+        }
+        Ok(Location {
+            mount: mount.unwrap_or_else(|| base.mount.clone()),
+            node: node.unwrap_or_else(|| base.node.clone()),
+        })
     }
 
     /// The directory `path`'s last name is in, and that name.
@@ -206,7 +267,7 @@ impl Vfs {
     ) -> Result<(Location, &'p str)> {
         let (dir, name) = path::split_last(path)?;
         let at = self.resolve(base, dir)?;
-        if at.node.stat().kind != Kind::Directory {
+        if at.node.kind() != Kind::Directory {
             return Err(Error::NotDirectory);
         }
         Ok((at, name))
@@ -229,7 +290,7 @@ impl Vfs {
         } else {
             self.resolve(base, path)?
         };
-        let kind = at.node.stat().kind;
+        let kind = at.node.kind();
         if flags.directory && kind != Kind::Directory {
             return Err(Error::NotDirectory);
         }
@@ -253,7 +314,7 @@ impl Vfs {
         let (dir, name) = self.resolve_parent(base, path)?;
         dir.writable()?;
         let node = dir.node.lookup(name)?;
-        if self.mounted_on(&Location { mount: dir.mount.clone(), node }).is_some() {
+        if self.mounted_on(&dir.mount, &node).is_some() {
             return Err(Error::InUse);
         }
         dir.node.remove(name)
@@ -269,11 +330,11 @@ impl Vfs {
         }
         source.writable()?;
         let moving = source.node.lookup(from_name)?;
-        if self.mounted_on(&Location { mount: source.mount.clone(), node: moving }).is_some() {
+        if self.mounted_on(&source.mount, &moving).is_some() {
             return Err(Error::InUse);
         }
         if let Ok(replaced) = target.node.lookup(to_name)
-            && self.mounted_on(&Location { mount: target.mount.clone(), node: replaced }).is_some()
+            && self.mounted_on(&target.mount, &replaced).is_some()
         {
             return Err(Error::InUse);
         }
@@ -313,7 +374,7 @@ impl Vfs {
             }
             Ok((at, where_))
         })?;
-        if at.node.stat().kind != Kind::Directory {
+        if at.node.kind() != Kind::Directory {
             return Err(Error::NotDirectory);
         }
         let root = fs.root();
@@ -325,6 +386,7 @@ impl Vfs {
             read_only,
             path: where_,
             source: mem::copy(source.as_bytes())?,
+            covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
         let mut mounts = self.mounts.lock();
         // `at` is what is on top already, so a second mount on the same
@@ -338,8 +400,12 @@ impl Vfs {
         if taken {
             return Err(Error::InUse);
         }
-        mem::push(&mut mounts, mount.clone())?;
-        self.count.store(mounts.len(), Ordering::Release);
+        mounts.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        // The bit first: a walk that sees it clear has not seen the mount
+        // either, and one that sees it set looks in the table.
+        let (word, bit) = filter_bit(address(&at.node));
+        at.mount.covered[word].fetch_or(bit, Ordering::Release);
+        let _ = mounts.push_within_capacity(mount.clone());
         Ok(mount)
     }
 
@@ -363,7 +429,9 @@ impl Vfs {
         }
         mount.fs.sync()?;
         mounts.retain(|m| !KArc::ptr_eq(m, &mount));
-        self.count.store(mounts.len(), Ordering::Release);
+        if let Some((on, _)) = &mount.on {
+            refilter(&mounts, on);
+        }
         Ok(())
     }
 
@@ -412,7 +480,9 @@ impl Vfs {
             mount.fs.sync()?;
         }
         mounts.retain(|m| !doomed.iter().any(|d| KArc::ptr_eq(m, d)));
-        self.count.store(mounts.len(), Ordering::Release);
+        if let Some((on, _)) = &top.on {
+            refilter(&mounts, on);
+        }
         Ok(())
     }
 
@@ -461,6 +531,24 @@ impl Vfs {
             let _ = out.push_within_capacity(mount.fs.clone());
         }
         Ok(out)
+    }
+}
+
+/// Sets `mount`'s filter of mount points from the table, `mounts`, after
+/// mounts on it have left: each word is computed whole and then stored, so
+/// a walk never sees a bit clear that a mount still in the table needs.
+fn refilter(mounts: &[MountRef], mount: &MountRef) {
+    let mut words = [0u64; FILTER_WORDS];
+    for m in mounts {
+        if let Some((on, covered)) = &m.on
+            && KArc::ptr_eq(on, mount)
+        {
+            let (word, bit) = filter_bit(address(covered));
+            words[word] |= bit;
+        }
+    }
+    for (filter, word) in mount.covered.iter().zip(words) {
+        filter.store(word, Ordering::Release);
     }
 }
 

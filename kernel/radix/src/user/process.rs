@@ -564,13 +564,15 @@ pub fn install_with_rights(
     object: Object,
     charge: Option<Charge>,
 ) -> Result<()> {
-    caps::with(|store| -> Result<()> {
-        objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
-        let id = store.create_with_rights(at, kind, rights).map_err(cap_error)?;
-        objects::insert_charged(store, id, object, charge).map_err(|_| error(Kernel::NoMemory))
+    let mut object = Some(object);
+    let made = caps::with(|store| {
+        objects::create_with_rights(store, at, kind, rights, &mut object, charge)
     })
     .map_err(cap_error)
-    .and_then(|made| made)
+    .and_then(|made| made);
+    // Not made: it goes now, with the store's lock gone.
+    drop(object);
+    made
 }
 
 /// Makes an object of `kind` with its original capability in `at`.

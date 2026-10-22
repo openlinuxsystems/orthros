@@ -613,12 +613,16 @@ impl Node for FatNode {
         let cluster = u64::from(self.fs.geo.cluster_size);
         let (size, allocated, modified) = match &self.cache {
             Some(cache) => {
-                let size = cache.size();
-                (size, size.next_multiple_of(cluster), cache.modified())
+                let (size, modified, _) = cache.status();
+                (size, size.next_multiple_of(cluster), modified)
             }
             None => (0, self.allocated(), dir_modified),
         };
         Stat { kind: self.kind, size, allocated, id, created, modified }
+    }
+
+    fn kind(&self) -> Kind {
+        self.kind
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {

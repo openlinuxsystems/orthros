@@ -18,7 +18,7 @@ use core::mem::size_of;
 use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags};
 use radix_abi::errors::Kernel;
 use radix_abi::{UserBuffer, file};
-use radix_cap::{CapError, ObjectKind, Rights, SlotRef};
+use radix_cap::{CapError, Capability, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
@@ -44,7 +44,9 @@ enum Path {
 }
 
 impl Path {
-    /// Copies the path in `buffer` from the caller.
+    /// Copies the path in `buffer` from the caller. Inlined, so that the
+    /// path is copied in where the caller keeps it, not moved there after.
+    #[inline(always)]
     fn copy(buffer: UserBuffer) -> Result<Path> {
         if buffer.len > PATH_MAX as u64 {
             return Err(fs::status(radix_vfs::Error::NameTooLong));
@@ -163,8 +165,34 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
 /// transfer.
 const OPEN_RIGHTS: Rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
 
-/// The directory interface.
-pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
+/// The directory `cap` designates, if it has the rights `needs`: `cap` is
+/// the capability the caller named, which the system call looked up a
+/// moment ago, so its slot is not looked at again.
+fn directory_of(cap: &Capability, needs: Rights) -> Result<FileRef> {
+    cap.check(ObjectKind::Directory, needs).map_err(cap_error)?;
+    match objects::object_of(cap)? {
+        Object::Directory(dir) => Ok(dir),
+        _ => Err(error(Kernel::Gone)),
+    }
+}
+
+/// The file `cap` designates, if it has the rights `needs`, as
+/// [`directory_of`].
+fn file_of(cap: &Capability, needs: Rights) -> Result<FileRef> {
+    cap.check(ObjectKind::File, needs).map_err(cap_error)?;
+    match objects::object_of(cap)? {
+        Object::File(file) => Ok(file),
+        _ => Err(error(Kernel::Gone)),
+    }
+}
+
+/// The directory interface, on the directory capability `cap`.
+pub fn directory_method(
+    user: &UserRef,
+    cap: &Capability,
+    label: u32,
+    args: &[u64; 8],
+) -> Result<Answer> {
     let cspace = user.cspace;
     match label {
         directory::OPEN => {
@@ -177,13 +205,17 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
             if changes {
                 needs = needs.union(Rights::WRITE);
             }
-            let (cap, dir) = objects::directory(cspace, slot, needs)?;
+            let dir = directory_of(cap, needs)?;
             let to = SlotRef::new(cspace, a.to);
-            // The slot first, so that a file is not made for nothing.
-            match crate::caps::get(to) {
-                Err(CapError::Empty) => {}
-                Ok(_) => return Err(error(Kernel::Occupied)),
-                Err(err) => return Err(cap_error(err)),
+            // The slot first when the open changes something, so that a
+            // file is not made or cut for nothing; otherwise putting the
+            // capability there finds out (`install`).
+            if changes {
+                match crate::caps::get(to) {
+                    Err(CapError::Empty) => {}
+                    Ok(_) => return Err(error(Kernel::Occupied)),
+                    Err(err) => return Err(cap_error(err)),
+                }
             }
             let path = Path::copy(a.path)?;
             let flags = VfsOpen {
@@ -194,7 +226,7 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
             };
             let at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
             drop(dir);
-            let kind = at.node.stat().kind;
+            let kind = at.node.kind();
             let object_kind =
                 if kind == Kind::Directory { ObjectKind::Directory } else { ObjectKind::File };
             let wanted = asked.intersection(object_kind.rights());
@@ -212,21 +244,21 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         }
         directory::MAKE_DIRECTORY => {
             let a = directory::MakeDirectoryArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::WRITE)?;
+            let dir = directory_of(cap, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
             vfs()?.make_directory(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::REMOVE => {
             let a = directory::RemoveArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::WRITE)?;
+            let dir = directory_of(cap, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
             vfs()?.remove(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::RENAME => {
             let a = directory::RenameArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::WRITE)?;
+            let dir = directory_of(cap, Rights::WRITE)?;
             let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (from, to) = (Path::copy(a.from)?, Path::copy(a.to)?);
             vfs()?.rename(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?).map_err(fs::status)?;
@@ -234,14 +266,14 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         }
         directory::LIST => {
             let a = directory::ListArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::READ)?;
+            let dir = directory_of(cap, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
             let results = list(&dir.at, a.cursor, address, len)?;
             answer(label, directory::ListResults::WORDS, results.encode())
         }
         directory::STAT => {
             let a = directory::StatArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::READ)?;
+            let dir = directory_of(cap, Rights::READ)?;
             let path = Path::copy(a.path)?;
             let stat = vfs()?.stat(&dir.at, path.as_str()?).map_err(fs::status)?;
             let results = directory::StatResults {
@@ -256,7 +288,7 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         }
         directory::MOUNT => {
             let a = directory::MountArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::CONTROL)?;
+            let dir = directory_of(cap, Rights::CONTROL)?;
             let read_only = a.flags.contains(MountFlags::READ_ONLY);
             let path = Path::copy(a.path)?;
             let kind = Path::copy(a.filesystem)?;
@@ -296,20 +328,20 @@ pub fn directory_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         }
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::CONTROL)?;
+            let dir = directory_of(cap, Rights::CONTROL)?;
             let path = Path::copy(a.path)?;
             vfs()?.unmount(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::SYNC => {
             directory::SyncArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::NONE)?;
+            let dir = directory_of(cap, Rights::NONE)?;
             dir.at.mount.fs.sync().map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::INFO => {
             directory::InfoArgs::decode(args)?;
-            let (_, dir) = objects::directory(cspace, slot, Rights::READ)?;
+            let dir = directory_of(cap, Rights::READ)?;
             let mount = &dir.at.mount;
             let info = mount.fs.info();
             let results = directory::InfoResults {
@@ -392,13 +424,12 @@ fn list(at: &Location, cursor: u64, address: u64, len: usize) -> Result<director
     Ok(directory::ListResults { count, used: used as u64, next })
 }
 
-/// The file interface.
-pub fn file_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
-    let cspace = user.cspace;
+/// The file interface, on the file capability `cap`.
+pub fn file_method(cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answer> {
     match label {
         file::READ => {
             let a = file::ReadArgs::decode(args)?;
-            let (_, file) = objects::file(cspace, slot, Rights::READ)?;
+            let file = file_of(cap, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
             let count = read(&file, a.offset, address, len)?;
             let results = file::ReadResults { count };
@@ -406,7 +437,7 @@ pub fn file_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Re
         }
         file::WRITE => {
             let a = file::WriteArgs::decode(args)?;
-            let (_, file) = objects::file(cspace, slot, Rights::WRITE)?;
+            let file = file_of(cap, Rights::WRITE)?;
             let (address, len) = user_range(a.data)?;
             let count = write(&file, a.offset, address, len)?;
             let results = file::WriteResults { count };
@@ -414,7 +445,7 @@ pub fn file_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Re
         }
         file::STAT => {
             file::StatArgs::decode(args)?;
-            let (_, file) = objects::file(cspace, slot, Rights::NONE)?;
+            let file = file_of(cap, Rights::NONE)?;
             let stat = file.at.node.stat();
             let results = file::StatResults {
                 kind: file_kind(stat.kind),
@@ -428,14 +459,14 @@ pub fn file_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Re
         }
         file::SET_SIZE => {
             let a = file::SetSizeArgs::decode(args)?;
-            let (_, file) = objects::file(cspace, slot, Rights::WRITE)?;
+            let file = file_of(cap, Rights::WRITE)?;
             file.at.writable().map_err(fs::status)?;
             file.at.node.set_size(a.size).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         file::SYNC => {
             file::SyncArgs::decode(args)?;
-            let (_, file) = objects::file(cspace, slot, Rights::WRITE)?;
+            let file = file_of(cap, Rights::WRITE)?;
             sync(&file)?;
             answer(label, 0, [0; 8])
         }

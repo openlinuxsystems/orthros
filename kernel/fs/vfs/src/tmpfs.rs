@@ -163,13 +163,6 @@ impl TmpNode {
     fn is_empty_dir(&self) -> bool {
         matches!(&self.body, Body::Dir(dir) if dir.lock_nested(1).entries.is_empty())
     }
-
-    fn kind(&self) -> Kind {
-        match self.body {
-            Body::Dir(_) => Kind::Directory,
-            Body::File { .. } => Kind::File,
-        }
-    }
 }
 
 /// The backing of a tmpfs file: no disk, and growth charged to the
@@ -225,15 +218,19 @@ fn find(entries: &[Entry], name: &str) -> core::result::Result<usize, usize> {
 
 impl Node for TmpNode {
     fn stat(&self) -> Stat {
-        let (size, modified) = match &self.body {
-            Body::Dir(dir) => (0, dir.lock().modified),
-            Body::File { cache, .. } => (cache.size(), cache.modified()),
+        let (size, modified, pages) = match &self.body {
+            Body::Dir(dir) => (0, dir.lock().modified, 0),
+            Body::File { cache, .. } => cache.status(),
         };
-        let allocated = match &self.body {
-            Body::File { cache, .. } => (cache.pages() * radix_block::PAGE_SIZE) as u64,
-            Body::Dir(_) => 0,
-        };
+        let allocated = (pages * radix_block::PAGE_SIZE) as u64;
         Stat { kind: self.kind(), size, allocated, id: self.id, created: self.created, modified }
+    }
+
+    fn kind(&self) -> Kind {
+        match self.body {
+            Body::Dir(_) => Kind::Directory,
+            Body::File { .. } => Kind::File,
+        }
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {

@@ -80,8 +80,22 @@ places it went through:
 
 So `..` always returns to a place this walk entered, which is how it
 crosses back over a mount point, and never reaches anything above the
-starting directory. While the table holds only the root mount, the walk
-skips it.
+starting directory. A path with no `..`, nearly every path, needs no
+chain: the walk holds only where it is, takes no reference to the places
+it passes, and allocates nothing; at the first `..` it starts again from
+the directory with the chain.
+
+Each mount keeps a 128-bit filter of its nodes that something is mounted
+on, one bit each, chosen by the node's address (Fibonacci hashing), as a
+Bloom filter with one hash. A walk past a node whose bit is clear knows
+that nothing is mounted there without taking the table's lock, which is
+the case for every node of a filesystem with nothing mounted on it; a set
+bit sends it to the table. Linux marks mount points in its directory
+cache (`DCACHE_MOUNTED`) for the same reason. Bits change only under the
+table's lock: `mount` sets the bit before the mount is in the table, so a
+walk that misses the bit has missed the mount too, and `unmount`
+recomputes the filter of the mount below after the mount has left, each
+word whole, so no bit a mount still needs is ever clear.
 
 ### Mounting
 
@@ -100,8 +114,13 @@ never crosses mounts, and a mount point cannot be removed.
 A directory or file capability names a `FileObject`: a `Location`. Its
 methods are in `user/files.rs`, decoded by the generated `*Args` types,
 with paths copied from the caller once (`Path::copy`) and checked as
-UTF-8 there. Rights are checked before anything is looked up, and `open`
-checks the destination slot is empty before it can create a file.
+UTF-8 there. The capability the call names is looked up once, by the
+system call, and handed to the method, which checks its kind and rights
+before anything is looked up. An `open` that creates or cuts a file
+checks the destination slot is empty first, so that nothing changes for
+a call that fails; any other `open` finds an occupied slot when it puts
+the capability there, and the object it made goes once the store's lock
+has gone.
 
 `open` hands on at most the rights of the directory it opens through: a
 file gets read and write, a directory read, write and control, both copy
@@ -307,7 +326,9 @@ either the start or reached from it by lookups, each of which returns a
 child of the place before (or, crossing a mount, the root of what is
 mounted on that child). A leading `/` is refused before the walk. So a
 path reaches only what lies beneath its directory, through mounts on the
-way, and a directory capability gives exactly the subtree under it.
+way, and a directory capability gives exactly the subtree under it. The
+walk without a chain only ever looks names up, so the same holds with
+no pops at all; it hands any path with a `..` to the walk with one.
 
 **A freed cluster is never written by its old owner.** Clusters change
 hands between files and directories. A file's data is written back
