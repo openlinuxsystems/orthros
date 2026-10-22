@@ -252,7 +252,12 @@ are grateful.
   ([ADR 0055](docs/adr/0055-page-cache-and-writeback.md),
   [ADR 0057](docs/adr/0057-hierarchy-proc-and-sys.md)); its
   `-Wframe-larger-than` limit on stack frames is the idea of the kernel's
-  frame budget ([ADR 0058](docs/adr/0058-kernel-stack-frame-budget.md)).
+  frame budget ([ADR 0058](docs/adr/0058-kernel-stack-frame-budget.md));
+  and its `DCACHE_MOUNTED` flag, which spares a path walk the mount table
+  at a directory nothing is mounted on, is the idea of each mount's
+  filter of mount points, a Bloom filter (Burton H. Bloom, 1970) with
+  one hash, by Fibonacci hashing as Knuth describes it
+  ([ADR 0059](docs/adr/0059-file-operations-fast-paths.md)).
   No code is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - The Rust compiler's performance suite
