@@ -24,6 +24,10 @@ sed -n "s|^		'include/abi-bits/\(.*\)',$|\1|p" "$PORT_SRC/sysdeps/radix/meson.bu
 			ln -s "../../../../abis/linux/$header" "$PORT_SRC/sysdeps/radix/include/abi-bits/$header"
 	done
 
+# Code from musl 1.2.5 that patches 0004, 0006 and 0007 use: exact
+# floating-point conversions, strftime and the calendar arithmetic.
+cp "$PORT_DIR"/musl/*.hpp "$PORT_SRC/options/internal/include/mlibc/"
+
 # A static C library with the POSIX, glibc and BSD interfaces, using
 # Clang's C headers and, to build, libstdc++'s freestanding C++ headers
 # (which the cross file names). Programs link compiler-rt's builtins

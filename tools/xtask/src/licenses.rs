@@ -492,7 +492,11 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
             area: Area::Kernel,
             download: format!("git+{}@{}", recipe.source.git, recipe.source.commit),
             sha256: None,
-            notices: notice_files(&port.sources[0]),
+            notices: if recipe.notices.is_empty() {
+                notice_files(&port.sources[0])
+            } else {
+                recipe.notices.iter().map(|file| port.sources[0].join(file)).collect()
+            },
             comment: format!(
                 "{}, from {} ({}); built by ports/{} of Dukovo.",
                 recipe.summary,

@@ -126,9 +126,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     let ports = ports::build_all(ctx, &[])?;
     let mut files = build_posix(ctx, &ports.toolchain)?;
     for port in &ports.ports {
-        for file in &port.recipe.image {
-            files.push((file.clone(), ctx.out.join("sysroot").join(file)));
-        }
+        files.extend(ports::image_files(&port.recipe, &ctx.out.join("sysroot"))?);
     }
     step(&format!("Building the user programs ({profile})"));
     let mut cmd = cargo(ctx, "build");

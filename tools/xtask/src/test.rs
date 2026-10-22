@@ -628,6 +628,22 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "posix",
+        about: "C programs on mlibc: fork, exec, signals, pipes, terminals, jobs, files, threads",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix /system/tests/posix/run",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: posix,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "oom",
         about: "out of memory stops an app, then a service its supervisor restarts",
         firmware: Firmware::Bios,
@@ -1782,7 +1798,8 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let rest = program_line(vm, "spark: Spark v1 is process ")?;
     let spark = image_bias(&rest, "Spark")?;
     vm.expect("spark: boot archive of ")?;
-    vm.expect(" KiB with 3 files at 0x")?;
+    vm.expect(" KiB with ")?;
+    vm.expect(" files at 0x")?;
     vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
     let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
     let args = program_line(vm, "hello: process ")?;
@@ -1798,6 +1815,31 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("hello: goodbye")?;
     vm.expect(&format!("spark: process {number} (/system/tests/hello) exited with code 0x0"))?;
     vm.expect(&format!("spark: reaped process {number}; all of its memory came back"))?;
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The POSIX test programs of userspace/posix: Spark starts their runner
+/// on a pseudo-terminal, which runs each as a job of its own.
+fn posix(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started /system/tests/posix/run as process ")?;
+    vm.expect(", on a pseudo-terminal")?;
+    let code = program_line(vm, "(/system/tests/posix/run) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains(": FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("POSIX tests failed: {}", failed.join("; ")));
+    }
+    let summary = log
+        .lines()
+        .find_map(|line| line.split("posix: ").nth(1).filter(|rest| rest.ends_with("tests passed")))
+        .ok_or("the runner never said how many tests passed")?;
+    let counts: Vec<&str> = summary.split(' ').collect();
+    if counts.len() != 5 || counts[0] != counts[2] || code != "0x0" {
+        return Err(format!("the runner said \"{summary}\" and exited with code {code}"));
+    }
     vm.expect("spark: nothing more to do; waiting")
 }
 

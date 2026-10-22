@@ -1,0 +1,414 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Converts floating-point numbers exactly: printf's %e, %f, %g and %a,
+strtod(3) and its kin, and scanf's floating-point conversions use musl
+1.2.5's code (ports/mlibc/musl, which build.sh copies to
+options/internal/include/mlibc). mlibc's own went through uint64_t and
+pow() or summed digits in the result's type, so printf("%f", 1e20) and
+strtod("1e308") came out wrong. Meant for upstream.
+
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -21,6 +21,8 @@
+ #include <mlibc/ctype.hpp>
+ #include <mlibc/debug.hpp>
+ #include <mlibc/file-io.hpp>
++#include <mlibc/float-format.hpp>
++#include <mlibc/float-scan.hpp>
+ #include <mlibc/global-config.hpp>
+ #include <mlibc/locale.hpp>
+ #include <mlibc/lock.hpp>
+@@ -88,9 +90,16 @@
+ 		case 'd': case 'i': case 'o': case 'x': case 'X': case 'b': case 'B': case 'u':
+ 			frg::do_printf_ints<Char, F>(*_formatter, t, opts, szmod, _vsp, locale_opts);
+ 			break;
+-		case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': case 'a': case 'A':
+-			frg::do_printf_floats<Char, F>(*_formatter, t, opts, szmod, _vsp, locale_opts);
++		case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': case 'a': case 'A': {
++			long double value;
++			if (szmod == frg::printf_size_mod::longdouble_size)
++				value = frg::pop_arg<long double>(_vsp, &opts);
++			else
++				value = frg::pop_arg<double>(_vsp, &opts);
++			if (!mlibc::format_float<Char, F>(*_formatter, value, t, opts, locale_opts))
++				return frg::format_error::agent_error;
+ 			break;
++		}
+ 		case 'm':
+ 			__ensure(!opts.fill_zeros);
+ 			__ensure(!opts.left_justify);
+@@ -1520,153 +1529,26 @@
+ 			case 'F':
+ 			case 'g':
+ 			case 'G': {
+-				bool is_negative = false;
+-				long double divisor = 10;
+-				long double result = 0;
+-				int base = 10;
+-				int count = 0;
+-				bool dot = false; // set to true once a decimal point has been hit
+-				char c = handler.look_ahead();
+-				EOF_CHECK(c == '\0');
+-
+-				if (c == '-' || c == '+') {
+-					handler.consume();
+-					is_negative = c == '-';
+-					c = handler.look_ahead();
+-				}
+-
+-				// nan?
+-				if (tolower(c) == 'n') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					if (tolower(c) != 'a')
+-						return match_count;
+-
+-					handler.consume();
+-					c = handler.look_ahead();
+-					if (tolower(c) != 'n')
+-						return match_count;
+-
+-					handler.consume();
+-					if (dest)
+-						store_float(dest, type, NAN);
+-
+-					break;
+-				}
+-
+-				// inf?
+-				if (tolower(c) == 'i') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					size_t i = 0;
+-					for (; i < strlen("nfinity"); i++) {
+-						if (tolower(c) != "nfinity"[i])
+-							break;
+-						handler.consume();
+-						c = handler.look_ahead();
+-					}
+-
+-					NOMATCH_CHECK(i != 2 && i != 7);
+-
+-					if (dest)
+-						store_float(dest, type, is_negative ? -INFINITY : INFINITY);
+-
+-					break;
+-				}
+-
+-				if (c == '0') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-
+-					if (c == 'x' || c == 'X') {
+-						divisor = 16;
+-						base = 16;
+-						handler.consume();
+-						c = handler.look_ahead();
+-					}
+-				}
+-
+-				while ((base == 16 ? isxdigit(c) : isdigit(c)) || (dot == false && c == '.')) {
+-					handler.consume();
+-					if (c == '.') {
+-						dot = true;
+-						c = handler.look_ahead();
+-						continue;
+-					}
+-
+-					long double character_value;
+-					if (base == 10 || (c >= '0' && c <= '9'))
+-						character_value = c - '0';
+-					else if (base == 16 && tolower(c) >= 'a' && tolower(c) <= 'f')
+-						character_value = tolower(c) - 'a' + 10;
+-					else
+-						break;
+-
+-					if (dot) {
+-						result = result + character_value / divisor;
+-						divisor *= base;
+-					} else {
+-						result = result * base + character_value;
+-					}
+-
+-					++count;
+-					c = handler.look_ahead();
+-				}
+-
+-				NOMATCH_CHECK(count == 0);
+-
+-				if (c == 'e' || c == 'E') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-
+-					bool exp_negative = false;
+-
+-					if (c == '-' || c == '+') {
+-						handler.consume();
+-						exp_negative = c == '-';
+-						c = handler.look_ahead();
+-					}
+-
+-					int exp = 0;
++				EOF_CHECK(handler.look_ahead() == '\0');
+ 
+-					while (isdigit(c)) {
+-						handler.consume();
+-						exp = exp * 10 + (c - '0');
+-						c = handler.look_ahead();
+-					}
+-
+-					if (exp_negative)
+-						exp = -exp;
+-
+-					result *= pow(10.0, exp);
+-				} else if (c == 'p' || c == 'P') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-
+-					bool exp_negative = false;
+-
+-					if (c == '-' || c == '+') {
+-						handler.consume();
+-						exp_negative = c == '-';
+-						c = handler.look_ahead();
+-					}
+-
+-					int exp = 0;
+-
+-					while (isdigit(c)) {
+-						handler.consume();
+-						exp = exp * 10 + (c - '0');
+-						c = handler.look_ahead();
+-					}
+-
+-					if (exp_negative)
+-						exp = -exp;
+-
+-					result *= pow(2.0, exp);
++				// musl's conversion (mlibc/float-scan.hpp), with the
++				// locale's decimal point if it is one character.
++				auto l = mlibc::getActiveLocale();
++				Char radix = '.';
++				if constexpr (std::is_same_v<Char, char>) {
++					auto point = l->numeric.get(DECIMAL_POINT).asString();
++					if (point.size() == 1)
++						radix = point[0];
++				} else {
++					radix = l->numeric.get(_NL_NUMERIC_DECIMAL_POINT_WC).asUint32();
+ 				}
++				mlibc::FloatScanfInput<H, Char> input{handler, width, radix};
++				long double result = mlibc::scan_float(input,
++						type == SCANF_TYPE_LL ? 2 : type == SCANF_TYPE_L ? 1 : 0, 0);
++				NOMATCH_CHECK(!input.finish());
+ 
+ 				if (dest)
+-					store_float(dest, type, is_negative ? -result : result);
++					store_float(dest, type, result);
+ 				break;
+ 			}
+ 		}
+--- a/options/internal/include/mlibc/strtofp.hpp
++++ b/options/internal/include/mlibc/strtofp.hpp
+@@ -7,6 +7,7 @@
+ #include <mlibc/charcode.hpp>
+ #include <mlibc/charset.hpp>
+ #include <mlibc/ctype.hpp>
++#include <mlibc/float-scan.hpp>
+ #include <mlibc/locale.hpp>
+ #include <mlibc/strings.hpp>
+ #include <wchar.h>
+@@ -77,183 +78,32 @@
+ 	static constexpr const wchar_t *nanUpper = L"NAN";
+ };
+ 
++// The conversion itself is musl's (mlibc/float-scan.hpp), which rounds
++// correctly.
+ template<typename T, typename Char>
+ T strtofp(const Char *str, Char **endptr, mlibc::localeinfo *l) {
+ 	using Type = StrToFpPolicy<Char>;
++	const Char *start = str;
+ 
+ 	while(Type::is_space(*str, l))
+ 		str++;
+ 
+-	bool negative = *str == '-';
+-	if (*str == '+' || *str == '-')
+-		str++;
+-
+-	if (Type::string_compare(str, Type::infUpper) == 0 || Type::string_compare(str, Type::inf) == 0) {
+-		if (endptr)
+-			*endptr = (Char *)str + 3;
+-		if constexpr (std::is_same_v<T, float>)
+-			return negative ? -__builtin_inff() : __builtin_inff();
+-		else if constexpr (std::is_same_v<T, double>)
+-			return negative ? -__builtin_inf() : __builtin_inf();
+-		else
+-			return negative ? -__builtin_infl() : __builtin_infl();
+-	} else if (Type::string_compare(str, Type::infinityUpper) == 0 || Type::string_compare(str, Type::infinity) == 0) {
+-		if (endptr)
+-			*endptr = (Char *)str + 8;
+-		if constexpr (std::is_same_v<T, float>)
+-			return negative ? -__builtin_inff() : __builtin_inff();
+-		else if constexpr (std::is_same_v<T, double>)
+-			return negative ? -__builtin_inf() : __builtin_inf();
+-		else
+-			return negative ? -__builtin_infl() : __builtin_infl();
+-	} else if (Type::string_compare_n(str, Type::nanUpper, 3) == 0 || Type::string_compare_n(str, Type::nan, 3) == 0) {
+-		if (endptr)
+-			*endptr = (Char *)str + 3;
+-		if constexpr (std::is_same_v<T, float>)
+-			return negative ? -__builtin_nanf("") : __builtin_nanf("");
+-		else if constexpr (std::is_same_v<T, double>)
+-			return negative ? -__builtin_nan("") : __builtin_nan("");
+-		else
+-			return negative ? -__builtin_nanl("") : __builtin_nanl("");
+-	}
+-
+ 	wchar_t wideDecimalPoint[2] = { L'\0', L'\0' };
+-
+-	auto decimal = [&]() -> frg::basic_string_view<Char> {
++	const Char *decimal = [&]() -> const Char * {
+ 		if constexpr (std::is_same_v<Char, char>) {
+-			return l->numeric.get(__DECIMAL_POINT).asString();
++			return l->numeric.get(__DECIMAL_POINT).asString().data();
+ 		} else {
+ 			wideDecimalPoint[0] = l->numeric.get(_NL_NUMERIC_DECIMAL_POINT_WC).asUint32();
+ 			return wideDecimalPoint;
+ 		}
+ 	}();
+ 
+-	bool hex = false;
+-	if (*str == '0' && (*(str + 1) == 'x' || *(str + 1) == 'X')) {
+-		str += 2;
+-		hex = true;
+-	}
+-
+-	T result = static_cast<T>(0);
+-
+-	const Char *tmp = str;
+-
+-	if (!hex) {
+-		while (true) {
+-			if (!Type::is_digit(*tmp, l))
+-				break;
+-			result *= static_cast<T>(10);
+-			result += static_cast<T>(*tmp - '0');
+-			tmp++;
+-		}
+-	} else {
+-		while (true) {
+-			if (!isxdigit_l(*tmp, l))
+-				break;
+-			result *= static_cast<T>(16);
+-			result += static_cast<T>(*tmp <= '9' ? (*tmp - '0') : (tolower_l(*tmp, l) - 'a' + 10));
+-			tmp++;
+-		}
+-	}
+-
+-	if (!Type::string_compare_n(tmp, decimal.data(), frg::generic_strnlen<Char>(decimal.data(), decimal.size()))) {
+-		tmp += frg::generic_strnlen<Char>(decimal.data(), decimal.size());
+-
+-		if (!hex) {
+-			T d = static_cast<T>(10);
+-
+-			while (true) {
+-				if (!Type::is_digit(*tmp, l))
+-					break;
+-				result += static_cast<T>(*tmp - '0') / d;
+-				d *= static_cast<T>(10);
+-				tmp++;
+-			}
+-		} else {
+-			T d = static_cast<T>(16);
+-
+-			while (true) {
+-				if (!isxdigit_l(*tmp, l))
+-					break;
+-				result += static_cast<T>(*tmp <= '9' ? (*tmp - '0') : (tolower_l(*tmp, l) - 'a' + 10)) / d;
+-				d *= static_cast<T>(16);
+-				tmp++;
+-			}
+-		}
+-	}
+-
+-	if (!hex) {
+-		if (*tmp == 'e' || *tmp == 'E') {
+-			// offset so we look ahead instead of incrementing tmp for a possibly-invalid exponent
+-			size_t expOff = 1;
+-
+-			bool exp_negative = tmp[expOff] == '-';
+-			if (tmp[expOff] == '+' || tmp[expOff] == '-')
+-				expOff++;
+-
+-			if (Type::is_digit(tmp[expOff], l)) {
+-				tmp += expOff;
+-
+-				int exp = 0;
+-				while (true) {
+-					if (!Type::is_digit(*tmp, l))
+-						break;
+-					exp *= 10;
+-					exp += *tmp - '0';
+-					tmp++;
+-				}
+-
+-				if (!exp_negative) {
+-					for (int i = 0; i < exp; ++i) {
+-						result *= static_cast<T>(10);
+-					}
+-				} else {
+-					for (int i = 0; i < exp; ++i) {
+-						result /= static_cast<T>(10);
+-					}
+-				}
+-			}
+-		}
+-	} else {
+-		if (*tmp == 'p' || *tmp == 'P') {
+-			// offset so we look ahead instead of incrementing tmp for a possibly-invalid exponent
+-			size_t expOff = 1;
+-
+-			bool exp_negative = tmp[expOff] == '-';
+-			if (tmp[expOff] == '+' || tmp[expOff] == '-')
+-				expOff++;
+-
+-			if (Type::is_digit(tmp[expOff], l)) {
+-				tmp += expOff;
+-
+-				int exp = 0;
+-				while (true) {
+-					if (!Type::is_digit(*tmp, l))
+-						break;
+-					exp *= 10;
+-					exp += *tmp - '0';
+-					tmp++;
+-				}
+-
+-				if (!exp_negative) {
+-					for (int i = 0; i < exp; ++i) {
+-						result *= static_cast<T>(2);
+-					}
+-				} else {
+-					for (int i = 0; i < exp; ++i) {
+-						result /= static_cast<T>(2);
+-					}
+-				}
+-			}
+-		}
+-	}
+-
++	FloatStringInput<Char> input{str, decimal};
++	constexpr int prec = std::is_same_v<T, float> ? 0 : std::is_same_v<T, double> ? 1 : 2;
++	long double result = scan_float(input, prec, 1);
+ 	if (endptr)
+-		*endptr = const_cast<Char *>(tmp);
+-	if (negative)
+-		result = -result;
+-
+-	return result;
++		*endptr = const_cast<Char *>(input.count() ? str + input.count() : start);
++	return static_cast<T>(result);
+ }
+ 
+ } // namespace mlibc

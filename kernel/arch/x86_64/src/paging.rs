@@ -669,8 +669,31 @@ pub fn shootdown(range: Range<u64>) {
     shootdown_on(range, |_| true);
 }
 
+/// Holds off preemption while it lives.
+struct NoPreemption;
+
+impl NoPreemption {
+    fn new() -> NoPreemption {
+        percpu::preempt_disable();
+        NoPreemption
+    }
+}
+
+impl Drop for NoPreemption {
+    fn drop(&mut self) {
+        // A preemption due meanwhile waits for the next tick.
+        percpu::preempt_enable();
+    }
+}
+
 /// Like [`shootdown`], for the other online CPUs `wanted` picks.
 pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) {
+    // On one CPU throughout: the CPU whose TLB it flushes here, which it
+    // leaves out of the targets and marks as having served the request,
+    // must be the one it runs on. A thread moved to a target CPU on the
+    // way would wait for itself, and one moved off would leave its new
+    // CPU's TLB unflushed.
+    let _pinned = NoPreemption::new();
     flush_local(range.clone());
     let me = percpu::current_index();
     // Two CPUs may shoot down at once: the one waiting for the lock keeps

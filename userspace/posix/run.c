@@ -5,9 +5,10 @@
 // starts it on a pseudo-terminal; it makes a session of its own with
 // that terminal as the controlling one, then runs each test (those its
 // arguments name, or all of them) as a shell runs a job: in a process
-// group of its own, in the foreground, with fork and exec. It prints
-// "posix: <test> passed" or "FAILED" for each, and exits with 0 only if
-// every test passed (radix-posix(7)).
+// group of its own, in the foreground, with fork and exec. The tests are
+// the programs of this directory, the C library's own tests (libc) and
+// Lua's test suite (lua). It prints "posix: <test> passed" or "FAILED"
+// for each, and exits with 0 only if every test passed (radix-posix(7)).
 
 #include <errno.h>
 #include <signal.h>
@@ -21,16 +22,50 @@
 // Where the tests are.
 #define DIRECTORY "/system/tests/posix/"
 
-// Every test, in the order they run.
-static const char *const TESTS[] = {
-		"hello", "fork", "exec", "signal", "pipe", "poll", "tty", "job", "time", "files",
-		"thread", "spawn",
+// A test.
+struct test {
+	const char *name;
+	// The directory it runs in; NULL for the runner's.
+	const char *dir;
+	// Its program and arguments; NULL for the program DIRECTORY<name>.
+	const char *const *argv;
 };
 
-// Runs test `name` as a foreground job; returns whether it passed.
-static int run(const char *name) {
+// Lua's own suite, as its all.lua runs it for users (_U): without the
+// tests that need a shell or C modules, or take long (ports/lua).
+static const char *const LUA[] = {"/system/tests/lua/lua", "-e", "_U=true", "all.lua", NULL};
+
+// The C library's own tests, in one program (ports/mlibc-tests).
+static const char *const LIBC[] = {"/system/tests/libc/run", NULL};
+
+// Every test, in the order they run.
+static const struct test TESTS[] = {
+		{"hello", NULL, NULL},
+		{"fork", NULL, NULL},
+		{"exec", NULL, NULL},
+		{"signal", NULL, NULL},
+		{"pipe", NULL, NULL},
+		{"poll", NULL, NULL},
+		{"tty", NULL, NULL},
+		{"job", NULL, NULL},
+		{"time", NULL, NULL},
+		{"files", NULL, NULL},
+		{"thread", NULL, NULL},
+		{"spawn", NULL, NULL},
+		{"format", NULL, NULL},
+		{"libc", NULL, LIBC},
+		{"lua", "/system/tests/lua/testes", LUA},
+};
+
+enum { COUNT = sizeof(TESTS) / sizeof(TESTS[0]) };
+
+// Runs `test` as a foreground job; returns whether it passed.
+static int run(const struct test *test) {
+	const char *name = test->name;
 	char path[256];
 	snprintf(path, sizeof(path), DIRECTORY "%s", name);
+	char *alone[] = {path, NULL};
+	char *const *argv = test->argv ? (char *const *)test->argv : alone;
 	fflush(stdout);
 	pid_t pid = fork();
 	if(pid < 0) {
@@ -45,8 +80,11 @@ static int run(const char *name) {
 		signal(SIGTTOU, SIG_DFL);
 		signal(SIGTTIN, SIG_DFL);
 		signal(SIGTSTP, SIG_DFL);
-		char *argv[] = {path, NULL};
-		execv(path, argv);
+		if(test->dir && chdir(test->dir) < 0) {
+			printf("posix: %s: cannot go to %s: %s\n", name, test->dir, strerror(errno));
+			_exit(127);
+		}
+		execv(argv[0], argv);
 		printf("posix: %s: exec failed: %s\n", name, strerror(errno));
 		_exit(127);
 	}
@@ -91,10 +129,21 @@ int main(int argc, char **argv) {
 	signal(SIGTTOU, SIG_IGN);
 	signal(SIGTTIN, SIG_IGN);
 	signal(SIGTSTP, SIG_IGN);
-	int count = argc > 1 ? argc - 1 : (int)(sizeof(TESTS) / sizeof(TESTS[0]));
+	int count = argc > 1 ? argc - 1 : COUNT;
 	int passed = 0;
-	for(int i = 0; i < count; i++)
-		passed += run(argc > 1 ? argv[i + 1] : TESTS[i]);
+	for(int i = 0; i < count; i++) {
+		const struct test *test = &TESTS[i];
+		if(argc > 1) {
+			test = NULL;
+			for(int j = 0; j < COUNT && !test; j++)
+				if(!strcmp(TESTS[j].name, argv[i + 1]))
+					test = &TESTS[j];
+		}
+		if(test)
+			passed += run(test);
+		else
+			printf("posix: %s FAILED: there is no such test\n", argv[i + 1]);
+	}
 	printf("posix: %d of %d tests passed\n", passed, count);
 	return passed == count ? 0 : 1;
 }

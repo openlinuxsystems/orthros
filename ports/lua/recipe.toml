@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Lua (ADR 0069): the first program ported with the ports system, and a
+# test of the C library under it. The interpreter and the language's own
+# test suite run in the posix boot test (radix-posix(7)); neither is a
+# system program.
+name = "lua"
+version = "5.4.7"
+summary = "the Lua interpreter and its test suite, to test the C library"
+license = "MIT"
+homepage = "https://www.lua.org"
+depends = ["mlibc"]
+image = ["system/tests/lua/"]
+# The repository has no license file: the notice ends lua.h.
+notices = ["lua.h"]
+
+[source]
+git = "https://github.com/lua/lua.git"
+commit = "1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3"
+tag = "v5.4.7"

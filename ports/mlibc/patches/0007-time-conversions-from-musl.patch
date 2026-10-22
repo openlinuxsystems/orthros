@@ -1,0 +1,327 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Converts between time_t and struct tm with musl 1.2.5's calendar code
+(ports/mlibc/musl/calendar.hpp): mlibc's counted 31 December as day 366
+of every year (its day-of-year formula took every year for a leap
+year), got times before 1970 wrong, and its mktime was timegm, which
+neither used the time zone nor put fields in range or filled in tm_wday
+and tm_yday. Also:
+  - gmtime sets tm_isdst to 0, not -1, so strftime's %z works;
+  - mktime uses the time zone and timelocal is mktime;
+  - localtime falls back to UTC instead of ending the program when the
+    time zone cannot be read;
+  - the TZ rules' transition days come from the calendar (J60 is 1
+    March in a leap year too) at their times of day, in UTC.
+Meant for upstream.
+
+--- a/options/ansi/generic/time.cpp
++++ b/options/ansi/generic/time.cpp
+@@ -23,6 +23,7 @@
+ #include <mlibc/locale.hpp>
+ #include <mlibc/bitutil.hpp>
+ #include <mlibc/strings.hpp>
++#include <mlibc/calendar.hpp>
+ #include <mlibc/time.hpp>
+ 
+ #include <frg/mutex.hpp>
+@@ -68,9 +69,6 @@
+ 	return a - b;
+ }
+ 
+-time_t mktime(struct tm *tm) {
+-	return timegm(tm);
+-}
+ 
+ /* There is no other implemented value than TIME_UTC; all other values
+  * are considered erroneous. */
+@@ -682,82 +680,42 @@
+ 
+ namespace {
+ 
+-void civil_from_days(time_t days_since_epoch, int *year, unsigned int *month, unsigned int *day) {
+-	time_t time = days_since_epoch + 719468;
+-	int era = (time >= 0 ? time : time - 146096) / 146097;
+-	unsigned int doe = static_cast<unsigned int>(time - era * 146097);
+-	unsigned int yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+-	int y = static_cast<int>(yoe) + era * 400;
+-	unsigned int doy = doe - (365*yoe + yoe/4 - yoe/100);
+-	unsigned int mp = (5*doy + 2)/153;
+-	unsigned int d = doy - (153*mp+2)/5 + 1;
+-	unsigned int m = mp + (mp < 10 ? 3 : -9);
+-
+-	*year = y + (m <= 2);
+-	*month = m;
+-	*day = d;
+-}
+-
+-void weekday_from_days(time_t days_since_epoch, unsigned int *weekday) {
+-	*weekday = static_cast<unsigned int>(days_since_epoch >= -4 ?
+-			(days_since_epoch+4) % 7 : (days_since_epoch+5) % 7 + 6);
+-}
+-
+-void yearday_from_date(unsigned int year, unsigned int month, unsigned int day, unsigned int *yday) {
+-	unsigned int n1 = 275 * month / 9;
+-	unsigned int n2 = (month + 9) / 12;
+-	unsigned int n3 = (1 + (year - 4 * year / 4 + 2) / 3);
+-	*yday = n1 - (n2 * n3) + day - 30;
+-}
+-
+ static bool is_leap_year(int year) {
+ 	return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+ }
+ 
+ // Given a rule and a year, compute the time of the transition in seconds since the epoch.
+ // TODO: Take into account the time of day when the transition occurs
++// The day `rule` names in `year`, at 00:00 UTC, in seconds since 1970 (its
++// time of day is the caller's to add).
+ time_t time_from_rule(const Rule &rule, int year) {
++	using namespace mlibc::musl_time;
++	time_t january1 = year_to_secs(year - 1900, nullptr);
+ 	if (rule.type == JULIAN_DAY) {
+-		// Jn: Julian day, ignoring Feb 29
+-		uint16_t day = rule.day - 1;
+-		if (is_leap_year(year) && day >= 60)
+-			day = rule.day;
+-
+-		struct tm t = {};
+-		t.tm_year = year - 1900;
+-		t.tm_yday = day;
+-		return mktime(&t);
++		// Jn: day n of 1 to 365, never counting 29 February.
++		int day = rule.day - 1;
++		if (is_leap_year(year) && rule.day >= 60)
++			day++;
++		return january1 + day * 86400LL;
+ 	} else if (rule.type == DAY_OF_YEAR) {
+-		// n: zero-based day of year, including Feb 29 in leap years
+-		struct tm t = {};
+-		t.tm_year = year - 1900;
+-		t.tm_yday = rule.day;
+-		return mktime(&t);
++		// n: day n of 0 to 365, counting 29 February.
++		return january1 + rule.day * 86400LL;
+ 	} else if (rule.type == MONTH_NTH_DAY_OF_WEEK) {
+-		// Mm.n.d: Month, week, weekday (month 1-12, week 1-5, weekday 0=Sun)
+-
+-		// Find the first day of the month
++		// Mm.n.d: weekday d (0 is Sunday) of week n (5 is the last) of
++		// month m.
+ 		struct tm t = {};
+ 		t.tm_year = year - 1900;
+ 		t.tm_mon = rule.month - 1;
+ 		t.tm_mday = 1;
+-		mktime(&t);
+-
+-		int first_wday = t.tm_wday;
+-		int day = 1 + ((7 + rule.day - first_wday) % 7) + (rule.week - 1) * 7;
+-		// If week==5, but that day is past the end of the month, go back by 7 days
+-		t.tm_mday = day;
+-		mktime(&t);
+-		if (rule.week == 5 && t.tm_mon != rule.month - 1)
++		time_t first = tm_to_secs(&t);
++		t.tm_mon++;
++		int days_in_month = (tm_to_secs(&t) - first) / 86400;
++		struct tm f;
++		secs_to_tm(first, &f);
++		int day = 1 + ((7 + rule.day - f.tm_wday) % 7) + (rule.week - 1) * 7;
++		while (day > days_in_month)
+ 			day -= 7;
+-
+-		t.tm_year = year - 1900;
+-		t.tm_mon = rule.month - 1;
+-		t.tm_mday = day;
+-		t.tm_hour = 0;
+-		t.tm_min = 0;
+-		t.tm_sec = 0;
+-		return mktime(&t);
++		return first + (day - 1) * 86400LL;
+ 	} else {
+ 		__ensure(!"Invalid rule type");
+ 		__builtin_unreachable();
+@@ -769,14 +727,16 @@
+ 	if (rules[0].type == TZFILE)
+ 	    __ensure(!"is_in_dst() called with invalid rules");
+ 
+-	int year;
+-	unsigned int _month;
+-	unsigned int _day;
+-	civil_from_days(unix_gmt / (60 * 60 * 24), &year, &_month, &_day);
+-
+-	// Get the start and end transition days of the year
+-	int start_time = time_from_rule(rules[0], year);
+-	int end_time = time_from_rule(rules[1], year);
++	struct tm now;
++	if (mlibc::musl_time::secs_to_tm(unix_gmt, &now))
++		return false;
++	int year = now.tm_year + 1900;
++
++	// The transitions of the year: a rule's time is local, in standard
++	// time for the start and in daylight time for the end (POSIX).
++	time_t start_time = time_from_rule(rules[0], year) + rules[0].time + timezone;
++	time_t end_time = time_from_rule(rules[1], year) + rules[1].time
++			- tt_infos[tznameDST].tt_gmtoff;
+ 
+ 	// Check if the unix_gmt falls within the DST period
+ 	if (start_time <= end_time) {
+@@ -904,72 +864,72 @@
+ } //anonymous namespace
+ 
+ struct tm *gmtime_r(const time_t *unix_gmt, struct tm *res) {
+-	int year;
+-	unsigned int month;
+-	unsigned int day;
+-	unsigned int weekday;
+-	unsigned int yday;
+-
+-	time_t unix_local = *unix_gmt;
+-
+-	int days_since_epoch = unix_local / (60*60*24);
+-	civil_from_days(days_since_epoch, &year, &month, &day);
+-	weekday_from_days(days_since_epoch, &weekday);
+-	yearday_from_date(year, month, day, &yday);
+-
+-	res->tm_sec = unix_local % 60;
+-	res->tm_min = (unix_local / 60) % 60;
+-	res->tm_hour = (unix_local / (60*60)) % 24;
+-	res->tm_mday = day;
+-	res->tm_mon = month - 1;
+-	res->tm_year = year - 1900;
+-	res->tm_wday = weekday;
+-	res->tm_yday = yday - 1;
+-	res->tm_isdst = -1;
++	if (mlibc::musl_time::secs_to_tm(*unix_gmt, res)) {
++		errno = EOVERFLOW;
++		return nullptr;
++	}
++	res->tm_isdst = 0;
+ 	res->tm_zone = __utc;
+ 	res->tm_gmtoff = 0;
+-
+ 	return res;
+ }
+ 
+-struct tm *localtime_r(const time_t *unix_gmt, struct tm *res) {
+-	int year;
+-	unsigned int month;
+-	unsigned int day;
+-	unsigned int weekday;
+-	unsigned int yday;
++namespace {
+ 
++// The local time zone's offset from UTC, whether it is daylight time and
++// its name at `unix_gmt`: UTC if the zone cannot be read.
++void zone_at(time_t unix_gmt, time_t *offset, bool *dst, char **tm_zone) {
++	if (unix_local_from_gmt(unix_gmt, offset, dst, tm_zone)) {
++		*offset = 0;
++		*dst = false;
++		*tm_zone = const_cast<char *>(__utc);
++	}
++}
++
++} // namespace
++
++struct tm *localtime_r(const time_t *unix_gmt, struct tm *res) {
+ 	time_t offset = 0;
+ 	bool dst;
+ 	char *tm_zone;
+ 	frg::unique_lock<FutexLock> lock(__time_lock);
+-	// TODO: Set errno if the conversion fails.
+-	if(unix_local_from_gmt(*unix_gmt, &offset, &dst, &tm_zone)) {
+-		__ensure(!"Error parsing /etc/localtime");
+-		__builtin_unreachable();
++	zone_at(*unix_gmt, &offset, &dst, &tm_zone);
++	if (mlibc::musl_time::secs_to_tm(static_cast<long long>(*unix_gmt) + offset, res)) {
++		errno = EOVERFLOW;
++		return nullptr;
+ 	}
+-	time_t unix_local = *unix_gmt + offset;
+-
+-	int days_since_epoch = unix_local / (60*60*24);
+-	civil_from_days(days_since_epoch, &year, &month, &day);
+-	weekday_from_days(days_since_epoch, &weekday);
+-	yearday_from_date(year, month, day, &yday);
+-
+-	res->tm_sec = unix_local % 60;
+-	res->tm_min = (unix_local / 60) % 60;
+-	res->tm_hour = (unix_local / (60*60)) % 24;
+-	res->tm_mday = day;
+-	res->tm_mon = month - 1;
+-	res->tm_year = year - 1900;
+-	res->tm_wday = weekday;
+-	res->tm_yday = yday - 1;
+ 	res->tm_isdst = dst;
+ 	res->tm_zone = tm_zone;
+ 	res->tm_gmtoff = offset;
+-
+ 	return res;
+ }
+ 
++// The fields of `tm` may be out of range (a 32nd of January is the 1st
++// of February); tm_wday and tm_yday are ignored and set, and the others
++// put in range, as musl does.
++time_t mktime(struct tm *tm) {
++	long long local = mlibc::musl_time::tm_to_secs(tm);
++	time_t offset = 0;
++	bool dst;
++	char *tm_zone;
++	frg::unique_lock<FutexLock> lock(__time_lock);
++	// The offset in force at that local time: the one at `local` read as
++	// UTC is near enough to find it on a second look.
++	zone_at(local, &offset, &dst, &tm_zone);
++	zone_at(local - offset, &offset, &dst, &tm_zone);
++	long long t = local - offset;
++	struct tm result;
++	if (t != static_cast<time_t>(t) || mlibc::musl_time::secs_to_tm(t + offset, &result)) {
++		errno = EOVERFLOW;
++		return -1;
++	}
++	result.tm_isdst = dst;
++	result.tm_zone = tm_zone;
++	result.tm_gmtoff = offset;
++	*tm = result;
++	return t;
++}
++
+ // This implementation of asctime_r is taken from sortix
+ char *asctime_r(const struct tm *tm, char *buf) {
+ 	static char weekday_names[7][4] =
+@@ -992,24 +952,21 @@
+ 	return asctime_r(localtime(clock), buf);
+ }
+ 
+-time_t timelocal(struct tm *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
+-}
+-
+-constexpr static int days_from_civil(int y, unsigned m, unsigned d) noexcept {
+-	y -= m <= 2;
+-	const int era = (y >= 0 ? y : y - 399) / 400;
+-	const unsigned yoe = static_cast<unsigned>(y - era * 400); // [0, 399]
+-	const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1; // [0, 365]
+-	const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+-	return era * 146097 + static_cast<int>(doe) - 719468;
++time_t timelocal(struct tm *tm) {
++	return mktime(tm);
+ }
+ 
++// As mktime, in UTC (musl's).
+ time_t timegm(struct tm *tm) {
+-	time_t year = tm->tm_year + 1900;
+-	time_t month = tm->tm_mon + 1;
+-	time_t days = days_from_civil(year, month, tm->tm_mday);
+-	time_t secs = (days * 86400) + (tm->tm_hour * 60 * 60) + (tm->tm_min * 60) + tm->tm_sec;
+-	return secs;
++	struct tm result;
++	long long t = mlibc::musl_time::tm_to_secs(tm);
++	if (t != static_cast<time_t>(t) || mlibc::musl_time::secs_to_tm(t, &result)) {
++		errno = EOVERFLOW;
++		return -1;
++	}
++	*tm = result;
++	tm->tm_isdst = 0;
++	tm->tm_gmtoff = 0;
++	tm->tm_zone = __utc;
++	return t;
+ }

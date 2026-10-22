@@ -23,6 +23,12 @@
 // Where new threads start (x86_64/thread-entry.S).
 extern "C" void __mlibc_thread_entry();
 
+// frigg's assertions call frg_panic (options/internal/generic/frigg.cpp)
+// through a weak reference, which does not take it out of a static
+// libc.a, so a failed one would trap without a word. This reference does.
+extern "C" void frg_panic(const char *message);
+[[gnu::used]] static void (*const keep_frg_panic)(const char *) = frg_panic;
+
 namespace mlibc {
 
 void Sysdeps<LibcLog>::operator()(const char *message) {

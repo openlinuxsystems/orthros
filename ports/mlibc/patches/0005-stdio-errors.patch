@@ -1,0 +1,207 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Makes stdio's errors those of glibc and musl:
+  - writing a stream opened only for reading, or reading one opened
+    only for writing, fails with EBADF and sets the error indicator;
+    mlibc took the bytes into its buffer and lost them when the flush
+    failed (Lua's test suite checks this). Standard input is for
+    reading and standard output and error for writing, as in glibc;
+  - fwrite and fflush set errno when they fail, and fflush(NULL)
+    returns EOF if any stream failed, instead of logging a warning to
+    standard error and returning 0.
+Meant for upstream.
+
+--- a/options/ansi/generic/file-io.cpp
++++ b/options/ansi/generic/file-io.cpp
+@@ -108,9 +108,20 @@
+ // While read() can trigger a write-back, write() can never trigger a read-ahead().
+ // This peculiarity is reflected in their code.
+ 
++void abstract_file::set_access(int flags) {
++	_readable = (flags & O_ACCMODE) != O_WRONLY;
++	_writable = (flags & O_ACCMODE) != O_RDONLY;
++}
++
+ int abstract_file::read(char *buffer, size_t max_size, size_t *actual_size) {
+ 	__ensure(max_size);
+ 
++	if(!_readable) {
++		__status_bits |= __MLIBC_ERROR_BIT;
++		errno = EBADF;
++		return EBADF;
++	}
++
+ 	if(_init_bufmode())
+ 		return -1;
+ 
+@@ -187,6 +198,12 @@
+ int abstract_file::write(const char *buffer, size_t max_size, size_t *actual_size) {
+ 	__ensure(max_size);
+ 
++	if(!_writable) {
++		__status_bits |= __MLIBC_ERROR_BIT;
++		errno = EBADF;
++		return EBADF;
++	}
++
+ 	if(_init_bufmode())
+ 		return -1;
+ 	if(globallyDisableBuffering || _bufmode == buffer_mode::no_buffer) {
+@@ -516,6 +533,7 @@
+ 	_orientation = stream_orientation::none;
+ 	_mbstate = {};
+ 
++	set_access(mode_flags);
+ 	if(mode_flags & O_APPEND) {
+ 		seek(0, SEEK_END);
+ 	}
+@@ -650,6 +668,12 @@
+ 		stdout_box.initialize(1);
+ 		stderr_box.initialize(2, nullptr, true);
+ 
++		// As in glibc: standard input is for reading, the others for
++		// writing.
++		stdin_box.get()->set_access(O_RDONLY);
++		stdout_box.get()->set_access(O_WRONLY);
++		stderr_box.get()->set_access(O_WRONLY);
++
+ 		stdin = stdin_box.get();
+ 		stdout = stdout_box.get();
+ 		stderr = stderr_box.get();
+@@ -694,8 +718,10 @@
+ 		return nullptr;
+ 	}
+ 
+-	return frg::construct<mlibc::fd_file>(getAllocator(), fd,
++	auto file = frg::construct<mlibc::fd_file>(getAllocator(), fd,
+ 			mlibc::file_dispose_cb<mlibc::fd_file>);
++	file->set_access(flags);
++	return file;
+ }
+ 
+ #if __MLIBC_LINUX_OPTION
+@@ -738,35 +764,44 @@
+ 	if(file_base == nullptr) {
+ 		// Only flush the files but do not close them.
+ 		frg::unique_lock list_lock(mlibc::global_file_list_mutex);
++		int result = 0;
+ 		for(auto it : mlibc::global_file_list()) {
+-			if(int e = it->flush(); e)
+-				mlibc::infoLogger() << "mlibc warning: Failed to flush file"
+-					<< frg::endlog;
++			if(int e = it->flush(); e) {
++				errno = e;
++				result = EOF;
++			}
+ 		}
+-		return 0;
++		return result;
+ 	}
+ 	auto file = static_cast<mlibc::abstract_file *>(file_base);
+-	if(file->flush())
++	if(int e = file->flush(); e) {
++		errno = e;
+ 		return EOF;
++	}
+ 	return 0;
+ }
+ int fflush(FILE *file_base) {
+ 	if(file_base == nullptr) {
+ 		// Only flush the files but do not close them.
++		// Every stream, and EOF if any failed (C and POSIX).
+ 		frg::unique_lock list_lock(mlibc::global_file_list_mutex);
++		int result = 0;
+ 		for(auto it : mlibc::global_file_list()) {
+ 			frg::unique_lock lock(it->_lock);
+-			if(int e = it->flush(); e)
+-				mlibc::infoLogger() << "mlibc warning: Failed to flush file"
+-					<< frg::endlog;
++			if(int e = it->flush(); e) {
++				errno = e;
++				result = EOF;
++			}
+ 		}
+-		return 0;
++		return result;
+ 	}
+ 
+ 	auto file = static_cast<mlibc::abstract_file *>(file_base);
+ 	frg::unique_lock lock(file->_lock);
+-	if (file->flush())
++	if (int e = file->flush(); e) {
++		errno = e;
+ 		return EOF;
++	}
+ 	return 0;
+ }
+ 
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -226,11 +226,10 @@
+ 		size_t progress = 0;
+ 		while(progress < count) {
+ 			size_t chunk;
+-			if(file->write((const char *)buffer + progress,
+-					count - progress, &chunk)) {
+-				// TODO: Handle I/O errors.
+-				mlibc::infoLogger() << "mlibc: fwrite() I/O errors are not handled"
+-						<< frg::endlog;
++			if(int e = file->write((const char *)buffer + progress,
++					count - progress, &chunk); e) {
++				// The stream's error indicator is set.
++				errno = e;
+ 				break;
+ 			}else if(!chunk) {
+ 				// TODO: Handle eof.
+@@ -246,11 +245,10 @@
+ 			size_t progress = 0;
+ 			while(progress < size) {
+ 				size_t chunk;
+-				if(file->write((const char *)buffer + i * size + progress,
+-						size - progress, &chunk)) {
+-					// TODO: Handle I/O errors.
+-					mlibc::infoLogger() << "mlibc: fwrite() I/O errors are not handled"
+-							<< frg::endlog;
++				if(int e = file->write((const char *)buffer + i * size + progress,
++						size - progress, &chunk); e) {
++					// The stream's error indicator is set.
++					errno = e;
+ 					break;
+ 				}else if(!chunk) {
+ 					// TODO: Handle eof.
+--- a/options/ansi/include/mlibc/file-io.hpp
++++ b/options/ansi/include/mlibc/file-io.hpp
+@@ -62,6 +62,11 @@
+ 
+ 	void dispose();
+ 
++	// Sets whether the stream may be read and written by the open(2)
++	// access mode in `flags` (from fopen's mode, say). Reading or writing
++	// a stream that may not be fails with EBADF, as in glibc and musl.
++	void set_access(int flags);
++
+ 	virtual int close() = 0;
+ 	virtual int reopen(const char *path, const char *mode) = 0;
+ 
+@@ -102,6 +107,8 @@
+ 
+ 	stream_type _type;
+ 	buffer_mode _bufmode;
++	bool _readable = true;
++	bool _writable = true;
+ 	void (*_do_dispose)(abstract_file *);
+ 
+ public:
+--- a/options/posix/generic/posix-file-io.cpp
++++ b/options/posix/generic/posix-file-io.cpp
+@@ -271,6 +271,8 @@
+ 
+ 	// TODO: We may need to activate line buffered mode for terminals.
+ 
+-	return frg::construct<mlibc::fd_file>(getAllocator(), fd,
++	auto file = frg::construct<mlibc::fd_file>(getAllocator(), fd,
+ 			mlibc::file_dispose_cb<mlibc::fd_file>);
++	file->set_access(flags);
++	return file;
+ }

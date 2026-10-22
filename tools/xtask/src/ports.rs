@@ -65,9 +65,14 @@ pub struct Recipe {
     /// More sources, unpacked inside the port's source tree.
     #[serde(default)]
     pub extra: Vec<Extra>,
-    /// Files of the sysroot the boot archive holds, as paths beneath it.
+    /// Files of the sysroot the boot archive holds, as paths beneath it;
+    /// one that ends in `/` is a directory, with everything in it.
     #[serde(default)]
     pub image: Vec<String>,
+    /// The files of the source that hold its copyright and license
+    /// notice, for a source without a LICENSE or COPYING file.
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 /// Where a source comes from: a git repository and a commit in it.
@@ -319,7 +324,9 @@ impl Toolchain {
     /// (radix-posix(7)), with Linux's own macros taken away and Radix's
     /// given, the sysroot's headers only, and, when it links, the C
     /// library's start files, the C library and compiler-rt's builtins,
-    /// into a static position-independent program. Linux's target, rather
+    /// into a static position-independent program, without the functions
+    /// and data it never uses (each is in a section of its own, as the C
+    /// library's are, for the linker to drop). Linux's target, rather
     /// than none, makes Clang link with LLD itself (for no OS it hands
     /// linking to the host's GCC).
     fn cc_script(&self, sysroot: &Path) -> String {
@@ -345,9 +352,9 @@ set -- --target=x86_64-unknown-linux-musl \
 	-D__radix__ -D__dukovo__ \
 	--sysroot='{sysroot}' -nostdinc \
 	-isystem '{sysroot}/system/include' -isystem '{resource}/include' \
-	-fPIE "$@"
+	-fPIE -ffunction-sections -fdata-sections "$@"
 if [ -n "$link" ]; then
-	set -- -fuse-ld=lld -nostdlib -static-pie -Wl,-z,max-page-size=4096 \
+	set -- -fuse-ld=lld -nostdlib -static-pie -Wl,-z,max-page-size=4096 -Wl,--gc-sections \
 		'{lib}/Scrt1.o' '{lib}/crti.o' "$@" \
 		-L'{lib}' -lc '{builtins}' '{lib}/crtn.o'
 fi
@@ -384,9 +391,11 @@ exec '{clang}' "$@"
              cpp_ld = 'lld'\n\
              \n\
              [built-in options]\n\
-             c_args = ['-fPIC', '-D__radix__', '-D__dukovo__', '-D__unix__', '-idirafter', '{radix}']\n\
-             cpp_args = ['-fPIC', '-Werror=unknown-attributes', '-D__radix__', '-D__dukovo__', \
-             '-D__unix__', '-idirafter', '{radix}']\n\
+             c_args = ['-fPIC', '-ffunction-sections', '-fdata-sections', '-D__radix__', \
+             '-D__dukovo__', '-D__unix__', '-idirafter', '{radix}']\n\
+             cpp_args = ['-fPIC', '-ffunction-sections', '-fdata-sections', \
+             '-Werror=unknown-attributes', '-D__radix__', '-D__dukovo__', '-D__unix__', \
+             '-idirafter', '{radix}']\n\
              c_link_args = ['-nostdlib']\n\
              cpp_link_args = ['-nostdlib']\n\
              \n{host}",
@@ -481,8 +490,9 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
     Ok(Ports { toolchain, ports })
 }
 
-/// What went into a port's build: its directory's files, the toolchain,
-/// the kernel's system call headers, and the builds of the ports it needs.
+/// What went into a port's build: its directory's files, the toolchain
+/// (its version, and the wrappers and cross files ob writes), the
+/// kernel's system call headers, and the builds of the ports it needs.
 fn inputs_hash(
     ctx: &Ctx,
     dir: &Path,
@@ -492,7 +502,8 @@ fn inputs_hash(
 ) -> Result<u64> {
     let mut hasher = DefaultHasher::new();
     let headers = ctx.out.join("sysroot/system/include/radix");
-    for dir in [dir, headers.as_path()] {
+    let (wrappers, cross) = (toolchain.bin(), toolchain.dir.join("meson"));
+    for dir in [dir, wrappers.as_path(), cross.as_path(), headers.as_path()] {
         let mut files = Vec::new();
         list_files(dir, &mut files)?;
         files.sort();
@@ -649,6 +660,7 @@ fn build(
         .env("RANLIB", tool("ranlib"))
         .env("NM", tool("nm"))
         .env("STRIP", tool("strip"))
+        .env("OBJCOPY", tool("objcopy"))
         .env("CFLAGS", "-O2")
         .env("CROSS_FILE", toolchain.cross_file())
         .env("LIBC_CROSS_FILE", toolchain.libc_cross_file())
@@ -664,7 +676,9 @@ fn build(
         .map_err(|err| Error::new(format!("port {}: {err}", recipe.name)))?;
     // Nothing a recipe says goes in the image may be missing.
     for file in &recipe.image {
-        if !sysroot.join(file).is_file() {
+        let path = sysroot.join(file);
+        let there = if file.ends_with('/') { path.is_dir() } else { path.is_file() };
+        if !there {
             return Err(Error::new(format!(
                 "port {}: build.sh installed no {file} in the sysroot",
                 recipe.name
@@ -672,6 +686,27 @@ fn build(
         }
     }
     Ok(())
+}
+
+/// The files of `recipe`'s image in `sysroot`, as (path in the image,
+/// path on the host) pairs, in name order.
+pub fn image_files(recipe: &Recipe, sysroot: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut files = Vec::new();
+    for file in &recipe.image {
+        let path = sysroot.join(file);
+        if !file.ends_with('/') {
+            files.push((file.clone(), path));
+            continue;
+        }
+        let mut found = Vec::new();
+        list_files(&path, &mut found)?;
+        found.sort();
+        for host in found {
+            let inside = host.strip_prefix(sysroot).unwrap_or(&host);
+            files.push((inside.to_string_lossy().into_owned(), host));
+        }
+    }
+    Ok(files)
 }
 
 #[cfg(test)]

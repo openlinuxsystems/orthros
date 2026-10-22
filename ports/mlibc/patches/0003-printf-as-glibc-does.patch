@@ -1,0 +1,182 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Makes printf behave as glibc's where frigg and mlibc did not (found by
+comparing ~30,000 conversions with glibc, and by Lua's test suite):
+  - %p takes a width, a precision and the '-', '0', '+' and ' ' flags,
+    as %#lx does (Lua's string.format("%90p") failed an assertion);
+  - %c and %s ignore '0', '#' and (for %c) a precision instead of
+    failing an assertion;
+  - a zero with precision 0 still gets its sign or ' ' ("% .0d") and
+    '#' still gives an octal zero its 0 ("%#.0o");
+  - %lc takes a width; %C and %S are %lc and %ls;
+  - "%5%" writes a %, and an unknown conversion makes printf fail with
+    EINVAL, as in musl, instead of ending the program;
+  - %p, %C and %S work with positional arguments ("%1$p").
+Meant for upstream.
+
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -64,20 +64,32 @@
+ 	frg::expected<frg::format_error> operator() (Char t, frg::format_options opts,
+ 			frg::printf_size_mod szmod) {
+ 		switch(t) {
++		case 'C':
++			// %lc.
++			szmod = frg::printf_size_mod::long_size;
++			[[fallthrough]];
+ 		case 'c':
+ 			if (szmod == frg::printf_size_mod::long_size) {
+ 				auto c = static_cast<wchar_t>(frg::pop_arg<wint_t>(_vsp, &opts));
+ 
++				Char c_buf[MB_LEN_MAX];
++				size_t res = 1;
+ 				if constexpr (std::is_same_v<Char, char>) {
+-					char c_buf[MB_LEN_MAX];
+ 					mbstate_t shift_state = {};
+-					size_t res = wcrtomb(c_buf, c, &shift_state);
++					res = wcrtomb(c_buf, c, &shift_state);
+ 					if (res == size_t(-1))
+ 						return frg::format_error::agent_error;
+-					_formatter->append(c_buf, res);
+ 				} else {
+-					_formatter->append(c);
++					c_buf[0] = c;
+ 				}
++				// A width pads it as it does %c (in bytes, for printf).
++				if (!opts.left_justify)
++					for (int i = res; i < opts.minimum_width; i++)
++						_formatter->append(' ');
++				_formatter->append(c_buf, res);
++				if (opts.left_justify)
++					for (int i = res; i < opts.minimum_width; i++)
++						_formatter->append(' ');
+ 				break;
+ 			}
+ 			frg::do_printf_chars<Char, F>(*_formatter, t, opts, szmod, _vsp);
+@@ -85,6 +97,11 @@
+ 		case 'p': case 's':
+ 			frg::do_printf_chars<Char, F>(*_formatter, t, opts, szmod, _vsp);
+ 			break;
++		case 'S':
++			// %ls.
++			frg::do_printf_chars<Char, F>(*_formatter, 's', opts,
++					frg::printf_size_mod::long_size, _vsp);
++			break;
+ 		case 'd': case 'i': case 'o': case 'x': case 'X': case 'b': case 'B': case 'u':
+ 			frg::do_printf_ints<Char, F>(*_formatter, t, opts, szmod, _vsp, locale_opts);
+ 			break;
+@@ -138,10 +155,13 @@
+ 
+ 			break;
+ 		}
++		case '%':
++			// "%5%" and the like: glibc and musl write a %.
++			_formatter->append('%');
++			break;
+ 		default:
+-			mlibc::infoLogger() << "\e[31mmlibc: Unknown printf terminator '"
+-					<< t << "'\e[39m" << frg::endlog;
+-			__ensure(!"Illegal printf terminator");
++			// As musl does: printf fails with EINVAL.
++			return frg::format_error::invalid_format;
+ 		}
+ 
+ 		return {};
+@@ -154,7 +174,9 @@
+ 					return frg::printf_arg_type::WCHAR;
+ 				else
+ 					return frg::printf_arg_type::CHAR;
+-			case 's': case 'n':
++			case 'C':
++				return frg::printf_arg_type::WCHAR;
++			case 's': case 'S': case 'n': case 'p':
+ 				return frg::printf_arg_type::POINTER;
+ 			case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': case 'a': case 'A':
+ 				return frg::printf_arg_type::DOUBLE;
+--- a/subprojects/frigg/include/frg/printf.hpp
++++ b/subprojects/frigg/include/frg/printf.hpp
+@@ -669,22 +669,33 @@
+ 	using P = frg::FormatterPolicy<Char>;
+ 
+ 	switch(t) {
+-	case 'p':
+-		FRG_ASSERT(!opts.fill_zeros);
+-		FRG_ASSERT(!opts.left_justify);
+-		FRG_ASSERT(!opts.alt_conversion);
+-		FRG_ASSERT(opts.minimum_width == 0);
+-		sink.append(P::hexPrefix);
+-		_fmt_basics::print_int<S, uintptr_t, Char>(sink, (uintptr_t)pop_arg<void*>(vsp, &opts), 16);
++	case 'p': {
++		// As %#lx, so that a width, a precision and the flags work as in
++		// glibc, and 0x0 for a null pointer.
++		auto pointer = (uintptr_t)pop_arg<void*>(vsp, &opts);
++		if(!pointer) {
++			int length = generic_strlen(P::hexPrefix) + 1;
++			if(!opts.left_justify)
++				for(int i = length; i < opts.minimum_width; i++)
++					sink.append(' ');
++			sink.append(P::hexPrefix);
++			sink.append('0');
++			if(opts.left_justify)
++				for(int i = length; i < opts.minimum_width; i++)
++					sink.append(' ');
++			break;
++		}
++		_fmt_basics::print_int<S, uintptr_t, Char>(sink, pointer, 16, opts.minimum_width,
++				opts.precision ? *opts.precision : 1,
++				opts.fill_zeros && !opts.precision ? '0' : ' ', opts.left_justify, false,
++				opts.always_sign, opts.plus_becomes_space, false, true);
+ 		break;
++	}
+ 	case 'C':
+ 		FRG_ASSERT(szmod == printf_size_mod::long_size);
+ 		[[fallthrough]];
+ 	case 'c':
+-		FRG_ASSERT(!opts.fill_zeros);
+-		FRG_ASSERT(!opts.alt_conversion);
+-		FRG_ASSERT(szmod == printf_size_mod::default_size);
+-		FRG_ASSERT(!opts.precision);
++		// glibc ignores '0', '#' and a precision here, and so do we.
+ 		if (opts.left_justify) {
+ 			sink.append(pop_arg<char>(vsp, &opts));
+ 			for (int i = 0; i < opts.minimum_width - 1; i++)
+@@ -699,8 +710,7 @@
+ 		FRG_ASSERT(szmod == printf_size_mod::long_size);
+ 		[[fallthrough]];
+ 	case 's': {
+-		FRG_ASSERT(!opts.fill_zeros);
+-		FRG_ASSERT(!opts.alt_conversion);
++		// glibc ignores '0' and '#' here, and so do we.
+ 
+ 		if(szmod == printf_size_mod::default_size) {
+ 			if constexpr (SinkFor<S, char>) {
+@@ -760,15 +770,23 @@
+ template<typename Char, Sink S>
+ void do_printf_ints(S &sink, Char t, format_options opts,
+ 		printf_size_mod szmod, va_struct *vsp, locale_options<Char> locale_opts = {}) {
++	// A zero with precision 0 has no digits: just its sign, or the 0
++	// that '#' gives an octal number.
+ 	auto pad_to_min = [&] {
+-		bool put_sign = opts.always_sign;
++		Char text = opts.always_sign ? '+' : opts.plus_becomes_space ? ' '
++				: t == 'o' && opts.alt_conversion ? '0' : 0;
++		int length = text ? 1 : 0;
+ 
+-		if(opts.minimum_width)
+-			for (int i = 0; i < opts.minimum_width - put_sign; i++)
++		if(!opts.left_justify)
++			for (int i = length; i < opts.minimum_width; i++)
+ 				sink.append(' ');
+ 
+-		if(put_sign)
+-			sink.append('+');
++		if(text)
++			sink.append(text);
++
++		if(opts.left_justify)
++			for (int i = length; i < opts.minimum_width; i++)
++				sink.append(' ');
+ 	};
+ 
+ 	if (opts.precision)
