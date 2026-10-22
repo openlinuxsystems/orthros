@@ -1,0 +1,229 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+The environment as POSIX says: setenv and unsetenv fail a name that is
+null, empty or has '=' in it with EINVAL; setenv and putenv fail with
+ENOMEM when memory runs out and leave the environment as it was, as in
+musl (mlibc's grew a frg::vector, which cannot fail); unsetenv takes
+out every string for the name, in place, without allocating; clearenv
+leaves an empty environment that setenv can add to (libc-test's
+functional/env and regression/setenv-oom). Meant for upstream.
+
+diff -ruN a/options/ansi/generic/environment.cpp b/options/ansi/generic/environment.cpp
+--- a/options/ansi/generic/environment.cpp
++++ b/options/ansi/generic/environment.cpp
+@@ -1,13 +1,12 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <string.h>
+ 
+ #include <bits/ensure.h>
+-#include <mlibc/allocator.hpp>
+ #include <mlibc/debug.hpp>
+ 
+ #include <frg/string.hpp>
+-#include <frg/vector.hpp>
+ 
+ namespace {
+ 	char *empty_environment[] = { nullptr };
+@@ -34,68 +33,65 @@
+ 	return -1;
+ }
+ 
+-struct EnvironmentVector {
+-	EnvironmentVector() : vector{getAllocator()} {}
+-	frg::vector<char *, MemoryAllocator> vector;
+-};
+-
+-constinit mlibc::lazy_eternal<EnvironmentVector> global_vector;
+-
+-// Environment vector that is mutated by putenv() and setenv().
+-frg::vector<char *, MemoryAllocator> &get_vector() {
+-	return global_vector.get().vector;
+-}
+-
+-void update_vector() {
+-	auto &vector = get_vector();
+-	if(environ == vector.data())
+-		return;
+-
+-	// If the environ variable was changed, we copy the environment.
+-	// Note that we must only copy the pointers but not the strings themselves!
+-	vector.clear();
+-	for(size_t i = 0; environ[i]; i++)
+-		vector.push(environ[i]);
+-	vector.push(nullptr);
+-
+-	environ = vector.data();
+-}
+-
+-void assign_variable(frg::string_view name, const char *string, bool overwrite) {
+-	auto &vector = get_vector();
+-	__ensure(environ == vector.data());
++size_t environ_size() {
++	size_t size = 0;
++	while(environ[size])
++		size++;
++	return size;
++}
++
++// The environment that putenv() and setenv() add to is an array of our
++// own with room to grow; one a program points environ at is copied
++// into a new one first. Running out of memory fails the change and
++// leaves the environment as it was, as in musl.
++constinit char **owned_environ = nullptr;
++constinit size_t owned_room = 0;
++
++// Makes environ our own array, with room for one more string.
++bool own_environ() {
++	size_t size = environ_size();
++	if(environ == owned_environ && size + 2 <= owned_room)
++		return true;
++
++	size_t room = 2 * (size + 2);
++	auto array = static_cast<char **>(malloc(room * sizeof(char *)));
++	if(!array)
++		return false;
++	memcpy(array, environ, (size + 1) * sizeof(char *));
++	free(owned_environ);
++	owned_environ = array;
++	owned_room = room;
++	environ = array;
++	return true;
++}
++
++// Needs own_environ() first.
++void assign_variable(frg::string_view name, char *string, bool overwrite) {
++	__ensure(environ == owned_environ);
+ 
+ 	auto k = find_environ_index(name);
+ 	if(k != size_t(-1)) {
+ 		if(overwrite)
+-			vector[k] = const_cast<char *>(string);
++			environ[k] = string;
+ 	}else{
+-		// Last pointer of environ must always be a null delimiter.
+-		__ensure(!vector.back());
+-		vector.back() = const_cast<char *>(string);
+-		vector.push(nullptr);
++		size_t size = environ_size();
++		environ[size] = string;
++		environ[size + 1] = nullptr;
+ 	}
+-
+-	// push() might have re-allocated the vector.
+-	environ = vector.data();
+ }
+ 
++// Takes every string for the name out of environ where it is, keeping
++// the others in order, as glibc and musl do; nothing is allocated.
+ void unassign_variable(frg::string_view name) {
+-	auto &vector = get_vector();
+-	__ensure(environ == vector.data());
+-
+-	auto k = find_environ_index(name);
+-	if(k == size_t(-1))
+-		return;
+-
+-	// Last pointer of environ must always be a null delimiter.
+-	__ensure(vector.size() >= 2 && !vector.back());
+-	std::swap(vector[k], vector[vector.size() - 2]);
+-	vector.pop();
+-	vector.back() = nullptr;
+-
+-	// pop() might have re-allocated the vector.
+-	environ = vector.data();
++	size_t kept = 0;
++	for(size_t i = 0; environ[i]; i++) {
++		frg::string_view view{environ[i]};
++		size_t s = view.find_first('=');
++		if(s != size_t(-1) && view.sub_string(0, s) == name)
++			continue;
++		environ[kept++] = environ[i];
++	}
++	environ[kept] = nullptr;
+ }
+ 
+ } // anonymous namespace
+@@ -118,12 +114,14 @@
+ 	size_t s = view.find_first('=');
+ 	if(s == size_t(-1)) {
+ 		// GLIBC EXTENSION
+-		update_vector();
+ 		unassign_variable(string);
+ 		return 0;
+ 	}
+ 
+-	update_vector();
++	if(!own_environ()) {
++		errno = ENOMEM;
++		return -1;
++	}
+ 	assign_variable(view.sub_string(0, s), string, true);
+ 	return 0;
+ }
+@@ -137,6 +135,11 @@
+ }
+ 
+ int setenv(const char *name, const char *value, int overwrite) {
++	// POSIX: a null or empty name, or one with an equals sign, fails.
++	if(!name || !*name) {
++		errno = EINVAL;
++		return -1;
++	}
+ 	frg::string_view view{name};
+ 	size_t s = view.find_first('=');
+ 	if(s != size_t(-1)) {
+@@ -147,26 +150,42 @@
+ 		return -1;
+ 	}
+ 
++	if(!overwrite && find_environ_index(view) != size_t(-1))
++		return 0;
++
+ 	// We never free strings here. TODO: Reuse them?
+ 	char *string;
+-	__ensure(asprintf(&string, "%s=%s", name, value) > 0);
+-	__ensure(string);
+-
+-	update_vector();
+-	assign_variable(name, string, overwrite);
++	if(asprintf(&string, "%s=%s", name, value) < 0) {
++		errno = ENOMEM;
++		return -1;
++	}
++	if(!own_environ()) {
++		free(string);
++		errno = ENOMEM;
++		return -1;
++	}
++	assign_variable(view, string, true);
+ 	return 0;
+ }
+ 
+ int unsetenv(const char *name) {
+-	update_vector();
++	// POSIX: a null or empty name, or one with an equals sign, fails.
++	if(!name || !*name || strchr(name, '=')) {
++		errno = EINVAL;
++		return -1;
++	}
+ 	unassign_variable(name);
+ 	return 0;
+ }
+ 
+ int clearenv(void) {
+-	auto vector = get_vector();
+-	vector.clear();
+-	update_vector();
++	// Our own array, when there is one, becomes the empty environment.
++	if(owned_environ) {
++		owned_environ[0] = nullptr;
++		environ = owned_environ;
++	}else{
++		environ = empty_environment;
++	}
+ 	return 0;
+ }
+ 

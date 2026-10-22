@@ -14,14 +14,16 @@
 # Left out, with why:
 #   linux/*, linux-wrappers/*, glibc/linux-syscall: Linux's own
 #     interfaces, which the C library leaves out on Radix (ADR 0068)
-#   rtld/*, glibc/_dl_find_object: dynamic linking (bundles, later)
+#   rtld/*, glibc/_dl_find_object: they build shared libraries of their
+#     own and run from mlibc's build tree; the dynamic test checks
+#     dynamic linking instead (ADR 0071)
 #   posix/popen, posix/system, posix/wordexp, posix/posix_spawn: they
 #     need /bin/sh (Phase 9)
 #   posix/getaddrinfo, gethostbyname, getnameinfo, getservbyname,
 #     getservbyport, protoent, accept4, cmsg, if_indextoname,
 #     if_nameindex: networking (Phase 12)
 #   posix/sysv_shm, sysv_msg, sysv_sem: System V IPC, which Radix does
-#     not have
+#     not have (radix-posix(7))
 #   posix/pwd, posix/grp, glibc/shadow, glibc/getgrouplist,
 #     posix/getlogin_r: the user database (Phase 13)
 #   ansi/tz, glibc/error, glibc/error_at_line: mlibc runs them through a
@@ -35,10 +37,12 @@
 #     strcoll_l, strxfrm_l, wcscoll_l, wcsxfrm_l: they need en_US or de_DE;
 #     the system has only C and C.UTF-8 until the locale data of Phase 12
 #     (ADR 0073)
-#   bsd/sbrk: Radix has no program break; malloc maps memory (ADR 0068)
+#   bsd/sbrk: Radix has no program break; malloc maps memory
+#     (radix-posix(7))
 #   posix/access: file modes and permissions come with users (Phase 13)
 #   posix/realpath: symbolic links come with Btrfs (Phase 10)
-#   posix/aio: POSIX asynchronous I/O; Radix's own is its rings (ADR 0068)
+#   posix/aio: POSIX asynchronous I/O; Radix's own is its rings
+#     (radix-posix(7))
 set -eu
 
 out="$SYSROOT/system/tests/libc"

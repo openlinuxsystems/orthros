@@ -9,7 +9,8 @@
 // pass when they do not. One program rather than 160 keeps the boot
 // archive small: each would carry its own copy of the C library. The one
 // test that is a program of its own (its main NULL in TESTS) is beside
-// run, and runs as itself.
+// run, and runs as itself. ports/libc-test builds libc-test's tests
+// with it too, with SUITE "libc-test".
 
 #include <errno.h>
 #include <fcntl.h>
@@ -23,7 +24,12 @@
 
 #include "tests.h"
 
-#define OUTPUT "/tmp/libc-test.out"
+// What the runner's lines start with.
+#ifndef SUITE
+#define SUITE "libc"
+#endif
+
+#define OUTPUT "/tmp/" SUITE ".out"
 
 // How long a test may take, in seconds, before it is ended.
 enum { LIMIT = 120 };
@@ -60,7 +66,7 @@ static void show_output(const char *name) {
 	buffer[got] = 0;
 	fclose(file);
 	for(char *line = strtok(buffer, "\n"); line; line = strtok(NULL, "\n"))
-		printf("libc: %s: | %s\n", name, line);
+		printf(SUITE ": %s: | %s\n", name, line);
 }
 
 // Runs `test` in a child, as `self name` or as the program beside self;
@@ -70,7 +76,7 @@ static int run(const char *self, const struct test *test) {
 	fflush(stdout);
 	pid_t pid = fork();
 	if(pid < 0) {
-		printf("libc: FAILED: %s: fork: %s\n", name, strerror(errno));
+		printf(SUITE ": FAILED: %s: fork: %s\n", name, strerror(errno));
 		return 0;
 	}
 	if(pid == 0) {
@@ -103,7 +109,7 @@ static int run(const char *self, const struct test *test) {
 	} while(got < 0 && errno == EINTR);
 	alarm(0);
 	if(got != pid) {
-		printf("libc: FAILED: %s: waitpid: %s\n", name, strerror(errno));
+		printf(SUITE ": FAILED: %s: waitpid: %s\n", name, strerror(errno));
 		return 0;
 	}
 	int exited = WIFEXITED(status);
@@ -112,13 +118,13 @@ static int run(const char *self, const struct test *test) {
 	if(passed)
 		return 1;
 	if(timed_out)
-		printf("libc: FAILED: %s took more than %d seconds\n", name, LIMIT);
+		printf(SUITE ": FAILED: %s took more than %d seconds\n", name, LIMIT);
 	else if(must_fail(name))
-		printf("libc: FAILED: %s passed, but should have failed\n", name);
+		printf(SUITE ": FAILED: %s passed, but should have failed\n", name);
 	else if(exited)
-		printf("libc: FAILED: %s exited with %d\n", name, WEXITSTATUS(status));
+		printf(SUITE ": FAILED: %s exited with %d\n", name, WEXITSTATUS(status));
 	else if(WIFSIGNALED(status))
-		printf("libc: FAILED: %s was ended by signal %d (%s)\n", name, WTERMSIG(status),
+		printf(SUITE ": FAILED: %s was ended by signal %d (%s)\n", name, WTERMSIG(status),
 				strsignal(WTERMSIG(status)));
 	show_output(name);
 	return 0;
@@ -149,9 +155,9 @@ int main(int argc, char **argv) {
 	for(size_t i = 0; i < TEST_COUNT; i++)
 		passed += run(argv[0], &TESTS[i]);
 	unlink(OUTPUT);
-	printf("libc: %zu of %zu tests passed\n", passed, (size_t)TEST_COUNT);
+	printf(SUITE ": %zu of %zu tests passed\n", passed, (size_t)TEST_COUNT);
 	if(passed == TEST_COUNT)
-		printf("libc: every check passed\n");
+		printf(SUITE ": every check passed\n");
 	size_t failed = TEST_COUNT - passed;
 	return failed > 125 ? 125 : (int)failed;
 }

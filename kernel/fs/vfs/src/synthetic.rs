@@ -52,7 +52,15 @@ impl Generated {
 impl Node for Generated {
     fn stat(&self) -> Stat {
         // As on Linux, a generated file's size is unknown until read.
-        Stat { kind: Kind::File, size: 0, allocated: 0, id: self.id, created: 0, modified: 0 }
+        Stat {
+            kind: Kind::File,
+            size: 0,
+            allocated: 0,
+            id: self.id,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+        }
     }
 
     fn open(&self, _this: &NodeRef) -> Result<NodeRef> {
@@ -94,6 +102,7 @@ impl Node for Snapshot {
             id: self.id,
             created: self.taken,
             modified: self.taken,
+            accessed: self.taken,
         }
     }
 
@@ -174,7 +183,15 @@ fn kind_of(node: &NodeRef) -> Kind {
 
 impl Node for FixedDir {
     fn stat(&self) -> Stat {
-        Stat { kind: Kind::Directory, size: 0, allocated: 0, id: self.id, created: 0, modified: 0 }
+        Stat {
+            kind: Kind::Directory,
+            size: 0,
+            allocated: 0,
+            id: self.id,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+        }
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
@@ -237,7 +254,15 @@ impl ListedDir {
 
 impl Node for ListedDir {
     fn stat(&self) -> Stat {
-        Stat { kind: Kind::Directory, size: 0, allocated: 0, id: self.id, created: 0, modified: 0 }
+        Stat {
+            kind: Kind::Directory,
+            size: 0,
+            allocated: 0,
+            id: self.id,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+        }
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
@@ -271,7 +296,7 @@ impl Node for ListedDir {
 }
 
 fn device_stat(id: u64, kind: Kind, size: u64) -> Stat {
-    Stat { kind, size, allocated: 0, id, created: 0, modified: 0 }
+    Stat { kind, size, allocated: 0, id, created: 0, modified: 0, accessed: 0 }
 }
 
 /// `/dev/null`: reads nothing, swallows writes.

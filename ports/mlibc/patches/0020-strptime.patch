@@ -1,0 +1,285 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+strptime as POSIX says (libc-test's functional/strptime): %c, %x and
+%X read the locale's formats, %E and %O modifiers are taken, %n and %t
+take any white space, none included, %U, %W, %V, %g and %G are read,
+%z takes Z and +hh, +hhmm and +hh:mm, %Z a zone name, and %s seconds
+since the Epoch. mlibc's aborted the program on most of these. Meant
+for upstream.
+
+diff -ruN a/options/posix/generic/time.cpp b/options/posix/generic/time.cpp
+--- a/options/posix/generic/time.cpp
++++ b/options/posix/generic/time.cpp
+@@ -2,6 +2,7 @@
+ #include <errno.h>
+ #include <langinfo.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+ 
+@@ -136,12 +137,29 @@
+ 		return true;
+ 	};
+ 
++	// Recurses for a directive that stands for others (%D, %c...).
++	auto matchFormat = [&] (const char *sub) -> bool {
++		size_t pre_fi = state->format_index;
++		state->format_index = 0;
++		char *result = strptime_internal(input, sub, tm, state);
++		state->format_index = pre_fi;
++		return result != nullptr;
++	};
++
++	// A number of at most `digits` digits, which is read but changes
++	// nothing in tm (%U, %W, %V, %g and %G, as in glibc and musl).
++	auto skipNumber = [&] (int digits) -> bool {
++		int product = 0, n = 0;
++		sscanf(&input[state->input_index], "%d%n", &product, &n);
++		if(n == 0 || digits < n)
++			return false;
++		state->input_index += n;
++		return true;
++	};
++
+ 	while(isspace(input[state->input_index]))
+ 		state->input_index++;
+ 
+-	if(input[state->input_index] == '\0')
+-		return nullptr;
+-
+ 	while(format[state->format_index] != '\0'){
+ 		if(format[state->format_index] != '%'){
+ 			if(isspace(format[state->format_index])){
+@@ -156,6 +174,11 @@
+ 			continue;
+ 		}
+ 		state->format_index++;
++		// %E and %O ask for the locale's other forms, which the C and
++		// C.UTF-8 locales do not have: the directive after them is read
++		// as itself, as glibc does.
++		if(format[state->format_index] == 'E' || format[state->format_index] == 'O')
++			state->format_index++;
+ 		switch(format[state->format_index]){
+ 			case '%':
+ 				if(input[state->input_index++] != '%')
+@@ -177,8 +200,8 @@
+ 				break;
+ 			}
+ 			case 'c':
+-				__ensure(!"strptime() %c directive unimplemented.");
+-				__builtin_unreachable();
++				if(!matchFormat(nl_langinfo(D_T_FMT)))
++					return nullptr;
+ 				break;
+ 			case 'C': {
+ 				int product = 0, n = 0;
+@@ -236,12 +259,9 @@
+ 			}
+ 			case 'n':
+ 			case 't': {
+-				size_t n = 0;
+-				while(isspace(input[state->input_index++]))
+-					n++;
+-				if(n == 0)
+-					return nullptr;
+-				state->input_index--;
++				// Any white space, none included.
++				while(isspace(input[state->input_index]))
++					state->input_index++;
+ 				break;
+ 			}
+ 			case 'p': {
+@@ -260,7 +280,8 @@
+ 					state->input_index += len;
+ 					break;
+ 				}
+-				break;
++				// Neither AM nor PM.
++				return nullptr;
+ 			}
+ 			case 'r': {  //equivalent to `%I:%M:%S %p`
+ 				size_t pre_fi = state->format_index;
+@@ -301,8 +322,15 @@
+ 				break;
+ 			}
+ 			case 'U':
+-				__ensure(!"strptime() %U directive unimplemented.");
+-				__builtin_unreachable();
++			case 'W':
++			case 'V':
++			case 'g':
++				if(!skipNumber(2))
++					return nullptr;
++				break;
++			case 'G':
++				if(!skipNumber(4))
++					return nullptr;
+ 				break;
+ 			case 'w': {
+ 				int product = 0, n = 0;
+@@ -314,17 +342,13 @@
+ 				state->has_day_of_week = true;
+ 				break;
+ 			}
+-			case 'W':
+-				__ensure(!"strptime() %W directive unimplemented.");
+-				__builtin_unreachable();
+-				break;
+ 			case 'x':
+-				__ensure(!"strptime() %x directive unimplemented.");
+-				__builtin_unreachable();
++				if(!matchFormat(nl_langinfo(D_FMT)))
++					return nullptr;
+ 				break;
+ 			case 'X':
+-				__ensure(!"strptime() %X directive unimplemented.");
+-				__builtin_unreachable();
++				if(!matchFormat(nl_langinfo(T_FMT)))
++					return nullptr;
+ 				break;
+ 			case 'y': {
+ 				int product = 0, n = 0;
+@@ -363,90 +387,66 @@
+ 				state->format_index = pre_fi;
+ 				break;
+ 			}
+-			case 'g':
+-				__ensure(!"strptime() %g directive unimplemented.");
+-				__builtin_unreachable();
+-				break;
+-			case 'G':
+-				__ensure(!"strptime() %G directive unimplemented.");
+-				__builtin_unreachable();
+-				break;
+ 			case 'u': {
+ 				if(!matchNumericRange(1, 7, tm->tm_wday, nullptr))
+ 					return nullptr;
+ 				tm->tm_wday--;
+ 				break;
+ 			}
+-			case 'V':
+-				__ensure(!"strptime() %V directive unimplemented.");
+-				__builtin_unreachable();
+-				break;
+-			case 'z':
+-				__ensure(!"strptime() %z directive unimplemented.");
+-				__builtin_unreachable();
++			case 'z': {
++				// Z, or an offset from UTC as +hh, +hhmm or +hh:mm, as in
++				// glibc; it sets tm_gmtoff.
++				const char *at = &input[state->input_index];
++				if(*at == 'Z') {
++					tm->tm_gmtoff = 0;
++					state->input_index++;
++					break;
++				}
++				if(*at != '+' && *at != '-')
++					return nullptr;
++				bool negative = *at++ == '-';
++				if(!isdigit(at[0]) || !isdigit(at[1]))
++					return nullptr;
++				long hours = (at[0] - '0') * 10 + (at[1] - '0');
++				long minutes = 0;
++				at += 2;
++				if(*at == ':' && isdigit(at[1]) && isdigit(at[2])) {
++					minutes = (at[1] - '0') * 10 + (at[2] - '0');
++					at += 3;
++				} else if(isdigit(at[0]) && isdigit(at[1])) {
++					minutes = (at[0] - '0') * 10 + (at[1] - '0');
++					at += 2;
++				}
++				if(minutes > 59)
++					return nullptr;
++				long offset = hours * 3600 + minutes * 60;
++				tm->tm_gmtoff = negative ? -offset : offset;
++				state->input_index = at - input;
+ 				break;
++			}
+ 			case 'Z':
+-				__ensure(!"strptime() %Z directive unimplemented.");
+-				__builtin_unreachable();
++				// A time zone's name, which is read but changes nothing,
++				// as in glibc.
++				while(input[state->input_index] && !isspace(input[state->input_index]))
++					state->input_index++;
++				break;
++			case 's': { //end of GNU extensions
++				// Seconds since the Epoch, as local time.
++				const char *at = &input[state->input_index];
++				char *end;
++				errno = 0;
++				long long seconds = strtoll(at, &end, 10);
++				if(end == at || errno)
++					return nullptr;
++				time_t t = seconds;
++				if(!localtime_r(&t, tm))
++					return nullptr;
++				state->input_index += end - at;
++				state->has_year = state->has_month = state->has_day_of_month = true;
++				state->has_day_of_year = state->has_day_of_week = true;
++				state->has_century = state->full_year_given = true;
++				state->century = (tm->tm_year + 1900) / 100;
+ 				break;
+-			case 's': //end of GNU extensions
+-				__ensure(!"strptime() %s directive unimplemented.");
+-				__builtin_unreachable();
+-				break;
+-			case 'E': { //locale-dependent date & time representation
+-				__ensure(!"strptime() %E* directives unimplemented.");
+-				__builtin_unreachable();
+-				/*
+-				state->format_index++;
+-				switch(format[state->format_index]){
+-					case 'c':
+-						break;
+-					case 'C':
+-						break;
+-					case 'x':
+-						break;
+-					case 'X':
+-						break;
+-					case 'y':
+-						break;
+-					case 'Y':
+-						break;
+-					default:
+-						return NULL;
+-				}
+-				*/
+-			}
+-			case 'O': { //locale-dependent numeric symbols
+-				__ensure(!"strptime() %O* directives unimplemented.");
+-				__builtin_unreachable();
+-				/*
+-				state->format_index++;
+-				switch(format[state->format_index]){
+-					case 'd':
+-					case 'e':
+-						break;
+-					case 'H':
+-						break;
+-					case 'I':
+-						break;
+-					case 'm':
+-						break;
+-					case 'M':
+-						break;
+-					case 'S':
+-						break;
+-					case 'U':
+-						break;
+-					case 'w':
+-						break;
+-					case 'W':
+-						break;
+-					case 'y':
+-						break;
+-					default:
+-						return NULL;
+-				}
+-				*/
+ 			}
+ 			default:
+ 				return nullptr;

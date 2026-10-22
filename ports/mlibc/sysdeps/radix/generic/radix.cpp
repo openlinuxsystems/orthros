@@ -163,7 +163,7 @@ int resolve(int dirfd, const char *path, Path *out) {
 		return ENAMETOOLONG;
 	if(path[0] != '/' && dirfd != AT_FDCWD) {
 		// Beneath the directory `dirfd` holds, which the kernel resolves:
-		// `..` stops at that directory (docs/design/posix.md).
+		// `..` cannot climb above that directory (docs/design/posix.md).
 		out->dir = slot_of(dirfd);
 		if(out->dir == NO_SLOT)
 			return EBADF;
@@ -245,11 +245,11 @@ void forget_pid() {
 }
 
 void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocated, uint64_t id,
-		uint64_t created, uint64_t modified) {
+		uint64_t created, uint64_t modified, uint64_t accessed, uint64_t mount) {
 	memset(st, 0, sizeof(*st));
-	// One filesystem number for all: ids are unique on a filesystem, and
-	// the kernel does not say which one yet (docs/design/posix.md).
-	st->st_dev = 1;
+	// A file's number is unique on its filesystem, and the mount's number
+	// tells the filesystems apart.
+	st->st_dev = mount;
 	st->st_ino = id;
 	switch(kind) {
 	case RADIX_FILE_KIND_DIRECTORY:
@@ -284,9 +284,11 @@ void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocate
 		ts.tv_nsec = ns % 1000000000;
 		return ts;
 	};
+	// The kernel keeps no time of the last change to a file's status, so
+	// st_ctim is the last change to its contents (docs/design/posix.md).
 	st->st_mtim = at(modified);
 	st->st_ctim = at(modified);
-	st->st_atim = at(modified);
+	st->st_atim = at(accessed);
 	(void)created;
 }
 

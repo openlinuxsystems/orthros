@@ -92,6 +92,11 @@ pub struct Stat {
     pub created: u64,
     /// When it last changed, in nanoseconds since 1970 (0 if unknown).
     pub modified: u64,
+    /// When it was last read: when it was made, unless a program set it
+    /// (0 if unknown).
+    pub accessed: u64,
+    /// The number of the mount it is on, unique since boot.
+    pub mount: u64,
 }
 
 /// What `info` says of a directory's filesystem.
@@ -107,6 +112,11 @@ pub struct Info {
     pub blocks: u64,
     /// Its free blocks.
     pub free: u64,
+    /// How many files and directories it can hold, or zero if it keeps no
+    /// count.
+    pub files: u64,
+    /// How many more it can take.
+    pub free_files: u64,
 }
 
 /// An entry of a directory.
@@ -247,6 +257,8 @@ impl Dir {
             id: s.id,
             created: s.created,
             modified: s.modified,
+            accessed: s.accessed,
+            mount: s.mount,
         })
     }
 
@@ -314,6 +326,8 @@ impl Dir {
             block_size: i.block_size,
             blocks: i.blocks,
             free: i.free,
+            files: i.files,
+            free_files: i.free_files,
         })
     }
 }
@@ -393,6 +407,8 @@ impl File {
             id: s.id,
             created: s.created,
             modified: s.modified,
+            accessed: s.accessed,
+            mount: s.mount,
         })
     }
 

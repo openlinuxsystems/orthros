@@ -179,7 +179,7 @@ template<typename Tag>
 using Sysdeps = SysdepOf<RadixSysdepTags, Tag>;
 
 struct SysdepTraits {
-	// No rtnetlink: networking comes in Phase 10.
+	// No rtnetlink: networking comes in Phase 12.
 	static constexpr bool usesRtNetlink = false;
 };
 

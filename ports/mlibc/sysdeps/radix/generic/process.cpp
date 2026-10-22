@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/sigset.hpp>
 #include <mlibc/tcb.hpp>
 #include <pthread.h>
 #include <sched.h>
@@ -669,7 +670,7 @@ void *run_timer_thread(void *argument) {
 	auto timer = static_cast<TimerThread *>(argument);
 	sigset_t set;
 	sigemptyset(&set);
-	sigaddset(&set, SIGTIMER);
+	mlibc::sigaddset_internal(&set, SIGTIMER);
 	for(;;) {
 		siginfo_t info;
 		int signal;
@@ -707,14 +708,15 @@ int start_timer_thread(const struct sigevent *event, TimerThread **made, pid_t *
 		pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	// It starts with every signal blocked: it takes SIGTIMER alone, and
-	// only by waiting for it.
+	// only by waiting for it. sigfillset leaves the C library's own
+	// signals out, so the set is filled by hand.
 	sigset_t all;
 	sigset_t old;
-	sigfillset(&all);
-	pthread_sigmask(SIG_BLOCK, &all, &old);
+	memset(&all, 0xff, sizeof(all));
+	sysdep<ThreadSigmask>(SIG_BLOCK, &all, &old);
 	pthread_t handle;
 	int e = pthread_create(&handle, &attr, run_timer_thread, timer);
-	pthread_sigmask(SIG_SETMASK, &old, nullptr);
+	sysdep<ThreadSigmask>(SIG_SETMASK, &old, nullptr);
 	if(!event->sigev_notify_attributes)
 		pthread_attr_destroy(&attr);
 	if(e) {

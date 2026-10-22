@@ -34,6 +34,10 @@ struct Shared {
     max: u64,
     /// The bytes they hold.
     used: AtomicU64,
+    /// The most files and directories it may hold, its root included.
+    max_files: u64,
+    /// The files and directories it holds.
+    files: AtomicU64,
     next_id: AtomicU64,
     /// Held while names are made, removed or moved, so that a move sees
     /// both directories unchanged and two moves cannot make a loop. Only
@@ -132,6 +136,8 @@ enum Body {
 pub struct TmpNode {
     id: u64,
     created: u64,
+    /// When it was last read, as `set_times` set it; reads leave it.
+    accessed: AtomicU64,
     shared: KArc<Shared>,
     /// The directory it is in; none for the root, or once it is removed.
     parent: Mutex<Option<Weak<TmpNode, Alloc>>>,
@@ -141,11 +147,15 @@ pub struct TmpNode {
 }
 
 impl Tmpfs {
-    /// An empty tmpfs whose files may hold `max` bytes together.
-    pub fn new(max: u64) -> Result<KArc<Tmpfs>> {
+    /// An empty tmpfs whose files may hold `max` bytes together, and
+    /// which may hold `max_files` files and directories, its root
+    /// included.
+    pub fn new(max: u64, max_files: u64) -> Result<KArc<Tmpfs>> {
         let shared = mem::arc(Shared {
             max,
             used: AtomicU64::new(0),
+            max_files,
+            files: AtomicU64::new(0),
             next_id: AtomicU64::new(2),
             namespace: Mutex::new(()),
         })?;
@@ -173,6 +183,11 @@ impl FileSystem for Tmpfs {
             block_size: page as u32,
             blocks: self.shared.max / page,
             free: self.shared.max.saturating_sub(self.shared.used.load(Ordering::Relaxed)) / page,
+            files: self.shared.max_files,
+            free_files: self
+                .shared
+                .max_files
+                .saturating_sub(self.shared.files.load(Ordering::Relaxed)),
         }
     }
 }
@@ -187,9 +202,18 @@ impl TmpNode {
             }
             _ => return Err(Error::NotSupported),
         };
+        // Each counts against the limit until it is dropped, as with
+        // Linux's nr_inodes, so that empty files cannot use up the heap.
+        shared
+            .files
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |files| {
+                (files < shared.max_files).then_some(files + 1)
+            })
+            .map_err(|_| Error::NoSpace)?;
         let node = mem::arc(TmpNode {
             id,
             created,
+            accessed: AtomicU64::new(created),
             shared,
             parent: Mutex::new(None),
             me: radix_sync::Once::new(),
@@ -267,6 +291,7 @@ impl Backing for Charge<'_> {
 
 impl Drop for TmpNode {
     fn drop(&mut self) {
+        self.shared.files.fetch_sub(1, Ordering::Relaxed);
         if let Body::File { charged, .. } = &self.body {
             self.shared.used.fetch_sub(charged.load(Ordering::Relaxed), Ordering::Relaxed);
         }
@@ -280,7 +305,15 @@ impl Node for TmpNode {
             Body::File { cache, .. } => cache.status(),
         };
         let allocated = (pages * radix_block::PAGE_SIZE) as u64;
-        Stat { kind: self.kind(), size, allocated, id: self.id, created: self.created, modified }
+        Stat {
+            kind: self.kind(),
+            size,
+            allocated,
+            id: self.id,
+            created: self.created,
+            modified,
+            accessed: self.accessed.load(Ordering::Relaxed),
+        }
     }
 
     fn kind(&self) -> Kind {
@@ -398,6 +431,19 @@ impl Node for TmpNode {
     fn set_size(&self, size: u64) -> Result<()> {
         let (cache, backing) = self.file()?;
         cache.set_size(size, &backing)
+    }
+
+    fn set_times(&self, accessed: Option<u64>, modified: Option<u64>) -> Result<()> {
+        if let Some(accessed) = accessed {
+            self.accessed.store(accessed, Ordering::Relaxed);
+        }
+        if let Some(modified) = modified {
+            match &self.body {
+                Body::Dir(dir) => dir.lock().modified = modified,
+                Body::File { cache, .. } => cache.set_modified(modified),
+            }
+        }
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {

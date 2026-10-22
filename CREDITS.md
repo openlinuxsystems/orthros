@@ -30,13 +30,21 @@ project's design, it adds the project here (see
 | [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel and the user programs | MIT OR Apache-2.0 |
 | [GNU GRUB](https://www.gnu.org/software/grub/) 2 | The boot loader, as a separate program that loads the kernel | GPL-3.0-or-later |
 | [Intel microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) | CPU microcode, only in local builds that ask for it ([ADR 0007](docs/adr/0007-closed-firmware-separate-package.md)) | Intel's redistribution license |
+| [mlibc](https://github.com/managarm/mlibc) 7.0.0 by the Managarm project | The C library and dynamic linker (`/system/lib/libc.so`, `ld.so` and the static `libc.a`), with Radix's system calls added in `ports/mlibc/sysdeps/radix` and the fixes in `ports/mlibc/patches` ([ADR 0068](docs/adr/0068-mlibc-is-the-c-library.md)); its own tests run in the `posix` boot test | MIT |
+| [frigg](https://github.com/managarm/frigg) b0dbea66bc19 and [libsmarter](https://github.com/managarm/libsmarter) f7d061bc37d4 by the Managarm project | Template libraries mlibc is built on; frigg's printf and formatting headers as its commit b9ce1199489f has them (commits by lzcunt and no92) | MIT |
+| [musl](https://musl.libc.org/) 1.2.5 by Rich Felker and contributors | Exact floating-point formatting and scanning, `strftime` and the calendar conversions of `mktime`, `gmtime` and `localtime`, `scanf`'s conversions and integers, `inet_pton` and `inet_ntop`, and the `rand48` family, in `ports/mlibc/musl` and the patches ([ADR 0072](docs/adr/0072-exact-numbers-and-times-in-the-c-library.md)) | MIT |
+| [GNU C Library](https://www.gnu.org/software/libc/) 2.42 locale data | The `C.UTF-8` locale, compiled from glibc's tables of Unicode 16 ([ADR 0073](docs/adr/0073-c-utf-8-locale.md)) | Unicode-3.0 |
+| [compiler-rt](https://compiler-rt.llvm.org/) builtins from LLVM 20 | Helper functions every C program links | Apache-2.0 WITH LLVM-exception |
+| [Rust](https://www.rust-lang.org/) `std`, `panic_unwind` and `unwind`, with the crates they use: [libc](https://github.com/rust-lang/libc) 0.2.189 (patched for Radix), [unwinding](https://github.com/nbdd0121/unwinding) 0.2.10 by Gary Guo, [addr2line](https://github.com/gimli-rs/addr2line), [gimli](https://github.com/gimli-rs/gimli), [object](https://github.com/gimli-rs/object), [miniz_oxide](https://github.com/Frommi/miniz_oxide), [adler2](https://github.com/oyvindln/adler2), [hashbrown](https://github.com/rust-lang/hashbrown), [memchr](https://github.com/BurntSushi/memchr) by Andrew Gallant, [rustc-demangle](https://github.com/rust-lang/rustc-demangle), [cfg-if](https://github.com/rust-lang/cfg-if) and `std_detect` | Rust's standard library for programs on Radix ([ADR 0070](docs/adr/0070-rust-standard-library-port.md)) | MIT OR Apache-2.0 (memchr: Unlicense OR MIT; miniz_oxide also Zlib; adler2 also 0BSD) |
+| [Lua](https://www.lua.org/) 5.4.7 and its test suite, by Roberto Ierusalimschy, Luiz Henrique de Figueiredo and Waldemar Celes at PUC-Rio | A real C program to test the C library with, in the `posix` boot test | MIT |
+| [libc-test](https://wiki.musl-libc.org/libc-test.html) b7ec467969a5 by Rich Felker, Szabolcs Nagy, Kirill Ternovsky, John Spencer, Jens Gustedt, Alexander Monakov and Julien Ramseier, from Khem Raj's mirror (github.com/kraj/libc-test) | The functional and regression tests of C libraries, which run in the `posix` boot test and found the fixes in `ports/mlibc/patches` 0013 to 0022; its math tests, whose vectors from crlibm are GPL-2.0, are left out | MIT |
 
 ## Rust crates
 
 The build tool (`tools/xtask`), the Linux benchmark (`tools/linux-bench`)
 and the kernel's host tests use these crates from
 [crates.io](https://crates.io/). None of them is linked into the kernel or
-the user programs.
+the user programs, except as Rust's standard library uses them (above).
 
 | Crate | Used by | License |
 | --- | --- | --- |
@@ -67,6 +75,10 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue, and reading and writing the FAT disks of the `storage` boot test on the host | GPL-3.0-or-later |
 | [dosfstools](https://github.com/dosfstools/dosfstools) (`mkfs.fat`, `fsck.fat`) | Making the FAT volumes Radix's FAT tests and the `storage` boot test use, and checking what Radix wrote to them | GPL-3.0-or-later |
+| [Clang, LLD and LLVM](https://llvm.org/) 20 | Building the C library, its ports and C programs for Radix ([ADR 0069](docs/adr/0069-clang-toolchain-and-ports.md)) | Apache-2.0 WITH LLVM-exception |
+| [Meson](https://mesonbuild.com/) and [Ninja](https://ninja-build.org/) | Building mlibc | Apache-2.0 |
+| [freestnd-cxx-hdrs](https://github.com/osdev0/freestnd-cxx-hdrs) 14.3.0 (libstdc++'s freestanding headers from GCC 14), by the osdev0 contributors and the GCC project | The C++ headers mlibc is compiled with; nothing of them reaches an image | GPL-3.0-or-later WITH GCC-exception-3.1 |
+| The [GNU C Library](https://www.gnu.org/software/libc/)'s `localedef` on the build machine, and glibc 2.39's `printf` | Compiling the `C.UTF-8` locale, and the expected results of the C library's `printf` tests | LGPL-2.1-or-later |
 | [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store, scheduling policy and IPC arithmetic | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
 | [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler, idle wake-up, endpoint, channel and FAT cluster models | MIT |
 | [mdBook](https://github.com/rust-lang/mdBook) 0.4.52 | The handbook | MPL-2.0 |
@@ -260,6 +272,20 @@ are grateful.
   ([ADR 0059](docs/adr/0059-file-operations-fast-paths.md)).
   No code is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
+  Radix's POSIX layer follows Linux's interface wherever programs see
+  it, so that the C library's and Rust's Linux code serves: its signal
+  numbers and x86-64 signal frame, its `struct termios`, terminal
+  `ioctl` numbers and the N_TTY line discipline's behaviour, its clocks,
+  resource limits with their defaults, nice levels and status words,
+  and its open file description locks, with its limit on how far
+  deadlock detection follows waiting owners
+  ([ADR 0062](docs/adr/0062-signals-in-the-kernel.md) to
+  [ADR 0075](docs/adr/0075-advisory-file-locks.md)). No code is taken:
+  the kernel's code is written from Linux's documentation and man pages
+  and checked against Linux by the C tests.
+- Rust's `std` for the GNU Hurd, whose `stat` fields ours takes, and for
+  Xous, which unwinds with the `unwinding` crate as ours does
+  ([ADR 0070](docs/adr/0070-rust-standard-library-port.md)).
 - The Rust compiler's performance suite
   ([rustc-perf](https://github.com/rust-lang/rustc-perf)) and
   [SQLite](https://sqlite.org/cpu.html), which track performance by
@@ -273,7 +299,8 @@ are grateful.
   ([ADR 0046](docs/adr/0046-performance-gate-on-the-fastest-of-three-runs.md)).
 - [Redox](https://www.redox-os.org/), [SerenityOS](https://serenityos.org/)
   and [Managarm](https://managarm.org/): their histories informed the
-  roadmap's sizing.
+  roadmap's sizing. Managarm's mlibc is our C library, and its system
+  layers for other kernels were the model for Radix's.
 
 The roadmap names more projects whose ideas later phases will follow, such as
 macOS, Windows, Ubuntu, GNOME, Hyprland and TMOG. They are added here when

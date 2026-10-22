@@ -157,7 +157,8 @@ int stat_fd(int fd, struct stat *st) {
 	struct radix_file_stat_results f;
 	uint64_t status = radix_file_stat(slot, &f);
 	if(!status) {
-		radix::fill_stat(st, f.kind, f.size, f.allocated, f.id, f.created, f.modified);
+		radix::fill_stat(st, f.kind, f.size, f.allocated, f.id, f.created, f.modified, f.accessed,
+				f.mount);
 		return 0;
 	}
 	if(!other_kind(status))
@@ -167,7 +168,8 @@ int stat_fd(int fd, struct stat *st) {
 	status = radix_directory_stat(slot, ".", 1, &d);
 	if(status)
 		return radix::to_errno(status);
-	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified);
+	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
+			d.mount);
 	return 0;
 }
 
@@ -177,7 +179,8 @@ int stat_path(const radix::Path &path, struct stat *st) {
 	uint64_t status = radix_directory_stat(path.dir, path.text, path.len, &d);
 	if(status)
 		return radix::to_errno(status);
-	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified);
+	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
+			d.mount);
 	return 0;
 }
 
@@ -755,6 +758,9 @@ int Sysdeps<Fstatvfs>::operator()(int fd, struct statvfs *out) {
 	out->f_blocks = r.blocks;
 	out->f_bfree = r.free;
 	out->f_bavail = r.free;
+	out->f_files = r.files;
+	out->f_ffree = r.free_files;
+	out->f_favail = r.free_files;
 	out->f_namemax = NAME_MAX;
 	if(r.flags & RADIX_MOUNT_FLAGS_READ_ONLY)
 		out->f_flag |= ST_RDONLY;
@@ -985,19 +991,56 @@ int Sysdeps<Fchownat>::operator()(int dirfd, const char *pathname, uid_t owner, 
 	return stat_path(resolved, &st);
 }
 
+namespace {
+
+// A time of utimensat's as set_times takes it: TIME_OMIT, TIME_NOW, or
+// nanoseconds since 1970, which cannot be before 1970 or past 2554.
+int kernel_time(const struct timespec &ts, uint64_t *out) {
+	if(ts.tv_nsec == UTIME_OMIT) {
+		*out = RADIX_FILE_TIME_OMIT;
+		return 0;
+	}
+	if(ts.tv_nsec == UTIME_NOW) {
+		*out = RADIX_FILE_TIME_NOW;
+		return 0;
+	}
+	if(ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000 || ts.tv_sec < 0)
+		return EINVAL;
+	uint64_t nsec = ts.tv_nsec;
+	if(static_cast<uint64_t>(ts.tv_sec) > (RADIX_FILE_TIME_NOW - 1 - nsec) / 1000000000)
+		return EINVAL;
+	*out = static_cast<uint64_t>(ts.tv_sec) * 1000000000 + nsec;
+	return 0;
+}
+
+} // namespace
+
 int Sysdeps<Utimensat>::operator()(int dirfd, const char *pathname, const struct timespec times[2],
 		int flags) {
-	(void)times;
+	// There are no symbolic links to not follow.
 	(void)flags;
-	// The kernel sets a file's times itself, and takes none from programs
-	// yet (docs/design/posix.md).
-	struct stat st;
-	if(!pathname)
-		return stat_fd(dirfd, &st);
+	uint64_t accessed = RADIX_FILE_TIME_NOW, modified = RADIX_FILE_TIME_NOW;
+	if(times) {
+		if(int e = kernel_time(times[0], &accessed); e)
+			return e;
+		if(int e = kernel_time(times[1], &modified); e)
+			return e;
+	}
+	if(!pathname) {
+		// futimens: a file, or a directory as its own ".".
+		uint32_t slot = radix::slot_of(dirfd);
+		if(slot == radix::NO_SLOT)
+			return EBADF;
+		uint64_t status = radix_file_set_times(slot, accessed, modified);
+		if(other_kind(status))
+			status = radix_directory_set_times(slot, ".", 1, accessed, modified);
+		return radix::to_errno(status);
+	}
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
-	return stat_path(resolved, &st);
+	return radix::to_errno(radix_directory_set_times(resolved.dir, resolved.text, resolved.len,
+			accessed, modified));
 }
 
 int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
@@ -1090,7 +1133,7 @@ int Sysdeps<Recvfrom>::operator()(int fd, void *buffer, size_t size, int flags,
 	(void)sock_addr;
 	(void)addr_length;
 	(void)length;
-	// Sockets come with networking (Phase 10): no descriptor is one yet.
+	// Sockets come with networking (Phase 12): no descriptor is one yet.
 	struct stat st;
 	if(int e = stat_fd(fd, &st); e)
 		return e;

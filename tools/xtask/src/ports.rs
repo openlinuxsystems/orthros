@@ -77,6 +77,10 @@ pub struct Recipe {
     /// notice, for a source without a LICENSE or COPYING file.
     #[serde(default)]
     pub notices: Vec<String>,
+    /// Code from other projects that the port keeps in its own
+    /// directory, each a package of its own in the license manifest.
+    #[serde(default)]
+    pub bundled: Vec<Bundled>,
 }
 
 /// Where a source comes from: a git repository and a commit in it, or
@@ -112,9 +116,27 @@ pub struct Extra {
     pub license: String,
 }
 
-/// A port that was built: its recipe, and where its source is.
+/// Code from another project that a port keeps in its own directory, as
+/// ports/mlibc keeps musl's in `musl/`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bundled {
+    pub name: String,
+    pub version: String,
+    /// SPDX license expression.
+    pub license: String,
+    pub homepage: String,
+    /// The files that hold its copyright and license notice, relative to
+    /// the port's directory.
+    pub notices: Vec<String>,
+}
+
+/// A port that was built: its recipe, its directory, and where its
+/// source is.
 pub struct Port {
     pub recipe: Recipe,
+    /// `ports/<name>`.
+    pub dir: PathBuf,
     /// Its source as fetched, then the extra sources.
     pub sources: Vec<PathBuf>,
 }
@@ -525,7 +547,7 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
             write_file(&stamp_file, &format!("{stamp:016x}\n"))?;
         }
         stamps.insert(recipe.name.clone(), stamp);
-        ports.push(Port { recipe, sources });
+        ports.push(Port { recipe, dir, sources });
     }
     for name in rebuild {
         if !stamps.contains_key(name) {
@@ -813,5 +835,11 @@ mod tests {
         assert_eq!(recipe.depends, ["mlibc"]);
         assert!(!recipe.toolchain);
         assert!(toml::from_str::<Recipe>(&text.replace("summary", "sumary")).is_err());
+        let bundled = format!(
+            "{text}\n[[bundled]]\nname = \"musl\"\nversion = \"1.2.5\"\nlicense = \"MIT\"\n\
+             homepage = \"https://musl.libc.org\"\nnotices = [\"musl/COPYRIGHT\"]\n"
+        );
+        let recipe: Recipe = toml::from_str(&bundled).unwrap();
+        assert_eq!(recipe.bundled[0].notices, ["musl/COPYRIGHT"]);
     }
 }

@@ -51,6 +51,8 @@ pub(crate) struct Meta {
     /// When a directory's entries last changed (a file's time is its
     /// cache's).
     pub(crate) modified: u64,
+    /// When it was last read, to the day, as FAT keeps it.
+    pub(crate) accessed: u64,
     /// Whether the entry on disk is behind.
     pub(crate) dirty: bool,
 }
@@ -105,8 +107,16 @@ impl FatNode {
     /// The root directory.
     pub(crate) fn root(fs: KArc<Inner>) -> Result<KArc<FatNode>> {
         let first = if fs.geo.width == Width::Fat32 { fs.geo.root_cluster } else { 0 };
-        let meta =
-            Meta { loc: None, first, chain: None, id: 1, created: 0, modified: 0, dirty: false };
+        let meta = Meta {
+            loc: None,
+            first,
+            chain: None,
+            id: 1,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            dirty: false,
+        };
         FatNode::make(fs, Kind::Directory, true, meta, 0)
     }
 
@@ -127,6 +137,7 @@ impl FatNode {
             id: id_of(dir, index),
             created: created_of(short),
             modified: from_fat(short.modified_date, short.modified_time),
+            accessed: from_fat(short.accessed_date, 0),
             dirty: false,
         };
         let size = if kind == Kind::File { u64::from(short.size) } else { 0 };
@@ -231,7 +242,7 @@ impl FatNode {
         short.size = size as u32;
         short.modified_date = date;
         short.modified_time = time;
-        short.accessed_date = date;
+        short.accessed_date = to_fat(meta.accessed).0;
         if self.kind == Kind::File {
             short.attr |= attr::ARCHIVE;
         }
@@ -606,9 +617,9 @@ fn hashed(basis: &[u8; 11], name: &str) -> [u8; 11] {
 
 impl Node for FatNode {
     fn stat(&self) -> Stat {
-        let (id, created, dir_modified) = {
+        let (id, created, dir_modified, accessed) = {
             let meta = self.meta.lock();
-            (meta.id, meta.created, meta.modified)
+            (meta.id, meta.created, meta.modified, meta.accessed)
         };
         let cluster = u64::from(self.fs.geo.cluster_size);
         let (size, allocated, modified) = match &self.cache {
@@ -618,7 +629,7 @@ impl Node for FatNode {
             }
             None => (0, self.allocated(), dir_modified),
         };
-        Stat { kind: self.kind, size, allocated, id, created, modified }
+        Stat { kind: self.kind, size, allocated, id, created, modified, accessed }
     }
 
     fn kind(&self) -> Kind {
@@ -803,6 +814,34 @@ impl Node for FatNode {
         let result = self.file()?.set_size(size, &FileBacking(self));
         self.changed();
         result
+    }
+
+    fn set_times(&self, accessed: Option<u64>, modified: Option<u64>) -> Result<()> {
+        self.writable()?;
+        // As FAT keeps them, so that what `stat` says now is what the disk
+        // will say: a change time in two-second steps, a read's day.
+        let modified = modified.map(|t| {
+            let (date, time) = to_fat(t);
+            from_fat(date, time)
+        });
+        let accessed = accessed.map(|t| from_fat(to_fat(t).0, 0));
+        // A file's change time is its cache's; the cache's lock comes
+        // before the entry's (write-back reads the entry), so they are
+        // taken one at a time.
+        if let (Some(modified), Some(cache)) = (modified, &self.cache) {
+            cache.set_modified(modified);
+        }
+        {
+            let mut meta = self.meta.lock();
+            if let Some(accessed) = accessed {
+                meta.accessed = accessed;
+            }
+            if let (Some(modified), None) = (modified, &self.cache) {
+                meta.modified = modified;
+            }
+        }
+        self.changed();
+        Ok(())
     }
 
     fn sync(&self) -> Result<()> {

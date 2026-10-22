@@ -18,10 +18,10 @@ use crate::mount::{Location, OpenFlags, Vfs};
 use crate::path::{self, Component};
 use crate::synthetic::{FixedDir, Generated, Null, SyntheticFs, Zero};
 use crate::tmpfs::Tmpfs;
-use crate::{APPEND, Error, FsKind, FsRef, Kind, NodeRef, Result, Slice, SliceMut, mem};
+use crate::{APPEND, Error, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem};
 
 fn tmpfs(max: u64) -> FsRef {
-    Tmpfs::new(max).unwrap()
+    Tmpfs::new(max, u64::MAX).unwrap()
 }
 
 fn vfs() -> Vfs {
@@ -118,6 +118,49 @@ fn tmpfs_files_and_directories() {
     assert_eq!(read_all(&file.node), b"kept");
     vfs.remove(&root, "etc").unwrap();
     assert!(names(&vfs, &root).is_empty());
+}
+
+#[test]
+fn tmpfs_times_are_set() {
+    let vfs = vfs();
+    let root = vfs.root();
+    write(&vfs, &root, "file", b"x").unwrap();
+    vfs.make_directory(&root, "dir").unwrap();
+    let file = vfs.resolve(&root, "file").unwrap().node;
+    let dir = vfs.resolve(&root, "dir").unwrap().node;
+    let made = file.stat();
+    assert_eq!(made.accessed, made.created);
+    // Reading leaves the read time.
+    read_all(&file);
+    assert_eq!(file.stat().accessed, made.created);
+    file.set_times(Some(1), Some(1 << 62)).unwrap();
+    assert_eq!((file.stat().accessed, file.stat().modified), (1, 1 << 62));
+    file.set_times(None, Some(7)).unwrap();
+    assert_eq!((file.stat().accessed, file.stat().modified), (1, 7));
+    dir.set_times(Some(5), Some(6)).unwrap();
+    assert_eq!((dir.stat().accessed, dir.stat().modified), (5, 6));
+    // Devices keep no times.
+    assert_eq!(Null(9).set_times(Some(1), None), Err(Error::NotSupported));
+}
+
+#[test]
+fn tmpfs_has_a_file_limit() {
+    let vfs = Vfs::new(Tmpfs::new(1 << 20, 3).unwrap(), "tmpfs").unwrap();
+    let root = vfs.root();
+    let info = || root.mount.fs.info();
+    assert_eq!((info().files, info().free_files), (3, 2));
+    write(&vfs, &root, "a", b"x").unwrap();
+    vfs.make_directory(&root, "b").unwrap();
+    assert_eq!(info().free_files, 0);
+    assert_eq!(write(&vfs, &root, "c", b"x"), Err(Error::NoSpace));
+    assert_eq!(vfs.make_directory(&root, "c"), Err(Error::NoSpace));
+    // A file counts until its last handle goes.
+    let a = vfs.resolve(&root, "a").unwrap();
+    vfs.remove(&root, "a").unwrap();
+    assert_eq!(info().free_files, 0);
+    drop(a);
+    assert_eq!(info().free_files, 1);
+    write(&vfs, &root, "c", b"x").unwrap();
 }
 
 #[test]

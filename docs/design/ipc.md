@@ -385,10 +385,10 @@ happened: on Radix the kernel's count for the benchmark, which includes
 starting and stopping the two programs, and on Linux the sum of both
 processes' `ru_nvcsw` and `ru_nivcsw`.
 
-Radix has no demand paging yet (the page cache comes in Phase 7 and
-copy-on-write in Phase 8), so `fresh_page` is
-how a program gets a new page: the same work as a first-touch fault
-(a zeroed page, mapped), plus giving it back.
+`fresh_page` is how a program got a new page before Radix had demand
+paging (the page cache came in Phase 7, and anonymous memory filled on
+touch in Phase 8): the same work as a first-touch fault (a zeroed page,
+mapped), plus giving it back.
 
 The report shows each Radix number, the Linux one from the virtual
 machine, their ratio and the host's Linux. Under KVM a system call does

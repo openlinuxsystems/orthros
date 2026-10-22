@@ -1,0 +1,1637 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+stdio fixes from libc-test. scanf and wscanf are rebuilt on musl
+1.2.5's vfscanf (MIT, https://musl.libc.org): a field ends at its
+width, numbers too (mlibc's took every digit of "%2d"); %c takes exactly
+its width or fails; %n$ takes the nth argument; input failure and
+matching failure differ; integers come from musl's __intscan
+(mlibc/int-scan.hpp, which ports/mlibc/musl keeps) and take C23's 0b
+prefix (functional/sscanf, fscanf, fwscanf). Also: fputc and putc
+return the byte written as an unsigned char (fputc returned 1); a
+memstream seek before the start fails with EINVAL and leaves the
+stream where it was; fmemopen in append mode writes at the end of the
+contents, and a write that makes them longer ends them with a null
+byte where one fits, as POSIX and glibc say (functional/memstream);
+ftello on an appending stream with unwritten output counts from the
+end of the file (regression/ftello-unflushed-append); a stream on a
+descriptor isatty fails on, a closed one, is not a terminal, and a
+read or write that fails for any reason sets the error indicator
+(regression/rewind-clear-error); fread returns what it read before an
+error; vasprintf fails with ENOMEM when memory runs out instead of
+aborting (regression/setenv-oom); wprintf's %s counts wide characters
+for its precision and width; swprintf leaves a string even when the
+output did not fit (functional/swprintf). Meant for upstream, the
+scanf part as a proposal.
+
+diff -ruN a/options/ansi/generic/file-io.cpp b/options/ansi/generic/file-io.cpp
+--- a/options/ansi/generic/file-io.cpp
++++ b/options/ansi/generic/file-io.cpp
+@@ -111,6 +111,7 @@
+ void abstract_file::set_access(int flags) {
+ 	_readable = (flags & O_ACCMODE) != O_WRONLY;
+ 	_writable = (flags & O_ACCMODE) != O_RDONLY;
++	_append = flags & O_APPEND;
+ }
+ 
+ int abstract_file::read(char *buffer, size_t max_size, size_t *actual_size) {
+@@ -122,8 +123,11 @@
+ 		return EBADF;
+ 	}
+ 
+-	if(_init_bufmode())
+-		return -1;
++	// Any failure, of a closed descriptor say, sets the error indicator.
++	if(int e = _init_bufmode(); e) {
++		__status_bits |= __MLIBC_ERROR_BIT;
++		return e;
++	}
+ 
+ 	size_t unget_length = 0;
+ 	if (__unget_ptr != __buffer_ptr) {
+@@ -162,10 +166,14 @@
+ 	// Clear the buffer, then buffer new data.
+ 	if(__offset == __valid_limit) {
+ 		// TODO: We only have to write-back/reset if __valid_limit reaches the buffer end.
+-		if(int e = _write_back(); e)
++		if(int e = _write_back(); e) {
++			__status_bits |= __MLIBC_ERROR_BIT;
+ 			return e;
+-		if(int e = _reset(); e)
++		}
++		if(int e = _reset(); e) {
++			__status_bits |= __MLIBC_ERROR_BIT;
+ 			return e;
++		}
+ 
+ 		// Perform a read-ahead.
+ 		_ensure_allocation();
+@@ -204,8 +212,11 @@
+ 		return EBADF;
+ 	}
+ 
+-	if(_init_bufmode())
+-		return -1;
++	// Any failure, of a closed descriptor say, sets the error indicator.
++	if(int e = _init_bufmode(); e) {
++		__status_bits |= __MLIBC_ERROR_BIT;
++		return e;
++	}
+ 	if(globallyDisableBuffering || _bufmode == buffer_mode::no_buffer) {
+ 		// As we do not buffer, nothing can be dirty.
+ 		__ensure(__dirty_begin == __dirty_end);
+@@ -220,10 +231,14 @@
+ 
+ 	// Flush the buffer if necessary.
+ 	if(__offset == __buffer_size) {
+-		if(int e = _write_back(); e)
++		if(int e = _write_back(); e) {
++			__status_bits |= __MLIBC_ERROR_BIT;
+ 			return e;
+-		if(int e = _reset(); e)
++		}
++		if(int e = _reset(); e) {
++			__status_bits |= __MLIBC_ERROR_BIT;
+ 			return e;
++		}
+ 	}
+ 
+ 	// Ensure correct buffer type for pipe-like streams.
+@@ -265,8 +280,10 @@
+ 
+ 	// Flush line-buffered streams.
+ 	if(flush_line) {
+-		if(_write_back())
+-			return -1;
++		if(int e = _write_back(); e) {
++			__status_bits |= __MLIBC_ERROR_BIT;
++			return e;
++		}
+ 	}
+ 
+ 	*actual_size = chunk;
+@@ -323,8 +340,11 @@
+ }
+ 
+ int abstract_file::tell(off_t *current_offset) {
++	// Output an appending stream has not written yet goes at the end of
++	// the file, not at the descriptor's offset, as musl's ftello counts it.
+ 	off_t seek_offset;
+-	if(int e = io_seek(0, SEEK_CUR, &seek_offset); e)
++	int whence = _append && __dirty_begin != __dirty_end ? SEEK_END : SEEK_CUR;
++	if(int e = io_seek(0, whence, &seek_offset); e)
+ 		return e;
+ 
+ 	*current_offset = seek_offset
+@@ -387,8 +407,8 @@
+ 	if(_bufmode != buffer_mode::unknown)
+ 		return 0;
+ 
+-	if(determine_bufmode(&_bufmode))
+-		return -1;
++	if(int e = determine_bufmode(&_bufmode); e)
++		return e;
+ 	__ensure(_bufmode != buffer_mode::unknown);
+ 	return 0;
+ }
+@@ -567,16 +587,15 @@
+ 		return 0;
+ 	}
+ 
++	// A descriptor isatty() fails on, a closed one say, is not a
++	// terminal, as in glibc and musl; reading or writing it then fails
++	// and sets the stream's error indicator.
+ 	if(int e = mlibc::sysdep<Isatty>(_fd); !e) {
+ 		*mode = buffer_mode::line_buffer;
+ 		return 0;
+-	}else if(e == ENOTTY) {
++	}else{
+ 		*mode = buffer_mode::full_buffer;
+ 		return 0;
+-	}else{
+-		mlibc::infoLogger() << "mlibc: sys_isatty() failed while determining whether"
+-				" stream is interactive" << frg::endlog;
+-		return -1;
+ 	}
+ }
+ 
+diff -ruN a/options/ansi/generic/stdio.cpp b/options/ansi/generic/stdio.cpp
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -6,6 +6,8 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <wchar.h>
++#include <wctype.h>
++#include <type_traits>
+ #include <ctype.h>
+ #include <limits.h>
+ #include <math.h>
+@@ -23,6 +25,7 @@
+ #include <mlibc/file-io.hpp>
+ #include <mlibc/float-format.hpp>
+ #include <mlibc/float-scan.hpp>
++#include <mlibc/int-scan.hpp>
+ #include <mlibc/global-config.hpp>
+ #include <mlibc/locale.hpp>
+ #include <mlibc/lock.hpp>
+@@ -58,6 +61,50 @@
+ 		return {};
+ 	}
+ 
++	// %s in wprintf(3): the argument is a multibyte string, and the
++	// precision and the width count the wide characters it makes, as C
++	// says; frigg counted its bytes, so "%.1s" cut "\xc3\x80" in half and
++	// printed nothing. A byte sequence that is no character fails
++	// (EILSEQ), as in musl.
++	frg::expected<frg::format_error> narrow_string(frg::format_options &opts) {
++		auto s = static_cast<const char *>(frg::pop_arg<void *>(_vsp, &opts));
++		if (!s)
++			s = "(null)";
++		auto limit = opts.precision ? static_cast<size_t>(*opts.precision) : SIZE_MAX;
++
++		// The number of wide characters, then the characters themselves.
++		auto convert = [&](bool emit) -> frg::expected<frg::format_error, int> {
++			mbstate_t st{};
++			const char *p = s;
++			int n = 0;
++			while (*p && size_t(n) < limit) {
++				wchar_t wc;
++				size_t r = mbrtowc(&wc, p, MB_LEN_MAX, &st);
++				if (r == size_t(-1) || r == size_t(-2)) {
++					errno = EILSEQ;
++					return frg::format_error::agent_error;
++				}
++				if (emit)
++					_formatter->append(wc);
++				p += r;
++				n++;
++			}
++			return n;
++		};
++		auto length = convert(false);
++		if (!length)
++			return length.error();
++		if (!opts.left_justify)
++			for (int i = length.value(); i < opts.minimum_width; i++)
++				_formatter->append(L' ');
++		if (auto e = convert(true); !e)
++			return e.error();
++		if (opts.left_justify)
++			for (int i = length.value(); i < opts.minimum_width; i++)
++				_formatter->append(L' ');
++		return {};
++	}
++
+ 	frg::expected<frg::format_error> operator() (const Char *c, size_t n) {
+ 		_formatter->append(c, n);
+ 		return {};
+@@ -96,7 +143,14 @@
+ 			}
+ 			frg::do_printf_chars<Char, F>(*_formatter, t, opts, szmod, _vsp);
+ 			break;
+-		case 'p': case 's':
++		case 's':
++			if constexpr (std::is_same_v<Char, wchar_t>) {
++				if (szmod == frg::printf_size_mod::default_size)
++					return narrow_string(opts);
++			}
++			frg::do_printf_chars<Char, F>(*_formatter, t, opts, szmod, _vsp);
++			break;
++		case 'p':
+ 			frg::do_printf_chars<Char, F>(*_formatter, t, opts, szmod, _vsp);
+ 			break;
+ 		case 'S':
+@@ -712,23 +766,32 @@
+ 	using char_type = char;
+ 
+ 	ResizePrinter()
+-	: buffer(nullptr), limit(0), count(0) { }
++	: buffer(nullptr), limit(0), count(0), failed(false) { }
+ 
+-	void expand() {
++	// Running out of memory makes the rest of the output go nowhere, and
++	// vasprintf() then fails with ENOMEM, as POSIX says.
++	bool expand() {
++		if(failed)
++			return false;
+ 		if(count == limit) {
+ 			auto new_limit = frg::max(2 * limit, size_t(16));
+ 			auto new_buffer = reinterpret_cast<char *>(malloc(new_limit));
+-			__ensure(new_buffer);
++			if(!new_buffer) {
++				failed = true;
++				return false;
++			}
+ 			memcpy(new_buffer, buffer, count);
+ 			free(buffer);
+ 			buffer = new_buffer;
+ 			limit = new_limit;
+ 		}
+ 		__ensure(count < limit);
++		return true;
+ 	}
+ 
+ 	void append(char c) {
+-		expand();
++		if(!expand())
++			return;
+ 		buffer[count] = c;
+ 		count++;
+ 	}
+@@ -779,6 +842,7 @@
+ 	char *buffer;
+ 	size_t limit;
+ 	size_t count;
++	bool failed;
+ };
+ 
+ static_assert(frg::SinkFor<ResizePrinter>);
+@@ -912,650 +976,400 @@
+ namespace {
+ 
+ enum {
+-	SCANF_TYPE_CHAR,
+-	SCANF_TYPE_SHORT,
+-	SCANF_TYPE_INTMAX,
+-	SCANF_TYPE_L,
+-	SCANF_TYPE_LL,
+-	SCANF_TYPE_PTRDIFF,
+-	SCANF_TYPE_SIZE_T,
+-	SCANF_TYPE_INT
++	SCANF_SIZE_hh = -2,
++	SCANF_SIZE_h = -1,
++	SCANF_SIZE_def = 0,
++	SCANF_SIZE_l = 1,
++	SCANF_SIZE_L = 2,
++	SCANF_SIZE_ll = 3
+ };
+ 
+-void store_int(void *dest, unsigned int size, unsigned long long i) {
++void store_int(void *dest, int size, unsigned long long i) {
++	if (!dest)
++		return;
+ 	switch (size) {
+-		case SCANF_TYPE_CHAR:
++		case SCANF_SIZE_hh:
+ 			*(char *)dest = i;
+ 			break;
+-		case SCANF_TYPE_SHORT:
++		case SCANF_SIZE_h:
+ 			*(short *)dest = i;
+ 			break;
+-		case SCANF_TYPE_INTMAX:
+-			*(intmax_t *)dest = i;
++		case SCANF_SIZE_def:
++			*(int *)dest = i;
+ 			break;
+-		case SCANF_TYPE_L:
++		case SCANF_SIZE_l:
+ 			*(long *)dest = i;
+ 			break;
+-		case SCANF_TYPE_LL:
++		// %Ld is long long, as in glibc.
++		case SCANF_SIZE_L:
++		case SCANF_SIZE_ll:
+ 			*(long long *)dest = i;
+ 			break;
+-		case SCANF_TYPE_PTRDIFF:
+-			*(ptrdiff_t *)dest = i;
+-			break;
+-		case SCANF_TYPE_SIZE_T:
+-			*(size_t *)dest = i;
+-			break;
+-		/* fallthrough */
+-		case SCANF_TYPE_INT:
+-		default:
+-			*(int *)dest = i;
+-			break;
+ 	}
+ }
+ 
+-void store_float(void *dest, unsigned int size, long double f) {
+-	switch (size) {
+-		case SCANF_TYPE_LL:
+-			*(long double *)dest = f;
+-			break;
+-		case SCANF_TYPE_L:
+-			*(double *)dest = f;
+-			break;
+-		default:
+-			*(float *)dest = f;
+-			break;
++// The nth pointer of the arguments, for %n$.
++void *arg_n(__builtin_va_list ap, unsigned int n) {
++	void *p;
++	__builtin_va_list ap2;
++	va_copy(ap2, ap);
++	for (unsigned int i = n; i > 1; i--)
++		va_arg(ap2, void *);
++	p = va_arg(ap2, void *);
++	va_end(ap2);
++	return p;
++}
++
++template<typename Char>
++bool scanf_isspace(int c) {
++	if constexpr (std::is_same_v<Char, char>)
++		return c >= 0 && isspace(c);
++	else
++		return c >= 0 && iswspace(c);
++}
++
++// Whether `c` is in the scanset that starts at `set`, just after "[" or
++// "[^" (musl's in_set).
++template<typename Char>
++bool scanf_in_set(const Char *set, int c) {
++	auto at = [](const Char *p) { return static_cast<int>(static_cast<std::make_unsigned_t<Char>>(*p)); };
++	const Char *p = set;
++	if (*p == '-') {
++		if (c == '-')
++			return true;
++		p++;
++	} else if (*p == ']') {
++		if (c == ']')
++			return true;
++		p++;
++	}
++	for (; *p && *p != ']'; p++) {
++		if (*p == '-' && p[1] && p[1] != ']') {
++			if (c >= at(p - 1) && c <= at(p + 1))
++				return true;
++			p++;
++			continue;
++		}
++		if (c == at(p))
++			return true;
+ 	}
++	return false;
+ }
+ 
++// The conversions of scanf(3) and wscanf(3), after musl 1.2.5's
++// vfscanf and vfwscanf (src/stdio/vfscanf.c and vfwscanf.c,
++// https://musl.libc.org, MIT): a field ends at its width, %c takes
++// exactly its width or fails, %n$ takes the nth argument, and numbers
++// are musl's (mlibc/int-scan.hpp, mlibc/float-scan.hpp). Bytes match a
++// scanset byte by byte, as in glibc and musl, and %lc, %ls and %l[ turn
++// the bytes that matched into wide characters; wide input is turned
++// into bytes for %c, %s and %[. A handler has look_ahead(), the next
++// character as a non-negative int or EOF at the end of the input,
++// consume(), and num_consumed, the characters consumed so far. mlibc's
++// own scanf took no field width for numbers, ended %c early at the end
++// of the input instead of failing, and lost %*2d's width.
+ template<typename H, typename Char>
+ int do_scanf(H &handler, const Char *fmt, __builtin_va_list args) {
+-	#define NOMATCH_CHECK(cond) ({ if(cond) return match_count; }) // if cond is true, matching error
+-	#define EOF_CHECK(cond) ({ if(cond) return match_count ? match_count : EOF; }) // if cond is true, no more data to read
+-	int match_count = 0;
+-	for (; *fmt; fmt++) {
+-		if (isspace(*fmt)) {
+-			while (isspace(fmt[1])) fmt++;
+-			while (isspace(handler.look_ahead()))
+-					handler.consume();
++	using UChar = std::make_unsigned_t<Char>;
++	int matches = 0;
++	bool alloc = false;
++	char *s = nullptr;
++	wchar_t *wcs = nullptr;
++
++	// An input failure before the first conversion is EOF.
++	auto input_fail = [&] {
++		if (!matches)
++			matches--;
++		if (alloc) {
++			free(s);
++			free(wcs);
++		}
++		return matches;
++	};
++	auto match_fail = [&] {
++		if (alloc) {
++			free(s);
++			free(wcs);
++		}
++		return matches;
++	};
++
++	for (const Char *p = fmt; *p; p++) {
++		alloc = false;
++		s = nullptr;
++		wcs = nullptr;
++
++		if (scanf_isspace<Char>(static_cast<UChar>(*p))) {
++			while (scanf_isspace<Char>(static_cast<UChar>(p[1])))
++				p++;
++			while (scanf_isspace<Char>(handler.look_ahead()))
++				handler.consume();
+ 			continue;
+ 		}
+-
+-		if (*fmt != '%' || fmt[1] == '%') {
+-			if (*fmt == '%')
+-				fmt++;
+-			char c = handler.consume();
+-			EOF_CHECK(c == '\0');
+-			NOMATCH_CHECK(c != *fmt);
++		if (*p != '%' || p[1] == '%') {
++			if (*p == '%') {
++				p++;
++				while (scanf_isspace<Char>(handler.look_ahead()))
++					handler.consume();
++			}
++			int c = handler.look_ahead();
++			if (c != static_cast<int>(static_cast<UChar>(*p))) {
++				if (c < 0)
++					return input_fail();
++				return match_fail();
++			}
++			handler.consume();
+ 			continue;
+ 		}
+ 
+-		void *dest = nullptr;
+-		/* %n$ format */
+-		if (isdigit(*fmt) && fmt[1] == '$') {
+-			/* TODO: dest = get_arg_at_pos(args, *fmt -'0'); */
+-			fmt += 3;
++		void *dest;
++		p++;
++		if (*p == '*') {
++			dest = nullptr;
++			p++;
++		} else if (*p >= '0' && *p <= '9' && p[1] == '$') {
++			dest = arg_n(args, *p - '0');
++			p += 2;
+ 		} else {
+-			if (fmt[1] != '*') {
+-				dest = va_arg(args, void*);
+-			}
+-			fmt++;
++			dest = va_arg(args, void *);
+ 		}
+ 
+-		bool allocate_buf = false;
+-		auto temp_dest = frg::string<MemoryAllocator>{getAllocator()};
+-		auto temp_wdest = frg::basic_string<wchar_t, MemoryAllocator>{getAllocator()};
+-		int count = 0;
+-
+-		const auto append_to_buffer = [&](wchar_t c) {
+-			size_t res = 0;
+-			char c_buf[MB_LEN_MAX];
+-
+-			if (c == L'\0') {
+-				res = 1;
+-				c_buf[0] = '\0';
+-			} else {
+-				mbstate_t shift_state = {};
+-				res = wcrtomb(c_buf, c, &shift_state);
+-				__ensure(res != size_t(-1));
+-			}
+-
+-			if (allocate_buf) {
+-				for (size_t i = 0; i < res; i++)
+-					temp_dest += c_buf[i];
+-			} else {
+-				char *typed_dest = (char *)dest;
+-				if(typed_dest)
+-					memcpy(typed_dest + count, c_buf, res);
+-			}
+-
+-			count += res;
+-		};
+-
+-		const auto append_to_wbuffer = [&](wchar_t c) {
+-			if(allocate_buf) {
+-				temp_wdest += c;
+-			} else {
+-				wchar_t *typed_dest = (wchar_t *)dest;
+-				if(typed_dest)
+-					typed_dest[count] = c;
+-			}
+-
+-			count++;
+-		};
+-
+ 		int width = 0;
+-		if (*fmt == '*') {
+-			fmt++;
+-		} else if (*fmt == '\'') {
+-			/* TODO: numeric seperators locale stuff */
+-			mlibc::infoLogger() << "do_scanf: \' not implemented!" << frg::endlog;
+-			fmt++;
+-			continue;
+-		} else if (*fmt == 'm') {
+-			allocate_buf = true;
+-			fmt++;
+-		} else if (*fmt >= '0' && *fmt <= '9') {
+-			/* read in width specifier */
+-			width = 0;
+-			while (*fmt >= '0' && *fmt <= '9') {
+-				width = width * 10 + (*fmt - '0');
+-				fmt++;
+-				continue;
+-			}
++		for (; *p >= '0' && *p <= '9'; p++)
++			width = 10 * width + (*p - '0');
++
++		if (*p == 'm') {
++			alloc = dest != nullptr;
++			p++;
+ 		}
+ 
+-		/* type modifiers */
+-		unsigned int type = SCANF_TYPE_INT;
+-		unsigned int base = 10;
+-		switch (*fmt) {
+-			case 'h': {
+-				if (fmt[1] == 'h') {
+-					type = SCANF_TYPE_CHAR;
+-					fmt += 2;
+-					break;
+-				}
+-				type = SCANF_TYPE_SHORT;
+-				fmt++;
+-				break;
+-			}
+-			case 'j': {
+-				type = SCANF_TYPE_INTMAX;
+-				fmt++;
+-				break;
+-			}
+-			case 'l': {
+-				if (fmt[1] == 'l') {
+-					type = SCANF_TYPE_LL;
+-					fmt += 2;
+-					break;
+-				}
+-				type = SCANF_TYPE_L;
+-				fmt++;
+-				break;
+-			}
+-			case 'L': {
+-				type = SCANF_TYPE_LL;
+-				fmt++;
+-				break;
+-			}
+-			case 'q': {
+-				type = SCANF_TYPE_LL;
+-				fmt++;
++		int size = SCANF_SIZE_def;
++		switch (*p++) {
++			case 'h':
++				if (*p == 'h')
++					p++, size = SCANF_SIZE_hh;
++				else
++					size = SCANF_SIZE_h;
+ 				break;
+-			}
+-			case 't': {
+-				type = SCANF_TYPE_PTRDIFF;
+-				fmt++;
++			case 'l':
++				if (*p == 'l')
++					p++, size = SCANF_SIZE_ll;
++				else
++					size = SCANF_SIZE_l;
+ 				break;
+-			}
+-			 case 'z': {
+-				type = SCANF_TYPE_SIZE_T;
+-				fmt++;
++			case 'j':
++			case 'q':
++				size = SCANF_SIZE_ll;
++				break;
++			case 'z':
++			case 't':
++				size = SCANF_SIZE_l;
++				break;
++			case 'L':
++				size = SCANF_SIZE_L;
++				break;
++			case 'd': case 'i': case 'o': case 'u': case 'x': case 'b':
++			case 'a': case 'e': case 'f': case 'g':
++			case 'A': case 'E': case 'F': case 'G': case 'X':
++			case 's': case 'c': case '[':
++			case 'S': case 'C':
++			case 'p': case 'n':
++				p--;
+ 				break;
+-			}
++			default:
++				return input_fail();
+ 		}
+ 
+-		// Leading whitespace is skipped for most conversions except these.
+-		if (*fmt != 'c' && *fmt != '[' && *fmt != 'n') {
+-			while (isspace(handler.look_ahead()))
+-				handler.consume();
++		int t = *p;
++		// %C and %S are %lc and %ls.
++		if (t == 'C' || t == 'S') {
++			t |= 32;
++			size = SCANF_SIZE_l;
+ 		}
+ 
+-		switch (*fmt) {
+-			case 'd':
+-			case 'u':
+-				base = 10;
++		switch (t) {
++			case 'c':
++				if (width < 1)
++					width = 1;
+ 				[[fallthrough]];
+-			case 'i': {
+-				bool is_negative = false;
+-				unsigned long long res = 0;
+-				char c = handler.look_ahead();
+-				EOF_CHECK(c == '\0');
+-
+-				if(c == '-') {
+-					handler.consume();
+-					is_negative = true;
+-				} else if(c == '+')
+-					handler.consume();
+-
+-				if(*fmt == 'i' && handler.look_ahead() == '0') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					if(tolower(c) == 'x') {
+-						handler.consume();
+-						base = 16;
+-					} else if(tolower(c) == 'b') {
+-						handler.consume();
+-						base = 2;
+-					} else {
+-						base = 8;
+-					}
+-				}
+-
+-				c = handler.look_ahead();
+-				int count = 0;
+-				switch (base) {
+-					case 10:
+-						NOMATCH_CHECK(!isdigit(c));
+-						while (c >= '0' && c <= '9') {
+-							handler.consume();
+-							res = res * 10 + (c - '0');
+-							c = handler.look_ahead();
+-						}
+-						break;
+-					case 16:
+-						while (true) {
+-							if (c >= '0' && c <= '9') {
+-								handler.consume();
+-								res = res * 16 + (c - '0');
+-							} else if (c >= 'a' && c <= 'f') {
+-								handler.consume();
+-								res = res * 16 + (c - 'a' + 10);
+-							} else if (c >= 'A' && c <= 'F') {
+-								handler.consume();
+-								res = res * 16 + (c - 'A' + 10);
+-							} else {
+-								break;
+-							}
+-							count++;
+-							c = handler.look_ahead();
+-						}
+-						NOMATCH_CHECK(count == 0);
+-						break;
+-					case 8:
+-						while (c >= '0' && c <= '7') {
+-							handler.consume();
+-							res = res * 8 + (c - '0');
+-							c = handler.look_ahead();
+-						}
+-						// no need for a match check, the starting 0 was already consumed
+-						break;
+-					case 2:
+-						NOMATCH_CHECK(c != '0' && c != '1');
+-						while (c == '0' || c == '1') {
+-							handler.consume();
+-							res = res * 2 + (c - '0');
+-							c = handler.look_ahead();
+-						}
+-						break;
+-				}
+-
+-				if (dest) {
+-					if(is_negative)
+-						store_int(dest, type, -res);
+-					else
+-						store_int(dest, type, res);
+-				}
++			case '[':
+ 				break;
+-			}
+-			case 'o': {
+-				bool is_negative = false;
+-				unsigned long long res = 0;
+-				char c = handler.look_ahead();
+-				EOF_CHECK(c == '\0');
+-
+-				if(c == '-') {
+-					handler.consume();
+-					is_negative = true;
+-				} else if(c == '+')
++			case 'n':
++				store_int(dest, size, handler.num_consumed);
++				// Not a conversion: the count of matches stays.
++				continue;
++			default:
++				while (scanf_isspace<Char>(handler.look_ahead()))
+ 					handler.consume();
++		}
+ 
+-				c = handler.look_ahead();
+-				NOMATCH_CHECK(!(c >= '0' && c <= '7'));
+-				while (c >= '0' && c <= '7') {
+-					handler.consume();
+-					res = res * 8 + (c - '0');
+-					c = handler.look_ahead();
+-				}
++		if (handler.look_ahead() < 0)
++			return input_fail();
+ 
+-				if (dest) {
+-					if(is_negative)
+-						store_int(dest, type, -res);
++		switch (t) {
++			case 's':
++			case 'c':
++			case '[': {
++				bool invert;
++				const Char *set = nullptr;
++				if (t == 'c') {
++					invert = true;
++				} else if (t == 's') {
++					invert = true;
++				} else {
++					if (*++p == '^')
++						p++, invert = true;
+ 					else
+-						store_int(dest, type, res);
+-				}
+-				break;
+-			}
+-			case 'x':
+-			case 'X': {
+-				bool is_negative = false;
+-				unsigned long long res = 0;
+-				char c = handler.look_ahead();
+-				int digit_count = 0;
+-				int consumed = 0;
+-				EOF_CHECK(c == '\0');
+-
+-				if(c == '-') {
+-					handler.consume();
+-					consumed++;
+-					is_negative = true;
+-				} else if(c == '+') {
+-					handler.consume();
+-					consumed++;
+-				}
+-
+-				c = handler.look_ahead();
+-				if (c == '0' && (!width || consumed < width)) {
+-					handler.consume();
+-					consumed++;
+-					c = handler.look_ahead();
+-					if (tolower(c) == 'x' && (!width || consumed < width)) {
+-						handler.consume();
+-						consumed++;
+-						c = handler.look_ahead();
+-					} else {
+-						digit_count++;
+-					}
+-				}
+-
+-				while (!width || consumed < width) {
+-					if (c >= '0' && c <= '9') {
+-						handler.consume();
+-						res = res * 16 + (c - '0');
+-					} else if (c >= 'a' && c <= 'f') {
+-						handler.consume();
+-						res = res * 16 + (c - 'a' + 10);
+-					} else if (c >= 'A' && c <= 'F') {
+-						handler.consume();
+-						res = res * 16 + (c - 'A' + 10);
+-					} else {
+-						break;
++						invert = false;
++					set = p;
++					if (*p == ']')
++						p++;
++					while (*p != ']') {
++						if (!*p)
++							return input_fail();
++						p++;
+ 					}
+-					digit_count++;
+-					consumed++;
+-					c = handler.look_ahead();
+ 				}
+-				NOMATCH_CHECK(digit_count == 0);
++				// Whether c belongs to the field.
++				auto accept = [&](int c) {
++					if (t == 'c')
++						return true;
++					if (t == 's')
++						return !scanf_isspace<Char>(c);
++					return scanf_in_set(set, c) != invert;
++				};
+ 
+-				if (dest) {
+-					if(is_negative)
+-						store_int(dest, type, -res);
++				// What to keep: bytes in s, or wide characters in wcs.
++				size_t i = 0;
++				size_t k = t == 'c' ? width + 1U : 31;
++				bool wide = size == SCANF_SIZE_l;
++				if (alloc) {
++					if (wide)
++						wcs = static_cast<wchar_t *>(malloc(k * sizeof(wchar_t)));
+ 					else
+-						store_int(dest, type, res);
+-				}
+-				break;
+-			}
+-			case 'b': {
+-				bool is_negative = false;
+-				unsigned long long res = 0;
+-				char c = handler.look_ahead();
+-				int count = 0;
+-				EOF_CHECK(c == '\0');
+-
+-				if(c == '-') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					is_negative = true;
+-				} else if(c == '+') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-				}
+-
+-				if (c == '0') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					if (tolower(c) == 'b') {
+-						handler.consume();
+-						c = handler.look_ahead();
+-					}
++						s = static_cast<char *>(malloc(k));
++					if (!wcs && !s)
++						return input_fail();
++				} else if (wide) {
++					wcs = static_cast<wchar_t *>(dest);
++				} else {
++					s = static_cast<char *>(dest);
+ 				}
+-				while (true) {
+-					if (c == '0' || c == '1') {
+-						handler.consume();
+-						res = res * 2 + (c - '0');
++				// Makes room for `n` more and the terminator.
++				auto grow = [&](size_t n) {
++					if (!alloc || i + n < k)
++						return true;
++					k += k + n;
++					if (wide) {
++						auto bigger = static_cast<wchar_t *>(realloc(wcs, k * sizeof(wchar_t)));
++						if (!bigger)
++							return false;
++						wcs = bigger;
+ 					} else {
+-						break;
++						auto bigger = static_cast<char *>(realloc(s, k));
++						if (!bigger)
++							return false;
++						s = bigger;
+ 					}
+-					count++;
+-					c = handler.look_ahead();
+-				}
+-				NOMATCH_CHECK(count == 0);
+-
+-				if (dest) {
+-					if(is_negative)
+-						store_int(dest, type, -res);
+-					else
+-						store_int(dest, type, res);
+-				}
+-				break;
+-			}
+-			case 's': {
+-				Char c = handler.look_ahead();
+-				EOF_CHECK(c == '\0');
+-				while (c && !isspace(c)) {
+-					handler.consume();
+-
+-					if(type == SCANF_TYPE_L)
+-						append_to_wbuffer(c);
+-					else
+-						append_to_buffer(c);
++					return true;
++				};
+ 
+-					c = handler.look_ahead();
+-					if (width && count >= width)
++				int taken = 0;
++				mbstate_t st{};
++				while (!width || taken < width) {
++					int c = handler.look_ahead();
++					if (c < 0 || !accept(c))
+ 						break;
+-				}
+-				NOMATCH_CHECK(count == 0);
+-
+-				if(type == SCANF_TYPE_L)
+-					append_to_wbuffer(L'\0');
+-				else
+-					append_to_buffer('\0');
+-
+-				break;
+-			}
+-			case 'c': {
+-				char c = handler.look_ahead();
+-				EOF_CHECK(c == '\0');
+-				if (!width)
+-					width = 1;
+-				while (c && count < width) {
+ 					handler.consume();
+-
+-					if(type == SCANF_TYPE_L)
+-						append_to_wbuffer(c);
+-					else
+-						append_to_buffer(c);
+-
+-					c = handler.look_ahead();
+-				}
+-				break;
+-			}
+-			case '[': {
+-				fmt++;
+-				bool invert = *fmt == '^';
+-				if (invert)
+-					fmt++;
+-
+-				auto decodeChar = [](frg::basic_string_view<Char> view, size_t off) {
+-					if constexpr (std::is_same_v<Char, char>) {
+-						mbstate_t mbs{};
+-						wchar_t wc;
+-						auto len = mbrtowc(&wc, &view[off], view.size() - off, &mbs);
+-						__ensure(len > 0);
+-						return std::make_pair(wc, len);
+-					} else {
+-						return std::make_pair(view[off], 1);
+-					}
+-				};
+-
+-				size_t scan_offset = *fmt == ']' ? 1 : 0;
+-				frg::basic_string_view remaining{fmt};
+-				size_t len = remaining.find_first(']', scan_offset);
+-				EOF_CHECK(len == size_t(-1));
+-				auto scansetView = remaining.sub_string(0, len);
+-
+-				auto inScanset = [&](wchar_t c) -> bool {
+-					size_t off = 0;
+-
+-					while (off < scansetView.size()) {
+-						auto [first_char, first_char_len] = decodeChar(scansetView, off);
+-
+-						if (first_char == c)
+-							return !invert;
+-
+-						if (off + first_char_len + 1 == scansetView.size() && scansetView[off + first_char_len] == '-') {
+-							return (c == '-') ? !invert : invert;
+-						} else if ((off + first_char_len + 1) < scansetView.size() && scansetView[off + first_char_len] == L'-' && c > first_char) {
+-							// determine end of range
+-							auto [second_char, second_char_len] = decodeChar(scansetView, off + first_char_len + 1);
+-
+-							if (c <= second_char)
+-								return !invert;
+-							off += first_char_len + 1 + second_char_len;
+-							continue;
+-						}
+-						off++;
+-					}
+-
+-					return invert;
+-				};
+-
+-				fmt += scansetView.size();
+-
+-				auto nextChar = [&]() -> wchar_t {
++					taken++;
+ 					if constexpr (std::is_same_v<Char, char>) {
+-						wchar_t wc;
+-						char part = handler.look_ahead();
+-						mbstate_t state{};
+-
+-						int res = mbrtowc(&wc, &part, 1, &state);
+-
+-						while (res < 0) {
+-							handler.consume();
+-							part = handler.look_ahead();
+-							res = mbrtowc(&wc, &part, 1, &state);
++						if (wide) {
++							wchar_t wc;
++							char byte = c;
++							size_t n = mbrtowc(&wc, &byte, 1, &st);
++							if (n == size_t(-1))
++								return input_fail();
++							if (n == size_t(-2))
++								continue;
++							if (!grow(1))
++								return input_fail();
++							if (wcs)
++								wcs[i] = wc;
++							i++;
++						} else {
++							if (!grow(1))
++								return input_fail();
++							if (s)
++								s[i] = c;
++							i++;
+ 						}
+-
+-						return wc;
+ 					} else {
+-						return handler.look_ahead();
++						if (wide) {
++							if (!grow(1))
++								return input_fail();
++							if (wcs)
++								wcs[i] = c;
++							i++;
++						} else {
++							char bytes[MB_LEN_MAX];
++							size_t n = wcrtomb(bytes, c, &st);
++							if (n == size_t(-1))
++								return input_fail();
++							if (!grow(n))
++								return input_fail();
++							if (s)
++								memcpy(s + i, bytes, n);
++							i += n;
++						}
+ 					}
+-				};
+-
+-				wchar_t c = nextChar();
+-				EOF_CHECK(c == '\0');
+-				while (c && (!width || count < width)) {
+-					if (!inScanset(c))
+-						break;
+-					handler.consume();
+-
+-					if(type == SCANF_TYPE_L)
+-						append_to_wbuffer(c);
+-					else
+-						append_to_buffer(c);
+-
+-					c = nextChar();
+ 				}
+-				NOMATCH_CHECK(count == 0);
+-
+-				if(type == SCANF_TYPE_L)
+-					append_to_wbuffer(L'\0');
+-				else
+-					append_to_buffer('\0');
+-
+-				break;
+-			}
+-			case 'p': {
+-				unsigned long long res = 0;
+-				char c = handler.look_ahead();
+-				int count = 0;
+-				EOF_CHECK(c == '\0');
+-
+-				if (c == '0') {
+-					handler.consume();
+-					c = handler.look_ahead();
+-					if (tolower(c) == 'x') {
+-						handler.consume();
+-						c = handler.look_ahead();
+-					}
++				if (!taken)
++					return match_fail();
++				if (t == 'c' && taken != width)
++					return match_fail();
++				if constexpr (std::is_same_v<Char, char>) {
++					if (wide && !mbsinit(&st))
++						return input_fail();
+ 				}
+-
+-				while (true) {
+-					if (c >= '0' && c <= '9') {
+-						handler.consume();
+-						res = res * 16 + (c - '0');
+-					} else if (c >= 'a' && c <= 'f') {
+-						handler.consume();
+-						res = res * 16 + (c - 'a' + 10);
+-					} else if (c >= 'A' && c <= 'F') {
+-						handler.consume();
+-						res = res * 16 + (c - 'A' + 10);
+-					} else {
+-						break;
+-					}
+-					count++;
+-					c = handler.look_ahead();
++				if (alloc) {
++					if (wide)
++						*static_cast<wchar_t **>(dest) = wcs;
++					else
++						*static_cast<char **>(dest) = s;
++				}
++				if (t != 'c') {
++					if (wcs)
++						wcs[i] = 0;
++					if (s)
++						s[i] = 0;
+ 				}
+-				NOMATCH_CHECK(count == 0);
+-				void **typed_dest = (void **)dest;
+-				if (typed_dest)
+-					*typed_dest = (void *)(uintptr_t)res;
+ 				break;
+ 			}
+-			case 'n': {
+-				if(dest) {
+-					switch(type) {
+-					case SCANF_TYPE_CHAR:
+-						*(signed char *)dest = (signed char)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_SHORT:
+-						*(short *)dest = (short)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_INTMAX:
+-						*(intmax_t *)dest = (intmax_t)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_L:
+-						*(long *)dest = (long)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_LL:
+-						*(long long *)dest = (long long)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_PTRDIFF:
+-						*(ptrdiff_t *)dest = (ptrdiff_t)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_SIZE_T:
+-						*(size_t *)dest = (size_t)handler.num_consumed;
+-						break;
+-					case SCANF_TYPE_INT:
+-						*(int *)dest = (int)handler.num_consumed;
+-						break;
+-					}
+-				}
+-
+-				continue;
++			case 'p':
++			case 'X':
++			case 'x':
++			case 'o':
++			case 'b':
++			case 'd':
++			case 'u':
++			case 'i': {
++				unsigned base = t == 'o' ? 8 : t == 'b' ? 2 : t == 'd' || t == 'u' ? 10
++						: t == 'i' ? 0 : 16;
++				mlibc::FloatScanfInput<H, Char> input{handler, width, '.'};
++				unsigned long long x = mlibc::int_scan::scan_int(input, base, ULLONG_MAX);
++				if (!input.finish())
++					return match_fail();
++				if (t == 'p' && dest)
++					*static_cast<void **>(dest) = reinterpret_cast<void *>(static_cast<uintptr_t>(x));
++				else
++					store_int(dest, size, x);
++				break;
+ 			}
+-			case 'a':
+-			case 'A':
+-			case 'e':
+-			case 'E':
+-			case 'f':
+-			case 'F':
+-			case 'g':
+-			case 'G': {
+-				EOF_CHECK(handler.look_ahead() == '\0');
+-
+-				// musl's conversion (mlibc/float-scan.hpp), with the
+-				// locale's decimal point if it is one character.
++			case 'a': case 'A':
++			case 'e': case 'E':
++			case 'f': case 'F':
++			case 'g': case 'G': {
++				// The locale's decimal point, if it is one character.
+ 				auto l = mlibc::getActiveLocale();
+ 				Char radix = '.';
+ 				if constexpr (std::is_same_v<Char, char>) {
+@@ -1566,37 +1380,31 @@
+ 					radix = l->numeric.get(_NL_NUMERIC_DECIMAL_POINT_WC).asUint32();
+ 				}
+ 				mlibc::FloatScanfInput<H, Char> input{handler, width, radix};
+-				long double result = mlibc::scan_float(input,
+-						type == SCANF_TYPE_LL ? 2 : type == SCANF_TYPE_L ? 1 : 0, 0);
+-				NOMATCH_CHECK(!input.finish());
+-
+-				if (dest)
+-					store_float(dest, type, result);
++				long double y = mlibc::scan_float(input,
++						size == SCANF_SIZE_L ? 2 : size == SCANF_SIZE_l ? 1 : 0, 0);
++				if (!input.finish())
++					return match_fail();
++				if (dest) {
++					switch (size) {
++						case SCANF_SIZE_def:
++							*static_cast<float *>(dest) = y;
++							break;
++						case SCANF_SIZE_l:
++							*static_cast<double *>(dest) = y;
++							break;
++						case SCANF_SIZE_L:
++							*static_cast<long double *>(dest) = y;
++							break;
++					}
++				}
+ 				break;
+ 			}
+ 		}
+ 
+-		if(allocate_buf && dest) {
+-			if(type == SCANF_TYPE_L) {
+-				wchar_t *temp = (wchar_t *)getAllocator().allocate((temp_wdest.size() + 1) * sizeof(wchar_t));
+-				memcpy(temp, temp_wdest.data(), temp_wdest.size() * sizeof(wchar_t));
+-				temp[temp_wdest.size()] = L'\0';
+-
+-				wchar_t **dest_ptr = (wchar_t **)dest;
+-				*dest_ptr = temp;
+-			} else {
+-				char *temp = (char *)getAllocator().allocate(temp_dest.size() + 1);
+-				memcpy(temp, temp_dest.data(), temp_dest.size());
+-				temp[temp_dest.size()] = '\0';
+-
+-				char **dest_ptr = (char **)dest;
+-				*dest_ptr = temp;
+-			}
+-		}
+-
+-		if (dest) match_count++;
++		if (dest)
++			matches++;
+ 	}
+-	return match_count;
++	return matches;
+ }
+ 
+ } // namespace
+@@ -1675,22 +1483,22 @@
+ 	}
+ 
+ 	struct {
+-		char look_ahead() {
++		// A read error ends the input as the end of the file does; the
++		// stream's error indicator tells them apart.
++		int look_ahead() {
+ 			char c;
+-			size_t actual_size;
+-			file->read(&c, 1, &actual_size);
+-			if (actual_size)
+-				file->unget(c);
+-			return actual_size ? c : 0;
++			size_t actual_size = 0;
++			if (file->read(&c, 1, &actual_size) || !actual_size)
++				return EOF;
++			file->unget(c);
++			return static_cast<unsigned char>(c);
+ 		}
+ 
+-		char consume() {
++		void consume() {
+ 			char c;
+-			size_t actual_size;
+-			file->read(&c, 1, &actual_size);
+-			if (actual_size)
++			size_t actual_size = 0;
++			if (!file->read(&c, 1, &actual_size) && actual_size)
+ 				num_consumed++;
+-			return actual_size ? c : 0;
+ 		}
+ 
+ 		mlibc::abstract_file *file;
+@@ -1751,13 +1559,13 @@
+ 
+ int vsscanf(const char *__restrict buffer, const char *__restrict format, __builtin_va_list args) {
+ 	struct {
+-		char look_ahead() {
+-			return *buffer;
++		int look_ahead() {
++			return *buffer ? static_cast<unsigned char>(*buffer) : EOF;
+ 		}
+ 
+-		char consume() {
++		void consume() {
+ 			num_consumed++;
+-			return *buffer++;
++			buffer++;
+ 		}
+ 
+ 		const char *buffer;
+@@ -1812,28 +1620,22 @@
+ 	frg::unique_lock lock(file->_lock);
+ 
+ 	struct {
+-		wchar_t look_ahead() {
++		int look_ahead() {
+ 			if (peek)
+ 				return *peek;
+ 
+ 			auto c = fgetwc_unlocked(file);
+-			if (c != WEOF) {
+-				peek = c;
+-				return c;
+-			}
+-			return 0;
++			if (c == WEOF)
++				return EOF;
++			peek = c;
++			return c;
+ 		}
+ 
+-		wchar_t consume() {
+-			if (peek) {
+-				auto c = *peek;
+-				peek = frg::null_opt;
+-				num_consumed++;
+-				return c;
+-			}
+-			auto c = fgetwc_unlocked(file);
++		void consume() {
++			if (!peek && look_ahead() < 0)
++				return;
++			peek = frg::null_opt;
+ 			num_consumed++;
+-			return (c != WEOF) ? c : 0;
+ 		}
+ 
+ 		mlibc::abstract_file *file;
+@@ -1841,7 +1643,11 @@
+ 		frg::optional<wchar_t> peek = frg::null_opt;
+ 	} handler = {file};
+ 
+-	return do_scanf(handler, format, args);
++	int result = do_scanf(handler, format, args);
++	// The character looked at but not taken goes back to the stream.
++	if (handler.peek)
++		ungetwc_unlocked(*handler.peek, file);
++	return result;
+ }
+ 
+ int swprintf(wchar_t *__restrict buffer, size_t n, const wchar_t *__restrict format, ...) {
+@@ -1868,27 +1674,29 @@
+ 	LimitedPrinter<wchar_t> p{buffer, n ? n - 1 : 0};
+ //	mlibc::infoLogger() << "printf(" << format << ")" << frg::endlog;
+ 	auto res = frg::printf_format<wchar_t, NL_ARGMAX>(PrintfAgent<wchar_t, decltype(p)>{&p, &vs}, format, &vs);
++	// What fit is a string even when the output did not, as in musl.
++	if (n)
++		p.buffer[frg::min(n - 1, p.count)] = 0;
+ 	if (!res) {
+-		errno = EINVAL;
++		if (errno != EILSEQ)
++			errno = EINVAL;
+ 		return -1;
+ 	} else if (p.count >= n) {
+ 		errno = EOVERFLOW;
+ 		return -1;
+ 	}
+-	if (n)
+-		p.buffer[frg::min(n - 1, p.count)] = 0;
+ 	return p.count;
+ }
+ 
+ int vswscanf(const wchar_t *__restrict buffer, const wchar_t *__restrict format, __builtin_va_list args) {
+ 	struct {
+-		wchar_t look_ahead() {
+-			return *buffer;
++		int look_ahead() {
++			return *buffer ? static_cast<int>(*buffer) : EOF;
+ 		}
+ 
+-		wchar_t consume() {
++		void consume() {
+ 			num_consumed++;
+-			return *buffer++;
++			buffer++;
+ 		}
+ 
+ 		const wchar_t *buffer;
+@@ -1949,11 +1757,12 @@
+ 	return fgets_unlocked(buffer, max_size, stream);
+ }
+ 
++// fputc() and putc() give back the byte written, as an unsigned char.
+ int fputc_unlocked(int c, FILE *stream) {
+ 	char d = c;
+ 	if(fwrite_unlocked(&d, 1, 1, stream) != 1)
+ 		return EOF;
+-	return 1;
++	return static_cast<unsigned char>(d);
+ }
+ 
+ // byte-oriented (POSIX)
+@@ -2009,7 +1818,7 @@
+ 	char d = c;
+ 	if(fwrite_unlocked(&d, 1, 1, stream) != 1)
+ 		return EOF;
+-	return c;
++	return static_cast<unsigned char>(d);
+ }
+ 
+ // byte-oriented (POSIX)
+@@ -2308,10 +2117,15 @@
+ 		mlibc::infoLogger() << "vasprintf(\"" << format << "\")" << frg::endlog;
+ 	auto res = frg::printf_format<char, NL_ARGMAX>(PrintfAgent<char, decltype(p)>{&p, &vs}, format, &vs);
+ 	if (!res) {
++		free(p.buffer);
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
+-	p.expand();
++	if (!p.expand()) {
++		free(p.buffer);
++		errno = ENOMEM;
++		return -1;
++	}
+ 	p.buffer[p.count] = 0;
+ 	*out = p.buffer;
+ 	return p.count;
+@@ -2365,8 +2179,9 @@
+ 			size_t chunk;
+ 			if(int e = file->read((char *)buffer + progress,
+ 					count - progress, &chunk)) {
++				// What was read before the error counts.
+ 				errno = e;
+-				return 0;
++				return progress;
+ 			}else if(!chunk) {
+ 				// TODO: Handle eof.
+ 				break;
+@@ -2384,7 +2199,7 @@
+ 				if(int e = file->read((char *)buffer + i * size + progress,
+ 						size - progress, &chunk)) {
+ 					errno = e;
+-					return 0;
++					return i;
+ 				}else if(!chunk) {
+ 					// TODO: Handle eof.
+ 					break;
+diff -ruN a/options/ansi/include/mlibc/file-io.hpp b/options/ansi/include/mlibc/file-io.hpp
+--- a/options/ansi/include/mlibc/file-io.hpp
++++ b/options/ansi/include/mlibc/file-io.hpp
+@@ -63,8 +63,9 @@
+ 	void dispose();
+ 
+ 	// Sets whether the stream may be read and written by the open(2)
+-	// access mode in `flags` (from fopen's mode, say). Reading or writing
+-	// a stream that may not be fails with EBADF, as in glibc and musl.
++	// access mode in `flags` (from fopen's mode, say), and whether it
++	// appends (O_APPEND). Reading or writing a stream that may not be
++	// fails with EBADF, as in glibc and musl.
+ 	void set_access(int flags);
+ 
+ 	virtual int close() = 0;
+@@ -109,6 +110,7 @@
+ 	buffer_mode _bufmode;
+ 	bool _readable = true;
+ 	bool _writable = true;
++	bool _append = false;
+ 	void (*_do_dispose)(abstract_file *);
+ 
+ public:
+diff -ruN a/options/posix/generic/posix-file-io.cpp b/options/posix/generic/posix-file-io.cpp
+--- a/options/posix/generic/posix-file-io.cpp
++++ b/options/posix/generic/posix-file-io.cpp
+@@ -67,25 +67,30 @@
+ }
+ 
+ int memstream_mem_file::io_seek(off_t offset, int whence, off_t *new_offset) {
++	off_t base;
+ 	switch (whence) {
+ 		case SEEK_SET:
+-			_pos = offset;
+-			if (_pos >= 0 && size_t(_pos) >= _buffer_size())
+-				_buf.resize(_pos + 1, '\0');
++			base = 0;
+ 			break;
+ 		case SEEK_CUR:
+-			_pos += offset;
+-			if (_pos >= 0 && size_t(_pos) >= _buffer_size())
+-				_buf.resize(_pos + 1, '\0');
++			base = _pos;
+ 			break;
+ 		case SEEK_END:
+-			_pos = _buffer_size() ? _buffer_size() - 1 + offset : _buffer_size() + offset;
+-			_buf.resize(_pos + 1, '\0');
++			base = _buffer_size() ? _buffer_size() - 1 : 0;
+ 			break;
+ 		default:
+ 			return EINVAL;
+ 	}
+ 
++	// A position before the start fails and leaves the stream where it
++	// was, as POSIX says; a write there would land before the buffer.
++	off_t pos;
++	if (__builtin_add_overflow(base, offset, &pos) || pos < 0)
++		return EINVAL;
++	_pos = pos;
++	if (size_t(_pos) >= _buffer_size())
++		_buf.resize(_pos + 1, '\0');
++
+ 	*new_offset = _pos;
+ 	return 0;
+ }
+@@ -101,6 +106,7 @@
+ 		_inBuffer = getAllocator().allocate(size);
+ 		_needsDeallocation = true;
+ 	}
++	set_access(flags);
+ 
+ 	if(_flags & O_APPEND) {
+ 		// the initial seek-size for append is zero if buf was NULL, or the first '\0' found, or the size
+@@ -136,24 +142,24 @@
+ }
+ 
+ int fmemopen_mem_file::io_write(const char *buffer, size_t max_size, size_t *actual_size) {
++	// In append mode every write goes to the end of the contents.
++	if(_flags & O_APPEND)
++		_pos = _max_size;
++
+ 	off_t bytes_write = std::min(static_cast<size_t>(_buffer_size() - _pos), max_size);
+ 	memcpy(_buffer().data() + _pos, buffer, bytes_write);
+ 	_pos += bytes_write;
+ 	*actual_size = bytes_write;
+ 
++	// A write that makes the contents longer ends them with a null byte
++	// if one fits, as POSIX says; otherwise, as in glibc, the buffer's
++	// last byte becomes one, except in append mode.
+ 	if(_pos > _max_size) {
+ 		_max_size = _pos;
+-	}
+-
+-	// upon flushing, we need to put a null byte at the current position or at the end of the buffer
+-	size_t null = _pos;
+-	// a special case is if the mode is set to updating ('+'), then it always goes at the end
+-	if(null >= _buffer_size() || _flags & O_RDWR) {
+-		null = _buffer_size() - 1;
+-	}
+-
+-	if(_buffer_size()) {
+-		_buffer()[null] = '\0';
++		if(size_t(_max_size) < _buffer_size())
++			_buffer()[_max_size] = '\0';
++		else if(!(_flags & O_APPEND) && _buffer_size())
++			_buffer()[_buffer_size() - 1] = '\0';
+ 	}
+ 
+ 	return 0;

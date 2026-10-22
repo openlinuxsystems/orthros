@@ -8,9 +8,10 @@
 // group of its own, in the foreground, with fork and exec. The tests are
 // the programs of this directory and the dynamically linked one of
 // dynamic/, the test of Rust's standard library
-// (std-test, userspace/programs), the C library's own tests (libc) and
-// Lua's test suite (lua); libc:<name> runs only the C library's test
-// <name>, with its output as it goes. It prints "posix: <test> passed" or
+// (std-test, userspace/programs), the C library's own tests (libc),
+// libc-test's (libc-test) and Lua's test suite (lua); libc:<name> and
+// libc-test:<name> run only that suite's test <name>, with its output as
+// it goes. It prints "posix: <test> passed" or
 // "FAILED" for each, and exits with 0 only if every test passed
 // (radix-posix(7)).
 
@@ -42,6 +43,10 @@ static const char *const LUA[] = {"/system/tests/lua/lua", "-e", "_U=true", "all
 // The C library's own tests, in one program (ports/mlibc-tests).
 static const char *const LIBC[] = {"/system/tests/libc/run", NULL};
 
+// libc-test's functional and regression tests, the same way
+// (ports/libc-test).
+static const char *const LIBC_TEST[] = {"/system/tests/libc-test/run", NULL};
+
 // Every test, in the order they run.
 static const struct test TESTS[] = {
 		{"hello", NULL, NULL},
@@ -62,6 +67,7 @@ static const struct test TESTS[] = {
 		{"dynamic", NULL, NULL},
 		{"std-test", NULL, NULL},
 		{"libc", NULL, LIBC},
+		{"libc-test", NULL, LIBC_TEST},
 		{"lua", "/system/tests/lua/testes", LUA},
 };
 
@@ -141,12 +147,16 @@ int main(int argc, char **argv) {
 	int passed = 0;
 	for(int i = 0; i < count; i++) {
 		const struct test *test = &TESTS[i];
-		const char *one[] = {LIBC[0], NULL, NULL};
-		struct test libc_one = {NULL, NULL, one};
+		const char *one[] = {NULL, NULL, NULL};
+		struct test suite_one = {argc > 1 ? argv[i + 1] : NULL, NULL, one};
 		if(argc > 1 && !strncmp(argv[i + 1], "libc:", 5)) {
-			libc_one.name = argv[i + 1];
+			one[0] = LIBC[0];
 			one[1] = argv[i + 1] + 5;
-			test = &libc_one;
+			test = &suite_one;
+		} else if(argc > 1 && !strncmp(argv[i + 1], "libc-test:", 10)) {
+			one[0] = LIBC_TEST[0];
+			one[1] = argv[i + 1] + 10;
+			test = &suite_one;
 		} else if(argc > 1) {
 			test = NULL;
 			for(int j = 0; j < COUNT && !test; j++)

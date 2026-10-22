@@ -142,11 +142,12 @@ interface directory = 0x000b version 2 {
                 corrupt];
     /// What the file at `path` (`.` for this directory) is: its kind, its
     /// size and the bytes it takes on its filesystem, a number unique on
-    /// its filesystem while it exists, and when it was made and last
-    /// changed, in nanoseconds since 1970 (0 if unknown). Needs the read
-    /// right.
+    /// its filesystem while it exists, when it was made, last changed and
+    /// last read, in nanoseconds since 1970 (0 if unknown), and the number
+    /// of the mount it is on, unique since boot. Needs the read right.
     method stat = 6 (path: in bytes)
-        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
+            accessed: u64, mount: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt];
@@ -171,9 +172,18 @@ interface directory = 0x000b version 2 {
     /// disk.
     method sync = 9 () -> ()
         raises [no_such_slot, empty_slot, io, corrupt];
-    /// The directory's filesystem: its kind, how it is mounted, and its
-    /// block size, blocks and free blocks. Needs the read right.
+    /// The directory's filesystem: its kind, how it is mounted, its block
+    /// size, blocks and free blocks, and how many files and directories it
+    /// holds at most and how many more it can take (both zero when it
+    /// keeps no count, as FAT does). Needs the read right.
     method info = 10 ()
-        -> (filesystem: FilesystemKind, flags: MountFlags, block_size: u32, blocks: u64, free: u64)
+        -> (filesystem: FilesystemKind, flags: MountFlags, block_size: u32, blocks: u64, free: u64,
+            files: u64, free_files: u64)
         raises [no_such_slot, empty_slot, missing_rights];
+    /// Sets the times of the file or directory at `path` (`.` for this
+    /// one), as radix-file(2)'s `set_times` does. Needs the write right.
+    method set_times = 11 (path: in bytes, accessed: u64, modified: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                not_permitted, read_only, io, corrupt];
 }

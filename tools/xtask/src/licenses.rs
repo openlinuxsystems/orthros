@@ -630,6 +630,21 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
                 ),
             });
         }
+        for bundled in &recipe.bundled {
+            packages.push(Package {
+                name: bundled.name.clone(),
+                version: bundled.version.clone(),
+                license: bundled.license.clone(),
+                area: Area::Kernel,
+                download: bundled.homepage.clone(),
+                sha256: None,
+                notices: bundled.notices.iter().map(|file| port.dir.join(file)).collect(),
+                comment: format!(
+                    "Built into {} {} from ports/{} of Dukovo, which keeps its code.",
+                    recipe.name, recipe.version, recipe.name
+                ),
+            });
+        }
     }
     let llvm = ports.toolchain.llvm_version();
     packages.push(Package {

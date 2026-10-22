@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# libc-test, the musl project's tests of C libraries, built for Radix:
+# its functional and regression tests that apply to Radix, which the
+# posix boot test runs (radix-posix(7)). It has no releases, so the
+# version is its commit's. The musl project's own repository cannot be
+# reached from CI, so the source is Khem Raj's mirror on GitHub; the
+# commit is the last of the upstream history. The runner is
+# ports/mlibc-tests' run.c, hence the dependency.
+name = "libc-test"
+version = "b7ec467969a5"
+summary = "the musl project's tests of C libraries"
+license = "MIT"
+homepage = "https://wiki.musl-libc.org/libc-test.html"
+depends = ["mlibc", "mlibc-tests"]
+image = ["system/tests/libc-test/"]
+notices = ["COPYRIGHT"]
+
+[source]
+git = "https://github.com/kraj/libc-test.git"
+commit = "b7ec467969a53756258778fa7d9b045f912d1c93"

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// exec: the program, its arguments and environment, what a process keeps
-// across it (its number, parent, working directory, descriptors without
-// close-on-exec, ignored signals, its mask and pending signals), scripts,
-// and how it fails.
+// exec: the program, its arguments and environment, the search path,
+// what a process keeps across it (its number, parent, working directory,
+// descriptors without close-on-exec, ignored signals, its mask and
+// pending signals), scripts, and how it fails.
 
 #include <fcntl.h>
 #include <limits.h>
@@ -46,6 +46,20 @@ static void arguments(void) {
 		_exit(126);
 	}
 	CHECK_CHILD(pid);
+	// Without PATH it searches /system/bin, which confstr names: there
+	// is no exec-helper there.
+	pid = check_fork();
+	if(pid == 0) {
+		unsetenv("PATH");
+		execlp("exec-helper", "exec-helper", "exit", "0", (char *)NULL);
+		_exit(errno == ENOENT ? 0 : 126);
+	}
+	CHECK_CHILD(pid);
+	char path[32];
+	CHECK(confstr(_CS_PATH, path, sizeof(path)) == sizeof("/system/bin"));
+	CHECK(!strcmp(path, "/system/bin"));
+	errno = 0;
+	CHECK(confstr(-1, path, sizeof(path)) == 0 && errno == EINVAL);
 	// The exit code comes back through wait.
 	pid = check_fork();
 	if(pid == 0) {

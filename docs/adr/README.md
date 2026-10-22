@@ -71,3 +71,20 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0057](0057-hierarchy-proc-and-sys.md) | Spark builds the directory hierarchy; /proc and /sys are plain text, with Linux's layout where both have a thing | Accepted |
 | [0058](0058-kernel-stack-frame-budget.md) | Every kernel function's stack frame is held to 2 KiB, checked after every release build | Accepted |
 | [0059](0059-file-operations-fast-paths.md) | A path with no `..` is walked without a chain, each mount filters its mount points, and a file method looks its capability up once | Accepted |
+| [0060](0060-anonymous-memory-in-the-kernel.md) | Anonymous memory is the kernel's: made when touched, charged to the domain, and shared copy-on-write after a fork | Accepted |
+| [0061](0061-posix-process-tree-in-the-kernel.md) | The kernel keeps POSIX's process tree, groups and sessions, beside the capabilities | Accepted |
+| [0062](0062-signals-in-the-kernel.md) | The kernel delivers signals on the way back to user mode, with Linux's numbers and frame | Accepted |
+| [0063](0063-fork-and-exec.md) | fork copies what may be copied, and exec loads a program from a file into a fresh address space | Accepted |
+| [0064](0064-file-descriptors-and-paths-for-posix.md) | A file descriptor is a capability slot, and the C library turns paths into paths beneath the root it holds | Accepted |
+| [0065](0065-pipes-and-poll.md) | Pipes are kernel file descriptions, and poll is one call over capabilities | Accepted |
+| [0066](0066-terminals-and-pseudo-terminals.md) | Terminals are kernel pseudo-terminals with POSIX's line discipline and job control | Accepted |
+| [0067](0067-clocks-and-timers.md) | Clocks are read through the process, and one kernel thread runs every timer | Accepted |
+| [0068](0068-mlibc-is-the-c-library.md) | mlibc is the C library, with Radix's own system layer and Linux's ABI numbers | Accepted |
+| [0069](0069-clang-toolchain-and-ports.md) | Software from elsewhere is built by ports: pinned sources, patches and a script, with the host's Clang wrapped for Radix | Accepted |
+| [0070](0070-rust-standard-library-port.md) | Rust's standard library is ported to a radix target on mlibc, built from the toolchain's rust-src | Accepted |
+| [0071](0071-dynamic-linker-for-bundles.md) | mlibc's dynamic linker is /system/lib/ld.so, for bundles; system programs stay static | Accepted |
+| [0072](0072-exact-numbers-and-times-in-the-c-library.md) | The C library writes and reads numbers and times as glibc does, with musl's code where mlibc's was wrong | Accepted |
+| [0073](0073-c-utf-8-locale.md) | Programs start in C.UTF-8, compiled from glibc's locale data; named locales wait for Phase 12 | Accepted |
+| [0074](0074-posix-scheduling-and-resource-limits.md) | Nice levels, POSIX scheduling and resource limits follow Linux's rules for a process without privileges | Accepted |
+| [0075](0075-advisory-file-locks.md) | Advisory file locks are kept by the kernel in one table: BSD's, POSIX's and Linux's open file description locks | Accepted |
+| [0076](0076-file-times-and-device-numbers.md) | Programs set a file's times; reading never changes them, and each mount has a device number | Accepted |

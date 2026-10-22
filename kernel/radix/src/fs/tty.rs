@@ -223,21 +223,28 @@ impl Tty {
     }
 
     /// Makes the terminal the controlling terminal of `process`'s session,
-    /// which `process` must lead, with no controlling terminal yet.
+    /// which `process` must lead, with no controlling terminal yet; if it
+    /// already is that, nothing changes, as on Linux.
     fn make_controlling(this: &TtyRef, process: &ProcessRef) -> Result<(), Status> {
         let (pid, group, session) = posix::ids_of(process)?;
         if pid != session {
             return Err(Kernel::NotPermitted.status(0));
         }
         let mut posix = process.posix.lock();
-        if posix.terminal.as_ref().is_some_and(|tty| tty.session() == session) {
-            return Err(Kernel::NotPermitted.status(0));
+        let current = posix.terminal.as_ref().filter(|tty| tty.session() == session);
+        if let Some(tty) = current {
+            return if KArc::ptr_eq(tty, this) {
+                Ok(())
+            } else {
+                Err(Kernel::NotPermitted.status(0))
+            };
         }
-        if self_session_taken(this, session) {
+        // Claimed in one step, so that of two session leaders asking for
+        // the same terminal at once, one fails.
+        if this.session.compare_exchange(0, session, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return Err(Kernel::NotPermitted.status(0));
         }
         this.foreground.store(group, Ordering::Release);
-        this.session.store(session, Ordering::Release);
         posix.terminal = Some(this.clone());
         Ok(())
     }
@@ -605,11 +612,6 @@ impl Tty {
 }
 
 /// Whether a session other than `session` already has `tty`.
-fn self_session_taken(tty: &Tty, session: u64) -> bool {
-    let now = tty.session();
-    now != 0 && now != session
-}
-
 /// One open of a side of a terminal: what a file description of it
 /// holds.
 pub struct Handle {
@@ -691,7 +693,7 @@ impl Drop for Handle {
 }
 
 fn char_device(id: u64) -> Stat {
-    Stat { kind: Kind::CharDevice, size: 0, allocated: 0, id, created: 0, modified: 0 }
+    Stat { kind: Kind::CharDevice, size: 0, allocated: 0, id, created: 0, modified: 0, accessed: 0 }
 }
 
 impl Node for Handle {

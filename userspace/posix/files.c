@@ -3,8 +3,8 @@
 
 // Files through the C library: open and its flags, reading, writing and
 // seeking, descriptions that share an offset, stdio, directories and
-// their descriptors, temporary files, and renaming and removing, on the
-// tmpfs at /tmp and the read-only /system.
+// their descriptors, temporary files, renaming and removing, and times,
+// on the tmpfs at /tmp and the read-only /system.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -161,8 +161,50 @@ static void directories(void) {
 	CHECK(stat("/system/tests/posix/files", &st) == 0 && S_ISREG(st.st_mode));
 	CHECK(stat("/system", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK_ERROR(open("/system/new", O_WRONLY | O_CREAT, 0644), EROFS);
+	CHECK_ERROR(utimensat(AT_FDCWD, "/system", NULL, 0), EROFS);
+	// Each mount has a device number of its own.
+	struct stat tmp;
+	CHECK(stat("/tmp", &tmp) == 0 && tmp.st_dev != st.st_dev);
 	CHECK(access("/system/tests/posix/files", R_OK) == 0);
 	CHECK_ERROR(access("/nowhere", F_OK), ENOENT);
+}
+
+// A file's times, as utimensat and futimens set them; reading leaves the
+// read time.
+static void times(void) {
+	int fd = open("/tmp/files-times", O_RDWR | O_CREAT | O_EXCL, 0644);
+	CHECK(fd >= 0);
+	struct timespec set[2] = {{.tv_sec = 1000000000, .tv_nsec = 5}, {.tv_sec = 2, .tv_nsec = 7}};
+	CHECK(utimensat(AT_FDCWD, "/tmp/files-times", set, 0) == 0);
+	struct stat st;
+	CHECK(fstat(fd, &st) == 0);
+	CHECK(st.st_atim.tv_sec == 1000000000 && st.st_atim.tv_nsec == 5);
+	CHECK(st.st_mtim.tv_sec == 2 && st.st_mtim.tv_nsec == 7);
+	char byte;
+	CHECK(read(fd, &byte, 1) == 0);
+	CHECK(fstat(fd, &st) == 0 && st.st_atim.tv_sec == 1000000000);
+	// UTIME_NOW and UTIME_OMIT; a write changes the change time.
+	time_t now = time(NULL);
+	struct timespec omit_now[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_nsec = UTIME_NOW}};
+	CHECK(futimens(fd, omit_now) == 0);
+	CHECK(fstat(fd, &st) == 0 && st.st_atim.tv_sec == 1000000000 && st.st_mtim.tv_sec >= now);
+	CHECK(futimens(fd, set) == 0 && write(fd, "x", 1) == 1);
+	CHECK(fstat(fd, &st) == 0 && st.st_mtim.tv_sec >= now && st.st_atim.tv_sec == 1000000000);
+	struct timespec bad[2] = {{.tv_nsec = 1000000000}, {.tv_nsec = UTIME_OMIT}};
+	CHECK_ERROR(futimens(fd, bad), EINVAL);
+	struct timespec early[2] = {{.tv_sec = -1}, {.tv_nsec = UTIME_OMIT}};
+	CHECK_ERROR(futimens(fd, early), EINVAL);
+	close(fd);
+	// A descriptor not open for writing may not set them.
+	fd = open("/tmp/files-times", O_RDONLY);
+	CHECK(fd >= 0);
+	CHECK_ERROR(futimens(fd, NULL), EACCES);
+	close(fd);
+	// Directories have times too, and devices none.
+	CHECK(utimensat(AT_FDCWD, "/tmp", set, 0) == 0);
+	CHECK(stat("/tmp", &st) == 0 && st.st_mtim.tv_sec == 2);
+	CHECK_ERROR(utimensat(AT_FDCWD, "/dev/null", NULL, 0), EPERM);
+	CHECK(unlink("/tmp/files-times") == 0);
 }
 
 // A descriptor of a directory, opened with or without O_DIRECTORY, as
@@ -298,5 +340,6 @@ int main(void) {
 	RUN(directories);
 	RUN(directory_descriptors);
 	RUN(temporary_files);
+	RUN(times);
 	return check_end();
 }

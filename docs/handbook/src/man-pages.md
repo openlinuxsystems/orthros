@@ -24,9 +24,10 @@ for section 2, which `ridlc` generates from the interface definitions in
 | `radix-ipc(7)` | User mode, the system calls, endpoints, notifications, channels, rings and the random capability |
 | `radix-processes(7)` | Processes, program loading, the address space layout and the boot archive |
 | `radix-files(7)` | Files, directory capabilities, paths, filesystems, the page cache, the directory hierarchy and `/volumes` |
+| `radix-posix(7)` | POSIX programs: the C library and toolchain, fork and exec, signals, descriptors and paths, pipes, terminals, timers, threads, limits, file locks, dynamic linking and Rust's standard library |
 | `spark(8)` | Spark, the first program, which starts every other |
 | `radix_cap_call(2)`, `radix_send(2)`, `radix_recv(2)`, `radix_reply_recv(2)`, `radix_notify(2)`, `radix_wait(2)`, `radix_yield(2)`, `radix_map(2)`, `radix_unmap(2)`, `radix_ring_setup(2)`, `radix_ring_enter(2)`, `radix_debug_log(2)` | The twelve system calls, one page each, with their registers and errors |
-| `radix-capability(2)`, `radix-memory(2)`, `radix-address-space(2)`, `radix-thread(2)`, `radix-endpoint(2)`, `radix-notification(2)`, `radix-random(2)`, `radix-ring(2)`, `radix-kernel-log(2)`, `radix-process(2)`, `radix-directory(2)`, `radix-file(2)`, `radix-startup(2)`, `radix-errors(2)` | The interfaces of each kind of object, the start-up page and the kernel's errors |
+| `radix-capability(2)`, `radix-memory(2)`, `radix-address-space(2)`, `radix-thread(2)`, `radix-endpoint(2)`, `radix-notification(2)`, `radix-random(2)`, `radix-ring(2)`, `radix-kernel-log(2)`, `radix-process(2)`, `radix-signal(2)`, `radix-terminal(2)`, `radix-directory(2)`, `radix-file(2)`, `radix-startup(2)`, `radix-errors(2)` | The interfaces of each kind of object, the start-up page and the kernel's errors |
 
 Sections follow the usual convention: 1 user commands, 2 system calls,
 3 library interfaces, 4 devices and drivers, 5 file formats, 7 overviews

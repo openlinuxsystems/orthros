@@ -187,6 +187,10 @@ pub struct Stat {
     pub created: u64,
     /// When its contents last changed, likewise.
     pub modified: u64,
+    /// When it was last read, likewise: when it was made, or the time a
+    /// program set (`set_times`), since reading does not change it (as
+    /// with Linux's `noatime`, ADR 0076).
+    pub accessed: u64,
 }
 
 /// A node, shared.
@@ -330,6 +334,15 @@ pub trait Node: Send + Sync + Any {
         Err(Error::IsDirectory)
     }
 
+    /// Sets when it was last read and when its contents last changed, in
+    /// nanoseconds since 1970 (none: as they are); a filesystem keeps them
+    /// as finely as it can (FAT: two seconds, and the day for reads).
+    /// Nodes that keep no times (devices, pipes, the synthetic
+    /// filesystems' files) fail with [`Error::NotSupported`].
+    fn set_times(&self, _accessed: Option<u64>, _modified: Option<u64>) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
     /// Writes what the node holds in memory to the disk.
     fn sync(&self) -> Result<()> {
         Ok(())
@@ -392,6 +405,12 @@ pub struct FsInfo {
     pub blocks: u64,
     /// How many are free.
     pub free: u64,
+    /// How many files and directories it can hold; zero when it keeps no
+    /// count (FAT, the synthetic filesystems), as Linux's vfat and procfs
+    /// say.
+    pub files: u64,
+    /// How many more it can take.
+    pub free_files: u64,
 }
 
 /// A filesystem.

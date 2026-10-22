@@ -1,0 +1,433 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Threads and processes, from libc-test. A program ends, with status 0,
+when its last thread calls pthread_exit, as POSIX says
+(regression/pthread_exit-dtor); mlibc's left the process without
+threads. A recursive mutex locked again by its owner, timed or not,
+counts up; an error-checking one fails with EDEADLK; unlocking one
+held by another thread fails with EPERM and changes nothing
+(functional/pthread_mutex). A mutex taken without waiting no longer
+sets its waiters flag, so unlocking it makes no futex system call, as
+with glibc and musl; mlibc's woke on every unlock, which cost a system
+call each time and woke threads still waiting on a mutex since
+initialized again at the same address. pthread_create fails with
+EAGAIN when the new thread's TLS cannot be allocated
+(regression/pthread_create-oom). pthread_atfork's handlers are the
+process's, so a fork from any thread runs them (mlibc kept them in the
+registering thread's TCB), and a fork that fails runs the parent's
+handlers and keeps its errno (regression/pthread_atfork-errno-clobber).
+daemon opens /dev/null and changes directory before it forks, as musl
+does, so its caller sees those errors (regression/daemon-failure).
+Meant for upstream.
+
+diff -ruN a/options/bsd-procdesc/generic/sys-procdesc.cpp b/options/bsd-procdesc/generic/sys-procdesc.cpp
+--- a/options/bsd-procdesc/generic/sys-procdesc.cpp
++++ b/options/bsd-procdesc/generic/sys-procdesc.cpp
+@@ -7,6 +7,7 @@
+ #include <mlibc/debug.hpp>
+ #include <mlibc/tid.hpp>
+ #include <mlibc/thread.hpp>
++#include <mlibc/threads.hpp>
+ 
+ pid_t pdfork(int *fdp, int flags) {
+ 	auto self = mlibc::get_current_tcb();
+@@ -14,35 +15,22 @@
+ 
+ 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<Pdfork>, -1);
+ 
+-	auto hand = self->atforkEnd;
+-	while (hand) {
+-		if (hand->prepare)
+-			hand->prepare();
+-
+-		hand = hand->prev;
+-	}
++	auto last = mlibc::fork_prepare();
+ 
+ 	if(int e = mlibc::sysdep_or_panic<Pdfork>(fdp, flags, &child); e) {
++		mlibc::fork_finish(last, false);
+ 		errno = e;
+ 		return -1;
+ 	}
+ 
+ 	// update the cached TID in the TCB
+-	if (!child)
++	if (!child) {
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
+-
+-	hand = self->atforkBegin;
+-	while (hand) {
+-		if (!child) {
+-			if (hand->child)
+-				hand->child();
+-		} else {
+-			if (hand->parent)
+-				hand->parent();
+-		}
+-		hand = hand->next;
++		mlibc::thread_forked();
+ 	}
+ 
++	mlibc::fork_finish(last, !child);
++
+ 	return child;
+ }
+ 
+diff -ruN a/options/internal/generic/threads.cpp b/options/internal/generic/threads.cpp
+--- a/options/internal/generic/threads.cpp
++++ b/options/internal/generic/threads.cpp
+@@ -30,6 +30,10 @@
+ 
+ FutexLock key_mutex_;
+ 
++// The threads alive, the first one included: when the last of them
++// exits, the process exits with 0, as POSIX says.
++constinit unsigned int live_threads = 1;
++
+ } // namespace
+ 
+ extern "C" int __cxa_thread_atexit_impl(void (*function)(void *), void *argument,
+@@ -97,6 +101,8 @@
+ 
+ int thread_create(struct __mlibc_thread_data **__restrict thread, const struct __mlibc_threadattr *__restrict attrp, void *entry, void *__restrict user_arg, bool returns_int) {
+ 	auto new_tcb = __rtld_allocateTcb();
++	if (!new_tcb)
++		return EAGAIN;
+ 	pid_t tid;
+ 	struct __mlibc_threadattr attr = {};
+ 	if (attrp)
+@@ -129,6 +135,7 @@
+ 	new_tcb->returnValueType = (returns_int) ? TcbThreadReturnValue::Integer : TcbThreadReturnValue::Pointer;
+ 	new_tcb->isJoinable = (attr.__detachstate == __MLIBC_THREAD_CREATE_JOINABLE);
+ 	__atomic_store_n(&new_tcb->cancelBits, 0, __ATOMIC_RELAXED);
++	__atomic_fetch_add(&live_threads, 1, __ATOMIC_RELAXED);
+ 	sysdep_or_panic<Clone>(new_tcb, &tid, stack);
+ 	*thread = reinterpret_cast<struct __mlibc_thread_data *>(new_tcb);
+ 
+@@ -219,6 +226,11 @@
+ 		}
+ 	}
+ 
++	// The last thread: the process exits as if it called exit(0), with
++	// atexit's functions and the flush of stdio.
++	if (__atomic_sub_fetch(&live_threads, 1, __ATOMIC_ACQ_REL) == 0)
++		exit(0);
++
+ 	self->returnValue = ret_val;
+ 
+ 	__atomic_store_n(&self->didExit, 1, __ATOMIC_RELEASE);
+@@ -226,10 +238,13 @@
+ 
+ 	// TODO: clean up thread resources when we are detached.
+ 
+-	// TODO: do exit(0) when we're the only thread instead
+ 	mlibc::do_exit();
+ }
+ 
++void thread_forked() {
++	__atomic_store_n(&live_threads, 1, __ATOMIC_RELAXED);
++}
++
+ int thread_mutex_init(struct __mlibc_mutex *__restrict mutex,
+ 		const struct __mlibc_mutexattr *__restrict attr) {
+ 	auto type = attr ? attr->__mlibc_type : __MLIBC_THREAD_MUTEX_DEFAULT;
+@@ -267,24 +282,30 @@
+ int thread_mutex_timedlock(struct __mlibc_mutex *mutex, const struct timespec *__restrict abstime, clockid_t clockid) {
+ 	unsigned int this_tid = mlibc::this_tid();
+ 	unsigned int expected = 0;
++	// A thread takes the mutex with the waiters flag only once it has
++	// waited, since others may still wait; a mutex taken without a wait
++	// is given back without waking anyone, so unlocking it needs no
++	// system call, as with glibc and musl.
++	unsigned int waiters = 0;
+ 	while(true) {
+ 		if(!expected) {
+ 			// Try to take the mutex here.
+ 			if(__atomic_compare_exchange_n(&mutex->__mlibc_state,
+-					&expected, this_tid | __mlibc_mutex::mutex_waiters_bit, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
++					&expected, this_tid | waiters, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+ 				__ensure(!mutex->__mlibc_recursion);
+ 				mutex->__mlibc_recursion = 1;
+ 				return 0;
+ 			}
+ 		}else{
+ 			// If this (recursive) mutex is already owned by us, increment the recursion level.
++			// An error-checking one fails; a normal one waits for ever, as POSIX says.
+ 			if((expected & __mlibc_mutex::mutex_owner_mask) == this_tid) {
+-				if(!(mutex->__mlibc_flags & __mlibc_mutex::mutexRecursive)) {
+-					return EDEADLK;
+-				} else {
++				if(mutex->__mlibc_flags & __mlibc_mutex::mutexRecursive) {
+ 					++mutex->__mlibc_recursion;
+ 					return 0;
+ 				}
++				if(mutex->__mlibc_flags & __mlibc_mutex::mutexErrorCheck)
++					return EDEADLK;
+ 			}
+ 
+ 			// Wait on the futex if the waiters flag is set.
+@@ -316,6 +337,7 @@
+ 
+ 				// Opportunistically try to take the lock after we wake up.
+ 				expected = 0;
++				waiters = __mlibc_mutex::mutex_waiters_bit;
+ 			}else{
+ 				// Otherwise we have to set the waiters flag first.
+ 				unsigned int desired = expected | __mlibc_mutex::mutex_waiters_bit;
+@@ -357,26 +379,28 @@
+ }
+ 
+ int thread_mutex_unlock(struct __mlibc_mutex *mutex) {
++	unsigned int this_tid = mlibc::this_tid();
++
++	// An error-checking or recursive mutex the caller does not hold fails
++	// with EPERM, as POSIX says, before anything about it changes.
++	if (mutex->__mlibc_flags & (__mlibc_mutex::mutexErrorCheck | __mlibc_mutex::mutexRecursive)) {
++		auto owner = __atomic_load_n(&mutex->__mlibc_state, __ATOMIC_RELAXED)
++				& __mlibc_mutex::mutex_owner_mask;
++		if (owner != this_tid)
++			return EPERM;
++	}
++
+ 	// Decrement the recursion level and unlock if we hit zero.
+ 	__ensure(mutex->__mlibc_recursion);
+ 	if(--mutex->__mlibc_recursion)
+ 		return 0;
+ 
+-	auto flags = mutex->__mlibc_flags;
+-
+ 	// Reset the mutex to the unlocked state.
+ 	auto state = __atomic_exchange_n(&mutex->__mlibc_state, 0, __ATOMIC_RELEASE);
+ 
+ 	// After this point the mutex is unlocked, and therefore we cannot access its contents as it
+ 	// may have been destroyed by another thread.
+ 
+-	unsigned int this_tid = mlibc::this_tid();
+-	if ((flags & __mlibc_mutex::mutexErrorCheck) && (state & __mlibc_mutex::mutex_owner_mask) != this_tid)
+-		return EPERM;
+-
+-	if ((flags & __mlibc_mutex::mutexErrorCheck) && !(state & __mlibc_mutex::mutex_owner_mask))
+-		return EINVAL;
+-
+ 	__ensure((state & __mlibc_mutex::mutex_owner_mask) == this_tid);
+ 
+ 	if(state & __mlibc_mutex::mutex_waiters_bit) {
+diff -ruN a/options/internal/include/mlibc/threads.hpp b/options/internal/include/mlibc/threads.hpp
+--- a/options/internal/include/mlibc/threads.hpp
++++ b/options/internal/include/mlibc/threads.hpp
+@@ -20,6 +20,14 @@
+ 	int integer;
+ };
+ __attribute__ ((__noreturn__)) void thread_exit(thread_exit_return ret_val);
++// In a child of fork, which has only the thread that forked.
++void thread_forked();
++
++// fork's part of pthread_atfork: fork_prepare runs the prepare handlers,
++// newest first, before the fork, and returns what fork_finish needs to
++// run the parent's or the child's handlers, oldest first, after it.
++void *fork_prepare();
++void fork_finish(void *last, bool child);
+ void run_thread_local_destructors();
+ 
+ int thread_mutex_init(struct __mlibc_mutex *__restrict mutex, const struct __mlibc_mutexattr *__restrict attr);
+diff -ruN a/options/posix/generic/pthread.cpp b/options/posix/generic/pthread.cpp
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -28,6 +28,7 @@
+ #include <mlibc/thread-types.hpp>
+ #include <mlibc/time-helpers.hpp>
+ #include <mlibc/global-config.hpp>
++#include <mlibc/lock.hpp>
+ 
+ struct ScopeTrace {
+ 	ScopeTrace(const char *file, int line, const char *function)
+@@ -713,9 +714,18 @@
+ 	return 0;
+ }
+ 
+-int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void)) {
+-	auto self = mlibc::get_current_tcb();
++namespace {
++	// The handlers pthread_atfork registered, oldest first: the process's,
++	// run by a fork from any thread. mlibc kept them in the registering
++	// thread's TCB, so a fork from another thread ran none of them.
++	// Handlers are only added, under atfork_lock, and the release store
++	// of atfork_last publishes each.
++	constinit FutexLock atfork_lock{};
++	constinit Tcb::AtforkHandler *atfork_first = nullptr;
++	constinit Tcb::AtforkHandler *atfork_last = nullptr;
++} // namespace
+ 
++int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void)) {
+ 	auto hand = frg::construct<Tcb::AtforkHandler>(getAllocator());
+ 	if (!hand)
+ 		return ENOMEM;
+@@ -724,19 +734,45 @@
+ 	hand->parent = parent;
+ 	hand->child = child;
+ 	hand->next = nullptr;
+-	hand->prev = self->atforkEnd;
+ 
+-	if (self->atforkEnd)
+-		self->atforkEnd->next = hand;
++	frg::unique_lock lock(atfork_lock);
++	hand->prev = atfork_last;
++	if (atfork_last)
++		atfork_last->next = hand;
++	else
++		atfork_first = hand;
++	__atomic_store_n(&atfork_last, hand, __ATOMIC_RELEASE);
+ 
+-	self->atforkEnd = hand;
++	return 0;
++}
+ 
+-	if (!self->atforkBegin)
+-		self->atforkBegin = self->atforkEnd;
++namespace mlibc {
+ 
+-	return 0;
++void *fork_prepare() {
++	auto last = __atomic_load_n(&atfork_last, __ATOMIC_ACQUIRE);
++	for (auto hand = last; hand; hand = hand->prev)
++		if (hand->prepare)
++			hand->prepare();
++	return last;
++}
++
++void fork_finish(void *last, bool child) {
++	// A thread the child does not have may have held the lock.
++	if (child)
++		new (&atfork_lock) FutexLock{};
++	if (!last)
++		return;
++	for (auto hand = atfork_first; ; hand = hand->next) {
++		auto handler = child ? hand->child : hand->parent;
++		if (handler)
++			handler();
++		if (hand == last)
++			break;
++	}
+ }
+ 
++} // namespace mlibc
++
+ // ----------------------------------------------------------------------------
+ // pthread_key functions.
+ // ----------------------------------------------------------------------------
+diff -ruN a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -23,6 +23,7 @@
+ #include <mlibc/debug.hpp>
+ #include <mlibc/getopt.hpp>
+ #include <mlibc/thread.hpp>
++#include <mlibc/threads.hpp>
+ #include <mlibc/utmp.hpp>
+ 
+ namespace {
+@@ -1273,8 +1274,10 @@
+ 	}
+ 
+ 	// update the cached TID in the TCB
+-	if (!child)
++	if (!child) {
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
++		mlibc::thread_forked();
++	}
+ 
+ 	return child;
+ }
+@@ -1285,35 +1288,25 @@
+ 
+ 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<Fork>, -1);
+ 
+-	auto hand = self->atforkEnd;
+-	while (hand) {
+-		if (hand->prepare)
+-			hand->prepare();
+-
+-		hand = hand->prev;
+-	}
++	auto last = mlibc::fork_prepare();
+ 
++	// A failed fork still runs the parent's handlers, which undo what
++	// the prepare handlers did (release locks, say), and the error
++	// outlives them, as in glibc and musl.
+ 	if(int e = mlibc::sysdep_or_panic<Fork>(&child); e) {
++		mlibc::fork_finish(last, false);
+ 		errno = e;
+ 		return -1;
+ 	}
+ 
+ 	// update the cached TID in the TCB
+-	if (!child)
++	if (!child) {
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
+-
+-	hand = self->atforkBegin;
+-	while (hand) {
+-		if (!child) {
+-			if (hand->child)
+-				hand->child();
+-		} else {
+-			if (hand->parent)
+-				hand->parent();
+-		}
+-		hand = hand->next;
++		mlibc::thread_forked();
+ 	}
+ 
++	mlibc::fork_finish(last, !child);
++
+ 	return child;
+ }
+ 
+@@ -1342,8 +1335,10 @@
+ 	}
+ 
+ 	// update the cached TID in the TCB
+-	if (!child)
++	if (!child) {
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
++		mlibc::thread_forked();
++	}
+ 
+ 	return child;
+ }
+@@ -1497,16 +1492,9 @@
+ 	return 0;
+ }
+ 
++// The steps that can fail for want of a file come before the fork, as in
++// musl, so that the caller still runs to see the error.
+ int daemon(int nochdir, int noclose) {
+-	switch(fork()) {
+-		case 0: break;
+-		case -1: return -1;
+-		default: _exit(0);
+-	}
+-
+-	if(setsid() < 0)
+-		return -1;
+-
+ 	if(!nochdir && chdir("/"))
+ 		return -1;
+ 
+@@ -1524,6 +1512,15 @@
+ 			return -1;
+ 	}
+ 
++	switch(fork()) {
++		case 0: break;
++		case -1: return -1;
++		default: _exit(0);
++	}
++
++	if(setsid() < 0)
++		return -1;
++
+ 	return 0;
+ }
+ 

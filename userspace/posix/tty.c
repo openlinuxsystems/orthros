@@ -267,8 +267,18 @@ static void hangups(void) {
 	if(pid == 0) {
 		close(master);
 		setsid();
-		// Asking for it makes it the controlling terminal too.
+		// Asking for it makes it the controlling terminal too, and
+		// asking again changes nothing, as on Linux.
 		CHECK(ioctl(terminal, TIOCSCTTY, 0) == 0);
+		CHECK(ioctl(terminal, TIOCSCTTY, 0) == 0);
+		// The leader of another session cannot take it.
+		pid_t other = check_fork();
+		if(other == 0) {
+			setsid();
+			CHECK_ERROR(ioctl(terminal, TIOCSCTTY, 0), EPERM);
+			check_exit_child();
+		}
+		CHECK_CHILD(other);
 		write(ready[1], "r", 1);
 		pause();
 		_exit(1);

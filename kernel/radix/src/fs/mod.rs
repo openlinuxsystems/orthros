@@ -220,8 +220,7 @@ const ROOT_MAX: u64 = 1 << 20;
 pub fn init() {
     radix_block::mem::set_page_source(<Arch as Devices>::alloc_cache_page);
     radix_vfs::set_clock(|| <Arch as Timer>::wall_clock_ns().unwrap_or(0));
-    let made =
-        radix_vfs::tmpfs::Tmpfs::new(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
+    let made = tmpfs(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
     match made {
         Ok(tree) => {
             let _ = VFS.set(tree);
@@ -239,9 +238,8 @@ pub fn scratch_tree(name: &str, max: u64) -> radix_vfs::Result<Location> {
     let tree = vfs().ok_or(Error::NotFound)?;
     let root = tree.root();
     tree.make_directory(&root, name)?;
-    let mounted = radix_vfs::tmpfs::Tmpfs::new(max)
-        .and_then(fs_ref)
-        .and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
+    let mounted =
+        tmpfs(max).and_then(fs_ref).and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
     if let Err(err) = mounted {
         let _ = tree.remove(&root, name);
         return Err(err);
@@ -256,6 +254,12 @@ pub fn remove_scratch_tree(name: &str) -> radix_vfs::Result<()> {
     let root = tree.root();
     tree.unmount_tree(&root, name)?;
     tree.remove(&root, name)
+}
+
+/// An empty tmpfs whose files may hold `max` bytes together. As on Linux,
+/// it may hold one file or directory for every two pages of memory.
+fn tmpfs(max: u64) -> radix_vfs::Result<radix_vfs::KArc<radix_vfs::tmpfs::Tmpfs>> {
+    radix_vfs::tmpfs::Tmpfs::new(max, FRAMES.managed_pages() / 2)
 }
 
 /// A filesystem, as the mount table takes it.
@@ -281,7 +285,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
         "tmpfs" => {
             // As on Linux, a tmpfs may fill half of memory.
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
-            fs_ref(radix_vfs::tmpfs::Tmpfs::new(max)?)?
+            fs_ref(tmpfs(max)?)?
         }
         "fat" => {
             let node = source.ok_or(Error::NotBlockDevice)?;

@@ -9,8 +9,9 @@
 //! [`FileObject`](super::FileObject), by its address) or a process (by its
 //! number). What a file's list of locks does is `radix_vfs::locks`'s,
 //! which the host tests; this module keeps the lists, and has locks wait.
-//! The locks of every file that has any are kept in one table, by the address of the file's node, which a weak reference keeps
-//! from being reused while they last. The table's lock is a leaf, taken
+//! The locks of every file that has any are kept in one table, by the
+//! address of the file's node, which a weak reference keeps from being
+//! reused while they last. The table's lock is a leaf, taken
 //! after every other, so that locks can be let go of anywhere: when a
 //! description's last reference goes, which may be with the capability
 //! store locked, and when a process ends. What it allocates under that

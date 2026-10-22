@@ -298,7 +298,9 @@ pub fn directory_method(
             let a = directory::StatArgs::decode(args)?;
             let dir = directory_of(cap, Rights::READ)?;
             let path = Path::copy(a.path)?;
-            let stat = vfs()?.stat(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            drop(dir);
+            let stat = at.node.stat();
             let results = directory::StatResults {
                 kind: file_kind(stat.kind),
                 size: stat.size,
@@ -306,8 +308,19 @@ pub fn directory_method(
                 id: stat.id,
                 created: stat.created,
                 modified: stat.modified,
+                accessed: stat.accessed,
+                mount: at.mount.id,
             };
             answer(label, directory::StatResults::WORDS, results.encode())
+        }
+        directory::SET_TIMES => {
+            let a = directory::SetTimesArgs::decode(args)?;
+            let dir = directory_of(cap, Rights::WRITE)?;
+            let path = Path::copy(a.path)?;
+            let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            drop(dir);
+            set_times(&at, a.accessed, a.modified)?;
+            answer(label, 0, [0; 8])
         }
         directory::MOUNT => {
             let a = directory::MountArgs::decode(args)?;
@@ -373,6 +386,8 @@ pub fn directory_method(
                 block_size: info.block_size,
                 blocks: info.blocks,
                 free: info.free,
+                files: info.files,
+                free_files: info.free_files,
             };
             answer(label, directory::InfoResults::WORDS, results.encode())
         }
@@ -498,8 +513,16 @@ pub fn file_method(
                 id: stat.id,
                 created: stat.created,
                 modified: stat.modified,
+                accessed: stat.accessed,
+                mount: file.at.mount.id,
             };
             answer(label, file::StatResults::WORDS, results.encode())
+        }
+        file::SET_TIMES => {
+            let a = file::SetTimesArgs::decode(args)?;
+            let file = file_of(cap, Rights::WRITE)?;
+            set_times(&file.at, a.accessed, a.modified)?;
+            answer(label, 0, [0; 8])
         }
         file::SET_SIZE => {
             let a = file::SetSizeArgs::decode(args)?;
@@ -754,6 +777,28 @@ fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
     }
     *at = new as u64;
     Ok(*at)
+}
+
+/// `set_times`: sets the times of the node at `at`, TIME_NOW meaning now
+/// and TIME_OMIT leaving one as it is. A node that keeps no times
+/// refuses with not_permitted, as Linux does a file whose times a
+/// process may not set.
+fn set_times(at: &Location, accessed: u64, modified: u64) -> Result<()> {
+    let now = radix_vfs::now();
+    let time = |t: u64| match t {
+        file::TIME_OMIT => None,
+        file::TIME_NOW => Some(now),
+        t => Some(t),
+    };
+    let (accessed, modified) = (time(accessed), time(modified));
+    if accessed.is_none() && modified.is_none() {
+        return Ok(());
+    }
+    at.writable().map_err(fs::status)?;
+    at.node.set_times(accessed, modified).map_err(|err| match err {
+        radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
+        err => fs::status(err),
+    })
 }
 
 /// Writes `file`'s filesystem's changes to its disk.

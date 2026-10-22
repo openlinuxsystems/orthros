@@ -131,7 +131,8 @@ impl PosixTimer {
     }
 }
 
-/// The processes with a timer set, which the thread looks at.
+/// The processes with a timer set, which the thread looks at. Its lock is
+/// taken before a process's POSIX state, and never with the tree's held.
 static ARMED: Mutex<Option<Vec<Weak<ProcessObject, Kmalloc>, Kmalloc>>> = Mutex::new(None);
 
 /// Moves whenever a timer is set, so that the thread looks again.

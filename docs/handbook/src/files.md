@@ -25,7 +25,7 @@ Every boot, Spark, the first program, builds the same tree:
 | `/data` | Data shared between users |
 | `/tmp` | Temporary files, in memory, gone at the next boot |
 | `/run` | The state of running services, in memory |
-| `/dev` | Devices: `null`, `zero`, `random`, `urandom` and one per disk and partition |
+| `/dev` | Devices: `null`, `zero`, `random`, `urandom`, one per disk and partition, and the terminals (`ptmx`, `tty`, `pts/`) |
 | `/proc` | The processes, the mounts, memory and uptime, as text |
 | `/sys` | The kernel's devices and settings, one value per file |
 | `/volumes` | Disks, USB sticks and SD cards, one directory each |

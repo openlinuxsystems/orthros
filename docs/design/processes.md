@@ -333,12 +333,14 @@ property tests that feed them garbage.
 - radix-rt's heap never gives its 64 KiB chunks back, and the address
   ranges it maps at are not reused. A freed large block stays mapped and
   is reused only for a later block of the same size (since Phase 7, when
-  reading files made programs free and make large buffers in turn); the
-  Rust `std` port of Phase 8 replaces it.
+  reading files made programs free and make large buffers in turn).
+  Programs on the Rust `std` port (Phase 8) use the C library's
+  allocator instead; Spark and the other radix-rt programs keep it.
 - The kernel copies the boot archive into Spark's frames rather than
   mapping the module's pages; finding a file reads the headers in turn.
-- Shared libraries, an interpreter and thread-local storage are refused
-  until Phase 8.
+- A program that radix-rt's `spawn` or the kernel loads may not use
+  shared libraries, an interpreter or thread-local storage; one that
+  `exec` loads from a file may (docs/design/posix.md).
 - A process name is at most 15 bytes, and a process's arguments must fit
   in its start-up page with the fields (about 3.9 KiB).
 - A process made for another ends with it, so only Spark's children

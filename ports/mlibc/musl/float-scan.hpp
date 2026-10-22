@@ -608,10 +608,12 @@ private:
 	bool dot;
 };
 
-// An Input over scanf's handler, which looks one character ahead: a
-// character is consumed when the next is asked for, so the one unget
-// scanf's conversions (pok 0) need is free. A field width stops it, and a
-// decimal point of one character is read as '.'.
+// An Input over scanf's handler, which looks one character ahead (EOF
+// at the end of the input): a character is consumed when the next is
+// asked for, so the one unget scanf's conversions (pok 0) need is free. A
+// field width stops it, and a decimal point of one character is read as
+// '.'. scanf's integers (mlibc/int-scan.hpp) read through it too, with
+// '.' as the decimal point.
 template<typename Handler, typename Char>
 struct FloatScanfInput {
 	FloatScanfInput(Handler &handler, int width, Char radix)
@@ -625,13 +627,13 @@ struct FloatScanfInput {
 		}
 		if (width && taken >= width)
 			return EOF;
-		auto c = static_cast<uint32_t>(static_cast<std::make_unsigned_t<Char>>(handler.look_ahead()));
-		if (!c)
+		int c = handler.look_ahead();
+		if (c < 0)
 			return EOF;
 		held = true;
-		if (c == static_cast<uint32_t>(radix))
+		if (c == static_cast<int>(static_cast<std::make_unsigned_t<Char>>(radix)))
 			return '.';
-		return c < 128 && c != '.' ? static_cast<int>(c) : '@';
+		return c < 128 && c != '.' ? c : '@';
 	}
 
 	void unget() {

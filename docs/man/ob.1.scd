@@ -96,10 +96,10 @@ _target/userspace/_).
 
 *ports* [*--rebuild* _name_]...
 	Build the ports in _ports/_, software from elsewhere built for Radix,
-	each after the ports it needs: the C library (mlibc) and the C++
-	headers it is built with, Rust's standard library, the C.UTF-8
-	locale, and Lua and the C library's tests, which the *posix* boot
-	test runs. A port is built again only when something that went into
+	each after the ports it needs: the C library (mlibc) and the
+	C++ headers it is built with, Rust's standard library, the C.UTF-8
+	locale, and Lua, mlibc's own tests and libc-test, which the *posix*
+	boot test runs. A port is built again only when something that went into
 	its last build changed: its directory, the toolchain (and the pinned
 	Rust toolchain, for Rust's standard library) or a port it needs.
 	After Rust's standard library is built, its *libc* crate is checked
@@ -556,8 +556,10 @@ _recipe.toml_
 	*toolchain*, so that what it installs is only used to build and
 	never reaches an image; the files of the sysroot it puts in the boot
 	archive (*image*, a path ending in _/_ meaning a whole directory);
-	and, for a source without a LICENSE or COPYING file, the files that
-	hold its *notices*.
+	for a source without a LICENSE or COPYING file, the files that hold
+	its *notices*; and code from other projects the port keeps in its
+	own directory (*bundled*: name, version, license, home page and
+	notice files), each a package of its own in the license manifest.
 
 _patches/\*.patch_
 	Changes to the source, applied in name order with *patch -p1*. Each
@@ -586,8 +588,9 @@ manifest.
 
 The toolchain is the host's Clang, LLD and LLVM tools, made to target
 Radix by the scripts and Meson cross files *ob* writes into
-_out/toolchain/_: _bin/x86_64-radix-cc_, _-ar_, _-nm_ and the rest, and _meson/radix.ini_ for programs and _meson/radix-libc.ini_ for
-the C library itself. *x86_64-radix-cc* compiles for Radix's ABI, which
+_out/toolchain/_: _bin/x86_64-radix-cc_, _-ar_, _-nm_ and the rest, and
+_meson/radix.ini_ for programs and _meson/radix-libc.ini_ for the C
+library itself. *x86_64-radix-cc* compiles for Radix's ABI, which
 is Linux's x86-64 one (see *radix-posix*(7)), with *\_\_radix\_\_* and
 *\_\_dukovo\_\_* defined and Linux's own macros not, against the
 sysroot's headers only. It links a static position-independent program,

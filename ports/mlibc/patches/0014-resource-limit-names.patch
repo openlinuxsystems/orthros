@@ -1,0 +1,40 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Defines the name of every resource limit in <sys/resource.h> whatever
+the feature macros, as glibc and musl do: a program built with
+_POSIX_C_SOURCE alone could not name RLIMIT_CPU or RLIMIT_NPROC
+(libc-test's regression/pthread_atfork-errno-clobber).
+
+diff -ruN a/abis/linux/resource.h b/abis/linux/resource.h
+--- a/abis/linux/resource.h
++++ b/abis/linux/resource.h
+@@ -20,18 +20,16 @@
+ 
+ #define RUSAGE_SELF 0
+ #define RUSAGE_CHILDREN -1
+-
+-#define RLIMIT_CPU 0
+ #endif /* defined(_DEFAULT_SOURCE) || __MLIBC_XOPEN */
+ 
++/* Every limit's name, whatever the feature macros, as in glibc and musl. */
++#define RLIMIT_CPU 0
+ #define RLIMIT_FSIZE 1
+ #define RLIMIT_DATA 2
+ #define RLIMIT_STACK 3
+ #define RLIMIT_CORE 4
+ #define RLIMIT_NOFILE 7
+ #define RLIMIT_AS 9
+-
+-#if defined(_DEFAULT_SOURCE)
+ #define RLIMIT_RSS 5
+ #define RLIMIT_NPROC 6
+ #define RLIMIT_MEMLOCK 8
+@@ -42,7 +40,6 @@
+ #define RLIMIT_RTPRIO 14
+ #define RLIMIT_RTTIME 15
+ #define RLIMIT_NLIMITS 16
+-#endif
+ 
+ #if defined(_DEFAULT_SOURCE) || __MLIBC_XOPEN
+ struct rusage {

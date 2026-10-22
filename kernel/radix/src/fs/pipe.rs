@@ -236,6 +236,7 @@ impl Node for End {
             id: self.pipe.id,
             created: 0,
             modified: 0,
+            accessed: 0,
         }
     }
 

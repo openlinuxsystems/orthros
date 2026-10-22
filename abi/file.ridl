@@ -30,6 +30,11 @@ const APPEND: u64 = 0xffffffffffffffff;
 /// description appends).
 const CURRENT: u64 = 0xfffffffffffffffe;
 
+/// A time `set_times` leaves as it is.
+const TIME_OMIT: u64 = 0xffffffffffffffff;
+/// A time `set_times` sets to now, by the kernel's clock.
+const TIME_NOW: u64 = 0xfffffffffffffffe;
+
 /// Where `seek` counts from, as `lseek`'s `whence`.
 enum Whence: u32 {
     /// From the start of the file.
@@ -94,7 +99,9 @@ interface file = 0x000c version 2 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
                 is_directory, read_only, no_space, too_big, io, corrupt];
     /// What the file is, as radix-directory(2)'s `stat` says.
-    method stat = 3 () -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+    method stat = 3 ()
+        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
+            accessed: u64, mount: u64)
         raises [no_such_slot, empty_slot];
     /// Makes the file `size` bytes long: cut, or grown with zeros. Needs
     /// the write right.
@@ -142,4 +149,12 @@ interface file = 0x000c version 2 {
     method lock_holder = 10 (owner: LockOwner, kind: LockKind, start: u64, length: u64)
         -> (kind: LockKind, start: u64, length: u64, process: u64)
         raises [no_such_slot, empty_slot, invalid_argument];
+    /// Sets when the file was last read and when its contents last
+    /// changed, in nanoseconds since 1970, or now (TIME_NOW), or leaves
+    /// either (TIME_OMIT). The filesystem keeps them as finely as it can
+    /// (FAT: two seconds, and the day for reads); reading a file never
+    /// changes its read time (ADR 0076). Devices and pipes keep no times
+    /// and fail with not_permitted. Needs the write right.
+    method set_times = 11 (accessed: u64, modified: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, not_permitted, read_only, io, corrupt];
 }

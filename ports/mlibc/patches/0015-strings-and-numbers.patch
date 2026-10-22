@@ -1,0 +1,68 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Fixes in string and number functions that libc-test found: strtol and
+its kin fail a base other than 0 or 2 to 36 with EINVAL instead of
+reading digits in it (functional/strtol, wcstol); memmem and wcsstr
+find an empty needle at the start of the haystack, as C and POSIX say
+(string_memmem, wcsstr); and wctob gives back a byte above 127 as an
+unsigned char, not a negative number (clocale_mbfuncs). Meant for
+upstream.
+
+diff -ruN a/options/ansi/generic/string.cpp b/options/ansi/generic/string.cpp
+--- a/options/ansi/generic/string.cpp
++++ b/options/ansi/generic/string.cpp
+@@ -419,6 +419,9 @@
+ }
+ 
+ wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle) {
++	// An empty needle is found at the start, even of an empty haystack.
++	if(!*needle)
++		return const_cast<wchar_t *>(haystack);
+ 	for(size_t i = 0; haystack[i]; i++) {
+ 		bool found = true;
+ 		for(size_t j = 0; needle[j]; j++) {
+diff -ruN a/options/ansi/generic/wchar.cpp b/options/ansi/generic/wchar.cpp
+--- a/options/ansi/generic/wchar.cpp
++++ b/options/ansi/generic/wchar.cpp
+@@ -49,7 +49,8 @@
+ 		return '\0';
+ 	else if(e != mlibc::transcode_status::input_exhausted)
+ 		return EOF;
+-	return c;
++	// A byte, not a char, which may be signed.
++	return static_cast<unsigned char>(c);
+ }
+ 
+ int mbsinit(const mbstate_t *stp) {
+diff -ruN a/options/internal/include/mlibc/strtol.hpp b/options/internal/include/mlibc/strtol.hpp
+--- a/options/internal/include/mlibc/strtol.hpp
++++ b/options/internal/include/mlibc/strtol.hpp
+@@ -67,9 +67,12 @@
+ 	auto base = static_cast<Return>(baseInt);
+ 	auto s = nptr;
+ 
+-	if (base < 0 || base == 1) {
++	// A base the digits and letters cannot write fails, as in glibc and
++	// musl.
++	if (base < 0 || base == 1 || base > 36) {
+ 		if (endptr)
+ 			*endptr = const_cast<Char *>(nptr);
++		errno = EINVAL;
+ 		return 0;
+ 	}
+ 
+diff -ruN a/options/posix/generic/posix_string.cpp b/options/posix/generic/posix_string.cpp
+--- a/options/posix/generic/posix_string.cpp
++++ b/options/posix/generic/posix_string.cpp
+@@ -172,6 +172,10 @@
+ 	const char *haystack = static_cast<const char *>(hs);
+ 	const char *needle = static_cast<const char *>(nd);
+ 
++	// An empty needle is found at the start, even of an empty haystack.
++	if (!needleLen)
++		return const_cast<char *>(haystack);
++
+ 	for (size_t i = 0; i < haystackLen; i++) {
+ 		bool found = true;
+ 
