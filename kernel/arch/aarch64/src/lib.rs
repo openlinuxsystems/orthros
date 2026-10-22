@@ -20,8 +20,8 @@ use core::sync::atomic::AtomicU32;
 
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
-    InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageTable, PciSegment, Platform, Smp,
-    PageEdit, SignalFrame, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
+    InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageEdit, PageTable, PciSegment,
+    Platform, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -248,7 +248,13 @@ impl UserMode for Arch {
         None
     }
 
-    fn set_entry(_: &Space, _: u64, _: u64, _: Option<UserAccess>, _: bool) -> Result<(), MapPageError> {
+    fn set_entry(
+        _: &Space,
+        _: u64,
+        _: u64,
+        _: Option<UserAccess>,
+        _: bool,
+    ) -> Result<(), MapPageError> {
         Err(MapPageError::NoMemory)
     }
 
@@ -294,6 +300,10 @@ impl UserMode for Arch {
     }
 
     fn set_results(_: &mut (), _: &SyscallRegs) {}
+
+    fn thread_pointer(_: &()) -> u64 {
+        0
+    }
 
     fn enter_user_registers(_: &()) -> ! {
         Self::halt()

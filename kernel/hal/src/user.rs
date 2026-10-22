@@ -246,7 +246,11 @@ pub trait UserMode: crate::Threads {
         to: &Self::Space,
         start: u64,
         end: u64,
-        decide: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> (PageEdit, Option<Option<UserAccess>>),
+        decide: &mut dyn FnMut(
+            u64,
+            u64,
+            Option<UserAccess>,
+        ) -> (PageEdit, Option<Option<UserAccess>>),
     ) -> Result<(), u64>;
 
     /// Makes `context` run in `space` from its next switch on (it keeps a
@@ -296,6 +300,11 @@ pub trait UserMode: crate::Threads {
     /// Puts a system call's status and results in saved registers, as the
     /// call itself returns them.
     fn set_results(regs: &mut Self::UserRegisters, results: &SyscallRegs);
+
+    /// The thread pointer (x86-64: the FS base) saved registers hold, which
+    /// [`UserMode::enter_user_registers`] leaves to the context: a forked
+    /// thread's context gets it with [`UserMode::set_thread_pointer`].
+    fn thread_pointer(regs: &Self::UserRegisters) -> u64;
 
     /// Leaves the kernel for user mode in the running context with every
     /// register as `regs` has it.

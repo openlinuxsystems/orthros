@@ -8,10 +8,12 @@
 //! capability space and threads, which end together. A program's thread
 //! is a scheduler thread with a [`UserThread`] attached: its process, the
 //! capability space it names capabilities in, the address space it runs
-//! in, and its IPC state. The architecture takes it into user mode
-//! once ([`UserMode::enter_user`]) and back into the kernel through system
-//! calls (`syscall`), interrupts and faults. A fault in user mode ends the
-//! thread; nothing a program does stops the kernel.
+//! in, its IPC state and its signals. The architecture takes it into user
+//! mode once ([`UserMode::enter_user`]) and back into the kernel through
+//! system calls (`syscall`), interrupts and faults. A fault in user mode
+//! that no page the kernel makes on demand resolves raises a signal
+//! (Phase 8), which ends the process unless a handler takes it; nothing a
+//! program does stops the kernel.
 //!
 //! Kernel objects live in [`objects`]'s registry, keyed by the name the
 //! capability store gives them, so a capability lookup leads to the object
@@ -27,6 +29,8 @@
 //! - `process`: processes, and the kernel memory their objects take,
 //!   charged to resource domains (`account`);
 //! - `files`: files and directories (Phase 7, `crate::fs`);
+//! - `posix`: the POSIX side of processes (Phase 8): the process tree,
+//!   signals, `fork`, `exec`, timers and `poll`;
 //! - `methods`: the methods called on capabilities with `cap_call`.
 //!
 //! The kernel itself starts one program, Spark, from the boot archive
@@ -41,7 +45,7 @@
 //! a thread's IPC state; a ring's queues. None is held across a block.
 
 mod account;
-mod files;
+pub(crate) mod files;
 pub mod init;
 mod ipc;
 pub mod launch;
@@ -50,6 +54,7 @@ mod memory;
 mod methods;
 mod notify;
 pub mod objects;
+pub(crate) mod posix;
 pub mod process;
 pub mod random;
 mod ring;
@@ -65,15 +70,16 @@ use radix_abi::Status;
 use radix_abi::errors::Kernel;
 use radix_abi::startup;
 use radix_cap::{CapError, SpaceId};
-use radix_hal::{Cpu, UserFault, UserMode};
+use radix_hal::{Cpu, UserFault, UserFaultKind, UserMode};
 use radix_klog::{info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
 
 use crate::Arch;
 use crate::sched::{self, ThreadRef, wait};
-use memory::SpaceObject;
-use process::{Ending, ProcessRef};
+use memory::{Fault, SpaceObject};
+use posix::ThreadSignals;
+use process::{Ending, ProcessRef, Start};
 
 /// A program thread's side, shared.
 pub type UserRef = Arc<UserThread, Kmalloc>;
@@ -84,8 +90,8 @@ pub struct UserThread {
     cspace: SpaceId,
     /// The address space it runs in.
     space: memory::SpaceRef,
-    /// Where it starts in user mode: entry point, stack top, argument.
-    start: [u64; 3],
+    /// Where it starts in user mode.
+    start: Start,
     /// Set once whoever started it has finished setting it up.
     ready: AtomicBool,
     /// Its IPC state.
@@ -95,7 +101,12 @@ pub struct UserThread {
     /// Its receive window: first slot (high half) and count (low half).
     window: AtomicU64,
     /// The process it is a thread of.
-    process: ProcessRef,
+    pub(crate) process: ProcessRef,
+    /// Its signal mask, the signals sent to it alone, and the rest of its
+    /// signal state (Phase 8).
+    pub(crate) signals: SpinLock<ThreadSignals>,
+    /// Set by the `futex_wake` that takes it off a futex's waiters.
+    pub(crate) futex_woken: AtomicBool,
 }
 
 impl UserThread {
@@ -156,6 +167,7 @@ fn current() -> Option<(ThreadRef, UserRef)> {
 pub fn init() {
     Arch::set_syscall_handler(syscall::handle);
     Arch::set_user_fault_handler(on_fault);
+    Arch::set_user_page_handler(on_user_page);
     Arch::set_user_return_handler(on_return);
     Arch::describe_user_mode(&mut |args| info!("{args}"));
     objects::init();
@@ -179,11 +191,14 @@ fn thread_main(_: usize) {
         drop(thread);
         exit_current(user, EXIT_STOPPED, Ending::Stop);
     }
-    let [entry, stack, arg] = user.start;
+    let start = user.start;
     // Nothing may stay on this stack: user mode abandons it.
     drop(thread);
     drop(user);
-    Arch::enter_user(entry, stack, arg)
+    match start {
+        Start::Fresh([entry, stack, arg]) => Arch::enter_user(entry, stack, arg),
+        Start::Registers(regs) => Arch::enter_user_registers(&regs),
+    }
 }
 
 /// Lets a thread that waits to start go: it was set up, or is to stop.
@@ -206,28 +221,65 @@ fn exit_current(user: UserRef, status: u64, how: Ending) -> ! {
     sched::exit()
 }
 
-/// A fault in user mode: the thread ends.
-fn on_fault(fault: &UserFault) -> ! {
+/// A fault in user mode: a page the kernel makes on demand (anonymous
+/// memory, a copy of a page shared since `fork`), or else a signal for the
+/// thread (`posix::signal::fault`), or the end of its process.
+fn on_fault(fault: &UserFault) {
     Arch::enable_interrupts();
     let Some((thread, user)) = current() else {
         panic!("User mode: {fault} in a thread that is not a program's");
     };
-    warn!("User: thread {} ({}) ended: {fault}", thread.id(), thread.name());
+    let mut bus = false;
+    if let UserFaultKind::Page { address, write, execute, .. } = fault.kind {
+        match user.space.resolve(address, write, execute) {
+            Fault::Resolved => return,
+            Fault::Refused => {}
+            Fault::Io => bus = true,
+            Fault::NoMemory => {
+                warn!(
+                    "User: thread {} ({}) ended: no memory for a page at {address:#x}",
+                    thread.id(),
+                    thread.name()
+                );
+                user.process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
+                drop(thread);
+                exit_current(user, EXIT_FAULT, Ending::Fault);
+            }
+        }
+    }
+    if posix::signal::fault(&thread, &user, fault, bus) {
+        // Its handler runs, from the way back to user mode.
+        return;
+    }
     drop(thread);
     exit_current(user, EXIT_FAULT, Ending::Fault)
 }
 
-/// On the way back to user mode from an interrupt: a thread asked to stop
-/// ends here.
+/// A page fault on user memory in one of the kernel's own copies: makes
+/// the page if the space makes it on demand.
+fn on_user_page(address: u64, write: bool) -> bool {
+    let Some(thread) = sched::running() else { return false };
+    let Some(user) = thread.user() else { return false };
+    user.space.resolve(address, write, false) == Fault::Resolved
+}
+
+/// On the way back to user mode, from a system call, an interrupt or a
+/// fault: a thread asked to stop ends here, and one with signals to take
+/// takes them (`posix::signal::deliver`).
 fn on_return() {
-    if !sched::should_stop() {
+    let Some(me) = sched::running() else { return };
+    if !me.interrupted() {
         return;
     }
     Arch::enable_interrupts();
-    if let Some((thread, user)) = current() {
-        info!("User: thread {} ({}) stopped", thread.id(), thread.name());
-        drop(thread);
-        exit_current(user, EXIT_STOPPED, Ending::Stop);
+    let Some(user) = me.user() else { return };
+    if me.should_stop() {
+        info!("User: thread {} ({}) stopped", me.id(), me.name());
+        exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
+    }
+    posix::signal::deliver(&me, user);
+    if me.should_stop() {
+        exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
 }
 

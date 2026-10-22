@@ -42,7 +42,10 @@ fn kill_and_stop_keep_their_default() {
     let mut actions = Actions::new();
     let handler = Action { handler: 0x1000, flags: 0, mask: u64::MAX, restorer: 0x2000 };
     assert_eq!(actions.set(SIGKILL, handler), Err(ActionError::Unchangeable));
-    assert_eq!(actions.set(SIGSTOP, Action { handler: IGNORE, ..handler }), Err(ActionError::Unchangeable));
+    assert_eq!(
+        actions.set(SIGSTOP, Action { handler: IGNORE, ..handler }),
+        Err(ActionError::Unchangeable)
+    );
     assert_eq!(actions.set(0, handler), Err(ActionError::NoSuchSignal));
     assert_eq!(actions.set(65, handler), Err(ActionError::NoSuchSignal));
     assert_eq!(actions.set(SIGUSR1, handler), Ok(Action::default()));
@@ -233,7 +236,8 @@ fn wait_reports_ends_stops_and_continues() {
     // A stop, reported once.
     assert_eq!(tree.stopped(3, SIGTSTP), Some(1));
     assert_eq!(tree.wait(1, Which::Any, WaitFor::default()), Found::NotYet);
-    let stopped = Found::Child { pid: 3, status: status::stopped(SIGTSTP), times: (0, 0), reaped: None };
+    let stopped =
+        Found::Child { pid: 3, status: status::stopped(SIGTSTP), times: (0, 0), reaped: None };
     assert_eq!(tree.wait(1, Which::Any, all), stopped);
     assert_eq!(tree.wait(1, Which::Any, all), Found::NotYet);
     assert_eq!(tree.continued(3), Some(1));

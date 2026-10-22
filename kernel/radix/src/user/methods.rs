@@ -20,7 +20,7 @@ use radix_ipc::info::Info;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 
-use super::memory::{cap_rights, frame_made};
+use super::memory::{Anon, FileSource, Placement, cap_rights, frame_made, futex};
 use super::objects;
 use super::{Result, UserRef, cap_error, error};
 use crate::caps;
@@ -33,6 +33,9 @@ pub enum Answer {
     /// The caller exits, with this code: the system call ends it once it
     /// has let go of what it holds.
     Exit(u64),
+    /// The caller returns from a signal handler (`signal_return`, Phase
+    /// 8): the system call returns these registers in place of results.
+    Restore(radix_hal::SyscallRegs),
 }
 
 /// A reply to the method `label`, with `words` of `values`.
@@ -124,10 +127,11 @@ pub fn call(
             let results = address_space::QueryResults { mapped, rights };
             answer(info.label, address_space::QueryResults::WORDS, results.encode())
         }
+        (ObjectKind::AddressSpace, _) => address_space_method(user, slot, info.label, &args),
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
         (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
         (ObjectKind::Directory, _) => super::files::directory_method(user, &cap, info.label, &args),
-        (ObjectKind::File, _) => super::files::file_method(&cap, info.label, &args),
+        (ObjectKind::File, _) => super::files::file_method(user, &cap, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
@@ -195,6 +199,17 @@ fn capability(at: SlotRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
             abi_cap::RevokeArgs::decode(args)?;
             caps::revoke(at).map_err(cap_error)?;
             answer(label, 0, [0; 8])
+        }
+        abi_cap::FLAGS => {
+            let a = abi_cap::FlagsArgs::decode(args)?;
+            let bits = u8::try_from(a.flags.0).map_err(|_| Kernel::InvalidArgument.status(1))?;
+            let old = caps::with(|store| {
+                if a.set { store.set_slot_flags(at, bits) } else { store.slot_flags(at) }
+            })
+            .and_then(|done| done)
+            .map_err(cap_error)?;
+            let results = abi_cap::FlagsResults { flags: abi_cap::SlotFlags(u32::from(old)) };
+            answer(label, abi_cap::FlagsResults::WORDS, results.encode())
         }
         abi_cap::SEAL | abi_cap::UNSEAL => {
             let (key, to) = if label == abi_cap::SEAL {
@@ -313,6 +328,132 @@ fn read_random(address: u64, len: u64) -> Result<()> {
         done += n as u64;
     }
     Ok(())
+}
+
+/// The access anonymous memory's `rights` ask for (Phase 8): any of read,
+/// write and execute, write implying read as on x86-64, write and execute
+/// never together; none keeps the memory out of reach.
+fn anonymous_access(rights: AbiRights) -> Result<Option<radix_hal::UserAccess>> {
+    use radix_hal::UserAccess;
+    let known = AbiRights::READ.0 | AbiRights::WRITE.0 | AbiRights::EXECUTE.0;
+    if rights.bits() & !known != 0 {
+        return Err(Kernel::InvalidArgument.status(2));
+    }
+    let (write, execute) = (rights.contains(AbiRights::WRITE), rights.contains(AbiRights::EXECUTE));
+    Ok(match (rights.contains(AbiRights::READ), write, execute) {
+        (_, true, true) => return Err(Kernel::InvalidArgument.status(2)),
+        (_, true, false) => Some(UserAccess::ReadWrite),
+        (_, false, true) => Some(UserAccess::ReadExecute),
+        (true, false, false) => Some(UserAccess::Read),
+        (false, false, false) => None,
+    })
+}
+
+/// Where `map_anonymous` and `map_file` put what they map.
+fn placement(address: u64, flags: address_space::MapFlags) -> Placement {
+    if flags.contains(address_space::MapFlags::FIXED_NO_REPLACE) {
+        Placement::FixedNoReplace(address)
+    } else if flags.contains(address_space::MapFlags::FIXED) {
+        Placement::Fixed(address)
+    } else {
+        Placement::Hint(address)
+    }
+}
+
+/// The pages `size` bytes take.
+fn pages_of(size: u64) -> Result<u64> {
+    let pages = size.div_ceil(address_space::PAGE_SIZE);
+    if pages == 0 || pages > address_space::USER_TOP / address_space::PAGE_SIZE {
+        return Err(Kernel::InvalidArgument.status(1));
+    }
+    Ok(pages)
+}
+
+/// The address space interface's methods since Phase 8 (`query` is
+/// answered in [`call`]): anonymous memory and futexes.
+fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
+    let (_, space) = objects::space(user.cspace, slot, Rights::CONTROL)?;
+    let aligned = |address: u64| address.is_multiple_of(address_space::PAGE_SIZE);
+    match label {
+        address_space::MAP_ANONYMOUS => {
+            let a = address_space::MapAnonymousArgs::decode(args)?;
+            let access = anonymous_access(a.rights)?;
+            let shared = a.flags.contains(address_space::MapFlags::SHARED);
+            let placement = placement(a.address, a.flags);
+            if !matches!(placement, Placement::Hint(_)) && !aligned(a.address) {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            let anon = Anon { access, shared, file: None };
+            let address = space.map_anonymous(pages_of(a.size)?, anon, placement)?;
+            let results = address_space::MapAnonymousResults { address };
+            answer(label, address_space::MapAnonymousResults::WORDS, results.encode())
+        }
+        address_space::PROTECT => {
+            let a = address_space::ProtectArgs::decode(args)?;
+            if !aligned(a.address) {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            space.protect(a.address, pages_of(a.size)?, anonymous_access(a.rights)?)?;
+            answer(label, 0, [0; 8])
+        }
+        address_space::DISCARD => {
+            let a = address_space::DiscardArgs::decode(args)?;
+            if !aligned(a.address) {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            space.discard(a.address, pages_of(a.size)?)?;
+            answer(label, 0, [0; 8])
+        }
+        address_space::MAP_FILE => {
+            let a = address_space::MapFileArgs::decode(args)?;
+            let access = anonymous_access(a.rights)?;
+            if a.flags.contains(address_space::MapFlags::SHARED) {
+                return Err(Kernel::InvalidArgument.status(3));
+            }
+            let placement = placement(a.address, a.flags);
+            if !a.offset.is_multiple_of(address_space::PAGE_SIZE)
+                || (!matches!(placement, Placement::Hint(_)) && !aligned(a.address))
+            {
+                return Err(Kernel::InvalidArgument.status(5));
+            }
+            let (_, file) = objects::file(user.cspace, a.file, Rights::READ)?;
+            let stat = file.at.node.stat();
+            match stat.kind {
+                radix_vfs::Kind::File => {}
+                radix_vfs::Kind::Directory => {
+                    return Err(radix_abi::errors::File::IsDirectory.status(0));
+                }
+                _ => return Err(Kernel::InvalidArgument.status(4)),
+            }
+            let source = FileSource {
+                node: file.at.node.clone(),
+                base: a.offset,
+                size: stat.size.saturating_sub(a.offset),
+            };
+            let anon = Anon { access, shared: false, file: Some(source) };
+            let address = space.map_anonymous(pages_of(a.size)?, anon, placement)?;
+            let results = address_space::MapFileResults { address };
+            answer(label, address_space::MapFileResults::WORDS, results.encode())
+        }
+        address_space::FUTEX_WAIT => {
+            let a = address_space::FutexWaitArgs::decode(args)?;
+            // The word is read where the caller runs.
+            if !core::ptr::eq(&*space, user.space()) {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            let deadline =
+                (a.timeout_ns != 0).then(|| crate::sched::now_ns().saturating_add(a.timeout_ns));
+            futex::wait(&space, a.address, a.expected, deadline, user)?;
+            answer(label, 0, [0; 8])
+        }
+        address_space::FUTEX_WAKE => {
+            let a = address_space::FutexWakeArgs::decode(args)?;
+            let woken = futex::wake(&space, a.address, a.count)?;
+            let results = address_space::FutexWakeResults { woken };
+            answer(label, address_space::FutexWakeResults::WORDS, results.encode())
+        }
+        _ => Err(error(Kernel::NoSuchMethod)),
+    }
 }
 
 /// The thread interface.

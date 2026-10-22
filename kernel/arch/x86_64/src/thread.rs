@@ -103,7 +103,10 @@ pub fn full_return() -> Option<(u64, u64)> {
     if current_word(FULL_RETURN).load(Ordering::Relaxed) == 0 {
         return None;
     }
-    Some((current_word(FULL_RCX).load(Ordering::Relaxed), current_word(FULL_R11).load(Ordering::Relaxed)))
+    Some((
+        current_word(FULL_RCX).load(Ordering::Relaxed),
+        current_word(FULL_R11).load(Ordering::Relaxed),
+    ))
 }
 
 /// Takes the running context's request for a full return: its RCX and

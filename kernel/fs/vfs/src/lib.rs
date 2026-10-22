@@ -161,8 +161,10 @@ pub enum Kind {
     Directory,
     /// A block device, which filesystems are mounted from.
     BlockDevice,
-    /// A character device: `null`, `zero` and the like.
+    /// A character device: `null`, `zero`, terminals and the like.
     CharDevice,
+    /// A pipe, which lives outside the tree (Phase 8).
+    Pipe,
 }
 
 /// What a node says about itself.
@@ -356,6 +358,9 @@ pub enum FsKind {
     Dev,
     /// The boot archive (`/system`), read-only.
     Boot,
+    /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
+    /// their files are on a mount of their own ([`mount::Mount::detached`]).
+    Pipe,
 }
 
 impl FsKind {
@@ -368,6 +373,7 @@ impl FsKind {
             FsKind::Sys => "sys",
             FsKind::Dev => "dev",
             FsKind::Boot => "bootfs",
+            FsKind::Pipe => "pipefs",
         }
     }
 }

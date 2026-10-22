@@ -523,12 +523,14 @@ impl UserMode for Arch {
         if start >= end {
             return;
         }
-        let mut decide = |virt, phys, access: Option<paging::Access>| {
-            match decide(virt, phys, access.map(space::user_access)) {
-                PageEdit::Keep => space::Edit::Keep,
-                PageEdit::Set(access) => space::Edit::Set(access.map(space::access)),
-                PageEdit::Clear => space::Edit::Clear,
-            }
+        let mut decide = |virt, phys, access: Option<paging::Access>| match decide(
+            virt,
+            phys,
+            access.map(space::user_access),
+        ) {
+            PageEdit::Keep => space::Edit::Keep,
+            PageEdit::Set(access) => space::Edit::Set(access.map(space::access)),
+            PageEdit::Clear => space::Edit::Clear,
         };
         space.space().edit(start, end, &mut decide, released);
     }
@@ -538,7 +540,11 @@ impl UserMode for Arch {
         to: &Self::Space,
         start: u64,
         end: u64,
-        decide: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> (PageEdit, Option<Option<UserAccess>>),
+        decide: &mut dyn FnMut(
+            u64,
+            u64,
+            Option<UserAccess>,
+        ) -> (PageEdit, Option<Option<UserAccess>>),
     ) -> Result<(), u64> {
         let end = end.min(user::USER_TOP);
         if start >= end {
@@ -590,6 +596,10 @@ impl UserMode for Arch {
 
     fn set_results(regs: &mut Self::UserRegisters, results: &SyscallRegs) {
         regs.set_results(results);
+    }
+
+    fn thread_pointer(regs: &Self::UserRegisters) -> u64 {
+        regs.fs_base
     }
 
     fn enter_user_registers(regs: &Self::UserRegisters) -> ! {

@@ -116,9 +116,11 @@ dependencies = [
  "radix-ksyms",
  "radix-lockdep",
  "radix-mm",
+ "radix-posix",
  "radix-random",
  "radix-sched",
  "radix-sync",
+ "radix-tty",
  "radix-vfs",
  "radix-virtio",
 ]

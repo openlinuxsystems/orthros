@@ -31,9 +31,11 @@ radix-klog = { path = "../lib/klog" }
 radix-lockdep = { path = "../lib/lockdep" }
 radix-ksyms = { path = "../lib/ksyms" }
 radix-mm = { path = "../mm" }
+radix-posix = { path = "../lib/posix" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-sync = { path = "../lib/sync" }
+radix-tty = { path = "../lib/tty" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
 

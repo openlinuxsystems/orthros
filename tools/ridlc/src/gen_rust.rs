@@ -778,6 +778,10 @@ fn call_code(out: &mut String, abi: &Abi, module: &Module, call: &Call, shape: &
         params.push(format!("{}: {}", field.name, wrapper_type(abi, module, field)));
     }
     let returns = if call.results.is_empty() { "()".to_string() } else { format!("{base}Results") };
+    // A wrapper takes what its call takes, however many that is.
+    if params.len() > 7 {
+        out.push_str("    #[allow(clippy::too_many_arguments)]\n");
+    }
     let _ = writeln!(
         out,
         "    pub fn {}<S: Syscalls + ?Sized>({}) -> Result<{returns}, Status> {{",

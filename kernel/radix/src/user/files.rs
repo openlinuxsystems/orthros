@@ -12,12 +12,20 @@
 //! time, without a buffer of its own in between. The capability `open`
 //! makes has the rights the caller asked for and its directory has, never
 //! more, and the object it names is charged to the caller's process.
+//!
+//! Since Phase 8 a file object is an open file description: reads and
+//! writes at CURRENT use its offset, and those of a pipe's end or a
+//! terminal's side go to the pipe or the terminal (`fs::pipe`, `fs::tty`),
+//! which may wait. Opening a terminal makes it the controlling terminal of
+//! a session leader that has none, unless asked not to.
 
 use core::mem::size_of;
 
+use radix_abi::capability::SlotFlags;
 use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags};
 use radix_abi::errors::Kernel;
-use radix_abi::{UserBuffer, file};
+use radix_abi::file::{DescriptionFlags, Whence};
+use radix_abi::{UserBuffer, file, terminal};
 use radix_cap::{CapError, Capability, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
 use radix_klog::info;
@@ -29,9 +37,9 @@ use super::account::Account;
 use super::memory::cap_rights;
 use super::methods::{Answer, answer};
 use super::objects::{self, Object};
-use super::{Result, UserRef, cap_error, error, process};
-use crate::Arch;
-use crate::fs::{self, FileObject, FileRef};
+use super::{Result, UserRef, UserThread, cap_error, error};
+use crate::fs::{self, Description, FileObject, FileRef, pipe, tty};
+use crate::{Arch, caps};
 
 /// The most bytes one read or write moves, as on Linux.
 pub const IO_MAX: u64 = 0x7fff_f000;
@@ -147,6 +155,7 @@ fn file_kind(kind: Kind) -> FileKind {
         Kind::Directory => FileKind::Directory,
         Kind::BlockDevice => FileKind::BlockDevice,
         Kind::CharDevice => FileKind::CharDevice,
+        Kind::Pipe => FileKind::Pipe,
     }
 }
 
@@ -158,6 +167,7 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
         FsKind::Sys => FilesystemKind::Sys,
         FsKind::Dev => FilesystemKind::Dev,
         FsKind::Boot => FilesystemKind::Bootfs,
+        FsKind::Pipe => FilesystemKind::Pipe,
     }
 }
 
@@ -226,6 +236,12 @@ pub fn directory_method(
             };
             let at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
             drop(dir);
+            let description = Description {
+                append: a.flags.contains(OpenFlags::APPEND),
+                non_blocking: a.flags.contains(OpenFlags::NON_BLOCKING),
+            };
+            let close_on_exec = a.flags.contains(OpenFlags::CLOSE_ON_EXEC);
+            let node = at.node.clone();
             let kind = at.node.kind();
             let object_kind =
                 if kind == Kind::Directory { ObjectKind::Directory } else { ObjectKind::File };
@@ -238,7 +254,14 @@ pub fn directory_method(
                 at.writable().map_err(fs::status)?;
             }
             let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER);
-            install(user, to, object_kind, rights, at)?;
+            let object = FileObject::with(at, description).ok_or(error(Kernel::NoMemory))?;
+            install_file(user, to, object_kind, rights, object, close_on_exec)?;
+            if let Some(handle) = tty::handle_of(&node)
+                && !handle.master
+                && !a.flags.contains(OpenFlags::NO_TERMINAL)
+            {
+                tty::Tty::opened_by(handle.tty(), &user.process);
+            }
             let results = directory::OpenResults { kind: file_kind(kind) };
             answer(label, directory::OpenResults::WORDS, results.encode())
         }
@@ -357,22 +380,35 @@ pub fn directory_method(
     }
 }
 
-/// Makes the object for `at` and puts a capability to it with `rights` in
-/// `to`, charged to the caller's process.
-fn install(
-    user: &UserRef,
+/// Puts a capability with `rights` to `object`, a file or directory
+/// object of `kind`, in `to`, charged to the caller's process; with
+/// `close_on_exec`, the slot gets that flag in the same step, so that no
+/// `fork` copies it without.
+pub fn install_file(
+    user: &UserThread,
     to: SlotRef,
     kind: ObjectKind,
     rights: Rights,
-    at: Location,
+    object: FileRef,
+    close_on_exec: bool,
 ) -> Result<()> {
     let charge = Account::charge(user.process.account(), size_of::<FileObject>() as u64)?;
-    let object = FileObject::new(at).ok_or(error(Kernel::NoMemory))?;
-    let object = match kind {
+    let mut object = Some(match kind {
         ObjectKind::Directory => Object::Directory(object),
         _ => Object::File(object),
-    };
-    process::install_with_rights(to, kind, rights, object, Some(charge))
+    });
+    let made = caps::with(|store| -> Result<()> {
+        objects::create_with_rights(store, to, kind, rights, &mut object, Some(charge))?;
+        if close_on_exec {
+            store.set_slot_flags(to, SlotFlags::CLOSE_ON_EXEC.0 as u8).map_err(cap_error)?;
+        }
+        Ok(())
+    })
+    .map_err(cap_error)
+    .and_then(|made| made);
+    // Not made: it goes now, with the store's lock gone.
+    drop(object);
+    made
 }
 
 /// Writes the directory's entries from `cursor` into the caller's buffer
@@ -424,14 +460,19 @@ fn list(at: &Location, cursor: u64, address: u64, len: usize) -> Result<director
     Ok(directory::ListResults { count, used: used as u64, next })
 }
 
-/// The file interface, on the file capability `cap`.
-pub fn file_method(cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answer> {
+/// The file interface, on the file capability `cap`, for `user`'s thread.
+pub fn file_method(
+    user: &UserRef,
+    cap: &Capability,
+    label: u32,
+    args: &[u64; 8],
+) -> Result<Answer> {
     match label {
         file::READ => {
             let a = file::ReadArgs::decode(args)?;
             let file = file_of(cap, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
-            let count = read(&file, a.offset, address, len)?;
+            let count = read(user, &file, a.offset, address, len, false)?;
             let results = file::ReadResults { count };
             answer(label, file::ReadResults::WORDS, results.encode())
         }
@@ -439,7 +480,7 @@ pub fn file_method(cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answ
             let a = file::WriteArgs::decode(args)?;
             let file = file_of(cap, Rights::WRITE)?;
             let (address, len) = user_range(a.data)?;
-            let count = write(&file, a.offset, address, len)?;
+            let count = write(user, &file, a.offset, address, len, false)?;
             let results = file::WriteResults { count };
             answer(label, file::WriteResults::WORDS, results.encode())
         }
@@ -470,22 +511,163 @@ pub fn file_method(cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answ
             sync(&file)?;
             answer(label, 0, [0; 8])
         }
+        file::SEEK => {
+            let a = file::SeekArgs::decode(args)?;
+            let file = file_of(cap, Rights::NONE)?;
+            let offset = seek(&file, a.offset, a.whence)?;
+            answer(label, file::SeekResults::WORDS, file::SeekResults { offset }.encode())
+        }
+        file::STATUS_FLAGS => {
+            let a = file::StatusFlagsArgs::decode(args)?;
+            let file = file_of(cap, Rights::NONE)?;
+            let old = file.description();
+            if a.set {
+                file.set_description(Description {
+                    append: a.flags.contains(DescriptionFlags::APPEND),
+                    non_blocking: a.flags.contains(DescriptionFlags::NON_BLOCKING),
+                });
+            }
+            let mut flags = DescriptionFlags::NONE;
+            if old.append {
+                flags = flags.union(DescriptionFlags::APPEND);
+            }
+            if old.non_blocking {
+                flags = flags.union(DescriptionFlags::NON_BLOCKING);
+            }
+            answer(
+                label,
+                file::StatusFlagsResults::WORDS,
+                file::StatusFlagsResults { flags }.encode(),
+            )
+        }
+        file::CONTROL => {
+            let a = file::ControlArgs::decode(args)?;
+            let file = file_of(cap, Rights::NONE)?;
+            let result = match target(&file) {
+                Target::Tty(handle) => {
+                    handle.control(user, a.request, a.argument, a.buffer, a.size)?
+                }
+                Target::Pipe(end) if a.request == terminal::READABLE => {
+                    let len = end.pipe().len() as u32;
+                    if a.size < 4 || !Arch::copy_to_user(a.buffer, &len.to_le_bytes()) {
+                        return Err(error(Kernel::BadAddress));
+                    }
+                    0
+                }
+                _ => return Err(error(Kernel::NotTerminal)),
+            };
+            answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
+        }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }
 
-/// Reads from `offset` of `file` into the caller's `len` bytes at
-/// `address`, checked already.
-pub fn read(file: &FileRef, offset: u64, address: u64, len: usize) -> Result<u64> {
-    let mut out = UserOut { address, len };
-    file.at.node.read(offset, &mut out).map(|n| n as u64).map_err(fs::status)
+/// What a file's reads and writes go to.
+enum Target<'a> {
+    /// An end of a pipe.
+    Pipe(&'a pipe::End),
+    /// A side of a terminal.
+    Tty(&'a tty::Handle),
+    /// A file of the tree, through its node.
+    Node,
 }
 
-/// Writes the caller's `len` bytes at `address` to `offset` of `file`.
-pub fn write(file: &FileRef, offset: u64, address: u64, len: usize) -> Result<u64> {
-    file.at.writable().map_err(fs::status)?;
+fn target(file: &FileObject) -> Target<'_> {
+    if let Some(end) = pipe::end_of(&file.at.node) {
+        Target::Pipe(end)
+    } else if let Some(handle) = tty::handle_of(&file.at.node) {
+        Target::Tty(handle)
+    } else {
+        Target::Node
+    }
+}
+
+/// Reads from `file` into the caller's `len` bytes at `address`, checked
+/// already: from `offset`, or at CURRENT from the description's offset,
+/// which moves past what was read. A pipe or a terminal takes any offset,
+/// and waits for something to read unless the description is non-blocking
+/// or `never_wait`.
+pub fn read(
+    user: &UserThread,
+    file: &FileObject,
+    offset: u64,
+    address: u64,
+    len: usize,
+    never_wait: bool,
+) -> Result<u64> {
+    let mut out = UserOut { address, len };
+    let non_blocking = never_wait || file.description().non_blocking;
+    let read = match target(file) {
+        Target::Pipe(end) => return end.pipe().read(&mut out, non_blocking).map(|n| n as u64),
+        Target::Tty(handle) => return handle.read(user, &mut out, non_blocking).map(|n| n as u64),
+        Target::Node if offset == file::CURRENT => {
+            let mut at = file.offset.lock();
+            let read = file.at.node.read(*at, &mut out);
+            if let Ok(n) = read {
+                *at += n as u64;
+            }
+            read
+        }
+        Target::Node => file.at.node.read(offset, &mut out),
+    };
+    read.map(|n| n as u64).map_err(fs::status)
+}
+
+/// Writes the caller's `len` bytes at `address` to `file`: at `offset`,
+/// or at CURRENT at the description's offset (the end of the file if it
+/// appends), which moves past what was written. A pipe or a terminal
+/// takes any offset, and waits for room as [`read`] waits.
+pub fn write(
+    user: &UserThread,
+    file: &FileObject,
+    offset: u64,
+    address: u64,
+    len: usize,
+    never_wait: bool,
+) -> Result<u64> {
     let data = UserIn { address, len };
-    file.at.node.write(offset, &data).map(|n| n as u64).map_err(fs::status)
+    let description = file.description();
+    let non_blocking = never_wait || description.non_blocking;
+    match target(file) {
+        Target::Pipe(end) => return end.pipe().write(&data, non_blocking).map(|n| n as u64),
+        Target::Tty(handle) => return handle.write(user, &data, non_blocking).map(|n| n as u64),
+        Target::Node => {}
+    }
+    file.at.writable().map_err(fs::status)?;
+    let node = &file.at.node;
+    if offset != file::CURRENT {
+        return node.write(offset, &data).map(|n| n as u64).map_err(fs::status);
+    }
+    let mut at = file.offset.lock();
+    let written = if description.append {
+        let written = node.write(file::APPEND, &data).map_err(fs::status)?;
+        *at = node.stat().size;
+        written
+    } else {
+        let written = node.write(*at, &data).map_err(fs::status)?;
+        *at += written as u64;
+        written
+    };
+    Ok(written as u64)
+}
+
+/// `seek`: moves `file`'s offset `offset` bytes from where `whence` says.
+fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
+    if !matches!(target(file), Target::Node) {
+        return Err(error(Kernel::NotSeekable));
+    }
+    let mut at = file.offset.lock();
+    let base = match whence {
+        Whence::Start => 0,
+        Whence::Current => *at,
+        Whence::End => file.at.node.stat().size,
+    };
+    let new = i128::from(base) + i128::from(offset);
+    if !(0..=i128::from(i64::MAX)).contains(&new) {
+        return Err(Kernel::InvalidArgument.status(0));
+    }
+    *at = new as u64;
+    Ok(*at)
 }
 
 /// Writes `file`'s filesystem's changes to its disk.
@@ -495,21 +677,22 @@ pub fn sync(file: &FileRef) -> Result<()> {
 }
 
 /// The ring's read operation: `args` are the offset, address and length.
-pub fn ring_read(user: &super::UserThread, cap: u32, args: [u64; 3]) -> Result<[u64; 2]> {
+/// A pipe or a terminal never waits here.
+pub fn ring_read(user: &UserThread, cap: u32, args: [u64; 3]) -> Result<[u64; 2]> {
     let (_, file) = objects::file(user.cspace, cap, Rights::READ)?;
     let (address, len) = user_range(UserBuffer { address: args[1], len: args[2] })?;
-    Ok([read(&file, args[0], address, len)?, 0])
+    Ok([read(user, &file, args[0], address, len, true)?, 0])
 }
 
 /// The ring's write operation.
-pub fn ring_write(user: &super::UserThread, cap: u32, args: [u64; 3]) -> Result<[u64; 2]> {
+pub fn ring_write(user: &UserThread, cap: u32, args: [u64; 3]) -> Result<[u64; 2]> {
     let (_, file) = objects::file(user.cspace, cap, Rights::WRITE)?;
     let (address, len) = user_range(UserBuffer { address: args[1], len: args[2] })?;
-    Ok([write(&file, args[0], address, len)?, 0])
+    Ok([write(user, &file, args[0], address, len, true)?, 0])
 }
 
 /// The ring's sync operation.
-pub fn ring_sync(user: &super::UserThread, cap: u32) -> Result<[u64; 2]> {
+pub fn ring_sync(user: &UserThread, cap: u32) -> Result<[u64; 2]> {
     let (_, file) = objects::file(user.cspace, cap, Rights::WRITE)?;
     sync(&file)?;
     Ok([0; 2])

@@ -82,6 +82,9 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     // Files the change released go now, with the lock gone: the last of
     // a removed file frees its space on the disk.
     crate::fs::drop_deferred();
+    // Processes it finished tell their parents now: that may send
+    // signals, which may end more processes (Phase 8).
+    crate::user::process::report_finished();
     result
 }
 

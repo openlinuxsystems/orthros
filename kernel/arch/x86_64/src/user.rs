@@ -170,9 +170,24 @@ impl UserRegisters {
     /// The general registers, in `mcontext_t`'s order.
     fn words(&self) -> [u64; GREGS] {
         [
-            self.r8, self.r9, self.r10, self.r11, self.r12, self.r13, self.r14, self.r15,
-            self.rdi, self.rsi, self.rbp, self.rbx, self.rdx, self.rax, self.rcx, self.rsp,
-            self.rip, self.rflags,
+            self.r8,
+            self.r9,
+            self.r10,
+            self.r11,
+            self.r12,
+            self.r13,
+            self.r14,
+            self.r15,
+            self.rdi,
+            self.rsi,
+            self.rbp,
+            self.rbx,
+            self.rdx,
+            self.rax,
+            self.rcx,
+            self.rsp,
+            self.rip,
+            self.rflags,
         ]
     }
 
@@ -459,11 +474,13 @@ fn user_flags(rflags: u64) -> u64 {
 #[unsafe(no_mangle)]
 extern "C" fn radix_syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
     thread::set_user_entry(UserEntry::Syscall);
-    // SAFETY: the stub passes the frame it has just saved at the top of
-    // this thread's kernel stack, which nothing else uses while the call
-    // runs; the borrow of its registers ends when the handler returns.
     match SYSCALL_HANDLER.get() {
+        // SAFETY: the stub passes the frame it has just saved at the top
+        // of this thread's kernel stack, which nothing else uses while the
+        // call runs; the borrow of its registers ends when the handler
+        // returns.
         Some(handler) => handler(unsafe { &mut (*frame).regs }),
+        // SAFETY: as above, for one write.
         None => unsafe { (*frame).regs.number = u64::MAX },
     }
     // Back to the program with interrupts masked from here to the return.
@@ -686,7 +703,8 @@ pub fn push_signal_frame(signal: &SignalFrame<'_>) -> bool {
     unsafe { fpu::load_initial(area) };
     // Its registers and RCX and R11 are in the frame now.
     let _ = thread::take_full_return();
-    let entry = (signal.handler, base, u64::from(signal.signal), context + layout::CONTEXT, context);
+    let entry =
+        (signal.handler, base, u64::from(signal.signal), context + layout::CONTEXT, context);
     // SAFETY: as in `restart_syscall`.
     unsafe {
         match saved() {
@@ -775,7 +793,8 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
     }
 
     regs.number = greg(13);
-    regs.args = [greg(8), greg(9), greg(12), greg(2), greg(0), greg(1), greg(4), greg(5), greg(6), greg(7)];
+    regs.args =
+        [greg(8), greg(9), greg(12), greg(2), greg(0), greg(1), greg(4), greg(5), greg(6), greg(7)];
     // SAFETY: as in `capture`: the tail of the frame, which the handler's
     // borrow (`regs`) does not cover.
     unsafe {

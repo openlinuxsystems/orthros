@@ -21,7 +21,10 @@
 //!   disks every five seconds, and drops clean cached pages when memory
 //!   runs short (the out-of-memory policy asks it first);
 //! - [`FileObject`] is what a file or directory capability names: a place
-//!   in the tree. `user::files` carries out their methods.
+//!   in the tree, and since Phase 8 an open file description's offset and
+//!   flags. `user::files` carries out their methods;
+//! - `pipe` and `tty` are pipes and terminals (Phase 8), files outside the
+//!   tree's filesystems.
 //!
 //! A file object's last reference can be the last one to a FAT file
 //! removed while open, whose clusters are freed when it goes, which
@@ -32,18 +35,21 @@
 
 pub mod devfs;
 pub mod disk;
+pub mod pipe;
 pub mod procfs;
 pub mod sysfs;
+pub mod tty;
 pub mod writeback;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use radix_abi::Status;
 use radix_abi::errors::{File as FileError, Kernel};
+use radix_abi::file::DescriptionFlags;
 use radix_hal::{Devices, Timer};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Kmalloc, PAGE_SIZE};
-use radix_sync::{Once, SpinLock};
+use radix_sync::{Mutex, Once, SpinLock};
 use radix_vfs::mount::{Location, OpenFlags, Vfs};
 use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, NodeRef, mem};
 
@@ -52,11 +58,50 @@ use crate::Arch;
 /// A file or directory object, shared.
 pub type FileRef = alloc::sync::Arc<FileObject, Kmalloc>;
 
-/// What a file or directory capability names.
+/// An open file description's status flags (radix-file(2)'s
+/// DescriptionFlags).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Description {
+    /// Writes at the description's offset go at the end of the file.
+    pub append: bool,
+    /// Reads and writes of a pipe or terminal fail with would_block
+    /// rather than wait.
+    pub non_blocking: bool,
+}
+
+impl Description {
+    fn bits(self) -> u32 {
+        let mut bits = 0;
+        if self.append {
+            bits |= DescriptionFlags::APPEND.0;
+        }
+        if self.non_blocking {
+            bits |= DescriptionFlags::NON_BLOCKING.0;
+        }
+        bits
+    }
+
+    fn from_bits(bits: u32) -> Description {
+        Description {
+            append: bits & DescriptionFlags::APPEND.0 != 0,
+            non_blocking: bits & DescriptionFlags::NON_BLOCKING.0 != 0,
+        }
+    }
+}
+
+/// What a file or directory capability names: what POSIX calls an open
+/// file description, which copies of the capability share.
 pub struct FileObject {
     /// The place in the tree: a mount and a node of it (for a generated
-    /// file, the snapshot its `open` took).
+    /// file, the snapshot its `open` took; for a pipe or a terminal, its
+    /// own node).
     pub at: Location,
+    /// The offset that reads and writes at CURRENT use and move. Locked
+    /// for the length of such a read or write, so that two of them on the
+    /// description follow one another, as POSIX asks.
+    pub offset: Mutex<u64>,
+    /// Its [`Description`], as bits.
+    flags: AtomicU32,
     /// The next released object to drop, while it waits in [`DROPPED`].
     next: SpinLock<Option<FileRef>>,
 }
@@ -64,8 +109,28 @@ pub struct FileObject {
 impl FileObject {
     /// An object for `at`.
     pub fn new(at: Location) -> Option<FileRef> {
-        let object = FileObject { at, next: SpinLock::new(None) };
+        FileObject::with(at, Description::default())
+    }
+
+    /// An object for `at`, with `description`'s flags.
+    pub fn with(at: Location, description: Description) -> Option<FileRef> {
+        let object = FileObject {
+            at,
+            offset: Mutex::new(0),
+            flags: AtomicU32::new(description.bits()),
+            next: SpinLock::new(None),
+        };
         alloc::sync::Arc::try_new_in(object, radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)).ok()
+    }
+
+    /// Its status flags.
+    pub fn description(&self) -> Description {
+        Description::from_bits(self.flags.load(Ordering::Acquire))
+    }
+
+    /// Changes its status flags.
+    pub fn set_description(&self, description: Description) {
+        self.flags.store(description.bits(), Ordering::Release);
     }
 }
 
@@ -79,9 +144,11 @@ static ANY_DROPPED: AtomicBool = AtomicBool::new(false);
 /// Lets go of a released object, with the store's lock held: at once if
 /// that can only free memory, or else queued until the lock has gone.
 /// Only its node can be the last reference that goes: no mount is ever
-/// unmounted while a handle holds a place on it.
+/// unmounted while a handle holds a place on it. A terminal's side, whose
+/// last description going may hang the terminal up and send signals, is
+/// on `dev`, whose drops are light otherwise.
 pub fn release(file: FileRef) {
-    if file.at.mount.fs.light_drops() {
+    if file.at.mount.fs.light_drops() && tty::handle_of(&file.at.node).is_none() {
         drop(file);
     } else {
         defer_drop(file);

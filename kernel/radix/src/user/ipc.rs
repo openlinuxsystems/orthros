@@ -438,7 +438,8 @@ pub fn exiting(user: &UserThread) {
 
 /// Waits until the running thread's IPC state settles, and returns it
 /// (leaving it idle). A thread asked to stop leaves the endpoint's queue
-/// (or stops waiting for a reply) and gets `interrupted`.
+/// (or stops waiting for a reply) and gets `interrupted`; so does one with
+/// a signal to take, from the queue only.
 fn wait(
     me: &ThreadRef,
     user: &UserThread,
@@ -463,7 +464,11 @@ fn wait(
                 _ => {}
             }
         }
-        if me.should_stop() && cancel(me, user, endpoint) {
+        // A signal (Phase 8) ends a wait in an endpoint's queue, which the
+        // call can make again from the start; a call whose message has been
+        // taken waits for its reply whatever comes, unless it is to stop.
+        let cut_short = me.should_stop() || (endpoint.is_some() && me.is_signalled());
+        if cut_short && cancel(me, user, endpoint) {
             return Err(error(Kernel::Interrupted));
         }
         sched::block(reason);

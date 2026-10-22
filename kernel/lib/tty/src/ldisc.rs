@@ -6,9 +6,9 @@
 
 use radix_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use radix_abi::terminal::{
-    ECHO, ECHOCTL, ECHOE, ECHOK, ECHOKE, ECHONL, ICANON, ICRNL, IEXTEN, IGNCR, INLCR, ISIG,
-    ISTRIP, IUTF8, IXANY, IXON, NOFLSH, OCRNL, ONLCR, OPOST, Termios, VEOF, VEOL, VEOL2, VERASE,
-    VINTR, VKILL, VLNEXT, VMIN, VQUIT, VREPRINT, VSTART, VSTOP, VSUSP, VTIME, VWERASE,
+    ECHO, ECHOCTL, ECHOE, ECHOK, ECHOKE, ECHONL, ICANON, ICRNL, IEXTEN, IGNCR, INLCR, ISIG, ISTRIP,
+    IUTF8, IXANY, IXON, NOFLSH, OCRNL, ONLCR, OPOST, Termios, VEOF, VEOL, VEOL2, VERASE, VINTR,
+    VKILL, VLNEXT, VMIN, VQUIT, VREPRINT, VSTART, VSTOP, VSUSP, VTIME, VWERASE,
 };
 
 use crate::Ring;
@@ -96,7 +96,9 @@ impl Settings {
 
     /// The settings a `struct termios` holds.
     pub fn from_bytes(bytes: &[u8; TERMIOS_SIZE]) -> Settings {
-        let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        let word = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
         let mut cc = [0u8; 32];
         cc.copy_from_slice(&bytes[Termios::OFFSET_CC..Termios::OFFSET_CC + 32]);
         Settings {

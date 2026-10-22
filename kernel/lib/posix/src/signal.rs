@@ -104,9 +104,11 @@ pub enum Disposition {
     Handle(Action),
 }
 
-/// The action of every signal of a process.
+/// The action of every signal of a process, kept in `S`: an array, or in
+/// the kernel memory from its heap, so that a process's actions are never
+/// built on a stack (they take 2 KiB).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Actions([Action; SIGNALS as usize]);
+pub struct Actions<S = [Action; SIGNALS as usize]>(S);
 
 /// Why an action could not be set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,10 +130,27 @@ impl Actions {
     pub const fn new() -> Actions {
         Actions([Action { handler: DEFAULT, flags: 0, mask: 0, restorer: 0 }; SIGNALS as usize])
     }
+}
+
+impl<S: AsRef<[Action]> + AsMut<[Action]>> Actions<S> {
+    /// Every signal at its default action, kept in `storage`, which must
+    /// hold [`SIGNALS`] actions (`None` otherwise).
+    pub fn in_storage(mut storage: S) -> Option<Actions<S>> {
+        if storage.as_ref().len() != SIGNALS as usize {
+            return None;
+        }
+        storage.as_mut().fill(Action::default());
+        Some(Actions(storage))
+    }
+
+    /// Makes every action `other`'s, as a fork's child gets them.
+    pub fn copy_from<T: AsRef<[Action]>>(&mut self, other: &Actions<T>) {
+        self.0.as_mut().copy_from_slice(other.0.as_ref());
+    }
 
     /// The action of `signal`, a valid signal.
     pub fn get(&self, signal: u32) -> Action {
-        self.0[(signal - 1) as usize]
+        self.0.as_ref()[(signal - 1) as usize]
     }
 
     /// Makes `action` the action of `signal`, and returns the one before.
@@ -144,14 +163,14 @@ impl Actions {
             return Err(ActionError::Unchangeable);
         }
         action.mask &= !UNBLOCKABLE;
-        Ok(core::mem::replace(&mut self.0[(signal - 1) as usize], action))
+        Ok(core::mem::replace(&mut self.0.as_mut()[(signal - 1) as usize], action))
     }
 
     /// What `exec` keeps: ignored signals stay ignored, handled ones go
     /// back to their default, since the handlers are gone with the
     /// program.
     pub fn reset_for_exec(&mut self) {
-        for action in &mut self.0 {
+        for action in self.0.as_mut() {
             if action.handler != IGNORE {
                 *action = Action::default();
             } else {
@@ -187,7 +206,7 @@ impl Actions {
     /// The handler of `signal` has run once: with RESETHAND, its action
     /// goes back to the default.
     pub fn handled(&mut self, signal: u32) {
-        let action = &mut self.0[(signal - 1) as usize];
+        let action = &mut self.0.as_mut()[(signal - 1) as usize];
         if action.has(ActionFlags::RESET_HAND) {
             *action = Action::default();
         }
@@ -215,16 +234,40 @@ pub const SI_KERNEL: i32 = 0x80;
 pub const SI_TIMER: i32 = -2;
 /// `si_code` of a signal sent to a thread.
 pub const SI_TKILL: i32 = -6;
+/// SIGCHLD's `si_code`: the child exited.
+pub const CLD_EXITED: i32 = 1;
+/// SIGCHLD's `si_code`: a signal ended the child.
+pub const CLD_KILLED: i32 = 2;
+/// SIGCHLD's `si_code`: the child stopped.
+pub const CLD_STOPPED: i32 = 5;
+/// SIGCHLD's `si_code`: the child continued.
+pub const CLD_CONTINUED: i32 = 6;
+/// SIGSEGV's `si_code`: nothing is mapped at the address.
+pub const SEGV_MAPERR: i32 = 1;
+/// SIGSEGV's `si_code`: the mapping does not allow the access.
+pub const SEGV_ACCERR: i32 = 2;
+/// SIGILL's `si_code`: an illegal opcode.
+pub const ILL_ILLOPN: i32 = 2;
+/// SIGFPE's `si_code`: an integer divided by zero.
+pub const FPE_INTDIV: i32 = 1;
+/// SIGBUS's `si_code`: a misaligned address.
+pub const BUS_ADRALN: i32 = 1;
+/// SIGBUS's `si_code`: an address with nothing behind it (a file mapping
+/// past its file's end, or one that could not be read).
+pub const BUS_ADRERR: i32 = 2;
+/// SIGTRAP's `si_code`: a breakpoint.
+pub const TRAP_BRKPT: i32 = 1;
 
 /// The signals pending for a thread, or for a process (taken by whichever
-/// of its threads does not block them first).
+/// of its threads does not block them first), with what each carries
+/// kept in `S`, as [`Actions`] keeps its actions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
+pub struct Pending<S = [Info; SIGNALS as usize]> {
     /// The signals pending.
     set: u64,
     /// What each pending signal carries: for a real-time signal sent more
     /// than once, the last one's.
-    info: [Info; SIGNALS as usize],
+    info: S,
     /// How many times each real-time signal is pending.
     queued: [u16; (SIGNALS - SIGRTMIN + 1) as usize],
 }
@@ -243,6 +286,18 @@ impl Pending {
             info: [Info { code: 0, pid: 0, status: 0 }; SIGNALS as usize],
             queued: [0; (SIGNALS - SIGRTMIN + 1) as usize],
         }
+    }
+}
+
+impl<S: AsRef<[Info]> + AsMut<[Info]>> Pending<S> {
+    /// Nothing pending, with what signals carry kept in `storage`, which
+    /// must hold [`SIGNALS`] entries (`None` otherwise).
+    pub fn in_storage(storage: S) -> Option<Pending<S>> {
+        (storage.as_ref().len() == SIGNALS as usize).then_some(Pending {
+            set: 0,
+            info: storage,
+            queued: [0; (SIGNALS - SIGRTMIN + 1) as usize],
+        })
     }
 
     /// The signals pending.
@@ -268,7 +323,7 @@ impl Pending {
             return false;
         }
         self.set |= bit;
-        self.info[(signal - 1) as usize] = info;
+        self.info.as_mut()[(signal - 1) as usize] = info;
         true
     }
 
@@ -282,7 +337,7 @@ impl Pending {
         let synchronous = ready & SYNCHRONOUS;
         let from = if synchronous != 0 { synchronous } else { ready };
         let signal = from.trailing_zeros() + 1;
-        let info = self.info[(signal - 1) as usize];
+        let info = self.info.as_ref()[(signal - 1) as usize];
         let bit = bit(signal);
         if bit & REAL_TIME != 0 {
             let queued = &mut self.queued[(signal - SIGRTMIN) as usize];

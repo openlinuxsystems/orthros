@@ -309,6 +309,13 @@ impl Thread {
         <crate::Arch as radix_hal::UserMode>::set_thread_pointer(&self.context, base);
     }
 
+    /// Gives it, before it first runs, the running thread's extended state
+    /// (Phase 8): a forked thread goes on with its parent's x87 and vector
+    /// registers.
+    pub fn copy_extended_state(&self) {
+        <crate::Arch as radix_hal::UserMode>::copy_extended_state(&self.context);
+    }
+
     /// Its name.
     pub fn name(&self) -> &Name {
         &self.name

@@ -50,7 +50,9 @@ impl<'a> Block<'a> {
             return Err(BlockError::TooLong);
         }
         let header = bytes.get(..ExecHeader::SIZE).ok_or(BlockError::Malformed)?;
-        let word = |at: usize| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]);
+        let word = |at: usize| {
+            u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
         if word(ExecHeader::OFFSET_VERSION) != EXEC_VERSION {
             return Err(BlockError::Malformed);
         }
@@ -232,7 +234,10 @@ impl Stack<'_> {
     /// strings take, each with its NUL.
     fn strings_len(&self) -> u64 {
         let sum = |list: &[&[u8]]| list.iter().map(|s| s.len() as u64 + 1).sum::<u64>();
-        sum(self.args) + sum(self.env) + self.execfn.len() as u64 + 1
+        sum(self.args)
+            + sum(self.env)
+            + self.execfn.len() as u64
+            + 1
             + self.cwd.map_or(0, |cwd| cwd.len() as u64 + 1)
     }
 
@@ -314,11 +319,9 @@ impl Stack<'_> {
             word(out, key);
             word(out, value);
         }
-        for (key, value) in [
-            (aux::AT_RANDOM, random),
-            (aux::AT_PLATFORM, platform),
-            (aux::AT_EXECFN, execfn),
-        ] {
+        for (key, value) in
+            [(aux::AT_RANDOM, random), (aux::AT_PLATFORM, platform), (aux::AT_EXECFN, execfn)]
+        {
             word(out, key);
             word(out, value);
         }

@@ -280,10 +280,10 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
             }
             i += 1;
         }
-        if parent == 0 || auto_reap {
-            if let Some(index) = self.index(pid) {
-                gone(self.members.swap_remove(index).handle);
-            }
+        if (parent == 0 || auto_reap)
+            && let Some(index) = self.index(pid)
+        {
+            gone(self.members.swap_remove(index).handle);
         }
         (parent != 0).then_some(parent)
     }
@@ -331,11 +331,8 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
         let pid = member.pid;
         match member.life {
             Life::Zombie { ended, times } => {
-                let reaped = if for_.no_reap {
-                    None
-                } else {
-                    Some(self.members.swap_remove(index).handle)
-                };
+                let reaped =
+                    if for_.no_reap { None } else { Some(self.members.swap_remove(index).handle) };
                 Found::Child { pid, status: ended.status(), times, reaped }
             }
             _ => {
@@ -466,9 +463,7 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
         if target.session == pid {
             return Err(TreeError::NotPermitted);
         }
-        if group != pid
-            && !self.members.iter().any(|m| m.group == group && m.session == session)
-        {
+        if group != pid && !self.members.iter().any(|m| m.group == group && m.session == session) {
             return Err(TreeError::NotPermitted);
         }
         if let Some(target) = self.get_mut(pid) {
@@ -494,11 +489,13 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
     /// parent in another process group of the same session, so no shell
     /// is left to continue it.
     pub fn orphaned(&self, group: u64) -> bool {
-        !self.members.iter().filter(|m| m.group == group && !matches!(m.life, Life::Zombie { .. }))
+        !self
+            .members
+            .iter()
+            .filter(|m| m.group == group && !matches!(m.life, Life::Zombie { .. }))
             .any(|m| {
-                self.get(m.parent).is_some_and(|parent| {
-                    parent.group != group && parent.session == m.session
-                })
+                self.get(m.parent)
+                    .is_some_and(|parent| parent.group != group && parent.session == m.session)
             })
     }
 
@@ -524,10 +521,8 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
                     _ => return Err("a member's parent is gone or has ended"),
                 }
             }
-            let mixed = self
-                .members
-                .iter()
-                .any(|m| m.group == member.group && m.session != member.session);
+            let mixed =
+                self.members.iter().any(|m| m.group == member.group && m.session != member.session);
             if mixed {
                 return Err("a process group spans two sessions");
             }

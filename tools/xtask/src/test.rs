@@ -51,10 +51,12 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-ksyms",
     "radix-microcode",
     "radix-mm",
+    "radix-posix",
     "radix-random",
     "radix-relocs",
     "radix-sched",
     "radix-sync",
+    "radix-tty",
     "radix-vfs",
     "radix-virtio",
 ];

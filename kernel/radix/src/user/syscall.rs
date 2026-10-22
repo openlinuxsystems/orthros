@@ -9,6 +9,11 @@
 //! back in the number register and its results in the argument registers;
 //! on an error every result register is 0, so nothing the kernel had in
 //! hand leaks out.
+//!
+//! A call a signal interrupted (Phase 8) fails with `interrupted`, and its
+//! arguments are kept (`posix::signal::call_failed`): on the way back to
+//! user mode it runs again with them, unless a handler that does not
+//! restart calls runs, as radix-signal(2) says.
 
 use core::fmt;
 
@@ -37,6 +42,10 @@ enum Done {
     Return,
     /// The caller exits.
     Exit(u64),
+    /// It returned from a signal handler (`signal_return`): the number
+    /// register gets this, and the argument registers what the frame
+    /// saved.
+    Restore(u64),
 }
 
 /// Handles a system call from user mode.
@@ -52,7 +61,12 @@ pub fn handle(regs: &mut SyscallRegs) {
     match dispatch(me, user, number, &mut regs.args) {
         Ok(Done::Return) => regs.number = 0,
         Ok(Done::Exit(code)) => exit_current(user.clone(), code, Ending::Exit),
+        Ok(Done::Restore(saved)) => regs.number = saved,
         Err(status) => {
+            // A failed call has not touched its arguments.
+            if status.code() == Kernel::Interrupted as u16 && status.domain() == Kernel::DOMAIN {
+                interrupted(me, user, number, &regs.args, status);
+            }
             regs.number = status.0;
             regs.args = [0; 10];
         }
@@ -61,6 +75,27 @@ pub fn handle(regs: &mut SyscallRegs) {
         stopped(me, number, info);
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
+}
+
+/// System call `number` with `args` was interrupted: it is kept to run
+/// again. What runs again of a `reply_recv` is its receive, the reply
+/// having gone.
+#[cold]
+#[inline(never)]
+fn interrupted(
+    me: &ThreadRef,
+    user: &UserRef,
+    number: u64,
+    args: &[u64; 10],
+    status: radix_abi::Status,
+) {
+    let (number, args) = match sys::ReplyRecvArgs::decode(args) {
+        Ok(a) if number == sys::REPLY_RECV => {
+            (sys::RECV, sys::RecvArgs { cap: a.cap, flags: 0 }.encode())
+        }
+        _ => (number, *args),
+    };
+    super::posix::signal::call_failed(me, user, number, &args, status);
 }
 
 /// Logs that thread `me` was stopped in system call `number`, with info
@@ -142,6 +177,10 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -
                     results(args, sys::CapCallResults { badge: 0, info, words }.encode())
                 }
                 Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
+                Ok(Answer::Restore(saved)) => {
+                    *args = saved.args;
+                    Ok(Done::Restore(saved.number))
+                }
                 Err(status) => Err(status),
             }
         }

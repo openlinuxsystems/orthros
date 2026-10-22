@@ -26,6 +26,12 @@
 //! loads programs in the kernel (into frames, by physical address) and in
 //! user space (through a mapping). Any input gives a result or an error,
 //! never a panic: the property tests feed it garbage.
+//!
+//! Since Phase 8 the kernel's `exec` also runs programs from files, which
+//! it maps rather than copies, so it reads only their first bytes
+//! ([`read_program`]): they may then name an interpreter (`PT_INTERP`, the
+//! dynamic linker, which does what a static loader cannot) and use
+//! thread-local storage, which their C library sets up.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -54,6 +60,7 @@ const DYN_SIZE: u64 = 16;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_PHDR: u32 = 6;
 const PT_TLS: u32 = 7;
 const PT_GNU_STACK: u32 = 0x6474_e551;
 const PT_GNU_RELRO: u32 = 0x6474_e552;
@@ -326,25 +333,55 @@ impl Placed<'_> {
         }
         let (table, count) = self.image.relocations;
         for i in 0..count {
-            let entry = table + i * RELA_SIZE;
-            let r_offset = u64_at(bytes, entry as usize)?;
-            let r_info = u64_at(bytes, entry as usize + 8)?;
-            let r_addend = u64_at(bytes, entry as usize + 16)?;
-            match (r_info & 0xffff_ffff) as u32 {
-                R_X86_64_NONE => continue,
-                R_X86_64_RELATIVE if r_info >> 32 == 0 => {}
-                _ => return Err(ElfError::Relocation),
+            let entry = (table + i * RELA_SIZE) as usize;
+            let entry = bytes.get(entry..entry + RELA_SIZE as usize).ok_or(ElfError::Truncated)?;
+            if let Some((at, value)) = self.relocate(entry)? {
+                write(at, &value.to_le_bytes());
             }
-            // Only writable data is relocated: text relocations would need
-            // code that is written to.
-            let (segment, at) = self.locate(r_offset, 8).ok_or(ElfError::Relocation)?;
-            if segment.access != Access::ReadWrite {
-                return Err(ElfError::Relocation);
-            }
-            write(at, &r_addend.wrapping_add(self.bias).to_le_bytes());
         }
         Ok(())
     }
+
+    /// What the relocation `entry` (one entry of the table, 24 bytes)
+    /// writes: where among the loaded pages, and the word; `None` for
+    /// `R_X86_64_NONE`.
+    fn relocate(&self, entry: &[u8]) -> Result<Option<(u64, u64)>, ElfError> {
+        let r_offset = u64_at(entry, 0)?;
+        let r_info = u64_at(entry, 8)?;
+        let r_addend = u64_at(entry, 16)?;
+        match (r_info & 0xffff_ffff) as u32 {
+            R_X86_64_NONE => return Ok(None),
+            R_X86_64_RELATIVE if r_info >> 32 == 0 => {}
+            _ => return Err(ElfError::Relocation),
+        }
+        // Only writable data is relocated: text relocations would need
+        // code that is written to.
+        let (segment, at) = self.locate(r_offset, 8).ok_or(ElfError::Relocation)?;
+        if segment.access != Access::ReadWrite {
+            return Err(ElfError::Relocation);
+        }
+        Ok(Some((at, r_addend.wrapping_add(self.bias))))
+    }
+
+    /// What the relocation `entry` writes, for a program mapped where it
+    /// was placed rather than loaded page after page (`exec`): the address
+    /// of the word, and the word; `None` for `R_X86_64_NONE`.
+    pub fn relocation(&self, entry: &[u8]) -> Result<Option<(u64, u64)>, ElfError> {
+        if entry.len() != RELA_SIZE as usize {
+            return Err(ElfError::Malformed);
+        }
+        self.relocate(entry)?;
+        let r_offset = u64_at(entry, 0)?;
+        let r_addend = u64_at(entry, 16)?;
+        let r_info = u64_at(entry, 8)?;
+        if r_info & 0xffff_ffff == u64::from(R_X86_64_NONE) {
+            return Ok(None);
+        }
+        Ok(Some((r_offset.wrapping_add(self.bias), r_addend.wrapping_add(self.bias))))
+    }
+
+    /// The size of one relocation entry.
+    pub const RELOCATION_SIZE: u64 = RELA_SIZE;
 }
 
 /// Why an image was refused.
@@ -446,6 +483,80 @@ fn phdr_at(bytes: &[u8], at: usize) -> Result<Phdr, ElfError> {
 /// Reads and checks the image in `bytes`. Where it may go is checked when
 /// it is placed ([`Image::place`]).
 pub fn read(bytes: &[u8]) -> Result<Image, ElfError> {
+    let (mut image, extra) = parse(bytes, bytes.len() as u64, false)?;
+    match (image.kind, extra.dynamic) {
+        (Kind::Relocatable, Some((offset, size))) => {
+            image.relocations = relocations(bytes, &image, offset, size)?;
+        }
+        // A position-independent image without a dynamic table has nothing
+        // to relocate; a fixed one is not relocated.
+        (Kind::Relocatable, None) | (Kind::Fixed, _) => {}
+    }
+    Ok(image)
+}
+
+/// A program `exec` runs from a file, read from its first bytes
+/// ([`read_program`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Program {
+    /// Its image: its segments are mapped from the file. Its relocations
+    /// are not read: [`Program::relocations`] finds them.
+    pub image: Image,
+    /// Where its interpreter's path (with its NUL) is in the file, and how
+    /// long it is.
+    pub interpreter: Option<(u64, u64)>,
+    /// Where its program headers are in memory, as linked, if a segment
+    /// holds them.
+    pub headers: Option<u64>,
+    /// How many program headers it has.
+    pub header_count: u16,
+    /// Where its dynamic table is in the file, and its size.
+    pub dynamic: Option<(u64, u64)>,
+}
+
+impl Program {
+    /// The size of a program header (AT_PHENT).
+    pub const HEADER_SIZE: u64 = PHDR_SIZE as u64;
+
+    /// Reads the dynamic table `table` (its bytes from the file) of a
+    /// position-independent program without an interpreter, and returns
+    /// where its relocation table is in the file and how many entries it
+    /// has, as [`read`] does for an image.
+    pub fn relocations(&self, table: &[u8]) -> Result<(u64, u64), ElfError> {
+        relocations(table, &self.image, 0, table.len() as u64)
+    }
+}
+
+/// The most bytes an interpreter's path may take.
+pub const INTERPRETER_MAX: u64 = 4096;
+
+/// Reads and checks the program whose file is `file_size` bytes long and
+/// starts with `head`, which must hold its ELF header and program
+/// headers. Everything is checked as [`read`] checks it, against the
+/// file's size, but an interpreter and thread-local storage are allowed.
+pub fn read_program(head: &[u8], file_size: u64) -> Result<Program, ElfError> {
+    let (image, extra) = parse(head, file_size, true)?;
+    Ok(Program {
+        image,
+        interpreter: extra.interpreter,
+        headers: extra.headers,
+        header_count: extra.header_count,
+        dynamic: extra.dynamic,
+    })
+}
+
+/// What [`parse`] finds besides the image.
+#[derive(Default)]
+struct Extra {
+    dynamic: Option<(u64, u64)>,
+    interpreter: Option<(u64, u64)>,
+    headers: Option<u64>,
+    header_count: u16,
+}
+
+/// Reads the headers in `bytes`, of a file `file_size` bytes long; with
+/// `exec`, as [`read_program`] does.
+fn parse(bytes: &[u8], file_size: u64, exec: bool) -> Result<(Image, Extra), ElfError> {
     if bytes.len() < HEADER_SIZE {
         return Err(ElfError::Truncated);
     }
@@ -479,17 +590,37 @@ pub fn read(bytes: &[u8]) -> Result<Image, ElfError> {
     let mut segments = [None; MAX_SEGMENTS];
     let mut count = 0;
     let mut next_page = 0;
-    let mut dynamic = None;
+    let mut extra = Extra { header_count: phnum, ..Extra::default() };
     let mut relro = None;
+    let in_file =
+        |offset: u64, size: u64| offset.checked_add(size).is_some_and(|end| end <= file_size);
     for i in 0..usize::from(phnum) {
         let phdr = phdr_at(bytes, table + i * PHDR_SIZE)?;
         match phdr.kind {
             PT_LOAD => {}
             PT_DYNAMIC => {
-                dynamic = Some((phdr.offset, phdr.filesz));
+                if !in_file(phdr.offset, phdr.filesz) {
+                    return Err(ElfError::Truncated);
+                }
+                extra.dynamic = Some((phdr.offset, phdr.filesz));
+                continue;
+            }
+            PT_INTERP if exec => {
+                if !in_file(phdr.offset, phdr.filesz) {
+                    return Err(ElfError::Truncated);
+                }
+                if phdr.filesz < 2 || phdr.filesz > INTERPRETER_MAX || extra.interpreter.is_some() {
+                    return Err(ElfError::Malformed);
+                }
+                extra.interpreter = Some((phdr.offset, phdr.filesz));
                 continue;
             }
             PT_INTERP => return Err(ElfError::Dynamic),
+            PT_PHDR if exec => {
+                extra.headers = Some(phdr.vaddr);
+                continue;
+            }
+            PT_TLS if exec => continue,
             PT_TLS if phdr.memsz > 0 => return Err(ElfError::ThreadLocal),
             PT_GNU_STACK if phdr.flags & PF_X != 0 => return Err(ElfError::BadAccess),
             PT_GNU_RELRO if phdr.memsz > 0 => {
@@ -505,8 +636,7 @@ pub fn read(bytes: &[u8]) -> Result<Image, ElfError> {
         if phdr.filesz > phdr.memsz || phdr.offset % PAGE != phdr.vaddr % PAGE {
             return Err(ElfError::Malformed);
         }
-        let file_end = phdr.offset.checked_add(phdr.filesz).ok_or(ElfError::Truncated)?;
-        if file_end > bytes.len() as u64 {
+        if !in_file(phdr.offset, phdr.filesz) {
             return Err(ElfError::Truncated);
         }
         let mem_end = phdr.vaddr.checked_add(phdr.memsz).ok_or(ElfError::OutOfRange)?;
@@ -535,7 +665,7 @@ pub fn read(bytes: &[u8]) -> Result<Image, ElfError> {
         });
         count += 1;
     }
-    let mut image = Image { entry, kind, segments, relocations: (0, 0), relro };
+    let image = Image { entry, kind, segments, relocations: (0, 0), relro };
     let runs_entry = image
         .segments()
         .any(|s| s.access == Access::ReadExecute && s.vaddr <= entry && entry < s.vaddr + s.memsz);
@@ -550,15 +680,15 @@ pub fn read(bytes: &[u8]) -> Result<Image, ElfError> {
             return Err(ElfError::Malformed);
         }
     }
-    match (kind, dynamic) {
-        (Kind::Relocatable, Some((offset, size))) => {
-            image.relocations = relocations(bytes, &image, offset, size)?;
-        }
-        // A position-independent image without a dynamic table has nothing
-        // to relocate; a fixed one is not relocated.
-        (Kind::Relocatable, None) | (Kind::Fixed, _) => {}
+    if extra.headers.is_none() {
+        // The program headers are in memory if a segment loads them.
+        let size = u64::from(phnum) * PHDR_SIZE as u64;
+        extra.headers = image
+            .segments()
+            .find(|s| s.offset <= phoff && phoff + size <= s.offset + s.filesz)
+            .map(|s| s.vaddr + (phoff - s.offset));
     }
-    Ok(image)
+    Ok((image, extra))
 }
 
 /// Reads the dynamic table at `offset`, `size` bytes long, and returns

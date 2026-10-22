@@ -77,10 +77,12 @@ fn a_read_takes_one_line_and_a_short_read_leaves_the_rest() {
     let mut ldisc = Ldisc::new([0u8; 64]);
     typed(&mut ldisc, b"one\ntwo\n");
     let mut out = Vec::new();
-    ldisc.read_with::<()>(2, &mut |run| {
-        out.extend_from_slice(run);
-        Ok(())
-    }).unwrap();
+    ldisc
+        .read_with::<()>(2, &mut |run| {
+            out.extend_from_slice(run);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(out, b"on");
     assert_eq!(read_all(&mut ldisc), b"e\n");
     assert_eq!(read_all(&mut ldisc), b"two\n");
