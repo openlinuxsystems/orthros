@@ -103,8 +103,7 @@ pub fn std_cargo(ctx: &Ctx, subcommand: &str, toolchain: &ports::Toolchain) -> C
     let sysroot = toolchain.dir.join("rust");
     let mut cmd = process::cargo(ctx);
     cmd.args([subcommand, "--manifest-path", "userspace/programs/Cargo.toml"])
-        .arg("--target-dir")
-        .arg(ctx.target.join("programs"))
+        .env("CARGO_TARGET_DIR", ctx.target.join("programs"))
         .arg("--target")
         .arg(ctx.root.join(STD_TARGET_SPEC))
         .arg("-Zjson-target-spec")

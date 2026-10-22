@@ -29,8 +29,9 @@ uint64_t cached_pid;
 // theirs. Untouched pages of it take no memory.
 uint64_t cursors[MAX_FDS];
 
-// The auxiliary vector entry with the working directory (radix-posix(7)).
-constexpr uintptr_t AT_RADIX_CWD = 0x52440001;
+// <sys/auxv.h>'s numbers for Radix's own entries are the kernel's.
+static_assert(AT_RADIX_CWD == RADIX_PROCESS_AUX_CWD);
+static_assert(AT_RADIX_STARTUP == RADIX_PROCESS_AUX_STARTUP);
 
 // The first thread's stack, which exec makes 8 MiB (radix-posix(7)), and
 // its top: 0 until start-up finds it.

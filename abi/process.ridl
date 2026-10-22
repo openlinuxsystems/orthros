@@ -70,6 +70,14 @@ const UNLIMITED: u64 = 0xffffffffffffffff;
 const EXEC_VERSION: u32 = 1;
 /// The most bytes an `exec` block may hold.
 const EXEC_MAX: u64 = 262144;
+/// Radix's own entry of a program's auxiliary vector (Linux's numbers
+/// are below 64): the program's working directory, a string the C
+/// library keeps (`exec`), as <sys/auxv.h>'s AT_RADIX_CWD.
+const AUX_CWD: u64 = 0x52440001;
+/// Radix's own entry of a program's auxiliary vector: the address of its
+/// start-up page (radix-startup(2)), so that programs built on radix-rt
+/// start the same way under `exec`; <sys/auxv.h>'s AT_RADIX_STARTUP.
+const AUX_STARTUP: u64 = 0x52440002;
 
 /// What `wait` waits for, besides children that have ended.
 flags ChildWaitFlags: u32 {

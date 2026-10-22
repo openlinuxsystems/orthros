@@ -191,10 +191,10 @@ pub mod aux {
     pub const AT_EXECFN: u64 = 31;
     /// Radix's own (Phase 8): the working directory, a string the C
     /// library keeps, since the kernel keeps none.
-    pub const AT_RADIX_CWD: u64 = 0x5244_0001;
+    pub const AT_RADIX_CWD: u64 = radix_abi::process::AUX_CWD;
     /// Radix's own: the start-up page (radix-startup(2)), so that
     /// programs built on radix-rt start the same way under `exec`.
-    pub const AT_RADIX_STARTUP: u64 = 0x5244_0002;
+    pub const AT_RADIX_STARTUP: u64 = radix_abi::process::AUX_STARTUP;
 }
 
 /// The strings of an initial stack, and where the pointers to them go.

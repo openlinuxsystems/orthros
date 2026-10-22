@@ -17,6 +17,7 @@ mod image;
 mod kernel;
 mod krelocs;
 mod ksyms;
+mod libc_check;
 mod licenses;
 mod lint;
 mod ports;

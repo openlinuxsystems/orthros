@@ -121,6 +121,15 @@ pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String>
                 }
             }
         }
+        if !userspace::STD_ARCHIVE.is_empty() {
+            for package in std_packages(ctx, ports)? {
+                // `core` and the like are listed once, from the kernel.
+                if !packages.iter().any(|p| p.name == package.name && p.version == package.version)
+                {
+                    packages.push(package);
+                }
+            }
+        }
         packages.extend(c_packages(ctx, ports));
     }
     packages.push(grub(ctx, extras.mkrescue)?);
@@ -211,10 +220,23 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
     let manifest = format!("{}/Cargo.toml", program.workspace);
     cmd.args(["tree", "--manifest-path", &manifest, "-p", program.package, "--target"])
         .arg(ctx.root.join(program.target))
-        .args(["-Zjson-target-spec", "-e", "normal", "--prefix", "none"])
-        .args(["--format", "{p}|{l}"]);
-    let output = process::output(ctx, &mut cmd)?;
+        .args(["-Zjson-target-spec"]);
     let lock = read_lock(&ctx.root.join(program.workspace).join("Cargo.lock"))?;
+    tree_packages(ctx, program.what, &mut cmd, &lock, None)
+}
+
+/// The crates `cmd`, a `cargo tree` of `what`, lists, with their
+/// checksums from `lock`; those in `provided` are left out, as listed
+/// elsewhere.
+fn tree_packages(
+    ctx: &Ctx,
+    what: &str,
+    cmd: &mut Command,
+    lock: &std::collections::BTreeMap<(String, String), String>,
+    provided: Option<&Path>,
+) -> Result<Vec<Package>> {
+    cmd.args(["-e", "normal", "--prefix", "none", "--format", "{p}|{l}"]);
+    let output = process::output(ctx, cmd)?;
     let commit = git_commit(ctx);
     let mut seen = BTreeSet::new();
     let mut packages = Vec::new();
@@ -234,6 +256,7 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
             version: entry.version,
         };
         match entry.source {
+            Source::Path(path) if provided.is_some_and(|dir| path.starts_with(dir)) => continue,
             Source::Path(path) => {
                 package.download =
                     format!("git+https://github.com/openlinuxsystems/orthros@{commit}");
@@ -255,9 +278,8 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
             }
             Source::Other(source) => {
                 crate::bail!(
-                    "{} uses {} {} from {source}; only crates.io and the \
+                    "{what} uses {} {} from {source}; only crates.io and the \
                      repository are allowed (deny.toml [sources])",
-                    program.what,
                     package.name,
                     package.version
                 );
@@ -266,7 +288,94 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
         packages.push(package);
     }
     if packages.is_empty() {
-        crate::bail!("`cargo tree` listed no crates for {}", program.what);
+        crate::bail!("`cargo tree` listed no crates for {what}");
+    }
+    Ok(packages)
+}
+
+/// The crates of Rust's standard library that ports/rust-std patches for
+/// Radix (std holds the backtrace crate's code too).
+const STD_PATCHED: &[&str] = &["std", "unwind", "libc", "unwinding"];
+
+/// What the programs on Rust's standard library are made of (ADR 0070):
+/// their own crates, from `cargo tree` with the libc crate the rust-std
+/// port patched, and the standard library's, which the port listed, with
+/// their notices, when it built.
+fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
+    let toolchain = &ports.toolchain;
+    let lock = read_lock(&ctx.root.join("userspace/programs/Cargo.lock"))?;
+    let mut packages: Vec<Package> = Vec::new();
+    for (_, program) in userspace::STD_ARCHIVE {
+        let mut cmd = userspace::std_cargo(ctx, "tree", toolchain);
+        cmd.args(["-p", program]);
+        let what = format!("the program {program}");
+        for package in tree_packages(ctx, &what, &mut cmd, &lock, Some(&toolchain.dir))? {
+            if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
+                packages.push(package);
+            }
+        }
+    }
+    let Some(port) = ports.ports.iter().find(|port| port.recipe.source.rust_src) else {
+        crate::bail!("no port builds Rust's standard library for the programs on it");
+    };
+    let rustc = rustc_info(ctx)?;
+    let sysroot = toolchain.dir.join("rust");
+    let list = sysroot.join("crates.txt");
+    let text = std::fs::read_to_string(&list).context(|| format!("reading {}", list.display()))?;
+    // rust-src's own lock file, which has the vendored crates' checksums.
+    let library_lock = read_lock(&port.sources[0].join("Cargo.lock"))?;
+    for line in text.lines() {
+        let Some(entry) = parse_tree_line(line) else { continue };
+        let mut package = Package {
+            // Some crates still write `MIT/Apache-2.0`, Cargo's old form.
+            license: entry.license.replace('/', " OR "),
+            area: Area::Kernel,
+            download: String::new(),
+            sha256: None,
+            notices: Vec::new(),
+            comment: String::new(),
+            name: entry.name,
+            version: entry.version,
+        };
+        match entry.source {
+            Source::Path(_) => {
+                if package.version == "0.0.0" {
+                    package.version = rustc.release.clone();
+                }
+                package.download =
+                    format!("git+https://github.com/rust-lang/rust@{}", rustc.commit);
+                package.comment = format!(
+                    "Rust standard library crate, from the rust-src of rustc {}",
+                    rustc.release
+                );
+            }
+            Source::Registry => {
+                let key = (package.name.clone(), package.version.clone());
+                package.sha256 = library_lock.get(&key).cloned();
+                package.download = format!(
+                    "https://crates.io/api/v1/crates/{}/{}/download",
+                    package.name, package.version
+                );
+                package.comment = format!(
+                    "A crate from crates.io that the rust-src of rustc {} vendors for the \
+                     standard library",
+                    rustc.release
+                );
+                let dir =
+                    sysroot.join("notices").join(format!("{}-{}", package.name, package.version));
+                package.notices = notice_files(&dir);
+            }
+            Source::Other(source) => {
+                crate::bail!("{list:?} lists {} from {source}", package.name);
+            }
+        }
+        if STD_PATCHED.contains(&package.name.as_str()) {
+            package.comment.push_str(", patched for Radix by ports/rust-std of Dukovo");
+        }
+        package.comment.push('.');
+        if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
+            packages.push(package);
+        }
     }
     Ok(packages)
 }

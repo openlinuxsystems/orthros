@@ -81,7 +81,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/mod.rs b/vendor/libc-0.2.189/src/unix/m
 diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/unix/radix/mod.rs
 --- a/vendor/libc-0.2.189/src/unix/radix/mod.rs
 +++ b/vendor/libc-0.2.189/src/unix/radix/mod.rs
-@@ -0,0 +1,2698 @@
+@@ -0,0 +1,2700 @@
 +//! Radix: the kernel of Dukovo, with mlibc as its C library.
 +//!
 +//! * mlibc: <https://github.com/managarm/mlibc>, built with its Radix system
@@ -89,10 +89,10 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +//!   layouts here are Linux's on x86-64. The thread, spawn and semaphore
 +//!   types are mlibc's own.
 +//!
-+//! The constants are generated from mlibc's headers, and a test on Radix
-+//! compares every type's size and alignment, every field's offset and
-+//! every constant's value here with the C headers' (Dukovo's
-+//! `ports/rust-std`).
++//! The constants are generated from mlibc's headers, and Dukovo's build
++//! of the standard library (`ports/rust-std`) compares every type's size
++//! and alignment, every field's offset and every constant's value here
++//! with the C headers'.
 +
 +use crate::prelude::*;
 +
@@ -294,6 +294,8 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +        pub int_n_sign_posn: c_char,
 +    }
 +
++    // mlibc aligns it as a pointer.
++    #[repr(align(8))]
 +    pub struct sched_param {
 +        pub sched_priority: c_int,
 +        __reserved: Padding<[u32; 15]>,

@@ -8,8 +8,10 @@
 # Installs it as a sysroot for the x86_64-unknown-radix target in
 # $TOOLCHAIN/rust, which ob builds programs in Rust against, with the
 # patched libc crate beside it, which ob gives those programs in place of
-# crates.io's. `ob` runs it (ob(1), PORTS) with PORT_SRC, PORT_BUILD,
-# TOOLCHAIN and RUST_TARGET set.
+# crates.io's, and what the license manifest needs to list the crates such
+# a program links. `ob` runs it (ob(1), PORTS) with PORT_SRC, PORT_BUILD,
+# TOOLCHAIN and RUST_TARGET set, and then checks the libc crate against
+# the C library's headers.
 set -eu
 
 cd "$PORT_SRC"
@@ -39,3 +41,17 @@ if [ -n "$twice" ]; then
 	exit 1
 fi
 cp -r vendor/libc-0.2.189 "$sysroot/vendor/libc"
+
+# The crates a program on it links, one "name vX.Y.Z (source)|license" line
+# each, and the notice files of those rust-src vendors, for the license
+# manifest (ADR 0021).
+RUSTFLAGS=-Zforce-unstable-if-unmarked "${CARGO:-cargo}" tree --offline -p std \
+	--features backtrace,panic-unwind -e normal --target "$RUST_TARGET" -Zjson-target-spec \
+	--prefix none --format '{p}|{l}' | sed 's/ (\*)$//' | sort -u >"$sysroot/crates.txt"
+sed -n 's/^\([^ ]*\) v\([^ |]*\)|.*/\1-\2/p' "$sysroot/crates.txt" | while read -r crate; do
+	[ -d "vendor/$crate" ] || continue
+	mkdir -p "$sysroot/notices/$crate"
+	find "vendor/$crate" -maxdepth 1 -type f \( -name 'LICENSE*' -o -name 'LICENCE*' \
+		-o -name 'COPYING*' -o -name 'COPYRIGHT*' -o -name 'NOTICE*' \) \
+		-exec cp {} "$sysroot/notices/$crate/" \;
+done

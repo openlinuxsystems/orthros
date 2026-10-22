@@ -34,8 +34,8 @@ libc_sources += radix_sources + files(
 
 if not no_headers
 	# Linux's ABI: Radix takes Linux's numbers and structures
-	# (radix-posix(7)). build.sh links each but ioctls.h, Radix's own, to
-	# mlibc's abis/linux.
+	# (radix-posix(7)). build.sh links each but ioctls.h and auxv.h,
+	# Radix's own, to mlibc's abis/linux.
 	install_headers(
 		'include/abi-bits/access.h',
 		'include/abi-bits/aio.h',

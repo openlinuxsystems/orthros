@@ -284,7 +284,7 @@ pub fn find_toolchain(ctx: &Ctx) -> Result<Toolchain> {
 }
 
 impl Toolchain {
-    fn bin(&self) -> PathBuf {
+    pub fn bin(&self) -> PathBuf {
         self.dir.join("bin")
     }
 
@@ -496,6 +496,11 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
             step(&format!("Port {} {} is up to date", recipe.name, recipe.version));
         } else {
             build(ctx, &toolchain, &recipe, &dir, &sources)?;
+            // A port of Rust's standard library must agree with the C
+            // library it calls.
+            if recipe.source.rust_src {
+                crate::libc_check::check(ctx, &toolchain)?;
+            }
             process::create_dir(&ctx.out.join("ports"))?;
             write_file(&stamp_file, &format!("{stamp:016x}\n"))?;
         }
