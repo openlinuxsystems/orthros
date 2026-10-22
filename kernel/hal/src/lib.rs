@@ -15,9 +15,11 @@
 //! processor itself, [`Smp`] for starting and stopping the other CPUs,
 //! [`Threads`] for kernel threads' contexts and switching between them
 //! (Phase 4), [`UserMode`] for programs' address spaces, system calls and
-//! faults (Phase 5), and [`Platform`] for machine-wide services such as
-//! restarting. All methods are associated functions: there is exactly one
-//! machine.
+//! faults (Phase 5), [`Devices`] for PCI configuration space, device
+//! registers, DMA memory and message-signalled interrupts (Phase 7, with
+//! the safe types of `radix-hw`), and [`Platform`] for machine-wide
+//! services such as restarting. All methods are associated functions:
+//! there is exactly one machine.
 //!
 //! The architecture owns the entry point. It sets up the CPU, the consoles it
 //! knows about and the kernel's page tables, then calls the kernel's
@@ -27,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boot;
+pub mod clock;
 pub mod cmdline;
 pub mod user;
 
@@ -37,6 +40,7 @@ pub use boot::{
     BootModule, BootParams, Channel, Firmware, Framebuffer, MemoryKind, MemoryRegion, PixelFormat,
     Reservation,
 };
+pub use radix_hw::{Dma, Mmio, MsiMessage, Page};
 pub use user::{MapPageError, SyscallRegs, UserAccess, UserFault, UserFaultKind, UserMode};
 
 /// Most CPUs the kernel manages. Per-CPU tables are sized by this.
@@ -251,6 +255,69 @@ pub trait Timer {
 
     /// How the timer is programmed, for the boot report.
     fn timer_mode() -> &'static str;
+
+    /// The time of day: nanoseconds since 1970-01-01 00:00:00 UTC, read
+    /// from the machine's real-time clock at boot (which is taken to keep
+    /// UTC) and advanced with [`Timer::now_ns`]; `None` when the machine
+    /// has no clock the kernel can read.
+    fn wall_clock_ns() -> Option<u64>;
+}
+
+/// One PCI segment's configuration space, as the firmware describes it
+/// (the ACPI MCFG table on x86-64).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciSegment {
+    /// Physical address of the segment's ECAM window, where bus 0 would
+    /// start.
+    pub base: u64,
+    /// The segment group number.
+    pub segment: u16,
+    /// The first bus the window decodes.
+    pub first_bus: u8,
+    /// The last bus the window decodes.
+    pub last_bus: u8,
+}
+
+/// Devices: what drivers need from the machine (Phase 7).
+///
+/// Drivers never see raw pointers: device registers come as
+/// [`radix_hw::Mmio`] windows and DMA memory as [`radix_hw::Dma`], whose
+/// accesses are checked; only the architecture creates them. Interrupts
+/// are message-signalled (MSI or MSI-X), so no firmware routing table is
+/// needed (ADR 0052).
+pub trait Devices {
+    /// Calls `found` with each PCI segment the firmware describes.
+    fn pci_segments(found: &mut dyn FnMut(PciSegment));
+
+    /// Maps `len` bytes of device registers from physical address `phys`,
+    /// uncached, for the rest of the kernel's life. `None` when the
+    /// mapping window or memory for page tables runs out.
+    fn map_device(phys: u64, len: usize) -> Option<radix_hw::Mmio>;
+
+    /// Allocates `pages` pages of zeroed, physically contiguous memory for
+    /// a device to read and write, below 4 GiB if `below_4g`. It is given
+    /// back when the [`radix_hw::Dma`] is dropped.
+    fn alloc_dma(pages: usize, below_4g: bool) -> Option<radix_hw::Dma>;
+
+    /// Allocates a zeroed page of ordinary RAM for the page cache, which
+    /// disks read into and write from by DMA. It may sleep, and comes out
+    /// of the frame allocator's reserves never; `None` when memory runs
+    /// out even after reclaim. It is given back when the
+    /// [`radix_hw::Page`] is dropped.
+    fn alloc_cache_page() -> Option<radix_hw::Page>;
+
+    /// Allocates an interrupt vector whose interrupts call `handler(arg)`,
+    /// with interrupts masked, on the CPU they arrive at. Returns the
+    /// vector's number and the message a device writes to raise it.
+    /// `None` when no vector is free.
+    fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hw::MsiMessage)>;
+
+    /// Frees a vector from [`Devices::allocate_interrupt`]; the device
+    /// must no longer send its message.
+    fn free_interrupt(vector: u32);
+
+    /// How many interrupts vector `vector` has delivered.
+    fn interrupt_count(vector: u32) -> u64;
 }
 
 /// Kernel threads: their saved contexts and switching between them.

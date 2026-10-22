@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-block"
+description = "The Radix block layer: block devices, partition tables (MBR and GPT), a page cache of a device's blocks, and the memory compartments use"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# Host memory instead of the kernel heap and frames, for the storage
+# crates' tests on the host.
+host = ["radix-hw/fake"]
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+radix-mm = { path = "../../mm" }
+radix-sync = { path = "../../lib/sync" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

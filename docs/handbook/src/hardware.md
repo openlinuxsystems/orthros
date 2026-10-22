@@ -26,7 +26,7 @@ parts list for its service tag.
 | SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; Dukovo installs here |
 | Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/data` |
 | USB | Intel xHCI | Phase 11 |
-| Keyboard | Built-in, PS/2 (i8042) | Phase 11 |
+| Keyboard | Built-in, PS/2 (i8042) | Phase 9 |
 | Touchpad | Likely I2C-HID (Intel Serial IO) | Phase 11, to be confirmed |
 | Wired network | Built-in 10/100 Ethernet, likely Realtek | Phase 12, chip to be confirmed |
 | Wi-Fi and Bluetooth | Qualcomm QCA9377 (Dell Wireless 1810) | After 1.0; needs closed firmware |
@@ -112,6 +112,16 @@ checks of every phase so far:
    end with `passed` before `Boot complete.` Then boot with
    `selftest=bench` and note the `BENCH` lines, which are the first
    numbers from real hardware.
+10. From Phase 6: the log must end with Spark's lines, from `spark: Spark
+    v1 is process 1` to `spark: nothing more to do; waiting`, with
+    `hello` exiting with code `0x0` and all of its memory coming back.
+11. From Phase 7: Spark must say `built the hierarchy of 10 directories
+    and mounted 8 filesystems`. Photograph the `PCI:` lines, which list
+    every PCI function with its vendor and device IDs and class: they
+    name the SATA controller (class `0106xx`) and the Ethernet controller
+    (class `0200xx`) that Phases 10 and 12 drive. No `Disk:` line is
+    expected, since the laptop has no virtio disks and its SATA drives
+    wait for the AHCI driver, so `/volumes` stays empty.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.
@@ -120,12 +130,15 @@ issue for anything that fails, with the photos.
 | --- | --- | --- | --- | --- | --- |
 | 1 | not yet run | | | | |
 | 2 | not yet run | | | | |
+| 6 | 2026-10-22 | `daa2682` (Phase 6) | not recorded | not recorded | Chase: "Latest P6 build boots on my laptop without issue". Which firmware mode, and the individual checks above, were not reported. |
 
 ### Help wanted: the Ethernet chip
 
 The network driver for Phase 12 depends on the exact Ethernet controller,
-which the parts list does not name. From any Linux live USB on the laptop,
-run:
+which the parts list does not name; the roadmap expects a Realtek RTL810x
+(PCI ID `10ec:8136`). From Phase 7, the boot log's `PCI:` lines show it
+(class `020000`, Ethernet controller). Or, from any Linux live USB on the
+laptop, run:
 
 ```sh
 lspci -nn | grep -i -E 'ethernet|network'

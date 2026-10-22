@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Benchmarks of one program, for `ob bench`: the cheapest system calls,
-//! fresh pages and memory bandwidth.
+//! fresh pages, memory bandwidth and files.
 
 use libradix::abi::capability::{self, ObjectKind, Rights};
 use libradix::abi::startup::{SLOT_FIRST_EXTRA, SLOT_MEMORY, SLOT_RANDOM, SLOT_SPACE};
-use libradix::abi::{memory, random, syscalls};
+use libradix::abi::{directory, file, memory, random, syscalls};
 use libradix::time::{Nanos, cycles};
 use libradix::{SYS, println, sys};
 
@@ -133,4 +133,51 @@ unsafe fn copy(from: u64, to: u64, len: u64) {
             options(nostack, preserves_flags),
         );
     }
+}
+
+/// The slots of the file benchmarks: the tmpfs directory the kernel
+/// passes, the file they read and write, and the one `open` puts what it
+/// opens in, again and again.
+const SLOT_DIRECTORY: u32 = SLOT_FIRST_EXTRA;
+const SLOT_FILE: u32 = 96;
+const SLOT_OPENED: u32 = 97;
+
+/// The file's name and size.
+const FILE_NAME: &[u8] = b"bench";
+const FILE_SIZE: usize = PAGE_SIZE as usize;
+
+/// What the file benchmarks read into and write from.
+static mut BUFFER: [u8; FILE_SIZE] = [0x5a; FILE_SIZE];
+
+/// What a file costs on a tmpfs, as tools/linux-bench measures it on one:
+/// opening and closing it, its status, and reading and writing a page of
+/// it, the page already in memory.
+pub fn files(argument: Argument) -> u64 {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let create = directory::OpenFlags::CREATE;
+    // SAFETY: only this function, on this program's one thread, touches
+    // the buffer, and the kernel only while a call below runs.
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(BUFFER) };
+    let made = directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, create, rw, SLOT_FILE)
+        .and_then(|_| file::write(&SYS, SLOT_FILE, 0, buffer));
+    if ok!(made, "the file to benchmark").is_none() {
+        return checks::failures();
+    }
+    let rounds = argument.rounds;
+    measure("file_open_close", rounds, || {
+        let none = directory::OpenFlags::NONE;
+        directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, none, Rights::READ, SLOT_OPENED).is_ok()
+            && capability::delete(&SYS, SLOT_OPENED).is_ok()
+    });
+    measure("file_stat", rounds, || {
+        directory::stat(&SYS, SLOT_DIRECTORY, FILE_NAME)
+            .is_ok_and(|stat| stat.size == FILE_SIZE as u64)
+    });
+    measure("file_read_4k", rounds, || {
+        file::read(&SYS, SLOT_FILE, 0, buffer).is_ok_and(|read| read.count == FILE_SIZE as u64)
+    });
+    measure("file_write_4k", rounds, || {
+        file::write(&SYS, SLOT_FILE, 0, buffer).is_ok_and(|wrote| wrote.count == FILE_SIZE as u64)
+    });
+    checks::failures()
 }

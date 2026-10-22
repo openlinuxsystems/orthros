@@ -729,68 +729,88 @@ impl<const CPUS: usize> Checker<CPUS> {
     }
 
     /// The classes reachable from `start` (included) along the edges of
-    /// `matrix`.
+    /// `matrix`. The search goes a level at a time with sets of classes,
+    /// so it needs no queue: 192 bytes of stack, where a queue of classes
+    /// would take 1 KiB in every acquire that adds an edge.
     fn reachable(matrix: &[[AtomicU64; WORDS]; MAX_CLASSES], start: u16) -> ClassSet {
         let mut seen: ClassSet = [0; WORDS];
-        let mut queue = [0u16; MAX_CLASSES];
-        let (mut head, mut tail) = (0, 1);
-        queue[0] = start;
         seen[usize::from(start) / 64] |= 1 << (start % 64);
-        while head < tail {
-            let node = usize::from(queue[head]);
-            head += 1;
-            for (word, row) in matrix[node].iter().enumerate() {
-                let mut fresh = row.load(Ordering::Acquire) & !seen[word];
-                seen[word] |= fresh;
-                while fresh != 0 {
-                    let bit = fresh.trailing_zeros() as usize;
-                    fresh &= fresh - 1;
-                    if tail < MAX_CLASSES {
-                        queue[tail] = (word * 64 + bit) as u16;
-                        tail += 1;
-                    }
-                }
+        let mut frontier = seen;
+        while frontier != [0; WORDS] {
+            frontier = Self::step(matrix, &frontier, &seen);
+            for (seen, fresh) in seen.iter_mut().zip(frontier) {
+                *seen |= fresh;
             }
         }
         seen
     }
 
-    /// A shortest path from `from` to `to`, as its first hop and its
-    /// length in edges.
-    fn path(&self, from: u16, to: u16) -> Option<(u16, usize)> {
-        let mut parent = [u16::MAX; MAX_CLASSES];
-        let mut queue = [0u16; MAX_CLASSES];
-        let (mut head, mut tail) = (0, 1);
-        queue[0] = from;
-        parent[usize::from(from)] = from;
-        while head < tail {
-            let node = queue[head];
-            head += 1;
-            for (word, row) in self.forward[usize::from(node)].iter().enumerate() {
-                let mut bits = row.load(Ordering::Acquire);
-                while bits != 0 {
-                    let next = (word * 64 + bits.trailing_zeros() as usize) as u16;
-                    bits &= bits - 1;
-                    if parent[usize::from(next)] != u16::MAX {
-                        continue;
-                    }
-                    parent[usize::from(next)] = node;
-                    if next == to {
-                        let mut length = 1;
-                        let mut hop = next;
-                        while parent[usize::from(hop)] != from {
-                            hop = parent[usize::from(hop)];
-                            length += 1;
-                        }
-                        return Some((hop, length));
-                    }
-                    if tail < MAX_CLASSES {
-                        queue[tail] = next;
-                        tail += 1;
-                    }
+    /// The classes one edge of `matrix` from those in `frontier`, less
+    /// those in `seen`.
+    fn step(
+        matrix: &[[AtomicU64; WORDS]; MAX_CLASSES],
+        frontier: &ClassSet,
+        seen: &ClassSet,
+    ) -> ClassSet {
+        let mut next: ClassSet = [0; WORDS];
+        for (word, &bits) in frontier.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let node = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                for (next, row) in next.iter_mut().zip(&matrix[node]) {
+                    *next |= row.load(Ordering::Acquire);
                 }
             }
         }
+        for (next, seen) in next.iter_mut().zip(seen) {
+            *next &= !seen;
+        }
+        next
+    }
+
+    /// How many edges a shortest path from `from` to `to` has.
+    fn distance(&self, from: u16, to: u16) -> Option<usize> {
+        let mut seen: ClassSet = [0; WORDS];
+        seen[usize::from(from) / 64] |= 1 << (from % 64);
+        let mut frontier = seen;
+        let mut length = 0;
+        while frontier != [0; WORDS] {
+            frontier = Self::step(&self.forward, &frontier, &seen);
+            length += 1;
+            if frontier[usize::from(to) / 64] & (1 << (to % 64)) != 0 {
+                return Some(length);
+            }
+            for (seen, fresh) in seen.iter_mut().zip(frontier) {
+                *seen |= fresh;
+            }
+        }
+        None
+    }
+
+    /// A shortest path from `from` to `to`, as its first hop and its
+    /// length in edges. The first hop is the lowest-numbered class after
+    /// `from` that is one edge nearer `to`, the one a search in class order
+    /// with a queue would find.
+    fn path(&self, from: u16, to: u16) -> Option<(u16, usize)> {
+        let length = self.distance(from, to)?;
+        for (word, row) in self.forward[usize::from(from)].iter().enumerate() {
+            let mut bits = row.load(Ordering::Acquire);
+            while bits != 0 {
+                let hop = (word * 64 + bits.trailing_zeros() as usize) as u16;
+                bits &= bits - 1;
+                let nearer = if length == 1 {
+                    hop == to
+                } else {
+                    hop != to && self.distance(hop, to) == Some(length - 1)
+                };
+                if nearer {
+                    return Some((hop, length));
+                }
+            }
+        }
+        // Not reached: edges are only ever added, so the path just found
+        // is still there.
         None
     }
 
@@ -900,6 +920,8 @@ impl<const CPUS: usize> Checker<CPUS> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn report_irq(
         &self,
         cpu: usize,
@@ -941,6 +963,8 @@ impl<const CPUS: usize> Checker<CPUS> {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
+    #[cold]
+    #[inline(never)]
     fn report(&self, mut report: Report) {
         if !self.enabled() {
             return;
@@ -1111,6 +1135,28 @@ mod tests {
             first.drop_it(&checker, THREAD);
         }
         c.take(&checker, THREAD);
+        a.take(&checker, THREAD);
+        let reports = seen();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].0, Problem::Inversion);
+        assert!(reports[0].1.contains("through 1 other lock:"), "{}", reports[0].1);
+    }
+
+    #[test]
+    fn the_shortest_way_round_is_reported() {
+        let checker = checker();
+        let (a, b, c, d, e) =
+            (Fake::spin(1), Fake::spin(2), Fake::spin(3), Fake::spin(4), Fake::spin(5));
+        // From a to d the long way, through b and c, then the short way,
+        // through e.
+        for (first, second) in [(&a, &b), (&b, &c), (&c, &d), (&a, &e), (&e, &d)] {
+            first.take(&checker, THREAD);
+            second.take(&checker, THREAD);
+            second.drop_it(&checker, THREAD);
+            first.drop_it(&checker, THREAD);
+        }
+        assert!(seen().is_empty());
+        d.take(&checker, THREAD);
         a.take(&checker, THREAD);
         let reports = seen();
         assert_eq!(reports.len(), 1);

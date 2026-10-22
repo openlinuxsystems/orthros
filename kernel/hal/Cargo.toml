@@ -10,5 +10,8 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+radix-hw = { path = "../lib/hw" }
+
 [lints]
 workspace = true

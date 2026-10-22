@@ -455,13 +455,21 @@ boots.
 	or not mapped, lengths that wrap, rights and flags that do not
 	exist), sharing two endpoints, two notifications and a memory
 	object with the other two, so calls meet partners and capabilities
-	travel. A fourth program in each group, the janitor, keeps answering
+	travel. Each group also gets a directory, the root of a tmpfs of its
+	own mounted at _/fuzz_, and calls every directory and file method on
+	it and on what it opens, with paths drawn from a few names, *.*,
+	*..*, absolute paths, names and paths at and past their limits, and
+	paths that hold a NUL or are not UTF-8. It mounts tmpfs, proc, sys
+	and bootfs there, but never dev, whose block devices are the
+	machine's disks. After the group, the kernel unmounts the tmpfs with
+	everything mounted in it. A fourth program in each group, the janitor, keeps answering
 	and signalling so that the fuzzers cannot all end up waiting for
 	each other; whatever still waits after 30 seconds is stopped, and
 	the log says in which call. After every call a fuzzer checks the
-	promise of *radix-syscalls*(2): a failed call returns a kernel error
-	that the call's documentation lists, and 0 in every result
-	register. It logs each broken promise as *fuzz: broken promise* or
+	promise of *radix-syscalls*(2): a failed call returns an error that
+	the call's documentation lists, a kernel error or, for files and
+	directories, one of the file domain (*radix-errors*(2)), and 0 in
+	every result register. It logs each broken promise as *fuzz: broken promise* or
 	*fuzz: undocumented error*, and exits with their count. At least
 	half the fuzzers must finish, the capability store must pass its
 	audit, and the store and the object registry must hold what they
@@ -473,7 +481,9 @@ boots.
 	the cheapest system calls, a fresh page and a memory copy, then round
 	trips of four pairs from *ipc* (all but capabilities), 100,000 each,
 	on one CPU and on two, a context switch between two programs, a TLB
-	shootdown, and three system calls on both CPUs at once. Each
+	shootdown, three system calls on both CPUs at once, and opening,
+	*stat* and 4 KiB reads and writes of a file in a tmpfs mounted at
+	_/bench_ for the run. Each
 	measurement is a line the program logs, *BENCH name=*_name_ *ns=*_ns_
 	*iterations=*_count_, and after each benchmark the kernel logs what
 	it did meanwhile, *BENCHCOUNT group=*_name_ *rounds=*_count_ followed

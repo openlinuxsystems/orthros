@@ -272,6 +272,12 @@ fn show_memory() {
     report::write_reservations(boot.reservations, &mut |args| say(args));
     say(format_args!("Frame allocator zones:"));
     report::write_zones(&mut |args| say(args));
+    let (dropped, failed) = crate::fs::writeback::stats();
+    say(format_args!(
+        "Page cache: {} pages held, {dropped} dropped to reclaim memory, {failed} failed \
+         write-backs",
+        radix_block::mem::pages()
+    ));
     Arch::describe(&mut |args| say(args));
 }
 

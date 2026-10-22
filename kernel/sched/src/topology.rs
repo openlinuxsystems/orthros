@@ -75,6 +75,20 @@ pub struct Place {
     pub node: u8,
 }
 
+/// The CPUs' loads, by CPU number: a snapshot, as a slice, or read as
+/// they are asked for, as the kernel does (a snapshot of every CPU would
+/// be kilobytes on the stack of a waking thread).
+pub trait Loads {
+    /// How busy CPU `cpu` is, if there is such a CPU.
+    fn load(&self, cpu: usize) -> Option<CpuLoad>;
+}
+
+impl Loads for [CpuLoad] {
+    fn load(&self, cpu: usize) -> Option<CpuLoad> {
+        self.get(cpu).copied()
+    }
+}
+
 /// How busy one CPU is, as a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CpuLoad {
@@ -216,14 +230,19 @@ impl Topology {
     /// The CPU an underloaded `this` should pull a thread from, comparing
     /// the groups that make up its span at `level`. `None` when the load
     /// there is even, or no CPU has a thread waiting.
-    pub fn find_busiest(&self, this: usize, level: Level, loads: &[CpuLoad]) -> Option<usize> {
+    pub fn find_busiest(
+        &self,
+        this: usize,
+        level: Level,
+        loads: &(impl Loads + ?Sized),
+    ) -> Option<usize> {
         let span = self.span(this, level);
         let group_of = |cpu: usize| match level.lower() {
             Some(lower) => self.span(cpu, lower).and(&span),
             None => CpuSet::single(cpu),
         };
         let sum = |group: &CpuSet| -> (u32, u32) {
-            let running = group.iter().map(|c| loads.get(c).map_or(0, |l| l.running)).sum();
+            let running = group.iter().map(|c| loads.load(c).map_or(0, |l| l.running)).sum();
             (running, group.len() as u32)
         };
         let local = group_of(this);
@@ -237,7 +256,7 @@ impl Topology {
             let group = group_of(cpu);
             seen = seen.or(&group);
             let (from, from_cpus) = sum(&group);
-            let waiting = group.iter().any(|c| loads.get(c).is_some_and(|l| l.running >= 2));
+            let waiting = group.iter().any(|c| loads.load(c).is_some_and(|l| l.running >= 2));
             if !waiting || !should_pull(from, from_cpus, to, to_cpus) {
                 continue;
             }
@@ -258,16 +277,21 @@ impl Topology {
         let (group, ..) = best?;
         group
             .iter()
-            .filter(|&c| loads.get(c).is_some_and(|l| l.running >= 2))
-            .max_by_key(|&c| (loads[c].running, core::cmp::Reverse(c)))
+            .filter(|&c| loads.load(c).is_some_and(|l| l.running >= 2))
+            .max_by_key(|&c| (loads.load(c).map_or(0, |l| l.running), core::cmp::Reverse(c)))
     }
 
     /// Where a waking fair thread that last ran on `prev` should run: an
     /// idle CPU as close to `prev` as possible, else `prev`, else the least
     /// busy CPU it may use. `allowed` must not be empty.
-    pub fn select_cpu(&self, prev: usize, allowed: &CpuSet, loads: &[CpuLoad]) -> usize {
+    pub fn select_cpu(
+        &self,
+        prev: usize,
+        allowed: &CpuSet,
+        loads: &(impl Loads + ?Sized),
+    ) -> usize {
         let idle =
-            |cpu: usize| allowed.contains(cpu) && loads.get(cpu).is_some_and(|l| l.running == 0);
+            |cpu: usize| allowed.contains(cpu) && loads.load(cpu).is_some_and(|l| l.running == 0);
         if idle(prev) {
             return prev;
         }
@@ -289,17 +313,17 @@ impl Topology {
         prev: usize,
         prio: u8,
         allowed: &CpuSet,
-        loads: &[CpuLoad],
+        loads: &(impl Loads + ?Sized),
     ) -> usize {
         let idle =
-            |cpu: usize| allowed.contains(cpu) && loads.get(cpu).is_some_and(|l| l.running == 0);
+            |cpu: usize| allowed.contains(cpu) && loads.load(cpu).is_some_and(|l| l.running == 0);
         if idle(prev) {
             return prev;
         }
         if let Some(cpu) = self.nearest(prev, allowed, idle) {
             return cpu;
         }
-        let below = |cpu: usize| loads.get(cpu).map_or(u8::MAX, |l| l.rt_prio);
+        let below = |cpu: usize| loads.load(cpu).map_or(u8::MAX, |l| l.rt_prio);
         if allowed.contains(prev) && below(prev) < prio {
             return prev;
         }
@@ -331,12 +355,12 @@ impl Topology {
         None
     }
 
-    fn least_busy(&self, prev: usize, allowed: &CpuSet, loads: &[CpuLoad]) -> usize {
+    fn least_busy(&self, prev: usize, allowed: &CpuSet, loads: &(impl Loads + ?Sized)) -> usize {
         allowed
             .iter()
             .filter(|&c| c < self.cpus)
             .min_by_key(|&c| {
-                (loads.get(c).map_or(u32::MAX, |l| l.running), self.cpu_distance(prev, c), c)
+                (loads.load(c).map_or(u32::MAX, |l| l.running), self.cpu_distance(prev, c), c)
             })
             .or_else(|| allowed.lowest())
             .unwrap_or(prev)
@@ -425,35 +449,35 @@ mod tests {
         let topology = machine();
         // CPU 1, the core sibling, has a thread waiting.
         assert_eq!(
-            topology.find_busiest(0, Level::Core, &loads(&[0, 2, 0, 0, 0, 0, 0, 0])),
+            topology.find_busiest(0, Level::Core, &*loads(&[0, 2, 0, 0, 0, 0, 0, 0])),
             Some(1)
         );
         // One thread each on CPUs 2 and 3: nothing is waiting, so nothing
         // moves, although the package is uneven.
         assert_eq!(
-            topology.find_busiest(0, Level::Package, &loads(&[0, 0, 1, 1, 0, 0, 0, 0])),
+            topology.find_busiest(0, Level::Package, &*loads(&[0, 0, 1, 1, 0, 0, 0, 0])),
             None
         );
         assert_eq!(
-            topology.find_busiest(0, Level::Package, &loads(&[0, 0, 3, 1, 0, 0, 0, 0])),
+            topology.find_busiest(0, Level::Package, &*loads(&[0, 0, 3, 1, 0, 0, 0, 0])),
             Some(2)
         );
         // The other package is busier than this one.
         let far = loads(&[1, 1, 1, 1, 3, 2, 2, 2]);
-        assert_eq!(topology.find_busiest(0, Level::Machine, &far), Some(4));
-        assert_eq!(topology.find_busiest(0, Level::Package, &far), None);
+        assert_eq!(topology.find_busiest(0, Level::Machine, &*far), Some(4));
+        assert_eq!(topology.find_busiest(0, Level::Package, &*far), None);
     }
 
     #[test]
     fn waking_threads_stay_close() {
         let topology = machine();
         let all = CpuSet::first(8);
-        assert_eq!(topology.select_cpu(0, &all, &loads(&[0; 8])), 0);
-        assert_eq!(topology.select_cpu(0, &all, &loads(&[1, 1, 1, 0, 0, 0, 0, 0])), 3);
-        assert_eq!(topology.select_cpu(0, &all, &loads(&[1, 1, 1, 1, 0, 1, 0, 1])), 4);
-        assert_eq!(topology.select_cpu(0, &all, &loads(&[1; 8])), 0);
+        assert_eq!(topology.select_cpu(0, &all, &*loads(&[0; 8])), 0);
+        assert_eq!(topology.select_cpu(0, &all, &*loads(&[1, 1, 1, 0, 0, 0, 0, 0])), 3);
+        assert_eq!(topology.select_cpu(0, &all, &*loads(&[1, 1, 1, 1, 0, 1, 0, 1])), 4);
+        assert_eq!(topology.select_cpu(0, &all, &*loads(&[1; 8])), 0);
         let only = CpuSet::single(6);
-        assert_eq!(topology.select_cpu(0, &only, &loads(&[0; 8])), 6);
+        assert_eq!(topology.select_cpu(0, &only, &*loads(&[0; 8])), 6);
     }
 
     #[test]
@@ -463,12 +487,12 @@ mod tests {
         let busy = |prios: [u8; 4]| {
             prios.iter().map(|&p| CpuLoad { running: 1, rt_prio: p }).collect::<Vec<_>>()
         };
-        assert_eq!(topology.select_rt_cpu(0, 50, &all, &busy([0, 0, 0, 0])), 0);
-        assert_eq!(topology.select_rt_cpu(0, 50, &all, &busy([60, 10, 0, 70])), 2);
-        assert_eq!(topology.select_rt_cpu(0, 50, &all, &busy([60, 70, 80, 90])), 0);
+        assert_eq!(topology.select_rt_cpu(0, 50, &all, &*busy([0, 0, 0, 0])), 0);
+        assert_eq!(topology.select_rt_cpu(0, 50, &all, &*busy([60, 10, 0, 70])), 2);
+        assert_eq!(topology.select_rt_cpu(0, 50, &all, &*busy([60, 70, 80, 90])), 0);
         let mut mixed = busy([60, 70, 80, 90]);
         mixed[3].running = 0;
-        assert_eq!(topology.select_rt_cpu(0, 50, &all, &mixed), 3);
+        assert_eq!(topology.select_rt_cpu(0, 50, &all, &*mixed), 3);
     }
 
     proptest! {
@@ -478,8 +502,8 @@ mod tests {
             let allowed = CpuSet::from_words([words & 0xff, 0, 0, 0]);
             prop_assume!(!allowed.is_empty());
             let loads = loads(&running);
-            prop_assert!(allowed.contains(topology.select_cpu(prev, &allowed, &loads)));
-            prop_assert!(allowed.contains(topology.select_rt_cpu(prev, 40, &allowed, &loads)));
+            prop_assert!(allowed.contains(topology.select_cpu(prev, &allowed, &*loads)));
+            prop_assert!(allowed.contains(topology.select_rt_cpu(prev, 40, &allowed, &*loads)));
         }
 
         #[test]

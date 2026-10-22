@@ -49,6 +49,9 @@ const SLOT_RANDOM: u32 = 4;
 const SLOT_LOG: u32 = 5;
 /// The slot of the program's own process (read and control rights).
 const SLOT_PROCESS: u32 = 6;
+/// The slot of the program's root directory, if it has one: the root of
+/// the system's tree, for Spark (radix-directory(2)).
+const SLOT_ROOT: u32 = 7;
 /// The first of the slots the start-up page's `slots` describe.
 const SLOT_FIRST_EXTRA: u32 = 8;
 /// The first slot of the receive window programs start with.

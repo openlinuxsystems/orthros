@@ -7,12 +7,13 @@
 //! Small blocks, up to 2 KiB, come in eight sizes, each a power of two
 //! and aligned to its size. They are cut from chunks of 64 KiB, and a
 //! freed block goes on a list for its size, for the next block of that
-//! size. Larger blocks get frames of their own, which go back to the
-//! kernel when they are freed. Chunks are never given back, and neither
-//! is a freed large block's memory to the memory object, whose pages
-//! only come back once everything made from it has gone (radix-memory(2)):
-//! enough for the programs of Phase 6, and docs/design/processes.md
-//! lists it.
+//! size. Larger blocks get frames of their own, of a power of two pages.
+//! A freed large block stays mapped, for the next large block of its
+//! size: giving its frame back to the kernel would not give its pages
+//! back to the memory object, whose pages only come back once everything
+//! made from it has gone (radix-memory(2)), so a program that freed and
+//! made large blocks in turn would run out. Chunks are never given back.
+//! docs/design/processes.md lists what this leaves for later.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -39,12 +40,14 @@ struct Free {
     next: *mut Free,
 }
 
-/// A large block: where it is mapped, the slot of its frame, its pages.
+/// A large block: where it is mapped, the slot of its frame, its pages,
+/// and whether it is in use or kept for the next one of its size.
 #[derive(Clone, Copy)]
 struct Large {
     address: usize,
     frame: u32,
     pages: u64,
+    used: bool,
 }
 
 struct Heap {
@@ -135,23 +138,39 @@ impl Heap {
         if layout.align() > PAGE_SIZE as usize {
             return ptr::null_mut();
         }
-        let Some(entry) = self.large.iter().position(Option::is_none) else {
-            return ptr::null_mut();
-        };
         let pages = (layout.size() as u64).div_ceil(PAGE_SIZE).next_power_of_two();
+        // A freed block of the size, if one is kept.
+        let kept = self.large.iter_mut().flatten().find(|e| !e.used && e.pages == pages);
+        if let Some(entry) = kept {
+            entry.used = true;
+            return entry.address as *mut u8;
+        }
+        let entry = match self.large.iter().position(Option::is_none) {
+            Some(entry) => entry,
+            // A full table: a kept block of another size makes room.
+            None => match self.large.iter().position(|e| e.is_some_and(|e| !e.used)) {
+                Some(entry) => {
+                    if let Some(old) = self.large[entry].take() {
+                        let _ = syscalls::unmap(&SYS, SLOT_SPACE, old.address as u64, old.pages);
+                        let _ = capability::delete(&SYS, old.frame);
+                        slots::give_back(old.frame);
+                    }
+                    entry
+                }
+                None => return ptr::null_mut(),
+            },
+        };
         let Some((address, frame)) = map_frame(pages.trailing_zeros()) else {
             return ptr::null_mut();
         };
-        self.large[entry] = Some(Large { address, frame, pages });
+        self.large[entry] = Some(Large { address, frame, pages, used: true });
         address as *mut u8
     }
 
     fn free_large(&mut self, block: *mut u8) {
-        let found = self.large.iter_mut().find(|e| e.is_some_and(|e| e.address == block as usize));
-        if let Some(entry) = found.and_then(Option::take) {
-            let _ = syscalls::unmap(&SYS, SLOT_SPACE, entry.address as u64, entry.pages);
-            let _ = capability::delete(&SYS, entry.frame);
-            slots::give_back(entry.frame);
+        let found = self.large.iter_mut().flatten().find(|e| e.address == block as usize);
+        if let Some(entry) = found {
+            entry.used = false;
         }
     }
 }

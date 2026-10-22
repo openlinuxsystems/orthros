@@ -118,6 +118,14 @@ impl Group {
         Ok(at.slot)
     }
 
+    /// Gives the group's programs the directory at `at` to share.
+    pub fn directory(&mut self, at: radix_vfs::mount::Location) -> Result<u32> {
+        let object = crate::fs::FileObject::new(at).ok_or(error(Kernel::NoMemory))?;
+        let slot = self.take_slot()?;
+        process::install(slot, ObjectKind::Directory, Object::Directory(object))?;
+        Ok(slot.slot)
+    }
+
     /// Starts a program. Returns its number in the group.
     pub fn start(&mut self, spec: &Spec<'_>) -> Result<usize> {
         if spec.extra.len() > EXTRA_MAX {
@@ -139,6 +147,7 @@ impl Group {
             args: &[spec.name],
             extra: &extra[..spec.extra.len()],
             archive: None,
+            root: false,
             domain: domains::root(),
             on_exit: None,
         };

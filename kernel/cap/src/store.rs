@@ -406,6 +406,20 @@ impl<A: Allocator + Clone> Capabilities<A> {
     /// process, endpoint, notification or resource domain) and puts its original
     /// capability, with every right of its kind, in `at`.
     pub fn create(&mut self, at: SlotRef, kind: ObjectKind) -> Result<ObjectId, CapError> {
+        self.create_with_rights(at, kind, kind.rights())
+    }
+
+    /// Makes a new kernel object of `kind`, as [`Capabilities::create`]
+    /// does, but with only `rights` (those of them its kind has) on its
+    /// original capability: for an object the kernel makes on a holder's
+    /// behalf, which must get no more than the holder may have (a file a
+    /// directory capability opens).
+    pub fn create_with_rights(
+        &mut self,
+        at: SlotRef,
+        kind: ObjectKind,
+        rights: Rights,
+    ) -> Result<ObjectId, CapError> {
         if kind.is_range() || kind.from_memory() {
             return Err(CapError::InvalidArgument);
         }
@@ -418,7 +432,8 @@ impl<A: Allocator + Clone> Capabilities<A> {
             watermark: 0,
             origin: None,
         })?;
-        let cap = Capability::original(Object { kind, target: Target::Object(id) });
+        let mut cap = Capability::original(Object { kind, target: Target::Object(id) });
+        cap.rights = rights.intersection(kind.rights());
         self.place(link, cap, None);
         Ok(id)
     }

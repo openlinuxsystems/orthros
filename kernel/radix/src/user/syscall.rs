@@ -17,7 +17,7 @@ use radix_abi::errors::Kernel;
 use radix_abi::kernel_log::WRITE_MAX;
 use radix_abi::notification::WaitFlags;
 use radix_abi::syscalls as sys;
-use radix_cap::{CapError, ObjectKind, Rights};
+use radix_cap::{CapError, ObjectKind, Rights, SpaceId};
 use radix_hal::{Cpu, SyscallRegs, UserMode};
 use radix_ipc::info::Info;
 use radix_klog::info;
@@ -233,24 +233,32 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -
             results(args, sys::RingEnterResults { submitted, ready }.encode())
         }
         sys::DEBUG_LOG => {
-            let a = sys::DebugLogArgs::decode(args)?;
-            objects::lookup(cspace, a.log, ObjectKind::KernelLog, Rights::WRITE)?;
-            let len = a.text.len.min(WRITE_MAX) as usize;
-            let mut text = [0u8; WRITE_MAX as usize];
-            if !radix_ipc::range::user_bytes(a.text.address, len as u64)
-                || !Arch::copy_from_user(&mut text[..len], a.text.address)
-            {
-                return Err(error(Kernel::BadAddress));
-            }
-            let mut text = &text[..len];
-            while let [rest @ .., b'\n' | b'\r'] = text {
-                text = rest;
-            }
-            info!("{}[{}]: {}", me.name(), me.id(), Shown(text));
+            debug_log(me, cspace, sys::DebugLogArgs::decode(args)?)?;
             results(args, [0; 10])
         }
         _ => Err(error(Kernel::NoSuchSyscall)),
     }
+}
+
+/// `debug_log`: writes the program's text to the kernel log. Kept out of
+/// [`dispatch`], whose frame every system call pays for: the text is
+/// copied to the stack first.
+#[inline(never)]
+fn debug_log(me: &ThreadRef, cspace: SpaceId, a: sys::DebugLogArgs) -> Result<()> {
+    objects::lookup(cspace, a.log, ObjectKind::KernelLog, Rights::WRITE)?;
+    let len = a.text.len.min(WRITE_MAX) as usize;
+    let mut text = [0u8; WRITE_MAX as usize];
+    if !radix_ipc::range::user_bytes(a.text.address, len as u64)
+        || !Arch::copy_from_user(&mut text[..len], a.text.address)
+    {
+        return Err(error(Kernel::BadAddress));
+    }
+    let mut text = &text[..len];
+    while let [rest @ .., b'\n' | b'\r'] = text {
+        text = rest;
+    }
+    info!("{}[{}]: {}", me.name(), me.id(), Shown(text));
+    Ok(())
 }
 
 /// Text from a program as the log shows it: UTF-8 kept, control

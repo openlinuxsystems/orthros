@@ -9,6 +9,9 @@
 //! resource domains (`domains`), never single threads, and says so in the
 //! log every time:
 //!
+//! 0. It asks the writeback thread to drop clean pages of the page cache,
+//!    which their disks hold (`fs::writeback`), and has the allocation
+//!    tried again if any went.
 //! 1. It picks the domain to stop: the lowest out-of-memory class first
 //!    (apps, then services), and within a class the one using the most
 //!    memory. Domains of the `system` class, which hold the trusted
@@ -39,6 +42,8 @@ use radix_sync::{Mutex, SpinLock};
 use crate::domains::{self, DomainRef, OomClass};
 use crate::sched::{self, Options, Policy, wait};
 
+/// How long the policy waits for the page cache to give back pages.
+const RECLAIM_WAIT_NS: u64 = 200_000_000;
 /// How long the policy waits for a stopped domain's threads to exit.
 const STOP_WAIT_NS: u64 = 1_000_000_000;
 /// Restarts that can wait for the supervisor thread.
@@ -98,6 +103,11 @@ fn on_out_of_memory(order: u32) -> bool {
     if me.should_stop() || me.domain().is_stopping() {
         // Being stopped already: unwind instead of stopping another domain.
         return false;
+    }
+    // Clean cached pages can be read again from their disks: they go
+    // before any domain is stopped.
+    if crate::fs::writeback::reclaim(RECLAIM_WAIT_NS) {
+        return true;
     }
     let seen = STOPS.load(Ordering::Acquire);
     let _policy = POLICY.lock();

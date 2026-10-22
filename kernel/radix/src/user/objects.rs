@@ -39,6 +39,7 @@ use super::process::{ProcessObject, ProcessRef};
 use super::ring::{RingObject, RingRef};
 use super::{Result, cap_error, error};
 use crate::caps::{self, Store};
+use crate::fs::{FileObject, FileRef};
 use crate::percpu::{Own, PerCpu, Slot};
 use crate::sched::{Thread, ThreadRef};
 
@@ -63,6 +64,10 @@ pub enum Object {
     Random,
     /// The kernel log.
     KernelLog,
+    /// A file (radix-file(2)).
+    File(FileRef),
+    /// A directory (radix-directory(2)).
+    Directory(FileRef),
 }
 
 impl Object {
@@ -78,6 +83,8 @@ impl Object {
             Object::Process(_) => ObjectKind::Process,
             Object::Random => ObjectKind::Random,
             Object::KernelLog => ObjectKind::KernelLog,
+            Object::File(_) => ObjectKind::File,
+            Object::Directory(_) => ObjectKind::Directory,
         }
     }
 }
@@ -202,6 +209,8 @@ enum Kept {
     Process(Weak<ProcessObject, Kmalloc>),
     Random,
     KernelLog,
+    File(Weak<FileObject, Kmalloc>),
+    Directory(Weak<FileObject, Kmalloc>),
 }
 
 impl Kept {
@@ -216,6 +225,8 @@ impl Kept {
             Object::Process(process) => Kept::Process(Arc::downgrade(process)),
             Object::Random => Kept::Random,
             Object::KernelLog => Kept::KernelLog,
+            Object::File(file) => Kept::File(Arc::downgrade(file)),
+            Object::Directory(dir) => Kept::Directory(Arc::downgrade(dir)),
         }
     }
 
@@ -230,6 +241,8 @@ impl Kept {
             Kept::Process(process) => Object::Process(process.upgrade()?),
             Kept::Random => Object::Random,
             Kept::KernelLog => Object::KernelLog,
+            Kept::File(file) => Object::File(file.upgrade()?),
+            Kept::Directory(dir) => Object::Directory(dir.upgrade()?),
         })
     }
 }
@@ -334,6 +347,20 @@ typed_lookup!(
     Process,
     ProcessRef
 );
+typed_lookup!(
+    /// The file a capability designates.
+    file,
+    File,
+    File,
+    FileRef
+);
+typed_lookup!(
+    /// The directory a capability designates.
+    directory,
+    Directory,
+    Directory,
+    FileRef
+);
 
 /// Takes the object named `id` out of the registry, with its charge.
 fn remove(id: ObjectId) -> Option<Entry> {
@@ -365,10 +392,40 @@ pub fn released(released: &Released) {
         // It ends; with no thread left to finish it, the store does once
         // its change is done (`process::finish_pending`).
         Object::Process(process) => super::process::released(process),
+        // It may be the last reference to a file removed while open,
+        // whose space is freed on the disk when it goes: that waits until
+        // the store's lock has gone (`fs::drop_deferred`).
+        Object::File(file) | Object::Directory(file) => crate::fs::defer_drop(file),
         Object::Space(_) | Object::Random | Object::KernelLog => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);
+}
+
+/// The numbers of the processes the registry holds, for `/proc`.
+pub fn process_numbers() -> Vec<u64, Kmalloc> {
+    let mut numbers = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    let registry = REGISTRY.lock();
+    let Some(table) = registry.as_ref() else { return numbers };
+    let count = table.iter().flatten().filter(|e| matches!(e.object, Object::Process(_))).count();
+    if numbers.try_reserve_exact(count).is_err() {
+        return numbers;
+    }
+    for entry in table.iter().flatten() {
+        if let Object::Process(process) = &entry.object {
+            let _ = numbers.push_within_capacity(process.number());
+        }
+    }
+    numbers
+}
+
+/// The process numbered `number`, if the registry holds it.
+pub fn process_by_number(number: u64) -> Option<ProcessRef> {
+    let registry = REGISTRY.lock();
+    registry.as_ref()?.iter().flatten().find_map(|entry| match &entry.object {
+        Object::Process(process) if process.number() == number => Some(process.clone()),
+        _ => None,
+    })
 }
 
 /// How many objects of each kind the registry holds, for `kdb`. Gives up

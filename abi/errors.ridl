@@ -73,3 +73,44 @@ errors kernel = 1 {
     /// already has one, or the badge is 0.
     bad_badge = 26 => EINVAL;
 }
+
+/// Errors of files and directories (radix-directory(2), radix-file(2)).
+errors file = 2 {
+    /// No file has that name.
+    not_found = 1 => ENOENT;
+    /// A file has that name already.
+    exists = 2 => EEXIST;
+    /// A component of the path is not a directory.
+    not_directory = 3 => ENOTDIR;
+    /// The file is a directory.
+    is_directory = 4 => EISDIR;
+    /// The directory is not empty.
+    not_empty = 5 => ENOTEMPTY;
+    /// The filesystem does not allow changes.
+    read_only = 6 => EROFS;
+    /// The filesystem is full.
+    no_space = 7 => ENOSPC;
+    /// A name is longer than NAME_MAX bytes, or the path than PATH_MAX.
+    name_too_long = 8 => ENAMETOOLONG;
+    /// A name is empty, `.` or `..` where a file is meant, holds a NUL or
+    /// is not UTF-8, or is one the filesystem cannot store.
+    bad_name = 9 => EINVAL;
+    /// The path leaves the directory it is resolved beneath: it starts
+    /// with `/`, or its `..` climbs above it.
+    outside = 10 => EXDEV;
+    /// The operation would move a file between filesystems.
+    cross_mount = 11 => EXDEV;
+    /// The file is in use: a mount point, or a filesystem with files open.
+    in_use = 12 => EBUSY;
+    /// The disk failed to read or write.
+    io = 13 => EIO;
+    /// The filesystem's structures on the disk are damaged.
+    corrupt = 14 => EUCLEAN;
+    /// The file would grow past the largest size the filesystem allows.
+    too_big = 15 => EFBIG;
+    /// No filesystem of that kind exists, or it does not recognise the
+    /// disk.
+    unknown_filesystem = 16 => ENODEV;
+    /// A mount needs a block device and was given another file.
+    not_block_device = 17 => ENOTBLK;
+}

@@ -64,6 +64,7 @@ mod role {
     pub const PARALLEL_B: u32 = 20;
     pub const FUZZ: u32 = 21;
     pub const FUZZ_JANITOR: u32 = 22;
+    pub const FILE_BENCH: u32 = 23;
 }
 
 /// The faults the fault program makes, by its argument.
@@ -271,6 +272,11 @@ const FUZZ_TIME_NS: u64 = 30_000_000_000;
 const FUZZ_POLL_NS: u64 = 50_000_000;
 /// The memory object a group's fuzzers share: 2^order pages.
 const FUZZ_MEMORY_ORDER: u32 = 6;
+/// The directory in the root where each round of fuzzers gets a tmpfs of
+/// its own to call the directory and file methods in, and the most it
+/// holds.
+const FUZZ_TREE: &str = "fuzz";
+const FUZZ_TREE_BYTES: u64 = 1 << 20;
 
 /// `selftest=fuzz`.
 pub fn fuzz() {
@@ -287,19 +293,28 @@ pub fn fuzz() {
     );
     let (mut finished, mut stopped) = (0, 0);
     for round in 0..FUZZ_GROUPS {
+        let tree = match crate::fs::scratch_tree(FUZZ_TREE, FUZZ_TREE_BYTES) {
+            Ok(tree) => tree,
+            Err(err) => {
+                outcome.fail(format_args!("no tree for the fuzzers: {err}"));
+                continue;
+            }
+        };
         let made = group(&mut outcome, "fuzzers", |group| {
             let endpoints = [group.endpoint().map_err(|_| ())?, group.endpoint().map_err(|_| ())?];
             let notifications =
                 [group.notification().map_err(|_| ())?, group.notification().map_err(|_| ())?];
             let memory = group.memory(FUZZ_MEMORY_ORDER).map_err(|_| ())?;
+            let directory = group.directory(tree.clone()).map_err(|_| ())?;
             // Badged and unbadged capabilities, as the programs' slots 8 to
-            // 12 (`userspace/usertests/src/fuzz.rs` counts on that order).
+            // 13 (`userspace/usertests/src/fuzz.rs` counts on that order).
             let extra = [
                 (endpoints[0], ALL, 0),
                 (endpoints[1], ALL, 7),
                 (notifications[0], ALL, 0),
                 (notifications[1], ALL, 0x30),
                 (memory, ALL, 0),
+                (directory, ALL, 0),
             ];
             for k in 0..FUZZERS {
                 let argument = seed(round * FUZZERS + k);
@@ -314,7 +329,11 @@ pub fn fuzz() {
                 Spec { name: "janitor", role: role::FUZZ_JANITOR, argument: 0, cpu, extra: &extra };
             start(group, janitor)
         });
-        let Some(group) = made else { continue };
+        let Some(group) = made else {
+            drop(tree);
+            take_fuzz_tree(&mut outcome);
+            continue;
+        };
         let fuzzers = 0..FUZZERS as usize;
         let started = sched::now_ns();
         while !fuzzers.clone().all(|index| group.status(index).is_some())
@@ -346,6 +365,9 @@ pub fn fuzz() {
             Some(EXIT_STOPPED) => {}
             status => outcome.fail(format_args!("the janitor ended with {status:#x?}")),
         }
+        drop(group);
+        drop(tree);
+        take_fuzz_tree(&mut outcome);
     }
     // Waiting fuzzers can be stopped, but the janitor lets go of each soon
     // enough that most should get through.
@@ -364,6 +386,23 @@ pub fn fuzz() {
          waiting; every failed call returned a kernel error its documentation lists and nothing \
          else, the store passed its audit and nothing was left behind"
     ));
+}
+
+/// Takes the fuzzers' tree away once they have gone, with what they
+/// mounted in it, giving their processes' ends a moment to let go of what
+/// they held open.
+fn take_fuzz_tree(outcome: &mut Outcome) {
+    let mut result = crate::fs::remove_scratch_tree(FUZZ_TREE);
+    for _ in 0..100 {
+        if result != Err(radix_vfs::Error::InUse) {
+            break;
+        }
+        sched::sleep_ns(10_000_000);
+        result = crate::fs::remove_scratch_tree(FUZZ_TREE);
+    }
+    if let Err(err) = result {
+        outcome.fail(format_args!("the fuzzers' tree could not be taken away: {err}"));
+    }
 }
 
 /// The pairs of programs the `ipc` and `bench` tests run.
@@ -429,6 +468,7 @@ pub fn bench() {
         outcome.check("memory", &group, 0);
         report_counters("memory", PAGE_ROUNDS, &before);
     }
+    files(&mut outcome);
     for across in [false, true] {
         for (what, roles) in PAIRS {
             if roles.0 == role::CAP_SEND {
@@ -448,6 +488,32 @@ pub fn bench() {
         parallel(&mut outcome);
     }
     outcome.end(format_args!("the numbers are above, one BENCH line each"));
+}
+
+/// The file benchmarks: a program with a tmpfs of its own, as the file
+/// benchmarks of tools/linux-bench work on one.
+fn files(outcome: &mut Outcome) {
+    let tree = match crate::fs::scratch_tree(BENCH_TREE, BENCH_TREE_BYTES) {
+        Ok(tree) => tree,
+        Err(err) => return outcome.fail(format_args!("no tree for the file benchmarks: {err}")),
+    };
+    let before = sched::counters();
+    if let Some(group) = group(outcome, "files", |group| {
+        let directory = group.directory(tree.clone()).map_err(|_| ())?;
+        let argument = BENCH | FILE_ROUNDS;
+        let extra = [(directory, ALL, 0)];
+        start(
+            group,
+            Spec { name: "files", role: role::FILE_BENCH, argument, cpu: 0, extra: &extra },
+        )
+    }) {
+        outcome.check("files", &group, 0);
+        report_counters("files", FILE_ROUNDS, &before);
+    }
+    drop(tree);
+    if let Err(err) = crate::fs::remove_scratch_tree(BENCH_TREE) {
+        outcome.fail(format_args!("the file benchmarks' tree could not be taken away: {err}"));
+    }
 }
 
 /// The parallel benchmarks: a pair of programs, one on each of the first
@@ -491,6 +557,11 @@ const SYSCALL_ROUNDS: u64 = 200_000;
 const PAIR_ROUNDS: u64 = 100_000;
 const PAGE_ROUNDS: u64 = 50_000;
 const SHOOT_ROUNDS: u64 = 50_000;
+/// Rounds of each file operation, and the tmpfs the file benchmarks get,
+/// in a directory of this name in the root.
+const FILE_ROUNDS: u64 = 50_000;
+const BENCH_TREE: &str = "bench";
+const BENCH_TREE_BYTES: u64 = 1 << 20;
 
 /// The memory objects the memory benchmark copies between: 16 of 4 MiB,
 /// two 32 MiB buffers, more than the caches of the CPUs CI runs on.

@@ -29,7 +29,7 @@ kernel/lib/bootfs       radix-bootfs: the checked ustar reader, and a writer
 kernel/hal              cmdline.rs: `init=` and the words after `--`
 userspace/libradix      entry point, system calls, printing (ADR 0036)
 userspace/radix-rt      the runtime: heap, arguments, BootFs, spawn
-userspace/spark         Spark v0
+userspace/spark         Spark (v0 in Phase 6; v1 in Phase 7, see storage.md)
 userspace/hello         the test program Spark starts
 tools/xtask             userspace.rs: builds the programs and writes the
                         boot archive; test.rs: the `spark` boot test
@@ -236,11 +236,13 @@ loaded a `bootfs` module (`user/init.rs`):
    the words after a lone `--` on the command line as its arguments (at
    most 32), any CPU, the root domain, and `on_exit` set to a panic.
 
-Spark v0 mounts the archive, reads the program its first argument names,
-spawns it with the rest of its arguments and 2 MiB of memory from the
-pool, waits for its exit notification, reaps it, checks that the pool
-has no page in use, and then waits for good on a notification nothing
-signals.
+Spark v0 (Phase 6) mounts the archive, reads the program its first
+argument names, spawns it with the rest of its arguments and 2 MiB of
+memory from the pool, waits for its exit notification, reaps it, checks
+that the pool has no page in use, and then waits for good on a
+notification nothing signals. Since Phase 7 the kernel also gives Spark
+the root of the file tree, and Spark v1 builds the hierarchy on it first
+(docs/design/storage.md).
 
 ## radix-rt
 
@@ -325,10 +327,14 @@ property tests that feed them garbage.
 - Every process runs in the root domain; Spark makes domains for the
   services it supervises in Phase 9, and until then the kernel's own
   stand-in applies the out-of-memory policy (ADR 0029).
-- Spark v0 starts one program at a time, and restarts nothing.
-- radix-rt's heap never gives its 64 KiB chunks back, and neither the
-  address ranges it maps at nor a freed large block's pages are reused;
-  the Rust `std` port of Phase 8 replaces it.
+- Spark starts one program at a time, and restarts nothing. Phase 7's
+  Spark v1 also builds the directory hierarchy and mounts the disks
+  (docs/design/storage.md).
+- radix-rt's heap never gives its 64 KiB chunks back, and the address
+  ranges it maps at are not reused. A freed large block stays mapped and
+  is reused only for a later block of the same size (since Phase 7, when
+  reading files made programs free and make large buffers in turn); the
+  Rust `std` port of Phase 8 replaces it.
 - The kernel copies the boot archive into Spark's frames rather than
   mapping the module's pages; finding a file reads the headers in turn.
 - Shared libraries, an interpreter and thread-local storage are refused

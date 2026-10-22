@@ -454,6 +454,9 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
         // Spurious interrupts from the local APIC or the masked PICs need
         // no end-of-interrupt.
         VECTOR_SPURIOUS => {}
+        v if (crate::devices::FIRST..=crate::devices::LAST).contains(&v) => {
+            crate::devices::dispatch(v);
+        }
         v if (VECTOR_PIC_BASE..VECTOR_PIC_BASE + 16).contains(&v) => {
             radix_klog::tracepoint!("pic.spurious", v);
         }

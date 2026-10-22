@@ -17,11 +17,14 @@ bench = false
 
 [dependencies]
 radix-abi = { path = "../abi" }
+radix-block = { path = "../fs/block" }
 radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-elf = { path = "../lib/elf" }
+radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }
+radix-hw = { path = "../lib/hw" }
 radix-ipc = { path = "../ipc" }
 radix-kdb = { path = "../lib/kdb" }
 radix-klog = { path = "../lib/klog" }
@@ -31,6 +34,8 @@ radix-mm = { path = "../mm" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-sync = { path = "../lib/sync" }
+radix-vfs = { path = "../fs/vfs" }
+radix-virtio = { path = "../drivers/virtio" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 radix-arch-x86_64 = { path = "../arch/x86_64" }

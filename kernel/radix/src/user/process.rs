@@ -240,6 +240,30 @@ impl ProcessObject {
         self.keep
     }
 
+    /// The account the objects it makes are charged to.
+    pub fn account(&self) -> &AccountRef {
+        &self.account
+    }
+
+    /// Writes its status as `/proc/<number>/status` shows it
+    /// (radix-proc(5)): `key: value` lines.
+    pub fn describe(&self, out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        let name = *self.name.lock();
+        let (phase, code, threads) = {
+            let state = self.state.lock();
+            (state.phase, state.code, state.threads.len())
+        };
+        writeln!(out, "number: {}", self.number)?;
+        writeln!(out, "name: {}", name.as_str())?;
+        writeln!(out, "state: {}", phase.name())?;
+        if phase == ProcessState::Exited {
+            writeln!(out, "code: {code:#x}")?;
+        }
+        writeln!(out, "threads: {threads}")?;
+        writeln!(out, "domain: {}", self.account.domain().name().as_str())?;
+        writeln!(out, "kernel_memory: {} bytes", self.account.bytes())
+    }
+
     /// Records `process` as made for it, forgetting those that have gone.
     /// Fails with `gone` once it has ended.
     fn made_one(&self, process: &ProcessRef) -> Result<()> {
@@ -525,6 +549,24 @@ pub fn install_charged(
     caps::with(|store| -> Result<()> {
         objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
         let id = store.create(at, kind).map_err(cap_error)?;
+        objects::insert_charged(store, id, object, charge).map_err(|_| error(Kernel::NoMemory))
+    })
+    .map_err(cap_error)
+    .and_then(|made| made)
+}
+
+/// Makes an object of `kind` with its original capability, holding only
+/// `rights`, in `at`, and what it costs charged with `charge`.
+pub fn install_with_rights(
+    at: SlotRef,
+    kind: ObjectKind,
+    rights: Rights,
+    object: Object,
+    charge: Option<Charge>,
+) -> Result<()> {
+    caps::with(|store| -> Result<()> {
+        objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
+        let id = store.create_with_rights(at, kind, rights).map_err(cap_error)?;
         objects::insert_charged(store, id, object, charge).map_err(|_| error(Kernel::NoMemory))
     })
     .map_err(cap_error)

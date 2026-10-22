@@ -58,7 +58,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
-use radix_sched::{CpuLoad, CpuSet, HaltPoll, Place, Topology};
+use radix_sched::{CpuLoad, CpuSet, HaltPoll, Loads, Place, Topology};
 use radix_sync::{Mutex, Once, SpinLock};
 
 use crate::Arch;
@@ -766,30 +766,32 @@ fn choose_cpu(previous: usize, state: &State) -> usize {
     {
         return previous;
     }
-    let loads = loads();
     let cpu = match state.rt_prio() {
-        0 => topology.select_cpu(previous, &allowed, &loads),
-        prio => topology.select_rt_cpu(previous, prio, &allowed, &loads),
+        0 => topology.select_cpu(previous, &allowed, &LiveLoads),
+        prio => topology.select_rt_cpu(previous, prio, &allowed, &LiveLoads),
     };
     if allowed.contains(cpu) { cpu } else { first }
 }
 
-/// Every CPU's published load.
-fn loads() -> [CpuLoad; MAX_CPUS] {
-    let mut loads = [CpuLoad::default(); MAX_CPUS];
-    for (cpu, load) in loads.iter_mut().enumerate().take(Arch::cpu_count()) {
+/// The CPUs' published loads, each read when it is asked for.
+pub(super) struct LiveLoads;
+
+impl Loads for LiveLoads {
+    fn load(&self, cpu: usize) -> Option<CpuLoad> {
+        if cpu >= Arch::cpu_count() {
+            return None;
+        }
         let slot = CPUS.get(cpu);
-        if slot.online.load(Ordering::Relaxed) {
-            *load = CpuLoad {
+        Some(if slot.online.load(Ordering::Relaxed) {
+            CpuLoad {
                 running: slot.running.load(Ordering::Relaxed),
                 rt_prio: slot.rt_prio.load(Ordering::Relaxed),
-            };
+            }
         } else {
             // A CPU that runs no threads looks fully busy.
-            *load = CpuLoad { running: u32::MAX / 2, rt_prio: u8::MAX };
-        }
+            CpuLoad { running: u32::MAX / 2, rt_prio: u8::MAX }
+        })
     }
-    loads
 }
 
 /// Asks CPU `cpu` to look for a more urgent thread.

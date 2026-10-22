@@ -7,8 +7,9 @@
 //! file (`radix-bootfs`) with the programs the system starts with. The
 //! kernel checks it whole, finds the first program in it (`init=PATH`,
 //! `/system/bin/spark` by default) and starts it in a process of its own
-//! (`loader`), with the archive mapped read-only for it, a memory object
-//! for the programs it starts in `SLOT_FIRST_EXTRA`, and the words after
+//! (`loader`), with the archive mapped read-only for it, the root of the
+//! file tree in `SLOT_ROOT` (`crate::fs`), a memory object for the
+//! programs it starts in `SLOT_FIRST_EXTRA`, and the words after
 //! a lone `--` on the command line as its arguments. From then on Spark
 //! starts every other program. The kernel keeps Spark's process
 //! capability, and Spark is the one program that must not end: if it
@@ -48,6 +49,11 @@ pub fn set_modules(modules: &'static [BootModule]) {
     if let Some(module) = modules.iter().find(|m| m.has_word(MODULE_WORD)) {
         let _ = ARCHIVE.set(module.bytes);
     }
+}
+
+/// The boot archive's bytes, if the boot loader loaded one.
+pub fn archive() -> Option<&'static [u8]> {
+    ARCHIVE.get().copied()
 }
 
 /// Whether the boot loader loaded a boot archive.
@@ -125,6 +131,7 @@ fn start_spark(
         args: &words,
         extra: &[(pool, ObjectKind::Memory.rights(), 0)],
         archive: Some(archive),
+        root: true,
         domain: domains::root(),
         on_exit: Some(spark_exited),
     };

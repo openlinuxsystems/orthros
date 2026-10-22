@@ -40,7 +40,8 @@ impl GenericAddress {
     }
 }
 
-/// The FADT fields the kernel uses in Phase 1.
+/// The FADT fields the kernel uses (Phase 1, and the century register
+/// since Phase 7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fadt {
     /// The ACPI power-management timer: (address, 32-bit counter). The
@@ -55,6 +56,9 @@ pub struct Fadt {
     pub hardware_reduced: bool,
     /// Physical address of the DSDT.
     pub dsdt: u64,
+    /// The CMOS RAM index of the real-time clock's century register, or 0
+    /// if it has none.
+    pub century: u8,
 }
 
 const FLAG_TMR_VAL_EXT: u32 = 1 << 8;
@@ -106,6 +110,7 @@ impl Fadt {
                 .filter(|&x| x != 0)
                 .or_else(|| u32_at(t, 40).map(u64::from))
                 .unwrap_or(0),
+            century: t.get(108).copied().unwrap_or(0),
         })
     }
 }

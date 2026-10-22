@@ -54,6 +54,8 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::Random => random::VERSION,
         ObjectKind::Ring => ring::VERSION,
         ObjectKind::KernelLog => radix_abi::kernel_log::VERSION,
+        ObjectKind::File => radix_abi::file::VERSION,
+        ObjectKind::Directory => radix_abi::directory::VERSION,
         _ => 0,
     }
 }
@@ -124,6 +126,8 @@ pub fn call(
         }
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
         (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
+        (ObjectKind::Directory, _) => super::files::directory_method(user, slot, info.label, &args),
+        (ObjectKind::File, _) => super::files::file_method(user, slot, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;

@@ -31,6 +31,7 @@ pub const MODELS: &[(&str, &str)] = &[
     ("kernel/ipc/tla/Endpoint.tla", "Endpoint.cfg"),
     ("kernel/ipc/tla/Endpoint.tla", "EndpointLiveness.cfg"),
     ("userspace/libradix/tla/Channel.tla", "Channel.cfg"),
+    ("kernel/fs/fat/tla/Clusters.tla", "Clusters.cfg"),
 ];
 
 /// How to install Java.

@@ -35,8 +35,15 @@ pub const BOOTFS_WORD: &str = "bootfs";
 
 /// What the boot archive holds: each program's path in it, and its
 /// package.
-pub const ARCHIVE: &[(&str, &str)] =
-    &[("system/bin/spark", "spark"), ("system/tests/hello", "hello")];
+pub const ARCHIVE: &[(&str, &str)] = &[
+    ("system/bin/spark", "spark"),
+    ("system/tests/hello", "hello"),
+    ("system/tests/storage", "storage"),
+];
+
+/// Empty directories of the boot archive: mount points under `/system`
+/// for what Spark mounts there (spark(8)).
+pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
 
 /// The user programs, built: the test image and the boot archive.
 pub struct Programs {
@@ -142,12 +149,16 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     Ok(Programs { usertests: installed, bootfs })
 }
 
-/// The boot archive: the programs of [`ARCHIVE`] from `built`, and the
-/// directories above them, owned by root and dated `epoch` (the commit's
-/// time), so the same programs make the same bytes.
+/// The boot archive: the programs of [`ARCHIVE`] from `built`, the
+/// directories above them and those of [`ARCHIVE_DIRS`], owned by root
+/// and dated `epoch` (the commit's time), so the same programs make the
+/// same bytes.
 fn write_archive(built: &Path, epoch: Option<String>) -> Result<Vec<u8>> {
     let mtime = epoch.and_then(|epoch| epoch.parse().ok()).unwrap_or(0);
     let mut entries: Vec<(String, Option<&str>)> = Vec::new();
+    for dir in ARCHIVE_DIRS {
+        entries.push((dir.to_string(), None));
+    }
     for (path, package) in ARCHIVE {
         // Each directory above the program, once.
         for (end, _) in path.match_indices('/') {
@@ -193,7 +204,17 @@ mod tests {
         let paths: Vec<String> = archive.entries().map(|e| e.path().to_string()).collect();
         assert_eq!(
             paths,
-            ["system", "system/bin", "system/bin/spark", "system/tests", "system/tests/hello"]
+            [
+                "system",
+                "system/bin",
+                "system/bin/spark",
+                "system/boot",
+                "system/etc",
+                "system/tests",
+                "system/tests/hello",
+                "system/tests/storage",
+                "system/var"
+            ]
         );
         let spark = archive.find("/system/bin/spark").unwrap();
         assert_eq!(spark.data, b"the spark program");

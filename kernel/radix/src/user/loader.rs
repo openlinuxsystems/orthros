@@ -84,6 +84,9 @@ pub struct Program<'a> {
     pub extra: &'a [(SlotRef, Rights, u64)],
     /// The boot archive, for Spark.
     pub archive: Option<&'a [u8]>,
+    /// Whether it gets the root of the file tree, with every right, in
+    /// `SLOT_ROOT`: Spark does.
+    pub root: bool,
     /// The domain its threads run in and its objects are charged to.
     pub domain: DomainRef,
     /// Called once it has exited.
@@ -162,6 +165,12 @@ fn build(at: SlotRef, process: &ProcessRef, program: &Program<'_>) -> Result<()>
         .map_err(|err| failed(name, "making its memory", cap_error(err)))?;
     process::install(mine(startup::SLOT_RANDOM), ObjectKind::Random, Object::Random)?;
     process::install(mine(startup::SLOT_LOG), ObjectKind::KernelLog, Object::KernelLog)?;
+    if program.root {
+        let root = crate::fs::vfs().ok_or(error(Kernel::Gone))?.root();
+        let root = crate::fs::FileObject::new(root).ok_or(error(Kernel::NoMemory))?;
+        process::install(mine(startup::SLOT_ROOT), ObjectKind::Directory, Object::Directory(root))
+            .map_err(|err| failed(name, "giving it the root directory", err))?;
+    }
     let mut kinds = [0u8; EXTRA_MAX];
     for (i, &(from, rights, badge)) in program.extra.iter().enumerate() {
         derive(from, mine(startup::SLOT_FIRST_EXTRA + i as u32), rights, badge)

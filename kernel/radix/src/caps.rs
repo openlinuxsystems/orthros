@@ -62,7 +62,8 @@ pub fn init() {
 
 /// Runs `f` on the store with its lock held, if the store is set up.
 /// Processes that `f` released and that have no thread left to finish
-/// them are finished before the lock goes (`user::process`).
+/// them are finished before the lock goes (`user::process`); files it
+/// released are dropped after (`fs::drop_deferred`).
 pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     let mut store = STORE.lock();
     let result = match store.as_mut() {
@@ -77,6 +78,10 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     // is stale from now on: before the lock goes, so that whoever sees the
     // change through the store sees the new version too.
     VERSION.fetch_add(1, Ordering::Release);
+    drop(store);
+    // Files the change released go now, with the lock gone: the last of
+    // a removed file frees its space on the disk.
+    crate::fs::drop_deferred();
     result
 }
 

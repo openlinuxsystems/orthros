@@ -18,7 +18,7 @@ endpoints, signals them through notifications, shares memory with them in
 frames, batches work through rings, and gets random numbers from the
 random capability it receives at start.
 
-This page describes these mechanisms as of Phase 6 of the roadmap. How
+This page describes these mechanisms as of Phase 7 of the roadmap. How
 programs are loaded and started, and the processes they run in, are in
 *radix-processes*(7). Each system call and each interface has its own
 page in section 2, generated from the interface definitions in
@@ -198,8 +198,8 @@ charged to the creating thread's resource domain (see
 
 The operations are *nop*, *notify*, *wait* (completes when a notification
 is signalled, without blocking a thread), *msg_ring* (posts a completion
-to another ring), *random* (16 random bytes) and *timeout*. See
-*radix-ring*(2).
+to another ring), *random* (16 random bytes), *timeout*, and *read*,
+*write* and *sync* of a file (see *radix-files*(7)). See *radix-ring*(2).
 
 # RANDOM NUMBERS
 
@@ -233,6 +233,8 @@ starts with a read-only *start-up page* at 0x10000, whose address is in
 :  The kernel log
 |  6
 :  Its own process, with the read and control rights
+|  7
+:  A directory, if its starter gives it one: its root (*radix-files*(7))
 |  8 to 23
 :  What its starter passes it, one kind per slot as the start-up page says
 |  32 to 47
@@ -258,11 +260,13 @@ _libradix_.
 *ob bench* (see *ob*(1)) measures what the system calls, a context
 switch, a fresh page, a TLB shootdown, a memory copy and each kind of
 round trip cost, on one CPU, across two, and (for system calls and
-endpoint calls) on both CPUs at once, and the closest operations of
+endpoint calls) on both CPUs at once, what opening, *stat* and 4 KiB
+reads and writes of a file in tmpfs cost, and the closest operations of
 Linux beside them, in a virtual machine set up the same way: *getppid*,
 *fcntl*, *getrandom*, *sched_yield*, *mmap* and *mprotect*, a pipe for an
-endpoint call, an eventfd for a notification, a futex for a channel and a
-Unix socket for a ring. CI runs it with *--gate* on every pull request
+endpoint call, an eventfd for a notification, a futex for a channel, a
+Unix socket for a ring, and *openat*, *fstatat*, *pread* and *pwrite* on
+tmpfs. CI runs it with *--gate* on every pull request
 and merge, and fails if Radix is slower than Linux at any of them.
 Numbers measured without KVM say nothing about the kernel, and the
 report says so. *ob bench --instructions* counts the instructions of each

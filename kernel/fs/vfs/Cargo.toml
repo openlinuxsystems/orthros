@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-vfs"
+description = "The Radix virtual file system: nodes and filesystems, the mount table, path resolution beneath a directory capability, the page cache, tmpfs, synthetic files and the boot archive as a filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# Host memory instead of the kernel's, for tests on the host.
+host = ["radix-block/host"]
+
+[dependencies]
+radix-block = { path = "../block" }
+radix-bootfs = { path = "../../lib/bootfs" }
+radix-hw = { path = "../../lib/hw" }
+radix-sync = { path = "../../lib/sync" }
+
+[dev-dependencies]
+radix-block = { path = "../block", features = ["host"] }
+radix-bootfs = { path = "../../lib/bootfs", features = ["write"] }
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

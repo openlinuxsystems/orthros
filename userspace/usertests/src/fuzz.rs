@@ -8,8 +8,11 @@
 //! object behind.
 //!
 //! The kernel starts three of these together and gives them two
-//! endpoints, two notifications and a memory object to share, so calls
-//! that wait can meet a partner and capabilities travel between them. A
+//! endpoints, two notifications, a memory object and a directory to share,
+//! so calls that wait can meet a partner, capabilities travel between them
+//! and files one makes another finds. The directory is a tmpfs of the
+//! group's own, which the kernel takes away with whatever was mounted in
+//! it once the group has gone. A
 //! fourth program, the [`janitor`], keeps letting go of fuzzers that wait
 //! for a partner, so that the three cannot all end up waiting for each
 //! other; the kernel stops it, and any fuzzer still waiting, at the end.
@@ -21,13 +24,16 @@
 //! pages that are not mapped, read-only pages, and addresses outside the
 //! user half. It never unmaps its own image, stack, start-up page or
 //! ring, never moves, deletes or revokes the capabilities it runs on (its
-//! thread, address space, memory, random number generator, log and ring),
-//! and never ends its own thread. Nor can it end its own process or start
+//! thread, address space, memory, random number generator, log, ring and
+//! the group's directory), and never ends its own thread. Nor does it
+//! mount `dev`, whose block devices are the disks of a machine that has
+//! them. Nor can it end its own process or start
 //! a thread in it: it first makes the processes it calls the process
 //! methods on most, then deletes its own process's capability. Everything
 //! else is fair game, and the processes it makes go when it ends. After
 //! every call it checks what radix-syscalls(2) promises of a failed one:
-//! a kernel error, and 0 in every result register. It also checks that
+//! an error of a domain errors.ridl defines (the kernel's, or the file
+//! interfaces'), and 0 in every result register. It also checks that
 //! the error is one the call's documentation lists (its `raises` list,
 //! and for a method that of `cap_call` too). It exits with the number of
 //! calls that broke a promise or failed with an error their documentation
@@ -39,7 +45,7 @@ use libradix::abi::capability as cap;
 use libradix::abi::endpoint::{
     INFO_CAPS_SHIFT, INFO_WORDS_SHIFT, MessageFlags, NO_SLOT, RESERVED_LABELS,
 };
-use libradix::abi::errors::Kernel;
+use libradix::abi::errors::{File as FileError, Kernel};
 use libradix::abi::notification::WaitFlags;
 use libradix::abi::ring::{ENTRIES_MAX, RingHeader, RingIndexes, Sqe};
 use libradix::abi::startup::{
@@ -47,7 +53,7 @@ use libradix::abi::startup::{
     SLOT_WINDOW, SLOTS, STARTUP_ADDRESS, WINDOW_SLOTS,
 };
 use libradix::abi::{
-    Status, address_space, memory, process, raises, random, ring, syscalls, thread,
+    Status, address_space, directory, file, memory, process, raises, random, ring, syscalls, thread,
 };
 use libradix::{println, startup, sys};
 
@@ -71,6 +77,16 @@ const RING_ENTRIES: u32 = 8;
 /// calls the process methods on most.
 const CHILD: u32 = 104;
 const CHILDREN: u32 = 2;
+
+/// The directory the group shares, in a slot it never gives up, and how
+/// many of the objects passed to it come before it: those it may give up.
+const DIRECTORY: u32 = SLOT_FIRST_EXTRA + 5;
+const SHARED: u32 = 5;
+
+/// Slots `open` puts the files and directories it opens in, which it may
+/// give up.
+const FILES: u32 = 112;
+const FILE_SLOTS: u32 = 4;
 
 /// Where `process.create` puts the endpoints and notifications it makes.
 /// Nobody else can reach those, and nobody would let go of a call that
@@ -97,7 +113,7 @@ const USER_TOP: u64 = address_space::USER_TOP;
 const KERNEL: u64 = 0xffff_8000_0000_0000;
 
 /// The methods it calls, by label.
-const LABELS: [u32; 27] = [
+const LABELS: [u32; 42] = [
     memory::RETYPE,
     memory::INFO,
     memory::frame::INFO,
@@ -125,7 +141,75 @@ const LABELS: [u32; 27] = [
     process::EXIT,
     process::NOTIFY_EXIT,
     process::INFO,
+    directory::OPEN,
+    directory::MAKE_DIRECTORY,
+    directory::REMOVE,
+    directory::RENAME,
+    directory::LIST,
+    directory::STAT,
+    directory::MOUNT,
+    directory::UNMOUNT,
+    directory::SYNC,
+    directory::INFO,
+    file::READ,
+    file::WRITE,
+    file::STAT,
+    file::SET_SIZE,
+    file::SYNC,
 ];
+
+/// Paths for the directory methods, in the program's read-only data: a few
+/// names, so that calls meet what earlier ones made, and paths at the
+/// edges of what radix-directory(2) takes.
+const PATHS: [&[u8]; 26] = [
+    b"a",
+    b"a",
+    b"b",
+    b"c",
+    b"a/b",
+    b"a/c",
+    b"b/a",
+    b"a/b/c",
+    b"a/b/c/d",
+    b".",
+    b"..",
+    b"",
+    b"a/..",
+    b"../a",
+    b"/a",
+    b"a//b",
+    b"a/",
+    b"./b",
+    b"a\0b",
+    b"\xff\xfe",
+    b"x.txt",
+    b"A",
+    &LONG_NAME,
+    &TOO_LONG_NAME,
+    &TOO_LONG_PATH,
+    &DEEP_PATH,
+];
+const LONG_NAME: [u8; directory::NAME_MAX as usize] = [b'n'; directory::NAME_MAX as usize];
+const TOO_LONG_NAME: [u8; directory::NAME_MAX as usize + 1] =
+    [b'n'; directory::NAME_MAX as usize + 1];
+const TOO_LONG_PATH: [u8; directory::PATH_MAX as usize + 1] =
+    [b'p'; directory::PATH_MAX as usize + 1];
+/// `a/a/a/...`, as long as a path may be.
+const DEEP_PATH: [u8; directory::PATH_MAX as usize - 1] = deep_path();
+
+const fn deep_path() -> [u8; directory::PATH_MAX as usize - 1] {
+    let mut path = [b'a'; directory::PATH_MAX as usize - 1];
+    let mut i = 1;
+    while i < path.len() {
+        path[i] = b'/';
+        i += 2;
+    }
+    path
+}
+
+/// Filesystems to mount, by name: never `dev` (see the module's comment).
+const FILESYSTEMS: [&[u8]; 8] =
+    [b"tmpfs", b"tmpfs", b"proc", b"sys", b"bootfs", b"fat", b"nfs", b""];
 
 /// xorshift64*, seeded through splitmix64 (Vigna).
 struct Rng(u64);
@@ -174,9 +258,13 @@ struct Fuzzer {
     failed: u32,
     broken: u32,
     undocumented: u32,
-    /// The undocumented errors reported so far, as (call, label, code), so
-    /// that each is reported once.
-    reported: [(u64, u32, u16); REPORTED],
+    /// Directory and file methods called, and how many of them did what
+    /// they were asked, so the log shows that files were made and used.
+    file_calls: u32,
+    file_done: u32,
+    /// The undocumented errors reported so far, as (call, label, error),
+    /// so that each is reported once.
+    reported: [(u64, u32, u32); REPORTED],
 }
 
 /// How many different undocumented errors a fuzzer reports.
@@ -192,6 +280,8 @@ impl Fuzzer {
             failed: 0,
             broken: 0,
             undocumented: 0,
+            file_calls: 0,
+            file_done: 0,
             reported: [(0, 0, 0); REPORTED],
         }
     }
@@ -228,13 +318,65 @@ impl Fuzzer {
     /// A slot it may delete, move or revoke: the objects passed to it, the
     /// receive window, the processes it made and its scratch slots.
     fn spare(&mut self) -> u64 {
-        let slot = match self.rng.below(8) {
-            0 | 1 => SLOT_FIRST_EXTRA + self.rng.below(u64::from(self.extra.max(1))) as u32,
+        let shared = self.extra.clamp(1, SHARED);
+        let slot = match self.rng.below(9) {
+            0 | 1 => SLOT_FIRST_EXTRA + self.rng.below(u64::from(shared)) as u32,
             2 => SLOT_WINDOW + self.rng.below(u64::from(WINDOW_SLOTS)) as u32,
             3 => CHILD + self.rng.below(u64::from(CHILDREN)) as u32,
+            4 => self.opened() as u32,
             _ => SCRATCH + self.rng.below(u64::from(SCRATCH_SLOTS)) as u32,
         };
         u64::from(slot)
+    }
+
+    /// One of the slots `open` puts what it opens in.
+    fn opened(&mut self) -> u64 {
+        u64::from(FILES + self.rng.below(u64::from(FILE_SLOTS)) as u32)
+    }
+
+    /// A directory to call a directory method on: mostly the group's, or
+    /// one `open` opened.
+    fn directory(&mut self) -> u64 {
+        match self.rng.below(8) {
+            0..=4 => u64::from(DIRECTORY),
+            5 | 6 => self.opened(),
+            _ => self.slot(),
+        }
+    }
+
+    /// A file to call a file method on: mostly one `open` opened.
+    fn file(&mut self) -> u64 {
+        if self.rng.one_in(8) { self.slot() } else { self.opened() }
+    }
+
+    /// A path, as its address and length: mostly one of [`PATHS`].
+    fn path(&mut self) -> (u64, u64) {
+        if self.rng.one_in(8) {
+            (self.address(), self.length())
+        } else {
+            let path = self.rng.pick(&PATHS);
+            (path.as_ptr() as u64, path.len() as u64)
+        }
+    }
+
+    /// An offset in a file: mostly near its start or the edges of a page,
+    /// sometimes far past any end, or `APPEND`.
+    fn offset(&mut self) -> u64 {
+        match self.rng.below(8) {
+            0..=4 => self.rng.pick(&[0, 0, 1, 511, 512, 4095, 4096, 4097, 8192, 70_000]),
+            5 => self.rng.pick(&[file::APPEND, file::APPEND, file::APPEND - 1, 1 << 40, 1 << 63]),
+            _ => self.rng.below(20_000),
+        }
+    }
+
+    /// Data to write, as its address and length: mostly the program's
+    /// text, which the kernel only reads.
+    fn data(&mut self) -> (u64, u64) {
+        if self.rng.one_in(2) {
+            (TEXT.as_ptr() as u64, self.rng.below(TEXT.len() as u64 + 1))
+        } else {
+            (self.address(), self.length())
+        }
     }
 
     /// A process to call a process method on: mostly one it made, which
@@ -473,6 +615,50 @@ impl Fuzzer {
                 args[0] = if self.rng.one_in(8) { self.rng.next() } else { 0 };
             }
             process::NOTIFY_EXIT => args[0] = self.notification(),
+            directory::OPEN => {
+                (args[0], args[1]) = self.path();
+                // Mostly no flags or create, sometimes with the others,
+                // sometimes bits that mean nothing.
+                args[2] = if self.rng.one_in(16) {
+                    self.rng.next()
+                } else {
+                    self.rng.pick(&[0, 1, 1, 1, 1, 1, 3, 4, 5, 8, 9, 15])
+                };
+                args[3] = self.rights();
+                args[4] = if self.rng.one_in(8) { self.slot() } else { self.opened() };
+            }
+            directory::MAKE_DIRECTORY
+            | directory::REMOVE
+            | directory::STAT
+            | directory::UNMOUNT => (args[0], args[1]) = self.path(),
+            directory::RENAME => {
+                (args[0], args[1]) = self.path();
+                args[2] = self.directory();
+                (args[3], args[4]) = self.path();
+            }
+            directory::LIST => {
+                args[0] = self.rng.pick(&[0, 0, 0, 1, 2, 3, u64::MAX, self.rng.0]);
+                args[1] = self.address();
+                args[2] = self.length();
+            }
+            directory::MOUNT => {
+                (args[0], args[1]) = self.path();
+                // The filesystem's name comes below.
+                args[4] = if self.rng.one_in(4) { self.file() } else { 0 };
+                args[5] = self.rng.pick(&[0, 0, 1, self.rng.0]);
+            }
+            file::READ => {
+                args[0] = self.offset();
+                args[1] = self.address();
+                args[2] = self.length();
+            }
+            file::WRITE => {
+                args[0] = self.offset();
+                (args[1], args[2]) = self.data();
+            }
+            file::SET_SIZE => {
+                args[0] = self.rng.pick(&[0, 0, 1, 100, 4096, 4097, 70_000, 1 << 20, 1 << 40]);
+            }
             _ => {
                 for word in &mut args {
                     *word = self.word();
@@ -486,6 +672,16 @@ impl Fuzzer {
         // But `give` and `keep` move only capabilities it may give up,
         if matches!(label, process::GIVE | process::KEEP) {
             args[0] = self.spare();
+        }
+        // and the filesystem to mount is one of FILESYSTEMS, never `dev`,
+        // or a name the kernel cannot read,
+        if label == directory::MOUNT {
+            let filesystem = self.rng.pick(&FILESYSTEMS);
+            (args[2], args[3]) = if self.rng.one_in(8) {
+                (self.unmapped(), self.length())
+            } else {
+                (filesystem.as_ptr() as u64, filesystem.len() as u64)
+            };
         }
         // and whatever `process.create` makes other than a process goes
         // where `MADE` says.
@@ -513,6 +709,10 @@ impl Fuzzer {
             self.spare()
         } else if label >> 16 == process::CREATE >> 16 {
             self.process()
+        } else if label >> 16 == directory::OPEN >> 16 {
+            self.directory()
+        } else if label >> 16 == file::READ >> 16 {
+            self.file()
         } else {
             self.slot()
         };
@@ -524,6 +724,13 @@ impl Fuzzer {
         if matches!(label, process::GIVE | process::KEEP) {
             words = words.max(1);
         }
+        // Files and directories need their words to get anywhere: mostly
+        // exactly those, so that calls make and use files.
+        if let Some(needed) = file_words(label)
+            && !self.rng.one_in(4)
+        {
+            words = needed;
+        }
         let mut info = u64::from(label) | (words << INFO_WORDS_SHIFT);
         if self.rng.one_in(16) {
             info |= self.info(label, true) & !u64::from(u32::MAX);
@@ -532,6 +739,16 @@ impl Fuzzer {
         args[0] = target;
         args[1] = info;
         args[2..].copy_from_slice(&self.method_args(label));
+        // Room for what `open` opens, now and then: what was in its slot
+        // goes first. (More often would leave the slots mostly empty for
+        // the file methods.)
+        let to = args[6];
+        if label == directory::OPEN
+            && (u64::from(FILES)..u64::from(FILES + FILE_SLOTS)).contains(&to)
+            && self.rng.one_in(4)
+        {
+            self.call(syscalls::CAP_CALL, [to, cap::DELETE.into(), 0, 0, 0, 0, 0, 0, 0, 0]);
+        }
         (syscalls::CAP_CALL, args)
     }
 
@@ -752,11 +969,18 @@ impl Fuzzer {
     fn call(&mut self, number: u64, args: [u64; 10]) {
         let (status, results) = sys::syscall(number, args);
         self.calls += 1;
+        let interface = (args[1] as u32) >> 16;
+        if number == syscalls::CAP_CALL
+            && (interface == directory::OPEN >> 16 || interface == file::READ >> 16)
+        {
+            self.file_calls += 1;
+            self.file_done += u32::from(status == 0);
+        }
         if status == 0 {
             return;
         }
         self.failed += 1;
-        let error = Kernel::from_status(Status(status));
+        let error = Failure::from_status(Status(status));
         if error.is_none() || results != [0; 10] {
             self.broken += 1;
             if self.broken <= 4 {
@@ -772,7 +996,7 @@ impl Fuzzer {
             self.undocumented += 1;
             // A method is told apart by its label; other calls by number.
             let label = if number == syscalls::CAP_CALL { args[1] as u32 } else { 0 };
-            let key = (number, label, error.code());
+            let key = (number, label, error.key());
             if self.reported.contains(&key) {
                 return;
             }
@@ -788,13 +1012,64 @@ impl Fuzzer {
     }
 }
 
+/// How many words a directory or file method takes.
+fn file_words(label: u32) -> Option<u64> {
+    let words = match label {
+        directory::OPEN => directory::OpenArgs::WORDS,
+        directory::MAKE_DIRECTORY => directory::MakeDirectoryArgs::WORDS,
+        directory::REMOVE => directory::RemoveArgs::WORDS,
+        directory::RENAME => directory::RenameArgs::WORDS,
+        directory::LIST => directory::ListArgs::WORDS,
+        directory::STAT => directory::StatArgs::WORDS,
+        directory::MOUNT => directory::MountArgs::WORDS,
+        directory::UNMOUNT => directory::UnmountArgs::WORDS,
+        file::READ => file::ReadArgs::WORDS,
+        file::WRITE => file::WriteArgs::WORDS,
+        file::SET_SIZE => file::SetSizeArgs::WORDS,
+        directory::SYNC | directory::INFO | file::STAT | file::SYNC => 0,
+        _ => return None,
+    };
+    Some(words as u64)
+}
+
+/// What a failed call failed with: an error of the kernel's own, or of
+/// the file interfaces (radix-directory(2), radix-file(2)).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    Kernel(Kernel),
+    File(FileError),
+}
+
+impl Failure {
+    fn from_status(status: Status) -> Option<Failure> {
+        Kernel::from_status(status)
+            .map(Failure::Kernel)
+            .or_else(|| FileError::from_status(status).map(Failure::File))
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Failure::Kernel(error) => error.name(),
+            Failure::File(error) => error.name(),
+        }
+    }
+
+    /// Its domain and code, as one word that is never 0.
+    fn key(self) -> u32 {
+        match self {
+            Failure::Kernel(error) => u32::from(Kernel::DOMAIN) << 16 | u32::from(error.code()),
+            Failure::File(error) => u32::from(FileError::DOMAIN) << 16 | u32::from(error.code()),
+        }
+    }
+}
+
 /// Whether the documentation lists `error` for call `number` with info word
 /// `info`: a method may fail with the errors of its own list and those of
 /// `cap_call`, and a call that does not exist only with no_such_syscall.
-fn documented(number: u64, info: u64, error: Kernel) -> bool {
+fn documented(number: u64, info: u64, error: Failure) -> bool {
     let name = error.name();
     let Some(own) = raises::syscall(number) else {
-        return error == Kernel::NoSuchSyscall;
+        return error == Failure::Kernel(Kernel::NoSuchSyscall);
     };
     own.contains(&name)
         || (number == syscalls::CAP_CALL
@@ -885,8 +1160,13 @@ pub fn run(argument: u64) -> u64 {
     fuzzer.drain();
     println!(
         "fuzz: seed {seed:#x}: {} calls, {} failed, {} broke a promise, {} failed with an \
-         undocumented error",
-        fuzzer.calls, fuzzer.failed, fuzzer.broken, fuzzer.undocumented
+         undocumented error; {} on files and directories, {} of them done",
+        fuzzer.calls,
+        fuzzer.failed,
+        fuzzer.broken,
+        fuzzer.undocumented,
+        fuzzer.file_calls,
+        fuzzer.file_done
     );
     u64::from(fuzzer.broken + fuzzer.undocumented)
 }

@@ -282,6 +282,21 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "dosfstools",
+            purpose: "makes and checks the FAT disks of the storage boot tests",
+            // In /usr/sbin, which a user's PATH may leave out.
+            found: |_| {
+                ["/usr/sbin/mkfs.fat", "/sbin/mkfs.fat"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkfs.fat"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: all("dosfstools"),
+            fallback: None,
+        },
+        Requirement {
             name: "scdoc",
             purpose: "compiles the man pages",
             found: |_| process::find_program("scdoc").map(|p| p.display().to_string()),

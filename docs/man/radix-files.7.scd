@@ -1,0 +1,195 @@
+radix-files(7) "Dukovo" "Dukovo Manual"
+
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
+; SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# NAME
+
+radix-files - files, directories, filesystems and the directory hierarchy
+in the Radix kernel
+
+# DESCRIPTION
+
+A program reaches files only through *directory capabilities*. There is no
+global root and no current directory: every path is resolved beneath the
+directory capability it is given with, and a program can reach exactly
+what lies beneath the directories it holds. Spark, the first program,
+holds the root of the system's tree and hands out capabilities to the
+parts each program needs. The interfaces are *radix-directory*(2) and
+*radix-file*(2); the ring (*radix-ring*(2)) has read, write and sync
+operations for files too.
+
+This page describes files as of Phase 7 of the roadmap. The design, with
+the arguments that a path never leaves its directory and that a freed
+cluster is never written by its old owner, is in _docs/design/storage.md_.
+
+# PATHS
+
+A path is UTF-8 of at most 4,096 bytes (*PATH_MAX*), names separated by
+*/*, each at most 255 bytes (*NAME_MAX*), with no NUL. *.* is the
+directory itself and *..* its parent, but never above the directory the
+path starts from: a path that starts with */*, or whose *..* climbs above
+its directory, fails with *outside*. This is how WASI's preopened
+directories and Capsicum's *openat* work. A walk crosses into whatever is
+mounted on a directory it passes through, and *..* crosses back.
+
+Absolute paths are for people and for POSIX programs: Spark strips the
+leading */* from the paths on its command line and resolves them beneath
+the root it holds, and the POSIX layer (Phase 8) will do the same with
+the directory each program is given as its root.
+
+# RIGHTS
+
+A directory capability's rights say what it can do:
+
+*read*
+	look names up, list the directory, open files for reading and
+	directories, and *stat*.
+
+*write*
+	create, remove and rename, and open files for writing.
+
+*control*
+	mount and unmount filesystems on directories beneath it.
+
+*open* makes a capability with the rights it asks for, which must be
+among the directory's own: a file can have *read* and *write*, a
+directory *read*, *write* and *control*. Both get *copy* and *transfer*,
+so they can be passed on (see *radix-capabilities*(7)). A file opened for
+writing on a read-only filesystem fails with *read_only*.
+
+# FILES AND THE PAGE CACHE
+
+A file's data is kept in memory in its *page cache*: a read copies from
+the cached pages (fetching them from the disk first), and a write copies
+into them and marks them dirty. The disk sees a change when its
+filesystem is synced:
+
+- every five seconds, by the kernel's writeback thread;
+- when a program calls *sync* on a file or a directory of the filesystem;
+- when the filesystem is unmounted.
+
+So a power cut loses at most the last five seconds of changes, as on
+Linux. *sync* returns once the disk says it has the data. The disk reads
+and writes cached pages directly, so data is copied once between a
+program and the disk.
+
+When memory runs low, the writeback thread drops clean cached pages, and
+the out-of-memory policy (*radix-scheduling*(7)) asks it to before it
+stops anything. Cached pages are counted as *page_cache* in
+_/proc/meminfo_.
+
+A file removed while it is open lives on, unnamed, until its last
+capability goes, then its space is freed.
+
+# FILESYSTEMS
+
+*mount* takes a filesystem kind by name:
+
+*tmpfs*
+	Files in memory only. A tmpfs a program mounts may grow to half of
+	memory; nothing in it survives a reboot.
+
+*fat*
+	FAT12, FAT16 or FAT32, read-write, with long names, on the block
+	device whose file capability the call names (a disk or a partition,
+	from _/dev_). Names compare without regard to case, as FAT requires,
+	and may not hold control characters or any of *" \* / : < > ? \\ |*.
+	A file is at most 4 GiB less one byte. exFAT comes in Phase 10.
+
+*proc*
+	The processes and what the kernel holds, as text (*radix-proc*(5)).
+
+*sys*
+	The kernel's devices and settings, one value per file, in Linux's
+	layout (*radix-sysfs*(5)).
+
+*dev*
+	The devices: _null_, _zero_, _random_, _urandom_ and a block device per
+	disk and partition.
+
+*bootfs*
+	The boot archive (*radix-processes*(7)), read-only.
+
+A second mount on a directory stacks on the first. *unmount* syncs the
+filesystem first, and fails with *in_use* while anything is mounted on it
+or anything holds a capability to a place in it. A rename never moves a
+file between filesystems (*cross_mount*), and a mount point cannot be
+removed.
+
+# THE DIRECTORY HIERARCHY
+
+The kernel makes only an empty root. Spark (*spark*(8)) builds the tree
+on it at every boot:
+
+[[ *Path*
+:< *What it is*
+|  _/system_
+:< the boot archive, read-only: programs and the system's own files
+|  _/system/etc_, _/system/var_
+:< tmpfs for now; settings and the system's changing data
+|  _/applications_
+:< applications (bundles come in Phase 13)
+|  _/users_
+:< the users' homes
+|  _/data_
+:< data shared between users
+|  _/tmp_, _/run_
+:< tmpfs: temporary files, and the state of running services
+|  _/dev_
+:< the devices
+|  _/proc_
+:< the processes (*radix-proc*(5))
+|  _/sys_
+:< the kernel's devices and settings (*radix-sysfs*(5))
+|  _/volumes_
+:< disks, USB sticks and SD cards, one directory each
+
+Until the root filesystem is on a disk (Btrfs, Phase 10), _/applications_,
+_/users_ and _/data_ are empty directories of the root's tmpfs.
+
+# VOLUMES
+
+At boot the kernel finds each disk, reads its partition table (MBR or
+GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
+virtio disks, _vda1_ for a partition. Each appears in _/dev_ and
+_/sys/block_. Spark mounts the FAT filesystem of each partition, or of
+each disk with no partition table, at _/volumes/_*name*, read-write, or
+read-only when the device is. A device with no FAT filesystem is left
+alone. Disks are found once, at boot. Removable media, mounted by label
+at _/volumes/_*label* with safe eject, come with *volumed* in Phase 11.
+
+# DIAGNOSTICS
+
+Errors of files and directories are in the *file* domain (2) of the
+status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
+*is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
+*bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
+*too_big*, *unknown_filesystem* and *not_block_device*, each with the
+POSIX errno it maps to.
+
+The kernel logs each disk, partition and mount:
+
+```
+Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, MSI-X vector 0x50
+Disk: vda has no partition table; it is used whole
+Files: mounted fat from vda on /volumes/vda, labelled RADIX16
+```
+
+*Files: writing back to a disk failed:* _error_*; changes stay in memory*
+	A sync by the writeback thread failed; the dirty pages stay in
+	memory and are tried again at the next sync.
+
+# LIMITS
+
+- Only virtio block devices have a driver: AHCI and NVMe come in Phase
+  10, USB storage in Phase 11.
+- FAT has no journal: a power cut in the middle of a write can leave lost
+  clusters, which *fsck.fat* finds and frees, as on every system.
+- There is no name cache, no read-ahead and no hot plug yet.
+
+# SEE ALSO
+
+*radix-directory*(2), *radix-file*(2), *radix-ring*(2), *radix-errors*(2),
+*radix-proc*(5), *radix-sysfs*(5), *radix-capabilities*(7),
+*radix-processes*(7), *spark*(8)

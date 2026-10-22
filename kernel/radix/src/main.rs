@@ -12,7 +12,8 @@
 //! starts the scheduler (Phase 4, `sched`, with resource domains in
 //! `domains` and the out-of-memory policy in `oom`), sets up the capability
 //! store (Phase 3, `radix-cap`, in `caps`) and user mode with its system
-//! calls and IPC (Phase 5, `user`), starts every other CPU and
+//! calls and IPC (Phase 5, `user`), finds the disks and sets up the file
+//! tree (Phase 7, `fs`), starts every other CPU and
 //! checks that each one takes timer interrupts and answers IPIs. A panic
 //! stops the other CPUs and shows a full-screen report with a symbolized
 //! backtrace; `kdb` debugs the kernel over the serial port.
@@ -50,6 +51,7 @@ mod captest;
 mod console;
 mod crashlog;
 mod domains;
+mod fs;
 mod kdb;
 mod oom;
 mod panic;
@@ -162,7 +164,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (Dukovo Phase 6)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (Dukovo Phase 7)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
@@ -195,6 +197,8 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     // With interrupts on: the store's lock is a mutex.
     caps::init();
     user::init();
+    fs::init();
+    fs::sysfs::set_command_line(params.command_line);
     user::launch::set_modules(params.modules);
     user::init::set_modules(params.modules);
 
@@ -208,6 +212,8 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     sched::start_threads();
     work::start();
     oom::start();
+    fs::disk::init();
+    fs::writeback::start();
     check_timers(online);
     check_ipis(online);
 

@@ -45,6 +45,10 @@ enum ObjectKind: u8 {
     ring = 13;
     /// The kernel log, for debugging output.
     kernel_log = 14;
+    /// A file (radix-file(2)).
+    file = 15;
+    /// A directory (radix-directory(2)).
+    directory = 16;
 }
 
 /// What a capability lets its holder do.

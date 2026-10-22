@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-virtio"
+description = "Virtio over PCI for the Radix kernel: the modern transport, split virtqueues and the block device driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true

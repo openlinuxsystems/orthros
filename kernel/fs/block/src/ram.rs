@@ -1,0 +1,152 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! A disk in memory: for the storage crates' tests, and for the kernel's
+//! own when there is no disk.
+
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use radix_sync::Mutex;
+
+use crate::mem::CachePage;
+use crate::pagemap::PageMap;
+use crate::{BlockDevice, Error, Info, PAGE_SIZE, SECTOR, Segment, SegmentMut, check};
+
+/// A disk whose sectors are pages of memory, allocated as they are
+/// first written (unwritten sectors read as zeros).
+pub struct RamDisk {
+    sectors: u64,
+    read_only: bool,
+    pages: Mutex<PageMap<CachePage>>,
+    /// Requests that reached the disk.
+    requests: AtomicU64,
+    /// Flushes.
+    flushes: AtomicU64,
+    /// Fail every request after this many more (u32::MAX: never), to test
+    /// what sits above against a failing disk.
+    fail_after: AtomicU32,
+}
+
+impl RamDisk {
+    /// An empty disk of `sectors` sectors.
+    pub fn new(sectors: u64, read_only: bool) -> RamDisk {
+        RamDisk {
+            sectors,
+            read_only,
+            pages: Mutex::new(PageMap::new()),
+            requests: AtomicU64::new(0),
+            flushes: AtomicU64::new(0),
+            fail_after: AtomicU32::new(u32::MAX),
+        }
+    }
+
+    /// Copies `bytes` onto the disk from byte `offset`, bypassing the
+    /// read-only flag: for building images.
+    pub fn load(&self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
+        let mut pages = self.pages.lock();
+        let mut done = 0;
+        while done < bytes.len() {
+            let at = offset + done as u64;
+            let (index, within) = (at / PAGE_SIZE as u64, (at % PAGE_SIZE as u64) as usize);
+            let n = (PAGE_SIZE - within).min(bytes.len() - done);
+            let chunk = &bytes[done..done + n];
+            // A missing page reads as zeros, so zeros need no page.
+            if pages.get(index).is_some() || chunk.iter().any(|&b| b != 0) {
+                let page = page_mut(&mut pages, index)?;
+                page.bytes_mut()[within..within + n].copy_from_slice(chunk);
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// Copies `out.len()` bytes from byte `offset` of the disk.
+    pub fn dump(&self, offset: u64, out: &mut [u8]) {
+        let pages = self.pages.lock();
+        let mut done = 0;
+        while done < out.len() {
+            let at = offset + done as u64;
+            let (index, within) = (at / PAGE_SIZE as u64, (at % PAGE_SIZE as u64) as usize);
+            let n = (PAGE_SIZE - within).min(out.len() - done);
+            let chunk = &mut out[done..done + n];
+            match pages.get(index) {
+                Some(page) => chunk.copy_from_slice(&page.bytes()[within..within + n]),
+                None => chunk.fill(0),
+            }
+            done += n;
+        }
+    }
+
+    /// Requests that reached the disk so far.
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+
+    /// Flushes so far.
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::Relaxed)
+    }
+
+    /// Makes every request after the next `count` fail with an I/O error.
+    pub fn fail_after(&self, count: u32) {
+        self.fail_after.store(count, Ordering::Relaxed);
+    }
+
+    fn start(&self) -> Result<(), Error> {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        let left = self.fail_after.load(Ordering::Relaxed);
+        if left == 0 {
+            return Err(Error::Io);
+        }
+        if left != u32::MAX {
+            self.fail_after.store(left - 1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+fn page_mut(pages: &mut PageMap<CachePage>, index: u64) -> Result<&mut CachePage, Error> {
+    if pages.get(index).is_none() {
+        let page = CachePage::new()?;
+        pages.insert(index, page).map_err(|_| Error::NoMemory)?;
+    }
+    pages.get_mut(index).ok_or(Error::NoMemory)
+}
+
+impl BlockDevice for RamDisk {
+    fn info(&self) -> Info {
+        Info { sectors: self.sectors, block_size: 512, read_only: self.read_only, max_segments: 64 }
+    }
+
+    fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
+        check(self.sectors, 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
+        self.start()?;
+        let mut at = sector * SECTOR;
+        for segment in segments.iter_mut() {
+            let out = &mut segment.page.bytes_mut()[segment.offset..segment.offset + segment.len];
+            self.dump(at, out);
+            at += segment.len as u64;
+        }
+        Ok(())
+    }
+
+    fn write(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        check(self.sectors, 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        self.start()?;
+        let mut at = sector * SECTOR;
+        for segment in segments {
+            self.load(at, &segment.page.bytes()[segment.offset..segment.offset + segment.len])?;
+            at += segment.len as u64;
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), Error> {
+        self.start()?;
+        self.flushes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
