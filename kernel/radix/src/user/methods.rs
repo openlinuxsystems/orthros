@@ -15,13 +15,13 @@ use alloc::vec::Vec;
 use radix_abi::capability::{self as abi_cap, ObjectKind as AbiKind, Rights as AbiRights};
 use radix_abi::errors::Kernel;
 use radix_abi::{address_space, memory, random, ring, thread};
-use radix_cap::{CapError, Capability, Derivation, ObjectKind, Rights, SlotRef};
+use radix_cap::{CapError, Derivation, ObjectKind, Rights, SlotRef};
 use radix_ipc::info::Info;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 
 use super::memory::{Anon, FileSource, Placement, cap_rights, frame_made, futex};
-use super::objects::{self, Object};
+use super::objects::{self, Found, Object};
 use super::{Result, UserRef, cap_error, error};
 use crate::caps;
 use crate::sched::ThreadRef;
@@ -63,30 +63,45 @@ fn version(kind: ObjectKind) -> u32 {
     }
 }
 
-/// Calls the method `info`'s label names on the capability in `slot`:
-/// `cap`, if the caller has just looked it up. Only the methods of
-/// radix-capability(2) reach an endpoint here; others on one are messages
-/// (`syscall`).
+/// Whether the methods of a capability of `kind` take the object it
+/// designates from the lookup that found it ([`objects::find`]),
+/// rather than looking it up themselves: messages to an endpoint, and the
+/// file and directory methods.
+pub fn takes_object(kind: ObjectKind) -> bool {
+    matches!(kind, ObjectKind::Endpoint | ObjectKind::File | ObjectKind::Directory)
+}
+
+/// The arguments of a method called with `info` and the data words
+/// `words`.
+fn arguments(info: Info, words: &[u64; 8]) -> [u64; 8] {
+    // The data words past the count are not the caller's arguments. A
+    // copy of a fixed size compiles to moves; one of `info.words` words
+    // would call `memcpy`, whose string moves cost more than the words.
+    core::array::from_fn(|i| if i < info.words { words[i] } else { 0 })
+}
+
+/// Calls the method of radix-capability(2) that `info`'s label (a reserved
+/// one) names, on the capability in `slot`, whatever its kind.
+pub fn call_capability(user: &UserRef, slot: u32, info: Info, words: [u64; 8]) -> Result<Answer> {
+    let args = arguments(info, &words);
+    capability(user, SlotRef::new(user.cspace, slot), info.label, &args)
+}
+
+/// Calls the method `info`'s label names on `found`, what the caller has
+/// just found in `slot`, with the object [`takes_object`] wants. Messages
+/// to an endpoint do not come here (`syscall`), nor do the methods of
+/// radix-capability(2) ([`call_capability`]).
 pub fn call(
     me: &ThreadRef,
     user: &UserRef,
     slot: u32,
-    cap: Option<Capability>,
+    found: &Found,
     info: Info,
     words: [u64; 8],
 ) -> Result<Answer> {
-    // The data words past the count are not the caller's arguments. A
-    // copy of a fixed size compiles to moves; one of `info.words` words
-    // would call `memcpy`, whose string moves cost more than the words.
-    let args: [u64; 8] = core::array::from_fn(|i| if i < info.words { words[i] } else { 0 });
+    let args = arguments(info, &words);
     let at = SlotRef::new(user.cspace, slot);
-    if info.is_reserved() {
-        return capability(user, at, info.label, &args);
-    }
-    let cap = match cap {
-        Some(cap) => cap,
-        None => objects::capability(user.cspace, slot)?,
-    };
+    let cap = &found.cap;
     let kind = cap.kind();
     match (kind, info.label) {
         (ObjectKind::Memory, memory::RETYPE) => {
@@ -130,8 +145,10 @@ pub fn call(
         (ObjectKind::AddressSpace, _) => address_space_method(user, slot, info.label, &args),
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
         (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
-        (ObjectKind::Directory, _) => super::files::directory_method(user, &cap, info.label, &args),
-        (ObjectKind::File, _) => super::files::file_method(user, &cap, info.label, &args),
+        (ObjectKind::Directory, _) => {
+            super::files::directory_method(user, found, info.label, &args)
+        }
+        (ObjectKind::File, _) => super::files::file_method(user, found, info.label, &args),
         (ObjectKind::Random, random::READ) => {
             let a = random::ReadArgs::decode(&args)?;
             cap.check(ObjectKind::Random, Rights::READ).map_err(cap_error)?;
@@ -160,7 +177,7 @@ fn capability(user: &UserRef, at: SlotRef, label: u32, args: &[u64; 8]) -> Resul
     match label {
         abi_cap::INFO => {
             abi_cap::InfoArgs::decode(args)?;
-            let cap: Capability = caps::get(at).map_err(cap_error)?;
+            let cap = objects::capability(space, at.slot)?;
             let kind = AbiKind::from_raw(cap.kind() as u8).ok_or(error(Kernel::WrongKind))?;
             let results = abi_cap::InfoResults {
                 kind,

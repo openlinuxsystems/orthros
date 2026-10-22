@@ -26,7 +26,7 @@ use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags
 use radix_abi::errors::Kernel;
 use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, Whence};
 use radix_abi::{UserBuffer, file, terminal};
-use radix_cap::{CapError, Capability, ObjectKind, Rights, SlotRef};
+use radix_cap::{CapError, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
@@ -36,7 +36,7 @@ use radix_vfs::{FsKind, In, Kind, Out, PATH_MAX};
 use super::account::Account;
 use super::memory::cap_rights;
 use super::methods::{Answer, answer};
-use super::objects::{self, Object};
+use super::objects::{self, Found, Object};
 use super::{Result, UserRef, UserThread, cap_error, error};
 use crate::fs::{self, Description, FileObject, FileRef, locks, pipe, tty};
 use crate::{Arch, caps};
@@ -175,31 +175,31 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
 /// transfer.
 const OPEN_RIGHTS: Rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
 
-/// The directory `cap` designates, if it has the rights `needs`: `cap` is
-/// the capability the caller named, which the system call looked up a
-/// moment ago, so its slot is not looked at again.
-fn directory_of(cap: &Capability, needs: Rights) -> Result<FileRef> {
-    cap.check(ObjectKind::Directory, needs).map_err(cap_error)?;
-    match objects::object_of(cap)? {
-        Object::Directory(dir) => Ok(dir),
+/// The directory `found` designates, if its capability has the rights
+/// `needs`: `found` is what the system call found in the slot the caller
+/// named, so the slot is not looked at again.
+fn directory_of(found: &Found, needs: Rights) -> Result<&FileRef> {
+    found.cap.check(ObjectKind::Directory, needs).map_err(cap_error)?;
+    match &found.object {
+        Some(Object::Directory(dir)) => Ok(dir),
         _ => Err(error(Kernel::Gone)),
     }
 }
 
-/// The file `cap` designates, if it has the rights `needs`, as
-/// [`directory_of`].
-fn file_of(cap: &Capability, needs: Rights) -> Result<FileRef> {
-    cap.check(ObjectKind::File, needs).map_err(cap_error)?;
-    match objects::object_of(cap)? {
-        Object::File(file) => Ok(file),
+/// The file `found` designates, if its capability has the rights `needs`,
+/// as [`directory_of`].
+fn file_of(found: &Found, needs: Rights) -> Result<&FileRef> {
+    found.cap.check(ObjectKind::File, needs).map_err(cap_error)?;
+    match &found.object {
+        Some(Object::File(file)) => Ok(file),
         _ => Err(error(Kernel::Gone)),
     }
 }
 
-/// The directory interface, on the directory capability `cap`.
+/// The directory interface, on the directory `found` in a slot.
 pub fn directory_method(
     user: &UserRef,
-    cap: &Capability,
+    found: &Found,
     label: u32,
     args: &[u64; 8],
 ) -> Result<Answer> {
@@ -215,7 +215,7 @@ pub fn directory_method(
             if changes {
                 needs = needs.union(Rights::WRITE);
             }
-            let dir = directory_of(cap, needs)?;
+            let dir = directory_of(found, needs)?;
             let to = SlotRef::new(cspace, a.to);
             // The slot first when the open changes something, so that a
             // file is not made or cut for nothing; otherwise putting the
@@ -235,18 +235,16 @@ pub fn directory_method(
                 directory: a.flags.contains(OpenFlags::DIRECTORY),
             };
             let at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
-            drop(dir);
             let description = Description {
                 append: a.flags.contains(OpenFlags::APPEND),
                 non_blocking: a.flags.contains(OpenFlags::NON_BLOCKING),
             };
             let close_on_exec = a.flags.contains(OpenFlags::CLOSE_ON_EXEC);
-            let node = at.node.clone();
             let kind = at.node.kind();
             let object_kind =
                 if kind == Kind::Directory { ObjectKind::Directory } else { ObjectKind::File };
             let wanted = asked.intersection(object_kind.rights());
-            let missing = wanted.difference(cap.rights());
+            let missing = wanted.difference(found.cap.rights());
             if !missing.is_empty() {
                 return Err(cap_error(CapError::MissingRights(missing)));
             }
@@ -255,8 +253,10 @@ pub fn directory_method(
             }
             let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER);
             let object = FileObject::with(at, description).ok_or(error(Kernel::NoMemory))?;
+            let terminal = object.tty_handle().is_some().then(|| object.at.node.clone());
             install_file(user, to, object_kind, rights, object, close_on_exec)?;
-            if let Some(handle) = tty::handle_of(&node)
+            if let Some(node) = terminal
+                && let Some(handle) = tty::handle_of(&node)
                 && !handle.master
                 && !a.flags.contains(OpenFlags::NO_TERMINAL)
             {
@@ -267,21 +267,21 @@ pub fn directory_method(
         }
         directory::MAKE_DIRECTORY => {
             let a = directory::MakeDirectoryArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::WRITE)?;
+            let dir = directory_of(found, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
             vfs()?.make_directory(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::REMOVE => {
             let a = directory::RemoveArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::WRITE)?;
+            let dir = directory_of(found, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
             vfs()?.remove(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::RENAME => {
             let a = directory::RenameArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::WRITE)?;
+            let dir = directory_of(found, Rights::WRITE)?;
             let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (from, to) = (Path::copy(a.from)?, Path::copy(a.to)?);
             vfs()?.rename(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?).map_err(fs::status)?;
@@ -289,17 +289,16 @@ pub fn directory_method(
         }
         directory::LIST => {
             let a = directory::ListArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::READ)?;
+            let dir = directory_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
             let results = list(&dir.at, a.cursor, address, len)?;
             answer(label, directory::ListResults::WORDS, results.encode())
         }
         directory::STAT => {
             let a = directory::StatArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::READ)?;
+            let dir = directory_of(found, Rights::READ)?;
             let path = Path::copy(a.path)?;
             let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
-            drop(dir);
             let stat = at.node.stat();
             let results = directory::StatResults {
                 kind: file_kind(stat.kind),
@@ -315,16 +314,15 @@ pub fn directory_method(
         }
         directory::SET_TIMES => {
             let a = directory::SetTimesArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::WRITE)?;
+            let dir = directory_of(found, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
             let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
-            drop(dir);
             set_times(&at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
         directory::MOUNT => {
             let a = directory::MountArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::CONTROL)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
             let read_only = a.flags.contains(MountFlags::READ_ONLY);
             let path = Path::copy(a.path)?;
             let kind = Path::copy(a.filesystem)?;
@@ -364,20 +362,20 @@ pub fn directory_method(
         }
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::CONTROL)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
             let path = Path::copy(a.path)?;
             vfs()?.unmount(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::SYNC => {
             directory::SyncArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::NONE)?;
+            let dir = directory_of(found, Rights::NONE)?;
             dir.at.mount.fs.sync().map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::INFO => {
             directory::InfoArgs::decode(args)?;
-            let dir = directory_of(cap, Rights::READ)?;
+            let dir = directory_of(found, Rights::READ)?;
             let mount = &dir.at.mount;
             let info = mount.fs.info();
             let results = directory::InfoResults {
@@ -392,7 +390,7 @@ pub fn directory_method(
             answer(label, directory::InfoResults::WORDS, results.encode())
         }
         file::LOCK | file::LOCK_HOLDER => {
-            lock_method(user, cap, ObjectKind::Directory, label, args)
+            lock_method(user, found, ObjectKind::Directory, label, args)
         }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
@@ -478,33 +476,29 @@ fn list(at: &Location, cursor: u64, address: u64, len: usize) -> Result<director
     Ok(directory::ListResults { count, used: used as u64, next })
 }
 
-/// The file interface, on the file capability `cap`, for `user`'s thread.
-pub fn file_method(
-    user: &UserRef,
-    cap: &Capability,
-    label: u32,
-    args: &[u64; 8],
-) -> Result<Answer> {
+/// The file interface, on the file `found` in a slot, for `user`'s
+/// thread.
+pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
     match label {
         file::READ => {
             let a = file::ReadArgs::decode(args)?;
-            let file = file_of(cap, Rights::READ)?;
+            let file = file_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
-            let count = read(user, &file, a.offset, address, len, false)?;
+            let count = read(user, file, a.offset, address, len, false)?;
             let results = file::ReadResults { count };
             answer(label, file::ReadResults::WORDS, results.encode())
         }
         file::WRITE => {
             let a = file::WriteArgs::decode(args)?;
-            let file = file_of(cap, Rights::WRITE)?;
+            let file = file_of(found, Rights::WRITE)?;
             let (address, len) = user_range(a.data)?;
-            let count = write(user, &file, a.offset, address, len, false)?;
+            let count = write(user, file, a.offset, address, len, false)?;
             let results = file::WriteResults { count };
             answer(label, file::WriteResults::WORDS, results.encode())
         }
         file::STAT => {
             file::StatArgs::decode(args)?;
-            let file = file_of(cap, Rights::NONE)?;
+            let file = file_of(found, Rights::NONE)?;
             let stat = file.at.node.stat();
             let results = file::StatResults {
                 kind: file_kind(stat.kind),
@@ -520,32 +514,32 @@ pub fn file_method(
         }
         file::SET_TIMES => {
             let a = file::SetTimesArgs::decode(args)?;
-            let file = file_of(cap, Rights::WRITE)?;
+            let file = file_of(found, Rights::WRITE)?;
             set_times(&file.at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
         file::SET_SIZE => {
             let a = file::SetSizeArgs::decode(args)?;
-            let file = file_of(cap, Rights::WRITE)?;
+            let file = file_of(found, Rights::WRITE)?;
             file.at.writable().map_err(fs::status)?;
             file.at.node.set_size(a.size).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         file::SYNC => {
             file::SyncArgs::decode(args)?;
-            let file = file_of(cap, Rights::WRITE)?;
-            sync(&file)?;
+            let file = file_of(found, Rights::WRITE)?;
+            sync(file)?;
             answer(label, 0, [0; 8])
         }
         file::SEEK => {
             let a = file::SeekArgs::decode(args)?;
-            let file = file_of(cap, Rights::NONE)?;
-            let offset = seek(&file, a.offset, a.whence)?;
+            let file = file_of(found, Rights::NONE)?;
+            let offset = seek(file, a.offset, a.whence)?;
             answer(label, file::SeekResults::WORDS, file::SeekResults { offset }.encode())
         }
         file::STATUS_FLAGS => {
             let a = file::StatusFlagsArgs::decode(args)?;
-            let file = file_of(cap, Rights::NONE)?;
+            let file = file_of(found, Rights::NONE)?;
             let old = file.description();
             if a.set {
                 file.set_description(Description {
@@ -568,8 +562,8 @@ pub fn file_method(
         }
         file::CONTROL => {
             let a = file::ControlArgs::decode(args)?;
-            let file = file_of(cap, Rights::NONE)?;
-            let result = match target(&file) {
+            let file = file_of(found, Rights::NONE)?;
+            let result = match target(file) {
                 Target::Tty(handle) => {
                     handle.control(user, a.request, a.argument, a.buffer, a.size)?
                 }
@@ -584,16 +578,16 @@ pub fn file_method(
             };
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
         }
-        file::LOCK | file::LOCK_HOLDER => lock_method(user, cap, ObjectKind::File, label, args),
+        file::LOCK | file::LOCK_HOLDER => lock_method(user, found, ObjectKind::File, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }
 
 /// radix-file(2)'s `lock` and `lock_holder`, on the file or directory
-/// (of kind `kind`) `cap` designates: `flock` locks directories too.
+/// (of kind `kind`) `found` designates: `flock` locks directories too.
 fn lock_method(
     user: &UserRef,
-    cap: &Capability,
+    found: &Found,
     kind: ObjectKind,
     label: u32,
     args: &[u64; 8],
@@ -622,8 +616,8 @@ fn lock_method(
         _ => Rights::NONE,
     };
     let file = match kind {
-        ObjectKind::File => file_of(cap, needs)?,
-        _ => directory_of(cap, needs)?,
+        ObjectKind::File => file_of(found, needs)?,
+        _ => directory_of(found, needs)?,
     };
     let (start, end) = match space {
         locks::Space::Whole => (0, u64::MAX),
@@ -682,9 +676,9 @@ enum Target<'a> {
 }
 
 fn target(file: &FileObject) -> Target<'_> {
-    if let Some(end) = pipe::end_of(&file.at.node) {
+    if let Some(end) = file.pipe_end() {
         Target::Pipe(end)
-    } else if let Some(handle) = tty::handle_of(&file.at.node) {
+    } else if let Some(handle) = file.tty_handle() {
         Target::Tty(handle)
     } else {
         Target::Node
@@ -696,6 +690,7 @@ fn target(file: &FileObject) -> Target<'_> {
 /// which moves past what was read. A pipe or a terminal takes any offset,
 /// and waits for something to read unless the description is non-blocking
 /// or `never_wait`.
+#[inline]
 pub fn read(
     user: &UserThread,
     file: &FileObject,
@@ -705,27 +700,44 @@ pub fn read(
     never_wait: bool,
 ) -> Result<u64> {
     let mut out = UserOut { address, len };
-    let non_blocking = never_wait || file.description().non_blocking;
-    let read = match target(file) {
-        Target::Pipe(end) => return end.pipe().read(&mut out, non_blocking).map(|n| n as u64),
-        Target::Tty(handle) => return handle.read(user, &mut out, non_blocking).map(|n| n as u64),
-        Target::Node if offset == file::CURRENT => {
-            let mut at = file.offset.lock();
-            let read = file.at.node.read(*at, &mut out);
-            if let Ok(n) = read {
-                *at += n as u64;
-            }
-            read
+    if !matches!(target(file), Target::Node) {
+        return read_special(user, file, &mut out, never_wait);
+    }
+    let read = if offset == file::CURRENT {
+        let mut at = file.offset.lock();
+        let read = file.at.node.read(*at, &mut out);
+        if let Ok(n) = read {
+            *at += n as u64;
         }
-        Target::Node => file.at.node.read(offset, &mut out),
+        read
+    } else {
+        file.at.node.read(offset, &mut out)
     };
     read.map(|n| n as u64).map_err(fs::status)
+}
+
+/// [`read`] from a pipe or a terminal: kept out of line, so that reads of
+/// files, which are most of them, skip its frame.
+#[inline(never)]
+fn read_special(
+    user: &UserThread,
+    file: &FileObject,
+    out: &mut UserOut,
+    never_wait: bool,
+) -> Result<u64> {
+    let non_blocking = never_wait || file.description().non_blocking;
+    match target(file) {
+        Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
+        Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
+        Target::Node => Ok(0),
+    }
 }
 
 /// Writes the caller's `len` bytes at `address` to `file`: at `offset`,
 /// or at CURRENT at the description's offset (the end of the file if it
 /// appends), which moves past what was written. A pipe or a terminal
 /// takes any offset, and waits for room as [`read`] waits.
+#[inline]
 pub fn write(
     user: &UserThread,
     file: &FileObject,
@@ -735,12 +747,8 @@ pub fn write(
     never_wait: bool,
 ) -> Result<u64> {
     let data = UserIn { address, len };
-    let description = file.description();
-    let non_blocking = never_wait || description.non_blocking;
-    match target(file) {
-        Target::Pipe(end) => return end.pipe().write(&data, non_blocking).map(|n| n as u64),
-        Target::Tty(handle) => return handle.write(user, &data, non_blocking).map(|n| n as u64),
-        Target::Node => {}
+    if !matches!(target(file), Target::Node) {
+        return write_special(user, file, &data, never_wait);
     }
     file.at.writable().map_err(fs::status)?;
     let node = &file.at.node;
@@ -748,7 +756,7 @@ pub fn write(
         return node.write(offset, &data).map(|n| n as u64).map_err(fs::status);
     }
     let mut at = file.offset.lock();
-    let written = if description.append {
+    let written = if file.description().append {
         let written = node.write(file::APPEND, &data).map_err(fs::status)?;
         *at = node.stat().size;
         written
@@ -758,6 +766,23 @@ pub fn write(
         written
     };
     Ok(written as u64)
+}
+
+/// [`write`] to a pipe or a terminal, kept out of line as [`read_special`]
+/// is.
+#[inline(never)]
+fn write_special(
+    user: &UserThread,
+    file: &FileObject,
+    data: &UserIn,
+    never_wait: bool,
+) -> Result<u64> {
+    let non_blocking = never_wait || file.description().non_blocking;
+    match target(file) {
+        Target::Pipe(end) => end.pipe().write(data, non_blocking).map(|n| n as u64),
+        Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
+        Target::Node => Ok(0),
+    }
 }
 
 /// `seek`: moves `file`'s offset `offset` bytes from where `whence` says.

@@ -1235,6 +1235,7 @@ fn thread_start(_: usize) -> ! {
 }
 
 /// The locks' preemption hook: preemption was just allowed again.
+#[inline]
 pub(crate) fn preempt_enable() {
     if Arch::preempt_enable() == 0
         && CPUS.this().need_resched.load(Ordering::Relaxed)

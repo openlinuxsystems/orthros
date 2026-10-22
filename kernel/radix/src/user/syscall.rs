@@ -128,6 +128,25 @@ fn results(registers: &mut [u64; 10], words: [u64; 10]) -> Result<Done> {
 }
 
 /// The info word of a message a program sends.
+/// Puts a method's answer in the argument registers, or says how the
+/// thread goes on.
+#[inline(always)]
+fn answered(registers: &mut [u64; 10], answer: Result<Answer>) -> Result<Done> {
+    // Matched in place rather than through `?`, which would copy the
+    // answer first.
+    match answer {
+        Ok(Answer::Reply(info, words)) => {
+            results(registers, sys::CapCallResults { badge: 0, info, words }.encode())
+        }
+        Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
+        Ok(Answer::Restore(saved)) => {
+            *registers = saved.args;
+            Ok(Done::Restore(saved.number))
+        }
+        Err(status) => Err(status),
+    }
+}
+
 fn message_info(word: u64) -> Result<Info> {
     Info::decode(word).map_err(|_| Kernel::InvalidArgument.status(1))
 }
@@ -144,48 +163,44 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -
         sys::CAP_CALL => {
             let a = sys::CapCallArgs::decode(args)?;
             let info = message_info(a.info)?;
-            // One look at the slot serves both an endpoint and a method.
-            let mut cap = None;
-            if !info.is_reserved() {
-                let found = objects::capability(cspace, a.cap)?;
-                match found.check(ObjectKind::Endpoint, Rights::SEND) {
-                    Ok(()) => {
-                        let Object::Endpoint(endpoint) = objects::object_of(&found)? else {
-                            return Err(error(Kernel::Gone));
-                        };
-                        let cap = found;
-                        let message = Message {
-                            info,
-                            words: a.words,
-                            badge: cap.badge(),
-                            call: true,
-                            grant: cap.rights().contains(Rights::GRANT),
-                            cspace,
-                        };
-                        let reply = ipc::send(me, user, &endpoint, message)?;
-                        let reply = reply.expect("a call ends with a reply or an error");
-                        return results(args, delivered(reply));
-                    }
-                    Err(CapError::WrongKind { .. }) => cap = Some(found),
-                    Err(err) => return Err(cap_error(err)),
+            if info.is_reserved() {
+                // radix-capability(2)'s methods, on a capability of any
+                // kind.
+                if info.caps > 0 || info.move_caps || info.no_block {
+                    return Err(Kernel::InvalidArgument.status(1));
                 }
+                return answered(args, methods::call_capability(user, a.cap, info, a.words));
+            }
+            // One look at this CPU's cache finds the capability and, for
+            // an endpoint, a file or a directory, its object, which the
+            // call borrows where the lookup put it.
+            let mut place = None;
+            let found = objects::find(cspace, a.cap, methods::takes_object, &mut place)?;
+            let cap = &found.cap;
+            match cap.check(ObjectKind::Endpoint, Rights::SEND) {
+                Ok(()) => {
+                    let Some(Object::Endpoint(endpoint)) = &found.object else {
+                        return Err(error(Kernel::Gone));
+                    };
+                    let message = Message {
+                        info,
+                        words: a.words,
+                        badge: cap.badge(),
+                        call: true,
+                        grant: cap.rights().contains(Rights::GRANT),
+                        cspace,
+                    };
+                    let reply = ipc::send(me, user, endpoint, message)?;
+                    let reply = reply.expect("a call ends with a reply or an error");
+                    return results(args, delivered(reply));
+                }
+                Err(CapError::WrongKind { .. }) => {}
+                Err(err) => return Err(cap_error(err)),
             }
             if info.caps > 0 || info.move_caps || info.no_block {
                 return Err(Kernel::InvalidArgument.status(1));
             }
-            // Matched in place rather than through `?`, which would copy
-            // the answer first.
-            match methods::call(me, user, a.cap, cap, info, a.words) {
-                Ok(Answer::Reply(info, words)) => {
-                    results(args, sys::CapCallResults { badge: 0, info, words }.encode())
-                }
-                Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
-                Ok(Answer::Restore(saved)) => {
-                    *args = saved.args;
-                    Ok(Done::Restore(saved.number))
-                }
-                Err(status) => Err(status),
-            }
+            answered(args, methods::call(me, user, a.cap, found, info, a.words))
         }
         sys::SEND => {
             let a = sys::SendArgs::decode(args)?;

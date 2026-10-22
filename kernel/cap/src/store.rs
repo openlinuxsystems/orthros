@@ -210,6 +210,10 @@ struct Slot {
     /// than the capability: the kernel's close-on-exec. Clear in an empty
     /// slot, and in one a capability was just put in.
     flags: u8,
+    /// Its capability may be in a cache outside the store: it was looked
+    /// up with [`Capabilities::get_to_cache`]. Taking it out of the slot
+    /// then makes the store stale ([`Capabilities::take_stale`]).
+    cached: bool,
 }
 
 impl Slot {
@@ -222,6 +226,7 @@ impl Slot {
         depth: 0,
         revoking: false,
         flags: 0,
+        cached: false,
     };
 }
 
@@ -263,6 +268,9 @@ pub struct Capabilities<A: Allocator + Clone> {
     free_space: Option<u32>,
     objects: Vec<Record, A>,
     free_object: Option<u32>,
+    /// A capability looked up with [`Capabilities::get_to_cache`] has
+    /// left its slot since [`Capabilities::take_stale`] last asked.
+    stale: bool,
 }
 
 /// The next generation number, skipping 0.
@@ -278,6 +286,7 @@ impl<A: Allocator + Clone> Capabilities<A> {
             free_space: None,
             objects: Vec::new_in(alloc.clone()),
             free_object: None,
+            stale: false,
             alloc,
         }
     }
@@ -413,6 +422,27 @@ impl<A: Allocator + Clone> Capabilities<A> {
     pub fn get(&self, at: SlotRef) -> Result<Capability, CapError> {
         let link = self.link(at)?;
         self.slot(link).cap.ok_or(CapError::Empty)
+    }
+
+    /// The capability in `at`, as [`Capabilities::get`] gives it, for a
+    /// cache outside the store to keep: from now on, the store is stale
+    /// once it leaves the slot (deleted, revoked, moved, or its space
+    /// destroyed), until [`Capabilities::take_stale`] says so. Nothing
+    /// else changes a capability in a slot, so until then the cached copy
+    /// is what the slot holds.
+    pub fn get_to_cache(&mut self, at: SlotRef) -> Result<Capability, CapError> {
+        let link = self.link(at)?;
+        let slot = self.slot_mut(link);
+        let cap = slot.cap.ok_or(CapError::Empty)?;
+        slot.cached = true;
+        Ok(cap)
+    }
+
+    /// Whether a capability looked up with [`Capabilities::get_to_cache`]
+    /// has left its slot since the last call: if so, whatever cache holds
+    /// it must forget it. Asking clears the answer.
+    pub fn take_stale(&mut self) -> bool {
+        core::mem::take(&mut self.stale)
     }
 
     /// The capability in `at`, if it may be used on a `kind` with the
@@ -671,9 +701,11 @@ impl<A: Allocator + Clone> Capabilities<A> {
         if node.revoking {
             return Err(CapError::Revoking);
         }
-        // The flags stay behind: they belong to the slot.
-        *self.slot_mut(dst) = Slot { flags: 0, ..node };
+        // The flags stay behind: they belong to the slot. A cache may
+        // hold the capability under its old slot, not its new one.
+        *self.slot_mut(dst) = Slot { flags: 0, cached: false, ..node };
         *self.slot_mut(src) = Slot::EMPTY;
+        self.stale |= node.cached;
         match node.prev {
             Some(prev) => self.slot_mut(prev).next = Some(dst),
             None => {
@@ -1029,6 +1061,8 @@ impl<A: Allocator + Clone> Capabilities<A> {
     /// Puts `cap` in the empty slot `link`, as the first child of
     /// `parent`.
     fn place(&mut self, link: Link, cap: Capability, parent: Option<Link>) {
+        // Only an empty slot, which no cache can hold, takes a capability.
+        debug_assert!(self.slot(link).cap.is_none(), "placing a capability in a full slot");
         let mut slot = Slot { cap: Some(cap), ..Slot::EMPTY };
         if let Some(parent) = parent {
             let above = self.slot_mut(parent);
@@ -1048,6 +1082,7 @@ impl<A: Allocator + Clone> Capabilities<A> {
     fn remove(&mut self, link: Link, released: &mut dyn FnMut(Released)) {
         let node = *self.slot(link);
         *self.slot_mut(link) = Slot::EMPTY;
+        self.stale |= node.cached;
         match (node.parent, node.child) {
             (Some(parent), Some(first)) => {
                 let mut last = first;

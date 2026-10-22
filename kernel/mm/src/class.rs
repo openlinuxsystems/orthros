@@ -49,6 +49,50 @@ const BY_SIZE: [u8; MAX_SMALL / 16 + 1] = {
     table
 };
 
+/// The order of each class's slabs: the smallest that holds at least
+/// eight objects, up to [`MAX_SLAB_ORDER`].
+const SLAB_ORDERS: [u8; CLASSES] = {
+    let mut table = [0u8; CLASSES];
+    let mut class = 0;
+    while class < CLASSES {
+        let mut order = 0;
+        while order < MAX_SLAB_ORDER && (PAGE_SIZE << order) / (SIZES[class] as usize) < 8 {
+            order += 1;
+        }
+        table[class] = order as u8;
+        class += 1;
+    }
+    table
+};
+
+/// The objects in each class's slab.
+const OBJECTS: [u16; CLASSES] = {
+    let mut table = [0u16; CLASSES];
+    let mut class = 0;
+    while class < CLASSES {
+        table[class] = ((PAGE_SIZE << SLAB_ORDERS[class]) / SIZES[class] as usize) as u16;
+        class += 1;
+    }
+    table
+};
+
+/// For each class, 2^32 / size rounded down, plus one: `(offset * it) >>
+/// 32` is `offset / size` for every offset within a slab, so finding an
+/// object's index on every free takes a multiplication, not a division.
+/// The product exceeds `offset / size` by less than `offset / 2^32`, under
+/// 2^-17 for the at most 2^15 bytes of a slab, while the fraction of
+/// `offset / size` is at most `1 - 1 / size`, and `1 / size` is at least
+/// 2^-13: the integer part stays the same.
+const RECIPROCALS: [u64; CLASSES] = {
+    let mut table = [0u64; CLASSES];
+    let mut class = 0;
+    while class < CLASSES {
+        table[class] = (1u64 << 32) / SIZES[class] as u64 + 1;
+        class += 1;
+    }
+    table
+};
+
 /// A size class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Class(u8);
@@ -97,11 +141,7 @@ impl Class {
 
     /// Order of the class's slabs.
     pub fn slab_order(self) -> u32 {
-        let mut order = 0;
-        while order < MAX_SLAB_ORDER && (PAGE_SIZE << order) / self.size() < 8 {
-            order += 1;
-        }
-        order
+        u32::from(SLAB_ORDERS[self.index()])
     }
 
     /// Bytes in one slab.
@@ -111,7 +151,18 @@ impl Class {
 
     /// Objects in one slab.
     pub fn objects(self) -> usize {
-        self.slab_bytes() / self.size()
+        usize::from(OBJECTS[self.index()])
+    }
+
+    /// The index of the object that starts `offset` bytes into one of the
+    /// class's slabs, if one does.
+    pub fn object_at(self, offset: usize) -> Option<usize> {
+        if offset >= self.slab_bytes() {
+            return None;
+        }
+        // Without a division: see RECIPROCALS.
+        let index = ((offset as u64 * RECIPROCALS[self.index()]) >> 32) as usize;
+        (index * self.size() == offset && index < self.objects()).then_some(index)
     }
 
     /// Objects a per-CPU magazine holds: fewer for large objects, so idle
@@ -165,6 +216,24 @@ mod tests {
         assert_eq!(large_order(4 << 20, 8), Some(10));
         assert_eq!(large_order((4 << 20) + 1, 8), None);
         assert_eq!(large_order(usize::MAX, 8), None);
+    }
+
+    #[test]
+    fn objects_are_found_without_dividing() {
+        for class in Class::all() {
+            let mut order = 0;
+            while order < MAX_SLAB_ORDER && (PAGE_SIZE << order) / class.size() < 8 {
+                order += 1;
+            }
+            assert_eq!(class.slab_order(), order);
+            assert_eq!(class.objects(), class.slab_bytes() / class.size());
+            for offset in 0..class.slab_bytes() + 64 {
+                let index = offset / class.size();
+                let expected =
+                    (offset % class.size() == 0 && index < class.objects()).then_some(index);
+                assert_eq!(class.object_at(offset), expected, "{class:?} at {offset}");
+            }
+        }
     }
 
     proptest! {

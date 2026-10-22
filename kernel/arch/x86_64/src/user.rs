@@ -435,7 +435,7 @@ pub fn on_return() {
     if let Some(handler) = RETURN_HANDLER.get() {
         handler();
     }
-    cpu::disable_interrupts();
+    cpu::mask_interrupts();
 }
 
 /// Turns on SYSCALL and points it at the entry stub. Every CPU runs this
@@ -484,7 +484,7 @@ extern "C" fn radix_syscall_dispatch(frame: *mut SyscallFrame) -> u64 {
         None => unsafe { (*frame).regs.number = u64::MAX },
     }
     // Back to the program with interrupts masked from here to the return.
-    cpu::disable_interrupts();
+    cpu::mask_interrupts();
     on_return();
     // SAFETY: as above; no reference to the frame is left.
     unsafe {

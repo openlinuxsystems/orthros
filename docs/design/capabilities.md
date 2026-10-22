@@ -175,24 +175,38 @@ Lock order: the store's lock, then the heap's locks, then the frame
 allocator's. The `Released` callback runs with the store locked and only
 calls the frame allocator.
 
-**Looking up without the lock.** Looking a capability up (`caps::get`,
-`caps::lookup`) is the most frequent use of the store: every system call
-on a capability does it. Each CPU keeps the last capabilities it found,
-sixteen of them indexed by slot, with the store's version number at the
-time; every operation on the store, under its lock, moves the version
-before the lock goes. A lookup that finds the slot in this CPU's cache at
-the current version returns it without taking the lock or writing
-anything another CPU reads. That is correct because the version did not
-move: nothing changed the store since the capability was read from it,
-and an operation that has changed it but not moved the version yet has
-not returned either, so the lookup counts as coming before it, which a
-lookup that took the lock first could also have done. A revoke that has
-returned has moved the version, and any thread that learns of it (through
-a lock, an IPC or any other synchronization) sees the new version, so it
-cannot use what was revoked. The cache keeps capabilities only, never
-objects, so it keeps nothing alive. It is a per-CPU value that only its
-own CPU touches, with preemption off (`percpu::Own`), so a hit takes no
-lock and no locked instruction at all (ADR 0040).
+**Looking up without the lock.** Looking a capability up is the most
+frequent use of the store: every system call on a capability does it.
+Each CPU keeps the last capabilities its system calls found
+(`user::objects::find`), sixteen of them indexed by slot, each with a
+weak reference to the object it designates and the store's version
+number at the time (ADR 0077). A lookup that finds the slot in this
+CPU's cache at the current version returns it without taking the lock
+or writing anything another CPU reads.
+
+The version moves, under the store's lock and before it goes, whenever
+a capability some CPU found leaves its slot, or an object some CPU found
+leaves the registry. Finding a capability for a cache marks its slot
+(`Store::get_to_cache`), and the store notes when a marked slot is
+emptied, moved from or destroyed (`Store::take_stale`); the registry
+does the same for its entries (`caps::mark_stale`). Other changes, such
+as a capability put in an empty slot or one nobody looked up deleted,
+leave every cache as it is: nothing in a cache was taken away.
+
+That is correct because a capability stays in its slot, unchanged,
+until it is deleted, moved or revoked, all of which empty the slot: so
+if the version did not move, the capability a CPU found is still there,
+and an operation that has emptied the slot but not moved the version yet
+has not returned either, so the lookup counts as coming before it, which
+a lookup that took the lock first could also have done. A revoke that
+has returned has moved the version, and any thread that learns of it
+(through a lock, an IPC or any other synchronization) sees the new
+version, so it cannot use what was revoked. The unit tests check this
+on random sequences of every operation (`a_cache_the_store_keeps_fresh_is_never_wrong`).
+The cache keeps weak references to objects, so it keeps no object
+alive. It is a per-CPU value that only its own CPU touches, with
+preemption off (`percpu::Own`), so a hit takes no lock and no locked
+instruction but the object's own reference count (ADR 0040).
 
 ## Why no capability can be forged or widened
 

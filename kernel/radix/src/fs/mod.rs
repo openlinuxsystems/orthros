@@ -54,7 +54,7 @@ use radix_klog::{error, info};
 use radix_mm::{FRAMES, Kmalloc, PAGE_SIZE};
 use radix_sync::{Mutex, Once, SpinLock};
 use radix_vfs::mount::{Location, OpenFlags, Vfs};
-use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, NodeRef, mem};
+use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, Kind, NodeRef, mem};
 
 use crate::Arch;
 
@@ -92,6 +92,18 @@ impl Description {
     }
 }
 
+/// What kind of node a [`FileObject`] is of, as its reads and writes see
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Special {
+    /// A file or directory of a filesystem.
+    No,
+    /// An end of a pipe.
+    Pipe,
+    /// A side of a terminal.
+    Tty,
+}
+
 /// What a file or directory capability names: what POSIX calls an open
 /// file description, which copies of the capability share.
 pub struct FileObject {
@@ -108,6 +120,10 @@ pub struct FileObject {
     /// Whether it has taken a lock (`locks`), which it lets go of when it
     /// goes.
     locked: AtomicBool,
+    /// Whether its node is a pipe's end or a terminal's side, found when
+    /// it is made: finding out takes dynamic type checks, which every
+    /// read and write of a plain file would otherwise make.
+    special: Special,
     /// The next released object to drop, while it waits in [`DROPPED`].
     next: SpinLock<Option<FileRef>>,
 }
@@ -120,11 +136,18 @@ impl FileObject {
 
     /// An object for `at`, with `description`'s flags.
     pub fn with(at: Location, description: Description) -> Option<FileRef> {
+        // Only a node of a pipe's or a character device's kind can be one.
+        let special = match at.node.kind() {
+            Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
+            Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
+            _ => Special::No,
+        };
         let object = FileObject {
             at,
             offset: Mutex::new(0),
             flags: AtomicU32::new(description.bits()),
             locked: AtomicBool::new(false),
+            special,
             next: SpinLock::new(None),
         };
         alloc::sync::Arc::try_new_in(object, radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)).ok()
@@ -148,6 +171,16 @@ impl FileObject {
     /// Notes that it has taken a lock, which goes when it does.
     pub fn note_locked(&self) {
         self.locked.store(true, Ordering::Release);
+    }
+
+    /// The end of a pipe it is of, if it is of one.
+    pub fn pipe_end(&self) -> Option<&pipe::End> {
+        if self.special == Special::Pipe { pipe::end_of(&self.at.node) } else { None }
+    }
+
+    /// The side of a terminal it is of, if it is of one.
+    pub fn tty_handle(&self) -> Option<&tty::Handle> {
+        if self.special == Special::Tty { tty::handle_of(&self.at.node) } else { None }
     }
 }
 
@@ -173,7 +206,7 @@ static ANY_DROPPED: AtomicBool = AtomicBool::new(false);
 /// last description going may hang the terminal up and send signals, is
 /// on `dev`, whose drops are light otherwise.
 pub fn release(file: FileRef) {
-    if file.at.mount.fs.light_drops() && tty::handle_of(&file.at.node).is_none() {
+    if file.at.mount.fs.light_drops() && file.tty_handle().is_none() {
         drop(file);
     } else {
         defer_drop(file);

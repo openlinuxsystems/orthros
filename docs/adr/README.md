@@ -88,3 +88,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0074](0074-posix-scheduling-and-resource-limits.md) | Nice levels, POSIX scheduling and resource limits follow Linux's rules for a process without privileges | Accepted |
 | [0075](0075-advisory-file-locks.md) | Advisory file locks are kept by the kernel in one table: BSD's, POSIX's and Linux's open file description locks | Accepted |
 | [0076](0076-file-times-and-device-numbers.md) | Programs set a file's times; reading never changes them, and each mount has a device number | Accepted |
+| [0077](0077-one-cache-emptied-only-by-what-it-holds.md) | One per-CPU cache finds a capability and its object, and empties only when something it holds goes | Accepted |

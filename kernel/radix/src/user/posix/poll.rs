@@ -5,15 +5,16 @@
 //! capabilities is ready, as POSIX's `poll` and `ppoll`.
 //!
 //! The entries are copied in, then each slot is looked at: a pipe's end
-//! or a terminal's side says what it is ready for ([`pipe::Pipe::events`],
-//! [`tty::Handle::events`]), a notification is readable while bits are
-//! set, other files and directories are always ready, and an empty slot
-//! is invalid. If none is ready the thread waits for a change anywhere:
-//! whatever a poll looks at calls [`changed`] after it changes, which
-//! moves [`GENERATION`] and wakes the pollers. A waiting poller does not
-//! know which of its entries changed, so it looks at them all again; many
-//! pollers on a busy system wake for one another's changes
-//! (docs/design/posix.md lists that limit).
+//! or a terminal's side says what it is ready for
+//! ([`crate::fs::pipe::Pipe::events`], [`crate::fs::tty::Handle::events`]),
+//! a notification is readable while bits are set, other files and
+//! directories are always ready, and an empty slot is invalid. If none is
+//! ready the thread waits for a change anywhere: whatever a poll looks at
+//! calls [`changed`] after it changes, which moves [`GENERATION`] and
+//! wakes the pollers. A waiting poller does not know which of its
+//! entries changed, so it looks at them all again; many pollers on a busy
+//! system wake for one another's changes (docs/design/posix.md lists that
+//! limit).
 //!
 //! No wake-up is lost between a poller's look and its wait: a poller
 //! counts itself in [`POLLERS`] before it reads the generation and looks,
@@ -35,7 +36,6 @@ use radix_mm::Kmalloc;
 use super::kmalloc;
 use super::signal::{self, Restart, interrupted};
 use crate::Arch;
-use crate::fs::{pipe, tty};
 use crate::sched::{self, wait};
 use crate::user::objects::{self, Object};
 use crate::user::{Result, UserRef, error};
@@ -105,25 +105,27 @@ impl Drop for Polling {
 /// What slot `slot` of `cspace` is ready for, among `events` and those
 /// always reported.
 fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
-    let Ok(cap) = objects::capability(cspace, slot) else { return INVALID };
-    let found = match objects::object_of(&cap) {
-        Ok(Object::File(file)) => {
-            let node = &file.at.node;
-            if let Some(end) = pipe::end_of(node) {
+    let mut place = None;
+    let Ok(found) = objects::find(cspace, slot, |_| true, &mut place) else { return INVALID };
+    let found = match &found.object {
+        Some(Object::File(file)) => {
+            if let Some(end) = file.pipe_end() {
                 end.pipe().events(end.write)
-            } else if let Some(handle) = tty::handle_of(node) {
+            } else if let Some(handle) = file.tty_handle() {
                 handle.events()
             } else {
                 READABLE | WRITABLE
             }
         }
-        Ok(Object::Directory(_)) => READABLE | WRITABLE,
-        Ok(Object::Notification(notification)) => {
+        Some(Object::Directory(_)) => READABLE | WRITABLE,
+        Some(Object::Notification(notification)) => {
             let (set, closed) = notification.peek();
             (if set { READABLE } else { 0 }) | (if closed { HANG_UP } else { 0 })
         }
-        Ok(_) => 0,
-        Err(_) => INVALID,
+        Some(_) => 0,
+        // Nothing in the registry (a memory capability), or released
+        // since the capability was found.
+        None => INVALID,
     };
     found & (events | ALWAYS)
 }

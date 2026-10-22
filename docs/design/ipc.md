@@ -427,13 +427,15 @@ registers, finds the running thread with one read of a per-CPU word
 without touching its reference count (`sched::running`), and writes its
 results straight into the saved registers (ADR 0042). A capability
 method looks the capability up in this CPU's cache when the store has
-not changed since (`caps::get`), so it takes no lock and writes nothing
-shared, and CPUs using capabilities at once do not contend. The object a
-capability names (an endpoint, say) comes from a second cache of the
-same kind (`user::objects::get`), which keeps weak references, so it
-holds no object alive; a hit writes only the object's own reference
-count, so pairs of programs calling different endpoints on different
-CPUs share no lock (`endpoint_call_parallel`). Random bytes
+not changed since (`user::objects::find`), so it takes no lock and
+writes nothing shared, and CPUs using capabilities at once do not
+contend. The same look finds the object the capability names (an
+endpoint, say): each entry keeps a weak reference to it beside the
+capability, so the cache holds no object alive, and a hit writes only
+the object's own reference count, so pairs of programs calling different
+endpoints on different CPUs share no lock (`endpoint_call_parallel`).
+The caches empty only when something one of them holds goes (ADR 0077),
+so opening and closing files leaves them as they are. Random bytes
 come from this CPU's generator, a batch of ChaCha20 blocks at a time. A
 same-CPU round trip is two context switches and no timer write, and
 waking a thread pinned to a CPU, or one whose last CPU is idle, reads no
@@ -451,11 +453,11 @@ whether to offer paravirtual EOI (ADR 0041).
 
 ## Known limits
 
-- Any change to the capability store empties every CPU's caches of
-  capabilities and objects. Programs that change their capabilities all
-  the time on many CPUs at once would queue on the store's lock; a
-  per-space store with RCU over the slots is the fix if programs
-  show it matters.
+- Changes to the capability store all take its one lock, and taking
+  away a capability or object that some CPU found empties every CPU's
+  cache. Programs that change their capabilities all the time on many
+  CPUs at once would queue on the store's lock; a per-space store with
+  RCU over the slots is the fix if programs show it matters.
 - Rings charge their memory to a resource domain, and since Phase 6 so
   do the endpoints, notifications and processes a program makes with
   `process.create`. Queued messages, and the endpoints and notifications

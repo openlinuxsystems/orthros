@@ -333,6 +333,41 @@ fn slot_flags_stay_with_the_slot() {
 }
 
 #[test]
+fn a_cached_capability_leaving_its_slot_makes_the_store_stale() {
+    let mut caps = store();
+    let a = caps.create_space(4).unwrap();
+    caps.create(at(a, 0), ObjectKind::Endpoint).unwrap();
+    caps.derive(at(a, 0), at(a, 1), Derivation::COPY).unwrap();
+    assert!(!caps.take_stale());
+    // Deleting or moving a capability nobody cached changes nothing cached.
+    caps.move_cap(at(a, 1), at(a, 2)).unwrap();
+    caps.delete(at(a, 2), &mut |_| {}).unwrap();
+    assert!(!caps.take_stale());
+    assert_eq!(caps.get_to_cache(at(a, 1)), Err(CapError::Empty));
+    // Once cached, moving it out of its slot or deleting it does.
+    let cap = caps.get_to_cache(at(a, 0)).unwrap();
+    assert_eq!(caps.get(at(a, 0)), Ok(cap));
+    caps.derive(at(a, 0), at(a, 1), Derivation::COPY).unwrap();
+    assert!(!caps.take_stale());
+    caps.move_cap(at(a, 0), at(a, 3)).unwrap();
+    assert!(caps.take_stale());
+    assert!(!caps.take_stale());
+    // Its new slot is not cached.
+    caps.delete(at(a, 3), &mut |_| {}).unwrap();
+    assert!(!caps.take_stale());
+    // A revoke of its parent, and destroying its space, take it out too.
+    caps.get_to_cache(at(a, 1)).unwrap();
+    caps.create(at(a, 0), ObjectKind::Notification).unwrap();
+    caps.derive(at(a, 0), at(a, 2), Derivation::COPY).unwrap();
+    caps.get_to_cache(at(a, 2)).unwrap();
+    assert_eq!(caps.revoke(at(a, 0), usize::MAX, &mut |_| {}), Ok(Progress::Done));
+    assert!(caps.take_stale());
+    caps.destroy_space(a, &mut |_| {}).unwrap();
+    assert!(caps.take_stale());
+    caps.audit().unwrap();
+}
+
+#[test]
 fn spaces_grow_and_keep_what_they_hold() {
     let mut caps = store();
     let a = caps.create_space(2).unwrap();
@@ -908,6 +943,30 @@ proptest! {
             run.caps.destroy_space(run.spaces[space as usize], &mut sink).unwrap();
         }
         prop_assert_eq!(run.caps.census(), Census::default());
+    }
+
+    /// A cache of capabilities looked up with `get_to_cache`, emptied
+    /// whenever the store says it is stale, never holds a capability its
+    /// slot no longer has: what the kernel's per-CPU caches rely on.
+    #[test]
+    fn a_cache_the_store_keeps_fresh_is_never_wrong(
+        ops in proptest::collection::vec((op(), slot()), 1..60)
+    ) {
+        let mut run = Run::new();
+        let mut cache = HashMap::new();
+        for (op, look) in &ops {
+            run.apply(op);
+            if run.caps.take_stale() {
+                cache.clear();
+            }
+            for (&at, cap) in &cache {
+                prop_assert_eq!(run.caps.get(at), Ok(*cap), "after {:?}", op);
+            }
+            let at = run.at(run.pick(*look, Want::Full(|_| true)));
+            if let Ok(cap) = run.caps.get_to_cache(at) {
+                cache.insert(at, cap);
+            }
+        }
     }
 
     /// Whatever the sequence, no capability in the store holds a right
