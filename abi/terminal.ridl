@@ -60,8 +60,8 @@ const READABLE: u32 = 0x541b;
 const DETACH: u32 = 0x5422;
 /// The session the terminal controls, as a 32-bit number at `buffer`.
 const GET_SESSION: u32 = 0x5429;
-/// On a master: the pseudo-terminal's number N, as a 32-bit number at
-/// `buffer`.
+/// The pseudo-terminal's number N, as a 32-bit number at `buffer`: on
+/// its master, and (unlike Linux, for `ttyname`) on the terminal too.
 const GET_PTY_NUMBER: u32 = 0x80045430;
 /// On a master: locks (non-zero 32-bit number at `buffer`) or unlocks
 /// `/dev/pts/N`; it starts unlocked.

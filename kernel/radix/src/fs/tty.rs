@@ -592,7 +592,8 @@ impl Tty {
                 }
                 put(&(this.session() as u32).to_le_bytes())
             }
-            abi::GET_PTY_NUMBER if master => put(&this.number.to_le_bytes()),
+            // Both sides tell, the terminal's for `ttyname`.
+            abi::GET_PTY_NUMBER => put(&this.number.to_le_bytes()),
             abi::SET_PTY_LOCK if master => {
                 let lock = word_in()? != 0;
                 this.state.lock().locked = lock;

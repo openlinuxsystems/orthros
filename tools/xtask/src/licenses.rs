@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::ports::Ports;
 use crate::process::{self, step};
 use crate::{Context, Ctx, Error, Result, VERSION, kernel, userspace};
 
@@ -47,7 +48,8 @@ const SYSROOT_CRATES: &[(&str, &str)] = &[
 /// Which allow-list a component is checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Area {
-    /// Linked into the kernel (and, later, /system Rust code): permissive only.
+    /// Linked into the kernel or a /system program, in Rust or in C:
+    /// permissive only.
     Kernel,
     /// A separate boot loader program.
     Bootloader,
@@ -98,9 +100,10 @@ pub struct Extras<'a> {
     pub mkrescue: &'a Path,
     /// Whether the image carries Intel microcode.
     pub microcode: bool,
-    /// Whether the image carries the user programs: the test image and
-    /// the boot archive.
-    pub programs: bool,
+    /// The ports, when the image carries the user programs: the test
+    /// image and the boot archive, with the C programs and what the
+    /// ports put there.
+    pub programs: Option<&'a Ports>,
 }
 
 /// Lists the image's components, checks their licenses, and writes the
@@ -108,7 +111,7 @@ pub struct Extras<'a> {
 pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String> {
     let mut packages = rust_crates(ctx, &KERNEL_PROGRAM)?;
     packages.extend(sysroot_crates(ctx)?);
-    if extras.programs {
+    if let Some(ports) = extras.programs {
         for program in &USER_PROGRAMS {
             for package in rust_crates(ctx, program)? {
                 // `core` and the like are listed once, from the kernel.
@@ -118,6 +121,7 @@ pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String>
                 }
             }
         }
+        packages.extend(c_packages(ctx, ports));
     }
     packages.push(grub(ctx, extras.mkrescue)?);
     if extras.microcode {
@@ -461,6 +465,71 @@ fn rustc_info(ctx: &Ctx) -> Result<Rustc> {
             .unwrap_or_else(|| "unknown".into())
     };
     Ok(Rustc { sysroot, release: field("release:"), commit: field("commit-hash:") })
+}
+
+/// What the C programs of the boot archive are made of: Dukovo's own
+/// test programs, each port that is not part of the toolchain and the
+/// sources unpacked in it, and the compiler-rt builtins every C program
+/// links (ADR 0069).
+fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
+    let commit = git_commit(ctx);
+    let mut packages = vec![Package {
+        name: "dukovo-posix-tests".into(),
+        version: VERSION.into(),
+        license: "Apache-2.0 OR MIT".into(),
+        area: Area::Kernel,
+        download: format!("git+https://github.com/openlinuxsystems/orthros@{commit}"),
+        sha256: None,
+        notices: Vec::new(),
+        comment: format!("Part of Dukovo: the C test programs of {}.", userspace::POSIX_SOURCES),
+    }];
+    for port in ports.ports.iter().filter(|port| !port.recipe.toolchain) {
+        let recipe = &port.recipe;
+        packages.push(Package {
+            name: recipe.name.clone(),
+            version: recipe.version.clone(),
+            license: recipe.license.clone(),
+            area: Area::Kernel,
+            download: format!("git+{}@{}", recipe.source.git, recipe.source.commit),
+            sha256: None,
+            notices: notice_files(&port.sources[0]),
+            comment: format!(
+                "{}, from {} ({}); built by ports/{} of Dukovo.",
+                recipe.summary,
+                recipe.homepage,
+                recipe.source.tag.as_deref().unwrap_or(&recipe.source.commit),
+                recipe.name
+            ),
+        });
+        for (extra, source) in recipe.extra.iter().zip(&port.sources[1..]) {
+            let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
+            packages.push(Package {
+                name: name.to_string(),
+                version: extra.commit[..12].to_string(),
+                license: extra.license.clone(),
+                area: Area::Kernel,
+                download: format!("git+{}@{}", extra.git, extra.commit),
+                sha256: None,
+                notices: notice_files(source),
+                comment: format!("Built into {} {} from its {}.", recipe.name, recipe.version, extra.path),
+            });
+        }
+    }
+    let llvm = ports.toolchain.llvm_version();
+    packages.push(Package {
+        name: "compiler-rt-builtins".into(),
+        version: llvm.clone(),
+        license: "Apache-2.0 WITH LLVM-exception".into(),
+        area: Area::Kernel,
+        download: "https://github.com/llvm/llvm-project".into(),
+        sha256: None,
+        notices: Vec::new(),
+        comment: format!(
+            "The compiler-rt builtins of LLVM {llvm}, from the build host, which every C \
+             program links (https://compiler-rt.llvm.org)."
+        ),
+    });
+    packages
 }
 
 /// GRUB, which grub-mkrescue copies from the build host into every image.

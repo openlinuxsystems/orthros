@@ -189,6 +189,15 @@ impl<S: AsRef<[Action]> + AsMut<[Action]>> Actions<S> {
             || (action.handler == DEFAULT && default_action(signal) == DefaultAction::Ignore)
     }
 
+    /// Whether children that end are reaped at once instead of waiting
+    /// as zombies for `wait`: SIGCHLD is set to SIG_IGN, or its action has
+    /// SA_NOCLDWAIT. SIGCHLD's default action does nothing too, but its
+    /// children stay to be waited for (POSIX).
+    pub fn reaps_children(&self) -> bool {
+        let action = self.get(SIGCHLD);
+        action.handler == IGNORE || action.has(ActionFlags::NO_CHILD_WAIT)
+    }
+
     /// What delivering `signal` comes to now.
     pub fn disposition(&self, signal: u32) -> Disposition {
         let action = self.get(signal);

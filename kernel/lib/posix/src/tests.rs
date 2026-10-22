@@ -56,6 +56,14 @@ fn kill_and_stop_keep_their_default() {
     assert_eq!(actions.disposition(SIGTSTP), Disposition::Stop);
     assert_eq!(actions.disposition(SIGCHLD), Disposition::Ignore);
     assert!(actions.ignores(SIGCHLD) && !actions.ignores(SIGTERM));
+    // Ignored by default, but its children wait for `wait`.
+    assert!(!actions.reaps_children());
+    let ignore = Action { handler: IGNORE, ..Action::default() };
+    assert_eq!(actions.set(SIGCHLD, ignore), Ok(Action::default()));
+    assert!(actions.reaps_children());
+    let no_wait = Action { flags: ActionFlags::NO_CHILD_WAIT.0, ..Action::default() };
+    assert_eq!(actions.set(SIGCHLD, no_wait), Ok(ignore));
+    assert!(actions.reaps_children());
 }
 
 #[test]

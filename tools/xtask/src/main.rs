@@ -19,6 +19,7 @@ mod krelocs;
 mod ksyms;
 mod licenses;
 mod lint;
+mod ports;
 mod process;
 mod qemu;
 mod screen;
@@ -43,6 +44,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("setup", "Install the pinned Rust toolchain, then run doctor"),
     ("doctor", "Check host tools and print the commands that install what is missing"),
     ("build", "Build the kernel, with its symbol table, and the user programs into out/sysroot"),
+    ("ports", "Build the ports (the C library and programs from elsewhere) into out/sysroot"),
     ("image", "Build the bootable USB image (or an ISO with --iso)"),
     ("run", "Boot the image in QEMU with the serial console on this terminal"),
     ("test", "Run unit tests, then boot the image in QEMU under UEFI and BIOS"),
@@ -98,12 +100,28 @@ Exits with status 1 when a required tool is missing."
 
 Builds the Radix kernel for its own target (kernel/targets/), writes the
 kernel symbol table into it, and places it in out/sysroot/boot/radix. Then
-builds the user programs (userspace/, for userspace/targets/), places
-their test image in out/sysroot/boot/usertests, and writes the C headers
-of the system call interface (abi/*.ridl) into out/sysroot/include/radix.
+writes the C headers of the system call interface (abi/*.ridl) into
+out/sysroot/system/include/radix, builds the ports that changed (see
+`./ob help ports`) and the C test programs, builds the user programs
+(userspace/, for userspace/targets/), places their test image in
+out/sysroot/boot/usertests, and writes the boot archive.
 
   --debug      Build without optimisation
   --release    Build with optimisation (the default from dukovo.toml)"
+        }
+        "ports" => {
+            "Usage: ./ob ports [--rebuild <name>]...
+
+Builds the ports in ports/, each after those it needs: the C library
+(mlibc), the C++ headers it is built with, and programs from elsewhere.
+Each source is fetched with git into target/ports once, by the commit its
+recipe pins, and checked to be that commit; a port is built again only
+when its directory, the toolchain or a port it needs changed. The
+toolchain is the host's Clang (20 or later) and LLD, wrapped by
+out/toolchain/bin/x86_64-radix-cc and the Meson cross files in
+out/toolchain/meson. `./ob build` runs this first.
+
+  --rebuild <name>   Build this port even if nothing changed; repeat for more"
         }
         "image" => {
             "Usage: ./ob image [--iso] [--cmdline <flags>] [--microcode <path>]
@@ -487,8 +505,16 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
             let profile = args.profile(&ctx.config)?;
             args.finish()?;
             kernel::build(&ctx, profile)?;
-            userspace::build(&ctx, profile)?;
-            userspace::install_headers(&ctx).map(|_| ())
+            userspace::build(&ctx, profile).map(|_| ())
+        }
+        "ports" => {
+            let mut rebuild = Vec::new();
+            while let Some(name) = args.value("--rebuild")? {
+                rebuild.push(name);
+            }
+            args.finish()?;
+            userspace::install_headers(&ctx)?;
+            ports::build_all(&ctx, &rebuild).map(|_| ())
         }
         "image" => {
             let iso = args.flag("--iso");

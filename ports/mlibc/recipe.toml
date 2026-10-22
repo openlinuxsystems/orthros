@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The C library (ADR 0068): mlibc, with its Radix system layer in
+# sysdeps/radix, and the two libraries its Meson build takes as
+# subprojects, at the commits mlibc 7.0.0's wrap files pin.
+name = "mlibc"
+version = "7.0.0"
+summary = "the C library"
+license = "MIT"
+homepage = "https://github.com/managarm/mlibc"
+depends = ["freestnd-cxx-hdrs"]
+
+[source]
+git = "https://github.com/managarm/mlibc.git"
+commit = "7c2a178142625cc9852e59a1a090468c61a62d3b"
+tag = "v7.0.0"
+
+# Header-only C++ containers and utilities, compiled into the C library.
+[[extra]]
+path = "subprojects/frigg"
+git = "https://github.com/managarm/frigg.git"
+commit = "b0dbea66bc19f7c5546f0039a3be842feb02678c"
+license = "MIT"
+
+# Header-only smart pointers, compiled into the C library.
+[[extra]]
+path = "subprojects/libsmarter"
+git = "https://github.com/managarm/libsmarter.git"
+commit = "f7d061bc37d485418344452c7ceb28d5df3ba85d"
+license = "MIT"

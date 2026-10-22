@@ -280,7 +280,8 @@ interface process = 0x000a version 2 {
                 arguments_too_long, not_found];
     /// Waits for a child of the caller to end (or with `flags`, to stop or
     /// continue), and returns its number and wait status and the CPU time
-    /// it used, in user mode and in all. `pid` names the child, or is -1
+    /// it used, in user mode and in the kernel (all of it counts as user
+    /// mode for now: radix-posix(7)). `pid` names the child, or is -1
     /// for any child, 0 for any in the caller's process group, or minus a
     /// process group. With no_hang it returns at once, with process 0 if
     /// none has changed. A child that ended is reaped, unless no_reap.
@@ -320,8 +321,9 @@ interface process = 0x000a version 2 {
                                restorer: addr)
         -> (handler: addr, flags: u64, mask: u64, restorer: addr)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
-    /// The CPU time the caller's threads used, in user mode and in all,
-    /// and the same for its children that it has waited for.
+    /// The CPU time the caller's threads used, in user mode and in the
+    /// kernel (all of it counts as user mode for now: radix-posix(7)), and
+    /// the same for its children that it has waited for.
     method times = 19 ()
         -> (user_ns: u64, system_ns: u64, children_user_ns: u64, children_system_ns: u64)
         raises [no_such_slot, empty_slot, missing_rights];

@@ -249,11 +249,7 @@ pub fn exited(process: &ProcessObject) {
         let Some(me) = tree.get(pid) else { return (None, None) };
         let session = me.session;
         let parent = find(tree, me.parent);
-        let auto_reap = parent.as_ref().is_some_and(|parent| {
-            let posix = parent.posix.lock();
-            posix.actions.ignores(SIGCHLD)
-                || posix.actions.get(SIGCHLD).has(radix_abi::signal::ActionFlags::NO_CHILD_WAIT)
-        });
+        let auto_reap = parent.as_ref().is_some_and(|parent| parent.posix.lock().actions.reaps_children());
         // Groups this end may leave orphaned with stopped members: its
         // own, and its children's.
         let mut groups = [0u64; 8];
