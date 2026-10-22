@@ -43,7 +43,7 @@ use radix_sync::SpinLock;
 use crate::cpu::{self, msr};
 use crate::memory::{self, HUGE_PAGE, LARGE_PAGE, PAGE};
 use crate::percpu::{self, PerCpu};
-use crate::{apic, interrupts, time};
+use crate::{apic, interrupts, smp, time};
 
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -706,7 +706,10 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         cpu::pause();
     };
     let mut targets = [0u64; MAX_CPUS / 64];
-    for (index, cpu) in (0..MAX_CPUS).filter_map(|i| Some((i, percpu::get(i)?))) {
+    // Only the CPUs the firmware lists can be online: on a machine with a
+    // few, looking at all MAX_CPUS slots made up most of an unmap's cost.
+    let cpus = smp::count();
+    for (index, cpu) in (0..cpus).filter_map(|i| Some((i, percpu::get(i)?))) {
         if index != me
             && cpu.online.load(Ordering::Acquire)
             && !cpu.stopped.load(Ordering::Relaxed)
@@ -729,7 +732,7 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         slot.store(word, Ordering::Relaxed);
     }
     SHOOTDOWN.generation.store(generation, Ordering::Release);
-    for index in (0..MAX_CPUS).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
+    for index in (0..cpus).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
         if let Some(cpu) = percpu::get(index) {
             apic::send_fixed(cpu.apic_id.load(Ordering::Relaxed), interrupts::VECTOR_TLB);
         }

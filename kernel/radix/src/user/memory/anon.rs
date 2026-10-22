@@ -39,7 +39,7 @@ use radix_hal::{PageEdit, UserAccess, UserMode};
 use radix_mm::{FRAMES, Flags, Owner};
 use radix_vfs::{NodeRef, Out};
 
-use super::{Backing, Region, SpaceObject, SpaceRef};
+use super::{Backing, Region, SpaceObject, SpaceRef, first_after, insert, overlaps};
 use crate::Arch;
 use crate::user::{Result, error};
 
@@ -191,9 +191,6 @@ impl SpaceObject {
             return Err(Kernel::InvalidArgument.status(1));
         }
         let mut regions = self.regions.lock();
-        let overlaps = |regions: &[Region], start: u64, end: u64| {
-            regions.iter().any(|r| r.start < end && start < r.end())
-        };
         let range = |start: u64| radix_ipc::range::user_pages(start, pages).map(|end| (start, end));
         let (start, end) = match placement {
             Placement::Fixed(at) | Placement::FixedNoReplace(at) => {
@@ -229,10 +226,7 @@ impl SpaceObject {
             backing: Backing::Anon(anon),
             offset: 0,
         };
-        let at = regions.iter().position(|r| r.start > start).unwrap_or(regions.len());
-        // Room was reserved above; the list stays sorted.
-        let _ = regions.push_within_capacity(region);
-        regions[at..].rotate_right(1);
+        insert(&mut regions, region);
         Ok(start)
     }
 
@@ -244,8 +238,11 @@ impl SpaceObject {
         let mut regions = self.regions.lock();
         // All of it anonymous, with no gap.
         let mut covered = start;
-        for region in regions.iter().filter(|r| r.start < end && start < r.end()) {
-            if region.start > covered || !matches!(region.backing, Backing::Anon(_)) {
+        for region in &regions[first_after(&regions, start)..] {
+            if covered >= end
+                || region.start > covered
+                || !matches!(region.backing, Backing::Anon(_))
+            {
                 break;
             }
             covered = region.end();
@@ -255,7 +252,8 @@ impl SpaceObject {
         }
         Self::split_at(&mut regions, start)?;
         Self::split_at(&mut regions, end)?;
-        for region in regions.iter_mut().filter(|r| r.start < end && start < r.end()) {
+        let first = first_after(&regions, start);
+        for region in regions[first..].iter_mut().take_while(|r| r.start < end) {
             let Backing::Anon(anon) = &mut region.backing else { continue };
             anon.access = access;
             let shared = anon.shared;
@@ -331,7 +329,8 @@ impl SpaceObject {
     pub fn resolve(&self, address: u64, write: bool, execute: bool) -> Fault {
         let page = address & !(PAGE_SIZE - 1);
         let regions = self.regions.lock();
-        let Some(region) = regions.iter().find(|r| r.start <= page && page < r.end()) else {
+        let Some(region) = regions.get(first_after(&regions, page)).filter(|r| r.start <= page)
+        else {
             return Fault::Refused;
         };
         let Backing::Anon(anon) = &region.backing else { return Fault::Refused };

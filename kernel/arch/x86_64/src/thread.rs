@@ -65,6 +65,7 @@ pub enum UserEntry {
 }
 
 /// A word of the running context's block.
+#[inline]
 fn current_word(offset: usize) -> &'static AtomicU64 {
     let block = percpu::current().context.load(Ordering::Relaxed);
     assert!(block != 0, "no context runs on this CPU");
@@ -76,6 +77,7 @@ fn current_word(offset: usize) -> &'static AtomicU64 {
 }
 
 /// Records how the running context came in from user mode.
+#[inline]
 pub fn set_user_entry(entry: UserEntry) {
     current_word(USER_ENTRY).store(entry as u64, Ordering::Relaxed);
 }
@@ -99,6 +101,7 @@ pub fn request_full_return(rcx: u64, r11: u64) {
 
 /// The RCX and R11 the running context's system call is to return with,
 /// if it asked for a full return.
+#[inline]
 pub fn full_return() -> Option<(u64, u64)> {
     if current_word(FULL_RETURN).load(Ordering::Relaxed) == 0 {
         return None;
@@ -110,11 +113,13 @@ pub fn full_return() -> Option<(u64, u64)> {
 }
 
 /// Takes the running context's request for a full return: its RCX and
-/// R11, if it made one.
+/// R11, if it made one. Every system call asks, so the usual answer, none,
+/// takes one look.
+#[inline]
 pub fn take_full_return() -> Option<(u64, u64)> {
-    let full = full_return();
+    let full = full_return()?;
     current_word(FULL_RETURN).store(0, Ordering::Relaxed);
-    full
+    Some(full)
 }
 
 /// The running context's extended-state save area.

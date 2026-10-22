@@ -417,9 +417,20 @@ pub fn current_index() -> usize {
     index
 }
 
-/// The running CPU's data.
+/// The running CPU's data, from the address it keeps of itself: one load,
+/// where indexing [`CPUS`] takes a bounds check and a multiplication, and
+/// system calls and the scheduler ask for it several times each.
 pub fn current() -> &'static PerCpu {
-    &CPUS[current_index().min(MAX_CPUS - 1)]
+    let addr: usize;
+    // SAFETY: GS base points at this CPU's `PerCpu` from `set_current` on,
+    // which stores the structure's own address at offset 0 (`self_addr`, an
+    // `AtomicUsize` read with a plain load) before pointing GS base at it.
+    // The address is an element of `CPUS`, a static that lives for ever and
+    // is only reached through shared references.
+    unsafe {
+        asm!("mov {}, gs:[0]", out(reg) addr, options(nostack, preserves_flags, readonly));
+        &*(addr as *const PerCpu)
+    }
 }
 
 /// Points GS base at CPU `index`'s data. Called first thing on each CPU.

@@ -83,8 +83,8 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("cap_info", 470),                         // 425
     ("random_words", 2_500),                   // 2,221
     ("context_switch", 1_100),                 // 959
-    ("fresh_page", 11_000),                    // 9,868
-    ("tlb_local", 5_600),                      // 5,024
+    ("fresh_page", 9_900),                     // 8,986
+    ("tlb_local", 3_500),                      // 3,106
     ("file_open_close", 4_300),                // 3,865
     ("file_stat", 1_700),                      // 1,512
     ("file_read_4k", 5_500),                   // 4,973

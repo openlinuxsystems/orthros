@@ -439,6 +439,9 @@ same-CPU round trip is two context switches and no timer write, and
 waking a thread pinned to a CPU, or one whose last CPU is idle, reads no
 other CPU's load; a cross-CPU wake-up finds the other CPU polling (ADR
 0037) and costs a write instead of an interrupt.
+An unmap picks the CPUs to flush from those the firmware lists, not
+from every slot of the per-CPU table: until Phase 8 it looked at all
+256, which was most of `tlb_local`'s cost.
 A TLB shootdown is the same system calls as `tlb_local` plus an
 interrupt to the other CPU and its answer; under KVM most of that time
 is the host sending and delivering the interrupt, which Linux pays too.

@@ -73,7 +73,9 @@ clocks, the auxiliary vector), so that mlibc's Linux ABI headers, Rust's
 
 An address space holds anonymous regions besides frames: runs of
 addresses with an access and nothing behind them yet, sorted in a list
-under the space's regions lock. A fault in one (or a kernel copy to or
+under the space's regions lock, which a fault, `mmap` or `munmap`
+searches by halves, so a program with many mappings pays little for
+them. A fault in one (or a kernel copy to or
 from user memory that faults there) makes the page: a frame from the
 allocator owned by `Anon`, zeroed or filled from the file the region
 maps, charged to the space's domain. Entries for pages under `PROT_NONE`

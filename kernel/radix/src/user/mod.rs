@@ -272,16 +272,23 @@ fn on_user_page(address: u64, write: bool) -> bool {
 /// takes them (`posix::signal::deliver`).
 fn on_return() {
     let Some(me) = sched::running() else { return };
-    if !me.interrupted() {
-        return;
+    if me.interrupted() {
+        returning_interrupted(&me);
     }
+}
+
+/// [`on_return`] for a thread with a signal to take or a stop to make:
+/// kept out of line, so that every other return skips its frame.
+#[cold]
+#[inline(never)]
+fn returning_interrupted(me: &ThreadRef) {
     Arch::enable_interrupts();
     let Some(user) = me.user() else { return };
     if me.should_stop() {
         info!("User: thread {} ({}) stopped", me.id(), me.name());
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
-    posix::signal::deliver(&me, user);
+    posix::signal::deliver(me, user);
     if me.should_stop() {
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }

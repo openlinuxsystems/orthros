@@ -112,6 +112,28 @@ impl Region {
     }
 }
 
+/// The index of the first of `regions` that ends after `at`. The list is
+/// sorted by address and its regions are disjoint, so a range from `at`
+/// can only meet regions from this one on: a binary search, which keeps
+/// a fault or an `mmap` cheap in a program with many regions.
+fn first_after(regions: &[Region], at: u64) -> usize {
+    regions.partition_point(|r| r.end() <= at)
+}
+
+/// Whether any of `regions` meets the range from `start` to `end`.
+fn overlaps(regions: &[Region], start: u64, end: u64) -> bool {
+    regions.get(first_after(regions, start)).is_some_and(|r| r.start < end)
+}
+
+/// Puts `region`, which meets none of them, in its place among
+/// `regions`, which must have room for it.
+fn insert(regions: &mut Vec<Region, Kmalloc>, region: Region) {
+    let at = first_after(regions, region.start);
+    // The caller reserved the room; the list stays sorted by address.
+    let _ = regions.push_within_capacity(region);
+    regions[at..].rotate_right(1);
+}
+
 /// An address space object.
 pub struct SpaceObject {
     arch: <Arch as UserMode>::Space,
@@ -182,7 +204,7 @@ impl SpaceObject {
     ) -> Result<()> {
         let end = user_pages(start, pages).ok_or(error(Kernel::InvalidArgument))?;
         let mut regions = self.regions.lock();
-        if regions.iter().any(|r| r.start < end && start < r.end()) {
+        if overlaps(&regions, start, end) {
             return Err(error(Kernel::AlreadyMapped));
         }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
@@ -199,11 +221,7 @@ impl SpaceObject {
                 }));
             }
         }
-        let region = Region { start, pages, backing: backing.clone(), offset };
-        let at = regions.iter().position(|r| r.start > start).unwrap_or(regions.len());
-        // Room was reserved above; the list stays sorted by address.
-        let _ = regions.push_within_capacity(region);
-        regions[at..].rotate_right(1);
+        insert(&mut regions, Region { start, pages, backing: backing.clone(), offset });
         Ok(())
     }
 
@@ -214,11 +232,11 @@ impl SpaceObject {
         let mut regions = self.regions.lock();
         // Every page must be covered: the regions are sorted and disjoint.
         let mut covered = start;
-        for region in regions.iter().filter(|r| r.start < end && start < r.end()) {
-            if region.start > covered {
+        for region in &regions[first_after(&regions, start)..] {
+            if covered >= end || region.start > covered {
                 break;
             }
-            covered = covered.max(region.end());
+            covered = region.end();
         }
         if covered < end {
             return Err(error(Kernel::NotMapped));
@@ -229,9 +247,10 @@ impl SpaceObject {
     /// Splits the region that `at` falls inside, if one does, in two at
     /// `at` (a page boundary).
     fn split_at(regions: &mut Vec<Region, Kmalloc>, at: u64) -> Result<()> {
-        let Some(index) = regions.iter().position(|r| r.start < at && at < r.end()) else {
+        let index = first_after(regions, at);
+        if regions.get(index).is_none_or(|r| r.start >= at) {
             return Ok(());
-        };
+        }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
         let region = &mut regions[index];
         let before = (at - region.start) / PAGE_SIZE;
@@ -255,17 +274,14 @@ impl SpaceObject {
     fn cut(&self, regions: &mut Vec<Region, Kmalloc>, start: u64, end: u64) -> Result<()> {
         Self::split_at(regions, start)?;
         Self::split_at(regions, end)?;
-        let mut index = 0;
-        while index < regions.len() {
-            let region = &regions[index];
-            if region.end() <= start || region.start >= end {
-                index += 1;
-                continue;
-            }
-            // Wholly inside, after the splits.
-            let region = regions.remove(index);
-            self.clear_region(&region);
+        // After the splits, the regions the range meets lie wholly inside.
+        let first = first_after(regions, start);
+        let last = first + regions[first..].partition_point(|r| r.start < end);
+        for region in &regions[first..last] {
+            self.clear_region(region);
         }
+        regions[first..].rotate_left(last - first);
+        regions.truncate(regions.len() - (last - first));
         Ok(())
     }
 
