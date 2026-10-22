@@ -70,6 +70,13 @@ dependencies = [
 [[package]]
 name = "radix-hal"
 version = "0.0.1"
+dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-hw"
+version = "0.0.1"
 
 [[package]]
 name = "radix-kdb"

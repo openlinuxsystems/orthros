@@ -9,13 +9,15 @@ dukovo-boot - how Dukovo boots, and the kernel command line
 
 # DESCRIPTION
 
-This page describes the boot path as of Phase 3 of the roadmap: the Radix
+This page describes the boot path as of Phase 7 of the roadmap: the Radix
 kernel moves itself to a random address in the higher half of the address
 space, brings up its consoles, builds its page tables, reads the ACPI
 tables, hands the machine's memory to its frame allocator and heap,
 programs the interrupt controllers and timers, sets up its capability
-store, starts every CPU and reports what it found. It then idles; later phases continue from there.
-The page grows with every phase that changes how the system starts.
+store, user mode and the root of the file tree, starts every CPU, finds
+the disks on PCI, reports what it found, and starts the first program,
+Spark. The page grows with every phase that changes how the system
+starts.
 
 *radix-debug*(7) describes what happens when something goes wrong: the
 panic report, the crash log, the kernel debugger and trace points.
@@ -115,14 +117,25 @@ _/system/share/licenses/_
   SMAP protect the kernel from it, and the *User:* line the size of the
   *usertests* image, if GRUB loaded one, which only the self-tests start
   programs from (see *radix-debug*(7)).
+. The kernel makes the root of the file tree, an empty tmpfs, which Spark
+  builds the directory hierarchy on (*Files:* line; see
+  *radix-files*(7)).
 . The other CPUs listed in the MADT are started one at a time with INIT
   and start-up IPIs. Each loads its own GDT, TSS and IDT, applies
   microcode, enables its local APIC and timer, and idles.
 . The kernel prints the CPU list. Every CPU then runs threads: each gets
   its run queue and its idle thread, and the kernel starts its own
   threads, one *work/*_N_ worker per CPU, the *reaper* that frees the
-  stacks of threads that have exited, and the out-of-memory *supervisor*
-  (see *radix-scheduling*(7)). It checks that every CPU takes timer
+  stacks of threads that have exited, the out-of-memory *supervisor*
+  (see *radix-scheduling*(7)) and the *writeback* thread that syncs the
+  filesystems every five seconds (see *radix-files*(7)).
+. The kernel walks PCI through the windows of the ACPI MCFG table, logs
+  every function it finds on a *PCI:* line, with its vendor and device
+  IDs and class, and sets up each virtio block device: a *Disk:* line
+  names it (_vda_, _vdb_, ...) and its size, and the next lines its
+  partition table and partitions. The functions are listed in
+  _/sys/bus/pci/devices_ (*radix-sysfs*(5)).
+. It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
 . Unless a self-test ran, the kernel starts the first program: it checks
@@ -135,25 +148,39 @@ _/system/share/licenses/_
 . With the *kdb* flag the kernel then waits for debugger commands;
   otherwise *kmain* exits and the CPUs idle until a thread has work.
 
-A boot on QEMU with four CPUs ends like this (times in seconds since the
-kernel started; messages before timer calibration show 0):
+A boot on QEMU with four CPUs and one virtio disk ends like this (times in
+seconds since the kernel started; messages before timer calibration show
+0):
 
 ```
-[    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
-[    0.398210] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
-[    0.399102] Lock checker: off (the lockdep flag turns it on)
-[    0.401388] Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
-[    0.427524] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
-[    0.468681] User: the usertests image is 152 KiB
-[    0.409872] CPUs: 4 of 4 online:
-[    0.425233]   cpu0: APIC ID 0, boot CPU, online
-[    0.456580]   cpu1: APIC ID 1, online
-[    0.485571]   cpu2: APIC ID 2, online
-[    0.510992]   cpu3: APIC ID 3, online
-[    0.524816] Scheduler: 4 CPUs run threads, on 1 NUMA node
-[    0.539507] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 9, cpu1 16, cpu2 15, cpu3 14)
-[    0.558527] IPI: all 3 other CPUs answered a ping (xAPIC)
-[    0.572421] Boot complete.
+[    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
+[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.419834] Lock checker: off (the lockdep flag turns it on)
+[    0.445393] Capabilities: ready; 17 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
+[    0.494239] Files: the root is a tmpfs; Spark mounts the rest
+[    0.520196] User: the usertests image is 183 KiB
+[    0.613107] CPUs: 4 of 4 online:
+[    0.634020]   cpu0: APIC ID 0, boot CPU, online
+[    0.655178]   cpu1: APIC ID 1, online
+[    0.676009]   cpu2: APIC ID 2, online
+[    0.696883]   cpu3: APIC ID 3, online
+[    0.720307] Scheduler: 4 CPUs run threads, on 1 NUMA node
+[    0.745062] PCI: 0000:00:00.0 8086:29c0 class 060000: host bridge
+[    0.769244] PCI: 0000:00:01.0 1234:1111 class 030000: display controller
+[    0.792540] PCI: 0000:00:02.0 1b36:000d class 0c0330: USB controller
+[    0.828349] PCI: 0000:00:03.0 1af4:1001 class 010000: SCSI controller, virtio
+[    0.864507] Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, MSI-X vector 0x50
+[    0.893952] Disk: vda has no partition table; it is used whole
+[    0.916262] PCI: 0000:00:1f.0 8086:2918 class 060100: ISA bridge
+[    0.941169] PCI: 0000:00:1f.2 8086:2922 class 010601: SATA controller
+[    0.964452] PCI: 0000:00:1f.3 8086:2930 class 0c0500: SMBus controller
+[    0.985756] PCI: 7 functions on 1 segment; 1 virtio disk
+[    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
+[    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
+[    1.049978] Boot complete.
+[    1.073162] Init: the boot archive is 206 KiB with 9 entries; starting /system/bin/spark
+[    1.150677] Init: /system/bin/spark is process 1
 ```
 
 ## Address space

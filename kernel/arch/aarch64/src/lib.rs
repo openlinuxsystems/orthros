@@ -19,9 +19,9 @@ use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
-    MapPageError, PageTable, Platform, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
-    UserMode,
+    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
+    InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageTable, PciSegment, Platform, Smp,
+    SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -176,6 +176,36 @@ impl Timer for Arch {
 
     fn timer_mode() -> &'static str {
         "none"
+    }
+
+    fn wall_clock_ns() -> Option<u64> {
+        None
+    }
+}
+
+impl Devices for Arch {
+    fn pci_segments(_found: &mut dyn FnMut(PciSegment)) {}
+
+    fn map_device(_phys: u64, _len: usize) -> Option<Mmio> {
+        None
+    }
+
+    fn alloc_dma(_pages: usize, _below_4g: bool) -> Option<Dma> {
+        None
+    }
+
+    fn alloc_cache_page() -> Option<radix_hal::Page> {
+        None
+    }
+
+    fn allocate_interrupt(_handler: fn(usize), _arg: usize) -> Option<(u32, MsiMessage)> {
+        None
+    }
+
+    fn free_interrupt(_vector: u32) {}
+
+    fn interrupt_count(_vector: u32) -> u64 {
+        0
     }
 }
 

@@ -65,9 +65,10 @@ These run on the build machine or in CI and are never part of an image.
 | [OVMF](https://github.com/tianocore/tianocore.github.io/wiki/OVMF) from [EDK II](https://github.com/tianocore/edk2) | UEFI firmware for QEMU | BSD-2-Clause-Patent |
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
-| [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue | GPL-3.0-or-later |
+| [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue, and reading and writing the FAT disks of the `storage` boot test on the host | GPL-3.0-or-later |
+| [dosfstools](https://github.com/dosfstools/dosfstools) (`mkfs.fat`, `fsck.fat`) | Making the FAT volumes Radix's FAT tests and the `storage` boot test use, and checking what Radix wrote to them | GPL-3.0-or-later |
 | [Kani](https://github.com/model-checking/kani) 0.68.0, with [CBMC](https://github.com/diffblue/cbmc) | Proofs of the memory manager, capability store, scheduling policy and IPC arithmetic | Apache-2.0 OR MIT (CBMC: BSD-4-Clause) |
-| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler, idle wake-up, endpoint and channel models | MIT |
+| [TLA+ tools](https://github.com/tlaplus/tlaplus) 1.7.4 (TLC), by Leslie Lamport and contributors | Checking the capability, scheduler, idle wake-up, endpoint, channel and FAT cluster models | MIT |
 | [mdBook](https://github.com/rust-lang/mdBook) 0.4.52 | The handbook | MPL-2.0 |
 | [scdoc](https://git.sr.ht/~sircmpwn/scdoc) | Man pages | MIT |
 | [mandoc](https://mandoc.bsd.lv/) | Checking man pages | ISC |
@@ -134,6 +135,22 @@ We implement these from their published descriptions. No code is copied.
 - The ustar interchange format of POSIX.1-1988 (IEEE Std 1003.1, the
   `pax` utility's description in later editions), the format of the boot
   archive ([ADR 0049](docs/adr/0049-boot-archive.md)).
+- Microsoft's "FAT: General Overview of On-Disk Format", version 1.03
+  (2000), and its long file names, from which `radix-fat` implements
+  FAT12, FAT16 and FAT32
+  ([ADR 0056](docs/adr/0056-own-fat-implementation.md)).
+- Howard Hinnant's
+  ["chrono-Compatible Low-Level Date Algorithms"](https://howardhinnant.github.io/date_algorithms.html),
+  which FAT's dates are converted with.
+- The OASIS Virtual I/O Device (virtio) specification, version 1.2: its
+  modern PCI transport, split virtqueues and block device
+  ([ADR 0053](docs/adr/0053-modern-virtio-only.md)).
+- The PCI Local Bus, PCI Express Base and PCI Firmware specifications
+  (PCI-SIG): configuration space through ECAM and the ACPI MCFG table,
+  base address registers, and MSI and MSI-X
+  ([ADR 0052](docs/adr/0052-message-signalled-interrupts-only.md)).
+- The MBR partition table, and the GUID partition table of the UEFI
+  specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,
   Jan Hubička, Andreas Jaeger and Mark Mitchell and maintained by H.J. Lu
   and others, which `radix-elf` reads, with its `R_X86_64_RELATIVE`
@@ -168,6 +185,15 @@ are grateful.
   [ADR 0050](docs/adr/0050-spark-is-started-by-the-kernel-from-the-boot-archive.md)).
 - [CHERI](https://www.cl.cam.ac.uk/research/security/ctsrd/cheri/): a point
   of comparison for the capability model.
+- [Capsicum](https://www.cl.cam.ac.uk/research/security/capsicum/), by
+  Robert N. M. Watson, Jonathan Anderson, Ben Laurie and Kris Kennaway
+  (USENIX Security 2010), with its `openat`-relative lookups that never
+  climb above their directory, and [WASI](https://wasi.dev/)'s preopened
+  directories: how files are reached only through directory capabilities
+  ([ADR 0054](docs/adr/0054-files-through-directory-capabilities.md)).
+- [Plan 9 from Bell Labs](https://9p.io/plan9/): kernel state as plain
+  text read with ordinary file calls, as `/proc` does
+  ([ADR 0057](docs/adr/0057-hierarchy-proc-and-sys.md)).
 - [Linux](https://kernel.org/) and the BSDs: allocation context flags in the
   style of Linux's GFP flags
   ([ADR 0017](docs/adr/0017-explicit-allocation-context.md)), a random
@@ -218,6 +244,21 @@ are grateful.
   `-static-pie` as GCC, glibc and musl build it, and LLVM's lld, which
   links our programs, set what a static position-independent program
   is. No code is taken.
+  Linux's page cache, its XArray (by Matthew Wilcox), which the page
+  index follows with nodes of 64 slots, its flusher threads, its tmpfs,
+  with half of memory as its default size, its names for disks and
+  partitions, the format of its `/proc/mounts` and the layout of its
+  `/sys/block` and `/sys/bus/pci/devices` shaped Radix's storage
+  ([ADR 0055](docs/adr/0055-page-cache-and-writeback.md),
+  [ADR 0057](docs/adr/0057-hierarchy-proc-and-sys.md)); its
+  `-Wframe-larger-than` limit on stack frames is the idea of the kernel's
+  frame budget ([ADR 0058](docs/adr/0058-kernel-stack-frame-budget.md));
+  and its `DCACHE_MOUNTED` flag, which spares a path walk the mount table
+  at a directory nothing is mounted on, is the idea of each mount's
+  filter of mount points, a Bloom filter (Burton H. Bloom, 1970) with
+  one hash, by Fibonacci hashing as Knuth describes it
+  ([ADR 0059](docs/adr/0059-file-operations-fast-paths.md)).
+  No code is taken.
   Linux's btrfs-progs will check the images our own Btrfs code writes.
 - The Rust compiler's performance suite
   ([rustc-perf](https://github.com/rust-lang/rustc-perf)) and

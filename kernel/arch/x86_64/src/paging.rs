@@ -484,6 +484,25 @@ pub fn map_physical(phys: u64, len: u64, access: Access, cache: Cache) -> usize 
     (virt + (phys - first)) as usize
 }
 
+/// Like [`map_physical`], but returns `None` instead of panicking when the
+/// window or memory for page tables runs out (for drivers, after boot).
+pub fn try_map_physical(phys: u64, len: u64, access: Access, cache: Cache) -> Option<usize> {
+    let mut state = STATE.lock();
+    let first = phys & !(PAGE - 1);
+    let last = phys.checked_add(len.max(1))?.next_multiple_of(PAGE);
+    let virt = window_alloc(&mut state, (last - first) / PAGE)?;
+    let flags = leaf_flags(&state, access, cache);
+    for offset in (0..last - first).step_by(PAGE as usize) {
+        if map_4k(state.pml4, virt + offset, first + offset, flags).is_err() {
+            // The pages mapped so far stay mapped and their window space
+            // taken: device mappings are never undone, so they only cost
+            // address space.
+            return None;
+        }
+    }
+    Some((virt + (phys - first)) as usize)
+}
+
 /// Allocates a stack of `pages` pages in the mapping window, with an
 /// unmapped guard page below it. Returns (guard, stack).
 pub fn allocate_stack(pages: u64) -> (Range<usize>, Range<usize>) {

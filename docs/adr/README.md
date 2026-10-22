@@ -63,3 +63,11 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0049](0049-boot-archive.md) | The programs a machine starts with come in a ustar boot archive that GRUB loads as a module, checked whole before use | Accepted |
 | [0050](0050-spark-is-started-by-the-kernel-from-the-boot-archive.md) | The kernel starts one program, Spark, from the boot archive, gives it the archive and a pool of memory, and stops if it ends | Accepted |
 | [0051](0051-radix-rt-runtime.md) | radix-rt is the Rust runtime of native programs: a heap, arguments, the boot archive and spawning, on top of libradix | Accepted |
+| [0052](0052-message-signalled-interrupts-only.md) | Device interrupts are message-signalled only, and PCI is reached through ECAM | Accepted |
+| [0053](0053-modern-virtio-only.md) | Virtio devices are driven through the modern PCI transport only, with split virtqueues | Accepted |
+| [0054](0054-files-through-directory-capabilities.md) | Files are reached through directory capabilities, with every path resolved beneath one | Accepted |
+| [0055](0055-page-cache-and-writeback.md) | File data lives in per-file page caches, metadata in a block cache per device, written back every five seconds | Accepted |
+| [0056](0056-own-fat-implementation.md) | FAT is our own implementation from Microsoft's specification, checked against dosfstools and mtools | Accepted |
+| [0057](0057-hierarchy-proc-and-sys.md) | Spark builds the directory hierarchy; /proc and /sys are plain text, with Linux's layout where both have a thing | Accepted |
+| [0058](0058-kernel-stack-frame-budget.md) | Every kernel function's stack frame is held to 2 KiB, checked after every release build | Accepted |
+| [0059](0059-file-operations-fast-paths.md) | A path with no `..` is walked without a chain, each mount filters its mount points, and a file method looks its capability up once | Accepted |

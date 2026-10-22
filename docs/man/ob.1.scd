@@ -314,13 +314,15 @@ _target/userspace/_).
 	*fuzz*
 		Boot 2 CPUs with *selftest=fuzz* and the lock checker on: eight
 		groups of three user programs make 4,000 random system calls,
-		methods and ring entries each, sharing endpoints, notifications
-		and memory, and making, building, starting and ending processes
-		of their own. The case fails if the kernel panics or the lock
-		checker reports, if a failed call returns anything but a kernel
-		error that its documentation lists with 0 in every result
-		register, or if the capability store fails its audit or keeps
-		anything afterwards. The log names the seeds; boot with
+		methods and ring entries each, sharing endpoints, notifications,
+		memory and a tmpfs of their own, making, building, starting and
+		ending processes, and calling every directory and file method on
+		files they make. The case fails if the kernel panics or the lock
+		checker reports, if a failed call returns anything but an error
+		that its documentation lists with 0 in every result register, if
+		the capability store fails its audit or keeps anything
+		afterwards, or if the tmpfs, with whatever they mounted in it,
+		cannot be taken away. The log names the seeds; boot with
 		*fuzz-seed=*_n_ to repeat a run.
 
 	*spark*
@@ -332,6 +334,21 @@ _target/userspace/_).
 		of both programs, that each was placed at a random page-aligned
 		address in the image window, the two apart, that the program
 		exited with 0, and that all of its memory came back.
+
+	*storage*
+		Boot 2 CPUs under UEFI with four virtio disks, formatted on the
+		host by *mkfs.fat*: FAT12, FAT16 and FAT32 disks used whole, and
+		one with an MBR partition table holding a FAT32 partition. Spark
+		builds the directory hierarchy and mounts each volume at
+		_/volumes/<name>_; _/system/tests/storage write_ writes files of
+		many sizes, a long-named one and directories to each, checks
+		_/tmp_, _/dev_, _/sys_ and _/proc_, and syncs. On the host,
+		*fsck.fat -n* checks every volume and mtools reads every file
+		back; the host then writes a file to one. A second boot from the
+		same disks runs _/system/tests/storage check_, which reads
+		everything back, the host's file too, and checks that _/proc_
+		lists the running processes. dosfstools and mtools must be
+		installed (*ob doctor* says how).
 
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit

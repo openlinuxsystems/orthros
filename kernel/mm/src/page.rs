@@ -72,11 +72,14 @@ pub enum Owner {
     /// Memory handed to the capability store as a memory object
     /// (`radix-cap`), from which frames and other objects are retyped.
     Memory = 6,
+    /// A page of the page cache: file data and filesystem metadata
+    /// (`radix-vfs`, `radix-block`), which can be dropped and read again.
+    PageCache = 7,
 }
 
 impl Owner {
     /// Every owner, in the order of their numbers.
-    pub const ALL: [Owner; 7] = [
+    pub const ALL: [Owner; 8] = [
         Owner::Kernel,
         Owner::PageTable,
         Owner::Slab,
@@ -84,6 +87,7 @@ impl Owner {
         Owner::Area,
         Owner::PerCpu,
         Owner::Memory,
+        Owner::PageCache,
     ];
 
     fn from_bits(bits: u32) -> Owner {
@@ -100,6 +104,7 @@ impl Owner {
             Owner::Area => "mapped areas",
             Owner::PerCpu => "per-CPU caches",
             Owner::Memory => "memory objects",
+            Owner::PageCache => "page cache",
         }
     }
 }

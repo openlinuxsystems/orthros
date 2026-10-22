@@ -85,6 +85,10 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("context_switch", 1_100),                 // 959
     ("fresh_page", 11_000),                    // 9,868
     ("tlb_local", 5_600),                      // 5,024
+    ("file_open_close", 4_300),                // 3,865
+    ("file_stat", 1_700),                      // 1,512
+    ("file_read_4k", 5_500),                   // 4,973
+    ("file_write_4k", 5_700),                  // 5,169
     ("endpoint_call_same_cpu", 6_200),         // 5,549
     ("notification_pingpong_same_cpu", 6_200), // 5,566
     ("channel_roundtrip_same_cpu", 5_100),     // 4,587
@@ -168,6 +172,25 @@ const ROWS: &[Row] = &[
         "Memory copy, per MiB (32 MiB buffers, `rep movsb`)",
         "memory_copy",
         "the same copy",
+    ),
+    row(
+        "file_open_close",
+        "File opened by name beneath a directory, then closed (tmpfs)",
+        "file_open_close",
+        "openat(2) and close(2), tmpfs",
+    ),
+    row("file_stat", "File status by name (tmpfs)", "file_stat", "fstatat(2), tmpfs"),
+    row(
+        "file_read_4k",
+        "4 KiB read from a file's page in memory (tmpfs)",
+        "file_read_4k",
+        "pread(2), 4 KiB, tmpfs",
+    ),
+    row(
+        "file_write_4k",
+        "4 KiB written over a file's page in memory (tmpfs)",
+        "file_write_4k",
+        "pwrite(2), 4 KiB, tmpfs",
     ),
     row(
         "endpoint_call_same_cpu",

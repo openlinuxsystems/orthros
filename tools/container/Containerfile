@@ -21,7 +21,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential \
         qemu-system-x86 ovmf \
-        grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools \
+        grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools \
         scdoc mandoc gdb default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 

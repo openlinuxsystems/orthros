@@ -50,7 +50,7 @@ fn code_symbols<'a>(elf: &Elf<'a>) -> Option<Vec<(u64, u64, &'a str, bool)>> {
 /// sorted, without overlaps: a label without a size extends to the next
 /// symbol or the end of its section. (The boot code that runs before the
 /// kernel's page tables, in low memory, is left out.)
-fn collect(elf: &Elf<'_>, near: u64) -> Result<Vec<(u64, u64, String)>> {
+pub fn functions(elf: &Elf<'_>, near: u64) -> Result<Vec<(u64, u64, String)>> {
     let Some(mut raw) = code_symbols(elf) else {
         bail!("the kernel has no readable ELF symbol table");
     };
@@ -89,7 +89,7 @@ pub fn embed(bytes: &mut [u8]) -> Result<usize> {
         let Some(section) = elf.section(".ksyms").cloned() else {
             bail!("the kernel has no .ksyms section to hold its symbol table");
         };
-        let functions = collect(&elf, section.addr)?;
+        let functions = functions(&elf, section.addr)?;
         let symbols: Vec<Symbol<'_>> = functions
             .iter()
             .map(|(address, size, name)| Symbol { address: *address, size: *size, name })

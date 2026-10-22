@@ -1,0 +1,46 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Files.
+//!
+//! A file capability comes from radix-directory(2)'s `open`. Reading needs
+//! the read right and writing the write right. Reads and writes go
+//! through the page cache: a read copies from the cache's pages (filling
+//! them from the disk first), a write copies into them, and the disk sees
+//! the change when its filesystem syncs (every five seconds, at `sync`,
+//! and at unmount). The ring's read, write and sync operations
+//! (radix-ring(2)) do the same without a system call each.
+
+module file;
+
+/// The offset of a write that appends: at the end of the file, wherever
+/// that is when the write happens.
+const APPEND: u64 = 0xffffffffffffffff;
+
+/// A file.
+interface file = 0x000c version 1 {
+    kind = file;
+    /// Reads from byte `offset` into `buffer`; returns how many bytes it
+    /// read, fewer than asked at the end of the file. Needs the read right.
+    method read = 1 (offset: u64, buffer: out bytes) -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
+                is_directory, io, corrupt];
+    /// Writes `data` at byte `offset` (APPEND: at the end), growing the
+    /// file if need be; returns how many bytes it wrote. Needs the write
+    /// right.
+    method write = 2 (offset: u64, data: in bytes) -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
+                is_directory, read_only, no_space, too_big, io, corrupt];
+    /// What the file is, as radix-directory(2)'s `stat` says.
+    method stat = 3 () -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+        raises [no_such_slot, empty_slot];
+    /// Makes the file `size` bytes long: cut, or grown with zeros. Needs
+    /// the write right.
+    method set_size = 4 (size: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                is_directory, read_only, no_space, too_big, io, corrupt];
+    /// Writes the file's filesystem's changes to its disk, and returns once
+    /// the disk has them. Needs the write right.
+    method sync = 5 () -> ()
+        raises [no_such_slot, empty_slot, missing_rights, io, corrupt];
+}

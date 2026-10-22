@@ -46,6 +46,17 @@ enum Opcode: u8 {
     /// Completes `args[0]` nanoseconds after it is taken. Timeouts end
     /// while a thread waits in ring_enter, or at the next ring_enter.
     timeout = 5;
+    /// Reads from byte `args[0]` of the file in `cap` into the `args[2]`
+    /// bytes at `args[1]`, as radix-file(2)'s read does; the first value
+    /// is the bytes read.
+    read = 6;
+    /// Writes the `args[2]` bytes at `args[1]` to byte `args[0]` of the
+    /// file in `cap` (APPEND: at its end), as radix-file(2)'s write does;
+    /// the first value is the bytes written.
+    write = 7;
+    /// Writes the changes of the filesystem of the file in `cap` to its
+    /// disk, as radix-file(2)'s sync does.
+    sync = 8;
 }
 
 /// The indexes of one queue. Each queue's indexes have a cache line of

@@ -55,6 +55,33 @@ fn derived_capabilities_never_grant_more() {
 }
 
 #[test]
+fn objects_made_for_a_holder_get_only_the_rights_asked_for() {
+    let mut caps = store();
+    let a = caps.create_space(4).unwrap();
+    let read = Rights::READ | Rights::COPY;
+    // EXECUTE is not a file's right, so it is dropped.
+    caps.create_with_rights(at(a, 0), ObjectKind::File, read | Rights::EXECUTE).unwrap();
+    let cap = caps.get(at(a, 0)).unwrap();
+    assert_eq!(cap.rights(), read);
+    assert_eq!(caps.parent(at(a, 0)), Ok(None));
+    // Nothing made from it gets more.
+    caps.derive(at(a, 0), at(a, 1), Derivation::COPY).unwrap();
+    assert_eq!(caps.get(at(a, 1)).unwrap().rights(), read);
+    assert_eq!(
+        caps.lookup(at(a, 1), ObjectKind::File, Rights::WRITE),
+        Err(CapError::MissingRights(Rights::WRITE))
+    );
+    caps.audit().unwrap();
+    // The object lives while either capability does.
+    let mut bin = Bin::default();
+    caps.delete(at(a, 0), &mut bin.sink()).unwrap();
+    assert!(bin.0.is_empty());
+    caps.delete(at(a, 1), &mut bin.sink()).unwrap();
+    assert_eq!(bin.0.len(), 1);
+    caps.audit().unwrap();
+}
+
+#[test]
 fn transfer_is_a_right_of_its_own() {
     let mut caps = store();
     let a = caps.create_space(4).unwrap();

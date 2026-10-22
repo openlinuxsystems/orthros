@@ -53,10 +53,14 @@ pub enum ObjectKind {
     Ring = 13,
     /// The kernel log, for debugging output.
     KernelLog = 14,
+    /// A file of the VFS.
+    File = 15,
+    /// A directory of the VFS: what paths are resolved beneath.
+    Directory = 16,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 15;
+pub const KINDS: usize = 17;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -76,6 +80,8 @@ impl ObjectKind {
         ObjectKind::Random,
         ObjectKind::Ring,
         ObjectKind::KernelLog,
+        ObjectKind::File,
+        ObjectKind::Directory,
     ];
 
     /// The kind numbered `n`.
@@ -114,6 +120,8 @@ impl ObjectKind {
             ObjectKind::Random => Rights::READ,
             ObjectKind::Ring => Rights::CONTROL.union(Rights::SEND),
             ObjectKind::KernelLog => Rights::WRITE,
+            ObjectKind::File => Rights::READ.union(Rights::WRITE),
+            ObjectKind::Directory => Rights::READ.union(Rights::WRITE).union(Rights::CONTROL),
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -166,6 +174,8 @@ impl ObjectKind {
             ObjectKind::Random => "random",
             ObjectKind::Ring => "ring",
             ObjectKind::KernelLog => "kernel log",
+            ObjectKind::File => "file",
+            ObjectKind::Directory => "directory",
         }
     }
 }

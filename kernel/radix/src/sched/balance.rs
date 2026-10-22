@@ -19,7 +19,7 @@ use core::sync::atomic::Ordering;
 
 use radix_sched::{Level, interval_ticks};
 
-use super::{CPUS, TOPOLOGY, adopt, loads};
+use super::{CPUS, LiveLoads, TOPOLOGY, adopt};
 
 /// Failed attempts at a level after which a cache-hot thread may move.
 const FORCE_AFTER: u32 = 4;
@@ -54,8 +54,7 @@ pub(super) fn idle(cpu: usize, now: u64) -> bool {
 /// Tries to pull one thread to `cpu` across `level`.
 fn pull(cpu: usize, level: Level, now: u64) -> bool {
     let Some(topology) = TOPOLOGY.get() else { return false };
-    let loads = loads();
-    let Some(busiest) = topology.find_busiest(cpu, level, &loads) else { return false };
+    let Some(busiest) = topology.find_busiest(cpu, level, &LiveLoads) else { return false };
     if busiest == cpu {
         return false;
     }

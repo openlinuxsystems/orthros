@@ -24,15 +24,19 @@
 //! anonymous mapping, its first touch and its removal; a TLB shootdown is
 //! a page losing its access while another thread of the process runs on
 //! another CPU; memory bandwidth is `rep movsb` between two buffers larger
-//! than the caches, the same instructions Radix runs.
+//! than the caches, the same instructions Radix runs. The file benchmarks
+//! work on a tmpfs, as Radix's do: opening and closing a file by its name
+//! beneath a directory, its status, and reading and writing its first
+//! page, which is in memory.
 //!
 //! `ob bench` runs it on the host, and also as the init process of a Linux
 //! virtual machine set up like the one Radix runs in: as process 1 it
 //! prints `linux-bench: done` at the end and powers the machine off.
 
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
@@ -66,6 +70,7 @@ fn main() {
     report("getrandom_64", calls / 4, getrandom_64);
     report("fresh_page", rounds / 2, fresh_page);
     memory_copy();
+    files(rounds / 2);
 
     for (place, other) in [("same_cpu", Some(first)), ("cross_cpu", cpus.get(1).copied())] {
         let Some(other) = other else {
@@ -341,6 +346,65 @@ fn parallel(name: &str, other: usize, count: u64, body: fn()) {
     }
     print_line(name, started, count);
     partner.join().expect("the other thread panicked");
+}
+
+/// Where the file benchmarks work: a tmpfs. In the virtual machine that is
+/// the root, the initramfs; on the host, /dev/shm, or the temporary
+/// directory where there is none.
+fn file_dir() -> PathBuf {
+    if std::process::id() == 1 {
+        return PathBuf::from("/bench");
+    }
+    let shm = std::path::Path::new("/dev/shm");
+    let base = if shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() };
+    base.join(format!("linux-bench-{}", std::process::id()))
+}
+
+/// The file benchmarks: openat(2) and close(2) of a file by its name
+/// beneath a directory, as Radix's paths always are; fstatat(2); and
+/// pread(2) and pwrite(2) of the file's first 4 KiB, which is in memory.
+fn files(rounds: u64) {
+    let dir = file_dir();
+    let path = dir.join("bench");
+    std::fs::create_dir_all(&dir).expect("cannot make the benchmark directory");
+    std::fs::write(&path, [0x5a; 4096]).expect("cannot write the benchmark file");
+    let directory = std::fs::File::open(&dir).expect("cannot open the benchmark directory");
+    let at = directory.as_raw_fd();
+    let name = c"bench";
+    report("file_open_close", rounds, || {
+        // SAFETY: the name is NUL-terminated and the directory is open.
+        let fd = unsafe { libc::openat(at, name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        assert!(fd >= 0, "openat: {}", std::io::Error::last_os_error());
+        // SAFETY: the descriptor was just opened, and is closed once.
+        unsafe { libc::close(fd) };
+    });
+    report("file_stat", rounds, || {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the name is NUL-terminated, the directory is open, and
+        // `stat` is room for the status.
+        let done = unsafe { libc::fstatat(at, name.as_ptr(), stat.as_mut_ptr(), 0) };
+        assert_eq!(done, 0, "fstatat: {}", std::io::Error::last_os_error());
+    });
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("cannot open the benchmark file");
+    let fd = file.as_raw_fd();
+    let mut buffer = [0x5au8; 4096];
+    report("file_read_4k", rounds, || {
+        // SAFETY: the buffer is 4096 writable bytes and the file is open.
+        let read = unsafe { libc::pread(fd, buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+        assert_eq!(read, 4096, "pread: {}", std::io::Error::last_os_error());
+    });
+    report("file_write_4k", rounds, || {
+        // SAFETY: the buffer is 4096 readable bytes and the file is open.
+        let wrote = unsafe { libc::pwrite(fd, buffer.as_ptr().cast(), buffer.len(), 0) };
+        assert_eq!(wrote, 4096, "pwrite: {}", std::io::Error::last_os_error());
+    });
+    drop(file);
+    drop(directory);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Runs `body` `count` times and prints what one run cost.

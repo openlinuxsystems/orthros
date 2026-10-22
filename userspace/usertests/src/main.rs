@@ -64,6 +64,7 @@ mod role {
     pub const PARALLEL_B: u64 = 20;
     pub const FUZZ: u64 = 21;
     pub const FUZZ_JANITOR: u64 = 22;
+    pub const FILE_BENCH: u64 = 23;
 }
 
 /// The flag in the argument that asks for timings.
@@ -114,6 +115,7 @@ fn main(start: &Startup) -> u64 {
         role::RING_B => pairs::ring_b(),
         role::SYSCALL_BENCH => bench::syscalls(argument),
         role::MEMORY_BENCH => bench::memory(argument),
+        role::FILE_BENCH => bench::files(argument),
         role::YIELD_A => pairs::yield_a(argument),
         role::YIELD_B => pairs::yield_b(argument),
         role::SHOOT_A => pairs::shoot_a(argument),

@@ -39,6 +39,7 @@ use super::process::{ProcessObject, ProcessRef};
 use super::ring::{RingObject, RingRef};
 use super::{Result, cap_error, error};
 use crate::caps::{self, Store};
+use crate::fs::{FileObject, FileRef};
 use crate::percpu::{Own, PerCpu, Slot};
 use crate::sched::{Thread, ThreadRef};
 
@@ -63,6 +64,10 @@ pub enum Object {
     Random,
     /// The kernel log.
     KernelLog,
+    /// A file (radix-file(2)).
+    File(FileRef),
+    /// A directory (radix-directory(2)).
+    Directory(FileRef),
 }
 
 impl Object {
@@ -78,6 +83,8 @@ impl Object {
             Object::Process(_) => ObjectKind::Process,
             Object::Random => ObjectKind::Random,
             Object::KernelLog => ObjectKind::KernelLog,
+            Object::File(_) => ObjectKind::File,
+            Object::Directory(_) => ObjectKind::Directory,
         }
     }
 }
@@ -137,6 +144,37 @@ pub fn insert_charged(
             let _ = table.push_within_capacity(None);
         }
     }
+    table[index] = Some(Entry { generation: id.generation, object, charge });
+    Ok(())
+}
+
+/// Makes an object of `kind` in `store`, with its original capability,
+/// holding only `rights`, in `at`, and records `object` under its name
+/// with what it was charged: one hold of the registry's lock for what
+/// [`reserve`], `Store::create_with_rights` and [`insert_charged`] do
+/// apart. `object` is taken only once nothing can fail; on a failure it is
+/// left to the caller, to drop once the store's lock has gone, since it
+/// may hold the last reference to something whose drop takes locks (a
+/// removed file frees its space on the disk).
+pub fn create_with_rights(
+    store: &mut Store,
+    at: SlotRef,
+    kind: ObjectKind,
+    rights: Rights,
+    object: &mut Option<Object>,
+    charge: Option<Charge>,
+) -> Result<()> {
+    let mut registry = REGISTRY.lock();
+    let Some(table) = registry.as_mut() else { return Err(error(Kernel::NoMemory)) };
+    let needed = store.object_records().saturating_add(1);
+    table.try_reserve(needed.saturating_sub(table.len())).map_err(|_| error(Kernel::NoMemory))?;
+    let id = store.create_with_rights(at, kind, rights).map_err(cap_error)?;
+    let index = id.index as usize;
+    while table.len() <= index {
+        // Room was reserved above, for every index the store can give.
+        let _ = table.push_within_capacity(None);
+    }
+    let Some(object) = object.take() else { return Err(error(Kernel::Gone)) };
     table[index] = Some(Entry { generation: id.generation, object, charge });
     Ok(())
 }
@@ -202,6 +240,8 @@ enum Kept {
     Process(Weak<ProcessObject, Kmalloc>),
     Random,
     KernelLog,
+    File(Weak<FileObject, Kmalloc>),
+    Directory(Weak<FileObject, Kmalloc>),
 }
 
 impl Kept {
@@ -216,6 +256,8 @@ impl Kept {
             Object::Process(process) => Kept::Process(Arc::downgrade(process)),
             Object::Random => Kept::Random,
             Object::KernelLog => Kept::KernelLog,
+            Object::File(file) => Kept::File(Arc::downgrade(file)),
+            Object::Directory(dir) => Kept::Directory(Arc::downgrade(dir)),
         }
     }
 
@@ -230,6 +272,8 @@ impl Kept {
             Kept::Process(process) => Object::Process(process.upgrade()?),
             Kept::Random => Object::Random,
             Kept::KernelLog => Object::KernelLog,
+            Kept::File(file) => Object::File(file.upgrade()?),
+            Kept::Directory(dir) => Object::Directory(dir.upgrade()?),
         })
     }
 }
@@ -334,6 +378,20 @@ typed_lookup!(
     Process,
     ProcessRef
 );
+typed_lookup!(
+    /// The file a capability designates.
+    file,
+    File,
+    File,
+    FileRef
+);
+typed_lookup!(
+    /// The directory a capability designates.
+    directory,
+    Directory,
+    Directory,
+    FileRef
+);
 
 /// Takes the object named `id` out of the registry, with its charge.
 fn remove(id: ObjectId) -> Option<Entry> {
@@ -365,10 +423,40 @@ pub fn released(released: &Released) {
         // It ends; with no thread left to finish it, the store does once
         // its change is done (`process::finish_pending`).
         Object::Process(process) => super::process::released(process),
+        // It may be the last reference to a file removed while open,
+        // whose space is freed on the disk when it goes: that waits until
+        // the store's lock has gone (`fs::release`, `fs::drop_deferred`).
+        Object::File(file) | Object::Directory(file) => crate::fs::release(file),
         Object::Space(_) | Object::Random | Object::KernelLog => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);
+}
+
+/// The numbers of the processes the registry holds, for `/proc`.
+pub fn process_numbers() -> Vec<u64, Kmalloc> {
+    let mut numbers = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    let registry = REGISTRY.lock();
+    let Some(table) = registry.as_ref() else { return numbers };
+    let count = table.iter().flatten().filter(|e| matches!(e.object, Object::Process(_))).count();
+    if numbers.try_reserve_exact(count).is_err() {
+        return numbers;
+    }
+    for entry in table.iter().flatten() {
+        if let Object::Process(process) = &entry.object {
+            let _ = numbers.push_within_capacity(process.number());
+        }
+    }
+    numbers
+}
+
+/// The process numbered `number`, if the registry holds it.
+pub fn process_by_number(number: u64) -> Option<ProcessRef> {
+    let registry = REGISTRY.lock();
+    registry.as_ref()?.iter().flatten().find_map(|entry| match &entry.object {
+        Object::Process(process) if process.number() == number => Some(process.clone()),
+        _ => None,
+    })
 }
 
 /// How many objects of each kind the registry holds, for `kdb`. Gives up

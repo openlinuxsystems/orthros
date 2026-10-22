@@ -36,11 +36,14 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-abi",
     "radix-acpi",
     "radix-bootfs",
+    "radix-block",
     "radix-bootinfo",
     "radix-cap",
     "radix-elf",
+    "radix-fat",
     "radix-fbcon",
     "radix-hal",
+    "radix-hw",
     "radix-ipc",
     "radix-kdb",
     "radix-klog",
@@ -52,6 +55,8 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-relocs",
     "radix-sched",
     "radix-sync",
+    "radix-vfs",
+    "radix-virtio",
 ];
 
 /// Length of the command-line slot in the test image's grub.cfg.
@@ -84,7 +89,43 @@ pub struct Case {
     cpu_model: Option<&'static str>,
     /// More QEMU arguments.
     qemu: &'static [&'static str],
-    script: fn(&mut Vm, &Case) -> Result<(), String>,
+    script: Script,
+    /// Disks to attach as virtio block devices (`vda`, `vdb`, ...), made
+    /// afresh for each run and checked with `fsck.fat` after each boot.
+    disks: &'static [Disk],
+    /// A second boot from the same disks, once the first has passed.
+    second: Option<SecondBoot>,
+}
+
+/// What a case does with its machine: follows the console, and fails with
+/// the reason.
+type Script = fn(&mut Vm, &Case) -> Result<(), String>;
+
+/// A disk of a boot test, holding a FAT filesystem `mkfs.fat` makes.
+pub struct Disk {
+    /// Its size in KiB.
+    kib: u64,
+    /// 12, 16 or 32.
+    fat: u8,
+    /// The filesystem's label.
+    label: &'static str,
+    /// Whether the filesystem is in an MBR partition from 1 MiB on, rather
+    /// than the whole disk.
+    partitioned: bool,
+}
+
+/// A case's second boot: its command line, what the host does to the
+/// disks first, and its script.
+pub struct SecondBoot {
+    cmdline: &'static str,
+    before: fn(&[DiskImage]) -> Result<(), String>,
+    script: Script,
+}
+
+/// A disk made for a run: its file, and where its filesystem starts.
+pub struct DiskImage {
+    path: PathBuf,
+    offset: u64,
 }
 
 /// Two NUMA nodes of 512 MiB and two CPUs each, 21 apart (with `-m 1G`).
@@ -100,6 +141,27 @@ const TWO_NODES: &[&str] = &[
     "-numa",
     "dist,src=0,dst=1,val=21",
 ];
+
+/// The storage test's disks: FAT12, FAT16 and FAT32 on whole disks, and
+/// FAT32 in an MBR partition. Spark mounts them at the volumes of
+/// [`STORAGE_VOLUMES`].
+const STORAGE_DISKS: &[Disk] = &[
+    Disk { kib: 1440, fat: 12, label: "RADIX12", partitioned: false },
+    Disk { kib: 32 * 1024, fat: 16, label: "RADIX16", partitioned: false },
+    Disk { kib: 64 * 1024, fat: 32, label: "RADIX32", partitioned: false },
+    Disk { kib: 48 * 1024, fat: 32, label: "RADIXPART", partitioned: true },
+];
+const STORAGE_VOLUMES: [&str; 4] = ["vda", "vdb", "vdc", "vdd1"];
+
+/// What the storage test's program writes (userspace/storage), as the
+/// host reads it back with mtools.
+const STORAGE_HELLO: &[u8] = b"Written by Dukovo before a reboot.\n";
+const STORAGE_LONG_NAME: &str = "A file with a long name, and spaces.txt";
+const STORAGE_BIG: usize = 200 * 1024 + 123;
+const STORAGE_MANY: usize = 40;
+/// What the host writes to each disk between the boots, for the program
+/// to read back.
+const STORAGE_FROM_HOST: &[u8] = b"Written on the host between the boots.\n";
 
 /// The CPU the microcode test emulates: an Intel Skylake client part,
 /// signature 0x506e3.
@@ -122,6 +184,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: boot,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "bios-usb",
@@ -136,6 +200,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: boot,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "uefi-cdrom",
@@ -150,6 +216,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: boot_xapic,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "bios-cdrom",
@@ -164,6 +232,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: boot,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "screen",
@@ -178,6 +248,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: screen_log,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "page-fault",
@@ -192,6 +264,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: page_fault,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "crash-log-uefi",
@@ -207,6 +281,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: crash_reboot,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "crash-log-bios",
@@ -222,6 +298,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: crash_reboot,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "kdb",
@@ -236,6 +314,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: kdb,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "mm-stress",
@@ -250,6 +330,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: TWO_NODES,
         script: mm_stress,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "tlb",
@@ -264,6 +346,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: tlb,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "caps",
@@ -278,6 +362,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: caps,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "stack-overflow",
@@ -292,6 +378,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: stack_overflow,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "smep",
@@ -306,6 +394,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: smep,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "smap",
@@ -320,6 +410,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: smap,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "microcode",
@@ -334,6 +426,8 @@ pub const CASES: &[Case] = &[
         cpu_model: Some(MICROCODE_CPU),
         qemu: &[],
         script: microcode,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "fpu",
@@ -348,6 +442,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: fpu,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "sched-fair",
@@ -362,6 +458,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: sched_fair,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "sched-rt",
@@ -376,6 +474,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: sched_rt,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "sched-pi",
@@ -390,6 +490,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: sched_pi,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "sched-balance",
@@ -404,6 +506,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: TWO_NODES,
         script: sched_balance,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "lockdep",
@@ -418,6 +522,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: lockdep,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "rcu",
@@ -432,6 +538,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: rcu,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "user",
@@ -446,6 +554,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: user,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "ipc",
@@ -460,6 +570,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: ipc,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "fuzz",
@@ -474,6 +586,8 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: fuzz,
+        disks: &[],
+        second: None,
     },
     Case {
         name: "spark",
@@ -488,6 +602,28 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: spark,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "storage",
+        about: "Spark mounts four FAT disks; what is written reads back after a reboot and on the host",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: STORAGE_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
     },
     Case {
         name: "oom",
@@ -502,12 +638,14 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: oom,
+        disks: &[],
+        second: None,
     },
 ];
 
 /// `ob test`.
 pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
-    let which = args.positional();
+    // The options first, so that the suite is not taken from a value of one.
     let timeout = match args.value("--timeout")? {
         Some(value) => value.parse::<u64>().ok().filter(|&secs| secs > 0).ok_or_else(|| {
             Error::new(format!("--timeout takes a number of seconds, not `{value}`"))
@@ -519,6 +657,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         selected.push(name);
     }
     let profile = args.profile(&ctx.config)?;
+    let which = args.positional();
     args.finish()?;
     let (unit, boot) = match which.as_deref() {
         None if selected.is_empty() => (true, true),
@@ -577,7 +716,8 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] = &["radix-mm", "radix-cap", "radix-sched", "radix-ipc"];
+pub const PROVED_LIBRARIES: &[&str] =
+    &["radix-mm", "radix-cap", "radix-sched", "radix-ipc", "radix-block", "radix-vfs", "radix-fat"];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
@@ -741,20 +881,25 @@ fn run_case(
     timeout: Duration,
 ) -> Result<(), String> {
     let image = dir.join(format!("{}.img", case.name));
-    std::fs::write(&image, with_cmdline(base, case.cmdline)?)
-        .map_err(|err| format!("writing {}: {err}", image.display()))?;
     let qmp = dir.join(format!("{}.qmp", case.name));
-    let _ = std::fs::remove_file(&qmp);
+    let disks = make_disks(dir, case)?;
+    let mut extra: Vec<String> = case.qemu.iter().map(|arg| arg.to_string()).collect();
+    for (i, disk) in disks.iter().enumerate() {
+        extra.push("-drive".into());
+        extra.push(format!("file={},if=none,id=disk{i},format=raw", disk.path.display()));
+        extra.push("-device".into());
+        extra.push(format!("virtio-blk-pci,drive=disk{i}"));
+    }
+    let ovmf = match case.firmware {
+        Firmware::Uefi => Some(
+            qemu::prepare_ovmf(ctx, &format!("test-{}", case.name)).map_err(|e| e.to_string())?,
+        ),
+        Firmware::Bios => None,
+    };
     let machine = Machine {
         firmware: case.firmware,
         media: case.media,
-        ovmf: match case.firmware {
-            Firmware::Uefi => Some(
-                qemu::prepare_ovmf(ctx, &format!("test-{}", case.name))
-                    .map_err(|e| e.to_string())?,
-            ),
-            Firmware::Bios => None,
-        },
+        ovmf,
         image: image.clone(),
         memory: case.memory.into(),
         cpus: case.cpus,
@@ -764,15 +909,142 @@ fn run_case(
         display: false,
         reboot: case.reboot,
         gdb: false,
-        qmp: Some(qmp),
-        extra: case.qemu.iter().map(|arg| arg.to_string()).collect(),
+        qmp: Some(qmp.clone()),
+        extra,
         direct: None,
     };
-    let mut vm = Vm::start(ctx, &machine, dir, case.name, timeout)?;
-    let result = (case.script)(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));
-    vm.stop();
+    let boot = |name: &str, cmdline: &str, script: Script| -> Result<(), String> {
+        std::fs::write(&image, with_cmdline(base, cmdline)?)
+            .map_err(|err| format!("writing {}: {err}", image.display()))?;
+        let _ = std::fs::remove_file(&qmp);
+        let mut vm = Vm::start(ctx, &machine, dir, name, timeout)?;
+        let result = script(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));
+        vm.stop();
+        result?;
+        disks.iter().try_for_each(fsck)
+    };
+    let mut result = boot(case.name, case.cmdline, case.script);
+    if let (Ok(()), Some(second)) = (&result, &case.second) {
+        let name = format!("{}-reboot", case.name);
+        result = (second.before)(&disks)
+            .and_then(|()| boot(&name, second.cmdline, second.script))
+            .map_err(|err| {
+                let log = dir.join(format!("boot-{name}.log"));
+                format!("after the reboot: {err} (serial log: {})", ctx.display(&log))
+            });
+    }
     let _ = std::fs::remove_file(&image);
+    if result.is_ok() {
+        for disk in &disks {
+            let _ = std::fs::remove_file(&disk.path);
+        }
+    }
     result
+}
+
+/// The first sector of a partitioned test disk's filesystem: 1 MiB in.
+const PARTITION_START: u64 = 2048;
+
+/// Makes the case's disks afresh in `dir`, with `mkfs.fat`.
+fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
+    let mut made = Vec::new();
+    for (i, disk) in case.disks.iter().enumerate() {
+        let path = dir.join(format!("{}-disk{i}.img", case.name));
+        let _ = std::fs::remove_file(&path);
+        let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
+        // A fixed volume ID, so that runs match.
+        mkfs.args(["-F", &disk.fat.to_string(), "-n", disk.label, "-i", "4f525448"]);
+        let offset = if disk.partitioned {
+            let file = std::fs::File::create(&path)
+                .map_err(|err| format!("making {}: {err}", path.display()))?;
+            file.set_len(disk.kib * 1024)
+                .map_err(|err| format!("sizing {}: {err}", path.display()))?;
+            write_mbr(&path, disk.kib * 2)?;
+            mkfs.args(["--offset", &PARTITION_START.to_string()]);
+            mkfs.arg(&path).arg((disk.kib - PARTITION_START / 2).to_string());
+            PARTITION_START * 512
+        } else {
+            mkfs.arg("-C").arg(&path).arg(disk.kib.to_string());
+            0
+        };
+        host_tool(&mut mkfs)?;
+        made.push(DiskImage { path, offset });
+    }
+    Ok(made)
+}
+
+/// Writes an MBR with one FAT32 (LBA) partition from [`PARTITION_START`]
+/// to the end of a disk of `sectors`.
+fn write_mbr(path: &Path, sectors: u64) -> Result<(), String> {
+    let mut mbr = [0u8; 512];
+    let entry = &mut mbr[446..462];
+    entry[4] = 0x0c;
+    entry[8..12].copy_from_slice(&(PARTITION_START as u32).to_le_bytes());
+    entry[12..16].copy_from_slice(&((sectors - PARTITION_START) as u32).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xaa;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|err| format!("opening {}: {err}", path.display()))?;
+    file.write_all(&mbr).map_err(|err| format!("writing {}: {err}", path.display()))
+}
+
+/// Where a dosfstools program is: in `/usr/sbin` or `/sbin`, which a
+/// user's PATH may leave out, or else wherever PATH finds it.
+fn fat_tool(name: &str) -> PathBuf {
+    ["/usr/sbin", "/sbin"]
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Runs a host program on a test disk; fails with what it said.
+fn host_tool(cmd: &mut std::process::Command) -> Result<Vec<u8>, String> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let output = cmd.env("MTOOLS_SKIP_CHECK", "1").output().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            format!("`{program}` is not installed; run `./ob doctor` to see what is missing")
+        } else {
+            format!("cannot run `{program}`: {err}")
+        }
+    })?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        return Err(format!("`{program}` failed ({}): {}", output.status, said.trim()));
+    }
+    Ok(output.stdout)
+}
+
+/// Checks a disk's filesystem with `fsck.fat`, changing nothing: a
+/// partition is copied out first, as `fsck.fat` reads whole files only.
+fn fsck(disk: &DiskImage) -> Result<(), String> {
+    let checked = if disk.offset == 0 {
+        disk.path.clone()
+    } else {
+        let bytes = std::fs::read(&disk.path).map_err(|err| format!("reading a disk: {err}"))?;
+        let part = disk.path.with_extension("part");
+        std::fs::write(&part, &bytes[disk.offset as usize..])
+            .map_err(|err| format!("writing {}: {err}", part.display()))?;
+        part
+    };
+    let result =
+        host_tool(std::process::Command::new(fat_tool("fsck.fat")).arg("-n").arg(&checked));
+    if checked != disk.path {
+        let _ = std::fs::remove_file(&checked);
+    }
+    result.map(drop).map_err(|err| format!("{} is damaged: {err}", disk.path.display()))
+}
+
+/// The mtools name of a test disk's filesystem.
+fn mtools_image(disk: &DiskImage) -> String {
+    if disk.offset == 0 {
+        disk.path.display().to_string()
+    } else {
+        format!("{}@@{}", disk.path.display(), disk.offset)
+    }
 }
 
 /// A running test machine.
@@ -1095,7 +1367,7 @@ fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (Dukovo Phase 6)"))?;
+    vm.expect(&format!("Radix {VERSION} (Dukovo Phase 7)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -1130,8 +1402,9 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 15 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 17 object kinds, 12 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
+    vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
     vm.expect("User: the usertests image is ")?;
     let cpus = case.cpus;
@@ -1504,10 +1777,11 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("Init: the boot archive is ")?;
     vm.expect("Init: /system/bin/spark is process ")?;
-    let rest = program_line(vm, "spark: Spark v0 is process ")?;
+    let rest = program_line(vm, "spark: Spark v1 is process ")?;
     let spark = image_bias(&rest, "Spark")?;
     vm.expect("spark: boot archive of ")?;
-    vm.expect(" KiB with 2 files at 0x")?;
+    vm.expect(" KiB with 3 files at 0x")?;
+    vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
     let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
     let args = program_line(vm, "hello: process ")?;
     if args != format!("{number}, arguments: /system/tests/hello one two") {
@@ -1523,6 +1797,155 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(&format!("spark: process {number} (/system/tests/hello) exited with code 0x0"))?;
     vm.expect(&format!("spark: reaped process {number}; all of its memory came back"))?;
     vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The kernel's and Spark's lines for the storage test's disks, up to
+/// the start of the program.
+fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    // The disks are found while the other CPUs start, so their lines come
+    // among those `boot_report` checks: looked for anywhere before here.
+    let log = vm.log();
+    let logged = |line: &str| {
+        if log.contains(line) { Ok(()) } else { Err(format!("the kernel never said \"{line}\"")) }
+    };
+    for (i, disk) in STORAGE_DISKS.iter().enumerate() {
+        let name = STORAGE_VOLUMES[i].trim_end_matches(char::is_numeric);
+        let size = disk_size(disk.kib);
+        logged(&format!("Disk: {name} is a virtio block device of {size} at "))?;
+        if disk.partitioned {
+            logged(&format!("Disk: {name} has an MBR with 1 partition"))?;
+            logged(&format!(
+                "Disk: {name}1: {} from sector {PARTITION_START}, type 0x0c",
+                disk_size(disk.kib - PARTITION_START / 2)
+            ))?;
+        } else {
+            logged(&format!("Disk: {name} has no partition table; it is used whole"))?;
+        }
+    }
+    logged(&format!("; {} virtio disks", STORAGE_DISKS.len()))?;
+    vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
+    for (i, name) in STORAGE_VOLUMES.iter().enumerate() {
+        let label = STORAGE_DISKS[i].label;
+        vm.expect(&format!("Files: mounted fat from {name} on /volumes/{name}, labelled {label}"))?;
+        vm.expect(&format!("spark: mounted the FAT filesystem of {name} at /volumes/{name}"))?;
+    }
+    vm.expect("spark: started /system/tests/storage as process ")
+}
+
+/// The end of the storage program: no failed checks, and exit code 0.
+fn storage_end(vm: &mut Vm, mode: &str) -> Result<(), String> {
+    vm.expect(&format!("storage: {mode}: "))?;
+    let log = vm.log();
+    let failed: Vec<&str> = log.lines().filter(|line| line.contains("storage: FAILED: ")).collect();
+    if !failed.is_empty() {
+        return Err(format!("the storage program failed: {}", failed.join("; ")));
+    }
+    if !log.contains(&format!("storage: {mode}: every check passed")) {
+        return Err(format!("the storage program did not pass every check of `{mode}`"));
+    }
+    vm.expect("(/system/tests/storage) exited with code 0x0")?;
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The first boot: the program writes its files to every volume.
+/// A disk's size as the kernel logs it: in the largest binary unit it
+/// reaches, with a tenth when it is not a whole number of them.
+fn disk_size(kib: u64) -> String {
+    let (unit, shift) = if kib >= 1 << 20 { ("GiB", 20) } else { ("MiB", 10) };
+    let (whole, tenths) = (kib >> shift, ((kib & ((1 << shift) - 1)) * 10) >> shift);
+    if tenths == 0 { format!("{whole} {unit}") } else { format!("{whole}.{tenths} {unit}") }
+}
+
+fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_boot(vm, case)?;
+    for name in STORAGE_VOLUMES {
+        vm.expect(&format!("storage: /volumes/{name}: fat, "))?;
+        vm.expect(&format!("storage: /volumes/{name}: wrote "))?;
+    }
+    vm.expect("storage: /tmp: a 10000-byte file written, read back and removed")?;
+    vm.expect("storage: /dev: ")?;
+    vm.expect(" of them disks; zero, random and null work")?;
+    for name in STORAGE_VOLUMES {
+        vm.expect(&format!("storage: /sys/block/{name}/size: "))?;
+    }
+    vm.expect(&format!("storage: /sys/kernel/version: Radix {VERSION} (Dukovo Phase 7)"))?;
+    vm.expect("storage: /sys/bus/pci/devices: ")?;
+    vm.expect("storage: /proc lists ")?;
+    vm.expect("1 spark (running)")?;
+    vm.expect("storage (running)")?;
+    vm.expect("storage: /proc/mounts lists 13 mounts, 4 of them FAT")?;
+    vm.expect("storage: /proc/meminfo: ")?;
+    storage_end(vm, "write")
+}
+
+/// Between the boots: the host reads what the program wrote with mtools,
+/// and writes a file of its own to each disk.
+fn storage_host(disks: &[DiskImage]) -> Result<(), String> {
+    let source = std::env::temp_dir().join(format!("ob-storage-{}.txt", std::process::id()));
+    std::fs::write(&source, STORAGE_FROM_HOST)
+        .map_err(|err| format!("writing {}: {err}", source.display()))?;
+    let result = disks.iter().zip(STORAGE_VOLUMES).try_for_each(|(disk, name)| {
+        let image = mtools_image(disk);
+        let mtype =
+            |path: &str| host_tool(std::process::Command::new("mtype").args(["-i", &image, path]));
+        let same = |path: &str, want: &[u8]| -> Result<(), String> {
+            let got = mtype(path)?;
+            if got != want {
+                return Err(format!(
+                    "{image}: mtype {path} gives {} bytes, not the {} written",
+                    got.len(),
+                    want.len()
+                ));
+            }
+            Ok(())
+        };
+        same("::/hello.txt", STORAGE_HELLO)?;
+        same(&format!("::/notes/{STORAGE_LONG_NAME}"), format!("Saved on {name}.\n").as_bytes())?;
+        same("::/notes/final.txt", b"final\n")?;
+        same("::/log.txt", b"one\ntwo\n")?;
+        same("::/cut.txt", &[b'x'; 1000])?;
+        let big = mtype("::/big.bin")?;
+        let want: Vec<u8> = (0..STORAGE_BIG).map(storage_big_byte).collect();
+        if big != want {
+            let at = big
+                .iter()
+                .zip(&want)
+                .position(|(a, b)| a != b)
+                .unwrap_or(big.len().min(want.len()));
+            return Err(format!("{image}: big.bin as mtools reads it differs at byte {at}"));
+        }
+        let listing =
+            host_tool(std::process::Command::new("mdir").args(["-i", &image, "-b", "::/many"]))?;
+        let files =
+            String::from_utf8_lossy(&listing).lines().filter(|line| line.ends_with(".txt")).count();
+        if files != STORAGE_MANY {
+            return Err(format!("{image}: mdir lists {files} files in many/, not {STORAGE_MANY}"));
+        }
+        let to = "::/Written on the host.txt";
+        host_tool(std::process::Command::new("mcopy").args(["-i", &image]).arg(&source).arg(to))?;
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&source);
+    result
+}
+
+/// The byte at `offset` of the program's `big.bin`.
+fn storage_big_byte(offset: usize) -> u8 {
+    (offset as u32).wrapping_mul(2_654_435_761).wrapping_add((offset / 4096) as u32).to_le_bytes()
+        [3]
+}
+
+/// The second boot: the program reads every file back.
+fn storage_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_boot(vm, case)?;
+    for name in STORAGE_VOLUMES {
+        vm.expect(&format!("storage: /volumes/{name}: "))?;
+        vm.expect(" files read back after the reboot, every byte as written")?;
+    }
+    vm.expect("storage: /proc lists ")?;
+    storage_end(vm, "check")
 }
 
 fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {
@@ -1561,6 +1984,14 @@ fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_sizes_read_as_the_kernel_logs_them() {
+        assert_eq!(disk_size(1440), "1.4 MiB");
+        assert_eq!(disk_size(32 * 1024), "32 MiB");
+        assert_eq!(disk_size(48 * 1024 - 1024), "47 MiB");
+        assert_eq!(disk_size(3 << 19), "1.5 GiB");
+    }
 
     #[test]
     fn strips_escapes() {

@@ -18,6 +18,9 @@
 //! Programs' address spaces are in [`space`], and the SYSCALL entry,
 //! entering user mode and user copies in [`user`] (Phase 5). [`power`]
 //! restarts the machine, and [`cpu`] and [`io`] wrap single instructions.
+//! [`devices`] maps device registers, allocates DMA memory and hands out
+//! interrupt vectors for message-signalled interrupts, and [`rtc`] reads
+//! the real-time clock (Phase 7).
 //!
 //! It is part of the trusted computing base, so it may use `unsafe`, and
 //! every `unsafe` block states why it is sound. docs/design/boot.md and
@@ -29,6 +32,7 @@ mod acpi;
 mod apic;
 mod boot;
 mod cpu;
+mod devices;
 mod entry;
 mod fpu;
 mod interrupts;
@@ -40,6 +44,7 @@ mod paging;
 mod percpu;
 mod power;
 mod random;
+mod rtc;
 mod serial;
 mod smp;
 mod space;
@@ -54,9 +59,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Fault, FaultTest, InterruptController, Ipi,
-    MapPageError, PageTable, Platform, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
-    UserMode,
+    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest, InterruptController,
+    Ipi, MapPageError, PageTable, PciSegment, Platform, Smp, SyscallRegs, Threads, Timer,
+    UserAccess, UserFault, UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -307,6 +312,48 @@ impl Timer for Arch {
 
     fn timer_mode() -> &'static str {
         time::mode_name()
+    }
+
+    fn wall_clock_ns() -> Option<u64> {
+        rtc::wall_clock_ns()
+    }
+}
+
+impl Devices for Arch {
+    fn pci_segments(found: &mut dyn FnMut(PciSegment)) {
+        let Some(mcfg) = acpi::get().and_then(|acpi| acpi.mcfg.as_ref()) else { return };
+        for window in radix_acpi::mcfg_entries(mcfg) {
+            found(PciSegment {
+                base: window.base,
+                segment: window.segment,
+                first_bus: window.start_bus,
+                last_bus: window.end_bus,
+            });
+        }
+    }
+
+    fn map_device(phys: u64, len: usize) -> Option<radix_hal::Mmio> {
+        devices::map(phys, len)
+    }
+
+    fn alloc_dma(pages: usize, below_4g: bool) -> Option<radix_hal::Dma> {
+        devices::alloc_dma(pages, below_4g)
+    }
+
+    fn alloc_cache_page() -> Option<radix_hal::Page> {
+        devices::alloc_cache_page()
+    }
+
+    fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hal::MsiMessage)> {
+        devices::allocate(handler, arg)
+    }
+
+    fn free_interrupt(vector: u32) {
+        devices::free(vector);
+    }
+
+    fn interrupt_count(vector: u32) -> u64 {
+        devices::count(vector)
     }
 }
 
@@ -638,6 +685,7 @@ impl Platform for Arch {
             );
         }
         time::start_tick();
+        rtc::init(acpi.and_then(|acpi| acpi.fadt.as_ref()).map_or(0, |fadt| fadt.century));
         // Under a hypervisor MWAIT is usually not passed through, and when
         // it is emulated it may spin; HLT lets the host run something else.
         IDLE_MWAIT.store(cpu::feature::monitor() && !cpu::feature::hypervisor(), Ordering::Relaxed);

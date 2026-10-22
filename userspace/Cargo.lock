@@ -57,6 +57,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage"
+version = "0.0.1"
+dependencies = [
+ "libradix",
+ "radix-abi",
+ "radix-rt",
+]
+
+[[package]]
 name = "usertests"
 version = "0.0.1"
 dependencies = [

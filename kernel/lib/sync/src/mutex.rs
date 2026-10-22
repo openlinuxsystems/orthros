@@ -93,9 +93,21 @@ impl<T: ?Sized> Mutex<T> {
     /// Takes the lock, sleeping while another thread holds it.
     #[track_caller]
     pub fn lock(&self) -> MutexGuard<'_, T> {
+        self.acquire(0, hooks::caller())
+    }
+
+    /// Like [`Mutex::lock`], for code that holds another lock of the same
+    /// class: `subclass` (1, 2 ...) tells the checker the nesting is
+    /// deliberate and always in this order.
+    #[track_caller]
+    pub fn lock_nested(&self, subclass: u8) -> MutexGuard<'_, T> {
+        self.acquire(subclass, hooks::caller())
+    }
+
+    fn acquire(&self, subclass: u8, at: &'static Location<'static>) -> MutexGuard<'_, T> {
         let hooks = hooks::active();
         if let Some(hooks) = hooks::checking(hooks) {
-            hooks.lock_acquire(self.acquire_info(hooks::caller(), false));
+            hooks.lock_acquire(self.acquire_info(at, subclass, false));
         }
         let me = hooks.map_or(0, |h| h.current_thread());
         let token = if me == 0 { NO_THREAD } else { me };
@@ -119,7 +131,7 @@ impl<T: ?Sized> Mutex<T> {
             return None;
         }
         if let Some(hooks) = hooks::checking(hooks) {
-            hooks.lock_acquire(self.acquire_info(hooks::caller(), true));
+            hooks.lock_acquire(self.acquire_info(hooks::caller(), 0, true));
         }
         Some(self.guard(hooks, token))
     }
@@ -160,12 +172,17 @@ impl<T: ?Sized> Mutex<T> {
         MutexGuard { mutex: self, hooks, token, _not_send: PhantomData }
     }
 
-    fn acquire_info(&self, at: &'static Location<'static>, trylock: bool) -> Acquire<'_> {
+    fn acquire_info(
+        &self,
+        at: &'static Location<'static>,
+        subclass: u8,
+        trylock: bool,
+    ) -> Acquire<'_> {
         Acquire {
             site: &self.raw.site,
             addr: self.raw.key(),
             kind: LockKind::Mutex,
-            subclass: 0,
+            subclass,
             at,
             trylock,
         }

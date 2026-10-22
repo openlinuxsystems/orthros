@@ -102,11 +102,14 @@ dependencies = [
  "radix-abi",
  "radix-arch-aarch64",
  "radix-arch-x86_64",
+ "radix-block",
  "radix-bootfs",
  "radix-cap",
  "radix-elf",
+ "radix-fat",
  "radix-fbcon",
  "radix-hal",
+ "radix-hw",
  "radix-ipc",
  "radix-kdb",
  "radix-klog",
@@ -116,6 +119,8 @@ dependencies = [
  "radix-random",
  "radix-sched",
  "radix-sync",
+ "radix-vfs",
+ "radix-virtio",
 ]
 
 [[package]]
@@ -143,11 +148,22 @@ dependencies = [
  "radix-acpi",
  "radix-bootinfo",
  "radix-hal",
+ "radix-hw",
  "radix-klog",
  "radix-microcode",
  "radix-mm",
  "radix-random",
  "radix-relocs",
+ "radix-sync",
+]
+
+[[package]]
+name = "radix-block"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-hw",
+ "radix-mm",
  "radix-sync",
 ]
 
@@ -177,6 +193,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-fat"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-block",
+ "radix-hw",
+ "radix-sync",
+ "radix-vfs",
+]
+
+[[package]]
 name = "radix-fbcon"
 version = "0.0.1"
 dependencies = [
@@ -186,6 +213,13 @@ dependencies = [
 
 [[package]]
 name = "radix-hal"
+version = "0.0.1"
+dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-hw"
 version = "0.0.1"
 
 [[package]]
@@ -252,6 +286,24 @@ dependencies = [
 [[package]]
 name = "radix-sync"
 version = "0.0.1"
+
+[[package]]
+name = "radix-vfs"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-block",
+ "radix-bootfs",
+ "radix-hw",
+ "radix-sync",
+]
+
+[[package]]
+name = "radix-virtio"
+version = "0.0.1"
+dependencies = [
+ "radix-hw",
+]
 
 [[package]]
 name = "rand"

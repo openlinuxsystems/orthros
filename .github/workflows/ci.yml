@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools scdoc mandoc
+            xorriso mtools dosfstools scdoc mandoc
 
       - name: Install mdBook
         run: |
@@ -127,7 +127,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools
+            xorriso mtools dosfstools
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
@@ -174,7 +174,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools
+            xorriso mtools dosfstools
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install

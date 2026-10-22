@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Profile;
 use crate::process::{self, step};
-use crate::{Context, Ctx, Result, bail, doctor, krelocs, ksyms};
+use crate::{Context, Ctx, Result, bail, doctor, frames, krelocs, ksyms};
 
 /// The kernel's target specification, relative to the repository root.
 /// docs/adr/0011-kernel-target-and-build-std.md explains why the kernel has
@@ -32,9 +32,14 @@ pub fn target_args(ctx: &Ctx) -> Vec<String> {
         "-Zbuild-std-features=compiler-builtins-mem".into(),
         // `alloc` without its infallible APIs (`Box::new`, `Vec::push`):
         // every kernel allocation states its context and handles failure
-        // (ADR 0017).
+        // (ADR 0017),
         "--config".into(),
-        format!(r#"target.{TARGET_NAME}.rustflags=["--cfg","no_global_oom_handling"]"#),
+        // and LLVM records each function's stack frame in `.stack_sizes`,
+        // which `ob` holds to the kernel's frame budget after linking
+        // (ADR 0058).
+        format!(
+            r#"target.{TARGET_NAME}.rustflags=["--cfg","no_global_oom_handling","-Zemit-stack-sizes"]"#
+        ),
     ]
 }
 
@@ -73,12 +78,21 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<PathBuf> {
 
     let built = target_dir(ctx).join(TARGET_NAME).join(profile.dir()).join("radix");
     let installed = installed(ctx);
-    install(ctx, &built, &installed)?;
+    install(ctx, &built, &installed, profile)?;
     Ok(installed)
 }
 
-fn install(ctx: &Ctx, built: &Path, installed: &Path) -> Result<()> {
+fn install(ctx: &Ctx, built: &Path, installed: &Path, profile: Profile) -> Result<()> {
     let mut bytes = std::fs::read(built).context(|| format!("reading {}", built.display()))?;
+    // Only the optimised kernel, which CI tests and images carry, is held
+    // to the frame budget: without optimisation, frames are several times
+    // larger.
+    let frames = match profile {
+        Profile::Release => {
+            format!("; {} stack frames held to {} bytes", frames::check(&bytes)?, frames::BUDGET)
+        }
+        Profile::Debug => String::new(),
+    };
     let functions = ksyms::embed(&mut bytes)?;
     let relocations = krelocs::embed(&mut bytes)?;
     if let Some(parent) = installed.parent() {
@@ -86,15 +100,17 @@ fn install(ctx: &Ctx, built: &Path, installed: &Path) -> Result<()> {
     }
     std::fs::write(installed, &bytes).context(|| format!("writing {}", installed.display()))?;
     // GRUB refuses to load an ELF file with relocation sections, and the
-    // kernel needs only the table in .krelocs, so they go.
+    // kernel needs only the table in .krelocs, so they go, with the frame
+    // sizes, which only the check above reads.
     process::run(
         ctx,
         std::process::Command::new(objcopy(ctx)?)
-            .args(["--wildcard", "--remove-section=.rela*"])
+            .args(["--wildcard", "--remove-section=.rela*", "--remove-section=.stack_sizes"])
             .arg(installed),
     )?;
     step(&format!(
-        "Kernel installed at {} (symbol table of {functions} functions, {relocations} relocations)",
+        "Kernel installed at {} (symbol table of {functions} functions, {relocations} \
+         relocations{frames})",
         ctx.display(installed)
     ));
     Ok(())

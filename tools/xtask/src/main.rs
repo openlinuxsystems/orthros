@@ -12,6 +12,7 @@ mod config;
 mod docs;
 mod doctor;
 mod elf;
+mod frames;
 mod image;
 mod kernel;
 mod krelocs;

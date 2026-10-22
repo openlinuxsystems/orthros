@@ -26,6 +26,7 @@
 //! - `ring`: rings shared with programs (radix-ring);
 //! - `process`: processes, and the kernel memory their objects take,
 //!   charged to resource domains (`account`);
+//! - `files`: files and directories (Phase 7, `crate::fs`);
 //! - `methods`: the methods called on capabilities with `cap_call`.
 //!
 //! The kernel itself starts one program, Spark, from the boot archive
@@ -40,6 +41,7 @@
 //! a thread's IPC state; a ring's queues. None is held across a block.
 
 mod account;
+mod files;
 pub mod init;
 mod ipc;
 pub mod launch;
@@ -49,7 +51,7 @@ mod methods;
 mod notify;
 pub mod objects;
 pub mod process;
-mod random;
+pub mod random;
 mod ring;
 mod syscall;
 

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "storage"
+description = "A test program: it writes files to every FAT volume, reads them back after a reboot, and checks /proc, /sys and /dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "storage"
+test = false
+bench = false
+
+[dependencies]
+libradix = { path = "../libradix" }
+radix-abi = { path = "../../kernel/abi" }
+radix-rt = { path = "../radix-rt" }
+
+[lints]
+workspace = true

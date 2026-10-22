@@ -18,6 +18,7 @@ bench = false
 radix-acpi = { path = "../../lib/acpi" }
 radix-bootinfo = { path = "../../lib/bootinfo" }
 radix-hal = { path = "../../hal" }
+radix-hw = { path = "../../lib/hw" }
 radix-klog = { path = "../../lib/klog" }
 radix-microcode = { path = "../../lib/microcode" }
 radix-mm = { path = "../../mm" }

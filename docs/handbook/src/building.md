@@ -83,37 +83,55 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (Dukovo Phase 5)
+[    0.000000] Radix 0.0.1 (Dukovo Phase 7)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:
 [    0.000000] Memory: 1017 MiB usable in 7 regions; memory map:
 ...
-[    0.000000] Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096 samples, 37 stuck)
-[    0.000000] KASLR: kernel moved by 0x20200000 (one of 509 places, 2612 addresses patched); direct map one of 65533 places, mapping window one of 32257
-[    0.000000] Layout: kernel at 0xffffffffa0300000, direct map at 0xffff962340000000, mapping window at 0xffffd0de40000000
+[    0.000000] Random: ChaCha20 seeded before KASLR from RDSEED, RDRAND and timing jitter (4096 samples, 14 stuck)
+[    0.000000] KASLR: kernel moved by 0x33200000 (one of 505 places, 12304 addresses patched); direct map one of 65533 places, mapping window one of 32257
+[    0.000000] Layout: kernel at 0xffffffffb3300000, direct map at 0xffffba4080000000, mapping window at 0xffffc8e500000000
 [    0.000000] Paging: W^X holds: none of 1025 MiB of kernel mappings is writable and executable
 ...
-[    0.341869] Time: TSC at 2807.482 MHz (measured against the HPET); APIC timer input 1005.301 MHz; tick 100 Hz
-[    0.343077] Memory: 1009 MiB free of 1009 MiB in the frame allocator's zones:
-[    0.344198]   node 0 DMA32  0x000000100000-0x00003fedbfff  1009 MiB managed,  1009 MiB free,   4 MiB reserve
-[    0.355310] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
-[    0.356021] Lock checker: off (the lockdep flag turns it on)
-[    0.358712] Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
-[    0.384891] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
-[    0.402551] User: the usertests image is 96 KiB
-[    0.409872] CPUs: 4 of 4 online:
-[    0.425233]   cpu0: APIC ID 0, boot CPU, online
-[    0.456580]   cpu1: APIC ID 1, online
-[    0.485571]   cpu2: APIC ID 2, online
-[    0.510992]   cpu3: APIC ID 3, online
-[    0.524816] Scheduler: 4 CPUs run threads, on 1 NUMA node
-[    0.539507] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 9, cpu1 16, cpu2 15, cpu3 14)
-[    0.558527] IPI: all 3 other CPUs answered a ping (xAPIC)
-[    0.572421] Boot complete.
+[    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
+[    0.284715] Time: the real-time clock says 2026-10-22 04:25:30 (taken as UTC)
+[    0.319111] Memory: 1006 MiB free of 1006 MiB in the frame allocator's zones:
+[    0.351867]   node 0 DMA32  0x000000100000-0x00003fedbfff  1006 MiB managed,  1006 MiB free,   4 MiB reserve
+[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.419834] Lock checker: off (the lockdep flag turns it on)
+[    0.445393] Capabilities: ready; 17 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
+[    0.494239] Files: the root is a tmpfs; Spark mounts the rest
+...
+[    0.613107] CPUs: 4 of 4 online:
+[    0.634020]   cpu0: APIC ID 0, boot CPU, online
+[    0.655178]   cpu1: APIC ID 1, online
+[    0.676009]   cpu2: APIC ID 2, online
+[    0.696883]   cpu3: APIC ID 3, online
+[    0.720307] Scheduler: 4 CPUs run threads, on 1 NUMA node
+[    0.745062] PCI: 0000:00:00.0 8086:29c0 class 060000: host bridge
+...
+[    0.964452] PCI: 0000:00:1f.3 8086:2930 class 0c0500: SMBus controller
+[    0.985756] PCI: 6 functions on 1 segment; 0 virtio disks
+[    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
+[    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
+[    1.049978] Boot complete.
+[    1.073162] Init: the boot archive is 206 KiB with 9 entries; starting /system/bin/spark
+[    1.150677] Init: /system/bin/spark is process 1
+...
+[    1.392469] cpu1: spark[12]: spark: built the hierarchy of 10 directories and mounted 8 filesystems
+[    1.484750] cpu1: spark[12]: spark: started /system/tests/hello as process 2
+...
+[    1.594897] cpu1: spark[12]: spark: process 2 (/system/tests/hello) exited with code 0x0
+[    1.650016] cpu1: spark[12]: spark: reaped process 2; all of its memory came back
+[    1.676573] cpu1: spark[12]: spark: nothing more to do; waiting
 ```
 
-The kernel then idles until a thread has work. `dukovo-boot(7)` explains
+After `Boot complete.` the kernel starts Spark, the first program, which
+builds the directory hierarchy, mounts any FAT disks QEMU has at
+`/volumes` (see [Files, the directory hierarchy and /volumes](files.md)),
+runs a test program and waits. `dukovo-boot(7)` and `spark(8)` explain
 each step. Press
 **Ctrl-A** then **X** to quit QEMU. Useful variations:
 

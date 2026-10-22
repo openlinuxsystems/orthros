@@ -183,6 +183,7 @@ impl Drop for RingObject {
 /// `ring_setup`: makes a ring with `entries` submission entries, maps it
 /// at `address` in the address space in slot `space`, and puts its
 /// capability in slot `to`. Returns the size mapped.
+#[inline(never)]
 pub fn setup(user: &UserThread, space: u32, address: u64, entries: u32, to: u32) -> Result<u64> {
     let (_, space) = objects::space(user.cspace, space, Rights::CONTROL)?;
     let layout = Layout::new(entries).ok_or(Kernel::InvalidArgument.status(2))?;
@@ -251,7 +252,10 @@ fn new(space: &SpaceRef, layout: Layout) -> Result<RingRef> {
 
 /// `ring_enter`: takes up to `submit` entries and carries them out, then
 /// waits for `min_complete` completions or `timeout_ns`. Returns how many
-/// entries it took and how many completions wait.
+/// entries it took and how many completions wait. Never inlined into the
+/// system call dispatcher, whose frame every call pays for: its batch of
+/// entries is a kilobyte.
+#[inline(never)]
 pub fn enter(
     user: &UserThread,
     ring: u32,
@@ -384,6 +388,9 @@ fn execute(user: &UserThread, ring: &RingRef, entry: &[u8; Sqe::SIZE]) {
             .and_then(|(_, target)| target.post(arg(0), [arg(1), arg(2)]))
             .map(|()| [0; 2]),
         Some(Opcode::Random) => Ok([super::random::u64(), super::random::u64()]),
+        Some(Opcode::Read) => super::files::ring_read(user, cap, [arg(0), arg(1), arg(2)]),
+        Some(Opcode::Write) => super::files::ring_write(user, cap, [arg(0), arg(1), arg(2)]),
+        Some(Opcode::Sync) => super::files::ring_sync(user, cap),
         Some(Opcode::Timeout) => {
             let deadline = sched::now_ns().saturating_add(arg(0));
             let mut timeouts = ring.timeouts.lock();

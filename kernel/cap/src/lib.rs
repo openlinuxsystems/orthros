@@ -7,11 +7,11 @@
 //! this crate is where capabilities live:
 //!
 //! - [`Rights`], the twelve rights a capability can grant, and
-//!   [`ObjectKind`], the fifteen kinds of object it can designate: memory,
-//!   frames, address spaces, threads, processes, endpoints, notifications,
-//!   interrupt lines, I/O ports, device registers, DMA buffers, resource
-//!   domains, and from Phase 5 the random number generator, rings and the
-//!   kernel log;
+//!   [`ObjectKind`], the seventeen kinds of object it can designate:
+//!   memory, frames, address spaces, threads, processes, endpoints,
+//!   notifications, interrupt lines, I/O ports, device registers, DMA
+//!   buffers, resource domains, from Phase 5 the random number generator,
+//!   rings and the kernel log, and from Phase 7 files and directories;
 //! - [`Capability`], a value holding an object, its rights, a badge and
 //!   the key it is sealed with, together with the checks that decide what
 //!   it may be used for and what may be made from it;

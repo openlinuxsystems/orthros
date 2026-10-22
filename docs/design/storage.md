@@ -1,0 +1,378 @@
+<!--
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+# Storage: files, disks and FAT
+
+This note describes Radix's storage as of Phase 7: the virtual file
+system and its capability-relative paths, directory and file objects,
+the page cache and the block cache, the block layer and the virtio disk
+driver, FAT, tmpfs and the generated trees, writeback and reclaim, and
+the hierarchy Spark builds. It ends with the semi-formal arguments that
+paths never leave their directory and that freed clusters are never
+written by their old owner, the lock order, and the known limits. The
+user-facing descriptions are radix-directory(2), radix-file(2),
+radix-files(7), radix-proc(5), radix-sysfs(5) and spark(8); the decisions
+behind the design are ADRs 0052 to 0059.
+
+## Crates
+
+```text
+kernel/lib/hw           radix-hw: device registers (Mmio), DMA memory (Dma),
+                        pages devices read and write (Page), MSI messages,
+                        PCI configuration space through ECAM (pci.rs)
+kernel/drivers/virtio   radix-virtio: the modern PCI transport, split
+                        virtqueues, virtio-blk (compartment)
+kernel/fs/block         radix-block: block devices, MBR and GPT, the block
+                        cache, the page index (pagemap), RAM disks for tests
+                        (compartment)
+kernel/fs/vfs           radix-vfs: nodes, filesystems, paths, the mount
+                        table, the page cache, tmpfs, generated files, the
+                        boot archive (compartment)
+kernel/fs/fat           radix-fat: FAT12/16/32 with long names (compartment);
+                        tla/Clusters.tla, the model of cluster reuse
+kernel/radix            fs/: the tree, disks, devfs, procfs, sysfs, the
+                        writeback thread; user/files.rs: the directory and
+                        file methods
+abi                     directory.ridl, file.ridl
+userspace/radix-rt      fs.rs: Dir and File for programs
+userspace/spark         Spark v1: the hierarchy and /volumes
+userspace/storage       the `storage` boot test's program
+tools/xtask             frames.rs: the stack frame budget; test.rs: disks,
+                        a second boot, and the host checks with dosfstools
+                        and mtools
+```
+
+A *compartment* is a crate with `#![forbid(unsafe_code)]` that builds and
+tests on the host. Every storage crate but `radix-hw` is one, and
+`radix-hw` hands out device memory only as types whose accesses are
+checked, so a driver or filesystem bug can corrupt its own data but not
+the kernel's.
+
+## The tree
+
+Every filesystem shows its files as nodes (`radix_vfs::Node`): a
+directory looks names up, creates, removes, renames and lists; a file
+reads and writes bytes at offsets, and can be cut or grown; both have a
+status (kind, size, bytes allocated, an id, times). A `FileSystem` is a
+tree of nodes with a root, and can sync, shrink its caches and say how
+full it is.
+
+The mount table (`radix_vfs::mount::Vfs`) joins filesystems into one
+tree. A mount records its filesystem, its root node, the mount and node it
+covers, whether it is read-only, its path from the root (for
+`/proc/mounts`) and where it was mounted from. A place in the tree is a
+`Location`: a mount and a node of it.
+
+### Paths
+
+A path is UTF-8, at most 4,096 bytes, with no NUL, and names of at most
+255 bytes. It is never absolute: a leading `/` is refused with `outside`.
+Resolution walks it from the directory it came with, keeping the chain of
+places it went through:
+
+- a name is looked up in the last place, and if something is mounted on
+  what it finds, the walk moves to that mount's root (and up a stack of
+  mounts on the same directory);
+- `.` stays; `..` pops the last place, and popping the first one is
+  refused with `outside`.
+
+So `..` always returns to a place this walk entered, which is how it
+crosses back over a mount point, and never reaches anything above the
+starting directory. A path with no `..`, nearly every path, needs no
+chain: the walk holds only where it is, takes no reference to the places
+it passes, and allocates nothing; at the first `..` it starts again from
+the directory with the chain.
+
+Each mount keeps a 128-bit filter of its nodes that something is mounted
+on, one bit each, chosen by the node's address (Fibonacci hashing), as a
+Bloom filter with one hash. A walk past a node whose bit is clear knows
+that nothing is mounted there without taking the table's lock, which is
+the case for every node of a filesystem with nothing mounted on it; a set
+bit sends it to the table. Linux marks mount points in its directory
+cache (`DCACHE_MOUNTED`) for the same reason. Bits change only under the
+table's lock: `mount` sets the bit before the mount is in the table, so a
+walk that misses the bit has missed the mount too, and `unmount`
+recomputes the filter of the mount below after the mount has left, each
+word whole, so no bit a mount still needs is ever clear.
+
+### Mounting
+
+`mount` needs the control right. It resolves the path, checks that it is
+a directory, makes the filesystem (`crate::fs::make`: `tmpfs`, `fat` on a
+block device the caller names by a file capability, or the generated
+`proc`, `sys`, `dev` and `bootfs`), and adds the mount. A second mount on
+the same place stacks on the first, as on Linux. `unmount` takes off the
+mount whose root the path names, after syncing it, unless something is
+mounted on it or anything holds a place on it: the table and the call
+hold two references to the mount, and any more is a handle. A rename
+never crosses mounts, and a mount point cannot be removed.
+
+## Directory and file objects
+
+A directory or file capability names a `FileObject`: a `Location`. Its
+methods are in `user/files.rs`, decoded by the generated `*Args` types,
+with paths copied from the caller once (`Path::copy`) and checked as
+UTF-8 there. The capability the call names is looked up once, by the
+system call, and handed to the method, which checks its kind and rights
+before anything is looked up. An `open` that creates or cuts a file
+checks the destination slot is empty first, so that nothing changes for
+a call that fails; any other `open` finds an occupied slot when it puts
+the capability there, and the object it made goes once the store's lock
+has gone.
+
+`open` hands on at most the rights of the directory it opens through: a
+file gets read and write, a directory read, write and control, both copy
+and transfer. Opening a file for writing on a read-only mount fails with
+`read_only`.
+
+Releasing a file object can mean freeing a removed FAT file's clusters,
+which reads and writes the disk. The capability store releases objects
+with its lock held, so file objects are queued (`fs::defer_drop`, linked
+through the objects themselves, so queueing needs no memory) and dropped
+once the store's lock has gone (`fs::drop_deferred`, from `caps::with`).
+An object whose filesystem says that its nodes only free memory when they
+go (`FileSystem::light_drops`: tmpfs, the boot archive and the generated
+trees) is dropped at once instead (`fs::release`). Only its node can go
+with it: no mount is unmounted while a handle holds a place on it.
+
+## The page cache
+
+A file's data lives in its `FileCache`: its size, and the pages of it in
+memory, indexed by page number in a `PageMap`, a radix tree of 64-slot
+nodes like Linux's XArray (a lookup takes six bits of the page number per
+level and never compares keys). Each cached page records whether it is
+dirty.
+
+- A read copies from the pages to the caller, fetching missing pages
+  through the file's `Backing` first. Bytes past the end read as nothing;
+  a page never written reads as zeros.
+- A write copies into the pages and marks them dirty, growing the file
+  first (`Backing::reserve`) if it ends past the end. The bytes between
+  the old end and the new data are zeroed, in memory and on the disk
+  (`Backing::zero`), since the disk may hold anything there.
+- Cutting a file drops the pages wholly past the new end, dirty or not,
+  zeroes the rest of the last page, and then has the backing free the
+  space (`Backing::truncate`).
+- `sync` writes the dirty pages back through the backing; a page whose
+  write fails stays dirty.
+- `shrink` drops clean pages.
+
+One mutex guards a file's pages and size, and is held while the disk
+works: a file has one request in flight at a time.
+
+Copies between the caller's memory and a page are the only copies: the
+disk reads and writes the page itself by DMA, so data moves once between
+a program and the disk. Pages come from the frame allocator, owned by
+`PageCache`, so `/proc/meminfo` counts them.
+
+## The block layer and the block cache
+
+A `BlockDevice` is a disk or a part of one, in 512-byte sectors. A
+request reads or writes sectors from one place into a list of
+`Segment`s, each a range of a page, and blocks the calling thread until
+the device is done. `partition` reads MBR and GPT tables (the GPT's CRC32
+checked, the backup header when the primary is bad) and `Slice` is a
+partition as a device of its own.
+
+A filesystem's metadata goes through a `BlockCache` of its device: page
+`n` holds the device's bytes from `n * 4096`, with a bit per sector for
+*valid* (read or written) and one for *dirty*. A read fetches only the
+sectors it lacks; a write of whole sectors fetches nothing; `sync` writes
+the dirty sectors in runs and then flushes the device. `discard` forgets
+sectors exactly, without touching their neighbours in the same page, and
+`shrink` drops clean pages, which the cache also does on its own past
+4,096 pages.
+
+## Disks
+
+At boot, `fs::disk::init` walks every PCI segment the ACPI MCFG table
+describes (`radix_hw::pci::scan`: every bus from the segment's first,
+through PCI-to-PCI bridges, with each function's BARs sized), logs each
+function, and binds the virtio block devices:
+
+1. it maps the BARs the virtio capabilities name, uncached, and turns on
+   bus mastering;
+2. it sets the device up through the modern transport (ADR 0053):
+   reset, the features it uses, one split virtqueue in DMA memory;
+3. it asks the architecture for an interrupt vector and programs it as
+   the queue's MSI-X entry (ADR 0052); a device with no vector to spare
+   is polled by the threads that wait for it;
+4. it reads the disk's partition table and names the disk and each
+   partition as Linux would (`vda`, `vda1`), for `/dev` and `/sys/block`.
+
+A request takes one of 64 slots, builds a descriptor chain (the header,
+up to 32 data segments, the status byte), adds it to the queue and rings
+the doorbell. The interrupt handler takes completions off the used ring
+and marks each slot done or failed, matched by the chain's head under the
+queue's lock (a head can be reused as soon as it is handed back), and
+wakes the waiting threads. The thread then frees its slot. Many threads
+can have requests in flight at once, up to the queue's size.
+
+## FAT
+
+`radix-fat` implements FAT12, FAT16 and FAT32 from Microsoft's
+specification (ADR 0056). `bpb` reads the boot sector and works out the
+geometry; `table` packs and unpacks entries of each width; `name` holds
+short entries, long-name entries and their checksums, and makes short
+names for long ones (`NAME~1.TXT`) as Windows does; `time` converts
+between FAT's local date and time fields and nanoseconds since 1970 with
+Howard Hinnant's civil-date algorithms.
+
+- A volume's metadata (both tables, directories, FSInfo) goes through its
+  block cache. A file's data goes through its page cache, whose backing
+  maps each page to the clusters of the file's chain and moves it
+  straight between the page and the disk.
+- A node knows where its short entry is, its first cluster and, once it
+  is used, its whole chain. A file's size lives in its cache while it is
+  in memory and reaches the entry, with its first cluster and its time,
+  when the node is flushed; a node with changes is kept on the volume's
+  dirty list until then, so nothing is lost when its last handle goes.
+- The node table maps an entry's place to the node in memory for it, so
+  two opens of one file share one node and one cache.
+- A file or directory removed while in use loses its entry at once and
+  keeps its clusters until its last reference goes; then they are freed.
+- Freeing a directory's clusters discards them from the block cache, so
+  entries written before the free are never written later over whatever
+  gets the clusters next. A file's clusters need nothing like that: its
+  dirty pages past a cut are dropped before the cut, and a removed file's
+  pages go with it.
+- Both tables are written; FSInfo's free count and hint are kept, and
+  counted once from the table when FSInfo has none.
+
+## tmpfs and the generated trees
+
+tmpfs is a page cache with nothing below it: its pages are the only copy,
+nothing is written back, and a tmpfs has a size limit (half of memory,
+as on Linux, for those programs mount; 1 MiB for the root, which holds
+only mount points). Directories are sorted vectors of entries, under a
+mutex each, and a namespace lock per tmpfs keeps creates, removes and
+renames apart.
+
+The generated trees are made of `synthetic` nodes: fixed directories,
+listed directories (whose entries come from a callback, such as the
+processes) and generated files, whose text is written when the file is
+opened, so that a reader sees one snapshot. They are read-only.
+
+- `devfs`: `null`, `zero`, `random`, `urandom`, and a block device node per
+  disk and partition, read and written through the block layer.
+- `procfs` (radix-proc(5)): `/proc/<n>/status` for every process the
+  kernel holds, `/proc/mounts`, `/proc/meminfo` and `/proc/uptime`.
+- `sysfs` (radix-sysfs(5)): `/sys/kernel/{version,cmdline,cpus}`,
+  `/sys/block/<name>/{size,ro}` and
+  `/sys/bus/pci/devices/<address>/{vendor,device,class}`, as on Linux.
+- `bootfs`: the boot archive's `system` directory, read-only, one node per
+  file over the archive's bytes.
+
+## Writeback and reclaim
+
+The writeback thread wakes every five seconds and syncs every filesystem
+with changes (`Vfs::sync_all`), so a power cut loses at most that much,
+as with Linux's flusher threads. When the frame allocator's free pages
+fall below 1/64 of memory at a wake-up, it also drops clean cached pages,
+and the out-of-memory policy asks it to (`writeback::reclaim`) before it
+stops a resource domain (ADR 0029). Dropping pages takes the caches'
+locks, so it only ever happens in this thread, which holds none, and
+never inside an allocation.
+
+## The hierarchy
+
+The kernel makes only the root, an empty tmpfs, and gives it to Spark in
+`SLOT_ROOT`. Spark v1 (spark(8)) makes `/system`, `/applications`,
+`/users`, `/data`, `/tmp`, `/run`, `/dev`, `/proc`, `/sys` and
+`/volumes`; mounts the boot archive read-only on `/system`, tmpfs on
+`/system/etc`, `/system/var`, `/tmp` and `/run`, and the `dev`, `proc`
+and `sys` trees; and mounts the FAT filesystem of each disk or partition
+in `/dev` at `/volumes/<name>`, read-only when the device is. A disk
+with a partition table is not mounted whole. It then starts the program
+its arguments name with the root, read and write.
+
+## Lock order
+
+From outermost to innermost:
+
+1. the capability store (released objects are queued, never dropped
+   under it);
+2. a FAT volume's `ns`, or a tmpfs's namespace lock;
+3. a directory's lock in tmpfs, and the lock of a directory under it
+   (subclass 1, only with the namespace lock held, so only one thread
+   ever holds two);
+4. a file's page cache;
+5. a FAT node's `meta` (one at a time);
+6. a FAT volume's `space`;
+7. the block cache;
+8. the disk's queue (with interrupts off).
+
+The mount table's lock is taken alone, around lookups and changes to the
+table, never while a filesystem works. The lock checker checks this
+order on every boot test (the `fuzz` test calls every directory and file
+method at random with it on).
+
+## Kernel stacks
+
+A system call into a directory method goes through `user/files.rs`, the
+VFS, FAT, the block cache, the block layer and the driver, on a 16 KiB
+kernel stack. The release kernel is checked after every build (ADR
+0058): `ob` reads the `.stack_sizes` section LLVM writes and refuses any
+function whose frame is over 2 KiB but the few, listed with their
+reasons, that run only at boot, in the panic handler or in boot tests.
+Large arrays are built on the heap a slot at a time (the page index's
+nodes), copies of tables go an entry at a time (the PCI functions), and
+the lock checker's graph searches use bit sets instead of queues.
+
+## Correctness
+
+**Paths stay beneath their directory.** The walk's chain starts with the
+starting place, and only a name lookup pushes onto it. `..` pops, and
+popping the last entry fails. So every place the walk is ever at is
+either the start or reached from it by lookups, each of which returns a
+child of the place before (or, crossing a mount, the root of what is
+mounted on that child). A leading `/` is refused before the walk. So a
+path reaches only what lies beneath its directory, through mounts on the
+way, and a directory capability gives exactly the subtree under it. The
+walk without a chain only ever looks names up, so the same holds with
+no pops at all; it hands any path with a `..` to the walk with one.
+
+**A freed cluster is never written by its old owner.** Clusters change
+hands between files and directories. A file's data is written back
+through the file's chain as it is at the moment of the write-back, under
+the file's cache lock; a directory's entries are in the block cache by
+position, written back wherever they are. Freeing a file's clusters
+happens after its dirty pages past the cut are dropped (a cut) or with
+all its pages (a removed file whose last reference goes), under the same
+lock, so no later write-back of that file can reach them. Freeing a
+directory's clusters discards them from the block cache under the
+volume's `space` lock, so no dirty sector of the directory survives the
+free. The TLA+ model `Clusters.tla` checks, with two files, two clusters
+and every interleaving of growth, writes, write-backs, frees and
+reclaim, that nothing is ever written to a cluster but by its owner of
+the moment and that every owner reads back what it last wrote; without
+the discard it finds the stale directory sector written over a file.
+
+**What is written reaches the disk.** A write marks its page dirty and
+the node dirty; a dirty node stays in memory on the volume's list until
+it is flushed, and a page is only dropped clean. The writeback thread,
+`sync` and unmount write dirty pages through the chain, then the entries,
+then the tables and FSInfo, then flush the device. The `storage` boot
+test writes four volumes (FAT12, FAT16, FAT32 and a partitioned disk),
+checks them with `fsck.fat` and mtools on the host, changes one from the
+host, and reads everything back after a second boot.
+
+## Known limits
+
+- No name cache: every component of every path is looked up in its
+  directory, and while anything is mounted, checked against the mount
+  table, which is a list. Both are fine for Phase 7's trees and are the
+  first things to measure as the trees grow.
+- A file's cache lock is held across its disk I/O, so one file has one
+  request in flight; FAT holds one namespace lock for all directory work.
+- No read-ahead and no write clustering beyond one file's dirty pages in
+  order; no `O_DIRECT`.
+- FAT has no exFAT, no TRIM, and no journalling (as on every system: a
+  power cut mid-write can leave lost clusters, which `fsck.fat` finds).
+- Disks are found once, at boot, and mounted by device name; there is no
+  hot plug yet, and no labels in `/volumes`.
+- The user heap of radix-rt keeps freed large blocks mapped and reuses
+  them for blocks of the same size (docs/design/processes.md); it never
+  gives memory back to its memory object.

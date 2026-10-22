@@ -1,0 +1,165 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Directories.
+//!
+//! Programs never name files by absolute path: they hold capabilities to
+//! directories, and every path is resolved beneath the directory it is
+//! given with. A path is names separated by `/`; `.` is the directory
+//! itself, `..` its parent, but never above the directory the path starts
+//! from, and a path that starts with `/` is refused (outside), as with
+//! WASI's preopened directories and Capsicum. What a program can reach is
+//! what its directory capabilities lead to. Spark holds the root of the
+//! system's tree in SLOT_ROOT (radix-startup(2)) and hands out
+//! capabilities to the parts each program needs.
+//!
+//! Rights: the read right looks names up, lists and opens for reading;
+//! the write right creates, removes and renames, and opens for writing;
+//! the control right mounts and unmounts. A capability `open` makes has
+//! the rights it asks for, which must be among the directory's own (for
+//! a file: read and write; for a directory: read, write and control), and
+//! the copy and transfer rights.
+
+module directory;
+
+/// The longest name in a directory, in bytes of UTF-8.
+const NAME_MAX: u64 = 255;
+/// The longest path a call takes, in bytes.
+const PATH_MAX: u64 = 4096;
+
+/// What a file is.
+enum FileKind: u8 {
+    /// A regular file.
+    file = 0;
+    /// A directory.
+    directory = 1;
+    /// A block device, which filesystems are mounted from.
+    block_device = 2;
+    /// A character device: `null`, `zero` and the like.
+    char_device = 3;
+}
+
+/// What kind of filesystem one is.
+enum FilesystemKind: u8 {
+    /// Memory only: `tmpfs`.
+    tmpfs = 0;
+    /// FAT12, FAT16 or FAT32 on a disk: `fat`.
+    fat = 1;
+    /// The processes: `proc`.
+    proc = 2;
+    /// The kernel's devices and settings: `sys`.
+    sys = 3;
+    /// The devices: `dev`.
+    dev = 4;
+    /// The boot archive, read-only: `bootfs`.
+    bootfs = 5;
+}
+
+/// How `open` opens.
+flags OpenFlags: u32 {
+    /// Make the file if it does not exist (needs the write right).
+    create = 0;
+    /// With `create`: fail with exists if it does.
+    exclusive = 1;
+    /// Cut the file to 0 bytes (needs the write right).
+    truncate = 2;
+    /// Fail with not_directory unless it is a directory.
+    directory = 3;
+}
+
+/// How a filesystem is mounted.
+flags MountFlags: u32 {
+    /// Refuse every change.
+    read_only = 0;
+}
+
+/// An entry `list` writes: this header, then the name's bytes, then
+/// zeros up to a multiple of 8 bytes.
+struct DirEntry {
+    /// The cursor that continues the listing after this entry.
+    next: u64;
+    /// What it is: a FileKind.
+    kind: u8;
+    /// Zero.
+    pad: u8;
+    /// The length of its name in bytes.
+    name_len: u16;
+    /// Zero.
+    reserved: u32;
+}
+
+/// A directory.
+interface directory = 0x000b version 1 {
+    kind = directory;
+    /// Opens the file or directory at `path` (`.` for this one) and puts
+    /// a capability to it with `rights` in slot `to`. Returns what it is.
+    /// Needs the read right, and the write right to create or truncate or
+    /// to ask for it.
+    method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
+        raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt];
+    /// Makes an empty directory at `path`. Needs the write right.
+    method make_directory = 2 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt];
+    /// Removes the file or empty directory at `path`. A file still open
+    /// lives on until its last capability goes. Needs the write right.
+    method remove = 3 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, not_empty, read_only, name_too_long,
+                bad_name, outside, in_use, io, corrupt];
+    /// Moves the file or directory at `from` to `to` beneath the
+    /// directory in slot `to_dir`, on the same filesystem, replacing a
+    /// file (or an empty directory, for a directory) there. Needs the
+    /// write right on both.
+    method rename = 4 (from: in bytes, to_dir: slot, to: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, not_directory, is_directory, not_empty,
+                read_only, no_space, name_too_long, bad_name, outside, cross_mount, in_use, io,
+                corrupt];
+    /// Writes the directory's entries from `cursor` (0 for the first) into
+    /// `buffer` as DirEntry records, other than `.` and `..`; returns how
+    /// many it wrote (0 at the end), the bytes they take, and the cursor
+    /// that continues after them. Needs the read right.
+    method list = 5 (cursor: u64, buffer: out bytes) -> (count: u32, used: u64, next: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, io,
+                corrupt];
+    /// What the file at `path` (`.` for this directory) is: its kind, its
+    /// size and the bytes it takes on its filesystem, a number unique on
+    /// its filesystem while it exists, and when it was made and last
+    /// changed, in nanoseconds since 1970 (0 if unknown). Needs the read
+    /// right.
+    method stat = 6 (path: in bytes)
+        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
+                corrupt];
+    /// Mounts a filesystem of kind `filesystem` (its name, as
+    /// FilesystemKind lists them) on the directory at `path`: `fat` on the
+    /// block device whose file capability is in slot `source`, the others
+    /// with `source` 0. A second mount on a directory stacks on the first.
+    /// Needs the control right, and the read right on `source` (and the
+    /// write right unless `flags` has read_only).
+    method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
+                outside, in_use, io, corrupt, unknown_filesystem, not_block_device];
+    /// Unmounts the filesystem whose root is at `path`, after writing what
+    /// it holds in memory to its disk. Fails with in_use while anything
+    /// is mounted on it or open on it. Needs the control right.
+    method unmount = 8 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use,
+                io, corrupt];
+    /// Writes everything the directory's filesystem holds in memory to its
+    /// disk.
+    method sync = 9 () -> ()
+        raises [no_such_slot, empty_slot, io, corrupt];
+    /// The directory's filesystem: its kind, how it is mounted, and its
+    /// block size, blocks and free blocks. Needs the read right.
+    method info = 10 ()
+        -> (filesystem: FilesystemKind, flags: MountFlags, block_size: u32, blocks: u64, free: u64)
+        raises [no_such_slot, empty_slot, missing_rights];
+}

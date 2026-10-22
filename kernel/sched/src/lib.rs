@@ -50,7 +50,7 @@ pub use fair::{
 pub use haltpoll::HaltPoll;
 pub use rt::{RR_QUANTUM_NS, RtEntry, RtQueue};
 pub use topology::{
-    CpuLoad, Level, MAX_NODES, Place, Topology, interval_ticks, is_cache_hot, should_pull,
+    CpuLoad, Level, Loads, MAX_NODES, Place, Topology, interval_ticks, is_cache_hot, should_pull,
 };
 pub use weight::{
     DOMAIN_WEIGHT_DEFAULT, DOMAIN_WEIGHT_MAX, NICE_0_WEIGHT, NICE_MAX, NICE_MIN, RT_PRIO_MAX,
