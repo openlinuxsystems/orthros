@@ -590,7 +590,9 @@ The toolchain is the host's Clang, LLD and LLVM tools, made to target
 Radix by the scripts and Meson cross files *ob* writes into
 _out/toolchain/_: _bin/x86_64-radix-cc_, _-ar_, _-nm_ and the rest, and
 _meson/radix.ini_ for programs and _meson/radix-libc.ini_ for the C
-library itself. *x86_64-radix-cc* compiles for Radix's ABI, which
+library itself. The C library is built for no operating system, for
+which Clang hands linking to the host's GCC, so _bin/ld.lld_ is there
+too: the LLD that GCC finds first on *PATH*. *x86_64-radix-cc* compiles for Radix's ABI, which
 is Linux's x86-64 one (see *radix-posix*(7)), with *\_\_radix\_\_* and
 *\_\_dukovo\_\_* defined and Linux's own macros not, against the
 sysroot's headers only. It links a static position-independent program,

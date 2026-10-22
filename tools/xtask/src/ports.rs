@@ -349,14 +349,22 @@ impl Toolchain {
         process::create_dir(&self.dir.join("meson"))?;
         let sysroot = ctx.out.join("sysroot");
         write_script(&self.cc(), &self.cc_script(&sysroot))?;
-        for (name, path) in &self.tools {
-            let script = format!(
+        let script = |name: &str, path: &Path| {
+            format!(
                 "#!/bin/sh\n# Written by ob (ob(1), PORTS): the Radix toolchain's {name}.\n\
                  exec '{}' \"$@\"\n",
                 path.display()
-            );
-            write_script(&self.bin().join(format!("{TRIPLE}-{name}")), &script)?;
+            )
+        };
+        for (name, path) in &self.tools {
+            write_script(&self.bin().join(format!("{TRIPLE}-{name}")), &script(name, path))?;
         }
+        // The C library is built for no OS, for which Clang hands linking
+        // to the host's GCC, and GCC takes `-fuse-ld=lld` to mean the first
+        // `ld.lld` on PATH: this one, the toolchain's own LLD, rather than
+        // whichever the host has, if any (Ubuntu's lld-20 installs only
+        // `ld.lld-20`).
+        write_script(&self.bin().join("ld.lld"), &script("ld", &self.tools["ld"]))?;
         write_file(&self.libc_cross_file(), &self.libc_cross(&sysroot))?;
         write_file(&self.cross_file(), &self.programs_cross())?;
         Ok(())
