@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Radix, the OrthrOS kernel.
+//! Radix, the Dukovo kernel.
 //!
 //! The architecture crate boots the CPU, moves the kernel to a random
 //! address, builds its page tables and calls [`radix_kernel_main`], which
@@ -26,7 +26,7 @@
 //! is reached only through the `radix-hal` traits, implemented by
 //! `radix-arch-x86_64` (and by AArch64 stubs that CI compiles, so this
 //! crate stays portable). The command-line flags are listed in
-//! `radix_hal::cmdline::FLAGS` and documented in orthros-boot(7).
+//! `radix_hal::cmdline::FLAGS` and documented in dukovo-boot(7).
 //!
 //! The crate needs `unsafe` in five places only, each allowed where it is
 //! used: exporting the entry point under a fixed name, switching the locks
@@ -162,12 +162,12 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (OrthrOS Phase 6)", env!("CARGO_PKG_VERSION"));
+    info!("Radix {} (Dukovo Phase 6)", env!("CARGO_PKG_VERSION"));
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);
     for flag in flags.unknown() {
-        warn!("Unknown kernel flag `{flag}` ignored; see orthros-boot(7)");
+        warn!("Unknown kernel flag `{flag}` ignored; see dukovo-boot(7)");
     }
     let _ =
         BOOT.set(BootSummary { memory_map: params.memory_map, reservations: params.reservations });

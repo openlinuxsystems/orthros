@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 This note describes how the Radix kernel manages memory as of Phase 2: the
 frame allocator, the kernel heap, the page tables, KASLR, and how all of it
 is verified. The user-facing description is the *MEMORY* and *KASLR*
-sections of `orthros-boot(7)`; `radix-debug(7)` covers heap corruption
+sections of `dukovo-boot(7)`; `radix-debug(7)` covers heap corruption
 reports, the `mem` and `heap` commands of `kdb`, and the self-tests.
 
 ## Crates

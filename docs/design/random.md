@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 This note describes the Radix kernel's random number generator as of
 Phase 2: where its seed comes from, how it makes output, and how it is
 tested. The decision is ADR 0022; the user-facing description is the
-*RANDOM NUMBERS* section of `orthros-boot(7)`.
+*RANDOM NUMBERS* section of `dukovo-boot(7)`.
 
 ## Crates
 

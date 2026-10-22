@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -17,7 +17,7 @@ copyright line checked in CI, and CREDITS.md thanks upstream projects,
 including those whose ideas we follow without using their code.
 [ADR 0021](0021-license-manifest-in-every-image.md) already checks the
 licenses of everything in an image, but said nothing about the files in the
-repository, and kept license texts in two places: OrthrOS's own at the top
+repository, and kept license texts in two places: Dukovo's own at the top
 of the repository and the rest in `image/licenses/<id>.txt`.
 
 The [REUSE specification](https://reuse.software/spec-3.3/) 3.3 asks for
@@ -32,7 +32,7 @@ uses, so the texts that only image components need cannot all move there.
   `SPDX-License-Identifier` lines in its comment syntax; man pages carry
   them as scdoc comments after the title line. Files without comments
   (Cargo lock files, the JSON target specification, the Spleen fonts) are
-  covered by `REUSE.toml`. Copyright is held by "The OrthrOS contributors",
+  covered by `REUSE.toml`. Copyright is held by "The Dukovo contributors",
   who keep the copyright in what they contribute.
 - `LICENSES/` holds the licenses that files in the repository use, now
   Apache-2.0, MIT, BSD-2-Clause (the fonts), CC-BY-4.0 (the code of

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! `ob test`: host unit tests and QEMU boot tests.
@@ -635,8 +635,8 @@ pub struct Built {
 /// Builds a test image whose kernel command line is a placeholder slot.
 pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -> Result<Vec<u8>> {
     let name = match kind {
-        TestImage::Plain => "orthros-test",
-        TestImage::Microcode => "orthros-test-microcode",
+        TestImage::Plain => "dukovo-test",
+        TestImage::Microcode => "dukovo-test-microcode",
     };
     let output = dir.join(format!("{name}.img"));
     image::build(
@@ -1095,7 +1095,7 @@ fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} (OrthrOS Phase 6)"))?;
+    vm.expect(&format!("Radix {VERSION} (Dukovo Phase 6)"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;

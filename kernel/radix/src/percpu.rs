@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Per-CPU data: one value per CPU, each on its own cache line, so that

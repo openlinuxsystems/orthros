@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -26,5 +26,5 @@ add deliberately.
   redistributable.
 - Early microcode loading (roadmap Phase 1) works only when the optional
   package is installed.
-- OrthrOS 1.0 supports wired Ethernet only; Wi-Fi would need the firmware
+- Dukovo 1.0 supports wired Ethernet only; Wi-Fi would need the firmware
   package and a driver, and is outside the 1.0 scope.

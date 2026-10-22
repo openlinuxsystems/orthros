@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 This chapter shows how to find out what went wrong when Radix crashes or
 misbehaves, in QEMU or on a real machine. The reference is
-`radix-debug(7)`; the kernel flags are in `orthros-boot(7)`.
+`radix-debug(7)`; the kernel flags are in `dukovo-boot(7)`.
 
 ## Reading a panic report
 

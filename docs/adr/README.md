@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -13,7 +13,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | --- | --- | --- |
 | [0000](0000-template.md) | Template | |
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0002](0002-license-apache-2.0-or-mit.md) | License OrthrOS under Apache-2.0 OR MIT | Accepted |
+| [0002](0002-license-apache-2.0-or-mit.md) | License Dukovo under Apache-2.0 OR MIT | Accepted |
 | [0003](0003-github-and-actions.md) | Host on GitHub and run CI on GitHub Actions | Accepted |
 | [0004](0004-btrfs-native-filesystem.md) | Btrfs is the native file system | Accepted |
 | [0005](0005-static-linking.md) | Statically link the programs in /system/bin | Accepted |

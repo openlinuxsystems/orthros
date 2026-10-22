@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 ## Context
 
 The roadmap pins GRUB by building it from source and, from Phase 14,
-assembles the USB image with OrthrOS's own `rdisk`, `mkfs-btrfs`,
+assembles the USB image with Dukovo's own `rdisk`, `mkfs-btrfs`,
 `mkfs-fat` and `rgrub-setup`. Phase 0 only needs to prove that GRUB loads
 the kernel under UEFI and BIOS, from USB and optical media.
 
@@ -28,7 +28,7 @@ target for the higher-half kernel.
 ## Consequences
 
 - The image boots on UEFI and BIOS machines from a USB stick, hard disk or
-  CD, with no OrthrOS-specific image tooling yet.
+  CD, with no Dukovo-specific image tooling yet.
 - Hosts with a different GRUB release may produce slightly different
   images. Builds through `./ob --container` use the pinned GRUB.
 - Images are not yet bit-for-bit reproducible, because grub-mkrescue writes

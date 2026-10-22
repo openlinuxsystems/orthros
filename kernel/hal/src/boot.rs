@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! What the architecture hands the kernel at boot.
@@ -8,7 +8,7 @@ use core::fmt;
 /// Everything the kernel learns from the boot loader, in a form that does
 /// not depend on the boot protocol.
 pub struct BootParams {
-    /// Kernel command line; see orthros-boot(7) and [`crate::cmdline`].
+    /// Kernel command line; see dukovo-boot(7) and [`crate::cmdline`].
     pub command_line: &'static str,
     /// Name the boot loader reported, such as `GRUB 2.12`.
     pub boot_loader: &'static str,

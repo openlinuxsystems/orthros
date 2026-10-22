@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `orthros.toml`, the build configuration. Documented in orthros.toml(5).
+//! `dukovo.toml`, the build configuration. Documented in dukovo.toml(5).
 
 use std::fmt;
 use std::path::Path;
@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
-/// Every key `orthros.toml` accepts. `ob docs --check` verifies that
-/// orthros.toml(5) documents each one.
+/// Every key `dukovo.toml` accepts. `ob docs --check` verifies that
+/// dukovo.toml(5) documents each one.
 pub const KEYS: &[&str] = &[
     "build.arch",
     "build.profile",
@@ -193,11 +193,11 @@ impl Config {
         };
         Self::parse(&text).map_err(|err| {
             Error::new(format!("{}: {err}", path.display()))
-                .hint("the accepted keys are listed in orthros.toml(5)")
+                .hint("the accepted keys are listed in dukovo.toml(5)")
         })
     }
 
-    /// Parses and validates the text of `orthros.toml`.
+    /// Parses and validates the text of `dukovo.toml`.
     pub fn parse(text: &str) -> Result<Self> {
         let config: Config = toml::from_str(text).map_err(|err| Error::new(err.message()))?;
         config.validate()?;
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn repository_config_parses() {
-        let config = Config::parse(include_str!("../../../orthros.toml")).unwrap();
+        let config = Config::parse(include_str!("../../../dukovo.toml")).unwrap();
         assert_eq!(config.build.arch, Arch::X86_64);
     }
 
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn keys_cover_the_repository_config() {
-        let table: toml::Table = include_str!("../../../orthros.toml").parse().unwrap();
+        let table: toml::Table = include_str!("../../../dukovo.toml").parse().unwrap();
         for (section, values) in &table {
             for key in values.as_table().unwrap().keys() {
                 let dotted = format!("{section}.{key}");

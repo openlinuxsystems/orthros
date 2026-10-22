@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Safe parser for the static ACPI tables the Radix kernel reads at boot.

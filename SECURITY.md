@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -40,7 +40,7 @@ bug bounty.
 
 ## Supported versions
 
-OrthrOS has not had a release yet; only the `main` branch is supported, and
+Dukovo has not had a release yet; only the `main` branch is supported, and
 fixes land there. Once releases begin, this section will list which ones
 receive security fixes.
 
@@ -48,5 +48,5 @@ receive security fixes.
 
 In scope: everything in this repository, including the Radix kernel, the
 `ob` build tool and the images it builds. A vulnerability in a third-party
-component that OrthrOS ships, such as GRUB, is also welcome; we will pass it
+component that Dukovo ships, such as GRUB, is also welcome; we will pass it
 on to that project and update the component.

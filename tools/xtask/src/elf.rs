@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Reading ELF64 little-endian files: the kernel `ob` post-processes after

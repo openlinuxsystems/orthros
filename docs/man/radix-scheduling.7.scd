@@ -1,6 +1,6 @@
-radix-scheduling(7) "OrthrOS" "OrthrOS Manual"
+radix-scheduling(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -145,7 +145,7 @@ Fair waiters lend nothing; the fair class already bounds how long a fair
 thread waits for the CPU.
 
 The lock checker (see *radix-debug*(7) and the *lockdep* kernel flag in
-*orthros-boot*(7)) reports locks taken in orders that can deadlock, the
+*dukovo-boot*(7)) reports locks taken in orders that can deadlock, the
 moment the code runs.
 
 # RCU
@@ -246,4 +246,4 @@ checker at any time (see *radix-debug*(7)).
 
 # SEE ALSO
 
-*radix-ipc*(7), *radix-debug*(7), *radix-capabilities*(7), *orthros-boot*(7), *ob*(1)
+*radix-ipc*(7), *radix-debug*(7), *radix-capabilities*(7), *dukovo-boot*(7), *ob*(1)

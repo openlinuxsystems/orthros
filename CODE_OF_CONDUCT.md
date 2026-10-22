@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2014-2021 The Contributor Covenant contributors <https://www.contributor-covenant.org>
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: CC-BY-4.0
 -->
 
@@ -86,9 +86,9 @@ For answers to common questions about this code of conduct, see the FAQ at [http
 
 This code of conduct is the Contributor Covenant, version 2.1, licensed under
 the [Creative Commons Attribution 4.0 International license][CC BY 4.0]
-(SPDX: `CC-BY-4.0`). OrthrOS has filled in the contact method in the
+(SPDX: `CC-BY-4.0`). Dukovo has filled in the contact method in the
 Enforcement section and added this section; the rest is unchanged. The
-license applies to this document only, not to the OrthrOS code, which is
+license applies to this document only, not to the Dukovo code, which is
 licensed under Apache-2.0 OR MIT.
 
 [CC BY 4.0]: https://creativecommons.org/licenses/by/4.0/

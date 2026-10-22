@@ -1,6 +1,6 @@
-radix-capabilities(7) "OrthrOS" "OrthrOS Manual"
+radix-capabilities(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
@@ -236,4 +236,4 @@ are described in *radix-debug*(7).
 # SEE ALSO
 
 *radix-ipc*(7), *radix-capability*(2), *radix-errors*(2), *radix-debug*(7),
-*orthros-boot*(7), *ob*(1)
+*dukovo-boot*(7), *ob*(1)

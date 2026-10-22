@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -24,7 +24,7 @@ on-disk format Linux uses.
 ## Consequences
 
 - Linux's `btrfs check` and `btrfs-progs` can verify images Radix writes,
-  and disks can move between Linux and OrthrOS, which the file system
+  and disks can move between Linux and Dukovo, which the file system
   torture tests rely on.
 - Subvolumes and snapshots give the update and rollback design a ready
   mechanism.

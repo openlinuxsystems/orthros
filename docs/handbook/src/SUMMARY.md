@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -9,12 +9,12 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Getting started
 
-- [Building OrthrOS with ob](building.md)
+- [Building Dukovo with ob](building.md)
 - [Creating USB install media](usb-media.md)
 - [Installing, including manual partitioning with rdisk]()
 - [First boot and login]()
 
-# Using OrthrOS
+# Using Dukovo
 
 - [Nukesh guide and scripting]()
 - [Files, the directory hierarchy and /volumes]()

@@ -1,18 +1,18 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
 # Introduction
 
-OrthrOS is an operating system built around **Radix**, a kernel written in
+Dukovo is an operating system built around **Radix**, a kernel written in
 Rust. Radix is a hybrid design: a small trusted core holds the code that
 must be trusted, and everything else (drivers, file systems, the network
 stack) runs as restartable compartments that cannot use `unsafe` Rust.
 Programs reach resources through capabilities, unforgeable references that
 carry exactly the rights a program was given.
 
-On top of Radix, OrthrOS provides a complete, installable system:
+On top of Radix, Dukovo provides a complete, installable system:
 
 - **Spark**, the init and service manager, and **Nukesh**, the shell, with
   the usual Unix utilities;
@@ -24,7 +24,7 @@ On top of Radix, OrthrOS provides a complete, installable system:
 
 ## Where the project is
 
-OrthrOS is built in phases, each ending in something that runs. This
+Dukovo is built in phases, each ending in something that runs. This
 handbook describes **Phase 5**: the Radix kernel boots through GRUB under
 UEFI and legacy BIOS at a random address, chosen by a cryptographic random
 number generator seeded from several sources, manages the machine's memory
@@ -53,9 +53,9 @@ those phases land. The full plan is in
 
 ## How this handbook is organised
 
-- **Getting started** covers building OrthrOS, making install media and
+- **Getting started** covers building Dukovo, making install media and
   installing it.
-- **Using OrthrOS** covers the system itself, from the shell to updates.
+- **Using Dukovo** covers the system itself, from the shell to updates.
 - **Reference** lists supported hardware, explains how to debug the
   kernel, and lists the manual pages. Every
   command, file format and interface has a man page; this handbook explains

@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! AArch64 stubs of the Radix hardware abstraction layer.
 //!
-//! OrthrOS 1.0 runs on x86-64 only, but the kernel is meant to be portable.
+//! Dukovo 1.0 runs on x86-64 only, but the kernel is meant to be portable.
 //! This crate implements every HAL trait with placeholders so that CI can
 //! check the architecture-independent kernel for `aarch64-unknown-none`
 //! (`ob lint` runs `cargo clippy` for that target). Code in `kernel/radix`

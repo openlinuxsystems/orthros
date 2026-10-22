@@ -1,18 +1,18 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# OrthrOS roadmap: Radix implementation plan
+# Dukovo roadmap: Radix implementation plan
 
-This is the implementation plan for OrthrOS, from the Radix kernel
+This is the implementation plan for Dukovo, from the Radix kernel
 specification (v1.4) to Release 1.0 and beyond, as agreed on 2026-10-20.
 When a phase's scope changes, update this file in the same pull request.
 Decisions it refers to are recorded in [`docs/adr/`](adr/README.md).
 
 ## Summary
 
-OrthrOS 1.0 is an installable x86-64 operating system on the Radix kernel. It boots from a USB stick, partitions and formats a disk with its own tools, installs itself, and boots into Nukesh with networking, bundles, atomic updates and the Lumen compositor. The plan reaches 1.0 in 17 phases (0 to 16), each ending in something you can boot and test in QEMU, then continues on a post-1.0 track to full spec conformance.
+Dukovo 1.0 is an installable x86-64 operating system on the Radix kernel. It boots from a USB stick, partitions and formats a disk with its own tools, installs itself, and boots into Nukesh with networking, bundles, atomic updates and the Lumen compositor. The plan reaches 1.0 in 17 phases (0 to 16), each ending in something you can boot and test in QEMU, then continues on a post-1.0 track to full spec conformance.
 
 Sizing, stated plainly: projects of this kind (Redox, SerenityOS, Managarm) took small teams several years to reach a comparable point. Phases therefore carry relative sizes (S, M, L, XL), not dates.
 
@@ -29,7 +29,7 @@ Sizing, stated plainly: projects of this kind (Redox, SerenityOS, Managarm) took
 | Reference hardware | QEMU/KVM (q35 + OVMF), then the reference Dell Inspiron 15 5570 laptop (Core i7-8550U) | Chosen by the project owner; see the Reference machine section |
 | Networking in 1.0 | Wired Ethernet only | Wi-Fi drivers and WPA supplicant are their own large effort; the Dell has a built-in 10/100 Ethernet port |
 | Graphics in 1.0 | UEFI GOP framebuffer and virtio-gpu with software rendering | Native Intel/AMD GPU drivers are post-1.0 |
-| License | Apache-2.0 OR MIT for all OrthrOS code; ported tools keep their own licenses | Matches the Rust crates we reuse; GPL tools ship as separate programs |
+| License | Apache-2.0 OR MIT for all Dukovo code; ported tools keep their own licenses | Matches the Rust crates we reuse; GPL tools ship as separate programs |
 
 ### Scope of 1.0
 
@@ -42,7 +42,7 @@ The spec (v1.4) is buildable as written once eleven gaps are settled. Each row b
 
 | # | Spec reference | Gap or conflict | Decision in this plan |
 | --- | --- | --- | --- |
-| 1 | 1.2 vs 7.x | 1.2 says "kernel only", yet sections 7.1 to 7.16 specify a full userspace | Treat the spec as the OrthrOS system spec; Radix is the kernel inside it |
+| 1 | 1.2 vs 7.x | 1.2 says "kernel only", yet sections 7.1 to 7.16 specify a full userspace | Treat the spec as the Dukovo system spec; Radix is the kernel inside it |
 | 2 | 16.2 | Two steps are numbered 7, and Spark (step 7) must mount filesystems before the VFS exists (the other step 7) | Phase 6 builds a minimal VFS with a read-only boot archive before Spark; the full VFS follows in Phase 7 |
 | 3 | 7.1 vs 7.6 | `/system` is immutable and replaced on update, but `/system/etc` and `/system/var` must persist and be writable | `/system` is a read-only Btrfs subvolume per update slot; `/system/etc` and `/system/var` are separate writable subvolumes mounted over it. Updates ship defaults in `/system/lib/defaults/etc` and add new files without overwriting edited ones |
 | 4 | 2.1 vs 7.8 | Network stacks are to be compartmentalized, yet the kernel stack must remain the default path | The network stack runs in the kernel as a compartment: a `#![forbid(unsafe_code)]` crate with its own capability set, restartable on panic |
@@ -115,9 +115,9 @@ Everything lives in one repository and is built by one command, `./ob`, which ne
 ### Repository layout
 
 ```
-orthros/
+dukovo/
 ├── ob                    # build entry point (shell wrapper around tools/xtask)
-├── orthros.toml          # build configuration: arch, profile, features, image options
+├── dukovo.toml           # build configuration: arch, profile, features, image options
 ├── rust-toolchain.toml   # pinned nightly Rust
 ├── abi/                  # .ridl interface definitions (syscalls, IPC protocols)
 ├── kernel/
@@ -133,7 +133,7 @@ orthros/
 │   ├── coreutils/        # Radix-native tools
 │   ├── bundle-runtime/
 │   ├── services/         # logd, netd, resolved, timed, authd, volumed, ...
-│   ├── installer/        # orthros-install, rdisk, mkfs tools, rgrub-setup
+│   ├── installer/        # dukovo-install, rdisk, mkfs tools, rgrub-setup
 │   ├── sysupdate/
 │   └── lumen/
 ├── libs/                 # radix-rt, libradix, mlibc sysdeps, Rust std patches
@@ -153,7 +153,7 @@ orthros/
 - **Rust:** a pinned nightly in `rust-toolchain.toml`, with `-Zbuild-std` for the kernel target (`x86_64-unknown-none` style custom JSON) and for userspace (`x86_64-unknown-radix`). Patches to Rust's `std` and the `libc` crate live in `libs/rust-std/` until they can go upstream, as Redox did.
 - **C ports:** Clang and LLD (the same LLVM that Rust uses) through wrapper scripts `x86_64-radix-cc` and `x86_64-radix-ld` that point at the mlibc sysroot. Ports get a small `config.sub` patch and a Meson cross file.
 - **Ports system:** each `ports/<name>/recipe.toml` pins a source URL, SHA-256, patches and build steps, similar to Redox's cookbook. Sources are cached in `sources/` so a second build works offline.
-- **Host tools built from pinned source:** GRUB 2, and OrthrOS's own `rdisk`, `mkfs-btrfs`, `mkfs-fat` and `rgrub-setup`, which are compiled for Linux too and used to assemble images. The image pipeline dogfoods the installer's tools.
+- **Host tools built from pinned source:** GRUB 2, and Dukovo's own `rdisk`, `mkfs-btrfs`, `mkfs-fat` and `rgrub-setup`, which are compiled for Linux too and used to assemble images. The image pipeline dogfoods the installer's tools.
 
 ### The `ob` command
 
@@ -162,8 +162,8 @@ orthros/
 | `./ob setup` | Installs the pinned Rust toolchain and checks host packages | Ready build environment |
 | `./ob doctor` | Lists anything missing, with the exact install command for Debian, Ubuntu, Fedora or Arch | Report |
 | `./ob build` | Builds kernel, userspace, ports and docs incrementally | `out/sysroot/` |
-| `./ob image` | Builds the USB installer image (hybrid GPT, boots UEFI and BIOS) | `out/orthros-<version>-x86_64.img` |
-| `./ob image --iso` | Same system as a hybrid ISO for VMs and optical media | `out/orthros-<version>-x86_64.iso` |
+| `./ob image` | Builds the USB installer image (hybrid GPT, boots UEFI and BIOS) | `out/dukovo-<version>-x86_64.img` |
+| `./ob image --iso` | Same system as a hybrid ISO for VMs and optical media | `out/dukovo-<version>-x86_64.iso` |
 | `./ob run` | Boots the image in QEMU with KVM, OVMF and a serial console | Running VM |
 | `./ob run --install` | Boots the installer with a blank 32 GiB virtual disk attached | Running VM |
 | `./ob write-usb` | Lists removable drives with model and size, asks for typed confirmation, writes and verifies the image | Bootable USB stick |
@@ -173,7 +173,7 @@ orthros/
 
 Every command accepts `--container`, which runs it inside the pinned Podman or Docker build image, so a macOS or Windows host can build too. `./ob write-usb` refuses non-removable disks unless given `--force`, and users who prefer can write the image with balenaEtcher, GNOME Disks, Rufus (DD mode) or `dd`.
 
-`orthros.toml` holds the few choices a builder makes:
+`dukovo.toml` holds the few choices a builder makes:
 
 ```toml
 [build]
@@ -323,7 +323,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 ### Phase 14: Installer, rdisk and USB media (L)
 
-- Live image, `orthros-install`, `rdisk`, `mkfs-btrfs`, `mkfs-fat`, `mkswap`, `rgrub-setup` and answer-file installs, as specified in the next section.
+- Live image, `dukovo-install`, `rdisk`, `mkfs-btrfs`, `mkfs-fat`, `mkswap`, `rgrub-setup` and answer-file installs, as specified in the next section.
 - **Exit:** an automated QEMU test installs to a blank disk under UEFI and under BIOS, reboots and logs in, and a manual install from a USB stick succeeds on the Dell.
 
 ### Phase 15: Atomic updates and snapshots (M)
@@ -340,7 +340,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 ## Installer, rdisk and USB install media
 
-One USB image boots on UEFI and legacy BIOS machines, offers a live console, and installs OrthrOS with a keyboard-only installer whose disk tool, `rdisk`, also works on its own like fdisk.
+One USB image boots on UEFI and legacy BIOS machines, offers a live console, and installs Dukovo with a keyboard-only installer whose disk tool, `rdisk`, also works on its own like fdisk.
 
 ### USB install image
 
@@ -351,13 +351,13 @@ One USB image boots on UEFI and legacy BIOS machines, offers a live console, and
 | Protective MBR | none | sector 0 | GRUB `boot.img` for BIOS boot |
 | BIOS boot | EF02 | 1 MiB | GRUB `core.img` |
 | EFI System | EF00, FAT32 | 256 MiB | `EFI/BOOT/BOOTX64.EFI` (GRUB), `grub.cfg`, the `radix` kernel, `bootfs.tar`, optional `install.json` |
-| ORTHROS\_LIVE | OrthrOS data, Btrfs | rest | Read-only live system and the signed system image the installer writes to disk, plus the separate optional firmware package |
+| DUKOVO\_LIVE | Dukovo data, Btrfs | rest | Read-only live system and the signed system image the installer writes to disk, plus the separate optional firmware package |
 
 The system image is the same signed format that `sysupdate` uses, so installation and updates share one code path and one verification step.
 
-The GRUB menu offers: **Install OrthrOS**, **Try OrthrOS (live console)**, **Install with serial console**, and **Boot from first disk**. The live system mounts tmpfs over `/system/etc`, `/system/var`, `/users` and `/tmp`, starts the installer on the first virtual terminal and a rescue Nukesh on the second.
+The GRUB menu offers: **Install Dukovo**, **Try Dukovo (live console)**, **Install with serial console**, and **Boot from first disk**. The live system mounts tmpfs over `/system/etc`, `/system/var`, `/users` and `/tmp`, starts the installer on the first virtual terminal and a rescue Nukesh on the second.
 
-### Installer (`orthros-install`)
+### Installer (`dukovo-install`)
 
 A text interface built with ratatui. It works entirely from the keyboard and over a serial console (spec 7.14). Steps:
 
@@ -379,7 +379,7 @@ The install log goes to `/tmp/install.log` and is copied to `/system/var/log/ins
 | BIOS boot | EF02 | 1 MiB | none | GRUB `core.img` for BIOS machines |
 | EFI System | EF00 | 512 MiB | FAT32 | GRUB, kernels and boot archives for both update slots, `grubenv` |
 | Swap | Linux swap GUID | Equal to RAM, capped at 8 GiB (installer default, adjustable, 0 disables) | swap | Paging and future suspend-to-disk |
-| OrthrOS root | OrthrOS root GUID (minted in Phase 0) | Remaining space | Btrfs | Everything else |
+| Dukovo root | Dukovo root GUID (minted in Phase 0) | Remaining space | Btrfs | Everything else |
 
 Btrfs subvolumes on the root partition:
 
@@ -402,7 +402,7 @@ Btrfs subvolumes on the root partition:
 
 - **Interactive mode** keeps fdisk's single-letter commands so the habit carries over: `p` print, `n` new, `d` delete, `t` type, `l` list types, `g` new GPT, `o` new MBR, `c` name, `u` units, `v` verify, `w` write, `q` quit, `m` help.
 - **Script mode** (`rdisk --script layout.json /dev/disk0`) applies a layout file; the installer and `./ob image` both use it.
-- GPT primary and backup headers with CRC32 checks and repair, protective MBR, 1 MiB alignment, partition names, readable type aliases (`efi`, `bios-boot`, `swap`, `orthros-root`, `linux`, `windows-data`).
+- GPT primary and backup headers with CRC32 checks and repair, protective MBR, 1 MiB alignment, partition names, readable type aliases (`efi`, `bios-boot`, `swap`, `dukovo-root`, `linux`, `windows-data`).
 - Nothing is written before `w`; `--dry-run` prints the result; mounted disks are refused.
 - Disks appear as `/dev/disk0`, partitions as `/dev/disk0p1`, with `/dev/disk/by-label/` and `/dev/disk/by-uuid/` links.
 - Builds for Linux too, so `./ob image` uses the same code that runs on target machines.
@@ -421,7 +421,7 @@ Btrfs subvolumes on the root partition:
 
 ### Writing the stick
 
-`./ob write-usb` is the recommended path. Alternatives that also work: balenaEtcher, GNOME Disks "Restore Disk Image", Rufus in DD mode, or `sudo dd if=out/orthros-<version>-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress`.
+`./ob write-usb` is the recommended path. Alternatives that also work: balenaEtcher, GNOME Disks "Restore Disk Image", Rufus in DD mode, or `sudo dd if=out/dukovo-<version>-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress`.
 
 ## Lumen compositor
 
@@ -437,7 +437,7 @@ Lumen 1.0 is a complete Wayland compositor with no desktop environment: it shows
 - **Notifications:** Lumen subscribes to `notifyd` and shows plain-text notifications with position, timeout and do-not-disturb settings.
 - **Accessibility:** a Lumen accessibility protocol exposes window titles, focus changes and basic roles to a screen-reader bundle; high-contrast and large-title-bar themes; everything usable from the keyboard.
 - **Configuration:** `/system/etc/lumen.json` for system defaults and `~/.config/lumen.json` per user, both documented in `lumen.json(5)`.
-- **Starting it:** `lumen` from Nukesh, or enable `lumen.service` in Spark to start it after login. Leaving Lumen out of `orthros.toml` builds a console-only image (spec 7.4, 16.6).
+- **Starting it:** `lumen` from Nukesh, or enable `lumen.service` in Spark to start it after login. Leaving Lumen out of `dukovo.toml` builds a console-only image (spec 7.4, 16.6).
 - **Test client:** `terminal.bundle`, a small Rust terminal emulator (alacritty\_terminal for the VT parser, fontdue for text) that proves input, rendering, decorations and permissions end to end.
 
 ### Out of scope for 1.0
@@ -457,7 +457,7 @@ Every shipped command, service, file format, system call and library interface g
 - **Handbook** is written in mdBook (MPL-2.0) and installs as plain text and HTML under `/system/share/doc/handbook`, readable from the console with `less` (spec 7.12).
 - **Design documents** live in `docs/design/` as Markdown, one per subsystem, each with its `unsafe` inventory and safety arguments.
 - **API reference** comes from rustdoc for every crate and from `ridlc` for every interface.
-- Ported tools ship their upstream man pages; uutils pages are generated from its argument definitions. Where OrthrOS behaves differently (for example permissions), the page gets an "OrthrOS notes" section.
+- Ported tools ship their upstream man pages; uutils pages are generated from its argument definitions. Where Dukovo behaves differently (for example permissions), the page gets an "Dukovo notes" section.
 - Every tool supports `--help`, and Nukesh has a `help` builtin.
 
 ### Man page sections
@@ -469,13 +469,13 @@ Every shipped command, service, file format, system call and library interface g
 | 3 | Library interfaces | `libradix(3)`, `radix_ring(3)` |
 | 4 | Devices and drivers | `nvme(4)`, `xhci(4)`, `e1000(4)`, `virtio-gpu(4)` |
 | 5 | File formats | `manifest.json(5)`, `spark.service(5)`, `install.json(5)`, `lumen.json(5)`, `network.json(5)`, `grants(5)` |
-| 7 | Overviews and concepts | `radix-capabilities(7)`, `orthros-hier(7)`, `radix-fs-rights(7)`, `bundles(7)`, `orthros-boot(7)`, `orthros-update(7)` |
-| 8 | Administration | `rdisk(8)`, `orthros-install(8)`, `mkfs-btrfs(8)`, `sysupdate(8)`, `spark(8)`, `netd(8)`, `logd(8)`, `user(8)`, `rgrub-setup(8)` |
+| 7 | Overviews and concepts | `radix-capabilities(7)`, `dukovo-hier(7)`, `radix-fs-rights(7)`, `bundles(7)`, `dukovo-boot(7)`, `dukovo-update(7)` |
+| 8 | Administration | `rdisk(8)`, `dukovo-install(8)`, `mkfs-btrfs(8)`, `sysupdate(8)`, `spark(8)`, `netd(8)`, `logd(8)`, `user(8)`, `rgrub-setup(8)` |
 
 ### Handbook chapters
 
-1. Introduction to OrthrOS and Radix
-2. Building OrthrOS with `ob`
+1. Introduction to Dukovo and Radix
+2. Building Dukovo with `ob`
 3. Creating USB install media
 4. Installing, including manual partitioning with `rdisk`
 5. First boot and login
@@ -572,15 +572,15 @@ The laptop has no serial port, so three tools are folded into the phases above:
 - The latest USB image is smoke-booted on the Dell at the end of Phases 1, 2, 6 and 9, then at the end of every later phase. Results go in `docs/hardware/dell-inspiron-15-5570.md`, which becomes the first entry of the supported-hardware list.
 - In 1.0 the laptop gets the power button and a clean power-off. Battery status, the lid switch, brightness keys and suspend wait for Phase 19.
 
-Decided: OrthrOS installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 1 TB hard drive untouched; it can be formatted later with rdisk and used under /data or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
+Decided: Dukovo installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 1 TB hard drive untouched; it can be formatted later with rdisk and used under /data or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
 
 ## Release 1.0 acceptance: a working system
 
-OrthrOS 1.0 ships when every item below passes, automated in QEMU where possible and by hand on the Dell reference laptop.
+Dukovo 1.0 ships when every item below passes, automated in QEMU where possible and by hand on the Dell reference laptop.
 
 **Build and media**
 
-- [ ] On a clean Linux host, `./ob setup && ./ob image` produces `orthros-1.0-x86_64.img` with no manual steps.
+- [ ] On a clean Linux host, `./ob setup && ./ob image` produces `dukovo-1.0-x86_64.img` with no manual steps.
 - [ ] Two builds of the same commit are bit-for-bit identical.
 - [ ] `./ob write-usb` writes and verifies a stick that boots the Dell in UEFI mode, and in legacy BIOS mode if its setup offers Legacy boot (otherwise BIOS boot is checked in QEMU).
 
@@ -715,7 +715,7 @@ Each row records a decision the plan depends on and the alternatives considered.
 | --- | --- | --- |
 | Reference machine | Decided: Dell Inspiron 15 5570 with a Core i7-8550U | Model confirmed from Dell's factory configuration; Ethernet chip still to confirm with lspci |
 | Code hosting and CI | Decided: GitHub with GitHub Actions | Codeberg or self-hosted Forgejo |
-| License for OrthrOS code | Decided: Apache-2.0 OR MIT | MPL-2.0, GPL-2.0 |
+| License for Dukovo code | Decided: Apache-2.0 OR MIT | MPL-2.0, GPL-2.0 |
 | Native filesystem | Decided: Btrfs | Purpose-built copy-on-write filesystem |
 | Linking of system programs | Decided: Static | Dynamic with mlibc's loader |
 | Default install image | Decided: full 4 GiB image with Lumen | Smaller console-only image |

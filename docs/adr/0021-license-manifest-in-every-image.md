@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -10,7 +10,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## Context
 
-OrthrOS is `Apache-2.0 OR MIT` ([0002](0002-license-apache-2.0-or-mit.md)),
+Dukovo is `Apache-2.0 OR MIT` ([0002](0002-license-apache-2.0-or-mit.md)),
 but its images already hold code under other terms: the Spleen fonts in
 the kernel (BSD-2-Clause, [0015](0015-console-font-spleen.md)), the Rust
 standard library crates that `-Zbuild-std` compiles into the kernel
@@ -41,13 +41,13 @@ GRUB, or put their notices into the image.
   checks it against the area's list (the kernel list is read from
   `kernel/deny.toml`, so CI and `ob image` cannot drift), and fails on a
   missing or disallowed license.
-- The image carries `/system/share/licenses/` with `orthros.spdx` (SPDX
+- The image carries `/system/share/licenses/` with `dukovo.spdx` (SPDX
   2.3 tag-value), a `README` summary, `texts/` with every license and
   exception the manifest names, and `notices/<component>-<version>/` with
   the component's own license and copyright files. A crate declares extra
-  notice files under `[package.metadata.orthros] notices`. A copy of the
+  notice files under `[package.metadata.dukovo] notices`. A copy of the
   document sits next to the image, and CI validates it with spdx-tools.
-- License texts that are not OrthrOS's own are kept verbatim from the
+- License texts that are not Dukovo's own are kept verbatim from the
   SPDX license list in `image/licenses/<id>.txt`; a unit test checks that
   every allowed license has one.
 - `radix-fbcon` declares `(Apache-2.0 OR MIT) AND BSD-2-Clause`, since it

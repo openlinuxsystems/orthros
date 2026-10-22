@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Host-side workspace: the `ob` build tool. The kernel is a separate
@@ -10,7 +10,7 @@ members = ["tools/linux-bench", "tools/ridlc", "tools/xtask"]
 exclude = ["kernel"]
 
 [workspace.package]
-# The OrthrOS release version. Keep kernel/Cargo.toml and
+# The Dukovo release version. Keep kernel/Cargo.toml and
 # userspace/Cargo.toml in step; a unit test in tools/xtask fails when they
 # differ.
 version = "0.0.1"

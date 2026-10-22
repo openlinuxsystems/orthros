@@ -1,9 +1,9 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# Building OrthrOS with ob
+# Building Dukovo with ob
 
 One command, `./ob`, builds everything: the kernel, the boot image, the
 documentation and the tests. It needs no root access. This chapter walks
@@ -38,7 +38,7 @@ When something is missing, `./ob doctor` prints the command that installs
 it for your distribution, for example on Ubuntu:
 
 ```text
-Checking the build host for OrthrOS 0.0.1
+Checking the build host for Dukovo 0.0.1
 
   ok       rustup          rustup 1.28.2
   ok       Rust toolchain  nightly-2026-10-15
@@ -71,7 +71,7 @@ with `rust-lld`. Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no
 `rustup` package: install rustup from <https://rustup.rs> instead, and
 drop it from the command.
 
-## Booting OrthrOS in QEMU
+## Booting Dukovo in QEMU
 
 ```sh
 ./ob run
@@ -83,7 +83,7 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (OrthrOS Phase 5)
+[    0.000000] Radix 0.0.1 (Dukovo Phase 5)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:
@@ -113,7 +113,7 @@ found and ends like this:
 [    0.572421] Boot complete.
 ```
 
-The kernel then idles until a thread has work. `orthros-boot(7)` explains
+The kernel then idles until a thread has work. `dukovo-boot(7)` explains
 each step. Press
 **Ctrl-A** then **X** to quit QEMU. Useful variations:
 
@@ -127,7 +127,7 @@ each step. Press
 | `./ob run --gdb` | Wait for GDB; see [Debugging the kernel](debugging.md) |
 | `./ob run -- -d int` | Pass extra arguments to QEMU, here to log interrupts |
 
-The kernel flags are listed in `orthros-boot(7)`. If the kernel panics,
+The kernel flags are listed in `dukovo-boot(7)`. If the kernel panics,
 the report fills the screen; press a key and QEMU boots again, showing the
 end of the crashed boot. [Debugging the kernel](debugging.md) explains
 what to do with it.
@@ -161,17 +161,17 @@ runs all three.
 ./ob image
 ```
 
-The result is `out/orthros-0.0.1-x86_64.img`, a hybrid image that boots on
+The result is `out/dukovo-0.0.1-x86_64.img`, a hybrid image that boots on
 UEFI and BIOS machines from a USB stick, a hard disk or a CD.
 `./ob image --iso` writes the same image as an `.iso` for virtual machines.
 [Creating USB install media](usb-media.md) shows how to write it to a stick.
 
 ## Configuration
 
-`orthros.toml` at the top of the repository holds the choices a builder
+`dukovo.toml` at the top of the repository holds the choices a builder
 makes: the build profile, the GRUB menu timeout, kernel flags, microcode
 to add to the image, and the virtual machine `./ob run` starts. Each key is described in
-`orthros.toml(5)`. Command-line options override the file for one command.
+`dukovo.toml(5)`. Command-line options override the file for one command.
 
 ## Building in a container
 

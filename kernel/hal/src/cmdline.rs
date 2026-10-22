@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The kernel command line.
@@ -8,7 +8,7 @@
 //! `name=value` (`loglevel=debug`). Unknown flags are reported and
 //! otherwise ignored. A lone `--` ends the flags: the words after it are
 //! the first program's arguments ([`CommandLine::init_args`]), as on
-//! Linux. Every flag in [`FLAGS`] is documented in orthros-boot(7); `ob
+//! Linux. Every flag in [`FLAGS`] is documented in dukovo-boot(7); `ob
 //! docs --check` enforces that.
 
 /// One flag the kernel understands.

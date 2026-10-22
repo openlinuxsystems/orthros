@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -31,4 +31,4 @@ Phase 0; Phase 1 moves it to the higher half.
 - The kernel cannot be started directly as an EFI application; an EFI stub
   remains a possible secondary option, as the specification allows.
 - The boot sequence and kernel command line are documented in
-  `orthros-boot(7)`.
+  `dukovo-boot(7)`.

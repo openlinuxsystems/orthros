@@ -1,11 +1,11 @@
-orthros-boot(7) "OrthrOS" "OrthrOS Manual"
+dukovo-boot(7) "Dukovo" "Dukovo Manual"
 
-; SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+; SPDX-FileCopyrightText: 2026 The Dukovo contributors
 ; SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # NAME
 
-orthros-boot - how OrthrOS boots, and the kernel command line
+dukovo-boot - how Dukovo boots, and the kernel command line
 
 # DESCRIPTION
 
@@ -36,11 +36,11 @@ _/boot/grub/grub.cfg_
 
 _/boot/firmware/intel-ucode.bin_
 	Intel microcode updates, only when the image was built with
-	*image.microcode* (see *orthros.toml*(5)) or *ob image --microcode*.
+	*image.microcode* (see *dukovo.toml*(5)) or *ob image --microcode*.
 	See *MICROCODE* below.
 
 _/system/share/licenses/_
-	The license manifest. _orthros.spdx_ lists every component of the
+	The license manifest. _dukovo.spdx_ lists every component of the
 	image (the kernel's crates, the Rust standard library crates compiled
 	into it, GRUB, and the microcode if any) with its SPDX license, in
 	the SPDX 2.3 tag-value format; _README_ summarises it, _texts/_ holds
@@ -344,7 +344,7 @@ messages of level info and above unless *loglevel* says otherwise.
 # KERNEL COMMAND LINE
 
 GRUB passes everything after the kernel path on the *multiboot2* line.
-*ob* fills it from *boot.cmdline* in _orthros.toml_, or from
+*ob* fills it from *boot.cmdline* in _dukovo.toml_, or from
 *--cmdline* on *ob image* and *ob run*. Flags are separated by spaces and
 are either a bare name or _name_=_value_. The kernel warns about unknown
 flags and otherwise ignores them. A lone *--* ends the kernel's flags:
@@ -433,7 +433,7 @@ them to *init*, and the kernel does not read them.
 
 Processors run microcode that the vendor fixes with updates. Firmware
 applies some; an operating system applies newer ones as early as possible.
-The updates are closed firmware, so OrthrOS never includes them itself:
+The updates are closed firmware, so Dukovo never includes them itself:
 the builder adds a file of them to an image with *image.microcode* or *ob
 image --microcode*, naming a file or a directory of Intel updates such as
 _/lib/firmware/intel-ucode_ from the *intel-microcode* package. *ob*
@@ -451,7 +451,7 @@ module is ignored on AMD processors.
 
 # REAL HARDWARE
 
-The reference machine is a Dell Inspiron 15 5570. Before booting OrthrOS on
+The reference machine is a Dell Inspiron 15 5570. Before booting Dukovo on
 it, set *SATA Operation* to *AHCI* and turn *Secure Boot* off in the
 firmware setup (F2), then choose the USB stick in the one-time boot menu
 (F12). It has no serial port: the boot log appears on the screen under
@@ -461,7 +461,7 @@ the steps of a smoke test and its results.
 
 # SEE ALSO
 
-*spark*(8), *radix-processes*(7), *radix-debug*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *orthros.toml*(5), *grub-mkrescue*(1)
+*spark*(8), *radix-processes*(7), *radix-debug*(7), *radix-capabilities*(7), *radix-scheduling*(7), *ob*(1), *dukovo.toml*(5), *grub-mkrescue*(1)
 
 The Multiboot2 specification:
 https://www.gnu.org/software/grub/manual/multiboot2/

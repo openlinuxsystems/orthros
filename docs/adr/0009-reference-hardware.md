@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
@@ -20,9 +20,9 @@ Windows, a 1 TB SATA hard disk, Qualcomm QCA9377 Wi-Fi, and no serial port.
 
 - The Inspiron 15 5570 is the reference machine for 1.0, alongside QEMU.
 - Storage drivers start with AHCI (both disks are SATA); NVMe follows.
-- OrthrOS installs on the SSD, erasing Windows; the hard disk is left for
+- Dukovo installs on the SSD, erasing Windows; the hard disk is left for
   `/data`.
-- Firmware settings for OrthrOS are SATA Operation set to AHCI and Secure
+- Firmware settings for Dukovo are SATA Operation set to AHCI and Secure
   Boot turned off.
 
 ## Consequences

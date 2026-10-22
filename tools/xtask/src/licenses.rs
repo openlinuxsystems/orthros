@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 The OrthrOS contributors
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The license manifest and notices that every image carries.
@@ -21,14 +21,14 @@ use crate::{Context, Ctx, Error, Result, VERSION, kernel, userspace};
 pub const DIR: &str = "system/share/licenses";
 
 /// File name of the SPDX document, in [`DIR`] and next to the image.
-pub const MANIFEST: &str = "orthros.spdx";
+pub const MANIFEST: &str = "dukovo.spdx";
 
 /// The allow-list of the kernel area. It is also the cargo-deny policy of the
 /// kernel workspace, so CI and `ob image` enforce the same list.
 pub const KERNEL_POLICY: &str = "kernel/deny.toml";
 
 /// Licenses a boot loader may use: it is a separate program that only loads
-/// the kernel, so the GPL does not reach OrthrOS code (ADR 0021).
+/// the kernel, so the GPL does not reach Dukovo code (ADR 0021).
 const BOOTLOADER_ALLOW: &[&str] = &["GPL-3.0-or-later"];
 
 /// Licenses of closed firmware, which only a local build adds (ADR 0007).
@@ -139,7 +139,7 @@ pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String>
         }
     }
     let document = Document {
-        name: format!("orthros-{VERSION}-x86_64"),
+        name: format!("dukovo-{VERSION}-x86_64"),
         commit: git_commit(ctx),
         created: crate::image::source_date_epoch(ctx).and_then(|e| e.parse().ok()).unwrap_or(0),
     };
@@ -227,7 +227,7 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
             Source::Path(path) => {
                 package.download =
                     format!("git+https://github.com/openlinuxsystems/orthros@{commit}");
-                package.comment = "Part of OrthrOS.".into();
+                package.comment = "Part of Dukovo.".into();
                 package.notices = declared_notices(&path)?;
                 package.notices.extend(notice_files(&path));
             }
@@ -294,7 +294,7 @@ fn parse_tree_line(line: &str) -> Option<TreeEntry> {
     Some(TreeEntry { name, version, source, license })
 }
 
-/// `[package.metadata.orthros] notices`: notice files a crate carries
+/// `[package.metadata.dukovo] notices`: notice files a crate carries
 /// outside its top directory, such as the font license of radix-fbcon.
 fn declared_notices(dir: &Path) -> Result<Vec<PathBuf>> {
     let path = dir.join("Cargo.toml");
@@ -304,7 +304,7 @@ fn declared_notices(dir: &Path) -> Result<Vec<PathBuf>> {
     let Some(list) = manifest
         .get("package")
         .and_then(|p| p.get("metadata"))
-        .and_then(|m| m.get("orthros"))
+        .and_then(|m| m.get("dukovo"))
         .and_then(|o| o.get("notices"))
     else {
         return Ok(Vec::new());
@@ -312,7 +312,7 @@ fn declared_notices(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut notices = Vec::new();
     for item in list.as_array().into_iter().flatten() {
         let Some(name) = item.as_str() else {
-            crate::bail!("{}: package.metadata.orthros.notices must hold paths", path.display());
+            crate::bail!("{}: package.metadata.dukovo.notices must hold paths", path.display());
         };
         let notice = dir.join(name);
         if !notice.is_file() {
@@ -723,8 +723,8 @@ impl Document {
         let _ = writeln!(o, "Creator: Tool: ob-{VERSION}");
         let _ = writeln!(o, "Created: {}", rfc3339(self.created));
         let _ = writeln!(o);
-        let _ = writeln!(o, "PackageName: orthros");
-        let _ = writeln!(o, "SPDXID: SPDXRef-Package-orthros");
+        let _ = writeln!(o, "PackageName: dukovo");
+        let _ = writeln!(o, "SPDXID: SPDXRef-Package-dukovo");
         let _ = writeln!(o, "PackageVersion: {VERSION}");
         let _ = writeln!(
             o,
@@ -737,11 +737,11 @@ impl Document {
         let _ = writeln!(o, "PackageCopyrightText: NOASSERTION");
         let _ = writeln!(
             o,
-            "PackageComment: <text>The OrthrOS {VERSION} x86-64 boot image. Each \
+            "PackageComment: <text>The Dukovo {VERSION} x86-64 boot image. Each \
              component below keeps its own license; the texts are in \
              /{DIR}/texts and the notices in /{DIR}/notices.</text>"
         );
-        let _ = writeln!(o, "Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-orthros");
+        let _ = writeln!(o, "Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-dukovo");
         for package in packages {
             let _ = writeln!(o);
             let _ = writeln!(o, "PackageName: {}", package.name);
@@ -764,7 +764,7 @@ impl Document {
             }
             let _ = writeln!(o, "PackageComment: <text>{comment}</text>");
             let _ =
-                writeln!(o, "Relationship: SPDXRef-Package-orthros CONTAINS {}", package.spdx_id());
+                writeln!(o, "Relationship: SPDXRef-Package-dukovo CONTAINS {}", package.spdx_id());
         }
         for id in ids.iter().filter(|id| id.starts_with("LicenseRef-")) {
             let path = text_source(root, id);
@@ -782,8 +782,8 @@ impl Document {
 /// A one-line-per-component summary for people reading the image.
 fn readme(packages: &[Package]) -> String {
     let mut out = format!(
-        "OrthrOS {VERSION} third-party and component licenses\n\n\
-         orthros.spdx lists every component of this image in the SPDX 2.3\n\
+        "Dukovo {VERSION} third-party and component licenses\n\n\
+         dukovo.spdx lists every component of this image in the SPDX 2.3\n\
          tag-value format. texts/ holds the full text of every license named\n\
          there, and notices/ the copyright and license files that came with\n\
          each component's source.\n\n"
@@ -948,15 +948,14 @@ mod tests {
             notices: vec!["LICENSE.txt".into()],
             comment: "C.".into(),
         }];
-        let document =
-            Document { name: "orthros-test".into(), commit: "c0ffee".into(), created: 0 };
+        let document = Document { name: "dukovo-test".into(), commit: "c0ffee".into(), created: 0 };
         let ids = BTreeSet::from(["MIT".to_string()]);
         let text = document.render(&packages, &ids, &root()).unwrap();
         assert!(text.starts_with("SPDXVersion: SPDX-2.3\n"));
         assert!(text.contains("SPDXID: SPDXRef-Package-compiler-builtins-0.1.160\n"));
         assert!(text.contains("PackageChecksum: SHA256: ab\n"));
         assert!(text.contains(
-            "Relationship: SPDXRef-Package-orthros CONTAINS \
+            "Relationship: SPDXRef-Package-dukovo CONTAINS \
              SPDXRef-Package-compiler-builtins-0.1.160\n"
         ));
         assert!(
