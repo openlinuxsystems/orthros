@@ -10,9 +10,9 @@ members = ["tools/linux-bench", "tools/ridlc", "tools/xtask"]
 exclude = ["kernel"]
 
 [workspace.package]
-# The Dukovo release version. Keep kernel/Cargo.toml and
-# userspace/Cargo.toml in step; a unit test in tools/xtask fails when they
-# differ.
+# The Dukovo release version. Keep kernel/Cargo.toml, userspace/Cargo.toml
+# and userspace/programs/Cargo.toml in step; a unit test in tools/xtask
+# fails when they differ.
 version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0 OR MIT"

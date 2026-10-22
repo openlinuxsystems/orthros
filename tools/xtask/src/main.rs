@@ -636,6 +636,10 @@ mod tests {
         for (path, manifest) in [
             ("kernel/Cargo.toml", include_str!("../../../kernel/Cargo.toml")),
             ("userspace/Cargo.toml", include_str!("../../../userspace/Cargo.toml")),
+            (
+                "userspace/programs/Cargo.toml",
+                include_str!("../../../userspace/programs/Cargo.toml"),
+            ),
         ] {
             let table: toml::Table = manifest.parse().unwrap();
             let version = table["workspace"]["package"]["version"].as_str().unwrap();

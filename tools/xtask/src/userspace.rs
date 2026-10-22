@@ -8,8 +8,9 @@
 //! `ipc`, `fuzz` and `bench` self-tests start (ADR 0036). Spark and the
 //! programs it starts go into the boot archive (`bootfs`), a ustar file
 //! the boot loader loads as another module and the kernel starts Spark
-//! from (spark(8)), with the C test programs of userspace/posix and the
-//! files the ports put there (ADR 0069).
+//! from (spark(8)), with the C test programs of userspace/posix, the
+//! files the ports put there (ADR 0069) and the programs on Rust's
+//! standard library of userspace/programs (ADR 0070).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +26,11 @@ pub const TARGET_SPEC: &str = "userspace/targets/x86_64-radix-user.json";
 
 /// Name Cargo gives the target's output directory.
 pub const TARGET_NAME: &str = "x86_64-radix-user";
+
+/// The target of programs on Rust's standard library, relative to the
+/// repository root (ADR 0070), and the name of its output directory.
+pub const STD_TARGET_SPEC: &str = "userspace/targets/x86_64-unknown-radix.json";
+pub const STD_TARGET_NAME: &str = "x86_64-unknown-radix";
 
 /// Where the test image goes in a boot image, and the word on its module
 /// line that the kernel finds it by.
@@ -47,6 +53,10 @@ pub const ARCHIVE: &[(&str, &str)] = &[
 /// Empty directories of the boot archive: mount points under `/system`
 /// for what Spark mounts there (spark(8)).
 pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
+
+/// The programs on Rust's standard library that the boot archive holds:
+/// each one's path in it, and its package in userspace/programs.
+pub const STD_ARCHIVE: &[(&str, &str)] = &[("system/tests/posix/std-test", "std-test")];
 
 /// The C test programs' sources, and where in the boot archive they go.
 pub const POSIX_SOURCES: &str = "userspace/posix";
@@ -81,6 +91,29 @@ pub fn cargo(ctx: &Ctx, subcommand: &str) -> std::process::Command {
     cmd.args([subcommand, "--manifest-path", "userspace/Cargo.toml"])
         .arg("--target-dir")
         .arg(ctx.target.join("userspace"))
+        .env("CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY", "never");
+    cmd
+}
+
+/// A Cargo command for the workspace of programs on Rust's standard
+/// library, writing to `target/programs`: for their own target, against
+/// the sysroot the rust-std port builds, with the port's libc crate in
+/// place of crates.io's, linked by the Radix C compiler (ADR 0070).
+pub fn std_cargo(ctx: &Ctx, subcommand: &str, toolchain: &ports::Toolchain) -> Command {
+    let sysroot = toolchain.dir.join("rust");
+    let mut cmd = process::cargo(ctx);
+    cmd.args([subcommand, "--manifest-path", "userspace/programs/Cargo.toml"])
+        .arg("--target-dir")
+        .arg(ctx.target.join("programs"))
+        .arg("--target")
+        .arg(ctx.root.join(STD_TARGET_SPEC))
+        .arg("-Zjson-target-spec")
+        .arg("--config")
+        .arg(format!("patch.crates-io.libc.path = {:?}", sysroot.join("vendor/libc")))
+        // Only the target's crates get these flags; build scripts and
+        // procedural macros use the host's standard library.
+        .env("CARGO_ENCODED_RUSTFLAGS", format!("--sysroot={}", sysroot.display()))
+        .env("CARGO_TARGET_X86_64_UNKNOWN_RADIX_LINKER", toolchain.cc())
         .env("CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY", "never");
     cmd
 }
@@ -128,6 +161,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     for port in &ports.ports {
         files.extend(ports::image_files(&port.recipe, &ctx.out.join("sysroot"))?);
     }
+    files.extend(build_std(ctx, profile, &ports.toolchain)?);
     step(&format!("Building the user programs ({profile})"));
     let mut cmd = cargo(ctx, "build");
     cmd.args(["-p", "usertests"]);
@@ -166,6 +200,32 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
         archive.len() / 1024
     ));
     Ok(Programs { usertests: installed, bootfs, ports })
+}
+
+/// Builds the programs of [`STD_ARCHIVE`] into `out/sysroot`, and returns
+/// each one's place in the boot archive and file.
+fn build_std(
+    ctx: &Ctx,
+    profile: Profile,
+    toolchain: &ports::Toolchain,
+) -> Result<Vec<(String, PathBuf)>> {
+    step(&format!("Building the programs on Rust's standard library ({profile})"));
+    let mut cmd = std_cargo(ctx, "build", toolchain);
+    for (_, package) in STD_ARCHIVE {
+        cmd.args(["-p", package]);
+    }
+    if profile == Profile::Release {
+        cmd.arg("--release");
+    }
+    process::run(ctx, &mut cmd)?;
+    let built = ctx.target.join("programs").join(STD_TARGET_NAME).join(profile.dir());
+    let mut files = Vec::new();
+    for (path, package) in STD_ARCHIVE {
+        let installed = ctx.out.join("sysroot").join(path);
+        process::copy(&built.join(package), &installed)?;
+        files.push((path.to_string(), installed));
+    }
+    Ok(files)
 }
 
 /// Builds each C test program of [`POSIX_SOURCES`] (one per `.c` file,

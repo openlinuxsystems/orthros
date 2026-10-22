@@ -567,4 +567,17 @@ interface process = 0x000a version 2 {
     /// has its parent's, and `exec` keeps it.
     method file_mask = 44 (set: bool, mask: u32) -> (mask: u32)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
+    /// Names thread `thread` of the caller's process (0: the calling
+    /// one), as `pthread_setname_np` does: up to NAME_MAX bytes of UTF-8
+    /// (out_of_range: longer), which the kernel log and the debugger
+    /// show. A new thread starts with its process's name.
+    method set_thread_name = 45 (thread: u64, name: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                out_of_range, no_such_process];
+    /// Copies the name of thread `thread` of the caller's process (0:
+    /// the calling one) to `buffer`, without a terminating NUL, and
+    /// returns its length in bytes; out_of_range if it does not fit.
+    method thread_name = 46 (thread: u64, buffer: out bytes) -> (length: u64)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address, out_of_range,
+                no_such_process];
 }

@@ -52,6 +52,7 @@ use radix_abi::errors::Kernel;
 use radix_abi::process::{self, ChildWaitFlags, ClockKind};
 use radix_abi::signal::{SIGCHLD, SIGNALS};
 use radix_abi::startup;
+use radix_hal::UserMode;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_posix::signal::{Action, Actions, Info, Pending};
 use radix_posix::status::Ended;
@@ -63,7 +64,7 @@ pub use signal::ThreadSignals;
 use super::methods::{Answer, answer};
 use super::process::{ProcessObject, ProcessRef};
 use super::{Result, UserRef, cap_error, error};
-use crate::sched::{self, ThreadRef, wait};
+use crate::sched::{self, Name, ThreadRef, wait};
 use crate::{Arch, caps};
 
 /// The process tree, made when first needed.
@@ -244,6 +245,14 @@ pub(super) fn find_thread(process: &ProcessObject, number: u64) -> Option<(Threa
         }
     });
     found
+}
+
+/// Thread `number` of `process` (0: the calling one): ESRCH for none.
+fn own_thread(process: &ProcessObject, number: u64) -> Result<ThreadRef> {
+    if number == 0 {
+        return sched::current().ok_or(error(Kernel::Gone));
+    }
+    find_thread(process, number).map(|(thread, _)| thread).ok_or(error(Kernel::NoSuchProcess))
 }
 
 /// `process`'s CPU time so far: its threads', live and exited.
@@ -518,6 +527,43 @@ pub fn method(
             }
             sched::current().ok_or(error(Kernel::Gone))?.set_thread_pointer(a.base);
             answer(label, 0, [0; 8])
+        }
+        process::SET_THREAD_NAME => {
+            let a = process::SetThreadNameArgs::decode(args)?;
+            let thread = own_thread(me, a.thread)?;
+            if a.name.len > process::NAME_MAX {
+                return Err(error(Kernel::OutOfRange));
+            }
+            let len = a.name.len as usize;
+            let mut bytes = [0u8; process::NAME_MAX as usize];
+            if !radix_ipc::range::user_bytes(a.name.address, a.name.len)
+                || !Arch::copy_from_user(&mut bytes[..len], a.name.address)
+            {
+                return Err(error(Kernel::BadAddress));
+            }
+            let name = core::str::from_utf8(&bytes[..len])
+                .map_err(|_| Kernel::InvalidArgument.status(0))?;
+            thread.set_name(Name::new(name));
+            answer(label, 0, [0; 8])
+        }
+        process::THREAD_NAME => {
+            let a = process::ThreadNameArgs::decode(args)?;
+            let name = own_thread(me, a.thread)?.name();
+            let name = name.as_str().as_bytes();
+            let length = name.len() as u64;
+            if length > a.buffer.len {
+                return Err(error(Kernel::OutOfRange));
+            }
+            if !radix_ipc::range::user_bytes(a.buffer.address, length)
+                || !Arch::copy_to_user(a.buffer.address, name)
+            {
+                return Err(error(Kernel::BadAddress));
+            }
+            answer(
+                label,
+                process::ThreadNameResults::WORDS,
+                process::ThreadNameResults { length }.encode(),
+            )
         }
         process::THREAD_ID => {
             process::ThreadIdArgs::decode(args)?;

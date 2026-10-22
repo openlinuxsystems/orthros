@@ -1,0 +1,63 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+preadv and pwritev, which stopped the program as not implemented: one
+buffer at a time with pread or pwrite, until one moves fewer bytes than
+it asked for. Rust's standard library and other programs call them.
+
+diff -ruN a/options/posix/generic/sys-uio.cpp b/options/posix/generic/sys-uio.cpp
+--- a/options/posix/generic/sys-uio.cpp
++++ b/options/posix/generic/sys-uio.cpp
+@@ -65,12 +65,46 @@
+ 	return written;
+ }
+ 
+-ssize_t preadv(int, const struct iovec *, int, off_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++namespace {
++
++// preadv and pwritev, one buffer at a time with pread or pwrite, until
++// one moves fewer bytes than it asked for: what the system calls do,
++// though not as one step.
++template<typename Buffer, typename Move>
++ssize_t vectored_at(int fd, const struct iovec *iovs, int iovc, off_t offset, Move move) {
++	if(iovc < 0 || iovc > IOV_MAX || offset < 0) {
++		errno = EINVAL;
++		return -1;
++	}
++	size_t bytes = 0;
++	for(int i = 0; i < iovc; i++) {
++		if(SSIZE_MAX - bytes < iovs[i].iov_len) {
++			errno = EINVAL;
++			return -1;
++		}
++		bytes += iovs[i].iov_len;
++	}
++	ssize_t moved = 0;
++	for(int i = 0; i < iovc; i++) {
++		if(!iovs[i].iov_len)
++			continue;
++		ssize_t n = move(fd, static_cast<Buffer>(iovs[i].iov_base), iovs[i].iov_len,
++				offset + moved);
++		if(n < 0)
++			return moved ? moved : -1;
++		moved += n;
++		if(static_cast<size_t>(n) < iovs[i].iov_len)
++			break;
++	}
++	return moved;
++}
++
++} // namespace
++
++ssize_t preadv(int fd, const struct iovec *iovs, int iovc, off_t offset) {
++	return vectored_at<void *>(fd, iovs, iovc, offset, pread);
+ }
+ 
+-ssize_t pwritev(int, const struct iovec *, int, off_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++ssize_t pwritev(int fd, const struct iovec *iovs, int iovc, off_t offset) {
++	return vectored_at<const void *>(fd, iovs, iovc, offset, pwrite);
+ }

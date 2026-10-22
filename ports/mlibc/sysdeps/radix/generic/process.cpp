@@ -460,6 +460,28 @@ int Sysdeps<SetSchedparam>::operator()(void *tcb, int policy, const struct sched
 	return scheduling(thread, true, &policy, &priority);
 }
 
+int Sysdeps<ThreadSetname>::operator()(void *tcb, const char *name) {
+	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
+	// Linux's limit of 15 bytes, which the kernel shares.
+	size_t length = strlen(name);
+	if(length > RADIX_PROCESS_NAME_MAX)
+		return ERANGE;
+	return radix::to_errno(radix_process_set_thread_name(radix::SLOT_PROCESS, thread, name, length));
+}
+
+int Sysdeps<ThreadGetname>::operator()(void *tcb, char *name, size_t size) {
+	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
+	if(!size)
+		return ERANGE;
+	struct radix_process_thread_name_results r;
+	// One byte is kept for the NUL.
+	if(uint64_t status = radix_process_thread_name(radix::SLOT_PROCESS, thread, name, size - 1, &r);
+			status)
+		return radix::to_errno(status);
+	name[r.length] = 0;
+	return 0;
+}
+
 int Sysdeps<GetMaxPriority>::operator()(int policy, int *out) {
 	switch(policy) {
 	case SCHED_FIFO:

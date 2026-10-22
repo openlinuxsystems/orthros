@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // POSIX threads: creating and joining them, mutexes and condition
-// variables, thread-local storage, detached threads, and signals to a
-// thread.
+// variables, thread-local storage, detached threads, signals to a
+// thread, and thread names.
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "check.h"
 
@@ -176,6 +177,43 @@ static void forking(void) {
 	CHECK(pthread_join(thread, &result) == 0 && result == (void *)1);
 }
 
+static void *named(void *argument) {
+	char name[16];
+	// A new thread has its process's name, until it names itself.
+	int ok = pthread_getname_np(pthread_self(), name, sizeof(name)) == 0 && !strcmp(name, "thread");
+	ok = ok && pthread_setname_np(pthread_self(), (const char *)argument) == 0;
+	return (void *)(intptr_t)ok;
+}
+
+// pthread_setname_np and pthread_getname_np, with Linux's limit of 15
+// bytes.
+static void names(void) {
+	char name[16];
+	CHECK(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0);
+	CHECK(!strcmp(name, "thread"));
+	CHECK(pthread_setname_np(pthread_self(), "main thread") == 0);
+	CHECK(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0);
+	CHECK(!strcmp(name, "main thread"));
+	CHECK(pthread_getname_np(pthread_self(), name, 11) == ERANGE);
+	CHECK(pthread_getname_np(pthread_self(), name, 12) == 0 && !strcmp(name, "main thread"));
+	CHECK(pthread_setname_np(pthread_self(), "fifteen bytes!!") == 0);
+	CHECK(pthread_setname_np(pthread_self(), "sixteen bytes!!!") == ERANGE);
+	CHECK(pthread_setname_np(pthread_self(), "\xff") == EINVAL);
+	CHECK(pthread_setname_np(pthread_self(), "naïve") == 0);
+	CHECK(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0 && !strcmp(name, "naïve"));
+	// A thread names itself, and this one names another.
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, named, "worker") == 0);
+	void *result = NULL;
+	CHECK(pthread_join(thread, &result) == 0 && result == (void *)1);
+	CHECK(pthread_create(&thread, NULL, waits, NULL) == 0);
+	CHECK(pthread_setname_np(thread, "waiter") == 0);
+	CHECK(pthread_getname_np(thread, name, sizeof(name)) == 0 && !strcmp(name, "waiter"));
+	atomic_store(&stop, 1);
+	CHECK(pthread_join(thread, NULL) == 0);
+	atomic_store(&stop, 0);
+}
+
 int main(void) {
 	check_start("thread");
 	RUN(counts);
@@ -183,5 +221,6 @@ int main(void) {
 	RUN(lives);
 	RUN(signals);
 	RUN(forking);
+	RUN(names);
 	return check_end();
 }

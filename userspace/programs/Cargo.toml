@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Programs on Rust's standard library for Radix.
+#
+# They build for the x86_64-unknown-radix target (../targets/), against
+# the standard library the rust-std port builds into out/toolchain (ADR
+# 0070), so they live in a workspace of their own. Build them with
+# `./ob build`, which puts them in the boot archive.
+
+[workspace]
+resolver = "3"
+members = ["std-test"]
+
+[workspace.package]
+# Keep in step with the root Cargo.toml (a unit test of ob checks it).
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/openlinuxsystems/orthros"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block needs a `// SAFETY:` comment (docs/coding-standard.md).
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[profile.release]
+# Symbols stay, so that backtraces name functions; debug info goes.
+strip = "debuginfo"

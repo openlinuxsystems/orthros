@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Rust's standard library for Radix (ADR 0070): the library of the pinned
+# toolchain's rust-src component, with the crates it vendors, patched for
+# the x86_64-unknown-radix target (userspace/targets/) and built once
+# into a sysroot in out/toolchain that programs in Rust build against.
+# The libc crate's Radix module is checked against the C library's
+# headers as it is built.
+name = "rust-std"
+version = "1.101.0-nightly"
+summary = "Rust's standard library, for programs in Rust"
+license = "Apache-2.0 OR MIT"
+homepage = "https://www.rust-lang.org"
+depends = ["mlibc"]
+toolchain = true
+
+[source]
+rust-src = true

@@ -39,6 +39,15 @@ static void basics(void) {
 	struct iovec into[2] = {{one, 2}, {two, 2}};
 	CHECK(lseek(fd, 0, SEEK_SET) == 0 && readv(fd, into, 2) == 4);
 	CHECK(!strcmp(one, "ab") && !strcmp(two, "cd"));
+	// At an offset, which they leave as it was; a read ends at the end.
+	struct iovec more[2] = {{"xy", 2}, {"z", 1}};
+	CHECK(pwritev(fd, more, 2, 7) == 3 && lseek(fd, 0, SEEK_CUR) == 4);
+	memset(one, 0, sizeof(one));
+	memset(two, 0, sizeof(two));
+	CHECK(preadv(fd, into, 2, 8) == 3 && lseek(fd, 0, SEEK_CUR) == 4);
+	CHECK(!strcmp(one, "yz") && !strcmp(two, "d"));
+	CHECK_ERROR(preadv(fd, into, -1, 0), EINVAL);
+	CHECK_ERROR(pwritev(fd, more, 2, -1), EINVAL);
 	// Sizes.
 	struct stat st;
 	CHECK(fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 11);

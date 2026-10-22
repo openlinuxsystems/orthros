@@ -6,9 +6,10 @@
 //! A port is a directory `ports/<name>/` with:
 //!
 //! - `recipe.toml`: the port's version, license and home page, the git
-//!   commit its source is pinned to and any other sources unpacked into
-//!   its tree, the ports it needs built first, and the files it adds to
-//!   the boot archive;
+//!   commit its source is pinned to (or, for Rust's standard library,
+//!   the pinned Rust toolchain's rust-src) and any other sources unpacked
+//!   into its tree, the ports it needs built first, and the files it adds
+//!   to the boot archive;
 //! - `patches/*.patch`, applied in name order with `patch -p1`;
 //! - `build.sh`, which builds the port in a fresh copy of its patched
 //!   source and installs it into the sysroot (`out/sysroot`), or, for a
@@ -17,7 +18,8 @@
 //! Sources are fetched with git once, by commit, into `target/ports`, and
 //! checked to be that commit, so a build uses nothing but what the recipe
 //! names. A port is built again only when something that went into its
-//! last build changed: its directory, the toolchain, or a port it needs.
+//! last build changed: its directory, the toolchain (and Rust's, for a
+//! port of rust-src), or a port it needs.
 //!
 //! The toolchain is the host's Clang and LLD, [`CLANG_MIN`] or later,
 //! made to target Radix by the wrapper scripts and Meson cross files ob
@@ -75,16 +77,25 @@ pub struct Recipe {
     pub notices: Vec<String>,
 }
 
-/// Where a source comes from: a git repository and a commit in it.
+/// Where a source comes from: a git repository and a commit in it, or
+/// rust-src.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
+    /// The repository; empty for rust-src.
+    #[serde(default)]
     pub git: String,
-    /// The full commit ID, which pins the tree.
+    /// The full commit ID, which pins the tree; empty for rust-src.
+    #[serde(default)]
     pub commit: String,
     /// The release or tag the commit is, for people.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Whether the source is the `library` directory of the pinned Rust
+    /// toolchain's rust-src component, with the crates it vendors: the
+    /// toolchain pins it, and it needs no fetching.
+    #[serde(default, rename = "rust-src")]
+    pub rust_src: bool,
 }
 
 /// A source unpacked inside a port's tree, such as a Meson subproject.
@@ -168,9 +179,16 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
     if dir.file_name().and_then(|n| n.to_str()) != Some(recipe.name.as_str()) {
         return Err(Error::new(format!("{what}: the name must be the directory's")));
     }
-    let commits =
-        std::iter::once(&recipe.source.commit).chain(recipe.extra.iter().map(|e| &e.commit));
-    for commit in commits {
+    if recipe.source.rust_src {
+        if !recipe.source.git.is_empty() || !recipe.source.commit.is_empty() {
+            return Err(Error::new(format!("{what}: a rust-src source has no git or commit")));
+        }
+        if !recipe.toolchain {
+            return Err(Error::new(format!("{what}: only a toolchain port builds rust-src")));
+        }
+    }
+    let main = (!recipe.source.rust_src).then_some(&recipe.source.commit);
+    for commit in main.into_iter().chain(recipe.extra.iter().map(|e| &e.commit)) {
         if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::new(format!("{what}: `{commit}` is not a full commit ID")));
         }
@@ -462,8 +480,11 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
     let mut stamps: BTreeMap<String, u64> = BTreeMap::new();
     let mut ports = Vec::new();
     for (recipe, dir) in recipes(ctx)? {
-        let mut sources =
-            vec![fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?];
+        let mut sources = vec![if recipe.source.rust_src {
+            rust_src(ctx)?.0
+        } else {
+            fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?
+        }];
         for extra in &recipe.extra {
             let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
             sources.push(fetch(ctx, name, &extra.git, &extra.commit)?);
@@ -516,6 +537,9 @@ fn inputs_hash(
     }
     toolchain.version.hash(&mut hasher);
     toolchain.builtins.hash(&mut hasher);
+    if recipe.source.rust_src {
+        rust_src(ctx)?.1.hash(&mut hasher);
+    }
     for dep in &recipe.depends {
         stamps.get(dep).hash(&mut hasher);
     }
@@ -532,6 +556,23 @@ fn list_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The pinned Rust toolchain's rust-src library, and its `rustc -vV`,
+/// which says which it is.
+fn rust_src(ctx: &Ctx) -> Result<(PathBuf, String)> {
+    let mut cmd = Command::new("rustc");
+    cmd.current_dir(&ctx.root).arg("-vV");
+    let version = String::from_utf8_lossy(&process::output(ctx, &mut cmd)?.stdout).into_owned();
+    let mut cmd = Command::new("rustc");
+    cmd.current_dir(&ctx.root).args(["--print", "sysroot"]);
+    let sysroot = String::from_utf8_lossy(&process::output(ctx, &mut cmd)?.stdout).into_owned();
+    let library = PathBuf::from(sysroot.trim()).join("lib/rustlib/src/rust/library");
+    if !library.join("vendor").is_dir() {
+        return Err(Error::new(format!("rust-src is not in {}", library.display()))
+            .hint("run `./ob setup`, which installs the toolchain's rust-src component"));
+    }
+    Ok((library, version))
 }
 
 /// Fetches commit `commit` of `git` into `target/ports/sources`, once,
@@ -610,7 +651,14 @@ fn build(
     }
     let src = work.join("src");
     let build_dir = work.join("build");
-    export(ctx, &sources[0], &src)?;
+    if recipe.source.rust_src {
+        process::create_dir(&src)?;
+        let mut cmd = Command::new("cp");
+        cmd.arg("-R").arg(sources[0].join(".")).arg(&src);
+        process::run(ctx, &mut cmd)?;
+    } else {
+        export(ctx, &sources[0], &src)?;
+    }
     for (extra, source) in recipe.extra.iter().zip(&sources[1..]) {
         export(ctx, source, &src.join(&extra.path))?;
     }
@@ -652,6 +700,7 @@ fn build(
         .env("PORT_BUILD", &build_dir)
         .env("SYSROOT", &sysroot)
         .env("TOOLCHAIN", &toolchain.dir)
+        .env("RUST_TARGET", ctx.root.join(crate::userspace::STD_TARGET_SPEC))
         .env("PREFIX", "/system")
         .env("JOBS", jobs.to_string())
         .env("HOST", TRIPLE)

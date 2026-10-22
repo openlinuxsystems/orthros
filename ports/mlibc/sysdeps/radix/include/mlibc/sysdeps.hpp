@@ -149,6 +149,8 @@ struct RadixSysdepTags :
 	Tcsetwinsize,
 	Tgkill,
 	ThreadExit,
+	ThreadGetname,
+	ThreadSetname,
 	ThreadSigmask,
 	TimerCreate,
 	TimerDelete,
