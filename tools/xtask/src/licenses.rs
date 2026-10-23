@@ -150,7 +150,12 @@ pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String>
                 }
             }
         }
-        packages.extend(c_packages(ctx, ports)?);
+        for package in c_packages(ctx, ports)? {
+            // A crate a Rust port links may be in the standard library too.
+            if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
+                packages.push(package);
+            }
+        }
     }
     packages.push(grub(ctx, extras.mkrescue)?);
     if extras.microcode {
@@ -427,8 +432,7 @@ fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
     for line in text.lines() {
         let Some(entry) = parse_tree_line(line) else { continue };
         let mut package = Package {
-            // Some crates still write `MIT/Apache-2.0`, Cargo's old form.
-            license: entry.license.replace('/', " OR "),
+            license: entry.license,
             area: Area::Kernel,
             download: String::new(),
             sha256: None,
@@ -507,7 +511,8 @@ struct TreeEntry {
 /// marks a crate printed before.
 fn parse_tree_line(line: &str) -> Option<TreeEntry> {
     let (package, license) = line.split_once('|')?;
-    let license = license.trim().trim_end_matches("(*)").trim().to_string();
+    // Some crates still write `MIT/Apache-2.0`, Cargo's old form.
+    let license = license.trim().trim_end_matches("(*)").trim().replace('/', " OR ");
     let mut words = package.trim().splitn(3, ' ');
     let name = words.next()?.to_string();
     let version = words.next()?.strip_prefix('v')?.to_string();
@@ -1228,6 +1233,8 @@ mod tests {
         assert_eq!(entry.source, Source::Registry);
         let entry = parse_tree_line("x v1.0.0 (https://example.com/x#abc)|MIT").unwrap();
         assert!(matches!(entry.source, Source::Other(_)));
+        let entry = parse_tree_line("memchr v2.7.4|Unlicense/MIT").unwrap();
+        assert_eq!(entry.license, "Unlicense OR MIT");
         assert_eq!(parse_tree_line("").map(|e| e.name), None);
     }
 
