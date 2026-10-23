@@ -1,0 +1,116 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Fixes getopt's reading of short options, as POSIX, glibc and musl read
+them. Meant for upstream.
+
+- The position within a cluster of options such as `-qQ` was not reset
+  when a call moved on to the next argv element, so the cluster after
+  it started where this one had ended: `xz -qQ -cdf` (as xzdiff runs
+  it) never saw -c, and decompressed its file in place.
+- An option's argument in the next element was refused when it began
+  with '-', where POSIX takes it whatever it is: `grep -e -x`.
+- A missing argument left optind on its element, so a program that
+  went on after the error read it again, and printed no message.
+- An unknown option in a cluster set optopt to the cluster's first
+  character, named the whole element, and skipped the rest of it.
+- ':' in argv matched the ':' of optstring, and a position left past
+  the end of an element by a program that set optind itself read past
+  it.
+
+--- a/options/internal/generic/getopt.cpp
++++ b/options/internal/generic/getopt.cpp
+@@ -210,6 +210,10 @@
+ 		}else{
+ 			/* handle short options, i.e. options with only one dash prefixed; e.g. `program -s` */
+ 			unsigned int i = __optpos;
++			// A program that set optind itself may have left the position past the end of
++			// this element, which then starts over at its first option.
++			if(i >= strlen(arg))
++				i = __optpos = 1;
+ 			while(true) {
+ 				if(mode == mlibc::GetoptMode::LongOnly) {
+ 					const char *lo_arg = &arg[1];
+@@ -234,7 +238,8 @@
+ 					}
+ 				}
+ 
+-				auto opt = strchr(optstring, arg[i]);
++				// ':' marks an option's argument in optstring, so it is never an option.
++				auto opt = arg[i] != ':' ? strchr(optstring, arg[i]) : nullptr;
+ 				if(opt) {
+ 					if(opt[0] == 'W' && w_long_options) {
+ 						const char *lo_arg = [&]() {
+@@ -281,28 +286,30 @@
+ 
+ 						if(arg[i+1]) {
+ 							optarg = arg + i + 1;
+-						} else if(optind + 1 < argc && argv[optind + 1] && required && argv[optind + 1][0] != '-') {
++						} else if(optind + 1 < argc && argv[optind + 1] && required) {
+ 							/* there is an argument to this short option, separated by a space,
+-								* and the shortopt specification does not specify an optional arg */
++								* and the shortopt specification does not specify an optional arg;
++								* POSIX takes the next argv element whatever it starts with, so
++								* `grep -e -x` looks for "-x" */
+ 							optarg = argv[optind + 1];
+ 							optind++;
+-							__optpos = 1;
+ 						} else if(!required) {
+ 							optarg = nullptr;
+ 						} else {
+-							__optpos = 1;
++							/* the missing argument ends this argv element, as on glibc and musl,
++								* so the next call goes on to the next one */
+ 							optopt = arg[i];
++							if(!colon && opterr)
++								fprintf(stderr, "%s: option requires an argument -- '%c'\n", argv[0], arg[i]);
++							optind++;
+ 							return colon ? ':' : '?';
+ 						}
+ 						optind++;
+ 					} else {
+ 						if(arg[i+1]) {
+ 							__optpos++;
+-						} else if(arg[i]) {
+-							optind++;
+ 						} else {
+-							optarg = nullptr;
+-							return -1;
++							optind++;
+ 						}
+ 					}
+ 
+@@ -310,11 +317,16 @@
+ 				} else {
+ 					/*	If getopt() does not recognize an option character, it prints an error message to stderr,
+ 						stores the character in optopt, and returns '?'. The calling program may prevent
+-						the error message by setting opterr to 0. */
+-					optopt = arg[1];
++						the error message by setting opterr to 0. The rest of its argv element is read
++						on, as more options, by the next call. */
++					optopt = arg[i];
+ 					if(opterr)
+-						fprintf(stderr, "%s is not a valid option.\n", arg);
+-					optind++;
++						fprintf(stderr, "%s: invalid option -- '%c'\n", argv[0], arg[i]);
++					if(arg[i+1]) {
++						__optpos++;
++					} else {
++						optind++;
++					}
+ 					return '?';
+ 				}
+ 			}
+@@ -380,6 +392,12 @@
+ 	int resumed = optind;
+ 	auto ret = getopt_common_internal(argc, argv, optstring, longopts, longindex, mode);
+ 
++	// A call that moves past an argv element has finished it, whichever way
++	// it did so, so the next call starts at the first option of the next
++	// element: in `-qQ -cdf`, at c, not where the end of `-qQ` left off.
++	if(optind != resumed)
++		__optpos = 1;
++
+ 	if(resumed > skipped) {
+ 		for(int i = 0; i < (optind - resumed); i++) {
+ 			permute(const_cast<char **>(argv), skipped, optind - 1);

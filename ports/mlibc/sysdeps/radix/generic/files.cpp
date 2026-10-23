@@ -95,11 +95,21 @@ int open_rights(const radix::Path &path, uint32_t flags, uint64_t rights, int *f
 	});
 }
 
+// The access mode of open's `flags`. mlibc's O_ACCMODE, as Linux's,
+// takes in O_PATH, which opens a descriptor only to name a file by (to
+// stat it, or to open files beneath it); that is one open for reading
+// here, as Radix has nothing narrower.
+int access_mode(int flags) {
+	if(flags & O_PATH)
+		return O_RDONLY;
+	return flags & (O_RDONLY | O_WRONLY | O_RDWR);
+}
+
 // Opens `path` as POSIX's openat does.
 int open_path(const radix::Path &path, int flags, int *fd) {
 	uint32_t kernel_flags = open_flags(flags);
 	uint64_t rights;
-	switch(flags & O_ACCMODE) {
+	switch(access_mode(flags)) {
 	case O_WRONLY:
 		rights = RADIX_RIGHTS_WRITE;
 		break;
@@ -111,7 +121,7 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 		break;
 	}
 	uint8_t kind = 0;
-	bool read_only = (flags & O_ACCMODE) == O_RDONLY;
+	bool read_only = access_mode(flags) == O_RDONLY;
 	// A directory opened for reading gets the write right too, where its
 	// filesystem allows it: POSIX lets openat make files beneath any
 	// directory descriptor, which takes that right here.
@@ -119,8 +129,10 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 		int e = open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, fd,
 				&kind);
 		if(e != EROFS && e != EACCES) {
-			if(!e)
+			if(!e) {
 				radix::set_dir_cursor(*fd, 0);
+				radix::note_dir_path(*fd, path);
+			}
 			return e;
 		}
 	}
@@ -148,6 +160,7 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 				*fd = wider;
 		}
 	}
+	radix::note_dir_path(*fd, path);
 	return 0;
 }
 
@@ -325,6 +338,7 @@ int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 		}); e)
 		return e;
 	radix::set_dir_cursor(*newfd, radix::dir_cursor(fd));
+	radix::copy_dir_path(fd, *newfd);
 	if(close_on_exec) {
 		struct radix_capability_flags_results old;
 		radix_capability_flags(radix::slot_of(*newfd), true, RADIX_SLOT_FLAGS_CLOSE_ON_EXEC, &old);
@@ -397,8 +411,8 @@ int open_named(int from, int flags, int *fd) {
 		return e;
 	if((flags & O_CREAT) && (flags & O_EXCL))
 		return EEXIST;
-	bool reads = (flags & O_ACCMODE) != O_WRONLY;
-	bool writes = (flags & O_ACCMODE) != O_RDONLY;
+	bool reads = access_mode(flags) != O_WRONLY;
+	bool writes = access_mode(flags) != O_RDONLY;
 	if(S_ISDIR(st.st_mode) && writes)
 		return EISDIR;
 	if(!S_ISDIR(st.st_mode) && (flags & O_DIRECTORY))
@@ -652,6 +666,7 @@ int Sysdeps<Close>::operator()(int fd) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
+	radix::forget_dir_path(fd);
 	return radix::to_errno(radix_capability_delete(slot));
 }
 
@@ -688,6 +703,7 @@ int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 		return radix::to_errno(status);
 	}
 	radix::set_dir_cursor(newfd, radix::dir_cursor(fd));
+	radix::copy_dir_path(fd, newfd);
 	if(flags & O_CLOEXEC) {
 		struct radix_capability_flags_results old;
 		radix_capability_flags(to, true, RADIX_SLOT_FLAGS_CLOSE_ON_EXEC, &old);
@@ -983,9 +999,18 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 }
 
 int Sysdeps<Fchdir>::operator()(int fd) {
-	(void)fd;
-	// A descriptor does not know its path (docs/design/posix.md).
-	return ENOSYS;
+	struct stat st;
+	if(int e = stat_fd(fd, &st); e)
+		return e;
+	if(!S_ISDIR(st.st_mode))
+		return ENOTDIR;
+	// By the path the C library noted for it (ADR 0089): a descriptor
+	// does not know its own, and one from before exec has none.
+	char path[radix::PATH_MAX_BYTES + 1];
+	path[0] = '/';
+	if(!radix::dir_path(fd, path + 1))
+		return ENOSYS;
+	return sysdep<Chdir>(path);
 }
 
 int Sysdeps<GetCwd>::operator()(char *buffer, size_t size) {

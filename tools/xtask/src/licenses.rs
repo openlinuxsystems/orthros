@@ -42,13 +42,22 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// a public domain dedication (uutils' `tail` follows files with the
 /// notify crate, ADR 0080). ncurses' license is the X11 license that also
 /// lets one distribute with modifications; the One True Awk's is Lucent's,
-/// which SPDX has no identifier for.
+/// which SPDX has no identifier for. The rest are permissive licenses of
+/// the compression and archive ports: XZ Utils' 0BSD, bzip2's own,
+/// Info-ZIP's for zip, and in jq, ICU's for decNumber, David M. Gay's for
+/// its number formatting, and CC-BY-3.0 for its manual (ADR 0088).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
     "GPL-2.0-or-later",
     "GPL-3.0-or-later",
     "X11-distribute-modifications-variant",
     "LicenseRef-onetrueawk",
+    "0BSD",
+    "bzip2-1.0.6",
+    "Info-ZIP",
+    "ICU",
+    "dtoa",
+    "CC-BY-3.0",
 ];
 
 /// Crates from crates.io that compile another project's C code into what

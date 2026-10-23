@@ -189,8 +189,13 @@ relative one joined to the working directory; it works out no `.` or
 `..` itself, since only the kernel knows where a link leads. `chdir`
 and `realpath` ask the kernel for the canonical path (`real_path`).
 Directory descriptors (`openat`) go to the kernel with their capability,
-beneath which `..` fails with `outside` (EXDEV). A description does not
-know its path, so `fchdir` fails with ENOSYS.
+beneath which `..` fails with `outside` (EXDEV). So the C library notes
+the path, beneath the root, by which each directory descriptor was
+opened (ADR 0089), copies it with the descriptor on `dup`, and forgets
+it on `close`: a path with a `..` beneath a descriptor goes to the
+kernel from the root by that path, and `fchdir` changes to it. A
+descriptor from before exec has none, so `..` above it still fails
+with EXDEV and `fchdir` with ENOSYS.
 
 `/dev/fd/N`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are the C
 library's (ADR 0084): `open`, `stat` and `access` match the resolved
@@ -525,8 +530,8 @@ and timer protocols are candidates for the audit after Phase 9.
 - `clock_gettime` is a capability call; there is no read-only clock page
   (vDSO). The instruction budgets will show when it matters.
 - `poll` wakes every poller on every change anywhere.
-- `fchdir` fails with ENOSYS, since a description does not know its path;
-  `getcwd` is the C library's string.
+- A directory descriptor's path is the one it was opened by, and one from
+  before exec has none (ADR 0089); `getcwd` is the C library's string.
 - No named pipes (`mkfifo` fails with ENOSYS: no filesystem keeps them
   yet), no device nodes (`mknod` fails with EPERM), no hard links (EPERM)
   until Btrfs. Symbolic links work on tmpfs and in the boot archive;

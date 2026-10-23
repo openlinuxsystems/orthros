@@ -177,15 +177,16 @@ open file description, with its offset and status flags, so *dup*,
 grows as descriptors are opened, up to the soft *RLIMIT_NOFILE* (1,024 by
 default) and never past 4,032 descriptors.
 
-The C library keeps the working directory as a string. It resolves *.*
-and *..* in a path against it as text, then hands the kernel the path
-beneath the root directory. So *..* in a path never climbs above the
-root, and a path that crosses a mount point and comes back with *..*
-lands where the text says. A path relative to a directory descriptor
-(*openat* and the rest) goes to the kernel with that directory's
-capability, beneath which *..* cannot climb: it fails with EXDEV.
-*chdir* checks the directory and keeps the new string; *fchdir* fails
-with ENOSYS, since a description does not know its path.
+The C library keeps the working directory as a canonical string. It
+hands the kernel an absolute path, or a relative one joined to the
+working directory, as a path beneath the root directory, and the kernel
+works out *.*, *..* and symbolic links; *..* never climbs above the
+root. A path relative to a directory descriptor (*openat* and the rest)
+goes to the kernel with that directory's capability, beneath which *..*
+cannot climb. So the C library notes the path each directory descriptor
+was opened by, and a path with *..* in it goes from the root by that
+path instead (ADR 0089). *chdir* and *fchdir* check the directory and
+keep its canonical path.
 
 *stat* fills in Linux's *struct stat*: the kind of file, its size, the
 blocks it has, its number (*st_ino*), the number of the mount it is on
@@ -448,7 +449,10 @@ passed*; the boot test fails on any failure.
   (Phase 10: *link* fails with EPERM), no named pipes (*mkfifo* fails
   with ENOSYS) and no device nodes (*mknod* fails with EPERM). Symbolic
   links work on tmpfs and in the boot archive, not on FAT.
-- *fchdir* fails with ENOSYS. *waitid* needs *WEXITED*.
+- A directory descriptor from before exec has no path: *..* above it
+  fails with EXDEV, and *fchdir* to it with ENOSYS. One whose directory
+  was moved while it was open still goes by the old path for both.
+  *waitid* needs *WEXITED*.
 - Futexes in memory several processes share are not shared: a
   process-shared mutex or semaphore does not wake waiters in another
   process.

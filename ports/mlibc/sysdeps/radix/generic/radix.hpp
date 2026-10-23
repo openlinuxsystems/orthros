@@ -65,6 +65,9 @@ void set_files_limit(uint64_t limit);
 // again (`place`).
 int free_slot(int min_fd, uint32_t *slot);
 
+// Forgets the path of directory descriptor `fd` (below).
+void forget_dir_path(int fd);
+
 // Runs `put(slot)`, which puts a capability in an empty slot, on the
 // lowest free descriptor from `min_fd` until one is empty when it runs.
 // Returns 0 and the descriptor, or an errno.
@@ -77,6 +80,8 @@ int place(int min_fd, int *fd, F put) {
 		uint64_t status = put(slot);
 		if(!status) {
 			*fd = static_cast<int>(slot - FD_BASE);
+			// A new descriptor has no directory path until it is given one.
+			forget_dir_path(*fd);
 			return 0;
 		}
 		// Another thread took it first.
@@ -98,8 +103,34 @@ struct Path {
 // Resolves `path`, relative to the directory `dirfd` (AT_FDCWD for the
 // working directory): an absolute path, or one relative to the working
 // directory, becomes a path beneath the root, whose `.`, `..` and
-// symbolic links the kernel works out. Returns 0 or an errno.
+// symbolic links the kernel works out. A path with a `..` in it,
+// relative to a directory descriptor whose path is known, becomes one
+// beneath the root too. Returns 0 or an errno.
 int resolve(int dirfd, const char *path, Path *out);
+
+// The paths of directory descriptors (ADR 0089). The kernel resolves a
+// path beneath a directory capability and never above it, so the C
+// library notes the path, beneath the root, by which each directory
+// descriptor was opened, and goes by it from the root for a `..` beneath
+// the descriptor and for fchdir. A descriptor from before exec, or one
+// opened while the notes are full, has no path.
+
+// Notes that descriptor `fd`, just opened as a directory by `path`, has
+// the path `path` leads to from the root; one beneath a descriptor with
+// no path has none.
+void note_dir_path(int fd, const Path &path);
+
+// Gives descriptor `to` the path of `from`, or none if it has none, as a
+// copy of `from` it now is.
+void copy_dir_path(int from, int to);
+
+// Forgets the path of `fd`, which was closed or is to be another file.
+void forget_dir_path(int fd);
+
+// Copies the path of descriptor `fd`, beneath the root (`.` for the root
+// itself), to `out`, which has room for PATH_MAX_BYTES bytes, and returns
+// its length: 0 if it has none.
+size_t dir_path(int fd, char *out);
 
 // The working directory, absolute, as the program knows it.
 const char *cwd();

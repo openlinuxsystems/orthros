@@ -41,7 +41,6 @@
 #   bsd/sbrk: Radix has no program break; malloc maps memory
 #     (radix-posix(7))
 #   posix/access: file modes and permissions come with users (Phase 13)
-#   posix/realpath: symbolic links come with Btrfs (Phase 10)
 #   posix/aio: POSIX asynchronous I/O; Radix's own is its rings
 #     (radix-posix(7))
 set -eu
@@ -78,7 +77,7 @@ for test in $(sed -n "/^all_test_cases = \[/,/^\]/s/^	'\([a-z-]*\/[A-Za-z0-9_-]*
 	ansi/mbrlen | ansi/mbstowcs | ansi/fputwc | ansi/fgetws) continue ;;
 	posix/getwchar | posix/locale | posix/strfmon | posix/strcoll_l) continue ;;
 	posix/strxfrm_l | posix/wcscoll_l | posix/wcsxfrm_l) continue ;;
-	bsd/sbrk | posix/access | posix/realpath | posix/aio) continue ;;
+	bsd/sbrk | posix/access | posix/aio) continue ;;
 	esac
 	name=$(echo "$test" | tr / -)
 	if [ "$test" = ansi/init-fini-order ]; then

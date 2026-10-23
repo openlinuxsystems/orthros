@@ -99,3 +99,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0085](0085-socket-pairs.md) | Socket pairs are two pipes, one each way | Accepted |
 | [0086](0086-release-archives-and-autoconf-ports.md) | Ports come from release archives or git, and autoconf packages build through one wrapper | Accepted |
 | [0087](0087-gpl-programs-among-the-ports.md) | GPL programs may be ports in /system, each a program of its own | Accepted |
+| [0088](0088-archives-and-compressors.md) | libarchive is tar, cpio and unzip; each compressor is its own project's | Accepted |
+| [0089](0089-directory-descriptor-paths.md) | The C library notes the path of each directory descriptor, for `..` beneath it and fchdir | Accepted |

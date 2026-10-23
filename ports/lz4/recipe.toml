@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# LZ4 (ADR 0086): the lz4 compressor and liblz4, for .lz4 files. The
+# library is BSD-2-Clause; the lz4 program is GPL-2.0-or-later, a program
+# of its own (ADR 0087).
+name = "lz4"
+version = "1.10.0"
+summary = "LZ4, the fast compressor, and liblz4"
+license = "BSD-2-Clause AND GPL-2.0-or-later"
+homepage = "https://lz4.org"
+depends = ["mlibc"]
+notices = ["LICENSE", "lib/LICENSE", "programs/COPYING"]
+
+[source]
+git = "https://github.com/lz4/lz4.git"
+commit = "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+tag = "v1.10.0"
