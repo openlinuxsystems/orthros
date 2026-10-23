@@ -109,7 +109,16 @@ pub struct Parser {
     /// goes back to when the command is incomplete.
     start: usize,
     unspliced: Option<Vec<char>>,
+    /// How deep the construct being read is nested (commands in
+    /// commands, `$(...)` and `${...}` in words, `[[`'s `(` and `!`), up to
+    /// [`MAX_DEPTH`].
+    depth: u32,
 }
+
+/// How deep constructs may nest. Deeper text is a syntax error, not a
+/// stack overflow: each level costs the parser, and then the code that
+/// runs, shows and drops what it read, a few kilobytes of stack.
+pub const MAX_DEPTH: u32 = 1000;
 
 /// The characters that end an unquoted word.
 fn is_meta(c: char) -> bool {
@@ -139,6 +148,11 @@ const RESERVED: [&str; 22] = [
     "until", "while", "[[", "]]", "function", "select", "time", "coproc",
 ];
 
+/// Whether `word` is a reserved word where a command starts.
+pub fn is_reserved(word: &str) -> bool {
+    RESERVED.contains(&word)
+}
+
 impl Parser {
     pub fn new(text: &str, file: Rc<str>, first_line: u32, options: Options) -> Parser {
         Parser {
@@ -152,7 +166,19 @@ impl Parser {
             alias_next: false,
             start: 0,
             unspliced: None,
+            depth: 0,
         }
+    }
+
+    /// Reads with `read` one level deeper, or fails past [`MAX_DEPTH`].
+    fn nested<T>(&mut self, read: impl FnOnce(&mut Parser) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.syntax("too deeply nested"));
+        }
+        self.depth += 1;
+        let result = read(self);
+        self.depth -= 1;
+        result
     }
 
     /// Adds text after what the parser holds: the next line typed, or read
@@ -612,6 +638,10 @@ impl Parser {
     }
 
     fn command(&mut self) -> Result<Command> {
+        self.nested(Parser::command_here)
+    }
+
+    fn command_here(&mut self) -> Result<Command> {
         if self.alias_next || self.options.aliases.is_some() {
             self.alias_next = false;
             self.expand_alias();
@@ -1425,6 +1455,10 @@ impl Parser {
     }
 
     fn cond_not(&mut self) -> Result<CondExpr> {
+        self.nested(Parser::cond_not_here)
+    }
+
+    fn cond_not_here(&mut self) -> Result<CondExpr> {
         self.skip_cond_blanks()?;
         if self.at_word("!") {
             self.eat("!");
@@ -1738,6 +1772,10 @@ impl Parser {
     /// What follows a `$`: `None` (with only the `$` consumed) if nothing
     /// that expands does.
     fn dollar(&mut self, in_double: bool) -> Result<Option<WordPart>> {
+        self.nested(|parser| parser.dollar_here(in_double))
+    }
+
+    fn dollar_here(&mut self, in_double: bool) -> Result<Option<WordPart>> {
         self.bump();
         let Some(c) = self.peek() else { return Ok(None) };
         match c {
@@ -2258,7 +2296,8 @@ impl Parser {
     /// Parses `text`, the inside of `` `...` ``, as commands.
     fn sub_program(&self, text: &str, line: u32) -> Result<Program> {
         let options = self.options.clone();
-        let parser = Parser::new(text, self.file.clone(), line, options);
+        let mut parser = Parser::new(text, self.file.clone(), line, options);
+        parser.depth = self.depth + 1;
         parser.parse().map_err(|error| match error {
             Error::Incomplete(message) => Error::Syntax { line, message },
             error => error,
@@ -2269,6 +2308,7 @@ impl Parser {
     /// quotes: a here-document's body, or an arithmetic expression.
     fn sub_word(&self, text: &str, line: u32, mode: WordMode) -> Result<Word> {
         let mut parser = Parser::new(text, self.file.clone(), line, self.options.clone());
+        parser.depth = self.depth + 1;
         let mut parts = Vec::new();
         let mut lit = String::new();
         let incomplete = |error| match error {

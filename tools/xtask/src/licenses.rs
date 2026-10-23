@@ -1239,7 +1239,8 @@ mod tests {
         assert!(matches!(entry.source, Source::Other(_)));
         let entry = parse_tree_line("memchr v2.7.4|Unlicense/MIT").unwrap();
         assert_eq!(entry.license, "Unlicense OR MIT");
-        let entry = parse_tree_line("serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0").unwrap();
+        let entry =
+            parse_tree_line("serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0").unwrap();
         assert_eq!((entry.name.as_str(), entry.source), ("serde_derive", Source::Registry));
         assert_eq!(parse_tree_line("").map(|e| e.name), None);
     }

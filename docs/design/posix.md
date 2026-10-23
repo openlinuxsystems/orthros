@@ -192,6 +192,11 @@ Directory descriptors (`openat`) go to the kernel with their capability,
 beneath which `..` fails with `outside` (EXDEV). A description does not
 know its path, so `fchdir` fails with ENOSYS.
 
+`/dev/fd/N`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are the C
+library's (ADR 0084): `open`, `stat` and `access` match the resolved
+path and work on the descriptor, as `dup` and `fstat` do, since no
+filesystem differs from one process to the next.
+
 ## Pipes
 
 A pipe is a `radix-tty` `Ring` of `CAPACITY` (64 KiB) under a sleeping
@@ -203,6 +208,16 @@ read only atomic counts kept beside the ring. A write of up to `ATOMIC`
 (4,096) bytes waits for room for all of it, so writers never interleave;
 copies to and from user memory are made with the ring's sleeping lock
 held, so a page fault in the copy may sleep.
+
+## Socket pairs
+
+A socket pair (ADR 0085) is two pipes, one each way: each end is a node
+on `pipefs` that counts as the reader of one pipe and the writer of the
+other, so reads, writes, waits, SIGPIPE and poll are the pipe's. An
+end's `shutdown` lets go of its reader or writer count early, once, with
+a flag per direction; dropping the node lets go of what is left.
+`send` and `receive` are the pipe's write and read with the caller's
+`dont_wait` and `no_signal`.
 
 ## poll
 
@@ -524,7 +539,8 @@ and timer protocols are candidates for the audit after Phase 9.
   ended.
 - CPU time in the kernel counts as user time (`times`, `getrusage`,
   `wait`'s times); CPU-time timers fire within a tick (10 ms).
-- No sockets (Phase 12), System V IPC, POSIX message queues, POSIX
+- Only socket pairs: named sockets come later in Phase 9, network
+  sockets with Phase 12. No System V IPC, POSIX message queues, POSIX
   asynchronous I/O, `epoll`, `eventfd`, `signalfd`, `timerfd` or
   `inotify`. Linux's `madvise` is not declared; `posix_madvise` is
   advice only.

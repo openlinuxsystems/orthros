@@ -40,6 +40,7 @@ pub mod disk;
 pub mod locks;
 pub mod pipe;
 pub mod procfs;
+pub mod socket;
 pub mod sysfs;
 pub mod tty;
 pub mod writeback;
@@ -100,6 +101,8 @@ enum Special {
     No,
     /// An end of a pipe.
     Pipe,
+    /// An end of a socket pair.
+    Socket,
     /// A side of a terminal.
     Tty,
 }
@@ -136,9 +139,11 @@ impl FileObject {
 
     /// An object for `at`, with `description`'s flags.
     pub fn with(at: Location, description: Description) -> Option<FileRef> {
-        // Only a node of a pipe's or a character device's kind can be one.
+        // Only a node of a pipe's, a socket's or a character device's kind
+        // can be one.
         let special = match at.node.kind() {
             Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
+            Kind::Socket if socket::end_of(&at.node).is_some() => Special::Socket,
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
             _ => Special::No,
         };
@@ -176,6 +181,11 @@ impl FileObject {
     /// The end of a pipe it is of, if it is of one.
     pub fn pipe_end(&self) -> Option<&pipe::End> {
         if self.special == Special::Pipe { pipe::end_of(&self.at.node) } else { None }
+    }
+
+    /// The end of a socket pair it is of, if it is of one.
+    pub fn socket_end(&self) -> Option<&socket::End> {
+        if self.special == Special::Socket { socket::end_of(&self.at.node) } else { None }
     }
 
     /// The side of a terminal it is of, if it is of one.

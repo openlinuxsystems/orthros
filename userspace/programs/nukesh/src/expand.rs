@@ -1178,19 +1178,29 @@ fn replace(
             }
         }
         ReplaceKind::First | ReplaceKind::All => {
+            // As in bash: an empty pattern replaces nothing, and an empty
+            // string only if the pattern matches it. Otherwise an empty
+            // match counts too, and the character after it is kept before
+            // the next look, which starts before the end.
+            if matcher.is_empty() {
+                return s.to_string();
+            }
+            if chars.is_empty() {
+                return if matcher.matches("") { render(&[]) } else { String::new() };
+            }
             let mut out = String::new();
             let mut at = 0;
-            while at <= chars.len() {
-                match matcher.find(&chars, at, false) {
-                    Some((start, end)) => {
-                        out.extend(&chars[at..start]);
-                        out.push_str(&render(&chars[start..end]));
-                        at = end;
-                        if kind == ReplaceKind::First {
-                            break;
-                        }
-                    }
-                    None => break,
+            while at < chars.len() {
+                let Some((start, end)) = matcher.find(&chars, at, true) else { break };
+                out.extend(&chars[at..start]);
+                out.push_str(&render(&chars[start..end]));
+                at = end;
+                if start == end && at < chars.len() {
+                    out.push(chars[at]);
+                    at += 1;
+                }
+                if kind == ReplaceKind::First {
+                    break;
                 }
             }
             out.extend(&chars[at.min(chars.len())..]);

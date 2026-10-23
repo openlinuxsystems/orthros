@@ -31,8 +31,14 @@ pub fn expand(word: &Word) -> Vec<Word> {
             other => items.push(Item::Part(other.clone())),
         }
     }
-    expand_items(&items).into_iter().map(|items| to_word(&items)).collect()
+    expand_items(&items, 0).into_iter().map(|items| to_word(&items)).collect()
 }
+
+/// How many braces are expanded inside braces and after them: those past
+/// it are left as they are, so that each level's copy of the text stays
+/// cheap and the stack shallow. (Every brace after another at least
+/// doubles the words, so text past it could not be expanded anyway.)
+const MAX_DEPTH: u32 = 256;
 
 fn to_word(items: &[Item]) -> Word {
     let mut parts = Vec::new();
@@ -54,7 +60,10 @@ fn to_word(items: &[Item]) -> Word {
     Word { parts }
 }
 
-fn expand_items(items: &[Item]) -> Vec<Vec<Item>> {
+fn expand_items(items: &[Item], depth: u32) -> Vec<Vec<Item>> {
+    if depth > MAX_DEPTH {
+        return vec![items.to_vec()];
+    }
     let mut start = 0;
     while let Some(open) = find_open(items, start) {
         if let Some((close, commas)) = find_close(items, open) {
@@ -76,10 +85,10 @@ fn expand_items(items: &[Item]) -> Vec<Vec<Item>> {
                 bounds.push(close);
                 bounds.windows(2).map(|w| items[w[0] + 1..w[1]].to_vec()).collect()
             };
-            let posts = expand_items(post);
+            let posts = expand_items(post, depth + 1);
             let mut out = Vec::new();
             for alternative in alternatives {
-                for expanded in expand_items(&alternative) {
+                for expanded in expand_items(&alternative, depth + 1) {
                     for post in &posts {
                         let mut word = pre.to_vec();
                         word.extend(expanded.iter().cloned());

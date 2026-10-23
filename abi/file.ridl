@@ -19,6 +19,11 @@
 //! files too, which have no offset: their reads and writes take any
 //! offset, and their reads return what has come, waiting while nothing
 //! has unless the description is non_blocking.
+//!
+//! Since Phase 9 the ends of a socket pair (radix-process(2)'s
+//! `socket_pair`) are files of that kind too, with three methods of their
+//! own: `send`, `receive` and `shutdown`. Each end reads what the other
+//! writes, as through two pipes, one each way.
 
 module file;
 
@@ -84,8 +89,18 @@ flags DescriptionFlags: u32 {
     non_blocking = 1;
 }
 
+/// How `send` and `receive` go, for that call alone.
+flags SocketFlags: u32 {
+    /// Fail with would_block instead of waiting, as if the description
+    /// were non_blocking: POSIX's MSG_DONTWAIT.
+    dont_wait = 0;
+    /// A send to an end no one reads fails with gone, without SIGPIPE:
+    /// POSIX's MSG_NOSIGNAL.
+    no_signal = 1;
+}
+
 /// A file.
-interface file = 0x000c version 2 {
+interface file = 0x000c version 3 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -157,4 +172,24 @@ interface file = 0x000c version 2 {
     /// and fail with not_permitted. Needs the write right.
     method set_times = 11 (accessed: u64, modified: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, not_permitted, read_only, io, corrupt];
+    /// Sends `data` to a socket's other end, as `write` does but with
+    /// `flags`; returns how many bytes went. Sending to an end that is
+    /// gone, or shut for reading, raises SIGPIPE (unless no_signal) and
+    /// fails with gone. Needs the write right.
+    method send = 12 (data: in bytes, flags: SocketFlags) -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
+                gone, interrupted];
+    /// Receives what a socket's other end sent into `buffer`, as `read`
+    /// does but with `flags`; returns how many bytes came, 0 once the
+    /// other end is gone or shut for writing and all it sent has been
+    /// read. Needs the read right.
+    method receive = 13 (buffer: out bytes, flags: SocketFlags) -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
+                interrupted];
+    /// Shuts a socket's end for reading (what the other end sends then
+    /// fails with gone), for writing (the other end then receives the
+    /// end), or both, for every description of the end: POSIX's
+    /// `shutdown`.
+    method shutdown = 14 (read: bool, write: bool) -> ()
+        raises [no_such_slot, empty_slot, not_socket];
 }

@@ -286,6 +286,10 @@ void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocate
 		st->st_mode = S_IFLNK | 0777;
 		st->st_nlink = 1;
 		break;
+	case RADIX_FILE_KIND_SOCKET:
+		st->st_mode = S_IFSOCK | 0777;
+		st->st_nlink = 1;
+		break;
 	default:
 		// Files have no permissions until users come (Phase 13): all may
 		// read, write and run them.

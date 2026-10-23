@@ -5,7 +5,9 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 rustix's libc back end on Radix: mlibc has statvfs but no statfs,
 no fallocate modes and no IPPROTO_MPTCP; ioctl request numbers are
 unsigned long, as on the BSDs, and msg_controllen is a socklen_t, as
-POSIX has it.
+POSIX has it. Its struct termios is Linux's, with c_line: without it,
+tcgetattr wrote past the end of rustix's Termios and the special codes
+were one place off, so crossterm's raw mode never set VMIN.
 
 diff --git a/rustix-1.1.5/src/backend/libc/fs/dir.rs b/rustix-1.1.5/src/backend/libc/fs/dir.rs
 index 6574287..c8be946 100644
@@ -219,3 +221,34 @@ index 8eca89c..886114f 100644
      )))]
      pub const MPTCP: Protocol = Protocol(new_raw_protocol(c::IPPROTO_MPTCP as _));
      /// `IPPROTO_FRAGMENT`
+diff --git a/rustix-1.1.5/src/termios/types.rs b/rustix-1.1.5/src/termios/types.rs
+index 71d9fb8..0a51b57 100644
+--- a/rustix-1.1.5/src/termios/types.rs
++++ b/rustix-1.1.5/src/termios/types.rs
+@@ -36,6 +36,7 @@ pub struct Termios {
+         target_env = "newlib",
+         target_os = "fuchsia",
+         target_os = "haiku",
++        target_os = "radix",
+         target_os = "redox"
+     ))]
+     pub line_discipline: u8,
+@@ -74,6 +75,10 @@ pub struct Termios {
+     pub special_codes: SpecialCodes,
+ }
+ 
++// `tcgetattr` writes a whole `c::termios` into a `Termios`.
++#[cfg(target_os = "radix")]
++const _: () = assert!(core::mem::size_of::<Termios>() == core::mem::size_of::<c::termios>());
++
+ impl Termios {
+     /// `cfmakeraw(self)`—Set a `Termios` value to the settings for “raw” mode.
+     ///
+@@ -230,6 +235,7 @@ impl core::fmt::Debug for Termios {
+             target_env = "newlib",
+             target_os = "fuchsia",
+             target_os = "haiku",
++            target_os = "radix",
+             target_os = "redox"
+         ))]
+         {

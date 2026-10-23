@@ -1,0 +1,46 @@
+SPDX-FileCopyrightText: The crossterm contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+On Radix, mio waits with poll(2), and its poll back end drops an
+interest once it has reported it, until the source is registered again
+(mio's IoSource types do that when an operation would block). crossterm
+reads the terminal and signal-hook drains its socket straight from the
+file descriptors, so after the first keys nothing woke the event loop:
+register both again each time they are reported.
+
+diff --git a/crossterm-0.29.0/src/event/source/unix/mio.rs b/crossterm-0.29.0/src/event/source/unix/mio.rs
+index 1c6f943..4e06cc9 100644
+--- a/crossterm-0.29.0/src/event/source/unix/mio.rs
++++ b/crossterm-0.29.0/src/event/source/unix/mio.rs
+@@ -92,6 +92,15 @@ impl EventSource for UnixInternalEventSource {
+             for token in self.events.iter().map(|x| x.token()) {
+                 match token {
+                     TTY_TOKEN => {
++                        // mio's poll(2) back end drops an interest once it
++                        // has reported it, until the source registers again;
++                        // reads straight from the fd do not, so ask again.
++                        #[cfg(target_os = "radix")]
++                        self.poll.registry().reregister(
++                            &mut SourceFd(&self.tty_fd.raw_fd()),
++                            TTY_TOKEN,
++                            Interest::READABLE,
++                        )?;
+                         loop {
+                             match self.tty_fd.read(&mut self.tty_buffer) {
+                                 Ok(read_count) => {
+@@ -120,6 +129,14 @@ impl EventSource for UnixInternalEventSource {
+                         }
+                     }
+                     SIGNAL_TOKEN => {
++                        // signal-hook drains its socket with recv(2), not
++                        // through mio, so the same holds here.
++                        #[cfg(target_os = "radix")]
++                        self.poll.registry().reregister(
++                            &mut self.signals,
++                            SIGNAL_TOKEN,
++                            Interest::READABLE,
++                        )?;
+                         if self.signals.pending().next() == Some(signal_hook::consts::SIGWINCH) {
+                             // TODO Should we remove tput?
+                             //

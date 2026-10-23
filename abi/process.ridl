@@ -91,7 +91,7 @@ flags ChildWaitFlags: u32 {
     no_reap = 3;
 }
 
-/// What `pipe` gives the descriptions it makes.
+/// What `pipe` and `socket_pair` give the descriptions they make.
 flags PipeFlags: u32 {
     /// Reads and writes do not wait (radix-file(2)'s non_blocking).
     non_blocking = 0;
@@ -273,7 +273,7 @@ enum ProcessState: u8 {
 }
 
 /// A process.
-interface process = 0x000a version 2 {
+interface process = 0x000a version 3 {
     kind = process;
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
@@ -588,4 +588,11 @@ interface process = 0x000a version 2 {
     method thread_name = 46 (thread: u64, buffer: out bytes) -> (length: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, out_of_range,
                 no_such_process];
+    /// Makes a pair of connected stream sockets, POSIX's `socketpair`
+    /// for AF_UNIX and SOCK_STREAM: a description of one end in slot
+    /// `first` and of the other in slot `second` (radix-file(2)). What one
+    /// end writes or sends the other reads or receives, 64 KiB at most
+    /// waiting each way; reads and writes otherwise go as a pipe's do.
+    method socket_pair = 47 (first: slot, second: slot, flags: PipeFlags) -> ()
+        raises [no_such_slot, missing_rights, occupied, invalid_argument, no_memory];
 }

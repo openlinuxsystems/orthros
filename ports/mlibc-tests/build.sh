@@ -10,6 +10,8 @@
 #
 # ansi/init-fini-order is a program of its own beside run, since its
 # constructors and destructors would otherwise run around every test.
+# posix/posix_spawn starts itself again, as argv[0]: it has a link to run
+# beside it, posix-posix_spawn, through which run runs it.
 #
 # Left out, with why:
 #   linux/*, linux-wrappers/*, glibc/linux-syscall: Linux's own
@@ -17,15 +19,14 @@
 #   rtld/*, glibc/_dl_find_object: they build shared libraries of their
 #     own and run from mlibc's build tree; the dynamic test checks
 #     dynamic linking instead (ADR 0071)
-#   posix/popen, posix/system, posix/wordexp, posix/posix_spawn: they
-#     need /bin/sh (Phase 9)
 #   posix/getaddrinfo, gethostbyname, getnameinfo, getservbyname,
 #     getservbyport, protoent, accept4, cmsg, if_indextoname,
 #     if_nameindex: networking (Phase 12)
 #   posix/sysv_shm, sysv_msg, sysv_sem: System V IPC, which Radix does
 #     not have (radix-posix(7))
 #   posix/pwd, posix/grp, glibc/shadow, glibc/getgrouplist,
-#     posix/getlogin_r: the user database (Phase 13)
+#     posix/getlogin_r, and posix/wordexp for its ~root: the user
+#     database (Phase 13)
 #   ansi/tz, glibc/error, glibc/error_at_line: mlibc runs them through a
 #     Python wrapper that checks their output; ansi/tz needs time zones
 #     (Phase 12)
@@ -63,13 +64,12 @@ for test in $(sed -n "/^all_test_cases = \[/,/^\]/s/^	'\([a-z-]*\/[A-Za-z0-9_-]*
 	"$PORT_SRC/tests/meson.build"); do
 	case "$test" in
 	linux/* | linux-wrappers/* | rtld/* | glibc/_dl_find_object) continue ;;
-	posix/popen | posix/system | posix/wordexp | posix/posix_spawn) continue ;;
 	posix/getaddrinfo | posix/gethostbyname | posix/getnameinfo) continue ;;
 	posix/getservbyname | posix/getservbyport | posix/protoent) continue ;;
 	posix/accept4 | posix/cmsg | posix/if_indextoname | posix/if_nameindex) continue ;;
 	posix/sysv_shm | posix/sysv_msg | posix/sysv_sem) continue ;;
 	posix/pwd | posix/grp | glibc/shadow | glibc/getgrouplist) continue ;;
-	posix/getlogin_r) continue ;;
+	posix/getlogin_r | posix/wordexp) continue ;;
 	ansi/tz | glibc/error | glibc/error_at_line) continue ;;
 	ansi/fenv | posix/pthread_cancel) continue ;;
 	ansi/sscanf | ansi/sprintf | ansi/swprintf | ansi/swscanf | ansi/fwscanf) continue ;;
@@ -118,4 +118,5 @@ done
 $CC $CFLAGS -Wall -I"$PORT_BUILD" -o "$PORT_BUILD/run" "$PORT_DIR/run.c" $objects -lm -lpthread
 # The image's copy without symbols; the build's keeps them, for a debugger.
 $STRIP -o "$out/run" "$PORT_BUILD/run"
+ln -s run "$out/posix-posix_spawn"
 echo "mlibc-tests: $(echo "$names" | wc -w) tests in /system/tests/libc"

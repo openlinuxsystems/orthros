@@ -231,6 +231,23 @@ shell keeps bash's: *RANDOM*, *SRANDOM*, *SECONDS*, *EPOCHSECONDS*,
 history and completion variables above. *NUKESH_VERSION* is its version.
 *BASH_VERSION* is not set, so that scripts can tell the shells apart.
 
+# LIMITS
+
+Commands, *$(...)*, *${...}* and the parentheses and *!* of *[[ ]]* nest
+at most 1,000 deep; deeper text is a syntax error, *too deeply nested*,
+where bash would run out of stack. Functions call each other at most
+2,000 deep, unless *FUNCNEST* says otherwise. Arithmetic's parentheses
+nest at most 1,024 deep. Extended patterns opened more than 64 deep, and
+braces past the 256th in a word, are left as plain text.
+
+Matching a pattern takes time that grows with the length of the text
+times that of the pattern, never exponentially: *${x//+(ab)/x}* on
+40 KB of text takes milliseconds, where bash takes minutes. Where bash's
+matcher has known quirks, Nukesh does what its manual says:
+a pattern ending in *\\\** matches a literal star in *${x/pattern/text}*
+too, and an empty text matches *?(a)* and *!(a)* there as it does in
+*[[ ]]*.
+
 # EXIT STATUS
 
 The status of the last command; 2 for a syntax error or a builtin used

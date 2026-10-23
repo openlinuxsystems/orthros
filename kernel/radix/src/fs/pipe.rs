@@ -64,6 +64,24 @@ pub struct Pipe {
 }
 
 impl Pipe {
+    /// A new, empty pipe, with one end reading it and one writing it.
+    pub(super) fn new() -> Result<KArc<Pipe>, Status> {
+        let mut buffer = alloc::vec::Vec::new_in(radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP));
+        buffer.try_reserve_exact(CAPACITY).map_err(|_| Kernel::NoMemory.status(0))?;
+        while buffer.len() < CAPACITY {
+            // Room was reserved above.
+            let _ = buffer.push_within_capacity(0);
+        }
+        mem::arc(Pipe {
+            buffer: Mutex::new(Ring::new(buffer)),
+            len: AtomicUsize::new(0),
+            readers: AtomicU32::new(1),
+            writers: AtomicU32::new(1),
+            id: next_id(),
+        })
+        .map_err(|_| Kernel::NoMemory.status(0))
+    }
+
     fn key(&self) -> usize {
         self as *const Pipe as usize
     }
@@ -102,6 +120,32 @@ impl Pipe {
     /// How many bytes it holds.
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
+    }
+
+    /// Whether a write of [`ATOMIC`] bytes would fit now.
+    pub fn has_room(&self) -> bool {
+        CAPACITY - self.len.load(Ordering::Acquire) >= ATOMIC
+    }
+
+    /// How many ends read it, and how many write it.
+    pub fn readers(&self) -> u32 {
+        self.readers.load(Ordering::Acquire)
+    }
+
+    pub fn writers(&self) -> u32 {
+        self.writers.load(Ordering::Acquire)
+    }
+
+    /// A reading end has gone.
+    pub(super) fn close_reader(&self) {
+        self.readers.fetch_sub(1, Ordering::AcqRel);
+        self.changed();
+    }
+
+    /// A writing end has gone.
+    pub(super) fn close_writer(&self) {
+        self.writers.fetch_sub(1, Ordering::AcqRel);
+        self.changed();
     }
 
     /// Reads up to `out.len()` bytes into `out`, waiting for some unless
@@ -146,8 +190,9 @@ impl Pipe {
 
     /// Writes `data`, waiting for room unless `non_blocking`; returns how
     /// many bytes went in, all of them unless a wait was cut short after
-    /// some had.
-    pub fn write(&self, data: &dyn In, non_blocking: bool) -> Result<usize, Status> {
+    /// some had. With no reader left, it fails with gone, and with
+    /// `signal` raises SIGPIPE for the writing thread first.
+    pub fn write(&self, data: &dyn In, non_blocking: bool, signal: bool) -> Result<usize, Status> {
         let total = data.len();
         if total == 0 {
             return Ok(0);
@@ -159,7 +204,7 @@ impl Pipe {
                 let mut buffer = self.buffer.lock();
                 if self.readers.load(Ordering::Acquire) == 0 {
                     drop(buffer);
-                    return broken(done);
+                    return broken(done, signal);
                 }
                 let left = total - done;
                 let free = buffer.free();
@@ -198,10 +243,12 @@ impl Pipe {
     }
 }
 
-/// A write found no reader: SIGPIPE for the writer, and gone (unless some
-/// of it went in first).
-fn broken(done: usize) -> Result<usize, Status> {
-    crate::user::posix::signal::raise_current(SIGPIPE);
+/// A write found no reader: SIGPIPE for the writer if `signal`, and gone
+/// (unless some of it went in first).
+pub(super) fn broken(done: usize, signal: bool) -> Result<usize, Status> {
+    if signal {
+        crate::user::posix::signal::raise_current(SIGPIPE);
+    }
     if done > 0 { Ok(done) } else { Err(Kernel::Gone.status(0)) }
 }
 
@@ -221,9 +268,11 @@ impl End {
 
 impl Drop for End {
     fn drop(&mut self) {
-        let count = if self.write { &self.pipe.writers } else { &self.pipe.readers };
-        count.fetch_sub(1, Ordering::AcqRel);
-        self.pipe.changed();
+        if self.write {
+            self.pipe.close_writer();
+        } else {
+            self.pipe.close_reader();
+        }
     }
 }
 
@@ -257,7 +306,7 @@ impl Node for End {
         if !self.write {
             return Err(radix_vfs::Error::NotSupported);
         }
-        self.pipe.write(data, true).map_err(|_| radix_vfs::Error::NotSupported)
+        self.pipe.write(data, true, true).map_err(|_| radix_vfs::Error::NotSupported)
     }
 
     fn set_size(&self, _size: u64) -> radix_vfs::Result<()> {
@@ -294,8 +343,9 @@ impl FileSystem for PipeFs {
     }
 }
 
-/// The mount pipes' ends are on, made when first needed.
-fn mount() -> radix_vfs::Result<MountRef> {
+/// The mount pipes' ends are on, made when first needed; sockets'
+/// (`socket`) are on it too.
+pub(super) fn mount() -> radix_vfs::Result<MountRef> {
     static MOUNT: Once<MountRef> = Once::new();
     if let Some(mount) = MOUNT.get() {
         return Ok(mount.clone());
@@ -321,20 +371,7 @@ pub fn make(
         return Err(Kernel::InvalidArgument.status(1));
     }
     let mount = mount().map_err(super::status)?;
-    let mut buffer = alloc::vec::Vec::new_in(radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP));
-    buffer.try_reserve_exact(CAPACITY).map_err(|_| Kernel::NoMemory.status(0))?;
-    while buffer.len() < CAPACITY {
-        // Room was reserved above.
-        let _ = buffer.push_within_capacity(0);
-    }
-    let pipe = mem::arc(Pipe {
-        buffer: Mutex::new(Ring::new(buffer)),
-        len: AtomicUsize::new(0),
-        readers: AtomicU32::new(1),
-        writers: AtomicU32::new(1),
-        id: next_id(),
-    })
-    .map_err(|_| Kernel::NoMemory.status(0))?;
+    let pipe = Pipe::new()?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
     let end = |write: bool| -> Result<FileRef, Status> {

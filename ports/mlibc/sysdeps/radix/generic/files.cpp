@@ -332,6 +332,82 @@ int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 	return 0;
 }
 
+// The descriptor a name in /dev/fd stands for (ADR 0084): /dev/fd/N for
+// descriptor N, and /dev/stdin, /dev/stdout and /dev/stderr for 0, 1 and
+// 2, as on Linux and the BSDs, where scripts and the shell's process
+// substitution (`diff <(a) <(b)`) find them. No filesystem holds a
+// process's descriptors, so the C library gives these names itself.
+// Returns -1 for any other path.
+int named_fd(const radix::Path &path) {
+	if(path.dir != radix::SLOT_ROOT)
+		return -1;
+	// The first `n` bytes of the path are `word`. (The dynamic linker,
+	// which has this code too, has no strncmp.)
+	auto starts = [&](const char *word, size_t n) {
+		if(path.len < n)
+			return false;
+		for(size_t i = 0; i < n; i++) {
+			if(path.text[i] != word[i])
+				return false;
+		}
+		return true;
+	};
+	static const char *const STANDARD[] = {"dev/stdin", "dev/stdout", "dev/stderr"};
+	for(int i = 0; i < 3; i++) {
+		size_t n = strlen(STANDARD[i]);
+		if(path.len == n && starts(STANDARD[i], n))
+			return i;
+	}
+	if(path.len <= 7 || !starts("dev/fd/", 7))
+		return -1;
+	// Only the number as it is written: no sign, and no leading zero.
+	const char *digits = path.text + 7;
+	if(digits[0] == '0' && digits[1])
+		return -1;
+	int fd = 0;
+	for(const char *p = digits; *p; p++) {
+		if(*p < '0' || *p > '9')
+			return -1;
+		fd = fd * 10 + (*p - '0');
+		if(fd >= radix::MAX_FDS)
+			return -1;
+	}
+	return fd;
+}
+
+// What the descriptor `from`, which a name in /dev/fd stands for, is:
+// ENOENT if it is not open, as there is then no such name.
+int stat_named(int from, struct stat *st) {
+	uint64_t rights;
+	if(rights_of(from, &rights))
+		return ENOENT;
+	return stat_fd(from, st);
+}
+
+// Opens descriptor `from` by its name in /dev/fd, with openat's `flags`:
+// a copy of it, as dup makes, which shares its open file description and
+// offset, as on the BSDs (Linux opens a file anew, at its start). As
+// there, it has no more access than `from` has, and O_TRUNC does nothing.
+int open_named(int from, int flags, int *fd) {
+	uint64_t rights;
+	if(rights_of(from, &rights))
+		return ENOENT;
+	struct stat st;
+	if(int e = stat_fd(from, &st); e)
+		return e;
+	if((flags & O_CREAT) && (flags & O_EXCL))
+		return EEXIST;
+	bool reads = (flags & O_ACCMODE) != O_WRONLY;
+	bool writes = (flags & O_ACCMODE) != O_RDONLY;
+	if(S_ISDIR(st.st_mode) && writes)
+		return EISDIR;
+	if(!S_ISDIR(st.st_mode) && (flags & O_DIRECTORY))
+		return ENOTDIR;
+	if((reads && !(rights & RADIX_RIGHTS_READ)) || (writes && !(rights & RADIX_RIGHTS_WRITE)))
+		return EACCES;
+	return dup_from(from, 0, flags & O_CLOEXEC, fd);
+}
+
 } // namespace
 
 namespace mlibc {
@@ -345,6 +421,8 @@ int Sysdeps<Openat>::operator()(int dirfd, const char *path, int flags, mode_t m
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, path, &resolved); e)
 		return e;
+	if(int from = named_fd(resolved); from >= 0)
+		return open_named(from, flags, fd);
 	return open_path(resolved, flags, fd);
 }
 
@@ -424,6 +502,7 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 			case RADIX_FILE_KIND_CHAR_DEVICE: type = DT_CHR; break;
 			case RADIX_FILE_KIND_PIPE: type = DT_FIFO; break;
 			case RADIX_FILE_KIND_SYMLINK: type = DT_LNK; break;
+			case RADIX_FILE_KIND_SOCKET: type = DT_SOCK; break;
 			default: type = DT_REG; break;
 			}
 			if(!put_entry(out, max_size, used, name, entry.name_len, entry.next, type))
@@ -712,6 +791,8 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 	radix::Path resolved;
 	if(int e = radix::resolve(fd, path, &resolved); e)
 		return e;
+	if(int from = named_fd(resolved); from >= 0)
+		return stat_named(from, statbuf);
 	return stat_path(resolved, statbuf, flags);
 }
 
@@ -788,6 +869,8 @@ int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, in
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
 	struct stat st;
+	if(int from = named_fd(resolved); from >= 0)
+		return stat_named(from, &st);
 	return stat_path(resolved, &st, flags);
 }
 
@@ -1155,21 +1238,6 @@ int Sysdeps<Fadvise>::operator()(int fd, off_t offset, off_t length, int advice)
 	(void)advice;
 	struct stat st;
 	return stat_fd(fd, &st);
-}
-
-int Sysdeps<Recvfrom>::operator()(int fd, void *buffer, size_t size, int flags,
-		struct sockaddr *sock_addr, socklen_t *addr_length, ssize_t *length) {
-	(void)buffer;
-	(void)size;
-	(void)flags;
-	(void)sock_addr;
-	(void)addr_length;
-	(void)length;
-	// Sockets come with networking (Phase 12): no descriptor is one yet.
-	struct stat st;
-	if(int e = stat_fd(fd, &st); e)
-		return e;
-	return ENOTSOCK;
 }
 
 } // namespace mlibc

@@ -4,8 +4,9 @@
 // Files through the C library: open and its flags, reading, writing and
 // seeking, descriptions that share an offset, stdio, directories and
 // their descriptors, temporary files, renaming and removing, times,
-// symbolic links, and reading into and writing from memory not made yet,
-// on the tmpfs at /tmp and the read-only /system.
+// symbolic links, reading into and writing from memory not made yet, and
+// descriptors by their names in /dev/fd, on the tmpfs at /tmp and the
+// read-only /system.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -471,6 +472,75 @@ static void mapped(void) {
 	CHECK(!close(fd) && !unlink("/tmp/mapped"));
 }
 
+// Descriptors by their names in /dev/fd, and /dev/stdin, /dev/stdout and
+// /dev/stderr: opening one copies the descriptor, as dup does, so the
+// copy shares its offset, and never with more access than it has.
+static void named_descriptors(void) {
+	int fds[2];
+	CHECK(pipe(fds) == 0);
+	char name[32];
+	snprintf(name, sizeof(name), "/dev/fd/%d", fds[0]);
+	struct stat st;
+	CHECK(stat(name, &st) == 0 && S_ISFIFO(st.st_mode));
+	CHECK(access(name, R_OK) == 0);
+	int reader = open(name, O_RDONLY | O_CLOEXEC);
+	CHECK(reader >= 0 && reader != fds[0]);
+	CHECK(fcntl(reader, F_GETFD) & FD_CLOEXEC);
+	// The reading end cannot be opened for writing.
+	CHECK_ERROR(open(name, O_WRONLY), EACCES);
+	CHECK(write(fds[1], "piped", 5) == 5);
+	char buffer[16] = {0};
+	CHECK(read(reader, buffer, sizeof(buffer)) == 5 && !memcmp(buffer, "piped", 5));
+	close(reader);
+	// What a shell's process substitution does: a child reads the pipe
+	// by its name, as `cat /dev/fd/N` would.
+	snprintf(name, sizeof(name), "/dev/fd/%d", fds[1]);
+	FILE *out = fopen(name, "w");
+	CHECK(out != NULL);
+	if(out) {
+		CHECK(fputs("through stdio\n", out) >= 0);
+		CHECK(fclose(out) == 0);
+	}
+	CHECK(read(fds[0], buffer, sizeof(buffer)) == 14 && !memcmp(buffer, "through stdio\n", 14));
+	close(fds[0]);
+	close(fds[1]);
+	// A file's copy shares the offset: reading on goes on from it.
+	int fd = open("/tmp/named", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	CHECK(fd >= 0 && write(fd, "0123456789", 10) == 10);
+	CHECK(lseek(fd, 4, SEEK_SET) == 4);
+	snprintf(name, sizeof(name), "/dev/fd/%d", fd);
+	// O_TRUNC does nothing, as on the BSDs.
+	int copy = open(name, O_RDWR | O_TRUNC);
+	CHECK(copy >= 0);
+	CHECK(read(copy, buffer, 3) == 3 && !memcmp(buffer, "456", 3));
+	CHECK(lseek(fd, 0, SEEK_CUR) == 7);
+	CHECK_ERROR(open(name, O_RDONLY | O_CREAT | O_EXCL, 0644), EEXIST);
+	CHECK_ERROR(open(name, O_RDONLY | O_DIRECTORY), ENOTDIR);
+	close(copy);
+	// The standard ones, and relative to /dev.
+	int saved = dup(0);
+	CHECK(saved >= 0 && dup2(fd, 0) == 0);
+	CHECK(lseek(0, 0, SEEK_SET) == 0);
+	int in = open("/dev/stdin", O_RDONLY);
+	CHECK(in >= 0 && read(in, buffer, 2) == 2 && !memcmp(buffer, "01", 2));
+	close(in);
+	CHECK(dup2(saved, 0) == 0);
+	close(saved);
+	CHECK(chdir("/dev") == 0);
+	snprintf(name, sizeof(name), "fd/%d", fd);
+	CHECK(stat(name, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 10);
+	CHECK(chdir("/") == 0);
+	CHECK(stat("/dev/stdout", &st) == 0 && stat("/dev/stderr", &st) == 0);
+	// A descriptor that is not open has no name; nor have others there.
+	close(fd);
+	snprintf(name, sizeof(name), "/dev/fd/%d", fd);
+	CHECK_ERROR(open(name, O_RDONLY), ENOENT);
+	CHECK_ERROR(stat("/dev/fd/999", &st), ENOENT);
+	CHECK_ERROR(stat("/dev/fd/01", &st), ENOENT);
+	CHECK_ERROR(stat("/dev/fd/x", &st), ENOENT);
+	CHECK(unlink("/tmp/named") == 0);
+}
+
 int main(void) {
 	check_start("files");
 	RUN(basics);
@@ -482,5 +552,6 @@ int main(void) {
 	RUN(times);
 	RUN(links);
 	RUN(mapped);
+	RUN(named_descriptors);
 	return check_end();
 }

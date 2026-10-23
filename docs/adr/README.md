@@ -94,3 +94,6 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0080](0080-crates-patched-for-radix.md) | Programs in Rust from elsewhere build with crates.io crates patched for Radix | Accepted |
 | [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted |
 | [0082](0082-copies-under-the-page-cache-never-wait-for-a-page.md) | Copies under a file's page cache lock never wait for a page | Accepted |
+| [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted |
+| [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted |
+| [0085](0085-socket-pairs.md) | Socket pairs are two pipes, one each way | Accepted |

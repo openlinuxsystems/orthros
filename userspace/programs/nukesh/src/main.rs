@@ -24,6 +24,8 @@ mod cond;
 mod editor;
 mod exec;
 mod expand;
+#[cfg(test)]
+mod fuzz;
 mod glob;
 mod history;
 mod interactive;

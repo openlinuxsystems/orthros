@@ -10,6 +10,8 @@
 //! `case` matches only a star. Patterns are used for `case`, `[[ == ]]`,
 //! the `${name#pattern}` family and, through [`crate::glob`], file names.
 
+use std::collections::HashSet;
+
 /// How a pattern matches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -134,14 +136,20 @@ fn closing_bracket(chars: &[char], open: usize) -> Option<usize> {
 impl Pattern {
     pub fn new(pattern: &str, options: Options) -> Pattern {
         let chars: Vec<char> = pattern.chars().collect();
-        let mut pos = 0;
-        let toks = compile(&chars, &mut pos, options, false);
+        let mut compiler = Compiler { chars: &chars, options, closed: closed(&chars, options) };
+        let toks = compiler.compile(&mut 0, false);
         let literal = if toks.iter().all(|t| matches!(t, Tok::Char(_))) && !options.nocase {
             Some(toks.iter().map(|t| if let Tok::Char(c) = t { *c } else { ' ' }).collect())
         } else {
             None
         };
         Pattern { toks, options, literal }
+    }
+
+    /// Whether the pattern is empty, so that it matches only an empty
+    /// text.
+    pub fn is_empty(&self) -> bool {
+        self.literal.as_deref() == Some("")
     }
 
     /// Whether the pattern matches all of `text`.
@@ -168,9 +176,8 @@ impl Pattern {
     /// `text` the pattern matches, for `${name#pattern}`.
     pub fn match_prefix(&self, text: &str, longest: bool) -> Option<usize> {
         let chars: Vec<char> = text.chars().collect();
-        let mut lengths: Box<dyn Iterator<Item = usize>> =
-            if longest { Box::new((0..=chars.len()).rev()) } else { Box::new(0..=chars.len()) };
-        lengths.find(|&n| match_here(&self.toks, &chars[..n], self.options))
+        let found = ends(&self.toks, &chars, vec![0], self.options);
+        if longest { found.last().copied() } else { found.first().copied() }
     }
 
     /// Where the shortest (or longest) end of `text` the pattern matches
@@ -179,7 +186,8 @@ impl Pattern {
         let chars: Vec<char> = text.chars().collect();
         let mut starts: Box<dyn Iterator<Item = usize>> =
             if longest { Box::new(0..=chars.len()) } else { Box::new((0..=chars.len()).rev()) };
-        starts.find(|&s| match_here(&self.toks, &chars[s..], self.options))
+        starts
+            .find(|&s| ends(&self.toks, &chars, vec![s], self.options).last() == Some(&chars.len()))
     }
 
     /// The first match in `chars` at or after `from`: the leftmost start,
@@ -195,91 +203,144 @@ impl Pattern {
                 .find(|&s| chars[s..].starts_with(&needle))
                 .map(|s| (s, s + needle.len()));
         }
-        for start in from..=chars.len() {
-            for end in (start..=chars.len()).rev() {
-                if end == start && !empty_ok {
-                    break;
-                }
-                if match_here(&self.toks, &chars[start..end], self.options) {
-                    return Some((start, end));
-                }
-            }
-        }
-        None
+        (from..=chars.len()).find_map(|start| {
+            let end = *ends(&self.toks, chars, vec![start], self.options).last()?;
+            (end > start || empty_ok).then_some((start, end))
+        })
     }
 }
 
-/// Compiles the pattern from `pos`; inside an extended pattern, stops at
-/// the `|` or `)` that ends an alternative.
-fn compile(chars: &[char], pos: &mut usize, options: Options, nested: bool) -> Vec<Tok> {
-    let mut toks = Vec::new();
-    while *pos < chars.len() {
-        let c = chars[*pos];
-        if nested && (c == '|' || c == ')') {
-            break;
-        }
-        match c {
-            '\\' => {
-                *pos += 1;
-                toks.push(Tok::Char(chars.get(*pos).copied().unwrap_or('\\')));
-                *pos += 1;
+/// How deep extended patterns may nest: deeper, `@(` and its kin are
+/// plain text, so that compiling and matching stay within the stack.
+const MAX_EXT_DEPTH: u32 = 64;
+
+/// What compiling a pattern keeps track of.
+struct Compiler<'a> {
+    chars: &'a [char],
+    options: Options,
+    /// Where the extended patterns that are closed start ([`closed`]).
+    closed: HashSet<usize>,
+}
+
+/// Where in `chars` the extended patterns that are closed start: each
+/// `)` closes the innermost one open, outside bracket expressions and
+/// unless quoted, and those opened [`MAX_EXT_DEPTH`] deep are plain text.
+/// Worked out once, so that a long run of `@(` never closed takes linear
+/// time to compile, not quadratic or worse.
+fn closed(chars: &[char], options: Options) -> HashSet<usize> {
+    let mut open = Vec::new();
+    let mut closed = HashSet::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => {
+                if let Some(close) = closing_bracket(chars, i) {
+                    i = close;
+                }
             }
-            '*' | '?' | '+' | '@' | '!' if options.extglob && chars.get(*pos + 1) == Some(&'(') => {
-                if let Some(alternatives) = compile_ext(chars, pos, options) {
-                    toks.push(Tok::Ext(c, alternatives));
-                } else {
+            '*' | '?' | '+' | '@' | '!'
+                if options.extglob
+                    && chars.get(i + 1) == Some(&'(')
+                    && open.len() < MAX_EXT_DEPTH as usize =>
+            {
+                open.push(i);
+                i += 1;
+            }
+            ')' => {
+                if let Some(start) = open.pop() {
+                    closed.insert(start);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    closed
+}
+
+impl Compiler<'_> {
+    /// Compiles the pattern from `pos`; inside an extended pattern, stops
+    /// at the `|` or `)` that ends an alternative.
+    fn compile(&mut self, pos: &mut usize, nested: bool) -> Vec<Tok> {
+        let chars = self.chars;
+        let mut toks = Vec::new();
+        while *pos < chars.len() {
+            let c = chars[*pos];
+            if nested && (c == '|' || c == ')') {
+                break;
+            }
+            match c {
+                '\\' => {
+                    *pos += 1;
+                    toks.push(Tok::Char(chars.get(*pos).copied().unwrap_or('\\')));
+                    *pos += 1;
+                }
+                '*' | '?' | '+' | '@' | '!'
+                    if self.options.extglob && chars.get(*pos + 1) == Some(&'(') =>
+                {
+                    if let Some(alternatives) = self.ext(pos) {
+                        toks.push(Tok::Ext(c, alternatives));
+                    } else {
+                        toks.push(Tok::Char(c));
+                        *pos += 1;
+                    }
+                }
+                '*' => {
+                    // Several stars match what one does.
+                    if toks.last() != Some(&Tok::Star) {
+                        toks.push(Tok::Star);
+                    }
+                    *pos += 1;
+                }
+                '?' => {
+                    toks.push(Tok::Any);
+                    *pos += 1;
+                }
+                '[' => match closing_bracket(chars, *pos) {
+                    Some(close) => {
+                        toks.push(class(&chars[*pos + 1..close]));
+                        *pos = close + 1;
+                    }
+                    None => {
+                        toks.push(Tok::Char('['));
+                        *pos += 1;
+                    }
+                },
+                _ => {
                     toks.push(Tok::Char(c));
                     *pos += 1;
                 }
             }
-            '*' => {
-                // Several stars match what one does.
-                if toks.last() != Some(&Tok::Star) {
-                    toks.push(Tok::Star);
-                }
-                *pos += 1;
-            }
-            '?' => {
-                toks.push(Tok::Any);
-                *pos += 1;
-            }
-            '[' => match closing_bracket(chars, *pos) {
-                Some(close) => {
-                    toks.push(class(&chars[*pos + 1..close]));
-                    *pos = close + 1;
-                }
-                None => {
-                    toks.push(Tok::Char('['));
-                    *pos += 1;
-                }
-            },
-            _ => {
-                toks.push(Tok::Char(c));
-                *pos += 1;
-            }
         }
+        toks
     }
-    toks
-}
 
-/// `x(a|b)`, at `pos`: its alternatives, or `None` if it is not closed.
-fn compile_ext(chars: &[char], pos: &mut usize, options: Options) -> Option<Vec<Vec<Tok>>> {
-    let start = *pos;
-    *pos += 2;
-    let mut alternatives = Vec::new();
-    loop {
-        alternatives.push(compile(chars, pos, options, true));
-        match chars.get(*pos) {
-            Some('|') => *pos += 1,
-            Some(')') => {
-                *pos += 1;
-                return Some(alternatives);
-            }
-            _ => {
-                *pos = start;
-                return None;
-            }
+    /// `x(a|b)`, at `pos`: its alternatives, or `None` if it is not closed
+    /// or nests too deeply.
+    fn ext(&mut self, pos: &mut usize) -> Option<Vec<Vec<Tok>>> {
+        let start = *pos;
+        if !self.closed.contains(&start) {
+            return None;
         }
+        *pos += 2;
+        let mut alternatives = Vec::new();
+        let closed = loop {
+            alternatives.push(self.compile(pos, true));
+            match self.chars.get(*pos) {
+                Some('|') => *pos += 1,
+                Some(')') => {
+                    *pos += 1;
+                    break true;
+                }
+                _ => break false,
+            }
+        };
+        if closed {
+            return Some(alternatives);
+        }
+        *pos = start;
+        None
     }
 }
 
@@ -380,7 +441,7 @@ fn same(a: char, b: char, options: Options) -> bool {
 /// Whether `toks` match all of `text`.
 fn match_here(toks: &[Tok], text: &[char], options: Options) -> bool {
     if toks.iter().any(|t| matches!(t, Tok::Ext(..))) {
-        return match_ext(toks, text, options);
+        return ends(toks, text, vec![0], options).last() == Some(&text.len());
     }
     // Without extended patterns, the usual backtracking to the last star
     // is enough, and linear in practice.
@@ -418,54 +479,108 @@ fn match_here(toks: &[Tok], text: &[char], options: Options) -> bool {
     toks[t..].iter().all(|tok| *tok == Tok::Star)
 }
 
-/// Matching with extended patterns, by trying each way of splitting the
-/// text.
-fn match_ext(toks: &[Tok], text: &[char], options: Options) -> bool {
-    let Some(first) = toks.first() else { return text.is_empty() };
-    let rest = &toks[1..];
-    match first {
-        Tok::Char(x) => {
-            text.first().is_some_and(|c| same(*x, *c, options))
-                && match_ext(rest, &text[1..], options)
+/// Where in `text` the tokens `toks` can end, starting at any of the
+/// positions `from` (ascending, each from 0 to the text's length): the
+/// matcher for extended patterns, and for finding a match's ends. It
+/// works out every position each token can reach, a token at a time, so
+/// that its time grows with the text's length times the pattern's, not
+/// exponentially, and it recurses only into extended patterns' insides.
+fn ends(toks: &[Tok], text: &[char], from: Vec<usize>, options: Options) -> Vec<usize> {
+    let can_take = |c: char| !(options.file_name && c == '/');
+    let mut at = from;
+    for tok in toks {
+        if at.is_empty() {
+            break;
         }
-        Tok::Any => !text.is_empty() && match_ext(rest, &text[1..], options),
-        Tok::Class { negate, items } => {
-            text.first().is_some_and(|c| class_matches(*negate, items, *c, options))
-                && match_ext(rest, &text[1..], options)
-        }
-        Tok::Star => (0..=text.len()).any(|n| match_ext(rest, &text[n..], options)),
-        Tok::Ext(kind, alternatives) => {
-            let one = |part: &[char]| alternatives.iter().any(|alt| match_ext(alt, part, options));
-            match kind {
-                '@' => (0..=text.len())
-                    .any(|n| one(&text[..n]) && match_ext(rest, &text[n..], options)),
-                '?' => {
-                    match_ext(rest, text, options)
-                        || (0..=text.len())
-                            .any(|n| one(&text[..n]) && match_ext(rest, &text[n..], options))
-                }
-                '!' => (0..=text.len())
-                    .any(|n| !one(&text[..n]) && match_ext(rest, &text[n..], options)),
-                // `*` and `+`: one or more matches, each taking at least a
-                // character, then the rest; `*` may also match nothing.
-                _ => {
-                    if *kind == '*' && match_ext(rest, text, options) {
-                        return true;
+        let mut next = Vec::new();
+        match tok {
+            Tok::Char(x) => next.extend(
+                at.iter().filter(|&&i| i < text.len() && same(*x, text[i], options)).map(|i| i + 1),
+            ),
+            Tok::Any => next
+                .extend(at.iter().filter(|&&i| i < text.len() && can_take(text[i])).map(|i| i + 1)),
+            Tok::Class { negate, items } => next.extend(
+                at.iter()
+                    .filter(|&&i| {
+                        i < text.len()
+                            && can_take(text[i])
+                            && class_matches(*negate, items, text[i], options)
+                    })
+                    .map(|i| i + 1),
+            ),
+            Tok::Star => {
+                // Everything from the first position, but not past a `/`
+                // in a file name.
+                let mut i = at[0];
+                for &start in &at {
+                    i = i.max(start);
+                    next.push(i);
+                    while i < text.len() && can_take(text[i]) {
+                        i += 1;
+                        next.push(i);
                     }
-                    repeat(alternatives, rest, text, options)
                 }
+                next.dedup();
+            }
+            Tok::Ext(kind, alternatives) => {
+                // Where one of the alternatives, starting at `starts`, ends.
+                let one = |starts: Vec<usize>| -> Vec<usize> {
+                    let mut out: Vec<usize> = alternatives
+                        .iter()
+                        .flat_map(|alt| ends(alt, text, starts.clone(), options))
+                        .collect();
+                    out.sort_unstable();
+                    out.dedup();
+                    out
+                };
+                match kind {
+                    '@' => next = one(at.clone()),
+                    '?' => {
+                        next = one(at.clone());
+                        next.extend(&at);
+                    }
+                    '!' => {
+                        // Anything from each start, not past a `/` in a
+                        // file name, that no alternative matches.
+                        for &i in &at {
+                            let matched = one(vec![i]);
+                            let mut j = i;
+                            loop {
+                                if matched.binary_search(&j).is_err() {
+                                    next.push(j);
+                                }
+                                if j == text.len() || !can_take(text[j]) {
+                                    break;
+                                }
+                                j += 1;
+                            }
+                        }
+                    }
+                    // `*` and `+`: one or more matches, each taking at
+                    // least a character; `*` may also match nothing.
+                    _ => {
+                        let mut reached = HashSet::new();
+                        let mut work = at.clone();
+                        while let Some(i) = work.pop() {
+                            for j in one(vec![i]) {
+                                if j > i && reached.insert(j) {
+                                    next.push(j);
+                                    work.push(j);
+                                }
+                            }
+                        }
+                        if *kind == '*' {
+                            next.extend(&at);
+                        }
+                    }
+                }
+                next.sort_unstable();
+                next.dedup();
             }
         }
+        at = next;
     }
-}
-
-/// One or more matches of `alternatives`, then `rest`.
-fn repeat(alternatives: &[Vec<Tok>], rest: &[Tok], text: &[char], options: Options) -> bool {
-    (1..=text.len()).any(|n| {
-        alternatives.iter().any(|alt| match_ext(alt, &text[..n], options))
-            && (match_ext(rest, &text[n..], options)
-                || repeat(alternatives, rest, &text[n..], options))
-    })
+    at
 }
 
 #[cfg(test)]

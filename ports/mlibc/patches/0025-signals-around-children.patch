@@ -1,0 +1,67 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Calls a signal interrupts, around the shell's children:
+
+- signal() installs its handler with SA_RESTART, as glibc, musl and the
+  BSDs do, so a program that sets a handler with it (libc-test's popen
+  test, for one) does not see EINTR from read or waitpid.
+- pclose() waits again when a handler interrupts its waitpid, as
+  glibc's and musl's do, rather than lose the child's status.
+- system() looked for a negative result from the Waitpid system call,
+  which returns an error number: an EINTR ended the wait with the
+  status unset, and another error was never reported.
+
+diff --git a/options/ansi/generic/signal.cpp b/options/ansi/generic/signal.cpp
+index 5630644..bfa2a7b 100644
+--- a/options/ansi/generic/signal.cpp
++++ b/options/ansi/generic/signal.cpp
+@@ -10,7 +10,9 @@
+ __sighandler signal(int sn, __sighandler handler) {
+ 	struct sigaction sa;
+ 	sa.sa_handler = handler;
+-	sa.sa_flags = 0;
++	// BSD semantics, as glibc and musl give: calls the handler interrupts
++	// go on.
++	sa.sa_flags = SA_RESTART;
+ 	sigemptyset(&sa.sa_mask);
+ 	struct sigaction old;
+ 	if(int e = mlibc::sysdep_or_enosys<Sigaction>(sn, &sa, &old)){
+diff --git a/options/ansi/generic/stdlib.cpp b/options/ansi/generic/stdlib.cpp
+index 9320cf8..02b28a1 100644
+--- a/options/ansi/generic/stdlib.cpp
++++ b/options/ansi/generic/stdlib.cpp
+@@ -303,12 +303,14 @@ int system(const char *command) {
+ 		int err;
+ 		pid_t unused;
+ 
+-		while ((err = mlibc::sysdep_or_panic<Waitpid>(child, &status, 0, nullptr, &unused)) < 0) {
++		// The system call layer returns an error number, not -1.
++		while ((err = mlibc::sysdep_or_panic<Waitpid>(child, &status, 0, nullptr, &unused)) != 0) {
+ 			if (err == EINTR)
+ 				continue;
+ 
+ 			errno = err;
+ 			status = -1;
++			break;
+ 		}
+ 	}
+ 
+diff --git a/options/posix/generic/posix_stdio.cpp b/options/posix/generic/posix_stdio.cpp
+index 04f0fad..fcb8442 100644
+--- a/options/posix/generic/posix_stdio.cpp
++++ b/options/posix/generic/posix_stdio.cpp
+@@ -49,7 +49,12 @@ int pclose(FILE *stream) {
+ 
+ 	fclose(file);
+ 
+-	if (mlibc::sysdep_or_panic<Waitpid>(pid, &status, 0, nullptr, &pid) != 0) {
++	// A signal handler that does not restart calls must not lose the
++	// child's status.
++	int e;
++	while ((e = mlibc::sysdep_or_panic<Waitpid>(pid, &status, 0, nullptr, &pid)) == EINTR)
++		;
++	if (e) {
+ 	    errno = ECHILD;
+ 	    return -1;
+ 	}

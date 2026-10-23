@@ -308,8 +308,13 @@ fn flat_command(cmd: &Command, out: &mut String) {
                 sep(out);
                 assign(a, out);
             }
-            for w in &simple.words {
+            for (i, w) in simple.words.iter().enumerate() {
                 sep(out);
+                // A reserved word that a redirection before it kept from
+                // being one (`<&- esac`) is escaped, as it comes first here.
+                if i == 0 && w.as_literal().is_some_and(crate::parse::is_reserved) {
+                    out.push('\\');
+                }
                 word(w, out);
             }
             for r in &simple.redirects {

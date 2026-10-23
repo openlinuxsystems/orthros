@@ -55,6 +55,7 @@ static const struct test TESTS[] = {
 		{"exec", NULL, NULL},
 		{"signal", NULL, NULL},
 		{"pipe", NULL, NULL},
+		{"socket", NULL, NULL},
 		{"poll", NULL, NULL},
 		{"tty", NULL, NULL},
 		{"job", NULL, NULL},

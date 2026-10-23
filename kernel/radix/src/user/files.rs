@@ -24,7 +24,7 @@ use core::mem::size_of;
 use radix_abi::capability::SlotFlags;
 use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags};
 use radix_abi::errors::Kernel;
-use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, Whence};
+use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, SocketFlags, Whence};
 use radix_abi::{UserBuffer, file, terminal};
 use radix_cap::{CapError, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
@@ -38,7 +38,7 @@ use super::memory::cap_rights;
 use super::methods::{Answer, answer};
 use super::objects::{self, Found, Object};
 use super::{Result, UserRef, UserThread, cap_error, error};
-use crate::fs::{self, Description, FileObject, FileRef, locks, pipe, tty};
+use crate::fs::{self, Description, FileObject, FileRef, locks, pipe, socket, tty};
 use crate::{Arch, caps};
 
 /// The most bytes one read or write moves, as on Linux.
@@ -198,6 +198,7 @@ fn file_kind(kind: Kind) -> FileKind {
         Kind::CharDevice => FileKind::CharDevice,
         Kind::Pipe => FileKind::Pipe,
         Kind::Symlink => FileKind::Symlink,
+        Kind::Socket => FileKind::Socket,
     }
 }
 
@@ -643,8 +644,12 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Target::Tty(handle) => {
                     handle.control(user, a.request, a.argument, a.buffer, a.size)?
                 }
-                Target::Pipe(end) if a.request == terminal::READABLE => {
-                    let len = end.pipe().len() as u32;
+                Target::Pipe(_) | Target::Socket(_) if a.request == terminal::READABLE => {
+                    let len = match target(file) {
+                        Target::Pipe(end) => end.pipe().len(),
+                        Target::Socket(end) => end.pending(),
+                        _ => 0,
+                    } as u32;
                     if a.size < 4 || !Arch::copy_to_user(a.buffer, &len.to_le_bytes()) {
                         return Err(error(Kernel::BadAddress));
                     }
@@ -655,8 +660,44 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
         }
         file::LOCK | file::LOCK_HOLDER => lock_method(user, found, ObjectKind::File, label, args),
+        file::SEND => {
+            let a = file::SendArgs::decode(args)?;
+            let (file, end) = socket_of(found, Rights::WRITE)?;
+            let (address, len) = user_range(a.data)?;
+            let data = UserIn { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
+            let count = end.send(&data, non_blocking, signal)? as u64;
+            answer(label, file::SendResults::WORDS, file::SendResults { count }.encode())
+        }
+        file::RECEIVE => {
+            let a = file::ReceiveArgs::decode(args)?;
+            let (file, end) = socket_of(found, Rights::READ)?;
+            let (address, len) = user_range(a.buffer)?;
+            let mut out = UserOut { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let count = end.receive(&mut out, non_blocking)? as u64;
+            answer(label, file::ReceiveResults::WORDS, file::ReceiveResults { count }.encode())
+        }
+        file::SHUTDOWN => {
+            let a = file::ShutdownArgs::decode(args)?;
+            let (_, end) = socket_of(found, Rights::NONE)?;
+            end.shutdown(a.read, a.write);
+            answer(label, 0, [0; 8])
+        }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
+}
+
+/// The file `found` designates and the socket end it is of, if its
+/// capability has the rights `needs`; not_socket for any other file.
+fn socket_of(found: &Found, needs: Rights) -> Result<(&FileRef, &socket::End)> {
+    let file = file_of(found, Rights::NONE)?;
+    let end = file.socket_end().ok_or(error(Kernel::NotSocket))?;
+    file_of(found, needs)?;
+    Ok((file, end))
 }
 
 /// radix-file(2)'s `lock` and `lock_holder`, on the file or directory
@@ -745,6 +786,8 @@ fn lock_method(
 enum Target<'a> {
     /// An end of a pipe.
     Pipe(&'a pipe::End),
+    /// An end of a socket pair.
+    Socket(&'a socket::End),
     /// A side of a terminal.
     Tty(&'a tty::Handle),
     /// A file of the tree, through its node.
@@ -754,6 +797,8 @@ enum Target<'a> {
 fn target(file: &FileObject) -> Target<'_> {
     if let Some(end) = file.pipe_end() {
         Target::Pipe(end)
+    } else if let Some(end) = file.socket_end() {
+        Target::Socket(end)
     } else if let Some(handle) = file.tty_handle() {
         Target::Tty(handle)
     } else {
@@ -804,6 +849,7 @@ fn read_special(
     let non_blocking = never_wait || file.description().non_blocking;
     match target(file) {
         Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
+        Target::Socket(end) => end.receive(out, non_blocking).map(|n| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Node => Ok(0),
     }
@@ -855,7 +901,8 @@ fn write_special(
 ) -> Result<u64> {
     let non_blocking = never_wait || file.description().non_blocking;
     match target(file) {
-        Target::Pipe(end) => end.pipe().write(data, non_blocking).map(|n| n as u64),
+        Target::Pipe(end) => end.pipe().write(data, non_blocking, true).map(|n| n as u64),
+        Target::Socket(end) => end.send(data, non_blocking, true).map(|n| n as u64),
         Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
         Target::Node => Ok(0),
     }

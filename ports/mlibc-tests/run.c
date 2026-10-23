@@ -9,8 +9,11 @@
 // pass when they do not. One program rather than 160 keeps the boot
 // archive small: each would carry its own copy of the C library. The one
 // test that is a program of its own (its main NULL in TESTS) is beside
-// run, and runs as itself. ports/libc-test builds libc-test's tests
-// with it too, with SUITE "libc-test".
+// run, and runs as itself. So does a test that runs itself again
+// (posix_spawn's starts argv[0] with what its child is to do): it is
+// beside run as a link to it named after the test, and run started
+// through that link runs the test. ports/libc-test builds libc-test's
+// tests with it too, with SUITE "libc-test".
 
 #include <errno.h>
 #include <fcntl.h>
@@ -69,8 +72,20 @@ static void show_output(const char *name) {
 		printf(SUITE ": %s: | %s\n", name, line);
 }
 
-// Runs `test` in a child, as `self name` or as the program beside self;
-// returns whether it passed.
+// Writes into `path` the program beside `self` named `name`; true if
+// there is one. errno is left as it was: tests start with it 0.
+static int beside(const char *self, const char *name, char *path, size_t size) {
+	int saved = errno;
+	char directory[256];
+	snprintf(directory, sizeof(directory), "%s", self);
+	snprintf(path, size, "%s/%s", dirname(directory), name);
+	int found = access(path, X_OK) == 0;
+	errno = saved;
+	return found;
+}
+
+// Runs `test` in a child, as `self name` or as the program (or link)
+// beside self; returns whether it passed.
 static int run(const char *self, const struct test *test) {
 	const char *name = test->name;
 	fflush(stdout);
@@ -86,14 +101,12 @@ static int run(const char *self, const struct test *test) {
 			dup2(out, STDERR_FILENO);
 			close(out);
 		}
-		if(test->main) {
+		char path[256];
+		int linked = beside(self, name, path, sizeof(path));
+		if(test->main && !linked) {
 			char *argv[] = {(char *)self, (char *)name, NULL};
 			execv(self, argv);
 		} else {
-			char path[256];
-			char directory[256];
-			snprintf(directory, sizeof(directory), "%s", self);
-			snprintf(path, sizeof(path), "%s/%s", dirname(directory), name);
 			char *argv[] = {path, NULL};
 			execv(path, argv);
 		}
@@ -131,6 +144,12 @@ static int run(const char *self, const struct test *test) {
 }
 
 int main(int argc, char **argv) {
+	// Started through a link named after a test: that test, as itself.
+	const char *base = strrchr(argv[0], '/');
+	base = base ? base + 1 : argv[0];
+	for(size_t i = 0; i < TEST_COUNT; i++)
+		if(TESTS[i].main && !strcmp(base, TESTS[i].name))
+			return TESTS[i].main(argc, argv);
 	if(argc > 1) {
 		// The test sees itself as the program, with the arguments after
 		// its name.
@@ -142,6 +161,10 @@ int main(int argc, char **argv) {
 				continue;
 			if(!TESTS[i].main)
 				return run(argv[0], &TESTS[i]) ? 0 : 1;
+			// Through its link, if it has one, it can find itself.
+			static char path[256];
+			if(beside(argv[0], name, path, sizeof(path)))
+				argv[0] = path;
 			return TESTS[i].main(argc - 1, argv);
 		}
 		fprintf(stderr, "run: there is no test %s\n", name);

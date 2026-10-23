@@ -98,6 +98,9 @@ errors kernel = 1 {
     /// A resource limit does not allow it: a nice level below the one
     /// RLIMIT_NICE allows (radix-process(2)'s `priority`).
     over_limit = 35 => EACCES;
+    /// The file is not a socket: `send`, `receive` and `shutdown` are for
+    /// sockets alone.
+    not_socket = 36 => ENOTSOCK;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).
