@@ -56,7 +56,19 @@ pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
 
 /// The programs on Rust's standard library that the boot archive holds:
 /// each one's path in it, and its package in userspace/programs.
-pub const STD_ARCHIVE: &[(&str, &str)] = &[("system/tests/posix/std-test", "std-test")];
+pub const STD_ARCHIVE: &[(&str, &str)] =
+    &[("system/bin/nukesh", "nukesh"), ("system/tests/posix/std-test", "std-test")];
+
+/// Symbolic links to those programs in the boot archive: each link's path,
+/// and its target. Nukesh is the POSIX shell when it is started as `sh`,
+/// and a restricted shell as `rnukesh` (nukesh(1)).
+pub const STD_LINKS: &[(&str, &str)] =
+    &[("system/bin/sh", "nukesh"), ("system/bin/rnukesh", "nukesh")];
+
+/// The shell's test scripts, with their expected output, and where in
+/// the boot archive they go, for the `shell` POSIX test.
+pub const SHELL_CASES: &str = "userspace/programs/nukesh/tests/cases";
+pub const SHELL_CASES_DIR: &str = "system/tests/shell";
 
 /// The C test programs' sources, and where in the boot archive they go.
 pub const POSIX_SOURCES: &str = "userspace/posix";
@@ -110,6 +122,24 @@ pub fn std_cargo(ctx: &Ctx, subcommand: &str, toolchain: &ports::Toolchain) -> C
 
 /// The workspace of programs on Rust's standard library.
 pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
+
+/// The programs on Rust's standard library whose unit tests run on the
+/// host: what they test does not need Radix.
+pub const HOST_TESTED: &[&str] = &["nukesh"];
+
+/// A Cargo command for the workspace of programs on Rust's standard
+/// library, building for the host, writing to `target/programs-host`:
+/// for their unit tests.
+pub fn host_cargo(ctx: &Ctx, subcommand: &str) -> Command {
+    let mut cmd = process::cargo(ctx);
+    cmd.args([subcommand, "--manifest-path", STD_MANIFEST])
+        .arg("--target-dir")
+        .arg(ctx.target.join("programs-host"));
+    for package in HOST_TESTED {
+        cmd.args(["-p", package]);
+    }
+    cmd
+}
 
 /// Checks that the programs on Rust's standard library take each crate
 /// the ports patch for Radix from the port, not from crates.io: Cargo
@@ -235,8 +265,9 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     Ok(Programs { usertests: installed, bootfs, ports })
 }
 
-/// Builds the programs of [`STD_ARCHIVE`] into `out/sysroot`, and returns
-/// each one's place in the boot archive and file.
+/// Builds the programs of [`STD_ARCHIVE`] into `out/sysroot`, with their
+/// links and the shell's test scripts, and returns each one's place in the
+/// boot archive and file.
 fn build_std(
     ctx: &Ctx,
     profile: Profile,
@@ -258,6 +289,27 @@ fn build_std(
         let installed = ctx.out.join("sysroot").join(path);
         process::copy(&built.join(package), &installed)?;
         files.push((path.to_string(), installed));
+    }
+    for (path, target) in STD_LINKS {
+        let link = ctx.out.join("sysroot").join(path);
+        if link.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link).context(|| format!("removing {}", link.display()))?;
+        }
+        std::os::unix::fs::symlink(target, &link)
+            .context(|| format!("linking {} to {target}", link.display()))?;
+        files.push((path.to_string(), link));
+    }
+    let cases = ctx.root.join(SHELL_CASES);
+    let mut names: Vec<String> = std::fs::read_dir(&cases)
+        .context(|| format!("reading {}", cases.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|name| name.ends_with(".sh") || name.ends_with(".out"))
+        .collect();
+    names.sort();
+    for name in names {
+        let installed = ctx.out.join("sysroot").join(SHELL_CASES_DIR).join(&name);
+        process::copy(&cases.join(&name), &installed)?;
+        files.push((format!("{SHELL_CASES_DIR}/{name}"), installed));
     }
     Ok(files)
 }

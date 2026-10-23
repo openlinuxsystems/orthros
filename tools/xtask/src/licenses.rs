@@ -513,7 +513,11 @@ fn parse_tree_line(line: &str) -> Option<TreeEntry> {
     let (package, license) = line.split_once('|')?;
     // Some crates still write `MIT/Apache-2.0`, Cargo's old form.
     let license = license.trim().trim_end_matches("(*)").trim().replace('/', " OR ");
-    let mut words = package.trim().splitn(3, ' ');
+    // A procedural macro runs only while building, but what it writes is
+    // in the program: listed as any other crate.
+    let package = package.trim();
+    let package = package.strip_suffix("(proc-macro)").unwrap_or(package).trim();
+    let mut words = package.splitn(3, ' ');
     let name = words.next()?.to_string();
     let version = words.next()?.strip_prefix('v')?.to_string();
     let source = match words.next().map(|s| s.trim().trim_start_matches('(').trim_end_matches(')'))
@@ -1235,6 +1239,8 @@ mod tests {
         assert!(matches!(entry.source, Source::Other(_)));
         let entry = parse_tree_line("memchr v2.7.4|Unlicense/MIT").unwrap();
         assert_eq!(entry.license, "Unlicense OR MIT");
+        let entry = parse_tree_line("serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0").unwrap();
+        assert_eq!((entry.name.as_str(), entry.source), ("serde_derive", Source::Registry));
         assert_eq!(parse_tree_line("").map(|e| e.name), None);
     }
 

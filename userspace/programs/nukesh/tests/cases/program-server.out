@@ -1,0 +1,26 @@
+[INFO] starting on localhost:8080
+[INFO] service web
+[INFO] service db
+[INFO] service cache
+[SKIP] web
+[OK] db
+[SKIP] cache
+total=15
+verbose=1 file=conf.txt rest=a b
+bad option -x
+parse failed
+missing arg for -f
+parse failed 2
+key1 -> val1
+key2 -> val2
+web,db,cache
+web     |db      |cache   |
+21
+LOCALHOST
+host is set
+nope is not set
+2: a b
+done
+ERR trap at line 69
+cleanup ran
+status=1

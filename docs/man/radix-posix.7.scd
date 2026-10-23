@@ -389,6 +389,13 @@ tests are:
 	on its standard input and checked for what it writes and its exit
 	status, and their manual pages.
 
+*shell*
+	The shell, *nukesh*(1): the scripts of its test suite, each giving
+	what bash gives, or dash for those run as _/bin/sh_; then the shell
+	at a pseudo-terminal, with its plain line reader and with its line
+	editor, typed at: commands, completion, history, *^C*, and jobs
+	stopped with *^Z* and brought back with *fg*.
+
 *libc*
 	mlibc's own test suite: every one of its 132 tests that apply to
 	Radix (_ports/mlibc-tests/build.sh_ says why each other is left

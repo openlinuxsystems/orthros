@@ -1,0 +1,54 @@
+a b c d e f
+[x]
+a"b a"b a"b it's
+tab	here AA é
+a b c
+a  b   c
+3
+[1]
+[2 3]
+[4]
+1 2 3 4
+1:2 3:4
+4
+[a][b][][c]
+3
+<a><b><c>
+<a b>
+<c>
+(a)
+(b)
+(c)
+a b c a b c 2
+a1 a2 b1 b2 c1 c2 1 2 3 4 5 a c e 05 07 09 3 2 1 xz xyz a bc bd
+{a,b} {a,b} {a} {a..}
+a
+ax
+a
+b
+nested inner deep backtick
+a.txt b.txt
+a.txt b.txt c.log with space
+.hidden
+c.log
+a.txt b.txt
+b.txt
+*.none
+end
+failglob
+.hidden a.txt b.txt c.log with space
+c.log with space
+a.txt c.log
+a.txt b.txt
+*.txt
+file: a.txt
+file: b.txt
+file: c.log
+file: with space
+a.txt b.txt *.txt
+tilde
+~ ~
+/home/x/a ~nobody_here/b
+/home/x
+x:/home/x/y
+status=0

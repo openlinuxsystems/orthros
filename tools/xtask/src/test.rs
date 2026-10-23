@@ -730,6 +730,10 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
     for library in KERNEL_LIBRARIES {
         cmd.args(["-p", library]);
     }
+    process::run(ctx, &mut cmd)?;
+
+    step("Running unit tests for the programs on Rust's standard library on the host");
+    let mut cmd = userspace::host_cargo(ctx, "test");
     process::run(ctx, &mut cmd)
 }
 
