@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Autoconf's site file for Radix (ob(1), PORTS): what a configure script
+# cannot find out when it cannot run the programs it builds, answered
+# for Radix and its C library, mlibc (radix-posix(7)). Each answer is a
+# cache variable a configure script reads before it guesses; one that is
+# not here, it guesses, and it guesses as it would for a system it does
+# not know.
+
+# gnulib's test of strcasecmp in a Latin-1 locale (diffutils), which has
+# no answer when it cannot run. Radix has no such locale, so the test
+# would find nothing to fault, as on glibc.
+gl_cv_func_strcasecmp_works=yes

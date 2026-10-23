@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# GNU diffutils (ADR 0086): diff, cmp, diff3 and sdiff. uutils' diffutils
+# lacks diff's -r, -w and -N, which scripts and patches rely on. They are
+# separate programs under the GPL, which is allowed in the ports (ADR
+# 0087).
+name = "diffutils"
+version = "3.12"
+summary = "GNU diff, cmp, diff3 and sdiff, which compare files"
+license = "GPL-3.0-or-later"
+homepage = "https://www.gnu.org/software/diffutils/"
+depends = ["mlibc"]
+
+[source]
+url = "https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz"
+sha256 = "7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/d/diffutils/diffutils_3.12.orig.tar.xz"]

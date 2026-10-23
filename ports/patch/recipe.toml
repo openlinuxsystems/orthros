@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# GNU patch (ADR 0086): applies diffs, including git's, with their
+# renames, copies and mode changes. It is a separate program under the
+# GPL, which is allowed in the ports (ADR 0087).
+name = "patch"
+version = "2.8"
+summary = "GNU patch, which applies diffs to files"
+license = "GPL-3.0-or-later"
+homepage = "https://www.gnu.org/software/patch/"
+depends = ["mlibc"]
+
+[source]
+url = "https://ftp.gnu.org/gnu/patch/patch-2.8.tar.xz"
+sha256 = "f87cee69eec2b4fcbf60a396b030ad6aa3415f192aa5f7ee84cad5e11f7f5ae3"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/p/patch/patch_2.8.orig.tar.xz"]

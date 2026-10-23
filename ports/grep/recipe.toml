@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# GNU grep (ADR 0086): searches text for regular expressions. It is a
+# separate program under the GPL, which is allowed in the ports (ADR
+# 0087). Built without Perl regular expressions (-P) until PCRE2 is
+# ported.
+name = "grep"
+version = "3.12"
+summary = "GNU grep, which searches text for patterns"
+license = "GPL-3.0-or-later"
+homepage = "https://www.gnu.org/software/grep/"
+depends = ["mlibc"]
+
+[source]
+url = "https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz"
+sha256 = "2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/g/grep/grep_3.12.orig.tar.xz"]

@@ -97,3 +97,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted |
 | [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted |
 | [0085](0085-socket-pairs.md) | Socket pairs are two pipes, one each way | Accepted |
+| [0086](0086-release-archives-and-autoconf-ports.md) | Ports come from release archives or git, and autoconf packages build through one wrapper | Accepted |
+| [0087](0087-gpl-programs-among-the-ports.md) | GPL programs may be ports in /system, each a program of its own | Accepted |

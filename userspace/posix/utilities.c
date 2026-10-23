@@ -4,7 +4,9 @@
 // The ported utilities as a script uses them: each run through the links
 // in /bin, with text on its standard input, and what it writes and its
 // exit status checked. uutils' core utilities (ports/uutils-coreutils),
-// find and xargs (ports/uutils-findutils), and their manual pages.
+// find and xargs (ports/uutils-findutils), GNU grep, sed, diffutils and
+// patch, awk, bc, less, ncurses' tools and man (ports/<name>), and their
+// manual pages.
 
 #include <sys/stat.h>
 
@@ -172,9 +174,102 @@ static void finding(void) {
 	STATUS(0, "/bin/rm", "-r", "/tmp/find");
 }
 
+// grep, sed and awk.
+static void searching(void) {
+	OUTPUT("a\nb\nab\n", "a\nab\n", "/bin/grep", "a");
+	OUTPUT("A\nb\n", "A\n", "/bin/grep", "-i", "a");
+	OUTPUT("a\nb\nab\n", "b\n", "/bin/grep", "-v", "a");
+	OUTPUT("a\nb\nab\n", "2\n", "/bin/grep", "-c", "a");
+	OUTPUT("x1\nfoo22\n", "2:foo22\n", "/bin/grep", "-n", "-E", "o{2}[0-9]{2}$");
+	OUTPUT("a.b\naxb\n", "a.b\n", "/bin/grep", "-F", "a.b");
+	OUTPUT("cat category\n", "cat\n", "/bin/grep", "-o", "-w", "cat");
+	STATUS(1, "/bin/grep", "x");
+	STATUS(2, "/bin/grep", "x", "/nowhere");
+	// egrep is a script, which /bin/sh runs.
+	OUTPUT("a\nb\nc\n", "a\nc\n", "/bin/egrep", "a|c");
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/search/d");
+	OUTPUT("needle\n", "needle\n", "/bin/tee", "/tmp/search/d/file");
+	OUTPUT("", "/tmp/search/d/file:needle\n", "/bin/grep", "-r", "needle", "/tmp/search");
+
+	OUTPUT("hello\n", "hallo\n", "/bin/sed", "s/e/a/");
+	OUTPUT("1\n2\n3\n", "2\n", "/bin/sed", "-n", "2p");
+	OUTPUT("a b\n", "b a\n", "/bin/sed", "-E", "s/(a) (b)/\\2 \\1/");
+	OUTPUT("a\nb\nc\n", "a\nc\n", "/bin/sed", "/b/d");
+	OUTPUT("x\n", "x\ny\n", "/bin/sed", "a\\\ny");
+	STATUS(0, "/bin/sed", "-i", "s/needle/thread/", "/tmp/search/d/file");
+	OUTPUT("", "thread\n", "/bin/cat", "/tmp/search/d/file");
+
+	OUTPUT("a 1\nb 2\n", "3\n", "/bin/awk", "{ s += $2 } END { print s }");
+	OUTPUT("a:b\n", "b\n", "/bin/awk", "-F:", "{ print $2 }");
+	OUTPUT("", "3.14\n", "/bin/awk", "BEGIN { printf \"%.2f\\n\", 3.14159 }");
+	OUTPUT("dukovo os\n", "DUKOVO 6\n", "/bin/awk", "{ print toupper($1), length($1) }");
+	OUTPUT("x=1\ny=2\n", "y\n", "/bin/awk", "-F=", "$2 > 1 { print $1 }");
+	OUTPUT("", "3\n", "/bin/awk", "BEGIN { n = split(\"a,b,c\", parts, \",\"); print n }");
+	STATUS(2, "/bin/awk", "BEGIN { exit 2 }");
+	STATUS(0, "/bin/rm", "-r", "/tmp/search");
+}
+
+// diff, cmp, diff3, sdiff and patch, on files and trees.
+static void comparing(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/compare/a", "/tmp/compare/b");
+	OUTPUT("one\ntwo\nthree\n", "one\ntwo\nthree\n", "/bin/tee", "/tmp/compare/a/f");
+	OUTPUT("one\n2\nthree\n", "one\n2\nthree\n", "/bin/tee", "/tmp/compare/b/f");
+	OUTPUT("one\n  two\nthree\n", "one\n  two\nthree\n", "/bin/tee", "/tmp/compare/spaced");
+	STATUS(0, "/bin/diff", "/tmp/compare/a/f", "/tmp/compare/a/f");
+	RUN_WITH(1, "", "2c2\n< two\n---\n> 2\n", 0, "/bin/diff", "/tmp/compare/a/f",
+			"/tmp/compare/b/f");
+	RUN_WITH(1, "", "@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n", 1, "/bin/diff", "-u",
+			"/tmp/compare/a/f", "/tmp/compare/b/f");
+	STATUS(0, "/bin/diff", "-w", "/tmp/compare/a/f", "/tmp/compare/spaced");
+	RUN_WITH(1, "", "diff -r /tmp/compare/a/f /tmp/compare/b/f\n", 1, "/bin/diff", "-r",
+			"/tmp/compare/a", "/tmp/compare/b");
+	STATUS(0, "/bin/cmp", "-s", "/tmp/compare/a/f", "/tmp/compare/a/f");
+	STATUS(1, "/bin/cmp", "-s", "/tmp/compare/a/f", "/tmp/compare/b/f");
+	STATUS(0, "/bin/diff3", "/tmp/compare/a/f", "/tmp/compare/a/f", "/tmp/compare/a/f");
+	STATUS(1, "/bin/sdiff", "-s", "/tmp/compare/a/f", "/tmp/compare/b/f");
+
+	// A patch made by diff, applied, and taken back.
+	STATUS(1, "/bin/sh", "-c",
+			"diff -u /tmp/compare/a/f /tmp/compare/b/f >/tmp/compare/change.diff");
+	STATUS(0, "/bin/patch", "-s", "/tmp/compare/a/f", "/tmp/compare/change.diff");
+	STATUS(0, "/bin/cmp", "/tmp/compare/a/f", "/tmp/compare/b/f");
+	STATUS(0, "/bin/patch", "-s", "-R", "/tmp/compare/a/f", "/tmp/compare/change.diff");
+	OUTPUT("", "one\ntwo\nthree\n", "/bin/cat", "/tmp/compare/a/f");
+	// git's patches name files with a/ and b/, and rename them.
+	OUTPUT("diff --git a/f b/g\nsimilarity index 100%\nrename from f\nrename to g\n", "",
+			"/bin/patch", "-s", "-p1", "-d", "/tmp/compare/b");
+	OUTPUT("", "g\n", "/bin/ls", "/tmp/compare/b");
+	STATUS(0, "/bin/rm", "-r", "/tmp/compare");
+}
+
+// bc, dc, less, the terminal descriptions and man.
+static void others(void) {
+	OUTPUT("2^100\n", "1267650600228229401496703205376\n", "/bin/bc");
+	OUTPUT("scale=10; sqrt(2)\n", "1.4142135623\n", "/bin/bc");
+	OUTPUT("define f(n) { if (n < 2) return (n); return (f(n - 1) + f(n - 2)); }\nf(20)\n",
+			"6765\n", "/bin/bc");
+	OUTPUT("2 3 + p\n", "5\n", "/bin/dc");
+	// less shows its input unchanged when its output is not a terminal.
+	OUTPUT("line\n", "line\n", "/bin/less");
+	OUTPUT("", "80\n", "/bin/tput", "-T", "xterm", "cols");
+	// xterm's description also clears the lines scrolled off the screen.
+	OUTPUT("", "\033[H\033[2J\033[3J", "/bin/tput", "-T", "xterm", "clear");
+	STATUS(0, "/bin/tput", "-T", "tmux-256color", "colors");
+	CONTAINS("cols#80,", "/bin/infocmp", "-1", "vt100");
+	STATUS(3, "/bin/tput", "-T", "no-such-terminal", "cols");
+	OUTPUT("", "/system/share/man/man1/grep.1\n", "/bin/man", "-w", "grep");
+	// The pages are longer than what this collects, so a script reads
+	// their start, where their NAME section is.
+	CONTAINS("print lines that match patterns", "/bin/sh", "-c", "man grep | head -n 8");
+	CONTAINS("stream editor", "/bin/sh", "-c", "man 1 sed | head -n 8");
+	CONTAINS("terminal capability database", "/bin/sh", "-c", "man 5 terminfo | head -n 8");
+}
+
 // Every utility has its manual page.
 static void manuals(void) {
-	const char *const pages[] = {"ls", "cat", "sort", "test", "[", "find", "xargs"};
+	const char *const pages[] = {"ls", "cat", "sort", "test", "[", "find", "xargs", "grep", "sed",
+			"awk", "diff", "cmp", "diff3", "sdiff", "patch", "bc", "dc", "less", "man", "mandoc",
+			"apropos", "tput", "tset", "clear"};
 	for(size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
 		char path[64];
 		snprintf(path, sizeof(path), "/usr/share/man/man1/%s.1", pages[i]);
@@ -189,6 +284,9 @@ int main(void) {
 	RUN(statuses);
 	RUN(files);
 	RUN(finding);
+	RUN(searching);
+	RUN(comparing);
+	RUN(others);
 	RUN(manuals);
 	return check_end();
 }

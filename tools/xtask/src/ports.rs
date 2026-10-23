@@ -6,21 +6,23 @@
 //! A port is a directory `ports/<name>/` with:
 //!
 //! - `recipe.toml`: the port's version, license and home page, the git
-//!   commit its source is pinned to (or, for Rust's standard library,
-//!   the pinned Rust toolchain's rust-src), any other sources unpacked
-//!   into its tree and crates from crates.io, each pinned by its SHA-256,
-//!   the ports it needs built first, and the files it adds to the boot
-//!   archive;
+//!   commit or the release archive's SHA-256 its source is pinned to (or,
+//!   for Rust's standard library, the pinned Rust toolchain's rust-src),
+//!   any other sources unpacked into its tree and crates from crates.io,
+//!   each pinned by its SHA-256, the ports it needs built first, and the
+//!   files it adds to the boot archive;
 //! - `patches/*.patch`, applied in name order with `patch -p1`;
 //! - `build.sh`, which builds the port in a fresh copy of its patched
 //!   source and installs it into the sysroot (`out/sysroot`), or, for a
 //!   port of the toolchain, into `out/toolchain`.
 //!
-//! Sources are fetched once into `target/ports`, with git by commit and
-//! from crates.io by checksum, and checked to be what the recipe names, so
-//! a build uses nothing else. A port is built again only when something that went into its
-//! last build changed: its directory, the toolchain (and Rust's, for a
-//! port of rust-src), or a port it needs.
+//! Sources are fetched once into `target/ports`, with git by commit, as
+//! release archives by checksum (from their home, or from a mirror when
+//! that cannot be reached) and from crates.io by checksum, and checked to
+//! be what the recipe names, so a build uses nothing else. A port is
+//! built again only when something that went into its last build
+//! changed: its directory, the toolchain (and Rust's, for a port of
+//! rust-src), or a port it needs.
 //!
 //! The toolchain is the host's Clang and LLD, [`CLANG_MIN`] or later,
 //! made to target Radix by the wrapper scripts and Meson cross files ob
@@ -89,25 +91,58 @@ pub struct Recipe {
     pub bundled: Vec<Bundled>,
 }
 
-/// Where a source comes from: a git repository and a commit in it, or
-/// rust-src; neither for a port of crates alone.
+/// Where a source comes from: a git repository and a commit in it, a
+/// release archive, or rust-src; none of them for a port of crates alone.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
-    /// The repository; empty for rust-src.
+    /// The repository, for a source from git.
     #[serde(default)]
     pub git: String,
-    /// The full commit ID, which pins the tree; empty for rust-src.
+    /// The full commit ID, which pins the tree.
     #[serde(default)]
     pub commit: String,
     /// The release or tag the commit is, for people.
     #[serde(default)]
     pub tag: Option<String>,
+    /// A release archive (`.tar.gz`, `.tar.xz` or `.tar.bz2`), for a
+    /// project whose releases hold more than its repository does, such as
+    /// GNU's, whose archives hold their generated configure scripts.
+    #[serde(default)]
+    pub url: String,
+    /// The archive's SHA-256, which pins it.
+    #[serde(default)]
+    pub sha256: String,
+    /// Other places that serve the same archive, tried in order when
+    /// `url` cannot be reached: Ubuntu's source pool keeps upstream's
+    /// release archives, unchanged, as `<name>_<version>.orig.tar.*`.
+    #[serde(default)]
+    pub mirrors: Vec<String>,
     /// Whether the source is the `library` directory of the pinned Rust
     /// toolchain's rust-src component, with the crates it vendors: the
     /// toolchain pins it, and it needs no fetching.
     #[serde(default, rename = "rust-src")]
     pub rust_src: bool,
+}
+
+impl Source {
+    /// Where the source can be downloaded, as an SPDX download location.
+    pub fn download(&self) -> String {
+        if !self.url.is_empty() {
+            return self.url.clone();
+        }
+        format!("git+{}@{}", self.git, self.commit)
+    }
+
+    /// Which release it is, for people: its tag, its commit or its
+    /// archive's name.
+    pub fn release(&self) -> &str {
+        match &self.tag {
+            Some(tag) => tag,
+            None if !self.url.is_empty() => self.url.rsplit('/').next().unwrap_or(&self.url),
+            None => &self.commit,
+        }
+    }
 }
 
 /// A source unpacked inside a port's tree, such as a Meson subproject.
@@ -237,21 +272,37 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
     if dir.file_name().and_then(|n| n.to_str()) != Some(recipe.name.as_str()) {
         return Err(Error::new(format!("{what}: the name must be the directory's")));
     }
-    if recipe.source.rust_src {
-        if !recipe.source.git.is_empty() || !recipe.source.commit.is_empty() {
-            return Err(Error::new(format!("{what}: a rust-src source has no git or commit")));
-        }
-        if !recipe.toolchain {
-            return Err(Error::new(format!("{what}: only a toolchain port builds rust-src")));
-        }
-    }
-    let none = !recipe.source.rust_src && recipe.source.git.is_empty();
-    if none && (!recipe.source.commit.is_empty() || recipe.crates.is_empty()) {
+    let source = &recipe.source;
+    let (git, archive) = (!source.git.is_empty(), !source.url.is_empty());
+    let kinds = usize::from(git) + usize::from(archive) + usize::from(source.rust_src);
+    if kinds > 1 {
         return Err(Error::new(format!(
-            "{what}: a port needs a source: git and commit, rust-src or crates"
+            "{what}: a source is one of git, url and rust-src, not more"
         )));
     }
-    let main = (!recipe.source.rust_src && !none).then_some(&recipe.source.commit);
+    if source.rust_src && !recipe.toolchain {
+        return Err(Error::new(format!("{what}: only a toolchain port builds rust-src")));
+    }
+    if kinds == 0 && recipe.crates.is_empty() {
+        return Err(Error::new(format!(
+            "{what}: a port needs a source: git and commit, url and sha256, rust-src or crates"
+        )));
+    }
+    if !git && (!source.commit.is_empty() || source.tag.is_some()) {
+        return Err(Error::new(format!("{what}: commit and tag go with git")));
+    }
+    if !archive && (!source.sha256.is_empty() || !source.mirrors.is_empty()) {
+        return Err(Error::new(format!("{what}: sha256 and mirrors go with url")));
+    }
+    if archive && !is_hex(&source.sha256, 64) {
+        return Err(Error::new(format!("{what}: `{}` is not a SHA-256", source.sha256)));
+    }
+    for url in archive.then_some(&source.url).into_iter().chain(&source.mirrors) {
+        if !url.starts_with("https://") || url.ends_with('/') {
+            return Err(Error::new(format!("{what}: `{url}` is not an https:// URL of a file")));
+        }
+    }
+    let main = git.then_some(&source.commit);
     for commit in main.into_iter().chain(recipe.extra.iter().map(|e| &e.commit)) {
         if !is_hex(commit, 40) {
             return Err(Error::new(format!("{what}: `{commit}` is not a full commit ID")));
@@ -268,11 +319,7 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
         let plain = |s: &str| {
             !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
         };
-        if !plain(&krate.name)
-            || !plain(&krate.version)
-            || path.starts_with('/')
-            || path.split('/').any(|part| part.is_empty() || part == "..")
-        {
+        if !plain(&krate.name) || !plain(&krate.version) || !inside(&path) {
             return Err(Error::new(format!(
                 "{what}: crate `{}` `{}` at `{path}` is not a crate's name, version and \
                  a path inside the source",
@@ -287,6 +334,12 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
         return Err(Error::new(format!("{what}: a toolchain port puts nothing in the image")));
     }
     Ok(())
+}
+
+/// Whether `path` is a relative path that stays inside the directory it
+/// is relative to.
+fn inside(path: &str) -> bool {
+    !path.starts_with('/') && path.split('/').all(|part| !part.is_empty() && part != "..")
 }
 
 /// Whether `text` is `len` hexadecimal digits.
@@ -429,10 +482,17 @@ impl Toolchain {
         self.rust().join("patches")
     }
 
+    /// The autoconf site file for Radix, and what else configure scripts
+    /// need beyond the wrappers.
+    pub fn autotools(&self) -> PathBuf {
+        self.dir.join("autotools")
+    }
+
     /// Writes the wrapper scripts and cross files into `out/toolchain`.
     pub fn write(&self, ctx: &Ctx) -> Result<()> {
         process::create_dir(&self.bin())?;
         process::create_dir(&self.dir.join("meson"))?;
+        process::create_dir(&self.autotools())?;
         let sysroot = ctx.out.join("sysroot");
         write_script(&self.cc(), &self.cc_script(&sysroot))?;
         let script = |name: &str, path: &Path| {
@@ -452,6 +512,15 @@ impl Toolchain {
         // `ld.lld-20`).
         write_script(&self.bin().join("ld.lld"), &script("ld", &self.tools["ld"]))?;
         write_script(&self.cargo(), &self.cargo_script(ctx)?)?;
+        // Ports with GNU configure scripts (autoconf's) run them with this.
+        write_script(
+            &self.bin().join(format!("{TRIPLE}-configure")),
+            include_str!("../autotools/configure.sh"),
+        )?;
+        write_file(
+            &self.autotools().join("config.site"),
+            include_str!("../autotools/config.site"),
+        )?;
         write_file(&self.libc_cross_file(), &self.libc_cross(&sysroot))?;
         write_file(&self.cross_file(), &self.programs_cross())?;
         Ok(())
@@ -701,12 +770,15 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
     let mut stamps: BTreeMap<String, u64> = BTreeMap::new();
     let mut ports = Vec::new();
     for (recipe, dir) in recipes(ctx)? {
-        let source = if recipe.source.rust_src {
+        let source = &recipe.source;
+        let source = if source.rust_src {
             Some(rust_src(ctx)?.0)
-        } else if recipe.source.git.is_empty() {
-            None
+        } else if !source.url.is_empty() {
+            Some(fetch_archive(ctx, &recipe.name, source)?)
+        } else if !source.git.is_empty() {
+            Some(fetch(ctx, &recipe.name, &source.git, &source.commit)?)
         } else {
-            Some(fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?)
+            None
         };
         let mut extras = Vec::new();
         for extra in &recipe.extra {
@@ -747,8 +819,8 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
 }
 
 /// What went into a port's build: its directory's files, the toolchain
-/// (its version, and the wrappers and cross files ob writes), the
-/// kernel's system call headers, and the builds of the ports it needs.
+/// (its version, and the wrappers, cross files and site file ob writes),
+/// the kernel's system call headers, and the builds of the ports it needs.
 fn inputs_hash(
     ctx: &Ctx,
     dir: &Path,
@@ -759,7 +831,8 @@ fn inputs_hash(
     let mut hasher = DefaultHasher::new();
     let headers = ctx.out.join("sysroot/system/include/radix");
     let (wrappers, cross) = (toolchain.bin(), toolchain.dir.join("meson"));
-    for dir in [dir, wrappers.as_path(), cross.as_path(), headers.as_path()] {
+    let autotools = toolchain.autotools();
+    for dir in [dir, &wrappers, &cross, &autotools, &headers] {
         let mut files = Vec::new();
         list_files(dir, &mut files)?;
         files.sort();
@@ -848,6 +921,72 @@ fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
     }
 }
 
+/// Fetches a release archive into `target/ports/sources`, once, from its
+/// URL or, failing that, from each mirror in turn, checks its SHA-256,
+/// and unpacks it there. Returns where it is unpacked: the directory the
+/// archive holds, as a release archive holds one, or else the whole.
+fn fetch_archive(ctx: &Ctx, name: &str, source: &Source) -> Result<PathBuf> {
+    let sources = ctx.target.join("ports/sources");
+    let base = format!("{name}-{}", &source.sha256[..12]);
+    // Unpacked beside its final place, then moved there: a directory
+    // there is a whole archive.
+    let dir = sources.join(&base);
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    process::create_dir(&sources)?;
+    let file = sources.join(format!("{base}.download"));
+    let mut failed = Vec::new();
+    for url in std::iter::once(&source.url).chain(&source.mirrors) {
+        step(&format!("Fetching {name} from {url}"));
+        let mut cmd = Command::new("curl");
+        cmd.args(["--proto", "=https", "--tlsv1.2", "-fsSL", "--retry", "3", "-o"])
+            .arg(&file)
+            .arg(url);
+        if let Err(err) = process::run(ctx, &mut cmd) {
+            failed.push(format!("{url}: {err}"));
+            continue;
+        }
+        let sum = process::sha256(ctx, &file)?;
+        if sum == source.sha256 {
+            failed.clear();
+            break;
+        }
+        failed.push(format!("{url} has SHA-256 {sum}, not the {} the recipe pins", source.sha256));
+    }
+    if !failed.is_empty() {
+        let _ = std::fs::remove_file(&file);
+        return Err(Error::new(format!(
+            "no copy of {name}'s source would do: {}",
+            failed.join("; ")
+        ))
+        .hint("add a mirror that serves the same archive to its recipe.toml"));
+    }
+    let partial = sources.join(format!("{base}.partial"));
+    if partial.exists() {
+        std::fs::remove_dir_all(&partial).context(|| format!("removing {}", partial.display()))?;
+    }
+    process::create_dir(&partial)?;
+    // tar finds out how the archive is compressed.
+    let mut cmd = Command::new("tar");
+    cmd.arg("-xf").arg(&file).arg("-C").arg(&partial).arg("--no-same-owner");
+    process::run(ctx, &mut cmd)?;
+    let entries: Vec<PathBuf> = std::fs::read_dir(&partial)
+        .context(|| format!("reading {}", partial.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
+    let top = match entries.as_slice() {
+        [one] if one.is_dir() => one.clone(),
+        _ => partial.clone(),
+    };
+    std::fs::rename(&top, &dir).context(|| format!("moving it to {}", dir.display()))?;
+    if partial.exists() {
+        std::fs::remove_dir_all(&partial).context(|| format!("removing {}", partial.display()))?;
+    }
+    let _ = std::fs::remove_file(&file);
+    Ok(dir)
+}
+
 /// Fetches a crate from crates.io into `target/ports/sources/crates`,
 /// once, checks its SHA-256, and unpacks it there. Returns where it is
 /// unpacked: with a `.cargo-checksum.json` that gives its checksum, as
@@ -926,11 +1065,14 @@ fn export(ctx: &Ctx, repo: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copies the directory `from`, with everything in it, to `to`.
+/// Copies the directory `from`, with everything in it, to `to`, keeping
+/// each file's time: make would otherwise find a release's generated
+/// files, such as its configure script, older than what they are made
+/// from, and make them again with programs the host need not have.
 fn copy_tree(ctx: &Ctx, from: &Path, to: &Path) -> Result<()> {
     process::create_dir(to)?;
     let mut cmd = Command::new("cp");
-    cmd.arg("-R").arg(from.join(".")).arg(to);
+    cmd.arg("-R").arg("-p").arg(from.join(".")).arg(to);
     process::run(ctx, &mut cmd)
 }
 
@@ -946,7 +1088,7 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
     let src = work.join("src");
     let build_dir = work.join("build");
     match &port.source {
-        Some(source) if recipe.source.rust_src => copy_tree(ctx, source, &src)?,
+        Some(source) if recipe.source.git.is_empty() => copy_tree(ctx, source, &src)?,
         Some(source) => export(ctx, source, &src)?,
         None => process::create_dir(&src)?,
     }
@@ -1127,5 +1269,28 @@ mod tests {
         );
         let recipe: Recipe = toml::from_str(&bundled).unwrap();
         assert_eq!(recipe.bundled[0].notices, ["musl/COPYRIGHT"]);
+    }
+
+    #[test]
+    fn archive_sources() {
+        let text = r#"
+            name = "grep"
+            version = "3.12"
+            summary = "GNU grep"
+            license = "GPL-3.0-or-later"
+            homepage = "https://www.gnu.org/software/grep/"
+            [source]
+            url = "https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz"
+            sha256 = "2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9"
+            mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/g/grep/grep_3.12.orig.tar.xz"]
+        "#;
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        assert_eq!(recipe.source.download(), "https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz");
+        assert_eq!(recipe.source.release(), "grep-3.12.tar.xz");
+        assert_eq!(recipe.source.mirrors.len(), 1);
+        let git =
+            Source { git: "https://x/y.git".into(), commit: "ab".into(), ..Source::default() };
+        assert_eq!(git.download(), "git+https://x/y.git@ab");
+        assert_eq!(git.release(), "ab");
     }
 }

@@ -99,8 +99,9 @@ _target/userspace/_).
 	each after the ports it needs: the C library (mlibc) and the
 	C++ headers it is built with, Rust's standard library, the C.UTF-8
 	locale, the crates.io crates patched for Radix, uutils' core
-	utilities and findutils, and Lua, mlibc's own tests and libc-test,
-	which the *posix* boot test runs. A port is built again only when something that went into
+	utilities and findutils, ncurses, zlib, less, mandoc, GNU grep, sed,
+	diffutils and patch, awk and bc, and Lua, mlibc's own tests and
+	libc-test, which the *posix* boot test runs. A port is built again only when something that went into
 	its last build changed: its directory, the toolchain (and the pinned
 	Rust toolchain, for Rust's standard library) or a port it needs.
 	After Rust's standard library is built, its *libc* crate is checked
@@ -549,8 +550,10 @@ A port is a directory _ports/<name>/_ (ADR 0069) holding:
 
 _recipe.toml_
 	The port's name, version, summary, SPDX license and home page; its
-	source, a git repository and the full commit it is pinned to, or
-	*rust-src = true* for the _library_ directory of the pinned Rust
+	source, a git repository and the full commit it is pinned to, a
+	release archive (*url*, *sha256* and *mirrors* that serve the same
+	file, ADR 0086), or *rust-src = true* for the _library_ directory of
+	the pinned Rust
 	toolchain's *rust-src* component, with the crates it vendors; any
 	*extra* sources unpacked inside its tree, each with its own commit
 	and license; crates from crates.io unpacked inside it (*[[crate]]*:
@@ -591,10 +594,13 @@ _build.sh_
 	*CPPFLAGS*, *CXXFLAGS*, *LDFLAGS* and *PKG_CONFIG_PATH* are taken
 	away.
 
-Sources are fetched with git once, by commit, into _target/ports/_, and
-checked to be that commit, and crates from crates.io once, checked
-against their SHA-256, so a build uses nothing the recipe does not
-name. Every port's license and notices go into the image's license
+Sources are fetched once into _target/ports/_: with git by commit, and
+checked to be that commit; release archives from their *url* or, when
+that cannot be reached, from each of their *mirrors* in turn, the first
+copy whose SHA-256 is the one pinned; and crates from crates.io, checked
+against their SHA-256. A build uses nothing the recipe does not name. A
+source is copied into the build with its files' times, so make never
+remakes a release's generated files. Every port's license and notices go into the image's license
 manifest.
 
 The toolchain is the host's Clang, LLD and LLVM tools, made to target
@@ -611,6 +617,16 @@ as every program in _/system_ is. With *-dynamic* it links a program
 that the dynamic linker, _/system/lib/ld.so_, starts on the shared C
 library, and with *-shared* a shared library, as a bundle that ships
 libraries of its own needs (ADR 0071).
+
+_bin/x86_64-radix-configure_ _source_ [_argument_...] runs the
+autoconf *configure* script of _source_ for Radix in the current
+directory, with the arguments after it: it puts a script that knows
+*x86_64-radix* in front of each _config.sub_ in _source_, gives the
+build machine with *--build* and *x86_64-radix* with *--host*, so that
+configure always knows it is cross compiling, passes the toolchain's
+programs and *CFLAGS*, and sets *CONFIG_SITE* to
+_autotools/config.site_, which answers what configure would have to run
+a program for Radix to find out, and *CONFIG_SHELL* to _/bin/sh_.
 
 _bin/x86_64-radix-cargo_ is Cargo for programs on Rust's standard
 library for Radix (ADR 0080), used as *cargo* is: it builds for the

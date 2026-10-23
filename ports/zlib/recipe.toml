@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# zlib (ADR 0086): deflate compression, for the ports that read and
+# write gzip and zip files, such as mandoc, which reads compressed
+# manual pages. Only the static library and its headers, in the sysroot.
+name = "zlib"
+version = "1.3.2"
+summary = "the deflate compression library"
+license = "Zlib"
+homepage = "https://zlib.net"
+depends = ["mlibc"]
+
+[source]
+git = "https://github.com/madler/zlib.git"
+commit = "da607da739fa6047df13e66a2af6b8bec7c2a498"
+tag = "v1.3.2"
