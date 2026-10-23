@@ -4,9 +4,9 @@
 // Files through the C library: open and its flags, reading, writing and
 // seeking, descriptions that share an offset, stdio, directories and
 // their descriptors, temporary files, renaming and removing, times,
-// symbolic links, reading into and writing from memory not made yet, and
-// descriptors by their names in /dev/fd, on the tmpfs at /tmp and the
-// read-only /system.
+// symbolic links, `..` beneath directory descriptors and fchdir, reading
+// into and writing from memory not made yet, and descriptors by their
+// names in /dev/fd, on the tmpfs at /tmp and the read-only /system.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -442,6 +442,79 @@ static void links(void) {
 	CHECK(realpath("/sbin/.", real) && !strcmp(real, "/system/bin"));
 }
 
+// Whether descriptor `fd` is the directory `path`.
+static int same_dir(int fd, const char *path) {
+	struct stat st, want;
+	return fstat(fd, &st) == 0 && stat(path, &want) == 0 && st.st_ino == want.st_ino
+			&& st.st_dev == want.st_dev;
+}
+
+// Whether the working directory is `path`.
+static int in_dir(const char *path) {
+	char cwd[PATH_MAX];
+	return getcwd(cwd, sizeof(cwd)) && !strcmp(cwd, path);
+}
+
+// `..` beneath a directory descriptor, and fchdir, which go by the path
+// the C library notes for each one (ADR 0089): up from descriptors
+// opened beneath others, with O_PATH as tree walks open them, and from a
+// link, in a walk up and down that would outgrow a path if each `..`
+// were kept, and from a copy.
+static void climbing(void) {
+	CHECK(mkdir("/tmp/files-up", 0755) == 0);
+	CHECK(mkdir("/tmp/files-up/a", 0755) == 0);
+	CHECK(mkdir("/tmp/files-up/a/b", 0755) == 0);
+	CHECK(mkdir("/tmp/files-up/c", 0755) == 0);
+	CHECK(symlink("a/b", "/tmp/files-up/l") == 0);
+	int made = open("/tmp/files-up/a/b/f", O_WRONLY | O_CREAT, 0644);
+	CHECK(made >= 0);
+	close(made);
+
+	int top = open("/tmp/files-up", O_RDONLY | O_DIRECTORY);
+	CHECK(top >= 0);
+	int a = openat(top, "a", O_PATH | O_DIRECTORY);
+	CHECK(a >= 0 && same_dir(a, "/tmp/files-up/a"));
+	int b = openat(a, "b", O_RDONLY | O_DIRECTORY);
+	CHECK(b >= 0 && same_dir(b, "/tmp/files-up/a/b"));
+	int c = openat(b, "../../c", O_RDONLY | O_DIRECTORY);
+	CHECK(c >= 0 && same_dir(c, "/tmp/files-up/c"));
+	struct stat st;
+	CHECK(fstatat(c, "../a/b/f", &st, 0) == 0 && S_ISREG(st.st_mode));
+	// `..` from a link is the parent of where it leads.
+	int l = openat(top, "l", O_RDONLY | O_DIRECTORY);
+	CHECK(l >= 0);
+	int up = openat(l, "..", O_RDONLY | O_DIRECTORY);
+	CHECK(up >= 0 && same_dir(up, "/tmp/files-up/a"));
+	// 2,000 steps up and down, from a copy.
+	int walk = dup(b);
+	CHECK(walk >= 0);
+	for(int i = 0; walk >= 0 && i < 2000; i++) {
+		int next = openat(walk, i % 2 ? "b" : "..", O_RDONLY | O_DIRECTORY);
+		close(walk);
+		walk = next;
+	}
+	CHECK(walk >= 0 && same_dir(walk, "/tmp/files-up/a/b"));
+
+	char saved[PATH_MAX];
+	CHECK(getcwd(saved, sizeof(saved)) != NULL);
+	CHECK(fchdir(walk) == 0 && in_dir("/tmp/files-up/a/b"));
+	CHECK(fchdir(l) == 0 && in_dir("/tmp/files-up/a/b"));
+	CHECK(fchdir(a) == 0 && in_dir("/tmp/files-up/a"));
+	CHECK(chdir("..") == 0 && in_dir("/tmp/files-up"));
+	int file = openat(b, "f", O_RDONLY);
+	CHECK(file >= 0);
+	CHECK_ERROR(fchdir(file), ENOTDIR);
+	CHECK_ERROR(fchdir(-1), EBADF);
+	CHECK(chdir(saved) == 0);
+
+	int fds[] = {top, a, b, c, l, up, walk, file};
+	for(size_t i = 0; i < sizeof(fds) / sizeof(fds[0]); i++)
+		close(fds[i]);
+	CHECK(unlink("/tmp/files-up/a/b/f") == 0 && unlink("/tmp/files-up/l") == 0);
+	CHECK(rmdir("/tmp/files-up/a/b") == 0 && rmdir("/tmp/files-up/a") == 0);
+	CHECK(rmdir("/tmp/files-up/c") == 0 && rmdir("/tmp/files-up") == 0);
+}
+
 // Reading into and writing from memory none of whose pages are there yet,
 // so that the copies fault: new anonymous memory, and private mappings of
 // the very file read or written, whose faults read that file.
@@ -551,6 +624,7 @@ int main(void) {
 	RUN(temporary_files);
 	RUN(times);
 	RUN(links);
+	RUN(climbing);
 	RUN(mapped);
 	RUN(named_descriptors);
 	return check_end();

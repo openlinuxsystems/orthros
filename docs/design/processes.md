@@ -182,8 +182,10 @@ way (ADR 0048).
    `PT_GNU_RELRO`, read-only from the start), the stack read-write and
    the start-up page read-only at `STARTUP_ADDRESS`.
 6. For Spark, it copies the boot archive into frames of its own (a
-   memory object and a frame per 4 MiB, kept too) and maps them
-   read-only at a random page in the 1 TiB window from `LOADER_BASE`.
+   memory object and a frame per 4 MiB, kept in the kernel's capability
+   space for Spark, which has room for them however many there are) and
+   maps them read-only at a random page in the 1 TiB window from
+   `LOADER_BASE`.
 7. It writes the start-up page: its version, CPU, role and argument, the
    time-stamp counter's frequency, the kinds of the extra capabilities,
    the free memory, the image's bias, the boot archive's place, and the
@@ -228,9 +230,12 @@ loaded a `bootfs` module (`user/init.rs`):
 
 1. The kernel checks the archive and finds `init=PATH` in it,
    `/system/bin/spark` by default.
-2. It makes a kernel capability space of two slots, which is never
-   destroyed: Spark's original process capability goes in slot 0, and a
-   4 MiB memory object in slot 1.
+2. It makes a kernel capability space, which is never destroyed:
+   Spark's original process capability goes in slot 0, a 4 MiB memory
+   object in slot 1, and the boot archive's memory objects and frames,
+   two slots per 4 MiB of it, from slot 2 on. (Until Phase 9 they were
+   among Spark's 32 kept capabilities, which held an archive of at most
+   56 MiB.)
 3. It loads Spark with the archive, that memory object as its first extra
    capability (`SLOT_FIRST_EXTRA`, with the memory rights), its path and
    the words after a lone `--` on the command line as its arguments (at

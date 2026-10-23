@@ -1,0 +1,25 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Declares drem, scalb and significand and their float forms, which
+mlibc's libm builds from musl but <math.h> left out, as glibc and musl
+declare them; jq calls them. Meant for upstream.
+
+--- a/options/ansi/include/math.h
++++ b/options/ansi/include/math.h
+@@ -393,6 +393,15 @@
+ double lgamma_r(double __x, int *__signp);
+ float lgammaf_r(float __x, int *__signp);
+ long double lgammal_r(long double __x, int *__signp);
++
++/* Obsolete BSD and System V functions, which libm has and glibc and musl
++ * declare too. */
++double drem(double __x, double __y);
++float dremf(float __x, float __y);
++double scalb(double __x, double __exp);
++float scalbf(float __x, float __exp);
++double significand(double __x);
++float significandf(float __x);
+ #endif /* defined (_DEFAULT_SOURCE) */
+ 
+ #endif /* !__MLIBC_ABI_ONLY */

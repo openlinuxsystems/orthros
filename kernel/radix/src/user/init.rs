@@ -115,10 +115,11 @@ fn start_spark(
         let _ = words.push_within_capacity(arg);
     }
     // The kernel's own capability space for Spark: its process's original
-    // capability, and the memory for the programs it starts. It is never
-    // destroyed.
+    // capability, the memory for the programs it starts, and the boot
+    // archive's memory and frames. It is never destroyed.
+    let slots = loader::archive_slots(archive.len()).saturating_add(2);
     let kept =
-        caps::with(|store| store.create_space(2)).and_then(|made| made).map_err(cap_error)?;
+        caps::with(|store| store.create_space(slots)).and_then(|made| made).map_err(cap_error)?;
     let (at, pool) = (SlotRef::new(kept, 0), SlotRef::new(kept, 1));
     caps::create_memory(pool, MEMORY_ORDER).map_err(cap_error)?;
     let program = Program {
@@ -130,7 +131,7 @@ fn start_spark(
         argument: 0,
         args: &words,
         extra: &[(pool, ObjectKind::Memory.rights(), 0)],
-        archive: Some(archive),
+        archive: Some((archive, SlotRef::new(kept, 2))),
         root: true,
         domain: domains::root(),
         on_exit: Some(spark_exited),

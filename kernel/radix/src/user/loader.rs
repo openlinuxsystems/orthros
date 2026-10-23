@@ -21,12 +21,12 @@
 //! - one thread, at the image's entry point with the start-up page's
 //!   address as its argument.
 //!
-//! The frames for the image, the stack, the start-up page and the boot
-//! archive are kept in the process's hidden capability space, so the
-//! program cannot pull its own code from under itself by accident. The
-//! image, stack and start-up page come from the program's own memory
-//! object, which says how much of it they took; the archive's from memory
-//! of its own.
+//! The frames for the image, the stack and the start-up page are kept in
+//! the process's hidden capability space, so the program cannot pull its
+//! own code from under itself by accident; they come from the program's
+//! own memory object, which says how much of it they took. The boot
+//! archive's frames come from memory of their own, kept in a capability
+//! space of the kernel's, which has room for an archive of any size.
 
 use radix_abi::Status;
 use radix_abi::address_space::{PAGE_SIZE, USER_START};
@@ -51,12 +51,10 @@ use crate::{Arch, caps};
 /// page says what each is.
 pub const EXTRA_MAX: usize = 16;
 
-/// The hidden slots of the image, stack and start-up page frames; the boot
-/// archive's memory and frames follow.
+/// The hidden slots of the image, stack and start-up page frames.
 const KEPT_STACK: u32 = 1;
 const KEPT_IMAGE: u32 = 2;
 const KEPT_PAGE: u32 = 3;
-const KEPT_ARCHIVE: u32 = 4;
 
 /// The largest frame the kernel makes: the boot archive is copied into as
 /// many as it takes.
@@ -82,8 +80,10 @@ pub struct Program<'a> {
     /// The capabilities it gets, from `SLOT_FIRST_EXTRA` on: where each
     /// is, the rights to keep, and a badge (0 for none).
     pub extra: &'a [(SlotRef, Rights, u64)],
-    /// The boot archive, for Spark.
-    pub archive: Option<&'a [u8]>,
+    /// The boot archive, for Spark, and the first of the
+    /// [`archive_slots`] slots its memory and frames are kept in, in a
+    /// space that outlives the process.
+    pub archive: Option<(&'a [u8], SlotRef)>,
     /// Whether it gets the root of the file tree, with every right, in
     /// `SLOT_ROOT`: Spark does.
     pub root: bool,
@@ -203,7 +203,7 @@ fn build(at: SlotRef, process: &ProcessRef, program: &Program<'_>) -> Result<()>
     FrameObject::map_into(&page, &space, startup::STARTUP_ADDRESS, 0, 1, UserAccess::Read)
         .map_err(|err| failed(name, "mapping its start-up page", err))?;
     let archive = match program.archive {
-        Some(archive) => Some(map_archive(process, &space, archive)?),
+        Some((archive, kept)) => Some(map_archive(kept, &space, archive)?),
         None => None,
     };
 
@@ -293,30 +293,32 @@ fn load(
     Ok(())
 }
 
-/// Copies the boot archive into frames kept for `process` and maps them
-/// read-only at a random place in the loader's window. Returns where, and
-/// the archive's size.
-fn map_archive(process: &ProcessObject, space: &SpaceRef, archive: &[u8]) -> Result<(u64, u64)> {
+/// How many slots a boot archive of `size` bytes is kept in: a memory
+/// object and its frame for each [`ARCHIVE_CHUNK`].
+pub fn archive_slots(size: usize) -> u32 {
+    let pages = (size as u64).div_ceil(PAGE_SIZE).max(1);
+    let chunks = (pages * PAGE_SIZE).div_ceil(ARCHIVE_CHUNK);
+    u32::try_from(2 * chunks).unwrap_or(u32::MAX)
+}
+
+/// Copies the boot archive into frames kept from slot `kept` on, in turn
+/// with the memory each is made from, and maps them read-only at a random
+/// place in the loader's window. Returns where, and the archive's size.
+fn map_archive(kept: SlotRef, space: &SpaceRef, archive: &[u8]) -> Result<(u64, u64)> {
     let size = archive.len() as u64;
     let pages = size.div_ceil(PAGE_SIZE).max(1);
     let chunks = (pages * PAGE_SIZE).div_ceil(ARCHIVE_CHUNK);
-    // A memory object and its frame for each chunk.
-    if KEPT_ARCHIVE as u64 + 2 * chunks > u64::from(radix_abi::process::KEEP_SLOTS) + 1 {
-        warn!("User: the boot archive is too large: {} KiB", size / 1024);
-        return Err(error(Kernel::NoRoom));
-    }
     let room = startup::WINDOW / PAGE_SIZE - pages;
     let base = startup::LOADER_BASE + radix_random::below(room + 1) * PAGE_SIZE;
-    let keep = process.keep_space();
     for chunk in 0..chunks {
         let first = chunk * ARCHIVE_CHUNK / PAGE_SIZE;
         let count = (pages - first).min(ARCHIVE_CHUNK / PAGE_SIZE);
         let order = count.next_power_of_two().trailing_zeros();
-        let memory = SlotRef::new(keep, KEPT_ARCHIVE + 2 * chunk as u32);
-        let to = SlotRef::new(keep, memory.slot + 1);
+        let memory = SlotRef::new(kept.space, kept.slot + 2 * chunk as u32);
+        let to = SlotRef::new(kept.space, memory.slot + 1);
         caps::create_memory(memory, order).map_err(cap_error)?;
         retype(memory, ObjectKind::Frame, order, to, 1)?;
-        let (_, frame) = objects::frame(keep, to.slot, Rights::NONE)?;
+        let (_, frame) = objects::frame(kept.space, to.slot, Rights::NONE)?;
         let start = (first * PAGE_SIZE) as usize;
         let end = (start + (count * PAGE_SIZE) as usize).min(archive.len());
         frame.write(0, &archive[start..end])?;

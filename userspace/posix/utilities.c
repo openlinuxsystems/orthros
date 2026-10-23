@@ -5,8 +5,8 @@
 // in /bin, with text on its standard input, and what it writes and its
 // exit status checked. uutils' core utilities (ports/uutils-coreutils),
 // find and xargs (ports/uutils-findutils), GNU grep, sed, diffutils and
-// patch, awk, bc, less, ncurses' tools and man (ports/<name>), and their
-// manual pages.
+// patch, awk, bc, less, ncurses' tools, man, the compressors, tar, cpio,
+// zip and unzip, file and jq (ports/<name>), and their manual pages.
 
 #include <sys/stat.h>
 
@@ -265,11 +265,154 @@ static void others(void) {
 	CONTAINS("terminal capability database", "/bin/sh", "-c", "man 5 terminfo | head -n 8");
 }
 
+// Each compressor, each way, through a pipe, and the scripts that read
+// what they made.
+static void compressing(void) {
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "gzip | gunzip");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "gzip -9 | zcat");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "bzip2 | bunzip2");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "bzip2 | bzcat");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "xz | unxz");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "xz -T0 -e | xzcat");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "lzma | unlzma");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "zstd | unzstd");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "zstd -T0 -12 | zstdcat");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "lz4 | unlz4");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "lz4 -9 | lz4cat");
+	// zstd reads the others' formats with their libraries.
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "gzip | zstd -dc");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "xz | zstd -dc");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "lz4 | zstd -dc");
+	// Damaged data is an error.
+	STATUS(1, "/bin/sh", "-c", "echo text | gzip -t");
+	STATUS(1, "/bin/sh", "-c", "echo text | xz -t");
+	STATUS(1, "/bin/sh", "-c", "echo text | zstd -t");
+
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/compress");
+	OUTPUT("one\nneedle\n", "one\nneedle\n", "/bin/tee", "/tmp/compress/f");
+	STATUS(0, "/bin/sh", "-c",
+			"cd /tmp/compress && gzip -k f && bzip2 -k f && xz -k f && zstd -q f && lz4 -q f");
+	OUTPUT("", "f\nf.bz2\nf.gz\nf.lz4\nf.xz\nf.zst\n", "/bin/ls", "/tmp/compress");
+	OUTPUT("", "needle\n", "/bin/zgrep", "needle", "/tmp/compress/f.gz");
+	OUTPUT("", "needle\n", "/bin/bzgrep", "needle", "/tmp/compress/f.bz2");
+	OUTPUT("", "needle\n", "/bin/xzgrep", "needle", "/tmp/compress/f.xz");
+	OUTPUT("", "needle\n", "/bin/zstdgrep", "needle", "/tmp/compress/f.zst");
+	STATUS(1, "/bin/zgrep", "thread", "/tmp/compress/f.gz");
+	STATUS(0, "/bin/zcmp", "/tmp/compress/f.gz", "/tmp/compress/f");
+	STATUS(0, "/bin/xzdiff", "/tmp/compress/f.xz", "/tmp/compress/f");
+	OUTPUT("", "one\nneedle\n", "/bin/bsdcat", "/tmp/compress/f.zst");
+	CONTAINS("% /tmp/compress/f\n", "/bin/gzip", "-l", "/tmp/compress/f.gz");
+	STATUS(0, "/bin/gunzip", "-f", "/tmp/compress/f.gz");
+	OUTPUT("", "f\nf.bz2\nf.lz4\nf.xz\nf.zst\n", "/bin/ls", "/tmp/compress");
+	STATUS(0, "/bin/rm", "-r", "/tmp/compress");
+}
+
+// tar, cpio, zip and unzip: archives made, listed and unpacked, with
+// each compressor, and read by the others' programs.
+static void archiving(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/archive/d/e", "/tmp/archive/out");
+	OUTPUT("first\n", "first\n", "/bin/tee", "/tmp/archive/d/a");
+	OUTPUT("second\n", "second\n", "/bin/tee", "/tmp/archive/d/e/b");
+	STATUS(0, "/bin/ln", "-s", "a", "/tmp/archive/d/l");
+	const char *const tars[] = {"t.tar", "t.tar.gz", "t.tar.bz2", "t.tar.xz", "t.tar.zst",
+			"t.tar.lz4"};
+	for(size_t i = 0; i < sizeof(tars) / sizeof(tars[0]); i++) {
+		char make[128], list[128];
+		snprintf(make, sizeof(make), "cd /tmp/archive && tar -acf %s d", tars[i]);
+		snprintf(list, sizeof(list), "tar -tf /tmp/archive/%s | sort", tars[i]);
+		STATUS(0, "/bin/sh", "-c", make);
+		OUTPUT("", "d/\nd/a\nd/e/\nd/e/b\nd/l\n", "/bin/sh", "-c", list);
+	}
+	STATUS(0, "/bin/tar", "-xzf", "/tmp/archive/t.tar.gz", "-C", "/tmp/archive/out");
+	OUTPUT("", "second\n", "/bin/cat", "/tmp/archive/out/d/e/b");
+	OUTPUT("", "a\n", "/bin/readlink", "/tmp/archive/out/d/l");
+	OUTPUT("", "first\n", "/bin/tar", "-xOf", "/tmp/archive/t.tar.xz", "d/a");
+	CONTAINS("d/e/b", "/bin/tar", "-tvf", "/tmp/archive/t.tar.zst");
+	STATUS(1, "/bin/tar", "-xf", "/tmp/archive/d/a");
+
+	// cpio's SVR4 format, out and back in.
+	STATUS(0, "/bin/sh", "-c",
+			"cd /tmp/archive && find d | cpio -o --quiet -H newc >t.cpio");
+	OUTPUT("", "d\nd/a\nd/e\nd/e/b\nd/l\n", "/bin/sh", "-c",
+			"cpio -it --quiet </tmp/archive/t.cpio | sort");
+	STATUS(0, "/bin/sh", "-c",
+			"mkdir /tmp/archive/c && cd /tmp/archive/c && cpio -id --quiet </tmp/archive/t.cpio");
+	OUTPUT("", "first\n", "/bin/cat", "/tmp/archive/c/d/a");
+
+	// zip makes archives; unzip and tar read them.
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/archive && zip -q -r -y t.zip d");
+	OUTPUT("", "first\n", "/bin/unzip", "-p", "/tmp/archive/t.zip", "d/a");
+	STATUS(0, "/bin/unzip", "-q", "-t", "/tmp/archive/t.zip");
+	STATUS(0, "/bin/unzip", "-q", "-d", "/tmp/archive/z", "/tmp/archive/t.zip");
+	OUTPUT("", "second\n", "/bin/cat", "/tmp/archive/z/d/e/b");
+	OUTPUT("", "second\n", "/bin/tar", "-xOf", "/tmp/archive/t.zip", "d/e/b");
+	CONTAINS("d/e/b", "/bin/unzip", "-l", "/tmp/archive/t.zip");
+	CONTAINS("@ d/e/b\n", "/bin/zipnote", "/tmp/archive/t.zip");
+	// zip -T checks for Info-ZIP's UnZip, so libarchive's is named.
+	STATUS(0, "/bin/zip", "-q", "-T", "-TT", "unzip -q -t", "/tmp/archive/t.zip");
+	STATUS(0, "/bin/zip", "-q", "-d", "/tmp/archive/t.zip", "d/l");
+	STATUS(1, "/bin/sh", "-c", "unzip -l /tmp/archive/t.zip | grep -q d/l");
+	// tar makes zip and 7z archives too.
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/archive && tar -acf t.7z d && tar --format zip -cf u.zip d");
+	OUTPUT("", "first\n", "/bin/tar", "-xOf", "/tmp/archive/t.7z", "d/a");
+	OUTPUT("", "first\n", "/bin/unzip", "-p", "/tmp/archive/u.zip", "d/a");
+	STATUS(0, "/bin/rm", "-r", "/tmp/archive");
+}
+
+// What file makes of each kind of file, and jq.
+static void describing(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/describe");
+	OUTPUT("text\n", "text\n", "/bin/tee", "/tmp/describe/t");
+	STATUS(0, "/bin/sh", "-c",
+			"cd /tmp/describe && gzip -k t && bzip2 -k t && xz -k t && zstd -q t && lz4 -q t "
+			"&& tar -cf t.tar t && zip -q t.zip t && echo t | cpio -o --quiet -H newc >t.cpio");
+	const char *const kinds[][2] = {{"t", "text/plain"}, {"t.gz", "application/gzip"},
+			{"t.bz2", "application/x-bzip2"}, {"t.xz", "application/x-xz"},
+			{"t.zst", "application/zstd"}, {"t.lz4", "application/x-lz4"},
+			{"t.tar", "application/x-tar"}, {"t.zip", "application/zip"},
+			{"t.cpio", "application/x-cpio"}};
+	for(size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		char path[64], expected[64];
+		snprintf(path, sizeof(path), "/tmp/describe/%s", kinds[i][0]);
+		snprintf(expected, sizeof(expected), "%s\n", kinds[i][1]);
+		expect(__FILE__, __LINE__, 0, "", 0, expected, 0,
+				(const char *const[]){"/bin/file", "-b", "--mime-type", path, NULL});
+	}
+	OUTPUT("", "ASCII text\n", "/bin/file", "-b", "/tmp/describe/t");
+	// Inside the compressed file.
+	CONTAINS("ASCII text (XZ compressed data", "/bin/file", "-bz", "/tmp/describe/t.xz");
+	CONTAINS("ELF 64-bit LSB pie executable, x86-64", "/bin/file", "-b", "/system/bin/jq");
+	CONTAINS("directory", "/bin/file", "/tmp/describe");
+	CONTAINS("symbolic link to system/bin", "/bin/file", "/bin");
+	STATUS(0, "/bin/rm", "-r", "/tmp/describe");
+
+	OUTPUT("{\"a\":1,\"b\":[1,2]}", "1\n", "/bin/jq", ".a");
+	OUTPUT("{\"a\":1,\"b\":[1,2]}", "[2,4]\n", "/bin/jq", "-c", ".b | map(. * 2)");
+	OUTPUT("{\"name\":\"Duke\"}", "Duke\n", "/bin/jq", "-r", ".name");
+	OUTPUT("", "{\n  \"os\": \"Dukovo\"\n}\n", "/bin/jq", "-n", "--arg", "os", "Dukovo",
+			"{os: $os}");
+	OUTPUT("", "3\n", "/bin/jq", "-n", "[range(3)] | add");
+	OUTPUT("[3,1,2]", "[1,2,3]\n", "/bin/jq", "-c", "sort");
+	// Oniguruma's regular expressions.
+	OUTPUT("\"abc-123\"", "true\n\"123\"\n", "/bin/jq",
+			"test(\"^[a-z]+-\"), (capture(\"(?<n>[0-9]+)\") | .n)");
+	// decNumber keeps numbers too large for a double exact.
+	OUTPUT("100000000000000000000000000001\n", "100000000000000000000000000001\n", "/bin/jq", ".");
+	// The C library's obsolete drem and significand.
+	OUTPUT("", "1.25\n-1\n", "/bin/jq", "-n", "(10 | significand), drem(5; 3)");
+	OUTPUT("", "1425599507\n", "/bin/jq", "-n", "\"2015-03-05T23:51:47Z\" | fromdate");
+	OUTPUT("", "\"2015-03-05T23:51:47Z\"\n", "/bin/jq", "-n", "1425599507 | todate");
+	RUN_WITH(1, "{}", "null\n", 0, "/bin/jq", "-e", ".missing");
+	RUN_WITH(5, "{", "", 0, "/bin/jq", ".");
+}
+
 // Every utility has its manual page.
 static void manuals(void) {
 	const char *const pages[] = {"ls", "cat", "sort", "test", "[", "find", "xargs", "grep", "sed",
 			"awk", "diff", "cmp", "diff3", "sdiff", "patch", "bc", "dc", "less", "man", "mandoc",
-			"apropos", "tput", "tset", "clear"};
+			"apropos", "tput", "tset", "clear", "gzip", "gunzip", "zcat", "zgrep", "bzip2",
+			"bunzip2", "bzcat", "xz", "unxz", "xzcat", "lzma", "xzgrep", "zstd", "unzstd",
+			"zstdcat", "lz4", "unlz4", "tar", "cpio", "unzip", "bsdcat", "zip", "file", "jq"};
 	for(size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
 		char path[64];
 		snprintf(path, sizeof(path), "/usr/share/man/man1/%s.1", pages[i]);
@@ -287,6 +430,9 @@ int main(void) {
 	RUN(searching);
 	RUN(comparing);
 	RUN(others);
+	RUN(compressing);
+	RUN(archiving);
+	RUN(describing);
 	RUN(manuals);
 	return check_end();
 }

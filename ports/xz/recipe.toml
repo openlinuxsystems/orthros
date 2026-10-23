@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# XZ Utils (ADR 0086): xz and liblzma, for .xz and .lzma files. Its
+# library and xz are 0BSD; xzgrep, xzdiff, xzless and xzmore, scripts of
+# their own, are GPL-2.0-or-later (ADR 0087). The getopt_long it keeps
+# under the LGPL is not built, as mlibc has one.
+name = "xz"
+version = "5.8.4"
+summary = "XZ Utils, the LZMA2 compressor, and liblzma"
+license = "0BSD AND GPL-2.0-or-later"
+homepage = "https://tukaani.org/xz/"
+depends = ["mlibc"]
+
+[source]
+url = "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.xz"
+sha256 = "4ce24038fd4221e0d13bc1a2de7a4db56e90b92b3bf75321f6c14be73f65de4b"

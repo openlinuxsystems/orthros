@@ -100,7 +100,8 @@ _target/userspace/_).
 	C++ headers it is built with, Rust's standard library, the C.UTF-8
 	locale, the crates.io crates patched for Radix, uutils' core
 	utilities and findutils, ncurses, zlib, less, mandoc, GNU grep, sed,
-	diffutils and patch, awk and bc, and Lua, mlibc's own tests and
+	diffutils and patch, awk and bc, gzip, bzip2, xz, zstd and lz4,
+	libarchive, Zip, file and jq, and Lua, mlibc's own tests and
 	libc-test, which the *posix* boot test runs. A port is built again only when something that went into
 	its last build changed: its directory, the toolchain (and the pinned
 	Rust toolchain, for Rust's standard library) or a port it needs.

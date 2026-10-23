@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# file (ADR 0086): tells what kind of data a file holds, from the magic
+# database of the patterns that mark each kind, and looks inside files
+# compressed with gzip, bzip2, xz and zstd.
+name = "file"
+version = "5.47"
+summary = "file and libmagic, which tell what kind of data a file holds"
+license = "BSD-2-Clause"
+homepage = "https://www.darwinsys.com/file/"
+depends = ["mlibc", "zlib", "bzip2", "xz", "zstd"]
+
+[source]
+url = "https://astron.com/pub/file/file-5.47.tar.gz"
+sha256 = "45672fec165cb4cc1358a2d76b5d57d22876dcb97ab169427ac385cbe1d5597a"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/f/file/file_5.47.orig.tar.gz"]

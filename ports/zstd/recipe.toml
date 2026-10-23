@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Zstandard (ADR 0086): the zstd compressor and libzstd, for .zst files.
+# Meta offers it under BSD-3-Clause or GPL-2.0-only; Dukovo takes it
+# under BSD-3-Clause. zstd reads and writes .gz, .xz and .lz4 files too,
+# with zlib, liblzma and liblz4.
+name = "zstd"
+version = "1.5.7"
+summary = "Zstandard, the zstd compressor, and libzstd"
+license = "BSD-3-Clause OR GPL-2.0-only"
+homepage = "https://facebook.github.io/zstd/"
+depends = ["mlibc", "zlib", "xz", "lz4"]
+
+[source]
+git = "https://github.com/facebook/zstd.git"
+commit = "f8745da6ff1ad1e7bab384bd1f9d742439278e99"
+tag = "v1.5.7"

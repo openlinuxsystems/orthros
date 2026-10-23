@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# libarchive (ADR 0086): reads and writes tar, cpio, pax, zip, 7z, ISO 9660
+# and many other archive formats, compressed with any of the ports'
+# compressors, and reads RAR. Its bsdtar, bsdcpio and bsdunzip are tar,
+# cpio and unzip. libarchive is BSD-2-Clause, with BSD-3-Clause files;
+# its BLAKE2 code may be taken under CC0-1.0 or Apache-2.0, and its date
+# parser is in the public domain.
+name = "libarchive"
+version = "3.8.10"
+summary = "libarchive, with tar, cpio, unzip and bsdcat"
+license = "BSD-2-Clause AND BSD-3-Clause AND (CC0-1.0 OR Apache-2.0)"
+homepage = "https://www.libarchive.org"
+depends = ["mlibc", "zlib", "bzip2", "xz", "lz4", "zstd"]
+
+[source]
+url = "https://github.com/libarchive/libarchive/releases/download/v3.8.10/libarchive-3.8.10.tar.xz"
+sha256 = "56cad765459d5ee25a3b761f90c47d99379d28297fbfb72d908880d6b875fb96"

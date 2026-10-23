@@ -152,6 +152,35 @@ int append(char *out, size_t *len, const char *path) {
 	return 0;
 }
 
+// Whether `path` has a `..` among its names.
+bool climbs(const char *path, size_t len) {
+	for(size_t i = 0; i < len; i++) {
+		bool starts = i == 0 || path[i - 1] == '/';
+		if(starts && path[i] == '.' && i + 1 < len && path[i + 1] == '.'
+				&& (i + 2 == len || path[i + 2] == '/'))
+			return true;
+	}
+	return false;
+}
+
+// Joins `rest`, a path beneath the directory whose path beneath the root
+// is the `len` bytes at `out`, onto it: `.` stands for the directory
+// itself in either. Returns the length, or 0 if it does not fit.
+size_t join(char *out, size_t len, const char *rest, size_t rest_len) {
+	if(rest_len == 1 && rest[0] == '.')
+		return len;
+	if(len == 1 && out[0] == '.')
+		len = 0;
+	size_t need = len + (len ? 1 : 0) + rest_len;
+	if(need >= PATH_MAX_BYTES)
+		return 0;
+	if(len)
+		out[len++] = '/';
+	memcpy(out + len, rest, rest_len);
+	out[need] = 0;
+	return need;
+}
+
 } // namespace
 
 int resolve(int dirfd, const char *path, Path *out) {
@@ -163,11 +192,21 @@ int resolve(int dirfd, const char *path, Path *out) {
 	if(total >= PATH_MAX_BYTES)
 		return ENAMETOOLONG;
 	if(path[0] != '/' && dirfd != AT_FDCWD) {
-		// Beneath the directory `dirfd` holds, which the kernel resolves:
-		// `..` cannot climb above that directory (docs/design/posix.md).
+		// Beneath the directory `dirfd` holds, which the kernel resolves.
 		out->dir = slot_of(dirfd);
 		if(out->dir == NO_SLOT)
 			return EBADF;
+		// `..` cannot climb above that directory there, so a path with
+		// one goes from the root, by the directory's path, when the C
+		// library knows it (ADR 0089); one that climbs above a directory
+		// without a path fails with EXDEV.
+		if(climbs(path, total)) {
+			if(size_t len = dir_path(dirfd, out->text); len) {
+				out->dir = SLOT_ROOT;
+				out->len = join(out->text, len, path, total);
+				return out->len ? 0 : ENAMETOOLONG;
+			}
+		}
 		memcpy(out->text, path, total + 1);
 		out->len = total;
 		return 0;
@@ -323,6 +362,129 @@ uint64_t dir_cursor(int fd) {
 void set_dir_cursor(int fd, uint64_t cursor) {
 	if(fd >= 0 && fd < MAX_FDS)
 		__atomic_store_n(&cursors[fd], cursor, __ATOMIC_RELAXED);
+}
+
+namespace {
+
+// The paths of directory descriptors (ADR 0089), in a pool of entries a
+// page each, of which only those that have been used take memory. They
+// are taken and given back with atomic operations alone: close and dup2
+// are async-signal-safe, and a child after fork calls them while a lock
+// its parent's other threads held may stay held.
+constexpr int DIR_PATHS = 64;
+struct alignas(4096) DirPath {
+	char text[PATH_MAX_BYTES];
+};
+DirPath dir_paths[DIR_PATHS];
+
+// The entries in use, a bit each.
+uint64_t dir_paths_used;
+static_assert(DIR_PATHS <= 64);
+
+// Each descriptor's entry, plus one: 0 for none.
+uint8_t dir_path_of[MAX_FDS];
+
+// Takes a free entry: its number, or -1 if all are in use.
+int take_dir_path() {
+	uint64_t used = __atomic_load_n(&dir_paths_used, __ATOMIC_RELAXED);
+	for(;;) {
+		if(!~used)
+			return -1;
+		int n = __builtin_ctzll(~used);
+		if(__atomic_compare_exchange_n(&dir_paths_used, &used, used | (UINT64_C(1) << n), true,
+				__ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+			return n;
+	}
+}
+
+// Gives entry `n` (-1 for none) back.
+void give_dir_path(int n) {
+	if(n >= 0)
+		__atomic_fetch_and(&dir_paths_used, ~(UINT64_C(1) << n), __ATOMIC_RELEASE);
+}
+
+// Makes entry `n` (-1 for none) descriptor `fd`'s, giving back the one it
+// had.
+void set_dir_path(int fd, int n) {
+	if(fd < 0 || fd >= MAX_FDS) {
+		give_dir_path(n);
+		return;
+	}
+	uint8_t old = __atomic_exchange_n(&dir_path_of[fd], static_cast<uint8_t>(n + 1),
+			__ATOMIC_RELEASE);
+	give_dir_path(static_cast<int>(old) - 1);
+}
+
+} // namespace
+
+void note_dir_path(int fd, const Path &path) {
+	int n = take_dir_path();
+	if(n < 0) {
+		set_dir_path(fd, -1);
+		return;
+	}
+	char *text = dir_paths[n].text;
+	size_t len = 1;
+	text[0] = '.';
+	text[1] = 0;
+	if(path.dir != SLOT_ROOT) {
+		// Beneath another directory descriptor, which resolve gave the
+		// kernel as it was: its path, then this one.
+		int from = static_cast<int>(path.dir - FD_BASE);
+		if(path.dir < FD_BASE || !(len = dir_path(from, text))) {
+			give_dir_path(n);
+			set_dir_path(fd, -1);
+			return;
+		}
+	}
+	len = join(text, len, path.text, path.len);
+	if(len && climbs(text, len)) {
+		// Where it really is, so that the paths of the directories a walk
+		// climbs back to do not grow with each `..`.
+		struct radix_directory_real_path_results r;
+		char canonical[PATH_MAX_BYTES];
+		if(radix_directory_real_path(SLOT_ROOT, text, len, canonical, sizeof(canonical) - 1, &r)
+				|| r.len >= sizeof(canonical)) {
+			len = 0;
+		} else {
+			memcpy(text, canonical, r.len);
+			text[r.len] = 0;
+			len = r.len;
+		}
+	}
+	if(!len) {
+		give_dir_path(n);
+		n = -1;
+	}
+	set_dir_path(fd, n);
+}
+
+void copy_dir_path(int from, int to) {
+	if(from == to)
+		return;
+	int n = -1;
+	if(from >= 0 && from < MAX_FDS && __atomic_load_n(&dir_path_of[from], __ATOMIC_RELAXED)
+			&& (n = take_dir_path()) >= 0 && !dir_path(from, dir_paths[n].text)) {
+		give_dir_path(n);
+		n = -1;
+	}
+	set_dir_path(to, n);
+}
+
+void forget_dir_path(int fd) {
+	if(fd >= 0 && fd < MAX_FDS && __atomic_load_n(&dir_path_of[fd], __ATOMIC_RELAXED))
+		set_dir_path(fd, -1);
+}
+
+size_t dir_path(int fd, char *out) {
+	if(fd < 0 || fd >= MAX_FDS)
+		return 0;
+	int n = static_cast<int>(__atomic_load_n(&dir_path_of[fd], __ATOMIC_ACQUIRE)) - 1;
+	if(n < 0)
+		return 0;
+	size_t len = strlen(dir_paths[n].text);
+	memcpy(out, dir_paths[n].text, len + 1);
+	return len;
 }
 
 void log(const char *text, size_t len) {

@@ -1,0 +1,21 @@
+SPDX-FileCopyrightText: 2015 Santiago Vila <sanvila@debian.org>
+SPDX-License-Identifier: Info-ZIP
+
+From Debian's zip 3.0-16 (https://salsa.debian.org/debian/zip), unchanged
+but for these lines.
+
+From: Santiago Vila <sanvila@debian.org>
+Subject: Remove (optional) build date to make the build reproducible
+Bug-Debian: https://bugs.debian.org/779042
+
+--- a/unix/unix.c
++++ b/unix/unix.c
+@@ -1020,7 +1020,7 @@
+ 
+ 
+ /* Define the compile date string */
+-#ifdef __DATE__
++#if 0
+ #  define COMPILE_DATE " on " __DATE__
+ #else
+ #  define COMPILE_DATE ""
