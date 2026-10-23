@@ -38,10 +38,23 @@ pub fn parse(bytes: &[u8]) -> Result<&str> {
     if bytes.len() > PATH_MAX {
         return Err(Error::NameTooLong);
     }
-    if bytes.contains(&0) {
-        return Err(Error::BadName);
+    // One loop finds a NUL and whether the path is ASCII, as most are:
+    // then it needs no UTF-8 decoding, whose set-up alone costs more than
+    // checking a short name.
+    let mut high = 0;
+    for &byte in bytes {
+        if byte == 0 {
+            return Err(Error::BadName);
+        }
+        high |= byte;
     }
-    let path = core::str::from_utf8(bytes).map_err(|_| Error::BadName)?;
+    let path = if high < 0x80
+        && let Some(ascii) = bytes.as_ascii()
+    {
+        ascii.as_str()
+    } else {
+        core::str::from_utf8(bytes).map_err(|_| Error::BadName)?
+    };
     if path.starts_with('/') {
         return Err(Error::Outside);
     }

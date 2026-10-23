@@ -439,6 +439,17 @@ tests are:
 	on its standard input and checked for what it writes and its exit
 	status, and their manual pages.
 
+*admin*
+	The native administration tools (*systools*(1)) as administrators
+	and their scripts use them: ps, top, pgrep, pkill and kill on
+	children it starts and stops; who, w, users and uptime; free,
+	vmstat and df; renice, ionice and taskset, set on children and
+	inherited through *exec*; lsof on a file it holds; rtrace on a
+	command, its children and a running process; dmesg and
+	_/dev/kmsg_; xxd, hexdump, hd, column and tree against what the
+	Linux tools write; script, watch and pidstat; and the _/proc_
+	files they read (*radix-proc*(5)).
+
 *shell*
 	The shell, *nukesh*(1): the scripts of its test suite, each giving
 	what bash gives, or dash for those run as _/bin/sh_; then the shell
@@ -486,7 +497,9 @@ passed*; the boot test fails on any failure.
 - No System V IPC, POSIX message queues or POSIX asynchronous I/O
   (Radix's own is its rings, *radix-ring*(2)), and no *epoll*,
   *eventfd*, *signalfd*, *timerfd* or *inotify*.
-- CPU time spent in the kernel counts as user time.
+- CPU time is split between user mode and the kernel by the timer's
+  samples, 100 a second, as on Linux, so a program that runs for less
+  than a tick may show all its time as one or the other.
 - Rust's standard library cannot catch a stack overflow yet (it needs
   *pthread_getattr_np*); the program ends with SIGSEGV instead.
 - Calls mlibc leaves "not implemented" end the program with a message

@@ -58,7 +58,7 @@ use crate::sched::{self, Name, wait};
 use crate::user::memory::{Anon, FileSource, Placement, SpaceObject, SpaceRef};
 use crate::user::methods::{Answer, answer};
 use crate::user::objects::{self, Object};
-use crate::user::process::{ProcessObject, ProcessRef, Start};
+use crate::user::process::{ARGS_KEPT, ProcessObject, ProcessRef, Start};
 use crate::user::{Result, UserRef, cap_error, error};
 use crate::{Arch, caps};
 
@@ -70,7 +70,7 @@ const HEAD_MAX: usize = 65536;
 const HEAD: usize = 4096;
 
 /// A buffer of `len` zero bytes from the kernel's heap.
-fn zeroed(len: usize) -> Result<Vec<u8, Kmalloc>> {
+pub(super) fn zeroed(len: usize) -> Result<Vec<u8, Kmalloc>> {
     let mut bytes = Vec::new_in(kmalloc());
     bytes.try_reserve_exact(len).map_err(|_| error(Kernel::NoMemory))?;
     while bytes.len() < len {
@@ -81,7 +81,7 @@ fn zeroed(len: usize) -> Result<Vec<u8, Kmalloc>> {
 }
 
 /// Copies `bytes` to the kernel's heap.
-fn copied(bytes: &[u8]) -> Result<Vec<u8, Kmalloc>> {
+pub(super) fn copied(bytes: &[u8]) -> Result<Vec<u8, Kmalloc>> {
     let mut copy = zeroed(bytes.len())?;
     copy.copy_from_slice(bytes);
     Ok(copy)
@@ -382,17 +382,59 @@ pub fn exec(
     let name = core::str::from_utf8(&name[..name.len().min(process::NAME_MAX as usize)])
         .unwrap_or("program");
     let name = Name::new(name);
+    keep_args(target, &block, script.as_ref(), execfn);
+    if let Some(cwd) = cwd {
+        super::set_directory(target, cwd);
+    }
 
     if own {
-        replace_own(user, target, space, [entry, sp, 0], name)
+        replace_own(user, target, space, [entry, sp, 0], name, run_as)
     } else {
-        start_created(user, target, slot, space, [entry, sp, 0], name)?;
+        start_created(user, target, slot, space, [entry, sp, 0], name, run_as)?;
         answer(label, 0, [0; 8])
     }
 }
 
 /// A script's interpreter, and the argument its `#!` line gives it.
 type Script = (Vec<u8, Kmalloc>, Option<Vec<u8, Kmalloc>>);
+
+/// Has `target` keep the arguments its new program starts with, as
+/// [`build_stack`] lays them out, for `/proc/<n>/cmdline`: for a script,
+/// its interpreter, the `#!` line's argument and the script's path in
+/// place of the first of the block's; each ends with a NUL.
+fn keep_args(
+    target: &ProcessRef,
+    block: &Block<'_>,
+    script: Option<&Script>,
+    execfn: Option<&[u8]>,
+) {
+    let mut kept: Vec<u8, Kmalloc> = Vec::new_in(kmalloc());
+    if kept.try_reserve_exact(ARGS_KEPT).is_err() {
+        return;
+    }
+    let mut add = |arg: &[u8]| {
+        for &byte in arg.iter().chain([0u8].iter()) {
+            if kept.push_within_capacity(byte).is_err() {
+                return;
+            }
+        }
+    };
+    let mut given = block.args();
+    let first = given.next();
+    if let Some((interpreter, argument)) = script {
+        add(interpreter);
+        if let Some(argument) = argument {
+            add(argument);
+        }
+        add(execfn.or(first).unwrap_or(b""));
+    } else if let Some(first) = first {
+        add(first);
+    }
+    for arg in given {
+        add(arg);
+    }
+    target.set_args(&kept);
+}
 
 /// Lays out the new program's stack in `space` as the System V ABI says:
 /// its arguments (the script's interpreter's first, for a script), its
@@ -526,15 +568,16 @@ fn install_space(process: &ProcessRef, space: &SpaceRef, empty_thread: bool) -> 
     Ok(())
 }
 
-/// The caller's own process runs the new program: its other threads stop,
-/// `space` takes the old one's place, and a thread starts at `start`;
-/// the calling thread then exits.
+/// The caller's own process runs the new program, at `path` as the C
+/// library named it: its other threads stop, `space` takes the old one's
+/// place, and a thread starts at `start`; the calling thread then exits.
 fn replace_own(
     user: &UserRef,
     process: &ProcessRef,
     space: SpaceRef,
     start: [u64; 3],
     name: Name,
+    path: &[u8],
 ) -> Result<Answer> {
     let me = sched::current().ok_or(error(Kernel::Gone))?;
     // The other threads stop before anything changes: none of them may see
@@ -576,6 +619,7 @@ fn replace_own(
     };
     process.posix.lock().actions.reset_for_exec();
     process.set_name(name);
+    crate::fs::trace::exec(process, me.id(), path);
     // The new program's thread has the process's number, as on Linux,
     // whichever thread called exec; the caller, which has it if it was the
     // first, exits as the new one starts.
@@ -607,9 +651,10 @@ fn replace_own(
 }
 
 /// A process `create` made, whose capability is in `user`'s slot `slot`,
-/// runs the new program: it gets `space`, its own process in
+/// runs the new program, at `path`: it gets `space`, its own process in
 /// SLOT_PROCESS if that slot is empty, a place in the tree as the caller's
 /// child, and a thread at `start`.
+#[allow(clippy::too_many_arguments)]
 fn start_created(
     user: &UserRef,
     process: &ProcessRef,
@@ -617,6 +662,7 @@ fn start_created(
     space: SpaceRef,
     start: [u64; 3],
     name: Name,
+    path: &[u8],
 ) -> Result<()> {
     install_space(process, &space, false)?;
     let me = &user.process;
@@ -645,7 +691,11 @@ fn start_created(
         posix.terminal = parent.terminal.clone();
         posix.inherit(&parent);
     }
+    let (class, level) = me.io_priority();
+    process.set_io_priority(class, level);
     process.set_name(name);
+    crate::fs::trace::forked(me, process);
+    crate::fs::trace::exec(process, process.number(), path);
     let mask = user.signals.lock().mask;
     ProcessObject::start(
         process,

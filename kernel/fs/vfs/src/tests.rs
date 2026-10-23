@@ -63,6 +63,8 @@ fn paths_are_checked() {
     assert_eq!(path::parse(b"/etc"), Err(Error::Outside));
     assert_eq!(path::parse(b"a\0b"), Err(Error::BadName));
     assert_eq!(path::parse(&[0xff]), Err(Error::BadName));
+    assert_eq!(path::parse("é/ü".as_bytes()), Ok("é/ü"));
+    assert_eq!(path::parse(b"\xc3"), Err(Error::BadName));
     assert_eq!(path::parse(&[b'a'; 4097]), Err(Error::NameTooLong));
     let parts: Vec<_> = path::components("a//./../b/").collect::<Result<_>>().unwrap();
     assert_eq!(

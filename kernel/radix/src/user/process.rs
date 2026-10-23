@@ -49,7 +49,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::endpoint::NO_SLOT;
 use radix_abi::startup;
@@ -78,6 +78,7 @@ use super::{
 };
 use crate::Arch;
 use crate::caps::{self, Store};
+use crate::fs::trace::TraceRef;
 use crate::sched::{self, Name, Options, SpawnError, ThreadRef, wait};
 
 /// A process, shared.
@@ -134,6 +135,22 @@ pub struct ProcessObject {
     grown: Mutex<Option<Charge>>,
     /// The CPU time of its threads that have exited, in nanoseconds.
     exited_ns: AtomicU64,
+    /// Theirs: the timer's samples of them in user mode and in the
+    /// kernel, and their voluntary and involuntary switches.
+    exited_ticks: [AtomicU64; 2],
+    exited_switches: [AtomicU64; 2],
+    /// When it was made, in nanoseconds since boot.
+    started_ns: u64,
+    /// The bytes its threads have read and written with radix-file(2)'s
+    /// methods, from files, pipes, sockets and terminals alike.
+    read_bytes: AtomicU64,
+    written_bytes: AtomicU64,
+    /// Its I/O class and level (radix-process(2)'s `io_priority`): the
+    /// class in bits 8 to 15, the level in bits 0 to 7.
+    io_priority: AtomicU32,
+    /// The arguments its program started with, each ending with a NUL, up
+    /// to ARGS_KEPT bytes (`/proc/<n>/cmdline`); none before `exec`.
+    args: SpinLock<Option<Vec<u8, Kmalloc>>>,
     /// Its POSIX side (Phase 8).
     pub posix: SpinLock<PosixState>,
     /// Moves when one of its children changes, for `wait`.
@@ -149,6 +166,10 @@ pub struct ProcessObject {
     /// Whether it has taken a POSIX record lock (`fs::locks`), which go
     /// when it ends or deletes a capability of their file.
     record_locks: AtomicBool,
+    /// The trace that follows it (`fs::trace`), if one does.
+    trace: SpinLock<Option<TraceRef>>,
+    /// Whether one does: what each of its system calls looks at first.
+    traced: AtomicBool,
 }
 
 struct State {
@@ -162,6 +183,11 @@ struct State {
     /// Someone has taken on finishing it.
     finishing: bool,
 }
+
+/// The most bytes of a program's arguments a process keeps for
+/// `/proc/<n>/cmdline`: a page, as Linux shows (from the program's memory)
+/// up to a page of them to other processes.
+pub const ARGS_KEPT: usize = 4096;
 
 /// Whether the first process, numbered 1, has been made; the others take
 /// their numbers from the count threads have theirs from
@@ -230,39 +256,7 @@ pub fn create(
                 store.create(SlotRef::new(keep, 0), ObjectKind::AddressSpace).map_err(cap_error)?;
             objects::insert(store, id, Object::Space(space.clone()))
                 .map_err(|_| error(Kernel::NoMemory))?;
-            let process = ProcessObject {
-                number: if FIRST_MADE.swap(true, Ordering::Relaxed) {
-                    sched::take_number()
-                } else {
-                    1
-                },
-                numbered: AtomicBool::new(false),
-                name: SpinLock::new(Name::new(name)),
-                cspace,
-                keep,
-                space: SpinLock::new(Some(space)),
-                account,
-                state: SpinLock::new(State {
-                    phase: ProcessState::Created,
-                    code: 0,
-                    threads,
-                    notify: None,
-                    finishing: false,
-                }),
-                on_exit,
-                pending: SpinLock::new(None),
-                made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
-                grown: Mutex::new(None),
-                exited_ns: AtomicU64::new(0),
-                posix: SpinLock::new(posix),
-                child_events: AtomicU64::new(0),
-                signal_events: AtomicU64::new(0),
-                stopped: AtomicBool::new(false),
-                posix_child: AtomicBool::new(false),
-                record_locks: AtomicBool::new(false),
-            };
-            let process: ProcessRef =
-                Arc::try_new_in(process, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
+            let process = allocate(name, cspace, keep, space, account, threads, on_exit, posix)?;
             // Before its capability exists, so that a failure leaves
             // nothing to undo but the spaces.
             if let Some(maker) = maker {
@@ -287,7 +281,76 @@ pub fn create(
     .and_then(|made| made)
 }
 
+/// Makes the object of a process `create` is making, on the heap. Kept out
+/// of `create`, whose frame would otherwise hold the object twice (ADR
+/// 0058).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn allocate(
+    name: &str,
+    cspace: SpaceId,
+    keep: SpaceId,
+    space: SpaceRef,
+    account: AccountRef,
+    threads: Vec<ThreadRef, Kmalloc>,
+    on_exit: Option<fn(&ProcessObject, u64)>,
+    posix: PosixState,
+) -> Result<ProcessRef> {
+    let process = ProcessObject {
+        number: if FIRST_MADE.swap(true, Ordering::Relaxed) { sched::take_number() } else { 1 },
+        numbered: AtomicBool::new(false),
+        name: SpinLock::new(Name::new(name)),
+        cspace,
+        keep,
+        space: SpinLock::new(Some(space)),
+        account,
+        state: SpinLock::new(State {
+            phase: ProcessState::Created,
+            code: 0,
+            threads,
+            notify: None,
+            finishing: false,
+        }),
+        on_exit,
+        pending: SpinLock::new(None),
+        made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
+        grown: Mutex::new(None),
+        exited_ns: AtomicU64::new(0),
+        exited_ticks: [const { AtomicU64::new(0) }; 2],
+        exited_switches: [const { AtomicU64::new(0) }; 2],
+        started_ns: sched::now_ns(),
+        read_bytes: AtomicU64::new(0),
+        written_bytes: AtomicU64::new(0),
+        io_priority: AtomicU32::new(0),
+        args: SpinLock::new(None),
+        posix: SpinLock::new(posix),
+        child_events: AtomicU64::new(0),
+        signal_events: AtomicU64::new(0),
+        stopped: AtomicBool::new(false),
+        posix_child: AtomicBool::new(false),
+        record_locks: AtomicBool::new(false),
+        trace: SpinLock::new(None),
+        traced: AtomicBool::new(false),
+    };
+    Arc::try_new_in(process, kmalloc()).map_err(|_| error(Kernel::NoMemory))
+}
+
 impl ProcessObject {
+    /// Whether a trace follows it (radix-trace(2)).
+    #[inline(always)]
+    pub fn traced(&self) -> bool {
+        self.traced.load(Ordering::Relaxed)
+    }
+
+    /// Runs `f` on the trace that follows it, which `f` may change, with
+    /// that locked. A trace `f` takes out must go once the lock has.
+    pub fn with_trace<R>(&self, f: impl FnOnce(&mut Option<TraceRef>) -> R) -> R {
+        let mut trace = self.trace.lock();
+        let result = f(&mut trace);
+        self.traced.store(trace.is_some(), Ordering::Relaxed);
+        result
+    }
+
     /// Its number.
     pub fn number(&self) -> u64 {
         self.number
@@ -371,6 +434,97 @@ impl ProcessObject {
         let state = self.state.lock();
         let live: u64 = state.threads.iter().map(|thread| thread.runtime_ns()).sum();
         self.exited_ns.load(Ordering::Relaxed) + live
+    }
+
+    /// Its CPU time so far in user mode and in the kernel: its threads',
+    /// live and exited, each split as the timer's samples of it share it
+    /// (`radix_sched::split_time`).
+    pub fn cpu_times(&self) -> (u64, u64) {
+        let state = self.state.lock();
+        let (mut user, mut system) = radix_sched::split_time(
+            self.exited_ns.load(Ordering::Relaxed),
+            self.exited_ticks[0].load(Ordering::Relaxed),
+            self.exited_ticks[1].load(Ordering::Relaxed),
+        );
+        for thread in state.threads.iter() {
+            let (u, s) = thread.cpu_times();
+            user += u;
+            system += s;
+        }
+        (user, system)
+    }
+
+    /// The times its threads, live and exited, gave the CPU up to wait,
+    /// and the times they were made to.
+    pub fn switch_counts(&self) -> (u64, u64) {
+        let state = self.state.lock();
+        let mut voluntary = self.exited_switches[0].load(Ordering::Relaxed);
+        let mut involuntary = self.exited_switches[1].load(Ordering::Relaxed);
+        for thread in state.threads.iter() {
+            let (v, i) = thread.switch_counts();
+            voluntary += v;
+            involuntary += i;
+        }
+        (voluntary, involuntary)
+    }
+
+    /// When it was made, in nanoseconds since boot.
+    pub fn started_ns(&self) -> u64 {
+        self.started_ns
+    }
+
+    /// Counts `bytes` read by one of its threads.
+    #[inline]
+    pub fn note_read(&self, bytes: u64) {
+        self.read_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Counts `bytes` written by one of its threads.
+    #[inline]
+    pub fn note_written(&self, bytes: u64) {
+        self.written_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// The bytes its threads have read and written.
+    pub fn io_bytes(&self) -> (u64, u64) {
+        (self.read_bytes.load(Ordering::Relaxed), self.written_bytes.load(Ordering::Relaxed))
+    }
+
+    /// Its I/O class and level as radix-process(2)'s `io_priority` sets
+    /// them: the class's number and the level.
+    pub fn io_priority(&self) -> (u32, u32) {
+        let packed = self.io_priority.load(Ordering::Relaxed);
+        (packed >> 8, packed & 0xff)
+    }
+
+    /// Sets its I/O class and level.
+    pub fn set_io_priority(&self, class: u32, level: u32) {
+        self.io_priority.store((class << 8) | (level & 0xff), Ordering::Relaxed);
+    }
+
+    /// Keeps `args`, the arguments its new program starts with, each
+    /// ending with a NUL: the first ARGS_KEPT bytes. Without memory for
+    /// them it keeps none.
+    pub fn set_args(&self, args: &[u8]) {
+        let kept = &args[..args.len().min(ARGS_KEPT)];
+        let mut copy = Vec::new_in(kmalloc());
+        let copy = copy.try_reserve_exact(kept.len()).ok().map(|()| {
+            for &byte in kept {
+                // Room was reserved above.
+                let _ = copy.push_within_capacity(byte);
+            }
+            copy
+        });
+        let old = core::mem::replace(&mut *self.args.lock(), copy);
+        drop(old);
+    }
+
+    /// Writes the arguments its program started with to `out`, each
+    /// ending with a NUL, as `/proc/<n>/cmdline` shows them.
+    pub fn write_args(&self, out: &mut dyn FnMut(&[u8])) {
+        if let Some(args) = self.args.lock().as_ref() {
+            out(args);
+        }
     }
 
     /// Asks every thread but `me` to stop (`exec`): each ends at its next
@@ -514,6 +668,10 @@ impl ProcessObject {
             .held();
         if let Some(cpu) = cpu {
             options = options.pinned(cpu);
+        } else if let Some(maker) = sched::current().filter(|maker| maker.user().is_some()) {
+            // A program's thread makes threads that may run where it may
+            // (`sched_setaffinity`), through `fork`, `exec` and `start`.
+            options = options.affinity(maker.cpu_mask());
         }
         if !process.numbered.swap(true, Ordering::Relaxed) {
             options = options.number(process.number);
@@ -613,6 +771,12 @@ impl ProcessObject {
             // Its CPU time stays the process's, under the state's lock so
             // that `cpu_ns` never misses it.
             self.exited_ns.fetch_add(gone.runtime_ns(), Ordering::Relaxed);
+            let (user, system) = gone.ticks();
+            self.exited_ticks[0].fetch_add(user, Ordering::Relaxed);
+            self.exited_ticks[1].fetch_add(system, Ordering::Relaxed);
+            let (voluntary, involuntary) = gone.switch_counts();
+            self.exited_switches[0].fetch_add(voluntary, Ordering::Relaxed);
+            self.exited_switches[1].fetch_add(involuntary, Ordering::Relaxed);
             if running && how == Ending::Fault {
                 state.phase = ProcessState::Ending;
                 state.code = EXIT_FAULT;

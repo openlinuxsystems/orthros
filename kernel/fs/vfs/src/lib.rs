@@ -33,6 +33,7 @@
 // Kani's own, older nightly has the allocator API unstable still.
 #![cfg_attr(kani, feature(allocator_api))]
 #![feature(vec_push_within_capacity)]
+#![feature(ascii_char)]
 
 extern crate alloc;
 
@@ -624,16 +625,21 @@ impl Text {
     pub fn finish(self) -> Result<KVec<u8>> {
         if self.failed { Err(Error::NoMemory) } else { Ok(self.bytes) }
     }
-}
 
-impl fmt::Write for Text {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if self.bytes.len() + s.len() > Text::LIMIT
-            || mem::extend(&mut self.bytes, s.as_bytes()).is_err()
+    /// Adds `bytes`, which need not be UTF-8 (a program's arguments).
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> fmt::Result {
+        if self.bytes.len() + bytes.len() > Text::LIMIT
+            || mem::extend(&mut self.bytes, bytes).is_err()
         {
             self.failed = true;
             return Err(fmt::Error);
         }
         Ok(())
+    }
+}
+
+impl fmt::Write for Text {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_bytes(s.as_bytes())
     }
 }

@@ -207,6 +207,24 @@ enum SchedulingPolicy: u32 {
     idle = 5;
 }
 
+/// A process's class of disk access, as Linux's I/O priority classes
+/// (with Linux's numbers): radix-scheduling(7) says how disks serve
+/// each.
+enum IoClass: u32 {
+    /// None set: served as best effort at level 4, the middle one.
+    none = 0;
+    /// Served before every other class, by level.
+    realtime = 1;
+    /// Served by level, before the idle class.
+    best_effort = 2;
+    /// Served only when no other class waits.
+    idle = 3;
+}
+
+/// The most levels of the realtime and best-effort I/O classes: 0 is
+/// served first, IO_LEVELS - 1 last.
+const IO_LEVELS: u32 = 8;
+
 /// The resource limits `limits` reads and sets, as `setrlimit`'s (with
 /// Linux's numbers). radix-posix(7) says which ones the system enforces.
 enum LimitKind: u32 {
@@ -274,7 +292,7 @@ enum ProcessState: u8 {
 }
 
 /// A process.
-interface process = 0x000a version 4 {
+interface process = 0x000a version 5 {
     kind = process;
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
@@ -378,8 +396,8 @@ interface process = 0x000a version 4 {
                 arguments_too_long, not_found];
     /// Waits for a child of the caller to end (or with `flags`, to stop or
     /// continue), and returns its number and wait status and the CPU time
-    /// it used, in user mode and in the kernel (all of it counts as user
-    /// mode for now: radix-posix(7)). `pid` names the child, or is -1
+    /// it used, in user mode and in the kernel (as `times` splits it).
+    /// `pid` names the child, or is -1
     /// for any child, 0 for any in the caller's process group, or minus a
     /// process group. With no_hang it returns at once, with process 0 if
     /// none has changed. A child that ended is reaped, unless no_reap.
@@ -421,8 +439,10 @@ interface process = 0x000a version 4 {
         -> (handler: addr, flags: u64, mask: u64, restorer: addr)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
     /// The CPU time the caller's threads used, in user mode and in the
-    /// kernel (all of it counts as user mode for now: radix-posix(7)), and
-    /// the same for its children that it has waited for.
+    /// kernel, and the same for its children that it has waited for. The
+    /// kernel measures each thread's time exactly and splits it as the
+    /// timer's samples of where the thread was (radix-scheduling(7)), as
+    /// Linux does.
     method times = 19 ()
         -> (user_ns: u64, system_ns: u64, children_user_ns: u64, children_system_ns: u64)
         raises [no_such_slot, empty_slot, missing_rights];
@@ -603,4 +623,47 @@ interface process = 0x000a version 4 {
     /// do and its `accept` takes connections from.
     method socket = 48 (to: slot, flags: PipeFlags) -> ()
         raises [no_such_slot, missing_rights, occupied, no_memory];
+    /// Sets the CPUs thread `thread` may run on (0: the calling one; a
+    /// process's number names its first thread), as `sched_setaffinity`
+    /// does: `cpus` is a mask with bit n % 8 of byte n / 8 set for CPU n.
+    /// Bits past the kernel's CPUs are ignored; a mask without a CPU that
+    /// is online fails with invalid_argument. A thread starts with the
+    /// mask of the thread that made it. Changing another process's needs
+    /// what `kill` needs.
+    method set_affinity = 49 (thread: u64, cpus: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                no_such_process, not_permitted];
+    /// Copies the mask of the CPUs thread `thread` may run on (0: the
+    /// calling one) to `cpus`, as `sched_getaffinity` does, and returns
+    /// its size: the bytes of whole 64-bit words that hold a bit for
+    /// every CPU the kernel can have. A smaller buffer fails with
+    /// invalid_argument.
+    method affinity = 50 (thread: u64, cpus: out bytes) -> (size: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                no_such_process];
+    /// Reads, and with `set` changes, the I/O class `io_class` and level (0 to
+    /// IO_LEVELS - 1) of the processes `which` and `who` name, as Linux's
+    /// `ioprio_set` does: process `who` (0: the caller), the processes of
+    /// group `who` (0: the caller's), or those of user `who` (0: the
+    /// caller's). Returns the most urgent class and level among them, as
+    /// they were. A forked child has its parent's, and `exec` keeps them.
+    /// Changing another process's needs what `kill` needs.
+    method io_priority = 51 (which: PriorityWhich, who: u64, set: bool, io_class: IoClass,
+            level: u32)
+        -> (io_class: IoClass, level: u32)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
+                not_permitted];
+    /// Notes the caller's working directory, an absolute path that the C
+    /// library keeps (radix-posix(7)), so that /proc shows it
+    /// (radix-proc(5)). `exec` notes the one its block names.
+    method set_directory = 52 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                no_memory];
+    /// Traces process `pid` and puts a trace file, which reads its
+    /// records, in slot `to` (radix-trace(2)). Tracing a process needs
+    /// what `kill` needs; one already traced fails with busy, and the
+    /// caller's own with invalid_argument.
+    method trace = 53 (pid: u64, flags: TraceFlags, to: slot) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, occupied,
+                no_such_process, not_permitted, busy, no_memory];
 }

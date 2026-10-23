@@ -17,12 +17,30 @@ static long long ns(const struct timespec *ts) {
 	return (long long)ts->tv_sec * 1000000000LL + ts->tv_nsec;
 }
 
+// The CPU time in `usage`, user and system, in microseconds. A spin's
+// time is both: each clock read is a system call on Radix, and the
+// kernel splits a thread's time by where the timer finds it.
+static long long cpu_us(const struct rusage *usage) {
+	return (usage->ru_utime.tv_sec + usage->ru_stime.tv_sec) * 1000000LL +
+			usage->ru_utime.tv_usec + usage->ru_stime.tv_usec;
+}
+
 // Spins for `ms` milliseconds of the monotonic clock.
 static void spin(long ms) {
 	long long end = check_now_ns() + ms * 1000000LL;
 	volatile unsigned long n = 0;
 	while(check_now_ns() < end)
 		n++;
+}
+
+// Spins for `ms` milliseconds in user mode, reading the clock seldom.
+static void spin_user(long ms) {
+	long long end = check_now_ns() + ms * 1000000LL;
+	volatile unsigned long n = 0;
+	do {
+		for(int i = 0; i < 1 << 16; i++)
+			n++;
+	} while(check_now_ns() < end);
 }
 
 static void clocks(void) {
@@ -105,11 +123,16 @@ static void cpu_time(void) {
 	CHECK(ns(&thread_after) - ns(&thread_before) >= 50000000);
 	struct rusage usage;
 	CHECK(getrusage(RUSAGE_SELF, &usage) == 0);
-	CHECK(usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec >= 50000);
+	CHECK(cpu_us(&usage) >= 50000);
+	// Time in user mode is user time.
+	long long user_before = usage.ru_utime.tv_sec * 1000000LL + usage.ru_utime.tv_usec;
+	spin_user(100);
+	CHECK(getrusage(RUSAGE_SELF, &usage) == 0);
+	CHECK(usage.ru_utime.tv_sec * 1000000LL + usage.ru_utime.tv_usec - user_before >= 50000);
 	// A child's time counts for its parent once the parent has waited.
 	struct rusage children;
 	CHECK(getrusage(RUSAGE_CHILDREN, &children) == 0);
-	long before_children = children.ru_utime.tv_sec * 1000000 + children.ru_utime.tv_usec;
+	long long before_children = cpu_us(&children);
 	pid_t pid = check_fork();
 	if(pid == 0) {
 		spin(100);
@@ -118,9 +141,9 @@ static void cpu_time(void) {
 	int status;
 	struct rusage child;
 	CHECK(wait4(pid, &status, 0, &child) == pid);
-	CHECK(child.ru_utime.tv_sec * 1000000 + child.ru_utime.tv_usec >= 50000);
+	CHECK(cpu_us(&child) >= 50000);
 	CHECK(getrusage(RUSAGE_CHILDREN, &children) == 0);
-	CHECK(children.ru_utime.tv_sec * 1000000 + children.ru_utime.tv_usec - before_children >= 50000);
+	CHECK(cpu_us(&children) - before_children >= 50000);
 	struct tms mine;
 	times(&mine);
 	CHECK(mine.tms_cutime + mine.tms_cstime >= 5);

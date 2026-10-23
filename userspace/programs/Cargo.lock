@@ -372,6 +372,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-abi"
+version = "0.0.1"
+dependencies = [
+ "ridlc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -396,6 +403,10 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
 ]
+
+[[package]]
+name = "ridlc"
+version = "0.0.1"
 
 [[package]]
 name = "rustc_version"
@@ -571,6 +582,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "systools"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "radix-abi",
 ]
 
 [[package]]

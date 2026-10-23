@@ -17,11 +17,20 @@ of that moment. Sizes in *stat* are 0 until a file is opened, as on
 Linux, so read a file to its end rather than by its size.
 
 Most files are lines of *key*: _value_, one per line, in a fixed order.
-Keys are lower case, with *\_* between words. New keys may be added in
-later versions, never in the middle of the existing ones, so a reader
-should look keys up by name.
+Keys are lower case, with *\_* between words. The files with a line per
+thing (a thread, a capability, a CPU) write it as fields of
+*key*=_value_ separated by spaces, with a name or path, which may hold
+spaces, last. New keys may be added in later versions, never in the
+middle of the existing ones, so a reader should look keys up by name.
+Times are in nanoseconds, and memory in KiB where the key does not say
+otherwise.
 
-This page describes _/proc_ as of Phase 7 of the roadmap.
+Linux keeps its own _/proc_ formats, which programs read: Dukovo's own
+tools read these instead (*ps*(1), *top*(1), *free*(1), *lsof*(8) and the
+others of *systools*(1)), and the C library's *getloadavg*(3) reads
+_/proc/loadavg_ for programs ported from Linux.
+
+This page describes _/proc_ as of Phase 9 of the roadmap.
 
 # FILES
 
@@ -45,12 +54,102 @@ _/proc/_*n*_/status_
 	*threads*
 		Its threads.
 
+	*anonymous_memory*
+		The pages of memory it holds that no file backs, followed by
+		*pages*.
+
 	*domain*
 		The resource domain it is charged to.
 
 	*kernel_memory*
 		The kernel memory charged for it, in bytes, followed by
 		*bytes*.
+
+	*parent*, *group*, *session*
+		For a POSIX process: the number of its parent, of its process
+		group and of its session (*radix-posix*(7)).
+
+	*terminal*
+		*pts/*_n_ for the pseudo-terminal that is its session's
+		controlling terminal, or *none*.
+
+	*run*
+		What it is doing: *running* (a thread of it runs or is ready
+		to), *disk* (a thread waits for a disk), *sleeping*, *stopped*
+		(by a signal) or *zombie* (it has ended, and its parent has not
+		waited for it).
+
+	*started_ns*
+		When it was made, in nanoseconds since the kernel started.
+
+	*cpu_ns*, *user_ns*, *system_ns*
+		The CPU time its threads have used, in all, in user mode and
+		in the kernel, with the time of its threads that have ended.
+
+	*policy*, *priority*, *nice*
+		The scheduling of its first thread (*radix-scheduling*(7)):
+		*other*, *fifo*, *round_robin*, *batch* or *idle*; the
+		real-time priority (0 for the other policies); and the nice
+		level.
+
+	*io_class*, *io_level*
+		Its I/O priority (*ionice*(1)): *none*, *realtime*,
+		*best_effort* or *idle*, and the level in the class, 0 first.
+		A process with none is served as best effort at level 4.
+
+	*virtual_memory*, *resident_memory*
+		The memory mapped in its address space, and the part of it in
+		memory, in KiB.
+
+	*minor_faults*, *major_faults*
+		Page faults met without reading a disk, and those that read one.
+
+	*read_bytes*, *written_bytes*
+		The bytes its threads have read and written, from files, pipes,
+		sockets and terminals alike: Linux's *rchar* and *wchar*, not
+		only what went to a disk.
+
+	*voluntary_switches*, *involuntary_switches*
+		Times its threads gave up the CPU to wait, and times another
+		thread was given it.
+
+	*traced*
+		*yes* while a tracer reads its system calls (*radix-trace*(2)),
+		else *no*.
+
+	*directory*
+		Its working directory, last, as it named it: the C library
+		tells the kernel at each *exec* and *chdir*, and a child
+		has its parent's. Left out for a process that never said,
+		such as Spark.
+
+_/proc/_*n*_/cmdline_
+	The arguments its program started with, each followed by a NUL, as
+	on Linux. Empty for a process that was not started from a program
+	file with arguments.
+
+_/proc/_*n*_/threads_
+	A line per thread, of the fields *number*, *run* (*running*,
+	*sleeping*, *disk*, *new* or *dead*), *cpu* (the CPU it last ran
+	on), *user_ns*, *system_ns*, *voluntary_switches*,
+	*involuntary_switches*, *policy*, *priority* and *nice*, then
+	*waits* (what it is blocked on, with _\__ for spaces) if it is
+	blocked, and *name* last.
+
+_/proc/_*n*_/files_
+	A line per capability the process holds, by slot: *fd*=_n_ for a
+	slot of the file descriptors (slot 64 + _n_, *radix-posix*(7)), else
+	*slot*=_n_. For a file or directory the fields that follow are
+	*kind* (*file*, *directory*, *block*, *char*, *pipe*, *socket* or
+	*link*), *access* (*r*, *w*, *rw* or *-*), *id* (its node number),
+	*size*, *fs* (the filesystem's kind), *mount* (the mount's number),
+	*rights*, *offset* (unless a read or write holds it), *cut=yes* if
+	the path was too long to keep whole, and *path*: the path it was
+	opened by, made absolute, or a pipe's or socket's name. For any
+	other capability they are *kind* (*thread*, *address_space*,
+	*process*, *endpoint*, *random*, *kernel_log* and so on) and
+	*rights*. Rights are names joined by *+*, as *radix-capabilities*(7)
+	lists them, or *none*.
 
 _/proc/mounts_
 	One line per mount, in the order they were made, of four fields
@@ -68,6 +167,24 @@ _/proc/meminfo_
 	is the files' data in memory (*radix-files*(7)), which the kernel
 	gives back when memory runs low.
 
+_/proc/stat_
+	A line per online CPU, *cpu*_n_*:* then the fields *user_ns*,
+	*system_ns* and *idle_ns* (the time it spent running programs, in
+	the kernel, and idle) and *switches* (the threads it switched
+	between). Then their sums, one key a line: *cpus*, *user_ns*,
+	*system_ns*, *idle_ns* and *switches*; *running*, the threads ready
+	to run; *disk_waiting*, the threads waiting for a disk;
+	*disk_reads*, *disk_read_sectors*, *disk_writes* and
+	*disk_written_sectors*, what the disks have done since boot, in
+	512-byte sectors; and *boot_time_ns*, when the kernel started, in
+	nanoseconds since 1970.
+
+_/proc/loadavg_
+	*load_1*, *load_5* and *load_15*: the load averages over 1, 5 and
+	15 minutes, with two decimals, as Linux computes them: the threads
+	running, ready to run or waiting for a disk, sampled every five
+	seconds.
+
 _/proc/uptime_
 	*uptime_ns*: nanoseconds since the kernel started.
 
@@ -76,12 +193,46 @@ _/proc/uptime_
 A process's status:
 
 ```
-number: 2
-name: storage
+number: 9
+name: nukesh
 state: running
 threads: 1
+anonymous_memory: 212 pages
 domain: system
 kernel_memory: 40960 bytes
+parent: 1
+group: 9
+session: 9
+terminal: pts/0
+run: sleeping
+started_ns: 1832004113
+cpu_ns: 41202770
+user_ns: 30419008
+system_ns: 10783762
+policy: other
+priority: 0
+nice: 0
+io_class: none
+io_level: 4
+virtual_memory: 9416 KiB
+resident_memory: 3104 KiB
+minor_faults: 811
+major_faults: 37
+read_bytes: 1402880
+written_bytes: 2210
+voluntary_switches: 64
+involuntary_switches: 3
+traced: no
+directory: /home
+```
+
+Its files:
+
+```
+slot=1 kind=thread rights=read+control+copy+transfer
+slot=4 kind=random rights=read+copy+transfer
+fd=0 kind=char access=rw id=30 size=0 fs=dev mount=7 rights=read+write+copy+transfer offset=0 path=/dev/pts/0
+fd=3 kind=file access=r id=1201 size=5120 fs=bootfs mount=2 rights=read+copy+transfer offset=4096 path=/system/etc/profile
 ```
 
 The mounts after Spark has built the hierarchy on a machine with one
@@ -102,5 +253,5 @@ vda /volumes/vda fat rw label=RADIX16
 
 # SEE ALSO
 
-*radix-sysfs*(5), *radix-files*(7), *radix-processes*(7),
-*radix-scheduling*(7), *spark*(8)
+*systools*(1), *ps*(1), *top*(1), *lsof*(8), *radix-sysfs*(5),
+*radix-files*(7), *radix-processes*(7), *radix-scheduling*(7), *spark*(8)

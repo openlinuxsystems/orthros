@@ -306,7 +306,10 @@ impl SpaceObject {
                     .node
                     .read(file.base + from, &mut BoundedOut { inner: &mut out, len: want })
                 {
-                    Ok(read) => filled = read as u64,
+                    Ok(read) => {
+                        filled = read as u64;
+                        self.file_faults.fetch_add(1, Ordering::Relaxed);
+                    }
                     Err(_) => {
                         let _ = FRAMES.free(phys, 0, Owner::Anon);
                         self.uncharge(1);
@@ -327,7 +330,15 @@ impl SpaceObject {
     /// anonymous memory that allows the access, or copies it if it is
     /// shared with another space and written to.
     pub fn resolve(&self, address: u64, write: bool, execute: bool) -> Fault {
-        let page = address & !(PAGE_SIZE - 1);
+        let fault = self.resolve_page(address & !(PAGE_SIZE - 1), write, execute);
+        if fault == Fault::Resolved {
+            self.faults.fetch_add(1, Ordering::Relaxed);
+        }
+        fault
+    }
+
+    /// [`resolve`](Self::resolve), at page `page`.
+    fn resolve_page(&self, page: u64, write: bool, execute: bool) -> Fault {
         let regions = self.regions.lock();
         let Some(region) = regions.get(first_after(&regions, page)).filter(|r| r.start <= page)
         else {

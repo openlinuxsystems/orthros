@@ -16,7 +16,7 @@
 //! - `disk` finds virtio block devices on PCI and drives them, one MSI-X
 //!   interrupt each, and names them and their partitions (`vda`, `vda1`);
 //! - `devfs`, `procfs` and `sysfs` make the generated trees of `/dev`,
-//!   `/proc` and `/sys`;
+//!   `/proc` and `/sys`, and `kmsg` is `/dev/kmsg`, the kernel log;
 //! - `writeback` is the thread that writes dirty filesystems to their
 //!   disks every five seconds, and drops clean cached pages when memory
 //!   runs short (the out-of-memory policy asks it first);
@@ -24,7 +24,8 @@
 //!   in the tree, and since Phase 8 an open file description's offset and
 //!   flags. `user::files` carries out their methods;
 //! - `pipe` and `tty` are pipes and terminals (Phase 8), and `socket`
-//!   sockets (Phase 9), files outside the tree's filesystems;
+//!   sockets (Phase 9), files outside the tree's filesystems; `trace`
+//!   writes the records of radix-trace(2) to a pipe for its tracer;
 //! - `locks` keeps files' advisory locks (Phase 8): `flock`'s, POSIX's
 //!   record locks and open file descriptions' range locks.
 //!
@@ -37,11 +38,13 @@
 
 pub mod devfs;
 pub mod disk;
+pub mod kmsg;
 pub mod locks;
 pub mod pipe;
 pub mod procfs;
 pub mod socket;
 pub mod sysfs;
+pub mod trace;
 pub mod tty;
 pub mod writeback;
 
@@ -105,6 +108,118 @@ enum Special {
     Socket,
     /// A side of a terminal.
     Tty,
+    /// `/dev/kmsg`.
+    Kmsg,
+}
+
+/// The most bytes of a path an [`Opened`] keeps.
+pub const OPENED_MAX: usize = 104;
+
+/// Where a file object was opened, as an absolute path, for
+/// `/proc/<n>/files` and lsof(1): the path its open was given, beneath the
+/// path of the directory it was opened from, with `.` and `..` worked out
+/// by name. Symbolic links on the way are not followed: it is the path
+/// the program named. It is kept in the object itself, so that an open
+/// takes no more memory for it, and a longer path than [`OPENED_MAX`]
+/// bytes keeps its first ones and is marked cut.
+#[derive(Clone, Copy)]
+pub struct Opened {
+    len: u8,
+    state: u8,
+    bytes: [u8; OPENED_MAX],
+}
+
+impl Opened {
+    /// [`Opened::state`]: nothing is known of it.
+    const UNKNOWN: u8 = 0;
+    /// It is all there.
+    const WHOLE: u8 = 1;
+    /// Its end was cut off.
+    const CUT: u8 = 2;
+
+    /// No path.
+    pub const NONE: Opened = Opened { len: 0, state: Opened::UNKNOWN, bytes: [0; OPENED_MAX] };
+
+    /// Makes it where an object for `at` was opened by a path from a
+    /// directory: `from` holds where the directory was opened and the
+    /// path; it stays none if that is none. A mount's root has its own
+    /// path, which the tree keeps.
+    fn set(&mut self, at: &Location, from: Option<(&Opened, &[u8])>) {
+        let path = if let Some(path) = at.mount_path() {
+            self.len = 1;
+            self.state = Opened::WHOLE;
+            self.bytes[0] = b'/';
+            path
+        } else if let Some((directory, path)) = from {
+            // Two copies of fixed lengths are plain moves; one of the
+            // path's length would be a call, and without SSE one of more
+            // than 64 bytes a string move, which costs more to start.
+            let (low, high) = self.bytes.split_at_mut(64);
+            low.copy_from_slice(&directory.bytes[..64]);
+            high.copy_from_slice(&directory.bytes[64..]);
+            self.len = directory.len;
+            self.state = directory.state;
+            path
+        } else {
+            return;
+        };
+        self.join(path);
+    }
+
+    /// Makes it where `path` beneath the directory it was leads. One pass,
+    /// which copies each name in as it looks for the name's end: names are
+    /// short, and a copy call for each would cost more than the name.
+    fn join(&mut self, path: &[u8]) {
+        let mut rest = path;
+        while !rest.is_empty() && self.state == Opened::WHOLE {
+            let len = usize::from(self.len);
+            // Where the name goes: after a slash, unless the path is `/`.
+            let start = len + usize::from(len > 1);
+            let room = self.bytes.get_mut(start..).unwrap_or_default();
+            let mut taken = 0;
+            for &byte in rest {
+                if byte == b'/' {
+                    break;
+                }
+                // Past the end, so harmless if the name is not kept.
+                if let Some(slot) = room.get_mut(taken) {
+                    *slot = byte;
+                }
+                taken += 1;
+            }
+            match &rest[..taken] {
+                b"" | b"." => {}
+                b".." => self.pop(),
+                name if start + name.len() > OPENED_MAX => self.state = Opened::CUT,
+                name => {
+                    if start > len {
+                        self.bytes[len] = b'/';
+                    }
+                    self.len = (start + name.len()) as u8;
+                }
+            }
+            rest = rest.get(taken + 1..).unwrap_or_default();
+        }
+    }
+
+    /// Takes the last name off, as `..` does; `/..` is `/`.
+    fn pop(&mut self) {
+        if self.state != Opened::WHOLE {
+            return;
+        }
+        let len = usize::from(self.len);
+        self.len = match self.bytes[..len].iter().rposition(|&b| b == b'/') {
+            Some(0) | None => 1,
+            Some(at) => at as u8,
+        };
+    }
+
+    /// The path, and whether its end was cut off; `None` if it is not
+    /// known.
+    pub fn path(&self) -> Option<(&[u8], bool)> {
+        (self.state != Opened::UNKNOWN)
+            .then(|| (&self.bytes[..usize::from(self.len)], self.state == Opened::CUT))
+    }
 }
 
 /// What a file or directory capability names: what POSIX calls an open
@@ -129,6 +244,8 @@ pub struct FileObject {
     special: Special,
     /// The next released object to drop, while it waits in [`DROPPED`].
     next: SpinLock<Option<FileRef>>,
+    /// Where it was opened.
+    pub opened: Opened,
 }
 
 impl FileObject {
@@ -139,14 +256,29 @@ impl FileObject {
 
     /// An object for `at`, with `description`'s flags.
     pub fn with(at: Location, description: Description) -> Option<FileRef> {
+        FileObject::opened(at, description, None)
+    }
+
+    /// An object for `at`, with `description`'s flags, opened by a path
+    /// from a directory: `from` holds where the directory was opened and
+    /// the path. A mount's root has its own path, which the tree keeps.
+    pub fn opened(
+        at: Location,
+        description: Description,
+        from: Option<(&Opened, &[u8])>,
+    ) -> Option<FileRef> {
         // Only a node of a pipe's, a socket's or a character device's kind
         // can be one.
         let special = match at.node.kind() {
             Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
             Kind::Socket if socket::socket_of(&at.node).is_some() => Special::Socket,
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
+            Kind::CharDevice if kmsg::is_kmsg(&at.node) => Special::Kmsg,
             _ => Special::No,
         };
+        if special == Special::Kmsg {
+            kmsg::opened();
+        }
         let object = FileObject {
             at,
             offset: Mutex::new(0),
@@ -154,8 +286,15 @@ impl FileObject {
             locked: AtomicBool::new(false),
             special,
             next: SpinLock::new(None),
+            opened: Opened::NONE,
         };
-        alloc::sync::Arc::try_new_in(object, radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)).ok()
+        let heap = radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP);
+        let mut object = alloc::sync::Arc::try_new_in(object, heap).ok()?;
+        // Worked out in place: an `Opened` is too big to move for free.
+        if let Some(object) = FileRef::get_mut(&mut object) {
+            object.opened.set(&object.at, from);
+        }
+        Some(object)
     }
 
     /// Its status flags.
@@ -192,10 +331,18 @@ impl FileObject {
     pub fn tty_handle(&self) -> Option<&tty::Handle> {
         if self.special == Special::Tty { tty::handle_of(&self.at.node) } else { None }
     }
+
+    /// Whether it is of `/dev/kmsg`.
+    pub fn is_kmsg(&self) -> bool {
+        self.special == Special::Kmsg
+    }
 }
 
 impl Drop for FileObject {
     fn drop(&mut self) {
+        if self.special == Special::Kmsg {
+            kmsg::closed();
+        }
         if self.locked.load(Ordering::Acquire) {
             locks::description_gone(&self.at.node, self.address());
         }

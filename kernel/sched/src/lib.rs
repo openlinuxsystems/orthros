@@ -16,7 +16,9 @@
 //! - [`RtQueue`], the FIFO and round-robin real-time classes;
 //! - [`Topology`]: the CPUs' cores, packages and NUMA nodes, and from them
 //!   where a waking thread runs and what load balancing moves;
-//! - [`HaltPoll`]: how long an idle virtual CPU polls before it halts.
+//! - [`HaltPoll`]: how long an idle virtual CPU polls before it halts;
+//! - [`account`]: user and system time from the timer's samples, and the
+//!   load averages.
 //!
 //! The queues never allocate on their own: the kernel grows them ahead of
 //! time, outside its locks. `docs/design/scheduler.md` describes the
@@ -33,6 +35,7 @@
 
 extern crate alloc;
 
+pub mod account;
 pub mod cpuset;
 pub mod fair;
 pub mod haltpoll;
@@ -43,6 +46,7 @@ pub mod weight;
 #[cfg(kani)]
 mod proofs;
 
+pub use account::{LOAD_INTERVAL_NS, LoadAverage, split_time};
 pub use cpuset::{CpuSet, MAX_CPUS};
 pub use fair::{
     BASE_SLICE_NS, Entity, FairQueue, Placement, mul_div, mul_div_unsigned, virtual_ns,

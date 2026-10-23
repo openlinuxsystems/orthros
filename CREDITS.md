@@ -311,6 +311,33 @@ are grateful.
   [ADR 0075](docs/adr/0075-advisory-file-locks.md)). No code is taken:
   the kernel's code is written from Linux's documentation and man pages
   and checked against Linux by the C tests.
+  Linux's `calc_load`, with its constants and rounding, is how Radix's
+  load averages are kept, and its sampling of user and system time at
+  the tick how CPU time is split
+  ([ADR 0092](docs/adr/0092-cpu-time-split-and-load-averages.md)); its
+  `sched_setaffinity` and its I/O priority classes, with their numbers,
+  are Radix's ([ADR 0093](docs/adr/0093-cpu-affinity-and-io-classes.md));
+  its `/dev/kmsg` record format is Radix's
+  ([ADR 0094](docs/adr/0094-proc-for-the-native-tools-kmsg-and-opened-paths.md)).
+  No code is taken.
+- The Linux administration tools whose names, options and output
+  Dukovo's native tools take, so that an administrator's habits carry
+  over ([ADR 0096](docs/adr/0096-native-administration-tools-as-one-program.md)):
+  [procps-ng](https://gitlab.com/procps-ng/procps) 4.0 (ps, top, kill,
+  pgrep, pkill, free, vmstat, w, uptime, watch),
+  [util-linux](https://github.com/util-linux/util-linux) 2.39 (renice,
+  ionice, taskset, dmesg, script, column with libsmartcols' tables, and
+  hexdump, whose format strings come from 4.4BSD's hexdump), GNU
+  [coreutils](https://www.gnu.org/software/coreutils/) (chmod, chown,
+  chgrp, df, who, users), Sébastien Godard's
+  [sysstat](https://github.com/sysstat/sysstat) (pidstat), Vic Abell's
+  [lsof](https://github.com/lsof-org/lsof), now kept by the lsof-org
+  team, [strace](https://strace.io/) (rtrace, and its `-c` table), xxd
+  by Juergen Weigert, as [Vim](https://www.vim.org/) ships it, and
+  [tree](https://oldmanprogrammer.net/source.php?dir=projects/tree) 2.1
+  by Steve Baker and its other authors. Their output was compared with
+  ours on Linux while ours were written. No code is taken: ours are
+  written from their manual pages and behaviour.
 - Rust's `std` for the GNU Hurd, whose `stat` fields ours takes, and for
   Xous, which unwinds with the `unwinding` crate as ours does
   ([ADR 0070](docs/adr/0070-rust-standard-library-port.md)).

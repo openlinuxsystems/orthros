@@ -264,7 +264,7 @@ pub(super) const FAIR: u8 = 1;
 /// On a real-time queue.
 pub(super) const REAL_TIME: u8 = 2;
 
-/// Counters for the debugger and the self-tests.
+/// Counters for the debugger, the self-tests and `/proc`.
 #[derive(Default)]
 pub(super) struct Stats {
     pub(super) runtime_ns: AtomicU64,
@@ -272,6 +272,14 @@ pub(super) struct Stats {
     pub(super) migrations: AtomicU64,
     pub(super) wakeups: AtomicU64,
     pub(super) last_ran_ns: AtomicU64,
+    /// The timer's samples of it running in user mode and in the kernel
+    /// (`radix_sched::account`).
+    pub(super) user_ticks: AtomicU64,
+    pub(super) system_ticks: AtomicU64,
+    /// The times it gave the CPU up to wait, and the times it was made to
+    /// (preempted, or yielding).
+    pub(super) voluntary: AtomicU64,
+    pub(super) involuntary: AtomicU64,
 }
 
 /// A kernel thread.
@@ -415,6 +423,11 @@ impl Thread {
         self as *const Thread as usize
     }
 
+    /// Where it is in its life: ready, blocked and why, or dead.
+    pub fn run(&self) -> Run {
+        self.state.lock_irq().run
+    }
+
     /// The CPU it runs on, or last ran or queued on.
     pub fn cpu(&self) -> usize {
         self.cpu.load(Ordering::Relaxed)
@@ -423,6 +436,32 @@ impl Thread {
     /// Nanoseconds it has run.
     pub fn runtime_ns(&self) -> u64 {
         self.stats.runtime_ns.load(Ordering::Relaxed)
+    }
+
+    /// Its CPU time split between user mode and the kernel, as the
+    /// timer's samples share it (`radix_sched::split_time`).
+    pub fn cpu_times(&self) -> (u64, u64) {
+        radix_sched::split_time(
+            self.runtime_ns(),
+            self.stats.user_ticks.load(Ordering::Relaxed),
+            self.stats.system_ticks.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The timer's samples of it in user mode and in the kernel.
+    pub fn ticks(&self) -> (u64, u64) {
+        (
+            self.stats.user_ticks.load(Ordering::Relaxed),
+            self.stats.system_ticks.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The times it gave up the CPU to wait, and the times it was made to.
+    pub fn switch_counts(&self) -> (u64, u64) {
+        (
+            self.stats.voluntary.load(Ordering::Relaxed),
+            self.stats.involuntary.load(Ordering::Relaxed),
+        )
     }
 
     /// How many times it was switched to.
@@ -492,6 +531,11 @@ impl Thread {
             boost: state.boost,
             affinity: state.affinity,
         })
+    }
+
+    /// The CPUs it may run on, as `set_affinity` last set them.
+    pub fn cpu_mask(&self) -> CpuSet {
+        self.allowed()
     }
 
     /// Where it may run, from the copy a run queue reads.

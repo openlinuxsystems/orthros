@@ -94,6 +94,24 @@ fn numbers_and_names_must_be_unique() {
 }
 
 #[test]
+fn fields_are_not_cpp_words() {
+    // mlibc includes the C headers in C++, which a field named `class`
+    // breaks; methods have their module's name before them there.
+    let problems = messages(&with_module(
+        "/// I.\ninterface i = 1 version 1 {\n /// M.\n method delete = 1 (class: u32) -> (new: u32);\n}",
+    ));
+    assert!(
+        problems.iter().any(|m| m.contains("parameter `class` is a reserved word in C++")),
+        "{problems:?}"
+    );
+    assert!(
+        problems.iter().any(|m| m.contains("parameter `new` is a reserved word in C++")),
+        "{problems:?}"
+    );
+    assert!(!problems.iter().any(|m| m.contains("`delete`")), "{problems:?}");
+}
+
+#[test]
 fn calls_fit_their_registers() {
     let problems = messages(&with_module(
         "/// Too many.\nsyscall big = 1 (a: [u64; 8], b: u64, c: u64, d: u64) -> ();",

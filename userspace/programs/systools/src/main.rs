@@ -1,0 +1,141 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Dukovo's native administration tools (ADR 0096): the commands an
+//! administrator expects from Linux whose Linux versions read Linux's
+//! `/proc`, utmp or system calls, written for Radix, with their names and
+//! common options, as one program. A link by each tool's name runs it
+//! (`/system/bin/ps` is a link to `systools`), and so does
+//! `systools <tool> [argument...]`.
+//!
+//! The process tools read the kernel's `/proc` (radix-proc(5)); `lsof`
+//! lists the capabilities each process holds; `rtrace` reads a trace of
+//! a process's system calls (radix-trace(2)), and `dmesg` the kernel log
+//! through `/dev/kmsg`. Every process is root's until users come
+//! (Phase 13), so the user columns all say root.
+
+mod args;
+mod column;
+mod df;
+mod dmesg;
+mod hexdump;
+mod lsof;
+mod memory;
+mod modes;
+mod pidstat;
+mod priority;
+mod proc;
+mod ps;
+mod rtrace;
+mod script;
+mod sessions;
+mod signals;
+mod sys;
+mod top;
+mod tree;
+mod util;
+mod watch;
+mod which;
+mod xxd;
+
+use std::ffi::OsString;
+use std::io::{self, Write};
+use std::path::Path;
+use std::process::ExitCode;
+
+use args::Args;
+use util::Fail;
+
+/// A tool: it takes its arguments and returns its exit status.
+type Tool = fn(&mut Args) -> Result<i32, Fail>;
+
+/// The tools, by name, in order.
+const TOOLS: &[(&str, Tool)] = &[
+    ("chgrp", modes::chgrp),
+    ("chmod", modes::chmod),
+    ("chown", modes::chown),
+    ("column", column::main),
+    ("df", df::main),
+    ("dmesg", dmesg::main),
+    ("free", memory::free),
+    ("hd", hexdump::hd),
+    ("hexdump", hexdump::main),
+    ("ionice", priority::ionice),
+    ("kill", signals::kill),
+    ("lsof", lsof::main),
+    ("pgrep", signals::pgrep),
+    ("pidstat", pidstat::main),
+    ("pkill", signals::pkill),
+    ("ps", ps::main),
+    ("renice", priority::renice),
+    ("rtrace", rtrace::main),
+    ("script", script::main),
+    ("taskset", priority::taskset),
+    ("top", top::main),
+    ("tree", tree::main),
+    ("uptime", sessions::uptime),
+    ("users", sessions::users),
+    ("vmstat", memory::vmstat),
+    ("w", sessions::w),
+    ("watch", watch::main),
+    ("which", which::main),
+    ("who", sessions::who),
+    ("xxd", xxd::main),
+];
+
+/// The tools whose Linux versions exit with 2, not 1, for a mistake in
+/// the command line: procps-ng's pgrep and pkill, and which.
+const USAGE_TWO: &[&str] = &["pgrep", "pkill", "which"];
+
+/// The tool named `name`.
+fn tool(name: &str) -> Option<Tool> {
+    TOOLS.iter().find(|(tool, _)| *tool == name).map(|(_, run)| *run)
+}
+
+fn main() -> ExitCode {
+    // SAFETY: setting a signal's disposition to the default touches no
+    // memory; it is done before any thread starts.
+    unsafe {
+        // A closed pipe ends a tool quietly, as it does a C program,
+        // where Rust would have every write after it fail.
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    let mut argv: Vec<OsString> = std::env::args_os().collect();
+    let called = argv.first().map(Path::new).and_then(Path::file_name);
+    let mut name = called.map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    if tool(&name).is_none() {
+        // `systools <tool> ...`, or `systools --list`.
+        match argv.get(1).map(|arg| arg.to_string_lossy().into_owned()) {
+            Some(arg) if arg == "--list" => {
+                let mut out = io::stdout().lock();
+                for (tool, _) in TOOLS {
+                    let _ = writeln!(out, "{tool}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            Some(arg) if tool(&arg).is_some() => {
+                argv.remove(0);
+                name = arg;
+            }
+            _ => {
+                eprintln!("usage: systools TOOL [ARGUMENT...]   (systools --list names them)");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let run = tool(&name).expect("checked above");
+    let name: &'static str = TOOLS.iter().find(|(tool, _)| *tool == name).map_or("", |(t, _)| t);
+    let mut args = Args::new(name, argv.into_iter().skip(1).collect());
+    let code = match run(&mut args) {
+        Ok(code) => code,
+        Err(fail) => {
+            if !fail.message.is_empty() {
+                eprintln!("{name}: {}", fail.message);
+            }
+            if fail.usage && USAGE_TWO.contains(&name) { 2 } else { fail.code }
+        }
+    };
+    // A closed standard output (`ps | head`) is not an error to report.
+    let _ = io::stdout().flush();
+    ExitCode::from(u8::try_from(code).unwrap_or(1))
+}

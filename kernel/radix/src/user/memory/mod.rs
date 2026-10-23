@@ -142,6 +142,10 @@ pub struct SpaceObject {
     domain: Option<DomainRef>,
     /// How many pages of anonymous memory it maps, each charged once.
     anon_pages: AtomicU64,
+    /// Page faults resolved in it, and how many of those read a file
+    /// (minor and major faults, `/proc`).
+    faults: AtomicU64,
+    file_faults: AtomicU64,
     /// Where anonymous memory the kernel places goes: the highest free
     /// range below this, a random distance below ANONYMOUS_TOP.
     anon_top: u64,
@@ -177,6 +181,8 @@ impl SpaceObject {
             regions: Mutex::new(Vec::new_in(kmalloc())),
             domain,
             anon_pages: AtomicU64::new(0),
+            faults: AtomicU64::new(0),
+            file_faults: AtomicU64::new(0),
             anon_top: anon::random_top(),
         };
         Arc::try_new_in(space, kmalloc()).ok()
@@ -185,6 +191,29 @@ impl SpaceObject {
     /// How many pages of anonymous memory it maps.
     pub fn anon_pages(&self) -> u64 {
         self.anon_pages.load(Ordering::Relaxed)
+    }
+
+    /// How many pages it maps in all, and how many of them are in memory:
+    /// its anonymous pages made so far, and every page of the frames and
+    /// rings it maps (`/proc`'s virtual and resident memory).
+    pub fn sizes(&self) -> (u64, u64) {
+        let regions = self.regions.lock();
+        let mut mapped = 0;
+        let mut resident = self.anon_pages();
+        for region in regions.iter() {
+            mapped += region.pages;
+            if !matches!(region.backing, Backing::Anon(_)) {
+                resident += region.pages;
+            }
+        }
+        (mapped, resident)
+    }
+
+    /// The page faults resolved in it that found or made a page without
+    /// reading a file, and those that read one (minor and major).
+    pub fn faults(&self) -> (u64, u64) {
+        let major = self.file_faults.load(Ordering::Relaxed);
+        (self.faults.load(Ordering::Relaxed).saturating_sub(major), major)
     }
 
     /// The architecture's side, which thread contexts load.

@@ -56,6 +56,7 @@ struct RadixSysdepTags :
 	GetGroups,
 	GetHostname,
 	GetItimer,
+	GetLoadavg,
 	GetMaxPriority,
 	GetMinPriority,
 	GetParam,

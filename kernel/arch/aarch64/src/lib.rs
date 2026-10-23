@@ -97,6 +97,10 @@ impl CpuLocal for Arch {
         0
     }
 
+    fn interrupted_user() -> bool {
+        false
+    }
+
     fn running_word() -> usize {
         RUNNING.load(core::sync::atomic::Ordering::Relaxed)
     }

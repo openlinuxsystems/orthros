@@ -77,6 +77,8 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
             posix.terminal = parent.terminal.clone();
             posix.inherit(&parent);
         }
+        let (class, level) = parent.io_priority();
+        child.set_io_priority(class, level);
         with_tree(|tree| -> Result<()> {
             join(tree, parent)?;
             tree.insert_child(child.number(), parent.number(), child.clone()).map_err(tree_error)
@@ -88,6 +90,7 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
         abandon(&child);
         return Err(err);
     }
+    crate::fs::trace::forked(parent, &child);
 
     let (mask, stack) = {
         let signals = user.signals.lock();

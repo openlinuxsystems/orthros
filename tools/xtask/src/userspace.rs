@@ -56,14 +56,50 @@ pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
 
 /// The programs on Rust's standard library that the boot archive holds:
 /// each one's path in it, and its package in userspace/programs.
-pub const STD_ARCHIVE: &[(&str, &str)] =
-    &[("system/bin/nukesh", "nukesh"), ("system/tests/posix/std-test", "std-test")];
+pub const STD_ARCHIVE: &[(&str, &str)] = &[
+    ("system/bin/nukesh", "nukesh"),
+    ("system/bin/systools", "systools"),
+    ("system/tests/posix/std-test", "std-test"),
+];
 
 /// Symbolic links to those programs in the boot archive: each link's path,
 /// and its target. Nukesh is the POSIX shell when it is started as `sh`,
-/// and a restricted shell as `rnukesh` (nukesh(1)).
-pub const STD_LINKS: &[(&str, &str)] =
-    &[("system/bin/sh", "nukesh"), ("system/bin/rnukesh", "nukesh")];
+/// and a restricted shell as `rnukesh` (nukesh(1)); the native tools are
+/// one program, which each tool's name runs (ADR 0096).
+pub const STD_LINKS: &[(&str, &str)] = &[
+    ("system/bin/sh", "nukesh"),
+    ("system/bin/rnukesh", "nukesh"),
+    ("system/bin/chgrp", "systools"),
+    ("system/bin/chmod", "systools"),
+    ("system/bin/chown", "systools"),
+    ("system/bin/column", "systools"),
+    ("system/bin/df", "systools"),
+    ("system/bin/dmesg", "systools"),
+    ("system/bin/free", "systools"),
+    ("system/bin/hd", "systools"),
+    ("system/bin/hexdump", "systools"),
+    ("system/bin/ionice", "systools"),
+    ("system/bin/kill", "systools"),
+    ("system/bin/lsof", "systools"),
+    ("system/bin/pgrep", "systools"),
+    ("system/bin/pidstat", "systools"),
+    ("system/bin/pkill", "systools"),
+    ("system/bin/ps", "systools"),
+    ("system/bin/renice", "systools"),
+    ("system/bin/rtrace", "systools"),
+    ("system/bin/script", "systools"),
+    ("system/bin/taskset", "systools"),
+    ("system/bin/top", "systools"),
+    ("system/bin/tree", "systools"),
+    ("system/bin/uptime", "systools"),
+    ("system/bin/users", "systools"),
+    ("system/bin/vmstat", "systools"),
+    ("system/bin/w", "systools"),
+    ("system/bin/watch", "systools"),
+    ("system/bin/which", "systools"),
+    ("system/bin/who", "systools"),
+    ("system/bin/xxd", "systools"),
+];
 
 /// The shell's test scripts, with their expected output, and where in
 /// the boot archive they go, for the `shell` POSIX test.
@@ -132,7 +168,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] = &["nukesh"];
+pub const HOST_TESTED: &[&str] = &["nukesh", "systools"];
 
 /// A Cargo command for the workspace of programs on Rust's standard
 /// library, building for the host, writing to `target/programs-host`:

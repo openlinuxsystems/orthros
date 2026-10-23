@@ -14,6 +14,10 @@
 //! arguments are kept (`posix::signal::call_failed`): on the way back to
 //! user mode it runs again with them, unless a handler that does not
 //! restart calls runs, as radix-signal(2) says.
+//!
+//! The calls of a process a trace follows (radix-trace(2)) take a slow
+//! way, which writes each one's record as it returns (`fs::trace`); the
+//! others pay one look at a flag of the process.
 
 use core::fmt;
 
@@ -58,10 +62,39 @@ pub fn handle(regs: &mut SyscallRegs) {
     };
     // Kept for the log line of a thread stopped in the call.
     let (number, info) = (regs.number, regs.args[1]);
+    // One call site, so that `dispatch` stays inlined in this fast path.
+    let mut begun = if user.process.traced() { begin(user, regs) } else { None };
+    // What `begin` noted holds the trace, which must go with the last
+    // thread that follows it, so that the tracer reads the end of it.
+    let status = call(me, user, regs, || drop(begun.take()));
+    if let Some(begun) = begun {
+        end(user, begun, status, regs);
+    }
+    if me.should_stop() {
+        // A signal that ends a POSIX process is its parent's to report.
+        if user.process.posix.lock().ended_by.is_none() {
+            stopped(me, number, info);
+        }
+        exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
+    }
+}
+
+/// Runs the system call in `regs` and puts what it returns there; returns
+/// its status: 0, or the error's. A call that ends the thread does not
+/// return: `exiting` runs first, to let go of what the caller holds.
+#[inline(always)]
+fn call(me: &ThreadRef, user: &UserRef, regs: &mut SyscallRegs, exiting: impl FnOnce()) -> u64 {
+    let number = regs.number;
     match dispatch(me, user, number, &mut regs.args) {
         Ok(Done::Return) => regs.number = 0,
-        Ok(Done::Exit(code)) => exit_current(user.clone(), code, Ending::Exit),
-        Ok(Done::Restore(saved)) => regs.number = saved,
+        Ok(Done::Exit(code)) => {
+            exiting();
+            exit_current(user.clone(), code, Ending::Exit)
+        }
+        Ok(Done::Restore(saved)) => {
+            regs.number = saved;
+            return 0;
+        }
         Err(status) => {
             // A failed call has not touched its arguments.
             if status.code() == Kernel::Interrupted as u16 && status.domain() == Kernel::DOMAIN {
@@ -71,13 +104,23 @@ pub fn handle(regs: &mut SyscallRegs) {
             regs.args = [0; 10];
         }
     }
-    if me.should_stop() {
-        // A signal that ends a POSIX process is its parent's to report.
-        if user.process.posix.lock().ended_by.is_none() {
-            stopped(me, number, info);
-        }
-        exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
-    }
+    regs.number
+}
+
+/// Notes the start of the call in `regs` of a process a trace follows
+/// (radix-trace(2)), whose record is written as it returns ([`end`]).
+#[cold]
+#[inline(never)]
+fn begin(user: &UserRef, regs: &SyscallRegs) -> Option<crate::fs::trace::Begun> {
+    crate::fs::trace::begin(user, regs.number, &regs.args)
+}
+
+/// Writes the record of a traced call that returned `status`, with its
+/// results in `regs`.
+#[cold]
+#[inline(never)]
+fn end(user: &UserRef, begun: crate::fs::trace::Begun, status: u64, regs: &SyscallRegs) {
+    crate::fs::trace::end(user, begun, status, &regs.args);
 }
 
 /// System call `number` with `args` was interrupted: it is kept to run

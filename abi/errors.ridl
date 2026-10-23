@@ -39,7 +39,8 @@ errors kernel = 1 {
     bad_address = 10 => EFAULT;
     /// The call would have to wait, and the caller asked it not to.
     would_block = 11 => EAGAIN;
-    /// A ring's completion queue has no room for another completion.
+    /// A ring's completion queue has no room for another completion, or
+    /// the process is traced already (radix-process(2)'s `trace`).
     busy = 12 => EBUSY;
     /// The receiver's receive window has no room for the capabilities in
     /// the message.

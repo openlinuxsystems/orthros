@@ -49,6 +49,8 @@ pub struct Mount {
     read_only: bool,
     /// Where it is in the tree, from the root, for `/proc/mounts`.
     path: KVec<u8>,
+    /// Whether it is in no tree ([`Mount::detached`]).
+    detached: bool,
     /// What it was mounted from: a device's name, or the filesystem's.
     source: KVec<u8>,
     /// The filter of its nodes that something is mounted on: bit
@@ -86,6 +88,7 @@ impl Mount {
             on: None,
             read_only: false,
             path: mem::vec(),
+            detached: true,
             source: mem::copy(source.as_bytes())?,
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?)
@@ -127,6 +130,13 @@ impl Location {
     /// Whether it is the same place as `other`.
     pub fn same(&self, other: &Location) -> bool {
         KArc::ptr_eq(&self.mount, &other.mount) && address(&self.node) == address(&other.node)
+    }
+
+    /// Its path from the tree's root if it is the root of a mount in the
+    /// tree, whose path the tree keeps: `""` for the tree's root.
+    pub fn mount_path(&self) -> Option<&[u8]> {
+        (address(&self.node) == address(&self.mount.root) && !self.mount.detached)
+            .then_some(&self.mount.path[..])
     }
 
     /// Fails with [`Error::ReadOnly`] if its mount is read-only.
@@ -172,6 +182,7 @@ impl Vfs {
             on: None,
             read_only: false,
             path: mem::vec(),
+            detached: false,
             source: mem::copy(source.as_bytes())?,
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
@@ -581,6 +592,7 @@ impl Vfs {
             on: Some((at.mount.clone(), at.node.clone())),
             read_only,
             path: where_,
+            detached: false,
             source: mem::copy(source.as_bytes())?,
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
