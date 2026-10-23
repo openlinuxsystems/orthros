@@ -1,0 +1,25 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Has <sys/ioctl.h> declare struct winsize on every system, not only
+with the Linux option, as it does on Linux and the BSDs: a program asks
+for a terminal's size with ioctl(TIOCGWINSZ) and that structure, and
+7-Zip, among others, includes nothing else for it. Meant for upstream.
+
+diff --git a/options/glibc/include/sys/ioctl.h b/options/glibc/include/sys/ioctl.h
+index f9707b8..1a8e96b 100644
+--- a/options/glibc/include/sys/ioctl.h
++++ b/options/glibc/include/sys/ioctl.h
+@@ -3,11 +3,11 @@
+ 
+ #include <mlibc-config.h>
+ #include <abi-bits/ioctls.h>
++#include <bits/winsize.h>
+ 
+ /* On Linux, sys/ioctl.h includes the termios ioctls. */
+ #if __MLIBC_LINUX_OPTION
+ #	include <asm/ioctls.h>
+-#	include <bits/winsize.h>
+ #   include <sys/ttydefaults.h>
+ #endif
+ 

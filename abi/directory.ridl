@@ -50,7 +50,8 @@ enum FileKind: u8 {
     pipe = 4;
     /// A symbolic link (`make_link`).
     symlink = 5;
-    /// A socket (radix-process(2)'s `socket_pair`).
+    /// A socket (radix-process(2)'s `socket_pair` and `socket`), or a
+    /// socket's name (`bind_socket`).
     socket = 6;
 }
 
@@ -126,7 +127,7 @@ struct DirEntry {
 }
 
 /// A directory.
-interface directory = 0x000b version 3 {
+interface directory = 0x000b version 4 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -237,4 +238,33 @@ interface directory = 0x000b version 3 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt, too_many_links];
+    /// Names the socket in slot `socket` (radix-process(2)'s `socket`)
+    /// `path`: makes a socket's name there, a file of kind socket, which
+    /// `connect_socket` connects through while the socket listens. The
+    /// socket keeps `name` (at most radix-file(2)'s SOCKET_NAME_MAX bytes)
+    /// as its name for radix-file(2)'s `socket_name`: the path as the
+    /// program gave it. A socket takes one name, before it listens or
+    /// connects; the name stays until it is removed, and once the socket
+    /// is gone, connecting through it fails with refused. Opening it fails
+    /// with no_device. FAT has no such files (not_permitted). Needs the
+    /// write right, and the write right on the socket.
+    method bind_socket = 15 (path: in bytes, socket: slot, name: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links,
+                not_socket, busy];
+    /// Connects the socket in slot `socket`, which must be neither
+    /// connected nor listening, to the socket listening at the name
+    /// `path`: the connection waits there until radix-file(2)'s `accept`
+    /// takes it, and the socket can send and receive at once. While as
+    /// many connections wait as the listening socket allows, it waits
+    /// for room, or fails with would_block if the socket's description
+    /// is non_blocking. A name of a socket that does not listen, or is
+    /// gone, and any other file, fail with refused. Needs the write right,
+    /// and the write right on the socket.
+    method connect_socket = 16 (path: in bytes, socket: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
+                outside, io, corrupt, too_many_links, not_socket, refused, connected, busy,
+                would_block, interrupted];
 }

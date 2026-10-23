@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# nvi2 (ADR 0090): the vi and ex of POSIX, as FreeBSD, NetBSD and macOS
+# have them, Zhihao Yuan's continuation of Keith Bostic's nvi of 4.4BSD,
+# with wide characters. It keeps the lines it edits in the 4.4BSD
+# database library (ports/db1).
+name = "nvi"
+version = "2.2.2"
+summary = "the vi and ex editors"
+license = "BSD-3-Clause"
+homepage = "https://github.com/lichray/nvi2"
+depends = ["mlibc", "ncurses", "db1"]
+
+[source]
+git = "https://github.com/lichray/nvi2.git"
+commit = "940bc13b6918b887b3df6c1a4850db87821ac7b5"
+tag = "v2.2.2"

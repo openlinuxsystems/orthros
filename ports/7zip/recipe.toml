@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# 7-Zip (ADR 0090), by Igor Pavlov: 7zz, its standalone program, which
+# reads and writes 7z, zip, tar, xz, bzip2, gzip, zstd and the other
+# formats 7-Zip knows, and reads many more, but RAR. The source is
+# Debian's copy of 7-Zip's (the "+dfsg" one), which leaves out the RAR
+# code: its unRAR license forbids making a RAR compressor with it, so it
+# is not free. 7zz is a program of its own, which nothing links, so its
+# LGPL is the Port area's on ADR 0087's terms; LZFSE's and Zstandard's
+# decoders are under BSD-3-Clause and xxHash's under BSD-2-Clause, and
+# some files are in the public domain.
+name = "7zip"
+version = "26.02"
+summary = "the 7-Zip archiver"
+license = "LGPL-2.1-or-later AND BSD-3-Clause AND BSD-2-Clause"
+homepage = "https://www.7-zip.org"
+depends = ["mlibc", "llvm-runtimes"]
+notices = ["DOC/License.txt", "DOC/copying.txt"]
+
+[source]
+url = "https://deb.debian.org/debian/pool/main/7/7zip/7zip_26.02+dfsg.orig.tar.xz"
+sha256 = "cbd9aef3b1a6596aafece29601df759f05c4d1b5619619b42ece125b8fe4d9a8"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/universe/7/7zip/7zip_26.02+dfsg.orig.tar.xz"]

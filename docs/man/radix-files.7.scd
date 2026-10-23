@@ -155,7 +155,9 @@ on it at every boot:
 |  _/system_
 :< the boot archive, read-only: programs and the system's own files
 |  _/system/etc_, _/system/var_
-:< tmpfs for now; settings and the system's changing data
+:< tmpfs for now; settings, which start from the defaults in
+   _/system/lib/defaults/etc_ (*spark*(8)), and the system's changing data,
+   with _/system/var/tmp_ for temporary files that are to outlive a restart
 |  _/applications_
 :< applications (bundles come in Phase 13)
 |  _/users_

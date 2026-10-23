@@ -180,8 +180,8 @@ pub enum Kind {
     CharDevice,
     /// A pipe, which lives outside the tree (Phase 8).
     Pipe,
-    /// A socket, which lives outside the tree too (Phase 9's socket
-    /// pairs).
+    /// A socket, which lives outside the tree too (Phase 9), or a
+    /// socket's name in it ([`Node::make_socket`]).
     Socket,
     /// A symbolic link: a path that resolution follows in its place
     /// ([`mount`]); its size is the path's length.
@@ -211,6 +211,10 @@ pub struct Stat {
 
 /// A node, shared.
 pub type NodeRef = KArc<dyn Node>;
+
+/// What a socket's name holds ([`Node::make_socket`]): the kernel's, which
+/// the filesystem only keeps.
+pub type SocketBinding = KArc<dyn Any + Send + Sync>;
 
 /// Where a read puts what it reads: the caller's buffer.
 pub trait Out {
@@ -349,6 +353,25 @@ pub trait Node: Send + Sync + Any {
         } else {
             Err(Error::NotDirectory)
         }
+    }
+
+    /// Makes a socket's name `name` in a directory: a file of kind
+    /// [`Kind::Socket`] that holds `binding`, which
+    /// [`Node::socket_binding`] gives back, and which cannot be opened. A
+    /// directory of a filesystem that has none fails with
+    /// [`Error::NotSupported`].
+    fn make_socket(&self, _name: &str, _binding: SocketBinding) -> Result<NodeRef> {
+        if self.kind() == Kind::Directory {
+            Err(Error::NotSupported)
+        } else {
+            Err(Error::NotDirectory)
+        }
+    }
+
+    /// What a socket's name holds ([`Node::make_socket`]); none for any
+    /// other node.
+    fn socket_binding(&self) -> Option<SocketBinding> {
+        None
     }
 
     /// Reads the path a symbolic link points to into `out`, from its

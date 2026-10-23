@@ -67,6 +67,7 @@ static const struct test TESTS[] = {
 		{"limits", NULL, NULL},
 		{"format", NULL, NULL},
 		{"dynamic", NULL, NULL},
+		{"cxx", NULL, NULL},
 		{"utilities", NULL, NULL},
 		{"std-test", NULL, NULL},
 		{"shell", NULL, NULL},

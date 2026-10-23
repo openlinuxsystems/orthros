@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# LLVM's C++ runtime (ADR 0090): libc++, the C++ standard library;
+# libc++abi, its exceptions and run-time type information; and
+# libunwind, which unwinds the stack for exceptions. Static libraries and
+# libc++'s headers, in the sysroot, which x86_64-radix-c++ compiles and
+# links C++ programs with (ob(1), PORTS). Only the directories of LLVM's
+# repository the runtimes build from are fetched: the rest is the
+# compiler, which the host's Clang is. libc++ takes some of LLVM's C
+# library's number formatting code into std::to_chars and from_chars,
+# hence the parts of libc.
+name = "llvm-runtimes"
+version = "20.1.8"
+summary = "LLVM's C++ runtime: libc++, libc++abi and libunwind"
+license = "Apache-2.0 WITH LLVM-exception"
+homepage = "https://libcxx.llvm.org"
+depends = ["mlibc"]
+
+[source]
+git = "https://github.com/llvm/llvm-project.git"
+commit = "87f0227cb60147a26a1eeb4fb06e3b505e9c7261"
+tag = "llvmorg-20.1.8"
+paths = [
+    "cmake",
+    "libc/hdr",
+    "libc/include",
+    "libc/shared",
+    "libc/src/__support",
+    "libc/src/errno",
+    "libcxx",
+    "libcxxabi",
+    "libunwind",
+    "llvm/cmake",
+    "llvm/utils/llvm-lit",
+    "runtimes",
+    "third-party",
+]

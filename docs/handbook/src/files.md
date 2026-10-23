@@ -36,6 +36,12 @@ Unix programs and scripts look for `/bin/sh`, `/usr/bin/env`, `/etc` and
 `/system/etc` and `/var` to `/system/var`. Everything is still kept in
 one place, `/system`.
 
+The system ships its default settings in `/system/lib/defaults/etc`,
+and Spark copies each one that `/system/etc` lacks into it at boot, so
+`/etc/nanorc` is there to edit. A setting already in `/system/etc` is
+never replaced. While `/system/etc` is in memory, each boot starts it
+afresh from the defaults.
+
 Until the root filesystem lives on a disk (Btrfs, Phase 10),
 `/applications`, `/users` and `/data` are empty and in memory.
 

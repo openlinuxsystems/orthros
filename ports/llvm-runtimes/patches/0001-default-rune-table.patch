@@ -1,0 +1,22 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Gives libc++ on Radix the character classification table of its own
+that it has on musl, OpenBSD and LLVM's C library: Radix's C library,
+like those, has no table libc++ could use in place of one, and libc++
+otherwise stops at an #error for a C library it does not know. The
+compiler wrapper defines __radix__ (ob(1), PORTS; ADR 0090).
+
+diff --git a/libcxx/include/__config b/libcxx/include/__config
+index a866a7e6..d9f1f0e0 100644
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -908,7 +908,7 @@ typedef __char32_t char32_t;
+ #  endif
+ 
+ #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
+-      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__)
++      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__) || defined(__radix__)
+ #    define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+ #  endif
+ 

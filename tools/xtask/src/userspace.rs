@@ -70,7 +70,14 @@ pub const STD_LINKS: &[(&str, &str)] =
 pub const SHELL_CASES: &str = "userspace/programs/nukesh/tests/cases";
 pub const SHELL_CASES_DIR: &str = "system/tests/shell";
 
-/// The C test programs' sources, and where in the boot archive they go.
+/// The system's own default settings (ADR 0090), and where in the boot
+/// archive they go: among the ports' defaults, which Spark copies into
+/// `/system/etc` (spark(8)).
+pub const DEFAULTS: &str = "userspace/defaults";
+pub const DEFAULTS_DIR: &str = "system/lib/defaults/etc";
+
+/// The C and C++ test programs' sources, and where in the boot archive
+/// they go.
 pub const POSIX_SOURCES: &str = "userspace/posix";
 pub const POSIX_DIR: &str = "system/tests/posix";
 
@@ -221,6 +228,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     install_headers(ctx)?;
     let ports = ports::build_all(ctx, &[])?;
     let mut files = build_posix(ctx, &ports.toolchain)?;
+    files.extend(install_defaults(ctx)?);
     for port in &ports.ports {
         files.extend(ports::image_files(ctx, &port.recipe, &ctx.out.join("sysroot"))?);
     }
@@ -263,6 +271,24 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
         archive.len() / 1024
     ));
     Ok(Programs { usertests: installed, bootfs, ports })
+}
+
+/// Copies the files of [`DEFAULTS`] into `out/sysroot`, and returns each
+/// one's place in the boot archive and file.
+fn install_defaults(ctx: &Ctx) -> Result<Vec<(String, PathBuf)>> {
+    let dir = ctx.root.join(DEFAULTS);
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .context(|| format!("reading {}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    let mut files = Vec::new();
+    for name in names {
+        let installed = ctx.out.join("sysroot").join(DEFAULTS_DIR).join(&name);
+        process::copy(&dir.join(&name), &installed)?;
+        files.push((format!("{DEFAULTS_DIR}/{name}"), installed));
+    }
+    Ok(files)
 }
 
 /// Builds the programs of [`STD_ARCHIVE`] into `out/sysroot`, with their
@@ -315,7 +341,8 @@ fn build_std(
 }
 
 /// Builds each C test program of [`POSIX_SOURCES`] (one per `.c` file,
-/// with the headers there) into `out/sysroot/system/tests/posix`, and
+/// with the headers there), and each C++ one (one per `.cpp` file, on
+/// libc++, ADR 0090), into `out/sysroot/system/tests/posix`, and
 /// the dynamically linked one of its `dynamic` directory (ADR 0071), and
 /// returns each one's place in the boot archive and file.
 fn build_posix(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, PathBuf)>> {
@@ -325,16 +352,21 @@ fn build_posix(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String, P
     let mut programs: Vec<PathBuf> = std::fs::read_dir(&sources)
         .context(|| format!("reading {}", sources.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|e| e == "c"))
+        .filter(|path| path.extension().is_some_and(|e| e == "c" || e == "cpp"))
         .collect();
     programs.sort();
-    step(&format!("Building {} C test programs", programs.len()));
+    step(&format!("Building {} C and C++ test programs", programs.len()));
     let mut files = Vec::new();
     for source in programs {
         let name = source.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
         let program = out.join(&name);
-        let mut cmd = Command::new(toolchain.cc());
-        cmd.args(["-std=c11", "-D_GNU_SOURCE"])
+        let (compiler, standard) = if source.extension().is_some_and(|e| e == "cpp") {
+            (toolchain.cxx(), "-std=c++23")
+        } else {
+            (toolchain.cc(), "-std=c11")
+        };
+        let mut cmd = Command::new(compiler);
+        cmd.args([standard, "-D_GNU_SOURCE"])
             .args(["-O2", "-g", "-Wall", "-Wextra", "-Werror", "-I"])
             .arg(&sources)
             .arg("-o")

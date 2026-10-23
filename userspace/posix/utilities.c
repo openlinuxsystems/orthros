@@ -6,9 +6,16 @@
 // exit status checked. uutils' core utilities (ports/uutils-coreutils),
 // find and xargs (ports/uutils-findutils), GNU grep, sed, diffutils and
 // patch, awk, bc, less, ncurses' tools, man, the compressors, tar, cpio,
-// zip and unzip, file and jq (ports/<name>), and their manual pages.
+// zip and unzip, 7-Zip, file and jq (ports/<name>), and their manual
+// pages; the editors, nano and vi, typed at on a pseudo-terminal; and
+// tmux, its server and a client attached at a pseudo-terminal.
 
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <termios.h>
 
 #include "check.h"
 
@@ -307,8 +314,8 @@ static void compressing(void) {
 	STATUS(0, "/bin/rm", "-r", "/tmp/compress");
 }
 
-// tar, cpio, zip and unzip: archives made, listed and unpacked, with
-// each compressor, and read by the others' programs.
+// tar, cpio, zip and unzip, and 7-Zip: archives made, listed and
+// unpacked, with each compressor, and read by the others' programs.
 static void archiving(void) {
 	STATUS(0, "/bin/mkdir", "-p", "/tmp/archive/d/e", "/tmp/archive/out");
 	OUTPUT("first\n", "first\n", "/bin/tee", "/tmp/archive/d/a");
@@ -356,6 +363,18 @@ static void archiving(void) {
 	STATUS(0, "/bin/sh", "-c", "cd /tmp/archive && tar -acf t.7z d && tar --format zip -cf u.zip d");
 	OUTPUT("", "first\n", "/bin/tar", "-xOf", "/tmp/archive/t.7z", "d/a");
 	OUTPUT("", "first\n", "/bin/unzip", "-p", "/tmp/archive/u.zip", "d/a");
+	// 7-Zip makes 7z archives, with a password and hidden names too, which
+	// tar reads, and reads tar's.
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/archive && 7zz a -bso0 -bsp0 s.7z d");
+	OUTPUT("", "first\n", "/bin/7zz", "e", "-so", "-bso0", "-bsp0", "/tmp/archive/s.7z", "d/a");
+	OUTPUT("", "first\n", "/bin/tar", "-xOf", "/tmp/archive/s.7z", "d/a");
+	OUTPUT("", "first\n", "/bin/7z", "e", "-so", "-bso0", "-bsp0", "/tmp/archive/t.7z", "d/a");
+	STATUS(0, "/bin/sh", "-c",
+			"cd /tmp/archive && 7zz x -bso0 -bsp0 -oseven s.7z && cmp seven/d/e/b d/e/b");
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/archive && 7zz a -bso0 -bsp0 -psecret -mhe p.7z d");
+	OUTPUT("", "second\n", "/bin/7zz", "e", "-so", "-bso0", "-bsp0", "-psecret",
+			"/tmp/archive/p.7z", "d/e/b");
+	STATUS(2, "/bin/7zz", "t", "-bso0", "-bsp0", "-bse0", "-pwrong", "/tmp/archive/p.7z");
 	STATUS(0, "/bin/rm", "-r", "/tmp/archive");
 }
 
@@ -406,13 +425,167 @@ static void describing(void) {
 	RUN_WITH(5, "{", "", 0, "/bin/jq", ".");
 }
 
+// Runs `argv` on a new pseudo-terminal of 24 lines of 80 columns, with
+// TERM=xterm, as someone at a terminal would: waits until it has written
+// `ready`, which it does once it has drawn its screen and so takes keys
+// as they are typed, types `keys`, and reads what it writes until it
+// ends, within 20 seconds. Returns its exit status, or -1 if it did not
+// get that far; what it wrote is in `output`, as much as that holds.
+static int on_terminal(const char *const argv[], const char *ready, const char *keys) {
+	int master = posix_openpt(O_RDWR | O_NOCTTY);
+	if(master < 0 || grantpt(master) < 0 || unlockpt(master) < 0)
+		return -1;
+	struct winsize size = {.ws_row = 24, .ws_col = 80};
+	const char *name = ptsname(master);
+	if(!name || ioctl(master, TIOCSWINSZ, &size) < 0)
+		return -1;
+	output[0] = 0;
+	pid_t pid = fork();
+	if(pid < 0)
+		return -1;
+	if(!pid) {
+		// Opening the terminal in a new session makes it the controlling
+		// terminal.
+		setsid();
+		int tty = open(name, O_RDWR);
+		if(tty < 0)
+			_exit(126);
+		dup2(tty, STDIN_FILENO);
+		dup2(tty, STDOUT_FILENO);
+		dup2(tty, STDERR_FILENO);
+		if(tty > STDERR_FILENO)
+			close(tty);
+		close(master);
+		setenv("TERM", "xterm", 1);
+		execv(argv[0], (char *const *)argv);
+		_exit(127);
+	}
+	struct timespec now, end;
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	end.tv_sec += 20;
+	size_t len = 0;
+	int typed = 0, status = -1;
+	struct pollfd entry = {.fd = master, .events = POLLIN};
+	do {
+		char buffer[512];
+		ssize_t got = poll(&entry, 1, 100) == 1 ? read(master, buffer, sizeof(buffer)) : 0;
+		if(got > 0) {
+			size_t take = sizeof(output) - 1 - len;
+			take = (size_t)got < take ? (size_t)got : take;
+			memcpy(output + len, buffer, take);
+			len += take;
+			output[len] = 0;
+		} else if(got < 0) {
+			// The terminal has closed: the program is ending.
+			poll(NULL, 0, 10);
+		}
+		if(!typed && strstr(output, ready)) {
+			if(write(master, keys, strlen(keys)) != (ssize_t)strlen(keys))
+				break;
+			typed = 1;
+		}
+		int got_status;
+		if(waitpid(pid, &got_status, WNOHANG) == pid) {
+			status = WIFEXITED(got_status) ? WEXITSTATUS(got_status) : 128 + WTERMSIG(got_status);
+			pid = 0;
+			break;
+		}
+		clock_gettime(CLOCK_MONOTONIC, &now);
+	} while(now.tv_sec < end.tv_sec || (now.tv_sec == end.tv_sec && now.tv_nsec < end.tv_nsec));
+	if(pid) {
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+	}
+	close(master);
+	return typed ? status : -1;
+}
+
+// Checks that `argv`, run on a terminal and typed `keys` at once it has
+// written `ready`, exits with 0.
+static void type_at(const char *file, int line, const char *ready, const char *keys,
+		const char *const argv[]) {
+	int got = on_terminal(argv, ready, keys);
+	if(got != 0) {
+		size_t len = strlen(output);
+		char what[512];
+		snprintf(what, sizeof(what), "%s exited with %d; it last wrote \"%s\"", argv[0], got,
+				output + (len > 300 ? len - 300 : 0));
+		check_failed(file, line, what, 0);
+	}
+}
+#define TYPE_AT(ready, keys, ...) \
+	type_at(__FILE__, __LINE__, ready, keys, (const char *const[]){__VA_ARGS__, NULL})
+
+// nano and vi: each edits a file typed at on a terminal, nano with the
+// key bindings the system's nanorc gives it, which Spark copied into
+// /etc; and ex edits by a script.
+static void editing(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/editing");
+	CONTAINS("GNU nano, version 9.2", "/bin/nano", "--version");
+	CONTAINS("bind ^S savefile main", "/bin/cat", "/etc/nanorc");
+	// Typed text, Ctrl+Z to undo it, more text, Ctrl+S to save and Ctrl+Q
+	// to quit.
+	TYPE_AT("n.txt", "first\032second\023\021", "/bin/nano", "/tmp/editing/n.txt");
+	OUTPUT("", "second\n", "/bin/cat", "/tmp/editing/n.txt");
+
+	// vi: insert, Escape, then :wq. It keeps a copy of what it edits to
+	// recover from in /var/tmp/vi.recover, which it makes.
+	TYPE_AT("v.txt", "ihello from vi\033:wq\r", "/bin/vi", "/tmp/editing/v.txt");
+	OUTPUT("", "hello from vi\n", "/bin/cat", "/tmp/editing/v.txt");
+	STATUS(0, "/bin/test", "-d", "/var/tmp/vi.recover");
+	// ex, from a script: substitute, append and write.
+	OUTPUT("one\ntwo\n", "one\ntwo\n", "/bin/tee", "/tmp/editing/e.txt");
+	OUTPUT("%s/o/0/g\n$a\nthree\n.\nwq\n", "", "/bin/ex", "-s", "/tmp/editing/e.txt");
+	OUTPUT("", "0ne\ntw0\nthree\n", "/bin/cat", "/tmp/editing/e.txt");
+	OUTPUT("2p\nq\n", "tw0\n", "/bin/ex", "-s", "/tmp/editing/e.txt");
+	// view is vi that does not write the file.
+	RUN_WITH(1, "s/0ne/1/\nw\nq!\n", "", 1, "/bin/view", "-e", "-s", "/tmp/editing/e.txt");
+	OUTPUT("", "0ne\ntw0\nthree\n", "/bin/cat", "/tmp/editing/e.txt");
+	STATUS(0, "/bin/rm", "-r", "/tmp/editing");
+}
+
+// tmux: a detached session, which starts the server; a command sent to
+// its shell and what its pane then shows; a client attached at a
+// terminal, which C-b d detaches; and the server's end. Client and
+// server talk over a named socket, and the client passes its terminal to
+// the server with SCM_RIGHTS (ADR 0091).
+static void multiplexing(void) {
+	CONTAINS("tmux 3.7c", "/bin/tmux", "-V");
+	STATUS(0, "/bin/tmux", "-S", "/tmp/mux", "new-session", "-d", "-s", "work", "-x", "80", "-y",
+			"24");
+	CONTAINS("work: 1 windows", "/bin/tmux", "-S", "/tmp/mux", "list-sessions");
+	STATUS(0, "/bin/tmux", "-S", "/tmp/mux", "send-keys", "-t", "work", "echo $((6 * 7))",
+			"Enter");
+	// The shell answers when it gets to it: look at the pane until it has.
+	const char *const capture[] = {"/bin/tmux", "-S", "/tmp/mux", "capture-pane", "-p", "-t",
+			"work", NULL};
+	int shown = 0;
+	for(int i = 0; i < 100 && !shown; i++) {
+		shown = run_program(capture, "", 0) == 0 && strstr(output, "\n42\n");
+		if(!shown)
+			check_sleep_ms(50);
+	}
+	CHECK(shown);
+	// Attached at a terminal, it draws the session's name in its status
+	// line; C-b d detaches.
+	TYPE_AT("[work]", "\002d", "/bin/tmux", "-S", "/tmp/mux", "attach-session", "-t", "work");
+	CHECK(strstr(output, "detached") != NULL);
+	STATUS(0, "/bin/tmux", "-S", "/tmp/mux", "kill-server");
+	STATUS(1, "/bin/tmux", "-S", "/tmp/mux", "has-session");
+	// Without -S, the socket is in /tmp/tmux-0, which tmux makes.
+	STATUS(0, "/bin/tmux", "new-session", "-d");
+	STATUS(0, "/bin/test", "-S", "/tmp/tmux-0/default");
+	STATUS(0, "/bin/tmux", "kill-server");
+}
+
 // Every utility has its manual page.
 static void manuals(void) {
 	const char *const pages[] = {"ls", "cat", "sort", "test", "[", "find", "xargs", "grep", "sed",
 			"awk", "diff", "cmp", "diff3", "sdiff", "patch", "bc", "dc", "less", "man", "mandoc",
 			"apropos", "tput", "tset", "clear", "gzip", "gunzip", "zcat", "zgrep", "bzip2",
 			"bunzip2", "bzcat", "xz", "unxz", "xzcat", "lzma", "xzgrep", "zstd", "unzstd",
-			"zstdcat", "lz4", "unlz4", "tar", "cpio", "unzip", "bsdcat", "zip", "file", "jq"};
+			"zstdcat", "lz4", "unlz4", "tar", "cpio", "unzip", "bsdcat", "zip", "file", "jq",
+			"nano", "rnano", "vi", "ex", "view", "tmux"};
 	for(size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
 		char path[64];
 		snprintf(path, sizeof(path), "/usr/share/man/man1/%s.1", pages[i]);
@@ -433,6 +606,8 @@ int main(void) {
 	RUN(compressing);
 	RUN(archiving);
 	RUN(describing);
+	RUN(editing);
+	RUN(multiplexing);
 	RUN(manuals);
 	return check_end();
 }

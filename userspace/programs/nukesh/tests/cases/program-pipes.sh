@@ -18,8 +18,9 @@ cat "$tmp/named"
 echo hi &>"$tmp/both"
 cat "$tmp/both"
 cat <<<"here string" | wc -c
+# Far enough apart that a busy machine still finishes them in order.
 for i in 1 2 3; do
-	(sleep 0.$i; echo "job $i") &
+	(sleep 0.$((i * 3)); echo "job $i") &
 done
 wait
 echo "all jobs done"

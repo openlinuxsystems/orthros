@@ -491,7 +491,12 @@ pub fn method(
         }
         process::SOCKET_PAIR => {
             let a = process::SocketPairArgs::decode(args)?;
-            crate::fs::socket::make(user, a.first, a.second, a.flags)?;
+            crate::fs::socket::make_pair(user, a.first, a.second, a.flags)?;
+            answer(label, 0, [0; 8])
+        }
+        process::SOCKET => {
+            let a = process::SocketArgs::decode(args)?;
+            crate::fs::socket::make(user, a.to, a.flags)?;
             answer(label, 0, [0; 8])
         }
         process::POLL => {

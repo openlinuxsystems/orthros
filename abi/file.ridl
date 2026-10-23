@@ -20,10 +20,14 @@
 //! offset, and their reads return what has come, waiting while nothing
 //! has unless the description is non_blocking.
 //!
-//! Since Phase 9 the ends of a socket pair (radix-process(2)'s
-//! `socket_pair`) are files of that kind too, with three methods of their
-//! own: `send`, `receive` and `shutdown`. Each end reads what the other
-//! writes, as through two pipes, one each way.
+//! Since Phase 9 sockets are files of that kind too: the ends of a socket
+//! pair (radix-process(2)'s `socket_pair`), and sockets radix-process(2)'s
+//! `socket` makes, which radix-directory(2) names and connects, and which
+//! `listen` and `accept` take connections on. They have methods of their
+//! own: `send` and `receive`, and with files, `send_files` and
+//! `receive_files`; `shutdown`; `socket_name` and `socket_state`. Each
+//! end of a connection reads what the other writes, as through two pipes,
+//! one each way.
 
 module file;
 
@@ -97,10 +101,24 @@ flags SocketFlags: u32 {
     /// A send to an end no one reads fails with gone, without SIGPIPE:
     /// POSIX's MSG_NOSIGNAL.
     no_signal = 1;
+    /// The slots `receive_files` puts files in are closed by exec:
+    /// POSIX's MSG_CMSG_CLOEXEC.
+    close_on_exec = 2;
 }
 
+/// The most files one `send_files` sends, as Linux's SCM_MAX_FD.
+const SEND_FILES_MAX: u64 = 253;
+/// The most files on their way through one direction of a connection,
+/// sent and not yet received.
+const FILES_IN_FLIGHT_MAX: u64 = 1024;
+/// The most connections a listening socket keeps waiting: SOMAXCONN.
+const BACKLOG_MAX: u64 = 4096;
+/// The longest name a socket takes, in bytes: sockaddr_un's sun_path,
+/// without its NUL.
+const SOCKET_NAME_MAX: u64 = 107;
+
 /// A file.
-interface file = 0x000c version 3 {
+interface file = 0x000c version 4 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -178,18 +196,76 @@ interface file = 0x000c version 3 {
     /// fails with gone. Needs the write right.
     method send = 12 (data: in bytes, flags: SocketFlags) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
-                gone, interrupted];
+                gone, interrupted, not_connected];
     /// Receives what a socket's other end sent into `buffer`, as `read`
     /// does but with `flags`; returns how many bytes came, 0 once the
     /// other end is gone or shut for writing and all it sent has been
     /// read. Needs the read right.
     method receive = 13 (buffer: out bytes, flags: SocketFlags) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
-                interrupted];
+                interrupted, not_connected];
     /// Shuts a socket's end for reading (what the other end sends then
     /// fails with gone), for writing (the other end then receives the
     /// end), or both, for every description of the end: POSIX's
     /// `shutdown`.
     method shutdown = 14 (read: bool, write: bool) -> ()
+        raises [no_such_slot, empty_slot, not_socket, not_connected];
+    /// Has a socket radix-process(2)'s `socket` made, which has a name
+    /// (radix-directory(2)'s `bind_socket`) and is not connected, take
+    /// connections: at most `backlog` wait for `accept` at once (1 at
+    /// least, BACKLOG_MAX at most; 0 means 1). A socket that listens
+    /// already takes the new number. A socket with no name, or connected,
+    /// fails with invalid_argument. Needs the write right.
+    method listen = 15 (backlog: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                not_socket, busy];
+    /// Takes a connection that waits at a listening socket, waiting for
+    /// one unless the description is non_blocking, and puts a
+    /// description of its end in slot `to` with `flags`: a socket of its
+    /// own, connected, with the listening socket's name. A socket that
+    /// does not listen fails with invalid_argument. Needs the read right.
+    method accept = 16 (to: slot, flags: PipeFlags) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument,
+                no_memory, not_socket, would_block, interrupted];
+    /// Writes the name of a socket (radix-directory(2)'s `bind_socket`),
+    /// or with `peer` of the socket at a connection's other end, into
+    /// `buffer`, as the path the binding was asked for; returns its
+    /// length, 0 for none, which is more than `buffer` holds if it was
+    /// cut short. A connection that `accept` took has the listening
+    /// socket's name.
+    method socket_name = 17 (peer: bool, buffer: out bytes) -> (len: u64)
+        raises [no_such_slot, empty_slot, bad_address, not_socket, not_connected];
+    /// What a socket is: whether it listens (SO_ACCEPTCONN), whether it
+    /// is connected, and for a connected one the number of the process at
+    /// the other end (SO_PEERCRED's `pid`): the one that connected, or for
+    /// the connecting end, the one that listened, as each was when the
+    /// connection was made; for a pair's ends, the process that made the
+    /// pair.
+    method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64)
         raises [no_such_slot, empty_slot, not_socket];
+    /// Sends `data` as `send` does, with the files whose slots `slots`
+    /// holds (u32 each, at most SEND_FILES_MAX): copies of their
+    /// capabilities, with their rights, which go with the first byte of
+    /// `data` and come out with it at the other end. Each must be a file
+    /// or directory capability with the copy right, and no socket: a
+    /// socket among them fails with not_supported. More than
+    /// FILES_IN_FLIGHT_MAX on their way fails with too_many. `data` must
+    /// hold a byte at least. Needs the write right.
+    method send_files = 19 (data: in bytes, slots: in bytes, flags: SocketFlags) -> (count: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_socket, not_connected, not_supported, too_many,
+                would_block, gone, interrupted];
+    /// Receives as `receive` does, with the files that came with the
+    /// bytes received: a receive that starts at a byte files came with
+    /// takes them, and one that does not ends before such a byte. Puts
+    /// each in the lowest free slot from radix-startup(2)'s SLOT_FD_BASE
+    /// below the process's limit of files (radix-process(2)'s `limits`),
+    /// as POSIX's lowest free descriptor, and writes their numbers into
+    /// `slots` (u32 each). Returns how many bytes and how many files it
+    /// put in slots, and how many files came that `slots` or the slots
+    /// had no room for, which are closed. Needs the read right.
+    method receive_files = 20 (buffer: out bytes, slots: out bytes, flags: SocketFlags)
+        -> (count: u64, files: u32, lost: u32)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address, no_memory, not_socket,
+                not_connected, would_block, interrupted];
 }

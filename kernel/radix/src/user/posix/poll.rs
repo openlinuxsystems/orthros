@@ -111,8 +111,8 @@ fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
         Some(Object::File(file)) => {
             if let Some(end) = file.pipe_end() {
                 end.pipe().events(end.write)
-            } else if let Some(end) = file.socket_end() {
-                end.events()
+            } else if let Some(socket) = file.socket() {
+                socket.events()
             } else if let Some(handle) = file.tty_handle() {
                 handle.events()
             } else {

@@ -1,0 +1,72 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+catopen, catgets and catclose, which POSIX's XSI option has and mlibc
+had only an empty <nl_types.h> for: musl 1.2.5's (MIT,
+https://musl.libc.org), from mlibc/catalog.hpp, which ports/mlibc/musl
+keeps. libc++'s std::messages opens catalogs with them, and nvi its
+messages. A catalog is in the format the BSDs' and musl's gencat write;
+a name without a '/' is looked for along NLSPATH, in the LC_MESSAGES
+locale for NL_CAT_LOCALE. Meant for upstream.
+
+diff -ruN a/options/posix/generic/nl_types.cpp b/options/posix/generic/nl_types.cpp
+--- a/options/posix/generic/nl_types.cpp
++++ b/options/posix/generic/nl_types.cpp
+@@ -0,0 +1,15 @@
++
++#include <nl_types.h>
++#include <mlibc/catalog.hpp>
++
++nl_catd catopen(const char *name, int oflag) {
++	return mlibc::catalog::open_catalog(name, oflag);
++}
++
++char *catgets(nl_catd catalog, int set, int number, const char *message) {
++	return mlibc::catalog::message(catalog, set, number, message);
++}
++
++int catclose(nl_catd catalog) {
++	return mlibc::catalog::close_catalog(catalog);
++}
+diff -ruN a/options/posix/include/nl_types.h b/options/posix/include/nl_types.h
+--- a/options/posix/include/nl_types.h
++++ b/options/posix/include/nl_types.h
+@@ -1,6 +1,27 @@
+ #ifndef NL_TYPES_H
+ #define NL_TYPES_H
+ 
++#include <bits/nl_item.h>
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define NL_SETD 1
++#define NL_CAT_LOCALE 1
++
++typedef void *nl_catd;
++
++#ifndef __MLIBC_ABI_ONLY
++
++nl_catd catopen(const char *__name, int __oflag);
++char *catgets(nl_catd __catalog, int __set, int __number, const char *__message);
++int catclose(nl_catd __catalog);
++
++#endif /* !__MLIBC_ABI_ONLY */
++
++#ifdef __cplusplus
++}
++#endif
+ 
+ #endif /* NL_TYPES_H */
+diff -ruN a/options/posix/meson.build b/options/posix/meson.build
+--- a/options/posix/meson.build
++++ b/options/posix/meson.build
+@@ -14,6 +14,7 @@
+ 	'generic/lookup.cpp',
+ 	'generic/netdb.cpp',
+ 	'generic/net-if.cpp',
++	'generic/nl_types.cpp',
+ 	'generic/poll.cpp',
+ 	'generic/posix_ctype.cpp',
+ 	'generic/posix_devctl.cpp',

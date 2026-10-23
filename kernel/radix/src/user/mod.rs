@@ -361,6 +361,15 @@ impl<T> Fifo<T> {
             .map_err(|item| item.expect("it was pushed as `Some`"))
     }
 
+    /// Makes room for one more item, so that the next `push_back` needs
+    /// no memory; says whether there was memory for it.
+    pub(crate) fn reserve_one(&mut self) -> bool {
+        if self.items.len() == self.items.capacity() {
+            self.compact();
+        }
+        self.items.try_reserve(1).is_ok()
+    }
+
     /// Puts `item` back at the front; right after `pop_front` this needs
     /// no memory. Gives it back if there is no memory.
     pub(crate) fn push_front(&mut self, item: T) -> core::result::Result<(), T> {
@@ -393,6 +402,11 @@ impl<T> Fifo<T> {
 
     pub(crate) fn len(&self) -> usize {
         self.items.len() - self.head
+    }
+
+    /// The items, from the front.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items[self.head..].iter().flatten()
     }
 
     /// Takes every item, leaving it empty.

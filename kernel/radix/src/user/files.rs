@@ -14,10 +14,12 @@
 //! more, and the object it names is charged to the caller's process.
 //!
 //! Since Phase 8 a file object is an open file description: reads and
-//! writes at CURRENT use its offset, and those of a pipe's end or a
-//! terminal's side go to the pipe or the terminal (`fs::pipe`, `fs::tty`),
-//! which may wait. Opening a terminal makes it the controlling terminal of
-//! a session leader that has none, unless asked not to.
+//! writes at CURRENT use its offset, and those of a pipe's end, a
+//! socket or a terminal's side go to the pipe, the socket or the terminal
+//! (`fs::pipe`, `fs::socket`, `fs::tty`), which may wait. Opening a
+//! terminal makes it the controlling terminal of a session leader that
+//! has none, unless asked not to. Since Phase 9 directories name sockets
+//! and connect them, and sockets listen, accept, and send files.
 
 use core::mem::size_of;
 
@@ -25,6 +27,8 @@ use radix_abi::capability::SlotFlags;
 use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags};
 use radix_abi::errors::Kernel;
 use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, SocketFlags, Whence};
+use radix_abi::process::{LimitKind, MAX_SLOTS};
+use radix_abi::startup::SLOT_FD_BASE;
 use radix_abi::{UserBuffer, file, terminal};
 use radix_cap::{CapError, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
@@ -466,6 +470,28 @@ pub fn directory_method(
             };
             answer(label, directory::InfoResults::WORDS, results.encode())
         }
+        directory::BIND_SOCKET => {
+            let a = directory::BindSocketArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let (_, file) = objects::file(cspace, a.socket, Rights::WRITE)?;
+            let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
+            let path = Path::copy(a.path)?;
+            let name = Path::copy(a.name)?;
+            let name = socket::Name::of(name.bytes()).ok_or(Kernel::InvalidArgument.status(2))?;
+            socket::bind(socket, vfs()?, &dir.at, path.as_str()?, name)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::CONNECT_SOCKET => {
+            let a = directory::ConnectSocketArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let (_, file) = objects::file(cspace, a.socket, Rights::WRITE)?;
+            let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
+            let path = Path::copy(a.path)?;
+            let named = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let non_blocking = file.description().non_blocking;
+            socket::connect(socket, &named.node, user.process.number(), non_blocking)?;
+            answer(label, 0, [0; 8])
+        }
         file::LOCK | file::LOCK_HOLDER => {
             lock_method(user, found, ObjectKind::Directory, label, args)
         }
@@ -647,7 +673,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Target::Pipe(_) | Target::Socket(_) if a.request == terminal::READABLE => {
                     let len = match target(file) {
                         Target::Pipe(end) => end.pipe().len(),
-                        Target::Socket(end) => end.pending(),
+                        Target::Socket(socket) => socket.pending(),
                         _ => 0,
                     } as u32;
                     if a.size < 4 || !Arch::copy_to_user(a.buffer, &len.to_le_bytes()) {
@@ -662,42 +688,247 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::LOCK | file::LOCK_HOLDER => lock_method(user, found, ObjectKind::File, label, args),
         file::SEND => {
             let a = file::SendArgs::decode(args)?;
-            let (file, end) = socket_of(found, Rights::WRITE)?;
+            let (file, socket) = socket_of(found, Rights::WRITE)?;
             let (address, len) = user_range(a.data)?;
             let data = UserIn { address, len };
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
             let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
-            let count = end.send(&data, non_blocking, signal)? as u64;
+            let count = socket.send(&data, non_blocking, signal)? as u64;
             answer(label, file::SendResults::WORDS, file::SendResults { count }.encode())
         }
         file::RECEIVE => {
             let a = file::ReceiveArgs::decode(args)?;
-            let (file, end) = socket_of(found, Rights::READ)?;
+            let (file, socket) = socket_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
-            let count = end.receive(&mut out, non_blocking)? as u64;
+            let count = socket.receive(&mut out, non_blocking)? as u64;
             answer(label, file::ReceiveResults::WORDS, file::ReceiveResults { count }.encode())
         }
         file::SHUTDOWN => {
             let a = file::ShutdownArgs::decode(args)?;
-            let (_, end) = socket_of(found, Rights::NONE)?;
-            end.shutdown(a.read, a.write);
+            let (_, socket) = socket_of(found, Rights::NONE)?;
+            socket.connected()?.shutdown(a.read, a.write);
             answer(label, 0, [0; 8])
+        }
+        file::LISTEN => {
+            let a = file::ListenArgs::decode(args)?;
+            let (_, socket) = socket_of(found, Rights::WRITE)?;
+            socket::listen(socket, a.backlog, user.process.number())?;
+            answer(label, 0, [0; 8])
+        }
+        file::ACCEPT => {
+            let a = file::AcceptArgs::decode(args)?;
+            let (file, socket) = socket_of(found, Rights::READ)?;
+            // The slot first, so that no connection is taken for nothing.
+            match caps::get(SlotRef::new(user.cspace, a.to)) {
+                Err(CapError::Empty) => {}
+                Ok(_) => return Err(error(Kernel::Occupied)),
+                Err(err) => return Err(cap_error(err)),
+            }
+            let non_blocking = file.description().non_blocking;
+            socket::accept(user, socket, a.to, a.flags, non_blocking)?;
+            answer(label, 0, [0; 8])
+        }
+        file::SOCKET_NAME => {
+            let a = file::SocketNameArgs::decode(args)?;
+            let (_, socket) = socket_of(found, Rights::NONE)?;
+            let name = socket.name(a.peer)?;
+            let (address, len) = user_range(a.buffer)?;
+            let bytes = name.bytes();
+            let fits = &bytes[..bytes.len().min(len)];
+            if !fits.is_empty() && !Arch::copy_to_user(address, fits) {
+                return Err(error(Kernel::BadAddress));
+            }
+            let results = file::SocketNameResults { len: bytes.len() as u64 };
+            answer(label, file::SocketNameResults::WORDS, results.encode())
+        }
+        file::SOCKET_STATE => {
+            file::SocketStateArgs::decode(args)?;
+            let (_, socket) = socket_of(found, Rights::NONE)?;
+            let results = file::SocketStateResults {
+                listening: socket.listens(),
+                connected: socket.end().is_some(),
+                peer: socket.end().map_or(0, socket::End::peer_process),
+            };
+            answer(label, file::SocketStateResults::WORDS, results.encode())
+        }
+        file::SEND_FILES => {
+            let a = file::SendFilesArgs::decode(args)?;
+            let (file, socket) = socket_of(found, Rights::WRITE)?;
+            let end = socket.connected()?;
+            let (address, len) = user_range(a.data)?;
+            if len == 0 {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            let files = files_to_send(user, a.slots)?;
+            let data = UserIn { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
+            let count = end.send(&data, files, non_blocking, signal)? as u64;
+            answer(label, file::SendFilesResults::WORDS, file::SendFilesResults { count }.encode())
+        }
+        file::RECEIVE_FILES => {
+            let a = file::ReceiveFilesArgs::decode(args)?;
+            let (file, socket) = socket_of(found, Rights::READ)?;
+            let end = socket.connected()?;
+            let (address, len) = user_range(a.buffer)?;
+            if !a.slots.len.is_multiple_of(4)
+                || !radix_ipc::range::user_bytes(a.slots.address, a.slots.len)
+            {
+                return Err(error(Kernel::BadAddress));
+            }
+            let mut out = UserOut { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let (count, files) = end.receive(&mut out, non_blocking)?;
+            let close_on_exec = a.flags.contains(SocketFlags::CLOSE_ON_EXEC);
+            let (files, lost) = match files {
+                Some(files) => install_received(user, files, a.slots, close_on_exec)?,
+                None => (0, 0),
+            };
+            let results = file::ReceiveFilesResults { count: count as u64, files, lost };
+            answer(label, file::ReceiveFilesResults::WORDS, results.encode())
         }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }
 
-/// The file `found` designates and the socket end it is of, if its
+/// The file `found` designates and the socket it is of, if its
 /// capability has the rights `needs`; not_socket for any other file.
-fn socket_of(found: &Found, needs: Rights) -> Result<(&FileRef, &socket::End)> {
+fn socket_of(found: &Found, needs: Rights) -> Result<(&FileRef, &socket::Socket)> {
     let file = file_of(found, Rights::NONE)?;
-    let end = file.socket_end().ok_or(error(Kernel::NotSocket))?;
+    let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
     file_of(found, needs)?;
-    Ok((file, end))
+    Ok((file, socket))
+}
+
+/// The files `send_files` sends: those whose slots the caller's `slots`
+/// holds, u32 each, at most SEND_FILES_MAX; none if it holds none. Each
+/// must be a file or directory capability with the copy right, and no
+/// socket's.
+fn files_to_send(user: &UserRef, slots: UserBuffer) -> Result<Option<pipe::Files>> {
+    let count = slots.len / 4;
+    if !slots.len.is_multiple_of(4) || count > file::SEND_FILES_MAX {
+        return Err(Kernel::InvalidArgument.status(1));
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    let mut files = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    files.try_reserve_exact(count as usize).map_err(|_| error(Kernel::NoMemory))?;
+    for i in 0..count {
+        let mut number = [0; 4];
+        if !Arch::copy_from_user(&mut number, slots.address + i * 4) {
+            return Err(error(Kernel::BadAddress));
+        }
+        let is_file = |kind| matches!(kind, ObjectKind::File | ObjectKind::Directory);
+        let mut place = None;
+        let found = objects::find(user.cspace, u32::from_le_bytes(number), is_file, &mut place)?;
+        let kind = found.cap.kind();
+        if !is_file(kind) {
+            return Err(error(Kernel::WrongKind));
+        }
+        found.cap.check(kind, Rights::COPY).map_err(cap_error)?;
+        let file = match found.object.take() {
+            Some(Object::File(file) | Object::Directory(file)) => file,
+            _ => return Err(error(Kernel::Gone)),
+        };
+        // A socket sent could hold itself open (`fs::socket`).
+        if file.socket().is_some() {
+            return Err(error(Kernel::NotSupported));
+        }
+        // Room was reserved above.
+        let _ = files.push_within_capacity(pipe::Passed { kind, rights: found.cap.rights(), file });
+    }
+    Ok(Some(files))
+}
+
+/// Puts each of `files`, received through a socket, in the caller's
+/// lowest free slot from SLOT_FD_BASE below its limit of files, closed by
+/// exec if `close_on_exec`, and writes the slots' numbers into its
+/// `slots`, u32 each, while there is room there. Returns how many it put,
+/// and how many it closed for want of room in `slots` or of a free slot.
+fn install_received(
+    user: &UserRef,
+    files: pipe::Files,
+    slots: UserBuffer,
+    close_on_exec: bool,
+) -> Result<(u32, u32)> {
+    let room = slots.len / 4;
+    let limit = user.process.posix.lock().limits.get(LimitKind::Files).current;
+    let end = (u64::from(SLOT_FD_BASE) + limit).min(u64::from(MAX_SLOTS)) as u32;
+    let (mut put, mut lost) = (0u32, 0u32);
+    let mut from = SLOT_FD_BASE;
+    for passed in files {
+        if u64::from(put) == room {
+            lost += 1;
+            continue;
+        }
+        let installed = loop {
+            let Some(slot) = free_slot(user, from, end) else { break None };
+            let to = SlotRef::new(user.cspace, slot);
+            match install_file(
+                user,
+                to,
+                passed.kind,
+                passed.rights,
+                passed.file.clone(),
+                close_on_exec,
+            ) {
+                Ok(()) => break Some(slot),
+                // Another thread took it first.
+                Err(status) if status == error(Kernel::Occupied) => from = slot + 1,
+                Err(_) => break None,
+            }
+        };
+        let Some(slot) = installed else {
+            lost += 1;
+            continue;
+        };
+        if !Arch::copy_to_user(slots.address + u64::from(put) * 4, &slot.to_le_bytes()) {
+            return Err(error(Kernel::BadAddress));
+        }
+        put += 1;
+        from = slot + 1;
+    }
+    Ok((put, lost))
+}
+
+/// The lowest free slot of the caller's space from `from` below `end`,
+/// growing the space when every slot it has is taken, as the C library
+/// does for a new descriptor (radix-posix(7)).
+fn free_slot(user: &UserRef, mut from: u32, end: u32) -> Option<u32> {
+    while from < end {
+        let (used, slots) = caps::with(|store| -> core::result::Result<_, CapError> {
+            Ok((store.used_slots(user.cspace, from)?, store.slots(user.cspace)?))
+        })
+        .and_then(|found| found)
+        .ok()?;
+        if from < slots {
+            // Only the slots the space has count as free.
+            let mut free = !used;
+            if slots - from < 64 {
+                free &= (1 << (slots - from)) - 1;
+            }
+            if free != 0 {
+                let slot = from + free.trailing_zeros();
+                return (slot < end).then_some(slot);
+            }
+            from += 64;
+            if from < slots {
+                continue;
+            }
+        }
+        if slots >= MAX_SLOTS {
+            return None;
+        }
+        user.process.grow((slots * 2).min(MAX_SLOTS)).ok()?;
+    }
+    None
 }
 
 /// radix-file(2)'s `lock` and `lock_holder`, on the file or directory
@@ -786,8 +1017,8 @@ fn lock_method(
 enum Target<'a> {
     /// An end of a pipe.
     Pipe(&'a pipe::End),
-    /// An end of a socket pair.
-    Socket(&'a socket::End),
+    /// A socket.
+    Socket(&'a socket::Socket),
     /// A side of a terminal.
     Tty(&'a tty::Handle),
     /// A file of the tree, through its node.
@@ -797,8 +1028,8 @@ enum Target<'a> {
 fn target(file: &FileObject) -> Target<'_> {
     if let Some(end) = file.pipe_end() {
         Target::Pipe(end)
-    } else if let Some(end) = file.socket_end() {
-        Target::Socket(end)
+    } else if let Some(socket) = file.socket() {
+        Target::Socket(socket)
     } else if let Some(handle) = file.tty_handle() {
         Target::Tty(handle)
     } else {
@@ -849,7 +1080,7 @@ fn read_special(
     let non_blocking = never_wait || file.description().non_blocking;
     match target(file) {
         Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
-        Target::Socket(end) => end.receive(out, non_blocking).map(|n| n as u64),
+        Target::Socket(socket) => socket.receive(out, non_blocking).map(|n| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Node => Ok(0),
     }
@@ -902,7 +1133,7 @@ fn write_special(
     let non_blocking = never_wait || file.description().non_blocking;
     match target(file) {
         Target::Pipe(end) => end.pipe().write(data, non_blocking, true).map(|n| n as u64),
-        Target::Socket(end) => end.send(data, non_blocking, true).map(|n| n as u64),
+        Target::Socket(socket) => socket.send(data, non_blocking, true).map(|n| n as u64),
         Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
         Target::Node => Ok(0),
     }

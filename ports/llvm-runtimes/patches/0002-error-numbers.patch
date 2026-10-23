@@ -1,0 +1,22 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Gives libc++ the highest error number there can be on Radix, which is
+Linux's (radix-posix(7)), as it has it on Linux and musl: an error
+category names a number above it as unknown itself rather than asking
+strerror. Without it, the build warns that it does not know Radix (ADR
+0090).
+
+diff --git a/libcxx/src/include/config_elast.h b/libcxx/src/include/config_elast.h
+index 7edff2d9..fd19d60f 100644
+--- a/libcxx/src/include/config_elast.h
++++ b/libcxx/src/include/config_elast.h
+@@ -33,7 +33,7 @@
+ // No _LIBCPP_ELAST needed on WASI
+ #elif defined(__EMSCRIPTEN__)
+ // No _LIBCPP_ELAST needed on Emscripten
+-#elif defined(__linux__) || _LIBCPP_HAS_MUSL_LIBC
++#elif defined(__linux__) || defined(__radix__) || _LIBCPP_HAS_MUSL_LIBC
+ #  define _LIBCPP_ELAST 4095
+ #elif defined(__APPLE__)
+ // No _LIBCPP_ELAST needed on Apple

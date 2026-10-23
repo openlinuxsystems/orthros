@@ -101,3 +101,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0087](0087-gpl-programs-among-the-ports.md) | GPL programs may be ports in /system, each a program of its own | Accepted |
 | [0088](0088-archives-and-compressors.md) | libarchive is tar, cpio and unzip; each compressor is its own project's | Accepted |
 | [0089](0089-directory-descriptor-paths.md) | The C library notes the path of each directory descriptor, for `..` beneath it and fchdir | Accepted |
+| [0090](0090-editors-cxx-and-default-settings.md) | Editors, a C++ runtime, and the settings the system starts with | Accepted |
+| [0091](0091-named-sockets-and-passed-descriptors.md) | Named sockets connect through the tree, and descriptors ride on their bytes | Accepted |
