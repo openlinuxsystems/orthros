@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Gavin Howard's bc (ADR 0086): bc and dc, the arbitrary-precision
+# calculators, as FreeBSD, macOS and Android ship them. Its random number
+# generator is PCG, under the MIT license.
+name = "bc"
+version = "7.1.0"
+summary = "bc and dc, the arbitrary-precision calculators"
+license = "BSD-2-Clause AND MIT"
+homepage = "https://git.gavinhoward.com/gavin/bc"
+depends = ["mlibc"]
+
+[source]
+git = "https://github.com/gavinhoward/bc.git"
+commit = "70c51d95e02d20fc3fc82791dc3f1aa0e9d47f0d"
+tag = "7.1.0"

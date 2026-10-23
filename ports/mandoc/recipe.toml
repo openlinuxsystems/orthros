@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# mandoc (ADR 0086): man, which shows the manual pages in
+# /system/share/man, and the formatter behind it. The release archive
+# comes from mandoc's home, or else from Ubuntu's source pool, which
+# keeps it unchanged under Debian's old name for mandoc, mdocml.
+name = "mandoc"
+version = "1.14.6"
+summary = "man and the manual page formatter"
+license = "ISC AND BSD-2-Clause AND BSD-3-Clause"
+homepage = "https://mandoc.bsd.lv"
+depends = ["mlibc", "zlib"]
+
+[source]
+url = "https://mandoc.bsd.lv/snapshots/mandoc-1.14.6.tar.gz"
+sha256 = "8bf0d570f01e70a6e124884088870cbed7537f36328d512909eb10cd53179d9c"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/universe/m/mdocml/mdocml_1.14.6.orig.tar.gz"]

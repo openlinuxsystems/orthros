@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# ncurses (ADR 0086): the terminal library that less, nano, tmux and nvi
+# draw with, the terminfo descriptions of the terminals they draw on, and
+# tput, tset, clear, infocmp and tic. Its home is invisible-island.net;
+# Thomas Dickey, who keeps it, also publishes every release and weekly
+# snapshot on GitHub, where this source is fetched from.
+name = "ncurses"
+version = "6.6"
+summary = "the terminal library, the terminfo database and its tools"
+license = "X11-distribute-modifications-variant"
+homepage = "https://invisible-island.net/ncurses/"
+depends = ["mlibc"]
+image = ["system/share/terminfo/"]
+
+[source]
+git = "https://github.com/ThomasDickey/ncurses-snapshots.git"
+commit = "0096bd402c4a9c8f39bd7ed266e1b8920327e4d8"
+tag = "v6_6"

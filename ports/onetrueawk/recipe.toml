@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The One True Awk (ADR 0086): awk as Aho, Weinberger and Kernighan wrote
+# it, kept up by Brian Kernighan and others, as the BSDs and macOS ship
+# it. Its license is Lucent's, which SPDX has no identifier for: SMLNJ's
+# is the closest, with other words for who may not be named.
+name = "onetrueawk"
+version = "20260426"
+summary = "awk, the pattern scanning and processing language"
+license = "LicenseRef-onetrueawk"
+homepage = "https://github.com/onetrueawk/awk"
+depends = ["mlibc"]
+
+[source]
+git = "https://github.com/onetrueawk/awk.git"
+commit = "5739fd79bcfc75ba7526773d0cf634521f8aca3c"
+tag = "20260426"

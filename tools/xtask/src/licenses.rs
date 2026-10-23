@@ -37,9 +37,19 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 
 /// Licenses a ported program, and what is built into it, may use beyond
 /// the kernel area's: it runs as a process of its own, so its terms reach
-/// no Dukovo code (ADR 0021). CC0-1.0 is a public domain dedication
-/// (uutils' `tail` follows files with the notify crate, ADR 0080).
-const PORT_EXTRA_ALLOW: &[&str] = &["CC0-1.0"];
+/// no Dukovo code (ADR 0021), and the GPL, which GNU grep, sed, diffutils
+/// and patch are under, is allowed for that reason (ADR 0087). CC0-1.0 is
+/// a public domain dedication (uutils' `tail` follows files with the
+/// notify crate, ADR 0080). ncurses' license is the X11 license that also
+/// lets one distribute with modifications; the One True Awk's is Lucent's,
+/// which SPDX has no identifier for.
+const PORT_EXTRA_ALLOW: &[&str] = &[
+    "CC0-1.0",
+    "GPL-2.0-or-later",
+    "GPL-3.0-or-later",
+    "X11-distribute-modifications-variant",
+    "LicenseRef-onetrueawk",
+];
 
 /// Crates from crates.io that compile another project's C code into what
 /// links them, under a license their Cargo.toml does not name: each
@@ -719,8 +729,8 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
                 version: recipe.version.clone(),
                 license: recipe.license.clone(),
                 area: Area::Port,
-                download: format!("git+{}@{}", recipe.source.git, recipe.source.commit),
-                sha256: None,
+                download: recipe.source.download(),
+                sha256: (!recipe.source.sha256.is_empty()).then(|| recipe.source.sha256.clone()),
                 notices: if recipe.notices.is_empty() {
                     notice_files(source)
                 } else {
@@ -730,7 +740,7 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
                     "{}, from {} ({}); built by ports/{} of Dukovo.",
                     recipe.summary,
                     recipe.homepage,
-                    recipe.source.tag.as_deref().unwrap_or(&recipe.source.commit),
+                    recipe.source.release(),
                     recipe.name
                 ),
             });
