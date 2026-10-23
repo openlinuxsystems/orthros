@@ -14,31 +14,32 @@
 //! steps of [`REVOKE_STEP`] deletions and let go of the lock between
 //! steps, yielding the CPU, so other threads are not shut out for long.
 //!
-//! Looking a capability up takes no lock and writes nothing shared when
-//! the store has not changed since this CPU last looked at that slot
-//! ([`get`]): every change to the store moves a version number, and each
-//! CPU keeps the capabilities it found, with the version they were found
-//! at. So programs on different CPUs using their capabilities at once do
-//! not contend, as long as nothing changes the store.
+//! The store has a version number for the caches outside it: each CPU
+//! keeps the capabilities its system calls found, with the version the
+//! store had then (`user::objects`), and the version moves whenever a
+//! capability some CPU found leaves its slot (`Store::take_stale`), or an
+//! object some CPU found leaves the registry ([`mark_stale`]). Other
+//! changes, such as a capability put in an empty slot or one nobody
+//! looked up deleted, leave every cache as it is. So programs on
+//! different CPUs using their capabilities at once do not contend, and
+//! opening and closing files does not empty the caches.
 //!
 //! Resource domains (`domains`) are objects in the store too: a domain
 //! lives while a capability to it does, and goes when the last one is
 //! deleted or revoked.
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_cap::{
     CapError, Capabilities, Capability, MAX_DEPTH, MAX_SLOTS, ObjectId, ObjectKind, Progress,
     Released, Rights, SlotRef,
 };
-use radix_hal::MAX_CPUS;
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
 use radix_sync::Mutex;
 
 use crate::domains::{self, DomainError, DomainRef, Settings};
-use crate::percpu::{Own, PerCpu, Slot};
 
 /// The store's type in the kernel.
 pub type Store = Capabilities<Kmalloc>;
@@ -74,89 +75,66 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
         }
         None => Err(CapError::NoSuchSpace),
     };
-    // `f` may have changed anything, so every capability a CPU has cached
-    // is stale from now on: before the lock goes, so that whoever sees the
-    // change through the store sees the new version too.
-    VERSION.fetch_add(1, Ordering::Release);
+    // If `f` took away something a CPU has cached, every cache is stale
+    // from now on: the version moves before the lock goes, so that whoever
+    // sees the change through the store sees the new version too.
+    let stale = store.as_mut().is_some_and(Store::take_stale);
+    if stale | STALE.swap(false, Ordering::Relaxed) {
+        VERSION.fetch_add(1, Ordering::Release);
+    }
     drop(store);
     // Files the change released go now, with the lock gone: the last of
     // a removed file frees its space on the disk.
     crate::fs::drop_deferred();
+    // Processes it finished tell their parents now: that may send
+    // signals, which may end more processes (Phase 8).
+    crate::user::process::report_finished();
     result
 }
 
-/// Moves on every change to the store, under its lock.
+/// Moves, under the store's lock, on every change that takes away
+/// something a CPU's cache may hold.
 static VERSION: AtomicU64 = AtomicU64::new(0);
 
-/// The store's version: it moves on every change to the store, and to the
-/// object registry (`user::objects`), which changes only under the store's
-/// lock. A version read with that lock held stays current until it goes.
+/// Something a cache outside the store may hold went in the change under
+/// way ([`mark_stale`]).
+static STALE: AtomicBool = AtomicBool::new(false);
+
+/// The store's version: it moves when a capability a CPU found leaves its
+/// slot, and when an object a CPU found leaves the object registry
+/// (`user::objects`), which changes only under the store's lock. A version
+/// read with that lock held stays current until it goes.
 pub fn version() -> u64 {
     VERSION.load(Ordering::Acquire)
 }
 
-/// Capabilities a CPU keeps, in a table indexed by slot.
-const CACHED: usize = 16;
-
-/// A capability this CPU found in a slot, and the store's version then.
-#[derive(Clone, Copy)]
-struct Cached {
-    at: SlotRef,
-    version: u64,
-    cap: Capability,
+/// Says that the change under way, with the store's lock held, took away
+/// something a CPU may have cached outside the store (an object the
+/// registry handed out): the version moves before the lock goes.
+pub fn mark_stale() {
+    STALE.store(true, Ordering::Relaxed);
 }
 
-/// Each CPU's capabilities, which only its own CPU uses.
-static CACHE: PerCpu<Own<[Option<Cached>; CACHED]>> =
-    PerCpu::new([const { Slot::new(Own::new([None; CACHED])) }; MAX_CPUS]);
-
-fn cache_index(at: SlotRef) -> usize {
-    (at.slot as usize ^ at.space.index as usize) % CACHED
-}
-
-/// The capability in `at`, as [`Store::get`] gives it.
-///
-/// If this CPU found it at the version the store has now, nothing has
-/// changed since, and it is still there: no lock, no shared write. A
-/// change under way that has not moved the version yet has not returned
-/// either, so a lookup that misses it happened before it. Otherwise the
-/// store is asked under its lock, and the answer kept with the version,
-/// which cannot move while the lock is held.
+/// The capability in `at`, as [`Store::get`] gives it, under the store's
+/// lock: for lookups too rare to be worth a place in a CPU's cache. The
+/// system calls' lookups go through `user::objects`, which keeps them.
 pub fn get(at: SlotRef) -> Result<Capability, CapError> {
-    let now = VERSION.load(Ordering::Acquire);
-    let index = cache_index(at);
-    let hit = CACHE.with_own(|cache| match &cache[index] {
-        Some(entry) if entry.at == at && entry.version == now => Some(entry.cap),
-        _ => None,
-    });
-    match hit {
-        Some(Some(cap)) => Ok(cap),
-        _ => get_from_store(at, index),
-    }
+    STORE.lock().as_ref().ok_or(CapError::NoSuchSpace)?.get(at)
 }
 
-/// [`get`] when this CPU's cache cannot answer: kept apart, so that a hit
-/// needs neither its registers nor its stack.
-#[cold]
-#[inline(never)]
-fn get_from_store(at: SlotRef, index: usize) -> Result<Capability, CapError> {
-    let (found, version) = {
-        let store = STORE.lock();
-        let found = store.as_ref().ok_or(CapError::NoSuchSpace)?.get(at);
-        (found, VERSION.load(Ordering::Relaxed))
-    };
-    if let Ok(cap) = found {
-        CACHE.with_own(|cache| cache[index] = Some(Cached { at, version, cap }));
-    }
-    found
-}
-
-/// The capability in `at`, if it may be used on a `kind` with the rights
-/// `needs`, as [`Store::lookup`] decides it, through [`get`].
-pub fn lookup(at: SlotRef, kind: ObjectKind, needs: Rights) -> Result<Capability, CapError> {
-    let cap = get(at)?;
-    cap.check(kind, needs)?;
-    Ok(cap)
+/// The capability in `at`, for a CPU's cache to keep (`user::objects`):
+/// from now on the version moves once it leaves its slot
+/// (`Store::get_to_cache`). With it come what `also` finds, with the
+/// store's lock still held, and the version then, which cannot move while
+/// the lock is held.
+pub fn get_to_cache<R>(
+    at: SlotRef,
+    also: impl FnOnce(&Capability) -> R,
+) -> Result<(Capability, R, u64), CapError> {
+    let mut store = STORE.lock();
+    let cap = store.as_mut().ok_or(CapError::NoSuchSpace)?.get_to_cache(at)?;
+    let found = also(&cap);
+    Ok((cap, found, VERSION.load(Ordering::Relaxed)))
 }
 
 /// Like [`with`], but gives up instead of waiting for the lock: for `kdb`,
@@ -260,7 +238,11 @@ pub fn create_domain(
 
 /// The domain the capability in `at` names, if it has `needs` on it.
 pub fn domain_at(at: SlotRef, needs: Rights) -> Result<DomainRef, CapError> {
-    let cap = lookup(at, ObjectKind::ResourceDomain, needs)?;
+    let cap = STORE.lock().as_ref().ok_or(CapError::NoSuchSpace)?.lookup(
+        at,
+        ObjectKind::ResourceDomain,
+        needs,
+    )?;
     cap.id().and_then(domains::by_object).ok_or(CapError::Empty)
 }
 

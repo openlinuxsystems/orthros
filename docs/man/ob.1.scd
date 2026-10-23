@@ -62,7 +62,10 @@ _target/userspace/_).
 *doctor*
 	Check every host tool the build needs: rustup, the pinned toolchain
 	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
-	UEFI, xorriso, mtools, scdoc, mandoc and mdBook. For anything missing,
+	UEFI, xorriso, mtools, dosfstools, the tools that build the ports
+	(Clang 20 or later with compiler-rt's builtins, LLD, LLVM's tools,
+	Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc, mandoc
+	and mdBook. For anything missing,
 	print the exact install command for Debian, Ubuntu, Fedora or Arch
 	Linux. Also report whether KVM is usable (without it QEMU still works,
 	only slower) and whether GDB is installed for *run --gdb*. Exits with
@@ -72,12 +75,17 @@ _target/userspace/_).
 	Build the Radix kernel for its own target,
 	_kernel/targets/x86_64-radix-kernel.json_, write the kernel's symbol
 	table into its *.ksyms* section (see *radix-debug*(7)), and install it
-	as _out/sysroot/boot/radix_. Then build the user programs in
-	_userspace/_ for _userspace/targets/x86_64-radix-user.json_ and install
-	their test image as _out/sysroot/boot/usertests_, which every image
-	loads as a boot module, and write the C headers of the system call
-	interface, which *ridlc* generates from _abi/\*.ridl_, into
-	_out/sysroot/include/radix/_ (see *radix-ipc*(7)).
+	as _out/sysroot/boot/radix_. Then write the C headers of the system
+	call interface, which *ridlc* generates from _abi/\*.ridl_, into
+	_out/sysroot/system/include/radix/_ (see *radix-ipc*(7)), build the
+	ports that changed (see *ports*), the C test programs of
+	_userspace/posix/_ and the programs on Rust's standard library in
+	_userspace/programs/_, and build the native user programs in
+	_userspace/_ for _userspace/targets/x86_64-radix-user.json_. Their
+	test image goes to _out/sysroot/boot/usertests_, which every image
+	loads as a boot module, and Spark, the programs it starts and the
+	files the ports put there go into the boot archive,
+	_out/sysroot/boot/bootfs_ (see *spark*(8)).
 
 	*--debug*
 		Build without optimisation.
@@ -85,6 +93,21 @@ _target/userspace/_).
 	*--release*
 		Build with optimisation. This is the default unless
 		*build.profile* in _dukovo.toml_ says otherwise.
+
+*ports* [*--rebuild* _name_]...
+	Build the ports in _ports/_, software from elsewhere built for Radix,
+	each after the ports it needs: the C library (mlibc) and the
+	C++ headers it is built with, Rust's standard library, the C.UTF-8
+	locale, and Lua, mlibc's own tests and libc-test, which the *posix*
+	boot test runs. A port is built again only when something that went into
+	its last build changed: its directory, the toolchain (and the pinned
+	Rust toolchain, for Rust's standard library) or a port it needs.
+	After Rust's standard library is built, its *libc* crate is checked
+	against the C library (see *PORTS*). *build* runs this first.
+
+	*--rebuild* _name_
+		Build this port even if nothing changed; repeat the option for
+		more.
 
 *image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
@@ -350,6 +373,21 @@ _target/userspace/_).
 		lists the running processes. dosfstools and mtools must be
 		installed (*ob doctor* says how).
 
+	*posix*
+		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark
+		starts _/system/tests/posix/run_ on a pseudo-terminal (see
+		*spark*(8)). It runs every test of the POSIX layer as a shell
+		runs a job, in a process group of its own in the foreground:
+		the C programs of _userspace/posix/_, on the C library (fork,
+		exec, signals, pipes, *poll*, terminals and job control, clocks
+		and timers, files and their locks, threads, *posix_spawn*,
+		resource limits and *printf*'s formats), a program linked
+		dynamically with a library of its own and one it opens with
+		*dlopen*, the test of Rust's standard library, the C library's
+		own tests and Lua's test suite (see *radix-posix*(7)). The case
+		checks that every test passed and that the runner exited
+		with 0.
+
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit
 		refuses what passes it, and when memory runs out the kernel stops
@@ -504,6 +542,72 @@ _target/userspace/_).
 *help* [_command_]
 	Show the list of commands, or the help for one command.
 
+# PORTS
+
+A port is a directory _ports/<name>/_ (ADR 0069) holding:
+
+_recipe.toml_
+	The port's name, version, summary, SPDX license and home page; its
+	source, a git repository and the full commit it is pinned to, or
+	*rust-src = true* for the _library_ directory of the pinned Rust
+	toolchain's *rust-src* component, with the crates it vendors; any
+	*extra* sources unpacked inside its tree, each with its own commit
+	and license; the ports it *depends* on; whether it belongs to the
+	*toolchain*, so that what it installs is only used to build and
+	never reaches an image; the files of the sysroot it puts in the boot
+	archive (*image*, a path ending in _/_ meaning a whole directory);
+	for a source without a LICENSE or COPYING file, the files that hold
+	its *notices*; and code from other projects the port keeps in its
+	own directory (*bundled*: name, version, license, home page and
+	notice files), each a package of its own in the license manifest.
+
+_patches/\*.patch_
+	Changes to the source, applied in name order with *patch -p1*. Each
+	starts with SPDX lines and a paragraph saying what it changes and
+	why.
+
+_build.sh_
+	Builds the port in a fresh copy of its patched source and installs
+	it into the sysroot, _out/sysroot_, or for a toolchain port into
+	_out/toolchain_. It runs with _out/toolchain/bin_ at the front of
+	*PATH* and gets in its environment the port's directory, source and
+	an empty build directory (*PORT_DIR*, *PORT_SRC*, *PORT_BUILD*),
+	*SYSROOT*, *TOOLCHAIN*, *PREFIX* (_/system_), *JOBS*, *HOST*
+	(*x86_64-radix*), the toolchain's programs as *CC*, *AR*, *RANLIB*,
+	*NM*, *STRIP* and *OBJCOPY*, *CFLAGS*, the Meson cross files
+	(*CROSS_FILE*, *LIBC_CROSS_FILE*), *RUST_TARGET* (the target
+	specification of programs on Rust's standard library), pkg-config's
+	settings for the sysroot and *SOURCE_DATE_EPOCH*; the host's own
+	*CPPFLAGS*, *CXXFLAGS*, *LDFLAGS* and *PKG_CONFIG_PATH* are taken
+	away.
+
+Sources are fetched with git once, by commit, into _target/ports/_, and
+checked to be that commit, so a build uses nothing the recipe does not
+name. Every port's license and notices go into the image's license
+manifest.
+
+The toolchain is the host's Clang, LLD and LLVM tools, made to target
+Radix by the scripts and Meson cross files *ob* writes into
+_out/toolchain/_: _bin/x86_64-radix-cc_, _-ar_, _-nm_ and the rest, and
+_meson/radix.ini_ for programs and _meson/radix-libc.ini_ for the C
+library itself. The C library is built for no operating system, for
+which Clang hands linking to the host's GCC, so _bin/ld.lld_ is there
+too: the LLD that GCC finds first on *PATH*. *x86_64-radix-cc* compiles for Radix's ABI, which
+is Linux's x86-64 one (see *radix-posix*(7)), with *\_\_radix\_\_* and
+*\_\_dukovo\_\_* defined and Linux's own macros not, against the
+sysroot's headers only. It links a static position-independent program,
+as every program in _/system_ is. With *-dynamic* it links a program
+that the dynamic linker, _/system/lib/ld.so_, starts on the shared C
+library, and with *-shared* a shared library, as a bundle that ships
+libraries of its own needs (ADR 0071).
+
+After building Rust's standard library, *ob* checks its *libc* crate
+against the C library: the size and alignment of every structure and
+type, the offset and size of every field and the value of every
+constant the crate's Radix module declares, as Clang sees them in the
+C library's headers, and that the C library defines every function it
+declares. Any difference fails the build.
+
 # ENVIRONMENT
 
 *OB_CONTAINER_ENGINE*
@@ -548,8 +652,24 @@ _out/sysroot/boot/usertests_
 
 _abi/\*.ridl_
 	The system call interface, from which *ridlc* generates the Rust
-	bindings, the C headers in _out/sysroot/include/radix/_ and the
-	section 2 man pages.
+	bindings, the C headers in _out/sysroot/system/include/radix/_ and
+	the section 2 man pages.
+
+_ports/_
+	The ports (see *PORTS*); their sources are fetched into
+	_target/ports/_.
+
+_out/toolchain/_
+	The C toolchain's wrapper scripts and Meson cross files, and the
+	toolchain ports' files.
+
+_out/sysroot/system/_
+	What the ports and the C test programs install: headers in
+	_include/_, the C library, its start files and the dynamic linker in
+	_lib/_, and the programs the boot archive holds.
+
+_out/sysroot/boot/bootfs_
+	The boot archive built by *ob build*.
 
 _kernel/deny.toml_
 	The license allow-list of the kernel, used by *ob image* and by
@@ -649,7 +769,7 @@ Build on a host without the tools installed, using Podman or Docker:
 # SEE ALSO
 
 *dukovo.toml*(5), *dukovo-boot*(7), *radix-debug*(7), *radix-ipc*(7),
-*qemu-system-x86_64*(1), *grub-mkrescue*(1), *rustup*(1), *gdb*(1), *dd*(1)
+*radix-posix*(7), *spark*(8), *qemu-system-x86_64*(1), *grub-mkrescue*(1), *rustup*(1), *gdb*(1), *dd*(1)
 
 The Dukovo handbook, chapter "Building Dukovo with ob", in
 _docs/handbook/_ or _out/docs/handbook/index.html_ after *ob docs*.

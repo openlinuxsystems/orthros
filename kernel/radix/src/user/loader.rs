@@ -42,7 +42,7 @@ use super::account::Account;
 use super::memory::{FrameObject, FrameRef, SpaceRef};
 use super::methods::retype;
 use super::objects::{self, Object};
-use super::process::{self, ProcessObject, ProcessRef};
+use super::process::{self, ProcessObject, ProcessRef, Start};
 use super::{Result, cap_error, error};
 use crate::domains::DomainRef;
 use crate::{Arch, caps};
@@ -107,8 +107,9 @@ pub fn start(at: SlotRef, program: &Program<'_>) -> Result<ProcessRef> {
         return Err(failed(name, "checking its capabilities", error(Kernel::InvalidArgument)));
     }
     let account = Account::new(program.domain.clone()).ok_or(error(Kernel::NoMemory))?;
-    let process = process::create(at, name, startup::SLOTS, account, None, None, program.on_exit)
-        .map_err(|err| failed(name, "making its process", err))?;
+    let process =
+        process::create(Some(at), name, startup::SLOTS, account, None, None, program.on_exit)
+            .map_err(|err| failed(name, "making its process", err))?;
     match build(at, &process, program) {
         Ok(()) => Ok(process),
         Err(err) => {
@@ -245,11 +246,18 @@ fn build(at: SlotRef, process: &ProcessRef, program: &Program<'_>) -> Result<()>
     put(Startup::OFFSET_ARGS_SIZE, &((at_byte - Startup::SIZE) as u32).to_le_bytes());
 
     let start = [placed.entry(), stack_top, startup::STARTUP_ADDRESS];
-    ProcessObject::start(process, start, startup::SLOT_THREAD, program.cpu, &mut |thread| {
-        bytes[Startup::OFFSET_THREAD_ID..][..4]
-            .copy_from_slice(&(thread.id() as u32).to_le_bytes());
-        page.write(0, &bytes)
-    })
+    ProcessObject::start(
+        process,
+        Start::Fresh(start),
+        startup::SLOT_THREAD,
+        program.cpu,
+        0,
+        &mut |thread| {
+            bytes[Startup::OFFSET_THREAD_ID..][..4]
+                .copy_from_slice(&(thread.id() as u32).to_le_bytes());
+            page.write(0, &bytes)
+        },
+    )
     .map_err(|err| failed(name, "starting its thread", err))?;
     Ok(())
 }

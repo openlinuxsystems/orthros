@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--posix*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -20,12 +20,12 @@ a program Spark started. The kernel keeps Spark's process for good, and
 Spark must not end. If it does, the kernel stops with a panic that names
 its exit code, since nothing could start a program again.
 
-This page describes Spark v1, as of Phase 7 of the roadmap. It builds
+This page describes Spark v1, as of Phase 8 of the roadmap. It builds
 the directory hierarchy and mounts the filesystems on it, mounts the FAT
 filesystem of each disk under _/volumes_, then starts the one program its
 arguments name, logs over the kernel log, waits for the program to exit,
-reaps it and checks that all of the program's memory came back. Then it
-waits. Phase 9 makes it the supervisor of the system's services, with
+reaps it and checks that all of the program's memory came back, or runs
+it as a POSIX program (see *POSIX PROGRAMS*). Then it waits. Phase 9 makes it the supervisor of the system's services, with
 restarts and resource domains.
 
 # STARTING
@@ -97,6 +97,32 @@ spark: reaped process 2; all of its memory came back
 spark: nothing more to do; waiting
 ```
 
+# POSIX PROGRAMS
+
+With *--posix* as its first argument, Spark runs the program after it as
+a POSIX program (*radix-posix*(7)): it makes a process for it, gives it
+the root directory, the random source and the kernel log, and a new
+pseudo-terminal from _/dev/ptmx_ as descriptors 0, 1 and 2, then starts
+it with *exec* as its own child, with the environment *PATH=/system/bin*,
+*HOME=/*, *TERM=dumb* and *LANG=C.UTF-8* and _/_ as its working
+directory. It copies what the program writes to the terminal to the
+kernel log, line by line, waits for the program with *wait*, and logs how
+it ended:
+
+```
+spark: started /system/tests/posix/run as process 14, on a pseudo-terminal
+posix: hello passed
+...
+posix: 20 of 20 tests passed
+spark: process 14 (/system/tests/posix/run) exited with code 0x0
+```
+
+The lines the program writes come without Spark's *spark:* prefix.
+
+A POSIX program and its children may *fork* and *exec* freely; Spark
+waits only for the one it started. The *posix* boot test (*ob*(1))
+boots with *-- --posix /system/tests/posix/run*.
+
 # EXAMPLES
 
 Boot the default image in QEMU, where Spark starts _/system/tests/hello_:
@@ -148,6 +174,10 @@ _/system/tests/storage_
 	every volume and checks _/tmp_, _/dev_, _/proc_ and _/sys_;
 	*storage check* reads them back after a reboot.
 
+_/system/tests/posix/run_
+	The *posix* boot test's runner, which Spark runs with *--posix*: it
+	runs the POSIX test programs beside it (*radix-posix*(7)).
+
 _/volumes/_*name*
 	Where each disk's FAT filesystem is mounted.
 
@@ -179,8 +209,15 @@ _name_ *holds no FAT filesystem; left alone*
 	A FAT filesystem that could not be mounted: *corrupt* when its boot
 	sector or tables are damaged.
 
+*spark: cannot make a pseudo-terminal:* _reason_, *spark: could not start* _path_*:* _reason_
+	Running a POSIX program failed before it started: _/dev/ptmx_ could
+	not be opened, or the process, its descriptors or *exec* failed.
+
+*spark: process* _n_ *(*_path_*) was ended by signal* _signal_
+	The POSIX program was killed by a signal.
+
 # SEE ALSO
 
-*dukovo-boot*(7), *radix-files*(7), *radix-processes*(7),
+*dukovo-boot*(7), *radix-files*(7), *radix-processes*(7), *radix-posix*(7),
 *radix-proc*(5), *radix-sysfs*(5), *radix-directory*(2),
 *radix-process*(2), *radix-startup*(2), *ob*(1)

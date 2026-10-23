@@ -21,7 +21,12 @@
 //!   disks every five seconds, and drops clean cached pages when memory
 //!   runs short (the out-of-memory policy asks it first);
 //! - [`FileObject`] is what a file or directory capability names: a place
-//!   in the tree. `user::files` carries out their methods.
+//!   in the tree, and since Phase 8 an open file description's offset and
+//!   flags. `user::files` carries out their methods;
+//! - `pipe` and `tty` are pipes and terminals (Phase 8), files outside the
+//!   tree's filesystems;
+//! - `locks` keeps files' advisory locks (Phase 8): `flock`'s, POSIX's
+//!   record locks and open file descriptions' range locks.
 //!
 //! A file object's last reference can be the last one to a FAT file
 //! removed while open, whose clusters are freed when it goes, which
@@ -32,31 +37,93 @@
 
 pub mod devfs;
 pub mod disk;
+pub mod locks;
+pub mod pipe;
 pub mod procfs;
 pub mod sysfs;
+pub mod tty;
 pub mod writeback;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use radix_abi::Status;
 use radix_abi::errors::{File as FileError, Kernel};
+use radix_abi::file::DescriptionFlags;
 use radix_hal::{Devices, Timer};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Kmalloc, PAGE_SIZE};
-use radix_sync::{Once, SpinLock};
+use radix_sync::{Mutex, Once, SpinLock};
 use radix_vfs::mount::{Location, OpenFlags, Vfs};
-use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, NodeRef, mem};
+use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, Kind, NodeRef, mem};
 
 use crate::Arch;
 
 /// A file or directory object, shared.
 pub type FileRef = alloc::sync::Arc<FileObject, Kmalloc>;
 
-/// What a file or directory capability names.
+/// An open file description's status flags (radix-file(2)'s
+/// DescriptionFlags).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Description {
+    /// Writes at the description's offset go at the end of the file.
+    pub append: bool,
+    /// Reads and writes of a pipe or terminal fail with would_block
+    /// rather than wait.
+    pub non_blocking: bool,
+}
+
+impl Description {
+    fn bits(self) -> u32 {
+        let mut bits = 0;
+        if self.append {
+            bits |= DescriptionFlags::APPEND.0;
+        }
+        if self.non_blocking {
+            bits |= DescriptionFlags::NON_BLOCKING.0;
+        }
+        bits
+    }
+
+    fn from_bits(bits: u32) -> Description {
+        Description {
+            append: bits & DescriptionFlags::APPEND.0 != 0,
+            non_blocking: bits & DescriptionFlags::NON_BLOCKING.0 != 0,
+        }
+    }
+}
+
+/// What kind of node a [`FileObject`] is of, as its reads and writes see
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Special {
+    /// A file or directory of a filesystem.
+    No,
+    /// An end of a pipe.
+    Pipe,
+    /// A side of a terminal.
+    Tty,
+}
+
+/// What a file or directory capability names: what POSIX calls an open
+/// file description, which copies of the capability share.
 pub struct FileObject {
     /// The place in the tree: a mount and a node of it (for a generated
-    /// file, the snapshot its `open` took).
+    /// file, the snapshot its `open` took; for a pipe or a terminal, its
+    /// own node).
     pub at: Location,
+    /// The offset that reads and writes at CURRENT use and move. Locked
+    /// for the length of such a read or write, so that two of them on the
+    /// description follow one another, as POSIX asks.
+    pub offset: Mutex<u64>,
+    /// Its [`Description`], as bits.
+    flags: AtomicU32,
+    /// Whether it has taken a lock (`locks`), which it lets go of when it
+    /// goes.
+    locked: AtomicBool,
+    /// Whether its node is a pipe's end or a terminal's side, found when
+    /// it is made: finding out takes dynamic type checks, which every
+    /// read and write of a plain file would otherwise make.
+    special: Special,
     /// The next released object to drop, while it waits in [`DROPPED`].
     next: SpinLock<Option<FileRef>>,
 }
@@ -64,8 +131,64 @@ pub struct FileObject {
 impl FileObject {
     /// An object for `at`.
     pub fn new(at: Location) -> Option<FileRef> {
-        let object = FileObject { at, next: SpinLock::new(None) };
+        FileObject::with(at, Description::default())
+    }
+
+    /// An object for `at`, with `description`'s flags.
+    pub fn with(at: Location, description: Description) -> Option<FileRef> {
+        // Only a node of a pipe's or a character device's kind can be one.
+        let special = match at.node.kind() {
+            Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
+            Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
+            _ => Special::No,
+        };
+        let object = FileObject {
+            at,
+            offset: Mutex::new(0),
+            flags: AtomicU32::new(description.bits()),
+            locked: AtomicBool::new(false),
+            special,
+            next: SpinLock::new(None),
+        };
         alloc::sync::Arc::try_new_in(object, radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)).ok()
+    }
+
+    /// Its status flags.
+    pub fn description(&self) -> Description {
+        Description::from_bits(self.flags.load(Ordering::Acquire))
+    }
+
+    /// Changes its status flags.
+    pub fn set_description(&self, description: Description) {
+        self.flags.store(description.bits(), Ordering::Release);
+    }
+
+    /// Its address, which owns its locks.
+    pub fn address(&self) -> usize {
+        core::ptr::from_ref(self).addr()
+    }
+
+    /// Notes that it has taken a lock, which goes when it does.
+    pub fn note_locked(&self) {
+        self.locked.store(true, Ordering::Release);
+    }
+
+    /// The end of a pipe it is of, if it is of one.
+    pub fn pipe_end(&self) -> Option<&pipe::End> {
+        if self.special == Special::Pipe { pipe::end_of(&self.at.node) } else { None }
+    }
+
+    /// The side of a terminal it is of, if it is of one.
+    pub fn tty_handle(&self) -> Option<&tty::Handle> {
+        if self.special == Special::Tty { tty::handle_of(&self.at.node) } else { None }
+    }
+}
+
+impl Drop for FileObject {
+    fn drop(&mut self) {
+        if self.locked.load(Ordering::Acquire) {
+            locks::description_gone(&self.at.node, self.address());
+        }
     }
 }
 
@@ -79,9 +202,11 @@ static ANY_DROPPED: AtomicBool = AtomicBool::new(false);
 /// Lets go of a released object, with the store's lock held: at once if
 /// that can only free memory, or else queued until the lock has gone.
 /// Only its node can be the last reference that goes: no mount is ever
-/// unmounted while a handle holds a place on it.
+/// unmounted while a handle holds a place on it. A terminal's side, whose
+/// last description going may hang the terminal up and send signals, is
+/// on `dev`, whose drops are light otherwise.
 pub fn release(file: FileRef) {
-    if file.at.mount.fs.light_drops() {
+    if file.at.mount.fs.light_drops() && file.tty_handle().is_none() {
         drop(file);
     } else {
         defer_drop(file);
@@ -128,8 +253,7 @@ const ROOT_MAX: u64 = 1 << 20;
 pub fn init() {
     radix_block::mem::set_page_source(<Arch as Devices>::alloc_cache_page);
     radix_vfs::set_clock(|| <Arch as Timer>::wall_clock_ns().unwrap_or(0));
-    let made =
-        radix_vfs::tmpfs::Tmpfs::new(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
+    let made = tmpfs(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
     match made {
         Ok(tree) => {
             let _ = VFS.set(tree);
@@ -147,9 +271,8 @@ pub fn scratch_tree(name: &str, max: u64) -> radix_vfs::Result<Location> {
     let tree = vfs().ok_or(Error::NotFound)?;
     let root = tree.root();
     tree.make_directory(&root, name)?;
-    let mounted = radix_vfs::tmpfs::Tmpfs::new(max)
-        .and_then(fs_ref)
-        .and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
+    let mounted =
+        tmpfs(max).and_then(fs_ref).and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
     if let Err(err) = mounted {
         let _ = tree.remove(&root, name);
         return Err(err);
@@ -164,6 +287,12 @@ pub fn remove_scratch_tree(name: &str) -> radix_vfs::Result<()> {
     let root = tree.root();
     tree.unmount_tree(&root, name)?;
     tree.remove(&root, name)
+}
+
+/// An empty tmpfs whose files may hold `max` bytes together. As on Linux,
+/// it may hold one file or directory for every two pages of memory.
+fn tmpfs(max: u64) -> radix_vfs::Result<radix_vfs::KArc<radix_vfs::tmpfs::Tmpfs>> {
+    radix_vfs::tmpfs::Tmpfs::new(max, FRAMES.managed_pages() / 2)
 }
 
 /// A filesystem, as the mount table takes it.
@@ -189,7 +318,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
         "tmpfs" => {
             // As on Linux, a tmpfs may fill half of memory.
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
-            fs_ref(radix_vfs::tmpfs::Tmpfs::new(max)?)?
+            fs_ref(tmpfs(max)?)?
         }
         "fat" => {
             let node = source.ok_or(Error::NotBlockDevice)?;
@@ -292,6 +421,7 @@ pub fn status(err: Error) -> Status {
         Error::TooBig => FileError::TooBig,
         Error::UnknownFilesystem => FileError::UnknownFilesystem,
         Error::NotBlockDevice => FileError::NotBlockDevice,
+        Error::NoDevice => FileError::NoDevice,
         // What a node does not do is an argument it does not take.
         Error::NotSupported => return Kernel::InvalidArgument.status(0),
         Error::NoMemory => return Kernel::NoMemory.status(0),

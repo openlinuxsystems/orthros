@@ -14,6 +14,14 @@
 //! thread's kernel stack with the call's registers, or through an
 //! interrupt or a fault. A fault in user mode runs the user fault handler
 //! instead of stopping the machine.
+//!
+//! Since Phase 8 the kernel also reaches the registers a program entered
+//! with: to fork it ([`UserMode::user_registers`]), to run a signal handler
+//! ([`UserMode::push_signal_frame`]) and to return from one
+//! ([`UserMode::pop_signal_frame`]). Pages of anonymous memory are made as
+//! a program touches them, and a fault on one while the kernel copies to
+//! or from user memory runs the user page handler, which may make the
+//! page, before the copy gives up.
 
 use core::fmt;
 
@@ -39,6 +47,44 @@ pub enum UserAccess {
     ReadWrite,
     /// Read and execute.
     ReadExecute,
+}
+
+/// What [`UserMode::edit_pages`] does with a page that holds a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageEdit {
+    /// Leaves it.
+    Keep,
+    /// Gives it this access, or none (keeping the frame) for `None`.
+    Set(Option<UserAccess>),
+    /// Removes it: the frame goes to the `released` callback once no CPU
+    /// can reach it.
+    Clear,
+}
+
+/// A signal handler's frame: what [`UserMode::push_signal_frame`] writes on
+/// a program's stack, so that its thread runs `handler(signal, &info,
+/// &context)` and returns through `restorer`, which calls the kernel to
+/// restore what was saved (radix-signal(2) describes the layout).
+pub struct SignalFrame<'a> {
+    /// The signal's number.
+    pub signal: u32,
+    /// Its `siginfo_t`, as the C library declares it.
+    pub info: &'a [u8; 128],
+    /// The handler to run.
+    pub handler: u64,
+    /// Where the handler returns to.
+    pub restorer: u64,
+    /// The signal mask to restore when it returns.
+    pub mask: u64,
+    /// The alternate stack to run the handler on (its lowest address and
+    /// size), if the handler asked for one and the thread is not on it.
+    pub stack: Option<(u64, u64)>,
+    /// The thread's alternate stack as the context records it: its
+    /// address, flags and size.
+    pub altstack: (u64, u32, u64),
+    /// For a signal a fault raised: the vector, the error code and the
+    /// address it faulted on.
+    pub trap: Option<(u64, u64, u64)>,
 }
 
 /// Why a page could not be mapped.
@@ -128,6 +174,10 @@ pub trait UserMode: crate::Threads {
     /// The frames its pages map belong to whoever mapped them.
     type Space: Send + Sync;
 
+    /// A program thread's registers, as it came into the kernel: what a
+    /// forked thread starts with.
+    type UserRegisters: Clone + Copy + Send + Sync;
+
     /// Kernel memory that can also be mapped into address spaces, such as
     /// a ring's shared pages: zeroed when made, freed when dropped. Only
     /// drop it once no address space maps it any more.
@@ -156,6 +206,53 @@ pub trait UserMode: crate::Threads {
     /// The frame and access of the page at `virt`, if it is mapped.
     fn query_page(space: &Self::Space, virt: u64) -> Option<(u64, UserAccess)>;
 
+    /// The frame the page at `virt` holds and the access it gives, `None`
+    /// for one that keeps its frame but gives no access.
+    fn query_entry(space: &Self::Space, virt: u64) -> Option<(u64, Option<UserAccess>)>;
+
+    /// Points the page at `virt` at the frame at `phys` with `access`
+    /// (`None`: keeping the frame without access), replacing whatever was
+    /// there. `upgrade` says only access to the same frame is added, which
+    /// needs no shootdown.
+    fn set_entry(
+        space: &Self::Space,
+        virt: u64,
+        phys: u64,
+        access: Option<UserAccess>,
+        upgrade: bool,
+    ) -> Result<(), MapPageError>;
+
+    /// Visits every page from `start` to `end` that holds a frame, in
+    /// order, and does what `decide` says, given its address, frame and
+    /// access; `released` gets the frame of every page cleared once no
+    /// CPU can reach it. Both run with the space's page tables locked,
+    /// and must not sleep.
+    fn edit_pages(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> PageEdit,
+        released: &mut dyn FnMut(u64),
+    );
+
+    /// Like [`UserMode::edit_pages`] over `from`, and gives `to` an entry
+    /// for the same frame wherever `decide` says (its second half), with
+    /// that access: how a forked program's pages are shared. `to` must be
+    /// a space no thread runs yet. If `to` cannot get a page table for an
+    /// entry, the walk stops at that entry and returns its address, with
+    /// `to` holding the entries before it.
+    fn copy_pages(
+        from: &Self::Space,
+        to: &Self::Space,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(
+            u64,
+            u64,
+            Option<UserAccess>,
+        ) -> (PageEdit, Option<Option<UserAccess>>),
+    ) -> Result<(), u64>;
+
     /// Makes `context` run in `space` from its next switch on (it keeps a
     /// handle). A context's space is set once; returns `false`, changing
     /// nothing, if it has one already.
@@ -177,13 +274,67 @@ pub trait UserMode: crate::Threads {
     fn set_syscall_handler(handler: fn(&mut SyscallRegs));
 
     /// Registers the handler of faults in user mode. It runs on the
-    /// thread's kernel stack with interrupts masked, and never returns:
-    /// the thread exits.
-    fn set_user_fault_handler(handler: fn(&UserFault) -> !);
+    /// thread's kernel stack with interrupts masked; when it returns, the
+    /// return handler runs and the thread goes back to user mode (to run
+    /// the faulting instruction again, or a signal handler), unless the
+    /// thread has exited meanwhile.
+    fn set_user_fault_handler(handler: fn(&UserFault));
+
+    /// Registers the handler of page faults on user memory that the
+    /// kernel's own copies take: given the address and whether it was a
+    /// write, it returns whether it made the page reachable, so that the
+    /// copy goes on. It runs with interrupts on and may sleep.
+    fn set_user_page_handler(handler: fn(u64, bool) -> bool);
 
     /// Registers the function called, with interrupts masked, just before
-    /// an interrupt returns to user mode: the kernel stops threads there.
+    /// a system call, an interrupt or a fault returns to user mode: the
+    /// kernel stops threads and delivers signals there. It may turn
+    /// interrupts on, but returns with them masked.
     fn set_user_return_handler(handler: fn());
+
+    /// The running thread's user registers as it came into the kernel. For
+    /// a system call only the registers the call keeps are meaningful: the
+    /// others hold its results, which [`UserMode::set_results`] fills.
+    fn user_registers() -> Option<Self::UserRegisters>;
+
+    /// Puts a system call's status and results in saved registers, as the
+    /// call itself returns them.
+    fn set_results(regs: &mut Self::UserRegisters, results: &SyscallRegs);
+
+    /// The thread pointer (x86-64: the FS base) saved registers hold, which
+    /// [`UserMode::enter_user_registers`] leaves to the context: a forked
+    /// thread's context gets it with [`UserMode::set_thread_pointer`].
+    fn thread_pointer(regs: &Self::UserRegisters) -> u64;
+
+    /// Leaves the kernel for user mode in the running context with every
+    /// register as `regs` has it.
+    fn enter_user_registers(regs: &Self::UserRegisters) -> !;
+
+    /// Gives `context`, which has not run yet, the running thread's
+    /// extended state (x86-64: x87, SSE, AVX).
+    fn copy_extended_state(context: &Self::Context);
+
+    /// The running thread's stack pointer in user mode.
+    fn user_stack_pointer() -> u64;
+
+    /// Writes a signal handler's frame on the running thread's stack (or
+    /// the alternate stack it names), saving its registers and extended
+    /// state there, and makes it return to user mode in the handler.
+    /// Returns `false`, changing nothing, if the frame cannot be written.
+    fn push_signal_frame(frame: &SignalFrame<'_>) -> bool;
+
+    /// Restores what a signal frame saved, given the address of its
+    /// context: the registers a system call keeps go into the running
+    /// thread's saved registers (which it then returns with in full), the
+    /// rest into `regs`, which the call writes back in place of results.
+    /// Returns the signal mask the frame holds, or `None`, changing
+    /// nothing, if the frame cannot be read or holds an address outside
+    /// the user half.
+    fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64>;
+
+    /// Makes the running thread's system call run again when it returns to
+    /// user mode, with the registers it had when it was made.
+    fn restart_syscall(original: &SyscallRegs);
 
     /// Copies `dst.len()` bytes of the running thread's user memory from
     /// `src`. Returns `false` if the range is not wholly below
@@ -223,6 +374,14 @@ pub trait UserMode: crate::Threads {
 
     /// Copies `src` into RAM at `phys`, for loading programs.
     fn write_frames(phys: u64, src: &[u8]);
+
+    /// Copies the page of RAM at `src` to the one at `dst`: a page of
+    /// anonymous memory that two address spaces shared, for the one that
+    /// writes to it.
+    fn copy_frame(dst: u64, src: u64);
+
+    /// Copies RAM at `phys` into `dst`.
+    fn read_frames(phys: u64, dst: &mut [u8]);
 
     /// The frequency of the cycle counter programs can read (x86-64: the
     /// TSC), in hertz, or 0 if unknown.

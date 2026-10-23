@@ -1,0 +1,191 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Signals the C library gets wrong, from libc-test. raise signals the
+calling thread, as C and POSIX say, not the process, where another
+thread could take the signal and raise could return before its
+handler ran; signals stay blocked while it finds the thread and sends,
+as in musl, so a handler that forks cannot leave the child signalling
+its parent (regression/raise-race). The signals from 32 up to SIGRTMIN
+are the C library's own (SIGCANCEL, SIGTIMER): sigaddset fails them
+with EINVAL, sigfillset leaves them out, and sigprocmask and
+pthread_sigmask never show them in the mask they give back, as in
+glibc and musl (regression/sigprocmask-internal); the library itself
+adds them to a set with mlibc::sigaddset_internal (mlibc/sigset.hpp),
+as pthread_setcancelstate does for SIGCANCEL. Meant for upstream.
+
+diff -ruN a/options/ansi/generic/signal.cpp b/options/ansi/generic/signal.cpp
+--- a/options/ansi/generic/signal.cpp
++++ b/options/ansi/generic/signal.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/debug.hpp>
++#include <mlibc/tid.hpp>
+ 
+ __sighandler signal(int sn, __sighandler handler) {
+ 	struct sigaction sa;
+@@ -19,7 +20,29 @@
+ 	return old.sa_handler;
+ }
+ 
++// raise() signals the calling thread, as C and POSIX say, not the whole
++// process, where another thread could take the signal. Signals stay
++// blocked from finding the thread to sending, as in musl, so that a
++// handler that forks cannot leave the child signalling its parent; the
++// signal arrives as the mask comes back, before raise() returns.
+ int raise(int sig) {
++	if constexpr (mlibc::IsImplemented<Tgkill> && mlibc::IsImplemented<Sigprocmask>
++			&& mlibc::IsImplemented<GetPid>) {
++		sigset_t all, old;
++		sigfillset(&all);
++		if (int e = mlibc::sysdep<Sigprocmask>(SIG_BLOCK, &all, &old)) {
++			errno = e;
++			return -1;
++		}
++		int e = mlibc::sysdep<Tgkill>(mlibc::sysdep<GetPid>(), mlibc::this_tid(), sig);
++		mlibc::sysdep<Sigprocmask>(SIG_SETMASK, &old, nullptr);
++		if (e) {
++			errno = e;
++			return -1;
++		}
++		return 0;
++	}
++
+ 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<GetPid> && mlibc::IsImplemented<Kill>, -1);
+ 	pid_t pid = mlibc::sysdep_or_panic<GetPid>();
+ 
+@@ -32,11 +55,16 @@
+ }
+ 
+ // This is a POSIX extension, but we have it in here for sigsetjmp
++// The C library's own signals (32 up to SIGRTMIN) never show in a mask
++// a program gets back, as in musl.
+ int sigprocmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
+ 	if(int e = mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve); e) {
+ 		errno = e;
+ 		return -1;
+ 	}
++	if(retrieve)
++		for(int sig = 32; sig < SIGRTMIN; sig++)
++			sigdelset(retrieve, sig);
+ 	return 0;
+ }
+ 
+diff -ruN a/options/internal/generic/sigset.cpp b/options/internal/generic/sigset.cpp
+--- a/options/internal/generic/sigset.cpp
++++ b/options/internal/generic/sigset.cpp
+@@ -2,9 +2,12 @@
+ #include <bits/ensure.h>
+ #include <errno.h>
+ #include <limits.h>
++#include <signal.h>
+ #include <string.h>
+ #include <stddef.h>
+ 
++#include <mlibc/sigset.hpp>
++
+ namespace {
+ 
+ template<class T> struct remove_reference { typedef T type; };
+@@ -48,12 +51,17 @@
+ 	return 0;
+ }
+ 
++// The signals from 32 up to SIGRTMIN are the C library's own (SIGCANCEL
++// and SIGTIMER): a program cannot add them to a set, so it cannot block
++// them, as in glibc and musl.
+ int sigfillset(sigset_t *sigset) {
+ 	memset(sigset, ~0, sizeof(*sigset));
++	for(int sig = 32; sig < SIGRTMIN; sig++)
++		sigdelset(sigset, sig);
+ 	return 0;
+ }
+ 
+-int sigaddset(sigset_t *sigset, int sig) {
++int mlibc::sigaddset_internal(sigset_t *sigset, int sig) {
+ 	int signo = sig - 1;
+ 	if(signo < 0 || static_cast<unsigned int>(signo) >= (sizeof(sigset_t) * CHAR_BIT)) {
+ 		errno = EINVAL;
+@@ -66,6 +74,14 @@
+ 	return 0;
+ }
+ 
++int sigaddset(sigset_t *sigset, int sig) {
++	if(sig >= 32 && sig < SIGRTMIN) {
++		errno = EINVAL;
++		return -1;
++	}
++	return mlibc::sigaddset_internal(sigset, sig);
++}
++
+ int sigdelset(sigset_t *sigset, int sig) {
+ 	int signo = sig - 1;
+ 	if(signo < 0 || static_cast<unsigned int>(signo) >= (sizeof(sigset_t) * CHAR_BIT)) {
+diff -ruN a/options/internal/include/mlibc/sigset.hpp b/options/internal/include/mlibc/sigset.hpp
+--- a/options/internal/include/mlibc/sigset.hpp
++++ b/options/internal/include/mlibc/sigset.hpp
+@@ -0,0 +1,11 @@
++#pragma once
++
++#include <signal.h>
++
++namespace mlibc {
++
++// sigaddset() for the C library's own use: it also takes the signals
++// from 32 up to SIGRTMIN (SIGCANCEL, SIGTIMER), which programs cannot add.
++int sigaddset_internal(sigset_t *sigset, int sig);
++
++} // namespace mlibc
+diff -ruN a/options/posix/generic/posix_signal.cpp b/options/posix/generic/posix_signal.cpp
+--- a/options/posix/generic/posix_signal.cpp
++++ b/options/posix/generic/posix_signal.cpp
+@@ -16,15 +16,20 @@
+ 	return -1;
+ }
+ 
++// The C library's own signals (32 up to SIGRTMIN) never show in a mask
++// a program gets back, as in musl.
+ int pthread_sigmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
+- 	if constexpr (mlibc::IsImplemented<ThreadSigmask>) {
+-	 	if(int e = mlibc::sysdep_or_enosys<ThreadSigmask>(how, set, retrieve); e) {
+-	 	 	return e;
+-	 	}
+- 	 	return 0;
+- 	}
+-
+-	return mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve);
++	int e;
++	if constexpr (mlibc::IsImplemented<ThreadSigmask>)
++		e = mlibc::sysdep_or_enosys<ThreadSigmask>(how, set, retrieve);
++	else
++		e = mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve);
++	if(e)
++		return e;
++	if(retrieve)
++		for(int sig = 32; sig < SIGRTMIN; sig++)
++			sigdelset(retrieve, sig);
++	return 0;
+ }
+ 
+ int pthread_kill(pthread_t thread, int sig) {
+diff -ruN a/options/posix/generic/pthread.cpp b/options/posix/generic/pthread.cpp
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -29,6 +29,7 @@
+ #include <mlibc/time-helpers.hpp>
+ #include <mlibc/global-config.hpp>
+ #include <mlibc/lock.hpp>
++#include <mlibc/sigset.hpp>
+ 
+ struct ScopeTrace {
+ 	ScopeTrace(const char *file, int line, const char *function)
+@@ -642,7 +643,7 @@
+ 				__mlibc_do_cancel();
+ 
+ 			sigset_t set = {};
+-			sigaddset(&set, SIGCANCEL);
++			mlibc::sigaddset_internal(&set, SIGCANCEL);
+ 			if (mlibc::tcb_cancel_enabled(new_value))
+ 				sigprocmask(SIG_UNBLOCK, &set, nullptr);
+ 			else

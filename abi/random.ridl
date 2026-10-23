@@ -5,7 +5,7 @@
 //!
 //! Every program gets a capability to the kernel's random number
 //! generator when it starts: a ChaCha20 generator seeded from every
-//! source of entropy the machine has (radix-random(7)). It is what
+//! source of entropy the machine has (radix-random(2)). It is what
 //! address space randomisation, TLS, SSH keys, password salts and
 //! signatures draw from, as getrandom(2) is on Linux.
 

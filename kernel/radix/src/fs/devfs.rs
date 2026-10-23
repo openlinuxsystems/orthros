@@ -5,9 +5,11 @@
 //!
 //! One tree of device nodes, which every `dev` mount shows: `null`,
 //! `zero`, `random` and `urandom` (both the kernel's generator, which
-//! never blocks once seeded at boot), and a block device for each disk
-//! and partition `disk` finds. Its tree is fixed, so nothing is made or
-//! removed in it; its devices are read and written.
+//! never blocks once seeded at boot), a block device for each disk and
+//! partition `disk` finds, and the terminals (Phase 8, `tty`): `ptmx`,
+//! `tty` and `pts/N`. Programs make and remove nothing in it; only the
+//! kernel adds devices, and `pts/N` comes and goes with its
+//! pseudo-terminal.
 
 use radix_block::DeviceRef;
 use radix_klog::{error, warn};
@@ -30,6 +32,7 @@ pub fn init() {
                 mem::arc(Random { id: next_id(), fill: crate::user::random::fill })?;
             root.add(name, random)?;
         }
+        super::tty::init(&root)?;
         Ok(root)
     })();
     match made {

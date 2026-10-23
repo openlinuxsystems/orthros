@@ -152,6 +152,7 @@ impl FileSystem for FatFs {
             block_size: geo.cluster_size,
             blocks: u64::from(geo.clusters),
             free: u64::from(self.inner.free_clusters().unwrap_or(0)),
+            ..FsInfo::default()
         }
     }
 

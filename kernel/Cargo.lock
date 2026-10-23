@@ -116,9 +116,11 @@ dependencies = [
  "radix-ksyms",
  "radix-lockdep",
  "radix-mm",
+ "radix-posix",
  "radix-random",
  "radix-sched",
  "radix-sync",
+ "radix-tty",
  "radix-vfs",
  "radix-virtio",
 ]
@@ -265,6 +267,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-posix"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-abi",
+]
+
+[[package]]
 name = "radix-random"
 version = "0.0.1"
 dependencies = [
@@ -286,6 +296,14 @@ dependencies = [
 [[package]]
 name = "radix-sync"
 version = "0.0.1"
+
+[[package]]
+name = "radix-tty"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "radix-abi",
+]
 
 [[package]]
 name = "radix-vfs"

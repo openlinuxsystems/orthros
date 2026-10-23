@@ -458,6 +458,14 @@ pub fn disable_interrupts() -> bool {
     were
 }
 
+/// Disables interrupts where whether they were enabled does not matter:
+/// one instruction, where [`disable_interrupts`] reads RFLAGS first.
+#[inline(always)]
+pub fn mask_interrupts() {
+    // SAFETY: masking interrupts cannot break memory safety.
+    unsafe { asm!("cli", options(nostack)) };
+}
+
 /// Halts until the next interrupt, leaving the interrupt flag as it is.
 pub fn halt() {
     // SAFETY: HLT only waits.

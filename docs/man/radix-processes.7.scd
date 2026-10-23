@@ -14,11 +14,12 @@ A *process* is an address space, a capability space and the threads that
 run in them, which end together. It is a kernel object like any other
 (see *radix-capabilities*(7)): whoever holds its capability with the
 *control* right builds it from outside, and whoever holds it with the
-*read* right can see how it is doing. There is no *fork* and nothing is
-inherited: a program gets exactly the capabilities its starter gives it.
-The interface is *radix-process*(2).
+*read* right can see how it is doing. A native program gets exactly the
+capabilities its starter gives it, and nothing is inherited. POSIX
+programs also have *fork*, *exec*, signals and a process tree, which
+*radix-posix*(7) describes. The interface is *radix-process*(2).
 
-This page describes processes as of Phase 6 of the roadmap. The design,
+This page describes processes as of Phase 8 of the roadmap. The design,
 with the argument that a process's end frees everything it held, is in
 _docs/design/processes.md_.
 
@@ -39,7 +40,8 @@ A process ends:
 - when a fault stops any of its threads, with *EXIT_FAULT* (0xdead0000);
 - when a holder of its control right calls *process.exit*;
 - when its last capability is deleted, with *EXIT_STOPPED* (0xdead0001);
-- when the process it was made for ends, also with *EXIT_STOPPED*.
+- when the process it was made for ends, also with *EXIT_STOPPED*;
+- for a POSIX program, when a signal ends it (*radix-posix*(7)).
 
 While it is *ending*, each of its threads stops at its next entry into
 the kernel. When the last has gone, its capability spaces are emptied,
@@ -52,7 +54,8 @@ A process made with *process.create* belongs to the process *create* was
 called on. So nothing a program makes outlives it, not even a process
 that holds the only capability to itself. Only Spark, which the kernel
 starts and never lets go of, has children that outlive the program that
-asked for them.
+asked for them; and a process made by *fork* holds its own original
+capability, so it outlives its parent (*radix-posix*(7)).
 
 # CHARGES
 
@@ -161,8 +164,9 @@ logs.
 - A process's name is at most 15 bytes, and it keeps at most 32
   capabilities out of its threads' reach.
 - A program's arguments must fit in its start-up page, about 3.9 KiB.
-- Shared libraries, an interpreter and thread-local storage are refused
-  until Phase 8.
+- A program that radix-rt's *spawn* or the kernel loads may not use
+  shared libraries, an interpreter or thread-local storage; one that
+  *exec* loads from a file may (*radix-posix*(7)).
 - The page tables below the top one are not charged to the process's
   domain yet, and every process runs in the root domain until Spark
   makes domains for the services it supervises (Phase 9).

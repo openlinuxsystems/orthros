@@ -10,9 +10,12 @@
 //! the scheduler uses to look at, and lock, other CPUs' run queues.
 //!
 //! A value only its own CPU ever uses needs no lock: an [`Own`] value is
-//! reached only through [`PerCpu::with_own`], on the CPU it belongs to.
+//! reached only through [`PerCpu::own`] and [`PerCpu::with_own`], on the
+//! CPU it belongs to.
 
 use core::cell::UnsafeCell;
+use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering, compiler_fence};
 
 use radix_hal::{CpuLocal, MAX_CPUS};
@@ -66,8 +69,8 @@ pub struct Own<T> {
     value: UnsafeCell<T>,
 }
 
-// SAFETY: the value is only reached through `PerCpu::with_own`, on the CPU
-// it belongs to, with preemption held off and `busy` keeping out an
+// SAFETY: the value is only reached through `PerCpu::own`, on the CPU it
+// belongs to, with preemption held off and `busy` keeping out an
 // interrupt handler on the same CPU, so it is never used from two places
 // at once. It may be used by any thread that runs on that CPU, hence
 // `T: Send`.
@@ -82,32 +85,77 @@ impl<T> Own<T> {
 }
 
 impl<T> PerCpu<Own<T>> {
-    /// Runs `f` on this CPU's value with preemption held off, or returns
-    /// `None` without running it if this CPU is using the value already
-    /// (an interrupt handler that came in during a use).
-    pub fn with_own<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+    /// This CPU's value, held with preemption off until the guard goes, or
+    /// `None` if this CPU is using the value already (an interrupt handler
+    /// that came in during a use). The holder must not sleep.
+    #[inline(always)]
+    pub fn own(&self) -> Option<OwnGuard<'_, T>> {
         Arch::preempt_disable();
         let own = self.this();
-        let result = if own.busy.load(Ordering::Relaxed) {
-            None
-        } else {
-            own.busy.store(true, Ordering::Relaxed);
-            // Only this CPU looks at `busy`, so keeping the compiler from
-            // moving the value's accesses out from between the two stores
-            // is all the ordering needed.
-            compiler_fence(Ordering::SeqCst);
-            // SAFETY: preemption is off, so this code stays on this CPU and
-            // no other thread runs on it until `f` returns; no other CPU
-            // reaches this CPU's value; and `busy` was clear, so no use on
-            // this CPU is under way that this one interrupted.
-            #[allow(unsafe_code)]
-            let value = unsafe { &mut *own.value.get() };
-            let result = f(value);
-            compiler_fence(Ordering::SeqCst);
-            own.busy.store(false, Ordering::Relaxed);
-            Some(result)
-        };
+        if own.busy.load(Ordering::Relaxed) {
+            crate::sched::preempt_enable();
+            return None;
+        }
+        own.busy.store(true, Ordering::Relaxed);
+        // Only this CPU looks at `busy`, so keeping the compiler from
+        // moving the value's accesses out from between the two stores is
+        // all the ordering needed.
+        compiler_fence(Ordering::SeqCst);
+        Some(OwnGuard { own, _here: PhantomData })
+    }
+
+    /// Runs `f` on this CPU's value with preemption held off, or returns
+    /// `None` without running it if this CPU is using the value already,
+    /// as [`PerCpu::own`].
+    #[inline(always)]
+    pub fn with_own<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let mut guard = self.own()?;
+        Some(f(&mut guard))
+    }
+}
+
+/// This CPU's value of a [`PerCpu<Own<T>>`], from [`PerCpu::own`].
+pub struct OwnGuard<'a, T> {
+    own: &'a Own<T>,
+    /// Not `Send`: the value is this CPU's, and preemption is off.
+    _here: PhantomData<*const ()>,
+}
+
+impl<T> Deref for OwnGuard<'_, T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        // SAFETY: as in `deref_mut`, and `&self` is shared only with other
+        // shared uses of this guard.
+        #[allow(unsafe_code)]
+        unsafe {
+            &*self.own.value.get()
+        }
+    }
+}
+
+impl<T> DerefMut for OwnGuard<'_, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: preemption is off while the guard lives, so this code
+        // stays on this CPU and no other thread runs on it; no other CPU
+        // reaches this CPU's value; and `busy` was clear when the guard was
+        // made and is set until it goes, so no other use on this CPU, the
+        // one this guard interrupted or one interrupting it, is under way.
+        // The guard is not `Send`, and `&mut self` borrows it alone.
+        #[allow(unsafe_code)]
+        unsafe {
+            &mut *self.own.value.get()
+        }
+    }
+}
+
+impl<T> Drop for OwnGuard<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        compiler_fence(Ordering::SeqCst);
+        self.own.busy.store(false, Ordering::Relaxed);
         crate::sched::preempt_enable();
-        result
     }
 }

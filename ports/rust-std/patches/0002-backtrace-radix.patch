@@ -1,0 +1,52 @@
+SPDX-FileCopyrightText: The Rust Project Developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Backtraces name functions on Radix (ADR 0070): the backtrace crate in
+std maps the program's file and reads its symbols with gimli, and finds
+the program through dl_iterate_phdr and std::env::current_exe, as on the
+Hurd, since Radix has no /proc/self/maps.
+
+diff -ruN a/backtrace/src/symbolize/gimli/libs_dl_iterate_phdr.rs b/backtrace/src/symbolize/gimli/libs_dl_iterate_phdr.rs
+--- a/backtrace/src/symbolize/gimli/libs_dl_iterate_phdr.rs
++++ b/backtrace/src/symbolize/gimli/libs_dl_iterate_phdr.rs
+@@ -18,9 +18,9 @@
+ pub(super) fn native_libraries() -> Vec<Library> {
+     let mut cb_data = CallbackData {
+         libs: Vec::new(),
+-        #[cfg(not(target_os = "hurd"))]
++        #[cfg(not(any(target_os = "hurd", target_os = "radix")))]
+         maps: parse_running_mmaps::parse_maps().ok(),
+-        #[cfg(target_os = "hurd")]
++        #[cfg(any(target_os = "hurd", target_os = "radix"))]
+         maps: None,
+     };
+     unsafe {
+@@ -33,7 +33,7 @@
+     maps: &Option<Vec<parse_running_mmaps::MapsEntry>>,
+     base_addr: usize,
+ ) -> OsString {
+-    #[cfg(not(target_os = "hurd"))]
++    #[cfg(not(any(target_os = "hurd", target_os = "radix")))]
+     if let Some(entries) = maps {
+         let opt_path = entries
+             .iter()
+diff -ruN a/backtrace/src/symbolize/gimli.rs b/backtrace/src/symbolize/gimli.rs
+--- a/backtrace/src/symbolize/gimli.rs
++++ b/backtrace/src/symbolize/gimli.rs
+@@ -44,6 +44,7 @@
+         target_os = "illumos",
+         target_os = "aix",
+         target_os = "cygwin",
++        target_os = "radix",
+     ))] {
+         #[path = "gimli/mmap_unix.rs"]
+         mod mmap;
+@@ -231,6 +232,7 @@
+             target_os = "netbsd",
+             target_os = "nto",
+             target_os = "android",
++            target_os = "radix",
+         ),
+         not(target_env = "uclibc"),
+     ))] {

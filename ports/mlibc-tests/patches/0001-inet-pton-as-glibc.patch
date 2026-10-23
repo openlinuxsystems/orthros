@@ -1,0 +1,53 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+mlibc's inet_pton test checked two things in which mlibc differed from
+glibc, guarded so as not to run on glibc: that leading zeros in an IPv4
+address are taken ("001.001.001.001"), and that an IPv6 address other
+than a v4-mapped one cannot end in a dotted IPv4 address. The C
+library's inet_pton is musl's now
+(ports/mlibc/patches/0021-inet-addresses.patch), which, as glibc does,
+refuses leading zeros, since inet_aton would read them as octal, and
+takes "1100::FFFF:204.152.189.116", as RFC 4291 (2.2) allows; libc-test's
+functional/inet_pton checks both. The test now checks them that way on
+every C library. Goes upstream with that patch.
+
+diff -ruN a/tests/posix/inet_pton.c b/tests/posix/inet_pton.c
+--- a/tests/posix/inet_pton.c
++++ b/tests/posix/inet_pton.c
+@@ -11,14 +11,10 @@
+ 	assert(((addr.s_addr >> 16) & 0xFF) == 1);
+ 	assert(((addr.s_addr >> 24) & 0xFF) == 1);
+ 
+-	// glibc is missing this behavior
+-#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
+-	assert(inet_pton(AF_INET, "001.001.001.001", &addr));
+-	assert((addr.s_addr & 0xFF) == 1);
+-	assert(((addr.s_addr >> 8) & 0xFF) == 1);
+-	assert(((addr.s_addr >> 16) & 0xFF) == 1);
+-	assert(((addr.s_addr >> 24) & 0xFF) == 1);
+-#endif
++	// Leading zeros are refused, as glibc and musl do, since inet_aton
++	// would read them as octal.
++	assert(!inet_pton(AF_INET, "001.001.001.001", &addr));
++	assert(!inet_pton(AF_INET, "1.2.03.4", &addr));
+ 
+ 	assert(!inet_pton(AF_INET, "256.999.1234.555", &addr));
+ 	assert(!inet_pton(AF_INET, "a.b.c.d", &addr));
+@@ -121,11 +117,12 @@
+ 	memset(&test6, 0, sizeof(test6));
+ 
+ 	{
++		// Any address may end in a dotted IPv4 address (RFC 4291, 2.2),
++		// as glibc and musl take it.
+ 		int ret = inet_pton(AF_INET6, "1100::FFFF:204.152.189.116", &test6);
+-		(void) ret;
+-#if !defined(USE_HOST_LIBC) && !defined(USE_CROSS_LIBC)
+-		assert(!ret);
+-#endif
++		assert(ret == 1);
++		assert(test6.s6_addr[0] == 0x11 && test6.s6_addr[11] == 0xff);
++		assert(test6.s6_addr[12] == 204 && test6.s6_addr[15] == 116);
+ 	}
+ 
+ 	memset(&test6, 0, sizeof(test6));

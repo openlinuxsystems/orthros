@@ -150,22 +150,37 @@ struct RegionEntry {
 struct RegionTable {
     entries: [Option<RegionEntry>; MAX_REGIONS],
     len: usize,
+    /// The entry the last search found, which the next lookup most likely
+    /// lands in too (the heap takes its slabs from one region at a time):
+    /// looked at before searching. Written only when it changes.
+    last: AtomicUsize,
 }
 
 impl RegionTable {
     const fn new() -> RegionTable {
-        RegionTable { entries: [None; MAX_REGIONS], len: 0 }
+        RegionTable { entries: [None; MAX_REGIONS], len: 0, last: AtomicUsize::new(0) }
     }
 
     fn iter(&self) -> impl Iterator<Item = &RegionEntry> {
         self.entries[..self.len].iter().flatten()
     }
 
-    /// The entry containing frame `pfn` (binary search; sorted by base).
+    /// The entry containing frame `pfn`: the one the last search found,
+    /// or a binary search (the entries are sorted by base).
+    #[inline]
     fn find(&self, pfn: u64) -> Option<&RegionEntry> {
+        match self.entries.get(self.last.load(Ordering::Relaxed)) {
+            Some(Some(entry)) if entry.region.contains(pfn) => Some(entry),
+            _ => self.search(pfn),
+        }
+    }
+
+    fn search(&self, pfn: u64) -> Option<&RegionEntry> {
         let entries = &self.entries[..self.len];
         let index = entries.partition_point(|e| e.is_some_and(|e| e.region.end() <= pfn));
-        entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))
+        let found = entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))?;
+        self.last.store(index, Ordering::Relaxed);
+        Some(found)
     }
 }
 
@@ -566,6 +581,22 @@ mod tests {
         }
         frames.start();
         frames
+    }
+
+    #[test]
+    fn frames_are_found_in_every_region() {
+        let frames = frames_with(&[(0, 64, 32), (0, 256, 4096), (0, 8192, 16)]);
+        for (base, pages) in [(64u64, 32u64), (256, 4096), (8192, 16)] {
+            for pfn in [base, base + pages / 2, base + pages - 1] {
+                let info = frames.info(pfn << PAGE_SHIFT).expect("a frame of a region");
+                assert!(core::ptr::eq(info, frames.info(pfn << PAGE_SHIFT).unwrap()));
+                assert_eq!(frames.node_of(pfn << PAGE_SHIFT), Some(0));
+            }
+        }
+        // Below, between and above them.
+        for pfn in [0, 63, 96, 255, 4352, 8191, 8208, u64::MAX >> PAGE_SHIFT] {
+            assert!(frames.info(pfn << PAGE_SHIFT).is_none(), "frame {pfn}");
+        }
     }
 
     #[test]

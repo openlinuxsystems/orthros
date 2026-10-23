@@ -492,7 +492,43 @@ fn read_only_volumes_refuse_changes() {
     assert_eq!(file.write(0, &Slice(b"x")).err(), Some(Error::ReadOnly));
     assert_eq!(root.create("new", Kind::File).err(), Some(Error::ReadOnly));
     assert_eq!(root.remove("hello.txt").err(), Some(Error::ReadOnly));
+    assert_eq!(file.set_times(Some(0), None).err(), Some(Error::ReadOnly));
     fs.sync().unwrap();
+}
+
+#[test]
+fn times_set_are_kept_as_fat_keeps_them() {
+    const S: u64 = 1_000_000_000;
+    // 2026-10-22 12:34:57.5 UTC, and 2001-02-03 04:05:06 UTC.
+    let (modified, accessed) = (1_792_672_497 * S + S / 2, 981_173_106 * S);
+    let volume = Volume::new(&mkfs(16, 32768, 4));
+    let root = volume.root();
+    let file = make_file(&root, "file", b"data");
+    let dir = root.create("dir", Kind::Directory).unwrap();
+    let made = file.stat();
+    assert_eq!(made.accessed, made.modified - made.modified % (86_400 * S));
+    file.set_times(Some(accessed), Some(modified)).unwrap();
+    dir.set_times(None, Some(modified)).unwrap();
+    // A change time in two-second steps, a read's day; what stat says now
+    // is what the disk will say.
+    let stat = file.stat();
+    assert_eq!(stat.modified, 1_792_672_496 * S);
+    assert_eq!(stat.accessed, 981_158_400 * S);
+    // Only what was asked for changes.
+    file.set_times(None, None).unwrap();
+    assert_eq!(file.stat(), stat);
+    drop((file, dir, root));
+    let volume = volume.remount();
+    let root = volume.root();
+    let file = walk(&root, "file").unwrap();
+    assert_eq!(file.stat().modified, 1_792_672_496 * S);
+    assert_eq!(file.stat().accessed, 981_158_400 * S);
+    assert_eq!(walk(&root, "dir").unwrap().stat().modified, 1_792_672_496 * S);
+    // Times FAT cannot hold are clamped to its years.
+    file.set_times(Some(0), Some(0)).unwrap();
+    assert_eq!(file.stat().modified, 315_532_800 * S);
+    drop((file, root));
+    fsck(&volume.image());
 }
 
 #[test]

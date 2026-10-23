@@ -43,7 +43,7 @@ twelve calls: nothing compared the two.
   from the IDL, and the fuzzer checks every failed call against them: an
   error a call's documentation does not list fails the test, as does a
   failed call that returns anything but a kernel error and zero in its
-  result registers (radix-syscalls(2)).
+  result registers (radix-ipc(7)).
 - The test fails if a fuzzer exits with failures, fewer than half get
   through their calls, the capability store fails its audit, or the
   store or the object registry holds anything more than before. A group

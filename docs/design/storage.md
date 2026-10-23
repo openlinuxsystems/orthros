@@ -246,7 +246,10 @@ Howard Hinnant's civil-date algorithms.
 tmpfs is a page cache with nothing below it: its pages are the only copy,
 nothing is written back, and a tmpfs has a size limit (half of memory,
 as on Linux, for those programs mount; 1 MiB for the root, which holds
-only mount points). Directories are sorted vectors of entries, under a
+only mount points). Like Linux's `nr_inodes`, a tmpfs also holds at
+most one file or directory for every two pages of memory, counted until
+the node is dropped, so that empty files cannot use up the kernel's heap.
+Directories are sorted vectors of entries, under a
 mutex each, and a namespace lock per tmpfs keeps creates, removes and
 renames apart.
 

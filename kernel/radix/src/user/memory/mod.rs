@@ -19,9 +19,18 @@
 //! under way and stops the rest, before its memory can go back. So a large
 //! retype holds up no other change to the store.
 //!
+//! Since Phase 8 a region can also be anonymous memory (`anon`): pages the
+//! kernel makes when a program first touches them, zeroed or filled from
+//! a file, charged to the space's resource domain, and shared after a
+//! fork until one side writes to them. `futex` keeps the threads that
+//! wait on words of an address space.
+//!
 //! Lock order: the capability store, then a frame's zeroing step, then its
 //! list of address spaces, then an address space's regions (then the
-//! architecture's page-table lock).
+//! architecture's page-table lock, then the frame allocator's).
+
+mod anon;
+pub mod futex;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -36,10 +45,13 @@ use radix_ipc::range::user_pages;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Mutex;
 
+pub use anon::{Anon, Fault, FileSource, Placement};
+
 use super::ring::RingRef;
 use super::{Result, error};
 use crate::Arch;
 use crate::caps::Store;
+use crate::domains::DomainRef;
 
 /// An address space, shared.
 pub type SpaceRef = Arc<SpaceObject, Kmalloc>;
@@ -57,14 +69,19 @@ pub enum Backing {
     Frame(FrameRef),
     /// A ring's shared pages.
     Ring(RingRef),
+    /// Anonymous memory, made page by page as it is touched (Phase 8).
+    Anon(Anon),
 }
 
 impl Backing {
-    /// The physical address of page `page` of what it maps.
-    fn phys(&self, page: u64) -> u64 {
+    /// The physical address of page `page` of what it maps: a frame's or a
+    /// ring's, which are mapped whole. Anonymous memory has none of its
+    /// own (`map` never takes it).
+    fn phys(&self, page: u64) -> Option<u64> {
         match self {
-            Backing::Frame(frame) => frame.phys + page * PAGE_SIZE,
-            Backing::Ring(ring) => ring.phys(page as usize),
+            Backing::Frame(frame) => Some(frame.phys + page * PAGE_SIZE),
+            Backing::Ring(ring) => Some(ring.phys(page as usize)),
+            Backing::Anon(_) => None,
         }
     }
 
@@ -83,7 +100,8 @@ struct Region {
     start: u64,
     /// How many pages.
     pages: u64,
-    /// What they map, from page `offset` of it.
+    /// What they map, from page `offset` of it (for anonymous memory, of
+    /// the file it is filled from).
     backing: Backing,
     offset: u64,
 }
@@ -94,10 +112,39 @@ impl Region {
     }
 }
 
+/// The index of the first of `regions` that ends after `at`. The list is
+/// sorted by address and its regions are disjoint, so a range from `at`
+/// can only meet regions from this one on: a binary search, which keeps
+/// a fault or an `mmap` cheap in a program with many regions.
+fn first_after(regions: &[Region], at: u64) -> usize {
+    regions.partition_point(|r| r.end() <= at)
+}
+
+/// Whether any of `regions` meets the range from `start` to `end`.
+fn overlaps(regions: &[Region], start: u64, end: u64) -> bool {
+    regions.get(first_after(regions, start)).is_some_and(|r| r.start < end)
+}
+
+/// Puts `region`, which meets none of them, in its place among
+/// `regions`, which must have room for it.
+fn insert(regions: &mut Vec<Region, Kmalloc>, region: Region) {
+    let at = first_after(regions, region.start);
+    // The caller reserved the room; the list stays sorted by address.
+    let _ = regions.push_within_capacity(region);
+    regions[at..].rotate_right(1);
+}
+
 /// An address space object.
 pub struct SpaceObject {
     arch: <Arch as UserMode>::Space,
     regions: Mutex<Vec<Region, Kmalloc>>,
+    /// The domain its anonymous memory is charged to: its process's.
+    domain: Option<DomainRef>,
+    /// How many pages of anonymous memory it maps, each charged once.
+    anon_pages: AtomicU64,
+    /// Where anonymous memory the kernel places goes: the highest free
+    /// range below this, a random distance below ANONYMOUS_TOP.
+    anon_top: u64,
 }
 
 /// Pages a step of zeroing a new frame clears: 256 KiB, a few tens of
@@ -121,11 +168,23 @@ pub struct FrameObject {
 }
 
 impl SpaceObject {
-    /// A new, empty address space.
-    pub fn new() -> Option<SpaceRef> {
+    /// A new, empty address space, whose anonymous memory is charged to
+    /// `domain`.
+    pub fn new(domain: Option<DomainRef>) -> Option<SpaceRef> {
         let arch = Arch::new_space()?;
-        let space = SpaceObject { arch, regions: Mutex::new(Vec::new_in(kmalloc())) };
+        let space = SpaceObject {
+            arch,
+            regions: Mutex::new(Vec::new_in(kmalloc())),
+            domain,
+            anon_pages: AtomicU64::new(0),
+            anon_top: anon::random_top(),
+        };
         Arc::try_new_in(space, kmalloc()).ok()
+    }
+
+    /// How many pages of anonymous memory it maps.
+    pub fn anon_pages(&self) -> u64 {
+        self.anon_pages.load(Ordering::Relaxed)
     }
 
     /// The architecture's side, which thread contexts load.
@@ -145,14 +204,14 @@ impl SpaceObject {
     ) -> Result<()> {
         let end = user_pages(start, pages).ok_or(error(Kernel::InvalidArgument))?;
         let mut regions = self.regions.lock();
-        if regions.iter().any(|r| r.start < end && start < r.end()) {
+        if overlaps(&regions, start, end) {
             return Err(error(Kernel::AlreadyMapped));
         }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
         for page in 0..pages {
             let virt = start + page * PAGE_SIZE;
-            if let Err(err) = Arch::map_page(&self.arch, virt, backing.phys(offset + page), access)
-            {
+            let phys = backing.phys(offset + page).ok_or(error(Kernel::InvalidArgument))?;
+            if let Err(err) = Arch::map_page(&self.arch, virt, phys, access) {
                 for done in 0..page {
                     Arch::unmap_page(&self.arch, start + done * PAGE_SIZE);
                 }
@@ -162,11 +221,7 @@ impl SpaceObject {
                 }));
             }
         }
-        let region = Region { start, pages, backing: backing.clone(), offset };
-        let at = regions.iter().position(|r| r.start > start).unwrap_or(regions.len());
-        // Room was reserved above; the list stays sorted by address.
-        let _ = regions.push_within_capacity(region);
-        regions[at..].rotate_right(1);
+        insert(&mut regions, Region { start, pages, backing: backing.clone(), offset });
         Ok(())
     }
 
@@ -177,52 +232,70 @@ impl SpaceObject {
         let mut regions = self.regions.lock();
         // Every page must be covered: the regions are sorted and disjoint.
         let mut covered = start;
-        for region in regions.iter().filter(|r| r.start < end && start < r.end()) {
-            if region.start > covered {
+        for region in &regions[first_after(&regions, start)..] {
+            if covered >= end || region.start > covered {
                 break;
             }
-            covered = covered.max(region.end());
+            covered = region.end();
         }
         if covered < end {
             return Err(error(Kernel::NotMapped));
         }
-        // A region cut in the middle becomes two.
+        self.cut(&mut regions, start, end)
+    }
+
+    /// Splits the region that `at` falls inside, if one does, in two at
+    /// `at` (a page boundary).
+    fn split_at(regions: &mut Vec<Region, Kmalloc>, at: u64) -> Result<()> {
+        let index = first_after(regions, at);
+        if regions.get(index).is_none_or(|r| r.start >= at) {
+            return Ok(());
+        }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
-        let mut index = 0;
-        while index < regions.len() {
-            let region = &regions[index];
-            if region.end() <= start || region.start >= end {
-                index += 1;
-                continue;
-            }
-            let (cut_start, cut_end) = (region.start.max(start), region.end().min(end));
-            for virt in (cut_start..cut_end).step_by(PAGE_SIZE as usize) {
-                Arch::unmap_page(&self.arch, virt);
-            }
-            let before = (cut_start - region.start) / PAGE_SIZE;
-            let after = (region.end() - cut_end) / PAGE_SIZE;
-            let tail = (after > 0).then(|| Region {
-                start: cut_end,
-                pages: after,
-                backing: region.backing.clone(),
-                offset: region.offset + (cut_end - region.start) / PAGE_SIZE,
-            });
-            if before > 0 {
-                regions[index].pages = before;
-                index += 1;
-            } else {
-                regions.remove(index);
-            }
-            if let Some(tail) = tail {
-                // Room was reserved above; only one region can be cut in
-                // the middle.
-                let _ = regions.push_within_capacity(tail);
-                let last = regions.len() - 1;
-                regions[index..=last].rotate_right(1);
-                index += 1;
+        let region = &mut regions[index];
+        let before = (at - region.start) / PAGE_SIZE;
+        let tail = Region {
+            start: at,
+            pages: region.pages - before,
+            backing: region.backing.clone(),
+            offset: region.offset + before,
+        };
+        region.pages = before;
+        // Room was reserved above; the list stays sorted.
+        let _ = regions.push_within_capacity(tail);
+        let last = regions.len() - 1;
+        regions[index + 1..=last].rotate_right(1);
+        Ok(())
+    }
+
+    /// Unmaps whatever is mapped from `start` to `end`, with the regions
+    /// locked: the regions inside go, those the range cuts through are
+    /// split first.
+    fn cut(&self, regions: &mut Vec<Region, Kmalloc>, start: u64, end: u64) -> Result<()> {
+        Self::split_at(regions, start)?;
+        Self::split_at(regions, end)?;
+        // After the splits, the regions the range meets lie wholly inside.
+        let first = first_after(regions, start);
+        let last = first + regions[first..].partition_point(|r| r.start < end);
+        for region in &regions[first..last] {
+            self.clear_region(region);
+        }
+        regions[first..].rotate_left(last - first);
+        regions.truncate(regions.len() - (last - first));
+        Ok(())
+    }
+
+    /// Takes away a region's pages: a frame's or ring's are unmapped one by
+    /// one, anonymous memory's given back.
+    fn clear_region(&self, region: &Region) {
+        match region.backing {
+            Backing::Anon(_) => self.release_range(region.start, region.end()),
+            Backing::Frame(_) | Backing::Ring(_) => {
+                for page in 0..region.pages {
+                    Arch::unmap_page(&self.arch, region.start + page * PAGE_SIZE);
+                }
             }
         }
-        Ok(())
     }
 
     /// Unmaps every region that maps `backing`.
@@ -253,13 +326,10 @@ impl Drop for SpaceObject {
     fn drop(&mut self) {
         // Unmap first, so nothing the regions held stays mapped while it
         // goes; the tables themselves go with the last handle.
-        let regions = self.regions.get_mut();
+        let regions = core::mem::replace(self.regions.get_mut(), Vec::new_in(kmalloc()));
         for region in regions.iter() {
-            for page in 0..region.pages {
-                Arch::unmap_page(&self.arch, region.start + page * PAGE_SIZE);
-            }
+            self.clear_region(region);
         }
-        regions.clear();
     }
 }
 

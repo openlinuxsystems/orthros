@@ -1,0 +1,68 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Adds lrand48, nrand48 and lcong48, which POSIX has and mlibc did not,
+as musl 1.2.5 has them (MIT), and makes seed48 and srand48 bring back
+the multiplier and addend lcong48 changes, as POSIX says. Found by
+libc-test's regression/lrand48-signextend. Meant for upstream.
+
+diff -ruN a/options/posix/generic/posix_stdlib.cpp b/options/posix/generic/posix_stdlib.cpp
+--- a/options/posix/generic/posix_stdlib.cpp
++++ b/options/posix/generic/posix_stdlib.cpp
+@@ -75,7 +75,7 @@
+ 	return k;
+ }
+ 
+-// erand, drand and srand are borrowed from musl
++// The rand48 family is borrowed from musl
+ namespace {
+ 
+ unsigned short seed_48[7] = { 0, 0, 0, 0xe66d, 0xdeec, 0x5, 0xb };
+@@ -108,9 +108,19 @@
+ 	static unsigned short p[3];
+ 	memcpy(p, seed_48, sizeof p);
+ 	memcpy(seed_48, s, sizeof p);
++	// As POSIX says: seed48 and srand48 bring back the multiplier and
++	// addend that lcong48 may have changed.
++	seed_48[3] = 0xe66d;
++	seed_48[4] = 0xdeec;
++	seed_48[5] = 0x5;
++	seed_48[6] = 0xb;
+ 	return p;
+ }
+ 
++void lcong48(unsigned short p[7]) {
++	memcpy(seed_48, p, sizeof seed_48);
++}
++
+ void srand48(long int seed) {
+ 	unsigned short arr[3] = { 0x330e, (unsigned short) seed, (unsigned short) (seed>>16) };
+ 	seed48(arr);
+@@ -124,6 +134,14 @@
+ 	return jrand48(seed_48);
+ }
+ 
++long nrand48(unsigned short s[3]) {
++	return eand48_step(s, seed_48 + 3) >> 17;
++}
++
++long lrand48(void) {
++	return nrand48(seed_48);
++}
++
+ // Borrowed from musl
+ void srandom(unsigned int seed) {
+ 	int k;
+diff -ruN a/options/posix/include/bits/posix/posix_stdlib.h b/options/posix/include/bits/posix/posix_stdlib.h
+--- a/options/posix/include/bits/posix/posix_stdlib.h
++++ b/options/posix/include/bits/posix/posix_stdlib.h
+@@ -20,6 +20,9 @@
+ void srand48(long int __seed);
+ long int mrand48(void);
+ long jrand48(unsigned short __s[3]);
++long lrand48(void);
++long nrand48(unsigned short __s[3]);
++void lcong48(unsigned short __p[7]);
+ char *initstate(unsigned int __seed, char *__state, size_t __size);
+ char *setstate(char *__state);
+ void srandom(unsigned int __seed);

@@ -22,7 +22,7 @@
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
 
 use radix_abi::errors::Kernel;
 use radix_abi::ring::{Cqe, LAYOUT_VERSION, Opcode, RingHeader, RingIndexes, Sqe};
@@ -108,8 +108,16 @@ impl RingObject {
         self.tail.store(tail, Ordering::Release);
     }
 
+    /// Wakes the threads waiting in `ring_enter`, if there are any, after
+    /// a completion was published.
     fn wake(&self) {
-        if self.waiting.load(Ordering::Acquire) > 0 {
+        // Pairs with the barrier a waiter makes after counting itself in
+        // `waiting`: either this sees its count, or its look at the tail
+        // sees the completion. Without it the load could be done before
+        // this CPU's store of the tail was seen, while the waiter counts
+        // itself and reads the old tail, and the wake-up would be lost.
+        fence(Ordering::SeqCst);
+        if self.waiting.load(Ordering::Relaxed) > 0 {
             wait::wake_all(self.key());
         }
     }
@@ -315,7 +323,7 @@ pub fn enter(
         if ready >= min_complete {
             return Ok((submitted, ready));
         }
-        if sched::should_stop() {
+        if sched::interrupted() {
             return Err(error(Kernel::Interrupted));
         }
         if ring.closed.load(Ordering::Acquire) {
@@ -331,16 +339,19 @@ pub fn enter(
         let done = || {
             ring.ready() >= min_complete
                 || ring.closed.load(Ordering::Relaxed)
-                || sched::should_stop()
+                || sched::interrupted()
         };
-        ring.waiting.fetch_add(1, Ordering::AcqRel);
+        ring.waiting.fetch_add(1, Ordering::Relaxed);
+        // Pairs with the barrier in `wake`: either the thread finishing an
+        // entry sees this count, or `done` sees what it wrote.
+        fence(Ordering::SeqCst);
         match until {
             None => wait::wait_until(ring.key(), "ring", done),
             Some(until) => {
                 wait::wait_until_or_timeout(ring.key(), "ring", until, done);
             }
         }
-        ring.waiting.fetch_sub(1, Ordering::AcqRel);
+        ring.waiting.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

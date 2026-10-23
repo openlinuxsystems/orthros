@@ -156,7 +156,11 @@ static ROOM: AtomicUsize = AtomicUsize::new(0);
 /// Held while the lists grow.
 static GROWING: Mutex<()> = Mutex::new(());
 static THREADS: AtomicUsize = AtomicUsize::new(0);
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+/// Numbers threads and processes from one count, as Linux numbers its
+/// tasks, so that a process's first thread can have the process's number
+/// and `gettid()` is `getpid()` in it (Phase 8). 1 is the first
+/// process's.
+static NEXT_ID: AtomicU64 = AtomicU64::new(2);
 /// Set once the hooks are registered and the boot CPU runs threads.
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// The CPUs that run threads.
@@ -170,6 +174,11 @@ fn kmalloc() -> Kmalloc {
 /// The kernel's clock.
 pub fn now_ns() -> u64 {
     Arch::now_ns()
+}
+
+/// A number no thread or process has had since boot.
+pub fn take_number() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Why a thread could not be made.
@@ -210,6 +219,8 @@ pub struct Options {
     domain: Option<DomainRef>,
     stack_pages: usize,
     user: Option<crate::user::UserRef>,
+    held: bool,
+    number: Option<u64>,
 }
 
 impl Options {
@@ -222,7 +233,24 @@ impl Options {
             domain: None,
             stack_pages: STACK_PAGES,
             user: None,
+            held: false,
+            number: None,
         }
+    }
+
+    /// Numbered `number`, which [`take_number`] gave and no other thread
+    /// has: a process's first thread has the process's number.
+    pub fn number(mut self, number: u64) -> Options {
+        self.number = Some(number);
+        self
+    }
+
+    /// Made but not started until [`release`]d (Phase 8), so that its
+    /// maker can finish setting it up (its thread pointer and registers)
+    /// before it first runs on any CPU.
+    pub fn held(mut self) -> Options {
+        self.held = true;
+        self
     }
 
     /// With this policy.
@@ -302,6 +330,7 @@ pub fn init(lockdep: Option<bool>) {
         *ZOMBIES.lock_irq() = Some(zombies);
         wait::init(room, kmalloc()).then_some(())?;
         let kmain = make_thread(
+            take_number(),
             Name::new("kmain"),
             Arch::adopt_current()?,
             idle_main,
@@ -377,6 +406,7 @@ pub fn start_threads() {
 
 fn idle_thread(cpu: usize, context: Context) -> Option<ThreadRef> {
     let idle = make_thread(
+        take_number(),
         Name::numbered("idle/", cpu),
         context,
         idle_main,
@@ -393,6 +423,7 @@ fn idle_thread(cpu: usize, context: Context) -> Option<ThreadRef> {
 
 #[allow(clippy::too_many_arguments)]
 fn make_thread(
+    id: u64,
     name: Name,
     context: Context,
     entry: fn(usize),
@@ -402,7 +433,6 @@ fn make_thread(
     domain: DomainRef,
     charged: u64,
 ) -> Option<ThreadRef> {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     domain.thread_joined();
     let thread = Thread::new(id, name, context, entry, arg, policy, affinity, domain, charged);
     let thread = Arc::try_new_in(thread, kmalloc()).ok()?;
@@ -555,6 +585,7 @@ pub fn spawn(
         let context =
             Arch::new_context(thread_start, 0, options.stack_pages).ok_or(SpawnError::NoMemory)?;
         make_thread(
+            options.number.unwrap_or_else(take_number),
             Name::new(name),
             context,
             entry,
@@ -579,11 +610,20 @@ pub fn spawn(
         Arch::attach_space(&thread.context, user.space().arch());
         let _ = thread.user.set(user);
     }
-    let mut state = thread.state.lock_irq();
-    state.run = Run::Ready;
-    enqueue_ready(&thread, &mut state, true);
-    drop(state);
+    if !options.held {
+        release(&thread);
+    }
     Ok(thread)
+}
+
+/// Starts a thread that [`spawn`] made held; a thread already started is
+/// left as it is.
+pub fn release(thread: &ThreadRef) {
+    let mut state = thread.state.lock_irq();
+    if matches!(state.run, Run::New) {
+        state.run = Run::Ready;
+        enqueue_ready(thread, &mut state, true);
+    }
 }
 
 /// The running thread, once the scheduler runs on this CPU.
@@ -659,6 +699,13 @@ pub fn can_sleep() -> bool {
 /// threads check it and return.
 pub fn should_stop() -> bool {
     running().is_some_and(|me| me.should_stop())
+}
+
+/// Whether the running thread's wait should end early: it has been asked
+/// to stop, or has a signal to take (Phase 8). Waits a signal may cut
+/// short return `Interrupted` when it holds.
+pub fn interrupted() -> bool {
+    running().is_some_and(|me| me.interrupted())
 }
 
 /// Gives the CPU to another thread of the same class, if one waits.
@@ -1188,6 +1235,7 @@ fn thread_start(_: usize) -> ! {
 }
 
 /// The locks' preemption hook: preemption was just allowed again.
+#[inline]
 pub(crate) fn preempt_enable() {
     if Arch::preempt_enable() == 0
         && CPUS.this().need_resched.load(Ordering::Relaxed)

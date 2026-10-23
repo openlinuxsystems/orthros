@@ -1,0 +1,101 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Locales as Dukovo keeps them:
+  - compiled locales, and glibc's locale archive, are looked for in
+    /system/lib/locale, where Dukovo keeps the system's files (there is
+    no /usr), after the directories of LOCPATH; /usr/share/i18n/locales
+    is left out: it holds glibc's locale sources, which mlibc does not
+    read;
+  - setlocale and newlocale name a locale as they were asked, as glibc
+    does ("C.UTF-8" stays "C.UTF-8"), not by the directory it was found
+    in ("C.utf8");
+  - MB_CUR_MAX is 4 in a UTF-8 locale and 1 in the C locale, as in glibc
+    and musl, rather than always 4.
+
+diff -ruN a/options/ansi/generic/stdio.cpp b/options/ansi/generic/stdio.cpp
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -625,7 +625,7 @@
+ 			if (ret != static_cast<size_t>(-1))
+ 				count += ret;
+ 		} else {
+-			char mb[MB_CUR_MAX];
++			char mb[MB_LEN_MAX];
+ 			auto ret = wcrtomb(mb, wc, &state);
+ 			if (ret != static_cast<size_t>(-1))
+ 				count += ret;
+diff -ruN a/options/ansi/generic/stdlib.cpp b/options/ansi/generic/stdlib.cpp
+--- a/options/ansi/generic/stdlib.cpp
++++ b/options/ansi/generic/stdlib.cpp
+@@ -469,6 +469,10 @@
+ 	return r;
+ }
+ 
++size_t __mlibc_mb_cur_max(void) {
++	return mlibc::current_charcode() == mlibc::utf8_charcode() ? 4 : 1;
++}
++
+ int mblen(const char *mbs, size_t mb_limit) {
+ 	auto cc = mlibc::current_charcode();
+ 	wchar_t wc;
+diff -ruN a/options/ansi/include/stdlib.h b/options/ansi/include/stdlib.h
+--- a/options/ansi/include/stdlib.h
++++ b/options/ansi/include/stdlib.h
+@@ -34,8 +34,10 @@
+ 
+ #define RAND_MAX 0x7FFFFFFF
+ 
+-/* TODO: this should not be a compile-time constant */
+-#define MB_CUR_MAX ((size_t)4)
++/* The most bytes a character takes in the current locale: 4 in a UTF-8
++ * one, 1 in the C locale. */
++size_t __mlibc_mb_cur_max(void);
++#define MB_CUR_MAX (__mlibc_mb_cur_max())
+ 
+ #ifndef __MLIBC_ABI_ONLY
+ 
+diff -ruN a/options/internal/generic/locale.cpp b/options/internal/generic/locale.cpp
+--- a/options/internal/generic/locale.cpp
++++ b/options/internal/generic/locale.cpp
+@@ -324,8 +324,7 @@
+ 					off += end + 1;
+ 			}
+ 		}
+-		locpaths.push_back(frg::string<MemoryAllocator>{"/usr/lib/locale", getAllocator()});
+-		locpaths.push_back(frg::string<MemoryAllocator>{"/usr/share/i18n/locales", getAllocator()});
++		locpaths.push_back(frg::string<MemoryAllocator>{"/system/lib/locale", getAllocator()});
+ 	}
+ 
+ 	if (!cachedLocpath.empty())
+@@ -335,10 +334,10 @@
+ 		return;
+ 
+ 	struct stat info;
+-	if (mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, "/usr/lib/locale/locale-archive", 0, &info))
++	if (mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, "/system/lib/locale/locale-archive", 0, &info))
+ 		return;
+ 
+-	auto window = smarter::allocate_shared<file_window>(getAllocator(), "/usr/lib/locale/locale-archive");
++	auto window = smarter::allocate_shared<file_window>(getAllocator(), "/system/lib/locale/locale-archive");
+ 	if (window->size() < sizeof(LocaleArchive::Header))
+ 		return;
+ 
+@@ -523,7 +522,7 @@
+ 			auto e = localeFiles.find(path);
+ 			if (e != localeFiles.end()) {
+ 				auto &[localeName, window] = *e;
+-				if (parseCategoryInfo(category, locale, {static_cast<const uint8_t *>(window->get()), window->size()}, out))
++				if (parseCategoryInfo(category, name, {static_cast<const uint8_t *>(window->get()), window->size()}, out))
+ 					return true;
+ 			} else {
+ 				struct stat info;
+@@ -533,7 +532,7 @@
+ 				auto window = smarter::allocate_shared<file_window>(getAllocator(), path.data());
+ 				localeFiles.insert(path, window);
+ 
+-				if (parseCategoryInfo(category, locale, {static_cast<const uint8_t *>(window->get()), window->size()}, out)) {
++				if (parseCategoryInfo(category, name, {static_cast<const uint8_t *>(window->get()), window->size()}, out)) {
+ 					return true;
+ 				}
+ 			}

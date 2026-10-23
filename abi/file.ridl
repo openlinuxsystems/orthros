@@ -10,15 +10,82 @@
 //! the change when its filesystem syncs (every five seconds, at `sync`,
 //! and at unmount). The ring's read, write and sync operations
 //! (radix-ring(2)) do the same without a system call each.
+//!
+//! Since Phase 8 a file capability is also what POSIX calls an open file
+//! description: it has an offset, which reads and writes at CURRENT use
+//! and move, and status flags. Copies of the capability (`derive`, and
+//! `fork`'s copies) share them; each `open` makes a new one. Pipes
+//! (radix-process(2)'s `pipe`) and terminals (radix-terminal(2)) are
+//! files too, which have no offset: their reads and writes take any
+//! offset, and their reads return what has come, waiting while nothing
+//! has unless the description is non_blocking.
 
 module file;
 
 /// The offset of a write that appends: at the end of the file, wherever
 /// that is when the write happens.
 const APPEND: u64 = 0xffffffffffffffff;
+/// The offset of a read or write at the description's offset, which then
+/// moves past the bytes read or written (at the end, for a write when the
+/// description appends).
+const CURRENT: u64 = 0xfffffffffffffffe;
+
+/// A time `set_times` leaves as it is.
+const TIME_OMIT: u64 = 0xffffffffffffffff;
+/// A time `set_times` sets to now, by the kernel's clock.
+const TIME_NOW: u64 = 0xfffffffffffffffe;
+
+/// Where `seek` counts from, as `lseek`'s `whence`.
+enum Whence: u32 {
+    /// From the start of the file.
+    start = 0;
+    /// From the description's offset.
+    current = 1;
+    /// From the end of the file.
+    end = 2;
+}
+
+/// Whose a file lock is, which decides which other locks it meets and
+/// when it goes. Locks are advisory: they stand in the way of other
+/// locks, never of reads and writes.
+enum LockOwner: u32 {
+    /// The open file description's lock on the whole file, as BSD's
+    /// `flock`: it meets only other such locks, and goes with the
+    /// description's last capability.
+    description = 0;
+    /// The calling process's lock on a range of bytes, as POSIX's record
+    /// locks (`fcntl`'s F_SETLK): it goes when the process ends, or
+    /// deletes any capability of the file, and `fork`'s child has none of
+    /// them.
+    process = 1;
+    /// The open file description's lock on a range of bytes, as Linux's
+    /// open file description locks (F_OFD_SETLK): it meets process locks
+    /// too, and goes with the description's last capability.
+    description_range = 2;
+}
+
+/// What a file lock lets others do.
+enum LockKind: u32 {
+    /// No lock: `lock` lets go of the range, and `lock_holder` finds none
+    /// in the way.
+    none = 0;
+    /// Others may hold shared locks on the range too, as readers do.
+    shared = 1;
+    /// Nobody else may lock the range, as a writer does.
+    exclusive = 2;
+}
+
+/// An open file description's status flags.
+flags DescriptionFlags: u32 {
+    /// Writes at CURRENT go at the end of the file.
+    append = 0;
+    /// Reads and writes of a pipe or terminal that would wait fail with
+    /// would_block instead.
+    non_blocking = 1;
+}
 
 /// A file.
-interface file = 0x000c version 1 {
+interface file = 0x000c version 2 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -32,7 +99,9 @@ interface file = 0x000c version 1 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
                 is_directory, read_only, no_space, too_big, io, corrupt];
     /// What the file is, as radix-directory(2)'s `stat` says.
-    method stat = 3 () -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+    method stat = 3 ()
+        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
+            accessed: u64, mount: u64)
         raises [no_such_slot, empty_slot];
     /// Makes the file `size` bytes long: cut, or grown with zeros. Needs
     /// the write right.
@@ -43,4 +112,49 @@ interface file = 0x000c version 1 {
     /// the disk has them. Needs the write right.
     method sync = 5 () -> ()
         raises [no_such_slot, empty_slot, missing_rights, io, corrupt];
+    /// Moves the description's offset to `offset` bytes from where
+    /// `whence` says, and returns it. Pipes and terminals fail with
+    /// not_seekable.
+    method seek = 6 (offset: i64, whence: Whence) -> (offset: u64)
+        raises [no_such_slot, empty_slot, invalid_argument, not_seekable, io, corrupt];
+    /// Reads, and with `set` changes, the description's status flags, and
+    /// returns them as they were.
+    method status_flags = 7 (set: bool, flags: DescriptionFlags) -> (flags: DescriptionFlags)
+        raises [no_such_slot, empty_slot];
+    /// A device's own request, as Linux's `ioctl`: `request` with its
+    /// `argument`, and `size` bytes at `buffer` it reads or writes.
+    /// Terminals take the termios, window size, process group and
+    /// controlling terminal requests radix-terminal(2) lists; other files
+    /// fail with not_terminal.
+    method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
+                not_terminal, not_permitted, interrupted, io];
+    /// Takes, changes or lets go of (`kind` none) a lock of `owner`'s on
+    /// the `length` bytes from `start` (0: all those past it, however the
+    /// file grows); a description lock always covers the whole file. A
+    /// lock its owner holds on part of the range already gives way to the
+    /// new one, which joins those of the same kind it touches. Another
+    /// owner's lock in the way fails it with would_block, or with `wait`
+    /// is waited for, until a signal interrupts the wait; a process lock
+    /// whose holder waits, in a chain, for one the caller's process holds
+    /// fails it with deadlock instead. A shared range lock needs the read
+    /// right and an exclusive one the write right.
+    method lock = 9 (owner: LockOwner, kind: LockKind, start: u64, length: u64, wait: bool) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                would_block, interrupted, deadlock];
+    /// Finds a lock that would stand in the way of a `kind` lock of
+    /// `owner`'s on the range `lock` takes, and returns its kind (none if
+    /// there is none), its range, and the number of the process holding
+    /// it (a description's: 0xffffffffffffffff).
+    method lock_holder = 10 (owner: LockOwner, kind: LockKind, start: u64, length: u64)
+        -> (kind: LockKind, start: u64, length: u64, process: u64)
+        raises [no_such_slot, empty_slot, invalid_argument];
+    /// Sets when the file was last read and when its contents last
+    /// changed, in nanoseconds since 1970, or now (TIME_NOW), or leaves
+    /// either (TIME_OMIT). The filesystem keeps them as finely as it can
+    /// (FAT: two seconds, and the day for reads); reading a file never
+    /// changes its read time (ADR 0076). Devices and pipes keep no times
+    /// and fail with not_permitted. Needs the write right.
+    method set_times = 11 (accessed: u64, modified: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, not_permitted, read_only, io, corrupt];
 }

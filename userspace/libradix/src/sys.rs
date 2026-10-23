@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The `syscall` instruction (radix-syscalls(2)): the number in `rax`, ten
+//! The `syscall` instruction (radix-ipc(7)): the number in `rax`, ten
 //! arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, `r12` to `r15`;
 //! the status back in `rax` and the results in the same ten registers.
 //! `rcx` and `r11` are overwritten.

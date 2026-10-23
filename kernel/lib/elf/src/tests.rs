@@ -313,12 +313,90 @@ fn refuses_what_only_a_dynamic_linker_does() {
     assert_eq!(read(&pie(&[], &[(DT_RELAENT, 16)])), Err(ElfError::Malformed));
 }
 
+/// A dynamically linked program as `exec` sees one: its program headers
+/// in its first page, an interpreter's path, thread-local storage and a
+/// dynamic table, with only its first 0x400 bytes read.
+fn dynamic_program(interp: (u64, u64)) -> Vec<u8> {
+    build(
+        ET_DYN,
+        0x1000,
+        &[
+            (PT_PHDR, PF_R, HEADER_SIZE as u64, HEADER_SIZE as u64, 6 * 56, 6 * 56),
+            (PT_INTERP, PF_R, 0x300, interp.0, interp.1, interp.1),
+            load(PF_R, 0, 0, 0x800, 0x800),
+            load(PF_R | PF_X, 0x1000, 0x1000, 0x100, 0x100),
+            (PT_TLS, PF_R, 0x2000, 0x2000, 0x10, 0x20),
+            (PT_DYNAMIC, PF_R | PF_W, 0x2000, 0x2000, 0x100, 0x100),
+        ],
+        0x400,
+    )
+}
+
+#[test]
+fn read_program_takes_what_exec_takes() {
+    let head = dynamic_program((0x300, 20));
+    // Only the head is in memory; the file is longer.
+    let program = read_program(&head, 0x2100).unwrap();
+    assert_eq!(program.interpreter, Some((0x300, 20)));
+    assert_eq!(program.headers, Some(HEADER_SIZE as u64));
+    assert_eq!(program.header_count, 6);
+    assert_eq!(program.dynamic, Some((0x2000, 0x100)));
+    assert_eq!(program.image.entry, 0x1000);
+    assert_eq!(program.image.segments().count(), 2);
+    // `read` takes none of that: an interpreter is a dynamic linker's.
+    let mut whole = head.clone();
+    whole.resize(0x2100, 0);
+    assert_eq!(read(&whole), Err(ElfError::Dynamic));
+}
+
+#[test]
+fn read_program_checks_against_the_file() {
+    // A segment, a dynamic table or a path past the end of the file.
+    assert_eq!(read_program(&dynamic_program((0x300, 20)), 0x1080), Err(ElfError::Truncated));
+    assert_eq!(read_program(&dynamic_program((0x2100, 20)), 0x2100), Err(ElfError::Truncated));
+    // Paths too short, too long, or given twice.
+    assert_eq!(read_program(&dynamic_program((0x300, 1)), 0x2100), Err(ElfError::Malformed));
+    let long = INTERPRETER_MAX + 1;
+    assert_eq!(read_program(&dynamic_program((0x300, long)), 0x3000), Err(ElfError::Malformed));
+    let mut twice = dynamic_program((0x300, 20));
+    let first = HEADER_SIZE + PHDR_SIZE;
+    let second = HEADER_SIZE + 4 * PHDR_SIZE;
+    let interp = twice[first..first + PHDR_SIZE].to_vec();
+    twice[second..second + PHDR_SIZE].copy_from_slice(&interp);
+    assert_eq!(read_program(&twice, 0x2100), Err(ElfError::Malformed));
+    // A head too short for its own program headers.
+    assert_eq!(
+        read_program(&dynamic_program((0x300, 20))[..0x100], 0x2100),
+        Err(ElfError::Truncated)
+    );
+}
+
+#[test]
+fn read_program_finds_headers_a_segment_loads() {
+    // No PT_PHDR: the headers are in memory because the first segment
+    // loads the start of the file.
+    let program = read_program(&typical(), 0x3000).unwrap();
+    assert_eq!(program.headers, Some(0x40_0000 + HEADER_SIZE as u64));
+    assert_eq!(program.interpreter, None);
+    // A static PIE has no interpreter but a dynamic table to relocate.
+    let bytes = good_pie();
+    let program = read_program(&bytes, bytes.len() as u64).unwrap();
+    let (offset, size) = program.dynamic.unwrap();
+    let table = &bytes[offset as usize..(offset + size) as usize];
+    assert_eq!(program.relocations(table), Ok(read(&bytes).unwrap().relocations));
+}
+
 proptest! {
     /// Garbage gives an error, never a panic.
     #[test]
     fn garbage_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
         if let Ok(image) = read(&bytes) {
             let _ = loaded(&bytes, &image, 0x1000_0000_0000);
+        }
+        if let Ok(program) = read_program(&bytes, bytes.len() as u64 + 0x1000)
+            && let Some((offset, size)) = program.interpreter
+        {
+            prop_assert!(offset + size <= bytes.len() as u64 + 0x1000);
         }
     }
 

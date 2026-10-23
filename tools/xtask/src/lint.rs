@@ -4,10 +4,11 @@
 //! `ob lint` and `ob fmt`.
 
 use crate::process::{self, step};
-use crate::{Ctx, Result, kernel, test, userspace};
+use crate::{Ctx, Result, kernel, ports, test, userspace};
 
 /// The Cargo workspaces in the repository.
-const MANIFESTS: &[&str] = &["Cargo.toml", "kernel/Cargo.toml", "userspace/Cargo.toml"];
+const MANIFESTS: &[&str] =
+    &["Cargo.toml", "kernel/Cargo.toml", "userspace/Cargo.toml", "userspace/programs/Cargo.toml"];
 
 /// `ob fmt`.
 pub fn fmt(ctx: &Ctx) -> Result<()> {
@@ -60,5 +61,14 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
     step("Running Clippy on the user programs");
     let mut cmd = userspace::cargo(ctx, "clippy");
     cmd.arg("--workspace").args(userspace::target_args(ctx)).args(["--", "-D", "warnings"]);
+    process::run(ctx, &mut cmd)?;
+
+    // These need Rust's standard library for Radix, which the rust-std
+    // port builds.
+    userspace::install_headers(ctx)?;
+    let ports = ports::build_all(ctx, &[])?;
+    step("Running Clippy on the programs on Rust's standard library");
+    let mut cmd = userspace::std_cargo(ctx, "clippy", &ports.toolchain);
+    cmd.arg("--workspace").args(["--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)
 }

@@ -16,11 +16,14 @@
 //! endpoint, a region of an address space) keep the memory alive until
 //! they let go.
 //!
-//! The registry changes only with the store's lock held, so the store's
-//! version (`caps::version`) moves on every change. Finding an object
-//! takes no lock when this CPU found it before at the version the store
-//! has now ([`get`]), as finding a capability does (`caps::get`): system
-//! calls on different CPUs share no lock to reach their objects.
+//! The registry changes only with the store's lock held. A system call
+//! finds a capability and the object it designates with one look at its
+//! CPU's cache, which takes no lock when this CPU found that slot before
+//! at the version the store has now ([`find`]): system calls on
+//! different CPUs share no lock to reach their objects. A capability a
+//! CPU found leaving its slot, or an object leaving the registry, moves
+//! the version (`caps`); one nobody looked up, such as a file opened and
+//! closed again, does not.
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -91,6 +94,9 @@ impl Object {
 
 struct Entry {
     generation: u32,
+    /// A CPU's cache may hold it ([`get_to_cache`]): taking it out moves
+    /// the store's version.
+    cached: bool,
     object: Object,
     /// What the object costs, charged to the account of the process that
     /// made it (`process.create`), and given back when it leaves.
@@ -144,8 +150,16 @@ pub fn insert_charged(
             let _ = table.push_within_capacity(None);
         }
     }
-    table[index] = Some(Entry { generation: id.generation, object, charge });
+    replace(table, index, Entry { generation: id.generation, cached: false, object, charge });
     Ok(())
+}
+
+/// Puts `entry` in the registry's slot `index`, which is normally empty;
+/// if a CPU may have cached what it held, the version moves.
+fn replace(table: &mut [Option<Entry>], index: usize, entry: Entry) {
+    if table[index].replace(entry).is_some_and(|old| old.cached) {
+        caps::mark_stale();
+    }
 }
 
 /// Makes an object of `kind` in `store`, with its original capability,
@@ -175,56 +189,31 @@ pub fn create_with_rights(
         let _ = table.push_within_capacity(None);
     }
     let Some(object) = object.take() else { return Err(error(Kernel::Gone)) };
-    table[index] = Some(Entry { generation: id.generation, object, charge });
+    replace(table, index, Entry { generation: id.generation, cached: false, object, charge });
     Ok(())
 }
 
-/// The object named `id`, if it exists.
-///
-/// If this CPU found it at the version the store has now, the registry
-/// has not changed since, and the object is still there: no lock, and
-/// nothing shared written but the object's reference count. A change
-/// under way that has not moved the version yet has not returned either,
-/// so a lookup that misses it happened before it. Otherwise the registry
-/// is asked under its lock, and the answer kept with the version.
+/// The object named `id`, if it is in the registry, looked up under the
+/// registry's lock: for lookups too rare to be worth a place in a CPU's
+/// cache. The system calls' lookups go through [`find`].
 pub fn get(id: ObjectId) -> Option<Object> {
-    let now = caps::version();
-    let index = cache_index(id);
-    let hit = CACHE.with_own(|cache| match &cache[index] {
-        Some(entry) if entry.id == id && entry.version == now => entry.object.upgrade(),
-        _ => None,
-    });
-    match hit {
-        Some(Some(object)) => Some(object),
-        _ => get_from_registry(id, index),
+    let registry = REGISTRY.lock();
+    let entry = registry.as_ref()?.get(id.index as usize)?.as_ref()?;
+    (entry.generation == id.generation).then(|| entry.object.clone())
+}
+
+/// The object named `id`, for a CPU's cache to keep: from now on the
+/// version moves once it leaves the registry. Called with the store's
+/// lock held, which every change to the registry holds too.
+fn get_to_cache(id: ObjectId) -> Option<Object> {
+    let mut registry = REGISTRY.lock();
+    let entry = registry.as_mut()?.get_mut(id.index as usize)?.as_mut()?;
+    if entry.generation != id.generation {
+        return None;
     }
+    entry.cached = true;
+    Some(entry.object.clone())
 }
-
-/// [`get`] when this CPU's cache cannot answer: kept apart, so that a hit
-/// needs neither its registers nor its stack.
-#[cold]
-#[inline(never)]
-fn get_from_registry(id: ObjectId, index: usize) -> Option<Object> {
-    let (object, version) = {
-        let registry = REGISTRY.lock();
-        let entry = registry.as_ref()?.get(id.index as usize)?.as_ref()?;
-        if entry.generation != id.generation {
-            return None;
-        }
-        // Read under the registry's lock: a change to the entry after it
-        // lets go moves the version past this one.
-        (entry.object.clone(), caps::version())
-    };
-    let kept = Cached { id, version, object: Kept::of(&object) };
-    // What the entry held before goes once preemption is back on: it may
-    // be the last reference to an object's memory.
-    let before = CACHE.with_own(|cache| cache[index].replace(kept));
-    drop(before);
-    Some(object)
-}
-
-/// Objects a CPU keeps, in a table indexed by object.
-const CACHED: usize = 16;
 
 /// An object as a CPU's cache keeps it: a weak reference, which keeps its
 /// memory but not the object, so a cache never holds on to an object the
@@ -261,6 +250,7 @@ impl Kept {
         }
     }
 
+    #[inline(always)]
     fn upgrade(&self) -> Option<Object> {
         Some(match self {
             Kept::Endpoint(endpoint) => Object::Endpoint(endpoint.upgrade()?),
@@ -278,19 +268,100 @@ impl Kept {
     }
 }
 
-/// An object this CPU found, and the store's version then.
+/// Capabilities a CPU keeps, with their objects, in a table indexed by
+/// slot.
+const CACHED: usize = 16;
+
+/// A capability this CPU found in a slot, the object it designates, and
+/// the store's version then.
 struct Cached {
-    id: ObjectId,
+    at: SlotRef,
     version: u64,
-    object: Kept,
+    cap: Capability,
+    /// `None` if the capability designates nothing in the registry, as a
+    /// memory capability does.
+    object: Option<Kept>,
 }
 
-/// Each CPU's objects, which only its own CPU uses.
+/// Each CPU's capabilities, which only its own CPU uses.
 static CACHE: PerCpu<Own<[Option<Cached>; CACHED]>> =
     PerCpu::new([const { Slot::new(Own::new([const { None }; CACHED])) }; MAX_CPUS]);
 
-fn cache_index(id: ObjectId) -> usize {
-    (id.index ^ id.generation) as usize % CACHED
+fn cache_index(at: SlotRef) -> usize {
+    (at.slot as usize ^ at.space.index as usize) % CACHED
+}
+
+/// A capability, and the object it designates, as [`find`] finds them.
+pub struct Found {
+    /// The capability.
+    pub cap: Capability,
+    /// The object it designates, if the caller wanted it and the registry
+    /// holds it.
+    pub object: Option<Object>,
+}
+
+/// The capability in slot `slot` of `cspace`, and the object it
+/// designates if `wanted` says its kind's is needed, found in `place`.
+///
+/// If this CPU found the capability at the version the store has now, it
+/// has not left the slot since, nor its object the registry, and nothing
+/// else changes either: no lock, and nothing shared written but the
+/// object's reference count. A change under way that has not moved the
+/// version yet has not returned either, so a lookup that misses it
+/// happened before it. Otherwise the store and the registry are asked
+/// under their locks (`caps::get_to_cache`, [`get_to_cache`], so that the
+/// version moves once either goes), and the answer is kept with the
+/// version, which cannot move while the store's lock is held.
+///
+/// What is found is written in the caller's `place`, not returned: a
+/// capability and an object are 88 bytes, which a move would copy with a
+/// string move, whose start-up costs more than the lookup.
+#[inline(always)]
+pub fn find(
+    cspace: SpaceId,
+    slot: u32,
+    wanted: impl Fn(ObjectKind) -> bool,
+    place: &mut Option<Found>,
+) -> Result<&mut Found> {
+    let at = SlotRef::new(cspace, slot);
+    let now = caps::version();
+    let index = cache_index(at);
+    'cached: {
+        let Some(cache) = CACHE.own() else { break 'cached };
+        let Some(entry) = &cache[index] else { break 'cached };
+        if entry.at != at || entry.version != now {
+            break 'cached;
+        }
+        let object = match &entry.object {
+            Some(kept) if wanted(entry.cap.kind()) => match kept.upgrade() {
+                Some(object) => Some(object),
+                // Gone, so the version is about to move: ask the store.
+                None => break 'cached,
+            },
+            _ => None,
+        };
+        return Ok(place.insert(Found { cap: entry.cap, object }));
+    }
+    let found = place.insert(fill(at, index)?);
+    if !wanted(found.cap.kind()) {
+        found.object = None;
+    }
+    Ok(found)
+}
+
+/// [`find`] when this CPU's cache cannot answer: kept apart, so that a
+/// hit needs neither its registers nor its stack.
+#[cold]
+#[inline(never)]
+fn fill(at: SlotRef, index: usize) -> Result<Found> {
+    let (cap, object, version) =
+        caps::get_to_cache(at, |cap| cap.id().and_then(get_to_cache)).map_err(cap_error)?;
+    let kept = Cached { at, version, cap, object: object.as_ref().map(Kept::of) };
+    // What the entry held before goes once preemption is back on: it may
+    // be the last reference to an object's memory.
+    let before = CACHE.with_own(|cache| cache[index].replace(kept));
+    drop(before);
+    Ok(Found { cap, object })
 }
 
 /// The capability in slot `slot` of `cspace`, if it may be used on a
@@ -301,17 +372,21 @@ pub fn lookup(
     kind: ObjectKind,
     needs: Rights,
 ) -> Result<(Capability, Object)> {
-    let cap = caps::lookup(SlotRef::new(cspace, slot), kind, needs).map_err(cap_error)?;
-    let object = object_of(&cap)?;
-    Ok((cap, object))
+    let mut place = None;
+    let found = find(cspace, slot, |of| of == kind, &mut place)?;
+    found.cap.check(kind, needs).map_err(cap_error)?;
+    // Released since the capability was found: as good as gone.
+    let object = found.object.take().ok_or(error(Kernel::Gone))?;
+    Ok((found.cap, object))
 }
 
 /// The capability in slot `slot` of `cspace`, whatever it designates.
 pub fn capability(cspace: SpaceId, slot: u32) -> Result<Capability> {
-    caps::get(SlotRef::new(cspace, slot)).map_err(cap_error)
+    let mut place = None;
+    Ok(find(cspace, slot, |_| false, &mut place)?.cap)
 }
 
-/// The object `cap`, looked up a moment ago, designates.
+/// The object `cap`, looked up a moment ago, designates, through [`get`].
 pub fn object_of(cap: &Capability) -> Result<Object> {
     // Released since the lookup: as good as gone.
     cap.id().and_then(get).ok_or(error(Kernel::Gone))
@@ -398,7 +473,11 @@ fn remove(id: ObjectId) -> Option<Entry> {
     let mut registry = REGISTRY.lock();
     let slot = registry.as_mut()?.get_mut(id.index as usize)?;
     if slot.as_ref().is_some_and(|entry| entry.generation == id.generation) {
-        slot.take()
+        let entry = slot.take();
+        if entry.as_ref().is_some_and(|entry| entry.cached) {
+            caps::mark_stale();
+        }
+        entry
     } else {
         None
     }

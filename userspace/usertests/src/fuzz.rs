@@ -31,7 +31,7 @@
 //! a thread in it: it first makes the processes it calls the process
 //! methods on most, then deletes its own process's capability. Everything
 //! else is fair game, and the processes it makes go when it ends. After
-//! every call it checks what radix-syscalls(2) promises of a failed one:
+//! every call it checks what radix-ipc(7) promises of a failed one:
 //! an error of a domain errors.ridl defines (the kernel's, or the file
 //! interfaces'), and 0 in every result register. It also checks that
 //! the error is one the call's documentation lists (its `raises` list,

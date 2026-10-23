@@ -73,6 +73,15 @@ impl Account {
     }
 }
 
+impl Charge {
+    /// Takes `other`, charged to the same account, into this charge: both
+    /// are given back together, when it is dropped.
+    pub fn absorb(&mut self, mut other: Charge) {
+        debug_assert!(Arc::ptr_eq(&self.account, &other.account));
+        self.bytes += core::mem::take(&mut other.bytes);
+    }
+}
+
 impl Drop for Charge {
     fn drop(&mut self) {
         let mut charged = self.account.bytes.lock();

@@ -35,8 +35,8 @@ mounted on a directory it passes through, and *..* crosses back.
 
 Absolute paths are for people and for POSIX programs: Spark strips the
 leading */* from the paths on its command line and resolves them beneath
-the root it holds, and the POSIX layer (Phase 8) will do the same with
-the directory each program is given as its root.
+the root it holds, and the C library does the same with the directory
+each POSIX program is given as its root (*radix-posix*(7)).
 
 # RIGHTS
 
@@ -47,7 +47,7 @@ A directory capability's rights say what it can do:
 	directories, and *stat*.
 
 *write*
-	create, remove and rename, and open files for writing.
+	create, remove and rename, open files for writing, and set times.
 
 *control*
 	mount and unmount filesystems on directories beneath it.
@@ -57,6 +57,16 @@ among the directory's own: a file can have *read* and *write*, a
 directory *read*, *write* and *control*. Both get *copy* and *transfer*,
 so they can be passed on (see *radix-capabilities*(7)). A file opened for
 writing on a read-only filesystem fails with *read_only*.
+
+# TIMES
+
+A file keeps when it was made, when its contents last changed and when
+it was last read. Reading never changes the last (as with Linux's
+*noatime*): it is when the file was made, or what *set_times* set.
+*set_times* on a file needs its *write* right, and on a path the
+directory's; tmpfs keeps times to the nanosecond, FAT in two-second
+steps and the last read to the day. *stat* also says the mount a file is
+on, a number unique since boot.
 
 # FILES AND THE PAGE CACHE
 
@@ -88,7 +98,8 @@ capability goes, then its space is freed.
 
 *tmpfs*
 	Files in memory only. A tmpfs a program mounts may grow to half of
-	memory; nothing in it survives a reboot.
+	memory and hold one file or directory for every two pages of it, as
+	on Linux; nothing in it survives a reboot.
 
 *fat*
 	FAT12, FAT16 or FAT32, read-write, with long names, on the block
@@ -105,8 +116,9 @@ capability goes, then its space is freed.
 	layout (*radix-sysfs*(5)).
 
 *dev*
-	The devices: _null_, _zero_, _random_, _urandom_ and a block device per
-	disk and partition.
+	The devices: _null_, _zero_, _random_, _urandom_, a block device per
+	disk and partition, and the terminals: _ptmx_, _tty_ and _pts/_*N*
+	(*radix-posix*(7)).
 
 *bootfs*
 	The boot archive (*radix-processes*(7)), read-only.
@@ -165,8 +177,8 @@ Errors of files and directories are in the *file* domain (2) of the
 status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
 *is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
 *bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
-*too_big*, *unknown_filesystem* and *not_block_device*, each with the
-POSIX errno it maps to.
+*too_big*, *unknown_filesystem*, *not_block_device* and *no_device*,
+each with the POSIX errno it maps to.
 
 The kernel logs each disk, partition and mount:
 

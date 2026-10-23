@@ -60,8 +60,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest, InterruptController,
-    Ipi, MapPageError, PageTable, PciSegment, Platform, Smp, SyscallRegs, Threads, Timer,
-    UserAccess, UserFault, UserMode,
+    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, SignalFrame, Smp, SyscallRegs,
+    Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -456,6 +456,7 @@ impl PageTable for Arch {
 impl UserMode for Arch {
     type Space = space::UserSpace;
     type Shared = user::Shared;
+    type UserRegisters = user::UserRegisters;
 
     const USER_TOP: u64 = user::USER_TOP;
 
@@ -490,6 +491,77 @@ impl UserMode for Arch {
         space.space().query(virt).map(|(phys, access)| (phys, space::user_access(access)))
     }
 
+    fn query_entry(space: &Self::Space, virt: u64) -> Option<(u64, Option<UserAccess>)> {
+        if virt >= user::USER_TOP {
+            return None;
+        }
+        space.space().entry(virt).map(|(phys, access)| (phys, access.map(space::user_access)))
+    }
+
+    fn set_entry(
+        space: &Self::Space,
+        virt: u64,
+        phys: u64,
+        access: Option<UserAccess>,
+        upgrade: bool,
+    ) -> Result<(), MapPageError> {
+        assert!(
+            (user::USER_START..user::USER_TOP).contains(&virt),
+            "{virt:#x} is outside the user half"
+        );
+        space.space().set(virt, phys, access.map(space::access), upgrade)
+    }
+
+    fn edit_pages(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(u64, u64, Option<UserAccess>) -> PageEdit,
+        released: &mut dyn FnMut(u64),
+    ) {
+        let end = end.min(user::USER_TOP);
+        if start >= end {
+            return;
+        }
+        let mut decide = |virt, phys, access: Option<paging::Access>| match decide(
+            virt,
+            phys,
+            access.map(space::user_access),
+        ) {
+            PageEdit::Keep => space::Edit::Keep,
+            PageEdit::Set(access) => space::Edit::Set(access.map(space::access)),
+            PageEdit::Clear => space::Edit::Clear,
+        };
+        space.space().edit(start, end, &mut decide, released);
+    }
+
+    fn copy_pages(
+        from: &Self::Space,
+        to: &Self::Space,
+        start: u64,
+        end: u64,
+        decide: &mut dyn FnMut(
+            u64,
+            u64,
+            Option<UserAccess>,
+        ) -> (PageEdit, Option<Option<UserAccess>>),
+    ) -> Result<(), u64> {
+        let end = end.min(user::USER_TOP);
+        if start >= end {
+            return Ok(());
+        }
+        let mut decide = |virt, phys, access: Option<paging::Access>| {
+            let (edit, copy) = decide(virt, phys, access.map(space::user_access));
+            let edit = match edit {
+                PageEdit::Keep => space::Edit::Keep,
+                PageEdit::Set(access) => space::Edit::Set(access.map(space::access)),
+                PageEdit::Clear => space::Edit::Clear,
+            };
+            (edit, copy.map(|access| access.map(space::access)))
+        };
+        from.space().copy_into(to.space(), start, end, &mut decide)
+    }
+
     fn attach_space(context: &Self::Context, space: &Self::Space) -> bool {
         context.attach_space(space)
     }
@@ -506,12 +578,52 @@ impl UserMode for Arch {
         user::set_syscall_handler(handler);
     }
 
-    fn set_user_fault_handler(handler: fn(&UserFault) -> !) {
+    fn set_user_fault_handler(handler: fn(&UserFault)) {
         user::set_fault_handler(handler);
+    }
+
+    fn set_user_page_handler(handler: fn(u64, bool) -> bool) {
+        user::set_page_handler(handler);
     }
 
     fn set_user_return_handler(handler: fn()) {
         user::set_return_handler(handler);
+    }
+
+    fn user_registers() -> Option<Self::UserRegisters> {
+        user::user_registers()
+    }
+
+    fn set_results(regs: &mut Self::UserRegisters, results: &SyscallRegs) {
+        regs.set_results(results);
+    }
+
+    fn thread_pointer(regs: &Self::UserRegisters) -> u64 {
+        regs.fs_base
+    }
+
+    fn enter_user_registers(regs: &Self::UserRegisters) -> ! {
+        user::enter_user_registers(regs)
+    }
+
+    fn copy_extended_state(context: &Self::Context) {
+        context.copy_extended_state();
+    }
+
+    fn user_stack_pointer() -> u64 {
+        user::user_stack_pointer()
+    }
+
+    fn push_signal_frame(frame: &SignalFrame<'_>) -> bool {
+        user::push_signal_frame(frame)
+    }
+
+    fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
+        user::pop_signal_frame(context, regs)
+    }
+
+    fn restart_syscall(original: &SyscallRegs) {
+        user::restart_syscall(original);
     }
 
     fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
@@ -552,6 +664,14 @@ impl UserMode for Arch {
 
     fn write_frames(phys: u64, src: &[u8]) {
         user::write_frames(phys, src);
+    }
+
+    fn copy_frame(dst: u64, src: u64) {
+        user::copy_frame(dst, src);
+    }
+
+    fn read_frames(phys: u64, dst: &mut [u8]) {
+        user::read_frames(phys, dst);
     }
 
     fn cycle_counter_hz() -> u64 {

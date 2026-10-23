@@ -91,7 +91,15 @@ impl FileSystem for BootFs {
     }
 
     fn info(&self) -> FsInfo {
-        FsInfo { block_size: 512, blocks: self.shared.size.div_ceil(512), free: 0 }
+        // Its entries and its root, all there is room for.
+        let nodes = self.shared.nodes.get().map_or(0, |nodes| nodes.len() as u64);
+        FsInfo {
+            block_size: 512,
+            blocks: self.shared.size.div_ceil(512),
+            free: 0,
+            files: nodes + 1,
+            free_files: 0,
+        }
     }
 
     fn read_only(&self) -> bool {
@@ -142,7 +150,15 @@ impl Node for BootNode {
             None => (Kind::Directory, 0, 0),
         };
         let time = mtime.saturating_mul(1_000_000_000);
-        Stat { kind, size, allocated: size, id: self.id, created: time, modified: time }
+        Stat {
+            kind,
+            size,
+            allocated: size,
+            id: self.id,
+            created: time,
+            modified: time,
+            accessed: time,
+        }
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {

@@ -111,7 +111,11 @@ the count in use) lives in the frame record of its first frame, so slabs
 have no headers. Free objects form a list through the objects: the first
 word holds a marker and the next free index, the second a poison pattern.
 Both are checked when the object is handed out, and a free checks that the
-address is the start of an object that is in use. Damage is reported to
+address is the start of an object that is in use. A free finds its frame's
+region starting with the region the last lookup found, and the object's
+index by multiplying by the class's reciprocal (2^32 / size + 1, which
+is exact for every offset below 2^15, beyond the largest slab), so it
+divides by nothing (Phase 8, ADR 0077). Damage is reported to
 the corruption handler (the kernel panics with a `heap corruption:` message)
 and the object or slab is quarantined, never used again.
 

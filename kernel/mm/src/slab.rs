@@ -108,10 +108,8 @@ impl Env<'_> {
             && info.owner() == Owner::Slab
             && usize::from(info.tag()) == class.index()
             && info.order() == class.slab_order();
-        let offset = addr - self.slab_addr(pfn);
-        let index = offset / class.size();
-        (ours && offset.is_multiple_of(class.size()) && index < class.objects())
-            .then_some((pfn, info, index))
+        let index = class.object_at(addr - self.slab_addr(pfn))?;
+        ours.then_some((pfn, info, index))
     }
 }
 

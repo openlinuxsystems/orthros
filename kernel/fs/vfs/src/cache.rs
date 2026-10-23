@@ -115,6 +115,11 @@ impl FileCache {
         self.state.lock().modified
     }
 
+    /// Says the file's data last changed at `modified` (`set_times`).
+    pub fn set_modified(&self, modified: u64) {
+        self.state.lock().modified = modified;
+    }
+
     /// How many pages it holds.
     pub fn pages(&self) -> usize {
         self.state.lock().pages.len()

@@ -250,7 +250,7 @@ described in *radix-debug*(7) under *user*, *ipc*, *fuzz* and *bench*.
 # C AND RUST
 
 *ob build* writes C headers of the whole interface to
-_out/sysroot/include/radix/_, with an inline function per system call and
+_out/sysroot/system/include/radix/_, with an inline function per system call and
 method and the errno value of every error. Rust programs use the
 _radix-abi_ crate, generated from the same definitions, through
 _libradix_.

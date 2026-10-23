@@ -35,8 +35,10 @@ enum FileKind: u8 {
     directory = 1;
     /// A block device, which filesystems are mounted from.
     block_device = 2;
-    /// A character device: `null`, `zero` and the like.
+    /// A character device: `null`, `zero`, terminals and the like.
     char_device = 3;
+    /// A pipe (radix-process(2)'s `pipe`).
+    pipe = 4;
 }
 
 /// What kind of filesystem one is.
@@ -53,6 +55,9 @@ enum FilesystemKind: u8 {
     dev = 4;
     /// The boot archive, read-only: `bootfs`.
     bootfs = 5;
+    /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
+    /// `pipefs`.
+    pipe = 6;
 }
 
 /// How `open` opens.
@@ -65,6 +70,15 @@ flags OpenFlags: u32 {
     truncate = 2;
     /// Fail with not_directory unless it is a directory.
     directory = 3;
+    /// The description appends (radix-file(2)'s DescriptionFlags).
+    append = 4;
+    /// The description does not wait (radix-file(2)'s DescriptionFlags).
+    non_blocking = 5;
+    /// Opening a terminal does not make it the controlling terminal of
+    /// the caller's session.
+    no_terminal = 6;
+    /// The slot is emptied by radix-process(2)'s `exec`.
+    close_on_exec = 7;
 }
 
 /// How a filesystem is mounted.
@@ -89,7 +103,7 @@ struct DirEntry {
 }
 
 /// A directory.
-interface directory = 0x000b version 1 {
+interface directory = 0x000b version 2 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -98,7 +112,7 @@ interface directory = 0x000b version 1 {
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
-                name_too_long, bad_name, outside, io, corrupt];
+                name_too_long, bad_name, outside, io, corrupt, no_device];
     /// Makes an empty directory at `path`. Needs the write right.
     method make_directory = 2 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
@@ -128,11 +142,12 @@ interface directory = 0x000b version 1 {
                 corrupt];
     /// What the file at `path` (`.` for this directory) is: its kind, its
     /// size and the bytes it takes on its filesystem, a number unique on
-    /// its filesystem while it exists, and when it was made and last
-    /// changed, in nanoseconds since 1970 (0 if unknown). Needs the read
-    /// right.
+    /// its filesystem while it exists, when it was made, last changed and
+    /// last read, in nanoseconds since 1970 (0 if unknown), and the number
+    /// of the mount it is on, unique since boot. Needs the read right.
     method stat = 6 (path: in bytes)
-        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64)
+        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
+            accessed: u64, mount: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt];
@@ -157,9 +172,18 @@ interface directory = 0x000b version 1 {
     /// disk.
     method sync = 9 () -> ()
         raises [no_such_slot, empty_slot, io, corrupt];
-    /// The directory's filesystem: its kind, how it is mounted, and its
-    /// block size, blocks and free blocks. Needs the read right.
+    /// The directory's filesystem: its kind, how it is mounted, its block
+    /// size, blocks and free blocks, and how many files and directories it
+    /// holds at most and how many more it can take (both zero when it
+    /// keeps no count, as FAT does). Needs the read right.
     method info = 10 ()
-        -> (filesystem: FilesystemKind, flags: MountFlags, block_size: u32, blocks: u64, free: u64)
+        -> (filesystem: FilesystemKind, flags: MountFlags, block_size: u32, blocks: u64, free: u64,
+            files: u64, free_files: u64)
         raises [no_such_slot, empty_slot, missing_rights];
+    /// Sets the times of the file or directory at `path` (`.` for this
+    /// one), as radix-file(2)'s `set_times` does. Needs the write right.
+    method set_times = 11 (path: in bytes, accessed: u64, modified: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                not_permitted, read_only, io, corrupt];
 }

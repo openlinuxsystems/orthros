@@ -165,7 +165,7 @@ them and writes three outputs:
   (decoding checks every argument, so the kernel never sees an invalid
   enum value or flag), wrappers generic over a `Syscalls` trait for
   programs, and `#[repr(C)]` structures with their sizes checked;
-- C headers (`out/sysroot/include/radix/`, written by `ob build`), with
+- C headers (`out/sysroot/system/include/radix/`, written by `ob build`), with
   `static inline` wrappers around the system call instruction;
 - man(2) pages in scdoc (`out/docs/man-src/`, built by `ob docs`), one per
   system call with its registers and errors, one per module.
@@ -290,7 +290,14 @@ queue stops submission: `ring_enter` takes nothing more, and fails with
 length ahead of the kernel's head is an `invalid_argument`. Entries are
 copied out of shared memory once, in batches of 16 under the ring's lock,
 carried out without it, and completed under it again, the completion
-written before its tail is published with release ordering.
+written before its tail is published with release ordering. A waiter
+counts itself in the ring's `waiting` before it looks at the tail, and
+whoever publishes a completion looks at `waiting` before it wakes
+anyone; a full barrier on each side, between the write and the read,
+makes sure that one of them sees the other. Until Phase 8 neither side
+had one, and on x86 a store can wait in the store buffer while a later
+load goes ahead, so a ring round trip between two CPUs could lose a
+wake-up and hang; `ob bench` on a CI runner found it.
 
 The operations are `nop`, `notify`, `wait` (completes when a notification
 is signalled), `msg_ring` (posts a completion to another ring, the
@@ -385,10 +392,10 @@ happened: on Radix the kernel's count for the benchmark, which includes
 starting and stopping the two programs, and on Linux the sum of both
 processes' `ru_nvcsw` and `ru_nivcsw`.
 
-Radix has no demand paging yet (the page cache comes in Phase 7 and
-copy-on-write in Phase 8), so `fresh_page` is
-how a program gets a new page: the same work as a first-touch fault
-(a zeroed page, mapped), plus giving it back.
+`fresh_page` is how a program got a new page before Radix had demand
+paging (the page cache came in Phase 7, and anonymous memory filled on
+touch in Phase 8): the same work as a first-touch fault (a zeroed page,
+mapped), plus giving it back.
 
 The report shows each Radix number, the Linux one from the virtual
 machine, their ratio and the host's Linux. Under KVM a system call does
@@ -427,18 +434,23 @@ registers, finds the running thread with one read of a per-CPU word
 without touching its reference count (`sched::running`), and writes its
 results straight into the saved registers (ADR 0042). A capability
 method looks the capability up in this CPU's cache when the store has
-not changed since (`caps::get`), so it takes no lock and writes nothing
-shared, and CPUs using capabilities at once do not contend. The object a
-capability names (an endpoint, say) comes from a second cache of the
-same kind (`user::objects::get`), which keeps weak references, so it
-holds no object alive; a hit writes only the object's own reference
-count, so pairs of programs calling different endpoints on different
-CPUs share no lock (`endpoint_call_parallel`). Random bytes
+not changed since (`user::objects::find`), so it takes no lock and
+writes nothing shared, and CPUs using capabilities at once do not
+contend. The same look finds the object the capability names (an
+endpoint, say): each entry keeps a weak reference to it beside the
+capability, so the cache holds no object alive, and a hit writes only
+the object's own reference count, so pairs of programs calling different
+endpoints on different CPUs share no lock (`endpoint_call_parallel`).
+The caches empty only when something one of them holds goes (ADR 0077),
+so opening and closing files leaves them as they are. Random bytes
 come from this CPU's generator, a batch of ChaCha20 blocks at a time. A
 same-CPU round trip is two context switches and no timer write, and
 waking a thread pinned to a CPU, or one whose last CPU is idle, reads no
 other CPU's load; a cross-CPU wake-up finds the other CPU polling (ADR
 0037) and costs a write instead of an interrupt.
+An unmap picks the CPUs to flush from those the firmware lists, not
+from every slot of the per-CPU table: until Phase 8 it looked at all
+256, which was most of `tlb_local`'s cost.
 A TLB shootdown is the same system calls as `tlb_local` plus an
 interrupt to the other CPU and its answer; under KVM most of that time
 is the host sending and delivering the interrupt, which Linux pays too.
@@ -448,11 +460,11 @@ whether to offer paravirtual EOI (ADR 0041).
 
 ## Known limits
 
-- Any change to the capability store empties every CPU's caches of
-  capabilities and objects. Programs that change their capabilities all
-  the time on many CPUs at once would queue on the store's lock; a
-  per-space store with RCU over the slots is the fix if programs
-  show it matters.
+- Changes to the capability store all take its one lock, and taking
+  away a capability or object that some CPU found empties every CPU's
+  cache. Programs that change their capabilities all the time on many
+  CPUs at once would queue on the store's lock; a per-space store with
+  RCU over the slots is the fix if programs show it matters.
 - Rings charge their memory to a resource domain, and since Phase 6 so
   do the endpoints, notifications and processes a program makes with
   `process.create`. Queued messages, and the endpoints and notifications

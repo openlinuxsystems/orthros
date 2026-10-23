@@ -60,6 +60,9 @@ const SLOT_WINDOW: u32 = 32;
 const WINDOW_SLOTS: u32 = 16;
 /// The number of slots of a program's capability space.
 const SLOTS: u32 = 256;
+/// The first slot of a POSIX program's file descriptors: descriptor `n`
+/// is slot `SLOT_FD_BASE + n` (radix-posix(7)).
+const SLOT_FD_BASE: u32 = 64;
 /// The CPU field of a program whose thread runs on any CPU.
 const ANY_CPU: u32 = 0xffffffff;
 /// The version of the start-up page's layout.

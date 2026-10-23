@@ -43,7 +43,7 @@ use radix_sync::SpinLock;
 use crate::cpu::{self, msr};
 use crate::memory::{self, HUGE_PAGE, LARGE_PAGE, PAGE};
 use crate::percpu::{self, PerCpu};
-use crate::{apic, interrupts, time};
+use crate::{apic, interrupts, smp, time};
 
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -669,8 +669,31 @@ pub fn shootdown(range: Range<u64>) {
     shootdown_on(range, |_| true);
 }
 
+/// Holds off preemption while it lives.
+struct NoPreemption;
+
+impl NoPreemption {
+    fn new() -> NoPreemption {
+        percpu::preempt_disable();
+        NoPreemption
+    }
+}
+
+impl Drop for NoPreemption {
+    fn drop(&mut self) {
+        // A preemption due meanwhile waits for the next tick.
+        percpu::preempt_enable();
+    }
+}
+
 /// Like [`shootdown`], for the other online CPUs `wanted` picks.
 pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) {
+    // On one CPU throughout: the CPU whose TLB it flushes here, which it
+    // leaves out of the targets and marks as having served the request,
+    // must be the one it runs on. A thread moved to a target CPU on the
+    // way would wait for itself, and one moved off would leave its new
+    // CPU's TLB unflushed.
+    let _pinned = NoPreemption::new();
     flush_local(range.clone());
     let me = percpu::current_index();
     // Two CPUs may shoot down at once: the one waiting for the lock keeps
@@ -683,7 +706,10 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         cpu::pause();
     };
     let mut targets = [0u64; MAX_CPUS / 64];
-    for (index, cpu) in (0..MAX_CPUS).filter_map(|i| Some((i, percpu::get(i)?))) {
+    // Only the CPUs the firmware lists can be online: on a machine with a
+    // few, looking at all MAX_CPUS slots made up most of an unmap's cost.
+    let cpus = smp::count();
+    for (index, cpu) in (0..cpus).filter_map(|i| Some((i, percpu::get(i)?))) {
         if index != me
             && cpu.online.load(Ordering::Acquire)
             && !cpu.stopped.load(Ordering::Relaxed)
@@ -706,7 +732,7 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         slot.store(word, Ordering::Relaxed);
     }
     SHOOTDOWN.generation.store(generation, Ordering::Release);
-    for index in (0..MAX_CPUS).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
+    for index in (0..cpus).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
         if let Some(cpu) = percpu::get(index) {
             apic::send_fixed(cpu.apic_id.load(Ordering::Relaxed), interrupts::VECTOR_TLB);
         }

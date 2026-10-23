@@ -14,9 +14,10 @@ through a first build; `ob(1)` documents every option.
 - An x86-64 computer running Linux. On macOS or Windows, or on a Linux
   distribution `ob` does not know, use the build container (see
   [Building in a container](#building-in-a-container)).
-- About 3 GB of free disk space for Phase 1.
+- About 10 GB of free disk space, most of it build output in `target/`.
 - An internet connection for the first build, to download the Rust
-  toolchain and crates.
+  toolchain, crates and the sources of the ported software (the C
+  library, Lua and the rest, ADR 0069).
 
 ## First build
 
@@ -61,15 +62,21 @@ The packages `ob` needs on each distribution are:
 
 | Distribution | Install command |
 | --- | --- |
-| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools scdoc mandoc`, then `cargo install mdbook --version 0.4.52 --locked` |
-| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools scdoc mandoc mdbook` |
-| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools scdoc mandoc mdbook` |
+| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build git`, then `cargo install mdbook --version 0.4.52 --locked` |
+| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build git patch` |
+| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja git` |
 
 The C compiler (`build-essential`, `gcc` or `base-devel`) is there because
 Rust uses it as the linker for `ob` itself and for mdBook; the kernel links
-with `rust-lld`. Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no
-`rustup` package: install rustup from <https://rustup.rs> instead, and
-drop it from the command.
+with `rust-lld`. Clang 20 or later, LLD, LLVM's tools, compiler-rt, Meson
+and Ninja build the C library and the other ported software for Dukovo,
+through wrappers `ob` writes (ADR 0069); Ubuntu 24.04 and Linux Mint 22
+have Clang 20 in their updates. The C.UTF-8 locale is compiled with the
+host's `localedef`, which every glibc system has.
+
+Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no `rustup` package and
+no Clang 20: install rustup from <https://rustup.rs> and Clang 20 from
+LLVM's packages at <https://apt.llvm.org>, or build in the container.
 
 ## Booting Dukovo in QEMU
 
@@ -157,13 +164,17 @@ what to do with it.
 ```
 
 This runs the unit tests on your machine, then the boot tests: QEMU boots
-a test image ten times, each with a purpose. Four normal boots, under UEFI
-and BIOS and from a USB stick and a CD-ROM, check the memory map, the CPU
-list and that all four CPUs take timer interrupts. Others check the boot
-log on the screen, the panic report after a deliberate page fault, the
-crash log across a restart, every `kdb` command, and microcode loading.
-The tests read the screen by comparing QEMU screenshots with the kernel's
-own font, so what you would see on a laptop is tested too.
+a test image thirty times, each with a purpose. Four normal boots, under
+UEFI and BIOS and from a USB stick and a CD-ROM, check the memory map, the
+CPU list and that all four CPUs take timer interrupts. Others check the
+boot log on the screen, the panic report after a deliberate page fault,
+the crash log across a restart, every `kdb` command, microcode loading,
+the memory manager, the scheduler, capabilities, IPC, Spark, disks and
+files, and the POSIX layer: the `posix` boot test runs C programs on the
+C library, mlibc's and Lua's own test suites, libc-test and a Rust
+program on the standard library (radix-posix(7)). The tests read the screen by
+comparing QEMU screenshots with the kernel's own font, so what you would
+see on a laptop is tested too.
 
 Serial logs and screenshots are kept in `out/test/`. `./ob test unit` and
 `./ob test boot` run one half, and `./ob test boot --case kdb` runs one

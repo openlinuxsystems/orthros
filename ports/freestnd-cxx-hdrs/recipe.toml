@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# libstdc++'s freestanding C++ headers, which the C library's C++ is
+# compiled with. A toolchain port: the headers are used to build and never
+# reach an image (ADR 0068). The commit is the one mlibc 7.0.0 pins.
+name = "freestnd-cxx-hdrs"
+version = "14.3.0"
+summary = "libstdc++'s freestanding C++ headers (GCC 14), to build the C library"
+license = "GPL-3.0-or-later WITH GCC-exception-3.1"
+homepage = "https://github.com/osdev0/freestnd-cxx-hdrs"
+toolchain = true
+
+[source]
+git = "https://github.com/osdev0/freestnd-cxx-hdrs.git"
+commit = "a6b351e0ab3e74e5789b01fa1447e4cd62373da7"

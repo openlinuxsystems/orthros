@@ -58,15 +58,25 @@ impl Notification {
             match rings.pop_front() {
                 Some(ring) => Some(ring),
                 None => {
-                    self.word.fetch_or(bits, Ordering::Release);
+                    // Sequentially consistent, for `poll` (changed_by_rmw).
+                    self.word.fetch_or(bits, Ordering::SeqCst);
                     None
                 }
             }
         };
         match ring {
             Some((ring, user_data)) => ring.finish(user_data, Ok([bits, 0])),
-            None => wait::wake_all(self.key()),
+            None => {
+                wait::wake_all(self.key());
+                super::posix::poll::changed_by_rmw();
+            }
         }
+    }
+
+    /// Whether bits are set, and whether its last capability has gone,
+    /// for `poll` (Phase 8): a look that takes nothing.
+    pub fn peek(&self) -> (bool, bool) {
+        (self.word.load(Ordering::SeqCst) != 0, self.closed.load(Ordering::Acquire))
     }
 
     /// Takes its word, waiting while it is 0: not at all with `poll`, and
@@ -83,13 +93,13 @@ impl Notification {
             if poll {
                 return Err(error(Kernel::WouldBlock));
             }
-            if sched::should_stop() {
+            if sched::interrupted() {
                 return Err(error(Kernel::Interrupted));
             }
             let ready = || {
                 self.word.load(Ordering::Relaxed) != 0
                     || self.closed.load(Ordering::Relaxed)
-                    || sched::should_stop()
+                    || sched::interrupted()
             };
             match deadline_ns {
                 None => wait::wait_until(self.key(), "notification", ready),
@@ -136,5 +146,6 @@ impl Notification {
             ring.finish(user_data, Err(error(Kernel::Gone)));
         }
         wait::wake_all(self.key());
+        super::posix::poll::changed();
     }
 }

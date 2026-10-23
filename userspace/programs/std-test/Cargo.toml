@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "std-test"
+description = "Tests Rust's standard library on Radix, in the posix boot test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The libc crate with its Radix module, which ob patches in from the
+# rust-std port (ADR 0070).
+libc = "0.2.189"
+
+[lints]
+workspace = true

@@ -16,6 +16,13 @@
 //!   urgent first, through the hooks ([`mutex_wait`], [`mutex_wake`]). The
 //!   owner lets go by handing the lock straight to the first waiter.
 //!
+//! A key may be both: an object whose first field is a mutex has that
+//! mutex's address, and objects wait on their own address. So the two
+//! kinds of waiter are told apart by their `owner`, which only a mutex
+//! waiter has: a hand-off goes only to a mutex waiter, and [`wake_all`]
+//! wakes only the others (Phase 8: a pipe's mutex handed to a reader that
+//! was waiting for data left both ends waiting for good).
+//!
 //! # Priority inheritance
 //!
 //! A thread waiting for a mutex lends its real-time priority to the owner,
@@ -56,6 +63,13 @@ struct Waiter {
     owner: usize,
 }
 
+impl Waiter {
+    /// Whether it waits for `key` as a mutex.
+    fn for_mutex(&self, key: usize) -> bool {
+        self.key == key && self.owner != 0
+    }
+}
+
 struct Table {
     waiters: Vec<Waiter, Kmalloc>,
     seq: u64,
@@ -80,19 +94,20 @@ impl Table {
         }
     }
 
-    /// The most urgent waiter on `key`: highest priority, then the first
-    /// to come.
+    /// The most urgent waiter for the mutex at `key`: highest priority,
+    /// then the first to come.
     fn best(&self, key: usize) -> Option<usize> {
         self.waiters
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.key == key)
+            .filter(|(_, w)| w.for_mutex(key))
             .max_by_key(|(_, w)| (w.prio, core::cmp::Reverse(w.seq)))
             .map(|(index, _)| index)
     }
 
+    /// Whether a thread waits for the mutex at `key`.
     fn has(&self, key: usize) -> bool {
-        self.waiters.iter().any(|w| w.key == key)
+        self.waiters.iter().any(|w| w.for_mutex(key))
     }
 
     /// The priority the waiters on mutexes owned by `owner` lend it.
@@ -314,7 +329,7 @@ pub(super) fn mutex_wake(mutex: &RawMutex) {
             let next = table.waiters.swap_remove(index);
             let token = next.thread.token();
             let more = table.has(key);
-            for waiter in table.waiters.iter_mut().filter(|w| w.key == key) {
+            for waiter in table.waiters.iter_mut().filter(|w| w.for_mutex(key)) {
                 waiter.owner = token;
             }
             next.thread.blocked_on.store(0, Ordering::Relaxed);

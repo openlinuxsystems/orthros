@@ -74,6 +74,23 @@ fn filter_bit(address: usize) -> (usize, u64) {
 pub type MountRef = KArc<Mount>;
 
 impl Mount {
+    /// A mount of `fs` that is in no tree, for files that live outside
+    /// it, such as pipes: a [`Location`] needs a mount, and nothing is
+    /// ever resolved through this one.
+    pub fn detached(fs: FsRef, source: &str) -> Result<MountRef> {
+        let root = fs.root();
+        Ok(mem::arc(Mount {
+            id: crate::next_id(),
+            fs,
+            root,
+            on: None,
+            read_only: false,
+            path: mem::vec(),
+            source: mem::copy(source.as_bytes())?,
+            covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
+        })?)
+    }
+
     /// Whether nothing on it may change.
     pub fn read_only(&self) -> bool {
         self.read_only || self.fs.read_only()

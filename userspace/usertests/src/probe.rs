@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The probe: every system call and method the kernel has, with good
-//! arguments and bad ones, checking each answer against radix-syscalls(2)
+//! arguments and bad ones, checking each answer against radix-ipc(7)
 //! and the interface pages.
 
 use libradix::abi::capability::{self, ObjectKind, Rights};
@@ -93,20 +93,21 @@ fn start_page() {
 }
 
 fn capabilities() {
+    // Each with the version of the interface its kind answers.
     let slots = [
-        (SLOT_THREAD, ObjectKind::Thread, Rights::CONTROL),
-        (SLOT_SPACE, ObjectKind::AddressSpace, Rights::CONTROL),
-        (SLOT_MEMORY, ObjectKind::Memory, Rights::CONTROL),
-        (SLOT_RANDOM, ObjectKind::Random, Rights::READ),
-        (SLOT_LOG, ObjectKind::KernelLog, Rights::WRITE),
-        (SLOT_PROCESS, ObjectKind::Process, Rights::CONTROL),
+        (SLOT_THREAD, ObjectKind::Thread, Rights::CONTROL, thread::VERSION),
+        (SLOT_SPACE, ObjectKind::AddressSpace, Rights::CONTROL, address_space::VERSION),
+        (SLOT_MEMORY, ObjectKind::Memory, Rights::CONTROL, memory::VERSION),
+        (SLOT_RANDOM, ObjectKind::Random, Rights::READ, random::VERSION),
+        (SLOT_LOG, ObjectKind::KernelLog, Rights::WRITE, libradix::abi::kernel_log::VERSION),
+        (SLOT_PROCESS, ObjectKind::Process, Rights::CONTROL, process::VERSION),
     ];
-    for (slot, kind, right) in slots {
+    for (slot, kind, right, version) in slots {
         if let Some(info) = ok!(capability::info(&SYS, slot), "info on slot {slot}") {
             check!(info.kind == kind, "slot {slot} holds a {}", info.kind.name());
             check!(info.rights.contains(right), "slot {slot} lacks a right: {:#x}", info.rights.0);
             check!(info.badge == 0, "slot {slot} has badge {}", info.badge);
-            check!(info.version == 1, "slot {slot}'s interface is version {}", info.version);
+            check!(info.version == version, "slot {slot}'s interface is version {}", info.version);
         }
     }
     fails!(capability::info(&SYS, 200), EmptySlot, "info on an empty slot");

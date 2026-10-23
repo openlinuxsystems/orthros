@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The twelve system calls (radix-syscalls(2)).
+//! The twelve system calls (radix-ipc(7)).
 //!
 //! The architecture saves the caller's registers and calls [`handle`]
 //! with interrupts off, on the thread's kernel stack. The call runs with
@@ -9,6 +9,11 @@
 //! back in the number register and its results in the argument registers;
 //! on an error every result register is 0, so nothing the kernel had in
 //! hand leaks out.
+//!
+//! A call a signal interrupted (Phase 8) fails with `interrupted`, and its
+//! arguments are kept (`posix::signal::call_failed`): on the way back to
+//! user mode it runs again with them, unless a handler that does not
+//! restart calls runs, as radix-signal(2) says.
 
 use core::fmt;
 
@@ -37,6 +42,10 @@ enum Done {
     Return,
     /// The caller exits.
     Exit(u64),
+    /// It returned from a signal handler (`signal_return`): the number
+    /// register gets this, and the argument registers what the frame
+    /// saved.
+    Restore(u64),
 }
 
 /// Handles a system call from user mode.
@@ -52,15 +61,44 @@ pub fn handle(regs: &mut SyscallRegs) {
     match dispatch(me, user, number, &mut regs.args) {
         Ok(Done::Return) => regs.number = 0,
         Ok(Done::Exit(code)) => exit_current(user.clone(), code, Ending::Exit),
+        Ok(Done::Restore(saved)) => regs.number = saved,
         Err(status) => {
+            // A failed call has not touched its arguments.
+            if status.code() == Kernel::Interrupted as u16 && status.domain() == Kernel::DOMAIN {
+                interrupted(me, user, number, &regs.args, status);
+            }
             regs.number = status.0;
             regs.args = [0; 10];
         }
     }
     if me.should_stop() {
-        stopped(me, number, info);
+        // A signal that ends a POSIX process is its parent's to report.
+        if user.process.posix.lock().ended_by.is_none() {
+            stopped(me, number, info);
+        }
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
+}
+
+/// System call `number` with `args` was interrupted: it is kept to run
+/// again. What runs again of a `reply_recv` is its receive, the reply
+/// having gone.
+#[cold]
+#[inline(never)]
+fn interrupted(
+    me: &ThreadRef,
+    user: &UserRef,
+    number: u64,
+    args: &[u64; 10],
+    status: radix_abi::Status,
+) {
+    let (number, args) = match sys::ReplyRecvArgs::decode(args) {
+        Ok(a) if number == sys::REPLY_RECV => {
+            (sys::RECV, sys::RecvArgs { cap: a.cap, flags: 0 }.encode())
+        }
+        _ => (number, *args),
+    };
+    super::posix::signal::call_failed(me, user, number, &args, status);
 }
 
 /// Logs that thread `me` was stopped in system call `number`, with info
@@ -90,6 +128,25 @@ fn results(registers: &mut [u64; 10], words: [u64; 10]) -> Result<Done> {
 }
 
 /// The info word of a message a program sends.
+/// Puts a method's answer in the argument registers, or says how the
+/// thread goes on.
+#[inline(always)]
+fn answered(registers: &mut [u64; 10], answer: Result<Answer>) -> Result<Done> {
+    // Matched in place rather than through `?`, which would copy the
+    // answer first.
+    match answer {
+        Ok(Answer::Reply(info, words)) => {
+            results(registers, sys::CapCallResults { badge: 0, info, words }.encode())
+        }
+        Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
+        Ok(Answer::Restore(saved)) => {
+            *registers = saved.args;
+            Ok(Done::Restore(saved.number))
+        }
+        Err(status) => Err(status),
+    }
+}
+
 fn message_info(word: u64) -> Result<Info> {
     Info::decode(word).map_err(|_| Kernel::InvalidArgument.status(1))
 }
@@ -106,44 +163,44 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -
         sys::CAP_CALL => {
             let a = sys::CapCallArgs::decode(args)?;
             let info = message_info(a.info)?;
-            // One look at the slot serves both an endpoint and a method.
-            let mut cap = None;
-            if !info.is_reserved() {
-                let found = objects::capability(cspace, a.cap)?;
-                match found.check(ObjectKind::Endpoint, Rights::SEND) {
-                    Ok(()) => {
-                        let Object::Endpoint(endpoint) = objects::object_of(&found)? else {
-                            return Err(error(Kernel::Gone));
-                        };
-                        let cap = found;
-                        let message = Message {
-                            info,
-                            words: a.words,
-                            badge: cap.badge(),
-                            call: true,
-                            grant: cap.rights().contains(Rights::GRANT),
-                            cspace,
-                        };
-                        let reply = ipc::send(me, user, &endpoint, message)?;
-                        let reply = reply.expect("a call ends with a reply or an error");
-                        return results(args, delivered(reply));
-                    }
-                    Err(CapError::WrongKind { .. }) => cap = Some(found),
-                    Err(err) => return Err(cap_error(err)),
+            if info.is_reserved() {
+                // radix-capability(2)'s methods, on a capability of any
+                // kind.
+                if info.caps > 0 || info.move_caps || info.no_block {
+                    return Err(Kernel::InvalidArgument.status(1));
                 }
+                return answered(args, methods::call_capability(user, a.cap, info, a.words));
+            }
+            // One look at this CPU's cache finds the capability and, for
+            // an endpoint, a file or a directory, its object, which the
+            // call borrows where the lookup put it.
+            let mut place = None;
+            let found = objects::find(cspace, a.cap, methods::takes_object, &mut place)?;
+            let cap = &found.cap;
+            match cap.check(ObjectKind::Endpoint, Rights::SEND) {
+                Ok(()) => {
+                    let Some(Object::Endpoint(endpoint)) = &found.object else {
+                        return Err(error(Kernel::Gone));
+                    };
+                    let message = Message {
+                        info,
+                        words: a.words,
+                        badge: cap.badge(),
+                        call: true,
+                        grant: cap.rights().contains(Rights::GRANT),
+                        cspace,
+                    };
+                    let reply = ipc::send(me, user, endpoint, message)?;
+                    let reply = reply.expect("a call ends with a reply or an error");
+                    return results(args, delivered(reply));
+                }
+                Err(CapError::WrongKind { .. }) => {}
+                Err(err) => return Err(cap_error(err)),
             }
             if info.caps > 0 || info.move_caps || info.no_block {
                 return Err(Kernel::InvalidArgument.status(1));
             }
-            // Matched in place rather than through `?`, which would copy
-            // the answer first.
-            match methods::call(me, user, a.cap, cap, info, a.words) {
-                Ok(Answer::Reply(info, words)) => {
-                    results(args, sys::CapCallResults { badge: 0, info, words }.encode())
-                }
-                Ok(Answer::Exit(code)) => Ok(Done::Exit(code)),
-                Err(status) => Err(status),
-            }
+            answered(args, methods::call(me, user, a.cap, found, info, a.words))
         }
         sys::SEND => {
             let a = sys::SendArgs::decode(args)?;

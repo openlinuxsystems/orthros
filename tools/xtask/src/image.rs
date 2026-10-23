@@ -192,7 +192,7 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
         &licenses::Extras {
             mkrescue: &mkrescue,
             microcode: spec.microcode.is_some(),
-            programs: spec.programs.is_some(),
+            programs: spec.programs.map(|programs| &programs.ports),
         },
     )?;
     let mut modules = Vec::new();

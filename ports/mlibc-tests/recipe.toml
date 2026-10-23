@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# mlibc's own test suite (ADR 0068), built for Radix: the C library's
+# tests of its interfaces, which the posix boot test runs
+# (radix-posix(7)). The same commit as the mlibc port.
+name = "mlibc-tests"
+version = "7.0.0"
+summary = "the C library's own tests"
+license = "MIT"
+homepage = "https://github.com/managarm/mlibc"
+depends = ["mlibc"]
+image = ["system/tests/libc/"]
+
+[source]
+git = "https://github.com/managarm/mlibc.git"
+commit = "7c2a178142625cc9852e59a1a090468c61a62d3b"
+tag = "v7.0.0"

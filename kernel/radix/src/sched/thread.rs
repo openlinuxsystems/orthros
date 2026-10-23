@@ -13,7 +13,7 @@
 
 use alloc::sync::Arc;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{self, AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::Threads;
 use radix_lockdep::Saved;
@@ -70,6 +70,81 @@ impl Name {
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(self.as_str())
+    }
+}
+
+/// The words a [`Name`] packs into: its bytes, then its length.
+const NAME_WORDS: usize = (NAME_LEN + 1) / 8;
+const _: () = assert!((NAME_LEN + 1).is_multiple_of(8), "a name is whole words");
+
+/// A thread's name, which its program may change (Phase 8,
+/// `pthread_setname_np`) while logs read it, perhaps from an interrupt:
+/// three words with a sequence count around them, so that a reader sees
+/// the name one write left. Writers take `writer`, which keeps them from
+/// being preempted halfway; a reader that keeps meeting a write (one an
+/// interrupt on its own CPU stopped) takes the words as they are, as
+/// Linux's readers of a task's `comm` do. They still make a name: at
+/// worst, a mixed one, or `?`.
+struct NameCell {
+    sequence: AtomicU32,
+    words: [AtomicU64; NAME_WORDS],
+    writer: SpinLock<()>,
+}
+
+impl NameCell {
+    /// Tries a reader makes before it takes the words as they are.
+    const TRIES: usize = 4;
+
+    fn new(name: Name) -> NameCell {
+        NameCell {
+            sequence: AtomicU32::new(0),
+            words: NameCell::pack(name).map(AtomicU64::new),
+            writer: SpinLock::new(()),
+        }
+    }
+
+    fn pack(name: Name) -> [u64; NAME_WORDS] {
+        let mut bytes = [0u8; NAME_WORDS * 8];
+        bytes[..NAME_LEN].copy_from_slice(&name.bytes);
+        bytes[NAME_LEN] = name.len;
+        let (chunks, _) = bytes.as_chunks::<8>();
+        core::array::from_fn(|i| u64::from_ne_bytes(chunks[i]))
+    }
+
+    fn unpack(words: [u64; NAME_WORDS]) -> Name {
+        let mut bytes = [0u8; NAME_WORDS * 8];
+        for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            chunk.copy_from_slice(&word.to_ne_bytes());
+        }
+        let mut name = Name { bytes: [0; NAME_LEN], len: bytes[NAME_LEN].min(NAME_LEN as u8) };
+        name.bytes.copy_from_slice(&bytes[..NAME_LEN]);
+        name
+    }
+
+    fn get(&self) -> Name {
+        let mut words = [0; NAME_WORDS];
+        for _ in 0..NameCell::TRIES {
+            let before = self.sequence.load(Ordering::Acquire);
+            for (word, cell) in words.iter_mut().zip(&self.words) {
+                *word = cell.load(Ordering::Relaxed);
+            }
+            atomic::fence(Ordering::Acquire);
+            if before.is_multiple_of(2) && self.sequence.load(Ordering::Relaxed) == before {
+                break;
+            }
+        }
+        NameCell::unpack(words)
+    }
+
+    fn set(&self, name: Name) {
+        let _writer = self.writer.lock();
+        let sequence = self.sequence.load(Ordering::Relaxed);
+        self.sequence.store(sequence.wrapping_add(1), Ordering::Relaxed);
+        atomic::fence(Ordering::Release);
+        for (cell, word) in self.words.iter().zip(NameCell::pack(name)) {
+            cell.store(word, Ordering::Relaxed);
+        }
+        self.sequence.store(sequence.wrapping_add(2), Ordering::Release);
     }
 }
 
@@ -202,7 +277,7 @@ pub(super) struct Stats {
 /// A kernel thread.
 pub struct Thread {
     id: u64,
-    name: Name,
+    name: NameCell,
     pub(super) context: Context,
     pub(super) entry: fn(usize),
     pub(super) arg: usize,
@@ -213,6 +288,11 @@ pub struct Thread {
     /// sleep, so a wake that comes before the block is not lost.
     pub(super) wake_pending: AtomicBool,
     stop: AtomicBool,
+    /// Set while it has a signal to take, or a stop to make for job
+    /// control, on its way back to user mode (Phase 8): with `stop`, what
+    /// the return path and interruptible waits look at
+    /// ([`Thread::interrupted`]).
+    signalled: AtomicBool,
     domain: DomainRef,
     /// Stack pages charged to the domain, given back when it is freed.
     pub(super) charged: u64,
@@ -262,7 +342,7 @@ impl Thread {
     ) -> Thread {
         Thread {
             id,
-            name,
+            name: NameCell::new(name),
             context,
             entry,
             arg,
@@ -270,6 +350,7 @@ impl Thread {
             cpu: AtomicUsize::new(affinity.lowest().unwrap_or(0)),
             wake_pending: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            signalled: AtomicBool::new(false),
             domain,
             charged,
             lockdep: RawSpinLock::new(Saved::new()),
@@ -287,7 +368,10 @@ impl Thread {
         }
     }
 
-    /// Its number, unique for as long as the kernel runs.
+    /// Its number, from the count processes take theirs from. A
+    /// process's first thread has the process's number, and so does the
+    /// thread that runs a program `exec` gave the process, while the
+    /// thread that called `exec` ends; no other two threads share one.
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -303,9 +387,21 @@ impl Thread {
         <crate::Arch as radix_hal::UserMode>::set_thread_pointer(&self.context, base);
     }
 
+    /// Gives it, before it first runs, the running thread's extended state
+    /// (Phase 8): a forked thread goes on with its parent's x87 and vector
+    /// registers.
+    pub fn copy_extended_state(&self) {
+        <crate::Arch as radix_hal::UserMode>::copy_extended_state(&self.context);
+    }
+
     /// Its name.
-    pub fn name(&self) -> &Name {
-        &self.name
+    pub fn name(&self) -> Name {
+        self.name.get()
+    }
+
+    /// Renames it (Phase 8, radix-process(2)'s `set_thread_name`).
+    pub fn set_name(&self, name: Name) {
+        self.name.set(name);
     }
 
     /// The resource domain it is charged to.
@@ -351,6 +447,25 @@ impl Thread {
     /// Whether it has been asked to stop.
     pub fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Marks that it has a signal to take (or a stop to make for job
+    /// control) on its way back to user mode, or clears that. Whoever sets
+    /// it then wakes the thread ([`super::wake`]), so that a wait it is in
+    /// ends as interrupted.
+    pub fn set_signalled(&self, signalled: bool) {
+        self.signalled.store(signalled, Ordering::Release);
+    }
+
+    /// Whether it has a signal to take ([`Thread::set_signalled`]).
+    pub fn is_signalled(&self) -> bool {
+        self.signalled.load(Ordering::Acquire)
+    }
+
+    /// Whether a wait it is in should end early: it has been asked to stop,
+    /// or has a signal to take.
+    pub fn interrupted(&self) -> bool {
+        self.should_stop() || self.is_signalled()
     }
 
     /// Stops counting it among its domain's threads: when it exits, so a

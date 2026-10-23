@@ -1,0 +1,34 @@
+SPDX-FileCopyrightText: Gary Guo
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+unwinding 0.2.10 for Radix (ADR 0070): its libc dependency builds as
+part of std (rustc-dep-of-std), and on Radix its exception header leaves
+two words for the unwinder's private data, as std's 32-byte header does.
+
+diff -ruN a/vendor/unwinding-0.2.10/Cargo.toml b/vendor/unwinding-0.2.10/Cargo.toml
+--- a/vendor/unwinding-0.2.10/Cargo.toml
++++ b/vendor/unwinding-0.2.10/Cargo.toml
+@@ -64,6 +64,7 @@
+ rustc-dep-of-std = [
+     "dep:core",
+     "gimli/rustc-dep-of-std",
++    "libc?/rustc-dep-of-std",
+ ]
+ spin = ["dep:spin"]
+ system-alloc = []
+diff -ruN a/vendor/unwinding-0.2.10/src/arch.rs b/vendor/unwinding-0.2.10/src/arch.rs
+--- a/vendor/unwinding-0.2.10/src/arch.rs
++++ b/vendor/unwinding-0.2.10/src/arch.rs
+@@ -10,6 +10,11 @@
+         pub const RA: Register = X86_64::RA;
+ 
+         pub const UNWIND_DATA_REG: (Register, Register) = (X86_64::RAX, X86_64::RDX);
++        // As std's unwind crate has it on Radix, which uses this crate as its
++        // unwinder: libgcc's two private words (only two are used).
++        #[cfg(target_os = "radix")]
++        pub const UNWIND_PRIVATE_DATA_SIZE: usize = 2;
++        #[cfg(not(target_os = "radix"))]
+         pub const UNWIND_PRIVATE_DATA_SIZE: usize = 6;
+     }
+ }

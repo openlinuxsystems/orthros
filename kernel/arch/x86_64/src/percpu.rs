@@ -10,7 +10,9 @@
 //! running thread's kernel stack and `gs:[32]` a scratch word, which the
 //! system call entry uses before it has a stack (`crate::user`); `gs:[40]`
 //! is the scheduler's word for the running thread, which it reads in one
-//! instruction to find the running thread without holding preemption off.
+//! instruction to find the running thread without holding preemption off;
+//! `gs:[48]` and `gs:[56]` are the RCX and R11 a system call that restores
+//! every register returns with.
 //! The boot CPU sets GS base first thing in [`crate::entry`], before any
 //! code that asks which CPU it is running on. In user mode GS base is the
 //! program's (zero); the entry paths swap it with `swapgs`.
@@ -59,6 +61,10 @@ const _: () = assert!(USER_DS == USER_BASE + 8 && USER_CS == USER_BASE + 16);
 pub const KERNEL_RSP_OFFSET: usize = 24;
 /// Offset of [`PerCpu`]'s scratch word, for the entry code.
 pub const SCRATCH_OFFSET: usize = 32;
+/// Offsets of [`PerCpu`]'s RCX and R11 for a full return, for the entry
+/// code.
+pub const FULL_RCX_OFFSET: usize = 48;
+pub const FULL_R11_OFFSET: usize = 56;
 
 /// Interrupt stack table slots (1-based, as the IDT names them).
 pub const IST_DOUBLE_FAULT: u8 = 1;
@@ -133,6 +139,12 @@ pub struct PerCpu {
     /// The scheduler's word for the thread running on this CPU:
     /// `gs:[40]`.
     running: AtomicUsize,
+    /// RCX and R11 for a system call that returns with every register
+    /// restored (`iretq`, not `sysretq`, which takes both for itself):
+    /// `gs:[48]` and `gs:[56]`, written with interrupts masked just before
+    /// the return (`crate::user`).
+    pub full_rcx: AtomicU64,
+    pub full_r11: AtomicU64,
     /// The address of this CPU's TSS, once loaded.
     tss: AtomicUsize,
     /// Local APIC ID.
@@ -197,6 +209,8 @@ impl PerCpu {
             kernel_rsp: AtomicU64::new(0),
             scratch: AtomicU64::new(0),
             running: AtomicUsize::new(0),
+            full_rcx: AtomicU64::new(0),
+            full_r11: AtomicU64::new(0),
             tss: AtomicUsize::new(0),
             apic_id: AtomicU32::new(0),
             present: AtomicBool::new(false),
@@ -257,6 +271,12 @@ impl PerCpu {
                 rsp0.write_unaligned(top as u64);
             }
         }
+    }
+
+    /// The top of the running thread's kernel stack, where its user
+    /// registers are saved when it comes in from user mode.
+    pub fn kernel_stack_top(&self) -> u64 {
+        self.kernel_rsp.load(Ordering::Relaxed)
     }
 
     /// The running thread's stack, if it is not one of [`Stacks`].
@@ -378,6 +398,8 @@ const _: () = {
     assert!(core::mem::offset_of!(PerCpu, kernel_rsp) == KERNEL_RSP_OFFSET);
     assert!(core::mem::offset_of!(PerCpu, scratch) == SCRATCH_OFFSET);
     assert!(core::mem::offset_of!(PerCpu, running) == 40);
+    assert!(core::mem::offset_of!(PerCpu, full_rcx) == FULL_RCX_OFFSET);
+    assert!(core::mem::offset_of!(PerCpu, full_r11) == FULL_R11_OFFSET);
 };
 
 /// The data of CPU `index`.
@@ -395,9 +417,20 @@ pub fn current_index() -> usize {
     index
 }
 
-/// The running CPU's data.
+/// The running CPU's data, from the address it keeps of itself: one load,
+/// where indexing [`CPUS`] takes a bounds check and a multiplication, and
+/// system calls and the scheduler ask for it several times each.
 pub fn current() -> &'static PerCpu {
-    &CPUS[current_index().min(MAX_CPUS - 1)]
+    let addr: usize;
+    // SAFETY: GS base points at this CPU's `PerCpu` from `set_current` on,
+    // which stores the structure's own address at offset 0 (`self_addr`, an
+    // `AtomicUsize` read with a plain load) before pointing GS base at it.
+    // The address is an element of `CPUS`, a static that lives for ever and
+    // is only reached through shared references.
+    unsafe {
+        asm!("mov {}, gs:[0]", out(reg) addr, options(nostack, preserves_flags, readonly));
+        &*(addr as *const PerCpu)
+    }
 }
 
 /// Points GS base at CPU `index`'s data. Called first thing on each CPU.

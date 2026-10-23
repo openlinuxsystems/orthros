@@ -21,7 +21,8 @@
 //! disks fill and empty by DMA, and dirty pages reach the disk when the
 //! filesystem syncs. tmpfs ([`tmpfs`]) is a page cache with nothing below
 //! it. [`synthetic`] makes the generated files of procfs, sysfs and devfs,
-//! and [`bootfs`] serves the boot archive.
+//! and [`bootfs`] serves the boot archive. [`locks`] is what a file's
+//! advisory locks do (Phase 8).
 //!
 //! The crate is a compartment: it has no `unsafe` code. It builds for the
 //! host (feature `host`), where its tests run.
@@ -37,6 +38,7 @@ extern crate alloc;
 
 pub mod bootfs;
 pub mod cache;
+pub mod locks;
 pub mod mount;
 pub mod path;
 pub mod synthetic;
@@ -98,6 +100,8 @@ pub enum Error {
     UnknownFilesystem,
     /// A mount needs a block device and was given something else.
     NotBlockDevice,
+    /// The device the node stands for is not there.
+    NoDevice,
     /// The node does not do this.
     NotSupported,
     /// Out of memory.
@@ -126,6 +130,7 @@ impl fmt::Display for Error {
             Error::TooBig => "the file would be too big",
             Error::UnknownFilesystem => "unknown filesystem",
             Error::NotBlockDevice => "not a block device",
+            Error::NoDevice => "no such device",
             Error::NotSupported => "not supported",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
@@ -161,8 +166,10 @@ pub enum Kind {
     Directory,
     /// A block device, which filesystems are mounted from.
     BlockDevice,
-    /// A character device: `null`, `zero` and the like.
+    /// A character device: `null`, `zero`, terminals and the like.
     CharDevice,
+    /// A pipe, which lives outside the tree (Phase 8).
+    Pipe,
 }
 
 /// What a node says about itself.
@@ -180,6 +187,10 @@ pub struct Stat {
     pub created: u64,
     /// When its contents last changed, likewise.
     pub modified: u64,
+    /// When it was last read, likewise: when it was made, or the time a
+    /// program set (`set_times`), since reading does not change it (as
+    /// with Linux's `noatime`, ADR 0076).
+    pub accessed: u64,
 }
 
 /// A node, shared.
@@ -323,6 +334,15 @@ pub trait Node: Send + Sync + Any {
         Err(Error::IsDirectory)
     }
 
+    /// Sets when it was last read and when its contents last changed, in
+    /// nanoseconds since 1970 (none: as they are); a filesystem keeps them
+    /// as finely as it can (FAT: two seconds, and the day for reads).
+    /// Nodes that keep no times (devices, pipes, the synthetic
+    /// filesystems' files) fail with [`Error::NotSupported`].
+    fn set_times(&self, _accessed: Option<u64>, _modified: Option<u64>) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
     /// Writes what the node holds in memory to the disk.
     fn sync(&self) -> Result<()> {
         Ok(())
@@ -356,6 +376,9 @@ pub enum FsKind {
     Dev,
     /// The boot archive (`/system`), read-only.
     Boot,
+    /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
+    /// their files are on a mount of their own ([`mount::Mount::detached`]).
+    Pipe,
 }
 
 impl FsKind {
@@ -368,6 +391,7 @@ impl FsKind {
             FsKind::Sys => "sys",
             FsKind::Dev => "dev",
             FsKind::Boot => "bootfs",
+            FsKind::Pipe => "pipefs",
         }
     }
 }
@@ -381,6 +405,12 @@ pub struct FsInfo {
     pub blocks: u64,
     /// How many are free.
     pub free: u64,
+    /// How many files and directories it can hold; zero when it keeps no
+    /// count (FAT, the synthetic filesystems), as Linux's vfat and procfs
+    /// say.
+    pub files: u64,
+    /// How many more it can take.
+    pub free_files: u64,
 }
 
 /// A filesystem.

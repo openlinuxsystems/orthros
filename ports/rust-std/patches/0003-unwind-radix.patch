@@ -1,0 +1,49 @@
+SPDX-FileCopyrightText: The Rust Project Developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Panics unwind on Radix through the unwinding crate (ADR 0070), a
+pure-Rust unwinder that finds each frame's unwind information through
+dl_iterate_phdr, as std's unwind crate already uses it on Xous. Its
+exception header is std's: 32 bytes.
+
+diff -ruN a/unwind/Cargo.toml b/unwind/Cargo.toml
+--- a/unwind/Cargo.toml
++++ b/unwind/Cargo.toml
+@@ -19,6 +19,9 @@
+ [target.'cfg(target_os = "xous")'.dependencies]
+ unwinding = { version = "0.2.7", features = ['rustc-dep-of-std', 'unwinder', 'fde-custom'], default-features = false }
+ 
++[target.'cfg(target_os = "radix")'.dependencies]
++unwinding = { version = "0.2.7", features = ['rustc-dep-of-std', 'unwinder', 'fde-phdr-dl', 'dwarf-expr'], default-features = false }
++
+ [features]
+ 
+ # Only applies for Linux and Fuchsia targets
+diff -ruN a/unwind/src/libunwind.rs b/unwind/src/libunwind.rs
+--- a/unwind/src/libunwind.rs
++++ b/unwind/src/libunwind.rs
+@@ -8,6 +8,11 @@
+     EhFrameFinder, FrameInfo, FrameInfoKind, set_custom_eh_frame_finder,
+ };
+ 
++// Use the unwinding crate as unwinder on Radix too: it finds each loaded
++// object's frame tables with dl_iterate_phdr.
++#[cfg(target_os = "radix")]
++use unwinding as _;
++
+ pub use crate::types::*;
+ 
+ pub type _Unwind_Ptr = *const u8;
+diff -ruN a/unwind/src/types.rs b/unwind/src/types.rs
+--- a/unwind/src/types.rs
++++ b/unwind/src/types.rs
+@@ -56,7 +56,7 @@
+ }
+ 
+ // Check the size of _Unwind_Exception against the source of truth when using the unwinding crate.
+-#[cfg(target_os = "xous")]
++#[cfg(any(target_os = "xous", target_os = "radix"))]
+ const _: () = {
+     assert!(size_of::<unwinding::abi::UnwindException>() == size_of::<_Unwind_Exception>());
+ };

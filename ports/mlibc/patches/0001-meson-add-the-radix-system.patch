@@ -1,0 +1,25 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Builds mlibc for Radix: host_machine.system() 'radix' uses the system
+layer in sysdeps/radix (ports/mlibc/sysdeps/radix, which build.sh copies
+there). Meant for upstream.
+
+diff --git a/meson.build b/meson.build
+index 8e981a3..0b719d0 100644
+--- a/meson.build
++++ b/meson.build
+@@ -320,6 +320,13 @@ elif host_machine.system() == 'ethereal'
+ 	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', false)
+ 	internal_conf.set10('MLIBC_MAP_FILE_WINDOWS', true)
+ 	subdir('sysdeps/ethereal')
++elif host_machine.system() == 'radix'
++	rtld_include_dirs += include_directories('sysdeps/radix/include')
++	libc_include_dirs += include_directories('sysdeps/radix/include')
++	internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', true)
++	internal_conf.set10('MLIBC_MAP_FILE_WINDOWS', true)
++	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
++	subdir('sysdeps/radix')
+ # ANCHOR: demo-sysdeps
+ elif host_machine.system() == 'demo'
+ 	subdir('sysdeps/demo')

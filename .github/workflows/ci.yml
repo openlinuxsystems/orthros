@@ -20,7 +20,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep in step with tools/container/Containerfile and tools/xtask/src/doctor.rs.
+  # Keep in step with tools/container/Containerfile and tools/xtask/src/doctor.rs,
+  # as the host packages below are (Clang 20 is ports::CLANG_MIN).
   MDBOOK_VERSION: 0.4.52
   # Keep in step with tools/xtask/src/doctor.rs (ADR 0019).
   KANI_VERSION: 0.68.0
@@ -48,7 +49,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools scdoc mandoc
+            xorriso mtools dosfstools scdoc mandoc \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build
 
       - name: Install mdBook
         run: |
@@ -127,7 +129,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools
+            xorriso mtools dosfstools \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
@@ -174,7 +177,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools
+            xorriso mtools dosfstools \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install

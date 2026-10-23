@@ -34,13 +34,25 @@
 //! be finished are linked through themselves, so ending one never needs
 //! memory.
 //!
-//! Lock order: the capability store, then a process's state, then a
-//! thread's scheduler state (`sched::wake`).
+//! Since Phase 8 a process also has a POSIX side (`posix`): its place in
+//! the process tree, its signals and its timers. A process `fork` makes,
+//! or one `exec` starts after `create`, does not end with its maker: its
+//! parent waits for it instead. Telling the parent that a process has
+//! finished may send signals, which may end more processes, so a process
+//! finished with the store locked tells it once the lock has gone
+//! ([`report_finished`]).
+//!
+//! Lock order: the capability store, then a process's POSIX state, then
+//! its state, then a thread's signals, then a thread's scheduler state
+//! (`sched::wake`).
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use radix_abi::endpoint::NO_SLOT;
+use radix_abi::startup;
 
 use radix_abi::address_space::USER_TOP;
 use radix_abi::capability::ObjectKind as AbiKind;
@@ -52,7 +64,7 @@ use radix_cap::{Derivation, ObjectKind, Rights, SLOT_BYTES, SlotRef, SpaceId};
 use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP, Kmalloc, PAGE_SIZE};
-use radix_sync::SpinLock;
+use radix_sync::{Mutex, SpinLock};
 
 use super::account::{Account, AccountRef, Charge};
 use super::ipc::{self, Endpoint};
@@ -60,6 +72,7 @@ use super::memory::{SpaceObject, SpaceRef};
 use super::methods::{Answer, answer};
 use super::notify::{Notification, NotificationRef};
 use super::objects::{self, Object};
+use super::posix::{self, PosixState, ThreadSignals};
 use super::{
     Result, UserRef, UserThread, cap_error, default_window, error, set_ready, thread_main,
 };
@@ -81,10 +94,23 @@ pub enum Ending {
     Stop,
 }
 
+/// Where a new thread starts in user mode.
+#[derive(Clone, Copy)]
+pub enum Start {
+    /// At an entry point, with its stack pointer and an argument in its
+    /// first argument register; every other register zero.
+    Fresh([u64; 3]),
+    /// With every register as given: a forked thread, which goes on where
+    /// its parent called `fork`.
+    Registers(<Arch as UserMode>::UserRegisters),
+}
+
 /// A process.
 pub struct ProcessObject {
-    /// Its number, unique since boot.
+    /// Its number, unique among processes and threads since boot.
     number: u64,
+    /// Whether a thread of it has had its number: its first thread does.
+    numbered: AtomicBool,
     /// Its name, which its threads take when they start.
     name: SpinLock<Name>,
     /// The capability space its threads use.
@@ -104,6 +130,25 @@ pub struct ProcessObject {
     /// The processes made for it, which end when it does; `None` once it
     /// has ended, when no more can be made for it.
     made: SpinLock<Option<Vec<Weak<ProcessObject, Kmalloc>, Kmalloc>>>,
+    /// The slots `grow` added, charged to its account.
+    grown: Mutex<Option<Charge>>,
+    /// The CPU time of its threads that have exited, in nanoseconds.
+    exited_ns: AtomicU64,
+    /// Its POSIX side (Phase 8).
+    pub posix: SpinLock<PosixState>,
+    /// Moves when one of its children changes, for `wait`.
+    pub child_events: AtomicU64,
+    /// Moves when a signal is sent to it or one of its threads, for
+    /// `signal_wait`.
+    pub signal_events: AtomicU64,
+    /// Whether a signal has stopped it: what its stopped threads wait on.
+    pub stopped: AtomicBool,
+    /// Whether it is a POSIX child: `exec` started it after `create`, so
+    /// it does not end with its maker.
+    posix_child: AtomicBool,
+    /// Whether it has taken a POSIX record lock (`fs::locks`), which go
+    /// when it ends or deletes a capability of their file.
+    record_locks: AtomicBool,
 }
 
 struct State {
@@ -118,8 +163,10 @@ struct State {
     finishing: bool,
 }
 
-/// Numbers processes, from 1.
-static NUMBERS: AtomicU64 = AtomicU64::new(1);
+/// Whether the first process, numbered 1, has been made; the others take
+/// their numbers from the count threads have theirs from
+/// ([`sched::take_number`]).
+static FIRST_MADE: AtomicBool = AtomicBool::new(false);
 
 /// The first of the processes waiting to be finished, linked through
 /// their `pending`.
@@ -143,12 +190,13 @@ pub fn bytes_of(slots: u32) -> u64 {
 
 /// Makes a process with a capability space of `slots` slots, named
 /// `name`, whose objects and threads are charged to `account`, and puts
-/// its original capability, with every right, in `at`. `charge` is what
-/// the process itself is charged to its maker; the registry keeps it
-/// until the process goes. A process made for `maker` ends when `maker`
-/// does; if `maker` has ended already, this fails with `gone`.
+/// its original capability, with every right, in `at`, or with `None` in
+/// its own SLOT_PROCESS (a forked process, which holds itself). `charge`
+/// is what the process itself is charged to its maker; the registry keeps
+/// it until the process goes. A process made for `maker` ends when
+/// `maker` does; if `maker` has ended already, this fails with `gone`.
 pub fn create(
-    at: SlotRef,
+    at: Option<SlotRef>,
     name: &str,
     slots: u32,
     account: AccountRef,
@@ -159,9 +207,10 @@ pub fn create(
     if !(MIN_SLOTS..=MAX_SLOTS).contains(&slots) {
         return Err(Kernel::InvalidArgument.status(1));
     }
-    let space = SpaceObject::new().ok_or(error(Kernel::NoMemory))?;
+    let space = SpaceObject::new(Some(account.domain().clone())).ok_or(error(Kernel::NoMemory))?;
     let mut threads = Vec::new_in(HEAP.with(Flags::ATOMIC));
     threads.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+    let posix = PosixState::new().ok_or(error(Kernel::NoMemory))?;
     caps::with(|store| -> Result<ProcessRef> {
         objects::reserve(store, 2).map_err(|_| error(Kernel::NoMemory))?;
         let cspace = store.create_space(slots).map_err(cap_error)?;
@@ -182,7 +231,12 @@ pub fn create(
             objects::insert(store, id, Object::Space(space.clone()))
                 .map_err(|_| error(Kernel::NoMemory))?;
             let process = ProcessObject {
-                number: NUMBERS.fetch_add(1, Ordering::Relaxed),
+                number: if FIRST_MADE.swap(true, Ordering::Relaxed) {
+                    sched::take_number()
+                } else {
+                    1
+                },
+                numbered: AtomicBool::new(false),
                 name: SpinLock::new(Name::new(name)),
                 cspace,
                 keep,
@@ -198,6 +252,14 @@ pub fn create(
                 on_exit,
                 pending: SpinLock::new(None),
                 made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
+                grown: Mutex::new(None),
+                exited_ns: AtomicU64::new(0),
+                posix: SpinLock::new(posix),
+                child_events: AtomicU64::new(0),
+                signal_events: AtomicU64::new(0),
+                stopped: AtomicBool::new(false),
+                posix_child: AtomicBool::new(false),
+                record_locks: AtomicBool::new(false),
             };
             let process: ProcessRef =
                 Arc::try_new_in(process, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
@@ -206,6 +268,7 @@ pub fn create(
             if let Some(maker) = maker {
                 maker.made_one(&process)?;
             }
+            let at = at.unwrap_or(SlotRef::new(cspace, startup::SLOT_PROCESS));
             let id = store.create(at, ObjectKind::Process).map_err(cap_error)?;
             // Room was reserved above, so this cannot fail.
             if objects::insert_charged(store, id, Object::Process(process.clone()), charge).is_err()
@@ -230,6 +293,22 @@ impl ProcessObject {
         self.number
     }
 
+    /// Notes that it has taken a POSIX record lock.
+    pub fn note_record_locks(&self) {
+        self.record_locks.store(true, Ordering::Release);
+    }
+
+    /// Whether it may hold POSIX record locks.
+    pub fn has_record_locks(&self) -> bool {
+        self.record_locks.load(Ordering::Acquire)
+    }
+
+    /// The next thread it starts has its number, as its first did: the
+    /// thread that runs the program `exec` gave it (Phase 8).
+    pub fn number_next_thread(&self) {
+        self.numbered.store(false, Ordering::Relaxed);
+    }
+
     /// The capability space its threads use.
     pub fn cspace(&self) -> SpaceId {
         self.cspace
@@ -243,6 +322,89 @@ impl ProcessObject {
     /// The account the objects it makes are charged to.
     pub fn account(&self) -> &AccountRef {
         &self.account
+    }
+
+    /// Its name.
+    pub fn name(&self) -> Name {
+        *self.name.lock()
+    }
+
+    /// Renames it.
+    pub fn set_name(&self, name: Name) {
+        *self.name.lock() = name;
+    }
+
+    /// Gives it `space` in place of its address space (`exec`).
+    pub fn set_space(&self, space: SpaceRef) {
+        let old = self.space.lock().replace(space);
+        drop(old);
+    }
+
+    /// It is a POSIX child: it no longer ends with its maker.
+    pub fn make_posix_child(&self) {
+        self.posix_child.store(true, Ordering::Release);
+    }
+
+    /// Calls `f` with each of its threads, with its state locked: `f` may
+    /// take a thread's signals and wake it, and nothing else.
+    pub fn for_each_thread(&self, f: &mut dyn FnMut(&ThreadRef, &UserRef)) {
+        let state = self.state.lock();
+        for thread in &state.threads {
+            if let Some(user) = thread.user() {
+                f(thread, user);
+            }
+        }
+    }
+
+    /// How many of its threads have not exited.
+    pub fn thread_count(&self) -> usize {
+        self.state.lock().threads.len()
+    }
+
+    /// What waiters for one of its threads to exit wait on.
+    pub fn threads_key(&self) -> usize {
+        self.key() + 4
+    }
+
+    /// The CPU time its threads have used, those that have exited too.
+    pub fn cpu_ns(&self) -> u64 {
+        let state = self.state.lock();
+        let live: u64 = state.threads.iter().map(|thread| thread.runtime_ns()).sum();
+        self.exited_ns.load(Ordering::Relaxed) + live
+    }
+
+    /// Asks every thread but `me` to stop (`exec`): each ends at its next
+    /// return to user mode, or in the wait it is in.
+    pub fn stop_other_threads(&self, me: &ThreadRef) {
+        let state = self.state.lock();
+        for thread in state.threads.iter().filter(|t| !ThreadRef::ptr_eq(t, me)) {
+            thread.request_stop();
+            sched::wake(thread);
+        }
+    }
+
+    /// Grows its capability space to `slots` slots, charging the slots
+    /// added to its account, and returns how many it has.
+    pub fn grow(&self, slots: u32) -> Result<u32> {
+        if !(MIN_SLOTS..=MAX_SLOTS).contains(&slots) {
+            return Err(Kernel::InvalidArgument.status(0));
+        }
+        // Held throughout, so that two calls charge the slots once.
+        let mut grown = self.grown.lock();
+        let now =
+            caps::with(|store| store.slots(self.cspace)).and_then(|n| n).map_err(cap_error)?;
+        if slots <= now {
+            return Ok(now);
+        }
+        let charge = Account::charge(&self.account, u64::from(slots - now) * SLOT_BYTES as u64)?;
+        let got = caps::with(|store| store.grow_space(self.cspace, slots))
+            .and_then(|n| n)
+            .map_err(cap_error)?;
+        match grown.as_mut() {
+            Some(total) => total.absorb(charge),
+            None => *grown = Some(charge),
+        }
+        Ok(got)
     }
 
     /// Writes its status as `/proc/<number>/status` shows it
@@ -260,6 +422,9 @@ impl ProcessObject {
             writeln!(out, "code: {code:#x}")?;
         }
         writeln!(out, "threads: {threads}")?;
+        if let Some(space) = self.space() {
+            writeln!(out, "anonymous_memory: {} pages", space.anon_pages())?;
+        }
         writeln!(out, "domain: {}", self.account.domain().name().as_str())?;
         writeln!(out, "kernel_memory: {} bytes", self.account.bytes())
     }
@@ -302,40 +467,56 @@ impl ProcessObject {
         })
     }
 
-    /// Starts a thread at `entry`, with its stack pointer at `stack` and
-    /// `argument` in its first argument register, on CPU `cpu` only if
-    /// there is one, and puts its capability in slot `to` of the process's
-    /// capability space. `prepare` sees the thread before it may run.
+    /// Starts a thread as `start` says, on CPU `cpu` only if there is
+    /// one, with `mask` as its signal mask, and puts its capability in
+    /// slot `to` of the process's capability space (nowhere with
+    /// NO_SLOT). `prepare` sees the thread before it may run.
     pub fn start(
         process: &ProcessRef,
-        [entry, stack, argument]: [u64; 3],
+        start: Start,
         to: u32,
         cpu: Option<usize>,
+        mask: u64,
         prepare: &mut dyn FnMut(&ThreadRef) -> Result<()>,
     ) -> Result<ThreadRef> {
-        if entry >= USER_TOP || stack > USER_TOP {
+        if let Start::Fresh([entry, stack, _]) = start
+            && (entry >= USER_TOP || stack > USER_TOP)
+        {
             return Err(Kernel::InvalidArgument.status(0));
         }
         if !matches!(process.state.lock().phase, ProcessState::Created | ProcessState::Running) {
             return Err(error(Kernel::Gone));
         }
         let space = process.space().ok_or(error(Kernel::Gone))?;
+        let signals = ThreadSignals::new(mask).ok_or(error(Kernel::NoMemory))?;
+        let scheduling = posix::priority::inherited();
         let user = UserThread {
             cspace: process.cspace,
             space,
-            start: [entry, stack, argument],
+            start,
             ready: AtomicBool::new(false),
             ipc: SpinLock::new(ipc::IpcState::Idle),
             reply: SpinLock::new(None),
             window: AtomicU64::new(default_window()),
             process: process.clone(),
+            signals: SpinLock::new(signals),
+            futex_woken: AtomicBool::new(false),
+            scheduling: Mutex::new(scheduling),
         };
         let user: UserRef =
             Arc::try_new_in(user, kmalloc()).map_err(|_| error(Kernel::NoMemory))?;
-        let mut options =
-            Options::new().domain(process.account.domain().clone()).user(user.clone());
+        // Held until it is set up, so that no CPU switches to it before
+        // its thread pointer and extended state are in its context.
+        let mut options = Options::new()
+            .domain(process.account.domain().clone())
+            .user(user.clone())
+            .policy(scheduling.policy())
+            .held();
         if let Some(cpu) = cpu {
             options = options.pinned(cpu);
+        }
+        if !process.numbered.swap(true, Ordering::Relaxed) {
+            options = options.number(process.number);
         }
         let name = *process.name.lock();
         let thread =
@@ -344,20 +525,23 @@ impl ProcessObject {
                 SpawnError::NoCpu | SpawnError::InvalidPolicy => Kernel::InvalidArgument.status(0),
                 _ => error(Kernel::NoMemory),
             })?;
-        // From here on the thread waits in the kernel: on a failure it is
-        // let go to stop at once.
+        // From here on the thread is the process's: on a failure it is let
+        // go to stop at once.
         let fail = |err| {
             thread.request_stop();
             set_ready(&user);
+            sched::release(&thread);
             err
         };
         prepare(&thread).map_err(fail)?;
-        install(
-            SlotRef::new(process.cspace, to),
-            ObjectKind::Thread,
-            Object::Thread(thread.clone()),
-        )
-        .map_err(fail)?;
+        if to != NO_SLOT {
+            install(
+                SlotRef::new(process.cspace, to),
+                ObjectKind::Thread,
+                Object::Thread(thread.clone()),
+            )
+            .map_err(fail)?;
+        }
         {
             let mut state = process.state.lock();
             if !matches!(state.phase, ProcessState::Created | ProcessState::Running) {
@@ -373,6 +557,7 @@ impl ProcessObject {
             state.phase = ProcessState::Running;
         }
         set_ready(&user);
+        sched::release(&thread);
         Ok(thread)
     }
 
@@ -425,6 +610,9 @@ impl ProcessObject {
             };
             let gone = state.threads.swap_remove(index);
             let running = state.phase == ProcessState::Running;
+            // Its CPU time stays the process's, under the state's lock so
+            // that `cpu_ns` never misses it.
+            self.exited_ns.fetch_add(gone.runtime_ns(), Ordering::Relaxed);
             if running && how == Ending::Fault {
                 state.phase = ProcessState::Ending;
                 state.code = EXIT_FAULT;
@@ -439,6 +627,7 @@ impl ProcessObject {
             (Self::take_finish(&mut state), gone)
         };
         drop(gone);
+        wait::wake_all(self.threads_key());
         if finish {
             self.finish(None);
         }
@@ -449,6 +638,10 @@ impl ProcessObject {
     /// whoever asked. With `store`, the caller holds the store's lock
     /// (`finish_pending`).
     fn finish(&self, store: Option<&mut Store>) {
+        let locked = store.is_some();
+        if self.has_record_locks() {
+            crate::fs::locks::process_gone(self.number, None);
+        }
         // The processes made for it end too. Those with no thread left are
         // finished through the pending list, as released ones are, so that
         // a long line of processes made for each other is finished one
@@ -456,7 +649,9 @@ impl ProcessObject {
         // next change finishes them (here `caps::destroy_space` below, or
         // with the store's lock held, the rest of `finish_pending`).
         let made = self.made.lock().take();
-        for process in made.iter().flatten().filter_map(Weak::upgrade) {
+        let made_here = made.iter().flatten().filter_map(Weak::upgrade);
+        // A POSIX child is its parent's to wait for instead.
+        for process in made_here.filter(|p| !p.posix_child.load(Ordering::Acquire)) {
             if process.end(EXIT_STOPPED) {
                 push_pending(process);
             }
@@ -484,13 +679,19 @@ impl ProcessObject {
         if let Some((notification, badge)) = notify {
             notification.notify(badge);
         }
-        if code != 0 {
+        // A POSIX process's parent hears how it ended from `wait`.
+        if code != 0 && !self.posix.lock().in_tree {
             let name = *self.name.lock();
             info!("User: process {} ({name}) exited with code {code:#x}", self.number);
         }
         wait::wake_all(self.key());
         if let Some(on_exit) = self.on_exit {
             on_exit(self, code);
+        }
+        // With the store locked, `finish_pending` has its parent told once
+        // the lock has gone.
+        if !locked {
+            posix::exited(self);
         }
     }
 }
@@ -532,9 +733,45 @@ pub fn finish_pending(store: &mut Store) {
             next
         };
         match next {
-            Some(process) => process.finish(Some(store)),
+            Some(process) => {
+                process.finish(Some(store));
+                push_finished(process);
+            }
             None => return,
         }
+    }
+}
+
+/// The first of the processes finished with the store locked, whose
+/// parents are still to hear of it, linked through their `pending`.
+static FINISHED: SpinLock<Option<ProcessRef>> = SpinLock::new(None);
+/// Whether any process waits in [`FINISHED`].
+static ANY_FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// Puts `process`, finished with the store locked, on the list
+/// [`report_finished`] reports.
+fn push_finished(process: ProcessRef) {
+    let mut first = FINISHED.lock();
+    *process.pending.lock() = first.take();
+    *first = Some(process);
+    ANY_FINISHED.store(true, Ordering::Release);
+}
+
+/// Tells the parents of the processes finished with the store locked
+/// (`posix::exited`). Called by `caps::with` once the lock has gone.
+pub fn report_finished() {
+    if !ANY_FINISHED.load(Ordering::Acquire) {
+        return;
+    }
+    let mut list = {
+        let mut first = FINISHED.lock();
+        ANY_FINISHED.store(false, Ordering::Release);
+        first.take()
+    };
+    // One after another, never recursively.
+    while let Some(process) = list {
+        list = process.pending.lock().take();
+        posix::exited(&process);
     }
 }
 
@@ -553,26 +790,6 @@ pub fn install_charged(
     })
     .map_err(cap_error)
     .and_then(|made| made)
-}
-
-/// Makes an object of `kind` with its original capability, holding only
-/// `rights`, in `at`, and what it costs charged with `charge`.
-pub fn install_with_rights(
-    at: SlotRef,
-    kind: ObjectKind,
-    rights: Rights,
-    object: Object,
-    charge: Option<Charge>,
-) -> Result<()> {
-    let mut object = Some(object);
-    let made = caps::with(|store| {
-        objects::create_with_rights(store, at, kind, rights, &mut object, charge)
-    })
-    .map_err(cap_error)
-    .and_then(|made| made);
-    // Not made: it goes now, with the store's lock gone.
-    drop(object);
-    made
 }
 
 /// Makes an object of `kind` with its original capability in `at`.
@@ -645,11 +862,18 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
         }
         process::START => {
             let a = process::StartArgs::decode(args)?;
+            // A thread of the caller's own process starts with its mask.
+            let mask = if ProcessRef::ptr_eq(&target, &user.process) {
+                user.signals.lock().mask
+            } else {
+                0
+            };
             let thread = ProcessObject::start(
                 &target,
-                [a.entry, a.stack, a.argument],
+                Start::Fresh([a.entry, a.stack, a.argument]),
                 a.to,
                 None,
+                mask,
                 &mut |_| Ok(()),
             )?;
             let results = process::StartResults { thread: thread.id() };
@@ -694,6 +918,7 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
             drop(state);
             answer(label, process::InfoResults::WORDS, results.encode())
         }
+        _ if label >= process::FORK => posix::method(user, slot, &target, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }
@@ -712,7 +937,8 @@ fn create_for(target: &ProcessRef, kind: AbiKind, size: u32, to: SlotRef) -> Res
             let charge = Account::charge(&target.account, bytes_of(size))?;
             let account =
                 Account::new(target.account.domain().clone()).ok_or(error(Kernel::NoMemory))?;
-            create(to, "process", size, account, Some(charge), Some(&**target), None).map(|_| ())
+            create(Some(to), "process", size, account, Some(charge), Some(&**target), None)
+                .map(|_| ())
         }
         AbiKind::Endpoint => {
             if size != 0 {
