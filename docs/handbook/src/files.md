@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Files, the directory hierarchy and /volumes
 
-This chapter describes files in Dukovo as of Phase 7 of the roadmap. There
-is no shell yet (Nukesh comes in Phase 9), so for now files are used by
-programs and checked by the boot tests; the layout and the rules below
-are the ones the shell and every later program will see. The full
+This chapter describes files in Dukovo as of Phase 9 of the roadmap,
+while its shell, Nukesh, is being built; until it lands, files are used
+by programs and checked by the boot tests. The layout and the rules
+below are the ones the shell and every later program see. The full
 reference is radix-files(7); `/proc` and `/sys` are in radix-proc(5) and
 radix-sysfs(5).
 
@@ -30,6 +30,12 @@ Every boot, Spark, the first program, builds the same tree:
 | `/sys` | The kernel's devices and settings, one value per file |
 | `/volumes` | Disks, USB sticks and SD cards, one directory each |
 
+Unix programs and scripts look for `/bin/sh`, `/usr/bin/env`, `/etc` and
+`/var/log`, so the root also has five symbolic links into `/system`:
+`/bin` and `/sbin` lead to `/system/bin`, `/usr` to `/system`, `/etc` to
+`/system/etc` and `/var` to `/system/var`. Everything is still kept in
+one place, `/system`.
+
 Until the root filesystem lives on a disk (Btrfs, Phase 10),
 `/applications`, `/users` and `/data` are empty and in memory.
 
@@ -38,8 +44,10 @@ Until the root filesystem lives on a disk (Btrfs, Phase 10),
 Dukovo has no global root that every program can reach. A program gets
 *directory capabilities*, handles to directories, and can reach only
 what lies beneath them: a path that starts with `/`, or whose `..` climbs
-above the directory it started from, is refused. Spark holds the root and
-decides what each program gets. When bundles arrive (Phase 13), this is
+above the directory it started from, is refused. A symbolic link cannot
+lead out either: one whose target starts with `/` is followed from the
+directory the program started from, as if that were the root. Spark
+holds the root and decides what each program gets. When bundles arrive (Phase 13), this is
 how an application that asked for `documents: read-write` gets your
 documents folder and nothing else.
 

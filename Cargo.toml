@@ -6,8 +6,10 @@
 [workspace]
 resolver = "3"
 members = ["tools/linux-bench", "tools/ridlc", "tools/xtask"]
-# The kernel crates that tools/xtask uses stay members of the kernel workspace.
-exclude = ["kernel"]
+# The kernel crates that tools/xtask uses stay members of the kernel
+# workspace, and the ports that `ob` builds in target/ports/work are
+# workspaces of their own.
+exclude = ["kernel", "target"]
 
 [workspace.package]
 # The Dukovo release version. Keep kernel/Cargo.toml, userspace/Cargo.toml

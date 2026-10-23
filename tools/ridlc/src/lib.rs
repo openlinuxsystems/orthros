@@ -455,6 +455,7 @@ pub const ERRNOS: &[(&str, i32)] = &[
     ("ENAMETOOLONG", 36),
     ("ENOSYS", 38),
     ("ENOTEMPTY", 39),
+    ("ELOOP", 40),
     ("EMSGSIZE", 90),
     ("EOPNOTSUPP", 95),
     ("ENOTCONN", 107),

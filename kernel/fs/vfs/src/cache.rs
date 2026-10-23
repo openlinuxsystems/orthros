@@ -28,7 +28,15 @@
 //! One lock guards a file's pages and size. It is held while the disk
 //! works, so a file's I/O is one request at a time (enough for Phase 7);
 //! the lock order is a file's cache, then its filesystem's own locks,
-//! which the backing takes.
+//! which the backing takes. A page fault on a program's mapping of a file
+//! holds the address space's lock and reads the file, taking this one,
+//! so a copy to or from a program's memory under this lock never waits
+//! for a page to be made: it stops, the lock is let go while the pages
+//! are made ([`Out::fault_in`]), and it goes on where it stopped, as
+//! Linux's `generic_perform_write` does. Writes and size changes also
+//! hold a second lock, which faults never take, for the whole call, so
+//! that one stopped partway is still not split by another write or cut:
+//! an `O_APPEND` write stays in one piece.
 
 use radix_block::mem::CachePage;
 use radix_block::pagemap::PageMap;
@@ -38,6 +46,11 @@ use radix_sync::Mutex;
 use crate::{APPEND, Error, In, Out, Result};
 
 const PAGE: u64 = PAGE_SIZE as u64;
+
+/// The most of a program's memory made at once when a copy finds a page
+/// missing: the pages it will copy next, so a large read into new memory
+/// lets go of the lock once for each 64 KiB rather than for each page.
+const FAULT_IN_MAX: usize = 16 * PAGE_SIZE;
 
 /// Where a file's data lives below its cache.
 pub trait Backing {
@@ -91,6 +104,18 @@ struct State {
 /// A file's size and cached pages.
 pub struct FileCache {
     state: Mutex<State>,
+    /// Held by a write or size change for the whole call, while `state`
+    /// may be let go to make a page of the caller's memory.
+    writing: Mutex<()>,
+}
+
+/// How far a copy under the lock got.
+enum Copied {
+    /// All of it: the bytes read or written in all.
+    All(usize),
+    /// Up to a page of the caller's memory that is not there yet; this
+    /// many bytes are left to copy.
+    Missing(usize),
 }
 
 /// The bytes of page `index` inside a file of `size` bytes.
@@ -102,7 +127,10 @@ impl FileCache {
     /// The cache of a file of `size` bytes, changed at `modified`, with
     /// nothing in memory yet.
     pub fn new(size: u64, modified: u64) -> FileCache {
-        FileCache { state: Mutex::new(State { pages: PageMap::new(), size, dirty: 0, modified }) }
+        FileCache {
+            state: Mutex::new(State { pages: PageMap::new(), size, dirty: 0, modified }),
+            writing: Mutex::new(()),
+        }
     }
 
     /// The file's size.
@@ -139,69 +167,143 @@ impl FileCache {
 
     /// Reads from `offset` into `out`; returns the bytes read.
     pub fn read(&self, offset: u64, out: &mut dyn Out, backing: &dyn Backing) -> Result<usize> {
+        let mut done = 0;
+        loop {
+            match self.read_from(offset, out, backing, &mut done)? {
+                Copied::All(read) => return Ok(read),
+                Copied::Missing(left) => out.fault_in(done, left.min(FAULT_IN_MAX))?,
+            }
+        }
+    }
+
+    /// [`FileCache::read`] under the lock, from `done` bytes on, which it
+    /// counts up as it copies.
+    fn read_from(
+        &self,
+        offset: u64,
+        out: &mut dyn Out,
+        backing: &dyn Backing,
+        done: &mut usize,
+    ) -> Result<Copied> {
         let mut state = self.state.lock();
+        // A file cut while the lock was let go ends the read early.
         if offset >= state.size {
-            return Ok(0);
+            return Ok(Copied::All(*done));
         }
         let len = (out.len() as u64).min(state.size - offset) as usize;
-        let mut done = 0;
-        while done < len {
-            let at = offset + done as u64;
+        while *done < len {
+            let at = offset + *done as u64;
             let (index, within) = (at / PAGE, (at % PAGE) as usize);
-            let n = (PAGE_SIZE - within).min(len - done);
+            let n = (PAGE_SIZE - within).min(len - *done);
             // A page in memory, the common case, is looked up once.
-            if let Some(slot) = state.pages.get(index) {
-                out.put(done, &slot.page.bytes()[within..within + n])?;
+            let copied = if let Some(slot) = state.pages.get(index) {
+                out.put_now(*done, &slot.page.bytes()[within..within + n])?
             } else {
                 match load(&mut state, index, backing, false, true)? {
-                    Some(slot) => out.put(done, &slot.page.bytes()[within..within + n])?,
+                    Some(slot) => out.put_now(*done, &slot.page.bytes()[within..within + n])?,
                     // A hole.
-                    None => out.zero(done, n)?,
+                    None => zero_now(out, *done, n)?,
                 }
+            };
+            if !copied {
+                return Ok(Copied::Missing(len - *done));
             }
-            done += n;
+            *done += n;
         }
-        Ok(len)
+        Ok(Copied::All(len.max(*done)))
     }
 
     /// Writes `data` at `offset` ([`APPEND`]: at the end); returns the
     /// bytes written. A fault partway through keeps what was written.
     pub fn write(&self, offset: u64, data: &dyn In, backing: &dyn Backing) -> Result<usize> {
+        let _writing = self.writing.lock();
+        let mut offset = offset;
+        let mut done = 0;
+        loop {
+            let (wrote, copied) = self.write_from(&mut offset, data, done, backing);
+            done += wrote;
+            let made = match copied {
+                Ok(Copied::All(total)) => return Ok(total),
+                Ok(Copied::Missing(left)) => data.fault_in(done, left.min(FAULT_IN_MAX)),
+                Err(err) => Err(err),
+            };
+            if let Err(err) = made {
+                return if done == 0 { Err(err) } else { Ok(done) };
+            }
+        }
+    }
+
+    /// [`FileCache::write`] under the lock, of `data` from `from` bytes on;
+    /// returns the bytes it wrote, with how far it got or what failed.
+    /// `offset` is where `data` starts in the file, [`APPEND`] until the
+    /// first call makes it the end.
+    fn write_from(
+        &self,
+        offset: &mut u64,
+        data: &dyn In,
+        from: usize,
+        backing: &dyn Backing,
+    ) -> (usize, Result<Copied>) {
         let mut state = self.state.lock();
-        let offset = if offset == APPEND { state.size } else { offset };
-        let len = data.len();
-        let end = offset.checked_add(len as u64).ok_or(Error::TooBig)?;
+        if *offset == APPEND {
+            *offset = state.size;
+        }
+        let len = data.len() - from;
+        let Some(start) = offset.checked_add(from as u64) else { return (0, Err(Error::TooBig)) };
+        let Some(end) = start.checked_add(len as u64) else { return (0, Err(Error::TooBig)) };
         if end > backing.max_size() {
-            return Err(Error::TooBig);
+            return (0, Err(Error::TooBig));
         }
         if len == 0 {
-            return Ok(0);
+            return (0, Ok(Copied::All(from)));
         }
         if end > state.size {
-            backing.reserve(end)?;
-            if offset > state.size {
+            if let Err(err) = backing.reserve(end) {
+                return (0, Err(err));
+            }
+            if start > state.size {
                 let size = state.size;
-                zero_gap(&mut state, size, offset, backing)?;
+                if let Err(err) = zero_gap(&mut state, size, start, backing) {
+                    return (0, Err(err));
+                }
             }
         }
         let mut done = 0;
-        let mut failed = None;
+        let mut stopped = None;
         while done < len {
-            let at = offset + done as u64;
+            let at = start + done as u64;
             let (index, within) = (at / PAGE, (at % PAGE) as usize);
             let n = (PAGE_SIZE - within).min(len - done);
+            let size = state.size;
             // A page written whole need not be read first.
-            let whole = within == 0 && (n == PAGE_SIZE || at + n as u64 >= state.size);
+            let whole = within == 0 && (n == PAGE_SIZE || at + n as u64 >= size);
+            let made = whole && state.pages.get(index).is_none();
             let slot = match load(&mut state, index, backing, true, !whole) {
                 Ok(Some(slot)) => slot,
                 Ok(None) => unreachable!("loading to write always makes a page"),
                 Err(err) => {
-                    failed = Some(err);
+                    stopped = Some(Err(err));
                     break;
                 }
             };
-            if let Err(err) = data.get(done, &mut slot.page.bytes_mut()[within..within + n]) {
-                failed = Some(err);
+            let bytes = &mut slot.page.bytes_mut()[within..within + n];
+            let copied = data.get_now(from + done, bytes);
+            if !matches!(copied, Ok(true)) {
+                if made {
+                    // A page made to be written whole holds none of the
+                    // file's bytes: it goes, and the file keeps its own.
+                    drop(state.pages.remove(index));
+                } else {
+                    // Some of the bytes may have been copied: those in
+                    // the file go to the disk with the page, and those
+                    // past its end are zeroed again, as all past it are.
+                    let inside = size.saturating_sub(at).min(n as u64) as usize;
+                    bytes[inside..].fill(0);
+                    if inside > 0 && !core::mem::replace(&mut slot.dirty, true) {
+                        state.dirty += 1;
+                    }
+                }
+                stopped = Some(copied.map(|_| Copied::Missing(len - done)));
                 break;
             }
             let was_dirty = core::mem::replace(&mut slot.dirty, true);
@@ -210,7 +312,7 @@ impl FileCache {
             }
             done += n;
         }
-        let new_end = offset + done as u64;
+        let new_end = start + done as u64;
         if new_end > state.size {
             state.size = new_end;
         }
@@ -222,14 +324,12 @@ impl FileCache {
             let size = state.size;
             let _ = backing.truncate(size);
         }
-        match failed {
-            Some(err) if done == 0 => Err(err),
-            _ => Ok(done),
-        }
+        (done, stopped.unwrap_or(Ok(Copied::All(from + done))))
     }
 
     /// Makes the file `size` bytes long: cut, or grown with zeros.
     pub fn set_size(&self, size: u64, backing: &dyn Backing) -> Result<()> {
+        let _writing = self.writing.lock();
         let mut state = self.state.lock();
         if size > backing.max_size() {
             return Err(Error::TooBig);
@@ -347,6 +447,21 @@ fn load<'s>(
         state.pages.insert(index, Slot { page, dirty: false }).map_err(|_| Error::NoMemory)?;
     }
     Ok(state.pages.get_mut(index))
+}
+
+/// Zeroes `len` bytes of `out` from `at`, without waiting for a page, as
+/// [`Out::put_now`] copies.
+fn zero_now(out: &mut dyn Out, at: usize, len: usize) -> Result<bool> {
+    let zeros = [0u8; 256];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(zeros.len());
+        if !out.put_now(at + done, &zeros[..n])? {
+            return Ok(false);
+        }
+        done += n;
+    }
+    Ok(true)
 }
 
 /// Makes the bytes from `from` to `to` read as zeros, as a file grows

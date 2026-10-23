@@ -98,8 +98,9 @@ _target/userspace/_).
 	Build the ports in _ports/_, software from elsewhere built for Radix,
 	each after the ports it needs: the C library (mlibc) and the
 	C++ headers it is built with, Rust's standard library, the C.UTF-8
-	locale, and Lua, mlibc's own tests and libc-test, which the *posix*
-	boot test runs. A port is built again only when something that went into
+	locale, the crates.io crates patched for Radix, uutils' core
+	utilities and findutils, and Lua, mlibc's own tests and libc-test,
+	which the *posix* boot test runs. A port is built again only when something that went into
 	its last build changed: its directory, the toolchain (and the pinned
 	Rust toolchain, for Rust's standard library) or a port it needs.
 	After Rust's standard library is built, its *libc* crate is checked
@@ -552,7 +553,10 @@ _recipe.toml_
 	*rust-src = true* for the _library_ directory of the pinned Rust
 	toolchain's *rust-src* component, with the crates it vendors; any
 	*extra* sources unpacked inside its tree, each with its own commit
-	and license; the ports it *depends* on; whether it belongs to the
+	and license; crates from crates.io unpacked inside it (*[[crate]]*:
+	name, version, the SHA-256 of the _.crate_ file that Cargo.lock
+	records too, license, and a *path* other than _<name>-<version>_);
+	the ports it *depends* on; whether it belongs to the
 	*toolchain*, so that what it installs is only used to build and
 	never reaches an image; the files of the sysroot it puts in the boot
 	archive (*image*, a path ending in _/_ meaning a whole directory);
@@ -571,8 +575,14 @@ _build.sh_
 	it into the sysroot, _out/sysroot_, or for a toolchain port into
 	_out/toolchain_. It runs with _out/toolchain/bin_ at the front of
 	*PATH* and gets in its environment the port's directory, source and
-	an empty build directory (*PORT_DIR*, *PORT_SRC*, *PORT_BUILD*),
-	*SYSROOT*, *TOOLCHAIN*, *PREFIX* (_/system_), *JOBS*, *HOST*
+	an empty build directory (*PORT_DIR*, *PORT_SRC*, *PORT_BUILD*), an
+	empty directory for what *ob* needs to know of the build
+	(*PORT_INFO*: _image_, more files of the sysroot for the image, one a
+	line, such as links and manual pages; and for a program in Rust,
+	_crates.txt_, the crates it links as *cargo tree -e
+	normal,no-proc-macro --prefix none --format '{p}|{l}'* lists them,
+	and its _Cargo.lock_), *SYSROOT*, *TOOLCHAIN*, Cargo for Radix
+	(*CARGO_RADIX*), *PREFIX* (_/system_), *JOBS*, *HOST*
 	(*x86_64-radix*), the toolchain's programs as *CC*, *AR*, *RANLIB*,
 	*NM*, *STRIP* and *OBJCOPY*, *CFLAGS*, the Meson cross files
 	(*CROSS_FILE*, *LIBC_CROSS_FILE*), *RUST_TARGET* (the target
@@ -582,7 +592,8 @@ _build.sh_
 	away.
 
 Sources are fetched with git once, by commit, into _target/ports/_, and
-checked to be that commit, so a build uses nothing the recipe does not
+checked to be that commit, and crates from crates.io once, checked
+against their SHA-256, so a build uses nothing the recipe does not
 name. Every port's license and notices go into the image's license
 manifest.
 
@@ -600,6 +611,15 @@ as every program in _/system_ is. With *-dynamic* it links a program
 that the dynamic linker, _/system/lib/ld.so_, starts on the shared C
 library, and with *-shared* a shared library, as a bundle that ships
 libraries of its own needs (ADR 0071).
+
+_bin/x86_64-radix-cargo_ is Cargo for programs on Rust's standard
+library for Radix (ADR 0080), used as *cargo* is: it builds for the
+*x86_64-unknown-radix* target against the rust-std port's sysroot,
+links with *x86_64-radix-cc*, and gives the program the crates the
+rust-crates port patched for Radix in place of crates.io's, each one
+the workspace's Cargo.lock names (all of them when there is no
+Cargo.lock yet). Cargo warns of a patch it then finds no use for, such
+as one for another version of a crate the lock names.
 
 After building Rust's standard library, *ob* checks its *libc* crate
 against the C library: the size and alignment of every structure and

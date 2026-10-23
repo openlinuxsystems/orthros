@@ -5,13 +5,15 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Supported hardware
 
-Dukovo 1.0 targets 64-bit x86 computers. Two systems are tested on every
+Dukovo 1.0 targets 64-bit x86 computers. Three systems are tested on every
 change or release:
 
 - **QEMU** (q35 machine, UEFI through OVMF and BIOS through SeaBIOS), in
   every CI run;
 - the **Dell Inspiron 15 5570**, the reference laptop, before every
-  release.
+  release;
+- the **Framework Desktop**, the reference desktop and bare-metal server
+  (ADR 0079), before every release once it is set up.
 
 ## Dell Inspiron 15 5570
 
@@ -145,3 +147,23 @@ lspci -nn | grep -i -E 'ethernet|network'
 ```
 
 and report the output in an issue on the repository.
+
+## Framework Desktop
+
+The second reference machine, from Framework's published specifications.
+The parts get confirmed with `lspci -nn` and `lsusb` from a Linux live
+USB when the machine is set up.
+
+| Component | Part | Dukovo support |
+| --- | --- | --- |
+| Processor | AMD Ryzen AI Max+ 395 (Zen 5, 16 cores, 32 threads) | SMP from Phase 1; AMD-Vi and machine checks in Phase 11 |
+| Memory | 128 GB LPDDR5x-8000, shared with the GPU | Frame allocator and kernel heap from Phase 2 |
+| Storage | Two M.2 NVMe PCIe 4.0 slots | NVMe driver and Btrfs RAID1 across both, Phase 10 |
+| Wired network | Realtek RTL8126 5 GbE | Phase 12 |
+| Platform | AMD FCH, SMU sensors, Framework embedded controller (open source) | Fans, LEDs, sensors and the watchdog, Phase 11 |
+| USB | Two USB4 Type-C, two USB-A 3.2 Gen 2 | xHCI in Phase 11; USB4 tunneling after 1.0 |
+| Graphics | Radeon 8060S (RDNA 3.5) | Firmware framebuffer console; GPU driver after 1.0 |
+| Audio | Realtek ALC623 | Screen-reader speech in 1.0; full audio after 1.0 |
+| Wi-Fi and Bluetooth | MediaTek MT7925 | After 1.0; needs closed firmware |
+| Firmware | Insyde UEFI, UEFI boot only | Turn Secure Boot off; boot the USB stick from the F12 menu |
+| Serial port | None | Screen, crash log, and later netlog and the xHCI debug console |

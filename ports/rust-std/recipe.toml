@@ -6,7 +6,9 @@
 # the x86_64-unknown-radix target (userspace/targets/) and built once
 # into a sysroot in out/toolchain that programs in Rust build against.
 # The libc crate's Radix module is checked against the C library's
-# headers as it is built.
+# headers as it is built. The libc crate is crates.io's 0.2.191, in place
+# of the 0.2.189 rust-src vendors, so that the standard library and the
+# crates programs use share one Radix module (ADR 0080).
 name = "rust-std"
 version = "1.101.0-nightly"
 summary = "Rust's standard library, for programs in Rust"
@@ -17,3 +19,10 @@ toolchain = true
 
 [source]
 rust-src = true
+
+[[crate]]
+name = "libc"
+version = "0.2.191"
+sha256 = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+license = "MIT OR Apache-2.0"
+path = "vendor/libc-0.2.191"

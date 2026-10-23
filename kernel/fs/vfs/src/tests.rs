@@ -18,7 +18,9 @@ use crate::mount::{Location, OpenFlags, Vfs};
 use crate::path::{self, Component};
 use crate::synthetic::{FixedDir, Generated, Null, SyntheticFs, Zero};
 use crate::tmpfs::Tmpfs;
-use crate::{APPEND, Error, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem};
+use crate::{
+    APPEND, Error, FileSystem, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem,
+};
 
 fn tmpfs(max: u64) -> FsRef {
     Tmpfs::new(max, u64::MAX).unwrap()
@@ -196,6 +198,137 @@ fn paths_stay_beneath_their_directory() {
     assert_eq!(vfs.stat(&home, "").unwrap().kind, Kind::Directory);
     // From the root, `..` inside the path is fine.
     assert_eq!(vfs.stat(&root, "home/user/../user/notes").unwrap().size, 2);
+}
+
+fn link_text(vfs: &Vfs, base: &Location, path: &str) -> Result<String> {
+    let mut out = [0u8; 64];
+    let n = vfs.read_link(base, path, &mut SliceMut(&mut out[..]))?;
+    Ok(String::from(core::str::from_utf8(&out[..n]).unwrap()))
+}
+
+#[test]
+fn symbolic_links_are_followed() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "a").unwrap();
+    vfs.make_directory(&root, "a/b").unwrap();
+    write(&vfs, &root, "a/b/file", b"data").unwrap();
+    // Relative targets go on from the link's directory.
+    vfs.make_link(&root, "rel", "a/b").unwrap();
+    vfs.make_link(&root, "a/up", "../a/b/file").unwrap();
+    assert_eq!(vfs.stat(&root, "rel/file").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "a/up").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "rel").unwrap().kind, Kind::Directory);
+    let link = vfs.stat_link(&root, "rel").unwrap();
+    assert_eq!((link.kind, link.size), (Kind::Symlink, 3));
+    assert_eq!(link_text(&vfs, &root, "rel").unwrap(), "a/b");
+    assert_eq!(link_text(&vfs, &root, "a/b/file").err(), Some(Error::NotLink));
+    assert!(names(&vfs, &root).contains(&(String::from("rel"), Kind::Symlink)));
+    // A `/` after the last name follows it.
+    assert_eq!(vfs.resolve_link(&root, "rel/").unwrap().node.kind(), Kind::Directory);
+    // Absolute targets start again from where the walk did.
+    vfs.make_link(&root, "abs", "/a/b/file").unwrap();
+    assert_eq!(read_all(&vfs.open(&root, "abs", OpenFlags::default()).unwrap().node), b"data");
+    let a = vfs.resolve(&root, "a").unwrap();
+    vfs.make_link(&a, "inside", "/b/file").unwrap();
+    assert_eq!(vfs.stat(&a, "inside").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "a/inside").err(), Some(Error::NotFound));
+    // `..` at the root is the root, as `/..` is `/`.
+    assert_eq!(vfs.stat(&root, "..").unwrap().kind, Kind::Directory);
+    assert_eq!(vfs.stat(&root, "../a/b/file").unwrap().size, 4);
+    assert_eq!(vfs.stat(&a, "..").err(), Some(Error::Outside));
+    // Not following the last name.
+    let no_follow = OpenFlags { no_follow: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "abs", no_follow).err(), Some(Error::Loop));
+    assert!(vfs.open(&root, "rel/file", no_follow).is_ok());
+    // Dangling links and loops.
+    vfs.make_link(&root, "dangling", "nowhere/x").unwrap();
+    assert_eq!(vfs.stat(&root, "dangling").err(), Some(Error::NotFound));
+    assert_eq!(vfs.stat_link(&root, "dangling").unwrap().kind, Kind::Symlink);
+    vfs.make_link(&root, "loop1", "loop2").unwrap();
+    vfs.make_link(&root, "loop2", "./loop1").unwrap();
+    assert_eq!(vfs.stat(&root, "loop1").err(), Some(Error::Loop));
+    assert_eq!(vfs.stat_link(&root, "loop1").unwrap().kind, Kind::Symlink);
+    // Where paths really lead.
+    let real = |base: &Location, path: &str| {
+        let mut out = [0u8; 64];
+        let n = vfs.real_path(base, path, &mut SliceMut(&mut out[..])).unwrap();
+        String::from(core::str::from_utf8(&out[..n]).unwrap())
+    };
+    assert_eq!(real(&root, "rel/file"), "a/b/file");
+    assert_eq!(real(&root, "a/up/"), "a/b/file");
+    assert_eq!(real(&root, "rel/.."), "a");
+    assert_eq!(real(&root, "abs/../../b/.."), "a");
+    assert_eq!(real(&root, ".."), ".");
+    assert_eq!(real(&a, "inside"), "b/file");
+    let mut short = [0u8; 3];
+    assert_eq!(vfs.real_path(&root, "rel", &mut SliceMut(&mut short[..])), Ok(3));
+    assert_eq!(&short, b"a/b");
+    let mut shorter = [0u8; 2];
+    assert_eq!(vfs.real_path(&root, "rel/file", &mut SliceMut(&mut shorter[..])), Ok(8));
+    assert_eq!(&shorter, b"a/");
+    // Making links.
+    assert_eq!(vfs.make_link(&root, "rel", "x").err(), Some(Error::Exists));
+    assert_eq!(vfs.make_link(&root, "empty", "").err(), Some(Error::BadName));
+    assert_eq!(vfs.make_link(&root, "a/b/file/x", "y").err(), Some(Error::NotDirectory));
+}
+
+#[test]
+fn at_most_forty_links_are_followed() {
+    let vfs = vfs();
+    let root = vfs.root();
+    write(&vfs, &root, "file", b"x").unwrap();
+    for i in 0..=crate::MAX_LINKS {
+        let next =
+            if i == crate::MAX_LINKS { String::from("file") } else { std::format!("l{}", i + 1) };
+        vfs.make_link(&root, &std::format!("l{i}"), &next).unwrap();
+    }
+    assert_eq!(vfs.stat(&root, "l1").unwrap().size, 1);
+    assert_eq!(vfs.stat(&root, "l0").err(), Some(Error::Loop));
+}
+
+#[test]
+fn files_are_made_and_names_changed_through_links() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "dir").unwrap();
+    // Creating through a link makes the file where it points.
+    vfs.make_link(&root, "new", "dir/made").unwrap();
+    write(&vfs, &root, "new", b"xy").unwrap();
+    assert_eq!(vfs.stat(&root, "dir/made").unwrap().size, 2);
+    assert_eq!(vfs.stat_link(&root, "new").unwrap().kind, Kind::Symlink);
+    let exclusive = OpenFlags { create: true, exclusive: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "new", exclusive).err(), Some(Error::Exists));
+    let no_follow = OpenFlags { create: true, no_follow: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "new", no_follow).err(), Some(Error::Loop));
+    // Renaming and removing take the link, not what it points to.
+    vfs.make_link(&root, "to_dir", "dir").unwrap();
+    vfs.rename(&root, "to_dir", &root, "dir2").unwrap();
+    assert_eq!(vfs.stat(&root, "dir2/made").unwrap().size, 2);
+    vfs.remove(&root, "dir2").unwrap();
+    assert_eq!(vfs.stat(&root, "dir").unwrap().kind, Kind::Directory);
+    assert_eq!(vfs.stat_link(&root, "dir2").err(), Some(Error::NotFound));
+    // A link replaces a file, but not a directory.
+    vfs.rename(&root, "new", &root, "dir/made").unwrap();
+    assert_eq!(vfs.stat_link(&root, "dir/made").unwrap().kind, Kind::Symlink);
+    vfs.make_link(&root, "other", "x").unwrap();
+    assert_eq!(vfs.rename(&root, "other", &root, "dir").err(), Some(Error::IsDirectory));
+}
+
+#[test]
+fn links_count_against_the_limits() {
+    let fs = Tmpfs::new(8, 3).unwrap();
+    let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
+    let root = vfs.root();
+    assert_eq!(vfs.make_link(&root, "long", "123456789").err(), Some(Error::NoSpace));
+    vfs.make_link(&root, "a", "1234").unwrap();
+    vfs.make_link(&root, "b", "5678").unwrap();
+    assert_eq!(fs.info().free_files, 0);
+    assert_eq!(vfs.make_link(&root, "c", "9").err(), Some(Error::NoSpace));
+    vfs.remove(&root, "a").unwrap();
+    vfs.remove(&root, "b").unwrap();
+    assert_eq!(fs.info().free_files, 2);
+    vfs.make_link(&root, "c", "12345678").unwrap();
 }
 
 #[test]
@@ -444,6 +577,7 @@ fn the_boot_archive_as_a_filesystem() {
     let mut writer = radix_bootfs::write::Writer::new();
     writer.directory("system", 0o755, 1).unwrap();
     writer.directory("system/bin", 0o755, 1).unwrap();
+    writer.symlink("system/bin/sh", "spark", 1).unwrap();
     writer.file("system/bin/spark", 0o755, 2, b"\x7fELF spark").unwrap();
     writer.directory("system/etc", 0o755, 1).unwrap();
     writer.file("system/etc/motd", 0o644, 3, b"hello\n").unwrap();
@@ -459,6 +593,14 @@ fn the_boot_archive_as_a_filesystem() {
         names(&vfs, &system),
         [(String::from("bin"), Kind::Directory), (String::from("etc"), Kind::Directory)]
     );
+    let bin = vfs.resolve(&root, "system/bin").unwrap();
+    assert_eq!(names(&vfs, &bin)[0], (String::from("sh"), Kind::Symlink));
+    let sh = vfs.open(&root, "system/bin/sh", OpenFlags::default()).unwrap();
+    assert_eq!(read_all(&sh.node), b"\x7fELF spark");
+    let link = vfs.stat_link(&root, "system/bin/sh").unwrap();
+    assert_eq!((link.kind, link.size), (Kind::Symlink, 5));
+    assert_eq!(link_text(&vfs, &root, "system/bin/sh").unwrap(), "spark");
+    assert_eq!(vfs.make_link(&root, "system/bin/ls", "x").err(), Some(Error::ReadOnly));
     assert_eq!(vfs.open(&root, "system/new", create()).err(), Some(Error::ReadOnly));
     assert_eq!(spark.node.write(0, &Slice(b"x")), Err(Error::ReadOnly));
     // Each file is one node, so a tmpfs mounts over a directory of it.
@@ -524,10 +666,92 @@ impl Backing for FakeDisk {
     }
 }
 
+/// Which pages of a program's buffer of `len` bytes are there, `skew`
+/// bytes into its first page: page `i` if bit `i % 64` of `mask` is set.
+fn pages_made(len: usize, skew: usize, mask: u64) -> Vec<bool> {
+    (0..(skew + len).div_ceil(4096).max(1)).map(|i| mask & (1 << (i % 64)) != 0).collect()
+}
+
+/// A buffer of a program's memory to write from, starting `skew` bytes
+/// into a page, whose missing pages a copy stops at, having copied what
+/// lay before, as a copy that faults partway does; `fault_in` makes them,
+/// unless the buffer is bad.
+struct LazyIn<'a> {
+    data: &'a [u8],
+    skew: usize,
+    made: std::cell::RefCell<Vec<bool>>,
+    bad: bool,
+}
+
+impl crate::In for LazyIn<'_> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn get(&self, _: usize, _: &mut [u8]) -> Result<()> {
+        panic!("a copy under the cache's lock waited for a page");
+    }
+
+    fn get_now(&self, at: usize, out: &mut [u8]) -> Result<bool> {
+        let made = self.made.borrow();
+        for (i, byte) in out.iter_mut().enumerate() {
+            if !made[(self.skew + at + i) / 4096] {
+                return Ok(false);
+            }
+            *byte = self.data[at + i];
+        }
+        Ok(true)
+    }
+
+    fn fault_in(&self, at: usize, len: usize) -> Result<()> {
+        if self.bad {
+            return Err(Error::BadAddress);
+        }
+        let (start, end) = (self.skew + at, self.skew + at + len);
+        self.made.borrow_mut()[start / 4096..end.div_ceil(4096)].fill(true);
+        Ok(())
+    }
+}
+
+/// [`LazyIn`] the other way: a buffer of a program's memory to read into.
+struct LazyOut {
+    bytes: Vec<u8>,
+    skew: usize,
+    made: Vec<bool>,
+}
+
+impl crate::Out for LazyOut {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn put(&mut self, _: usize, _: &[u8]) -> Result<()> {
+        panic!("a copy under the cache's lock waited for a page");
+    }
+
+    fn put_now(&mut self, at: usize, bytes: &[u8]) -> Result<bool> {
+        for (i, &byte) in bytes.iter().enumerate() {
+            if !self.made[(self.skew + at + i) / 4096] {
+                return Ok(false);
+            }
+            self.bytes[at + i] = byte;
+        }
+        Ok(true)
+    }
+
+    fn fault_in(&mut self, at: usize, len: usize) -> Result<()> {
+        let (start, end) = (self.skew + at, self.skew + at + len);
+        self.made[start / 4096..end.div_ceil(4096)].fill(true);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 enum FileOp {
-    Write(u64, Vec<u8>),
-    Read(u64, usize),
+    /// Data at an offset, from a buffer with the pages a mask says,
+    /// starting where in a page its low 12 bits say.
+    Write(u64, Vec<u8>, u64),
+    Read(u64, usize, u64),
     SetSize(u64),
     Sync,
     Shrink,
@@ -535,12 +759,13 @@ enum FileOp {
 
 proptest! {
     /// A file's cache over a disk whose unwritten blocks hold garbage
-    /// matches a plain vector, whatever is synced or dropped when.
+    /// matches a plain vector, whatever is synced or dropped when, and
+    /// whichever pages of the programs' buffers are not there yet.
     #[test]
     fn file_cache_matches_a_model(ops in proptest::collection::vec(prop_oneof![
-        4 => (0u64..40_000, proptest::collection::vec(any::<u8>(), 0..9000))
-            .prop_map(|(o, d)| FileOp::Write(o, d)),
-        3 => (0u64..45_000, 0usize..10_000).prop_map(|(o, l)| FileOp::Read(o, l)),
+        4 => (0u64..40_000, proptest::collection::vec(any::<u8>(), 0..9000), any::<u64>())
+            .prop_map(|(o, d, m)| FileOp::Write(o, d, m)),
+        3 => (0u64..45_000, 0usize..10_000, any::<u64>()).prop_map(|(o, l, m)| FileOp::Read(o, l, m)),
         2 => (0u64..45_000).prop_map(FileOp::SetSize),
         1 => Just(FileOp::Sync),
         1 => Just(FileOp::Shrink),
@@ -550,9 +775,12 @@ proptest! {
         let mut model: Vec<u8> = Vec::new();
         for op in ops {
             match op {
-                FileOp::Write(offset, data) => {
+                FileOp::Write(offset, data, mask) => {
                     let end = offset as usize + data.len();
-                    let result = cache.write(offset, &Slice(&data), &disk);
+                    let skew = (mask & 0xfff) as usize;
+                    let made = std::cell::RefCell::new(pages_made(data.len(), skew, mask >> 12));
+                    let buffer = LazyIn { data: &data, skew, made, bad: false };
+                    let result = cache.write(offset, &buffer, &disk);
                     if data.is_empty() {
                         prop_assert_eq!(result, Ok(0));
                     } else if end as u64 > disk.limit {
@@ -565,12 +793,14 @@ proptest! {
                         model[offset as usize..end].copy_from_slice(&data);
                     }
                 }
-                FileOp::Read(offset, len) => {
-                    let mut out = std::vec![0u8; len];
-                    let n = cache.read(offset, &mut SliceMut(&mut out[..]), &disk).unwrap();
+                FileOp::Read(offset, len, mask) => {
+                    let skew = (mask & 0xfff) as usize;
+                    let made = pages_made(len, skew, mask >> 12);
+                    let mut out = LazyOut { bytes: std::vec![0u8; len], skew, made };
+                    let n = cache.read(offset, &mut out, &disk).unwrap();
                     let start = (offset as usize).min(model.len());
                     let end = (offset as usize + len).min(model.len());
-                    prop_assert_eq!(&out[..n], &model[start..end]);
+                    prop_assert_eq!(&out.bytes[..n], &model[start..end]);
                 }
                 FileOp::SetSize(size) => {
                     let result = cache.set_size(size, &disk);
@@ -599,6 +829,80 @@ proptest! {
         let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
         prop_assert_eq!(n, model.len());
         prop_assert_eq!(out, model);
+    }
+}
+
+/// A write from a bad buffer, one whose pages cannot be made, keeps what
+/// it wrote before it, makes up none of the file's other bytes, cached or
+/// on the disk, and leaves zeros past the file's end.
+#[test]
+fn a_write_from_a_bad_buffer_makes_up_nothing() {
+    let disk = FakeDisk { limit: 1 << 20, ..FakeDisk::default() };
+    let cache = FileCache::new(0, 0);
+    let old: Vec<u8> = (0..3 * 4096 - 50).map(|i| (i % 251) as u8).collect();
+    assert_eq!(cache.write(0, &Slice(&old), &disk), Ok(old.len()));
+    cache.sync(&disk).unwrap();
+    cache.shrink(usize::MAX, &disk);
+    let bad = |skew, made: Vec<bool>, data| LazyIn {
+        data,
+        skew,
+        made: std::cell::RefCell::new(made),
+        bad: true,
+    };
+    // Whole pages over the file, the second not there: the first is
+    // written, and the second, not read from the disk, is not made up.
+    let new = std::vec![7u8; 2 * 4096 + 200];
+    assert_eq!(cache.write(0, &bad(0, std::vec![true, false, false], &new), &disk), Ok(4096));
+    // Over the file's end, from a buffer whose second page is not there:
+    // the copy stops 50 bytes in, past the end, and those bytes go.
+    let at = 2 * 4096 + 4000;
+    let result = cache.write(at, &bad(4096 - 50, std::vec![true, false, false], &new), &disk);
+    assert_eq!(result, Err(Error::BadAddress));
+    assert_eq!(cache.size(), old.len() as u64);
+    let mut expected = old.clone();
+    expected[..4096].fill(7);
+    // What the copy did get to inside the file is there.
+    expected[at as usize..].fill(7);
+    let mut out = std::vec![0u8; 4 * 4096];
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[..n], &expected[..]);
+    // Growing the file shows zeros past the old end, in the cache and on
+    // the disk.
+    cache.set_size(old.len() as u64 + 50, &disk).unwrap();
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+    cache.sync(&disk).unwrap();
+    cache.shrink(usize::MAX, &disk);
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[..old.len()], &expected[..]);
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+    // Without a disk the cache's pages are the file, so the bytes the copy
+    // left past the end are what growing it would show, unless zeroed.
+    let memory = Memory;
+    let cache = FileCache::new(0, 0);
+    assert_eq!(cache.write(0, &Slice(&old), &memory), Ok(old.len()));
+    let result = cache.write(at, &bad(4096 - 50, std::vec![true, false, false], &new), &memory);
+    assert_eq!(result, Err(Error::BadAddress));
+    cache.set_size(old.len() as u64 + 50, &memory).unwrap();
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &memory).unwrap();
+    assert_eq!(&out[..at as usize], &old[..at as usize]);
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+}
+
+/// A file with no disk below its cache, as tmpfs's are.
+struct Memory;
+
+impl Backing for Memory {
+    fn persistent(&self) -> bool {
+        false
+    }
+
+    fn reserve(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn truncate(&self, _: u64) -> Result<()> {
+        Ok(())
     }
 }
 

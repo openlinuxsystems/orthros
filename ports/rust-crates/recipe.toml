@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Crates from crates.io that programs in Rust need and that do not build
+# for Radix as they are (ADR 0080): each patched in patches/<crate>.patch
+# and installed into the toolchain, where Cargo for Radix gives programs
+# the patched crate in place of crates.io's. One version of each semver
+# line: a program's Cargo.lock names that version. The libc crate is the
+# rust-std port's.
+name = "rust-crates"
+version = "1"
+summary = "crates.io crates patched for Radix, for programs in Rust"
+license = "(MIT OR Apache-2.0) AND MIT AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)"
+homepage = "https://crates.io"
+depends = ["rust-std"]
+toolchain = true
+
+[[crate]]
+name = "errno"
+version = "0.3.14"
+sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+license = "MIT OR Apache-2.0"
+
+[[crate]]
+name = "getrandom"
+version = "0.2.17"
+sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+license = "MIT OR Apache-2.0"
+
+[[crate]]
+name = "getrandom"
+version = "0.4.3"
+sha256 = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+license = "MIT OR Apache-2.0"
+
+[[crate]]
+name = "mio"
+version = "1.2.4"
+sha256 = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+license = "MIT"
+
+[[crate]]
+name = "nix"
+version = "0.30.1"
+sha256 = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+license = "MIT"
+
+[[crate]]
+name = "nix"
+version = "0.31.3"
+sha256 = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+license = "MIT"
+
+[[crate]]
+name = "rustix"
+version = "1.1.5"
+sha256 = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+
+[[crate]]
+name = "uucore"
+version = "0.9.0"
+sha256 = "069b34217c27f611e1589f540f58118dbf226a9e407d38ab472052ff075a1dc2"
+license = "MIT"

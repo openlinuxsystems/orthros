@@ -31,7 +31,7 @@ pub struct BootFs {
     root: KArc<BootNode>,
 }
 
-/// A file or directory of the archive.
+/// A file, directory or symbolic link of the archive.
 pub struct BootNode {
     shared: Weak<Shared, Alloc>,
     /// Its entry; none for the root.
@@ -116,6 +116,14 @@ impl BootNode {
         self.entry.is_none_or(|e| e.kind == EntryKind::Directory)
     }
 
+    fn node_kind(&self) -> Kind {
+        match self.entry.map(|e| e.kind) {
+            None | Some(EntryKind::Directory) => Kind::Directory,
+            Some(EntryKind::File) => Kind::File,
+            Some(EntryKind::Symlink) => Kind::Symlink,
+        }
+    }
+
     /// The index of this node among the archive's, none for the root.
     fn index(&self) -> Option<usize> {
         self.entry.map(|_| self.id as usize - 2)
@@ -144,9 +152,10 @@ impl BootNode {
 
 impl Node for BootNode {
     fn stat(&self) -> Stat {
+        // A link's data is its target, and its size the target's length.
         let (kind, size, mtime) = match self.entry {
-            Some(e) if e.kind == EntryKind::File => (Kind::File, e.data.len() as u64, e.mtime),
-            Some(e) => (Kind::Directory, 0, e.mtime),
+            Some(e) if e.kind == EntryKind::Directory => (Kind::Directory, 0, e.mtime),
+            Some(e) => (self.node_kind(), e.data.len() as u64, e.mtime),
             None => (Kind::Directory, 0, 0),
         };
         let time = mtime.saturating_mul(1_000_000_000);
@@ -159,6 +168,10 @@ impl Node for BootNode {
             modified: time,
             accessed: time,
         }
+    }
+
+    fn kind(&self) -> Kind {
+        self.node_kind()
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
@@ -181,6 +194,21 @@ impl Node for BootNode {
         if self.is_dir() { Err(Error::ReadOnly) } else { Err(Error::NotDirectory) }
     }
 
+    fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
+        if self.is_dir() { Err(Error::ReadOnly) } else { Err(Error::NotDirectory) }
+    }
+
+    fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
+        match self.entry {
+            Some(e) if e.kind == EntryKind::Symlink => {
+                let room = out.len().min(e.data.len());
+                out.put(0, &e.data[..room])?;
+                Ok(e.data.len())
+            }
+            _ => Err(Error::NotLink),
+        }
+    }
+
     fn remove(&self, _name: &str) -> Result<()> {
         if self.is_dir() { Err(Error::ReadOnly) } else { Err(Error::NotDirectory) }
     }
@@ -193,14 +221,14 @@ impl Node for BootNode {
         let mut i = 0u64;
         self.children(|node| {
             i += 1;
-            let kind = if node.is_dir() { Kind::Directory } else { Kind::File };
-            i <= cursor || f(i, node.name(), kind)
+            i <= cursor || f(i, node.name(), node.node_kind())
         })
     }
 
     fn read(&self, offset: u64, out: &mut dyn Out) -> Result<usize> {
         match self.entry {
             Some(e) if e.kind == EntryKind::File => read_bytes(e.data, offset, out),
+            Some(e) if e.kind == EntryKind::Symlink => Err(Error::NotSupported),
             _ => Err(Error::IsDirectory),
         }
     }

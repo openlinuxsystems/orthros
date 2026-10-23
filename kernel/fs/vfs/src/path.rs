@@ -14,7 +14,10 @@
 //! Resolution (`mount::Vfs::resolve`) keeps the chain of directories it
 //! walked through, so `..` returns to the previous one and can never go
 //! above where the walk started: `a/../../b` is refused, wherever the
-//! directory is in the tree.
+//! directory is in the tree, but from the root `..` stays at the root,
+//! as `/..` is `/`. A symbolic link on the way puts its target in its
+//! place; a target that starts with `/` starts again from where the walk
+//! did, so links cannot lead out of a directory either.
 
 use crate::{Error, NAME_MAX, PATH_MAX, Result};
 
@@ -71,26 +74,44 @@ pub struct Components<'a> {
     rest: &'a str,
 }
 
+impl<'a> Components<'a> {
+    /// What follows the component last returned: the `/` after it and the
+    /// rest of the path, or nothing at the end.
+    pub fn rest(&self) -> &'a str {
+        self.rest
+    }
+
+    /// Whether the component last returned was the path's last: only
+    /// slashes, if anything, follow it.
+    pub fn at_end(&self) -> bool {
+        self.rest.bytes().all(|b| b == b'/')
+    }
+
+    /// Whether the component last returned was the last and a `/` follows
+    /// it, which makes a symbolic link there followed (POSIX.1-2024 XBD
+    /// 4.16) and a file there not a directory.
+    pub fn trailing_slash(&self) -> bool {
+        !self.rest.is_empty() && self.at_end()
+    }
+}
+
 impl<'a> Iterator for Components<'a> {
     type Item = Result<Component<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.rest.is_empty() {
-                return None;
-            }
-            let end = self.rest.bytes().position(|b| b == b'/').unwrap_or(self.rest.len());
-            // `/` is one byte of UTF-8, so both sides of it are text.
-            let (part, rest) = self.rest.split_at(end);
-            self.rest = rest.get(1..).unwrap_or("");
-            return Some(match part {
-                "" => continue,
-                "." => Ok(Component::Current),
-                ".." => Ok(Component::Parent),
-                name if name.len() > NAME_MAX => Err(Error::NameTooLong),
-                name => Ok(Component::Name(name)),
-            });
-        }
+        // `/` is one byte of UTF-8, so both sides of one are text.
+        let start = self.rest.bytes().position(|b| b != b'/')?;
+        let tail = &self.rest[start..];
+        let end = tail.bytes().position(|b| b == b'/').unwrap_or(tail.len());
+        let (part, rest) = tail.split_at(end);
+        // The `/` stays, so that `rest` shows a trailing one.
+        self.rest = rest;
+        Some(match part {
+            "." => Ok(Component::Current),
+            ".." => Ok(Component::Parent),
+            name if name.len() > NAME_MAX => Err(Error::NameTooLong),
+            name => Ok(Component::Name(name)),
+        })
     }
 }
 

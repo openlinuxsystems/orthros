@@ -68,7 +68,7 @@ pub fn check(ctx: &Ctx) -> Result<()> {
 fn tools(ctx: &Ctx) -> Result<PathBuf> {
     let dir = ctx.root.join(".cache/tla");
     let jar = dir.join(format!("tla2tools-{TLA_VERSION}.jar"));
-    if jar.exists() && sha256(ctx, &jar)? == TLA_SHA256 {
+    if jar.exists() && process::sha256(ctx, &jar)? == TLA_SHA256 {
         return Ok(jar);
     }
     let url = format!(
@@ -80,7 +80,7 @@ fn tools(ctx: &Ctx) -> Result<PathBuf> {
     let mut cmd = Command::new("curl");
     cmd.args(["--proto", "=https", "--tlsv1.2", "-fsSL", "-o"]).arg(&partial).arg(&url);
     process::run(ctx, &mut cmd)?;
-    let sum = sha256(ctx, &partial)?;
+    let sum = process::sha256(ctx, &partial)?;
     if sum != TLA_SHA256 {
         let _ = fs::remove_file(&partial);
         return Err(Error::new(format!(
@@ -89,12 +89,6 @@ fn tools(ctx: &Ctx) -> Result<PathBuf> {
     }
     fs::rename(&partial, &jar).context(|| format!("cannot move it to {}", jar.display()))?;
     Ok(jar)
-}
-
-fn sha256(ctx: &Ctx, path: &Path) -> Result<String> {
-    let out = process::output(ctx, Command::new("sha256sum").arg(path))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text.split_whitespace().next().unwrap_or_default().to_string())
 }
 
 #[cfg(test)]

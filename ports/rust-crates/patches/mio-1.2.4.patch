@@ -1,0 +1,116 @@
+SPDX-FileCopyrightText: Carl Lerche and the mio contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+mio waits with poll(2) on Radix and wakes a poll through a pipe, as on
+the Hurd: Radix has no epoll or kqueue. Its socket addresses are Linux's,
+without the Hurd's length fields.
+
+diff --git a/mio-1.2.4/src/poll.rs b/mio-1.2.4/src/poll.rs
+index 7dc0237..50abc77 100644
+--- a/mio-1.2.4/src/poll.rs
++++ b/mio-1.2.4/src/poll.rs
+@@ -9,6 +9,7 @@
+         target_os = "haiku",
+         target_os = "hermit",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "vita",
+         target_os = "cygwin",
+@@ -451,6 +452,7 @@ impl Poll {
+         target_os = "haiku",
+         target_os = "hermit",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "vita",
+         target_os = "cygwin",
+@@ -755,6 +757,7 @@ impl fmt::Debug for Registry {
+         target_os = "fuchsia",
+         target_os = "hermit",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "vita",
+         target_os = "cygwin",
+@@ -778,6 +781,7 @@ impl AsFd for Registry {
+         target_os = "fuchsia",
+         target_os = "hermit",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "vita",
+         target_os = "cygwin",
+@@ -800,6 +804,7 @@ cfg_os_poll! {
+             target_os = "nuttx",
+             target_os = "hermit",
+             target_os = "hurd",
++            target_os = "radix",
+             target_os = "nto",
+             target_os = "vita",
+             target_os = "cygwin",
+diff --git a/mio-1.2.4/src/sys/unix/mod.rs b/mio-1.2.4/src/sys/unix/mod.rs
+index c7d66e0..0843e31 100644
+--- a/mio-1.2.4/src/sys/unix/mod.rs
++++ b/mio-1.2.4/src/sys/unix/mod.rs
+@@ -51,6 +51,7 @@ cfg_os_poll! {
+         target_os = "haiku",
+         target_os = "hermit",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "vita",
+         target_os = "cygwin",
+@@ -109,6 +110,7 @@ cfg_os_poll! {
+         target_os = "aix",
+         target_os = "haiku",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "nto",
+         target_os = "redox",
+         all(mio_unsupported_force_poll_poll, target_os = "solaris"),
+@@ -160,6 +162,7 @@ cfg_os_poll! {
+             target_os = "dragonfly",
+             target_os = "haiku",
+             target_os = "hurd",
++            target_os = "radix",
+             target_os = "netbsd",
+             target_os = "nto",
+             target_os = "openbsd",
+diff --git a/mio-1.2.4/src/sys/unix/net.rs b/mio-1.2.4/src/sys/unix/net.rs
+index 9e4d890..f356672 100644
+--- a/mio-1.2.4/src/sys/unix/net.rs
++++ b/mio-1.2.4/src/sys/unix/net.rs
+@@ -18,6 +18,7 @@ pub(crate) fn new_socket(domain: libc::c_int, socket_type: libc::c_int) -> io::R
+         target_os = "dragonfly",
+         target_os = "freebsd",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "illumos",
+         target_os = "linux",
+         target_os = "netbsd",
+diff --git a/mio-1.2.4/src/sys/unix/pipe.rs b/mio-1.2.4/src/sys/unix/pipe.rs
+index 52953a3..18adf09 100644
+--- a/mio-1.2.4/src/sys/unix/pipe.rs
++++ b/mio-1.2.4/src/sys/unix/pipe.rs
+@@ -15,6 +15,7 @@ pub(crate) fn new_raw() -> io::Result<[RawFd; 2]> {
+         target_os = "freebsd",
+         target_os = "fuchsia",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "linux",
+         target_os = "netbsd",
+         target_os = "openbsd",
+diff --git a/mio-1.2.4/src/sys/unix/tcp.rs b/mio-1.2.4/src/sys/unix/tcp.rs
+index 5b9f078..71f8829 100644
+--- a/mio-1.2.4/src/sys/unix/tcp.rs
++++ b/mio-1.2.4/src/sys/unix/tcp.rs
+@@ -68,6 +68,7 @@ pub(crate) fn accept(listener: &net::TcpListener) -> io::Result<(net::TcpStream,
+         target_os = "freebsd",
+         target_os = "fuchsia",
+         target_os = "hurd",
++        target_os = "radix",
+         target_os = "illumos",
+         target_os = "linux",
+         target_os = "netbsd",

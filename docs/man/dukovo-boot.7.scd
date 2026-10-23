@@ -236,8 +236,9 @@ Before it allocates anything the kernel sets aside, and lists at boot: the
 first MiB (firmware data and the page that starts the other CPUs), the
 kernel image, the boot information, boot modules, and the 1 MiB crash log.
 The crash log goes at the first 2 MiB boundary above 4 GiB where there is
-RAM, or else at 64 MiB, so it is in the same place on every boot of the
-same machine; see *radix-debug*(7). Until the frame allocator starts, a
+RAM, or else at the first one from 64 MiB, clear of the kernel image and
+the modules, so it is in the same place on every boot of the same machine;
+see *radix-debug*(7). Until the frame allocator starts, a
 simple allocator hands out frames for page tables and stacks; those stay
 allocated, and the rest of RAM goes to the frame allocator.
 

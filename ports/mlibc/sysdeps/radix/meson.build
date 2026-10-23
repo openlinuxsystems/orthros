@@ -26,6 +26,9 @@ radix_sources = files(
 rtld_dso_sources += radix_sources
 
 libc_sources += radix_sources + files(
+	# The Linux option's getrandom, which needs nothing of Linux's
+	# (patch 0023).
+	'../../options/linux/generic/sys-random.cpp',
 	'generic/entry.cpp',
 	'generic/poll.cpp',
 	'generic/process.cpp',
@@ -103,6 +106,14 @@ if not no_headers
 		'include/abi-bits/wait.h',
 		'include/abi-bits/xattr.h',
 		subdir: 'abi-bits',
+		follow_symlinks: true,
+	)
+	# Headers of the Linux option that other systems have too: build.sh
+	# links them to it.
+	install_headers(
+		'include/sys/random.h',
+		'include/sys/sysmacros.h',
+		subdir: 'sys',
 		follow_symlinks: true,
 	)
 	install_headers(

@@ -1,0 +1,19 @@
+SPDX-FileCopyrightText: The errno crate authors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+The errno crate finds errno through __errno_location on Radix, as on
+Linux: mlibc names it so.
+
+diff --git a/errno-0.3.14/src/unix.rs b/errno-0.3.14/src/unix.rs
+index 5536eef..2c3e61c 100644
+--- a/errno-0.3.14/src/unix.rs
++++ b/errno-0.3.14/src/unix.rs
+@@ -93,6 +93,7 @@ extern "C" {
+             target_os = "linux",
+             target_os = "hurd",
+             target_os = "redox",
++            target_os = "radix",
+             target_os = "dragonfly",
+             target_os = "emscripten",
+         ),

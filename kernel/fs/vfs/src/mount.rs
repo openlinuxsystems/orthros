@@ -33,7 +33,7 @@ use radix_sync::Mutex;
 
 use crate::mem::{self, KArc, KVec};
 use crate::path::{self, Component};
-use crate::{Error, FsRef, Kind, ListFn, NodeRef, Result, Stat, address};
+use crate::{Error, FsRef, Kind, ListFn, MAX_LINKS, NodeRef, PATH_MAX, Result, Stat, address};
 
 /// A filesystem mounted on a directory.
 pub struct Mount {
@@ -146,6 +146,9 @@ pub struct OpenFlags {
     pub truncate: bool,
     /// Fail unless it is a directory.
     pub directory: bool,
+    /// Fail with [`Error::Loop`] if the last name is a symbolic link,
+    /// rather than follow it.
+    pub no_follow: bool,
 }
 
 /// The tree of mounted filesystems.
@@ -154,8 +157,9 @@ pub struct Vfs {
     mounts: Mutex<KVec<MountRef>>,
 }
 
-/// One step of a resolution: where it is, and the name that led there.
-type Step<'p> = (Location, &'p str);
+/// One step of a resolution: where it is, and where in the walk's names
+/// is the name that led there.
+type Step = (Location, core::ops::Range<usize>);
 
 impl Vfs {
     /// A tree whose root is `fs`'s root, mounted from `source`.
@@ -214,52 +218,116 @@ impl Vfs {
         self.mounted_root(&at.mount, &at.node).unwrap_or(at)
     }
 
-    /// Walks `path` from `base`, calling `f` with the chain of steps.
-    fn walk<'p, T>(
+    /// Walks `path` from `base`, calling `f` with the chain of steps: the
+    /// places it passed, each with the name that led there. A symbolic
+    /// link on the way is followed, as is one that is the last name when
+    /// `follow` is set or a `/` follows it: the path goes on from the
+    /// link's directory with the link's target in its place, or, for a
+    /// target that starts with `/`, from `base`, as if `base` were the
+    /// root. At most [`MAX_LINKS`] are followed. `..` steps back along the
+    /// chain; at `base` it stays there when `base` is the tree's root, as
+    /// `/..` is `/`, and is refused anywhere else.
+    fn walk<T>(
         &self,
         base: &Location,
-        path: &'p str,
-        f: impl FnOnce(&[Step<'p>]) -> Result<T>,
+        path: &str,
+        follow: bool,
+        f: impl FnOnce(&[Step], &[u8]) -> Result<T>,
     ) -> Result<T> {
-        let mut chain: KVec<Step<'p>> = mem::vec_with_capacity(8)?;
-        mem::push(&mut chain, (base.clone(), ""))?;
-        for component in path::components(path) {
-            match component? {
-                Component::Current => {}
-                Component::Parent => {
-                    if chain.len() == 1 {
-                        return Err(Error::Outside);
+        let mut chain: KVec<Step> = mem::vec_with_capacity(8)?;
+        let mut names: KVec<u8> = mem::vec();
+        mem::push(&mut chain, (base.clone(), 0..0))?;
+        let at_root = base.same(&self.root);
+        // The path left to walk, once a link has replaced what was walked.
+        let mut owned: Option<KVec<u8>> = None;
+        let mut links = 0;
+        'walk: loop {
+            let text = match &owned {
+                // Built from the path and links' targets, which are text.
+                Some(bytes) => core::str::from_utf8(bytes).map_err(|_| Error::BadName)?,
+                None => path,
+            };
+            let mut components = path::components(text);
+            while let Some(component) = components.next() {
+                match component? {
+                    Component::Current => {}
+                    Component::Parent if chain.len() == 1 && at_root => {}
+                    Component::Parent if chain.len() == 1 => return Err(Error::Outside),
+                    Component::Parent => {
+                        if let Some((_, name)) = chain.pop() {
+                            names.truncate(name.start);
+                        }
                     }
-                    chain.pop();
-                }
-                Component::Name(name) => {
-                    let Some((here, _)) = chain.last() else { return Err(Error::Outside) };
-                    let node = here.node.lookup(name)?;
-                    let next = self.cross(Location { mount: here.mount.clone(), node });
-                    mem::push(&mut chain, (next, name))?;
+                    Component::Name(name) => {
+                        let Some((here, _)) = chain.last() else { return Err(Error::Outside) };
+                        let node = here.node.lookup(name)?;
+                        let last = components.at_end();
+                        if node.kind() == Kind::Symlink
+                            && (!last || follow || components.trailing_slash())
+                        {
+                            links += 1;
+                            if links > MAX_LINKS {
+                                return Err(Error::Loop);
+                            }
+                            let target = crate::link_target(&*node)?;
+                            let rest = components.rest().as_bytes();
+                            if target.len() + rest.len() > PATH_MAX {
+                                return Err(Error::NameTooLong);
+                            }
+                            let mut next = mem::vec_with_capacity(target.len() + rest.len())?;
+                            mem::extend(&mut next, &target)?;
+                            mem::extend(&mut next, rest)?;
+                            if target.first() == Some(&b'/') {
+                                chain.truncate(1);
+                                names.clear();
+                            }
+                            owned = Some(next);
+                            continue 'walk;
+                        }
+                        let next = self.cross(Location { mount: here.mount.clone(), node });
+                        let start = names.len();
+                        mem::extend(&mut names, name.as_bytes())?;
+                        mem::push(&mut chain, (next, start..names.len()))?;
+                    }
                 }
             }
+            return f(&chain, &names);
         }
-        f(&chain)
     }
 
-    /// Where `path` leads from `base`.
+    /// Where `path` leads from `base`, following symbolic links ([`walk`]).
+    ///
+    /// [`walk`]: Vfs::walk
     pub fn resolve(&self, base: &Location, path: &str) -> Result<Location> {
+        self.resolve_as(base, path, true)
+    }
+
+    /// Where `path` leads from `base`, following symbolic links but for
+    /// one that is its last name (unless a `/` follows it): what `lstat`
+    /// and `readlink` look at.
+    pub fn resolve_link(&self, base: &Location, path: &str) -> Result<Location> {
+        self.resolve_as(base, path, false)
+    }
+
+    fn resolve_as(&self, base: &Location, path: &str, follow: bool) -> Result<Location> {
         // Where the walk is, when it has left `base`: a name moves the
         // node on, and a mount there the mount too.
         let mut mount: Option<MountRef> = None;
         let mut node: Option<NodeRef> = None;
-        for component in path::components(path) {
+        let mut components = path::components(path);
+        while let Some(component) = components.next() {
             match component? {
                 Component::Current => {}
-                // Only `..` needs the chain, to step back along.
-                Component::Parent => {
-                    return self.walk(base, path, |chain| {
-                        chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)
-                    });
-                }
+                // Only `..` and symbolic links need the chain: `..` to
+                // step back along, and a link to start again from.
+                Component::Parent => return self.walk_to_end(base, path, follow),
                 Component::Name(name) => {
                     let found = node.as_ref().unwrap_or(&base.node).lookup(name)?;
+                    if found.kind() == Kind::Symlink
+                        && (!components.at_end() || follow || components.trailing_slash())
+                    {
+                        return self.walk_to_end(base, path, follow);
+                    }
                     match self.mounted_root(mount.as_ref().unwrap_or(&base.mount), &found) {
                         Some(top) => {
                             mount = Some(top.mount);
@@ -273,6 +341,13 @@ impl Vfs {
         Ok(Location {
             mount: mount.unwrap_or_else(|| base.mount.clone()),
             node: node.unwrap_or_else(|| base.node.clone()),
+        })
+    }
+
+    /// Where the walk of `path` from `base` ends.
+    fn walk_to_end(&self, base: &Location, path: &str, follow: bool) -> Result<Location> {
+        self.walk(base, path, follow, |chain, _| {
+            chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)
         })
     }
 
@@ -290,24 +365,48 @@ impl Vfs {
         Ok((at, name))
     }
 
-    /// Opens `path` beneath `base`.
+    /// Opens `path` beneath `base`, following symbolic links unless
+    /// `flags.no_follow` says not to follow one that is the last name. A
+    /// file made through a symbolic link is made where the link points,
+    /// as POSIX has it.
     pub fn open(&self, base: &Location, path: &str, flags: OpenFlags) -> Result<Location> {
         let at = if flags.create {
-            let (dir, name) = self.resolve_parent(base, path)?;
-            match dir.node.lookup(name) {
-                Ok(_) if flags.exclusive => return Err(Error::Exists),
-                Ok(node) => self.cross(Location { mount: dir.mount.clone(), node }),
-                Err(Error::NotFound) => {
-                    dir.writable()?;
-                    let node = dir.node.create(name, Kind::File)?;
-                    Location { mount: dir.mount.clone(), node }
+            // The path again with the link's target for its last name,
+            // once a link stood there.
+            let mut owned: Option<KVec<u8>> = None;
+            let mut links = 0;
+            loop {
+                let text = match &owned {
+                    Some(bytes) => core::str::from_utf8(bytes).map_err(|_| Error::BadName)?,
+                    None => path,
+                };
+                let (dir, name) = self.resolve_parent(base, text)?;
+                match dir.node.lookup(name) {
+                    Ok(_) if flags.exclusive => return Err(Error::Exists),
+                    Ok(node) if node.kind() == Kind::Symlink => {
+                        links += 1;
+                        if flags.no_follow || links > MAX_LINKS {
+                            return Err(Error::Loop);
+                        }
+                        let target = crate::link_target(&*node)?;
+                        owned = Some(replace_last(text, &target)?);
+                    }
+                    Ok(node) => break self.cross(Location { mount: dir.mount.clone(), node }),
+                    Err(Error::NotFound) => {
+                        dir.writable()?;
+                        let node = dir.node.create(name, Kind::File)?;
+                        break Location { mount: dir.mount.clone(), node };
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
             }
         } else {
-            self.resolve(base, path)?
+            self.resolve_as(base, path, !flags.no_follow)?
         };
         let kind = at.node.kind();
+        if kind == Kind::Symlink {
+            return Err(Error::Loop);
+        }
         if flags.directory && kind != Kind::Directory {
             return Err(Error::NotDirectory);
         }
@@ -317,6 +416,66 @@ impl Vfs {
         }
         let node = at.node.open(&at.node)?;
         Ok(Location { mount: at.mount, node })
+    }
+
+    /// Makes a symbolic link `path` beneath `base` that points to
+    /// `target`: any text of at most [`PATH_MAX`] bytes but the empty one,
+    /// which is not looked at until the link is followed.
+    pub fn make_link(&self, base: &Location, path: &str, target: &str) -> Result<()> {
+        if target.is_empty() || target.contains('\0') {
+            return Err(Error::BadName);
+        }
+        if target.len() > PATH_MAX {
+            return Err(Error::NameTooLong);
+        }
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.node.make_link(name, target).map(drop)
+    }
+
+    /// Reads where the symbolic link `path` beneath `base` points into
+    /// `out`; returns the target's length, more than `out` holds when it
+    /// was cut short.
+    pub fn read_link(
+        &self,
+        base: &Location,
+        path: &str,
+        out: &mut dyn crate::Out,
+    ) -> Result<usize> {
+        self.resolve_link(base, path)?.node.read_link(out)
+    }
+
+    /// Writes where `path` beneath `base` leads into `out`: the names
+    /// from `base` that the walk took, every symbolic link followed and
+    /// `.` and `..` worked out, joined by `/` (`.` for `base` itself), as
+    /// realpath(3) wants. Returns its length, which is more than `out`
+    /// holds if it was cut short.
+    pub fn real_path(
+        &self,
+        base: &Location,
+        path: &str,
+        out: &mut dyn crate::Out,
+    ) -> Result<usize> {
+        self.walk(base, path, true, |chain, names| {
+            let steps = &chain[1..];
+            if steps.is_empty() {
+                put_within(out, 0, b".")?;
+                return Ok(1);
+            }
+            let mut len = 0;
+            for (i, (_, name)) in steps.iter().enumerate() {
+                if i > 0 {
+                    put_within(out, len, b"/")?;
+                    len += 1;
+                }
+                put_within(out, len, &names[name.clone()])?;
+                len += name.len();
+            }
+            Ok(len)
+        })
     }
 
     /// Makes the directory `path` beneath `base`.
@@ -363,6 +522,12 @@ impl Vfs {
         Ok(self.resolve(base, path)?.node.stat())
     }
 
+    /// What `path` beneath `base` is, the link itself if it is a symbolic
+    /// link.
+    pub fn stat_link(&self, base: &Location, path: &str) -> Result<Stat> {
+        Ok(self.resolve_link(base, path)?.node.stat())
+    }
+
     /// Lists the directory at `at` from `cursor`.
     pub fn list(&self, at: &Location, cursor: u64, f: ListFn<'_>) -> Result<()> {
         at.node.list(cursor, f)
@@ -377,7 +542,7 @@ impl Vfs {
         source: &str,
         read_only: bool,
     ) -> Result<MountRef> {
-        let (at, where_) = self.walk(base, path, |chain| {
+        let (at, where_) = self.walk(base, path, true, |chain, names| {
             let at = chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)?;
             let mut where_ = mem::vec();
             prefix_of(base, &mut where_)?;
@@ -385,9 +550,7 @@ impl Vfs {
                 if !where_.is_empty() {
                     mem::push(&mut where_, b'/')?;
                 }
-                for &byte in name.as_bytes() {
-                    mem::push(&mut where_, byte)?;
-                }
+                mem::extend(&mut where_, &names[name.clone()])?;
             }
             Ok((at, where_))
         })?;
@@ -549,6 +712,29 @@ impl Vfs {
         }
         Ok(out)
     }
+}
+
+/// Puts what of `bytes` fits in `out` at `at`.
+fn put_within(out: &mut dyn crate::Out, at: usize, bytes: &[u8]) -> Result<()> {
+    let room = out.len().saturating_sub(at).min(bytes.len());
+    if room > 0 { out.put(at, &bytes[..room]) } else { Ok(()) }
+}
+
+/// `path` with its last name replaced by `target`, the target of the
+/// symbolic link that name is: the directory's path and the target, or
+/// the target alone when it starts with `/`.
+fn replace_last(path: &str, target: &[u8]) -> Result<KVec<u8>> {
+    let dir = match path.trim_end_matches('/').rfind('/') {
+        Some(at) if target.first() != Some(&b'/') => &path[..=at],
+        _ => "",
+    };
+    if dir.len() + target.len() > PATH_MAX {
+        return Err(Error::NameTooLong);
+    }
+    let mut out = mem::vec_with_capacity(dir.len() + target.len())?;
+    mem::extend(&mut out, dir.as_bytes())?;
+    mem::extend(&mut out, target)?;
+    Ok(out)
 }
 
 /// Sets `mount`'s filter of mount points from the table, `mounts`, after

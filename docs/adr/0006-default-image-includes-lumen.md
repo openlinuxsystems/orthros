@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0006. The default image is the full 4 GiB image with Lumen
 
-- Status: Accepted
+- Status: Superseded by [0078](0078-server-first-release.md)
 - Date: 2026-10-20
 
 ## Context

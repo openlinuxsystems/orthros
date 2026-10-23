@@ -14,7 +14,7 @@ A shell needs a terminal: a device that edits a line before the program
 reads it, echoes, turns Ctrl-C and Ctrl-Z into signals for the
 foreground job, stops background jobs that read it, and hangs up when
 it goes. Phase 9 brings Nukesh and `consoled` with virtual terminals,
-and Phase 16 a graphical terminal; all of them need the same terminal
+and Phase 17 a graphical terminal; all of them need the same terminal
 underneath. The signals a terminal sends must reach a process group the
 moment a key is typed, and the rules that decide who may read and write
 span sessions, so the terminal has to be where the process tree is.

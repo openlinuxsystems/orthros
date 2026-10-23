@@ -1,0 +1,1092 @@
+SPDX-FileCopyrightText: The nix-rust Project Developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+nix 0.30 on Radix, for crates that have not moved to 0.31 (argmax, which
+findutils' xargs uses): the changes of nix-0.31.3.patch, on 0.30.1's code.
+
+diff --git a/nix-0.30.1/build.rs b/nix-0.30.1/build.rs
+index eb27943..c348db0 100644
+--- a/nix-0.30.1/build.rs
++++ b/nix-0.30.1/build.rs
+@@ -15,6 +15,7 @@ fn main() {
+         watchos: { target_os = "watchos" },
+         tvos: { target_os = "tvos" },
+         visionos: { target_os = "visionos" },
++        radix: { target_os = "radix" },
+ 
+ 
+         // cfg aliases we would like to use
+@@ -32,4 +33,6 @@ fn main() {
+     println!("cargo:rustc-check-cfg=cfg(qemu)");
+     // Cygwin target, added in 1.86
+     println!("cargo:rustc-check-cfg=cfg(target_os, values(\"cygwin\"))");
++    // Radix, the kernel of Dukovo, whose C library is mlibc.
++    println!("cargo:rustc-check-cfg=cfg(target_os, values(\"radix\"))");
+ }
+diff --git a/nix-0.30.1/src/dir.rs b/nix-0.30.1/src/dir.rs
+index b514212..3332f90 100644
+--- a/nix-0.30.1/src/dir.rs
++++ b/nix-0.30.1/src/dir.rs
+@@ -290,6 +290,7 @@ impl Entry {
+                          target_os = "cygwin",
+                          solarish,
+                          linux_android,
++                         target_os = "radix",
+                          apple_targets))] {
+                 self.0.d_ino as u64
+             } else {
+diff --git a/nix-0.30.1/src/errno.rs b/nix-0.30.1/src/errno.rs
+index 497e33d..cd55676 100644
+--- a/nix-0.30.1/src/errno.rs
++++ b/nix-0.30.1/src/errno.rs
+@@ -29,6 +29,7 @@ cfg_if! {
+             unsafe { libc::__errno() }
+         }
+     } else if #[cfg(any(target_os = "linux",
++                        target_os = "radix",
+                         target_os = "redox",
+                         target_os = "dragonfly",
+                         target_os = "fuchsia",
+@@ -276,6 +277,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -286,6 +288,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -296,6 +299,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -306,6 +310,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -316,6 +321,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -326,6 +332,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -336,6 +343,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -346,6 +354,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -356,6 +365,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -365,6 +375,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -374,6 +385,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -383,6 +395,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -392,6 +405,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -401,6 +415,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -410,6 +425,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -419,6 +435,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -429,6 +446,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -439,6 +457,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -449,6 +468,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -459,6 +479,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -468,6 +489,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -477,6 +499,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -487,6 +510,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -496,6 +520,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -505,6 +530,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -514,6 +540,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -523,6 +550,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -533,6 +561,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -542,6 +571,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+             target_os = "cygwin",
+@@ -550,6 +580,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "aix",
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -562,6 +593,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "aix",
+             target_os = "fuchsia",
+             target_os = "haiku",
+@@ -573,6 +605,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -582,6 +615,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -591,6 +625,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -600,6 +635,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -609,6 +645,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -618,6 +655,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -627,6 +665,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -636,6 +675,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -646,6 +686,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -657,6 +698,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "aix",
+             target_os = "fuchsia",
+@@ -666,6 +708,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -675,6 +718,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -684,6 +728,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "netbsd",
+             target_os = "redox",
+@@ -694,6 +739,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "hurd",
+             target_os = "emscripten",
+@@ -703,6 +749,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -710,6 +757,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -717,6 +765,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -724,6 +773,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -731,6 +781,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -738,6 +789,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+             target_os = "cygwin",
+@@ -746,6 +798,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "openbsd",
+             target_os = "dragonfly",
+@@ -756,6 +809,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "openbsd",
+             target_os = "emscripten",
+@@ -764,6 +818,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             solarish,
+             target_os = "fuchsia",
+             target_os = "haiku",
+@@ -774,6 +829,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -781,6 +837,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -788,6 +845,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -795,6 +853,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -802,6 +861,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "aix",
+             target_os = "fuchsia",
+             target_os = "hurd",
+@@ -815,6 +875,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             linux_android,
++            radix,
+             target_os = "aix",
+             target_os = "fuchsia",
+             target_os = "emscripten",
+@@ -827,6 +888,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             all(target_os = "linux", not(target_arch = "mips")),
++            target_os = "radix",
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -834,6 +896,7 @@ fn desc(errno: Errno) -> &'static str {
+ 
+         #[cfg(any(
+             all(target_os = "linux", not(target_arch = "mips")),
++            target_os = "radix",
+             target_os = "fuchsia",
+             target_os = "emscripten",
+         ))]
+@@ -1087,7 +1150,7 @@ fn desc(errno: Errno) -> &'static str {
+     }
+ }
+ 
+-#[cfg(any(linux_android, target_os = "fuchsia", target_os = "emscripten"))]
++#[cfg(any(linux_android, radix, target_os = "fuchsia", target_os = "emscripten"))]
+ mod consts {
+     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+     #[repr(i32)]
+diff --git a/nix-0.30.1/src/features.rs b/nix-0.30.1/src/features.rs
+index b472f80..166b505 100644
+--- a/nix-0.30.1/src/features.rs
++++ b/nix-0.30.1/src/features.rs
+@@ -103,6 +103,7 @@ mod os {
+         target_os = "hurd",         // Since glibc 2.28
+         target_os = "illumos",      // Since ???
+         target_os = "redox",        // Since 1-july-2020
++        target_os = "radix",
+         target_os = "cygwin",
+ ))]
+ mod os {
+diff --git a/nix-0.30.1/src/sys/ioctl/mod.rs b/nix-0.30.1/src/sys/ioctl/mod.rs
+index aab4819..8b6e694 100644
+--- a/nix-0.30.1/src/sys/ioctl/mod.rs
++++ b/nix-0.30.1/src/sys/ioctl/mod.rs
+@@ -231,6 +231,7 @@ use cfg_if::cfg_if;
+ #[macro_use]
+ mod linux;
+ 
++    target_os = "radix",
+ #[cfg(any(linux_android, target_os = "fuchsia", target_os = "redox"))]
+ pub use self::linux::*;
+ 
+@@ -240,6 +241,7 @@ mod bsd;
+ 
+ #[cfg(any(bsd, solarish, target_os = "haiku",))]
+ pub use self::bsd::*;
++    target_os = "radix",
+ 
+ /// Convert raw ioctl return value to a Nix result
+ #[macro_export]
+diff --git a/nix-0.30.1/src/sys/mod.rs b/nix-0.30.1/src/sys/mod.rs
+index c17c7be..8298858 100644
+--- a/nix-0.30.1/src/sys/mod.rs
++++ b/nix-0.30.1/src/sys/mod.rs
+@@ -40,6 +40,7 @@ feature! {
+     solarish,
+     target_os = "fuchsia",
+     target_os = "redox",
++    target_os = "radix",
+ ))]
+ #[cfg(feature = "ioctl")]
+ #[cfg_attr(docsrs, doc(cfg(feature = "ioctl")))]
+diff --git a/nix-0.30.1/src/sys/signal.rs b/nix-0.30.1/src/sys/signal.rs
+index 2b0c779..0a04f4a 100644
+--- a/nix-0.30.1/src/sys/signal.rs
++++ b/nix-0.30.1/src/sys/signal.rs
+@@ -61,7 +61,7 @@ libc_enum! {
+         /// Software termination signal from kill
+         SIGTERM,
+         /// Stack fault (obsolete)
+-        #[cfg(all(any(linux_android, target_os = "emscripten",
++        #[cfg(all(any(linux_android, radix, target_os = "emscripten",
+                       target_os = "fuchsia"),
+                   not(any(target_arch = "mips",
+                           target_arch = "mips32r6",
+@@ -97,18 +97,18 @@ libc_enum! {
+         /// Input/output possible signal
+         #[cfg(not(target_os = "haiku"))]
+         SIGIO,
+-        #[cfg(any(linux_android, target_os = "emscripten",
++        #[cfg(any(linux_android, radix, target_os = "emscripten",
+                   target_os = "fuchsia", target_os = "aix"))]
+         /// Power failure imminent.
+         SIGPWR,
+         /// Bad system call
+         SIGSYS,
+-        #[cfg(not(any(linux_android, target_os = "emscripten",
++        #[cfg(not(any(linux_android, radix, target_os = "emscripten",
+                       target_os = "fuchsia",
+                       target_os = "redox", target_os = "haiku")))]
+         /// Emulator trap
+         SIGEMT,
+-        #[cfg(not(any(linux_android, target_os = "emscripten",
++        #[cfg(not(any(linux_android, radix, target_os = "emscripten",
+                       target_os = "fuchsia", target_os = "redox",
+                       target_os = "haiku", target_os = "aix",
+                       target_os = "solaris", target_os = "cygwin")))]
+@@ -141,6 +141,7 @@ impl FromStr for Signal {
+             #[cfg(all(
+                 any(
+                     linux_android,
++                    radix,
+                     target_os = "emscripten",
+                     target_os = "fuchsia",
+                 ),
+@@ -170,6 +171,7 @@ impl FromStr for Signal {
+             "SIGIO" => Signal::SIGIO,
+             #[cfg(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+             ))]
+@@ -177,6 +179,7 @@ impl FromStr for Signal {
+             "SIGSYS" => Signal::SIGSYS,
+             #[cfg(not(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+                 target_os = "redox",
+@@ -185,6 +188,7 @@ impl FromStr for Signal {
+             "SIGEMT" => Signal::SIGEMT,
+             #[cfg(not(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+                 target_os = "redox",
+@@ -226,6 +230,7 @@ impl Signal {
+             #[cfg(all(
+                 any(
+                     linux_android,
++                    radix,
+                     target_os = "emscripten",
+                     target_os = "fuchsia",
+                 ),
+@@ -255,6 +260,7 @@ impl Signal {
+             Signal::SIGIO => "SIGIO",
+             #[cfg(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+                 target_os = "aix",
+@@ -263,6 +269,7 @@ impl Signal {
+             Signal::SIGSYS => "SIGSYS",
+             #[cfg(not(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+                 target_os = "redox",
+@@ -271,6 +278,7 @@ impl Signal {
+             Signal::SIGEMT => "SIGEMT",
+             #[cfg(not(any(
+                 linux_android,
++                radix,
+                 target_os = "emscripten",
+                 target_os = "fuchsia",
+                 target_os = "redox",
+@@ -318,7 +326,7 @@ const SIGNALS: [Signal; 28] = [
+     SIGPROF, SIGWINCH, SIGSYS,
+ ];
+ #[cfg(all(
+-    any(linux_android, target_os = "emscripten", target_os = "fuchsia"),
++    any(linux_android, radix, target_os = "emscripten", target_os = "fuchsia"),
+     not(any(
+         target_arch = "mips",
+         target_arch = "mips32r6",
+@@ -336,7 +344,7 @@ const SIGNALS: [Signal; 31] = [
+     SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS,
+ ];
+ #[cfg(all(
+-    any(linux_android, target_os = "emscripten", target_os = "fuchsia"),
++    any(linux_android, radix, target_os = "emscripten", target_os = "fuchsia"),
+     any(
+         target_arch = "mips",
+         target_arch = "mips32r6",
+@@ -371,6 +379,7 @@ const SIGNALS: [Signal; 30] = [
+ ];
+ #[cfg(not(any(
+     linux_android,
++    radix,
+     target_os = "fuchsia",
+     target_os = "emscripten",
+     target_os = "aix",
+@@ -608,6 +617,7 @@ impl SigSet {
+     #[cfg(any(
+         bsd,
+         linux_android,
++        radix,
+         solarish,
+         target_os = "haiku",
+         target_os = "hurd",
+diff --git a/nix-0.30.1/src/sys/termios.rs b/nix-0.30.1/src/sys/termios.rs
+index b2415c0..9b2ba64 100644
+--- a/nix-0.30.1/src/sys/termios.rs
++++ b/nix-0.30.1/src/sys/termios.rs
+@@ -166,7 +166,7 @@ pub struct Termios {
+     /// Control characters (see `termios.c_cc` documentation)
+     pub control_chars: [libc::cc_t; NCCS],
+     /// Line discipline (see `termios.c_line` documentation)
+-    #[cfg(linux_android)]
++    #[cfg(any(linux_android, radix))]
+     pub line_discipline: libc::cc_t,
+     /// Line discipline (see `termios.c_line` documentation)
+     #[cfg(target_os = "haiku")]
+@@ -186,7 +186,7 @@ impl Termios {
+             termios.c_cflag = self.control_flags.bits();
+             termios.c_lflag = self.local_flags.bits();
+             termios.c_cc = self.control_chars;
+-            #[cfg(any(linux_android, target_os = "haiku"))]
++            #[cfg(any(linux_android, radix, target_os = "haiku"))]
+             {
+                 termios.c_line = self.line_discipline;
+             }
+@@ -208,7 +208,7 @@ impl Termios {
+             termios.c_cflag = self.control_flags.bits();
+             termios.c_lflag = self.local_flags.bits();
+             termios.c_cc = self.control_chars;
+-            #[cfg(any(linux_android, target_os = "haiku"))]
++            #[cfg(any(linux_android, radix, target_os = "haiku"))]
+             {
+                 termios.c_line = self.line_discipline;
+             }
+@@ -224,7 +224,7 @@ impl Termios {
+         self.control_flags = ControlFlags::from_bits_retain(termios.c_cflag);
+         self.local_flags = LocalFlags::from_bits_truncate(termios.c_lflag);
+         self.control_chars = termios.c_cc;
+-        #[cfg(any(linux_android, target_os = "haiku"))]
++        #[cfg(any(linux_android, radix, target_os = "haiku"))]
+         {
+             self.line_discipline = termios.c_line;
+         }
+@@ -240,7 +240,7 @@ impl From<libc::termios> for Termios {
+             control_flags: ControlFlags::from_bits_truncate(termios.c_cflag),
+             local_flags: LocalFlags::from_bits_truncate(termios.c_lflag),
+             control_chars: termios.c_cc,
+-            #[cfg(any(linux_android, target_os = "haiku"))]
++            #[cfg(any(linux_android, radix, target_os = "haiku"))]
+             line_discipline: termios.c_line,
+         }
+     }
+@@ -304,26 +304,28 @@ libc_enum! {
+         #[cfg(solarish)]
+         B307200,
+         #[cfg(any(linux_android,
++        radix,
+                   solarish,
+                   target_os = "freebsd",
+                   target_os = "netbsd"))]
+         B460800,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B500000,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B576000,
+         #[cfg(any(linux_android,
++        radix,
+                   solarish,
+                   target_os = "freebsd",
+                   target_os = "netbsd"))]
+         B921600,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B1000000,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B1152000,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B1500000,
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         B2000000,
+         #[cfg(any(target_os = "android", all(target_os = "linux", not(target_arch = "sparc64"))))]
+         B2500000,
+@@ -461,7 +463,7 @@ impl SpecialCharacterIndices {
+ }
+ 
+ pub use libc::NCCS;
+-#[cfg(any(bsd, linux_android, target_os = "aix", target_os = "solaris"))]
++#[cfg(any(bsd, linux_android, radix, target_os = "aix", target_os = "solaris"))]
+ pub use libc::_POSIX_VDISABLE;
+ 
+ libc_bitflags! {
+@@ -479,10 +481,11 @@ libc_bitflags! {
+         IXON;
+         IXOFF;
+         #[cfg(not(target_os = "redox"))]
++        radix,
+         IXANY;
+         #[cfg(not(any(target_os = "redox", target_os = "haiku")))]
+         IMAXBEL;
+-        #[cfg(any(linux_android, apple_targets))]
++        #[cfg(any(linux_android, radix, apple_targets))]
+         IUTF8;
+     }
+ }
+@@ -492,6 +495,7 @@ libc_bitflags! {
+     pub struct OutputFlags: tcflag_t {
+         OPOST;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   target_os = "openbsd"))]
+         OLCUC;
+@@ -500,74 +504,91 @@ libc_bitflags! {
+         ONOCR as tcflag_t;
+         ONLRET as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         OFDEL as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         NL0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         NL1 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         CR0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         CR1 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         CR2 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         CR3 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "freebsd",
+                   target_os = "haiku",
+                   apple_targets))]
+         TAB0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         TAB1 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         TAB2 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "freebsd",
+                   target_os = "haiku",
+                   apple_targets))]
+         TAB3 as tcflag_t;
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         XTABS;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         BS0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         BS1 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         VT0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         VT1 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         FF0 as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         FF1 as tcflag_t;
+@@ -581,27 +602,33 @@ libc_bitflags! {
+         // is resolved.
+ 
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         NLDLY as tcflag_t; // FIXME: Datatype needs to be corrected in libc for mac
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         CRDLY as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "freebsd",
+                   target_os = "haiku",
+                   apple_targets))]
+         TABDLY as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         BSDLY as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         VTDLY as tcflag_t;
+         #[cfg(any(linux_android,
++        radix,
+                   target_os = "haiku",
+                   apple_targets))]
+         FFDLY as tcflag_t;
+@@ -625,7 +652,7 @@ libc_bitflags! {
+         CLOCAL;
+         #[cfg(not(any(target_os = "redox", target_os = "aix")))]
+         CRTSCTS;
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         CBAUD;
+         #[cfg(any(target_os = "android", all(target_os = "linux", not(target_arch = "mips"))))]
+         CMSPAR;
+@@ -633,7 +660,7 @@ libc_bitflags! {
+                   all(target_os = "linux",
+                       not(any(target_arch = "powerpc", target_arch = "powerpc64")))))]
+         CIBAUD;
+-        #[cfg(linux_android)]
++        #[cfg(any(linux_android, radix))]
+         CBAUDEX;
+         #[cfg(bsd)]
+         MDMBUF;
+@@ -687,6 +714,7 @@ libc_bitflags! {
+         PENDIN;
+         NOFLSH;
+     }
++        radix,
+ }
+ 
+ cfg_if! {
+diff --git a/nix-0.30.1/src/unistd.rs b/nix-0.30.1/src/unistd.rs
+index 8995fbe..ae3d9b1 100644
+--- a/nix-0.30.1/src/unistd.rs
++++ b/nix-0.30.1/src/unistd.rs
+@@ -1667,7 +1667,15 @@ pub fn chroot<P: ?Sized + NixPath>(path: &P) -> Result<()> {
+ /// Commit filesystem caches to disk
+ ///
+ /// See also [sync(2)](https://pubs.opengroup.org/onlinepubs/9699919799/functions/sync.html)
+-#[cfg(any(bsd, linux_android, solarish, target_os = "haiku", target_os = "aix", target_os = "hurd"))]
++#[cfg(any(
++    bsd,
++    linux_android,
++    solarish,
++    target_os = "haiku",
++    target_os = "aix",
++    target_os = "hurd",
++    target_os = "radix",
++))]
+ pub fn sync() {
+     unsafe { libc::sync() };
+ }
+@@ -3501,6 +3509,7 @@ pub struct User {
+         target_os = "hurd",
+         target_os = "emscripten",
+         target_os = "cygwin",
++        target_os = "radix",
+     )))]
+     pub class: CString,
+     /// Last password change
+@@ -3513,6 +3522,7 @@ pub struct User {
+         target_os = "hurd",
+         target_os = "emscripten",
+         target_os = "cygwin",
++        target_os = "radix",
+     )))]
+     pub change: libc::time_t,
+     /// Expiration time of account
+@@ -3525,6 +3535,7 @@ pub struct User {
+         target_os = "hurd",
+         target_os = "emscripten",
+         target_os = "cygwin",
++        target_os = "radix",
+     )))]
+     pub expire: libc::time_t,
+ }
+@@ -3580,6 +3591,7 @@ impl From<&libc::passwd> for User {
+                     target_os = "hurd",
+                     target_os = "emscripten",
+                     target_os = "cygwin",
++                    target_os = "radix",
+                 )))]
+                 class: CString::new(CStr::from_ptr(pw.pw_class).to_bytes())
+                     .unwrap(),
+@@ -3592,6 +3604,7 @@ impl From<&libc::passwd> for User {
+                     target_os = "hurd",
+                     target_os = "emscripten",
+                     target_os = "cygwin",
++                    target_os = "radix",
+                 )))]
+                 change: pw.pw_change,
+                 #[cfg(not(any(
+@@ -3603,6 +3616,7 @@ impl From<&libc::passwd> for User {
+                     target_os = "hurd",
+                     target_os = "emscripten",
+                     target_os = "cygwin",
++                    target_os = "radix",
+                 )))]
+                 expire: pw.pw_expire,
+             }
+@@ -3646,6 +3660,7 @@ impl From<User> for libc::passwd {
+                 target_os = "hurd",
+                 target_os = "emscripten",
+                 target_os = "cygwin",
++                target_os = "radix",
+             )))]
+             pw_class: u.class.into_raw(),
+             #[cfg(not(any(
+@@ -3657,6 +3672,7 @@ impl From<User> for libc::passwd {
+                 target_os = "hurd",
+                 target_os = "emscripten",
+                 target_os = "cygwin",
++                target_os = "radix",
+             )))]
+             pw_change: u.change,
+             #[cfg(not(any(
+@@ -3668,6 +3684,7 @@ impl From<User> for libc::passwd {
+                 target_os = "hurd",
+                 target_os = "emscripten",
+                 target_os = "cygwin",
++                target_os = "radix",
+             )))]
+             pw_expire: u.expire,
+             #[cfg(solarish)]

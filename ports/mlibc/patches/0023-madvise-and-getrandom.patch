@@ -1,0 +1,106 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+madvise and getrandom without the Linux option: BSD systems have both,
+and programs and crates written for Linux call them. madvise's advice
+constants (MADV_NORMAL to MADV_DONTNEED, and MADV_FREE) and its
+declaration leave the Linux option's block, the function is built with
+posix_madvise, and <abi-bits/random.h> no longer refuses to be included
+without the Linux option. The Radix system layer builds the Linux
+option's getrandom (options/linux/generic/sys-random.cpp) and installs
+its <sys/random.h> and <sys/sysmacros.h> (ports/mlibc/build.sh), which
+need nothing of Linux's.
+
+diff --git a/abis/linux/random.h b/abis/linux/random.h
+index ccddf9f..a06d929 100644
+--- a/abis/linux/random.h
++++ b/abis/linux/random.h
+@@ -3,10 +3,6 @@
+ 
+ #include <mlibc-config.h>
+ 
+-#if !__MLIBC_LINUX_OPTION
+-#  error "getrandom() is inherently Linux specific. Enable the Linux option or do not use this header."
+-#endif /* !__MLIBC_LINUX_OPTION */
+-
+ #define GRND_NONBLOCK 0x0001
+ #define GRND_RANDOM 0x0002
+ #define GRND_INSECURE 0x0004
+diff --git a/abis/linux/vm-flags.h b/abis/linux/vm-flags.h
+index 231d18f..2ab3bb2 100644
+--- a/abis/linux/vm-flags.h
++++ b/abis/linux/vm-flags.h
+@@ -45,8 +45,6 @@
+ #define POSIX_MADV_WILLNEED 3
+ #define POSIX_MADV_DONTNEED 4
+ 
+-#if __MLIBC_LINUX_OPTION
+-
+ #if defined(_DEFAULT_SOURCE)
+ #define MADV_NORMAL 0
+ #define MADV_RANDOM 1
+@@ -54,6 +52,11 @@
+ #define MADV_WILLNEED 3
+ #define MADV_DONTNEED 4
+ #define MADV_FREE 8
++#endif /* defined(_DEFAULT_SOURCE) */
++
++#if __MLIBC_LINUX_OPTION
++
++#if defined(_DEFAULT_SOURCE)
+ #define MADV_REMOVE 9
+ #define MADV_DONTFORK 10
+ #define MADV_DOFORK 11
+diff --git a/options/posix/generic/sys-mman.cpp b/options/posix/generic/sys-mman.cpp
+index 93b546f..95f29bb 100644
+--- a/options/posix/generic/sys-mman.cpp
++++ b/options/posix/generic/sys-mman.cpp
+@@ -50,6 +50,15 @@ int munlockall(void) {
+ 	return 0;
+ }
+ 
++int madvise(void *addr, size_t length, int advice) {
++	if(int e = mlibc::sysdep_or_enosys<Madvise>(addr, length, advice)) {
++		errno = e;
++		return -1;
++	}
++
++	return 0;
++}
++
+ int posix_madvise(void *addr, size_t length, int advice) {
+ 	return mlibc::sysdep_or_enosys<PosixMadvise>(addr, length, advice);
+ }
+@@ -150,15 +159,6 @@ int memfd_create(const char *name, unsigned int flags) {
+ 	return ret;
+ }
+ 
+-int madvise(void *addr, size_t length, int advice) {
+-	if(int e = mlibc::sysdep_or_enosys<Madvise>(addr, length, advice)) {
+-		errno = e;
+-		return -1;
+-	}
+-
+-	return 0;
+-}
+-
+ int mincore(void *addr, size_t length, unsigned char *vec) {
+ 	if(int e = mlibc::sysdep_or_enosys<Mincore>(addr, length, vec); e) {
+ 		errno = e;
+diff --git a/options/posix/include/sys/mman.h b/options/posix/include/sys/mman.h
+index 9566aa1..5665c52 100644
+--- a/options/posix/include/sys/mman.h
++++ b/options/posix/include/sys/mman.h
+@@ -38,8 +38,11 @@ int remap_file_pages(void *__addr, size_t __size, int __prot, size_t __pgoff, in
+ int memfd_create(const char *__name, unsigned int __flags);
+ #endif /* __MLIBC_LINUX_OPTION && defined(_GNU_SOURCE) */
+ 
+-#if __MLIBC_LINUX_OPTION && defined(_DEFAULT_SOURCE)
++#if defined(_DEFAULT_SOURCE)
+ int madvise(void *__addr, size_t __size, int __advise);
++#endif /* defined(_DEFAULT_SOURCE) */
++
++#if __MLIBC_LINUX_OPTION && defined(_DEFAULT_SOURCE)
+ int mincore(void *__addr, size_t __size, unsigned char *__vec);
+ #endif /* __MLIBC_LINUX_OPTION && defined(_DEFAULT_SOURCE) */
+ 

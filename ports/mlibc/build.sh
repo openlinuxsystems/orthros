@@ -23,6 +23,13 @@ sed -n "s|^		'include/abi-bits/\(.*\)',$|\1|p" "$PORT_SRC/sysdeps/radix/meson.bu
 		[ -e "$PORT_SRC/sysdeps/radix/include/abi-bits/$header" ] ||
 			ln -s "../../../../abis/linux/$header" "$PORT_SRC/sysdeps/radix/include/abi-bits/$header"
 	done
+# Two headers of the Linux option that other systems have too and that
+# need nothing of Linux's (patch 0023): getrandom's and the device number
+# macros'.
+mkdir -p "$PORT_SRC/sysdeps/radix/include/sys"
+for header in random.h sysmacros.h; do
+	ln -s "../../../../options/linux/include/sys/$header" "$PORT_SRC/sysdeps/radix/include/sys/$header"
+done
 
 # Code from musl 1.2.5 that the patches use: exact floating-point
 # conversions (0004), strftime (0006), the calendar arithmetic (0007),

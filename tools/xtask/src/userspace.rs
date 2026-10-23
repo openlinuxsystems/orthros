@@ -96,25 +96,59 @@ pub fn cargo(ctx: &Ctx, subcommand: &str) -> std::process::Command {
 }
 
 /// A Cargo command for the workspace of programs on Rust's standard
-/// library, writing to `target/programs`: for their own target, against
-/// the sysroot the rust-std port builds, with the port's libc crate in
+/// library, writing to `target/programs`: the toolchain's Cargo for
+/// Radix, which builds for their own target against the sysroot the
+/// rust-std port builds, with the crates the ports patch for Radix in
 /// place of crates.io's, linked by the Radix C compiler (ADR 0070).
 pub fn std_cargo(ctx: &Ctx, subcommand: &str, toolchain: &ports::Toolchain) -> Command {
-    let sysroot = toolchain.dir.join("rust");
-    let mut cmd = process::cargo(ctx);
-    cmd.args([subcommand, "--manifest-path", "userspace/programs/Cargo.toml"])
-        .env("CARGO_TARGET_DIR", ctx.target.join("programs"))
-        .arg("--target")
-        .arg(ctx.root.join(STD_TARGET_SPEC))
-        .arg("-Zjson-target-spec")
-        .arg("--config")
-        .arg(format!("patch.crates-io.libc.path = {:?}", sysroot.join("vendor/libc")))
-        // Only the target's crates get these flags; build scripts and
-        // procedural macros use the host's standard library.
-        .env("CARGO_ENCODED_RUSTFLAGS", format!("--sysroot={}", sysroot.display()))
-        .env("CARGO_TARGET_X86_64_UNKNOWN_RADIX_LINKER", toolchain.cc())
-        .env("CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY", "never");
+    let mut cmd = Command::new(toolchain.cargo());
+    cmd.current_dir(&ctx.root)
+        .args([subcommand, "--manifest-path", STD_MANIFEST])
+        .env("CARGO_TARGET_DIR", ctx.target.join("programs"));
     cmd
+}
+
+/// The workspace of programs on Rust's standard library.
+pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
+
+/// Checks that the programs on Rust's standard library take each crate
+/// the ports patch for Radix from the port, not from crates.io: Cargo
+/// keeps a version Cargo.lock names that the port has no patch for.
+fn check_patched(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<()> {
+    let patches = toolchain.crate_patches();
+    let mut patched: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&patches).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((name, version)) = name.strip_suffix(".toml").and_then(|n| n.rsplit_once('-')) {
+            patched.push((name.to_string(), version.to_string()));
+        }
+    }
+    let path = ctx.root.join("userspace/programs/Cargo.lock");
+    let text = std::fs::read_to_string(&path).context(|| format!("reading {}", path.display()))?;
+    let lock: toml::Value = toml::from_str(&text)
+        .map_err(|err| crate::Error::new(format!("{}: {err}", path.display())))?;
+    for package in lock.get("package").and_then(|p| p.as_array()).into_iter().flatten() {
+        let field = |key: &str| package.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+        let (name, version) = (field("name"), field("version"));
+        if field("source").is_empty() {
+            continue;
+        }
+        let versions: Vec<&str> =
+            patched.iter().filter(|(n, _)| n == name).map(|(_, v)| v.as_str()).collect();
+        if !versions.is_empty() {
+            return Err(crate::Error::new(format!(
+                "userspace/programs uses {name} {version} from crates.io, which does not \
+                 build for Radix"
+            ))
+            .hint(format!(
+                "the ports patch {name} {}: run `cargo update --manifest-path {STD_MANIFEST} \
+                 -p {name}@{version} --precise {}`",
+                versions.join(" and "),
+                versions[0]
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Where the test image is installed.
@@ -158,7 +192,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     let ports = ports::build_all(ctx, &[])?;
     let mut files = build_posix(ctx, &ports.toolchain)?;
     for port in &ports.ports {
-        files.extend(ports::image_files(&port.recipe, &ctx.out.join("sysroot"))?);
+        files.extend(ports::image_files(ctx, &port.recipe, &ctx.out.join("sysroot"))?);
     }
     files.extend(build_std(ctx, profile, &ports.toolchain)?);
     step(&format!("Building the user programs ({profile})"));
@@ -217,6 +251,7 @@ fn build_std(
         cmd.arg("--release");
     }
     process::run(ctx, &mut cmd)?;
+    check_patched(ctx, toolchain)?;
     let built = ctx.target.join("programs").join(STD_TARGET_NAME).join(profile.dir());
     let mut files = Vec::new();
     for (path, package) in STD_ARCHIVE {
@@ -300,9 +335,10 @@ fn build_dynamic(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String,
 }
 
 /// The boot archive: `files`, each a path in the archive and the file
-/// it holds, the directories above them and those of [`ARCHIVE_DIRS`],
-/// owned by root and dated `epoch` (the commit's time), so the same
-/// programs make the same bytes.
+/// it holds (a symbolic link stays one, with its target), the
+/// directories above them and those of [`ARCHIVE_DIRS`], owned by root
+/// and dated `epoch` (the commit's time), so the same programs make the
+/// same bytes.
 fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<Vec<u8>> {
     let mtime = epoch.and_then(|epoch| epoch.parse().ok()).unwrap_or(0);
     let mut entries: Vec<(String, Option<&Path>)> = Vec::new();
@@ -325,6 +361,14 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
     for (path, file) in &entries {
         let written = match file {
             None => writer.directory(path, 0o755, mtime),
+            Some(file) if file.is_symlink() => {
+                let target =
+                    std::fs::read_link(file).context(|| format!("reading {}", file.display()))?;
+                let target = target.to_str().ok_or_else(|| {
+                    crate::Error::new(format!("the link {} is not UTF-8", file.display()))
+                })?;
+                writer.symlink(path, target, mtime)
+            }
             Some(file) => {
                 let data = std::fs::read(file).context(|| format!("reading {}", file.display()))?;
                 writer.file(path, 0o755, mtime, &data)
@@ -348,6 +392,8 @@ mod tests {
             std::fs::write(dir.join(package), format!("the {package} program")).unwrap();
             files.push((path.to_string(), dir.join(package)));
         }
+        std::os::unix::fs::symlink("spark", dir.join("init")).unwrap();
+        files.push(("system/bin/init".to_string(), dir.join("init")));
         let bytes = write_archive(&files, Some("1700000000".into())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let archive = radix_bootfs::open(&bytes).unwrap();
@@ -357,6 +403,7 @@ mod tests {
             [
                 "system",
                 "system/bin",
+                "system/bin/init",
                 "system/bin/spark",
                 "system/boot",
                 "system/etc",
@@ -369,6 +416,8 @@ mod tests {
         let spark = archive.find("/system/bin/spark").unwrap();
         assert_eq!(spark.data, b"the spark program");
         assert_eq!((spark.mode, spark.mtime), (0o755, 1_700_000_000));
+        let init = archive.find("/system/bin/init").unwrap();
+        assert_eq!((init.kind, init.data), (radix_bootfs::Kind::Symlink, &b"spark"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");
     }
 }

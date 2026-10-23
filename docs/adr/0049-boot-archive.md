@@ -51,7 +51,7 @@ the same problem.
   `tools/xtask/src/userspace.rs`; `tar tvf out/sysroot/boot/bootfs`
   shows what is in it.
 - Long names are limited to ustar's 255 bytes (prefix and name), and
-  there are no symbolic links, owners or extended attributes, which
-  the programs of the boot archive do not need.
+  there are no owners or extended attributes, which the programs of the
+  boot archive do not need. Symbolic links came in Phase 9 (ADR 0081).
 - The kernel copies the archive into frames of Spark's own once; a
   later phase can map the module's pages directly instead.

@@ -116,7 +116,9 @@ objects found so far.
 
 Everything the consoles print, debug messages included, is also written to
 1 MiB of RAM reserved at the same physical address on every boot: the
-first 2 MiB boundary above 4 GiB where there is RAM, or else 64 MiB. A warm
+first 2 MiB boundary above 4 GiB where there is RAM, or else the first one
+from 64 MiB, in either case clear of the kernel image and the boot
+modules. A warm
 restart (a panic, *reboot* in *kdb*, the reset button on many machines)
 leaves RAM as it was, so the next boot finds the log there and prints how
 the previous boot ended and its last lines: 40 after a panic, 12

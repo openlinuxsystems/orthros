@@ -22,7 +22,10 @@ debug cable arrives only in Phase 11; network logging only in Phase 12.
 The kernel reserves 1 MiB of RAM at an address that depends only on the
 firmware's memory map: the first 2 MiB boundary at or above 4 GiB with
 enough usable RAM (firmware and boot loaders rarely write there), or else
-the first such boundary at or above 64 MiB. Every console message, at every
+the first such boundary at or above 64 MiB. Since Phase 9 it is also clear
+of the kernel image and the boot modules: the boot archive grew past
+64 MiB in memory, and the log wrote over the programs in it. Every
+console message, at every
 level, is copied into it. The region holds two slots, each a checksummed
 64-byte header (boot number, how the boot ended, bytes written) and a ring
 of text; each boot writes the slot the previous boot did not, so a crash

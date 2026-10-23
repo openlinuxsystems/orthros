@@ -6,7 +6,7 @@
 # after `./ob docs`). Command-line options override these values.
 
 [build]
-arch = "x86_64"        # the only architecture until AArch64 (Phase 17)
+arch = "x86_64"        # the only architecture until AArch64 (Phase 34)
 profile = "release"    # "release" or "debug"
 
 [boot]

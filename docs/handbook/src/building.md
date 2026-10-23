@@ -171,8 +171,9 @@ boot log on the screen, the panic report after a deliberate page fault,
 the crash log across a restart, every `kdb` command, microcode loading,
 the memory manager, the scheduler, capabilities, IPC, Spark, disks and
 files, and the POSIX layer: the `posix` boot test runs C programs on the
-C library, mlibc's and Lua's own test suites, libc-test and a Rust
-program on the standard library (radix-posix(7)). The tests read the screen by
+C library, mlibc's and Lua's own test suites, libc-test, a Rust
+program on the standard library and the ported utilities, `ls`, `sort`,
+`find`, `xargs` and the rest (radix-posix(7)). The tests read the screen by
 comparing QEMU screenshots with the kernel's own font, so what you would
 see on a laptop is tested too.
 

@@ -85,12 +85,48 @@ fn set(header: &mut [u8], (offset, len): (usize, usize), text: &[u8]) {
 }
 
 #[test]
+fn keeps_symbolic_links() {
+    let mut w = Writer::new();
+    w.directory("system", 0o755, 1).unwrap();
+    w.directory("system/bin", 0o755, 1).unwrap();
+    w.file("system/bin/coreutils", 0o755, 2, b"\x7fELF").unwrap();
+    w.symlink("system/bin/ls", "coreutils", 3).unwrap();
+    w.symlink("system/bin/sh", "/system/bin/nukesh", 3).unwrap();
+    assert_eq!(w.symlink("system/bin/x", "", 3), Err(Error::BadLink));
+    assert_eq!(w.symlink("system/bin/y", &"a".repeat(MAX_LINK + 1), 3), Err(Error::BadLink));
+    let bytes = w.finish();
+    let archive = open(&bytes).unwrap();
+    let ls = archive.find("system/bin/ls").unwrap();
+    assert_eq!((ls.kind, ls.data, ls.mode, ls.mtime), (Kind::Symlink, &b"coreutils"[..], 0o777, 3));
+    assert_eq!(archive.find("system/bin/sh").unwrap().data, b"/system/bin/nukesh");
+    let names: Vec<_> = archive.list("system/bin").map(|e| e.path().file_name()).collect();
+    assert_eq!(names, ["coreutils", "ls", "sh"]);
+}
+
+#[test]
 fn refuses_what_it_must() {
     // The third entry, system/bin/spark, starts at block 2.
     let at = 2 * BLOCK;
     let cases: Vec<(Vec<u8>, Error)> = vec![
-        (patched(at, |h| h[TYPE] = b'2'), Error::Unsupported),
+        (patched(at, |h| h[TYPE] = b'1'), Error::Unsupported),
         (patched(at, |h| h[TYPE] = b'3'), Error::Unsupported),
+        // A symbolic link holds no data, and points somewhere.
+        (patched(at, |h| h[TYPE] = b'2'), Error::BadNumber),
+        (
+            patched(at, |h| {
+                h[TYPE] = b'2';
+                set(h, SIZE, b"0");
+            }),
+            Error::BadLink,
+        ),
+        (
+            patched(at, |h| {
+                h[TYPE] = b'2';
+                set(h, SIZE, b"0");
+                set(h, LINK, b"\xff");
+            }),
+            Error::BadLink,
+        ),
         (patched(at, |h| set(h, NAME, b"/system/bin/spark")), Error::BadPath),
         (patched(at, |h| set(h, NAME, b"system/../bin/spark")), Error::BadPath),
         (patched(at, |h| set(h, NAME, b"system/./spark")), Error::BadPath),

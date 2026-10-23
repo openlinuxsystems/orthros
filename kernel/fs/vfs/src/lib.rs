@@ -59,6 +59,9 @@ pub const NAME_MAX: usize = 255;
 /// The longest path a call takes, in bytes.
 pub const PATH_MAX: usize = 4096;
 
+/// The most symbolic links one resolution follows, as Linux allows.
+pub const MAX_LINKS: usize = 40;
+
 /// What can go wrong with a file operation. Each maps to an error of the
 /// `file` domain of radix-errors(2), or to a kernel error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +107,11 @@ pub enum Error {
     NoDevice,
     /// The node does not do this.
     NotSupported,
+    /// Resolving the path met more than [`MAX_LINKS`] symbolic links, or
+    /// a symbolic link where it was not to follow one.
+    Loop,
+    /// The node is not a symbolic link.
+    NotLink,
     /// Out of memory.
     NoMemory,
     /// A buffer of the caller's is not mapped for the access.
@@ -132,6 +140,8 @@ impl fmt::Display for Error {
             Error::NotBlockDevice => "not a block device",
             Error::NoDevice => "no such device",
             Error::NotSupported => "not supported",
+            Error::Loop => "too many levels of symbolic links",
+            Error::NotLink => "not a symbolic link",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
         })
@@ -170,6 +180,9 @@ pub enum Kind {
     CharDevice,
     /// A pipe, which lives outside the tree (Phase 8).
     Pipe,
+    /// A symbolic link: a path that resolution follows in its place
+    /// ([`mount`]); its size is the path's length.
+    Symlink,
 }
 
 /// What a node says about itself.
@@ -217,6 +230,22 @@ pub trait Out {
         }
         Ok(())
     }
+    /// Copies as [`Out::put`] does, but without waiting for a page of a
+    /// program's memory to be made: `Ok(false)` if one is not there yet,
+    /// when some of the bytes may have been copied. For a caller holding
+    /// a lock that making a page can take (a file's cache: a fault on a
+    /// mapped file reads it), which lets go of the lock and calls
+    /// [`Out::fault_in`] before it tries again. Kernel memory is always
+    /// there.
+    fn put_now(&mut self, at: usize, bytes: &[u8]) -> Result<bool> {
+        self.put(at, bytes).map(|()| true)
+    }
+    /// Makes the memory for `len` bytes from `at` ready to be written, as
+    /// faults on it would, so that [`Out::put_now`] there succeeds; called
+    /// with no lock held.
+    fn fault_in(&mut self, _at: usize, _len: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Where a write takes what it writes from: the caller's buffer.
@@ -229,6 +258,16 @@ pub trait In {
     }
     /// Copies `out.len()` bytes from `at` bytes from its start.
     fn get(&self, at: usize, out: &mut [u8]) -> Result<()>;
+    /// Copies as [`In::get`] does, without waiting for a page, as
+    /// [`Out::put_now`] does.
+    fn get_now(&self, at: usize, out: &mut [u8]) -> Result<bool> {
+        self.get(at, out).map(|()| true)
+    }
+    /// Makes the memory for `len` bytes from `at` ready to be read, as
+    /// [`Out::fault_in`] does.
+    fn fault_in(&self, _at: usize, _len: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A buffer in kernel memory to read into.
@@ -298,6 +337,24 @@ pub trait Node: Send + Sync + Any {
         Err(Error::NotDirectory)
     }
 
+    /// Makes a symbolic link `name` to `target` in a directory: a
+    /// directory of a filesystem that has none fails with
+    /// [`Error::NotSupported`].
+    fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
+        if self.kind() == Kind::Directory {
+            Err(Error::NotSupported)
+        } else {
+            Err(Error::NotDirectory)
+        }
+    }
+
+    /// Reads the path a symbolic link points to into `out`, from its
+    /// start; returns its length, which is more than `out` holds if it
+    /// was cut short.
+    fn read_link(&self, _out: &mut dyn Out) -> Result<usize> {
+        Err(Error::NotLink)
+    }
+
     /// Removes the file or empty directory `name` from a directory.
     fn remove(&self, _name: &str) -> Result<()> {
         Err(Error::NotDirectory)
@@ -360,6 +417,27 @@ pub trait Node: Send + Sync + Any {
 
 /// The offset of a write that appends.
 pub const APPEND: u64 = u64::MAX;
+
+/// The path the symbolic link `node` points to: UTF-8, not empty, at most
+/// [`PATH_MAX`] bytes, without NULs (what a link that holds anything else
+/// leads to is [`Error::NotFound`]).
+pub fn link_target(node: &dyn Node) -> Result<KVec<u8>> {
+    let size = usize::try_from(node.stat().size).unwrap_or(usize::MAX).min(PATH_MAX);
+    let mut target = mem::vec_with_capacity(size)?;
+    while target.len() < size {
+        // Room was made above.
+        let _ = target.push_within_capacity(0);
+    }
+    let len = node.read_link(&mut SliceMut(&mut target))?;
+    if len > size || len == 0 {
+        return Err(Error::NotFound);
+    }
+    target.truncate(len);
+    if target.contains(&0) || core::str::from_utf8(&target).is_err() {
+        return Err(Error::NotFound);
+    }
+    Ok(target)
+}
 
 /// What kind of filesystem one is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -129,10 +129,19 @@ impl DirState {
 
 enum Body {
     Dir(Mutex<DirState>),
-    File { cache: FileCache, charged: AtomicU64 },
+    File {
+        cache: FileCache,
+        charged: AtomicU64,
+    },
+    /// A symbolic link's target, charged to the limit like a file's
+    /// bytes, and when it was last changed, as `set_times` sets it.
+    Link {
+        target: KVec<u8>,
+        modified: AtomicU64,
+    },
 }
 
-/// A tmpfs file or directory.
+/// A tmpfs file, directory or symbolic link.
 pub struct TmpNode {
     id: u64,
     created: u64,
@@ -202,14 +211,42 @@ impl TmpNode {
             }
             _ => return Err(Error::NotSupported),
         };
+        TmpNode::with_body(id, shared, created, body)
+    }
+
+    /// A symbolic link to `target`.
+    fn link(id: u64, shared: KArc<Shared>, target: &str) -> Result<KArc<TmpNode>> {
+        let bytes = target.len() as u64;
+        let used = shared.used.fetch_add(bytes, Ordering::Relaxed);
+        if used + bytes > shared.max {
+            shared.used.fetch_sub(bytes, Ordering::Relaxed);
+            return Err(Error::NoSpace);
+        }
+        let created = now();
+        let body = match mem::copy(target.as_bytes()) {
+            Ok(target) => Body::Link { target, modified: AtomicU64::new(created) },
+            Err(error) => {
+                shared.used.fetch_sub(bytes, Ordering::Relaxed);
+                return Err(error.into());
+            }
+        };
+        TmpNode::with_body(id, shared, created, body)
+    }
+
+    /// A node with `body`; a node that cannot be made hands back what
+    /// its body was charged, as one dropped does.
+    fn with_body(id: u64, shared: KArc<Shared>, created: u64, body: Body) -> Result<KArc<TmpNode>> {
         // Each counts against the limit until it is dropped, as with
         // Linux's nr_inodes, so that empty files cannot use up the heap.
-        shared
-            .files
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |files| {
-                (files < shared.max_files).then_some(files + 1)
-            })
-            .map_err(|_| Error::NoSpace)?;
+        let counted = shared.files.try_update(Ordering::Relaxed, Ordering::Relaxed, |files| {
+            (files < shared.max_files).then_some(files + 1)
+        });
+        if counted.is_err() {
+            if let Body::Link { target, .. } = &body {
+                shared.used.fetch_sub(target.len() as u64, Ordering::Relaxed);
+            }
+            return Err(Error::NoSpace);
+        }
         let node = mem::arc(TmpNode {
             id,
             created,
@@ -231,7 +268,7 @@ impl TmpNode {
     fn dir(&self) -> Result<&Mutex<DirState>> {
         match &self.body {
             Body::Dir(dir) => Ok(dir),
-            Body::File { .. } => Err(Error::NotDirectory),
+            Body::File { .. } | Body::Link { .. } => Err(Error::NotDirectory),
         }
     }
 
@@ -239,7 +276,26 @@ impl TmpNode {
         match &self.body {
             Body::File { cache, charged } => Ok((cache, Charge { shared: &self.shared, charged })),
             Body::Dir(_) => Err(Error::IsDirectory),
+            // Resolution follows links, so only a caller that asked not
+            // to reaches one here.
+            Body::Link { .. } => Err(Error::NotSupported),
         }
+    }
+
+    /// Adds `node`, new, to this directory as `name`.
+    fn add(&self, name: &str, node: KArc<TmpNode>) -> Result<NodeRef> {
+        let dir = self.dir()?;
+        let name_bytes = mem::copy(name.as_bytes())?;
+        let _namespace = self.shared.namespace.lock();
+        let mut dir = dir.lock();
+        let at = match dir.find(name) {
+            Ok(_) => return Err(Error::Exists),
+            Err(at) => at,
+        };
+        *node.parent.lock() = self.weak();
+        dir.insert(at, name_bytes, node.clone())?;
+        dir.modified = now();
+        Ok(node)
     }
 
     /// Whether it is a directory with nothing in it. Called with its
@@ -292,9 +348,12 @@ impl Backing for Charge<'_> {
 impl Drop for TmpNode {
     fn drop(&mut self) {
         self.shared.files.fetch_sub(1, Ordering::Relaxed);
-        if let Body::File { charged, .. } = &self.body {
-            self.shared.used.fetch_sub(charged.load(Ordering::Relaxed), Ordering::Relaxed);
-        }
+        let charged = match &self.body {
+            Body::File { charged, .. } => charged.load(Ordering::Relaxed),
+            Body::Link { target, .. } => target.len() as u64,
+            Body::Dir(_) => 0,
+        };
+        self.shared.used.fetch_sub(charged, Ordering::Relaxed);
     }
 }
 
@@ -303,6 +362,9 @@ impl Node for TmpNode {
         let (size, modified, pages) = match &self.body {
             Body::Dir(dir) => (0, dir.lock().modified, 0),
             Body::File { cache, .. } => cache.status(),
+            Body::Link { target, modified } => {
+                (target.len() as u64, modified.load(Ordering::Relaxed), 0)
+            }
         };
         let allocated = (pages * radix_block::PAGE_SIZE) as u64;
         Stat {
@@ -320,6 +382,7 @@ impl Node for TmpNode {
         match self.body {
             Body::Dir(_) => Kind::Directory,
             Body::File { .. } => Kind::File,
+            Body::Link { .. } => Kind::Symlink,
         }
     }
 
@@ -330,20 +393,27 @@ impl Node for TmpNode {
 
     fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
         check_name(name)?;
-        let dir = self.dir()?;
+        self.dir()?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let node = TmpNode::new(id, self.shared.clone(), kind)?;
-        let name_bytes = mem::copy(name.as_bytes())?;
-        let _namespace = self.shared.namespace.lock();
-        let mut dir = dir.lock();
-        let at = match dir.find(name) {
-            Ok(_) => return Err(Error::Exists),
-            Err(at) => at,
-        };
-        *node.parent.lock() = self.weak();
-        dir.insert(at, name_bytes, node.clone())?;
-        dir.modified = now();
-        Ok(node)
+        self.add(name, TmpNode::new(id, self.shared.clone(), kind)?)
+    }
+
+    fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
+        check_name(name)?;
+        self.dir()?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        self.add(name, TmpNode::link(id, self.shared.clone(), target)?)
+    }
+
+    fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
+        match &self.body {
+            Body::Link { target, .. } => {
+                let room = out.len().min(target.len());
+                out.put(0, &target[..room])?;
+                Ok(target.len())
+            }
+            _ => Err(Error::NotLink),
+        }
     }
 
     fn remove(&self, name: &str) -> Result<()> {
@@ -441,6 +511,7 @@ impl Node for TmpNode {
             match &self.body {
                 Body::Dir(dir) => dir.lock().modified = modified,
                 Body::File { cache, .. } => cache.set_modified(modified),
+                Body::Link { modified: link, .. } => link.store(modified, Ordering::Relaxed),
             }
         }
         Ok(())
@@ -466,13 +537,13 @@ fn is_under(node: &KArc<TmpNode>, dir: &KArc<TmpNode>) -> bool {
     }
 }
 
-/// Whether `moving` may replace `old`: a file replaces a file, a
-/// directory an empty directory.
+/// Whether `moving` may replace `old`: a file or symbolic link replaces
+/// either, a directory an empty directory.
 fn check_replace(moving: &TmpNode, old: &TmpNode) -> Result<()> {
     match (&moving.body, &old.body) {
-        (_, Body::Dir(_)) if !old.is_empty_dir() => Err(Error::NotEmpty),
-        (Body::Dir(_), Body::File { .. }) => Err(Error::NotDirectory),
-        (Body::File { .. }, Body::Dir(_)) => Err(Error::IsDirectory),
+        (Body::Dir(_), Body::File { .. } | Body::Link { .. }) => Err(Error::NotDirectory),
+        (Body::File { .. } | Body::Link { .. }, Body::Dir(_)) => Err(Error::IsDirectory),
+        (Body::Dir(_), Body::Dir(_)) if !old.is_empty_dir() => Err(Error::NotEmpty),
         _ => Ok(()),
     }
 }

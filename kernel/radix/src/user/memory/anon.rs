@@ -396,6 +396,27 @@ impl SpaceObject {
         }
     }
 
+    /// Makes the pages for `len` bytes from `address` ready for reading,
+    /// or writing if `write`, as faults on them would, passing over those
+    /// that are: how a copy that could not wait for a page, under a lock
+    /// that making one can take, gets them before it tries again. `false`
+    /// if one cannot be made.
+    pub fn fault_in(&self, address: u64, len: usize, write: bool) -> bool {
+        let Some(end) = address.checked_add(len as u64) else { return false };
+        let mut page = address & !(PAGE_SIZE - 1);
+        while page < end {
+            let ready = match Arch::query_entry(&self.arch, page) {
+                Some((_, Some(access))) => !write || access == UserAccess::ReadWrite,
+                _ => false,
+            };
+            if !ready && self.resolve(page, write, false) != Fault::Resolved {
+                return false;
+            }
+            page += PAGE_SIZE;
+        }
+        true
+    }
+
     /// Makes sure the page at `address` of anonymous memory is there, as
     /// the program would find it, and returns its frame: for writing a new
     /// program's stack and relocations before any thread runs in the

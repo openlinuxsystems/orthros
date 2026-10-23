@@ -383,6 +383,12 @@ tests are:
 *std-test*
 	The test of Rust's standard library.
 
+*utilities*
+	The ported utilities as scripts use them, through the links in
+	_/bin_: uutils' core utilities, *find* and *xargs*, each given text
+	on its standard input and checked for what it writes and its exit
+	status, and their manual pages.
+
 *libc*
 	mlibc's own test suite: every one of its 132 tests that apply to
 	Radix (_ports/mlibc-tests/build.sh_ says why each other is left
@@ -404,10 +410,10 @@ passed*; the boot test fails on any failure.
 
 # LIMITS
 
-- No sockets until networking (Phase 12), no symbolic or hard links
-  until Btrfs (Phase 10: *symlink* and *link* fail with EPERM), no named
-  pipes (*mkfifo* fails with ENOSYS) and no device nodes (*mknod* fails
-  with EPERM).
+- No sockets until networking (Phase 12), no hard links until Btrfs
+  (Phase 10: *link* fails with EPERM), no named pipes (*mkfifo* fails
+  with ENOSYS) and no device nodes (*mknod* fails with EPERM). Symbolic
+  links work on tmpfs and in the boot archive, not on FAT.
 - *fchdir* fails with ENOSYS. *waitid* needs *WEXITED*.
 - Futexes in memory several processes share are not shared: a
   process-shared mutex or semaphore does not wake waiters in another

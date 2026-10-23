@@ -10,18 +10,22 @@ constants were generated from the headers, and the rust-std port checks
 every structure's size and layout and every constant against the headers
 when it is built.
 
-diff -ruN a/vendor/libc-0.2.189/src/new/mlibc/mod.rs b/vendor/libc-0.2.189/src/new/mlibc/mod.rs
---- a/vendor/libc-0.2.189/src/new/mlibc/mod.rs
-+++ b/vendor/libc-0.2.189/src/new/mlibc/mod.rs
+diff --git a/vendor/libc-0.2.191/src/new/mlibc/mod.rs b/vendor/libc-0.2.191/src/new/mlibc/mod.rs
+new file mode 100644
+index 0000000..d220376
+--- /dev/null
++++ b/vendor/libc-0.2.191/src/new/mlibc/mod.rs
 @@ -0,0 +1,5 @@
 +//! mlibc, the C library of Radix (Dukovo).
 +//!
 +//! * Headers: <https://github.com/managarm/mlibc>
 +
 +pub(crate) mod unistd;
-diff -ruN a/vendor/libc-0.2.189/src/new/mlibc/unistd.rs b/vendor/libc-0.2.189/src/new/mlibc/unistd.rs
---- a/vendor/libc-0.2.189/src/new/mlibc/unistd.rs
-+++ b/vendor/libc-0.2.189/src/new/mlibc/unistd.rs
+diff --git a/vendor/libc-0.2.191/src/new/mlibc/unistd.rs b/vendor/libc-0.2.191/src/new/mlibc/unistd.rs
+new file mode 100644
+index 0000000..8d55ee5
+--- /dev/null
++++ b/vendor/libc-0.2.191/src/new/mlibc/unistd.rs
 @@ -0,0 +1,7 @@
 +//! Header: `unistd.h`
 +
@@ -30,10 +34,11 @@ diff -ruN a/vendor/libc-0.2.189/src/new/mlibc/unistd.rs b/vendor/libc-0.2.189/sr
 +    STDIN_FILENO,
 +    STDOUT_FILENO,
 +};
-diff -ruN a/vendor/libc-0.2.189/src/new/mod.rs b/vendor/libc-0.2.189/src/new/mod.rs
---- a/vendor/libc-0.2.189/src/new/mod.rs
-+++ b/vendor/libc-0.2.189/src/new/mod.rs
-@@ -161,6 +161,9 @@
+diff --git a/vendor/libc-0.2.191/src/new/mod.rs b/vendor/libc-0.2.191/src/new/mod.rs
+index 5f3accb..ec96aec 100644
+--- a/vendor/libc-0.2.191/src/new/mod.rs
++++ b/vendor/libc-0.2.191/src/new/mod.rs
+@@ -164,6 +164,9 @@ cfg_if! {
      } else if #[cfg(target_env = "relibc")] {
          mod relibc;
          pub(crate) use relibc::*;
@@ -43,10 +48,11 @@ diff -ruN a/vendor/libc-0.2.189/src/new/mod.rs b/vendor/libc-0.2.189/src/new/mod
      } else if #[cfg(target_env = "sgx")] {
          mod sgx;
          // pub(crate) use sgx::*;
-diff -ruN a/vendor/libc-0.2.189/src/unix/mod.rs b/vendor/libc-0.2.189/src/unix/mod.rs
---- a/vendor/libc-0.2.189/src/unix/mod.rs
-+++ b/vendor/libc-0.2.189/src/unix/mod.rs
-@@ -595,6 +595,21 @@
+diff --git a/vendor/libc-0.2.191/src/unix/mod.rs b/vendor/libc-0.2.191/src/unix/mod.rs
+index 62d48c9..4ca4425 100644
+--- a/vendor/libc-0.2.191/src/unix/mod.rs
++++ b/vendor/libc-0.2.191/src/unix/mod.rs
+@@ -649,6 +649,21 @@ cfg_if! {
              link(name = "c", cfg(not(target_feature = "crt-static")))
          )]
          extern "C" {}
@@ -68,7 +74,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/mod.rs b/vendor/libc-0.2.189/src/unix/m
      } else if #[cfg(target_os = "aix")] {
          #[link(name = "c")]
          #[link(name = "m")]
-@@ -2499,6 +2514,9 @@
+@@ -2544,6 +2559,9 @@ cfg_if! {
      } else if #[cfg(target_os = "redox")] {
          mod redox;
          pub use self::redox::*;
@@ -78,10 +84,12 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/mod.rs b/vendor/libc-0.2.189/src/unix/m
      } else if #[cfg(target_os = "cygwin")] {
          mod cygwin;
          pub use self::cygwin::*;
-diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/unix/radix/mod.rs
---- a/vendor/libc-0.2.189/src/unix/radix/mod.rs
-+++ b/vendor/libc-0.2.189/src/unix/radix/mod.rs
-@@ -0,0 +1,2700 @@
+diff --git a/vendor/libc-0.2.191/src/unix/radix/mod.rs b/vendor/libc-0.2.191/src/unix/radix/mod.rs
+new file mode 100644
+index 0000000..e740167
+--- /dev/null
++++ b/vendor/libc-0.2.191/src/unix/radix/mod.rs
+@@ -0,0 +1,3068 @@
 +//! Radix: the kernel of Dukovo, with mlibc as its C library.
 +//!
 +//! * mlibc: <https://github.com/managarm/mlibc>, built with its Radix system
@@ -636,6 +644,19 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const ABMON_8: nl_item = 0x20015;
 +pub const ABMON_9: nl_item = 0x20016;
 +pub const ACCOUNTING: c_short = 9;
++pub const ADJ_ESTERROR: c_uint = 8;
++pub const ADJ_FREQUENCY: c_uint = 2;
++pub const ADJ_MAXERROR: c_uint = 4;
++pub const ADJ_MICRO: c_uint = 0x1000;
++pub const ADJ_NANO: c_uint = 0x2000;
++pub const ADJ_OFFSET: c_uint = 1;
++pub const ADJ_OFFSET_SINGLESHOT: c_uint = 32769;
++pub const ADJ_OFFSET_SS_READ: c_uint = 40961;
++pub const ADJ_SETOFFSET: c_uint = 0x100;
++pub const ADJ_STATUS: c_uint = 16;
++pub const ADJ_TAI: c_uint = 128;
++pub const ADJ_TICK: c_uint = 0x4000;
++pub const ADJ_TIMECONST: c_uint = 32;
 +pub const AF_ALG: c_int = 38;
 +pub const AF_APPLETALK: c_int = 5;
 +pub const AF_ASH: c_int = 18;
@@ -682,6 +703,9 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const AF_WANPIPE: c_int = 25;
 +pub const AF_X25: c_int = 9;
 +pub const AF_XDP: c_int = 44;
++pub const AIO_ALLDONE: c_int = 2;
++pub const AIO_CANCELED: c_int = 0;
++pub const AIO_NOTCANCELED: c_int = 1;
 +pub const AI_ADDRCONFIG: c_int = 32;
 +pub const AI_ALL: c_int = 16;
 +pub const AI_CANONNAME: c_int = 2;
@@ -691,6 +715,69 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const AI_V4MAPPED: c_int = 8;
 +pub const ALT_DIGITS: nl_item = 0x2002f;
 +pub const AM_STR: nl_item = 0x20026;
++pub const ARPHRD_ADAPT: u16 = 264;
++pub const ARPHRD_APPLETLK: u16 = 8;
++pub const ARPHRD_ARCNET: u16 = 7;
++pub const ARPHRD_ASH: u16 = 781;
++pub const ARPHRD_ATM: u16 = 19;
++pub const ARPHRD_AX25: u16 = 3;
++pub const ARPHRD_BIF: u16 = 775;
++pub const ARPHRD_CAN: u16 = 280;
++pub const ARPHRD_CHAOS: u16 = 5;
++pub const ARPHRD_CISCO: u16 = 513;
++pub const ARPHRD_CSLIP: u16 = 257;
++pub const ARPHRD_CSLIP6: u16 = 259;
++pub const ARPHRD_DDCMP: u16 = 517;
++pub const ARPHRD_DLCI: u16 = 15;
++pub const ARPHRD_ECONET: u16 = 782;
++pub const ARPHRD_EETHER: u16 = 2;
++pub const ARPHRD_ETHER: u16 = 1;
++pub const ARPHRD_EUI64: u16 = 27;
++pub const ARPHRD_FCAL: u16 = 785;
++pub const ARPHRD_FCFABRIC: u16 = 787;
++pub const ARPHRD_FCPL: u16 = 786;
++pub const ARPHRD_FCPP: u16 = 784;
++pub const ARPHRD_FDDI: u16 = 774;
++pub const ARPHRD_FRAD: u16 = 770;
++pub const ARPHRD_HDLC: u16 = 513;
++pub const ARPHRD_HIPPI: u16 = 780;
++pub const ARPHRD_HWX25: u16 = 272;
++pub const ARPHRD_IEEE1394: u16 = 24;
++pub const ARPHRD_IEEE802: u16 = 6;
++pub const ARPHRD_IEEE80211: u16 = 801;
++pub const ARPHRD_IEEE80211_PRISM: u16 = 802;
++pub const ARPHRD_IEEE80211_RADIOTAP: u16 = 803;
++pub const ARPHRD_IEEE802154: u16 = 804;
++pub const ARPHRD_IEEE802_TR: u16 = 800;
++pub const ARPHRD_INFINIBAND: u16 = 32;
++pub const ARPHRD_IPDDP: u16 = 777;
++pub const ARPHRD_IPGRE: u16 = 778;
++pub const ARPHRD_IRDA: u16 = 783;
++pub const ARPHRD_LAPB: u16 = 516;
++pub const ARPHRD_LOCALTLK: u16 = 773;
++pub const ARPHRD_LOOPBACK: u16 = 772;
++pub const ARPHRD_METRICOM: u16 = 23;
++pub const ARPHRD_NETROM: u16 = 0;
++pub const ARPHRD_NONE: u16 = 65534;
++pub const ARPHRD_PIMREG: u16 = 779;
++pub const ARPHRD_PPP: u16 = 0x200;
++pub const ARPHRD_PRONET: u16 = 4;
++pub const ARPHRD_RAWHDLC: u16 = 518;
++pub const ARPHRD_ROSE: u16 = 270;
++pub const ARPHRD_RSRVD: u16 = 260;
++pub const ARPHRD_SIT: u16 = 776;
++pub const ARPHRD_SKIP: u16 = 771;
++pub const ARPHRD_SLIP: u16 = 0x100;
++pub const ARPHRD_SLIP6: u16 = 258;
++pub const ARPHRD_TUNNEL: u16 = 768;
++pub const ARPHRD_TUNNEL6: u16 = 769;
++pub const ARPHRD_VOID: u16 = 65535;
++pub const ARPHRD_X25: u16 = 271;
++pub const ARPOP_InREPLY: u16 = 9;
++pub const ARPOP_InREQUEST: u16 = 8;
++pub const ARPOP_NAK: u16 = 10;
++pub const ARPOP_RREPLY: u16 = 4;
++pub const ARPOP_RREQUEST: u16 = 3;
 +pub const AT_BASE: c_ulong = 7;
 +pub const AT_CLKTCK: c_ulong = 17;
 +pub const AT_EACCESS: c_int = 0x200;
@@ -798,11 +885,13 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const CREAD: tcflag_t = 0o200;
 +pub const CRNCYSTR: nl_item = 0x4000f;
 +pub const CRTSCTS: tcflag_t = 0o20000000000;
++pub const CS: c_int = 17;
 +pub const CS5: tcflag_t = 0;
 +pub const CS6: tcflag_t = 0o20;
 +pub const CS7: tcflag_t = 0o40;
 +pub const CS8: tcflag_t = 0o60;
 +pub const CSIZE: tcflag_t = 0o60;
++pub const CSTOPB: crate::tcflag_t = 0o100;
 +pub const _CS_GNU_LIBC_VERSION: c_int = 2;
 +pub const _CS_GNU_LIBPTHREAD_VERSION: c_int = 3;
 +pub const _CS_PATH: c_int = 0;
@@ -851,6 +940,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const DAY_6: nl_item = 0x2000c;
 +pub const DAY_7: nl_item = 0x2000d;
 +pub const DEAD_PROCESS: c_short = 8;
++pub const DS: c_int = 23;
 +pub const D_FMT: nl_item = 0x20029;
 +pub const D_T_FMT: nl_item = 0x20028;
 +pub const E2BIG: c_int = 7;
@@ -905,6 +995,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const EEXIST: c_int = 17;
 +pub const EFAULT: c_int = 14;
 +pub const EFBIG: c_int = 27;
++pub const EFLAGS: c_int = 18;
 +pub const EHOSTDOWN: c_int = 112;
 +pub const EHOSTUNREACH: c_int = 113;
 +pub const EHWPOISON: c_int = 133;
@@ -917,6 +1008,16 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const EISCONN: c_int = 106;
 +pub const EISDIR: c_int = 21;
 +pub const EISNAM: c_int = 120;
++pub const EI_ABIVERSION: usize = 8;
++pub const EI_CLASS: usize = 4;
++pub const EI_DATA: usize = 5;
++pub const EI_MAG0: usize = 0;
++pub const EI_MAG1: usize = 1;
++pub const EI_MAG2: usize = 2;
++pub const EI_MAG3: usize = 3;
++pub const EI_NIDENT: usize = 16;
++pub const EI_OSABI: usize = 7;
++pub const EI_VERSION: usize = 6;
 +pub const EKEYEXPIRED: c_int = 127;
 +pub const EKEYREJECTED: c_int = 129;
 +pub const EKEYREVOKED: c_int = 128;
@@ -924,6 +1025,28 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const EL2NSYNC: c_int = 45;
 +pub const EL3HLT: c_int = 46;
 +pub const EL3RST: c_int = 47;
++pub const ELFCLASS32: u8 = 1;
++pub const ELFCLASS64: u8 = 2;
++pub const ELFCLASSNONE: u8 = 0;
++pub const ELFCLASSNUM: usize = 3;
++pub const ELFDATA2LSB: u8 = 1;
++pub const ELFDATA2MSB: u8 = 2;
++pub const ELFDATANONE: u8 = 0;
++pub const ELFDATANUM: usize = 3;
++pub const ELFMAG0: u8 = 127;
++pub const ELFMAG1: u8 = 69;
++pub const ELFMAG2: u8 = 76;
++pub const ELFMAG3: u8 = 70;
++pub const ELFOSABI_AIX: u8 = 7;
++pub const ELFOSABI_FREEBSD: u8 = 9;
++pub const ELFOSABI_GNU: u8 = 3;
++pub const ELFOSABI_HPUX: u8 = 1;
++pub const ELFOSABI_IRIX: u8 = 8;
++pub const ELFOSABI_LINUX: u8 = 3;
++pub const ELFOSABI_NETBSD: u8 = 2;
++pub const ELFOSABI_OPENBSD: u8 = 12;
++pub const ELFOSABI_SOLARIS: u8 = 6;
++pub const ELFOSABI_SYSV: u8 = 0;
 +pub const ELIBACC: c_int = 79;
 +pub const ELIBBAD: c_int = 80;
 +pub const ELIBEXEC: c_int = 83;
@@ -937,6 +1060,24 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const EMPTY: c_short = 0;
 +pub const EMSGSIZE: c_int = 90;
 +pub const EMULTIHOP: c_int = 72;
++pub const EM_386: u16 = 3;
++pub const EM_68K: u16 = 4;
++pub const EM_AARCH64: u16 = 183;
++pub const EM_ALPHA: u16 = 36902;
++pub const EM_ARM: u16 = 40;
++pub const EM_IA_64: u16 = 50;
++pub const EM_M32: u16 = 1;
++pub const EM_MIPS: u16 = 8;
++pub const EM_NONE: u16 = 0;
++pub const EM_PARISC: u16 = 15;
++pub const EM_PPC: u16 = 20;
++pub const EM_PPC64: u16 = 21;
++pub const EM_RISCV: u16 = 243;
++pub const EM_S390: u16 = 22;
++pub const EM_SH: u16 = 42;
++pub const EM_SPARC: u16 = 2;
++pub const EM_SPARCV9: u16 = 43;
++pub const EM_X86_64: u16 = 62;
 +pub const ENAMETOOLONG: c_int = 36;
 +pub const ENAVAIL: c_int = 119;
 +pub const ENETDOWN: c_int = 100;
@@ -995,6 +1136,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const ERESTART: c_int = 85;
 +pub const ERFKILL: c_int = 132;
 +pub const EROFS: c_int = 30;
++pub const ES: c_int = 24;
 +pub const ESHUTDOWN: c_int = 108;
 +pub const ESOCKTNOSUPPORT: c_int = 94;
 +pub const ESPIPE: c_int = 29;
@@ -1002,6 +1144,90 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const ESRMNT: c_int = 69;
 +pub const ESTALE: c_int = 116;
 +pub const ESTRPIPE: c_int = 86;
++pub const ETH_ALEN: c_int = 6;
++pub const ETH_FCS_LEN: c_int = 4;
++pub const ETH_FRAME_LEN: c_int = 1514;
++pub const ETH_HLEN: c_int = 14;
++pub const ETH_P_1588: c_int = 35063;
++pub const ETH_P_8021AD: c_int = 34984;
++pub const ETH_P_8021AH: c_int = 35047;
++pub const ETH_P_8021Q: c_int = 33024;
++pub const ETH_P_80221: c_int = 35095;
++pub const ETH_P_802_2: c_int = 4;
++pub const ETH_P_802_3: c_int = 1;
++pub const ETH_P_802_3_MIN: c_int = 1536;
++pub const ETH_P_802_EX1: c_int = 34997;
++pub const ETH_P_AARP: c_int = 33011;
++pub const ETH_P_AF_IUCV: c_int = 64507;
++pub const ETH_P_ALL: c_int = 3;
++pub const ETH_P_AOE: c_int = 34978;
++pub const ETH_P_ARCNET: c_int = 26;
++pub const ETH_P_ARP: c_int = 2054;
++pub const ETH_P_ATALK: c_int = 32923;
++pub const ETH_P_ATMFATE: c_int = 34948;
++pub const ETH_P_ATMMPOA: c_int = 34892;
++pub const ETH_P_AX25: c_int = 2;
++pub const ETH_P_BATMAN: c_int = 17157;
++pub const ETH_P_BPQ: c_int = 2303;
++pub const ETH_P_CAIF: c_int = 247;
++pub const ETH_P_CAN: c_int = 12;
++pub const ETH_P_CANFD: c_int = 13;
++pub const ETH_P_CONTROL: c_int = 22;
++pub const ETH_P_CUST: c_int = 24582;
++pub const ETH_P_DDCMP: c_int = 6;
++pub const ETH_P_DEC: c_int = 24576;
++pub const ETH_P_DIAG: c_int = 24581;
++pub const ETH_P_DNA_DL: c_int = 24577;
++pub const ETH_P_DNA_RC: c_int = 24578;
++pub const ETH_P_DNA_RT: c_int = 24579;
++pub const ETH_P_DSA: c_int = 27;
++pub const ETH_P_ECONET: c_int = 24;
++pub const ETH_P_EDSA: c_int = 56026;
++pub const ETH_P_FCOE: c_int = 35078;
++pub const ETH_P_FIP: c_int = 35092;
++pub const ETH_P_HDLC: c_int = 25;
++pub const ETH_P_IEEE802154: c_int = 246;
++pub const ETH_P_IEEEPUP: c_int = 2560;
++pub const ETH_P_IEEEPUPAT: c_int = 2561;
++pub const ETH_P_IP: c_int = 0x800;
++pub const ETH_P_IPV6: c_int = 34525;
++pub const ETH_P_IPX: c_int = 33079;
++pub const ETH_P_IRDA: c_int = 23;
++pub const ETH_P_LAT: c_int = 24580;
++pub const ETH_P_LINK_CTL: c_int = 34924;
++pub const ETH_P_LOCALTALK: c_int = 9;
++pub const ETH_P_LOOP: c_int = 96;
++pub const ETH_P_LOOPBACK: c_int = 36864;
++pub const ETH_P_MOBITEX: c_int = 21;
++pub const ETH_P_MPLS_MC: c_int = 34888;
++pub const ETH_P_MPLS_UC: c_int = 34887;
++pub const ETH_P_MVRP: c_int = 35061;
++pub const ETH_P_PAE: c_int = 34958;
++pub const ETH_P_PAUSE: c_int = 34824;
++pub const ETH_P_PHONET: c_int = 245;
++pub const ETH_P_PPPTALK: c_int = 16;
++pub const ETH_P_PPP_DISC: c_int = 34915;
++pub const ETH_P_PPP_MP: c_int = 8;
++pub const ETH_P_PPP_SES: c_int = 34916;
++pub const ETH_P_PRP: c_int = 35067;
++pub const ETH_P_PUP: c_int = 0x200;
++pub const ETH_P_PUPAT: c_int = 513;
++pub const ETH_P_QINQ1: c_int = 37120;
++pub const ETH_P_QINQ2: c_int = 37376;
++pub const ETH_P_QINQ3: c_int = 37632;
++pub const ETH_P_RARP: c_int = 32821;
++pub const ETH_P_SCA: c_int = 24583;
++pub const ETH_P_SLOW: c_int = 34825;
++pub const ETH_P_SNAP: c_int = 5;
++pub const ETH_P_TDLS: c_int = 35085;
++pub const ETH_P_TEB: c_int = 25944;
++pub const ETH_P_TIPC: c_int = 35018;
++pub const ETH_P_TRAILER: c_int = 28;
++pub const ETH_P_TR_802_2: c_int = 17;
++pub const ETH_P_WAN_PPP: c_int = 7;
++pub const ETH_P_WCCP: c_int = 34878;
++pub const ETH_P_X25: c_int = 2053;
++pub const ETH_ZLEN: c_int = 60;
 +pub const ETIME: c_int = 62;
 +pub const ETIMEDOUT: c_int = 110;
 +pub const ETOOMANYREFS: c_int = 109;
@@ -1009,6 +1235,9 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const EUCLEAN: c_int = 117;
 +pub const EUNATCH: c_int = 49;
 +pub const EUSERS: c_int = 87;
++pub const EV_CURRENT: u32 = 1;
++pub const EV_NONE: u32 = 0;
++pub const EV_NUM: u32 = 2;
 +pub const EWOULDBLOCK: c_int = 11;
 +pub const EXDEV: c_int = 18;
 +pub const EXFULL: c_int = 54;
@@ -1037,6 +1266,8 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const FPE_FLTUND: c_int = 5;
 +pub const FPE_INTDIV: c_int = 1;
 +pub const FPE_INTOVF: c_int = 2;
++pub const FS: c_int = 25;
++pub const FS_BASE: c_int = 21;
 +pub const F_ADD_SEALS: c_int = 1033;
 +pub const F_DUPFD: c_int = 0;
 +pub const F_DUPFD_CLOEXEC: c_int = 1030;
@@ -1081,6 +1312,9 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const F_ULOCK: c_int = 4;
 +pub const F_UNLCK: c_int = 2;
 +pub const F_WRLCK: c_int = 1;
++pub const GETALL: c_int = 13;
++pub const GETPID: c_int = 11;
++pub const GETVAL: c_int = 12;
 +pub const GLOB_ABORTED: c_int = 1;
 +pub const GLOB_ALTDIRFUNC: c_int = 0x1000;
 +pub const GLOB_APPEND: c_int = 1;
@@ -1098,6 +1332,11 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const GLOB_PERIOD: c_int = 128;
 +pub const GLOB_TILDE: c_int = 0x100;
 +pub const GLOB_TILDE_CHECK: c_int = 0x200;
++pub const GRND_INSECURE: c_uint = 4;
++pub const GRND_NONBLOCK: c_uint = 1;
++pub const GRND_RANDOM: c_uint = 2;
++pub const GS: c_int = 26;
++pub const GS_BASE: c_int = 22;
 +pub const HOST_NAME_MAX: c_int = 255;
 +pub const HUPCL: tcflag_t = 0o2000;
 +pub const ICANON: tcflag_t = 2;
@@ -1144,6 +1383,41 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const _IOLBF: c_int = 2;
 +pub const _IONBF: c_int = 3;
 +pub const IOV_MAX: c_int = 0x400;
++pub const IPC_CREAT: c_int = 0x200;
++pub const IPC_EXCL: c_int = 0x400;
++pub const IPC_INFO: c_int = 3;
++pub const IPC_NOWAIT: c_int = 0x800;
++pub const IPC_PRIVATE: crate::key_t = 0;
++pub const IPC_RMID: c_int = 0;
++pub const IPC_SET: c_int = 1;
++pub const IPC_STAT: c_int = 2;
++pub const IPDEFTTL: u8 = 64;
++pub const IPOPT_CLASS_MASK: u8 = 96;
++pub const IPOPT_CONTROL: u8 = 0;
++pub const IPOPT_COPY: u8 = 128;
++pub const IPOPT_END: u8 = 0;
++pub const IPOPT_EOL: u8 = 0;
++pub const IPOPT_LSRR: u8 = 131;
++pub const IPOPT_MEASUREMENT: u8 = 64;
++pub const IPOPT_MINOFF: u8 = 4;
++pub const IPOPT_NOOP: u8 = 1;
++pub const IPOPT_NOP: u8 = 1;
++pub const IPOPT_NUMBER_MASK: u8 = 31;
++pub const IPOPT_OFFSET: u8 = 2;
++pub const IPOPT_OLEN: u8 = 1;
++pub const IPOPT_OPTVAL: u8 = 0;
++pub const IPOPT_RA: u8 = 148;
++pub const IPOPT_RESERVED1: u8 = 32;
++pub const IPOPT_RESERVED2: u8 = 96;
++pub const IPOPT_RR: u8 = 7;
++pub const IPOPT_SEC: u8 = 130;
++pub const IPOPT_SID: u8 = 136;
++pub const IPOPT_SSRR: u8 = 137;
++pub const IPOPT_TIMESTAMP: u8 = 68;
++pub const IPOPT_TS: u8 = 68;
++pub const IPOPT_TS_PRESPEC: u8 = 3;
++pub const IPOPT_TS_TSANDADDR: u8 = 1;
++pub const IPOPT_TS_TSONLY: u8 = 0;
 +pub const IPPROTO_AH: c_int = 51;
 +pub const IPPROTO_BEETPH: c_int = 94;
 +pub const IPPROTO_COMP: c_int = 108;
@@ -1171,6 +1445,14 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const IPPROTO_SCTP: c_int = 132;
 +pub const IPPROTO_TP: c_int = 29;
 +pub const IPPROTO_UDPLITE: c_int = 136;
++pub const IPTOS_LOWDELAY: u8 = 16;
++pub const IPTOS_MINCOST: u8 = 2;
++pub const IPTOS_PREC_CRITIC_ECP: u8 = 160;
++pub const IPTOS_PREC_INTERNETCONTROL: u8 = 192;
++pub const IPTOS_PREC_NETCONTROL: u8 = 224;
++pub const IPTOS_RELIABILITY: u8 = 4;
++pub const IPTOS_THROUGHPUT: u8 = 8;
++pub const IPTOS_TOS_MASK: u8 = 30;
 +pub const IPV6_2292HOPLIMIT: c_int = 8;
 +pub const IPV6_2292PKTOPTIONS: c_int = 6;
 +pub const IPV6_ADD_MEMBERSHIP: c_int = 20;
@@ -1198,6 +1480,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const IPV6_TCLASS: c_int = 67;
 +pub const IPV6_UNICAST_HOPS: c_int = 16;
 +pub const IPV6_V6ONLY: c_int = 26;
++pub const IPVERSION: u8 = 4;
 +pub const IP_ADD_MEMBERSHIP: c_int = 35;
 +pub const IP_ADD_SOURCE_MEMBERSHIP: c_int = 39;
 +pub const IP_BLOCK_SOURCE: c_int = 38;
@@ -1263,19 +1546,37 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const LC_TIME: c_int = 2;
 +pub const LC_TIME_MASK: c_int = 4;
 +pub const LINE_MAX: c_int = 0x1000;
++pub const LIO_NOP: c_int = 2;
++pub const LIO_NOWAIT: c_int = 1;
++pub const LIO_READ: c_int = 0;
++pub const LIO_WAIT: c_int = 0;
++pub const LIO_WRITE: c_int = 1;
 +pub const LOCK_EX: c_int = 2;
 +pub const LOCK_NB: c_int = 4;
 +pub const LOCK_SH: c_int = 1;
 +pub const LOCK_UN: c_int = 8;
 +pub const LOGIN_NAME_MAX: c_int = 0x100;
 +pub const LOGIN_PROCESS: c_short = 6;
++pub const LOG_AUTHPRIV: c_int = 80;
++pub const LOG_CRON: c_int = 72;
++pub const LOG_FTP: c_int = 88;
++pub const LOG_NFACILITIES: c_int = 24;
++pub const LOG_PERROR: c_int = 32;
 +pub const L_tmpnam: c_uint = 0x100;
++pub const MADV_DONTNEED: c_int = 4;
++pub const MADV_FREE: c_int = 8;
++pub const MADV_NORMAL: c_int = 0;
++pub const MADV_RANDOM: c_int = 1;
++pub const MADV_SEQUENTIAL: c_int = 2;
++pub const MADV_WILLNEED: c_int = 3;
 +pub const MAP_ANON: c_int = 32;
 +pub const MAP_ANONYMOUS: c_int = 32;
 +pub const MAP_FILE: c_int = 0;
 +pub const MAP_FIXED: c_int = 16;
 +pub const MAP_PRIVATE: c_int = 2;
 +pub const MAP_SHARED: c_int = 1;
++pub const MAX_ADDR_LEN: usize = 7;
++pub const MAX_IPOPTLEN: u8 = 40;
 +pub const MCAST_BLOCK_SOURCE: c_int = 43;
 +pub const MCAST_EXCLUDE: c_int = 0;
 +pub const MCAST_INCLUDE: c_int = 1;
@@ -1323,13 +1624,16 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const MS_INVALIDATE: c_int = 2;
 +pub const MS_SYNC: c_int = 4;
 +pub const NAME_MAX: c_int = 255;
++pub const NBBY: c_uint = 8;
 +pub const NCCS: usize = 32;
 +pub const NEW_TIME: c_short = 3;
++pub const NFDBITS: c_uint = 64;
 +pub const NGROUPS_MAX: c_int = 8;
 +pub const NI_DGRAM: c_int = 16;
 +pub const NI_IDN: c_int = 32;
 +pub const NI_IDN_USE_STD3_ASCII_RULES: c_int = 128;
 +pub const NI_MAXHOST: socklen_t = 1025;
++pub const NI_MAXSERV: size_t = 32;
 +pub const NI_NAMEREQD: c_int = 4;
 +pub const NI_NOFQDN: c_int = 1;
 +pub const NI_NUMERICHOST: c_int = 2;
@@ -1341,6 +1645,10 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const NOEXPR: nl_item = 0x50001;
 +pub const NOFLSH: tcflag_t = 0o200;
 +pub const NOSTR: nl_item = 0x50003;
++pub const NT_AUXV: c_int = 6;
++pub const NT_FPREGSET: c_int = 2;
++pub const NT_PRPSINFO: c_int = 3;
++pub const NT_PRSTATUS: c_int = 1;
 +pub const OCRNL: tcflag_t = 0o10;
 +pub const OFDEL: tcflag_t = 0o200;
 +pub const OFILL: tcflag_t = 0o100;
@@ -1349,7 +1657,9 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const ONLCR: tcflag_t = 4;
 +pub const ONLRET: tcflag_t = 0o40;
 +pub const ONOCR: tcflag_t = 0o20;
++pub const OPEN_MAX: c_int = 0x100;
 +pub const OPOST: tcflag_t = 1;
++pub const ORIG_RAX: c_int = 15;
 +pub const O_ACCMODE: c_int = 0x200003;
 +pub const O_APPEND: c_int = 0x400;
 +pub const O_ASYNC: c_int = 0x2000;
@@ -1375,6 +1685,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const O_TMPFILE: c_int = 0x410000;
 +pub const O_TRUNC: c_int = 0x200;
 +pub const O_WRONLY: c_int = 1;
++pub const PAGE_SIZE: size_t = 4096;
 +pub const PARENB: tcflag_t = 0o400;
 +pub const PARMRK: tcflag_t = 0o10;
 +pub const PARODD: tcflag_t = 0o1000;
@@ -1476,6 +1787,9 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const POSIX_SPAWN_SETSIGMASK: c_int = 8;
 +pub const POSIX_SPAWN_USEVFORK: c_short = 64;
 +pub const _POSIX_VDISABLE: crate::cc_t = 0;
++pub const PRIO_PGRP: c_int = 1;
++pub const PRIO_PROCESS: c_int = 0;
++pub const PRIO_USER: c_int = 2;
 +pub const PROT_EXEC: c_int = 4;
 +pub const PROT_NONE: c_int = 0;
 +pub const PROT_READ: c_int = 1;
@@ -1508,8 +1822,22 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const PTHREAD_SCOPE_PROCESS: c_int = 1;
 +pub const PTHREAD_SCOPE_SYSTEM: c_int = 0;
 +pub const PTHREAD_STACK_MIN: size_t = 16384;
++pub const R10: c_int = 7;
++pub const R11: c_int = 6;
++pub const R12: c_int = 3;
++pub const R13: c_int = 2;
++pub const R14: c_int = 1;
++pub const R15: c_int = 0;
++pub const R8: c_int = 9;
++pub const R9: c_int = 8;
 +pub const RADIXCHAR: nl_item = 0x10000;
 +pub const RAND_MAX: c_int = 0x7fffffff;
++pub const RAX: c_int = 10;
++pub const RBP: c_int = 4;
++pub const RBX: c_int = 5;
++pub const RCX: c_int = 11;
++pub const RDI: c_int = 14;
++pub const RDX: c_int = 12;
 +pub const REG_BADBR: c_int = 10;
 +pub const REG_BADPAT: c_int = 2;
 +pub const REG_BADRPT: c_int = 13;
@@ -1555,6 +1883,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const REG_RSP: c_int = 15;
 +pub const REG_TRAPNO: c_int = 20;
 +pub const RENAME_EXCHANGE: c_uint = 2;
++pub const RIP: c_int = 16;
 +pub const RLIMIT_AS: c_int = 9;
 +pub const RLIMIT_CORE: c_int = 4;
 +pub const RLIMIT_CPU: c_int = 0;
@@ -1576,6 +1905,12 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const RLIM_NLIMITS: c_int = 16;
 +pub const RLIM_SAVED_CUR: rlim_t = !0;
 +pub const RLIM_SAVED_MAX: rlim_t = !0;
++pub const RSI: c_int = 13;
++pub const RSP: c_int = 19;
++pub const RTF_GATEWAY: c_ushort = 2;
++pub const RTF_HOST: c_ushort = 4;
++pub const RTF_REJECT: c_ushort = 0x200;
++pub const RTF_UP: c_ushort = 1;
 +pub const RTLD_DEEPBIND: c_int = 8;
 +pub const RTLD_DI_LINKMAP: c_int = 2;
 +pub const RTLD_GLOBAL: c_int = 0x100;
@@ -1755,6 +2090,19 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const SEGV_ACCERR: c_int = 2;
 +pub const SEGV_MAPERR: c_int = 1;
 +pub const SELFMAG: usize = 4;
++pub const SEM_UNDO: c_int = 0x1000;
++pub const SETALL: c_int = 17;
++pub const SETVAL: c_int = 16;
++pub const SHM_EXEC: c_int = 0x8000;
++pub const SHM_HUGETLB: c_int = 0x800;
++pub const SHM_LOCK: c_int = 11;
++pub const SHM_NORESERVE: c_int = 0x1000;
++pub const SHM_R: c_int = 0x100;
++pub const SHM_RDONLY: c_int = 0x1000;
++pub const SHM_REMAP: c_int = 0x4000;
++pub const SHM_RND: c_int = 0x2000;
++pub const SHM_UNLOCK: c_int = 12;
++pub const SHM_W: c_int = 128;
 +pub const SHUT_RD: c_int = 0;
 +pub const SHUT_RDWR: c_int = 2;
 +pub const SHUT_WR: c_int = 1;
@@ -1836,6 +2184,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const SOL_ICMPV6: c_int = 58;
 +pub const SOL_IP: c_int = 0;
 +pub const SOL_IPV6: c_int = 41;
++pub const SOL_IPX: c_int = 0x100;
 +pub const SOL_IRDA: c_int = 266;
 +pub const SOL_IUCV: c_int = 277;
 +pub const SOL_LLC: c_int = 268;
@@ -1918,8 +2267,25 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const SO_TYPE: c_int = 3;
 +pub const SO_WIFI_STATUS: c_int = 41;
 +pub const SO_ZEROCOPY: c_int = 60;
++pub const SS: c_int = 20;
 +pub const SS_DISABLE: c_int = 2;
 +pub const SS_ONSTACK: c_int = 1;
++pub const STA_CLK: c_int = 0x8000;
++pub const STA_CLOCKERR: c_int = 0x1000;
++pub const STA_DEL: c_int = 32;
++pub const STA_FLL: c_int = 8;
++pub const STA_FREQHOLD: c_int = 128;
++pub const STA_INS: c_int = 16;
++pub const STA_MODE: c_int = 0x4000;
++pub const STA_NANO: c_int = 0x2000;
++pub const STA_PLL: c_int = 1;
++pub const STA_PPSERROR: c_int = 0x800;
++pub const STA_PPSFREQ: c_int = 2;
++pub const STA_PPSJITTER: c_int = 0x200;
++pub const STA_PPSSIGNAL: c_int = 0x100;
++pub const STA_PPSTIME: c_int = 4;
++pub const STA_PPSWANDER: c_int = 0x400;
++pub const STA_UNSYNC: c_int = 64;
 +pub const ST_APPEND: c_ulong = 0x100;
 +pub const ST_IMMUTABLE: c_ulong = 0x200;
 +pub const ST_MANDLOCK: c_ulong = 64;
@@ -1993,6 +2359,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const TCXONC: Ioctl = 21514;
 +pub const THOUSEP: nl_item = 0x10001;
 +pub const TIMER_ABSTIME: c_int = 1;
++pub const TIME_ERROR: c_int = 5;
 +pub const TIME_UTC: c_int = 1;
 +pub const TIOCCBRK: Ioctl = 21544;
 +pub const TIOCCONS: Ioctl = 21533;
@@ -2036,6 +2403,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +pub const TOSTOP: tcflag_t = 0o400;
 +pub const TRAP_BRKPT: c_int = 1;
 +pub const TRAP_TRACE: c_int = 2;
++pub const TZNAME_MAX: c_int = 6;
 +pub const T_FMT: nl_item = 0x2002a;
 +pub const T_FMT_AMPM: nl_item = 0x2002b;
 +pub const UIO_MAXIOV: c_int = 0x400;
@@ -2184,7 +2552,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +    }
 +}
 +
-+safe_f! {
++f! {
 +    pub const safe fn SIGRTMIN() -> c_int {
 +        35
 +    }
@@ -2281,6 +2649,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +        flag: c_int,
 +    ) -> c_int;
 +    pub fn futimes(fd: c_int, times: *const crate::timeval) -> c_int;
++    pub fn lutimes(file: *const c_char, times: *const crate::timeval) -> c_int;
 +    pub fn faccessat(dirfd: c_int, pathname: *const c_char, mode: c_int, flags: c_int) -> c_int;
 +    pub fn mkfifoat(dirfd: c_int, pathname: *const c_char, mode: crate::mode_t) -> c_int;
 +    pub fn mknodat(
@@ -2305,11 +2674,15 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +    ) -> c_int;
 +    pub fn sync();
 +    pub fn getdtablesize() -> c_int;
++    pub fn sethostname(name: *const c_char, len: size_t) -> c_int;
++    pub fn getdomainname(name: *mut c_char, len: size_t) -> c_int;
++    pub fn setdomainname(name: *const c_char, len: size_t) -> c_int;
 +
 +    // Memory
 +    pub fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int;
 +    pub fn msync(addr: *mut c_void, len: size_t, flags: c_int) -> c_int;
 +    pub fn posix_madvise(addr: *mut c_void, len: size_t, advice: c_int) -> c_int;
++    pub fn madvise(addr: *mut c_void, len: size_t, advice: c_int) -> c_int;
 +    pub fn malloc_usable_size(ptr: *mut c_void) -> size_t;
 +    pub fn reallocarray(ptr: *mut c_void, nmemb: size_t, size: size_t) -> *mut c_void;
 +    pub fn memrchr(cx: *const c_void, c: c_int, n: size_t) -> *mut c_void;
@@ -2344,6 +2717,7 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +    pub fn fexecve(fd: c_int, argv: *const *const c_char, envp: *const *const c_char) -> c_int;
 +    pub fn getauxval(type_: c_ulong) -> c_ulong;
 +    pub fn getentropy(buf: *mut c_void, buflen: size_t) -> c_int;
++    pub fn getrandom(buf: *mut c_void, buflen: size_t, flags: c_uint) -> ssize_t;
 +    pub fn gettid() -> crate::pid_t;
 +    pub fn getresuid(
 +        ruid: *mut crate::uid_t,
@@ -2703,6 +3077,8 @@ diff -ruN a/vendor/libc-0.2.189/src/unix/radix/mod.rs b/vendor/libc-0.2.189/src/
 +    pub fn getpwent() -> *mut crate::passwd;
 +    pub fn setpwent();
 +    pub fn endpwent();
++    pub fn getgrgid(gid: crate::gid_t) -> *mut crate::group;
++    pub fn getgrnam(name: *const c_char) -> *mut crate::group;
 +    pub fn getgrent() -> *mut crate::group;
 +    pub fn setgrent();
 +    pub fn endgrent();

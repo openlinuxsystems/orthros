@@ -76,6 +76,8 @@ uint32_t open_flags(int flags) {
 		out |= RADIX_OPEN_FLAGS_NO_TERMINAL;
 	if(flags & O_CLOEXEC)
 		out |= RADIX_OPEN_FLAGS_CLOSE_ON_EXEC;
+	if(flags & O_NOFOLLOW)
+		out |= RADIX_OPEN_FLAGS_NO_FOLLOW;
 	return out;
 }
 
@@ -165,7 +167,7 @@ int stat_fd(int fd, struct stat *st) {
 		return radix::to_errno(status);
 	// A directory.
 	struct radix_directory_stat_results d;
-	status = radix_directory_stat(slot, ".", 1, &d);
+	status = radix_directory_stat(slot, ".", 1, 0, &d);
 	if(status)
 		return radix::to_errno(status);
 	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
@@ -173,10 +175,16 @@ int stat_fd(int fd, struct stat *st) {
 	return 0;
 }
 
-// What the file at `path` is, as `struct stat`.
-int stat_path(const radix::Path &path, struct stat *st) {
+// The kernel's PathFlags for the AT_ flags `flags`.
+uint32_t path_flags(int flags) {
+	return flags & AT_SYMLINK_NOFOLLOW ? RADIX_PATH_FLAGS_NO_FOLLOW : 0;
+}
+
+// What the file at `path` is, as `struct stat`: with `flags`
+// AT_SYMLINK_NOFOLLOW, a symbolic link there itself.
+int stat_path(const radix::Path &path, struct stat *st, int flags = 0) {
 	struct radix_directory_stat_results d;
-	uint64_t status = radix_directory_stat(path.dir, path.text, path.len, &d);
+	uint64_t status = radix_directory_stat(path.dir, path.text, path.len, path_flags(flags), &d);
 	if(status)
 		return radix::to_errno(status);
 	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
@@ -194,10 +202,10 @@ int must_be_dir(const radix::Path &path) {
 
 // Removes `path`: a directory only with `directory`, which fails with
 // ENOTDIR on anything else; a file only without, which fails with EISDIR
-// on a directory.
+// on a directory. A symbolic link is removed itself, as a file.
 int remove_path(const radix::Path &path, bool directory) {
 	struct stat st;
-	if(int e = stat_path(path, &st); e)
+	if(int e = stat_path(path, &st, AT_SYMLINK_NOFOLLOW); e)
 		return e;
 	if(directory && !S_ISDIR(st.st_mode))
 		return ENOTDIR;
@@ -380,7 +388,7 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 	if(cursor == 0) {
 		// Only a directory lists.
 		struct radix_directory_stat_results d;
-		if(uint64_t status = radix_directory_stat(slot, ".", 1, &d); status)
+		if(uint64_t status = radix_directory_stat(slot, ".", 1, 0, &d); status)
 			return other_kind(status) ? ENOTDIR : radix::to_errno(status);
 		if(!put_entry(out, max_size, used, ".", 1, DOTDOT_CURSOR, DT_DIR))
 			return EINVAL;
@@ -415,6 +423,7 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 			case RADIX_FILE_KIND_BLOCK_DEVICE: type = DT_BLK; break;
 			case RADIX_FILE_KIND_CHAR_DEVICE: type = DT_CHR; break;
 			case RADIX_FILE_KIND_PIPE: type = DT_FIFO; break;
+			case RADIX_FILE_KIND_SYMLINK: type = DT_LNK; break;
 			default: type = DT_REG; break;
 			}
 			if(!put_entry(out, max_size, used, name, entry.name_len, entry.next, type))
@@ -703,7 +712,7 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 	radix::Path resolved;
 	if(int e = radix::resolve(fd, path, &resolved); e)
 		return e;
-	return stat_path(resolved, statbuf);
+	return stat_path(resolved, statbuf, flags);
 }
 
 // Not in the dynamic linker, which has no strnlen (core.cpp).
@@ -773,14 +782,13 @@ int Sysdeps<Access>::operator()(const char *path, int mode) {
 
 int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, int flags) {
 	(void)mode;
-	(void)flags;
 	// There are no permissions until users come (Phase 13): a file that
 	// exists may be read, written and run.
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
 	struct stat st;
-	return stat_path(resolved, &st);
+	return stat_path(resolved, &st, flags);
 }
 
 int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
@@ -883,12 +891,11 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 		return e;
 	if(int e = must_be_dir(resolved); e)
 		return e;
-	char absolute[radix::PATH_MAX_BYTES + 1];
-	absolute[0] = '/';
-	if(resolved.len == 1 && resolved.text[0] == '.')
-		absolute[1] = 0;
-	else
-		memcpy(absolute + 1, resolved.text, resolved.len + 1);
+	// Where it really is, links followed, so that getcwd says so and
+	// `..` from it leads where the kernel's would.
+	char absolute[radix::PATH_MAX_BYTES];
+	if(int e = sysdep<Realpath>(path, absolute, sizeof(absolute)); e)
+		return e;
 	return radix::set_cwd(absolute);
 }
 
@@ -914,17 +921,38 @@ int Sysdeps<Readlink>::operator()(const char *path, void *buffer, size_t max_siz
 
 int Sysdeps<Readlinkat>::operator()(int dirfd, const char *path, void *buffer, size_t max_size,
 		ssize_t *length) {
-	(void)buffer;
-	(void)max_size;
-	(void)length;
-	// No filesystem has symbolic links yet: whatever exists is not one.
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, path, &resolved); e)
 		return e;
-	struct stat st;
-	if(int e = stat_path(resolved, &st); e)
+	struct radix_directory_read_link_results r;
+	if(uint64_t status = radix_directory_read_link(resolved.dir, resolved.text, resolved.len,
+			buffer, max_size, &r); status)
+		return radix::to_errno(status);
+	// What did not fit is cut off, as POSIX has it.
+	*length = static_cast<ssize_t>(r.len < max_size ? r.len : max_size);
+	return 0;
+}
+
+int Sysdeps<Realpath>::operator()(const char *path, char *out, size_t size) {
+	radix::Path resolved;
+	if(int e = radix::resolve(AT_FDCWD, path, &resolved); e)
 		return e;
-	return EINVAL;
+	if(size < 2)
+		return ERANGE;
+	// The kernel's answer is beneath the root: after a `/`, with room for
+	// the NUL.
+	struct radix_directory_real_path_results r;
+	if(uint64_t status = radix_directory_real_path(resolved.dir, resolved.text, resolved.len,
+			out + 1, size - 2, &r); status)
+		return radix::to_errno(status);
+	if(r.len > size - 2)
+		return ENAMETOOLONG;
+	out[0] = '/';
+	if(r.len == 1 && out[1] == '.')
+		out[1] = 0;
+	else
+		out[r.len + 1] = 0;
+	return 0;
 }
 
 int Sysdeps<Link>::operator()(const char *old_path, const char *new_path) {
@@ -947,11 +975,18 @@ int Sysdeps<Symlink>::operator()(const char *target_path, const char *link_path)
 }
 
 int Sysdeps<Symlinkat>::operator()(const char *target_path, int dirfd, const char *link_path) {
-	(void)target_path;
-	(void)dirfd;
-	(void)link_path;
-	// No filesystem has symbolic links yet.
-	return EPERM;
+	if(!target_path)
+		return EFAULT;
+	size_t len = strlen(target_path);
+	if(!len)
+		return ENOENT;
+	if(len >= radix::PATH_MAX_BYTES)
+		return ENAMETOOLONG;
+	radix::Path resolved;
+	if(int e = radix::resolve(dirfd, link_path, &resolved); e)
+		return e;
+	return radix::to_errno(radix_directory_make_link(resolved.dir, resolved.text, resolved.len,
+			target_path, len));
 }
 
 int Sysdeps<Chmod>::operator()(const char *pathname, mode_t mode) {
@@ -966,13 +1001,12 @@ int Sysdeps<Fchmod>::operator()(int fd, mode_t mode) {
 
 int Sysdeps<Fchmodat>::operator()(int fd, const char *pathname, mode_t mode, int flags) {
 	(void)mode;
-	(void)flags;
 	// Files have no permissions to change until users come (Phase 13).
 	radix::Path resolved;
 	if(int e = radix::resolve(fd, pathname, &resolved); e)
 		return e;
 	struct stat st;
-	return stat_path(resolved, &st);
+	return stat_path(resolved, &st, flags);
 }
 
 int Sysdeps<Fchownat>::operator()(int dirfd, const char *pathname, uid_t owner, gid_t group,
@@ -988,7 +1022,7 @@ int Sysdeps<Fchownat>::operator()(int dirfd, const char *pathname, uid_t owner, 
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
 	struct stat st;
-	return stat_path(resolved, &st);
+	return stat_path(resolved, &st, flags);
 }
 
 namespace {
@@ -1017,8 +1051,6 @@ int kernel_time(const struct timespec &ts, uint64_t *out) {
 
 int Sysdeps<Utimensat>::operator()(int dirfd, const char *pathname, const struct timespec times[2],
 		int flags) {
-	// There are no symbolic links to not follow.
-	(void)flags;
 	uint64_t accessed = RADIX_FILE_TIME_NOW, modified = RADIX_FILE_TIME_NOW;
 	if(times) {
 		if(int e = kernel_time(times[0], &accessed); e)
@@ -1033,14 +1065,14 @@ int Sysdeps<Utimensat>::operator()(int dirfd, const char *pathname, const struct
 			return EBADF;
 		uint64_t status = radix_file_set_times(slot, accessed, modified);
 		if(other_kind(status))
-			status = radix_directory_set_times(slot, ".", 1, accessed, modified);
+			status = radix_directory_set_times(slot, ".", 1, accessed, modified, 0);
 		return radix::to_errno(status);
 	}
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
 	return radix::to_errno(radix_directory_set_times(resolved.dir, resolved.text, resolved.len,
-			accessed, modified));
+			accessed, modified, path_flags(flags)));
 }
 
 int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {

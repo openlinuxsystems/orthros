@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The core utilities of uutils (ADR 0080): ls, cp, cat, sort and the rest
+# of the POSIX and GNU core utilities, in Rust, as one program that each
+# utility's name runs, with a manual page for each. Radix-native tools
+# take the place of those that depend on Linux internals (chmod, chown,
+# chgrp, df, kill, uptime, who and the other utmp readers), and chroot,
+# hostid, stdbuf and the SELinux tools are left out: Radix has none of
+# what they need.
+name = "uutils-coreutils"
+version = "0.9.0"
+summary = "the core utilities, rewritten in Rust"
+license = "MIT"
+homepage = "https://github.com/uutils/coreutils"
+depends = ["rust-crates"]
+image = ["system/bin/coreutils"]
+
+[source]
+git = "https://github.com/uutils/coreutils.git"
+commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+tag = "0.9.0"

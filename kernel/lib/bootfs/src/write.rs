@@ -5,7 +5,7 @@
 //! that are the same bytes every time for the same files, so images can
 //! be reproduced (owner 0, no user or group names, the times given).
 
-use super::{BLOCK, CHECKSUM, Error, MAX_PATH, MODE, MTIME, NAME, PREFIX, SIZE, TYPE};
+use super::{BLOCK, CHECKSUM, Error, LINK, MAX_PATH, MODE, MTIME, NAME, PREFIX, SIZE, TYPE};
 
 /// An archive being written. Entries go in in order of their paths, a
 /// directory before what is in it.
@@ -23,12 +23,21 @@ impl Writer {
 
     /// Adds a directory.
     pub fn directory(&mut self, path: &str, mode: u32, mtime: u64) -> Result<(), Error> {
-        self.entry(path, b'5', mode, mtime, &[])
+        self.entry(path, b'5', mode, mtime, &[], "")
     }
 
     /// Adds a regular file.
     pub fn file(&mut self, path: &str, mode: u32, mtime: u64, data: &[u8]) -> Result<(), Error> {
-        self.entry(path, b'0', mode, mtime, data)
+        self.entry(path, b'0', mode, mtime, data, "")
+    }
+
+    /// Adds a symbolic link to `target`, at most [`crate::MAX_LINK`]
+    /// bytes.
+    pub fn symlink(&mut self, path: &str, target: &str, mtime: u64) -> Result<(), Error> {
+        if target.is_empty() || target.len() > LINK.1 || target.contains('\0') {
+            return Err(Error::BadLink);
+        }
+        self.entry(path, b'2', 0o777, mtime, &[], target)
     }
 
     /// The archive's bytes, with the two blocks of zeros that end it.
@@ -44,6 +53,7 @@ impl Writer {
         mode: u32,
         mtime: u64,
         data: &[u8],
+        link: &str,
     ) -> Result<(), Error> {
         let path = path.trim_matches('/');
         let named = |c: &str| !c.is_empty() && c != "." && c != "..";
@@ -75,6 +85,7 @@ impl Writer {
         octal(&mut header, SIZE, data.len() as u64)?;
         octal(&mut header, MTIME, mtime)?;
         header[TYPE] = kind;
+        header[LINK.0..LINK.0 + link.len()].copy_from_slice(link.as_bytes());
         header[257..263].copy_from_slice(b"ustar\0");
         header[263..265].copy_from_slice(b"00");
         header[PREFIX.0..PREFIX.0 + prefix.len()].copy_from_slice(prefix.as_bytes());
