@@ -551,7 +551,9 @@ A port is a directory _ports/<name>/_ (ADR 0069) holding:
 
 _recipe.toml_
 	The port's name, version, summary, SPDX license and home page; its
-	source, a git repository and the full commit it is pinned to, a
+	source, a git repository and the full commit it is pinned to (with
+	*paths*, the only directories of a large repository it needs, of
+	which nothing else is fetched), a
 	release archive (*url*, *sha256* and *mirrors* that serve the same
 	file, ADR 0086), or *rust-src = true* for the _library_ directory of
 	the pinned Rust
@@ -587,13 +589,13 @@ _build.sh_
 	normal,no-proc-macro --prefix none --format '{p}|{l}'* lists them,
 	and its _Cargo.lock_), *SYSROOT*, *TOOLCHAIN*, Cargo for Radix
 	(*CARGO_RADIX*), *PREFIX* (_/system_), *JOBS*, *HOST*
-	(*x86_64-radix*), the toolchain's programs as *CC*, *AR*, *RANLIB*,
-	*NM*, *STRIP* and *OBJCOPY*, *CFLAGS*, the Meson cross files
-	(*CROSS_FILE*, *LIBC_CROSS_FILE*), *RUST_TARGET* (the target
+	(*x86_64-radix*), the toolchain's programs as *CC*, *CXX*, *AR*,
+	*RANLIB*, *NM*, *STRIP* and *OBJCOPY*, *CFLAGS* and *CXXFLAGS*, the
+	Meson cross files (*CROSS_FILE*, *LIBC_CROSS_FILE*), the CMake
+	toolchain file (*CMAKE_TOOLCHAIN_FILE*), *RUST_TARGET* (the target
 	specification of programs on Rust's standard library), pkg-config's
 	settings for the sysroot and *SOURCE_DATE_EPOCH*; the host's own
-	*CPPFLAGS*, *CXXFLAGS*, *LDFLAGS* and *PKG_CONFIG_PATH* are taken
-	away.
+	*CPPFLAGS*, *LDFLAGS* and *PKG_CONFIG_PATH* are taken away.
 
 Sources are fetched once into _target/ports/_: with git by commit, and
 checked to be that commit; release archives from their *url* or, when
@@ -617,7 +619,19 @@ sysroot's headers only. It links a static position-independent program,
 as every program in _/system_ is. With *-dynamic* it links a program
 that the dynamic linker, _/system/lib/ld.so_, starts on the shared C
 library, and with *-shared* a shared library, as a bundle that ships
-libraries of its own needs (ADR 0071).
+libraries of its own needs (ADR 0071). *x86_64-radix-c++* is the same
+for C++, on LLVM's libc++, libc++abi and libunwind, which the
+*llvm-runtimes* port builds (ADR 0090): it puts libc++'s headers before
+the C library's, unless given *-nostdinc++*, and links the three
+libraries before the C library, unless given *-nostdlib++* or
+*-nodefaultlibs*.
+
+_cmake/radix.cmake_ is the toolchain file for ports that build with
+CMake (3.28 or later): it names the wrappers and the sysroot, in which
+alone CMake looks for libraries, headers and packages, and the system
+*Radix*, which _cmake/Platform/_ describes to CMake as a Unix whose
+compilers and linker take Linux's settings, with _/system_ the first
+prefix to look in.
 
 _bin/x86_64-radix-configure_ _source_ [_argument_...] runs the
 autoconf *configure* script of _source_ for Radix in the current

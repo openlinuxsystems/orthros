@@ -101,6 +101,20 @@ errors kernel = 1 {
     /// The file is not a socket: `send`, `receive` and `shutdown` are for
     /// sockets alone.
     not_socket = 36 => ENOTSOCK;
+    /// No socket listens at that name: the name leads to no socket, or to
+    /// one that does not listen or is gone (radix-directory(2)'s
+    /// `connect_socket`).
+    refused = 37 => ECONNREFUSED;
+    /// The socket is connected already.
+    connected = 38 => EISCONN;
+    /// The socket is not connected.
+    not_connected = 39 => ENOTCONN;
+    /// The call does not take what it was given: a socket among the
+    /// files sent with radix-file(2)'s `send_files`.
+    not_supported = 40 => EOPNOTSUPP;
+    /// Too many files are on their way through the socket already, sent
+    /// and not yet received (radix-file(2)'s `send_files`).
+    too_many = 41 => ETOOMANYREFS;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).

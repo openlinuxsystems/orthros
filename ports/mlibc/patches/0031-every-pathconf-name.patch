@@ -1,0 +1,115 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Has pathconf and fpathconf answer every name POSIX lists, numbered as
+on Linux, with musl's values, where they knew two and failed with
+EINVAL on the rest: libc++'s std::filesystem::current_path asks for
+_PC_PATH_MAX, and threw. Meant for upstream.
+
+diff --git a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
+index 1810415..a1dd5dc 100644
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -259,19 +259,56 @@ int fexecve(int fd, char *const argv[], char *const envp[]) {
+ 	return 0;
+ }
+ 
+-long fpathconf(int, int name) {
++namespace {
++
++// What pathconf and fpathconf answer, the same for every file, as on
++// musl: -1 without an error is no limit, or an option not supported.
++long path_limit(int name) {
+ 	switch (name) {
++	case _PC_LINK_MAX:
++		return _POSIX_LINK_MAX;
++	case _PC_MAX_CANON:
++		return _POSIX_MAX_CANON;
++	case _PC_MAX_INPUT:
++		return _POSIX_MAX_INPUT;
+ 	case _PC_NAME_MAX:
+ 		return NAME_MAX;
++	case _PC_PATH_MAX:
++		return PATH_MAX;
++	case _PC_PIPE_BUF:
++		return PIPE_BUF;
++	case _PC_CHOWN_RESTRICTED:
++	case _PC_NO_TRUNC:
++	case _PC_SYNC_IO:
++	case _PC_2_SYMLINKS:
++		return 1;
++	case _PC_VDISABLE:
++		return _POSIX_VDISABLE;
++	case _PC_ASYNC_IO:
++	case _PC_PRIO_IO:
++	case _PC_SOCK_MAXBUF:
++	case _PC_SYMLINK_MAX:
++		return -1;
+ 	case _PC_FILESIZEBITS:
+ 		return FILESIZEBITS;
++	case _PC_REC_INCR_XFER_SIZE:
++	case _PC_REC_MAX_XFER_SIZE:
++	case _PC_REC_MIN_XFER_SIZE:
++	case _PC_REC_XFER_ALIGN:
++	case _PC_ALLOC_SIZE_MIN:
++		return 4096;
+ 	default:
+-		mlibc::infoLogger() << "missing fpathconf() entry " << name << frg::endlog;
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
+ }
+ 
++} // namespace
++
++long fpathconf(int, int name) {
++	return path_limit(name);
++}
++
+ int fsync(int fd) {
+ 	if(auto e = mlibc::sysdep_or_enosys<Fsync>(fd); e) {
+ 		errno = e;
+@@ -612,16 +649,7 @@ int nice(int nice) {
+ }
+ 
+ long pathconf(const char *, int name) {
+-	switch (name) {
+-	case _PC_NAME_MAX:
+-		return NAME_MAX;
+-	case _PC_FILESIZEBITS:
+-		return FILESIZEBITS;
+-	default:
+-		mlibc::infoLogger() << "missing pathconf() entry " << name << frg::endlog;
+-		errno = EINVAL;
+-		return -1;
+-	}
++	return path_limit(name);
+ }
+ 
+ int pause(void) {
+diff --git a/options/posix/include/unistd.h b/options/posix/include/unistd.h
+index d72ddf3..d00563f 100644
+--- a/options/posix/include/unistd.h
++++ b/options/posix/include/unistd.h
+@@ -128,9 +128,18 @@ extern "C" {
+ #define _PC_CHOWN_RESTRICTED	6
+ #define _PC_NO_TRUNC		7
+ #define _PC_VDISABLE		8
+-
+-#define _PC_FILESIZEBITS 13
+-#define _PC_SYMLINK_MAX 19
++#define _PC_SYNC_IO		9
++#define _PC_ASYNC_IO		10
++#define _PC_PRIO_IO		11
++#define _PC_SOCK_MAXBUF		12
++#define _PC_FILESIZEBITS	13
++#define _PC_REC_INCR_XFER_SIZE	14
++#define _PC_REC_MAX_XFER_SIZE	15
++#define _PC_REC_MIN_XFER_SIZE	16
++#define _PC_REC_XFER_ALIGN	17
++#define _PC_ALLOC_SIZE_MIN	18
++#define _PC_SYMLINK_MAX		19
++#define _PC_2_SYMLINKS		20
+ 
+ /* MISSING: remaining _SC_macros */
+ #define _SC_ARG_MAX 0

@@ -92,9 +92,10 @@ The auxiliary vector has Linux's entries (*AT_PHDR*, *AT_ENTRY*,
 *AT_RADIX_STARTUP* (0x52440002), the start-up page's address.
 
 Spark gives every POSIX program it starts the environment
-*PATH=/system/bin*, *HOME=/*, *TERM=dumb* and *LANG=C.UTF-8*, the root
-with the read and write rights, and a new pseudo-terminal as descriptors
-0, 1 and 2, whose output it copies to the kernel log.
+*PATH=/system/bin*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8* and
+*EDITOR=nano*, the root with the read and write rights, and a new
+pseudo-terminal as descriptors 0, 1 and 2, whose output it copies to the
+kernel log.
 
 # PROCESSES
 
@@ -235,21 +236,43 @@ There is no *epoll*, *eventfd*, *signalfd* or *timerfd*.
 
 # SOCKETS
 
-*socketpair* makes two connected *AF_UNIX* stream sockets, with
-*SOCK_NONBLOCK* and *SOCK_CLOEXEC* if asked: a pipe's buffer each way
-(*radix-process*(2)'s *socket_pair*). *read*, *write*, *send*, *recv*,
-*sendto*, *recvfrom*, *sendmsg* and *recvmsg* move bytes, with
-*MSG_DONTWAIT*, *MSG_NOSIGNAL* and *MSG_WAITALL*; *MSG_MORE* is taken and
-does nothing. Up to *PIPE_BUF* bytes of one send go in whole. *shutdown*
-shuts one way or both, for every descriptor of the socket. *fstat* says
-*S_IFSOCK*, *getsockname* and *getpeername* give an unnamed *AF_UNIX*
-address, and *getsockopt* answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
-*SO_ERROR*, *SO_ACCEPTCONN*, *SO_RCVBUF* and *SO_SNDBUF*.
+Sockets are *AF_UNIX* stream sockets, as *socket*, *socketpair* and
+*accept* make them, with *SOCK_NONBLOCK* and *SOCK_CLOEXEC* if asked.
+Each connection is a pipe's buffer each way (*radix-process*(2)'s
+*socket_pair*). *read*, *write*, *send*, *recv*, *sendto*, *recvfrom*,
+*sendmsg* and *recvmsg* move bytes, with *MSG_DONTWAIT*, *MSG_NOSIGNAL*
+and *MSG_WAITALL*; *MSG_MORE* is taken and does nothing. Up to
+*PIPE_BUF* bytes of one send go in whole. *shutdown* shuts one way or
+both, for every descriptor of the socket. *fstat* says *S_IFSOCK*.
 
-Datagram and sequenced-packet pairs fail with ESOCKTNOSUPPORT, and
-*MSG_PEEK*, *MSG_OOB* and control messages (passing descriptors) with
-EOPNOTSUPP. *socket* fails with EAFNOSUPPORT: named sockets come later
-in Phase 9, network sockets with Phase 12.
+*bind* gives a socket a name, a file of the socket kind on tmpfs, which
+lasts until it is removed (EADDRINUSE if a file has the name; EPERM on
+FAT, which keeps no such files); opening it fails with ENXIO. *listen*
+has a named socket take connections, with a backlog of up to 4,096, and
+*connect* connects to the name: it waits while the backlog is full, or
+fails with EAGAIN on a non-blocking socket, and fails with ECONNREFUSED
+once no socket listens there. *accept* and *accept4* take the
+connection that has waited longest. *getsockname*, *getpeername*,
+*recvfrom* and *accept* give a socket's name as it was bound, or an
+unnamed *AF_UNIX* address. *getsockopt* answers *SO_TYPE*, *SO_DOMAIN*,
+*SO_PROTOCOL*, *SO_ERROR*, *SO_ACCEPTCONN*, *SO_RCVBUF*, *SO_SNDBUF* and
+*SO_PEERCRED*, which gives the process at the other end as it was when
+the connection was made, with user and group 0.
+
+*sendmsg* passes up to 253 descriptors of files and directories with
+*SCM_RIGHTS*, which ride on the first byte it sends; one with no bytes
+sends nothing. A receive stops before a byte that brought descriptors,
+so the receive that starts there gets them, in the lowest free
+descriptors, closed by exec with *MSG_CMSG_CLOEXEC*. *recvmsg* closes
+those its control buffer has no room for and says so with
+*MSG_CTRUNC*; *read* and *recv* close them all. At most 1,024
+descriptors are on their way each way at once (ETOOMANYREFS). Sockets
+are not passed (EOPNOTSUPP), so none can keep itself open (ADR 0091).
+
+Datagram and sequenced-packet sockets fail with ESOCKTNOSUPPORT,
+Linux's abstract names and *MSG_PEEK* and *MSG_OOB* with EOPNOTSUPP,
+and control messages other than *SCM_RIGHTS* with EINVAL. Other
+families fail with EAFNOSUPPORT until networking comes in Phase 12.
 
 # TERMINALS
 
@@ -444,8 +467,8 @@ passed*; the boot test fails on any failure.
 
 # LIMITS
 
-- Only socket pairs until named sockets (later in Phase 9) and
-  networking (Phase 12). No hard links until Btrfs
+- Only *AF_UNIX* stream sockets until networking (Phase 12), and no
+  sockets passed over them. No hard links until Btrfs
   (Phase 10: *link* fails with EPERM), no named pipes (*mkfifo* fails
   with ENOSYS) and no device nodes (*mknod* fails with EPERM). Symbolic
   links work on tmpfs and in the boot archive, not on FAT.

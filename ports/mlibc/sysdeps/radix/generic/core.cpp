@@ -341,6 +341,31 @@ bool read_sys(const char *path, char *out, size_t size) {
 	return true;
 }
 
+// The number of KiB on the line of /proc/meminfo that starts with `key`
+// (as "free:"), or -1 if none does.
+long memory_kib(const char *key) {
+	char text[1024];
+	int fd;
+	if(sysdep<Open>("/proc/meminfo", O_RDONLY | O_CLOEXEC, 0, &fd))
+		return -1;
+	ssize_t got = 0;
+	int e = sysdep<Read>(fd, text, sizeof(text) - 1, &got);
+	sysdep<Close>(fd);
+	if(e || got <= 0)
+		return -1;
+	text[got] = 0;
+	size_t len = strlen(key);
+	for(char *line = text; *line;) {
+		if(!strncmp(line, key, len))
+			return strtol(line + len, nullptr, 10);
+		char *next = strchr(line, '\n');
+		if(!next)
+			break;
+		line = next + 1;
+	}
+	return -1;
+}
+
 } // namespace
 
 int Sysdeps<Uname>::operator()(struct utsname *buf) {
@@ -394,6 +419,14 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 	case _SC_CLK_TCK:
 		*ret = 100;
 		return 0;
+	case _SC_PHYS_PAGES:
+	case _SC_AVPHYS_PAGES: {
+		long kib = memory_kib(num == _SC_PHYS_PAGES ? "total:" : "free:");
+		if(kib < 0)
+			return EINVAL;
+		*ret = kib / 4;
+		return 0;
+	}
 	default:
 		// mlibc's own answer.
 		return EINVAL;

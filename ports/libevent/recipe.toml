@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# libevent (ADR 0091): the event loop tmux is built on, as a static
+# library for the ports that use it. Niels Provos's and Nick Mathewson's
+# code is BSD-3-Clause; the arc4random it carries, built in as the C
+# library has none, is David Mazieres's and Damien Miller's, under the
+# ISC license.
+name = "libevent"
+version = "2.1.13"
+summary = "an event notification library"
+license = "BSD-3-Clause AND ISC"
+homepage = "https://libevent.org/"
+depends = ["mlibc"]
+
+[source]
+url = "https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz"
+sha256 = "f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/libe/libevent/libevent_2.1.13-stable.orig.tar.gz"]

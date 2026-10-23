@@ -66,11 +66,19 @@ Init: /system/bin/spark is process 1
 . It mounts, in this order, the boot archive read-only on _/system_;
   tmpfs on _/system/etc_, _/system/var_, _/tmp_ and _/run_; and the
   *dev*, *proc* and *sys* trees on _/dev_, _/proc_ and _/sys_
-  (*radix-proc*(5), *radix-sysfs*(5)). If any of this fails, it starts
-  nothing.
+  (*radix-proc*(5), *radix-sysfs*(5)); then it makes _/system/var/tmp_,
+  for temporary files that are to outlive a restart. If any of this
+  fails, it starts nothing.
 . It makes the root's symbolic links for Unix programs: _/bin_ and
   _/sbin_ to _system/bin_, _/usr_ to _system_, _/etc_ to _system/etc_
   and _/var_ to _system/var_.
+. It copies each default setting in _/system/lib/defaults/etc_ that
+  _/system/etc_ lacks into it, with the directories it is in: the
+  defaults the system ships, such as nano's _nanorc_, which an
+  administrator edits in _/system/etc_. A file already there is never
+  replaced, so an update can add settings without undoing edits; until
+  _/system/etc_ is kept on a disk, each boot starts it with all of
+  them.
 . It looks for disks in _/dev_ and mounts the FAT filesystem of each
   partition, or of each disk with no partition table, at
   _/volumes/_*name*: read-write, or read-only when the device is. A
@@ -107,8 +115,8 @@ a POSIX program (*radix-posix*(7)): it makes a process for it, gives it
 the root directory, the random source and the kernel log, and a new
 pseudo-terminal from _/dev/ptmx_ as descriptors 0, 1 and 2, then starts
 it with *exec* as its own child, with the environment *PATH=/system/bin*,
-*HOME=/*, *TERM=dumb* and *LANG=C.UTF-8* and _/_ as its working
-directory. It copies what the program writes to the terminal to the
+*HOME=/*, *TERM=dumb*, *LANG=C.UTF-8* and *EDITOR=nano* and _/_ as its
+working directory. It copies what the program writes to the terminal to the
 kernel log, line by line, waits for the program with *wait*, and logs how
 it ended:
 

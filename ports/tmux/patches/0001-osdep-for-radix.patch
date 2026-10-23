@@ -1,0 +1,130 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Adds Radix to the systems tmux knows, with its own osdep file: tmux
+finds the program running in a pane, which it names the window after,
+in the name line of /proc/<number>/status, as it finds it in
+/proc/<number>/cmdline on Linux. And when cross-compiling for Radix,
+configure takes the C library's reallocarray as working, as it is:
+configure cannot run its test program then, and would build tmux's
+own, which clashes with the C library's in a static program. The new
+file is under tmux's ISC license, so that it can go upstream as it is.
+Only the generated configure script changes: changing configure.ac too
+would have make run autoconf again, which the build machine need not
+have.
+
+--- a/configure
++++ b/configure
+@@ -5695,6 +5695,12 @@
+ { $as_echo "$as_me:${as_lineno-$LINENO}: checking for working reallocarray" >&5
+ $as_echo_n "checking for working reallocarray... " >&6; }
+ if test "$cross_compiling" = yes; then :
++  case "$host_os" in
++  *radix*)
++ { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
++$as_echo "yes" >&6; }
++ ;;
++  *)
+   case " $LIBOBJS " in
+   *" reallocarray.$ac_objext "* ) ;;
+   *) LIBOBJS="$LIBOBJS reallocarray.$ac_objext"
+@@ -5702,6 +5708,8 @@
+ esac
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+ $as_echo "no" >&6; }
++ ;;
++  esac
+ 
+ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+@@ -8351,6 +8359,11 @@
+ $as_echo "haiku" >&6; }
+ 		PLATFORM=haiku
+ 		;;
++	*radix*)
++		{ $as_echo "$as_me:${as_lineno-$LINENO}: result: radix" >&5
++$as_echo "radix" >&6; }
++		PLATFORM=radix
++		;;
+ 	*)
+ 		{ $as_echo "$as_me:${as_lineno-$LINENO}: result: unknown" >&5
+ $as_echo "unknown" >&6; }
+--- a/osdep-radix.c
++++ b/osdep-radix.c
+@@ -0,0 +1,76 @@
++/* $OpenBSD$ */
++
++/*
++ * Copyright (c) 2026 The Dukovo contributors
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
++ * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
++ * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/types.h>
++
++#include <event.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "tmux.h"
++
++/*
++ * Radix, the kernel of Dukovo, shows each process's program as the name
++ * line of /proc/<number>/status. It keeps no working directory for a
++ * process: that is the C library's.
++ */
++
++char *
++osdep_get_name(int fd, __unused char *tty)
++{
++	FILE	*f;
++	char	*path, line[256], *name = NULL;
++	pid_t	 pgrp;
++	size_t	 len;
++
++	if ((pgrp = tcgetpgrp(fd)) == -1)
++		return (NULL);
++
++	xasprintf(&path, "/proc/%lld/status", (long long) pgrp);
++	f = fopen(path, "r");
++	free(path);
++	if (f == NULL)
++		return (NULL);
++
++	while (fgets(line, sizeof line, f) != NULL) {
++		if (strncmp(line, "name:", 5) != 0)
++			continue;
++		path = line + 5;
++		path += strspn(path, " \t");
++		len = strcspn(path, "\n");
++		if (len != 0)
++			name = xstrndup(path, len);
++		break;
++	}
++	fclose(f);
++	return (name);
++}
++
++char *
++osdep_get_cwd(__unused int fd)
++{
++	return (NULL);
++}
++
++struct event_base *
++osdep_event_init(void)
++{
++	return (event_init());
++}

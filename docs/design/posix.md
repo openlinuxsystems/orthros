@@ -214,15 +214,30 @@ read only atomic counts kept beside the ring. A write of up to `ATOMIC`
 copies to and from user memory are made with the ring's sleeping lock
 held, so a page fault in the copy may sleep.
 
-## Socket pairs
+## Sockets
 
-A socket pair (ADR 0085) is two pipes, one each way: each end is a node
-on `pipefs` that counts as the reader of one pipe and the writer of the
-other, so reads, writes, waits, SIGPIPE and poll are the pipe's. An
-end's `shutdown` lets go of its reader or writer count early, once, with
-a flag per direction; dropping the node lets go of what is left.
+A socket pair (ADR 0085) is two pipes, one each way: each socket is a
+node on `pipefs`, and its end of the connection counts as the reader of
+one pipe and the writer of the other, so reads, writes, waits, SIGPIPE
+and poll are the pipe's. An end's `shutdown` lets go of its reader or
+writer count early, once, with a flag per direction; dropping the end,
+with the socket's node, lets go of what is left.
 `send` and `receive` are the pipe's write and read with the caller's
 `dont_wait` and `no_signal`.
+
+A named socket (ADR 0091) moves once from fresh to listening or to
+connected. `bind_socket` makes a tmpfs node of the socket kind holding a
+`Binding`, through which a connecting socket finds the `Listener` while
+the socket listens; `connect_socket` makes the two pipes, keeps one end
+and queues the other at the listener, and `accept` gives the queued end
+a socket of its own. The socket's state is a spin lock taken only to
+move its phase; the listener's queue is a sleeping lock, and its waits
+read an atomic count beside it. Files sent with `send_files` ride on a
+byte of the pipe: each pipe keeps a queue of attachments, each the
+position of its byte in all that was written and the files, and a read
+ends before the next attachment's byte unless it starts there, so the
+files come out with their bytes. A socket is never sent, so the files
+in flight hold no socket, and no cycle of sockets can keep itself alive.
 
 ## poll
 
@@ -544,8 +559,8 @@ and timer protocols are candidates for the audit after Phase 9.
   ended.
 - CPU time in the kernel counts as user time (`times`, `getrusage`,
   `wait`'s times); CPU-time timers fire within a tick (10 ms).
-- Only socket pairs: named sockets come later in Phase 9, network
-  sockets with Phase 12. No System V IPC, POSIX message queues, POSIX
+- Only `AF_UNIX` stream sockets, which pass no sockets: network
+  sockets come with Phase 12. No System V IPC, POSIX message queues, POSIX
   asynchronous I/O, `epoll`, `eventfd`, `signalfd`, `timerfd` or
   `inotify`. Linux's `madvise` is not declared; `posix_madvise` is
   advice only.

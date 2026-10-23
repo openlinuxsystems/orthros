@@ -1,0 +1,24 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Has a symbol lookup find nothing in an object without a symbol hash
+table, as a statically linked program is, where it stopped the program
+on an assertion: dlsym(RTLD_DEFAULT, ...) in a static program, as
+libunwind and others do to see whether a function exists, now returns
+NULL, as on musl. Meant for upstream.
+
+diff --git a/options/rtld/generic/linker.cpp b/options/rtld/generic/linker.cpp
+index cf503ee..3447a31 100644
+--- a/options/rtld/generic/linker.cpp
++++ b/options/rtld/generic/linker.cpp
+@@ -1590,6 +1590,10 @@ uint32_t gnuHash(frg::string_view string) {
+ // TODO: move this to some namespace or class?
+ frg::optional<ObjectSymbol> resolveInObject(SharedObject *object, frg::string_view string,
+ 		frg::optional<SymbolVersion> version) {
++	// A static program has no hash table, and no symbols to look up.
++	if(object->hashStyle == HashStyle::none)
++		return frg::optional<ObjectSymbol>{};
++
+ 	// Checks if the symbol can be used to satisfy the dependency.
+ 	auto eligible = [&] (ObjectSymbol cand) {
+ 		if(cand.symbol()->st_shndx == SHN_UNDEF)

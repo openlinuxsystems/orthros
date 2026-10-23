@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# tmux (ADR 0091): the terminal multiplexer, whose sessions outlast the
+# terminal or SSH connection they were started from. Nicholas Marriott's
+# and its other authors' code is under the ISC license; what it carries
+# from OpenBSD for what the C library lacks is under BSD licenses, its
+# allocation wrappers under Tatu Ylonen's short SSH notice, and its
+# base64 code also under IBM's notice (LicenseRef-IBM-base64).
+name = "tmux"
+version = "3.7c"
+summary = "the terminal multiplexer"
+license = "ISC AND BSD-2-Clause AND BSD-3-Clause AND SSH-short AND LicenseRef-IBM-base64"
+homepage = "https://github.com/tmux/tmux"
+depends = ["mlibc", "ncurses", "libevent"]
+
+[source]
+url = "https://github.com/tmux/tmux/releases/download/3.7c/tmux-3.7c.tar.gz"
+sha256 = "7c60cae9a0e25288e2e24750aafc9e8800fc7fd4555e447e1b29ee4201cfb3bf"

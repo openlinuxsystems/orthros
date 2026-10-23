@@ -25,7 +25,8 @@ use crate::cache::{Backing, FileCache};
 use crate::mem::{self, Alloc, KArc, KVec};
 use crate::path::check_name;
 use crate::{
-    Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now,
+    Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding,
+    Stat, now,
 };
 
 /// What every node of one tmpfs shares.
@@ -139,9 +140,16 @@ enum Body {
         target: KVec<u8>,
         modified: AtomicU64,
     },
+    /// A socket's name, with what the kernel keeps in it
+    /// ([`Node::make_socket`]), and when it was last changed, as
+    /// `set_times` sets it.
+    Socket {
+        binding: SocketBinding,
+        modified: AtomicU64,
+    },
 }
 
-/// A tmpfs file, directory or symbolic link.
+/// A tmpfs file, directory, symbolic link or socket's name.
 pub struct TmpNode {
     id: u64,
     created: u64,
@@ -233,6 +241,13 @@ impl TmpNode {
         TmpNode::with_body(id, shared, created, body)
     }
 
+    /// A socket's name, holding `binding`.
+    fn socket(id: u64, shared: KArc<Shared>, binding: SocketBinding) -> Result<KArc<TmpNode>> {
+        let created = now();
+        let body = Body::Socket { binding, modified: AtomicU64::new(created) };
+        TmpNode::with_body(id, shared, created, body)
+    }
+
     /// A node with `body`; a node that cannot be made hands back what
     /// its body was charged, as one dropped does.
     fn with_body(id: u64, shared: KArc<Shared>, created: u64, body: Body) -> Result<KArc<TmpNode>> {
@@ -268,7 +283,7 @@ impl TmpNode {
     fn dir(&self) -> Result<&Mutex<DirState>> {
         match &self.body {
             Body::Dir(dir) => Ok(dir),
-            Body::File { .. } | Body::Link { .. } => Err(Error::NotDirectory),
+            Body::File { .. } | Body::Link { .. } | Body::Socket { .. } => Err(Error::NotDirectory),
         }
     }
 
@@ -277,8 +292,8 @@ impl TmpNode {
             Body::File { cache, charged } => Ok((cache, Charge { shared: &self.shared, charged })),
             Body::Dir(_) => Err(Error::IsDirectory),
             // Resolution follows links, so only a caller that asked not
-            // to reaches one here.
-            Body::Link { .. } => Err(Error::NotSupported),
+            // to reaches one here; a socket's name cannot be opened.
+            Body::Link { .. } | Body::Socket { .. } => Err(Error::NotSupported),
         }
     }
 
@@ -351,7 +366,7 @@ impl Drop for TmpNode {
         let charged = match &self.body {
             Body::File { charged, .. } => charged.load(Ordering::Relaxed),
             Body::Link { target, .. } => target.len() as u64,
-            Body::Dir(_) => 0,
+            Body::Dir(_) | Body::Socket { .. } => 0,
         };
         self.shared.used.fetch_sub(charged, Ordering::Relaxed);
     }
@@ -365,6 +380,7 @@ impl Node for TmpNode {
             Body::Link { target, modified } => {
                 (target.len() as u64, modified.load(Ordering::Relaxed), 0)
             }
+            Body::Socket { modified, .. } => (0, modified.load(Ordering::Relaxed), 0),
         };
         let allocated = (pages * radix_block::PAGE_SIZE) as u64;
         Stat {
@@ -383,6 +399,15 @@ impl Node for TmpNode {
             Body::Dir(_) => Kind::Directory,
             Body::File { .. } => Kind::File,
             Body::Link { .. } => Kind::Symlink,
+            Body::Socket { .. } => Kind::Socket,
+        }
+    }
+
+    // A socket's name is connected through, never opened (ENXIO).
+    fn open(&self, this: &NodeRef) -> Result<NodeRef> {
+        match self.body {
+            Body::Socket { .. } => Err(Error::NoDevice),
+            _ => Ok(this.clone()),
         }
     }
 
@@ -403,6 +428,20 @@ impl Node for TmpNode {
         self.dir()?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         self.add(name, TmpNode::link(id, self.shared.clone(), target)?)
+    }
+
+    fn make_socket(&self, name: &str, binding: SocketBinding) -> Result<NodeRef> {
+        check_name(name)?;
+        self.dir()?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        self.add(name, TmpNode::socket(id, self.shared.clone(), binding)?)
+    }
+
+    fn socket_binding(&self) -> Option<SocketBinding> {
+        match &self.body {
+            Body::Socket { binding, .. } => Some(binding.clone()),
+            _ => None,
+        }
     }
 
     fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
@@ -511,7 +550,9 @@ impl Node for TmpNode {
             match &self.body {
                 Body::Dir(dir) => dir.lock().modified = modified,
                 Body::File { cache, .. } => cache.set_modified(modified),
-                Body::Link { modified: link, .. } => link.store(modified, Ordering::Relaxed),
+                Body::Link { modified: time, .. } | Body::Socket { modified: time, .. } => {
+                    time.store(modified, Ordering::Relaxed)
+                }
             }
         }
         Ok(())
@@ -537,13 +578,14 @@ fn is_under(node: &KArc<TmpNode>, dir: &KArc<TmpNode>) -> bool {
     }
 }
 
-/// Whether `moving` may replace `old`: a file or symbolic link replaces
-/// either, a directory an empty directory.
+/// Whether `moving` may replace `old`: a file, symbolic link or socket's
+/// name replaces any of them, a directory an empty directory.
 fn check_replace(moving: &TmpNode, old: &TmpNode) -> Result<()> {
     match (&moving.body, &old.body) {
-        (Body::Dir(_), Body::File { .. } | Body::Link { .. }) => Err(Error::NotDirectory),
-        (Body::File { .. } | Body::Link { .. }, Body::Dir(_)) => Err(Error::IsDirectory),
         (Body::Dir(_), Body::Dir(_)) if !old.is_empty_dir() => Err(Error::NotEmpty),
+        (Body::Dir(_), Body::Dir(_)) => Ok(()),
+        (Body::Dir(_), _) => Err(Error::NotDirectory),
+        (_, Body::Dir(_)) => Err(Error::IsDirectory),
         _ => Ok(()),
     }
 }

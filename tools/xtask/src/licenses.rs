@@ -45,7 +45,14 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// which SPDX has no identifier for. The rest are permissive licenses of
 /// the compression and archive ports: XZ Utils' 0BSD, bzip2's own,
 /// Info-ZIP's for zip, and in jq, ICU's for decNumber, David M. Gay's for
-/// its number formatting, and CC-BY-3.0 for its manual (ADR 0088).
+/// its number formatting, and CC-BY-3.0 for its manual (ADR 0088). The
+/// 4.4BSD database library vi keeps its lines in is under the University
+/// of California's license with the advertising clause, which the
+/// University rescinded in 1999 (ADR 0090). 7-Zip is under the LGPL, as a
+/// program of its own that nothing links, on the GPL's terms (ADR 0090).
+/// tmux's allocation wrappers are under Tatu Ylonen's short notice from
+/// ssh, and the base64 code it builds in, as the C library has none, also
+/// under IBM's notice, which SPDX has no identifier for (ADR 0091).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
     "GPL-2.0-or-later",
@@ -58,6 +65,10 @@ const PORT_EXTRA_ALLOW: &[&str] = &[
     "ICU",
     "dtoa",
     "CC-BY-3.0",
+    "BSD-4-Clause-UC",
+    "LGPL-2.1-or-later",
+    "SSH-short",
+    "LicenseRef-IBM-base64",
 ];
 
 /// Crates from crates.io that compile another project's C code into what

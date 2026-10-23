@@ -1,0 +1,22 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Marks libunwind's assembly on Radix as needing no executable stack, as
+on Linux, as everything Clang compiles is: its objects otherwise lack
+the .note.GNU-stack section, and a linker that follows those notes, as
+GNU ld does, would give every C++ program an executable stack (ADR
+0090).
+
+diff --git a/libunwind/src/assembly.h b/libunwind/src/assembly.h
+index f8e83e13..561613d5 100644
+--- a/libunwind/src/assembly.h
++++ b/libunwind/src/assembly.h
+@@ -173,7 +173,7 @@
+   SYMBOL_NAME(aliasname) = SYMBOL_NAME(name)
+ #endif
+ 
+-#if defined(__GNU__) || defined(__FreeBSD__) || defined(__Fuchsia__) || \
++#if defined(__GNU__) || defined(__FreeBSD__) || defined(__Fuchsia__) || defined(__radix__) || \
+     defined(__linux__)
+ #define NO_EXEC_STACK_DIRECTIVE .section .note.GNU-stack,"",%progbits
+ #else

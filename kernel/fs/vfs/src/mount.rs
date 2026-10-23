@@ -436,6 +436,22 @@ impl Vfs {
         dir.node.make_link(name, target).map(drop)
     }
 
+    /// Makes a socket's name `path` beneath `base`, which holds `binding`
+    /// ([`crate::Node::make_socket`]).
+    pub fn make_socket(
+        &self,
+        base: &Location,
+        path: &str,
+        binding: crate::SocketBinding,
+    ) -> Result<()> {
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.node.make_socket(name, binding).map(drop)
+    }
+
     /// Reads where the symbolic link `path` beneath `base` points into
     /// `out`; returns the target's length, more than `out` holds when it
     /// was cut short.

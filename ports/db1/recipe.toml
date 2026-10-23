@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The Berkeley DB 1.85 library of 4.4BSD (ADR 0090), by Mike Olson, Margo
+# Seltzer and Keith Bostic, as the GNU C library carried it until 2.1.3
+# and Debian keeps it: nvi, the system's vi, keeps the lines of the file
+# it edits in a recno database. Only the static library and db.h, in the
+# sysroot. Its license is the University of California's with the
+# advertising clause, which the University rescinded in 1999.
+name = "db1"
+version = "2.1.3"
+summary = "the Berkeley DB 1.85 database library"
+license = "BSD-4-Clause-UC"
+homepage = "https://tracker.debian.org/pkg/db1-compat"
+depends = ["mlibc"]
+
+[source]
+url = "https://deb.debian.org/debian/pool/main/d/db1-compat/db1-compat_2.1.3.orig.tar.gz"
+sha256 = "b01f560f00a67f921e678586d903969015b0c9cec6c18b1679b7e9fd6d27394e"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/d/db1-compat/db1-compat_2.1.3.orig.tar.gz"]

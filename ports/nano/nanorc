@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+## The system's settings for nano (nanorc(5)), which each user's
+## ~/.nanorc may change. Spark puts this file in /system/etc at boot
+## when it is not there (spark(8)); edit that copy.
+
+## The key bindings most programs use, as the system has them everywhere
+## (Ctrl+S saves, Ctrl+Q quits, Ctrl+C, X and V copy, cut and paste,
+## Ctrl+Z and Y undo and redo, Ctrl+F finds): the ones nano's option
+## --modernbindings (-/) gives, which a nanorc cannot turn on. F1 shows
+## the help: Ctrl+H, which that option also gives it, is what Backspace
+## sends on some terminals.
+bind ^Q exit main
+bind ^Q exit browser
+bind ^Q exit help
+bind ^S savefile main
+bind ^W writeout main
+bind ^O insert main
+bind ^F whereis main
+bind ^B wherewas main
+bind ^G findnext main
+bind ^G findnext browser
+bind ^G findnext help
+bind ^D findprevious main
+bind ^D findprevious browser
+bind ^D findprevious help
+bind ^R replace main
+bind ^T gotoline main
+bind ^P location main
+bind ^E execute main
+bind ^A mark main
+bind ^X cut main
+bind ^C copy main
+bind ^V paste main
+bind ^Z undo main
+bind ^Y redo main
+
+## Syntax highlighting for the file types nano knows.
+include "/system/share/nano/*.nanorc"

@@ -19,7 +19,9 @@
 //! Sources are fetched once into `target/ports`, with git by commit, as
 //! release archives by checksum (from their home, or from a mirror when
 //! that cannot be reached) and from crates.io by checksum, and checked to
-//! be what the recipe names, so a build uses nothing else. A port is
+//! be what the recipe names, so a build uses nothing else. Of a large
+//! repository, such as LLVM's, a recipe can name the directories it
+//! needs, and only their files are fetched. A port is
 //! built again only when something that went into its last build
 //! changed: its directory, the toolchain (and Rust's, for a port of
 //! rust-src), or a port it needs.
@@ -29,7 +31,9 @@
 //! writes into `out/toolchain`: C for Radix against the C library in the
 //! sysroot, linked into static position-independent programs, or, for
 //! bundles that ship libraries of their own, into programs and libraries
-//! on the shared C library and its dynamic linker (ADR 0071).
+//! on the shared C library and its dynamic linker (ADR 0071); C++ the same
+//! way, on LLVM's libc++ once the llvm-runtimes port has built it; and a
+//! CMake toolchain file for ports that build with CMake (ADR 0090).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -105,6 +109,11 @@ pub struct Source {
     /// The release or tag the commit is, for people.
     #[serde(default)]
     pub tag: Option<String>,
+    /// The directories of the repository the port needs, for a large one
+    /// of which it needs only these: only their files are fetched (with a
+    /// partial clone, checked out sparsely) and copied into its tree.
+    #[serde(default)]
+    pub paths: Vec<String>,
     /// A release archive (`.tar.gz`, `.tar.xz` or `.tar.bz2`), for a
     /// project whose releases hold more than its repository does, such as
     /// GNU's, whose archives hold their generated configure scripts.
@@ -464,6 +473,28 @@ impl Toolchain {
         self.bin().join(format!("{TRIPLE}-cc"))
     }
 
+    /// The C++ compiler wrapper.
+    pub fn cxx(&self) -> PathBuf {
+        self.bin().join(format!("{TRIPLE}-c++"))
+    }
+
+    /// Clang's C++ driver, beside Clang: clang++-20 for clang-20.
+    fn clangxx(&self) -> PathBuf {
+        let name = self.clang.file_name().and_then(|n| n.to_str()).unwrap_or("clang");
+        self.clang.with_file_name(name.replacen("clang", "clang++", 1))
+    }
+
+    /// CMake's files for Radix: the toolchain file, and the platform
+    /// files it finds Radix's description in.
+    pub fn cmake(&self) -> PathBuf {
+        self.dir.join("cmake")
+    }
+
+    /// The CMake toolchain file, for `-DCMAKE_TOOLCHAIN_FILE=`.
+    pub fn cmake_toolchain_file(&self) -> PathBuf {
+        self.cmake().join("radix.cmake")
+    }
+
     /// Cargo for Radix: the wrapper that builds programs on Rust's
     /// standard library.
     pub fn cargo(&self) -> PathBuf {
@@ -493,8 +524,10 @@ impl Toolchain {
         process::create_dir(&self.bin())?;
         process::create_dir(&self.dir.join("meson"))?;
         process::create_dir(&self.autotools())?;
+        process::create_dir(&self.cmake().join("Platform"))?;
         let sysroot = ctx.out.join("sysroot");
-        write_script(&self.cc(), &self.cc_script(&sysroot))?;
+        write_script(&self.cc(), &self.compiler_script(&sysroot, false))?;
+        write_script(&self.cxx(), &self.compiler_script(&sysroot, true))?;
         let script = |name: &str, path: &Path| {
             format!(
                 "#!/bin/sh\n# Written by ob (ob(1), PORTS): the Radix toolchain's {name}.\n\
@@ -523,6 +556,7 @@ impl Toolchain {
         )?;
         write_file(&self.libc_cross_file(), &self.libc_cross(&sysroot))?;
         write_file(&self.cross_file(), &self.programs_cross())?;
+        self.write_cmake(&sysroot)?;
         Ok(())
     }
 
@@ -539,16 +573,43 @@ impl Toolchain {
     /// libraries of their own (ADR 0071). Linux's target, rather than
     /// none, makes Clang link with LLD itself (for no OS it hands linking
     /// to the host's GCC).
-    fn cc_script(&self, sysroot: &Path) -> String {
+    ///
+    /// The C++ compiler is the same with Clang's C++ driver, libc++'s
+    /// headers before the C library's (as libc++ needs: its own
+    /// `<stdlib.h>` and the like wrap the C library's), and, when it
+    /// links, libc++, libc++abi and libunwind before the C library (ADR
+    /// 0090). `-nostdinc++` leaves out the headers and `-nostdlib++` or
+    /// `-nodefaultlibs` the libraries, as libc++'s own build asks.
+    fn compiler_script(&self, sysroot: &Path, cxx: bool) -> String {
         let lib = sysroot.join("system/lib");
+        let (what, clang) =
+            if cxx { ("C++ compiler", self.clangxx()) } else { ("C compiler", self.clang.clone()) };
+        // What only C++ adds: the arguments that leave out libc++, its
+        // headers, and its libraries.
+        let (cases, headers, libraries) = if cxx {
+            (
+                "\t-nostdinc++)\n\t\tcxxinc= ;;\n\
+                 \t-nostdlib++ | -nodefaultlibs)\n\t\tcxxlib= ;;\n",
+                format!(
+                    "[ -n \"$cxxinc\" ] && set -- -isystem '{}/system/include/c++/v1' \"$@\"\n\
+                     set -- -nostdinc++ \"$@\"\n",
+                    sysroot.display()
+                ),
+                "-lc++ -lc++abi -lunwind",
+            )
+        } else {
+            ("", String::new(), "")
+        };
         let mut s = String::new();
         let _ = write!(
             s,
             r#"#!/bin/sh
-# Written by ob (ob(1), PORTS): the Radix toolchain's C compiler.
+# Written by ob (ob(1), PORTS): the Radix toolchain's {what}.
 # {version}
 link=yes
 mode=static
+cxxinc=yes
+cxxlib=yes
 for arg do
 	shift
 	case $arg in
@@ -563,15 +624,15 @@ for arg do
 	# (x86_64-unknown-radix-mlibc), which Clang does not know.
 	--target=*)
 		continue ;;
-	esac
+{cases}	esac
 	set -- "$@" "$arg"
 done
-set -- --target=x86_64-unknown-linux-musl \
+set -- -isystem '{sysroot}/system/include' -isystem '{resource}/include' \
+	-fPIE -ffunction-sections -fdata-sections "$@"
+{headers}set -- --target=x86_64-unknown-linux-musl \
 	-U__linux__ -U__linux -Ulinux -U__gnu_linux__ \
 	-D__radix__ -D__dukovo__ \
-	--sysroot='{sysroot}' -nostdinc \
-	-isystem '{sysroot}/system/include' -isystem '{resource}/include' \
-	-fPIE -ffunction-sections -fdata-sections "$@"
+	--sysroot='{sysroot}' -nostdinc "$@"
 if [ -n "$link" ]; then
 	# The C library goes in as the program does, whichever way the
 	# arguments left the linker (rustc's end with -Bdynamic).
@@ -581,9 +642,10 @@ if [ -n "$link" ]; then
 		set -- -pie -Wl,--dynamic-linker=/system/lib/ld.so -Wl,--as-needed "$@" ;;
 	shared) start= libc=-Bdynamic; set -- -Wl,--as-needed "$@" ;;
 	esac
+	[ -n "$cxxlib" ] && cxx='{libraries}' || cxx=
 	set -- -fuse-ld=lld -nostdlib -Wl,-z,max-page-size=4096 -Wl,--gc-sections \
 		${{start:+"$start"}} '{lib}/crti.o' "$@" \
-		-L'{lib}' -Wl,$libc -lc '{builtins}' '{lib}/crtn.o'
+		-L'{lib}' -Wl,$libc $cxx -lc '{builtins}' '{lib}/crtn.o'
 fi
 exec '{clang}' "$@"
 "#,
@@ -592,9 +654,59 @@ exec '{clang}' "$@"
             resource = self.resource.display(),
             lib = lib.display(),
             builtins = self.builtins.display(),
-            clang = self.clang.display(),
+            clang = clang.display(),
         );
         s
+    }
+
+    /// CMake's toolchain file for Radix, and the platform files that
+    /// describe it: a Unix whose programs and libraries are built as
+    /// Linux's are (Radix's ABI is Linux's, radix-posix(7)), with its
+    /// files under `/system` in the sysroot, where nothing of the host's
+    /// is looked for.
+    fn write_cmake(&self, sysroot: &Path) -> Result<()> {
+        let tool = |name: &str| self.bin().join(format!("{TRIPLE}-{name}"));
+        let mut text = format!(
+            "# Written by ob (ob(1), PORTS): CMake's toolchain file for Radix.\n\
+             list(APPEND CMAKE_MODULE_PATH \"{cmake}\")\n\
+             set(CMAKE_SYSTEM_NAME Radix)\n\
+             set(CMAKE_SYSTEM_PROCESSOR x86_64)\n\
+             set(CMAKE_C_COMPILER \"{cc}\")\n\
+             set(CMAKE_CXX_COMPILER \"{cxx}\")\n",
+            cmake = self.cmake().display(),
+            cc = self.cc().display(),
+            cxx = self.cxx().display(),
+        );
+        for name in ["ar", "ranlib", "nm", "strip", "objcopy", "readelf"] {
+            let _ =
+                writeln!(text, "set(CMAKE_{} \"{}\")", name.to_uppercase(), tool(name).display());
+        }
+        let _ = write!(
+            text,
+            "set(CMAKE_SYSROOT \"{sysroot}\")\n\
+             set(CMAKE_FIND_ROOT_PATH \"{sysroot}\")\n\
+             set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n\
+             set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n\
+             set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n\
+             set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n",
+            sysroot = sysroot.display(),
+        );
+        write_file(&self.cmake_toolchain_file(), &text)?;
+        // Read before the compilers are checked: what Radix is, and whose
+        // compiler and linker settings it takes (CMake 3.28 and later).
+        write_file(
+            &self.cmake().join("Platform/Radix-Initialize.cmake"),
+            "# Written by ob (ob(1), PORTS): Radix, for CMake.\n\
+             set(UNIX 1)\n\
+             set(CMAKE_EFFECTIVE_SYSTEM_NAME Linux)\n",
+        )?;
+        write_file(
+            &self.cmake().join("Platform/Radix.cmake"),
+            "# Written by ob (ob(1), PORTS): Radix, for CMake: Linux's\n\
+             # settings, with /system first among the places to look.\n\
+             include(Platform/Linux)\n\
+             list(PREPEND CMAKE_SYSTEM_PREFIX_PATH /system)\n",
+        )
     }
 
     /// Cargo for programs on Rust's standard library (ADR 0070), as
@@ -683,9 +795,7 @@ exec cargo "$command" "$@"
     /// sysroot's headers come after all others, for the kernel's
     /// (`radix/`) only: the C library has its own.
     fn libc_cross(&self, sysroot: &Path) -> String {
-        // clang-20 goes with clang++-20.
-        let name = self.clang.file_name().and_then(|n| n.to_str()).unwrap_or("clang");
-        let clangxx = self.clang.with_file_name(name.replacen("clang", "clang++", 1));
+        let clangxx = self.clangxx();
         format!(
             "# Written by ob (ob(1), PORTS): Meson's cross file for the C library.\n\
              [binaries]\n\
@@ -725,11 +835,13 @@ exec cargo "$command" "$@"
             "# Written by ob (ob(1), PORTS): Meson's cross file for Radix.\n\
              [binaries]\n\
              c = '{cc}'\n\
+             cpp = '{cxx}'\n\
              ar = '{ar}'\n\
              strip = '{strip}'\n\
              nm = '{nm}'\n\
              \n{host}",
             cc = self.cc().display(),
+            cxx = self.cxx().display(),
             ar = tool("ar").display(),
             strip = tool("strip").display(),
             nm = tool("nm").display(),
@@ -776,14 +888,14 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
         } else if !source.url.is_empty() {
             Some(fetch_archive(ctx, &recipe.name, source)?)
         } else if !source.git.is_empty() {
-            Some(fetch(ctx, &recipe.name, &source.git, &source.commit)?)
+            Some(fetch(ctx, &recipe.name, &source.git, &source.commit, &source.paths)?)
         } else {
             None
         };
         let mut extras = Vec::new();
         for extra in &recipe.extra {
             let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
-            extras.push(fetch(ctx, name, &extra.git, &extra.commit)?);
+            extras.push(fetch(ctx, name, &extra.git, &extra.commit, &[])?);
         }
         let mut crates = Vec::new();
         for krate in &recipe.crates {
@@ -831,8 +943,8 @@ fn inputs_hash(
     let mut hasher = DefaultHasher::new();
     let headers = ctx.out.join("sysroot/system/include/radix");
     let (wrappers, cross) = (toolchain.bin(), toolchain.dir.join("meson"));
-    let autotools = toolchain.autotools();
-    for dir in [dir, &wrappers, &cross, &autotools, &headers] {
+    let (autotools, cmake) = (toolchain.autotools(), toolchain.cmake());
+    for dir in [dir, &wrappers, &cross, &autotools, &cmake, &headers] {
         let mut files = Vec::new();
         list_files(dir, &mut files)?;
         files.sort();
@@ -887,8 +999,9 @@ fn rust_src(ctx: &Ctx) -> Result<(PathBuf, String)> {
 }
 
 /// Fetches commit `commit` of `git` into `target/ports/sources`, once,
-/// and checks that it is that commit. Returns where it is.
-fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
+/// and checks that it is that commit; with `paths`, only the files of
+/// those directories. Returns where it is.
+fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -> Result<PathBuf> {
     let dir = ctx.target.join("ports/sources").join(format!("{name}-{}", &commit[..12]));
     let head = |dir: &Path| -> Option<String> {
         let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output();
@@ -896,7 +1009,22 @@ fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
+    let git_in = |args: &[&str]| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&dir).args(args);
+        cmd
+    };
+    // In cone mode, which takes directories, each with what is beneath it.
+    let sparse = || {
+        let mut cmd = git_in(&["sparse-checkout", "set", "--cone", "--"]);
+        cmd.args(paths);
+        process::run(ctx, &mut cmd)
+    };
     if dir.join(".git").is_dir() && head(&dir).as_deref() == Some(commit) {
+        // The recipe may name other directories than it did.
+        if !paths.is_empty() {
+            sparse()?;
+        }
         return Ok(dir);
     }
     step(&format!("Fetching {name} {} from {git}", &commit[..12]));
@@ -904,13 +1032,17 @@ fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
         std::fs::remove_dir_all(&dir).context(|| format!("removing {}", dir.display()))?;
     }
     process::create_dir(&dir)?;
-    let git_in = |args: &[&str]| {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(&dir).args(args);
-        cmd
-    };
     process::run(ctx, &mut git_in(&["init", "--quiet"]))?;
-    process::run(ctx, &mut git_in(&["fetch", "--quiet", "--depth", "1", git, commit]))?;
+    if paths.is_empty() {
+        process::run(ctx, &mut git_in(&["fetch", "--quiet", "--depth", "1", git, commit]))?;
+    } else {
+        // The commit and its trees only; git fetches the files of `paths`
+        // as it checks them out, from the remote it records for that.
+        process::run(ctx, &mut git_in(&["remote", "add", "origin", git]))?;
+        let fetch = ["fetch", "--quiet", "--depth", "1", "--filter=blob:none", "origin", commit];
+        process::run(ctx, &mut git_in(&fetch))?;
+        sparse()?;
+    }
     process::run(ctx, &mut git_in(&["checkout", "--quiet", "--detach", "FETCH_HEAD"]))?;
     match head(&dir) {
         Some(found) if found == commit => Ok(dir),
@@ -1041,11 +1173,12 @@ fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
 }
 
 /// Copies the tree of `repo`'s checked-out commit, without its `.git`, to
-/// `to`.
-fn export(ctx: &Ctx, repo: &Path, to: &Path) -> Result<()> {
+/// `to`; with `paths`, only those directories of it.
+fn export(ctx: &Ctx, repo: &Path, to: &Path, paths: &[String]) -> Result<()> {
     process::create_dir(to)?;
     let mut archive = Command::new("git");
-    archive.arg("-C").arg(repo).args(["archive", "--format=tar", "HEAD"]).stdout(Stdio::piped());
+    archive.arg("-C").arg(repo).args(["archive", "--format=tar", "HEAD", "--"]).args(paths);
+    archive.stdout(Stdio::piped());
     if ctx.verbose {
         eprintln!("+ {} | tar -x -C {}", process::render(&archive), to.display());
     }
@@ -1089,11 +1222,11 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
     let build_dir = work.join("build");
     match &port.source {
         Some(source) if recipe.source.git.is_empty() => copy_tree(ctx, source, &src)?,
-        Some(source) => export(ctx, source, &src)?,
+        Some(source) => export(ctx, source, &src, &recipe.source.paths)?,
         None => process::create_dir(&src)?,
     }
     for (extra, source) in recipe.extra.iter().zip(&port.extras) {
-        export(ctx, source, &src.join(&extra.path))?;
+        export(ctx, source, &src.join(&extra.path), &[])?;
     }
     for (krate, source) in recipe.crates.iter().zip(&port.crates) {
         copy_tree(ctx, source, &src.join(krate.path()))?;
@@ -1148,18 +1281,20 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
         .env("JOBS", jobs.to_string())
         .env("HOST", TRIPLE)
         .env("CC", toolchain.cc())
+        .env("CXX", toolchain.cxx())
         .env("AR", tool("ar"))
         .env("RANLIB", tool("ranlib"))
         .env("NM", tool("nm"))
         .env("STRIP", tool("strip"))
         .env("OBJCOPY", tool("objcopy"))
         .env("CFLAGS", "-O2")
+        .env("CXXFLAGS", "-O2")
         .env("CROSS_FILE", toolchain.cross_file())
+        .env("CMAKE_TOOLCHAIN_FILE", toolchain.cmake_toolchain_file())
         .env("LIBC_CROSS_FILE", toolchain.libc_cross_file())
         // The host's settings must not reach a build for Radix.
         .env_remove("CPPFLAGS")
         .env_remove("LDFLAGS")
-        .env_remove("CXXFLAGS")
         .env_remove("PKG_CONFIG_PATH")
         .env("PKG_CONFIG_LIBDIR", sysroot.join("system/lib/pkgconfig"))
         .env("PKG_CONFIG_SYSROOT_DIR", &sysroot)

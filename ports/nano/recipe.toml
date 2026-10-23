@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# GNU nano (ADR 0090): the editor a console-first system opens its
+# settings in, with the Windows-style key bindings the system nanorc
+# gives it. Its release archive is signed by its maintainer, Benno
+# Schulenberg (key 168E6F4297BFD7A79AFD4496514BBE2EB8E1961F); its manual
+# pages are under the GPL or the GFDL, and Dukovo takes them under the
+# GPL.
+name = "nano"
+version = "9.2"
+summary = "the text editor"
+license = "GPL-3.0-or-later"
+homepage = "https://www.nano-editor.org/"
+depends = ["mlibc", "ncurses"]
+
+[source]
+url = "https://www.nano-editor.org/dist/v9/nano-9.2.tar.xz"
+sha256 = "05ecb99247b782e8a5b3a25ed4101dd034b0236902f7449bc9795b717642f7e9"
+mirrors = ["https://archive.ubuntu.com/ubuntu/pool/main/n/nano/nano_9.2.orig.tar.xz"]

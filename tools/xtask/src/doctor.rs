@@ -359,6 +359,20 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "CMake",
+            purpose: "builds the ports that build with CMake, such as LLVM's C++ library \
+                      (version 3.28 or later)",
+            found: |_| {
+                let version = program_version("cmake", "--version")?;
+                let number = version.rsplit(' ').next()?;
+                let mut parts = number.split('.').map(|part| part.parse::<u32>().unwrap_or(0));
+                let (major, minor) = (parts.next()?, parts.next().unwrap_or(0));
+                ((major, minor) >= (3, 28)).then_some(version)
+            },
+            packages: all("cmake"),
+            fallback: None,
+        },
+        Requirement {
             name: "localedef",
             purpose: "compiles the C.UTF-8 locale",
             found: |_| process::find_program("localedef").map(|p| p.display().to_string()),

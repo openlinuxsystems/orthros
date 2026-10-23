@@ -12,9 +12,11 @@
 namespace mlibc {
 
 struct RadixSysdepTags :
+	Accept,
 	Access,
 	AnonAllocate,
 	AnonFree,
+	Bind,
 	Chdir,
 	Chmod,
 	ClockGet,
@@ -22,6 +24,7 @@ struct RadixSysdepTags :
 	ClockSet,
 	Clone,
 	Close,
+	Connect,
 	Dup,
 	Dup2,
 	Execve,
@@ -77,6 +80,7 @@ struct RadixSysdepTags :
 	LibcPanic,
 	Link,
 	Linkat,
+	Listen,
 	Madvise,
 	Mkdir,
 	Mkdirat,

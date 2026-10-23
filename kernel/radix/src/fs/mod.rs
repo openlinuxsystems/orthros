@@ -23,8 +23,8 @@
 //! - [`FileObject`] is what a file or directory capability names: a place
 //!   in the tree, and since Phase 8 an open file description's offset and
 //!   flags. `user::files` carries out their methods;
-//! - `pipe` and `tty` are pipes and terminals (Phase 8), files outside the
-//!   tree's filesystems;
+//! - `pipe` and `tty` are pipes and terminals (Phase 8), and `socket`
+//!   sockets (Phase 9), files outside the tree's filesystems;
 //! - `locks` keeps files' advisory locks (Phase 8): `flock`'s, POSIX's
 //!   record locks and open file descriptions' range locks.
 //!
@@ -101,7 +101,7 @@ enum Special {
     No,
     /// An end of a pipe.
     Pipe,
-    /// An end of a socket pair.
+    /// A socket.
     Socket,
     /// A side of a terminal.
     Tty,
@@ -143,7 +143,7 @@ impl FileObject {
         // can be one.
         let special = match at.node.kind() {
             Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
-            Kind::Socket if socket::end_of(&at.node).is_some() => Special::Socket,
+            Kind::Socket if socket::socket_of(&at.node).is_some() => Special::Socket,
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
             _ => Special::No,
         };
@@ -183,9 +183,9 @@ impl FileObject {
         if self.special == Special::Pipe { pipe::end_of(&self.at.node) } else { None }
     }
 
-    /// The end of a socket pair it is of, if it is of one.
-    pub fn socket_end(&self) -> Option<&socket::End> {
-        if self.special == Special::Socket { socket::end_of(&self.at.node) } else { None }
+    /// The socket it is of, if it is of one.
+    pub fn socket(&self) -> Option<&socket::Socket> {
+        if self.special == Special::Socket { socket::socket_of(&self.at.node) } else { None }
     }
 
     /// The side of a terminal it is of, if it is of one.

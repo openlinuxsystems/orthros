@@ -20,12 +20,19 @@
 //! conditions read only the atomic counts kept beside the buffer. Copies
 //! to and from the program's memory are made with the buffer's lock held:
 //! it is a sleeping lock, so a page the copy needs may be made meanwhile.
+//!
+//! The pipes of a socket's connection carry files too (`socket`,
+//! radix-file(2)'s `send_files`): a write may bring some, which ride on
+//! its first byte. A read never goes past a byte that has files on it
+//! unless it starts there, so the files come out with the bytes they were
+//! sent with; a read that does not take them closes them.
 
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use radix_abi::Status;
 use radix_abi::errors::Kernel;
+use radix_abi::file::FILES_IN_FLIGHT_MAX;
 use radix_abi::process::PipeFlags;
 use radix_abi::signal::SIGPIPE;
 use radix_cap::{ObjectKind, Rights, SlotRef};
@@ -40,6 +47,7 @@ use radix_vfs::{
 
 use super::{Description, FileObject, FileRef};
 use crate::sched::{self, wait};
+use crate::user::Fifo;
 use crate::user::posix::poll;
 use crate::user::posix::signal::{Restart, interrupted};
 
@@ -50,15 +58,65 @@ pub const CAPACITY: usize = 65536;
 /// PIPE_BUF.
 pub const ATOMIC: usize = 4096;
 
+/// A file sent through a socket: a copy of a capability to it.
+pub struct Passed {
+    /// What the capability is to: a file or a directory.
+    pub kind: ObjectKind,
+    /// The rights it has.
+    pub rights: Rights,
+    /// The file or directory.
+    pub file: FileRef,
+}
+
+/// Files sent together.
+pub type Files = alloc::vec::Vec<Passed, Kmalloc>;
+
+/// Files riding on a byte of a pipe.
+struct Attachment {
+    /// The byte's place in all that was ever written to the pipe.
+    at: u64,
+    files: Files,
+}
+
+/// A pipe's buffer, and the files riding on its bytes.
+struct Buffer {
+    ring: Ring<alloc::vec::Vec<u8, Kmalloc>>,
+    /// How many bytes have been read from it in all: the place of the
+    /// first byte in `ring`.
+    taken: u64,
+    /// The files riding on its bytes, in the order of their places.
+    attachments: Fifo<Attachment>,
+}
+
+impl Buffer {
+    /// How many bytes a read may take, and whether files ride on the
+    /// first: a read ends before the next byte files ride on.
+    fn boundary(&self) -> (usize, bool) {
+        let mut ahead = self.attachments.iter().map(|a| (a.at - self.taken) as usize);
+        match ahead.next() {
+            None => (usize::MAX, false),
+            Some(0) => (ahead.next().unwrap_or(usize::MAX), true),
+            Some(n) => (n, false),
+        }
+    }
+}
+
+/// The heap a pipe's memory comes from.
+fn heap() -> Kmalloc {
+    radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP)
+}
+
 /// A pipe.
 pub struct Pipe {
     /// Its buffer.
-    buffer: Mutex<Ring<alloc::vec::Vec<u8, Kmalloc>>>,
+    buffer: Mutex<Buffer>,
     /// How many bytes it holds, as the buffer says, for the waits.
     len: AtomicUsize,
     /// How many reading and writing ends are open.
     readers: AtomicU32,
     writers: AtomicU32,
+    /// How many files ride on its bytes.
+    files: AtomicUsize,
     /// Its number, which both ends' nodes show.
     id: u64,
 }
@@ -66,17 +124,19 @@ pub struct Pipe {
 impl Pipe {
     /// A new, empty pipe, with one end reading it and one writing it.
     pub(super) fn new() -> Result<KArc<Pipe>, Status> {
-        let mut buffer = alloc::vec::Vec::new_in(radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP));
+        let mut buffer = alloc::vec::Vec::new_in(heap());
         buffer.try_reserve_exact(CAPACITY).map_err(|_| Kernel::NoMemory.status(0))?;
         while buffer.len() < CAPACITY {
             // Room was reserved above.
             let _ = buffer.push_within_capacity(0);
         }
+        let buffer = Buffer { ring: Ring::new(buffer), taken: 0, attachments: Fifo::new() };
         mem::arc(Pipe {
-            buffer: Mutex::new(Ring::new(buffer)),
+            buffer: Mutex::new(buffer),
             len: AtomicUsize::new(0),
             readers: AtomicU32::new(1),
             writers: AtomicU32::new(1),
+            files: AtomicUsize::new(0),
             id: next_id(),
         })
         .map_err(|_| Kernel::NoMemory.status(0))
@@ -136,9 +196,17 @@ impl Pipe {
         self.writers.load(Ordering::Acquire)
     }
 
-    /// A reading end has gone.
+    /// A reading end has gone. Once none is left, the files riding on
+    /// its bytes, which no one can read now, are closed.
     pub(super) fn close_reader(&self) {
-        self.readers.fetch_sub(1, Ordering::AcqRel);
+        if self.readers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let unread = {
+                let mut buffer = self.buffer.lock();
+                self.files.store(0, Ordering::Release);
+                buffer.attachments.take()
+            };
+            drop(unread);
+        }
         self.changed();
     }
 
@@ -149,29 +217,52 @@ impl Pipe {
     }
 
     /// Reads up to `out.len()` bytes into `out`, waiting for some unless
-    /// `non_blocking`; returns 0 once no writer is left.
+    /// `non_blocking`; returns 0 once no writer is left. Files that came
+    /// with what it read are closed.
     pub fn read(&self, out: &mut dyn Out, non_blocking: bool) -> Result<usize, Status> {
+        self.read_files(out, non_blocking).map(|(read, _)| read)
+    }
+
+    /// Reads as [`Pipe::read`] does, and returns the files that came with
+    /// what it read, if any did: a read that starts at a byte files ride
+    /// on takes them, and one that does not ends before such a byte.
+    pub fn read_files(
+        &self,
+        out: &mut dyn Out,
+        non_blocking: bool,
+    ) -> Result<(usize, Option<Files>), Status> {
         let want = out.len();
         if want == 0 {
-            return Ok(0);
+            return Ok((0, None));
         }
         loop {
             {
                 let mut buffer = self.buffer.lock();
-                if !buffer.is_empty() {
+                if !buffer.ring.is_empty() {
+                    let (most, with_files) = buffer.boundary();
                     let mut at = 0;
-                    let read = buffer.read_with(want, &mut |run| {
+                    let read = buffer.ring.read_with(want.min(most), &mut |run| {
                         out.put(at, run)?;
                         at += run.len();
                         Ok::<(), radix_vfs::Error>(())
                     });
-                    self.len.store(buffer.len(), Ordering::Release);
+                    let taken = *read.as_ref().unwrap_or(&0);
+                    buffer.taken += taken as u64;
+                    let files = if with_files && taken > 0 {
+                        buffer.attachments.pop_front().map(|attachment| attachment.files)
+                    } else {
+                        None
+                    };
+                    if let Some(files) = &files {
+                        self.files.fetch_sub(files.len(), Ordering::AcqRel);
+                    }
+                    self.len.store(buffer.ring.len(), Ordering::Release);
                     drop(buffer);
                     self.changed();
-                    return read.map_err(super::status);
+                    return read.map(|read| (read, files)).map_err(super::status);
                 }
                 if self.writers.load(Ordering::Acquire) == 0 {
-                    return Ok(0);
+                    return Ok((0, None));
                 }
             }
             if non_blocking {
@@ -193,6 +284,20 @@ impl Pipe {
     /// some had. With no reader left, it fails with gone, and with
     /// `signal` raises SIGPIPE for the writing thread first.
     pub fn write(&self, data: &dyn In, non_blocking: bool, signal: bool) -> Result<usize, Status> {
+        self.write_files(data, None, non_blocking, signal)
+    }
+
+    /// Writes as [`Pipe::write`] does, with `files` riding on the first
+    /// byte of `data`; fails with too_many if they would make more than
+    /// FILES_IN_FLIGHT_MAX on their way. Files that do not go in are
+    /// closed.
+    pub fn write_files(
+        &self,
+        data: &dyn In,
+        mut files: Option<Files>,
+        non_blocking: bool,
+        signal: bool,
+    ) -> Result<usize, Status> {
         let total = data.len();
         if total == 0 {
             return Ok(0);
@@ -207,15 +312,34 @@ impl Pipe {
                     return broken(done, signal);
                 }
                 let left = total - done;
-                let free = buffer.free();
+                let free = buffer.ring.free();
                 if (atomic && free >= left) || (!atomic && free > 0) {
+                    // The files go with the first piece written.
+                    let count = files.as_ref().map_or(0, |files| files.len());
+                    if count > 0 {
+                        let flying = self.files.load(Ordering::Acquire);
+                        if flying + count > FILES_IN_FLIGHT_MAX as usize {
+                            return Err(Kernel::TooMany.status(0));
+                        }
+                        if !buffer.attachments.reserve_one() {
+                            return Err(Kernel::NoMemory.status(0));
+                        }
+                    }
+                    let place = buffer.taken + buffer.ring.len() as u64;
                     let mut at = done;
-                    let wrote = buffer.write_with(left, &mut |run| {
+                    let wrote = buffer.ring.write_with(left, &mut |run| {
                         data.get(at, run)?;
                         at += run.len();
                         Ok::<(), radix_vfs::Error>(())
                     });
-                    self.len.store(buffer.len(), Ordering::Release);
+                    if let Ok(1..) = wrote
+                        && let Some(files) = files.take()
+                    {
+                        self.files.fetch_add(files.len(), Ordering::AcqRel);
+                        // Room was reserved above.
+                        let _ = buffer.attachments.push_back(Attachment { at: place, files });
+                    }
+                    self.len.store(buffer.ring.len(), Ordering::Release);
                     drop(buffer);
                     self.changed();
                     match wrote {

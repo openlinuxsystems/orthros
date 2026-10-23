@@ -12,7 +12,9 @@
 //!    `/system`, `/applications`, `/users`, `/data`, `/tmp`, `/run`,
 //!    `/dev`, `/proc`, `/sys` and `/volumes`; and mounts the boot archive
 //!    read-only on `/system`, tmpfs on `/system/etc`, `/system/var`,
-//!    `/tmp` and `/run`, and the `dev`, `proc` and `sys` trees;
+//!    `/tmp` and `/run`, and the `dev`, `proc` and `sys` trees; makes
+//!    `/system/var/tmp`; then copies each default setting in
+//!    `/system/lib/defaults/etc` that `/system/etc` lacks into it;
 //! 2. mounts the FAT filesystem of each disk in `/dev` that holds one
 //!    (each partition, or the whole disk if it has none) at
 //!    `/volumes/<name>`;
@@ -67,8 +69,10 @@ const ARGS_MAX: usize = 16;
 const POSIX_SLOTS: u32 = 1024;
 
 /// The environment a POSIX program starts with: text is UTF-8 (the
-/// C.UTF-8 locale, radix-posix(7)).
-const POSIX_ENV: [&str; 4] = ["PATH=/system/bin", "HOME=/", "TERM=dumb", "LANG=C.UTF-8"];
+/// C.UTF-8 locale, radix-posix(7)), and nano is the editor programs
+/// open a file in for its user (ADR 0090).
+const POSIX_ENV: [&str; 5] =
+    ["PATH=/system/bin", "HOME=/", "TERM=dumb", "LANG=C.UTF-8", "EDITOR=nano"];
 
 /// How long Spark waits for a POSIX program's output before it looks
 /// whether the program has ended: 50 ms.
@@ -103,6 +107,11 @@ const MOUNTS: [(&str, FilesystemKind, MountFlags); 8] = [
     ("sys", FilesystemKind::Sys, MountFlags::NONE),
 ];
 
+/// Directories of the mounted tmpfs that Unix programs expect there:
+/// `/var/tmp`, for temporary files that are to outlive a restart, such
+/// as vi's recovery files, once `/system/var` is on a disk.
+const MOUNTED_DIRS: [&str; 1] = ["system/var/tmp"];
+
 fn main(start: &Startup) -> u64 {
     let number = process::info(&SYS, SLOT_PROCESS).map_or(0, |info| info.number);
     println!("spark: Spark v1 is process {number}, moved by {:#x}", start.image_bias);
@@ -136,6 +145,7 @@ fn run() {
     if !build(&root) {
         return;
     }
+    seed_settings(&root);
     mount_disks(&root);
     let mut words = args().skip(1).peekable();
     let posix = words.next_if_eq(&"--posix").is_some();
@@ -359,6 +369,12 @@ fn build(root: &Dir) -> bool {
             return false;
         }
     }
+    for name in MOUNTED_DIRS {
+        if let Err(err) = root.make_dir(name) {
+            println!("spark: cannot make /{name}: {err}");
+            return false;
+        }
+    }
     for (path, target) in LINKS {
         if let Err(err) = root.make_link(path, target) {
             println!("spark: cannot link /{path} to /{target}: {err}");
@@ -371,6 +387,67 @@ fn build(root: &Dir) -> bool {
         MOUNTS.len()
     );
     true
+}
+
+/// Where the system keeps its default settings, and where the settings
+/// are, which start with each default that is not there yet: the plan's
+/// way for updates to add settings without replacing edited ones
+/// (spark(8)). `/system/etc` is a tmpfs until Btrfs, so each boot starts
+/// it with all of them.
+const DEFAULTS: &str = "system/lib/defaults/etc";
+const SETTINGS: &str = "system/etc";
+
+/// How deep the defaults' directories may nest.
+const DEFAULTS_DEPTH: usize = 8;
+
+/// Copies each default setting into `/system/etc` that is not there.
+fn seed_settings(root: &Dir) {
+    let Ok(defaults) = root.open_dir(DEFAULTS, Rights::READ) else {
+        return;
+    };
+    let settings = match root.open_dir(SETTINGS, Rights::READ.union(Rights::WRITE)) {
+        Ok(settings) => settings,
+        Err(err) => {
+            println!("spark: cannot open /{SETTINGS}: {err}");
+            return;
+        }
+    };
+    let mut added = 0;
+    seed(&defaults, &settings, DEFAULTS_DEPTH, &mut added);
+    println!("spark: added {added} default settings to /{SETTINGS}");
+}
+
+/// Copies the files beneath `from` that `to` lacks into it, with the
+/// directories they are in, to `depth` levels; counts them in `added`.
+fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
+    let entries = match from.entries() {
+        Ok(entries) => entries,
+        Err(err) => {
+            println!("spark: cannot list the default settings: {err}");
+            return;
+        }
+    };
+    for entry in entries {
+        let name = entry.name.as_str();
+        let done = match entry.kind {
+            FileKind::Directory if depth > 1 => match to.make_dir(name) {
+                Err(err) if !err.is(FileError::Exists) => Err(err),
+                _ => from.open_dir(name, Rights::READ).and_then(|inner| {
+                    let rw = Rights::READ.union(Rights::WRITE);
+                    to.open_dir(name, rw).map(|out| seed(&inner, &out, depth - 1, added))
+                }),
+            },
+            FileKind::File if to.stat(name).is_err() => {
+                from.read_file(name).and_then(|data| to.write_file(name, &data)).map(|()| {
+                    *added += 1;
+                })
+            }
+            _ => Ok(()),
+        };
+        if let Err(err) = done {
+            println!("spark: cannot add the default setting {name}: {err}");
+        }
+    }
 }
 
 /// Mounts the FAT filesystem of each disk partition, or of each disk with

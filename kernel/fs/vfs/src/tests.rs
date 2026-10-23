@@ -332,6 +332,34 @@ fn links_count_against_the_limits() {
 }
 
 #[test]
+fn sockets_have_names() {
+    let fs = Tmpfs::new(1 << 20, 3).unwrap();
+    let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
+    let root = vfs.root();
+    let binding: crate::SocketBinding = mem::arc(7u32).unwrap();
+    vfs.make_socket(&root, "s", binding.clone()).unwrap();
+    assert_eq!(vfs.make_socket(&root, "s", binding).err(), Some(Error::Exists));
+    let named = vfs.resolve(&root, "s").unwrap();
+    assert_eq!(named.node.kind(), Kind::Socket);
+    assert_eq!(named.node.socket_binding().unwrap().downcast_ref::<u32>(), Some(&7));
+    assert!(root.node.socket_binding().is_none());
+    // A name is connected through, never opened.
+    assert_eq!(vfs.open(&root, "s", OpenFlags::default()).err(), Some(Error::NoDevice));
+    assert_eq!(names(&vfs, &root), [(String::from("s"), Kind::Socket)]);
+    // It counts against the limit, and moves and goes as a file does.
+    write(&vfs, &root, "f", b"x").unwrap();
+    assert_eq!(fs.info().free_files, 0);
+    vfs.rename(&root, "s", &root, "f").unwrap();
+    assert_eq!(vfs.stat(&root, "f").unwrap().kind, Kind::Socket);
+    assert_eq!(fs.info().free_files, 1);
+    vfs.make_directory(&root, "d").unwrap();
+    assert_eq!(vfs.rename(&root, "f", &root, "d").err(), Some(Error::IsDirectory));
+    vfs.remove(&root, "f").unwrap();
+    drop(named);
+    assert_eq!(fs.info().free_files, 1);
+}
+
+#[test]
 fn a_tree_of_mounts_goes_at_once() {
     let vfs = vfs();
     let root = vfs.root();

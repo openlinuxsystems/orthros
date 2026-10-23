@@ -1,0 +1,29 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Finds how much memory there is on Radix with sysconf(_SC_PHYS_PAGES),
+as 7-Zip already does on Solaris: Radix has no sysinfo() and no
+<sys/sysinfo.h>, which 7-Zip's code for Linux uses and which every
+system it does not know falls into. 7-Zip keeps the memory it uses
+within it (ADR 0090).
+
+--- a/CPP/Windows/System.cpp
++++ b/CPP/Windows/System.cpp
+@@ -9,7 +9,7 @@
+     || defined(BSD) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) \
+     || defined(__QNXNTO__)
+ #include <sys/sysctl.h>
+-#else
++#elif !defined(__radix__)
+ #include <sys/sysinfo.h>
+ #endif
+ #endif
+@@ -340,7 +340,7 @@
+     #if defined(_SC_AIX_REALMEM) // AIX
+       size64 = (UInt64)sysconf(_SC_AIX_REALMEM) * 1024;
+     #endif
+-  #elif 0 || defined(__sun)
++  #elif defined(__radix__) || defined(__sun)
+     #if defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+     // FreeBSD, Linux, OpenBSD, and Solaris.
+     {
