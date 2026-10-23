@@ -461,6 +461,32 @@ int Sysdeps<SetSchedparam>::operator()(void *tcb, int policy, const struct sched
 	return scheduling(thread, true, &policy, &priority);
 }
 
+// The load averages, from /proc/loadavg's `load_N: whole.hundredths`
+// lines (radix-proc(5)).
+int Sysdeps<GetLoadavg>::operator()(double *samples) {
+	int fd;
+	if(int e = sysdep<Open>("/proc/loadavg", O_RDONLY | O_CLOEXEC, 0, &fd); e)
+		return e;
+	char text[256];
+	ssize_t length = 0;
+	int e = sysdep<Read>(fd, text, sizeof(text) - 1, &length);
+	sysdep<Close>(fd);
+	if(e)
+		return e;
+	text[length] = 0;
+	int found = 0;
+	for(char *line = text; line && *line && found < 3; ) {
+		char *colon = strchr(line, ':');
+		if(!colon)
+			break;
+		samples[found++] = strtod(colon + 1, nullptr);
+		line = strchr(colon, '\n');
+		if(line)
+			line++;
+	}
+	return found == 3 ? 0 : EIO;
+}
+
 int Sysdeps<ThreadSetname>::operator()(void *tcb, const char *name) {
 	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
 	// Linux's limit of 15 bytes, which the kernel shares.

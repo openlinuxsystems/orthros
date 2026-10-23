@@ -138,6 +138,27 @@ pub struct PosixState {
     pub limits: Box<limits::Limits, Kmalloc>,
     /// Its file mode creation mask (`umask`).
     pub file_mask: u32,
+    /// Its working directory as the C library last noted it (`exec`,
+    /// `set_directory`): an absolute path, for `/proc`. Shared, so that
+    /// `fork` copies it under the lock without taking memory.
+    pub directory: Option<Directory>,
+}
+
+/// A working directory's path, as [`PosixState::directory`] keeps it.
+pub type Directory = alloc::sync::Arc<Vec<u8, Kmalloc>, Kmalloc>;
+
+/// Notes `path` as `process`'s working directory, if there is memory for
+/// it (`exec`, and radix-process(2)'s `set_directory`).
+pub fn set_directory(process: &ProcessObject, path: &[u8]) -> bool {
+    exec::copied(path).is_ok_and(|copy| keep_directory(process, copy))
+}
+
+/// [`set_directory`] with the path copied already.
+fn keep_directory(process: &ProcessObject, path: Vec<u8, Kmalloc>) -> bool {
+    let Ok(directory) = alloc::sync::Arc::try_new_in(path, kmalloc()) else { return false };
+    let old = process.posix.lock().directory.replace(directory);
+    drop(old);
+    true
 }
 
 impl PosixState {
@@ -157,14 +178,19 @@ impl PosixState {
             terminal: None,
             limits: Box::try_new_in(limits::Limits::DEFAULT, kmalloc()).ok()?,
             file_mask: 0o022,
+            directory: None,
         })
     }
 
     /// Takes what a child has of its parent's `parent` (`fork`, or `exec`
-    /// on a created process): its resource limits and file mode mask.
+    /// on a created process): its resource limits, file mode mask and,
+    /// unless `exec` noted its own, working directory.
     pub fn inherit(&mut self, parent: &PosixState) {
         *self.limits = *parent.limits;
         self.file_mask = parent.file_mask;
+        if self.directory.is_none() {
+            self.directory = parent.directory.clone();
+        }
     }
 }
 
@@ -214,6 +240,17 @@ pub fn ids_of(process: &ProcessRef) -> Result<(u64, u64, u64)> {
         join(tree, process)?;
         let member = tree.get(process.number()).ok_or(error(Kernel::NoSuchProcess))?;
         Ok((member.pid, member.group, member.session))
+    })
+}
+
+/// Where process `pid` is in the tree, for `/proc`: its parent, process
+/// group and session, and whether it has ended unreaped (a zombie); none
+/// if it is not in the tree.
+pub fn tree_place(pid: u64) -> Option<(u64, u64, u64, bool)> {
+    with_tree(|tree| {
+        let member = tree.get(pid)?;
+        let zombie = matches!(member.life, radix_posix::tree::Life::Zombie { .. });
+        Some((member.parent, member.group, member.session, zombie))
     })
 }
 
@@ -278,6 +315,7 @@ pub fn exited(process: &ProcessObject) {
         };
         (posix.in_tree, ended, posix.terminal.take())
     };
+    crate::fs::trace::exited(process, ended.status());
     let pid = process.number();
     if let Some(terminal) = terminal {
         // A session leader's end hangs its terminal up.
@@ -287,9 +325,9 @@ pub fn exited(process: &ProcessObject) {
         return;
     }
     let times = {
-        let own = process.cpu_ns();
+        let (own_user, own_system) = process.cpu_times();
         let (user, all) = process.posix.lock().children_ns;
-        (own + user, own + all)
+        (own_user + user, own_user + own_system + all)
     };
     // The handles of members that left: dropped once the tree is let go.
     let mut gone: Vec<ProcessRef, Kmalloc> = Vec::new_in(kmalloc());
@@ -464,15 +502,53 @@ pub fn method(
         process::TIMER_CREATE | process::TIMER_SET | process::TIMER_GET | process::TIMER_DELETE => {
             timer::method(user, label, args)
         }
-        process::PRIORITY | process::SCHEDULING => priority::method(user, label, args),
+        process::PRIORITY
+        | process::SCHEDULING
+        | process::SET_AFFINITY
+        | process::AFFINITY
+        | process::IO_PRIORITY => priority::method(user, label, args),
+        process::SET_DIRECTORY => {
+            let a = process::SetDirectoryArgs::decode(args)?;
+            if a.path.len > radix_vfs::PATH_MAX as u64 + 1 {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            if !radix_ipc::range::user_bytes(a.path.address, a.path.len) {
+                return Err(error(Kernel::BadAddress));
+            }
+            let mut path = exec::zeroed(a.path.len as usize)?;
+            if !Arch::copy_from_user(&mut path, a.path.address) {
+                return Err(error(Kernel::BadAddress));
+            }
+            if path.first() != Some(&b'/') || path.contains(&0) {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            if !keep_directory(me, path) {
+                return Err(error(Kernel::NoMemory));
+            }
+            answer(label, 0, [0; 8])
+        }
+        process::TRACE => {
+            let a = process::TraceArgs::decode(args)?;
+            let target = with_tree(|tree| -> Result<(ProcessRef, bool)> {
+                join(tree, me)?;
+                let target = find(tree, a.pid).ok_or(error(Kernel::NoSuchProcess))?;
+                Ok((target, tree.may_signal(me.number(), a.pid)))
+            })?;
+            let (target, permitted) = target;
+            if !permitted {
+                return Err(error(Kernel::NotPermitted));
+            }
+            crate::fs::trace::start(user, &target, a.flags, a.to)?;
+            answer(label, 0, [0; 8])
+        }
         process::LIMITS | process::FILE_MASK => limits::method(user, label, args),
         process::TIMES => {
             process::TimesArgs::decode(args)?;
-            let own = cpu_ns(me);
+            let (user_ns, system_ns) = me.cpu_times();
             let children = me.posix.lock().children_ns;
             let results = process::TimesResults {
-                user_ns: own,
-                system_ns: 0,
+                user_ns,
+                system_ns,
                 children_user_ns: children.0,
                 children_system_ns: children.1.saturating_sub(children.0),
             };

@@ -29,6 +29,7 @@ use radix_abi::signal::{
     ActionFlags, MaskHow, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGNALS, SIGSEGV,
     SIGSTOP, SIGTRAP, SIGTTIN, SignalInfo, StackFlags,
 };
+use radix_abi::trace::TraceSignal;
 use radix_hal::{SignalFrame, SyscallRegs, UserFault, UserFaultKind, UserMode};
 use radix_klog::warn;
 use radix_posix::signal::{
@@ -41,6 +42,7 @@ use super::{
     with_tree,
 };
 use crate::Arch;
+use crate::fs::trace;
 use crate::sched::{self, ThreadRef, wait};
 use crate::user::methods::{Answer, answer};
 use crate::user::process::{Ending, ProcessObject, ProcessRef};
@@ -506,6 +508,9 @@ enum Step {
     Kill(u32),
     /// Run a handler.
     Handle { signal: u32, info: Info, action: Action },
+    /// Nothing: the signal was ignored. Only a traced process stops for
+    /// it, to note it.
+    Ignored(u32),
 }
 
 /// Delivers what `me`, `user`'s thread, has pending on its way back to
@@ -549,6 +554,7 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                         drop(signals);
                         let info = timer::taken(process, &mut posix, signal, info);
                         match posix.actions.disposition(signal) {
+                            Disposition::Ignore if process.traced() => Step::Ignored(signal),
                             Disposition::Ignore => continue,
                             Disposition::Stop => Step::Stop(signal),
                             Disposition::Terminate => Step::Kill(signal),
@@ -567,8 +573,19 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                     !process.stopped.load(Ordering::Acquire) || me.should_stop()
                 });
             }
-            Step::Stop(signal) => stop_process(process, signal),
+            Step::Ignored(signal) => {
+                // SIGCONT's default is to be ignored, once it has
+                // continued the process as it was sent.
+                let what =
+                    if signal == SIGCONT { TraceSignal::Continued } else { TraceSignal::Ignored };
+                trace::signal(process, me.id(), signal, what);
+            }
+            Step::Stop(signal) => {
+                trace::signal(process, me.id(), signal, TraceSignal::Stopped);
+                stop_process(process, signal);
+            }
             Step::Kill(signal) => {
+                trace::signal(process, me.id(), signal, TraceSignal::Ended);
                 if rules::is_crash(signal) {
                     warn!("User: process {} ended by signal {signal}", process.number());
                 }
@@ -576,6 +593,7 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                 exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
             }
             Step::Handle { signal, info, action } => {
+                trace::signal(process, me.id(), signal, TraceSignal::Handled);
                 if !run_handler(user, signal, &info, &action) {
                     // No room for the frame: the process cannot go on.
                     warn!(

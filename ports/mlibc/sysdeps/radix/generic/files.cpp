@@ -995,7 +995,13 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 	char absolute[radix::PATH_MAX_BYTES];
 	if(int e = sysdep<Realpath>(path, absolute, sizeof(absolute)); e)
 		return e;
-	return radix::set_cwd(absolute);
+	if(int e = radix::set_cwd(absolute); e)
+		return e;
+	// The kernel shows it in /proc (radix-proc(5)); a failure there is
+	// no failure of chdir.
+	const char *dir = radix::cwd();
+	radix_process_set_directory(radix::SLOT_PROCESS, dir, strlen(dir));
+	return 0;
 }
 
 int Sysdeps<Fchdir>::operator()(int fd) {

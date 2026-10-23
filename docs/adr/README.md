@@ -103,3 +103,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0089](0089-directory-descriptor-paths.md) | The C library notes the path of each directory descriptor, for `..` beneath it and fchdir | Accepted |
 | [0090](0090-editors-cxx-and-default-settings.md) | Editors, a C++ runtime, and the settings the system starts with | Accepted |
 | [0091](0091-named-sockets-and-passed-descriptors.md) | Named sockets connect through the tree, and descriptors ride on their bytes | Accepted |
+| [0092](0092-cpu-time-split-and-load-averages.md) | CPU time is split by the timer's samples, and the load averages are Linux's | Accepted |
+| [0093](0093-cpu-affinity-and-io-classes.md) | Threads have Linux's CPU affinity, and processes Linux's I/O classes | Accepted |
+| [0094](0094-proc-for-the-native-tools-kmsg-and-opened-paths.md) | /proc tells the native tools what they show, /dev/kmsg gives the log, and files keep the path they were opened by | Accepted |
+| [0095](0095-tracing-through-a-pipe-the-kernel-writes.md) | A trace is a pipe the kernel writes a record to for each call | Accepted |
+| [0096](0096-native-administration-tools-as-one-program.md) | The native administration tools are one Rust program, written for Radix with Linux's names and options | Accepted |

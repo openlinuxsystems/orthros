@@ -202,6 +202,10 @@ impl CpuLocal for Arch {
         percpu::interrupt_depth()
     }
 
+    fn interrupted_user() -> bool {
+        percpu::interrupted_user()
+    }
+
     fn running_word() -> usize {
         percpu::running_word()
     }

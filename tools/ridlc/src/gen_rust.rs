@@ -144,6 +144,7 @@ pub fn rust(abi: &Abi) -> String {
         out.push_str("}\n");
     }
     raises_module(&mut out, abi);
+    catalog_module(&mut out, abi);
     out
 }
 
@@ -185,6 +186,253 @@ fn raises_module(out: &mut String, abi: &Abi) {
         }
     }
     out.push_str("            _ => None,\n        }\n    }\n}\n");
+}
+
+/// The names of results that say how many bytes a call wrote to its
+/// first output argument, most telling first (radix-trace(2)).
+const WRITTEN: [&str; 4] = ["used", "len", "length", "count"];
+
+/// Writes the `catalog` module: what tracing needs of each call (radix-
+/// trace(2)). The kernel uses where the byte arguments are and how much
+/// a call wrote, which hold no names; a tracer uses the names and shapes
+/// of the arguments and results, to print them.
+fn catalog_module(out: &mut String, abi: &Abi) {
+    out.push_str(CATALOG_PRELUDE);
+    let mut calls: Vec<(String, String, &Call)> = Vec::new();
+    for (_, call) in abi.syscalls() {
+        calls.push((format!("SYSCALL_{}", call.number), String::new(), call));
+    }
+    let mut methods: Vec<(u64, String, &Call)> = Vec::new();
+    for module in &abi.modules {
+        for item in &module.items {
+            if let ItemKind::Interface { id, methods: list, .. } = &item.kind {
+                for method in list {
+                    let label = (id << 16) | method.number;
+                    methods.push((label, item.name.clone(), method));
+                    calls.push((format!("METHOD_{label:08X}"), item.name.clone(), method));
+                }
+            }
+        }
+    }
+    for (constant, interface, call) in &calls {
+        let _ = writeln!(out, "    const {constant}: Call = Call {{");
+        let _ = writeln!(out, "        interface: \"{interface}\",");
+        let _ = writeln!(out, "        name: \"{}\",", call.name);
+        let _ = writeln!(out, "        args: &[{}],", params(abi, &call.args));
+        let _ = writeln!(out, "        results: &[{}],", params(abi, &call.results));
+        out.push_str("    };\n\n");
+    }
+
+    out.push_str("    /// The system call numbered `number`.\n");
+    out.push_str(
+        "    pub fn syscall(number: u64) -> Option<&'static Call> {\n        match number {\n",
+    );
+    for (_, call) in abi.syscalls() {
+        let _ = writeln!(out, "            {} => Some(&SYSCALL_{}),", call.number, call.number);
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+    out.push_str("    /// The method labelled `label`.\n");
+    out.push_str(
+        "    pub fn method(label: u32) -> Option<&'static Call> {\n        match label {\n",
+    );
+    for (label, _, _) in &methods {
+        let _ = writeln!(out, "            {label:#010x} => Some(&METHOD_{label:08X}),");
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+
+    out.push_str(
+        "    /// The byte arguments of the system call numbered `number`: for\n    \
+         /// each, the argument register its address is in (its length is in\n    \
+         /// the next), and whether the kernel writes it.\n",
+    );
+    out.push_str("    pub const fn syscall_bytes(number: u64) -> &'static [(u8, bool)] {\n        match number {\n");
+    for (_, call) in abi.syscalls() {
+        let bytes = byte_words(abi, &call.args);
+        if !bytes.is_empty() {
+            let _ = writeln!(out, "            {} => &[{bytes}],", call.number);
+        }
+    }
+    out.push_str("            _ => &[],\n        }\n    }\n\n");
+    out.push_str(
+        "    /// The byte arguments of the method labelled `label`: for each, the\n    \
+         /// data word its address is in (its length is in the next), and\n    \
+         /// whether the kernel writes it.\n",
+    );
+    out.push_str("    pub const fn method_bytes(label: u32) -> &'static [(u8, bool)] {\n        match label {\n");
+    for (label, _, call) in &methods {
+        let bytes = byte_words(abi, &call.args);
+        if !bytes.is_empty() {
+            let _ = writeln!(out, "            {label:#010x} => &[{bytes}],");
+        }
+    }
+    out.push_str("            _ => &[],\n        }\n    }\n\n");
+    out.push_str(
+        "    /// The result word of the method labelled `label` that says how many\n    \
+         /// bytes it wrote to its first output argument, if it has one.\n",
+    );
+    out.push_str(
+        "    pub const fn method_written(label: u32) -> Option<u8> {\n        match label {\n",
+    );
+    for (label, _, call) in &methods {
+        let writes = call.args.iter().any(|arg| arg.ty == Type::Bytes(Dir::Out));
+        if !writes {
+            continue;
+        }
+        let found = WRITTEN.iter().find_map(|wanted| {
+            let mut word = 0;
+            for result in &call.results {
+                if result.name == *wanted {
+                    return Some(word);
+                }
+                word += abi.words(&result.ty);
+            }
+            None
+        });
+        if let Some(word) = found {
+            let _ = writeln!(out, "            {label:#010x} => Some({word}),");
+        }
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+
+    out.push_str(
+        "    /// The name of value `value` of the enumeration named `ty`.\n    \
+         pub fn enum_name(ty: &str, value: u64) -> Option<&'static str> {\n        \
+         match (ty, value) {\n",
+    );
+    for module in &abi.modules {
+        for item in &module.items {
+            if let ItemKind::Enum { variants, .. } = &item.kind {
+                for variant in variants {
+                    let _ = writeln!(
+                        out,
+                        "            (\"{}\", {}) => Some(\"{}\"),",
+                        item.name, variant.value, variant.name
+                    );
+                }
+            }
+        }
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+    out.push_str(
+        "    /// The flags of the set of flags named `ty`: each one's bit number\n    \
+         /// and name.\n    \
+         pub fn flag_names(ty: &str) -> &'static [(u32, &'static str)] {\n        match ty {\n",
+    );
+    for module in &abi.modules {
+        for item in &module.items {
+            if let ItemKind::Flags { bits, .. } = &item.kind {
+                let list: Vec<String> =
+                    bits.iter().map(|bit| format!("({}, \"{}\")", bit.value, bit.name)).collect();
+                let _ = writeln!(out, "            \"{}\" => &[{}],", item.name, list.join(", "));
+            }
+        }
+    }
+    out.push_str("            _ => &[],\n        }\n    }\n}\n");
+}
+
+const CATALOG_PRELUDE: &str = r#"
+/// What tracing needs to know of each call (radix-trace(2)): where its
+/// byte arguments are, for the kernel to copy their data, and the names
+/// and shapes of its arguments and results, for a tracer to print them.
+pub mod catalog {
+    /// How an argument or result reads.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Shape {
+        /// An unsigned number.
+        Unsigned,
+        /// A signed number.
+        Signed,
+        /// 0 or 1.
+        Bool,
+        /// A capability's slot.
+        Slot,
+        /// An address in the caller's memory.
+        Addr,
+        /// A buffer the kernel reads: its address and length, two words.
+        BytesIn,
+        /// A buffer the kernel writes: its address and length, two words.
+        BytesOut,
+        /// A value of the enumeration of this name.
+        Enum(&'static str),
+        /// A set of the flags of this name.
+        Flags(&'static str),
+        /// A structure of this name, or an array: so many words.
+        Words(usize),
+    }
+
+    impl Shape {
+        /// How many words it takes.
+        pub const fn words(self) -> usize {
+            match self {
+                Shape::BytesIn | Shape::BytesOut => 2,
+                Shape::Words(words) => words,
+                _ => 1,
+            }
+        }
+    }
+
+    /// An argument or result.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Param {
+        /// Its name.
+        pub name: &'static str,
+        /// How it reads.
+        pub shape: Shape,
+    }
+
+    /// A system call or a method.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Call {
+        /// Its interface's name; empty for a system call.
+        pub interface: &'static str,
+        /// Its name.
+        pub name: &'static str,
+        /// Its arguments, in the order of their words.
+        pub args: &'static [Param],
+        /// Its results, in the order of their words.
+        pub results: &'static [Param],
+    }
+
+"#;
+
+/// The `Param` list of `fields`, as Rust.
+fn params(abi: &Abi, fields: &[Field]) -> String {
+    let list: Vec<String> = fields
+        .iter()
+        .map(|field| {
+            let shape = match &field.ty {
+                Type::Prim(Prim::I32 | Prim::I64) => "Shape::Signed".to_string(),
+                Type::Prim(Prim::Bool) => "Shape::Bool".to_string(),
+                Type::Prim(_) => "Shape::Unsigned".to_string(),
+                Type::Slot => "Shape::Slot".to_string(),
+                Type::Addr => "Shape::Addr".to_string(),
+                Type::Bytes(Dir::In) => "Shape::BytesIn".to_string(),
+                Type::Bytes(Dir::Out) => "Shape::BytesOut".to_string(),
+                Type::Named(name) => match abi.find(name).map(|(_, item)| &item.kind) {
+                    Some(ItemKind::Enum { .. }) => format!("Shape::Enum(\"{name}\")"),
+                    Some(ItemKind::Flags { .. }) => format!("Shape::Flags(\"{name}\")"),
+                    _ => format!("Shape::Words({})", abi.words(&field.ty)),
+                },
+                Type::Array(..) => format!("Shape::Words({})", abi.words(&field.ty)),
+            };
+            format!("Param {{ name: \"{}\", shape: {shape} }}", field.name)
+        })
+        .collect();
+    list.join(", ")
+}
+
+/// The byte arguments among `args`: each one's first word and whether it
+/// is written, as Rust tuples.
+fn byte_words(abi: &Abi, args: &[Field]) -> String {
+    let mut word = 0;
+    let mut list = Vec::new();
+    for arg in args {
+        if let Type::Bytes(dir) = arg.ty {
+            list.push(format!("({word}, {})", dir == Dir::Out));
+        }
+        word += abi.words(&arg.ty);
+    }
+    list.join(", ")
 }
 
 fn error_set_of(abi: &Abi, error: &str) -> String {

@@ -6,11 +6,32 @@
 //! The kernel log is how early programs, before there are consoles and
 //! log services (Phase 6), report what they do: `debug_log` writes a line
 //! to it, prefixed with the thread's name.
+//!
+//! Programs read the log through _/dev/kmsg_ (radix-files(7)), as on
+//! Linux: each read of it returns one record, the oldest the reader has
+//! not read, as a line of text `priority,sequence,microseconds,-;text`.
+//! The priority is the record's syslog(3) level (3 for errors, 4 for
+//! warnings, 6 for information, 7 for debugging), of the kernel's
+//! facility, 0, for every record; the lines programs wrote start with
+//! their names. The sequence numbers every record since boot, and the
+//! microseconds are the time since boot. A read waits for a record unless
+//! the file is non-blocking, and fails with invalid_argument if the
+//! buffer cannot hold the line; one that finds its next record gone from
+//! the kernel's ring fails with gone (EPIPE) once, then goes on from the
+//! oldest still kept. Seeking to the start goes back to the oldest record
+//! kept since the log was last cleared, and to the end skips all of them;
+//! no other offset is taken. Writing a line logs it, as `debug_log` does,
+//! at the level a `<N>` before it gives, or information.
 
 module kernel_log;
 
 /// The most bytes of one line `debug_log` keeps.
 const WRITE_MAX: u64 = 256;
+
+/// radix-file(2)'s `control` request on _/dev/kmsg_ that clears the log
+/// (as `dmesg -C` does): readers that open it or seek to its start
+/// later skip the records it holds. Needs the write right.
+const CLEAR: u32 = 0x4b4d0001;
 
 /// The kernel log. Writing needs the write right.
 interface kernel_log = 0x0009 version 1 {

@@ -136,6 +136,11 @@ pub trait CpuLocal {
     /// context).
     fn interrupt_depth() -> u32;
 
+    /// Whether the interrupt this CPU is handling came while it ran user
+    /// code: what the timer interrupt samples to split a thread's CPU time
+    /// between user mode and the kernel. False outside an interrupt.
+    fn interrupted_user() -> bool;
+
     /// The word the scheduler keeps for the thread running on this CPU (0
     /// before it has one), read in one instruction that a migration cannot
     /// split: whatever CPU the code is on, the thread running there is the

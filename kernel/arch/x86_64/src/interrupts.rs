@@ -426,6 +426,9 @@ extern "C" fn radix_trap_dispatch(frame: *mut TrapFrame) {
         }
     }
     if interrupt {
+        // For the timer's sample of where the CPU's time goes. Handlers
+        // run with interrupts masked, so no other interrupt comes between.
+        percpu::current().interrupted_user.store(from_user, Ordering::Relaxed);
         percpu::interrupt_enter();
     }
     // SAFETY: as above.

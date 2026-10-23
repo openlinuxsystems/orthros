@@ -294,7 +294,34 @@ impl Pipe {
     pub fn write_files(
         &self,
         data: &dyn In,
+        files: Option<Files>,
+        non_blocking: bool,
+        signal: bool,
+    ) -> Result<usize, Status> {
+        self.put(data, files, 0, non_blocking, signal)
+    }
+
+    /// Writes `data`, of at most [`ATOMIC`] bytes, whole, as the kernel
+    /// writes a trace's records (`trace`): waits, unless `non_blocking`,
+    /// until it fits with `keep` bytes still free after it. Fails with
+    /// gone once no end reads the pipe, without SIGPIPE.
+    pub(super) fn write_keeping(
+        &self,
+        data: &dyn In,
+        keep: usize,
+        non_blocking: bool,
+    ) -> Result<usize, Status> {
+        debug_assert!(data.len() <= ATOMIC);
+        self.put(data, None, keep, non_blocking, false)
+    }
+
+    /// [`Pipe::write_files`], leaving `keep` bytes free after a write of
+    /// up to [`ATOMIC`] bytes.
+    fn put(
+        &self,
+        data: &dyn In,
         mut files: Option<Files>,
+        keep: usize,
         non_blocking: bool,
         signal: bool,
     ) -> Result<usize, Status> {
@@ -313,7 +340,7 @@ impl Pipe {
                 }
                 let left = total - done;
                 let free = buffer.ring.free();
-                if (atomic && free >= left) || (!atomic && free > 0) {
+                if (atomic && free >= left + keep) || (!atomic && free > 0) {
                     // The files go with the first piece written.
                     let count = files.as_ref().map_or(0, |files| files.len());
                     if count > 0 {
@@ -353,7 +380,7 @@ impl Pipe {
             if non_blocking {
                 return if done > 0 { Ok(done) } else { Err(Kernel::WouldBlock.status(0)) };
             }
-            let room = if atomic { total - done } else { 1 };
+            let room = if atomic { total - done + keep } else { 1 };
             wait::wait_until(self.key(), "pipe write", || {
                 CAPACITY - self.len.load(Ordering::Acquire) >= room
                     || self.readers.load(Ordering::Acquire) == 0
@@ -531,6 +558,18 @@ pub fn make(
         return Err(err);
     }
     Ok(())
+}
+
+/// Makes a pipe the kernel writes (`trace`): the pipe, whose writing end
+/// is the kernel's to close with [`Pipe::close_writer`], and a
+/// description of its reading end.
+pub(super) fn for_kernel() -> Result<(KArc<Pipe>, FileRef), Status> {
+    let mount = mount().map_err(super::status)?;
+    let pipe = Pipe::new()?;
+    let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write: false })
+        .map_err(|_| Kernel::NoMemory.status(0))?;
+    let reader = FileObject::new(Location { mount, node }).ok_or(Kernel::NoMemory.status(0))?;
+    Ok((pipe, reader))
 }
 
 /// The pipe end `node` is, if it is one.

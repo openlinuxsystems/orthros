@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "systools"
+description = "Dukovo's native administration tools (ps, top, lsof, rtrace and the rest) as one program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2.191"
+# The system call interface, generated from abi/*.ridl, for what the C
+# library does not wrap: affinity, I/O priority, tracing.
+radix-abi = { path = "../../../kernel/abi" }
+
+[lints]
+workspace = true

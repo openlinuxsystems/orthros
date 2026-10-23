@@ -146,6 +146,11 @@ impl Tty {
         self.output_len.store(state.output.len(), Ordering::Release);
     }
 
+    /// N, of its `/dev/pts/N`.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+
     /// The session it controls, 0 for none.
     pub fn session(&self) -> u64 {
         self.session.load(Ordering::Acquire)

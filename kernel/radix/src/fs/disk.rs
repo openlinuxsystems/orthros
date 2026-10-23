@@ -19,11 +19,19 @@
 //! completions are matched to slots by head at that moment, under the
 //! queue's lock. A device with no MSI-X vector to spare is polled by the
 //! threads waiting for it.
+//!
+//! Requests take room by their processes' I/O class and level
+//! (radix-process(2)'s `io_priority`, ionice(1)): one takes room only
+//! while no more urgent one waits for it, the real-time class before
+//! best effort, and level 0 before 7 in each; the idle class takes room
+//! only while the disk has nothing else to do. Once in flight, every
+//! request is the device's alike.
 
 use alloc::sync::Arc;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use radix_abi::process::{IO_LEVELS, IoClass};
 use radix_block::{BlockDevice, DeviceRef, Error, Info, Segment, SegmentMut, partition};
 use radix_hal::{Devices, PciSegment};
 use radix_hw::pci::{self, Bar, Function, MsiX};
@@ -35,6 +43,7 @@ use radix_virtio::{NO_VECTOR, Transport, device_type};
 
 use crate::Arch;
 use crate::sched::{self, wait};
+use crate::user::posix::priority;
 
 /// The most virtio disks.
 const MAX_DISKS: usize = 16;
@@ -49,8 +58,50 @@ const PENDING: u8 = 1;
 const DONE: u8 = 2;
 const FAILED: u8 = 3;
 
+/// How many ranks of urgency requests have (`posix::priority::io_rank`):
+/// the real-time class's levels, the best-effort class's, and idle.
+const RANKS: usize = 2 * IO_LEVELS as usize + 1;
+/// The idle class's rank, the least urgent.
+const IDLE: usize = RANKS - 1;
+
 /// A disk's name: `vda`, `vda1`.
 pub type Name = TextBuf<16>;
+
+/// What every disk has done since boot, for `/proc/stat` and vmstat(8):
+/// the reads and writes finished, and the 512-byte sectors they moved.
+pub static READS: AtomicU64 = AtomicU64::new(0);
+pub static READ_SECTORS: AtomicU64 = AtomicU64::new(0);
+pub static WRITES: AtomicU64 = AtomicU64::new(0);
+pub static WRITTEN_SECTORS: AtomicU64 = AtomicU64::new(0);
+
+/// Takes a waiter off [`sched::DISK_WAITERS`] when it goes.
+struct Counted;
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        sched::DISK_WAITERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Takes a request off its disk's count of those waiting for room at its
+/// rank when it goes.
+struct Waiting<'a>(&'a AtomicU32);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// How urgently the running thread's requests are served: by its
+/// process's I/O class and level (radix-process(2)'s `io_priority`), or
+/// for the kernel's own threads, the middle of best effort.
+fn running_rank() -> usize {
+    let class = sched::running()
+        .and_then(|me| me.user().map(|user| user.process.io_priority()))
+        .unwrap_or((IoClass::None.raw(), 0));
+    (priority::io_rank(class.0, class.1) as usize).min(IDLE)
+}
 
 /// A virtio block device.
 pub struct VirtioDisk {
@@ -61,6 +112,8 @@ pub struct VirtioDisk {
     /// Moves on every completion and every slot freed: what threads
     /// waiting for room wait on.
     events: AtomicU64,
+    /// How many requests wait for room, by rank.
+    waiting: [AtomicU32; RANKS],
     info: radix_virtio::blk::Info,
     /// Its interrupt vector, if it has one; otherwise waiters poll.
     vector: Option<u32>,
@@ -144,6 +197,9 @@ impl VirtioDisk {
     /// Waits until `condition` holds: asleep until an interrupt, or
     /// polling the device without one.
     fn wait(&self, condition: impl Fn() -> bool) {
+        // Counted in the load averages while it waits, as on Linux.
+        sched::DISK_WAITERS.fetch_add(1, Ordering::Relaxed);
+        let _counted = Counted;
         if self.vector.is_some() {
             wait::wait_until(self.key(), "disk", condition);
         } else {
@@ -156,11 +212,28 @@ impl VirtioDisk {
         }
     }
 
+    /// Whether a request of rank `rank` may take room now: no more urgent
+    /// one waits for it, and for the idle class, no other request waits or
+    /// is in flight, as Linux's idle class is served only when the disk
+    /// is otherwise idle.
+    fn may_go(&self, rank: usize) -> bool {
+        let others = |range: core::ops::Range<usize>| {
+            self.waiting[range].iter().any(|count| count.load(Ordering::Acquire) > 0)
+        };
+        if rank < IDLE {
+            return !others(0..rank);
+        }
+        !others(0..IDLE) && self.requests.iter().all(|r| r.load(Ordering::Acquire) == FREE)
+    }
+
     /// Carries out one request and waits for it.
     fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
+        let rank = running_rank();
+        self.waiting[rank].fetch_add(1, Ordering::AcqRel);
+        let waiting = Waiting(&self.waiting[rank]);
         let slot = loop {
             let seen = self.events.load(Ordering::Acquire);
-            {
+            if self.may_go(rank) {
                 let mut queue = self.queue.lock_irq();
                 let free = self.requests.iter().position(|r| r.load(Ordering::Acquire) == FREE);
                 if let Some(slot) = free
@@ -176,14 +249,33 @@ impl VirtioDisk {
                     break slot;
                 }
             }
-            // No room: wait for a completion, or a slot freed.
+            // No room, or a more urgent request comes first: wait for a
+            // completion, or a slot freed.
             self.wait(|| self.events.load(Ordering::Acquire) != seen);
         };
+        drop(waiting);
+        if self.waiting.iter().any(|count| count.load(Ordering::Acquire) > 0) {
+            // Less urgent requests waited for this one: there may be room
+            // for them too.
+            self.events.fetch_add(1, Ordering::Release);
+            wait::wake_all(self.key());
+        }
         self.wait(|| self.requests[slot].load(Ordering::Acquire) != PENDING);
         let state = self.requests[slot].swap(FREE, Ordering::AcqRel);
         self.events.fetch_add(1, Ordering::Release);
         wait::wake_all(self.key());
-        if state == DONE { Ok(()) } else { Err(Error::Io) }
+        if state != DONE {
+            return Err(Error::Io);
+        }
+        let sectors = data.iter().map(|&(_, len)| u64::from(len)).sum::<u64>() / 512;
+        let (count, moved) = match op {
+            Op::Read => (&READS, &READ_SECTORS),
+            Op::Write => (&WRITES, &WRITTEN_SECTORS),
+            _ => return Ok(()),
+        };
+        count.fetch_add(1, Ordering::Relaxed);
+        moved.fetch_add(sectors, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -386,6 +478,7 @@ fn bind(function: Function, index: usize) -> Result<(), &'static str> {
         queue: SpinLock::new(Queue { blk, owner: [0; radix_virtio::queue::MAX_SIZE as usize] }),
         requests: [const { AtomicU8::new(FREE) }; REQUESTS],
         events: AtomicU64::new(0),
+        waiting: [const { AtomicU32::new(0) }; RANKS],
         info,
         vector: interrupt,
     };

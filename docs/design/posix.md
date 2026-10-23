@@ -557,8 +557,9 @@ and timer protocols are candidates for the audit after Phase 9.
   (ADR 0076).
 - `waitid` needs `WEXITED`: the kernel always reports children that
   ended.
-- CPU time in the kernel counts as user time (`times`, `getrusage`,
-  `wait`'s times); CPU-time timers fire within a tick (10 ms).
+- CPU time is split between user mode and the kernel by the timer's
+  samples, 100 a second, as Linux splits it (`times`, `getrusage`,
+  `wait`'s times; ADR 0092); CPU-time timers fire within a tick (10 ms).
 - Only `AF_UNIX` stream sockets, which pass no sockets: network
   sockets come with Phase 12. No System V IPC, POSIX message queues, POSIX
   asynchronous I/O, `epoll`, `eventfd`, `signalfd`, `timerfd` or

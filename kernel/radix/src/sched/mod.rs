@@ -58,7 +58,9 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize
 use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
-use radix_sched::{CpuLoad, CpuSet, HaltPoll, Loads, Place, Topology};
+use radix_sched::{
+    CpuLoad, CpuSet, HaltPoll, LOAD_INTERVAL_NS, LoadAverage, Loads, Place, Topology,
+};
 use radix_sync::{Mutex, Once, SpinLock};
 
 use crate::Arch;
@@ -103,6 +105,10 @@ struct CpuSched {
     /// When the running thread's slice or quantum ends.
     slice_end: AtomicU64,
     ticks: AtomicU64,
+    /// The ticks that found a thread running in user mode, and in the
+    /// kernel (`radix_sched::account`); the rest found it idle.
+    user_ticks: AtomicU64,
+    system_ticks: AtomicU64,
     preemptions: AtomicU64,
     idle_ns: AtomicU64,
     /// Idle periods that ended while polling, and that halted.
@@ -127,6 +133,8 @@ impl CpuSched {
             timer_next: AtomicU64::new(u64::MAX),
             slice_end: AtomicU64::new(u64::MAX),
             ticks: AtomicU64::new(0),
+            user_ticks: AtomicU64::new(0),
+            system_ticks: AtomicU64::new(0),
             preemptions: AtomicU64::new(0),
             idle_ns: AtomicU64::new(0),
             polls: AtomicU64::new(0),
@@ -166,6 +174,13 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// The CPUs that run threads.
 static ONLINE: SpinLock<CpuSet> = SpinLock::new(CpuSet::EMPTY);
 static TICK_NS: AtomicU64 = AtomicU64::new(10_000_000);
+/// The load averages (`radix_sched::account`), and when they are next
+/// sampled.
+static LOAD: SpinLock<LoadAverage> = SpinLock::new(LoadAverage::new());
+static NEXT_LOAD_NS: AtomicU64 = AtomicU64::new(LOAD_INTERVAL_NS);
+/// Threads waiting for a disk to carry out their request, which the load
+/// averages count as Linux counts them.
+pub static DISK_WAITERS: AtomicU64 = AtomicU64::new(0);
 
 fn kmalloc() -> Kmalloc {
     HEAP.with(Flags::MAY_SLEEP)
@@ -1159,6 +1174,11 @@ fn reschedule(why: Switch) {
     let switching = !ThreadRef::ptr_eq(&next, &me);
     if switching {
         slot.preemptions.fetch_add(u64::from(why == Switch::Preempt), Ordering::Relaxed);
+        match why {
+            Switch::Block(_) => me.stats.voluntary.fetch_add(1, Ordering::Relaxed),
+            Switch::Preempt | Switch::Yield => me.stats.involuntary.fetch_add(1, Ordering::Relaxed),
+            Switch::Exit => 0,
+        };
         rq.switches += 1;
         next.stats.switches.fetch_add(1, Ordering::Relaxed);
         next.stats.last_ran_ns.store(now, Ordering::Relaxed);
@@ -1263,6 +1283,7 @@ fn on_timer(tick: bool) {
     }
     let now = Arch::now_ns();
     expire_timers(cpu, now);
+    let mut idling = true;
     {
         let mut guard = slot.rq.lock();
         if let Some(rq) = guard.as_mut() {
@@ -1270,18 +1291,98 @@ fn on_timer(tick: bool) {
                 slot.need_resched.store(true, Ordering::Relaxed);
             }
             slot.slice_end.store(rq.slice_end(now), Ordering::Relaxed);
+            idling = rq.idling();
         }
     }
     if tick {
         slot.ticks.fetch_add(1, Ordering::Relaxed);
+        if !idling {
+            sample(slot);
+        }
         // The interrupted code could have been preempted, so it was not in
         // an RCU read section.
         if Arch::preempt_count() == 0 && Arch::interrupt_depth() <= 1 {
             rcu::quiescent(cpu);
         }
         balance::tick(cpu, now);
+        if cpu == 0 && now >= NEXT_LOAD_NS.load(Ordering::Relaxed) {
+            sample_load(now);
+        }
     }
     arm(cpu);
+}
+
+/// Counts the tick for the running thread, which is not the idle one, and
+/// its CPU: in user mode or in the kernel.
+fn sample(slot: &CpuSched) {
+    let Some(running) = borrow(slot.current.load(Ordering::Relaxed)) else { return };
+    let (thread, cpu) = if Arch::interrupted_user() {
+        (&running.stats.user_ticks, &slot.user_ticks)
+    } else {
+        (&running.stats.system_ticks, &slot.system_ticks)
+    };
+    thread.fetch_add(1, Ordering::Relaxed);
+    cpu.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Folds the threads ready or running on every CPU, and those waiting for
+/// a disk, into the load averages. On the boot CPU's tick, every
+/// LOAD_INTERVAL_NS.
+fn sample_load(now: u64) {
+    let mut active = DISK_WAITERS.load(Ordering::Relaxed);
+    for cpu in 0..MAX_CPUS {
+        let slot = CPUS.get(cpu);
+        if slot.online.load(Ordering::Acquire) {
+            active += u64::from(slot.running.load(Ordering::Relaxed));
+        }
+    }
+    NEXT_LOAD_NS.store(now.saturating_add(LOAD_INTERVAL_NS), Ordering::Relaxed);
+    LOAD.lock().sample(active);
+}
+
+/// The 1, 5 and 15 minute load averages.
+pub fn load_average() -> LoadAverage {
+    *LOAD.lock_irq()
+}
+
+/// What CPU `cpu` has done since it came online, for `/proc/stat`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuTimes {
+    /// Nanoseconds running threads in user mode, and in the kernel.
+    pub user_ns: u64,
+    pub system_ns: u64,
+    /// Nanoseconds idle.
+    pub idle_ns: u64,
+    /// Threads ready to run there, or running.
+    pub running: u32,
+    /// Context switches.
+    pub switches: u64,
+}
+
+/// What CPU `cpu` has done, if it is online.
+pub fn cpu_times(cpu: usize) -> Option<CpuTimes> {
+    if cpu >= MAX_CPUS {
+        return None;
+    }
+    let slot = CPUS.get(cpu);
+    if !slot.online.load(Ordering::Acquire) {
+        return None;
+    }
+    let idle_ns = slot.idle_ns.load(Ordering::Relaxed);
+    let busy = now_ns().saturating_sub(idle_ns);
+    let (user_ns, system_ns) = radix_sched::split_time(
+        busy,
+        slot.user_ticks.load(Ordering::Relaxed),
+        slot.system_ticks.load(Ordering::Relaxed),
+    );
+    let switches = slot.rq.lock_irq().as_ref().map_or(0, |rq| rq.switches);
+    Some(CpuTimes {
+        user_ns,
+        system_ns,
+        idle_ns,
+        running: slot.running.load(Ordering::Relaxed),
+        switches,
+    })
 }
 
 /// Each CPU's idle thread, as a new thread (the boot CPU's).

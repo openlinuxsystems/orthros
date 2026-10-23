@@ -300,7 +300,10 @@ pub fn directory_method(
                 at.writable().map_err(fs::status)?;
             }
             let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER);
-            let object = FileObject::with(at, description).ok_or(error(Kernel::NoMemory))?;
+            // The bytes the VFS took as a path above.
+            let from = Some((&dir.opened, path.bytes()));
+            let object =
+                FileObject::opened(at, description, from).ok_or(error(Kernel::NoMemory))?;
             let terminal = object.tty_handle().is_some().then(|| object.at.node.clone());
             install_file(user, to, object_kind, rights, object, close_on_exec)?;
             if let Some(node) = terminal
@@ -681,6 +684,11 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     }
                     0
                 }
+                Target::Kmsg if a.request == radix_abi::kernel_log::CLEAR => {
+                    found.cap.check(ObjectKind::File, Rights::WRITE).map_err(cap_error)?;
+                    fs::kmsg::clear();
+                    0
+                }
                 _ => return Err(error(Kernel::NotTerminal)),
             };
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
@@ -695,6 +703,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
             let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
             let count = socket.send(&data, non_blocking, signal)? as u64;
+            user.process.note_written(count);
             answer(label, file::SendResults::WORDS, file::SendResults { count }.encode())
         }
         file::RECEIVE => {
@@ -705,6 +714,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
             let count = socket.receive(&mut out, non_blocking)? as u64;
+            user.process.note_read(count);
             answer(label, file::ReceiveResults::WORDS, file::ReceiveResults { count }.encode())
         }
         file::SHUTDOWN => {
@@ -769,6 +779,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
             let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
             let count = end.send(&data, files, non_blocking, signal)? as u64;
+            user.process.note_written(count);
             answer(label, file::SendFilesResults::WORDS, file::SendFilesResults { count }.encode())
         }
         file::RECEIVE_FILES => {
@@ -790,6 +801,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Some(files) => install_received(user, files, a.slots, close_on_exec)?,
                 None => (0, 0),
             };
+            user.process.note_read(count as u64);
             let results = file::ReceiveFilesResults { count: count as u64, files, lost };
             answer(label, file::ReceiveFilesResults::WORDS, results.encode())
         }
@@ -1021,6 +1033,8 @@ enum Target<'a> {
     Socket(&'a socket::Socket),
     /// A side of a terminal.
     Tty(&'a tty::Handle),
+    /// `/dev/kmsg`.
+    Kmsg,
     /// A file of the tree, through its node.
     Node,
 }
@@ -1032,6 +1046,8 @@ fn target(file: &FileObject) -> Target<'_> {
         Target::Socket(socket)
     } else if let Some(handle) = file.tty_handle() {
         Target::Tty(handle)
+    } else if file.is_kmsg() {
+        Target::Kmsg
     } else {
         Target::Node
     }
@@ -1053,7 +1069,9 @@ pub fn read(
 ) -> Result<u64> {
     let mut out = UserOut { address, len };
     if !matches!(target(file), Target::Node) {
-        return read_special(user, file, &mut out, never_wait);
+        let read = read_special(user, file, &mut out, never_wait)?;
+        user.process.note_read(read);
+        return Ok(read);
     }
     let read = if offset == file::CURRENT {
         let mut at = file.offset.lock();
@@ -1065,7 +1083,9 @@ pub fn read(
     } else {
         file.at.node.read(offset, &mut out)
     };
-    read.map(|n| n as u64).map_err(fs::status)
+    let read = read.map_err(fs::status)? as u64;
+    user.process.note_read(read);
+    Ok(read)
 }
 
 /// [`read`] from a pipe or a terminal: kept out of line, so that reads of
@@ -1082,6 +1102,7 @@ fn read_special(
         Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
         Target::Socket(socket) => socket.receive(out, non_blocking).map(|n| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
+        Target::Kmsg => fs::kmsg::read(file, out, non_blocking).map(|n| n as u64),
         Target::Node => Ok(0),
     }
 }
@@ -1101,24 +1122,28 @@ pub fn write(
 ) -> Result<u64> {
     let data = UserIn { address, len };
     if !matches!(target(file), Target::Node) {
-        return write_special(user, file, &data, never_wait);
+        let written = write_special(user, file, &data, never_wait)?;
+        user.process.note_written(written);
+        return Ok(written);
     }
     file.at.writable().map_err(fs::status)?;
     let node = &file.at.node;
-    if offset != file::CURRENT {
-        return node.write(offset, &data).map(|n| n as u64).map_err(fs::status);
-    }
-    let mut at = file.offset.lock();
-    let written = if file.description().append {
-        let written = node.write(file::APPEND, &data).map_err(fs::status)?;
-        *at = node.stat().size;
-        written
+    let written = if offset != file::CURRENT {
+        node.write(offset, &data).map_err(fs::status)?
     } else {
-        let written = node.write(*at, &data).map_err(fs::status)?;
-        *at += written as u64;
-        written
-    };
-    Ok(written as u64)
+        let mut at = file.offset.lock();
+        if file.description().append {
+            let written = node.write(file::APPEND, &data).map_err(fs::status)?;
+            *at = node.stat().size;
+            written
+        } else {
+            let written = node.write(*at, &data).map_err(fs::status)?;
+            *at += written as u64;
+            written
+        }
+    } as u64;
+    user.process.note_written(written);
+    Ok(written)
 }
 
 /// [`write`] to a pipe or a terminal, kept out of line as [`read_special`]
@@ -1135,14 +1160,17 @@ fn write_special(
         Target::Pipe(end) => end.pipe().write(data, non_blocking, true).map(|n| n as u64),
         Target::Socket(socket) => socket.send(data, non_blocking, true).map(|n| n as u64),
         Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
+        Target::Kmsg => fs::kmsg::write(data).map(|n| n as u64),
         Target::Node => Ok(0),
     }
 }
 
 /// `seek`: moves `file`'s offset `offset` bytes from where `whence` says.
 fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
-    if !matches!(target(file), Target::Node) {
-        return Err(error(Kernel::NotSeekable));
+    match target(file) {
+        Target::Node => {}
+        Target::Kmsg => return fs::kmsg::seek(file, offset, whence),
+        _ => return Err(error(Kernel::NotSeekable)),
     }
     let mut at = file.offset.lock();
     let base = match whence {

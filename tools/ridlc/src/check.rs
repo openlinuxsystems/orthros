@@ -23,6 +23,69 @@ const RESERVED: &[&str] = &[
     "typedef", "union", "unsigned", "void", "volatile", "errno",
 ];
 
+/// Words C++ reserves, in which mlibc includes the C headers: they may
+/// not name parameters or fields, which keep their names there. Other
+/// names have their module's before them in C.
+const RESERVED_CPP: &[&str] = &[
+    "alignas",
+    "alignof",
+    "and",
+    "and_eq",
+    "asm",
+    "bitand",
+    "bitor",
+    "bool",
+    "catch",
+    "char8_t",
+    "char16_t",
+    "char32_t",
+    "class",
+    "compl",
+    "concept",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "const_cast",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "decltype",
+    "delete",
+    "dynamic_cast",
+    "explicit",
+    "export",
+    "friend",
+    "inline",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "reinterpret_cast",
+    "requires",
+    "restrict",
+    "static_assert",
+    "static_cast",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "typeid",
+    "typename",
+    "using",
+    "wchar_t",
+    "xor",
+    "xor_eq",
+];
+
 struct Checker<'a> {
     abi: &'a Abi,
     problems: Vec<Error>,
@@ -47,6 +110,14 @@ impl Checker<'_> {
         }
         if RESERVED.contains(&name) {
             self.fail(module, line, format!("{what} `{name}` is a reserved word in Rust or C"));
+        }
+    }
+
+    /// Checks the name of a parameter or field, which C++ sees as it is.
+    fn field_name(&mut self, module: &Module, line: usize, name: &str, what: &str) {
+        self.name(module, line, name, what);
+        if RESERVED_CPP.contains(&name) {
+            self.fail(module, line, format!("{what} `{name}` is a reserved word in C++"));
         }
     }
 
@@ -125,7 +196,7 @@ impl Checker<'_> {
         for (list, side) in [(&call.args, "arguments"), (&call.results, "results")] {
             let mut names = HashSet::new();
             for field in list.iter() {
-                self.name(module, field.line, &field.name, "parameter");
+                self.field_name(module, field.line, &field.name, "parameter");
                 if !names.insert(field.name.as_str()) {
                     self.fail(
                         module,
@@ -166,7 +237,7 @@ impl Checker<'_> {
         let mut names = HashSet::new();
         for field in fields {
             self.doc(module, field.line, &field.doc, &format!("field `{name}.{}`", field.name));
-            self.name(module, field.line, &field.name, "field");
+            self.field_name(module, field.line, &field.name, "field");
             if !names.insert(field.name.as_str()) {
                 self.fail(module, field.line, format!("field `{}` is defined twice", field.name));
             }

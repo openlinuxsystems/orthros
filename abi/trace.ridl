@@ -1,0 +1,162 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Tracing what a process asks of the kernel (ADR 0095).
+//!
+//! radix-process(2)'s `trace` follows a process and puts a trace file in
+//! a slot: a file that only reads, from which the tracer reads a record
+//! for each system call the process's threads make, and for each signal
+//! they take, each program the process starts, each child it forks and
+//! its end. rtrace(1) prints them, as strace(1) does on Linux.
+//!
+//! The trace file is the reading end of a pipe the kernel writes
+//! (radix-process(2)'s `pipe`): a read waits for records unless the file
+//! is non-blocking, `poll` finds it readable while records wait, and once
+//! every process the trace follows has ended or left it, and their
+//! records have been read, a read returns 0: the end of the file. Records
+//! come one after another, each a TraceRecord and the data after it,
+//! whole in the pipe: a read with room for TRACE_BUFFER bytes takes whole
+//! records only, and a smaller one may end inside a record, which the
+//! next read goes on with.
+//!
+//! The pipe holds TRACE_BUFFER bytes. A traced thread that would add a
+//! record to a full pipe waits for the tracer to read, leaving room for
+//! one record more, so that a process's end is not lost to a busy
+//! tracer; a signal for the thread cuts the wait short, and the record is
+//! lost, which the next record's `lost` flag says. The records of a
+//! process's end, and of a signal that ends or stops it, never wait: if
+//! there is no room, they are lost. Deleting the last capability of the
+//! trace file ends the trace: each process it follows goes on untraced
+//! from its next record. A process has one trace at a time: tracing a
+//! traced one fails with busy, and a process cannot trace itself.
+//!
+//! Records are written as calls return, so a call that waits (`recv`,
+//! `wait`) appears when it ends, with the time it began and how long it
+//! took; a call that does not return (`exec` of the caller's own process,
+//! the calls that end it) has no record, and its event tells of it. With
+//! the `data` flag a record carries, after itself, the bytes of the
+//! call's byte arguments (radix-capabilities(7)), up to TRACE_DATA_MAX
+//! bytes of each: its input data is what each input argument held as the
+//! call began (a path, the data of a write), one after the other, and
+//! stops at an argument the kernel cannot read; its output data is what
+//! the call wrote to its first output argument (the data of a read). The
+//! kernel knows how much a call wrote only from a result named `used`,
+//! `len`, `length` or `count` (the first of these the method has): a
+//! method without one has no output data.
+
+module trace;
+
+/// The most bytes of each byte argument a record carries.
+const TRACE_DATA_MAX: u64 = 256;
+/// The most bytes of data a record carries after itself: four byte
+/// arguments' worth, as no method has more than two input ones and only
+/// the first output one's data is kept.
+const TRACE_RECORD_DATA_MAX: u64 = 1024;
+/// The size of the largest record, with its data.
+const TRACE_RECORD_MAX: u64 = 1264;
+/// The most bytes of records that wait for the tracer to read them.
+const TRACE_BUFFER: u64 = 65536;
+
+/// What `trace` follows.
+flags TraceFlags: u32 {
+    /// Also trace the children the traced process forks from now on,
+    /// their children, and so on (strace's -f).
+    children = 0;
+    /// Copy the data of byte arguments into the records.
+    data = 1;
+}
+
+/// What a record tells of.
+enum TraceEvent: u16 {
+    /// A system call returned: `number`, `label`, `object`, `args`,
+    /// `status` and `results` say which, with what, and how it went.
+    call = 0;
+    /// A signal was delivered to the thread: `number` is the signal, and
+    /// `value` what was done with it (TraceSignal).
+    signal = 1;
+    /// The process started a new program (`exec`): the record's input
+    /// data is the program's path as the C library gave it, or else its
+    /// first argument, up to TRACE_DATA_MAX bytes.
+    exec = 2;
+    /// The process forked a child, or started one it made (`create` and
+    /// `exec`, as posix_spawn does), numbered `value`, which is traced too
+    /// when the trace follows children.
+    fork = 3;
+    /// The process ended: `value` is its wait status, as radix-process(2)
+    /// describes it. Its last record.
+    exit = 4;
+    /// The trace began: the first record of each process it follows.
+    attach = 5;
+}
+
+/// What happened to a signal a record tells of.
+enum TraceSignal: u64 {
+    /// A handler of the program's ran.
+    handled = 0;
+    /// It was ignored.
+    ignored = 1;
+    /// It ended the process.
+    ended = 2;
+    /// It stopped the process (job control).
+    stopped = 3;
+    /// It continued the process.
+    continued = 4;
+}
+
+/// What a record's `flags` say.
+flags TraceRecordFlags: u32 {
+    /// The input data was cut to TRACE_DATA_MAX bytes.
+    input_cut = 0;
+    /// The output data was cut to TRACE_DATA_MAX bytes.
+    output_cut = 1;
+    /// Records were lost before this one: a signal cut a wait for room
+    /// short, or a record that never waits found none.
+    lost = 2;
+}
+
+/// A record of a trace file. `data_in` bytes of input data follow it,
+/// then `data_out` bytes of output data, then zeros up to `size`.
+struct TraceRecord {
+    /// Its size in bytes, with the data after it: a multiple of 8.
+    size: u32;
+    /// What it tells of: a TraceEvent.
+    event: u16;
+    /// TraceRecordFlags.
+    flags: u16;
+    /// The process's number.
+    process: u64;
+    /// The thread's number.
+    thread: u64;
+    /// When the call began, or the event happened: nanoseconds since
+    /// boot, on the clock radix-process(2)'s `clock` calls monotonic.
+    time_ns: u64;
+    /// How long the call took, in nanoseconds; 0 for other events.
+    duration_ns: u64;
+    /// The system call's number (radix-ipc(7)), or the signal's.
+    number: u32;
+    /// For `cap_call`, the method's label: the interface's number in the
+    /// high half, the method's in the low half (radix-capabilities(7)).
+    label: u32;
+    /// The kind of object the call's capability named, an ObjectKind of
+    /// radix-capability(2), or 0xff if there was none.
+    object: u32;
+    /// The bytes of input data after the record.
+    data_in: u32;
+    /// The bytes of output data after the input data.
+    data_out: u32;
+    /// 0, for later use.
+    reserved: u32;
+    /// The call's status: 0 for success, else an error of
+    /// radix-errors(2). A call a signal interrupted fails with
+    /// interrupted, and unless the signal's handler does not restart
+    /// calls, runs again after it (radix-signal(2)), with a record of its
+    /// own.
+    status: u64;
+    /// What the event says: a signal's TraceSignal, a forked child's
+    /// number, the wait status of the end.
+    value: u64;
+    /// The call's argument registers as it began.
+    args: [u64; 10];
+    /// Its result registers as it returned: zeros after an error.
+    results: [u64; 10];
+}

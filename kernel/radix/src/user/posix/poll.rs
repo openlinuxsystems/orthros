@@ -115,6 +115,8 @@ fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
                 socket.events()
             } else if let Some(handle) = file.tty_handle() {
                 handle.events()
+            } else if file.is_kmsg() {
+                crate::fs::kmsg::events(file) | WRITABLE
             } else {
                 READABLE | WRITABLE
             }

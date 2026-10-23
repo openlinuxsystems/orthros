@@ -162,6 +162,8 @@ pub struct PerCpu {
     pub stopped_at: [AtomicUsize; STOPPED_FRAMES],
     /// Timer interrupts taken.
     pub ticks: AtomicU64,
+    /// Whether the interrupt being handled came from user mode.
+    pub interrupted_user: AtomicBool,
     /// Ping IPIs received.
     pub pings: AtomicU64,
     /// The last TLB shootdown request this CPU has carried out.
@@ -219,6 +221,7 @@ impl PerCpu {
             stopped: AtomicBool::new(false),
             stopped_at: [const { AtomicUsize::new(0) }; STOPPED_FRAMES],
             ticks: AtomicU64::new(0),
+            interrupted_user: AtomicBool::new(false),
             pings: AtomicU64::new(0),
             tlb_generation: AtomicU64::new(0),
             space: AtomicUsize::new(0),
@@ -376,6 +379,12 @@ pub fn interrupt_exit() -> u32 {
     // SAFETY: as in `interrupt_enter`.
     unsafe { asm!("dec dword ptr gs:[20]", "mov {:e}, gs:[20]", out(reg) left, options(nostack)) };
     left
+}
+
+/// Whether the interrupt the running CPU handles came from user mode
+/// (false outside an interrupt).
+pub fn interrupted_user() -> bool {
+    interrupt_depth() > 0 && current().interrupted_user.load(Ordering::Relaxed)
 }
 
 /// The running CPU's interrupt depth.
