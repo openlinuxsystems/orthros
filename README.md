@@ -6,39 +6,41 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # Dukovo
 
 Dukovo is an operating system built around **Radix**, a capability-based
-kernel written in Rust. The goal is a complete, installable system: the
-kernel, a shell and core utilities, Btrfs storage, networking, users and
-logging, atomic updates, the **Lumen** Wayland compositor, an installer with
-the `rdisk` partitioner, and a USB install image. Every command and file
+kernel written in Rust. Release 1.0 is a headless **server** system, in
+the spirit of Ubuntu Server: the kernel, the Nukesh shell with a full set
+of administration commands, Btrfs storage with mirroring, networking,
+users and logging, bundles and service bundles, atomic updates, an
+installer with the `rdisk` partitioner, USB and cloud images, and the
+**Dukovo Admin** web console. The **Lumen** compositor follows in 1.1
+([ADR 0078](docs/adr/0078-server-first-release.md)). Every command and file
 format comes with a man page.
 
-Dukovo is at **Phase 5** of its [roadmap](docs/roadmap.md): the Radix
-kernel boots through GRUB under UEFI and BIOS at a random address, chosen
-by a ChaCha20 generator seeded from RDSEED, RDRAND and timing jitter, manages
-memory with a frame allocator per NUMA node and a slab heap with per-CPU
-caches (with Kani proofs of their invariants), protects itself with W^X,
-guard pages, SMEP and SMAP, starts every CPU, reads the ACPI tables, takes
-timer interrupts and reports all of it on the serial port and the screen.
-Its capability core holds the capabilities through which every resource
-will be reached, with delegation, badges, sealing and revocation; Kani
-proofs, a TLA+ model and an in-kernel test suite check that no capability
-can be forged or have its rights widened. It runs threads on every CPU with
-an EEVDF fair class and FIFO and round-robin real-time classes, priority
-inheritance, and load balancing that keeps threads near their caches and
-NUMA nodes; groups them into resource domains with CPU weights and memory
-limits; and, when memory runs out, stops whole app domains before services
-and never the system's own. A lock checker reports locking bugs the first
-time they run, and RCU lets readers go without locks.
-Programs run in user mode and reach the kernel through twelve system
-calls, defined once in an interface language that generates the Rust
-bindings, C headers and man pages. They talk over synchronous endpoints
-with a register-only fast path, notifications, shared-memory channels and
-io_uring-style rings, all checked by a TLA+ model, Kani proofs and
-user-mode test programs, and CI publishes what each costs next to Linux
-on the same machine.
-A panic fills the screen with a symbolized backtrace and is kept in memory
-for the next boot; a serial kernel debugger, GDB through QEMU and trace
-points help with the rest. There is nothing to install yet.
+Dukovo has finished **Phase 8** of its [roadmap](docs/roadmap.md):
+
+- **Boot.** The Radix kernel boots through GRUB under UEFI and BIOS at a
+  random address.
+- **Memory.** It manages memory with per-NUMA-node frame allocators and a
+  slab heap with per-CPU caches.
+- **Protection.** It protects itself with W^X, guard pages, SMEP and SMAP.
+- **Hardware.** It starts every CPU and reads the ACPI tables.
+- **Capabilities.** Every resource is reached through unforgeable
+  capabilities, checked by Kani proofs, TLA+ models and in-kernel tests.
+- **Scheduling.** Threads are scheduled fairly or by real-time priority,
+  in resource domains.
+- **IPC.** Programs talk over endpoints, notifications, shared-memory
+  channels and io_uring-style rings.
+- **Processes.** Programs run in processes of their own, which Spark
+  starts from a boot archive.
+- **Files.** Files live behind directory capabilities: tmpfs, FAT on
+  virtio disks, `/proc` and `/sys`.
+- **POSIX.** A POSIX layer covers fork, exec, signals, pipes, terminals
+  and job control. It runs on mlibc and a port of Rust's standard
+  library, so C and Rust programs from elsewhere build for it.
+- **Speed.** CI checks every kernel operation it measures against Linux
+  in the same virtual machine, and fails if Radix is slower.
+
+Phase 9 brings the shell and the command-line tools. There is nothing to
+install yet.
 
 ## Quick start
 
@@ -67,9 +69,11 @@ the pinned build container with Podman or Docker:
 | `./ob setup` | Install the pinned Rust toolchain, then run `doctor` |
 | `./ob doctor` | Check host tools and print the commands that install what is missing |
 | `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
+| `./ob ports` | Build the software Dukovo ports from elsewhere (mlibc, Rust's standard library, Lua and the rest) at their pinned commits |
 | `./ob image` | Build the hybrid USB/disk image `out/dukovo-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
-| `./ob test` | Run unit tests, then the boot tests in QEMU: UEFI and BIOS, USB and CD-ROM, 4 CPUs, panics, the crash log, `kdb`, the screen, the memory manager, capabilities and the scheduler (`kani` for the Kani proofs, `tla` for the TLA+ models instead) |
+| `./ob test` | Run unit tests, then the boot tests in QEMU, from the boot paths and the memory manager to processes, storage and POSIX (`kani` for the Kani proofs, `tla` for the TLA+ models instead) |
+| `./ob bench` | Measure kernel operations against Linux in the same virtual machine (`--gate` fails if Radix is slower; `--instructions` counts instructions per operation) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |
 | `./ob signoff` | Check that your new commits carry a Developer Certificate of Origin sign-off |

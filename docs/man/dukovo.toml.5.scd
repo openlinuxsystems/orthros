@@ -25,7 +25,7 @@ override the file.
 
 *build.arch* = "x86_64"
 	Target architecture. *x86_64* is the only value until AArch64 support
-	arrives in Phase 17 of the roadmap.
+	arrives in Phase 34 of the roadmap.
 
 *build.profile* = "release" | "debug"
 	Cargo profile for the kernel. *release* (the default) is optimised;

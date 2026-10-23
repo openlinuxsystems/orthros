@@ -17,7 +17,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0003](0003-github-and-actions.md) | Host on GitHub and run CI on GitHub Actions | Accepted |
 | [0004](0004-btrfs-native-filesystem.md) | Btrfs is the native file system | Accepted |
 | [0005](0005-static-linking.md) | Statically link the programs in /system/bin | Accepted |
-| [0006](0006-default-image-includes-lumen.md) | The default image is the full 4 GiB image with Lumen | Accepted |
+| [0006](0006-default-image-includes-lumen.md) | The default image is the full 4 GiB image with Lumen | Superseded by [0078](0078-server-first-release.md) |
 | [0007](0007-closed-firmware-separate-package.md) | Closed firmware ships only as a separate optional package | Accepted |
 | [0008](0008-grub-multiboot2-boot.md) | Boot through GRUB 2 with the Multiboot2 protocol | Accepted |
 | [0009](0009-reference-hardware.md) | The Dell Inspiron 15 5570 is the reference machine | Accepted |
@@ -89,3 +89,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0075](0075-advisory-file-locks.md) | Advisory file locks are kept by the kernel in one table: BSD's, POSIX's and Linux's open file description locks | Accepted |
 | [0076](0076-file-times-and-device-numbers.md) | Programs set a file's times; reading never changes them, and each mount has a device number | Accepted |
 | [0077](0077-one-cache-emptied-only-by-what-it-holds.md) | One per-CPU cache finds a capability and its object, and empties only when something it holds goes | Accepted |
+| [0078](0078-server-first-release.md) | Dukovo 1.0 is a server release, and Lumen moves to 1.1 | Accepted |
+| [0079](0079-framework-desktop-second-reference-machine.md) | The Framework Desktop is the second reference machine | Accepted |

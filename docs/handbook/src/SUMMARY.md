@@ -21,9 +21,16 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 - [Bundles and permissions]()
 - [Users and administration]()
 - [Networking]()
-- [Updates, snapshots and recovery]()
-- [Lumen]()
-- [Logs and troubleshooting]()
+- [Updates, snapshots, backups and recovery]()
+- [The Dukovo Admin web console]()
+- [Running services: web, databases and certificates]()
+- [Cloud and virtual machines]()
+- [Server hardening]()
+- [Logs, monitoring and troubleshooting]()
+- [SSH and remote access]()
+- [Power, laptops and desktops]()
+- [Privacy and security reporting]()
+- [Moving from Linux: familiar commands and their Dukovo equivalents]()
 
 # Reference
 

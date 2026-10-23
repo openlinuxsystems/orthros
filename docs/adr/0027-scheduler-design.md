@@ -61,7 +61,7 @@ kernel's own helper threads are scheduled.
   the few instructions of the switch's first half.
 - Flat domain weights give exact shares among the threads runnable on one
   CPU, but do not move time between CPUs to even out domains. A queue per
-  domain per CPU replaces them if containers (Phase 22) need exact
+  domain per CPU replaces them if containers (Phase 20) need exact
   machine-wide shares.
 - Picking scans the queue, which is fine for Phase 4's short queues and
   becomes a tree when queues grow.

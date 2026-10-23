@@ -26,7 +26,7 @@
 //! ([`radix_cap::ObjectKind::ResourceDomain`]); `caps::create_domain` makes
 //! one with its first capability. Threads are charged for their stacks,
 //! and the objects a program makes with `process.create` are charged to
-//! its process's domain (`user::account`); Phase 22 builds containers on
+//! its process's domain (`user::account`); Phase 20 builds containers on
 //! domains.
 
 use alloc::sync::Arc;

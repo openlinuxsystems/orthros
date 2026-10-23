@@ -97,7 +97,7 @@ impl Default for Run {
 /// Target architecture.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 pub enum Arch {
-    /// 64-bit x86, the only architecture before Phase 17.
+    /// 64-bit x86, the only architecture before Phase 34.
     #[default]
     #[serde(rename = "x86_64")]
     X86_64,

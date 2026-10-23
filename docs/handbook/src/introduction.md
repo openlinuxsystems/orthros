@@ -12,43 +12,57 @@ stack) runs as restartable compartments that cannot use `unsafe` Rust.
 Programs reach resources through capabilities, unforgeable references that
 carry exactly the rights a program was given.
 
-On top of Radix, Dukovo provides a complete, installable system:
+On top of Radix, Dukovo 1.0 is a headless server system that installs
+itself and is run from the shell or from a browser:
 
-- **Spark**, the init and service manager, and **Nukesh**, the shell, with
-  the usual Unix utilities;
-- **Btrfs** as the native file system, with snapshots and atomic,
-  roll-back-able system updates;
-- wired networking with DHCP and DNS, users and logging;
-- **Lumen**, a Wayland compositor, without a desktop environment on top;
-- an installer with the `rdisk` partitioner, delivered as a USB image.
+- **Spark**, the init and service manager, which supervises services and
+  restarts them when they fail;
+- **Nukesh**, the shell, which is also the POSIX `/bin/sh`, with the
+  commands an administrator expects on a Linux server;
+- **Btrfs** as the native file system, with snapshots, mirroring across
+  disks, and atomic system updates that can be rolled back;
+- wired networking with DHCP and DNS, WireGuard, a firewall, users,
+  logging and SSH;
+- bundles, the signed packages that apps and services come in;
+- **Dukovo Admin**, a web console that runs the whole machine from any
+  browser;
+- an installer with the `rdisk` partitioner, delivered as a USB image,
+  and images for clouds and virtual machines.
+
+The **Lumen** compositor, and the graphical side that builds on it, follow
+in Dukovo 1.1.
 
 ## Where the project is
 
 Dukovo is built in phases, each ending in something that runs. This
-handbook describes **Phase 5**: the Radix kernel boots through GRUB under
-UEFI and legacy BIOS at a random address, chosen by a cryptographic random
-number generator seeded from several sources, manages the machine's memory
-with a frame allocator per NUMA node and a kernel heap, protects itself
-with W^X page tables, guard pages, SMEP and SMAP, starts every CPU, reads
-the firmware's ACPI tables, takes timer interrupts and shows its log on
-the screen and the serial port, with crash reports, a kernel debugger and
-a crash log for when things go wrong. It also has its capability core, the
-store of unforgeable capabilities through which programs will reach every
-resource once they arrive (see `radix-capabilities(7)`), and its
-scheduler: threads on every CPU, shared fairly or run first by real-time
-priority, grouped into resource domains with CPU weights and memory
-limits, with an out-of-memory policy that stops apps before services and
-never the system (see `radix-scheduling(7)`). Programs run in user mode
-and reach the kernel through twelve system calls; they talk to each other
-over endpoints, notifications, shared-memory channels and rings, and each
-gets random numbers from a capability it receives at start (see
-`radix-ipc(7)`). Each program runs in a process of its own, placed at a
-random address; the kernel starts one, Spark, from a boot archive the boot
-loader loads, and Spark starts the rest (see `radix-processes(7)` and
-`spark(8)`). For now Spark starts one test program and reaps it; file
-systems come in Phase 7 and a shell in Phase 9. Chapters
-for later phases are listed in the table of contents and are written as
-those phases land. The full plan is in
+handbook describes **Phase 8**.
+
+- **Boot and hardware.** The Radix kernel boots through GRUB under UEFI
+  and legacy BIOS at a random address, starts every CPU and reads the
+  firmware's ACPI tables.
+- **Memory and protection.** It manages memory with a frame allocator per
+  NUMA node and a kernel heap, and protects itself with W^X page tables,
+  guard pages, SMEP and SMAP.
+- **Capabilities.** Programs reach every resource through unforgeable
+  capabilities (see `radix-capabilities(7)`).
+- **Scheduling.** Threads are shared fairly or run first by real-time
+  priority, grouped into resource domains (see `radix-scheduling(7)`).
+- **IPC.** Programs talk over endpoints, notifications, shared-memory
+  channels and rings (see `radix-ipc(7)`).
+- **Processes.** Each program runs in a process of its own. Spark starts
+  them from a boot archive (see `radix-processes(7)` and `spark(8)`).
+- **Files.** Files are reached through directory capabilities: tmpfs,
+  FAT on virtual disks, `/proc` and `/sys` (see `radix-files(7)` and the
+  Files chapter).
+- **POSIX.** Programs written for Unix run on a POSIX layer with fork,
+  exec, signals, pipes, terminals and job control (see `radix-posix(7)`),
+  through the mlibc C library and a port of Rust's standard library.
+- **Debugging.** Crash reports, a kernel debugger and a crash log help
+  when things go wrong.
+
+The shell and the command-line tools arrive in Phase 9. Chapters for later
+phases are listed in the table of contents and are written as those
+phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
 
 ## How this handbook is organised
