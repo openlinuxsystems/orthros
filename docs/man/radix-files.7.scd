@@ -19,7 +19,7 @@ parts each program needs. The interfaces are *radix-directory*(2) and
 *radix-file*(2); the ring (*radix-ring*(2)) has read, write and sync
 operations for files too.
 
-This page describes files as of Phase 7 of the roadmap. The design, with
+This page describes files as of Phase 9 of the roadmap. The design, with
 the arguments that a path never leaves its directory and that a freed
 cluster is never written by its old owner, is in _docs/design/storage.md_.
 
@@ -29,9 +29,23 @@ A path is UTF-8 of at most 4,096 bytes (*PATH_MAX*), names separated by
 */*, each at most 255 bytes (*NAME_MAX*), with no NUL. *.* is the
 directory itself and *..* its parent, but never above the directory the
 path starts from: a path that starts with */*, or whose *..* climbs above
-its directory, fails with *outside*. This is how WASI's preopened
-directories and Capsicum's *openat* work. A walk crosses into whatever is
-mounted on a directory it passes through, and *..* crosses back.
+its directory, fails with *outside* (at the root of the whole tree, *..*
+is the root, as */..* is */*). This is how WASI's preopened directories
+and Capsicum's *openat* work. A walk crosses into whatever is mounted on
+a directory it passes through, and *..* crosses back.
+
+A *symbolic link* holds a path, its target, which the walk follows in
+its place. A relative target goes on from the link's directory; one that
+starts with */* goes on from the directory the walk started from, as if
+that were the root, so a link never leads out of what a program holds
+(Linux's *RESOLVE_IN_ROOT*). *..* steps back along the names the walk
+took, never along the text of a target. A walk follows at most 40 links
+and then fails with *too_many_links*. A link that is a path's last name
+is followed too, unless the call is told not to (*no_follow*), or a */*
+ends the path; removing or renaming a link works on the link itself, and
+creating a file through one creates its target. *make_link*, *read_link*
+and *real_path* (the path a walk reaches, every link followed) are in
+*radix-directory*(2).
 
 Absolute paths are for people and for POSIX programs: Spark strips the
 leading */* from the paths on its command line and resolves them beneath
@@ -99,14 +113,15 @@ capability goes, then its space is freed.
 *tmpfs*
 	Files in memory only. A tmpfs a program mounts may grow to half of
 	memory and hold one file or directory for every two pages of it, as
-	on Linux; nothing in it survives a reboot.
+	on Linux; nothing in it survives a reboot. It keeps symbolic links.
 
 *fat*
 	FAT12, FAT16 or FAT32, read-write, with long names, on the block
 	device whose file capability the call names (a disk or a partition,
 	from _/dev_). Names compare without regard to case, as FAT requires,
 	and may not hold control characters or any of *" \* / : < > ? \\ |*.
-	A file is at most 4 GiB less one byte. exFAT comes in Phase 10.
+	A file is at most 4 GiB less one byte. FAT has no symbolic links
+	(*make_link* fails with EPERM). exFAT comes in Phase 10.
 
 *proc*
 	The processes and what the kernel holds, as text (*radix-proc*(5)).
@@ -121,7 +136,8 @@ capability goes, then its space is freed.
 	(*radix-posix*(7)).
 
 *bootfs*
-	The boot archive (*radix-processes*(7)), read-only.
+	The boot archive (*radix-processes*(7)), read-only, with the
+	symbolic links the archive holds.
 
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
@@ -156,6 +172,9 @@ on it at every boot:
 :< the kernel's devices and settings (*radix-sysfs*(5))
 |  _/volumes_
 :< disks, USB sticks and SD cards, one directory each
+|  _/bin_, _/sbin_, _/usr_, _/etc_, _/var_
+:< symbolic links to _system/bin_, _system/bin_, _system_, _system/etc_
+   and _system/var_, for Unix programs and scripts
 
 Until the root filesystem is on a disk (Btrfs, Phase 10), _/applications_,
 _/users_ and _/data_ are empty directories of the root's tmpfs.
@@ -177,8 +196,9 @@ Errors of files and directories are in the *file* domain (2) of the
 status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
 *is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
 *bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
-*too_big*, *unknown_filesystem*, *not_block_device* and *no_device*,
-each with the POSIX errno it maps to.
+*too_big*, *unknown_filesystem*, *not_block_device*, *no_device*,
+*too_many_links* (ELOOP) and *not_link* (EINVAL), each with the POSIX
+errno it maps to.
 
 The kernel logs each disk, partition and mount:
 

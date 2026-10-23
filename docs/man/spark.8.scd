@@ -68,6 +68,9 @@ Init: /system/bin/spark is process 1
   *dev*, *proc* and *sys* trees on _/dev_, _/proc_ and _/sys_
   (*radix-proc*(5), *radix-sysfs*(5)). If any of this fails, it starts
   nothing.
+. It makes the root's symbolic links for Unix programs: _/bin_ and
+  _/sbin_ to _system/bin_, _/usr_ to _system_, _/etc_ to _system/etc_
+  and _/var_ to _system/var_.
 . It looks for disks in _/dev_ and mounts the FAT filesystem of each
   partition, or of each disk with no partition table, at
   _/volumes/_*name*: read-write, or read-only when the device is. A
@@ -199,7 +202,7 @@ _/volumes/_*name*
 	Spark could not build the program's process; the reason names the
 	step and the kernel's error.
 
-*spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_
+*spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_, *spark: cannot link /*_name_ *to /*_target_*:* _error_
 	Building the hierarchy failed; Spark starts nothing.
 
 _name_ *holds no FAT filesystem; left alone*

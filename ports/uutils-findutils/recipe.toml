@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# find and xargs of uutils' findutils (ADR 0080), in Rust, with manual
+# pages of Dukovo's (man/). Its locate and updatedb are left out until a
+# service keeps their database up to date.
+name = "uutils-findutils"
+version = "0.9.1"
+summary = "find and xargs, rewritten in Rust"
+license = "MIT"
+homepage = "https://github.com/uutils/findutils"
+depends = ["rust-crates"]
+image = [
+    "system/bin/find",
+    "system/bin/xargs",
+    "system/share/man/man1/find.1",
+    "system/share/man/man1/xargs.1",
+]
+
+[source]
+git = "https://github.com/uutils/findutils.git"
+commit = "147ac337bcee43a37801931c723bc82d7605981a"
+tag = "0.9.1"

@@ -301,11 +301,17 @@ From outermost to innermost:
 3. a directory's lock in tmpfs, and the lock of a directory under it
    (subclass 1, only with the namespace lock held, so only one thread
    ever holds two);
-4. a file's page cache;
-5. a FAT node's `meta` (one at a time);
-6. a FAT volume's `space`;
-7. the block cache;
-8. the disk's queue (with interrupts off).
+4. a file's write lock, held by a write or a change of size for the
+   whole call;
+5. an address space's regions, held by a page fault, which fills a page
+   of a mapped file by reading it;
+6. a file's page cache, under which a copy to or from a program's memory
+   never waits for a page: it stops, the lock is let go while the pages
+   are made, and it goes on (ADR 0082);
+7. a FAT node's `meta` (one at a time);
+8. a FAT volume's `space`;
+9. the block cache;
+10. the disk's queue (with interrupts off).
 
 The mount table's lock is taken alone, around lookups and changes to the
 table, never while a filesystem works. The lock checker checks this

@@ -122,6 +122,22 @@ impl Out for UserOut {
         }
         Ok(())
     }
+
+    fn put_now(&mut self, at: usize, bytes: &[u8]) -> radix_vfs::Result<bool> {
+        if at.checked_add(bytes.len()).is_none_or(|end| end > self.len) {
+            return Err(radix_vfs::Error::BadAddress);
+        }
+        Ok(super::copy_to_user_now(self.address + at as u64, bytes))
+    }
+
+    fn fault_in(&mut self, at: usize, len: usize) -> radix_vfs::Result<()> {
+        if at.checked_add(len).is_none_or(|end| end > self.len)
+            || !super::fault_in(self.address + at as u64, len, true)
+        {
+            return Err(radix_vfs::Error::BadAddress);
+        }
+        Ok(())
+    }
 }
 
 /// A caller's buffer to write from.
@@ -138,6 +154,22 @@ impl In for UserIn {
     fn get(&self, at: usize, out: &mut [u8]) -> radix_vfs::Result<()> {
         if at.checked_add(out.len()).is_none_or(|end| end > self.len)
             || !Arch::copy_from_user(out, self.address + at as u64)
+        {
+            return Err(radix_vfs::Error::BadAddress);
+        }
+        Ok(())
+    }
+
+    fn get_now(&self, at: usize, out: &mut [u8]) -> radix_vfs::Result<bool> {
+        if at.checked_add(out.len()).is_none_or(|end| end > self.len) {
+            return Err(radix_vfs::Error::BadAddress);
+        }
+        Ok(super::copy_from_user_now(out, self.address + at as u64))
+    }
+
+    fn fault_in(&self, at: usize, len: usize) -> radix_vfs::Result<()> {
+        if at.checked_add(len).is_none_or(|end| end > self.len)
+            || !super::fault_in(self.address + at as u64, len, false)
         {
             return Err(radix_vfs::Error::BadAddress);
         }

@@ -3,7 +3,8 @@
 
 // Files through the C library: open and its flags, reading, writing and
 // seeking, descriptions that share an offset, stdio, directories and
-// their descriptors, temporary files, renaming and removing, and times,
+// their descriptors, temporary files, renaming and removing, times,
+// symbolic links, and reading into and writing from memory not made yet,
 // on the tmpfs at /tmp and the read-only /system.
 
 #include <dirent.h>
@@ -11,6 +12,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <ftw.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/uio.h>
@@ -332,6 +334,143 @@ static void temporary_files(void) {
 	}
 }
 
+// Symbolic links (ADR 0081): made and read, followed by the calls that
+// take a path but not by those that work on a link itself, `..` after
+// one taken from where it led, links that lead nowhere or round in a
+// loop, and the links to /system that Spark makes.
+static void links(void) {
+	CHECK(mkdir("/tmp/links", 0755) == 0);
+	CHECK(mkdir("/tmp/links/a", 0755) == 0);
+	CHECK(mkdir("/tmp/links/a/b", 0755) == 0);
+	int fd = open("/tmp/links/a/b/file", O_WRONLY | O_CREAT, 0644);
+	CHECK(fd >= 0 && write(fd, "linked", 6) == 6);
+	close(fd);
+	// A relative target goes on from the link's directory.
+	CHECK(symlink("a/b", "/tmp/links/rel") == 0);
+	CHECK_ERROR(symlink("x", "/tmp/links/rel"), EEXIST);
+	struct stat st;
+	CHECK(lstat("/tmp/links/rel", &st) == 0 && S_ISLNK(st.st_mode) && st.st_size == 3);
+	CHECK(stat("/tmp/links/rel", &st) == 0 && S_ISDIR(st.st_mode));
+	char target[16];
+	CHECK(readlink("/tmp/links/rel", target, sizeof(target)) == 3 && !memcmp(target, "a/b", 3));
+	// readlink cuts the target short to the buffer, with no NUL added.
+	CHECK(readlink("/tmp/links/rel", target, 2) == 2 && !memcmp(target, "a/", 2));
+	CHECK_ERROR(readlink("/tmp/links/a", target, sizeof(target)), EINVAL);
+	CHECK_ERROR(readlink("/tmp/links/none", target, sizeof(target)), ENOENT);
+	char text[8] = {0};
+	fd = open("/tmp/links/rel/file", O_RDONLY);
+	CHECK(fd >= 0 && read(fd, text, sizeof(text)) == 6 && !strcmp(text, "linked"));
+	close(fd);
+	// An absolute target; `..` after a link goes up from where it led,
+	// not back along the path's text.
+	CHECK(symlink("/tmp/links/a/b", "/tmp/links/abs") == 0);
+	CHECK(stat("/tmp/links/abs/file", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 6);
+	CHECK(stat("/tmp/links/abs/../b/file", &st) == 0 && S_ISREG(st.st_mode));
+	CHECK_ERROR(stat("/tmp/links/abs/../rel", &st), ENOENT);
+	// realpath and the working directory name where links lead.
+	char real[PATH_MAX];
+	CHECK(realpath("/tmp/links/rel/../b/./file", real) && !strcmp(real, "/tmp/links/a/b/file"));
+	CHECK(realpath("/tmp/links/abs/", real) && !strcmp(real, "/tmp/links/a/b"));
+	errno = 0;
+	CHECK(realpath("/tmp/links/rel/none", real) == NULL && errno == ENOENT);
+	CHECK(chdir("/tmp/links/abs") == 0);
+	CHECK(getcwd(real, sizeof(real)) && !strcmp(real, "/tmp/links/a/b"));
+	CHECK(chdir("..") == 0 && getcwd(real, sizeof(real)) && !strcmp(real, "/tmp/links/a"));
+	CHECK(readlink("../rel", target, sizeof(target)) == 3);
+	CHECK(chdir("/") == 0);
+	// The last name of a path is followed unless the call says not to,
+	// or a slash after it says to all the same.
+	CHECK_ERROR(open("/tmp/links/rel", O_RDONLY | O_NOFOLLOW), ELOOP);
+	CHECK(fstatat(AT_FDCWD, "/tmp/links/rel", &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode));
+	CHECK(lstat("/tmp/links/rel/", &st) == 0 && S_ISDIR(st.st_mode));
+	struct timespec set[2] = {{.tv_sec = 5}, {.tv_sec = 6}};
+	CHECK(utimensat(AT_FDCWD, "/tmp/links/rel", set, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(lstat("/tmp/links/rel", &st) == 0 && st.st_mtim.tv_sec == 6);
+	CHECK(stat("/tmp/links/rel", &st) == 0 && st.st_mtim.tv_sec != 6);
+	// A directory lists a link as one.
+	DIR *dir = opendir("/tmp/links");
+	CHECK(dir != NULL);
+	int listed = 0;
+	struct dirent *entry;
+	while(dir && (entry = readdir(dir)))
+		listed += entry->d_type == DT_LNK;
+	if(dir)
+		closedir(dir);
+	CHECK(listed == 2);
+	// A link that leads nowhere: O_CREAT through it makes its target,
+	// beneath the root for an absolute one, and O_EXCL refuses it.
+	CHECK(symlink("made", "/tmp/links/dangling") == 0);
+	CHECK_ERROR(stat("/tmp/links/dangling", &st), ENOENT);
+	CHECK(lstat("/tmp/links/dangling", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK_ERROR(open("/tmp/links/dangling", O_WRONLY | O_CREAT | O_EXCL, 0644), EEXIST);
+	fd = open("/tmp/links/dangling", O_WRONLY | O_CREAT, 0644);
+	CHECK(fd >= 0);
+	close(fd);
+	CHECK(stat("/tmp/links/made", &st) == 0 && S_ISREG(st.st_mode));
+	CHECK(symlink("/tmp/links/a/made", "/tmp/links/a/dangling") == 0);
+	fd = open("/tmp/links/a/dangling", O_WRONLY | O_CREAT, 0644);
+	CHECK(fd >= 0);
+	close(fd);
+	CHECK(stat("/tmp/links/a/made", &st) == 0 && S_ISREG(st.st_mode));
+	// Links round in a loop.
+	CHECK(symlink("loop2", "/tmp/links/loop1") == 0 && symlink("loop1", "/tmp/links/loop2") == 0);
+	CHECK_ERROR(stat("/tmp/links/loop1", &st), ELOOP);
+	CHECK_ERROR(open("/tmp/links/loop1", O_RDONLY), ELOOP);
+	CHECK_ERROR(open("/tmp/links/loop1", O_WRONLY | O_CREAT, 0644), ELOOP);
+	// nftw reports links as links with FTW_PHYS: three directories, three
+	// files and six links.
+	visited = 0;
+	CHECK(nftw("/tmp/links", count_entry, 8, FTW_PHYS) == 0 && visited == 60303);
+	// Renaming and removing work on a link, never on its target.
+	CHECK(rename("/tmp/links/rel", "/tmp/links/moved") == 0);
+	CHECK(lstat("/tmp/links/moved", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK(stat("/tmp/links/a/b", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(unlink("/tmp/links/moved") == 0 && unlink("/tmp/links/abs") == 0);
+	CHECK(stat("/tmp/links/a/b/file", &st) == 0);
+	// No hard links yet, and nothing new in /system.
+	CHECK_ERROR(link("/tmp/links/a/b/file", "/tmp/links/hard"), EPERM);
+	CHECK_ERROR(symlink("x", "/system/new"), EROFS);
+	CHECK(nftw("/tmp/links", remove_entry, 8, FTW_DEPTH | FTW_PHYS) == 0);
+	CHECK_ERROR(lstat("/tmp/links", &st), ENOENT);
+	// Spark's links to /system, for Unix programs and scripts.
+	CHECK(lstat("/bin", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK(readlink("/usr", target, sizeof(target)) == 6 && !memcmp(target, "system", 6));
+	CHECK(realpath("/usr/share/../bin", real) && !strcmp(real, "/system/bin"));
+	CHECK(stat("/etc", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(stat("/var", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(realpath("/sbin/.", real) && !strcmp(real, "/system/bin"));
+}
+
+// Reading into and writing from memory none of whose pages are there yet,
+// so that the copies fault: new anonymous memory, and private mappings of
+// the very file read or written, whose faults read that file.
+static void mapped(void) {
+	enum { SIZE = 3 * 4096 };
+	static char pattern[SIZE];
+	for(int i = 0; i < SIZE; i++)
+		pattern[i] = (char)(i % 251);
+	int fd = open("/tmp/mapped", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	CHECK(fd >= 0 && write(fd, pattern, SIZE) == SIZE);
+	char *map = mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	CHECK(map != MAP_FAILED);
+	CHECK(pread(fd, map, SIZE, 0) == SIZE && !memcmp(map, pattern, SIZE));
+	char *again = mmap(NULL, SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+	CHECK(again != MAP_FAILED);
+	CHECK(pwrite(fd, again, SIZE, SIZE) == SIZE);
+	char *fresh = mmap(NULL, 2 * SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(fresh != MAP_FAILED);
+	CHECK(pread(fd, fresh, 2 * SIZE, 0) == 2 * SIZE);
+	CHECK(!memcmp(fresh, pattern, SIZE) && !memcmp(fresh + SIZE, pattern, SIZE));
+	// New memory reads as zeros, and writes them.
+	char *zeros = mmap(NULL, SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(zeros != MAP_FAILED);
+	CHECK(pwrite(fd, zeros, SIZE, 0) == SIZE);
+	CHECK(pread(fd, fresh, SIZE, 0) == SIZE && !memcmp(fresh, zeros, SIZE));
+	CHECK(!munmap(map, SIZE) && !munmap(again, SIZE));
+	CHECK(!munmap(fresh, 2 * SIZE) && !munmap(zeros, SIZE));
+	CHECK(!close(fd) && !unlink("/tmp/mapped"));
+}
+
 int main(void) {
 	check_start("files");
 	RUN(basics);
@@ -341,5 +480,7 @@ int main(void) {
 	RUN(directory_descriptors);
 	RUN(temporary_files);
 	RUN(times);
+	RUN(links);
+	RUN(mapped);
 	return check_end();
 }

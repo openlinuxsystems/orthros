@@ -51,8 +51,7 @@ would have to copy.
 - A program can reach only what its root leads to, so a sandboxed
   program's absolute paths stay inside its sandbox, as WASI's preopened
   directories do.
-- Lexical `..` differs from POSIX only through symbolic links, which no
-  file system has before Phase 10; the C library will ask the kernel to
-  resolve paths that cross one then.
+- Lexical `..` differs from POSIX only through symbolic links. When they
+  came in Phase 9, resolution moved into the kernel (ADR 0081).
 - `st_dev` is one number for every file system until the kernel says
   which one a file is on (docs/design/posix.md).

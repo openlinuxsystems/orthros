@@ -41,6 +41,13 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// (uutils' `tail` follows files with the notify crate, ADR 0080).
 const PORT_EXTRA_ALLOW: &[&str] = &["CC0-1.0"];
 
+/// Crates from crates.io that compile another project's C code into what
+/// links them, under a license their Cargo.toml does not name: each
+/// crate, the license that code adds, and the files in the crate that
+/// hold its notice. onig_sys builds Oniguruma, by K. Kosako, which uutils'
+/// `expr` matches regular expressions with.
+const BUNDLED_C: &[(&str, &str, &[&str])] = &[("onig_sys", "BSD-2-Clause", &["oniguruma/COPYING"])];
+
 /// Names of the files in a source tree that hold license terms or notices.
 const NOTICE_PREFIXES: &[&str] = &["LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE"];
 
@@ -317,8 +324,25 @@ fn listed_packages(
                 package.sha256 = lock.get(&key).cloned();
                 package.download = crate_download(&package.name, &package.version);
                 package.comment = "A crate from crates.io.".into();
-                if let Some(dir) = registry_dir(&package.name, &package.version) {
-                    package.notices = notice_files(&dir);
+                let dir = registry_dir(&package.name, &package.version);
+                if let Some(dir) = &dir {
+                    package.notices = notice_files(dir);
+                }
+                if let Some((_, license, files)) =
+                    BUNDLED_C.iter().find(|(name, ..)| *name == package.name)
+                {
+                    package.license = format!("({}) AND {license}", package.license);
+                    for file in files.iter() {
+                        let Some(notice) = dir.as_ref().map(|dir| dir.join(file)) else { break };
+                        if !notice.is_file() {
+                            crate::bail!(
+                                "{} {} has no {file}, the notice of the C code it builds",
+                                package.name,
+                                package.version
+                            );
+                        }
+                        package.notices.push(notice);
+                    }
                 }
             }
             Source::Other(source) => {

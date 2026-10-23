@@ -666,10 +666,92 @@ impl Backing for FakeDisk {
     }
 }
 
+/// Which pages of a program's buffer of `len` bytes are there, `skew`
+/// bytes into its first page: page `i` if bit `i % 64` of `mask` is set.
+fn pages_made(len: usize, skew: usize, mask: u64) -> Vec<bool> {
+    (0..(skew + len).div_ceil(4096).max(1)).map(|i| mask & (1 << (i % 64)) != 0).collect()
+}
+
+/// A buffer of a program's memory to write from, starting `skew` bytes
+/// into a page, whose missing pages a copy stops at, having copied what
+/// lay before, as a copy that faults partway does; `fault_in` makes them,
+/// unless the buffer is bad.
+struct LazyIn<'a> {
+    data: &'a [u8],
+    skew: usize,
+    made: std::cell::RefCell<Vec<bool>>,
+    bad: bool,
+}
+
+impl crate::In for LazyIn<'_> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn get(&self, _: usize, _: &mut [u8]) -> Result<()> {
+        panic!("a copy under the cache's lock waited for a page");
+    }
+
+    fn get_now(&self, at: usize, out: &mut [u8]) -> Result<bool> {
+        let made = self.made.borrow();
+        for (i, byte) in out.iter_mut().enumerate() {
+            if !made[(self.skew + at + i) / 4096] {
+                return Ok(false);
+            }
+            *byte = self.data[at + i];
+        }
+        Ok(true)
+    }
+
+    fn fault_in(&self, at: usize, len: usize) -> Result<()> {
+        if self.bad {
+            return Err(Error::BadAddress);
+        }
+        let (start, end) = (self.skew + at, self.skew + at + len);
+        self.made.borrow_mut()[start / 4096..end.div_ceil(4096)].fill(true);
+        Ok(())
+    }
+}
+
+/// [`LazyIn`] the other way: a buffer of a program's memory to read into.
+struct LazyOut {
+    bytes: Vec<u8>,
+    skew: usize,
+    made: Vec<bool>,
+}
+
+impl crate::Out for LazyOut {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn put(&mut self, _: usize, _: &[u8]) -> Result<()> {
+        panic!("a copy under the cache's lock waited for a page");
+    }
+
+    fn put_now(&mut self, at: usize, bytes: &[u8]) -> Result<bool> {
+        for (i, &byte) in bytes.iter().enumerate() {
+            if !self.made[(self.skew + at + i) / 4096] {
+                return Ok(false);
+            }
+            self.bytes[at + i] = byte;
+        }
+        Ok(true)
+    }
+
+    fn fault_in(&mut self, at: usize, len: usize) -> Result<()> {
+        let (start, end) = (self.skew + at, self.skew + at + len);
+        self.made[start / 4096..end.div_ceil(4096)].fill(true);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 enum FileOp {
-    Write(u64, Vec<u8>),
-    Read(u64, usize),
+    /// Data at an offset, from a buffer with the pages a mask says,
+    /// starting where in a page its low 12 bits say.
+    Write(u64, Vec<u8>, u64),
+    Read(u64, usize, u64),
     SetSize(u64),
     Sync,
     Shrink,
@@ -677,12 +759,13 @@ enum FileOp {
 
 proptest! {
     /// A file's cache over a disk whose unwritten blocks hold garbage
-    /// matches a plain vector, whatever is synced or dropped when.
+    /// matches a plain vector, whatever is synced or dropped when, and
+    /// whichever pages of the programs' buffers are not there yet.
     #[test]
     fn file_cache_matches_a_model(ops in proptest::collection::vec(prop_oneof![
-        4 => (0u64..40_000, proptest::collection::vec(any::<u8>(), 0..9000))
-            .prop_map(|(o, d)| FileOp::Write(o, d)),
-        3 => (0u64..45_000, 0usize..10_000).prop_map(|(o, l)| FileOp::Read(o, l)),
+        4 => (0u64..40_000, proptest::collection::vec(any::<u8>(), 0..9000), any::<u64>())
+            .prop_map(|(o, d, m)| FileOp::Write(o, d, m)),
+        3 => (0u64..45_000, 0usize..10_000, any::<u64>()).prop_map(|(o, l, m)| FileOp::Read(o, l, m)),
         2 => (0u64..45_000).prop_map(FileOp::SetSize),
         1 => Just(FileOp::Sync),
         1 => Just(FileOp::Shrink),
@@ -692,9 +775,12 @@ proptest! {
         let mut model: Vec<u8> = Vec::new();
         for op in ops {
             match op {
-                FileOp::Write(offset, data) => {
+                FileOp::Write(offset, data, mask) => {
                     let end = offset as usize + data.len();
-                    let result = cache.write(offset, &Slice(&data), &disk);
+                    let skew = (mask & 0xfff) as usize;
+                    let made = std::cell::RefCell::new(pages_made(data.len(), skew, mask >> 12));
+                    let buffer = LazyIn { data: &data, skew, made, bad: false };
+                    let result = cache.write(offset, &buffer, &disk);
                     if data.is_empty() {
                         prop_assert_eq!(result, Ok(0));
                     } else if end as u64 > disk.limit {
@@ -707,12 +793,14 @@ proptest! {
                         model[offset as usize..end].copy_from_slice(&data);
                     }
                 }
-                FileOp::Read(offset, len) => {
-                    let mut out = std::vec![0u8; len];
-                    let n = cache.read(offset, &mut SliceMut(&mut out[..]), &disk).unwrap();
+                FileOp::Read(offset, len, mask) => {
+                    let skew = (mask & 0xfff) as usize;
+                    let made = pages_made(len, skew, mask >> 12);
+                    let mut out = LazyOut { bytes: std::vec![0u8; len], skew, made };
+                    let n = cache.read(offset, &mut out, &disk).unwrap();
                     let start = (offset as usize).min(model.len());
                     let end = (offset as usize + len).min(model.len());
-                    prop_assert_eq!(&out[..n], &model[start..end]);
+                    prop_assert_eq!(&out.bytes[..n], &model[start..end]);
                 }
                 FileOp::SetSize(size) => {
                     let result = cache.set_size(size, &disk);
@@ -741,6 +829,80 @@ proptest! {
         let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
         prop_assert_eq!(n, model.len());
         prop_assert_eq!(out, model);
+    }
+}
+
+/// A write from a bad buffer, one whose pages cannot be made, keeps what
+/// it wrote before it, makes up none of the file's other bytes, cached or
+/// on the disk, and leaves zeros past the file's end.
+#[test]
+fn a_write_from_a_bad_buffer_makes_up_nothing() {
+    let disk = FakeDisk { limit: 1 << 20, ..FakeDisk::default() };
+    let cache = FileCache::new(0, 0);
+    let old: Vec<u8> = (0..3 * 4096 - 50).map(|i| (i % 251) as u8).collect();
+    assert_eq!(cache.write(0, &Slice(&old), &disk), Ok(old.len()));
+    cache.sync(&disk).unwrap();
+    cache.shrink(usize::MAX, &disk);
+    let bad = |skew, made: Vec<bool>, data| LazyIn {
+        data,
+        skew,
+        made: std::cell::RefCell::new(made),
+        bad: true,
+    };
+    // Whole pages over the file, the second not there: the first is
+    // written, and the second, not read from the disk, is not made up.
+    let new = std::vec![7u8; 2 * 4096 + 200];
+    assert_eq!(cache.write(0, &bad(0, std::vec![true, false, false], &new), &disk), Ok(4096));
+    // Over the file's end, from a buffer whose second page is not there:
+    // the copy stops 50 bytes in, past the end, and those bytes go.
+    let at = 2 * 4096 + 4000;
+    let result = cache.write(at, &bad(4096 - 50, std::vec![true, false, false], &new), &disk);
+    assert_eq!(result, Err(Error::BadAddress));
+    assert_eq!(cache.size(), old.len() as u64);
+    let mut expected = old.clone();
+    expected[..4096].fill(7);
+    // What the copy did get to inside the file is there.
+    expected[at as usize..].fill(7);
+    let mut out = std::vec![0u8; 4 * 4096];
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[..n], &expected[..]);
+    // Growing the file shows zeros past the old end, in the cache and on
+    // the disk.
+    cache.set_size(old.len() as u64 + 50, &disk).unwrap();
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+    cache.sync(&disk).unwrap();
+    cache.shrink(usize::MAX, &disk);
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &disk).unwrap();
+    assert_eq!(&out[..old.len()], &expected[..]);
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+    // Without a disk the cache's pages are the file, so the bytes the copy
+    // left past the end are what growing it would show, unless zeroed.
+    let memory = Memory;
+    let cache = FileCache::new(0, 0);
+    assert_eq!(cache.write(0, &Slice(&old), &memory), Ok(old.len()));
+    let result = cache.write(at, &bad(4096 - 50, std::vec![true, false, false], &new), &memory);
+    assert_eq!(result, Err(Error::BadAddress));
+    cache.set_size(old.len() as u64 + 50, &memory).unwrap();
+    let n = cache.read(0, &mut SliceMut(&mut out[..]), &memory).unwrap();
+    assert_eq!(&out[..at as usize], &old[..at as usize]);
+    assert_eq!(&out[old.len()..n], &[0u8; 50][..]);
+}
+
+/// A file with no disk below its cache, as tmpfs's are.
+struct Memory;
+
+impl Backing for Memory {
+    fn persistent(&self) -> bool {
+        false
+    }
+
+    fn reserve(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn truncate(&self, _: u64) -> Result<()> {
+        Ok(())
     }
 }
 

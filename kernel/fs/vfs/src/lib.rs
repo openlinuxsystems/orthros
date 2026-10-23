@@ -230,6 +230,22 @@ pub trait Out {
         }
         Ok(())
     }
+    /// Copies as [`Out::put`] does, but without waiting for a page of a
+    /// program's memory to be made: `Ok(false)` if one is not there yet,
+    /// when some of the bytes may have been copied. For a caller holding
+    /// a lock that making a page can take (a file's cache: a fault on a
+    /// mapped file reads it), which lets go of the lock and calls
+    /// [`Out::fault_in`] before it tries again. Kernel memory is always
+    /// there.
+    fn put_now(&mut self, at: usize, bytes: &[u8]) -> Result<bool> {
+        self.put(at, bytes).map(|()| true)
+    }
+    /// Makes the memory for `len` bytes from `at` ready to be written, as
+    /// faults on it would, so that [`Out::put_now`] there succeeds; called
+    /// with no lock held.
+    fn fault_in(&mut self, _at: usize, _len: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Where a write takes what it writes from: the caller's buffer.
@@ -242,6 +258,16 @@ pub trait In {
     }
     /// Copies `out.len()` bytes from `at` bytes from its start.
     fn get(&self, at: usize, out: &mut [u8]) -> Result<()>;
+    /// Copies as [`In::get`] does, without waiting for a page, as
+    /// [`Out::put_now`] does.
+    fn get_now(&self, at: usize, out: &mut [u8]) -> Result<bool> {
+        self.get(at, out).map(|()| true)
+    }
+    /// Makes the memory for `len` bytes from `at` ready to be read, as
+    /// [`Out::fault_in`] does.
+    fn fault_in(&self, _at: usize, _len: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A buffer in kernel memory to read into.

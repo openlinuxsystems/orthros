@@ -5,7 +5,8 @@ SPDX-License-Identifier: MIT
 The core utilities on Radix, which has Linux's system interface through
 mlibc: uucore's signal list, realtime signals and broken-pipe check are
 Linux's; file systems are described with statvfs, as on Redox, since
-mlibc has no statfs; and setgroups and the audit-less id are Linux's.
+mlibc has no statfs, and listed from /proc/mounts, which Radix writes as
+mtab lines; and setgroups and the audit-less id are Linux's.
 
 diff --git a/src/uu/chroot/src/chroot.rs b/src/uu/chroot/src/chroot.rs
 index 23e696b..78fdf69 100644
@@ -55,19 +56,20 @@ index 24b80e8..1036b6f 100644
  fn auditid() -> io::Result<()> {
      use std::mem::MaybeUninit;
 diff --git a/src/uucore/src/lib/features/fsext.rs b/src/uucore/src/lib/features/fsext.rs
-index 0ede0f2..977b048 100644
+index 0ede0f2..8c9f923 100644
 --- a/src/uucore/src/lib/features/fsext.rs
 +++ b/src/uucore/src/lib/features/fsext.rs
-@@ -11,7 +11,7 @@
+@@ -9,6 +9,9 @@
+ 
+ #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
  const LINUX_MTAB: &str = "/etc/mtab";
++// Radix lists its mounts in /proc/mounts, one mtab line each.
++#[cfg(target_os = "radix")]
++const LINUX_MTAB: &str = "/proc/mounts";
  #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
  const LINUX_MOUNTINFO: &str = "/proc/self/mountinfo";
--#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
-+#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
- static MOUNT_OPT_BIND: &str = "bind";
- #[cfg(windows)]
- const MAX_PATH: usize = 266;
-@@ -97,6 +97,7 @@ pub use libc::statfs as StatFs;
+ #[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
+@@ -97,6 +100,7 @@ pub use libc::statfs as StatFs;
      target_os = "illumos",
      target_os = "solaris",
      target_os = "redox",
@@ -75,7 +77,7 @@ index 0ede0f2..977b048 100644
      target_os = "cygwin",
  ))]
  pub use libc::statvfs as StatFs;
-@@ -116,6 +117,7 @@ pub use libc::statfs as statfs_fn;
+@@ -116,6 +120,7 @@ pub use libc::statfs as statfs_fn;
      target_os = "solaris",
      target_os = "dragonfly",
      target_os = "redox",
@@ -83,41 +85,68 @@ index 0ede0f2..977b048 100644
      target_os = "cygwin",
  ))]
  pub use libc::statvfs as statfs_fn;
-@@ -386,7 +388,7 @@ impl From<StatFs> for MountInfo {
+@@ -197,7 +202,7 @@ pub struct MountInfo {
+     pub dummy: bool,
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin", target_os = "radix"))]
+ fn replace_special_chars(s: &[u8]) -> Vec<u8> {
+     use bstr::ByteSlice;
+ 
+@@ -213,9 +218,11 @@ fn replace_special_chars(s: &[u8]) -> Vec<u8> {
+ }
+ 
+ impl MountInfo {
+-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
++    #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin", target_os = "radix"))]
+     fn new(file_name: &str, raw: &[&[u8]]) -> Option<Self> {
++        #[cfg(not(target_os = "radix"))]
+         use std::ffi::OsStr;
++        #[cfg(not(target_os = "radix"))]
+         use std::os::unix::ffi::OsStrExt;
+         use std::os::unix::ffi::OsStringExt;
+ 
+@@ -229,6 +236,7 @@ impl MountInfo {
+             // spell-checker:ignore (word) noatime
+             // Format: 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
+             // "man proc" for more details
++            #[cfg(not(target_os = "radix"))]
+             LINUX_MOUNTINFO => {
+                 const FIELDS_OFFSET: usize = 6;
+                 let after_fields = raw[FIELDS_OFFSET..]
+@@ -438,9 +446,9 @@ use crate::error::UResult;
+     target_os = "windows"
+ ))]
+ use crate::error::USimpleError;
+-#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin", target_os = "radix"))]
+ use std::fs::File;
+-#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin", target_os = "radix"))]
+ use std::io::{BufRead, BufReader};
+ #[cfg(any(
+     target_vendor = "apple",
+@@ -535,6 +543,18 @@ pub fn read_fs_list() -> UResult<Vec<MountInfo>> {
+         }
+         Ok(mounts)
      }
- }
- 
--#[cfg(all(unix, not(target_os = "redox")))]
-+#[cfg(all(unix, not(any(target_os = "redox", target_os = "radix"))))]
- fn is_dummy_filesystem(fs_type: &str, mount_option: &str) -> bool {
-     // spell-checker:disable
-     match fs_type {
-@@ -409,14 +411,14 @@ fn is_dummy_filesystem(fs_type: &str, mount_option: &str) -> bool {
-     // spell-checker:enable
- }
- 
--#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
-+#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
- fn is_remote_filesystem(dev_name: &str, fs_type: &str) -> bool {
-     dev_name.find(':').is_some()
-         || (dev_name.starts_with("//") && fs_type == "smbfs" || fs_type == "cifs")
-         || dev_name == "-hosts"
- }
- 
--#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
-+#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
- fn mount_dev_id(mount_dir: &OsStr) -> String {
-     use std::os::unix::fs::MetadataExt;
- 
-@@ -538,6 +540,7 @@ pub fn read_fs_list() -> UResult<Vec<MountInfo>> {
++    #[cfg(target_os = "radix")]
++    {
++        let reader = BufReader::new(File::open(LINUX_MTAB)?);
++        Ok(reader
++            .split(b'\n')
++            .map_while(Result::ok)
++            .filter_map(|line| {
++                let raw_data = line.split(|c| *c == b' ').collect::<Vec<&[u8]>>();
++                MountInfo::new(LINUX_MTAB, &raw_data)
++            })
++            .collect::<Vec<_>>())
++    }
      #[cfg(any(
          target_os = "aix",
          target_os = "redox",
-+        target_os = "radix",
-         target_os = "illumos",
-         target_os = "solaris",
-     ))]
-@@ -706,7 +709,7 @@ impl FsMeta for StatFs {
+@@ -706,7 +726,7 @@ impl FsMeta for StatFs {
              not(target_os = "openbsd"),
              not(target_os = "illumos"),
              not(target_os = "solaris"),
@@ -126,7 +155,7 @@ index 0ede0f2..977b048 100644
              not(target_arch = "s390x"),
              not(target_os = "cygwin"),
              target_pointer_width = "64"
-@@ -716,7 +719,7 @@ impl FsMeta for StatFs {
+@@ -716,7 +736,7 @@ impl FsMeta for StatFs {
              not(target_env = "musl"),
              not(target_os = "freebsd"),
              not(target_os = "netbsd"),
@@ -135,7 +164,7 @@ index 0ede0f2..977b048 100644
              not(target_os = "cygwin"),
              any(
                  target_arch = "s390x",
-@@ -735,6 +738,7 @@ impl FsMeta for StatFs {
+@@ -735,6 +755,7 @@ impl FsMeta for StatFs {
              target_os = "illumos",
              target_os = "solaris",
              target_os = "redox",
@@ -143,15 +172,6 @@ index 0ede0f2..977b048 100644
              target_os = "cygwin",
              all(target_os = "android", target_pointer_width = "64"),
          ))]
-@@ -1210,7 +1214,7 @@ mod tests {
-     }
- 
-     #[test]
--    #[cfg(all(unix, not(target_os = "redox")))]
-+    #[cfg(all(unix, not(any(target_os = "redox", target_os = "radix"))))]
-     // spell-checker:ignore (word) binfmt
-     fn test_binfmt_misc_is_dummy() {
-         use super::is_dummy_filesystem;
 diff --git a/src/uucore/src/lib/features/signals.rs b/src/uucore/src/lib/features/signals.rs
 index 0d423a6..7c0cf46 100644
 --- a/src/uucore/src/lib/features/signals.rs

@@ -43,7 +43,9 @@ to thirty seconds.
   are never dropped inside an allocation, since that would take the
   caches' locks there.
 - One lock guards a file's pages and size, held while the disk works:
-  one request at a time per file.
+  one request at a time per file. Since ADR 0082, copies to and from a
+  program's memory under it never wait for a page, and writes hold a
+  second lock for the whole call.
 
 ## Consequences
 

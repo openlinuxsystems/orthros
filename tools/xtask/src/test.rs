@@ -629,7 +629,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "posix",
-        about: "C programs on mlibc and a Rust std one: fork, exec, signals, pipes, terminals, files, threads",
+        about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- --posix /system/tests/posix/run",

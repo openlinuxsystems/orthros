@@ -91,3 +91,6 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0077](0077-one-cache-emptied-only-by-what-it-holds.md) | One per-CPU cache finds a capability and its object, and empties only when something it holds goes | Accepted |
 | [0078](0078-server-first-release.md) | Dukovo 1.0 is a server release, and Lumen moves to 1.1 | Accepted |
 | [0079](0079-framework-desktop-second-reference-machine.md) | The Framework Desktop is the second reference machine | Accepted |
+| [0080](0080-crates-patched-for-radix.md) | Programs in Rust from elsewhere build with crates.io crates patched for Radix | Accepted |
+| [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted |
+| [0082](0082-copies-under-the-page-cache-never-wait-for-a-page.md) | Copies under a file's page cache lock never wait for a page | Accepted |

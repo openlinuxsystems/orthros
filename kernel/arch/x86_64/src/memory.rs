@@ -589,13 +589,26 @@ pub fn start_frame_allocator(srat: Option<&Srat<'_>>, slit: Option<&Slit<'_>>) {
 /// Picks the crash log's place: the lowest 2 MiB boundary at or above
 /// 4 GiB with `CRASH_LOG_SIZE` of usable RAM, where firmware and boot
 /// loaders rarely write; otherwise the lowest 2 MiB boundary at or above
-/// 64 MiB. The choice depends only on the memory map, so it is the same on
-/// every boot of the same machine.
+/// 64 MiB. Either way it is clear of what is reserved so far (the kernel
+/// image, the boot information and the modules, which may reach past
+/// 64 MiB: the boot archive is tens of MiB, and the log would write over
+/// the programs in it). The choice depends only on the memory map and
+/// where the boot loader put the kernel and its modules, so it is the
+/// same on every boot of the same machine and image.
 pub fn choose_crash_log_region() -> Option<u64> {
+    let reservations = RESERVATIONS.lock();
+    let reserved = &reservations.list[..reservations.len];
     let fits = |floor: u64| {
         memory_map().iter().filter(|r| r.kind == MemoryKind::Usable).find_map(|r| {
-            let start = r.start.max(floor).next_multiple_of(LARGE_PAGE);
-            (start + CRASH_LOG_SIZE <= r.end).then_some(start)
+            let mut start = r.start.max(floor).next_multiple_of(LARGE_PAGE);
+            while start + CRASH_LOG_SIZE <= r.end {
+                match reserved.iter().find(|x| x.start < start + CRASH_LOG_SIZE && start < x.end) {
+                    None => return Some(start),
+                    // Past it: its end is above `start`, so this moves on.
+                    Some(x) => start = x.end.next_multiple_of(LARGE_PAGE),
+                }
+            }
+            None
         })
     };
     fits(FOUR_GIB).or_else(|| fits(64 << 20))

@@ -182,12 +182,12 @@ description, so `dup`, `fork` and `exec` need nothing from the C library.
 of a capability does not inherit it.
 
 The kernel resolves every path beneath a directory capability and never
-above it (ADR 0054). The C library keeps the working directory as an
-absolute string, resolves `.` and `..` in a path against it lexically,
-and passes the kernel a path beneath `SLOT_ROOT`. Lexical `..` is what
-POSIX gives in a tree with no symbolic links, and nothing has symbolic
-links before Btrfs (Phase 10); when they come, resolution beneath the
-root moves into the kernel, which follows links and `..` physically.
+above it (ADR 0054), following symbolic links on the way (ADR 0081). The
+C library keeps the working directory as a canonical absolute string. It
+passes the kernel an absolute path as it is, beneath `SLOT_ROOT`, and a
+relative one joined to the working directory; it works out no `.` or
+`..` itself, since only the kernel knows where a link leads. `chdir`
+and `realpath` ask the kernel for the canonical path (`real_path`).
 Directory descriptors (`openat`) go to the kernel with their capability,
 beneath which `..` fails with `outside` (EXDEV). A description does not
 know its path, so `fchdir` fails with ENOSYS.
@@ -513,8 +513,9 @@ and timer protocols are candidates for the audit after Phase 9.
 - `fchdir` fails with ENOSYS, since a description does not know its path;
   `getcwd` is the C library's string.
 - No named pipes (`mkfifo` fails with ENOSYS: no filesystem keeps them
-  yet), no device nodes (`mknod` fails with EPERM), no hard or symbolic
-  links (EPERM) until Btrfs.
+  yet), no device nodes (`mknod` fails with EPERM), no hard links (EPERM)
+  until Btrfs. Symbolic links work on tmpfs and in the boot archive;
+  FAT has none (EPERM).
 - `chmod`, `chown` and `umask` change nothing until users (Phase 13).
 - The kernel keeps no time of the last change to a file's status, so
   `st_ctim` is `st_mtim`; reading a file never changes `st_atim`

@@ -70,7 +70,7 @@ use radix_abi::Status;
 use radix_abi::errors::Kernel;
 use radix_abi::startup;
 use radix_cap::{CapError, SpaceId};
-use radix_hal::{Cpu, UserFault, UserFaultKind, UserMode};
+use radix_hal::{Cpu, CpuLocal, UserFault, UserFaultKind, UserMode};
 use radix_klog::{info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::{Mutex, SpinLock};
@@ -265,6 +265,36 @@ fn on_user_page(address: u64, write: bool) -> bool {
     let Some(thread) = sched::running() else { return false };
     let Some(user) = thread.user() else { return false };
     user.space.resolve(address, write, false) == Fault::Resolved
+}
+
+/// Copies `src` to the running program's memory at `dst` as
+/// `Arch::copy_to_user` does, but without waiting for a page that is not
+/// there yet: with preemption off, a fault on the copy ends it rather than
+/// making the page (`on_user_page`), which may read a file. For a copy
+/// under a lock that reading a file takes, a file's cache; the caller
+/// then lets go of the lock and calls [`fault_in`].
+pub(crate) fn copy_to_user_now(dst: u64, src: &[u8]) -> bool {
+    Arch::preempt_disable();
+    let copied = Arch::copy_to_user(dst, src);
+    sched::preempt_enable();
+    copied
+}
+
+/// [`copy_to_user_now`] the other way: from the running program's memory.
+pub(crate) fn copy_from_user_now(dst: &mut [u8], src: u64) -> bool {
+    Arch::preempt_disable();
+    let copied = Arch::copy_from_user(dst, src);
+    sched::preempt_enable();
+    copied
+}
+
+/// Makes the running program's pages for `len` bytes from `address` ready
+/// to be read, or written if `write`, as faults on them would; `false` if
+/// one cannot be.
+pub(crate) fn fault_in(address: u64, len: usize, write: bool) -> bool {
+    let Some(thread) = sched::running() else { return false };
+    let Some(user) = thread.user() else { return false };
+    user.space.fault_in(address, len, write)
 }
 
 /// On the way back to user mode, from a system call, an interrupt or a
