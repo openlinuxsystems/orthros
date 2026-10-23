@@ -180,6 +180,9 @@ pub enum Kind {
     CharDevice,
     /// A pipe, which lives outside the tree (Phase 8).
     Pipe,
+    /// A socket, which lives outside the tree too (Phase 9's socket
+    /// pairs).
+    Socket,
     /// A symbolic link: a path that resolution follows in its place
     /// ([`mount`]); its size is the path's length.
     Symlink,

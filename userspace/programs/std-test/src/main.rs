@@ -3,8 +3,8 @@
 
 //! The test of Rust's standard library on Radix (the `std-test` test of
 //! the posix boot test, radix-posix(7)): the environment, files,
-//! threads and their synchronisation, time, processes and pipes, panics
-//! and backtraces, and memory, through `std` as programs use it. Like
+//! threads and their synchronisation, time, processes, pipes and socket
+//! pairs, panics and backtraces, and memory, through `std` as programs use it. Like
 //! the C tests, it prints "std-test: <part>" before each part, a line for
 //! each check that fails, and "std-test: every check passed"; it exits
 //! with how many checks failed.
@@ -19,7 +19,9 @@ use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
 use std::hint;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::net::Shutdown;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -82,6 +84,7 @@ fn main() {
     run("time", time);
     run("processes", processes);
     run("pipes", pipes);
+    run("sockets", sockets);
     run("panics", panics);
     run("backtraces", backtraces);
     run("memory", memory);
@@ -557,6 +560,47 @@ fn pipes() -> Outcome {
     let (reader, mut writer) = io::pipe()?;
     drop(reader);
     check!(writer.write_all(b"x").err().map(|e| e.kind()) == Some(io::ErrorKind::BrokenPipe));
+    Ok(())
+}
+
+/// Socket pairs, as `UnixStream::pair` makes them (mio and crossterm's
+/// way to wake a thread from a signal handler): both ways, the end of the
+/// stream after a shutdown, non-blocking ends, and what they are.
+fn sockets() -> Outcome {
+    let (mut one, mut other) = UnixStream::pair()?;
+    one.write_all(b"ping")?;
+    let mut got = [0u8; 4];
+    other.read_exact(&mut got)?;
+    check!(&got == b"ping");
+    other.write_all(b"pong")?;
+    one.read_exact(&mut got)?;
+    check!(&got == b"pong");
+    let copy = File::from(std::os::fd::OwnedFd::from(one.try_clone()?));
+    check!(copy.metadata()?.file_type().is_socket());
+    drop(copy);
+    check!(one.peer_addr()?.is_unnamed() && one.local_addr()?.is_unnamed());
+    check!(one.take_error()?.is_none());
+    // A thread streams into it while this one reads.
+    let mut writer = one.try_clone()?;
+    let writing = thread::spawn(move || {
+        writer.write_all(&[9u8; 200_000])?;
+        writer.shutdown(Shutdown::Write)
+    });
+    let mut all = Vec::new();
+    other.read_to_end(&mut all)?;
+    writing.join().map_err(|_| "the writer panicked")??;
+    check!(all.len() == 200_000 && all.iter().all(|&b| b == 9));
+    // Shut for writing, it cannot send any more; the other way still works.
+    check!(one.write_all(b"x").err().map(|e| e.kind()) == Some(io::ErrorKind::BrokenPipe));
+    other.write_all(b"back")?;
+    one.read_exact(&mut got)?;
+    check!(&got == b"back");
+    // Non-blocking, an empty end would block.
+    // (The other way has ended, so a read there gives 0, not WouldBlock.)
+    one.set_nonblocking(true)?;
+    check!(one.read(&mut got).err().map(|e| e.kind()) == Some(io::ErrorKind::WouldBlock));
+    drop(other);
+    check!(one.read(&mut got)? == 0);
     Ok(())
 }
 

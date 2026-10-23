@@ -195,7 +195,7 @@ Linux's *noatime*: it is when the file was made, or what a program set.
 *st_ctim* is *st_mtim*, since the kernel keeps no time of the last
 change to a file's status. Until users come in Phase 13, everything
 belongs to user 0, regular files and directories have mode 0755,
-devices 0660 or 0666 and pipes 0600.
+devices 0660 or 0666, pipes 0600 and sockets 0777.
 
 *utimensat*, *futimens* and the older *utime* and *utimes* set a file's
 times on tmpfs and FAT, which keeps them in two-second steps and the
@@ -203,6 +203,14 @@ last read only to the day, as Linux's vfat does. Times before 1970 fail
 with EINVAL, and devices and pipes, which keep no times, with EPERM.
 *futimens* needs a descriptor open for writing (EACCES otherwise),
 where Linux lets the file's owner.
+
+_/dev/fd/_*N* names descriptor _N_, and _/dev/stdin_, _/dev/stdout_ and
+_/dev/stderr_ name 0, 1 and 2, for *open*, *stat* and *access* and
+their *at* forms; the shell passes pipes by these names. The C library
+gives them: opening one copies the descriptor, as *dup* does, as on the
+BSDs, so the copy shares its offset, never has more access than it
+(EACCES), and *O_TRUNC* does nothing. A descriptor not open has no name
+(ENOENT). _/dev/fd_ itself cannot be listed.
 
 *statvfs* and *fstatvfs* say the filesystem's block size and blocks,
 and how many files and directories it can hold: a tmpfs one for every
@@ -219,10 +227,28 @@ reads as its end; a write with no reader left raises SIGPIPE and fails
 with EPIPE. *O_NONBLOCK* makes either end fail with EAGAIN instead of
 waiting.
 
-*poll* and *ppoll* take *struct pollfd* as it is. Pipes and terminals
-say when they can be read or written, or have hung up; other files are
-always ready. *select* and *pselect* are the C library's, on *poll*.
+*poll* and *ppoll* take *struct pollfd* as it is. Pipes, sockets and
+terminals say when they can be read or written, or have hung up; other
+files are always ready. *select* and *pselect* are the C library's, on *poll*.
 There is no *epoll*, *eventfd*, *signalfd* or *timerfd*.
+
+# SOCKETS
+
+*socketpair* makes two connected *AF_UNIX* stream sockets, with
+*SOCK_NONBLOCK* and *SOCK_CLOEXEC* if asked: a pipe's buffer each way
+(*radix-process*(2)'s *socket_pair*). *read*, *write*, *send*, *recv*,
+*sendto*, *recvfrom*, *sendmsg* and *recvmsg* move bytes, with
+*MSG_DONTWAIT*, *MSG_NOSIGNAL* and *MSG_WAITALL*; *MSG_MORE* is taken and
+does nothing. Up to *PIPE_BUF* bytes of one send go in whole. *shutdown*
+shuts one way or both, for every descriptor of the socket. *fstat* says
+*S_IFSOCK*, *getsockname* and *getpeername* give an unnamed *AF_UNIX*
+address, and *getsockopt* answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+*SO_ERROR*, *SO_ACCEPTCONN*, *SO_RCVBUF* and *SO_SNDBUF*.
+
+Datagram and sequenced-packet pairs fail with ESOCKTNOSUPPORT, and
+*MSG_PEEK*, *MSG_OOB* and control messages (passing descriptors) with
+EOPNOTSUPP. *socket* fails with EAFNOSUPPORT: named sockets come later
+in Phase 9, network sockets with Phase 12.
 
 # TERMINALS
 
@@ -371,7 +397,7 @@ of its own with it as the controlling terminal and runs each test as a
 shell runs a job, in a process group of its own, in the foreground. The
 tests are:
 
-*hello*, *fork*, *exec*, *signal*, *pipe*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *spawn*, *limits*, *format*
+*hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *spawn*, *limits*, *format*
 	C programs in _userspace/posix_, one per area. *format* holds
 	*printf*, *strtod*, *scanf*, *strftime* and the time conversions to
 	1,428 answers generated with glibc 2.39.
@@ -389,13 +415,20 @@ tests are:
 	on its standard input and checked for what it writes and its exit
 	status, and their manual pages.
 
+*shell*
+	The shell, *nukesh*(1): the scripts of its test suite, each giving
+	what bash gives, or dash for those run as _/bin/sh_; then the shell
+	at a pseudo-terminal, with its plain line reader and with its line
+	editor, typed at: commands, completion, history, *^C*, and jobs
+	stopped with *^Z* and brought back with *fg*.
+
 *libc*
-	mlibc's own test suite: every one of its 132 tests that apply to
+	mlibc's own test suite: every one of its 135 tests that apply to
 	Radix (_ports/mlibc-tests/build.sh_ says why each other is left
 	out). *libc:*_name_ runs only test _name_, with its output.
 
 *libc-test*
-	The musl project's tests of C libraries: every one of its 110
+	The musl project's tests of C libraries: every one of its 114
 	functional and regression tests that apply to Radix
 	(_ports/libc-test/build.sh_ says why each other is left out).
 	*libc-test:*_name_ runs only test _name_, with its output.
@@ -410,7 +443,8 @@ passed*; the boot test fails on any failure.
 
 # LIMITS
 
-- No sockets until networking (Phase 12), no hard links until Btrfs
+- Only socket pairs until named sockets (later in Phase 9) and
+  networking (Phase 12). No hard links until Btrfs
   (Phase 10: *link* fails with EPERM), no named pipes (*mkfifo* fails
   with ENOSYS) and no device nodes (*mknod* fails with EPERM). Symbolic
   links work on tmpfs and in the boot archive, not on FAT.

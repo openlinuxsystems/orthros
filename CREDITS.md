@@ -40,6 +40,7 @@ project's design, it adds the project here (see
 | [uutils findutils](https://github.com/uutils/findutils) 0.9.1 by the uutils developers | `find` and `xargs` | MIT |
 | [errno](https://github.com/lambda-fairy/rust-errno), [getrandom](https://github.com/rust-random/getrandom), [mio](https://github.com/tokio-rs/mio), [nix](https://github.com/nix-rust/nix), [rustix](https://github.com/bytecodealliance/rustix) and [uucore](https://github.com/uutils/coreutils) from crates.io | Patched for Radix in `ports/rust-crates` ([ADR 0080](docs/adr/0080-crates-patched-for-radix.md)), for the programs above | MIT OR Apache-2.0 (nix, mio, uucore: MIT; rustix also Apache-2.0 WITH LLVM-exception) |
 | The other crates the uutils programs link, from crates.io, among them [clap](https://github.com/clap-rs/clap), [regex](https://github.com/rust-lang/regex), [jiff](https://github.com/BurntSushi/jiff), [memchr](https://github.com/BurntSushi/memchr) and [bstr](https://github.com/BurntSushi/bstr) by Andrew Gallant, [chrono](https://github.com/chronotope/chrono), [ICU4X](https://github.com/unicode-org/icu4x) by the Unicode Consortium, [Fluent](https://github.com/projectfluent/fluent-rs) by Mozilla, the [RustCrypto](https://github.com/RustCrypto) hashes, [BLAKE3](https://github.com/BLAKE3-team/BLAKE3), [num-bigint](https://github.com/rust-num/num-bigint), [rayon](https://github.com/rayon-rs/rayon), [crossterm](https://github.com/crossterm-rs/crossterm), [indicatif](https://github.com/console-rs/indicatif), [notify](https://github.com/notify-rs/notify) and [Oniguruma](https://github.com/kkos/oniguruma) by K. Kosako, built by onig_sys for `expr` | What the utilities are made of; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0, Unlicense, Unicode-3.0, BSD-2-Clause, BSD-3-Clause, Zlib, CC0-1.0 (each as the manifest gives it) |
+| [reedline](https://github.com/nushell/reedline) 0.52.1 by the Nushell project, with [crossterm](https://github.com/crossterm-rs/crossterm) 0.29, [signal-hook](https://github.com/vorner/signal-hook) and signal-hook-mio by Michal Vaner, [nu-ansi-term](https://github.com/nushell/nu-ansi-term), [vte](https://github.com/alacritty/vte) by the Alacritty project, [strip-ansi-escapes](https://github.com/luser/strip-ansi-escapes), [unicode-width](https://github.com/unicode-rs/unicode-width), [unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation), [chrono](https://github.com/chronotope/chrono), [parking_lot](https://github.com/Amanieu/parking_lot) by Amanieu d'Antras, [strum](https://github.com/Peternator7/strum), [derive_more](https://github.com/JelteF/derive_more), [indexmap](https://github.com/indexmap-rs/indexmap) and the crates they use, from crates.io | Nukesh's line editor and the terminal handling under it ([ADR 0083](docs/adr/0083-nukesh-the-shell.md)), and the ordered tables of its variables and functions; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0 OR MIT (each as the manifest gives it; unicode-ident also Unicode-3.0, memchr Unlicense OR MIT) |
 | [Lua](https://www.lua.org/) 5.4.7 and its test suite, by Roberto Ierusalimschy, Luiz Henrique de Figueiredo and Waldemar Celes at PUC-Rio | A real C program to test the C library with, in the `posix` boot test | MIT |
 | [libc-test](https://wiki.musl-libc.org/libc-test.html) b7ec467969a5 by Rich Felker, Szabolcs Nagy, Kirill Ternovsky, John Spencer, Jens Gustedt, Alexander Monakov and Julien Ramseier, from Khem Raj's mirror (github.com/kraj/libc-test) | The functional and regression tests of C libraries, which run in the `posix` boot test and found the fixes in `ports/mlibc/patches` 0013 to 0022; its math tests, whose vectors from crlibm are GPL-2.0, are left out | MIT |
 
@@ -305,6 +306,15 @@ are grateful.
   and [Managarm](https://managarm.org/): their histories informed the
   roadmap's sizing. Managarm's mlibc is our C library, and its system
   layers for other kernels were the model for Radix's.
+- [GNU Bash](https://www.gnu.org/software/bash/) by Chet Ramey and the
+  Free Software Foundation, and [dash](http://gondor.apana.org.au/~herbert/dash/)
+  by Herbert Xu: what Nukesh does is what they do. Its test scripts'
+  expected output was recorded from bash 5.2, and from dash for POSIX
+  mode, and its functions in the environment take bash's form
+  ([ADR 0083](docs/adr/0083-nukesh-the-shell.md)). Nukesh has none of
+  their code.
+- FreeBSD's fdescfs: opening `/dev/fd/N` copies the descriptor, as
+  `dup` does ([ADR 0084](docs/adr/0084-dev-fd-in-the-c-library.md)).
 
 The roadmap names more projects whose ideas later phases will follow, such as
 macOS, Windows, Ubuntu, GNOME, Hyprland and TMOG. They are added here when

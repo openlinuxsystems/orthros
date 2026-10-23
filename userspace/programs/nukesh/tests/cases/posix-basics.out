@@ -1,0 +1,103 @@
+a b c d e f
+3
+[1]
+[2 3]
+[4]
+1 2 3 4
+1:2 3:4
+ello hel 5 hello def set
+set
+20 3 1 16 1 31 15 -2
+0
+1
+2
+args: 2
+rc=3
+v=inner
+glob
+class
+star
+0
+1
+out
+err
+a
+b
+3
+   ab|cd   |00042|ff|10|x|%
+got a
+got b
+got c
+before
+trapped
+ok
+status 1
+ok
+nounset failed
+5 10
+/tmp
+back
+cd
+typed
+ll='ls -l'
+readonly failed
+waited 0
+42
+nested inner deep
+a b c
+a  b   c
+b c
+0
+x
+a	b
+2
+/nonexistent*
+unset
+set empty
+eval 4
+from var
+0022
+a 
+b val
+c 
+rest: file
+2
+*
+3
+4
+[a][b][][c]
+one|two three
+literal $x `y`
+2
+2
+3 1 7
+0
+0
+0
+<a b>
+<c>
+(a)
+(b)
+(c)
+a
+ax
+alive
+int
+after-int
+hi
+there
+1 a
+2 b
+3 
+set 
+less
+times
+shift failed
+f=1
+a"b a"b a"b
+abcdef ab c  
+pwd
+no newline
+a
+b
+status=0

@@ -1,0 +1,31 @@
+ONE
+0
+1
+1 0
+0 1 0
+pipefail 1
+got a
+got b
+got c
+count after pipe 0
+lastpipe 3
+[a
+b]
+backticks
+subst status 4
+/tmp
+/tmp
+sub2
+4
+3
+y
+y
+in-subshell
+subshell status 3
+inside 2
+outside 1
+deep
+from here-doc
+case-in-subst
+ba
+status=0

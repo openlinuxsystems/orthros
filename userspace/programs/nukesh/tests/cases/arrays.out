@@ -1,0 +1,31 @@
+two three 0 1 2 3 one two 3
+four three
+one three four 3 0 2 3
+0 2 3 10
+0
+2 5 two five
+with space=3
+x=1
+y=2
+3
+2
+has-y
+no-x
+localhost:8080
+3 l2
+b
+k1 -> v1
+k2 -> v2
+a b c
+4 1 two 3 1 2 3
+2
+a b c
+declare -a a=()
+declare -a sparse=([2]="two" [5]="five")
+2: a b
+0:3
+1:1
+2:2
+2 1
+2 y
+status=0

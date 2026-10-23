@@ -58,6 +58,11 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
     cmd.args(["--all-targets", "--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)?;
 
+    step("Running Clippy on the host tests of the programs on Rust's standard library");
+    let mut cmd = userspace::host_cargo(ctx, "clippy");
+    cmd.args(["--all-targets", "--", "-D", "warnings"]);
+    process::run(ctx, &mut cmd)?;
+
     step("Running Clippy on the user programs");
     let mut cmd = userspace::cargo(ctx, "clippy");
     cmd.arg("--workspace").args(userspace::target_args(ctx)).args(["--", "-D", "warnings"]);

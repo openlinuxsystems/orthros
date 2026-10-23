@@ -1,0 +1,30 @@
+before
+trapped
+exit trap, status 5
+after 5
+caught USR1
+after-usr1
+int
+after-int
+ignored-term
+second
+none
+err at 11
+after-err
+trap -- 'echo x' EXIT
+ok
+errexit status 1
+survived
+in f
+f ok
+assignment status 1
+pipe-ok
+pipefail errexit 1
+ok
+nounset status 1
+empty
+exited 1
+killed status 143
+inner status 1
+child-exit
+status=0

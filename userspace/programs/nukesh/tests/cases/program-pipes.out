@@ -1,0 +1,31 @@
+a
+b
+c
+sorted a
+sorted b
+sorted c
+std: one err: two
+via named fd
+hi
+12
+job 1
+job 2
+job 3
+all jobs done
+killed status 143
+pipestatus 0 1 0
+[a
+b]
+first=b
+line=x
+line=y
+sub2
+6
+both
+err
+in
+named
+out
+std
+cleaned
+status=0

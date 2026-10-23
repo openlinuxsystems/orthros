@@ -45,3 +45,10 @@ SPDX-License-Identifier = "LicenseRef-DCO"
 path = "ports/mlibc/musl/COPYRIGHT"
 SPDX-FileCopyrightText = "2005-2020 Rich Felker, et al."
 SPDX-License-Identifier = "MIT"
+
+# What the shell's test scripts must write: bash's and dash's output,
+# compared byte for byte, which a header would change.
+[[annotations]]
+path = "userspace/programs/nukesh/tests/cases/*.out"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

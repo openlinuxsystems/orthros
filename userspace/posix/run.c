@@ -8,7 +8,8 @@
 // group of its own, in the foreground, with fork and exec. The tests are
 // the programs of this directory and the dynamically linked one of
 // dynamic/, the test of Rust's standard library
-// (std-test, userspace/programs), the C library's own tests (libc),
+// (std-test, userspace/programs), the shell's (shell), the C library's
+// own tests (libc),
 // libc-test's (libc-test) and Lua's test suite (lua); libc:<name> and
 // libc-test:<name> run only that suite's test <name>, with its output as
 // it goes. It prints "posix: <test> passed" or
@@ -54,6 +55,7 @@ static const struct test TESTS[] = {
 		{"exec", NULL, NULL},
 		{"signal", NULL, NULL},
 		{"pipe", NULL, NULL},
+		{"socket", NULL, NULL},
 		{"poll", NULL, NULL},
 		{"tty", NULL, NULL},
 		{"job", NULL, NULL},
@@ -67,6 +69,7 @@ static const struct test TESTS[] = {
 		{"dynamic", NULL, NULL},
 		{"utilities", NULL, NULL},
 		{"std-test", NULL, NULL},
+		{"shell", NULL, NULL},
 		{"libc", NULL, LIBC},
 		{"libc-test", NULL, LIBC_TEST},
 		{"lua", "/system/tests/lua/testes", LUA},

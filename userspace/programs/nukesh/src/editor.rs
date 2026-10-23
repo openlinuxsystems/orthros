@@ -1,0 +1,543 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The line editor.
+//!
+//! At a terminal, reedline reads each command: Emacs or vi keys (`set -o
+//! emacs`, `set -o vi`), the history (Up, Down, Ctrl-R), programmable
+//! completion on Tab, and a command that goes on past its line (an open
+//! quote, `if` with no `fi`, a here-document) read as one, with `PS2`
+//! before each line after the first. A dumb terminal (`TERM=dumb`, or no
+//! `TERM`) and input that is not a terminal get a plain reader: the
+//! prompt, then a line, read a byte at a time so that nothing after it is
+//! taken from the input.
+
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use reedline::{
+    Color, ColumnarMenu, Completer, CompletionResult, EditCommand, Emacs, Highlighter, HistoryItem,
+    KeyCode, KeyModifiers, Keybindings, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+    PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, StyledText,
+    Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
+    default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
+};
+
+use crate::parse;
+use crate::shell::Shell;
+use crate::{prompt, sys, text, trap};
+
+/// What the editor read.
+pub enum Input {
+    /// A command's text: one line, or several when the first did not
+    /// finish it.
+    Command(String),
+    /// Ctrl-C: the line was dropped.
+    Interrupted,
+    /// The end of the input: Ctrl-D on an empty line, or the end of a file
+    /// or pipe.
+    Eof,
+    /// `TMOUT` seconds went by with nothing typed.
+    TimedOut,
+    /// A signal with a trap came while the prompt waited; the line typed so
+    /// far is kept for the next prompt.
+    Signal,
+}
+
+/// The shell, as reedline's completer and validator hold it.
+#[derive(Clone)]
+struct Handle(Rc<RefCell<Shell>>);
+
+// SAFETY: reedline asks for a completer and a validator that are Send, so
+// that it could move them to another thread; it calls them only from
+// `read_line`, on the thread that runs the shell, and never moves them.
+// The editor that owns them stays on that thread as well.
+unsafe impl Send for Handle {}
+
+/// The line editor for an interactive shell.
+pub struct Editor {
+    shell: Rc<RefCell<Shell>>,
+    /// reedline, at a terminal that can take it.
+    line: Option<Reedline>,
+    /// Whether `line` has vi keys.
+    vi: bool,
+    /// Whether `line` wakes each second to look at the clock and at
+    /// signals: only for `TMOUT` and traps, so that an idle prompt costs
+    /// nothing otherwise.
+    wakes: bool,
+    /// Set to make `read_line` return, and the time (in milliseconds since
+    /// 1970) at which `TMOUT` runs out, or 0.
+    wake: Arc<AtomicBool>,
+    deadline: Arc<AtomicU64>,
+    /// The shell's history as reedline has it: the history's generation
+    /// and count when it was last given to reedline.
+    synced: Option<(u64, usize)>,
+    /// The line reedline read last, which it added to its own history.
+    submitted: Option<String>,
+}
+
+impl Editor {
+    pub fn new(shell: Rc<RefCell<Shell>>) -> Editor {
+        let fancy = can_edit(&shell.borrow());
+        let mut editor = Editor {
+            shell,
+            line: None,
+            vi: false,
+            wakes: false,
+            wake: Arc::new(AtomicBool::new(false)),
+            deadline: Arc::new(AtomicU64::new(0)),
+            synced: None,
+            submitted: None,
+        };
+        if fancy {
+            editor.build();
+        }
+        editor
+    }
+
+    /// Makes reedline for the shell's settings now.
+    fn build(&mut self) {
+        let (vi, colors, wakes) = {
+            let shell = self.shell.borrow();
+            (shell.opts.vi, colors(&shell), needs_wakes(&shell))
+        };
+        let handle = Handle(self.shell.clone());
+        let mut line = new_reedline(vi, colors)
+            .with_completer(Box::new(ShellCompleter(handle.clone())))
+            .with_validator(Box::new(ShellValidator(handle)))
+            .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+                ColumnarMenu::default().with_name(MENU),
+            )))
+            .with_quick_completions(true)
+            .with_partial_completions(true);
+        if wakes {
+            let (wake, deadline) = (self.wake.clone(), self.deadline.clone());
+            line = line
+                .with_break_signal(self.wake.clone())
+                .with_poll_interval(Duration::from_secs(1))
+                .with_idle_callback(Box::new(move || {
+                    let due = deadline.load(Ordering::Relaxed);
+                    if trap::pending_other_than(libc::SIGWINCH) || (due != 0 && now_millis() >= due)
+                    {
+                        wake.store(true, Ordering::Relaxed);
+                    }
+                }));
+        }
+        self.line = Some(line);
+        self.vi = vi;
+        self.wakes = wakes;
+        // The new editor's history is empty.
+        self.synced = None;
+    }
+
+    /// Shows the prompt (`PS1` expanded) and reads the next command.
+    pub fn read_command(&mut self) -> Input {
+        let (ps1, ps2, vi, wakes, timeout) = {
+            let mut shell = self.shell.borrow_mut();
+            let ps1 = shell.get("PS1").unwrap_or_default();
+            let ps1 = prompt::expand(&mut shell, &ps1);
+            let ps2 = shell.get("PS2").unwrap_or_default();
+            let ps2 = prompt::expand(&mut shell, &ps2);
+            (ps1, ps2, shell.opts.vi, needs_wakes(&shell), timeout(&shell))
+        };
+        if self.line.is_none() {
+            return self.read_plain(&ps1, timeout);
+        }
+        if wakes != self.wakes {
+            self.build();
+        } else if vi != self.vi {
+            self.vi = vi;
+            let line = self.line.take().map(|line| line.with_edit_mode(edit_mode(vi)));
+            self.line = line;
+        }
+        self.sync_history();
+        let due = timeout.map_or(0, |t| now_millis() + t.as_millis() as u64);
+        self.deadline.store(due, Ordering::Relaxed);
+        let prompt = ShellPrompt { left: ps1, more: ps2 };
+        let Some(line) = self.line.as_mut() else { return Input::Eof };
+        match line.read_line(&prompt) {
+            Ok(Signal::Success(text)) => {
+                self.submitted = Some(text.clone());
+                Input::Command(text)
+            }
+            Ok(Signal::CtrlC) => {
+                // As if SIGINT had come at the prompt, so that its trap runs.
+                trap::raise_later(libc::SIGINT);
+                Input::Interrupted
+            }
+            Ok(Signal::ExternalBreak(_)) => {
+                if trap::pending_other_than(libc::SIGWINCH) {
+                    Input::Signal
+                } else {
+                    Input::TimedOut
+                }
+            }
+            Ok(_) => Input::Eof,
+            Err(error) => {
+                // A terminal that went away: the end of the input.
+                let _ = sys::write_all(
+                    2,
+                    text::encode(&format!("nukesh: line editor: {error}\n")).as_slice(),
+                );
+                Input::Eof
+            }
+        }
+    }
+
+    /// Reads a command without reedline: a line, and more while the
+    /// command is not finished, each after `PS2`.
+    fn read_plain(&mut self, ps1: &str, timeout: Option<Duration>) -> Input {
+        let _ = sys::write_all(2, &text::encode(ps1));
+        if let Some(timeout) = timeout {
+            match sys::poll_in(0, timeout.as_millis().min(i32::MAX as u128) as i32) {
+                Ok(true) => {}
+                Ok(false) => return Input::TimedOut,
+                Err(_) if trap::is_pending(libc::SIGINT) => {
+                    let _ = sys::write_all(2, b"\n");
+                    return Input::Interrupted;
+                }
+                Err(_) => return Input::Signal,
+            }
+        }
+        let mut command = match read_plain_line(0) {
+            Got::Line(line) => line,
+            Got::Eof => return Input::Eof,
+            Got::Interrupted => {
+                let _ = sys::write_all(2, b"\n");
+                return Input::Interrupted;
+            }
+        };
+        loop {
+            let options = self.shell.borrow().parse_options();
+            if !needs_more(&command, options) {
+                return Input::Command(command);
+            }
+            let ps2 = {
+                let mut shell = self.shell.borrow_mut();
+                let ps2 = shell.get("PS2").unwrap_or_default();
+                prompt::expand(&mut shell, &ps2)
+            };
+            let _ = sys::write_all(2, &text::encode(&ps2));
+            match read_plain_line(0) {
+                Got::Line(line) => {
+                    command.push('\n');
+                    command.push_str(&line);
+                }
+                // The parser reports the unfinished command.
+                Got::Eof => return Input::Command(command),
+                Got::Interrupted => {
+                    let _ = sys::write_all(2, b"\n");
+                    return Input::Interrupted;
+                }
+            }
+        }
+    }
+
+    /// Gives reedline the shell's history again when it changed other
+    /// than by the line reedline read last, which it keeps on its own.
+    fn sync_history(&mut self) {
+        let Some(line) = self.line.as_mut() else { return };
+        let shell = self.shell.borrow();
+        let history = &shell.history;
+        let now = (history.generation, history.count());
+        let submitted = self.submitted.take();
+        let in_step = match (self.synced, submitted) {
+            (Some(then), None) => then == now,
+            // An empty line is not added to either.
+            (Some(then), Some(text)) if text.trim().is_empty() => then == now,
+            (Some((generation, count)), Some(text)) => {
+                generation == now.0
+                    && count + 1 == now.1
+                    && history.entries.last().is_some_and(|entry| entry.line == text)
+            }
+            (None, _) => false,
+        };
+        if !in_step {
+            let editor_history = line.history_mut();
+            let _ = editor_history.clear();
+            for entry in &history.entries {
+                let _ = editor_history.save(HistoryItem::from_command_line(entry.line.clone()));
+            }
+        }
+        self.synced = Some(now);
+    }
+}
+
+/// The completion menu's name, which Tab opens.
+const MENU: &str = "completion_menu";
+
+/// Whether reedline can run: input and output at a terminal that is not
+/// dumb.
+fn can_edit(shell: &Shell) -> bool {
+    let term = shell.get("TERM").unwrap_or_default();
+    sys::isatty(0) && sys::isatty(2) && !term.is_empty() && term != "dumb"
+}
+
+/// Whether the prompt has to wake: for `TMOUT`, and for traps on signals
+/// that can come while it waits.
+fn needs_wakes(shell: &Shell) -> bool {
+    timeout(shell).is_some()
+        || trap::SIGNALS.iter().any(|(_, signal)| {
+            !matches!(*signal, libc::SIGWINCH | libc::SIGCHLD)
+                && shell.trap_command(*signal as usize).is_some()
+        })
+}
+
+/// `TMOUT`: how long the prompt waits before the shell exits.
+fn timeout(shell: &Shell) -> Option<Duration> {
+    let seconds = shell.get("TMOUT")?.trim().parse::<f64>().ok()?;
+    (seconds > 0.0 && seconds.is_finite()).then(|| Duration::from_secs_f64(seconds))
+}
+
+/// The time, in milliseconds since 1970.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Whether the editor may use colour: not with `NO_COLOR` set.
+fn colors(shell: &Shell) -> bool {
+    shell.get("NO_COLOR").is_none_or(|v| v.is_empty())
+}
+
+/// reedline with the keys for `vi` or Emacs, and no colouring of its own
+/// for the line typed.
+fn new_reedline(vi: bool, colors: bool) -> Reedline {
+    Reedline::create()
+        .with_edit_mode(edit_mode(vi))
+        .with_highlighter(Box::new(Plain))
+        .with_ansi_colors(colors)
+        .use_bracketed_paste(true)
+}
+
+/// The keys: Emacs or vi, with Tab for completion.
+fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
+    let complete = |keys: &mut Keybindings| {
+        keys.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu(MENU.to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+        keys.add_binding(KeyModifiers::SHIFT, KeyCode::BackTab, ReedlineEvent::MenuPrevious);
+    };
+    if vi {
+        let mut insert = default_vi_insert_keybindings();
+        complete(&mut insert);
+        Box::new(Vi::new(insert, default_vi_normal_keybindings(), default_vi_visual_keybindings()))
+    } else {
+        let mut keys = default_emacs_keybindings();
+        complete(&mut keys);
+        Box::new(Emacs::new(keys))
+    }
+}
+
+/// The line as typed, without colours.
+struct Plain;
+
+impl Highlighter for Plain {
+    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        let mut styled = StyledText::default();
+        styled.buffer.push((Default::default(), line.to_string()));
+        styled
+    }
+}
+
+/// `PS1`, and `PS2` before each line after the first.
+struct ShellPrompt {
+    left: String,
+    more: String,
+}
+
+impl Prompt for ShellPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.left)
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.more)
+    }
+
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
+        let failed = match search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failed ",
+        };
+        Cow::Owned(format!("({failed}reverse-i-search)`{}': ", search.term))
+    }
+
+    // The prompt's colours are those its escapes give.
+    fn get_prompt_color(&self) -> Color {
+        Color::Default
+    }
+
+    fn get_prompt_multiline_color(&self) -> Color {
+        Color::Default
+    }
+
+    fn get_indicator_color(&self) -> Color {
+        Color::Default
+    }
+
+    fn get_prompt_right_color(&self) -> Color {
+        Color::Default
+    }
+}
+
+/// Tab: the shell's programmable completion.
+struct ShellCompleter(Handle);
+
+impl Completer for ShellCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
+        let Ok(mut shell) = self.0.0.try_borrow_mut() else {
+            return CompletionResult::fresh(Vec::new());
+        };
+        let (start, candidates) = shell.complete_line(line, pos);
+        let suggestions: Vec<Suggestion> = candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                display_override: (candidate.display != candidate.text)
+                    .then_some(candidate.display),
+                value: candidate.text,
+                span: Span::new(start, pos),
+                append_whitespace: candidate.space,
+                ..Suggestion::default()
+            })
+            .collect();
+        CompletionResult::fresh(suggestions)
+    }
+}
+
+/// Enter: a command that is not finished goes on to another line.
+struct ShellValidator(Handle);
+
+impl Validator for ShellValidator {
+    fn validate(&self, line: &str) -> ValidationResult {
+        let options = self.0.0.try_borrow().map(|shell| shell.parse_options()).unwrap_or_default();
+        if needs_more(line, options) {
+            ValidationResult::Incomplete
+        } else {
+            ValidationResult::Complete
+        }
+    }
+}
+
+/// Whether `text` ends inside a command, so that another line is needed:
+/// an open quote or construct, a here-document without its delimiter, a
+/// line that ends with `|` or `&&`, or a `\` that joins the next line.
+pub fn needs_more(text: &str, options: parse::Options) -> bool {
+    let last_line = text.rsplit('\n').next().unwrap_or("");
+    let backslashes = last_line.chars().rev().take_while(|c| *c == '\\').count();
+    if backslashes % 2 == 1 && !last_line.trim_start().starts_with('#') {
+        return true;
+    }
+    let mut whole = text.to_string();
+    whole.push('\n');
+    let parser = parse::Parser::new(&whole, Rc::from("stdin"), 1, options);
+    matches!(parser.parse(), Err(parse::Error::Incomplete(_)))
+}
+
+/// A line read by the plain reader.
+enum Got {
+    Line(String),
+    Interrupted,
+    Eof,
+}
+
+/// Reads a line from `fd` a byte at a time, without its newline. Ctrl-C
+/// (SIGINT caught while waiting) drops it; other signals wait for the
+/// line, and their traps run after it.
+fn read_plain_line(fd: i32) -> Got {
+    let mut bytes = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        // SAFETY: byte is valid for writes of one byte.
+        let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        match n {
+            1 if byte[0] == b'\n' => return Got::Line(text::decode(&bytes)),
+            1 => bytes.push(byte[0]),
+            0 => break,
+            _ if sys::errno() == libc::EINTR => {
+                if trap::is_pending(libc::SIGINT) {
+                    return Got::Interrupted;
+                }
+            }
+            _ => break,
+        }
+    }
+    if bytes.is_empty() { Got::Eof } else { Got::Line(text::decode(&bytes)) }
+}
+
+/// `read -e`: one line from the editor, with `initial` already typed. The
+/// end of the input is `None`.
+pub fn read_line(shell: &mut Shell, prompt: &str, initial: &str) -> Option<String> {
+    if !can_edit(shell) {
+        let _ = sys::write_all(2, &text::encode(prompt));
+        return match read_plain_line(0) {
+            Got::Line(line) => Some(line),
+            Got::Interrupted | Got::Eof => None,
+        };
+    }
+    let mut line = new_reedline(shell.opts.vi, colors(shell));
+    if !initial.is_empty() {
+        line.run_edit_commands(&[EditCommand::InsertString(initial.to_string())]);
+    }
+    let prompt = ShellPrompt { left: prompt.to_string(), more: String::new() };
+    match line.read_line(&prompt) {
+        Ok(Signal::Success(text)) => Some(text),
+        Ok(Signal::CtrlC) => {
+            trap::raise_later(libc::SIGINT);
+            None
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn more(text: &str) -> bool {
+        needs_more(text, parse::Options::default())
+    }
+
+    #[test]
+    fn unfinished_commands_need_more_lines() {
+        assert!(more("echo 'abc"));
+        assert!(more("if true; then"));
+        assert!(more("echo a |"));
+        assert!(more("true &&"));
+        assert!(more("cat <<EOF"));
+        assert!(more("cat <<EOF\nbody"));
+        assert!(more("echo a \\"));
+        assert!(more("f() {"));
+        assert!(more("echo $(date"));
+    }
+
+    #[test]
+    fn finished_commands_do_not() {
+        assert!(!more("echo hi"));
+        assert!(!more("cat <<EOF\nbody\nEOF"));
+        assert!(!more("echo a \\\\"));
+        assert!(!more("# a comment \\"));
+        assert!(!more("if true; then echo; fi"));
+        assert!(!more(""));
+        // A syntax error is not more to read: the parser reports it.
+        assert!(!more("echo )"));
+    }
+}

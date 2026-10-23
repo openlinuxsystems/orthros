@@ -1,0 +1,94 @@
+no newline
+a	bAA
+a\tb
+-
+   ab|cd   |00042|ff|FF|10|1.234500e+03|3.14|x|%|  2.2|+3| 4
+a
+b
+c
+1 a
+2 b
+3 
+x	y
+a\ b
+it\'s
+$'x\ny'
+a-b
+none
+   1|2  |
+1 2 3,4
+<line1>
+<line2>
+abc
+a
+[  spaced  ]
+[  spaced  ]
+a\b
+ab
+a 
+b val
+c 
+rest: file
+bad x
+rest: 
+missing b
+rest: 
+a 
+c 
+rest: -d
+/tmp
+back
+cd failed
+/tmp
+/
+/tmp
+echo is a shell builtin
+file
+keyword
+builtin
+cd
+function
+alias ll='ls -l'
+unaliased
+8
+abc
+ABC
+exported
+0022
+u=rwx,g=rx,o=rx
+0027
+KILL
+TERM
+2
+eval 4
+from var
+12
+0
+0
+0
+0
+tests
+str-lt
+parens
+b c
+0
+shift status 1
+4
+0
+hashed
+colon 0
+times
+gone
+f gone
+12
+5 6
+3
+extglob-off
+now-on
+errexit off
+via-command
+via-builtin
+called from wrapper
+/ /tmp /tmp
+/tmp /tmp
+status=0

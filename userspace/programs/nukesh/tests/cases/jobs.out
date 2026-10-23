@@ -1,0 +1,17 @@
+waited 0
+status 7
+job 1
+job 2
+job 3
+all jobs done
+a 3
+b 4
+first 1
+killed 143
+by job 143
+nothing to wait for 0
+not a child 127
+has-last-pid
+grouped
+outer
+status=0

@@ -1,0 +1,49 @@
+a
+b
+3
+fd3
+out
+err
+std: one err: two
+via named fd
+hi
+hi
+more
+read text
+noclobber
+y
+12
+x|y z
+Hello, world!
+  2+2=4 and sub and $literal and `tick`
+QUOTED $HOME `DATE` \N
+tab-indented
+twice
+first
+second
+alpha=1
+beta=2
+function body input
+got: in a pipe
+a
+b
+c
+first=b
+c
+to five
+stderr
+stdout
+null-ok
+empty-made
+both
+empty
+err
+f
+g
+in
+named
+out
+rw
+std
+cleaned
+status=0

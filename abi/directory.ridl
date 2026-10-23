@@ -50,6 +50,8 @@ enum FileKind: u8 {
     pipe = 4;
     /// A symbolic link (`make_link`).
     symlink = 5;
+    /// A socket (radix-process(2)'s `socket_pair`).
+    socket = 6;
 }
 
 /// What kind of filesystem one is.
