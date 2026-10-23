@@ -97,14 +97,15 @@ struct Path {
 
 // Resolves `path`, relative to the directory `dirfd` (AT_FDCWD for the
 // working directory): an absolute path, or one relative to the working
-// directory, becomes a path beneath the root, with `.` and `..` worked
-// out (there are no symbolic links to follow). Returns 0 or an errno.
+// directory, becomes a path beneath the root, whose `.`, `..` and
+// symbolic links the kernel works out. Returns 0 or an errno.
 int resolve(int dirfd, const char *path, Path *out);
 
 // The working directory, absolute, as the program knows it.
 const char *cwd();
 
-// Makes `path` (absolute, already resolved) the working directory.
+// Makes `path` (absolute, with no links in it: what the kernel's
+// real_path returned) the working directory.
 int set_cwd(const char *path);
 
 // Called at start-up with the auxiliary vector's entries.

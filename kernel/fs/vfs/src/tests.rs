@@ -18,7 +18,9 @@ use crate::mount::{Location, OpenFlags, Vfs};
 use crate::path::{self, Component};
 use crate::synthetic::{FixedDir, Generated, Null, SyntheticFs, Zero};
 use crate::tmpfs::Tmpfs;
-use crate::{APPEND, Error, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem};
+use crate::{
+    APPEND, Error, FileSystem, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem,
+};
 
 fn tmpfs(max: u64) -> FsRef {
     Tmpfs::new(max, u64::MAX).unwrap()
@@ -196,6 +198,137 @@ fn paths_stay_beneath_their_directory() {
     assert_eq!(vfs.stat(&home, "").unwrap().kind, Kind::Directory);
     // From the root, `..` inside the path is fine.
     assert_eq!(vfs.stat(&root, "home/user/../user/notes").unwrap().size, 2);
+}
+
+fn link_text(vfs: &Vfs, base: &Location, path: &str) -> Result<String> {
+    let mut out = [0u8; 64];
+    let n = vfs.read_link(base, path, &mut SliceMut(&mut out[..]))?;
+    Ok(String::from(core::str::from_utf8(&out[..n]).unwrap()))
+}
+
+#[test]
+fn symbolic_links_are_followed() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "a").unwrap();
+    vfs.make_directory(&root, "a/b").unwrap();
+    write(&vfs, &root, "a/b/file", b"data").unwrap();
+    // Relative targets go on from the link's directory.
+    vfs.make_link(&root, "rel", "a/b").unwrap();
+    vfs.make_link(&root, "a/up", "../a/b/file").unwrap();
+    assert_eq!(vfs.stat(&root, "rel/file").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "a/up").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "rel").unwrap().kind, Kind::Directory);
+    let link = vfs.stat_link(&root, "rel").unwrap();
+    assert_eq!((link.kind, link.size), (Kind::Symlink, 3));
+    assert_eq!(link_text(&vfs, &root, "rel").unwrap(), "a/b");
+    assert_eq!(link_text(&vfs, &root, "a/b/file").err(), Some(Error::NotLink));
+    assert!(names(&vfs, &root).contains(&(String::from("rel"), Kind::Symlink)));
+    // A `/` after the last name follows it.
+    assert_eq!(vfs.resolve_link(&root, "rel/").unwrap().node.kind(), Kind::Directory);
+    // Absolute targets start again from where the walk did.
+    vfs.make_link(&root, "abs", "/a/b/file").unwrap();
+    assert_eq!(read_all(&vfs.open(&root, "abs", OpenFlags::default()).unwrap().node), b"data");
+    let a = vfs.resolve(&root, "a").unwrap();
+    vfs.make_link(&a, "inside", "/b/file").unwrap();
+    assert_eq!(vfs.stat(&a, "inside").unwrap().size, 4);
+    assert_eq!(vfs.stat(&root, "a/inside").err(), Some(Error::NotFound));
+    // `..` at the root is the root, as `/..` is `/`.
+    assert_eq!(vfs.stat(&root, "..").unwrap().kind, Kind::Directory);
+    assert_eq!(vfs.stat(&root, "../a/b/file").unwrap().size, 4);
+    assert_eq!(vfs.stat(&a, "..").err(), Some(Error::Outside));
+    // Not following the last name.
+    let no_follow = OpenFlags { no_follow: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "abs", no_follow).err(), Some(Error::Loop));
+    assert!(vfs.open(&root, "rel/file", no_follow).is_ok());
+    // Dangling links and loops.
+    vfs.make_link(&root, "dangling", "nowhere/x").unwrap();
+    assert_eq!(vfs.stat(&root, "dangling").err(), Some(Error::NotFound));
+    assert_eq!(vfs.stat_link(&root, "dangling").unwrap().kind, Kind::Symlink);
+    vfs.make_link(&root, "loop1", "loop2").unwrap();
+    vfs.make_link(&root, "loop2", "./loop1").unwrap();
+    assert_eq!(vfs.stat(&root, "loop1").err(), Some(Error::Loop));
+    assert_eq!(vfs.stat_link(&root, "loop1").unwrap().kind, Kind::Symlink);
+    // Where paths really lead.
+    let real = |base: &Location, path: &str| {
+        let mut out = [0u8; 64];
+        let n = vfs.real_path(base, path, &mut SliceMut(&mut out[..])).unwrap();
+        String::from(core::str::from_utf8(&out[..n]).unwrap())
+    };
+    assert_eq!(real(&root, "rel/file"), "a/b/file");
+    assert_eq!(real(&root, "a/up/"), "a/b/file");
+    assert_eq!(real(&root, "rel/.."), "a");
+    assert_eq!(real(&root, "abs/../../b/.."), "a");
+    assert_eq!(real(&root, ".."), ".");
+    assert_eq!(real(&a, "inside"), "b/file");
+    let mut short = [0u8; 3];
+    assert_eq!(vfs.real_path(&root, "rel", &mut SliceMut(&mut short[..])), Ok(3));
+    assert_eq!(&short, b"a/b");
+    let mut shorter = [0u8; 2];
+    assert_eq!(vfs.real_path(&root, "rel/file", &mut SliceMut(&mut shorter[..])), Ok(8));
+    assert_eq!(&shorter, b"a/");
+    // Making links.
+    assert_eq!(vfs.make_link(&root, "rel", "x").err(), Some(Error::Exists));
+    assert_eq!(vfs.make_link(&root, "empty", "").err(), Some(Error::BadName));
+    assert_eq!(vfs.make_link(&root, "a/b/file/x", "y").err(), Some(Error::NotDirectory));
+}
+
+#[test]
+fn at_most_forty_links_are_followed() {
+    let vfs = vfs();
+    let root = vfs.root();
+    write(&vfs, &root, "file", b"x").unwrap();
+    for i in 0..=crate::MAX_LINKS {
+        let next =
+            if i == crate::MAX_LINKS { String::from("file") } else { std::format!("l{}", i + 1) };
+        vfs.make_link(&root, &std::format!("l{i}"), &next).unwrap();
+    }
+    assert_eq!(vfs.stat(&root, "l1").unwrap().size, 1);
+    assert_eq!(vfs.stat(&root, "l0").err(), Some(Error::Loop));
+}
+
+#[test]
+fn files_are_made_and_names_changed_through_links() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "dir").unwrap();
+    // Creating through a link makes the file where it points.
+    vfs.make_link(&root, "new", "dir/made").unwrap();
+    write(&vfs, &root, "new", b"xy").unwrap();
+    assert_eq!(vfs.stat(&root, "dir/made").unwrap().size, 2);
+    assert_eq!(vfs.stat_link(&root, "new").unwrap().kind, Kind::Symlink);
+    let exclusive = OpenFlags { create: true, exclusive: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "new", exclusive).err(), Some(Error::Exists));
+    let no_follow = OpenFlags { create: true, no_follow: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&root, "new", no_follow).err(), Some(Error::Loop));
+    // Renaming and removing take the link, not what it points to.
+    vfs.make_link(&root, "to_dir", "dir").unwrap();
+    vfs.rename(&root, "to_dir", &root, "dir2").unwrap();
+    assert_eq!(vfs.stat(&root, "dir2/made").unwrap().size, 2);
+    vfs.remove(&root, "dir2").unwrap();
+    assert_eq!(vfs.stat(&root, "dir").unwrap().kind, Kind::Directory);
+    assert_eq!(vfs.stat_link(&root, "dir2").err(), Some(Error::NotFound));
+    // A link replaces a file, but not a directory.
+    vfs.rename(&root, "new", &root, "dir/made").unwrap();
+    assert_eq!(vfs.stat_link(&root, "dir/made").unwrap().kind, Kind::Symlink);
+    vfs.make_link(&root, "other", "x").unwrap();
+    assert_eq!(vfs.rename(&root, "other", &root, "dir").err(), Some(Error::IsDirectory));
+}
+
+#[test]
+fn links_count_against_the_limits() {
+    let fs = Tmpfs::new(8, 3).unwrap();
+    let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
+    let root = vfs.root();
+    assert_eq!(vfs.make_link(&root, "long", "123456789").err(), Some(Error::NoSpace));
+    vfs.make_link(&root, "a", "1234").unwrap();
+    vfs.make_link(&root, "b", "5678").unwrap();
+    assert_eq!(fs.info().free_files, 0);
+    assert_eq!(vfs.make_link(&root, "c", "9").err(), Some(Error::NoSpace));
+    vfs.remove(&root, "a").unwrap();
+    vfs.remove(&root, "b").unwrap();
+    assert_eq!(fs.info().free_files, 2);
+    vfs.make_link(&root, "c", "12345678").unwrap();
 }
 
 #[test]
@@ -444,6 +577,7 @@ fn the_boot_archive_as_a_filesystem() {
     let mut writer = radix_bootfs::write::Writer::new();
     writer.directory("system", 0o755, 1).unwrap();
     writer.directory("system/bin", 0o755, 1).unwrap();
+    writer.symlink("system/bin/sh", "spark", 1).unwrap();
     writer.file("system/bin/spark", 0o755, 2, b"\x7fELF spark").unwrap();
     writer.directory("system/etc", 0o755, 1).unwrap();
     writer.file("system/etc/motd", 0o644, 3, b"hello\n").unwrap();
@@ -459,6 +593,14 @@ fn the_boot_archive_as_a_filesystem() {
         names(&vfs, &system),
         [(String::from("bin"), Kind::Directory), (String::from("etc"), Kind::Directory)]
     );
+    let bin = vfs.resolve(&root, "system/bin").unwrap();
+    assert_eq!(names(&vfs, &bin)[0], (String::from("sh"), Kind::Symlink));
+    let sh = vfs.open(&root, "system/bin/sh", OpenFlags::default()).unwrap();
+    assert_eq!(read_all(&sh.node), b"\x7fELF spark");
+    let link = vfs.stat_link(&root, "system/bin/sh").unwrap();
+    assert_eq!((link.kind, link.size), (Kind::Symlink, 5));
+    assert_eq!(link_text(&vfs, &root, "system/bin/sh").unwrap(), "spark");
+    assert_eq!(vfs.make_link(&root, "system/bin/ls", "x").err(), Some(Error::ReadOnly));
     assert_eq!(vfs.open(&root, "system/new", create()).err(), Some(Error::ReadOnly));
     assert_eq!(spark.node.write(0, &Slice(b"x")), Err(Error::ReadOnly));
     // Each file is one node, so a tmpfs mounts over a directory of it.

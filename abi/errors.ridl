@@ -146,4 +146,9 @@ errors file = 2 {
     /// chain, for a lock the caller's process holds (radix-file(2)'s
     /// `lock`).
     deadlock = 19 => EDEADLK;
+    /// Resolving a path met more than 40 symbolic links, or one where
+    /// the call said not to follow it (radix-directory(2)).
+    too_many_links = 20 => ELOOP;
+    /// The file is not a symbolic link.
+    not_link = 21 => EINVAL;
 }

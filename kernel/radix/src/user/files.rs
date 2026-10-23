@@ -22,7 +22,7 @@
 use core::mem::size_of;
 
 use radix_abi::capability::SlotFlags;
-use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags};
+use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags};
 use radix_abi::errors::Kernel;
 use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, Whence};
 use radix_abi::{UserBuffer, file, terminal};
@@ -84,13 +84,22 @@ impl Path {
         Ok(path)
     }
 
-    /// The path, checked (radix_vfs::path::parse).
-    fn as_str(&self) -> Result<&str> {
-        let bytes = match self {
+    fn bytes(&self) -> &[u8] {
+        match self {
             Path::Short(bytes, len) => &bytes[..*len],
             Path::Long(bytes) => &bytes[..],
-        };
-        radix_vfs::path::parse(bytes).map_err(fs::status)
+        }
+    }
+
+    /// The path, checked (radix_vfs::path::parse).
+    fn as_str(&self) -> Result<&str> {
+        radix_vfs::path::parse(self.bytes()).map_err(fs::status)
+    }
+
+    /// The bytes as a symbolic link's target: UTF-8, which may start with
+    /// `/` (the VFS checks the rest).
+    fn as_target(&self) -> Result<&str> {
+        core::str::from_utf8(self.bytes()).map_err(|_| fs::status(radix_vfs::Error::BadName))
     }
 }
 
@@ -156,6 +165,7 @@ fn file_kind(kind: Kind) -> FileKind {
         Kind::BlockDevice => FileKind::BlockDevice,
         Kind::CharDevice => FileKind::CharDevice,
         Kind::Pipe => FileKind::Pipe,
+        Kind::Symlink => FileKind::Symlink,
     }
 }
 
@@ -233,6 +243,7 @@ pub fn directory_method(
                 exclusive: a.flags.contains(OpenFlags::EXCLUSIVE),
                 truncate: a.flags.contains(OpenFlags::TRUNCATE),
                 directory: a.flags.contains(OpenFlags::DIRECTORY),
+                no_follow: a.flags.contains(OpenFlags::NO_FOLLOW),
             };
             let at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
             let description = Description {
@@ -298,7 +309,7 @@ pub fn directory_method(
             let a = directory::StatArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
             let path = Path::copy(a.path)?;
-            let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
             let stat = at.node.stat();
             let results = directory::StatResults {
                 kind: file_kind(stat.kind),
@@ -316,9 +327,42 @@ pub fn directory_method(
             let a = directory::SetTimesArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
             let path = Path::copy(a.path)?;
-            let at = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
             set_times(&at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
+        }
+        directory::MAKE_LINK => {
+            let a = directory::MakeLinkArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let (path, target) = (Path::copy(a.path)?, Path::copy(a.target)?);
+            vfs()?.make_link(&dir.at, path.as_str()?, target.as_target()?).map_err(
+                |err| match err {
+                    // FAT has no links: Linux says EPERM.
+                    radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
+                    err => fs::status(err),
+                },
+            )?;
+            answer(label, 0, [0; 8])
+        }
+        directory::READ_LINK => {
+            let a = directory::ReadLinkArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let path = Path::copy(a.path)?;
+            let (address, len) = user_range(a.buffer)?;
+            let mut out = UserOut { address, len };
+            let len = vfs()?.read_link(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
+            let results = directory::ReadLinkResults { len: len as u64 };
+            answer(label, directory::ReadLinkResults::WORDS, results.encode())
+        }
+        directory::REAL_PATH => {
+            let a = directory::RealPathArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let path = Path::copy(a.path)?;
+            let (address, len) = user_range(a.buffer)?;
+            let mut out = UserOut { address, len };
+            let len = vfs()?.real_path(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
+            let results = directory::RealPathResults { len: len as u64 };
+            answer(label, directory::RealPathResults::WORDS, results.encode())
         }
         directory::MOUNT => {
             let a = directory::MountArgs::decode(args)?;
@@ -802,6 +846,18 @@ fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
     }
     *at = new as u64;
     Ok(*at)
+}
+
+/// Where `path` leads from `at`, following a symbolic link that is its
+/// last name unless `flags` says no_follow.
+fn resolve(at: &Location, path: &str, flags: PathFlags) -> Result<Location> {
+    let vfs = vfs()?;
+    if flags.contains(PathFlags::NO_FOLLOW) {
+        vfs.resolve_link(at, path)
+    } else {
+        vfs.resolve(at, path)
+    }
+    .map_err(fs::status)
 }
 
 /// `set_times`: sets the times of the node at `at`, TIME_NOW meaning now

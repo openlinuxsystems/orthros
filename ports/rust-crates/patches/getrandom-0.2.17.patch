@@ -1,0 +1,32 @@
+SPDX-FileCopyrightText: The Rand Project Developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+getrandom 0.2 takes random bytes from getentropy on Radix, which mlibc
+has, as it does on OpenBSD, and finds errno through __errno_location.
+
+diff --git a/getrandom-0.2.17/src/lib.rs b/getrandom-0.2.17/src/lib.rs
+index 4d2e4ea..688ba8e 100644
+--- a/getrandom-0.2.17/src/lib.rs
++++ b/getrandom-0.2.17/src/lib.rs
+@@ -243,6 +243,7 @@ cfg_if! {
+         target_os = "openbsd",
+         target_os = "vita",
+         target_os = "emscripten",
++        target_os = "radix",
+     ))] {
+         mod util_libc;
+         #[path = "getentropy.rs"] mod imp;
+diff --git a/getrandom-0.2.17/src/util_libc.rs b/getrandom-0.2.17/src/util_libc.rs
+index f488b41..a0e20cd 100644
+--- a/getrandom-0.2.17/src/util_libc.rs
++++ b/getrandom-0.2.17/src/util_libc.rs
+@@ -11,7 +11,7 @@ use libc::c_void;
+ cfg_if! {
+     if #[cfg(any(target_os = "netbsd", target_os = "openbsd", target_os = "android", target_os = "cygwin"))] {
+         use libc::__errno as errno_location;
+-    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly"))] {
++    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly", target_os = "radix"))] {
+         use libc::__errno_location as errno_location;
+     } else if #[cfg(any(target_os = "solaris", target_os = "illumos"))] {
+         use libc::___errno as errno_location;

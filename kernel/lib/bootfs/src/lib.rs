@@ -17,7 +17,9 @@
 //! or listing a directory cannot fail; both read the headers in turn,
 //! which suits an archive of a few files. Any input gives a result or an
 //! error, never a panic: the property tests feed it garbage. Only regular
-//! files and directories are allowed; links and devices are refused.
+//! files, directories and symbolic links are allowed (a link's target, at
+//! most [`MAX_LINK`] bytes, is in its header); hard links and devices are
+//! refused.
 //!
 //! With the `write` feature, [`write::Writer`] makes archives, for `ob`
 //! and the tests.
@@ -41,12 +43,16 @@ pub const MAX_ENTRIES: usize = 4096;
 /// The longest path, prefix and name together.
 pub const MAX_PATH: usize = 255;
 
+/// The longest target of a symbolic link: ustar's link name field.
+pub const MAX_LINK: usize = 100;
+
 const NAME: (usize, usize) = (0, 100);
 const MODE: (usize, usize) = (100, 8);
 const SIZE: (usize, usize) = (124, 12);
 const MTIME: (usize, usize) = (136, 12);
 const CHECKSUM: (usize, usize) = (148, 8);
 const TYPE: usize = 156;
+const LINK: (usize, usize) = (157, MAX_LINK);
 const MAGIC: (usize, usize) = (257, 6);
 const PREFIX: (usize, usize) = (345, 155);
 
@@ -57,9 +63,11 @@ pub enum Kind {
     File,
     /// A directory.
     Directory,
+    /// A symbolic link: its data is the path it points to.
+    Symlink,
 }
 
-/// A file or directory in the archive.
+/// A file, directory or symbolic link in the archive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<'a> {
     path: Path<'a>,
@@ -69,7 +77,8 @@ pub struct Entry<'a> {
     pub mode: u32,
     /// When it was last changed, in seconds since 1970.
     pub mtime: u64,
-    /// Its contents: empty for a directory.
+    /// Its contents: empty for a directory, and the path it points to
+    /// for a symbolic link (never empty, UTF-8, without NULs).
     pub data: &'a [u8],
 }
 
@@ -148,8 +157,11 @@ pub enum Error {
     BadPath,
     /// The paths are not in order, or one is there twice.
     Order,
-    /// An entry is something other than a file or a directory.
+    /// An entry is something other than a file, a directory or a
+    /// symbolic link.
     Unsupported,
+    /// A symbolic link's target is empty or not UTF-8.
+    BadLink,
     /// More than [`MAX_ENTRIES`] entries.
     TooMany,
 }
@@ -163,7 +175,10 @@ impl fmt::Display for Error {
             Error::BadNumber => "a number in a header is not octal or is too large",
             Error::BadPath => "a path is empty, absolute, too long, not UTF-8 or has . or .. in it",
             Error::Order => "the paths are not in order, or one is there twice",
-            Error::Unsupported => "an entry is a link or a device, not a file or a directory",
+            Error::Unsupported => {
+                "an entry is a hard link or a device, not a file, directory or symbolic link"
+            }
+            Error::BadLink => "a symbolic link's target is empty or not UTF-8",
             Error::TooMany => "the archive has too many entries",
         })
     }
@@ -261,6 +276,7 @@ impl<'a> Archive<'a> {
         let kind = match header[TYPE] {
             b'0' | 0 => Kind::File,
             b'5' => Kind::Directory,
+            b'2' => Kind::Symlink,
             _ => return Err(Error::Unsupported),
         };
         let size = number(field(header, SIZE))?;
@@ -275,8 +291,15 @@ impl<'a> Archive<'a> {
                 let end = start.checked_add(size).ok_or(Error::Truncated)?;
                 self.bytes.get(start..end).ok_or(Error::Truncated)?
             }
-            Kind::Directory if size == 0 => &[],
-            Kind::Directory => return Err(Error::BadNumber),
+            Kind::Directory | Kind::Symlink if size != 0 => return Err(Error::BadNumber),
+            Kind::Directory => &[],
+            Kind::Symlink => {
+                let target = text(field(header, LINK)).map_err(|_| Error::BadLink)?;
+                if target.is_empty() {
+                    return Err(Error::BadLink);
+                }
+                target.as_bytes()
+            }
         };
         let next = start + size.div_ceil(BLOCK) * BLOCK;
         if next > self.bytes.len() {

@@ -119,7 +119,8 @@ int free_slot(int min_fd, uint32_t *slot) {
 namespace {
 
 // Appends the components of `path` to the resolved path in `out` (which
-// holds `len` bytes, no `/` at either end), working out `.` and `..`.
+// holds `len` bytes, no `/` at either end), working out `.` and `..` by
+// their names: only for a working directory, which has no links in it.
 int append(char *out, size_t *len, const char *path) {
 	const char *p = path;
 	while(*p) {
@@ -171,17 +172,30 @@ int resolve(int dirfd, const char *path, Path *out) {
 		out->len = total;
 		return 0;
 	}
+	// Beneath the root: an absolute path without its leading slashes, or
+	// the working directory (which has no links or `..` in it) and the
+	// path. The kernel works out `.`, `..` and symbolic links, as a link
+	// changes where a `..` after it leads.
 	out->dir = SLOT_ROOT;
-	out->len = 0;
-	if(path[0] != '/') {
-		if(int e = append(out->text, &out->len, current_dir); e)
-			return e;
+	size_t len = 0;
+	if(path[0] == '/') {
+		while(*path == '/')
+			path++;
+	} else if(current_dir[1]) {
+		size_t dir = strlen(current_dir + 1);
+		memcpy(out->text, current_dir + 1, dir);
+		out->text[dir] = '/';
+		len = dir + 1;
 	}
-	if(int e = append(out->text, &out->len, path); e)
-		return e;
-	if(!out->len)
-		out->text[out->len++] = '.';
-	out->text[out->len] = 0;
+	size_t rest = strlen(path);
+	if(len + rest >= PATH_MAX_BYTES)
+		return ENAMETOOLONG;
+	memcpy(out->text + len, path, rest);
+	len += rest;
+	if(!len)
+		out->text[len++] = '.';
+	out->text[len] = 0;
+	out->len = len;
 	return 0;
 }
 
@@ -266,6 +280,10 @@ void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocate
 		break;
 	case RADIX_FILE_KIND_PIPE:
 		st->st_mode = S_IFIFO | 0600;
+		st->st_nlink = 1;
+		break;
+	case RADIX_FILE_KIND_SYMLINK:
+		st->st_mode = S_IFLNK | 0777;
 		st->st_nlink = 1;
 		break;
 	default:

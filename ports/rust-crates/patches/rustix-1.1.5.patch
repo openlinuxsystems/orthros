@@ -1,0 +1,221 @@
+SPDX-FileCopyrightText: Dan Gohman and the rustix contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+rustix's libc back end on Radix: mlibc has statvfs but no statfs,
+no fallocate modes and no IPPROTO_MPTCP; ioctl request numbers are
+unsigned long, as on the BSDs, and msg_controllen is a socklen_t, as
+POSIX has it.
+
+diff --git a/rustix-1.1.5/src/backend/libc/fs/dir.rs b/rustix-1.1.5/src/backend/libc/fs/dir.rs
+index 6574287..c8be946 100644
+--- a/rustix-1.1.5/src/backend/libc/fs/dir.rs
++++ b/rustix-1.1.5/src/backend/libc/fs/dir.rs
+@@ -22,6 +22,7 @@ use crate::fs::{fstat, Stat};
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ use crate::fs::{fstatfs, StatFs};
+ #[cfg(not(any(solarish, target_os = "vita", target_os = "wasi")))]
+@@ -249,6 +250,7 @@ impl Dir {
+         target_os = "redox",
+         target_os = "vita",
+         target_os = "wasi",
++        target_os = "radix",
+     )))]
+     #[inline]
+     pub fn statfs(&self) -> io::Result<StatFs> {
+diff --git a/rustix-1.1.5/src/backend/libc/fs/syscalls.rs b/rustix-1.1.5/src/backend/libc/fs/syscalls.rs
+index c95eaf5..50f7238 100644
+--- a/rustix-1.1.5/src/backend/libc/fs/syscalls.rs
++++ b/rustix-1.1.5/src/backend/libc/fs/syscalls.rs
+@@ -47,6 +47,7 @@ use crate::fs::SealFlags;
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ use crate::fs::StatFs;
+ #[cfg(not(any(target_os = "espidf", target_os = "horizon", target_os = "vita")))]
+@@ -262,6 +263,7 @@ pub(crate) fn openat(
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ #[inline]
+ pub(crate) fn statfs(filename: &CStr) -> io::Result<StatFs> {
+@@ -1610,6 +1612,7 @@ fn fstat_old(fd: BorrowedFd<'_>) -> io::Result<Stat> {
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ pub(crate) fn fstatfs(fd: BorrowedFd<'_>) -> io::Result<StatFs> {
+     let mut statfs = MaybeUninit::<StatFs>::uninit();
+diff --git a/rustix-1.1.5/src/backend/libc/fs/types.rs b/rustix-1.1.5/src/backend/libc/fs/types.rs
+index 6a4ed6d..273f9a3 100644
+--- a/rustix-1.1.5/src/backend/libc/fs/types.rs
++++ b/rustix-1.1.5/src/backend/libc/fs/types.rs
+@@ -794,6 +794,7 @@ bitflags! {
+             target_os = "haiku",
+             target_os = "hurd",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const KEEP_SIZE = bitcast!(c::FALLOC_FL_KEEP_SIZE);
+         /// `FALLOC_FL_PUNCH_HOLE`
+@@ -804,6 +805,7 @@ bitflags! {
+             target_os = "haiku",
+             target_os = "hurd",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const PUNCH_HOLE = bitcast!(c::FALLOC_FL_PUNCH_HOLE);
+         /// `FALLOC_FL_NO_HIDE_STALE`
+@@ -819,6 +821,7 @@ bitflags! {
+             target_os = "l4re",
+             target_os = "linux",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const NO_HIDE_STALE = bitcast!(c::FALLOC_FL_NO_HIDE_STALE);
+         /// `FALLOC_FL_COLLAPSE_RANGE`
+@@ -830,6 +833,7 @@ bitflags! {
+             target_os = "hurd",
+             target_os = "emscripten",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const COLLAPSE_RANGE = bitcast!(c::FALLOC_FL_COLLAPSE_RANGE);
+         /// `FALLOC_FL_ZERO_RANGE`
+@@ -841,6 +845,7 @@ bitflags! {
+             target_os = "hurd",
+             target_os = "emscripten",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const ZERO_RANGE = bitcast!(c::FALLOC_FL_ZERO_RANGE);
+         /// `FALLOC_FL_INSERT_RANGE`
+@@ -852,6 +857,7 @@ bitflags! {
+             target_os = "hurd",
+             target_os = "emscripten",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const INSERT_RANGE = bitcast!(c::FALLOC_FL_INSERT_RANGE);
+         /// `FALLOC_FL_UNSHARE_RANGE`
+@@ -863,6 +869,7 @@ bitflags! {
+             target_os = "hurd",
+             target_os = "emscripten",
+             target_os = "wasi",
++            target_os = "radix",
+         )))]
+         const UNSHARE_RANGE = bitcast!(c::FALLOC_FL_UNSHARE_RANGE);
+ 
+@@ -1074,6 +1081,7 @@ pub struct Stat {
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ #[allow(clippy::module_name_repetitions)]
+ pub type StatFs = c::statfs;
+@@ -1096,6 +1104,7 @@ pub type StatFs = c::statfs64;
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ pub type Fsid = c::fsid_t;
+ 
+diff --git a/rustix-1.1.5/src/backend/libc/net/msghdr.rs b/rustix-1.1.5/src/backend/libc/net/msghdr.rs
+index f46ac7e..8467cae 100644
+--- a/rustix-1.1.5/src/backend/libc/net/msghdr.rs
++++ b/rustix-1.1.5/src/backend/libc/net/msghdr.rs
+@@ -59,6 +59,7 @@ fn msg_iov_len(len: usize) -> c::c_int {
+     target_os = "haiku",
+     target_os = "hurd",
+     target_os = "nto",
++    target_os = "radix",
+ ))]
+ #[inline]
+ fn msg_control_len(len: usize) -> c::socklen_t {
+@@ -79,6 +80,7 @@ fn msg_control_len(len: usize) -> c::socklen_t {
+     target_os = "haiku",
+     target_os = "hurd",
+     target_os = "nto",
++    target_os = "radix",
+     target_os = "vita",
+     target_os = "wasi",
+ )))]
+diff --git a/rustix-1.1.5/src/fs/abs.rs b/rustix-1.1.5/src/fs/abs.rs
+index 6642fee..cc2647e 100644
+--- a/rustix-1.1.5/src/fs/abs.rs
++++ b/rustix-1.1.5/src/fs/abs.rs
+@@ -13,6 +13,7 @@ use crate::fs::Access;
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ use crate::fs::StatFs;
+ #[cfg(not(any(target_os = "wasi")))]
+@@ -264,6 +265,7 @@ pub fn access<P: path::Arg>(path: P, access: Access) -> io::Result<()> {
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ #[inline]
+ pub fn statfs<P: path::Arg>(path: P) -> io::Result<StatFs> {
+diff --git a/rustix-1.1.5/src/fs/fd.rs b/rustix-1.1.5/src/fs/fd.rs
+index 61cd3f4..7e05038 100644
+--- a/rustix-1.1.5/src/fs/fd.rs
++++ b/rustix-1.1.5/src/fs/fd.rs
+@@ -38,6 +38,7 @@ use backend::fs::types::Stat;
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ use backend::fs::types::StatFs;
+ #[cfg(not(target_os = "wasi"))]
+@@ -176,6 +177,7 @@ pub fn fstat<Fd: AsFd>(fd: Fd) -> io::Result<Stat> {
+     target_os = "redox",
+     target_os = "vita",
+     target_os = "wasi",
++    target_os = "radix",
+ )))]
+ #[inline]
+ pub fn fstatfs<Fd: AsFd>(fd: Fd) -> io::Result<StatFs> {
+diff --git a/rustix-1.1.5/src/ioctl/mod.rs b/rustix-1.1.5/src/ioctl/mod.rs
+index 70c6905..8f7d77e 100644
+--- a/rustix-1.1.5/src/ioctl/mod.rs
++++ b/rustix-1.1.5/src/ioctl/mod.rs
+@@ -313,9 +313,10 @@ type _Opcode = c::c_int;
+ #[cfg(all(not(linux_raw), target_os = "android"))]
+ type _Opcode = c::c_int;
+ 
+-// BSD, Haiku, Hurd, Redox, and Vita use `unsigned long`.
++// BSD, Haiku, Hurd, Radix, Redox, and Vita use `unsigned long`.
+ #[cfg(any(
+     bsd,
++    target_os = "radix",
+     target_os = "redox",
+     target_os = "haiku",
+     target_os = "horizon",
+diff --git a/rustix-1.1.5/src/net/types.rs b/rustix-1.1.5/src/net/types.rs
+index 8eca89c..886114f 100644
+--- a/rustix-1.1.5/src/net/types.rs
++++ b/rustix-1.1.5/src/net/types.rs
+@@ -1073,6 +1073,7 @@ pub mod ipproto {
+         target_os = "nto",
+         target_os = "redox",
+         target_os = "vita",
++        target_os = "radix",
+     )))]
+     pub const MPTCP: Protocol = Protocol(new_raw_protocol(c::IPPROTO_MPTCP as _));
+     /// `IPPROTO_FRAGMENT`

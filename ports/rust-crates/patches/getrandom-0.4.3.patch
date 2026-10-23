@@ -1,0 +1,46 @@
+SPDX-FileCopyrightText: The Rand Project Developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+getrandom 0.4 takes random bytes from getentropy on Radix, which mlibc
+has, as it does on OpenBSD, with the libc crate it needs for that, and
+finds errno through __errno_location.
+
+diff --git a/getrandom-0.4.3/Cargo.toml b/getrandom-0.4.3/Cargo.toml
+index f2ad6f9..b2ca898 100644
+--- a/getrandom-0.4.3/Cargo.toml
++++ b/getrandom-0.4.3/Cargo.toml
+@@ -116,7 +116,7 @@ default-features = false
+ version = "0.2.154"
+ default-features = false
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "openbsd", target_os = "vita", target_os = "emscripten"))'.dependencies.libc]
++[target.'cfg(any(target_os = "macos", target_os = "openbsd", target_os = "vita", target_os = "emscripten", target_os = "radix"))'.dependencies.libc]
+ version = "0.2.154"
+ default-features = false
+ 
+diff --git a/getrandom-0.4.3/src/backends.rs b/getrandom-0.4.3/src/backends.rs
+index 86ffd75..07b542b 100644
+--- a/getrandom-0.4.3/src/backends.rs
++++ b/getrandom-0.4.3/src/backends.rs
+@@ -54,6 +54,7 @@ cfg_if! {
+         target_os = "openbsd",
+         target_os = "vita",
+         target_os = "emscripten",
++        target_os = "radix",
+     ))] {
+         mod getentropy;
+         pub use getentropy::*;
+diff --git a/getrandom-0.4.3/src/utils/get_errno.rs b/getrandom-0.4.3/src/utils/get_errno.rs
+index 1895fc0..79fd3e2 100644
+--- a/getrandom-0.4.3/src/utils/get_errno.rs
++++ b/getrandom-0.4.3/src/utils/get_errno.rs
+@@ -1,7 +1,7 @@
+ cfg_if! {
+     if #[cfg(any(target_os = "netbsd", target_os = "openbsd", target_os = "android", target_os = "cygwin"))] {
+         use libc::__errno as errno_location;
+-    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly"))] {
++    } else if #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "hurd", target_os = "redox", target_os = "dragonfly", target_os = "radix"))] {
+         use libc::__errno_location as errno_location;
+     } else if #[cfg(target_os = "illumos")] {
+         use libc::___errno as errno_location;

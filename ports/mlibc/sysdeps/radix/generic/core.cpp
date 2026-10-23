@@ -186,16 +186,39 @@ int Sysdeps<VmProtect>::operator()(void *pointer, size_t size, int prot) {
 			reinterpret_cast<uint64_t>(pointer), size, rights_of(prot)));
 }
 
+// What memory advice Radix takes: all of it as hints, which it is free to
+// ignore.
+static bool advice_known(int advice) {
+	switch(advice) {
+	case POSIX_MADV_NORMAL:
+	case POSIX_MADV_RANDOM:
+	case POSIX_MADV_SEQUENTIAL:
+	case POSIX_MADV_WILLNEED:
+	case POSIX_MADV_DONTNEED:
+		return true;
+	default:
+		return false;
+	}
+}
+
 int Sysdeps<Madvise>::operator()(void *addr, size_t length, int advice) {
 	(void)addr;
 	(void)length;
-	(void)advice;
-	// Advice only.
+	// Linux's MADV_DONTNEED, unlike POSIX's, drops the pages, which then
+	// read as zeros: Radix cannot do that in place, so it says so rather
+	// than leave the old contents to a program that counts on zeros.
+	// MADV_FREE lets the pages keep their contents.
+	if(advice == MADV_DONTNEED)
+		return EINVAL;
+	if(advice != MADV_FREE && !advice_known(advice))
+		return EINVAL;
 	return 0;
 }
 
 int Sysdeps<PosixMadvise>::operator()(void *addr, size_t length, int advice) {
-	return sysdep<Madvise>(addr, length, advice);
+	(void)addr;
+	(void)length;
+	return advice_known(advice) ? 0 : EINVAL;
 }
 
 int Sysdeps<Msync>::operator()(void *addr, size_t length, int flags) {

@@ -101,6 +101,7 @@ struct RadixSysdepTags :
 	Readlink,
 	Readlinkat,
 	Readv,
+	Realpath,
 	Recvfrom,
 	Rename,
 	Renameat,

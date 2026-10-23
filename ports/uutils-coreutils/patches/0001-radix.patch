@@ -1,0 +1,246 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+The core utilities on Radix, which has Linux's system interface through
+mlibc: uucore's signal list, realtime signals and broken-pipe check are
+Linux's; file systems are described with statvfs, as on Redox, since
+mlibc has no statfs; and setgroups and the audit-less id are Linux's.
+
+diff --git a/src/uu/chroot/src/chroot.rs b/src/uu/chroot/src/chroot.rs
+index 23e696b..78fdf69 100644
+--- a/src/uu/chroot/src/chroot.rs
++++ b/src/uu/chroot/src/chroot.rs
+@@ -311,7 +311,7 @@ fn set_supplemental_gids(gids: &[libc::gid_t]) -> std::io::Result<()> {
+         target_os = "netbsd"
+     ))]
+     let n = gids.len() as libc::c_int;
+-    #[cfg(any(target_os = "linux", target_os = "android"))]
++    #[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+     let n = gids.len() as libc::size_t;
+     let err = unsafe { setgroups(n, gids.as_ptr()) };
+     if err == 0 {
+diff --git a/src/uu/id/src/id.rs b/src/uu/id/src/id.rs
+index 24b80e8..1036b6f 100644
+--- a/src/uu/id/src/id.rs
++++ b/src/uu/id/src/id.rs
+@@ -569,7 +569,8 @@ fn pline(possible_uid: Option<Uid>) -> io::Result<()> {
+     target_os = "android",
+     target_os = "openbsd",
+     target_os = "cygwin",
+-    target_os = "netbsd"
++    target_os = "netbsd",
++    target_os = "radix",
+ ))]
+ fn pline(possible_uid: Option<Uid>) -> io::Result<()> {
+     let uid = possible_uid.unwrap_or_else(getuid);
+@@ -594,7 +595,8 @@ fn pline(possible_uid: Option<Uid>) -> io::Result<()> {
+     target_os = "android",
+     target_os = "openbsd",
+     target_os = "cygwin",
+-    target_os = "netbsd"
++    target_os = "netbsd",
++    target_os = "radix",
+ ))]
+ #[allow(clippy::unnecessary_wraps)]
+ fn auditid() -> io::Result<()> {
+@@ -606,7 +608,8 @@ fn auditid() -> io::Result<()> {
+     target_os = "android",
+     target_os = "openbsd",
+     target_os = "cygwin",
+-    target_os = "netbsd"
++    target_os = "netbsd",
++    target_os = "radix",
+ )))]
+ fn auditid() -> io::Result<()> {
+     use std::mem::MaybeUninit;
+diff --git a/src/uucore/src/lib/features/fsext.rs b/src/uucore/src/lib/features/fsext.rs
+index 0ede0f2..977b048 100644
+--- a/src/uucore/src/lib/features/fsext.rs
++++ b/src/uucore/src/lib/features/fsext.rs
+@@ -11,7 +11,7 @@
+ const LINUX_MTAB: &str = "/etc/mtab";
+ #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
+ const LINUX_MOUNTINFO: &str = "/proc/self/mountinfo";
+-#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
++#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
+ static MOUNT_OPT_BIND: &str = "bind";
+ #[cfg(windows)]
+ const MAX_PATH: usize = 266;
+@@ -97,6 +97,7 @@ pub use libc::statfs as StatFs;
+     target_os = "illumos",
+     target_os = "solaris",
+     target_os = "redox",
++    target_os = "radix",
+     target_os = "cygwin",
+ ))]
+ pub use libc::statvfs as StatFs;
+@@ -116,6 +117,7 @@ pub use libc::statfs as statfs_fn;
+     target_os = "solaris",
+     target_os = "dragonfly",
+     target_os = "redox",
++    target_os = "radix",
+     target_os = "cygwin",
+ ))]
+ pub use libc::statvfs as statfs_fn;
+@@ -386,7 +388,7 @@ impl From<StatFs> for MountInfo {
+     }
+ }
+ 
+-#[cfg(all(unix, not(target_os = "redox")))]
++#[cfg(all(unix, not(any(target_os = "redox", target_os = "radix"))))]
+ fn is_dummy_filesystem(fs_type: &str, mount_option: &str) -> bool {
+     // spell-checker:disable
+     match fs_type {
+@@ -409,14 +411,14 @@ fn is_dummy_filesystem(fs_type: &str, mount_option: &str) -> bool {
+     // spell-checker:enable
+ }
+ 
+-#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
++#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
+ fn is_remote_filesystem(dev_name: &str, fs_type: &str) -> bool {
+     dev_name.find(':').is_some()
+         || (dev_name.starts_with("//") && fs_type == "smbfs" || fs_type == "cifs")
+         || dev_name == "-hosts"
+ }
+ 
+-#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]
++#[cfg(all(unix, not(any(target_os = "aix", target_os = "redox", target_os = "radix"))))]
+ fn mount_dev_id(mount_dir: &OsStr) -> String {
+     use std::os::unix::fs::MetadataExt;
+ 
+@@ -538,6 +540,7 @@ pub fn read_fs_list() -> UResult<Vec<MountInfo>> {
+     #[cfg(any(
+         target_os = "aix",
+         target_os = "redox",
++        target_os = "radix",
+         target_os = "illumos",
+         target_os = "solaris",
+     ))]
+@@ -706,7 +709,7 @@ impl FsMeta for StatFs {
+             not(target_os = "openbsd"),
+             not(target_os = "illumos"),
+             not(target_os = "solaris"),
+-            not(target_os = "redox"),
++            not(any(target_os = "redox", target_os = "radix")),
+             not(target_arch = "s390x"),
+             not(target_os = "cygwin"),
+             target_pointer_width = "64"
+@@ -716,7 +719,7 @@ impl FsMeta for StatFs {
+             not(target_env = "musl"),
+             not(target_os = "freebsd"),
+             not(target_os = "netbsd"),
+-            not(target_os = "redox"),
++            not(any(target_os = "redox", target_os = "radix")),
+             not(target_os = "cygwin"),
+             any(
+                 target_arch = "s390x",
+@@ -735,6 +738,7 @@ impl FsMeta for StatFs {
+             target_os = "illumos",
+             target_os = "solaris",
+             target_os = "redox",
++            target_os = "radix",
+             target_os = "cygwin",
+             all(target_os = "android", target_pointer_width = "64"),
+         ))]
+@@ -1210,7 +1214,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    #[cfg(all(unix, not(target_os = "redox")))]
++    #[cfg(all(unix, not(any(target_os = "redox", target_os = "radix"))))]
+     // spell-checker:ignore (word) binfmt
+     fn test_binfmt_misc_is_dummy() {
+         use super::is_dummy_filesystem;
+diff --git a/src/uucore/src/lib/features/signals.rs b/src/uucore/src/lib/features/signals.rs
+index 0d423a6..7c0cf46 100644
+--- a/src/uucore/src/lib/features/signals.rs
++++ b/src/uucore/src/lib/features/signals.rs
+@@ -12,7 +12,7 @@
+ 
+ #[cfg(unix)]
+ use nix::errno::Errno;
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ use nix::libc;
+ #[cfg(unix)]
+ use nix::sys::signal::{
+@@ -37,7 +37,7 @@ Linux Programmer's Manual
+ */
+ 
+ /// The list of all signals.
+-#[cfg(any(target_os = "linux", target_os = "android", target_os = "redox"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android", target_os = "redox"))]
+ pub static ALL_SIGNALS: [&str; 32] = [
+     "EXIT", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV",
+     "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU",
+@@ -426,7 +426,7 @@ pub fn signal_name_by_value(signal_value: usize) -> Option<&'static str> {
+     ALL_SIGNALS.get(signal_value).copied()
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ fn realtime_signal_bounds() -> Option<(usize, usize)> {
+     let rtmin = libc::SIGRTMIN();
+     let rtmax = libc::SIGRTMAX();
+@@ -434,7 +434,7 @@ fn realtime_signal_bounds() -> Option<(usize, usize)> {
+     (0 < rtmin && rtmin <= rtmax).then_some((rtmin as usize, rtmax as usize))
+ }
+ 
+-#[cfg(not(any(target_os = "linux", target_os = "android")))]
++#[cfg(not(any(target_os = "linux", target_os = "radix", target_os = "android")))]
+ fn realtime_signal_bounds() -> Option<(usize, usize)> {
+     None
+ }
+@@ -650,7 +650,7 @@ pub const fn sigpipe_was_ignored() -> bool {
+     false
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "radix"))]
+ pub fn ensure_stdout_not_broken() -> std::io::Result<bool> {
+     use nix::{
+         poll::{PollFd, PollFlags, PollTimeout, poll},
+@@ -743,14 +743,14 @@ fn list_signal_numbers_follow_upper_bound() {
+     );
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ #[test]
+ fn linux_realtime_signal_upper_bound_includes_rtmax() {
+     let (_, rtmax) = realtime_signal_bounds().unwrap();
+     assert!(signal_number_upper_bound() >= rtmax);
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ #[test]
+ fn linux_realtime_signal_names_are_listed() {
+     let (rtmin, rtmax) = realtime_signal_bounds().unwrap();
+@@ -759,7 +759,7 @@ fn linux_realtime_signal_names_are_listed() {
+     assert_eq!(signal_list_name_by_value(rtmax), Some("RTMAX".to_string()));
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ #[test]
+ fn linux_realtime_signal_names_resolve_to_runtime_values() {
+     let (rtmin, rtmax) = realtime_signal_bounds().unwrap();
+@@ -770,14 +770,14 @@ fn linux_realtime_signal_names_resolve_to_runtime_values() {
+     assert_eq!(signal_list_value_by_name_or_number("SIGRTMAX"), Some(rtmax));
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ #[test]
+ fn linux_unnamed_signal_numbers_are_valid_for_lists() {
+     assert_eq!(signal_list_value_by_name_or_number("32"), Some(32));
+     assert_eq!(signal_list_value_by_name_or_number("33"), Some(33));
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++#[cfg(any(target_os = "linux", target_os = "radix", target_os = "android"))]
+ #[test]
+ fn linux_realtime_signals_resolve_by_name_or_value() {
+     let (rtmin, rtmax) = realtime_signal_bounds().unwrap();

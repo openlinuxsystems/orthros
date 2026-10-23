@@ -13,6 +13,15 @@
 //! system's tree in SLOT_ROOT (radix-startup(2)) and hands out
 //! capabilities to the parts each program needs.
 //!
+//! Symbolic links are followed as a path is resolved: a target that does
+//! not start with `/` goes on from the link's directory, and one that
+//! does starts again from the directory the path started from, as if it
+//! were the root, so a link cannot lead out of it either. `..` at the
+//! system's root stays there, as `/..` is `/`. A link that is the last
+//! name of a path is followed too, unless the call says no_follow and no
+//! `/` comes after it; `remove` and `rename` take the link itself. At
+//! most 40 are followed in one call (too_many_links).
+//!
 //! Rights: the read right looks names up, lists and opens for reading;
 //! the write right creates, removes and renames, and opens for writing;
 //! the control right mounts and unmounts. A capability `open` makes has
@@ -39,6 +48,8 @@ enum FileKind: u8 {
     char_device = 3;
     /// A pipe (radix-process(2)'s `pipe`).
     pipe = 4;
+    /// A symbolic link (`make_link`).
+    symlink = 5;
 }
 
 /// What kind of filesystem one is.
@@ -79,6 +90,16 @@ flags OpenFlags: u32 {
     no_terminal = 6;
     /// The slot is emptied by radix-process(2)'s `exec`.
     close_on_exec = 7;
+    /// Fail with too_many_links if the last name is a symbolic link, as
+    /// O_NOFOLLOW does.
+    no_follow = 8;
+}
+
+/// How `stat` and `set_times` find what they look at.
+flags PathFlags: u32 {
+    /// A symbolic link that is the last name is taken itself, not what it
+    /// points to, as AT_SYMLINK_NOFOLLOW has it.
+    no_follow = 0;
 }
 
 /// How a filesystem is mounted.
@@ -103,7 +124,7 @@ struct DirEntry {
 }
 
 /// A directory.
-interface directory = 0x000b version 2 {
+interface directory = 0x000b version 3 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -112,18 +133,19 @@ interface directory = 0x000b version 2 {
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
-                name_too_long, bad_name, outside, io, corrupt, no_device];
+                name_too_long, bad_name, outside, io, corrupt, no_device, too_many_links];
     /// Makes an empty directory at `path`. Needs the write right.
     method make_directory = 2 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, read_only, no_space,
-                name_too_long, bad_name, outside, io, corrupt];
-    /// Removes the file or empty directory at `path`. A file still open
-    /// lives on until its last capability goes. Needs the write right.
+                name_too_long, bad_name, outside, io, corrupt, too_many_links];
+    /// Removes the file, symbolic link or empty directory at `path`. A
+    /// file still open lives on until its last capability goes. Needs the
+    /// write right.
     method remove = 3 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, not_empty, read_only, name_too_long,
-                bad_name, outside, in_use, io, corrupt];
+                bad_name, outside, in_use, io, corrupt, too_many_links];
     /// Moves the file or directory at `from` to `to` beneath the
     /// directory in slot `to_dir`, on the same filesystem, replacing a
     /// file (or an empty directory, for a directory) there. Needs the
@@ -132,7 +154,7 @@ interface directory = 0x000b version 2 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, is_directory, not_empty,
                 read_only, no_space, name_too_long, bad_name, outside, cross_mount, in_use, io,
-                corrupt];
+                corrupt, too_many_links];
     /// Writes the directory's entries from `cursor` (0 for the first) into
     /// `buffer` as DirEntry records, other than `.` and `..`; returns how
     /// many it wrote (0 at the end), the bytes they take, and the cursor
@@ -144,13 +166,14 @@ interface directory = 0x000b version 2 {
     /// size and the bytes it takes on its filesystem, a number unique on
     /// its filesystem while it exists, when it was made, last changed and
     /// last read, in nanoseconds since 1970 (0 if unknown), and the number
-    /// of the mount it is on, unique since boot. Needs the read right.
-    method stat = 6 (path: in bytes)
+    /// of the mount it is on, unique since boot. A symbolic link's size is
+    /// its target's length. Needs the read right.
+    method stat = 6 (path: in bytes, flags: PathFlags)
         -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
             accessed: u64, mount: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
-                corrupt];
+                corrupt, too_many_links];
     /// Mounts a filesystem of kind `filesystem` (its name, as
     /// FilesystemKind lists them) on the directory at `path`: `fat` on the
     /// block device whose file capability is in slot `source`, the others
@@ -160,14 +183,14 @@ interface directory = 0x000b version 2 {
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
-                outside, in_use, io, corrupt, unknown_filesystem, not_block_device];
+                outside, in_use, io, corrupt, unknown_filesystem, not_block_device, too_many_links];
     /// Unmounts the filesystem whose root is at `path`, after writing what
     /// it holds in memory to its disk. Fails with in_use while anything
     /// is mounted on it or open on it. Needs the control right.
     method unmount = 8 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use,
-                io, corrupt];
+                io, corrupt, too_many_links];
     /// Writes everything the directory's filesystem holds in memory to its
     /// disk.
     method sync = 9 () -> ()
@@ -182,8 +205,34 @@ interface directory = 0x000b version 2 {
         raises [no_such_slot, empty_slot, missing_rights];
     /// Sets the times of the file or directory at `path` (`.` for this
     /// one), as radix-file(2)'s `set_times` does. Needs the write right.
-    method set_times = 11 (path: in bytes, accessed: u64, modified: u64) -> ()
+    method set_times = 11 (path: in bytes, accessed: u64, modified: u64, flags: PathFlags) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside,
-                not_permitted, read_only, io, corrupt];
+                not_permitted, read_only, io, corrupt, too_many_links];
+    /// Makes a symbolic link at `path` that points to `target`: any text
+    /// of at most PATH_MAX bytes but the empty one and one with a NUL,
+    /// which is not looked at until the link is followed. A filesystem
+    /// that has no links, as FAT has none, refuses with not_permitted.
+    /// Needs the write right.
+    method make_link = 12 (path: in bytes, target: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
+    /// Reads where the symbolic link at `path` points into `buffer`;
+    /// returns the target's length, which is more than `buffer` holds if
+    /// it was cut short. Fails with not_link if it is not a link. Needs
+    /// the read right.
+    method read_link = 13 (path: in bytes, buffer: out bytes) -> (len: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
+                corrupt, not_link, too_many_links];
+    /// Writes where `path` leads into `buffer`: the names from this
+    /// directory that resolving it took, every symbolic link followed and
+    /// `.` and `..` worked out, joined by `/` (`.` for this directory
+    /// itself), as realpath(3) wants. Returns its length, which is more
+    /// than `buffer` holds if it was cut short. Needs the read right.
+    method real_path = 14 (path: in bytes, buffer: out bytes) -> (len: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
+                corrupt, too_many_links];
 }

@@ -1,0 +1,60 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+A Realpath system call for realpath(3): a system whose kernel resolves
+paths whole, symbolic links and all, implements it and realpath asks it
+in one call. mlibc's own walk, which stays for the other systems, does
+not resolve the components of an absolute link's target or count the
+links it follows, and reads each target into 512 bytes. Radix's kernel
+returns the path its walk took (radix-directory(2)'s `real_path`).
+
+diff --git a/options/internal/include/mlibc/sysdep-signatures.hpp b/options/internal/include/mlibc/sysdep-signatures.hpp
+index 20d8637..166b1e7 100644
+--- a/options/internal/include/mlibc/sysdep-signatures.hpp
++++ b/options/internal/include/mlibc/sysdep-signatures.hpp
+@@ -150,6 +150,7 @@ SYSDEP_FUNC(SetParam, pid_t pid, const struct sched_param *param);
+ SYSDEP_FUNC(GetMaxPriority, int policy, int *out);
+ SYSDEP_FUNC(GetMinPriority, int policy, int *out);
+ SYSDEP_FUNC(GetCwd, char *buffer, size_t size);
++SYSDEP_FUNC(Realpath, const char *path, char *out, size_t size);
+ SYSDEP_FUNC(Chdir, const char *path);
+ SYSDEP_FUNC(Fchdir, int fd);
+ SYSDEP_FUNC(Chroot, const char *path);
+diff --git a/options/internal/include/mlibc/sysdep-tags.hpp b/options/internal/include/mlibc/sysdep-tags.hpp
+index 6630cd5..3549ae4 100644
+--- a/options/internal/include/mlibc/sysdep-tags.hpp
++++ b/options/internal/include/mlibc/sysdep-tags.hpp
+@@ -316,6 +316,8 @@ struct GetMaxPriority {};
+ struct GetMinPriority {};
+ // int sys_getcwd(char *buffer, size_t size);
+ struct GetCwd {};
++// int sys_realpath(const char *path, char *out, size_t size);
++struct Realpath {};
+ // int sys_chdir(const char *path);
+ struct Chdir {};
+ // int sys_fchdir(int fd);
+diff --git a/options/posix/generic/posix_stdlib.cpp b/options/posix/generic/posix_stdlib.cpp
+index a49d28f..e94c040 100644
+--- a/options/posix/generic/posix_stdlib.cpp
++++ b/options/posix/generic/posix_stdlib.cpp
+@@ -254,6 +254,20 @@ char *mkdtemp(char *pattern) {
+ char *realpath(const char *path, char *out) {
+ 	if(mlibc::globalConfig().debugPathResolution)
+ 		mlibc::infoLogger() << "mlibc realpath(): Called on '" << path << "'" << frg::endlog;
++
++	// A system that resolves paths whole, links and all, says where one
++	// leads in a single call.
++	if constexpr (mlibc::IsImplemented<Realpath>) {
++		char resolved[PATH_MAX];
++		if(int e = mlibc::sysdep<Realpath>(path, resolved, PATH_MAX); e) {
++			errno = e;
++			return nullptr;
++		}
++		if(!out)
++			out = reinterpret_cast<char *>(getAllocator().allocate(strlen(resolved) + 1));
++		strcpy(out, resolved);
++		return out;
++	}
+ 	frg::string_view path_view{path};
+ 
+ 	// In case of the root, the string only contains the null-terminator.

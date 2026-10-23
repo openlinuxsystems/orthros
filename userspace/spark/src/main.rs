@@ -79,6 +79,17 @@ const POSIX_POLL_NS: u64 = 50_000_000;
 const HIERARCHY: [&str; 10] =
     ["system", "applications", "users", "data", "tmp", "run", "dev", "proc", "sys", "volumes"];
 
+/// Symbolic links in the root to where Dukovo keeps what Unix programs
+/// look for at the usual places: `/bin/sh`, `#!/usr/bin/env`,
+/// `/etc/hosts`, `/usr/share/man` (ADR 0081).
+const LINKS: [(&str, &str); 5] = [
+    ("bin", "system/bin"),
+    ("etc", "system/etc"),
+    ("sbin", "system/bin"),
+    ("usr", "system"),
+    ("var", "system/var"),
+];
+
 /// What is mounted where, in this order. `/system/etc`, `/system/var` and
 /// `/system/boot` are directories of the boot archive's, for this.
 const MOUNTS: [(&str, FilesystemKind, MountFlags); 8] = [
@@ -333,8 +344,8 @@ fn exec_block(path: &str, args: &[&str]) -> Vec<u8> {
     block
 }
 
-/// Makes the hierarchy's directories and mounts what goes on them.
-/// Returns whether all of it worked.
+/// Makes the hierarchy's directories, mounts what goes on them and makes
+/// the links to them. Returns whether all of it worked.
 fn build(root: &Dir) -> bool {
     for name in HIERARCHY {
         if let Err(err) = root.make_dir(name) {
@@ -345,6 +356,12 @@ fn build(root: &Dir) -> bool {
     for (path, kind, flags) in MOUNTS {
         if let Err(err) = root.mount(path, kind, None, flags) {
             println!("spark: cannot mount {} on /{path}: {err}", kind.name());
+            return false;
+        }
+    }
+    for (path, target) in LINKS {
+        if let Err(err) = root.make_link(path, target) {
+            println!("spark: cannot link /{path} to /{target}: {err}");
             return false;
         }
     }

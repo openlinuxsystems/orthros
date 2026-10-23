@@ -170,7 +170,7 @@ pub fn files(argument: Argument) -> u64 {
             && capability::delete(&SYS, SLOT_OPENED).is_ok()
     });
     measure("file_stat", rounds, || {
-        directory::stat(&SYS, SLOT_DIRECTORY, FILE_NAME)
+        directory::stat(&SYS, SLOT_DIRECTORY, FILE_NAME, directory::PathFlags::NONE)
             .is_ok_and(|stat| stat.size == FILE_SIZE as u64)
     });
     measure("file_read_4k", rounds, || {

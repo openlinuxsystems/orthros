@@ -35,6 +35,12 @@ const BOOTLOADER_ALLOW: &[&str] = &["GPL-3.0-or-later"];
 /// Licenses of closed firmware, which only a local build adds (ADR 0007).
 const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 
+/// Licenses a ported program, and what is built into it, may use beyond
+/// the kernel area's: it runs as a process of its own, so its terms reach
+/// no Dukovo code (ADR 0021). CC0-1.0 is a public domain dedication
+/// (uutils' `tail` follows files with the notify crate, ADR 0080).
+const PORT_EXTRA_ALLOW: &[&str] = &["CC0-1.0"];
+
 /// Names of the files in a source tree that hold license terms or notices.
 const NOTICE_PREFIXES: &[&str] = &["LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE"];
 
@@ -51,6 +57,9 @@ pub enum Area {
     /// Linked into the kernel or a /system program, in Rust or in C:
     /// permissive only.
     Kernel,
+    /// A ported program, or built into one: the kernel area's licenses and
+    /// [`PORT_EXTRA_ALLOW`].
+    Port,
     /// A separate boot loader program.
     Bootloader,
     /// Closed firmware loaded by the kernel.
@@ -61,6 +70,10 @@ impl Area {
     fn describe(self) -> &'static str {
         match self {
             Area::Kernel => "the kernel allow-list in kernel/deny.toml",
+            Area::Port => {
+                "the port allow-list (kernel/deny.toml and PORT_EXTRA_ALLOW in \
+                 tools/xtask/src/licenses.rs)"
+            }
             Area::Bootloader => "the boot loader allow-list in tools/xtask/src/licenses.rs",
             Area::Firmware => "the firmware allow-list in tools/xtask/src/licenses.rs",
         }
@@ -130,7 +143,7 @@ pub fn install(ctx: &Ctx, staging: &Path, extras: &Extras<'_>) -> Result<String>
                 }
             }
         }
-        packages.extend(c_packages(ctx, ports));
+        packages.extend(c_packages(ctx, ports)?);
     }
     packages.push(grub(ctx, extras.mkrescue)?);
     if extras.microcode {
@@ -226,21 +239,41 @@ fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
 }
 
 /// The crates `cmd`, a `cargo tree` of `what`, lists, with their
-/// checksums from `lock`; those in `provided` are left out, as listed
-/// elsewhere.
+/// checksums from `lock`; those the ports patch for Radix in the
+/// toolchain, which `ports` has, as crates.io's that the ports patch.
 fn tree_packages(
     ctx: &Ctx,
     what: &str,
     cmd: &mut Command,
-    lock: &std::collections::BTreeMap<(String, String), String>,
-    provided: Option<&Path>,
+    lock: &Lock,
+    ports: Option<&Ports>,
 ) -> Result<Vec<Package>> {
     cmd.args(["-e", "normal", "--prefix", "none", "--format", "{p}|{l}"]);
     let output = process::output(ctx, cmd)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let packages = listed_packages(ctx, what, &text, lock, ports, None)?;
+    if packages.is_empty() {
+        crate::bail!("`cargo tree` listed no crates for {what}");
+    }
+    Ok(packages)
+}
+
+/// The crates of `text`, a `cargo tree --format '{p}|{l}'` listing of
+/// `what`, with their checksums from `lock`. A crate in the toolchain is
+/// one a port patches for Radix, which `ports` has; one in `own`, the
+/// source of the port that listed them, is the port's own, and left out.
+fn listed_packages(
+    ctx: &Ctx,
+    what: &str,
+    text: &str,
+    lock: &Lock,
+    ports: Option<&Ports>,
+    own: Option<&Path>,
+) -> Result<Vec<Package>> {
     let commit = git_commit(ctx);
     let mut seen = BTreeSet::new();
     let mut packages = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in text.lines() {
         let Some(entry) = parse_tree_line(line) else { continue };
         if !seen.insert((entry.name.clone(), entry.version.clone())) {
             continue;
@@ -256,7 +289,22 @@ fn tree_packages(
             version: entry.version,
         };
         match entry.source {
-            Source::Path(path) if provided.is_some_and(|dir| path.starts_with(dir)) => continue,
+            Source::Path(path) if own.is_some_and(|dir| path.starts_with(dir)) => continue,
+            Source::Path(path)
+                if ports.is_some_and(|ports| path.starts_with(&ports.toolchain.dir)) =>
+            {
+                let ports = ports.expect("checked above");
+                let Some(patched) = patched_crate(ports, &package.name, &package.version) else {
+                    crate::bail!(
+                        "{what} uses {} {} from {}, which no port's recipe lists",
+                        package.name,
+                        package.version,
+                        path.display()
+                    );
+                };
+                packages.push(patched);
+                continue;
+            }
             Source::Path(path) => {
                 package.download =
                     format!("git+https://github.com/openlinuxsystems/orthros@{commit}");
@@ -267,10 +315,7 @@ fn tree_packages(
             Source::Registry => {
                 let key = (package.name.clone(), package.version.clone());
                 package.sha256 = lock.get(&key).cloned();
-                package.download = format!(
-                    "https://crates.io/api/v1/crates/{}/{}/download",
-                    package.name, package.version
-                );
+                package.download = crate_download(&package.name, &package.version);
                 package.comment = "A crate from crates.io.".into();
                 if let Some(dir) = registry_dir(&package.name, &package.version) {
                     package.notices = notice_files(&dir);
@@ -287,10 +332,37 @@ fn tree_packages(
         }
         packages.push(package);
     }
-    if packages.is_empty() {
-        crate::bail!("`cargo tree` listed no crates for {what}");
-    }
     Ok(packages)
+}
+
+/// Where crates.io serves a crate.
+fn crate_download(name: &str, version: &str) -> String {
+    format!("https://crates.io/api/v1/crates/{name}/{version}/download")
+}
+
+/// A crate from crates.io that a port's recipe lists, and so patches.
+fn patched_crate(ports: &Ports, name: &str, version: &str) -> Option<Package> {
+    ports.ports.iter().find_map(|port| {
+        let (krate, dir) = port
+            .recipe
+            .crates
+            .iter()
+            .zip(&port.crates)
+            .find(|(krate, _)| krate.name == name && krate.version == version)?;
+        Some(Package {
+            name: krate.name.clone(),
+            version: krate.version.clone(),
+            license: krate.license.clone(),
+            area: Area::Kernel,
+            download: crate_download(name, version),
+            sha256: Some(krate.sha256.clone()),
+            notices: notice_files(dir),
+            comment: format!(
+                "A crate from crates.io, patched for Radix by ports/{} of Dukovo.",
+                port.recipe.name
+            ),
+        })
+    })
 }
 
 /// The crates of Rust's standard library that ports/rust-std patches for
@@ -309,13 +381,17 @@ fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
         let mut cmd = userspace::std_cargo(ctx, "tree", toolchain);
         cmd.args(["-p", program]);
         let what = format!("the program {program}");
-        for package in tree_packages(ctx, &what, &mut cmd, &lock, Some(&toolchain.dir))? {
+        for package in tree_packages(ctx, &what, &mut cmd, &lock, Some(ports))? {
             if !packages.iter().any(|p| p.name == package.name && p.version == package.version) {
                 packages.push(package);
             }
         }
     }
-    let Some(port) = ports.ports.iter().find(|port| port.recipe.source.rust_src) else {
+    let Some(library) = ports
+        .ports
+        .iter()
+        .find_map(|port| port.source.as_ref().filter(|_| port.recipe.source.rust_src))
+    else {
         crate::bail!("no port builds Rust's standard library for the programs on it");
     };
     let rustc = rustc_info(ctx)?;
@@ -323,7 +399,7 @@ fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
     let list = sysroot.join("crates.txt");
     let text = std::fs::read_to_string(&list).context(|| format!("reading {}", list.display()))?;
     // rust-src's own lock file, which has the vendored crates' checksums.
-    let library_lock = read_lock(&port.sources[0].join("Cargo.lock"))?;
+    let library_lock = read_lock(&library.join("Cargo.lock"))?;
     for line in text.lines() {
         let Some(entry) = parse_tree_line(line) else { continue };
         let mut package = Package {
@@ -349,13 +425,20 @@ fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
                     rustc.release
                 );
             }
+            // A crate the port puts in place of the one rust-src vendors.
+            Source::Registry
+                if let Some(patched) = patched_crate(ports, &package.name, &package.version) =>
+            {
+                if !packages.iter().any(|p| p.name == patched.name && p.version == patched.version)
+                {
+                    packages.push(patched);
+                }
+                continue;
+            }
             Source::Registry => {
                 let key = (package.name.clone(), package.version.clone());
                 package.sha256 = library_lock.get(&key).cloned();
-                package.download = format!(
-                    "https://crates.io/api/v1/crates/{}/{}/download",
-                    package.name, package.version
-                );
+                package.download = crate_download(&package.name, &package.version);
                 package.comment = format!(
                     "A crate from crates.io that the rust-src of rustc {} vendors for the \
                      standard library",
@@ -475,7 +558,10 @@ fn registry_dir(name: &str, version: &str) -> Option<PathBuf> {
 }
 
 /// (name, version) to checksum, from a Cargo.lock.
-fn read_lock(path: &Path) -> Result<std::collections::BTreeMap<(String, String), String>> {
+type Lock = std::collections::BTreeMap<(String, String), String>;
+
+/// The checksums of a Cargo.lock.
+fn read_lock(path: &Path) -> Result<Lock> {
     let text = std::fs::read_to_string(path).context(|| format!("reading {}", path.display()))?;
     let lock: toml::Value =
         toml::from_str(&text).map_err(|err| Error::new(format!("{}: {err}", path.display())))?;
@@ -580,7 +666,7 @@ fn rustc_info(ctx: &Ctx) -> Result<Rustc> {
 /// test programs, each port that is not part of the toolchain and the
 /// sources unpacked in it, and the compiler-rt builtins every C program
 /// links (ADR 0069).
-fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
+fn c_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
     let commit = git_commit(ctx);
     let mut packages = vec![Package {
         name: "dukovo-posix-tests".into(),
@@ -594,33 +680,35 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
     }];
     for port in ports.ports.iter().filter(|port| !port.recipe.toolchain) {
         let recipe = &port.recipe;
-        packages.push(Package {
-            name: recipe.name.clone(),
-            version: recipe.version.clone(),
-            license: recipe.license.clone(),
-            area: Area::Kernel,
-            download: format!("git+{}@{}", recipe.source.git, recipe.source.commit),
-            sha256: None,
-            notices: if recipe.notices.is_empty() {
-                notice_files(&port.sources[0])
-            } else {
-                recipe.notices.iter().map(|file| port.sources[0].join(file)).collect()
-            },
-            comment: format!(
-                "{}, from {} ({}); built by ports/{} of Dukovo.",
-                recipe.summary,
-                recipe.homepage,
-                recipe.source.tag.as_deref().unwrap_or(&recipe.source.commit),
-                recipe.name
-            ),
-        });
-        for (extra, source) in recipe.extra.iter().zip(&port.sources[1..]) {
+        if let Some(source) = &port.source {
+            packages.push(Package {
+                name: recipe.name.clone(),
+                version: recipe.version.clone(),
+                license: recipe.license.clone(),
+                area: Area::Port,
+                download: format!("git+{}@{}", recipe.source.git, recipe.source.commit),
+                sha256: None,
+                notices: if recipe.notices.is_empty() {
+                    notice_files(source)
+                } else {
+                    recipe.notices.iter().map(|file| source.join(file)).collect()
+                },
+                comment: format!(
+                    "{}, from {} ({}); built by ports/{} of Dukovo.",
+                    recipe.summary,
+                    recipe.homepage,
+                    recipe.source.tag.as_deref().unwrap_or(&recipe.source.commit),
+                    recipe.name
+                ),
+            });
+        }
+        for (extra, source) in recipe.extra.iter().zip(&port.extras) {
             let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
             packages.push(Package {
                 name: name.to_string(),
                 version: extra.commit[..12].to_string(),
                 license: extra.license.clone(),
-                area: Area::Kernel,
+                area: Area::Port,
                 download: format!("git+{}@{}", extra.git, extra.commit),
                 sha256: None,
                 notices: notice_files(source),
@@ -630,12 +718,27 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
                 ),
             });
         }
+        for (krate, source) in recipe.crates.iter().zip(&port.crates) {
+            packages.push(Package {
+                name: krate.name.clone(),
+                version: krate.version.clone(),
+                license: krate.license.clone(),
+                area: Area::Port,
+                download: crate_download(&krate.name, &krate.version),
+                sha256: Some(krate.sha256.clone()),
+                notices: notice_files(source),
+                comment: format!(
+                    "A crate from crates.io, built into {} {} by ports/{} of Dukovo.",
+                    recipe.name, recipe.version, recipe.name
+                ),
+            });
+        }
         for bundled in &recipe.bundled {
             packages.push(Package {
                 name: bundled.name.clone(),
                 version: bundled.version.clone(),
                 license: bundled.license.clone(),
-                area: Area::Kernel,
+                area: Area::Port,
                 download: bundled.homepage.clone(),
                 sha256: None,
                 notices: bundled.notices.iter().map(|file| port.dir.join(file)).collect(),
@@ -644,6 +747,27 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
                     recipe.name, recipe.version, recipe.name
                 ),
             });
+        }
+        // A port in Rust: the crates its build linked.
+        let info = crate::ports::info_dir(ctx, &recipe.name);
+        let list = info.join("crates.txt");
+        if list.is_file() {
+            let text =
+                std::fs::read_to_string(&list).context(|| format!("reading {}", list.display()))?;
+            let lock = read_lock(&info.join("Cargo.lock"))?;
+            let what = format!("port {}", recipe.name);
+            let own = ctx.target.join("ports/work").join(&recipe.name);
+            for mut package in listed_packages(ctx, &what, &text, &lock, Some(ports), Some(&own))? {
+                if packages.iter().any(|p| p.name == package.name && p.version == package.version) {
+                    continue;
+                }
+                package.area = Area::Port;
+                package.comment = format!(
+                    "{} Built into {} {} by ports/{} of Dukovo.",
+                    package.comment, recipe.name, recipe.version, recipe.name
+                );
+                packages.push(package);
+            }
         }
     }
     let llvm = ports.toolchain.llvm_version();
@@ -660,7 +784,7 @@ fn c_packages(ctx: &Ctx, ports: &Ports) -> Vec<Package> {
              program links (https://compiler-rt.llvm.org)."
         ),
     });
-    packages
+    Ok(packages)
 }
 
 /// GRUB, which grub-mkrescue copies from the build host into every image.
@@ -732,6 +856,11 @@ fn check(packages: &[Package], kernel_allow: &[String]) -> Result<()> {
     for package in packages {
         let allowed: Vec<String> = match package.area {
             Area::Kernel => kernel_allow.to_vec(),
+            Area::Port => kernel_allow
+                .iter()
+                .cloned()
+                .chain(PORT_EXTRA_ALLOW.iter().map(|s| s.to_string()))
+                .collect(),
             Area::Bootloader => BOOTLOADER_ALLOW.iter().map(|s| s.to_string()).collect(),
             Area::Firmware => FIRMWARE_ALLOW.iter().map(|s| s.to_string()).collect(),
         };
@@ -1099,7 +1228,7 @@ mod tests {
         for id in parse_allow_list(&text).unwrap() {
             Expr::parse(&id).unwrap().collect_ids(&mut ids);
         }
-        for id in BOOTLOADER_ALLOW.iter().chain(FIRMWARE_ALLOW) {
+        for id in BOOTLOADER_ALLOW.iter().chain(FIRMWARE_ALLOW).chain(PORT_EXTRA_ALLOW) {
             Expr::parse(id).unwrap().collect_ids(&mut ids);
         }
         for id in ids {

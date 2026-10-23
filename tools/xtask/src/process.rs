@@ -112,6 +112,13 @@ pub fn cargo(ctx: &Ctx) -> Command {
     cmd
 }
 
+/// The SHA-256 of a file, in hexadecimal.
+pub fn sha256(ctx: &Ctx, path: &Path) -> Result<String> {
+    let out = output(ctx, Command::new("sha256sum").arg(path))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text.split_whitespace().next().unwrap_or_default().to_string())
+}
+
 /// Creates `path` and its parents.
 pub fn create_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)

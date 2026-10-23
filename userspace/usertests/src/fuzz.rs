@@ -113,7 +113,7 @@ const USER_TOP: u64 = address_space::USER_TOP;
 const KERNEL: u64 = 0xffff_8000_0000_0000;
 
 /// The methods it calls, by label.
-const LABELS: [u32; 42] = [
+const LABELS: [u32; 45] = [
     memory::RETYPE,
     memory::INFO,
     memory::frame::INFO,
@@ -151,6 +151,9 @@ const LABELS: [u32; 42] = [
     directory::UNMOUNT,
     directory::SYNC,
     directory::INFO,
+    directory::MAKE_LINK,
+    directory::READ_LINK,
+    directory::REAL_PATH,
     file::READ,
     file::WRITE,
     file::STAT,
@@ -627,10 +630,24 @@ impl Fuzzer {
                 args[3] = self.rights();
                 args[4] = if self.rng.one_in(8) { self.slot() } else { self.opened() };
             }
-            directory::MAKE_DIRECTORY
-            | directory::REMOVE
-            | directory::STAT
-            | directory::UNMOUNT => (args[0], args[1]) = self.path(),
+            directory::MAKE_DIRECTORY | directory::REMOVE | directory::UNMOUNT => {
+                (args[0], args[1]) = self.path();
+            }
+            directory::STAT => {
+                (args[0], args[1]) = self.path();
+                args[2] = self.rng.pick(&[0, 0, 1, self.rng.0]);
+            }
+            directory::MAKE_LINK => {
+                // Targets from the same paths, so that links lead to one
+                // another, to themselves and out of the directory.
+                (args[0], args[1]) = self.path();
+                (args[2], args[3]) = self.path();
+            }
+            directory::READ_LINK | directory::REAL_PATH => {
+                (args[0], args[1]) = self.path();
+                args[2] = self.address();
+                args[3] = self.length();
+            }
             directory::RENAME => {
                 (args[0], args[1]) = self.path();
                 args[2] = self.directory();
@@ -1023,6 +1040,9 @@ fn file_words(label: u32) -> Option<u64> {
         directory::STAT => directory::StatArgs::WORDS,
         directory::MOUNT => directory::MountArgs::WORDS,
         directory::UNMOUNT => directory::UnmountArgs::WORDS,
+        directory::MAKE_LINK => directory::MakeLinkArgs::WORDS,
+        directory::READ_LINK => directory::ReadLinkArgs::WORDS,
+        directory::REAL_PATH => directory::RealPathArgs::WORDS,
         file::READ => file::ReadArgs::WORDS,
         file::WRITE => file::WriteArgs::WORDS,
         file::SET_SIZE => file::SetSizeArgs::WORDS,

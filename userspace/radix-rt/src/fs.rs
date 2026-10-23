@@ -20,7 +20,9 @@ use core::fmt;
 use libradix::SYS;
 use radix_abi::Status;
 use radix_abi::capability::{self, ObjectKind, Rights};
-use radix_abi::directory::{self, DirEntry, FileKind, FilesystemKind, MountFlags, OpenFlags};
+use radix_abi::directory::{
+    self, DirEntry, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags,
+};
 use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::{file, startup};
 
@@ -247,9 +249,15 @@ impl Dir {
         Ok(directory::rename(&SYS, slot, from.as_bytes(), to_dir.held.slot, to.as_bytes())?)
     }
 
-    /// What the file at `path` is (`.` for this directory).
+    /// Makes a symbolic link at `path` that points to `target`.
+    pub fn make_link(&self, path: &str, target: &str) -> Result<()> {
+        Ok(directory::make_link(&SYS, self.held.slot, path.as_bytes(), target.as_bytes())?)
+    }
+
+    /// What the file at `path` is (`.` for this directory), following a
+    /// symbolic link there.
     pub fn stat(&self, path: &str) -> Result<Stat> {
-        let s = directory::stat(&SYS, self.held.slot, path.as_bytes())?;
+        let s = directory::stat(&SYS, self.held.slot, path.as_bytes(), PathFlags::NONE)?;
         Ok(Stat {
             kind: s.kind,
             size: s.size,

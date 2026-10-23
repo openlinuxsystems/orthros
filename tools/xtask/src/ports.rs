@@ -7,17 +7,18 @@
 //!
 //! - `recipe.toml`: the port's version, license and home page, the git
 //!   commit its source is pinned to (or, for Rust's standard library,
-//!   the pinned Rust toolchain's rust-src) and any other sources unpacked
-//!   into its tree, the ports it needs built first, and the files it adds
-//!   to the boot archive;
+//!   the pinned Rust toolchain's rust-src), any other sources unpacked
+//!   into its tree and crates from crates.io, each pinned by its SHA-256,
+//!   the ports it needs built first, and the files it adds to the boot
+//!   archive;
 //! - `patches/*.patch`, applied in name order with `patch -p1`;
 //! - `build.sh`, which builds the port in a fresh copy of its patched
 //!   source and installs it into the sysroot (`out/sysroot`), or, for a
 //!   port of the toolchain, into `out/toolchain`.
 //!
-//! Sources are fetched with git once, by commit, into `target/ports`, and
-//! checked to be that commit, so a build uses nothing but what the recipe
-//! names. A port is built again only when something that went into its
+//! Sources are fetched once into `target/ports`, with git by commit and
+//! from crates.io by checksum, and checked to be what the recipe names, so
+//! a build uses nothing else. A port is built again only when something that went into its
 //! last build changed: its directory, the toolchain (and Rust's, for a
 //! port of rust-src), or a port it needs.
 //!
@@ -65,10 +66,15 @@ pub struct Recipe {
     /// what it installs is used to build, and never reaches an image.
     #[serde(default)]
     pub toolchain: bool,
+    /// Its source; a port of crates alone has none.
+    #[serde(default)]
     pub source: Source,
     /// More sources, unpacked inside the port's source tree.
     #[serde(default)]
     pub extra: Vec<Extra>,
+    /// Crates from crates.io, unpacked inside the port's source tree.
+    #[serde(default, rename = "crate")]
+    pub crates: Vec<Crate>,
     /// Files of the sysroot the boot archive holds, as paths beneath it;
     /// one that ends in `/` is a directory, with everything in it.
     #[serde(default)]
@@ -84,8 +90,8 @@ pub struct Recipe {
 }
 
 /// Where a source comes from: a git repository and a commit in it, or
-/// rust-src.
-#[derive(Debug, Deserialize)]
+/// rust-src; neither for a port of crates alone.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     /// The repository; empty for rust-src.
@@ -116,6 +122,30 @@ pub struct Extra {
     pub license: String,
 }
 
+/// A crate from crates.io unpacked inside a port's tree: the crates a port
+/// of Rust's standard library or of crates patches for Radix.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Crate {
+    pub name: String,
+    pub version: String,
+    /// The SHA-256 of its `.crate` file, which Cargo.lock files record too.
+    pub sha256: String,
+    /// SPDX license expression, as its Cargo.toml gives it.
+    pub license: String,
+    /// Where it goes, relative to the port's source: `<name>-<version>`
+    /// unless given.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl Crate {
+    /// Where it goes in the port's source.
+    pub fn path(&self) -> String {
+        self.path.clone().unwrap_or_else(|| format!("{}-{}", self.name, self.version))
+    }
+}
+
 /// Code from another project that a port keeps in its own directory, as
 /// ports/mlibc keeps musl's in `musl/`.
 #[derive(Debug, Deserialize)]
@@ -132,13 +162,17 @@ pub struct Bundled {
 }
 
 /// A port that was built: its recipe, its directory, and where its
-/// source is.
+/// sources are.
 pub struct Port {
     pub recipe: Recipe,
     /// `ports/<name>`.
     pub dir: PathBuf,
-    /// Its source as fetched, then the extra sources.
-    pub sources: Vec<PathBuf>,
+    /// Its source as fetched, if it has one.
+    pub source: Option<PathBuf>,
+    /// The extra sources, in the recipe's order.
+    pub extras: Vec<PathBuf>,
+    /// The crates, unpacked, in the recipe's order.
+    pub crates: Vec<PathBuf>,
 }
 
 /// Reads every recipe in `ports/`, in an order that builds each port
@@ -211,10 +245,39 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
             return Err(Error::new(format!("{what}: only a toolchain port builds rust-src")));
         }
     }
-    let main = (!recipe.source.rust_src).then_some(&recipe.source.commit);
+    let none = !recipe.source.rust_src && recipe.source.git.is_empty();
+    if none && (!recipe.source.commit.is_empty() || recipe.crates.is_empty()) {
+        return Err(Error::new(format!(
+            "{what}: a port needs a source: git and commit, rust-src or crates"
+        )));
+    }
+    let main = (!recipe.source.rust_src && !none).then_some(&recipe.source.commit);
     for commit in main.into_iter().chain(recipe.extra.iter().map(|e| &e.commit)) {
-        if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !is_hex(commit, 40) {
             return Err(Error::new(format!("{what}: `{commit}` is not a full commit ID")));
+        }
+    }
+    for krate in &recipe.crates {
+        let path = krate.path();
+        if !is_hex(&krate.sha256, 64) {
+            return Err(Error::new(format!(
+                "{what}: crate {} {}: `{}` is not a SHA-256",
+                krate.name, krate.version, krate.sha256
+            )));
+        }
+        let plain = |s: &str| {
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
+        };
+        if !plain(&krate.name)
+            || !plain(&krate.version)
+            || path.starts_with('/')
+            || path.split('/').any(|part| part.is_empty() || part == "..")
+        {
+            return Err(Error::new(format!(
+                "{what}: crate `{}` `{}` at `{path}` is not a crate's name, version and \
+                 a path inside the source",
+                krate.name, krate.version
+            )));
         }
     }
     if !dir.join("build.sh").is_file() {
@@ -224,6 +287,11 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
         return Err(Error::new(format!("{what}: a toolchain port puts nothing in the image")));
     }
     Ok(())
+}
+
+/// Whether `text` is `len` hexadecimal digits.
+fn is_hex(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The host programs the toolchain is made of.
@@ -343,6 +411,24 @@ impl Toolchain {
         self.bin().join(format!("{TRIPLE}-cc"))
     }
 
+    /// Cargo for Radix: the wrapper that builds programs on Rust's
+    /// standard library.
+    pub fn cargo(&self) -> PathBuf {
+        self.bin().join(format!("{TRIPLE}-cargo"))
+    }
+
+    /// The sysroot of Rust's standard library for Radix, which the
+    /// rust-std port builds, with the crates the ports patch for Radix.
+    pub fn rust(&self) -> PathBuf {
+        self.dir.join("rust")
+    }
+
+    /// The `[patch]` configurations of the crates the ports patch for
+    /// Radix, one per crate, named `<name>-<version>.toml`.
+    pub fn crate_patches(&self) -> PathBuf {
+        self.rust().join("patches")
+    }
+
     /// Writes the wrapper scripts and cross files into `out/toolchain`.
     pub fn write(&self, ctx: &Ctx) -> Result<()> {
         process::create_dir(&self.bin())?;
@@ -365,6 +451,7 @@ impl Toolchain {
         // whichever the host has, if any (Ubuntu's lld-20 installs only
         // `ld.lld-20`).
         write_script(&self.bin().join("ld.lld"), &script("ld", &self.tools["ld"]))?;
+        write_script(&self.cargo(), &self.cargo_script(ctx)?)?;
         write_file(&self.libc_cross_file(), &self.libc_cross(&sysroot))?;
         write_file(&self.cross_file(), &self.programs_cross())?;
         Ok(())
@@ -403,6 +490,10 @@ for arg do
 	-dynamic)
 		mode=dynamic
 		continue ;;
+	# The target is this script's to choose: the cc crate names Rust's
+	# (x86_64-unknown-radix-mlibc), which Clang does not know.
+	--target=*)
+		continue ;;
 	esac
 	set -- "$@" "$arg"
 done
@@ -435,6 +526,86 @@ exec '{clang}' "$@"
             clang = self.clang.display(),
         );
         s
+    }
+
+    /// Cargo for programs on Rust's standard library (ADR 0070), as
+    /// `cargo` is used: `x86_64-radix-cargo build --release`. It builds for
+    /// the x86_64-unknown-radix target against the rust-std port's
+    /// sysroot, with the crates the ports patch for Radix in place of
+    /// crates.io's (those the workspace's Cargo.lock names, so Cargo has no
+    /// unused patches to warn of; all of them before there is one), and
+    /// links with the toolchain's C compiler, which the cc crate builds C
+    /// with too. The pinned Rust toolchain builds, whatever a port's tree
+    /// pins.
+    fn cargo_script(&self, ctx: &Ctx) -> Result<String> {
+        let pin = ctx.root.join("rust-toolchain.toml");
+        let text =
+            std::fs::read_to_string(&pin).context(|| format!("reading {}", pin.display()))?;
+        let channel = text
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .map(|value| value.trim().trim_matches('"').to_string())
+            .ok_or_else(|| Error::new(format!("{} names no channel", ctx.display(&pin))))?;
+        let tool = |name: &str| self.bin().join(format!("{TRIPLE}-{name}"));
+        Ok(format!(
+            r#"#!/bin/sh
+# Written by ob (ob(1), PORTS): Cargo for Radix's programs on Rust's
+# standard library.
+if [ $# -eq 0 ]; then
+	echo "usage: {TRIPLE}-cargo command [argument...]" >&2
+	exit 2
+fi
+command=$1
+shift
+# The workspace's Cargo.lock: beside --manifest-path, or here or above.
+dir=.
+take=
+for arg do
+	[ -n "$take" ] && dir=$(dirname "$arg")
+	take=
+	case $arg in
+	--manifest-path) take=yes ;;
+	--manifest-path=*) dir=$(dirname "${{arg#*=}}") ;;
+	esac
+done
+dir=$(cd "$dir" && pwd) || exit
+lock=
+while [ -z "$lock" ]; do
+	if [ -f "$dir/Cargo.lock" ]; then
+		lock=$dir/Cargo.lock
+	elif [ "$dir" = / ]; then
+		break
+	fi
+	dir=$(dirname "$dir")
+done
+for patch in '{patches}'/*.toml; do
+	[ -f "$patch" ] || continue
+	name=${{patch##*/}}
+	name=${{name%-*}}
+	if [ -z "$lock" ] || grep -qx "name = \"$name\"" "$lock"; then
+		set -- --config "$patch" "$@"
+	fi
+done
+case $command in
+build | b | check | c | clippy | doc | d | fetch | run | r | rustc | test | t | tree)
+	set -- --target '{spec}' -Zjson-target-spec "$@" ;;
+esac
+unset RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET
+export RUSTUP_TOOLCHAIN='{channel}'
+export CARGO_ENCODED_RUSTFLAGS='--sysroot={rust}'
+export CARGO_TARGET_X86_64_UNKNOWN_RADIX_LINKER='{cc}'
+export CC_x86_64_unknown_radix='{cc}'
+export AR_x86_64_unknown_radix='{ar}'
+export CFLAGS_x86_64_unknown_radix=-O2
+export CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY=never
+exec cargo "$command" "$@"
+"#,
+            patches = self.crate_patches().display(),
+            spec = ctx.root.join(crate::userspace::STD_TARGET_SPEC).display(),
+            rust = self.rust().display(),
+            cc = self.cc().display(),
+            ar = tool("ar").display(),
+        ))
     }
 
     /// The cross file the C library is built with: Clang for no OS, so
@@ -530,22 +701,31 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
     let mut stamps: BTreeMap<String, u64> = BTreeMap::new();
     let mut ports = Vec::new();
     for (recipe, dir) in recipes(ctx)? {
-        let mut sources = vec![if recipe.source.rust_src {
-            rust_src(ctx)?.0
+        let source = if recipe.source.rust_src {
+            Some(rust_src(ctx)?.0)
+        } else if recipe.source.git.is_empty() {
+            None
         } else {
-            fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?
-        }];
+            Some(fetch(ctx, &recipe.name, &recipe.source.git, &recipe.source.commit)?)
+        };
+        let mut extras = Vec::new();
         for extra in &recipe.extra {
             let name = extra.path.rsplit('/').next().unwrap_or(&extra.path);
-            sources.push(fetch(ctx, name, &extra.git, &extra.commit)?);
+            extras.push(fetch(ctx, name, &extra.git, &extra.commit)?);
         }
-        let stamp = inputs_hash(ctx, &dir, &toolchain, &recipe, &stamps)?;
+        let mut crates = Vec::new();
+        for krate in &recipe.crates {
+            crates.push(fetch_crate(ctx, krate)?);
+        }
+        let port = Port { recipe, dir, source, extras, crates };
+        let recipe = &port.recipe;
+        let stamp = inputs_hash(ctx, &port.dir, &toolchain, recipe, &stamps)?;
         let stamp_file = ctx.out.join("ports").join(format!("{}.stamp", recipe.name));
         let built = std::fs::read_to_string(&stamp_file).ok() == Some(format!("{stamp:016x}\n"));
         if built && !rebuild.contains(&recipe.name) {
             step(&format!("Port {} {} is up to date", recipe.name, recipe.version));
         } else {
-            build(ctx, &toolchain, &recipe, &dir, &sources)?;
+            build(ctx, &toolchain, &port)?;
             // A port of Rust's standard library must agree with the C
             // library it calls.
             if recipe.source.rust_src {
@@ -555,7 +735,7 @@ pub fn build_all(ctx: &Ctx, rebuild: &[String]) -> Result<Ports> {
             write_file(&stamp_file, &format!("{stamp:016x}\n"))?;
         }
         stamps.insert(recipe.name.clone(), stamp);
-        ports.push(Port { recipe, dir, sources });
+        ports.push(port);
     }
     for name in rebuild {
         if !stamps.contains_key(name) {
@@ -603,8 +783,11 @@ fn inputs_hash(
 
 fn list_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).context(|| format!("reading {}", dir.display()))? {
-        let path = entry.context(|| format!("reading {}", dir.display()))?.path();
-        if path.is_dir() {
+        let entry = entry.context(|| format!("reading {}", dir.display()))?;
+        let path = entry.path();
+        // A symbolic link is listed itself, even one to a directory.
+        let kind = entry.file_type().context(|| format!("reading {}", path.display()))?;
+        if kind.is_dir() {
             list_files(&path, out)?;
         } else {
             out.push(path);
@@ -665,6 +848,59 @@ fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str) -> Result<PathBuf> {
     }
 }
 
+/// Fetches a crate from crates.io into `target/ports/sources/crates`,
+/// once, checks its SHA-256, and unpacks it there. Returns where it is
+/// unpacked: with a `.cargo-checksum.json` that gives its checksum, as
+/// Cargo wants of a vendored crate.
+fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
+    let crates = ctx.target.join("ports/sources/crates");
+    let name = format!("{}-{}", krate.name, krate.version);
+    let dir = crates.join(&name);
+    let checksum = format!("{{\"files\":{{}},\"package\":\"{}\"}}", krate.sha256);
+    let marker = dir.join(".cargo-checksum.json");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(checksum.as_str()) {
+        return Ok(dir);
+    }
+    let url = format!("https://static.crates.io/crates/{}/{name}.crate", krate.name);
+    step(&format!("Fetching crate {} {} from crates.io", krate.name, krate.version));
+    process::create_dir(&crates)?;
+    let file = crates.join(format!("{name}.crate"));
+    let mut cmd = Command::new("curl");
+    cmd.args(["--proto", "=https", "--tlsv1.2", "-fsSL", "--retry", "3", "-o"])
+        .arg(&file)
+        .arg(&url);
+    process::run(ctx, &mut cmd)?;
+    let sum = process::sha256(ctx, &file)?;
+    if sum != krate.sha256 {
+        let _ = std::fs::remove_file(&file);
+        return Err(Error::new(format!(
+            "{url} has SHA-256 {sum}, not the {} the recipe pins; not using it",
+            krate.sha256
+        )));
+    }
+    // Unpacked beside its final place, then moved there: a directory
+    // there is a whole crate.
+    let partial = crates.join(format!("{name}.partial"));
+    for old in [&dir, &partial] {
+        if old.exists() {
+            std::fs::remove_dir_all(old).context(|| format!("removing {}", old.display()))?;
+        }
+    }
+    process::create_dir(&partial)?;
+    let mut cmd = Command::new("tar");
+    cmd.arg("-xzf").arg(&file).arg("-C").arg(&partial).arg("--no-same-owner");
+    process::run(ctx, &mut cmd)?;
+    let unpacked = partial.join(&name);
+    if !unpacked.join("Cargo.toml").is_file() {
+        return Err(Error::new(format!("{url} holds no {name}/Cargo.toml")));
+    }
+    write_file(&unpacked.join(".cargo-checksum.json"), &checksum)?;
+    std::fs::rename(&unpacked, &dir).context(|| format!("moving it to {}", dir.display()))?;
+    std::fs::remove_dir_all(&partial).context(|| format!("removing {}", partial.display()))?;
+    let _ = std::fs::remove_file(&file);
+    Ok(dir)
+}
+
 /// Copies the tree of `repo`'s checked-out commit, without its `.git`, to
 /// `to`.
 fn export(ctx: &Ctx, repo: &Path, to: &Path) -> Result<()> {
@@ -690,15 +926,18 @@ fn export(ctx: &Ctx, repo: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Builds one port: a fresh copy of its source with its patches applied,
+/// Copies the directory `from`, with everything in it, to `to`.
+fn copy_tree(ctx: &Ctx, from: &Path, to: &Path) -> Result<()> {
+    process::create_dir(to)?;
+    let mut cmd = Command::new("cp");
+    cmd.arg("-R").arg(from.join(".")).arg(to);
+    process::run(ctx, &mut cmd)
+}
+
+/// Builds one port: a fresh copy of its sources with its patches applied,
 /// then its build.sh.
-fn build(
-    ctx: &Ctx,
-    toolchain: &Toolchain,
-    recipe: &Recipe,
-    dir: &Path,
-    sources: &[PathBuf],
-) -> Result<()> {
+fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
+    let (recipe, dir) = (&port.recipe, port.dir.as_path());
     step(&format!("Building port {} {}", recipe.name, recipe.version));
     let work = ctx.target.join("ports/work").join(&recipe.name);
     if work.exists() {
@@ -706,16 +945,16 @@ fn build(
     }
     let src = work.join("src");
     let build_dir = work.join("build");
-    if recipe.source.rust_src {
-        process::create_dir(&src)?;
-        let mut cmd = Command::new("cp");
-        cmd.arg("-R").arg(sources[0].join(".")).arg(&src);
-        process::run(ctx, &mut cmd)?;
-    } else {
-        export(ctx, &sources[0], &src)?;
+    match &port.source {
+        Some(source) if recipe.source.rust_src => copy_tree(ctx, source, &src)?,
+        Some(source) => export(ctx, source, &src)?,
+        None => process::create_dir(&src)?,
     }
-    for (extra, source) in recipe.extra.iter().zip(&sources[1..]) {
+    for (extra, source) in recipe.extra.iter().zip(&port.extras) {
         export(ctx, source, &src.join(&extra.path))?;
+    }
+    for (krate, source) in recipe.crates.iter().zip(&port.crates) {
+        copy_tree(ctx, source, &src.join(krate.path()))?;
     }
     let patches = dir.join("patches");
     if patches.is_dir() {
@@ -735,6 +974,11 @@ fn build(
         }
     }
     process::create_dir(&build_dir)?;
+    let info = info_dir(ctx, &recipe.name);
+    if info.exists() {
+        std::fs::remove_dir_all(&info).context(|| format!("removing {}", info.display()))?;
+    }
+    process::create_dir(&info)?;
     let sysroot = ctx.out.join("sysroot");
     process::create_dir(&sysroot)?;
     let jobs = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -753,8 +997,10 @@ fn build(
         .env("PORT_DIR", dir)
         .env("PORT_SRC", &src)
         .env("PORT_BUILD", &build_dir)
+        .env("PORT_INFO", &info)
         .env("SYSROOT", &sysroot)
         .env("TOOLCHAIN", &toolchain.dir)
+        .env("CARGO_RADIX", toolchain.cargo())
         .env("RUST_TARGET", ctx.root.join(crate::userspace::STD_TARGET_SPEC))
         .env("PREFIX", "/system")
         .env("JOBS", jobs.to_string())
@@ -778,8 +1024,8 @@ fn build(
         .env("SOURCE_DATE_EPOCH", crate::image::source_date_epoch(ctx).unwrap_or("0".into()));
     process::run(ctx, &mut cmd)
         .map_err(|err| Error::new(format!("port {}: {err}", recipe.name)))?;
-    // Nothing a recipe says goes in the image may be missing.
-    for file in &recipe.image {
+    // Nothing a recipe or build.sh says goes in the image may be missing.
+    for file in &image_list(ctx, recipe)? {
         let path = sysroot.join(file);
         let there = if file.ends_with('/') { path.is_dir() } else { path.is_file() };
         if !there {
@@ -792,11 +1038,43 @@ fn build(
     Ok(())
 }
 
+/// Where a port's build.sh leaves what ob needs to know of the build
+/// (`$PORT_INFO`): `image`, the files it installed for the image beyond
+/// those the recipe names, one path beneath the sysroot a line, such as
+/// manual pages; and for a port in Rust, the crates it linked
+/// (`crates.txt`, as `cargo tree --format '{p}|{l}'` lists them) and its
+/// `Cargo.lock`, for the license manifest.
+pub fn info_dir(ctx: &Ctx, name: &str) -> PathBuf {
+    ctx.out.join("ports").join(name)
+}
+
+/// What of the sysroot a port puts in the image: what its recipe names,
+/// then what its build.sh listed in `$PORT_INFO/image`.
+fn image_list(ctx: &Ctx, recipe: &Recipe) -> Result<Vec<String>> {
+    let mut list = recipe.image.clone();
+    let listed = info_dir(ctx, &recipe.name).join("image");
+    if listed.is_file() {
+        let text =
+            std::fs::read_to_string(&listed).context(|| format!("reading {}", listed.display()))?;
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if line.starts_with('/') || line.split('/').any(|part| part == "..") {
+                return Err(Error::new(format!(
+                    "port {}: `{line}` in {} is not a path beneath the sysroot",
+                    recipe.name,
+                    listed.display()
+                )));
+            }
+            list.push(line.to_string());
+        }
+    }
+    Ok(list)
+}
+
 /// The files of `recipe`'s image in `sysroot`, as (path in the image,
 /// path on the host) pairs, in name order.
-pub fn image_files(recipe: &Recipe, sysroot: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub fn image_files(ctx: &Ctx, recipe: &Recipe, sysroot: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut files = Vec::new();
-    for file in &recipe.image {
+    for file in &image_list(ctx, recipe)? {
         let path = sysroot.join(file);
         if !file.ends_with('/') {
             files.push((file.clone(), path));
