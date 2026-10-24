@@ -47,7 +47,8 @@ reach the network, or leave processes behind.
 - The corpus runs in a sandbox. A user namespace (or root) with mount,
   PID and network namespaces of its own copies the corpus into a new
   tmpfs on `/tmp`, puts fresh ones on `/var/tmp` and `/dev/shm`, and
-  remounts everything else read-only. There is no network, and `curl`,
+  remounts everything else read-only, or runs nothing if one mount
+  stays writable. There is no network, and `curl`,
   `wget` and `sudo` are stubs that fail as they would offline. A source
   can name more stubs, which print their name and arguments: the servers
   an entrypoint starts, so that none starts for real, whether the host

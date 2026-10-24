@@ -14,10 +14,10 @@
 //!
 //! The scripts are other people's and run as they are written, so they
 //! run in a sandbox: new user, mount, PID and network namespaces, every
-//! file system read-only but a fresh `/tmp` holding a copy of the corpus,
-//! a limit on processes, and each test in a PID namespace of its own,
-//! which ends whole when the test does or runs out of time. As root, the
-//! sandbox runs as `nobody`.
+//! file system read-only but a fresh `/tmp` holding a copy of the corpus
+//! (nothing runs if one stays writable), a limit on processes, and each
+//! test in a PID namespace of its own, which ends whole when the test
+//! does or runs out of time. As root, the sandbox runs as `nobody`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -301,6 +301,17 @@ awk '{ print $2 }' /proc/self/mounts | sort -u | while read -r point; do
     *) mount -o remount,bind,ro "$point" 2>/dev/null || true ;;
     esac
 done
+# Other people's code runs only where nothing else can be written: a mount
+# that is still writable stops the corpus before anything runs. Kernel
+# interfaces that hold no files (nsfs, cgroup and the like) do not count.
+writable=$(awk '{ for (i = 7; $i != "-"; i++) continue; type = $(i + 1) }
+    $5 !~ "^/(proc|sys|dev|tmp|var/tmp)(/|$)" &&
+    type !~ "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|efivarfs|fusectl|mqueue|nsfs|proc|pstore|securityfs|sysfs|tracefs)$" {
+        split($6, options, ","); if (options[1] != "ro") print $5 }' /proc/self/mountinfo)
+if [ -n "$writable" ]; then
+    echo "ob: the sandbox could not make these read-only:" $writable >&2
+    exit 1
+fi
 if [ "$mode" = root ]; then
     chown -R 65534:65534 /tmp/corpus
     exec setpriv --reuid=65534 --regid=65534 --clear-groups -- \
