@@ -138,6 +138,23 @@ impl Settings {
     }
 }
 
+/// What [`Ldisc::receive`] did with a byte typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// It was taken: into the input, or acted on (flow, editing).
+    Taken,
+    /// It was a signal character, taken: the foreground process group
+    /// gets this signal.
+    Signal(u32),
+    /// It was typed past a line that fills the input with no complete
+    /// line before it, which nothing could read: dropped, as on Linux.
+    Dropped,
+    /// It needs room the input lacks until a reader takes some, and was
+    /// not taken: it is to be typed again then. (IXANY's restart of
+    /// output stands.)
+    Full,
+}
+
 /// One terminal's line discipline.
 pub struct Ldisc<B> {
     /// The settings.
@@ -180,14 +197,21 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
     }
 
     /// Changes the settings. Leaving canonical mode makes what was typed
-    /// readable as it is; entering it makes it the line being edited.
+    /// readable as it is; entering it makes it a complete line, readable
+    /// at once, as Linux does. Either way a pending LNEXT is forgotten.
     pub fn set(&mut self, settings: Settings) {
         let was = self.settings.canonical();
         self.settings = settings;
         if was != settings.canonical() {
-            self.lines_count = 0;
             self.lines_head = 0;
-            self.complete = if settings.canonical() { 0 } else { self.input.len() };
+            self.lines_count = 0;
+            if settings.canonical() && !self.input.is_empty() {
+                // The input holds no more than a line's length (u16).
+                self.lines[0] = self.input.len() as u16;
+                self.lines_count = 1;
+            }
+            self.complete = self.input.len();
+            self.literal = false;
             self.edit_column = self.column;
         }
         if settings.iflag & IXON == 0 {
@@ -224,18 +248,30 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
         if self.settings.canonical() { self.complete } else { self.input.len() }
     }
 
-    /// Whether a read would find something now: in canonical mode a
-    /// complete line, otherwise at least `min` bytes (VMIN's, at least 1
-    /// unless VMIN is 0).
+    /// Whether `poll` finds the terminal readable, as Linux's
+    /// `input_available_p` decides: in canonical mode when a line is
+    /// complete; otherwise when VMIN bytes wait if VMIN is set and VTIME
+    /// is not, and a byte otherwise.
     pub fn ready(&self) -> bool {
         match self.readable() {
             None => false,
-            Some(n) if self.settings.canonical() => {
-                let _ = n;
-                true
+            Some(_) if self.settings.canonical() => true,
+            Some(n) => {
+                let (min, time) = self.settings.min_time();
+                n >= if min > 0 && time == 0 { usize::from(min) } else { 1 }
             }
-            Some(n) => n >= usize::from(self.settings.min_time().0.max(1)),
         }
+    }
+
+    /// Whether a byte typed now would be taken (or dropped), not left
+    /// [`Received::Full`]: in canonical mode there is room for it and its
+    /// line's end and a line slot, or no complete line a reader could
+    /// take to make room; otherwise there is room for it.
+    pub fn has_room(&self) -> bool {
+        if !self.settings.canonical() {
+            return self.input.free() > 0;
+        }
+        self.lines_count == 0 || (self.lines_count < LINES && self.input.free() > 1)
     }
 
     /// Takes up to `max` bytes of input through `sink` (as
@@ -274,11 +310,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
         self.edit_column = self.column;
     }
 
-    /// Takes a byte typed at the terminal. Echoes through `echo` (already
-    /// processed for output), and returns the signal its foreground process
-    /// group is to get, if the byte was a signal character. Returns
-    /// whether readers may have something new, as the second value.
-    pub fn receive(&mut self, byte: u8, echo: &mut dyn FnMut(&[u8])) -> (Option<u32>, bool) {
+    /// Takes a byte typed at the terminal, if there is room for it:
+    /// echoes through `echo` (already processed for output), and says
+    /// what it did ([`Received`]). Signal, flow and editing characters
+    /// need no room, so they reach a terminal whose input is full.
+    pub fn receive(&mut self, byte: u8, echo: &mut dyn FnMut(&[u8])) -> Received {
         let s = self.settings;
         let mut byte = byte;
         if s.input(ISTRIP) {
@@ -289,11 +325,11 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
             if s.input(IXON) {
                 if s.is(byte, VSTOP) {
                     self.output_stopped = true;
-                    return (None, false);
+                    return Received::Taken;
                 }
                 if s.is(byte, VSTART) {
                     self.output_stopped = false;
-                    return (None, false);
+                    return Received::Taken;
                 }
                 if s.input(IXANY) {
                     self.output_stopped = false;
@@ -316,12 +352,12 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
                     if s.local(ECHO) {
                         self.echo_char(byte, echo);
                     }
-                    return (Some(signal), false);
+                    return Received::Signal(signal);
                 }
             }
             if byte == b'\r' {
                 if s.input(IGNCR) {
-                    return (None, false);
+                    return Received::Taken;
                 }
                 if s.input(ICRNL) {
                     byte = b'\n';
@@ -331,53 +367,60 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
             }
         }
         if !s.canonical() {
-            let added = self.input.push_byte(byte);
-            if added {
-                self.complete = self.input.len();
+            if !self.input.push_byte(byte) {
+                self.literal = literal;
+                return Received::Full;
             }
+            self.complete = self.input.len();
             if s.local(ECHO) || (byte == b'\n' && s.local(ECHONL)) {
                 self.echo_char(byte, echo);
             }
-            return (None, added);
+            return Received::Taken;
         }
         if !literal {
             if s.is(byte, VERASE) {
                 self.erase(false, echo);
-                return (None, false);
+                return Received::Taken;
             }
             if s.local(IEXTEN) && s.is(byte, VWERASE) {
                 self.erase(true, echo);
-                return (None, false);
+                return Received::Taken;
             }
             if s.is(byte, VKILL) {
                 self.kill(echo);
-                return (None, false);
+                return Received::Taken;
             }
             if s.local(IEXTEN) && s.is(byte, VLNEXT) {
                 self.literal = true;
                 if s.local(ECHO) && s.local(ECHOCTL) {
                     self.output_echo(b"^\x08", echo);
                 }
-                return (None, false);
+                return Received::Taken;
             }
             if s.local(IEXTEN) && s.is(byte, VREPRINT) {
                 self.reprint(byte, echo);
-                return (None, false);
+                return Received::Taken;
             }
             if s.is(byte, VEOF) {
                 if self.lines_count == LINES {
-                    return (None, false);
+                    return Received::Full;
                 }
                 self.end_line();
-                return (None, true);
+                return Received::Taken;
             }
         }
         let ends = byte == b'\n' || (!literal && (s.is(byte, VEOL) || s.is(byte, VEOL2)));
         // A line keeps room for its end, so that a full line can still be
-        // finished; with every line slot used, input waits to be read.
+        // finished. Past that, or with every line slot used, the byte waits
+        // for a reader to take a line; with no line to take, nothing could
+        // make room, and it is dropped.
         let room = self.input.free();
         if self.lines_count == LINES || room == 0 || (!ends && room == 1) {
-            return (None, false);
+            if self.lines_count == 0 {
+                return Received::Dropped;
+            }
+            self.literal = literal;
+            return Received::Full;
         }
         self.input.push_byte(byte);
         if s.local(ECHO) || (byte == b'\n' && s.local(ECHONL)) {
@@ -385,9 +428,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
         }
         if ends {
             self.end_line();
-            return (None, true);
         }
-        (None, false)
+        Received::Taken
     }
 
     /// Echoes `byte` as typed: a control character as `^X` with ECHOCTL.

@@ -185,13 +185,22 @@ pub fn create_with_rights(
     let Some(table) = registry.as_mut() else { return Err(error(Kernel::NoMemory)) };
     let needed = store.object_records().saturating_add(1);
     table.try_reserve(needed.saturating_sub(table.len())).map_err(|_| error(Kernel::NoMemory))?;
-    let id = store.create_with_rights(at, kind, rights).map_err(cap_error)?;
+    // Taken before the capability is made, which then always has its
+    // object in the registry.
+    let Some(taken) = object.take() else { return Err(error(Kernel::Gone)) };
+    let id = match store.create_with_rights(at, kind, rights) {
+        Ok(id) => id,
+        Err(err) => {
+            *object = Some(taken);
+            return Err(cap_error(err));
+        }
+    };
     let index = id.index as usize;
     while table.len() <= index {
         // Room was reserved above, for every index the store can give.
         let _ = table.push_within_capacity(None);
     }
-    let Some(object) = object.take() else { return Err(error(Kernel::Gone)) };
+    let object = taken;
     replace(table, index, Entry { generation: id.generation, cached: false, object, charge });
     Ok(())
 }

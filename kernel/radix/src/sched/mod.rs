@@ -53,13 +53,13 @@ pub mod wait;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{self, AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
 use radix_sched::{
-    CpuLoad, CpuSet, HaltPoll, LOAD_INTERVAL_NS, LoadAverage, Loads, Place, Topology,
+    CpuLoad, CpuSet, HaltPoll, LOAD_INTERVAL_NS, LoadAverage, Loads, Place, Split, Topology,
 };
 use radix_sync::{Mutex, Once, SpinLock};
 
@@ -110,7 +110,15 @@ struct CpuSched {
     user_ticks: AtomicU64,
     system_ticks: AtomicU64,
     preemptions: AtomicU64,
+    /// Nanoseconds idle, in periods that have ended; while one is under
+    /// way, when it began (0 while busy). `idle_seq` is odd while an ended
+    /// period moves into `idle_ns`, for readers on other CPUs.
     idle_ns: AtomicU64,
+    idle_since: AtomicU64,
+    idle_seq: AtomicU64,
+    /// Its busy time as [`cpu_times`] last split it, and the idle time
+    /// it gave then.
+    given: SpinLock<(Split, u64)>,
     /// Idle periods that ended while polling, and that halted.
     polls: AtomicU64,
     halts: AtomicU64,
@@ -137,6 +145,9 @@ impl CpuSched {
             system_ticks: AtomicU64::new(0),
             preemptions: AtomicU64::new(0),
             idle_ns: AtomicU64::new(0),
+            idle_since: AtomicU64::new(0),
+            idle_seq: AtomicU64::new(0),
+            given: SpinLock::new((Split::new(), 0)),
             polls: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             balance_failures: [const { AtomicU32::new(0) }; 4],
@@ -354,7 +365,8 @@ pub fn init(lockdep: Option<bool>) {
             CpuSet::single(cpu),
             domains::root(),
             0,
-        )?;
+        )
+        .ok()?;
         let idle = idle_thread(cpu, Arch::new_context(thread_start, 0, STACK_PAGES)?)?;
         kmain.state.lock_irq().run = Run::Ready;
         start_cpu_with(cpu, kmain.clone(), idle, true)?;
@@ -430,12 +442,17 @@ fn idle_thread(cpu: usize, context: Context) -> Option<ThreadRef> {
         CpuSet::single(cpu),
         domains::root(),
         0,
-    )?;
+    )
+    .ok()?;
     // Never queued, always ready: it runs whenever nothing else is.
     idle.state.lock_irq().run = Run::Ready;
     Some(idle)
 }
 
+/// Makes a thread in `domain`, which `charged` pages were charged to for
+/// it, and puts it in the registry. On failure the charge is given back:
+/// here if the domain refused the thread, or by the thread itself, made
+/// and dropped, as it leaves the domain.
 #[allow(clippy::too_many_arguments)]
 fn make_thread(
     id: u64,
@@ -447,13 +464,25 @@ fn make_thread(
     affinity: CpuSet,
     domain: DomainRef,
     charged: u64,
-) -> Option<ThreadRef> {
-    domain.thread_joined();
+) -> Result<ThreadRef, SpawnError> {
+    if !domain.thread_joined() {
+        domain.uncharge(charged);
+        return Err(SpawnError::Stopping);
+    }
     let thread = Thread::new(id, name, context, entry, arg, policy, affinity, domain, charged);
-    let thread = Arc::try_new_in(thread, kmalloc()).ok()?;
-    let mut registry = REGISTRY.lock_irq();
-    registry.as_mut()?.push_within_capacity(thread.clone()).ok()?;
-    Some(thread)
+    let thread = Arc::try_new_in(thread, kmalloc()).map_err(|_| SpawnError::NoMemory)?;
+    {
+        let mut registry = REGISTRY.lock_irq();
+        let registry = registry.as_mut().ok_or(SpawnError::NoMemory)?;
+        registry.push_within_capacity(thread.clone()).map_err(|_| SpawnError::NoMemory)?;
+    }
+    // A stop that marked the domain after it joined may have looked
+    // through the registry before it was there (`oom::stop_threads`
+    // marks first, then looks): it stops all the same.
+    if thread.domain().is_stopping() {
+        thread.request_stop();
+    }
+    Ok(thread)
 }
 
 /// Counts one more thread for the lists' room, before making it.
@@ -597,9 +626,10 @@ pub fn spawn(
     })?;
     let made = (|| {
         make_room(reserve_thread())?;
-        let context =
-            Arch::new_context(thread_start, 0, options.stack_pages).ok_or(SpawnError::NoMemory)?;
-        make_thread(
+        Arch::new_context(thread_start, 0, options.stack_pages).ok_or(SpawnError::NoMemory)
+    })();
+    let made = match made {
+        Ok(context) => make_thread(
             options.number.unwrap_or_else(take_number),
             Name::new(name),
             context,
@@ -609,14 +639,18 @@ pub fn spawn(
             allowed,
             domain.clone(),
             charged,
-        )
-        .ok_or(SpawnError::NoMemory)
-    })();
+        ),
+        Err(err) => {
+            domain.uncharge(charged);
+            Err(err)
+        }
+    };
+    // make_thread gives the charge back itself when it fails: a thread it
+    // made and dropped did, as it left.
     let thread = match made {
         Ok(thread) => thread,
         Err(err) => {
             THREADS.fetch_sub(1, Ordering::Relaxed);
-            domain.uncharge(charged);
             return Err(err);
         }
     };
@@ -1368,13 +1402,21 @@ pub fn cpu_times(cpu: usize) -> Option<CpuTimes> {
     if !slot.online.load(Ordering::Acquire) {
         return None;
     }
-    let idle_ns = slot.idle_ns.load(Ordering::Relaxed);
-    let busy = now_ns().saturating_sub(idle_ns);
-    let (user_ns, system_ns) = radix_sched::split_time(
-        busy,
-        slot.user_ticks.load(Ordering::Relaxed),
-        slot.system_ticks.load(Ordering::Relaxed),
-    );
+    let (now, idle_ns) = idle_time(slot);
+    let ((user_ns, system_ns), idle_ns) = {
+        let mut given = slot.given.lock();
+        // A reader can count a few nanoseconds of an idle period the CPU
+        // has just ended past its end: what it gave stands.
+        let idle_ns = idle_ns.max(given.1);
+        given.1 = idle_ns;
+        let busy = now.saturating_sub(idle_ns);
+        let split = given.0.update(
+            busy,
+            slot.user_ticks.load(Ordering::Relaxed),
+            slot.system_ticks.load(Ordering::Relaxed),
+        );
+        (split, idle_ns)
+    };
     let switches = slot.rq.lock_irq().as_ref().map_or(0, |rq| rq.switches);
     Some(CpuTimes {
         user_ns,
@@ -1383,6 +1425,25 @@ pub fn cpu_times(cpu: usize) -> Option<CpuTimes> {
         running: slot.running.load(Ordering::Relaxed),
         switches,
     })
+}
+
+/// The time now, and how long `slot`'s CPU has been idle by then: the
+/// period under way counts as it goes, so the busy time never falls.
+fn idle_time(slot: &CpuSched) -> (u64, u64) {
+    loop {
+        let seq = slot.idle_seq.load(Ordering::Acquire);
+        let ended = slot.idle_ns.load(Ordering::Relaxed);
+        let since = slot.idle_since.load(Ordering::Relaxed);
+        let now = now_ns();
+        // Pairs with the CPU's release as it moved a period into
+        // `idle_ns`: an unchanged, even count means these were read whole.
+        atomic::fence(Ordering::Acquire);
+        if seq.is_multiple_of(2) && slot.idle_seq.load(Ordering::Relaxed) == seq {
+            let current = if since == 0 { 0 } else { now.saturating_sub(since) };
+            return (now, ended + current);
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Each CPU's idle thread, as a new thread (the boot CPU's).
@@ -1409,6 +1470,7 @@ fn idle_loop(cpu: usize) -> ! {
         }
         slot.wake.store(0, Ordering::Relaxed);
         let started = Arch::now_ns();
+        slot.idle_since.store(started, Ordering::Relaxed);
         if poll_first && poll(slot, started.saturating_add(haltpoll.limit_ns())) {
             slot.polls.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -1422,7 +1484,13 @@ fn idle_loop(cpu: usize) -> ! {
             slot.polling.store(false, Ordering::SeqCst);
         }
         let idle = Arch::now_ns().saturating_sub(started);
+        // A reader on another CPU sees the period under way, or ended,
+        // never both or neither (`idle_time`).
+        slot.idle_seq.fetch_add(1, Ordering::Relaxed);
+        atomic::fence(Ordering::Release);
         slot.idle_ns.fetch_add(idle, Ordering::Relaxed);
+        slot.idle_since.store(0, Ordering::Relaxed);
+        slot.idle_seq.fetch_add(1, Ordering::Release);
         if poll_first {
             haltpoll.record(idle);
         }

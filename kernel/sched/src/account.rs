@@ -10,7 +10,12 @@
 //! work. As on Linux, the timer interrupt samples instead: at each tick it
 //! counts one for user mode or the kernel, by where it interrupted the
 //! running thread, and [`split_time`] shares the exact time out between
-//! them in the samples' proportion.
+//! them in the samples' proportion. Shared out afresh at each look, a part
+//! could go back (a thread that ran 100 ms with one user sample has 100 ms
+//! of user time; at 110 ms with a kernel sample too, 55), so a thread, a
+//! process and a CPU each keep their last [`Split`], which moves the line
+//! between the parts so that neither ever falls, as Linux's
+//! `cputime_adjust` does.
 //!
 //! The load averages are Linux's: every [`LOAD_INTERVAL_NS`] the kernel
 //! counts the threads that are ready to run or running, and those waiting
@@ -40,6 +45,47 @@ pub fn split_time(runtime_ns: u64, user: u64, system: u64) -> (u64, u64) {
     }
     let user_ns = (u128::from(runtime_ns) * u128::from(user) / samples) as u64;
     (user_ns, runtime_ns - user_ns)
+}
+
+/// User and system time as last given, so that neither part of a later
+/// split is less ([`Split::update`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Split {
+    user_ns: u64,
+    system_ns: u64,
+}
+
+impl Split {
+    /// No time yet.
+    pub const fn new() -> Split {
+        Split { user_ns: 0, system_ns: 0 }
+    }
+
+    /// Shares `runtime_ns` out as [`split_time`] does, then moves the line
+    /// between the parts as little as it must so that neither is less than
+    /// last time: the kernel's part first, then the user part. Returns the
+    /// user and the system time, which add up to `runtime_ns`; a runtime
+    /// no longer than last time's gives last time's parts.
+    pub fn update(&mut self, runtime_ns: u64, user: u64, system: u64) -> (u64, u64) {
+        // The parts add up to a runtime given before, so this cannot wrap.
+        if runtime_ns <= self.user_ns + self.system_ns {
+            return (self.user_ns, self.system_ns);
+        }
+        let (mut user_ns, mut system_ns) = split_time(runtime_ns, user, system);
+        if system_ns < self.system_ns {
+            system_ns = self.system_ns;
+            user_ns = runtime_ns - system_ns;
+        }
+        // Now the user part has more than last time's, or the kernel's
+        // stands as it came, at least last time's: taking from it to give
+        // the user part last time's leaves it more than before.
+        if user_ns < self.user_ns {
+            user_ns = self.user_ns;
+            system_ns = runtime_ns - user_ns;
+        }
+        *self = Split { user_ns, system_ns };
+        (user_ns, system_ns)
+    }
 }
 
 /// The 1, 5 and 15 minute load averages.
@@ -103,6 +149,43 @@ mod tests {
                     let (u, s) = split_time(runtime, user, system);
                     assert_eq!(u + s, runtime);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_split_never_goes_back() {
+        // The example above: 100 ms with a user sample, then 110 ms with a
+        // kernel sample too.
+        let mut split = Split::new();
+        assert_eq!(split.update(100, 1, 0), (100, 0));
+        assert_eq!(split.update(110, 1, 1), (100, 10));
+        // Then the kernel's part is held while the user's catches up.
+        let mut split = Split::new();
+        assert_eq!(split.update(100, 0, 1), (0, 100));
+        assert_eq!(split.update(300, 2, 1), (200, 100));
+        // A runtime that does not grow changes nothing.
+        assert_eq!(split.update(300, 0, 9), (200, 100));
+        assert_eq!(split.update(250, 9, 0), (200, 100));
+        // Every runtime and samples that grow, a little at a time.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        for _ in 0..200 {
+            let (mut split, mut runtime, mut user, mut system) = (Split::new(), 0, 0, 0);
+            let mut last = (0, 0);
+            for _ in 0..200 {
+                runtime += next(5_000_000);
+                user += next(3);
+                system += next(3);
+                let (u, s) = split.update(runtime, user, system);
+                assert_eq!(u + s, runtime.max(last.0 + last.1));
+                assert!(u >= last.0 && s >= last.1, "{last:?} then {:?}", (u, s));
+                last = (u, s);
             }
         }
     }

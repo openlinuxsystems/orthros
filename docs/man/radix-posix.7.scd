@@ -291,6 +291,13 @@ requests are Linux's *ioctl* numbers for what POSIX's terminal calls do:
 *TIOCGPGRP*, *TIOCSPGRP*, *TIOCGSID*, *TIOCGWINSZ*, *TIOCSWINSZ*,
 *FIONREAD*, *TIOCGPTN* and *TIOCSPTLCK* (*radix-terminal*(2)).
 
+As on Linux, typing the terminal has no room for waits: a write to the
+master blocks, or with *O_NONBLOCK* stops short or fails with EAGAIN,
+until a read makes room, and the master polls writable only while typing
+would be taken. The signal, flow and editing characters need no room.
+In canonical mode only typing past a line that fills the input, with no
+complete line before it, is dropped, since no read could take it.
+
 A terminal may be the controlling terminal of one session: the first one
 its leader opens without *O_NOCTTY* while it has none, or one it asks for
 with *TIOCSCTTY*. A background process of the session that reads it gets

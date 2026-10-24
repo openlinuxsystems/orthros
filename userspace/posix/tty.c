@@ -3,8 +3,8 @@
 
 // Terminals: the one the test runs on, and pseudo-terminals it makes:
 // line editing, echo, the end of the file, raw mode with VMIN and VTIME,
-// output processing, window sizes, signals from typed characters, and
-// what happens when the master goes.
+// output processing, flow control both ways, window sizes, signals from
+// typed characters, and what happens when the master goes.
 
 #include <fcntl.h>
 #include <poll.h>
@@ -173,6 +173,76 @@ static void raw(void) {
 	close(master);
 }
 
+// VMIN with VTIME, typing past what the terminal holds, stopped output,
+// and typeahead when canonical mode comes back, as on Linux.
+static void flow(void) {
+	int master, terminal;
+	CHECK(open_pty(&master, &terminal) == 0);
+	struct termios cooked, attr;
+	CHECK(tcgetattr(terminal, &cooked) == 0);
+	attr = cooked;
+	cfmakeraw(&attr);
+	attr.c_cc[VMIN] = 4;
+	attr.c_cc[VTIME] = 1;
+	CHECK(tcsetattr(terminal, TCSANOW, &attr) == 0);
+	char buffer[64];
+	// VMIN 4 and VTIME 1: a byte makes it ready for poll, and a read ends
+	// 0.1 s after the last byte came.
+	CHECK(write(master, "12", 2) == 2);
+	struct pollfd entry = {.fd = terminal, .events = POLLIN};
+	CHECK(poll(&entry, 1, 1000) == 1 && (entry.revents & POLLIN));
+	long long start = check_now_ns();
+	CHECK(read(terminal, buffer, sizeof(buffer)) == 2 && !memcmp(buffer, "12", 2));
+	long long took = check_now_ns() - start;
+	CHECK(took >= 50000000 && took < 2000000000);
+	// A read asking for fewer than VMIN bytes ends once it has them.
+	attr.c_cc[VTIME] = 0;
+	CHECK(tcsetattr(terminal, TCSANOW, &attr) == 0);
+	CHECK(write(master, "345", 3) == 3);
+	CHECK(read(terminal, buffer, 2) == 2 && !memcmp(buffer, "34", 2));
+	CHECK(read(terminal, buffer, 1) == 1 && buffer[0] == '5');
+	// Typing past what the terminal holds waits for a read: a master
+	// that does not block takes what fits, then says EAGAIN, and polls
+	// writable again once a read made room.
+	int flags = fcntl(master, F_GETFL);
+	CHECK(fcntl(master, F_SETFL, flags | O_NONBLOCK) == 0);
+	static char typing[6000];
+	memset(typing, 'k', sizeof(typing));
+	ssize_t took_in = write(master, typing, sizeof(typing));
+	CHECK(took_in == 4096);
+	CHECK_ERROR(write(master, "k", 1), EAGAIN);
+	struct pollfd out = {.fd = master, .events = POLLOUT};
+	CHECK(poll(&out, 1, 0) == 0);
+	CHECK(read(terminal, buffer, sizeof(buffer)) == sizeof(buffer));
+	CHECK(poll(&out, 1, 1000) == 1 && (out.revents & POLLOUT));
+	CHECK(write(master, typing, sizeof(typing)) == sizeof(buffer));
+	CHECK(fcntl(master, F_SETFL, flags) == 0);
+	CHECK(tcflush(terminal, TCIFLUSH) == 0);
+	// Stopped output: the terminal side is not writable, and a write
+	// that does not block says EAGAIN, until output starts again.
+	CHECK(tcflow(terminal, TCOOFF) == 0);
+	struct pollfd side = {.fd = terminal, .events = POLLOUT};
+	CHECK(poll(&side, 1, 0) == 0);
+	flags = fcntl(terminal, F_GETFL);
+	CHECK(fcntl(terminal, F_SETFL, flags | O_NONBLOCK) == 0);
+	CHECK_ERROR(write(terminal, "x", 1), EAGAIN);
+	CHECK(tcflow(terminal, TCOON) == 0);
+	CHECK(poll(&side, 1, 1000) == 1 && (side.revents & POLLOUT));
+	CHECK(write(terminal, "x", 1) == 1);
+	CHECK(fcntl(terminal, F_SETFL, flags) == 0);
+	CHECK(read_within(master, buffer, sizeof(buffer), 200) == 1 && buffer[0] == 'x');
+	// Typeahead from raw mode is a line, readable at once, once
+	// canonical mode comes back.
+	CHECK(write(master, "ls", 2) == 2);
+	CHECK(tcsetattr(terminal, TCSANOW, &cooked) == 0);
+	CHECK(read_within(master, buffer, sizeof(buffer), 30) == 0);
+	entry.revents = 0;
+	CHECK(poll(&entry, 1, 0) == 1 && (entry.revents & POLLIN));
+	CHECK(read(terminal, buffer, sizeof(buffer)) == 2 && !memcmp(buffer, "ls", 2));
+	close(terminal);
+	close(master);
+}
+
 static void sizes(void) {
 	int master, terminal;
 	CHECK(open_pty(&master, &terminal) == 0);
@@ -307,6 +377,7 @@ int main(void) {
 	RUN(own);
 	RUN(lines);
 	RUN(raw);
+	RUN(flow);
 	RUN(sizes);
 	RUN(signals);
 	RUN(hangups);

@@ -19,7 +19,7 @@ use radix_hal::Threads;
 use radix_lockdep::Saved;
 use radix_mm::Kmalloc;
 use radix_sched::cpuset::WORDS;
-use radix_sched::{CpuSet, nice_valid, rt_prio_valid, weight};
+use radix_sched::{CpuSet, Split, nice_valid, rt_prio_valid, weight};
 use radix_sync::{Once, RawSpinLock, SpinLock};
 
 use crate::Arch;
@@ -329,6 +329,8 @@ pub struct Thread {
     /// Set once it no longer counts among its domain's threads.
     left: AtomicBool,
     pub(super) stats: Stats,
+    /// Its CPU time as [`Thread::cpu_times`] last split it.
+    split: SpinLock<Split>,
     /// What a thread of a program has besides (Phase 5): set before it
     /// first runs, never for kernel threads.
     pub(super) user: Once<UserRef>,
@@ -372,6 +374,7 @@ impl Thread {
             reaped: AtomicBool::new(false),
             left: AtomicBool::new(false),
             stats: Stats::default(),
+            split: SpinLock::new(Split::new()),
             user: Once::new(),
         }
     }
@@ -439,13 +442,11 @@ impl Thread {
     }
 
     /// Its CPU time split between user mode and the kernel, as the
-    /// timer's samples share it (`radix_sched::split_time`).
+    /// timer's samples share it, neither part ever less than it was
+    /// ([`Split`]).
     pub fn cpu_times(&self) -> (u64, u64) {
-        radix_sched::split_time(
-            self.runtime_ns(),
-            self.stats.user_ticks.load(Ordering::Relaxed),
-            self.stats.system_ticks.load(Ordering::Relaxed),
-        )
+        let (user, system) = self.ticks();
+        self.split.lock().update(self.runtime_ns(), user, system)
     }
 
     /// The timer's samples of it in user mode and in the kernel.

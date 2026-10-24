@@ -18,6 +18,8 @@ use radix_sync::{SpinLock, TakeOnce};
 const STORAGE_CELLS: usize = 96 * 1024;
 
 static STORAGE: TakeOnce<[u32; STORAGE_CELLS]> = TakeOnce::new([0; STORAGE_CELLS]);
+/// The console. The log's sink takes it from interrupts too (the log masks
+/// them around its sinks), so everything else takes it with them masked.
 static SCREEN: SpinLock<Option<Console>> = SpinLock::new(None);
 /// Set by the panic path, which draws its report itself.
 static TAKEN_OVER: AtomicBool = AtomicBool::new(false);
@@ -62,7 +64,7 @@ pub fn init_framebuffer(framebuffer: Framebuffer, font: Option<&str>) {
     let (width, height) = (framebuffer.width, framebuffer.height);
     match Console::new(framebuffer, font, storage) {
         Some(console) => {
-            *SCREEN.lock() = Some(console);
+            *SCREEN.lock_irq() = Some(console);
             radix_klog::add_sink(&SCREEN_SINK, true);
         }
         None => warn!("Framebuffer: cannot draw text on a {width}x{height} framebuffer"),
@@ -71,7 +73,7 @@ pub fn init_framebuffer(framebuffer: Framebuffer, font: Option<&str>) {
 
 /// Logs what the screen console looks like.
 pub fn report() {
-    let screen = SCREEN.lock();
+    let screen = SCREEN.lock_irq();
     let Some(console) = screen.as_ref() else {
         return;
     };
@@ -93,14 +95,14 @@ pub fn report() {
 
 /// Whether there is a framebuffer console.
 pub fn present() -> bool {
-    SCREEN.lock().is_some()
+    SCREEN.lock_irq().is_some()
 }
 
 /// Stops log output to the screen and hands it to `draw`, for the panic
 /// report, over whatever a program drew there.
 pub fn take_over(draw: impl FnOnce(&mut Console)) {
     TAKEN_OVER.store(true, Ordering::Relaxed);
-    if let Some(console) = SCREEN.lock().as_mut() {
+    if let Some(console) = SCREEN.lock_irq().as_mut() {
         if HANDED_OVER.load(Ordering::Relaxed) {
             console.repaint();
         }
@@ -161,7 +163,7 @@ pub fn update_line(row_from_bottom: usize, text: &str, style: Style) {
     if HANDED_OVER.load(Ordering::Relaxed) && !TAKEN_OVER.load(Ordering::Relaxed) {
         return;
     }
-    if let Some(console) = SCREEN.lock().as_mut() {
+    if let Some(console) = SCREEN.lock_irq().as_mut() {
         let row = console.rows().saturating_sub(1 + row_from_bottom);
         console.fill_row(row, Style::Plain);
         console.set_position(0, row);

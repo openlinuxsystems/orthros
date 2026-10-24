@@ -148,10 +148,14 @@ fn changes_key() -> usize {
 /// The signal interval timer `index` sends.
 const ITIMER_SIGNALS: [u32; 3] = [SIGALRM, SIGVTALRM, SIGPROF];
 
-/// What timer `index` of `process` counts now: the kernel's clock, or the
-/// process's CPU time.
+/// What timer `index` of `process` counts now: the kernel's clock, the
+/// process's time in user mode, or all its CPU time.
 fn now_for(process: &ProcessObject, index: usize) -> u64 {
-    if index == 0 { sched::now_ns() } else { cpu_ns(process) }
+    match index {
+        0 => sched::now_ns(),
+        1 => process.cpu_times().0,
+        _ => cpu_ns(process),
+    }
 }
 
 /// What POSIX timer `timer` of `process` counts now.
@@ -552,6 +556,7 @@ fn expire_due() -> Option<u64> {
     for process in &processes {
         let real = sched::now_ns();
         let cpu = cpu_ns(process);
+        let user = process.cpu_times().0;
         let mut fired = [false; 3];
         let mut fires = [None; FIRES];
         let mut count = 0;
@@ -562,7 +567,7 @@ fn expire_due() -> Option<u64> {
                 if timer.expires == 0 {
                     continue;
                 }
-                let now = if index == 0 { real } else { cpu };
+                let now = [real, user, cpu][index];
                 if now >= timer.expires {
                     fired[index] = true;
                     // Missed expiries count once.

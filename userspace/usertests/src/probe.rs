@@ -5,6 +5,8 @@
 //! arguments and bad ones, checking each answer against radix-ipc(7)
 //! and the interface pages.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use libradix::abi::capability::{self, ObjectKind, Rights};
 use libradix::abi::endpoint::{INFO_WORDS_SHIFT, NO_SLOT};
 use libradix::abi::errors::Kernel;
@@ -36,11 +38,17 @@ const ENDPOINT: u32 = 75;
 const CHILD_SPACE: u32 = 76;
 const GRANDCHILD: u32 = 77;
 const GRANDCHILD_VIEW: u32 = 78;
+const STACK: u32 = 79;
+const WAITER_DONE: u32 = 80;
 
 /// Free addresses for its mappings.
 const MAP_AT: u64 = 0x2000_0000;
 const TLS_AT: u64 = 0x2100_0000;
 const RING_AT: u64 = 0x3000_0000;
+const STACK_AT: u64 = 0x2200_0000;
+
+/// The pages of the stack of the probe's second thread.
+const STACK_PAGES: u64 = 4;
 
 /// An address in the kernel's half.
 const KERNEL: u64 = 0xffff_8000_0000_0000;
@@ -575,9 +583,81 @@ fn rings() {
     let _ = ring.pop();
     fails!(ring.enter(0, 17, 0), InvalidArgument, "waiting for more than fit");
     fails!(ring.enter(0, 1, 1_000_000), TimedOut, "waiting for nothing, with a timeout");
+    timeout_wakes_waiter(&ring);
     ok!(capability::delete(&SYS, RING), "deleting the ring");
     if let Some(q) = ok!(address_space::query(&SYS, SLOT_SPACE, RING_AT), "query") {
         check!(!q.mapped, "a deleted ring stays mapped");
+    }
+}
+
+/// What the second thread's `ring_enter` gave: its status, and how many
+/// completions were waiting. The notification it signals after orders
+/// them before the probe's reads.
+static WAITER_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
+static WAITER_READY: AtomicU64 = AtomicU64::new(0);
+
+/// A thread waiting in a ring with no deadline of its own wakes when
+/// another thread adds a timeout, and the timeout's end ends its wait.
+fn timeout_wakes_waiter(ring: &Ring) {
+    let stack = memory::retype(&SYS, SLOT_MEMORY, ObjectKind::Frame, 2, STACK, 1)
+        .and_then(|()| syscalls::map(&SYS, SLOT_SPACE, STACK, STACK_AT, RW, 0, STACK_PAGES));
+    if ok!(stack, "a stack for a second thread").is_none() {
+        return;
+    }
+    ok!(process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, WAITER_DONE), "a note");
+    // Its stack pointer as just after a call: 8 below a 16-byte boundary.
+    let top = STACK_AT + STACK_PAGES * address_space::PAGE_SIZE - 8;
+    let entry = ring_waiter as extern "C" fn(u64) -> ! as usize as u64;
+    let started = process::start(&SYS, SLOT_PROCESS, entry, top, u64::from(RING), NO_SLOT);
+    if ok!(started, "starting a second thread").is_none() {
+        return;
+    }
+    // Long enough for it to wait in the ring, with nothing to read.
+    fails!(syscalls::wait(&SYS, WAITER_DONE, WaitFlags::NONE, 20_000_000), TimedOut, "it waits");
+    check!(ring.push(Opcode::Timeout, 0, 400, [10_000_000, 0, 0, 0, 0, 0]), "push a timeout");
+    ok!(ring.enter(1, 0, 0), "adding the timeout");
+    let woke = syscalls::wait(&SYS, WAITER_DONE, WaitFlags::NONE, 2_000_000_000);
+    if ok!(woke, "the waiter woke when the timeout ended").is_none() {
+        // It waits still, until the ring goes; its stack stays mapped.
+        return;
+    }
+    let (status, ready) =
+        (WAITER_STATUS.load(Ordering::Relaxed), WAITER_READY.load(Ordering::Relaxed));
+    check!(status == 0 && ready == 1, "the waiter's ring_enter: status {status:#x}, {ready} ready");
+    match ring.pop() {
+        Some(c) => check!(c.user_data == 400 && c.status == 0, "the timeout: {c:?}"),
+        None => check!(false, "no completion for the timeout"),
+    };
+    // Its stack is unmapped once the thread has ended.
+    let mut ended = false;
+    for _ in 0..1000 {
+        ended = process::info(&SYS, SLOT_PROCESS).is_ok_and(|info| info.threads == 1);
+        if ended {
+            break;
+        }
+        let _ = syscalls::r#yield(&SYS);
+    }
+    check!(ended, "the second thread did not end");
+    if ended {
+        ok!(syscalls::unmap(&SYS, SLOT_SPACE, STACK_AT, STACK_PAGES), "unmapping its stack");
+        ok!(capability::delete(&SYS, STACK), "deleting its stack");
+    }
+    ok!(capability::delete(&SYS, WAITER_DONE), "deleting its notification");
+}
+
+/// The second thread: waits in the ring in slot `ring` for a completion,
+/// with no timeout, says how that went, and ends.
+extern "C" fn ring_waiter(ring: u64) -> ! {
+    let (status, ready) = match syscalls::ring_enter(&SYS, ring as u32, 0, 1, 0) {
+        Ok(entered) => (0, u64::from(entered.ready)),
+        Err(status) => (status.0, 0),
+    };
+    WAITER_STATUS.store(status, Ordering::Relaxed);
+    WAITER_READY.store(ready, Ordering::Relaxed);
+    let _ = syscalls::notify(&SYS, WAITER_DONE);
+    let _ = process::exit_thread(&SYS, SLOT_PROCESS, 0);
+    loop {
+        core::hint::spin_loop();
     }
 }
 

@@ -34,10 +34,15 @@ sample for its running thread and for itself: user if the interrupt
 came from user mode, system if it came from the kernel. A thread's
 exact CPU time is shared out between user and system in its samples'
 proportion when it is read (`radix_sched::split_time`); with no sample
-yet, all of it is user time, as Linux counts it. A process's time is
-the sum of its threads', with the time of those that have ended. A CPU's
-busy time is shared out the same way by its own samples, and its idle
-time is measured exactly, as before.
+yet, all of it is user time, as Linux counts it. A proportion taken
+afresh could take user time back when a kernel sample came, so each
+read moves the line between the parts no more than it must for neither
+to fall below what the last read gave (`radix_sched::Split`, as Linux's
+`cputime_adjust` does). A process's time is shared out the same way,
+from the sums of its threads' times and samples with those of the
+threads that have ended. A CPU's busy time is shared out the same way
+by its own samples, and its idle time is measured exactly, the idle
+period under way included.
 
 The load averages are Linux's `calc_load`: every 5 seconds the boot
 CPU's tick counts the threads ready to run or running on every CPU, and

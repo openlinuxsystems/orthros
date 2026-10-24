@@ -23,7 +23,9 @@ thing (a thread, a capability, a CPU) write it as fields of
 spaces, last. New keys may be added in later versions, never in the
 middle of the existing ones, so a reader should look keys up by name.
 Times are in nanoseconds, and memory in KiB where the key does not say
-otherwise.
+otherwise. A newline or a backslash in a name or a path is written as
+Linux writes it, a backslash and three octal digits (*\\012*, *\\134*),
+so that it cannot end its line early.
 
 Linux keeps its own _/proc_ formats, which programs read: Dukovo's own
 tools read these instead (*ps*(1), *top*(1), *free*(1), *lsof*(8) and the
@@ -157,7 +159,9 @@ _/proc/mounts_
 	where it was mounted from (a device name such as _vda1_, or the
 	filesystem's kind), where it is, its kind (*tmpfs*, *fat*, *proc*,
 	*sys*, *dev* or *bootfs*), *rw* or *ro*, and *label=*_label_. The
-	first four fields are those of Linux's _/proc/mounts_.
+	first four fields are those of Linux's _/proc/mounts_, and as there,
+	a space, tab, newline or backslash in a field is written *\\040*,
+	*\\011*, *\\012* or *\\134*.
 
 _/proc/meminfo_
 	Memory in KiB, each value followed by *KiB*: *total*, the memory the

@@ -1089,6 +1089,50 @@ pub fn oom() {
     );
     domains::remove(&limited);
 
+    // The stopping mark and the thread count move together: a stop leaves
+    // an empty domain without a supervisor alone; once it has marked one,
+    // no thread joins, and its last thread to leave clears the mark.
+    let Ok(machine) = app("oom-state", None) else {
+        return outcome.fail(format_args!("could not make the domains"));
+    };
+    machine.set_stopping(true, false);
+    let empty_left = !machine.is_stopping();
+    let first = sched::spawn("oom-state", sleeper, 0, Options::new().domain(machine.clone()));
+    machine.set_stopping(true, false);
+    let refused = sched::spawn("oom-state", sleeper, 0, Options::new().domain(machine.clone()));
+    let refused = refused.err();
+    if let Ok(first) = &first {
+        first.request_stop();
+        sched::wake(first);
+        sched::join(first);
+    }
+    let cleared = wait_for(|| !machine.is_stopping() && machine.threads() == 0);
+    let again = sched::spawn("oom-state", sleeper, 0, Options::new().domain(machine.clone()));
+    if let Ok(again) = &again {
+        again.request_stop();
+        sched::wake(again);
+        sched::join(again);
+    }
+    outcome.check(
+        empty_left
+            && first.is_ok()
+            && refused == Some(sched::SpawnError::Stopping)
+            && cleared
+            && again.is_ok(),
+        format_args!(
+            "a stopped domain: left alone while empty {empty_left}, refused a thread with \
+             {refused:?}, took threads again {cleared} {}",
+            again.is_ok()
+        ),
+    );
+    // Their stacks go back when the reaper has freed them.
+    drop((first, again));
+    outcome.check(
+        wait_for(|| machine.usage_pages() == 0),
+        format_args!("the stopped domain still has {} pages charged", machine.usage_pages()),
+    );
+    domains::remove(&machine);
+
     // Out of memory: the app goes first.
     let free_before = FRAMES.free_pages();
     let service = domains::create(

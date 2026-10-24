@@ -25,5 +25,5 @@ mod ring;
 #[cfg(test)]
 mod tests;
 
-pub use ldisc::{Ldisc, Settings, TERMIOS_SIZE};
+pub use ldisc::{Ldisc, Received, Settings, TERMIOS_SIZE};
 pub use ring::Ring;
