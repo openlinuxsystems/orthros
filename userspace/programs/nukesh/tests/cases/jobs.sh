@@ -15,8 +15,8 @@ echo "$!" | while read -r p; do [ -n "$p" ] && echo has-last-pid; done
 x=outer; { x=inner; } & wait; echo $x
 # A command a signal ended is reported on standard error, as bash does:
 # its PID, how it ended and its command, for each of a pipeline's; SIGTERM
-# by name alone, SIGINT not at all. In a function, at the line its body
-# starts on. (PIDs and the script's path differ, so they are left out.)
+# by name alone, SIGINT not at all; in a function, at its body's first line.
+# PIDs, paths and core dumps (cores piped to a program ignore -c 0) are cut.
 {
 	ulimit -c 0
 	sh -c 'kill -SEGV $$'
@@ -31,7 +31,7 @@ x=outer; { x=inner; } & wait; echo $x
 	sh -c 'kill -ABRT $$' &
 	wait
 	x=$(sh -c 'kill -SEGV $$')
-} 2>&1 | sed -E 's/^[^ ]* line ([0-9]+): +[0-9]+ /line \1: PID /; s/^ +[0-9]+ /     PID /'
+} 2>&1 | sed -E 's/^[^ ]* line ([0-9]+): +[0-9]+ /line \1: PID /; s/^ +[0-9]+ /     PID /; s/\(core dumped\) //'
 # The parent's jobs are listed in a command substitution and in a
 # pipeline's commands, as bash lists them, but not in a subshell, so a
 # throttle works.
