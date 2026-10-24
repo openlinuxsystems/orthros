@@ -22,3 +22,7 @@
 (set -e; trap 'echo "exited $?"' EXIT; false)
 (sleep 5 & pid=$!; kill $pid; wait $pid; echo "killed status $?")
 (trap 'echo child-exit' EXIT; (exit 1); echo "inner status $?")
+(trap 'false; exit' EXIT; true); echo "exit in the EXIT trap: $?"
+(f() { false; exit; }; trap f EXIT; true); echo "exit in the EXIT trap's function: $?"
+(trap 'false; exit' USR1; kill -USR1 $BASHPID; echo not-here); echo "exit in a signal's trap: $?"
+(trap '(false; exit); echo "subshell $?"' EXIT; true)

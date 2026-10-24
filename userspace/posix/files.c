@@ -428,8 +428,11 @@ static void links(void) {
 	CHECK(stat("/tmp/links/a/b", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK(unlink("/tmp/links/moved") == 0 && unlink("/tmp/links/abs") == 0);
 	CHECK(stat("/tmp/links/a/b/file", &st) == 0);
-	// No hard links yet, and nothing new in /system.
+	// No hard links, named pipes or device nodes yet (radix-posix(7)),
+	// and nothing new in /system.
 	CHECK_ERROR(link("/tmp/links/a/b/file", "/tmp/links/hard"), EPERM);
+	CHECK_ERROR(mkfifo("/tmp/links/fifo", 0644), ENOSYS);
+	CHECK_ERROR(mknod("/tmp/links/node", S_IFIFO | 0644, 0), EPERM);
 	CHECK_ERROR(symlink("x", "/system/new"), EROFS);
 	CHECK(nftw("/tmp/links", remove_entry, 8, FTW_DEPTH | FTW_PHYS) == 0);
 	CHECK_ERROR(lstat("/tmp/links", &st), ENOENT);

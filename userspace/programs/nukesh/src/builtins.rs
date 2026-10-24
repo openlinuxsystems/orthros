@@ -338,7 +338,7 @@ fn return_(shell: &mut Shell, args: &[String]) -> Res {
 
 fn exit(shell: &mut Shell, args: &[String]) -> Res {
     let status = match status_arg(shell, "exit", args.get(1)) {
-        Ok(status) => status.unwrap_or(shell.status),
+        Ok(status) => status.or(shell.trap_status).unwrap_or(shell.status),
         Err(status) => status,
     };
     if shell.interactive && shell.subshell == 0 {

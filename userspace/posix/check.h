@@ -19,6 +19,11 @@
 #include <time.h>
 #include <unistd.h>
 
+// Where the tests that run programs (programs.h) note each program of
+// /system/bin they run, a name a line: the `commands` test checks that
+// every program there was run.
+#define COMMANDS_RUN "/tmp/posix-commands"
+
 // The test's name, which every line it prints starts with.
 static const char *check_name = "posix";
 // How many checks have failed in this process.

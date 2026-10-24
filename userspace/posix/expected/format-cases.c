@@ -49,6 +49,8 @@ int main(void) {
 		{"%u",'i'},{"%o",'i'},{"%#o",'i'},{"%#.0o",'i'},{"%#5o",'i'},{"%x",'i'},{"%X",'i'},{"%#x",'i'},
 		{"%#X",'i'},{"%#10x",'i'},{"%-#10x|",'i'},{"%#010x",'i'},{"%.0x",'i'},{"%hhu",'i'},{"%hx",'i'},
 		{"%lu",'l'},{"%llx",'l'},{"%#llo",'l'},{"%zu",'l'},{"%+u",'i'},{"% x",'i'},{"%#d",'i'},{"%'d",'i'},
+		// glibc takes L before an integer conversion for ll.
+		{"%Ld",'l'},{"%Lu",'l'},{"%Lx",'l'},
 	};
 	long long ivs[] = {0, 1, -1, 42, -42, 255, 1000000, INT_MAX, INT_MIN, LLONG_MAX, LLONG_MIN};
 	printf("static const struct int_case int_cases[] = {\n");

@@ -1,0 +1,51 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Has printf take an L before an integer conversion as ll, as glibc
+does: "%Lu" is "%llu". frigg read it as long double's L and failed an
+assertion, which ended the program: bzip2recover prints its block
+offsets with "%Lu". Meant for upstream.
+
+--- a/subprojects/frigg/include/frg/printf.hpp
++++ b/subprojects/frigg/include/frg/printf.hpp
+@@ -45,6 +45,16 @@
+ 	intmax_size
+ };
+ 
++#ifndef FRG_DONT_USE_LONG_DOUBLE
++// Whether `c` converts an integer, which an L before it makes a long long,
++// as in glibc: "%Lu" is "%llu".
++template<typename Char>
++constexpr bool int_conversion(Char c) {
++	return c == 'd' || c == 'i' || c == 'o' || c == 'u' || c == 'x' || c == 'X'
++			|| c == 'b' || c == 'B' || c == 'n';
++}
++#endif
++
+ template<typename T>
+ T pop_arg(va_struct *vsp, format_options *opts) {
+ 	auto pop_va_arg = [&] {
+@@ -254,9 +264,10 @@
+ 			FRG_ASSERT(*p1);
+ #ifndef FRG_DONT_USE_LONG_DOUBLE
+ 		} else if(*p1 == 'L') {
+-			szmod = printf_size_mod::longdouble_size;
+ 			++p1;
+ 			FRG_ASSERT(*p1);
++			szmod = int_conversion(*p1) ? printf_size_mod::longlong_size
++					: printf_size_mod::longdouble_size;
+ #endif
+ 		} else if(*p1 == 'h') {
+ 			++p1;
+@@ -570,9 +581,10 @@
+ 			FRG_ASSERT(*s);
+ #ifndef FRG_DONT_USE_LONG_DOUBLE
+ 		} else if(*s == 'L') {
+-			szmod = printf_size_mod::longdouble_size;
+ 			++s;
+ 			FRG_ASSERT(*s);
++			szmod = int_conversion(*s) ? printf_size_mod::longlong_size
++					: printf_size_mod::longdouble_size;
+ #endif
+ 		} else if(*s == 'h') {
+ 			++s;

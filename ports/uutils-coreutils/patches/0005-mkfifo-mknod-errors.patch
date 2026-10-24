@@ -1,0 +1,94 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+`mkfifo` and `mknod` say why they failed, as GNU's do. mkfifo gave
+"File exists" whatever the error was, and mknod left out the file's
+name and exited with 255 in place of 1.
+
+--- a/src/uu/mkfifo/locales/en-US.ftl
++++ b/src/uu/mkfifo/locales/en-US.ftl
+@@ -9,6 +9,6 @@
+ # Error messages
+ mkfifo-error-invalid-mode = invalid mode: { $error }
+ mkfifo-error-missing-operand = missing operand
+-mkfifo-error-cannot-create-fifo = cannot create fifo { $path }: File exists
++mkfifo-error-cannot-create-fifo = cannot create fifo { $path }: { $error }
+ mkfifo-error-cannot-set-permissions = cannot set permissions on { $path }: { $error }
+ mkfifo-error-non-file-permission = mode must specify only file permission bits
+--- a/src/uu/mkfifo/locales/fr-FR.ftl
++++ b/src/uu/mkfifo/locales/fr-FR.ftl
+@@ -9,6 +9,6 @@
+ # Messages d'erreur
+ mkfifo-error-invalid-mode = mode invalide : { $error }
+ mkfifo-error-missing-operand = opérande manquant
+-mkfifo-error-cannot-create-fifo = impossible de créer le fifo { $path } : Le fichier existe
++mkfifo-error-cannot-create-fifo = impossible de créer le fifo { $path } : { $error }
+ mkfifo-error-cannot-set-permissions = impossible de définir les permissions sur { $path } : { $error }
+ mkfifo-error-non-file-permission = le mode ne doit spécifier que des bits de permission de fichier
+--- a/src/uu/mkfifo/src/mkfifo.rs
++++ b/src/uu/mkfifo/src/mkfifo.rs
+@@ -9,7 +9,7 @@
+ use std::fs;
+ use std::os::unix::fs::PermissionsExt;
+ use uucore::display::Quotable;
+-use uucore::error::{UResult, USimpleError};
++use uucore::error::{UResult, USimpleError, strip_errno};
+ use uucore::translate;
+ 
+ use uucore::{format_usage, show};
+@@ -48,10 +48,10 @@
+     };
+ 
+     for f in fifos {
+-        if mkfifo(f.as_str(), Mode::from_bits_truncate(0o666)).is_err() {
++        if let Err(e) = mkfifo(f.as_str(), Mode::from_bits_truncate(0o666)) {
+             show!(USimpleError::new(
+                 1,
+-                translate!("mkfifo-error-cannot-create-fifo", "path" => f.quote()),
++                translate!("mkfifo-error-cannot-create-fifo", "path" => f.quote(), "error" => strip_errno(&e.into())),
+             ));
+             continue;
+         }
+--- a/src/uu/mknod/src/mknod.rs
++++ b/src/uu/mknod/src/mknod.rs
+@@ -11,7 +11,7 @@
+ use std::io::{self, Write as _};
+ 
+ use uucore::display::Quotable;
+-use uucore::error::{UResult, USimpleError, UUsageError, set_exit_code};
++use uucore::error::{UResult, USimpleError, UUsageError, set_exit_code, strip_errno};
+ use uucore::format_usage;
+ use uucore::fs::makedev;
+ use uucore::translate;
+@@ -87,7 +87,7 @@
+         config.dev as _,
+     )
+     .err();
+-    let errno = if mknod_err.is_some() { -1 } else { 0 };
++    let status = i32::from(mknod_err.is_some());
+ 
+     // set umask back to original value
+     if let Some(prev_umask) = have_prev_umask {
+@@ -97,9 +97,10 @@
+     if let Some(err) = mknod_err {
+         let _ = writeln!(
+             io::stderr(),
+-            "{}: {}",
++            "{}: {}: {}",
+             uucore::execution_phrase(),
+-            io::Error::from(err)
++            file_name.maybe_quote(),
++            strip_errno(&io::Error::from(err))
+         );
+     }
+ 
+@@ -130,7 +131,7 @@
+         }
+     }
+ 
+-    errno
++    status
+ }
+ 
+ #[uucore::main]

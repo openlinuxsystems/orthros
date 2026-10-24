@@ -1,0 +1,121 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+Three fixes that bring `pr` to what GNU's pr writes:
+
+- Without a header and trailer (-t, -T, or a page of 10 lines or
+  fewer), a page holds the whole page length of lines, and the last
+  page is not filled out with blank lines; pr wrote "a\n" then 55
+  blank lines for `printf 'a\n' | pr -t`, where GNU writes "a\n".
+- A short file in columns keeps its last row: `pr -t -2` of three
+  lines wrote two.
+- The -NUM column and +PAGE options are read from the arguments that
+  are options, not from file names: `pr notes-2` printed notes-2 in
+  two columns.
+
+--- a/src/uu/pr/src/pr.rs
++++ b/src/uu/pr/src/pr.rs
+@@ -397,7 +397,7 @@
+     };
+ 
+     for file_group in file_groups {
+-        let result_options = build_options(&matches, &file_group, &args.join(" "));
++        let result_options = build_options(&matches, &file_group, &column_page_arguments(&args));
+         let options = match result_options {
+             Ok(options) => options,
+             Err(err) => {
+@@ -464,6 +464,15 @@
+         .collect()
+ }
+ 
++/// Returns the -column and +page arguments, which `recreate_arguments`
++/// removes, so that a file name such as `notes-2` is not taken for one.
++fn column_page_arguments(args: &[String]) -> String {
++    let column_page_option = Regex::new(r"^[-+]\d+.*").unwrap();
++    args.iter()
++        .filter(|i| column_page_option.is_match(i))
++        .join(" ")
++}
++
+ fn print_error(matches: &ArgMatches, err: &PrError) {
+     if !matches.get_flag(options::NO_FILE_WARNINGS) {
+         let _ = writeln!(stderr(), "{err}");
+@@ -719,10 +728,11 @@
+         && !matches.get_flag(options::OMIT_HEADER)
+         && !matches.get_flag(options::OMIT_PAGINATION);
+ 
+-    let content_lines_per_page = if page_length_le_ht {
+-        page_length
+-    } else {
++    // Without a header and trailer, the whole page holds lines.
++    let content_lines_per_page = if display_header_and_trailer {
+         page_length - (HEADER_LINES_PER_PAGE + TRAILER_LINES_PER_PAGE)
++    } else {
++        page_length
+     };
+ 
+     let page_separator_char = if matches.get_flag(options::FORM_FEED) {
+@@ -1115,7 +1125,11 @@
+             out.write_all(line_separator)?;
+         }
+     }
+-    out.write_all(page_separator)?;
++    // Without a header and trailer (-t, -T, or a page of 10 lines or
++    // fewer), the pages' lines alone are written, as GNU's pr does.
++    if options.display_header_and_trailer {
++        out.write_all(page_separator)?;
++    }
+     out.flush()?;
+     Ok(())
+ }
+@@ -1177,7 +1191,8 @@
+     columns: usize,
+     lines: &[FileLine],
+ ) -> Vec<Vec<Option<&FileLine>>> {
+-    let num_rows = lines.len() / columns;
++    // The last row may be short, but it must not be lost.
++    let num_rows = lines.len().div_ceil(columns);
+     let mut table: Vec<Vec<_>> = (0..num_rows)
+         .map(|i| (0..columns).map(|j| lines.get(num_rows * j + i)).collect())
+         .collect();
+@@ -1207,7 +1222,6 @@
+         .unwrap_or_else(|| get_columns(options));
+     let line_width = options.line_width;
+     let feed_line_present = options.form_feed_used;
+-    let mut not_found_break = false;
+ 
+     let across_mode = options
+         .column_mode_options
+@@ -1250,6 +1264,13 @@
+ 
+     let blank_line = FileLine::default();
+     for row in table {
++        // Only a page with a trailer is filled out to its length; others
++        // end with their last line.
++        if (feed_line_present || !options.display_header_and_trailer)
++            && row.iter().all(Option::is_none)
++        {
++            break;
++        }
+         let indexes = row.len();
+         for (i, cell) in row.iter().enumerate() {
+             if cell.is_none() && options.merge_files_print.is_some() {
+@@ -1258,7 +1279,6 @@
+                         .as_bytes(),
+                 )?;
+             } else if cell.is_none() {
+-                not_found_break = true;
+                 break;
+             } else if cell.is_some() {
+                 let file_line = cell.unwrap();
+@@ -1269,9 +1289,6 @@
+                 )?;
+             }
+         }
+-        if not_found_break && feed_line_present {
+-            break;
+-        }
+         out.write_all(line_separator)?;
+     }
+ 

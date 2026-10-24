@@ -19,5 +19,7 @@ split by IFS: 2
 []
 set -e goes on
 a function's failure ends it: 1
+exit in the EXIT trap: 0
+exit in a signal's trap: 0
 bye
 status=2

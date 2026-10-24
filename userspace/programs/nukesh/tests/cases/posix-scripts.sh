@@ -25,6 +25,11 @@ IFS=:; set -- ${unset_var:-a:b}; echo "split by IFS: $#"; IFS=' '
 sleep 0 & wait; echo "[${!##*}]"
 (set -e; if true; then false && true; fi; { false && true; }; echo "set -e goes on")
 (set -e; f() { false && true; }; f; echo "not reached"); echo "a function's failure ends it: $?"
+(trap 'false; exit' EXIT; true); echo "exit in the EXIT trap: $?"
+ready=/tmp/posix-scripts-trap-$$
+(trap 'false; exit' USR1; : >"$ready"; while :; do sleep 0.01; done) &
+until [ -e "$ready" ]; do sleep 0.01; done; kill -USR1 $!; wait $!
+echo "exit in a signal's trap: $?"; rm -f "$ready"
 f() { set -Q; echo "not reached"; }
 f
 echo "not reached"

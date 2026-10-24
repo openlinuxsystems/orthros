@@ -27,4 +27,8 @@ exited 1
 killed status 143
 inner status 1
 child-exit
+exit in the EXIT trap: 0
+exit in the EXIT trap's function: 0
+exit in a signal's trap: 1
+subshell 1
 status=0

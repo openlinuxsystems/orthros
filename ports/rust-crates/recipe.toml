@@ -28,6 +28,12 @@ sha256 = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 license = "MIT OR Apache-2.0"
 
 [[crate]]
+name = "filetime"
+version = "0.2.29"
+sha256 = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+license = "MIT OR Apache-2.0"
+
+[[crate]]
 name = "getrandom"
 version = "0.2.17"
 sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"

@@ -5,10 +5,13 @@
 // in /bin, with text on its standard input, and what it writes and its
 // exit status checked. uutils' core utilities (ports/uutils-coreutils),
 // find and xargs (ports/uutils-findutils), GNU grep, sed, diffutils and
-// patch, awk, bc, less, ncurses' tools, man, the compressors, tar, cpio,
-// zip and unzip, 7-Zip, file and jq (ports/<name>), and their manual
-// pages; the editors, nano and vi, typed at on a pseudo-terminal; and
-// tmux, its server and a client attached at a pseudo-terminal.
+// patch, awk, bc, less, ncurses' tools, mandoc's, the compressors and
+// their scripts, tar, cpio, zip and its tools, 7-Zip, file and jq
+// (ports/<name>), and their manual pages; the editors, nano and vi, and
+// the terminal tools, typed at on a pseudo-terminal; tmux, its server and
+// a client attached at a pseudo-terminal; and the shell by each of its
+// names. The `commands` test then checks that every program in
+// /system/bin was run.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -74,6 +77,121 @@ static void statuses(void) {
 	STATUS(0, "/bin/sleep", "0.05");
 	STATUS(124, "/bin/timeout", "0.2", "/bin/sleep", "5");
 	OUTPUT("", "bar\n", "/bin/env", "FOO=bar", "/bin/printenv", "FOO");
+}
+
+// Checksums and encodings, of what the standards' own examples take.
+static void checksums(void) {
+	OUTPUT("abc", "a9993e364706816aba3e25717850c26c9cd0d89d  -\n", "/bin/sha1sum");
+	OUTPUT("abc", "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7  -\n",
+			"/bin/sha224sum");
+	OUTPUT("abc",
+			"cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca1"
+			"34c825a7  -\n",
+			"/bin/sha384sum");
+	OUTPUT("abc",
+			"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23"
+			"a3feebbd454d4423643ce80e2a9ac94fa54ca49f  -\n",
+			"/bin/sha512sum");
+	OUTPUT("abc",
+			"ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de"
+			"4533cc9518d38aa8dbf1925ab92386edd4009923  -\n",
+			"/bin/b2sum");
+	OUTPUT("abc", "1219131554 3\n", "/bin/cksum");
+	OUTPUT("abc", "16556     1\n", "/bin/sum");
+	OUTPUT("hi", "NBUQ====\n", "/bin/base32");
+	OUTPUT("NBUQ====\n", "hi", "/bin/base32", "-d");
+	OUTPUT("hi", "6869\n", "/bin/basenc", "--base16");
+}
+
+// The filters that format text.
+static void formatting(void) {
+	OUTPUT("a\nb\n", "a b\n", "/bin/fmt");
+	OUTPUT("abcd\n", "ab\ncd\n", "/bin/fold", "-w", "2");
+	OUTPUT("a\nb\n", "     1\ta\n     2\tb\n", "/bin/nl");
+	OUTPUT("a\nb\n", "a,b\n", "/bin/paste", "-s", "-d,");
+	OUTPUT("        a\n", "\ta\n", "/bin/unexpand");
+	OUTPUT("a b\nb c\n", "a\nb\nc\n", "/bin/tsort");
+	OUTPUT("a\n", "a\n", "/bin/pr", "-t");
+	RUN_WITH(0, "a b\n", "a b", 1, "/bin/ptx");
+	OUTPUT("", "1.0M\n", "/bin/numfmt", "--to=iec", "1048576");
+	OUTPUT("", "y\ny\n", "/bin/sh", "-c", "yes | head -n 2");
+	OUTPUT("", "1\n2\n3\n", "/bin/sh", "-c", "shuf -i 1-3 | sort -n");
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/formatting");
+	OUTPUT("1 a\n2 b\n", "1 a\n2 b\n", "/bin/tee", "/tmp/formatting/one");
+	OUTPUT("1 x\n2 y\n", "1 x\n2 y\n", "/bin/tee", "/tmp/formatting/two");
+	OUTPUT("", "1 a x\n2 b y\n", "/bin/join", "/tmp/formatting/one", "/tmp/formatting/two");
+	OUTPUT("", "\t\t1 a\n\t\t2 b\n", "/bin/comm", "/tmp/formatting/one",
+			"/tmp/formatting/one");
+	STATUS(0, "/bin/rm", "-r", "/tmp/formatting");
+}
+
+// The rest of the file tools: copies by blocks, sizes, installs, times,
+// links, named pipes, empty directories, temporary names, pieces,
+// overwriting, listings and their colours, and portable names.
+static void file_tools(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/file-tools/listed");
+	OUTPUT("abc", "abc", "/bin/dd", "status=none");
+	OUTPUT("", "8\n", "/bin/sh", "-c", "dd if=/dev/zero bs=4 count=2 status=none | wc -c");
+	STATUS(0, "/bin/truncate", "-s", "10", "/tmp/file-tools/t");
+	OUTPUT("", "10\n", "/bin/stat", "-c", "%s", "/tmp/file-tools/t");
+	STATUS(0, "/bin/install", "-m", "644", "-D", "/tmp/file-tools/t", "/tmp/file-tools/i/t");
+	OUTPUT("", "10\n", "/bin/stat", "-c", "%s", "/tmp/file-tools/i/t");
+	STATUS(0, "/bin/unlink", "/tmp/file-tools/i/t");
+	STATUS(1, "/bin/test", "-e", "/tmp/file-tools/i/t");
+	// Times that touch sets, and that cp -p keeps.
+	STATUS(0, "/bin/touch", "-d", "@1000000000", "/tmp/file-tools/t");
+	OUTPUT("", "1000000000\n", "/bin/stat", "-c", "%Y", "/tmp/file-tools/t");
+	STATUS(0, "/bin/cp", "-p", "/tmp/file-tools/t", "/tmp/file-tools/kept");
+	OUTPUT("", "1000000000\n", "/bin/stat", "-c", "%Y", "/tmp/file-tools/kept");
+	// No hard links, named pipes or device nodes until Btrfs (Phase 10,
+	// radix-posix(7)): link, mkfifo and mknod fail and say so. (link
+	// says EPERM as "Permission denied", as uutils' tools do on Linux.)
+	RUN_WITH(1, "", "link: cannot create link", 1, "/bin/sh", "-c",
+			"link /tmp/file-tools/t /tmp/file-tools/l 2>&1");
+	OUTPUT("", "1\n", "/bin/stat", "-c", "%h", "/tmp/file-tools/t");
+	RUN_WITH(1, "", "Operation not implemented", 1, "/bin/sh", "-c",
+			"mkfifo /tmp/file-tools/fifo 2>&1");
+	RUN_WITH(1, "", "Operation not permitted", 1, "/bin/sh", "-c",
+			"mknod /tmp/file-tools/node p 2>&1");
+	STATUS(1, "/bin/test", "-e", "/tmp/file-tools/node");
+	CONTAINS("/tmp/file-tools/x.", "/bin/mktemp", "/tmp/file-tools/x.XXXXXX");
+	CONTAINS("/tmp/file-tools/d.", "/bin/mktemp", "-d", "/tmp/file-tools/d.XXXXXX");
+	OUTPUT("1\n2\n3\n", "", "/bin/split", "-l", "1", "-", "/tmp/file-tools/part.");
+	OUTPUT("", "2\n", "/bin/cat", "/tmp/file-tools/part.ab");
+	OUTPUT("a\nb\nc\n", "2\n4\n", "/bin/csplit", "-f", "/tmp/file-tools/piece", "-", "2");
+	OUTPUT("", "b\nc\n", "/bin/cat", "/tmp/file-tools/piece01");
+	STATUS(0, "/bin/shred", "-u", "/tmp/file-tools/part.aa");
+	STATUS(1, "/bin/test", "-e", "/tmp/file-tools/part.aa");
+	STATUS(0, "/bin/sync");
+	STATUS(0, "/bin/mkdir", "/tmp/file-tools/empty");
+	STATUS(0, "/bin/rmdir", "/tmp/file-tools/empty");
+	STATUS(1, "/bin/test", "-e", "/tmp/file-tools/empty");
+	STATUS(0, "/bin/touch", "/tmp/file-tools/listed/a", "/tmp/file-tools/listed/b");
+	OUTPUT("", "a  b\n", "/bin/dir", "/tmp/file-tools/listed");
+	CONTAINS(" b\n", "/bin/vdir", "/tmp/file-tools/listed");
+	CONTAINS("LS_COLORS='", "/bin/dircolors", "-b");
+	OUTPUT("", "", "/bin/pathchk", "-p", "a/b");
+	STATUS(1, "/bin/pathchk", "-p", "a*");
+	STATUS(0, "/bin/rm", "-r", "/tmp/file-tools");
+}
+
+// Who and where: the user, the machine, the working directory, a
+// priority and a hang-up, and the program behind the links. Every
+// process is user 0 until Phase 13 (radix-posix(7)).
+static void identity(void) {
+	OUTPUT("", "root\n", "/bin/whoami");
+	OUTPUT("", "0\n", "/bin/id", "-u");
+	CONTAINS("uid=0(root) gid=0(root)", "/bin/id");
+	OUTPUT("", "root\n", "/bin/groups");
+	// No login records until Phase 13, so no login name.
+	RUN_WITH(1, "", "no login name", 1, "/bin/sh", "-c", "logname 2>&1");
+	STATUS(0, "/bin/hostname");
+	OUTPUT("", "x86_64\n", "/bin/arch");
+	OUTPUT("", "4\n", "/bin/nproc");
+	OUTPUT("", "/tmp\n", "/bin/sh", "-c", "cd /tmp && /bin/pwd");
+	OUTPUT("", "3\n", "/bin/nice", "-n", "3", "/bin/nice");
+	OUTPUT("", "hi\n", "/bin/nohup", "/bin/echo", "hi");
+	OUTPUT("", "hi\n", "/system/bin/coreutils", "echo", "hi");
 }
 
 // Files: making, linking, copying, moving, listing and removing them.
@@ -259,6 +377,57 @@ static void compressing(void) {
 	CONTAINS("% /tmp/compress/f\n", "/bin/gzip", "-l", "/tmp/compress/f.gz");
 	STATUS(0, "/bin/gunzip", "-f", "/tmp/compress/f.gz");
 	OUTPUT("", "f\nf.bz2\nf.lz4\nf.xz\nf.zst\n", "/bin/ls", "/tmp/compress");
+
+	// The other scripts: the other greps, cmp and diff, and the pagers,
+	// which show the text as it is when their output is not a terminal.
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/compress && gzip -k f && lzma -k f");
+	OUTPUT("", "needle\n", "/bin/zegrep", "ne+dle", "/tmp/compress/f.gz");
+	OUTPUT("", "needle\n", "/bin/zfgrep", "needle", "/tmp/compress/f.gz");
+	OUTPUT("", "needle\n", "/bin/bzegrep", "ne+dle", "/tmp/compress/f.bz2");
+	OUTPUT("", "needle\n", "/bin/bzfgrep", "needle", "/tmp/compress/f.bz2");
+	OUTPUT("", "needle\n", "/bin/xzegrep", "ne+dle", "/tmp/compress/f.xz");
+	OUTPUT("", "needle\n", "/bin/xzfgrep", "needle", "/tmp/compress/f.xz");
+	OUTPUT("", "needle\n", "/bin/lzgrep", "needle", "/tmp/compress/f.lzma");
+	OUTPUT("", "needle\n", "/bin/lzegrep", "ne+dle", "/tmp/compress/f.lzma");
+	OUTPUT("", "needle\n", "/bin/lzfgrep", "needle", "/tmp/compress/f.lzma");
+	STATUS(0, "/bin/zdiff", "/tmp/compress/f.gz", "/tmp/compress/f");
+	STATUS(0, "/bin/bzcmp", "/tmp/compress/f.bz2", "/tmp/compress/f");
+	STATUS(0, "/bin/bzdiff", "/tmp/compress/f.bz2", "/tmp/compress/f");
+	STATUS(0, "/bin/xzcmp", "/tmp/compress/f.xz", "/tmp/compress/f");
+	STATUS(0, "/bin/lzcmp", "/tmp/compress/f.lzma", "/tmp/compress/f");
+	STATUS(0, "/bin/lzdiff", "/tmp/compress/f.lzma", "/tmp/compress/f");
+	OUTPUT("", "one\nneedle\n", "/bin/lzcat", "/tmp/compress/f.lzma");
+	CONTAINS("Uncompressed size:", "/bin/lzmainfo", "/tmp/compress/f.lzma");
+	CONTAINS("needle", "/bin/zless", "/tmp/compress/f.gz");
+	CONTAINS("needle", "/bin/zmore", "/tmp/compress/f.gz");
+	CONTAINS("needle", "/bin/bzless", "/tmp/compress/f.bz2");
+	CONTAINS("needle", "/bin/bzmore", "/tmp/compress/f.bz2");
+	CONTAINS("needle", "/bin/xzless", "/tmp/compress/f.xz");
+	CONTAINS("needle", "/bin/xzmore", "/tmp/compress/f.xz");
+	CONTAINS("needle", "/bin/lzless", "/tmp/compress/f.lzma");
+	CONTAINS("needle", "/bin/lzmore", "/tmp/compress/f.lzma");
+	CONTAINS("needle", "/bin/zstdless", "/tmp/compress/f.zst");
+	// The other compressors' names, and bzip2's repair of a damaged file
+	// from its blocks.
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "lz4c | lz4 -d");
+	OUTPUT("text\n", "text\n", "/bin/sh", "-c", "zstdmt | zstd -d");
+	STATUS(0, "/bin/bzip2recover", "/tmp/compress/f.bz2");
+	OUTPUT("", "one\nneedle\n", "/bin/bzcat", "/tmp/compress/rec00001f.bz2");
+	// zforce names a gzip file as one; compress's format, which gzip
+	// reads and znew makes a gzip file of.
+	STATUS(0, "/bin/sh", "-c", "gzip -c /tmp/compress/f >/tmp/compress/z");
+	STATUS(0, "/bin/zforce", "/tmp/compress/z");
+	OUTPUT("", "one\nneedle\n", "/bin/zcat", "/tmp/compress/z.gz");
+	STATUS(0, "/bin/sh", "-c",
+			"printf '\\037\\235\\220\\164\\312\\340\\241\\243\\000' >/tmp/compress/t.Z");
+	OUTPUT("", "text\n", "/bin/uncompress", "-c", "/tmp/compress/t.Z");
+	STATUS(0, "/bin/znew", "/tmp/compress/t.Z");
+	OUTPUT("", "text\n", "/bin/zcat", "/tmp/compress/t.gz");
+	// gzexe makes a program that unpacks and runs itself.
+	STATUS(0, "/bin/cp", "/system/tests/posix/hello", "/tmp/compress/hello");
+	STATUS(0, "/bin/gzexe", "/tmp/compress/hello");
+	OUTPUT("", "#!/bin/sh\n", "/bin/sed", "1q", "/tmp/compress/hello");
+	CONTAINS("a megabyte from malloc", "/tmp/compress/hello");
 	STATUS(0, "/bin/rm", "-r", "/tmp/compress");
 }
 
@@ -323,6 +492,14 @@ static void archiving(void) {
 	OUTPUT("", "second\n", "/bin/7zz", "e", "-so", "-bso0", "-bsp0", "-psecret",
 			"/tmp/archive/p.7z", "d/e/b");
 	STATUS(2, "/bin/7zz", "t", "-bso0", "-bsp0", "-bse0", "-pwrong", "/tmp/archive/p.7z");
+	// libarchive's programs by their own names, and zipsplit's pieces.
+	OUTPUT("", "d/\nd/a\nd/e/\nd/e/b\nd/l\n", "/bin/sh", "-c",
+			"bsdtar -tf /tmp/archive/t.tar | sort");
+	OUTPUT("", "d\nd/a\nd/e\nd/e/b\nd/l\n", "/bin/sh", "-c",
+			"bsdcpio -it --quiet </tmp/archive/t.cpio | sort");
+	OUTPUT("", "first\n", "/bin/bsdunzip", "-p", "/tmp/archive/u.zip", "d/a");
+	STATUS(0, "/bin/zipsplit", "-q", "-n", "100000", "-b", "/tmp/archive", "/tmp/archive/t.zip");
+	OUTPUT("", "second\n", "/bin/unzip", "-p", "/tmp/archive/t1.zip", "d/e/b");
 	STATUS(0, "/bin/rm", "-r", "/tmp/archive");
 }
 
@@ -373,13 +550,43 @@ static void describing(void) {
 	RUN_WITH(5, "{", "", 0, "/bin/jq", ".");
 }
 
+// mandoc's tools on a page of their own, less's helpers, a terminal
+// description compiled, and the other names of grep and less.
+static void documents(void) {
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/documents/man/man1");
+	OUTPUT(".TH DUKE 1\n.SH NAME\nduke \\- a page for the tools\n.SH DESCRIPTION\nText.\n",
+			".TH DUKE 1\n.SH NAME\nduke \\- a page for the tools\n.SH DESCRIPTION\nText.\n",
+			"/bin/tee", "/tmp/documents/man/man1/duke.1");
+	CONTAINS("a page for the tools", "/bin/mandoc", "-T", "ascii", "/tmp/documents/man/man1/duke.1");
+	STATUS(0, "/bin/mandoc", "-T", "lint", "-W", "error", "/tmp/documents/man/man1/duke.1");
+	CONTAINS("a page for the tools", "/bin/demandoc", "/tmp/documents/man/man1/duke.1");
+	RUN_WITH(0, ".so /tmp/documents/man/man1/duke.1\n", "a page for the tools", 1, "/bin/soelim");
+	STATUS(0, "/bin/makewhatis", "/tmp/documents/man");
+	CONTAINS("duke(1) - a page for the tools", "/bin/whatis", "-M", "/tmp/documents/man", "duke");
+	OUTPUT("", "a b\n", "/bin/lessecho", "a", "b");
+	RUN_WITH(0, "#command\nQ quit\n", "", 1, "/bin/lesskey", "-o", "/tmp/documents/keys", "-");
+	STATUS(0, "/bin/test", "-s", "/tmp/documents/keys");
+	OUTPUT("duke|a test terminal,\n\tcols#80, lines#24,\n",
+			"duke|a test terminal,\n\tcols#80, lines#24,\n", "/bin/tee", "/tmp/documents/duke.ti");
+	STATUS(0, "/bin/tic", "-o", "/tmp/documents/terminfo", "/tmp/documents/duke.ti");
+	OUTPUT("", "80\n", "/bin/env", "TERMINFO=/tmp/documents/terminfo", "/bin/tput", "-T", "duke",
+			"cols");
+	OUTPUT("a.b\naxb\n", "a.b\n", "/bin/fgrep", "a.b");
+	OUTPUT("line\n", "line\n", "/bin/more");
+	STATUS(0, "/bin/rm", "-r", "/tmp/documents");
+}
+
 // Runs `argv` on a new pseudo-terminal of 24 lines of 80 columns, with
 // TERM=xterm, as someone at a terminal would: waits until it has written
 // `ready`, which it does once it has drawn its screen and so takes keys
-// as they are typed, types `keys`, and reads what it writes until it
-// ends, within 20 seconds. Returns its exit status, or -1 if it did not
-// get that far; what it wrote is in `output`, as much as that holds.
+// as they are typed, and has turned echo off, as it does before reading
+// keys, types `keys`, and reads what it writes until it ends, within 20
+// seconds. A program that asks more than once is typed at in steps: each
+// line of `ready` it writes gets it the line of `keys` that goes with
+// it. Returns its exit status, or -1 if it did not get that far; what it
+// wrote is in `output`, as much as that holds.
 static int on_terminal(const char *const argv[], const char *ready, const char *keys) {
+	note_commands(argv);
 	int master = posix_openpt(O_RDWR | O_NOCTTY);
 	if(master < 0 || grantpt(master) < 0 || unlockpt(master) < 0)
 		return -1;
@@ -408,11 +615,15 @@ static int on_terminal(const char *const argv[], const char *ready, const char *
 		execv(argv[0], (char *const *)argv);
 		_exit(127);
 	}
+	// The terminal side, to see its modes by: a program that turns echo
+	// off throws away what was typed before (TCSAFLUSH).
+	int terminal = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC);
 	struct timespec now, end;
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	end.tv_sec += 20;
-	size_t len = 0;
-	int typed = 0, status = -1;
+	size_t len = 0, seen = 0;
+	const char *wait_for = ready, *to_type = keys;
+	int typed = 0, failed = 0, status = -1;
 	struct pollfd entry = {.fd = master, .events = POLLIN};
 	do {
 		char buffer[512];
@@ -427,10 +638,32 @@ static int on_terminal(const char *const argv[], const char *ready, const char *
 			// The terminal has closed: the program is ending.
 			poll(NULL, 0, 10);
 		}
-		if(!typed && strstr(output, ready)) {
-			if(write(master, keys, strlen(keys)) != (ssize_t)strlen(keys))
+		while(!typed) {
+			char step[128];
+			size_t want = strcspn(wait_for, "\n");
+			snprintf(step, sizeof(step), "%.*s", (int)want, wait_for);
+			const char *found = strstr(output + seen, step);
+			if(!found)
 				break;
-			typed = 1;
+			size_t count = strcspn(to_type, "\n");
+			struct termios modes;
+			if(count && (terminal < 0 || tcgetattr(terminal, &modes) < 0 || (modes.c_lflag & ECHO)))
+				break;
+			seen = (size_t)(found - output) + want;
+			if(write(master, to_type, count) != (ssize_t)count) {
+				failed = 1;
+				break;
+			}
+			wait_for += want + (wait_for[want] == '\n');
+			to_type += count;
+			typed = !*to_type;
+			to_type += !typed;
+		}
+		if(failed)
+			break;
+		if(typed && terminal >= 0) {
+			close(terminal);
+			terminal = -1;
 		}
 		int got_status;
 		if(waitpid(pid, &got_status, WNOHANG) == pid) {
@@ -444,6 +677,8 @@ static int on_terminal(const char *const argv[], const char *ready, const char *
 		kill(pid, SIGKILL);
 		waitpid(pid, NULL, 0);
 	}
+	if(terminal >= 0)
+		close(terminal);
 	close(master);
 	return typed ? status : -1;
 }
@@ -489,7 +724,45 @@ static void editing(void) {
 	// view is vi that does not write the file.
 	RUN_WITH(1, "s/0ne/1/\nw\nq!\n", "", 1, "/bin/view", "-e", "-s", "/tmp/editing/e.txt");
 	OUTPUT("", "0ne\ntw0\nthree\n", "/bin/cat", "/tmp/editing/e.txt");
+	// rnano, nano that writes only the file it was given.
+	TYPE_AT("r.txt", "restricted\023\021", "/bin/rnano", "/tmp/editing/r.txt");
+	OUTPUT("", "restricted\n", "/bin/cat", "/tmp/editing/r.txt");
 	STATUS(0, "/bin/rm", "-r", "/tmp/editing");
+}
+
+// The terminal tools at a terminal, and what tty says without one; and
+// zipcloak, which asks for its password there.
+static void terminals(void) {
+	TYPE_AT("24 80", "", "/bin/stty", "size");
+	TYPE_AT("/dev/pts/", "", "/bin/tty");
+	STATUS(1, "/bin/tty");
+	TYPE_AT("xterm", "", "/bin/tset", "-q");
+	// xterm's full reset, and its clearing of the screen.
+	TYPE_AT("\033c", "", "/bin/reset");
+	TYPE_AT("\033[2J", "", "/bin/clear");
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/terminals");
+	OUTPUT("secret\n", "secret\n", "/bin/tee", "/tmp/terminals/s");
+	STATUS(0, "/bin/sh", "-c", "cd /tmp/terminals && zip -q t.zip s");
+	// It asks twice, and throws away what was typed before each question,
+	// as programs that turn off echo with TCSAFLUSH do.
+	TYPE_AT("Enter password\nVerify password", "word\r\nword\r", "/bin/zipcloak",
+			"/tmp/terminals/t.zip");
+	OUTPUT("", "secret\n", "/bin/unzip", "-P", "word", "-p", "/tmp/terminals/t.zip", "s");
+	CHECK(run_program((const char *const[]){"/bin/unzip", "-P", "wrong", "-p",
+						  "/tmp/terminals/t.zip", "s", NULL},
+				  "", 0) != 0);
+	STATUS(0, "/bin/rm", "-r", "/tmp/terminals");
+}
+
+// The shell by its other names: as bash, which says it is bash 5.2
+// (ADR 0103); as sh, which does not; and restricted, as rnukesh.
+static void shells(void) {
+	OUTPUT("", "5.2.0(1)-release\n", "/bin/bash", "-c", "echo $BASH_VERSION");
+	OUTPUT("", "yes\n", "/bin/bash", "-c", "[[ abc == a* ]] && echo yes");
+	OUTPUT("", "unset\n", "/bin/sh", "-c", "echo ${BASH_VERSION-unset}");
+	OUTPUT("", "yes\n", "/system/bin/nukesh", "-c", "[ -n \"$NUKESH_VERSION\" ] && echo yes");
+	OUTPUT("", "hi\n", "/bin/rnukesh", "-c", "echo hi");
+	STATUS(1, "/bin/rnukesh", "-c", "cd /");
 }
 
 // tmux: a detached session, which starts the server; a command sent to
@@ -568,6 +841,10 @@ int main(void) {
 	check_start("utilities");
 	RUN(text);
 	RUN(statuses);
+	RUN(checksums);
+	RUN(formatting);
+	RUN(file_tools);
+	RUN(identity);
 	RUN(files);
 	RUN(finding);
 	RUN(searching);
@@ -576,8 +853,11 @@ int main(void) {
 	RUN(compressing);
 	RUN(archiving);
 	RUN(describing);
+	RUN(documents);
 	RUN(editing);
+	RUN(terminals);
 	RUN(multiplexing);
+	RUN(shells);
 	RUN(manuals);
 	return check_end();
 }
