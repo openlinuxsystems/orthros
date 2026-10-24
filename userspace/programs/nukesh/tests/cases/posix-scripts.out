@@ -1,0 +1,23 @@
+joinedline
+said an alias in a script
+7
+temporary
+11
+a b
+a background job's ID
+trap KILL: 0
+echo to a closed descriptor: 1
+i=1
+i=2
+set -m: 0
+command exec failed, and the script goes on
+command readonly: 2
+. ..
+default split: 2
+alternative split: 2 -f
+split by IFS: 2
+[]
+set -e goes on
+a function's failure ends it: 1
+bye
+status=2

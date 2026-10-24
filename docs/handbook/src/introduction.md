@@ -17,8 +17,9 @@ itself and is run from the shell or from a browser:
 
 - **Spark**, the init and service manager, which supervises services and
   restarts them when they fail;
-- **Nukesh**, the shell, which is also the POSIX `/bin/sh`, with the
-  commands an administrator expects on a Linux server;
+- **Nukesh**, the shell, which is also the POSIX `/bin/sh` and runs
+  bash's scripts as `/bin/bash`, with the commands an administrator
+  expects on a Linux server;
 - **Btrfs** as the native file system, with snapshots, mirroring across
   disks, and atomic system updates that can be rolled back;
 - wired networking with DHCP and DNS, WireGuard, a firewall, users,

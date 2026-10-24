@@ -126,6 +126,29 @@ These run on the build machine or in CI and are never part of an image.
 | [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) | Caching builds in CI | LGPL-3.0-only |
 | [taiki-e/install-action](https://github.com/taiki-e/install-action) | Installing cargo-deny in CI | Apache-2.0 OR MIT |
 
+## The shell corpus
+
+`ob test corpus` ([ADR 0103](docs/adr/0103-the-shell-corpus.md)) fetches
+these projects, each at the commit `userspace/programs/nukesh/tests/corpus.toml`
+pins, and runs their tests and scripts in a sandbox, under Nukesh and under
+dash or bash, to check that Nukesh gives what those shells give. None of
+their files is in the repository or in an image.
+
+| Project | What we use it for | License |
+| --- | --- | --- |
+| [smoosh](https://github.com/mgree/smoosh), the executable POSIX shell semantics by Michael Greenberg and Austin J. Blatt | Its tests of the POSIX shell, which Nukesh as `sh` must pass, and their C helpers | MIT |
+| [nvm](https://github.com/nvm-sh/nvm) by Tim Caswell, Jordan Harband and contributors | Its fast tests, in POSIX `sh`, with their mocks | MIT |
+| [shUnit2](https://github.com/kward/shunit2) by Kate Ward | Its own tests, in POSIX `sh` | Apache-2.0 |
+| [Bats](https://github.com/bats-core/bats-core) by Sam Stephenson and the bats-core contributors | Running rbenv's and pyenv's tests | MIT |
+| [rbenv](https://github.com/rbenv/rbenv) by Sam Stephenson and contributors, and [pyenv](https://github.com/pyenv/pyenv), by Yamashita Yuu and contributors, which began as rbenv | Their commands, in bash, and their Bats tests | MIT |
+| The installers of [Starship](https://github.com/starship/starship) (ISC), [Deno](https://github.com/denoland/deno_install) (MIT), [Docker](https://github.com/docker/docker-install) (Apache-2.0), [rustup](https://github.com/rust-lang/rustup) (MIT OR Apache-2.0), [Helm](https://github.com/helm/helm) (Apache-2.0), [K3s](https://github.com/k3s-io/k3s) (Apache-2.0), [Homebrew](https://github.com/Homebrew/install) (BSD-2-Clause) and [Oh My Zsh](https://github.com/ohmyzsh/ohmyzsh) (MIT), each by its project's contributors | Run as far as they go without a network | As listed |
+| The entrypoints of the official [PostgreSQL](https://github.com/docker-library/postgres) (MIT), [Redis](https://github.com/docker-library/redis) (BSD-3-Clause), [MongoDB](https://github.com/docker-library/mongo) (Apache-2.0) and [RabbitMQ](https://github.com/docker-library/rabbitmq) (MIT) container images, by their maintainers at Docker, and of [NGINX](https://github.com/nginxinc/docker-nginx)'s (BSD-2-Clause), by F5 | Run as a container runs them, with stubs for the servers they start | As listed |
+| [neofetch](https://github.com/dylanaraps/neofetch) 7.1.0 by Dylan Araps | A large program in bash | MIT |
+| [dehydrated](https://github.com/dehydrated-io/dehydrated) by Lukas Schauer | An ACME client in bash | MIT |
+| [Oils](https://github.com/oils-for-unix/oils) by Andy Chu and contributors | Its `configure` script, in POSIX `sh`, and that script's tests | Apache-2.0 |
+| [dash](http://gondor.apana.org.au/~herbert/dash/) by Herbert Xu, from Kenneth Almquist's ash, and [GNU Bash](https://www.gnu.org/software/bash/) 5.2 by Chet Ramey | The shells Nukesh is compared with, as the build machine has them; Bats runs under bash | BSD-3-Clause (dash; one of its files GPL-2.0-or-later), GPL-3.0-or-later (bash) |
+| [util-linux](https://github.com/util-linux/util-linux)'s `unshare`, `prlimit` and `setpriv` | The sandbox | GPL-2.0-or-later |
+
 ## Specifications and papers
 
 We implement these from their published descriptions. No code is copied.

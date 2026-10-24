@@ -1,0 +1,30 @@
+after arithmetic: 1
+not positive: 1
+let: 1
+[[: 0
+for: 1
+after index: 1
+after read-only: 1
+for read-only: 1
+in f
+after f: 1
+eval goes on
+eval: 0
+subshell: 1
+substitution: [] 1
+read 1
+after while: 1
+after cannot assign: 1
+untaken
+a:b b: :b a :b:
+[]
+5 6
+plain is found
+plain: as its mode says
+after unset name: 1
+<> <> <>
+<assigned> <target>
+after bad name: 1
+after read-only default: 2
+indirect before set -u: 1
+status=1

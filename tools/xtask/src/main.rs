@@ -9,6 +9,7 @@
 
 mod bench;
 mod config;
+mod corpus;
 mod docs;
 mod doctor;
 mod elf;
@@ -157,17 +158,19 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
   --microcode <path>   Intel microcode file or directory instead of image.microcode"
         }
         "test" => {
-            "Usage: ./ob test [unit | boot | kani | tla] [--case <name>]...
+            "Usage: ./ob test [unit | boot | kani | tla | corpus] [--case <name>]...
                  [--timeout <seconds>] [--debug | --release]
 
 Runs host unit tests, then the boot tests: QEMU boots a test image under
 UEFI and BIOS, from USB and CD-ROM, with 4 CPUs, and each test follows the
 serial console, types kdb commands and reads the framebuffer from
 screenshots. Logs go to out/test/. Give `unit` or `boot` to run only that
-part; `kani` checks the Kani proof harnesses instead, and `tla` the TLA+
-models with TLC (minutes each, so plain `ob test` leaves them out; TLC needs
-Java, and ob downloads the pinned TLA+ tools into .cache/tla). The boot
-tests are:
+part; `kani` checks the Kani proof harnesses instead, `tla` the TLA+
+models with TLC, and `corpus` compares Nukesh with dash and bash on POSIX's
+shell tests and real projects' scripts, in a sandbox (minutes each, so plain
+`ob test` leaves them out; TLC needs Java, and ob downloads the pinned TLA+
+tools into .cache/tla). With `corpus`, --case names a source in
+userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (bios-usb with the
                    lock checker on, uefi-cdrom in xAPIC mode, bios-cdrom
                    without KASLR and PCIDs)
@@ -584,7 +587,11 @@ fn clean(ctx: &Ctx, all: bool) -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    match dispatch(std::env::args().skip(1).collect()) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = corpus::internal(&argv) {
+        return code;
+    }
+    match dispatch(argv) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("ob: error: {err}");

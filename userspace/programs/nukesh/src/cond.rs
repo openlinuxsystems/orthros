@@ -366,11 +366,13 @@ impl Shell {
                         file_compare(op, &a, &b)
                     }
                     _ => {
-                        // Inside [[ ]], the integers are arithmetic.
+                        // Inside [[ ]], the integers are arithmetic; an
+                        // error makes the comparison false, as in bash.
                         let b = self.expand_string(right)?;
-                        let x = self.arith(&a)?;
-                        let y = self.arith(&b)?;
-                        compare_integers(op, x, y)
+                        match (self.arith_command("[[", &a), self.arith_command("[[", &b)) {
+                            (Some(x), Some(y)) => compare_integers(op, x, y),
+                            _ => false,
+                        }
                     }
                 }
             }

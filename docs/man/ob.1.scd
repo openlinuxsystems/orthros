@@ -68,8 +68,9 @@ _target/userspace/_).
 	and mdBook. For anything missing,
 	print the exact install command for Debian, Ubuntu, Fedora or Arch
 	Linux. Also report whether KVM is usable (without it QEMU still works,
-	only slower) and whether GDB is installed for *run --gdb*. Exits with
-	status 1 when a required tool is missing.
+	only slower), whether GDB is installed for *run --gdb*, and whether
+	dash, bash, *unshare*, *prlimit* and *setpriv* are there for *test
+	corpus*. Exits with status 1 when a required tool is missing.
 
 *build* [*--debug* | *--release*]
 	Build the Radix kernel for its own target,
@@ -190,7 +191,7 @@ _target/userspace/_).
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot* | *kani* | *tla*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -226,6 +227,26 @@ _target/userspace/_).
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned
 	release of the TLA+ tools from GitHub into _.cache/tla/_ and checks
 	its SHA-256; TLC's working files go to _out/tla/_.
+
+	*corpus* runs the shell corpus instead (ADR 0103): the sources that
+	_userspace/programs/nukesh/tests/corpus.toml_ lists, each a git
+	repository pinned by its commit and fetched into
+	_target/ports/sources/_ once. smoosh's tests of the POSIX shell must
+	give what their files expect under Nukesh as *sh*; every other
+	source's tests and scripts must give the same exit status and
+	standard output under Nukesh as under dash or bash, whichever the
+	source is written for. A test listed in its source's *known* table,
+	with the reason, may differ; one that no longer does is reported, so
+	that its entry goes. *--case* _name_ runs only that source. The corpus
+	runs in a sandbox: new user, mount, PID and network namespaces, the
+	system read-only, the corpus copied into a tmpfs on _/tmp_, and each
+	test as *nobody* in a PID namespace of its own. It needs dash, bash,
+	*unshare*(1), *prlimit*(1) and *setpriv*(1), a C compiler, and, as a
+	user other than root, user namespaces, which Ubuntu 23.10 and later
+	allow only after *sudo sysctl
+	kernel.apparmor_restrict_unprivileged_userns=0*. Plain *ob test*
+	leaves it out, and CI runs it in a job of its own; it takes about
+	seven minutes.
 
 	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
 		Boot with 4 CPUs under each firmware and medium, and check the

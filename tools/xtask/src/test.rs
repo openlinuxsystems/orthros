@@ -22,7 +22,7 @@ use crate::config::{Firmware, Media};
 use crate::image::{self, ImageSpec};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
-use crate::{Args, Ctx, Error, Result, VERSION, doctor, kernel, screen, tla, userspace};
+use crate::{Args, Ctx, Error, Result, VERSION, corpus, doctor, kernel, screen, tla, userspace};
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
 pub const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -724,12 +724,13 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         Some("unit") if selected.is_empty() => (true, false),
         Some("kani") if selected.is_empty() => return kani(ctx),
         Some("tla") if selected.is_empty() => return tla::check(ctx),
+        Some("corpus") => return corpus::test(ctx, &selected),
         Some(suite @ ("unit" | "kani" | "tla")) => {
             crate::bail!("--case selects boot tests; it cannot be used with `{suite}`")
         }
-        Some(other) => {
-            crate::bail!("unknown test suite `{other}`; use `unit`, `boot`, `kani` or `tla`")
-        }
+        Some(other) => crate::bail!(
+            "unknown test suite `{other}`; use `unit`, `boot`, `kani`, `tla` or `corpus`"
+        ),
     };
     let cases: Vec<&Case> = if selected.is_empty() {
         CASES.iter().collect()

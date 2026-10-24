@@ -109,6 +109,12 @@ pub struct Parser {
     /// goes back to when the command is incomplete.
     start: usize,
     unspliced: Option<Vec<char>>,
+    /// More text may come after what the parser holds, from
+    /// [`Parser::push_text`] until [`Parser::end_text`]: a command whose
+    /// text ends in a line continuation goes on in it.
+    more: bool,
+    /// Taking out a line continuation reached the end of the text.
+    continued: bool,
     /// How deep the construct being read is nested (commands in
     /// commands, `$(...)` and `${...}` in words, `[[`'s `(` and `!`), up to
     /// [`MAX_DEPTH`].
@@ -166,6 +172,8 @@ impl Parser {
             alias_next: false,
             start: 0,
             unspliced: None,
+            more: false,
+            continued: false,
             depth: 0,
         }
     }
@@ -185,6 +193,25 @@ impl Parser {
     /// from a script that comes a line at a time.
     pub fn push_text(&mut self, text: &str) {
         self.text.extend(text.chars());
+        self.more = true;
+    }
+
+    /// Takes back the text after the command just parsed, which its
+    /// reader read ahead of it, so that it can be read again: `None` while
+    /// aliases or here-documents still use it.
+    pub fn take_rest(&mut self) -> Option<String> {
+        if !self.pending.is_empty() || !self.expanding.is_empty() || self.pos == self.text.len() {
+            return None;
+        }
+        let rest = self.text.drain(self.pos..).collect();
+        self.more = true;
+        Some(rest)
+    }
+
+    /// Says that no more text will come, so that a line continuation at
+    /// the end of the text ends with it.
+    pub fn end_text(&mut self) {
+        self.more = false;
     }
 
     /// Changes how the rest of the text is parsed, as `alias`, `shopt -s
@@ -218,12 +245,18 @@ impl Parser {
     /// for reading a script one command at a time: `None` at the end of the
     /// text. When the text ends inside the command, the parser goes back to
     /// where the command started, so that the caller can add the next line
-    /// and call again.
+    /// and call again. So does a command whose text, as far as the parser
+    /// holds it, ends in a line continuation (`cmd \` then a newline),
+    /// while more text may come: the next line is part of it.
     pub fn next_command(&mut self) -> Result<Option<CompleteCommand>> {
         let saved = (self.pos, self.line, self.alias_next);
         self.start = self.pos;
         self.unspliced = None;
-        let result = self.next_command_here();
+        self.continued = false;
+        let mut result = self.next_command_here();
+        if self.more && self.continued && matches!(result, Ok(Some(_))) {
+            result = Err(self.incomplete("a continued line"));
+        }
         if let Err(Error::Incomplete(_)) = result {
             if let Some(text) = self.unspliced.take() {
                 self.text.truncate(self.start);
@@ -284,6 +317,7 @@ impl Parser {
         while self.text.get(self.pos) == Some(&'\\') && self.text.get(self.pos + 1) == Some(&'\n') {
             self.pos += 2;
             self.line += 1;
+            self.continued |= self.pos == self.text.len();
         }
         self.leave_aliases();
         self.text.get(self.pos).copied()
@@ -468,9 +502,11 @@ impl Parser {
         }
     }
 
-    /// If the next word is an alias, puts its text in its place.
-    fn expand_alias(&mut self) {
-        let Some(aliases) = self.options.aliases.clone() else { return };
+    /// If the next word is an alias, puts its text in its place; true if
+    /// it did.
+    fn expand_alias(&mut self) -> bool {
+        let Some(aliases) = self.options.aliases.clone() else { return false };
+        let mut expanded = false;
         loop {
             self.skip_blanks();
             let start = self.pos;
@@ -482,17 +518,17 @@ impl Parser {
                 end += 1;
             }
             if end == start {
-                return;
+                return expanded;
             }
             let ends_word = self.text.get(end).is_none_or(|&c| is_meta(c));
             if !ends_word {
-                return;
+                return expanded;
             }
             let name: String = self.text[start..end].iter().collect();
             if self.expanding.iter().any(|(_, active)| *active == name) {
-                return;
+                return expanded;
             }
-            let Some(value) = aliases.get(&name) else { return };
+            let Some(value) = aliases.get(&name) else { return expanded };
             let value: Vec<char> = value.chars().collect();
             if self.unspliced.is_none() && start >= self.start {
                 self.unspliced = Some(self.text[self.start..].to_vec());
@@ -505,9 +541,10 @@ impl Parser {
             let stop = start + value.len();
             self.expanding.push((stop, name));
             self.alias_next = value.last().is_some_and(|c| *c == ' ' || *c == '\t');
+            expanded = true;
             // The alias's text may start with another alias.
             if self.pos >= stop {
-                return;
+                return true;
             }
         }
     }
@@ -642,12 +679,18 @@ impl Parser {
     }
 
     fn command_here(&mut self) -> Result<Command> {
+        let mut aliased = false;
         if self.alias_next || self.options.aliases.is_some() {
             self.alias_next = false;
-            self.expand_alias();
+            aliased = self.expand_alias();
         }
         self.skip_blanks();
         let line = self.line;
+        // A line that was only an alias of nothing (`alias nothing=''`)
+        // runs nothing, as a blank line would.
+        if aliased && matches!(self.peek(), None | Some('\n')) {
+            return Ok(Command::Simple(SimpleCommand { line, ..SimpleCommand::default() }));
+        }
         let compound = match self.peek() {
             None => return Err(self.incomplete("a command")),
             Some('(') if self.at("((") && !self.options.posix => match self.arith_command()? {
@@ -1589,7 +1632,8 @@ impl Parser {
                     lit.push(c);
                     self.bump();
                 }
-                '|' if ctx == Ctx::Regex && paren_depth > 0 => {
+                // Outside parentheses too, as bash has it: `a|b`.
+                '|' if ctx == Ctx::Regex => {
                     lit.push(c);
                     self.bump();
                 }
@@ -1924,8 +1968,70 @@ impl Parser {
         }
     }
 
-    /// `${...}`, after the `{`.
+    /// `${...}`, after the `{`. One the shell cannot take is read to its
+    /// `}`, an error only if it is expanded, as in bash and dash: a script
+    /// may hold, where it never runs it, an expansion of another shell
+    /// (`if [ -n "$BASH_VERSION" ]; then x=${y/a/b}; fi` in POSIX mode).
     fn brace_param(&mut self, in_double: bool) -> Result<ParamExp> {
+        let (pos, line, depth, pending) = (self.pos, self.line, self.depth, self.pending.len());
+        match self.brace_param_parts(in_double) {
+            Err(Error::Syntax { message, .. }) if message.ends_with("bad substitution") => {
+                self.pos = pos;
+                self.line = line;
+                self.depth = depth;
+                self.pending.truncate(pending);
+                let text = self.brace_text(in_double)?;
+                let name = ParamName::Special('?');
+                Ok(ParamExp { name, index: None, op: ParamOp::Bad(text), indirect: false })
+            }
+            other => other,
+        }
+    }
+
+    /// The text of a `${...}` after its `{`, through the `}` that closes
+    /// it: a `}` in quotes, after a backslash, or closing a `{` within
+    /// does not. Inside double quotes, a single quote is itself.
+    fn brace_text(&mut self, in_double: bool) -> Result<String> {
+        let mut text = String::new();
+        let (mut braces, mut parens) = (0usize, 0usize);
+        let mut quote = None;
+        loop {
+            let Some(c) = self.bump() else { return Err(self.incomplete("a ${...} expansion")) };
+            if let Some(open) = quote {
+                text.push(c);
+                if c == open {
+                    quote = None;
+                } else if c == '\\'
+                    && open != '\''
+                    && let Some(next) = self.bump()
+                {
+                    text.push(next);
+                }
+                continue;
+            }
+            match c {
+                '}' if braces == 0 && parens == 0 => return Ok(text),
+                '\\' => {
+                    text.push(c);
+                    if let Some(next) = self.bump() {
+                        text.push(next);
+                    }
+                    continue;
+                }
+                '\'' if in_double => {}
+                '\'' | '"' | '`' => quote = Some(c),
+                '{' => braces += 1,
+                '}' if braces > 0 => braces -= 1,
+                '(' => parens += 1,
+                ')' if parens > 0 => parens -= 1,
+                _ => {}
+            }
+            text.push(c);
+        }
+    }
+
+    /// The parts of a `${...}`, after the `{`.
+    fn brace_param_parts(&mut self, in_double: bool) -> Result<ParamExp> {
         let unclosed = |p: &Parser| p.incomplete("a ${...} expansion");
         let mut length = false;
         let mut indirect = false;
@@ -1937,7 +2043,13 @@ impl Parser {
                 length = true;
             }
         }
-        if !length && self.peek() == Some('!') && !matches!(self.peek2(), Some('}')) {
+        // In POSIX mode, `!` is only `$!`: `${!#pattern}` takes a prefix
+        // off it, as in dash.
+        if !length
+            && !self.options.posix
+            && self.peek() == Some('!')
+            && !matches!(self.peek2(), Some('}'))
+        {
             self.bump();
             indirect = true;
         }
@@ -2143,31 +2255,54 @@ impl Parser {
     }
 
     /// The text of a substring offset or length, through the `:` or `}`
-    /// after it; whether a `:` (a length) follows.
+    /// after it; whether a `:` (a length) follows. A `:` or `}` inside
+    /// parentheses, quotes or an expansion such as `${#name}`, or the
+    /// `:` of a conditional `?:`, is part of the text.
     fn substring_part(&mut self) -> Result<(String, bool)> {
         let mut text = String::new();
-        let mut depth = 0;
+        let (mut parens, mut braces, mut conditionals) = (0usize, 0usize, 0usize);
+        let mut quote = None;
         loop {
-            match self.bump() {
-                None => return Err(self.incomplete("a ${...} expansion")),
-                Some('}') if depth == 0 => return Ok((text, false)),
-                Some(':') if depth == 0 => {
-                    // `?:` inside the expression is a conditional.
-                    if text.contains('?') {
-                        text.push(':');
-                        continue;
-                    }
-                    return Ok((text, true));
+            let Some(c) = self.bump() else { return Err(self.incomplete("a ${...} expansion")) };
+            if let Some(open) = quote {
+                text.push(c);
+                if c == open {
+                    quote = None;
+                } else if c == '\\'
+                    && open == '"'
+                    && let Some(next) = self.bump()
+                {
+                    text.push(next);
                 }
-                Some(c) => {
-                    if c == '(' {
-                        depth += 1;
-                    } else if c == ')' && depth > 0 {
-                        depth -= 1;
-                    }
-                    text.push(c);
-                }
+                continue;
             }
+            let top = parens == 0 && braces == 0;
+            match c {
+                '}' if top => return Ok((text, false)),
+                ':' if top && conditionals == 0 => return Ok((text, true)),
+                ':' if top => conditionals -= 1,
+                '?' if top => conditionals += 1,
+                '\\' => {
+                    text.push(c);
+                    if let Some(next) = self.bump() {
+                        text.push(next);
+                    }
+                    continue;
+                }
+                '\'' | '"' | '`' => quote = Some(c),
+                '$' if self.peek() == Some('{') => {
+                    text.push(c);
+                    self.bump();
+                    text.push('{');
+                    braces += 1;
+                    continue;
+                }
+                '}' if braces > 0 => braces -= 1,
+                '(' => parens += 1,
+                ')' if parens > 0 => parens -= 1,
+                _ => {}
+            }
+            text.push(c);
         }
     }
 

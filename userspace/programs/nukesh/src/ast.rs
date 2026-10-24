@@ -318,6 +318,10 @@ pub enum ParamOp {
     Names(bool),
     /// `${!name[@]}` (true) or `${!name[*]}`: the array's keys.
     Keys(bool),
+    /// An expansion the shell cannot take, with its text between `${`
+    /// and `}`: an error when it is expanded, as in bash and dash, not
+    /// when it is read.
+    Bad(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

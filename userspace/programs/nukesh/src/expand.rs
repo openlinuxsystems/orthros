@@ -29,9 +29,10 @@ enum Piece {
     Split(String),
     /// Between two elements of `"$@"`: always ends the field.
     Break,
-    /// Between two elements of an unquoted `$@`: ends a field that has
-    /// begun.
-    SoftBreak,
+    /// Between two elements of an unquoted `$@` or `$*`: ends a field that
+    /// has begun. Where nothing is split, as in an assignment, the text
+    /// joins them: a space for `$@`, the first character of `IFS` for `$*`.
+    SoftBreak(String),
 }
 
 /// A field after splitting: its text in segments, each quoted or not.
@@ -175,6 +176,8 @@ impl Shell {
                     nocase: self.shopt("nocaseglob"),
                     dotglob: self.shopt("dotglob"),
                     globstar: self.shopt("globstar"),
+                    // `.*` takes in `.` and `..` in POSIX mode, as in dash.
+                    dots: self.posix() || !self.shopt("globskipdots"),
                 };
                 let matches = glob::glob(&pattern, options);
                 if !matches.is_empty() {
@@ -185,7 +188,7 @@ impl Shell {
                     return Ok(());
                 }
                 if self.shopt("failglob") {
-                    return Err(self.fatal(&format!("no match: {}", field.text()), 1));
+                    return Err(self.discard(&format!("no match: {}", field.text())));
                 }
             }
         }
@@ -375,6 +378,9 @@ impl Shell {
         quoted: bool,
         out: &mut Vec<Piece>,
     ) -> Result<(), Flow> {
+        if let ParamOp::Bad(text) = &p.op {
+            return Err(self.discard(&format!("${{{text}}}: bad substitution")));
+        }
         let value = self.param_value(p)?;
         let colon_missing = |colon: bool, value: &PVal| value.missing(colon);
         let value = match &p.op {
@@ -384,7 +390,7 @@ impl Shell {
             }
             ParamOp::Length => {
                 if value == PVal::Unset && self.opts.nounset && !is_count(p) {
-                    return Err(self.fatal(&format!("{}: unbound variable", param_label(p)), 1));
+                    return Err(self.unbound(p));
                 }
                 let n = match (&value, is_count(p)) {
                     (PVal::List(items, _), _) => items.len(),
@@ -409,19 +415,37 @@ impl Shell {
             ParamOp::Assign(colon, word) => {
                 if colon_missing(*colon, &value) {
                     let text = self.operand_string(word)?;
-                    let ParamName::Var(name) = &p.name else {
-                        return Err(self
-                            .fatal(&format!("${}: cannot assign in this way", param_label(p)), 1));
+                    let (name, index) = if p.indirect {
+                        // `${!ref:=word}` assigns to the variable `ref` names.
+                        let direct = ParamExp { indirect: false, op: ParamOp::None, ..p.clone() };
+                        let target = match self.param_value(&direct)? {
+                            PVal::One(target) => target,
+                            PVal::List(items, _) => items.join(" "),
+                            PVal::Unset => String::new(),
+                        };
+                        // As in bash, not to an element.
+                        let Some((base, None)) = parse_target(&target) else {
+                            return Err(self.discard(&format!("{target}: invalid variable name")));
+                        };
+                        (base, None)
+                    } else {
+                        let ParamName::Var(name) = &p.name else {
+                            let message = format!("${}: cannot assign in this way", param_label(p));
+                            return Err(self.discard(&message));
+                        };
+                        let index = match &p.index {
+                            Some(index) => Some(self.expand_quoted(index)?),
+                            None => None,
+                        };
+                        (name.clone(), index)
                     };
-                    let target = match &p.index {
-                        Some(index) => {
-                            let index = self.expand_quoted(index)?;
-                            self.assign_element(name, &index, text.clone(), false)
-                        }
-                        None => self.assign(name, text.clone(), false),
+                    let target = match index {
+                        Some(index) => self.assign_element(&name, &index, text.clone(), false),
+                        None => self.assign(&name, text.clone(), false),
                     };
                     if let Err(message) = target {
-                        return Err(self.fatal(&message, 1));
+                        // bash's status for this one is 2.
+                        return Err(self.discard_with(&message, 2));
                     }
                     PVal::One(text)
                 } else {
@@ -471,16 +495,13 @@ impl Shell {
             ParamOp::Replace(kind, pattern_word, replacement) => {
                 self.check_set(p, &value)?;
                 let text = self.expand_pattern(pattern_word)?;
+                let ampersand = self.shopt("patsub_replacement");
                 let replacement = match replacement {
-                    Some(word) => {
-                        let pieces = self.pieces(word, true)?;
-                        Some(one_field(pieces))
-                    }
-                    None => None,
+                    Some(word) => replacement_parts(self.pieces(word, true)?, ampersand),
+                    None => Vec::new(),
                 };
                 let matcher = Pattern::new(&text, self.pattern_options());
-                let ampersand = self.shopt("patsub_replacement");
-                value.map(|s| replace(&s, &matcher, *kind, replacement.as_ref(), ampersand))
+                value.map(|s| replace(&s, &matcher, *kind, &replacement))
             }
             ParamOp::Case(upper, all, pattern_word) => {
                 self.check_set(p, &value)?;
@@ -546,29 +567,40 @@ impl Shell {
                 if *t == 'P' { result.map(|s| crate::prompt::expand(self, &s)) } else { result }
             }
             ParamOp::Names(_) | ParamOp::Keys(_) => value,
+            ParamOp::Bad(_) => unreachable!("an error above"),
         };
         emit(value, quoted, self.ifs_first(), out);
         Ok(())
     }
 
-    /// The pieces of an operand of `${x:-word}` and `${x:+word}`, quoted as
-    /// the expansion is.
+    /// The pieces of the word of `${x:-word}` and the like, quoted as the
+    /// expansion is. Unquoted, the word is part of the expansion's result,
+    /// so its text as written is split too, as in bash and dash:
+    /// `${opt:+-f }file` gives `-f` and `file`.
     fn operand_pieces(
         &mut self,
         word: &Word,
         quoted: bool,
         out: &mut Vec<Piece>,
     ) -> Result<(), Flow> {
+        let start = out.len();
         if !quoted
             && let Some(WordPart::Lit(first)) = word.parts.first()
             && first.starts_with('~')
         {
             let pieces = self.pieces(word, true)?;
             out.extend(pieces);
-            return Ok(());
+        } else {
+            for part in &word.parts {
+                self.part_pieces(part, quoted, out)?;
+            }
         }
-        for part in &word.parts {
-            self.part_pieces(part, quoted, out)?;
+        if !quoted {
+            for piece in &mut out[start..] {
+                if let Piece::Lit(text) = piece {
+                    *piece = Piece::Split(std::mem::take(text));
+                }
+            }
         }
         Ok(())
     }
@@ -584,7 +616,7 @@ impl Shell {
             && self.opts.nounset
             && !matches!(p.name, ParamName::Special('@' | '*'))
         {
-            return Err(self.fatal(&format!("{}: unbound variable", param_label(p)), 1));
+            return Err(self.unbound(p));
         }
         Ok(())
     }
@@ -660,7 +692,7 @@ impl Shell {
                     indirect: false,
                 }
             } else {
-                return Err(self.fatal(&format!("{target}: invalid indirect expansion"), 1));
+                return Err(self.discard(&format!("{target}: invalid variable name")));
             };
             return self.param_value(&name);
         }
@@ -685,7 +717,10 @@ impl Shell {
                         v.join(" ")
                     } else {
                         let at = self.expand_quoted(word)?;
-                        self.element(&name, &at)?.unwrap_or_default()
+                        match self.element(&name, &at)? {
+                            Some(target) => target,
+                            None => return Ok(PVal::Unset),
+                        }
                     }
                 }
                 None => match self.get(&self.resolve(&name)) {
@@ -701,7 +736,10 @@ impl Shell {
                         ));
                     }
                     Some(target) => target,
-                    None => return Ok(PVal::Unset),
+                    // bash 5.2's error, which comes before `set -u`'s.
+                    None => {
+                        return Err(self.discard(&format!("{name}: invalid indirect expansion")));
+                    }
                 },
             };
             index = None;
@@ -724,7 +762,7 @@ impl Shell {
                             None => PVal::Unset,
                         });
                     }
-                    return Err(self.fatal(&format!("{target}: invalid indirect expansion"), 1));
+                    return Err(self.discard(&format!("{target}: invalid variable name")));
                 }
             }
         }
@@ -812,6 +850,13 @@ impl Shell {
         }
     }
 
+    /// The error of `set -u` for an unset parameter, which ends a script:
+    /// with status 2 in POSIX mode, as in dash, and 1 as in bash.
+    fn unbound(&mut self, p: &ParamExp) -> Flow {
+        let status = if self.posix() { 2 } else { 1 };
+        self.fatal(&format!("{}: unbound variable", param_label(p)), status)
+    }
+
     fn substring(
         &mut self,
         p: &ParamExp,
@@ -819,6 +864,13 @@ impl Shell {
         offset: &Word,
         length: Option<&Word>,
     ) -> Result<PVal, Flow> {
+        // Nothing to take a part of: the offset and length are not
+        // evaluated, as in bash.
+        if matches!(&value, PVal::Unset)
+            || matches!(&value, PVal::List(items, _) if items.is_empty())
+        {
+            return Ok(value);
+        }
         let offset_text = self.expand_quoted(offset)?;
         let offset = self.arith(&offset_text)?;
         let length = match length {
@@ -828,7 +880,6 @@ impl Shell {
             }
             None => None,
         };
-        let label = param_label(p);
         let slice = |count: usize,
                      offset: i64,
                      length: Option<i64>|
@@ -843,7 +894,7 @@ impl Shell {
                 Some(n) if n < 0 => {
                     let end = count + n;
                     if end < start {
-                        return Err(format!("{label}: {n}: substring expression < 0"));
+                        return Err(format!("{n}: substring expression < 0"));
                     }
                     end
                 }
@@ -858,14 +909,14 @@ impl Shell {
                 match slice(chars.len(), offset, length) {
                     Ok(Some((a, b))) => PVal::One(chars[a..b].iter().collect()),
                     Ok(None) => PVal::One(String::new()),
-                    Err(message) => return Err(self.fatal(&message, 1)),
+                    Err(message) => return Err(self.discard(&message)),
                 }
             }
             PVal::List(items, star) => {
                 if let Some(n) = length
                     && n < 0
                 {
-                    return Err(self.fatal(&format!("{label}: {n}: substring expression < 0"), 1));
+                    return Err(self.discard(&format!("{n}: substring expression < 0")));
                 }
                 // Arrays are sliced by index; `$@` by position.
                 let positions: Vec<(i64, String)> = match (&p.name, self.get_value_of(p)) {
@@ -993,7 +1044,7 @@ impl Shell {
                     live = false;
                     ended_by_space = false;
                 }
-                Piece::SoftBreak => {
+                Piece::SoftBreak(_) => {
                     if live {
                         fields.push(std::mem::take(&mut current));
                         live = false;
@@ -1061,7 +1112,11 @@ fn emit(value: PVal, quoted: bool, ifs_first: String, out: &mut Vec<Piece>) {
             } else {
                 for (i, item) in items.into_iter().enumerate() {
                     if i > 0 {
-                        out.push(if quoted { Piece::Break } else { Piece::SoftBreak });
+                        out.push(if quoted {
+                            Piece::Break
+                        } else {
+                            Piece::SoftBreak(if star { ifs_first.clone() } else { " ".into() })
+                        });
                     }
                     out.push(if quoted { Piece::Quoted(item) } else { Piece::Split(item) });
                 }
@@ -1070,13 +1125,16 @@ fn emit(value: PVal, quoted: bool, ifs_first: String, out: &mut Vec<Piece>) {
     }
 }
 
-/// Pieces as one string: the elements of `$@` joined by spaces.
+/// Pieces as one string: the elements of `"$@"` and `$@` joined by
+/// spaces, and those of `$*` by the first character of `IFS`.
 fn join(pieces: &[Piece]) -> String {
     let mut out = String::new();
     for piece in pieces {
         match piece {
-            Piece::Lit(s) | Piece::Quoted(s) | Piece::Split(s) => out.push_str(s),
-            Piece::Break | Piece::SoftBreak => out.push(' '),
+            Piece::Lit(s) | Piece::Quoted(s) | Piece::Split(s) | Piece::SoftBreak(s) => {
+                out.push_str(s)
+            }
+            Piece::Break => out.push(' '),
         }
     }
     out
@@ -1089,7 +1147,8 @@ fn one_field(pieces: Vec<Piece>) -> Field {
         match piece {
             Piece::Lit(s) | Piece::Split(s) => field.push(&s, false),
             Piece::Quoted(s) => field.push(&s, true),
-            Piece::Break | Piece::SoftBreak => field.push(" ", true),
+            Piece::Break => field.push(" ", true),
+            Piece::SoftBreak(s) => field.push(&s, true),
         }
     }
     field
@@ -1097,14 +1156,15 @@ fn one_field(pieces: Vec<Piece>) -> Field {
 
 /// The name of a parameter, for messages.
 fn param_label(p: &ParamExp) -> String {
-    match &p.name {
+    let label = match &p.name {
         ParamName::Var(name) => match &p.index {
             Some(index) => format!("{name}[{}]", index.as_literal().unwrap_or("...")),
             None => name.clone(),
         },
         ParamName::Positional(n) => n.to_string(),
         ParamName::Special(c) => c.to_string(),
-    }
+    };
+    if p.indirect { format!("!{label}") } else { label }
 }
 
 /// Whether `${#...}` counts arguments rather than measuring a string.
@@ -1124,32 +1184,64 @@ fn parse_target(target: &str) -> Option<(String, Option<String>)> {
     }
 }
 
-/// `${s/pattern/replacement}` and its kin.
-fn replace(
-    s: &str,
-    matcher: &Pattern,
-    kind: ReplaceKind,
-    replacement: Option<&Field>,
-    ampersand: bool,
-) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let render = |matched: &[char]| -> String {
-        let Some(field) = replacement else { return String::new() };
-        if !ampersand {
-            return field.text();
-        }
-        // An unquoted `&` stands for what matched; `\&` for itself.
-        let mut out = String::new();
-        let text = field.escaped(|c| c == '&' || c == '\\');
-        let mut it = text.chars();
+/// A part of the replacement of `${x/pattern/string}`.
+enum Replacement {
+    Text(String),
+    /// An unquoted `&`, with `patsub_replacement`: what matched.
+    Matched,
+}
+
+/// The replacement's parts, from its expanded pieces, as in bash: in the
+/// text as written, a backslash takes the next character as it is. With
+/// `patsub_replacement`, an unquoted `&` stands for what matched, and in
+/// an unquoted expansion's value `\&` and `\\` stand for `&` and `\`.
+fn replacement_parts(pieces: Vec<Piece>, ampersand: bool) -> Vec<Replacement> {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    for piece in pieces {
+        let (written, s) = match piece {
+            Piece::Lit(s) => (true, s),
+            Piece::Split(s) => (false, s),
+            Piece::Quoted(s) | Piece::SoftBreak(s) => {
+                text.push_str(&s);
+                continue;
+            }
+            Piece::Break => {
+                text.push(' ');
+                continue;
+            }
+        };
+        let mut it = s.chars().peekable();
         while let Some(c) = it.next() {
             match c {
-                '\\' => match it.next() {
-                    Some(n) => out.push(n),
-                    None => out.push('\\'),
+                '\\' => match it.peek().copied() {
+                    Some(n) if written || ampersand && (n == '&' || n == '\\') => {
+                        text.push(n);
+                        it.next();
+                    }
+                    _ => text.push('\\'),
                 },
-                '&' => out.extend(matched),
-                c => out.push(c),
+                '&' if ampersand => {
+                    parts.push(Replacement::Text(std::mem::take(&mut text)));
+                    parts.push(Replacement::Matched);
+                }
+                c => text.push(c),
+            }
+        }
+    }
+    parts.push(Replacement::Text(text));
+    parts
+}
+
+/// `${s/pattern/replacement}` and its kin.
+fn replace(s: &str, matcher: &Pattern, kind: ReplaceKind, replacement: &[Replacement]) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let render = |matched: &[char]| -> String {
+        let mut out = String::new();
+        for part in replacement {
+            match part {
+                Replacement::Text(text) => out.push_str(text),
+                Replacement::Matched => out.extend(matched),
             }
         }
         out

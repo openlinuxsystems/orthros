@@ -25,6 +25,8 @@ true && { echo grp; }; false || echo or; ! false && echo not
 x=1; { x=2; }; echo $x; (x=3); echo $x
 [[ "abc" =~ ^a(b)c$ ]] && echo "${BASH_REMATCH[0]} ${BASH_REMATCH[1]}"
 re='^([0-9]+)\.([0-9]+)$'; [[ 12.34 =~ $re ]] && echo "${BASH_REMATCH[2]}.${BASH_REMATCH[1]}"
+[[ sign_csr =~ sign_domains|sign_csr ]] && echo "alternation"; [[ "|" =~ [|] ]] && echo "bar"
+[[ y =~ x||y && 1 -eq 1 ]] && echo "empty alternative"
 x=1; [[ $x -eq 1 && ( 2 -gt 1 || 0 -eq 1 ) ]] && echo complex
 [[ a < b ]] && echo lt; [[ 10 -lt 9 ]] || echo numlt; [[ -z "" && -n x ]] && echo zn
 [[ foo == f* ]] && echo pattern; [[ foo == "f*" ]] || echo literal

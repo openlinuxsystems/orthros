@@ -9,7 +9,10 @@
 //! should a later redirection name one of them (`exec 10>file`), it moves
 //! out of the way first.
 
-use crate::ast::{RedirFd, RedirOp, RedirTarget, Redirect};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::ast::{HereDoc, RedirFd, RedirOp, RedirTarget, Redirect, Word, WordPart};
 use crate::shell::{Flow, Shell};
 use crate::{sys, text};
 
@@ -36,6 +39,29 @@ impl Shell {
             }
         }
         Ok(saved)
+    }
+
+    /// `redirects` with their words and here-documents expanded, to be
+    /// taken as they are: POSIX's order, in which a command's
+    /// redirections are expanded before its assignments.
+    pub fn expand_redirects(&mut self, redirects: &[Redirect]) -> Result<Vec<Redirect>, Flow> {
+        let literal = |text: String| Word { parts: vec![WordPart::Quoted(text)] };
+        let mut expanded = Vec::with_capacity(redirects.len());
+        for r in redirects {
+            let target = match &r.target {
+                RedirTarget::Word(word) => RedirTarget::Word(literal(self.expand_string(word)?)),
+                RedirTarget::HereDoc(doc) if doc.borrow().expand => {
+                    let body = self.expand_quoted(&doc.borrow().body)?;
+                    RedirTarget::HereDoc(Rc::new(RefCell::new(HereDoc {
+                        body: literal(body),
+                        expand: false,
+                    })))
+                }
+                RedirTarget::HereDoc(_) => r.target.clone(),
+            };
+            expanded.push(Redirect { fd: r.fd.clone(), op: r.op, target });
+        }
+        Ok(expanded)
     }
 
     /// Puts back what [`Shell::redirect`] changed.

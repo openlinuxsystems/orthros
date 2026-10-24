@@ -66,14 +66,14 @@ pub fn jobs(shell: &mut Shell, args: &[String]) -> Res {
         let suffix = if state == "Running" { " &" } else { "" };
         if flags.has('l') {
             text.push_str(&format!(
-                "[{}]{mark} {:>6} {state:<24}{}{suffix}\n",
+                "[{}]{mark} {:>5} {state:<24}{}{suffix}\n",
                 job.id, job.pgid, job.text
             ));
         } else {
             text.push_str(&format!("[{}]{mark}  {state:<24}{}{suffix}\n", job.id, job.text));
         }
     }
-    out(shell, "jobs", &text);
+    let written = out(shell, "jobs", &text);
     // Jobs reported as done are forgotten.
     for id in ids {
         if shell.jobs.get(id).is_some_and(|j| j.done()) {
@@ -82,7 +82,7 @@ pub fn jobs(shell: &mut Shell, args: &[String]) -> Res {
             job.notify = false;
         }
     }
-    Ok(0)
+    Ok(i32::from(!written))
 }
 
 fn job_control(shell: &Shell, name: &str) -> bool {
@@ -97,6 +97,7 @@ pub fn fg(shell: &mut Shell, args: &[String]) -> Res {
     if !job_control(shell, "fg") {
         return Ok(1);
     }
+    shell.reap();
     let Some(id) = job_of(shell, "fg", args.get(1).map(String::as_str)) else { return Ok(1) };
     shell.continue_job(id, true)
 }
@@ -105,6 +106,8 @@ pub fn bg(shell: &mut Shell, args: &[String]) -> Res {
     if !job_control(shell, "bg") {
         return Ok(1);
     }
+    // A job stopped since the shell last looked is stopped for `bg`.
+    shell.reap();
     let specs: Vec<Option<&str>> = if args.len() < 2 {
         vec![None]
     } else {
@@ -485,8 +488,7 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                 },
             }
         }
-        out(shell, "kill", &text);
-        return Ok(status);
+        return Ok(if out(shell, "kill", &text) { status } else { 1 });
     }
     let targets = &args[i..];
     if targets.is_empty() {
@@ -499,8 +501,7 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                 Ok(id) => {
                     let job = shell.jobs.get(id).cloned();
                     match job {
-                        Some(job) if shell.opts.monitor => vec![-job.pgid],
-                        Some(job) => job.procs.iter().map(|p| p.pid).collect(),
+                        Some(job) => shell.job_targets(&job),
                         None => Vec::new(),
                     }
                 }
@@ -526,11 +527,14 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                 status = 1;
             } else if signal == libc::SIGHUP || signal == libc::SIGTERM || signal == libc::SIGKILL {
                 // A stopped job does not die until it is continued.
-                if let Some(job) =
-                    shell.jobs.list.iter().find(|j| j.pgid == pid.abs() && j.stopped())
-                {
-                    let _ =
-                        sys::kill(if shell.opts.monitor { -job.pgid } else { pid }, libc::SIGCONT);
+                if let Some(job) = shell.jobs.list.iter().find(|j| {
+                    j.stopped() && (j.pgid == -pid || j.procs.iter().any(|p| p.pid == pid))
+                }) {
+                    if pid < 0 {
+                        shell.signal_job(job, libc::SIGCONT);
+                    } else {
+                        let _ = sys::kill(pid, libc::SIGCONT);
+                    }
                 }
             }
         }

@@ -7,6 +7,8 @@ q failed 1
 Hello world HELLO WORLD Hello world hello world heLLO wOrLd
 hELLO hello
 a-b A*b a*B
+\eabc\ea &bc& \bc\ ebce \abc\a a[b]ca
+\e&bc\e& &bc&
 libfoo.so.1 /usr/local/lib /usr/local/lib/libfoo so.1
 archive.tar archive tar.gz gz
 ac []
@@ -29,5 +31,5 @@ randoms
 val
 new
 fn 2
-29
+32
 status=0

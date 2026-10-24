@@ -65,19 +65,32 @@ impl Shell {
     }
 
     /// Runs a pipeline of an and-or list; `set -e` and the ERR trap apply
-    /// unless more of the list follows, or the pipeline is negated.
+    /// unless more of the list follows, or the pipeline is negated. Nor do
+    /// they to a compound command other than a subshell that fails because
+    /// a command in it failed where they were ignored, as POSIX has it:
+    /// `if c; then a && b; fi` with `a` failing goes on.
     fn run_pipeline_in(&mut self, pipeline: &Pipeline, more: bool) -> Res {
         let off = more || pipeline.bang;
         if off {
             self.errexit_off += 1;
         }
+        self.failed_ignored = false;
         let result = self.run_pipeline(pipeline);
         if off {
             self.errexit_off -= 1;
         }
         let status = result?;
         self.status = status;
-        if status != 0 && !off {
+        let compound = matches!(
+            pipeline.commands.as_slice(),
+            [Command::Compound(c, _)] if !matches!(**c, CompoundCommand::Subshell(_))
+        );
+        if status == 0 {
+            self.failed_ignored = false;
+        } else if off {
+            self.failed_ignored = true;
+        } else if !(compound && self.failed_ignored) {
+            self.failed_ignored = false;
             self.failed(status)?;
         }
         Ok(status)
@@ -106,7 +119,7 @@ impl Shell {
             self.pipestatus = vec![status];
             status
         } else {
-            self.run_multi(pipeline)?
+            self.run_multi(pipeline, false)?
         };
         if pipeline.bang {
             status = i32::from(status == 0);
@@ -178,10 +191,51 @@ impl Shell {
         let _ = sys::write_all(2, &text::encode(&text));
     }
 
+    /// Runs a program as the last thing a child does, its last command as
+    /// [`Shell::run_pipeline_last`] does; as [`Shell::run_program`] when an
+    /// EXIT or ERR trap is set, which a program replacing the child would
+    /// skip.
+    fn run_program_last(&mut self, program: &Program) -> Res {
+        if self.trap_command(trap::EXIT).is_some() || self.trap_command(trap::ERR).is_some() {
+            return self.run_program(program);
+        }
+        let Some((last, commands)) = program.commands.split_last() else { return Ok(0) };
+        for command in commands {
+            self.run_complete(command)?;
+        }
+        let Some(((list, Sep::Seq), items)) = last.items.split_last() else {
+            return self.run_complete(last);
+        };
+        if !list.rest.is_empty() {
+            return self.run_complete(last);
+        }
+        for (and_or, sep) in items {
+            match sep {
+                Sep::Async => self.run_async(and_or)?,
+                Sep::Seq => self.run_and_or(and_or)?,
+            };
+            self.run_pending_traps()?;
+        }
+        self.run_pipeline_last(&list.first)
+    }
+
+    /// Runs a pipeline as the last thing a child does: its last command in
+    /// the child itself, a program replacing it, so that the process `$!`
+    /// names for `cmd &` or `a | cmd &` is the program's own, as in dash.
+    fn run_pipeline_last(&mut self, pipeline: &Pipeline) -> Res {
+        if pipeline.bang || pipeline.time.is_some() || self.trap_command(trap::ERR).is_some() {
+            return self.run_pipeline(pipeline);
+        }
+        if pipeline.commands.len() == 1 {
+            return self.run_command(&pipeline.commands[0], true);
+        }
+        self.run_multi(pipeline, true)
+    }
+
     /// A pipeline of two commands or more: each in a child, joined by
-    /// pipes. With `lastpipe` and no job control, the last runs in the
-    /// shell itself.
-    fn run_multi(&mut self, pipeline: &Pipeline) -> Res {
+    /// pipes. With `lastpipe` and no job control, or `in_place` in a child
+    /// that ends after it, the last runs in the shell itself.
+    fn run_multi(&mut self, pipeline: &Pipeline, in_place: bool) -> Res {
         let count = pipeline.commands.len();
         let lastpipe = self.shopt("lastpipe") && !self.opts.monitor;
         let mut pids = Vec::new();
@@ -190,13 +244,13 @@ impl Shell {
         let mut last_status = None;
         for (i, cmd) in pipeline.commands.iter().enumerate() {
             let last = i + 1 == count;
-            if last && lastpipe {
+            if last && (lastpipe || in_place) {
                 let saved = sys::dup_high(0).ok();
                 if let Some(fd) = input.take() {
                     let _ = sys::dup2(fd, 0);
                     sys::close(fd);
                 }
-                let result = self.run_command(cmd, false);
+                let result = self.run_command(cmd, in_place);
                 if let Some(saved) = saved {
                     let _ = sys::dup2(saved, 0);
                     sys::close(saved);
@@ -273,7 +327,11 @@ impl Shell {
                     sys::close(null);
                 }
             }
-            let result = self.run_and_or(list);
+            let result = if list.rest.is_empty() {
+                self.run_pipeline_last(&list.first)
+            } else {
+                self.run_and_or(list)
+            };
             self.exit_child(result);
         }
         self.last_bg = Some(pid);
@@ -286,8 +344,8 @@ impl Shell {
 
     /// Forks a child of the shell. The child is a subshell: it forgets the
     /// jobs and traps, and with job control joins (or starts) process
-    /// group `pgid`, taking the terminal unless `background`. Returns the
-    /// child's number, or 0 in the child.
+    /// group `pgid`, taking the terminal, if the shell has it, unless
+    /// `background`. Returns the child's number, or 0 in the child.
     pub fn fork_child(&mut self, pgid: i32, background: bool) -> Result<i32, Flow> {
         let pid = match sys::fork() {
             Ok(pid) => pid,
@@ -295,23 +353,32 @@ impl Shell {
                 return Err(self.fatal(&format!("fork: {}", sys::describe(&error)), 1));
             }
         };
-        let monitor = self.opts.monitor && self.tty.is_some();
+        // With job control every job has a process group of its own, as
+        // POSIX asks, with a terminal or without: so a stop signal stops
+        // it even where the shell's own group is orphaned, as under
+        // `setsid` or a CI runner, and the kernel throws such signals
+        // away.
+        let groups = self.opts.monitor;
         if pid != 0 {
-            if monitor {
+            if groups {
                 let _ = sys::setpgid(pid, if pgid == 0 { pid } else { pgid });
             }
             return Ok(pid);
         }
         // The child.
-        if monitor {
+        if groups {
             let own = sys::getpid();
             let group = if pgid == 0 { own } else { pgid };
             let _ = sys::setpgid(0, group);
             if !background && let Some(tty) = self.tty {
                 let _ = sys::tcsetpgrp(tty, group);
             }
+            // The job stops as programs do, unless the shell ignores the
+            // signal for it.
             for signal in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
-                trap::set(signal, trap::Disposition::Default);
+                if !self.ignores(signal) {
+                    trap::set(signal, trap::Disposition::Default);
+                }
             }
         }
         self.become_subshell();
@@ -341,6 +408,12 @@ impl Shell {
             }
         }
         self.tty = None;
+        // The loops around a subshell are not its own: `break` leaves only
+        // those inside it, as in bash.
+        self.loops = 0;
+        if self.parent_traps.is_none() {
+            self.parent_traps = Some(self.traps.clone());
+        }
         // Traps with commands go back to the default; ignored signals stay
         // ignored.
         for (slot, command) in self.traps.iter_mut().enumerate().take(trap::MAX_SIGNAL + 1).skip(1)
@@ -369,7 +442,12 @@ impl Shell {
     pub fn flow_status(&self, result: Res) -> i32 {
         match result {
             Ok(status) => status,
-            Err(Flow::Exit(status) | Flow::Fatal(status) | Flow::Return(status)) => status,
+            Err(
+                Flow::Exit(status)
+                | Flow::Fatal(status)
+                | Flow::Discard(status)
+                | Flow::Return(status),
+            ) => status,
             Err(Flow::Break(_) | Flow::Continue(_)) => self.status,
             Err(Flow::Interrupt) => 130,
         }
@@ -394,6 +472,23 @@ impl Shell {
     pub fn run_command(&mut self, command: &Command, last: bool) -> Res {
         match command {
             Command::Simple(simple) => self.run_simple(simple, last),
+            // A child that ends after `( ... )` is that subshell already,
+            // and can end with the group's last command, as with `{ ...; }`.
+            Command::Compound(compound, redirects)
+                if last
+                    && self.subshell > 0
+                    && let CompoundCommand::Subshell(program) | CompoundCommand::Brace(program) =
+                        &**compound =>
+            {
+                let saved = match self.redirect(redirects, true) {
+                    Ok(saved) => saved,
+                    Err(Some(flow)) => return Err(flow),
+                    Err(None) => return Ok(1),
+                };
+                let result = self.run_program_last(program);
+                self.restore(saved);
+                result
+            }
             Command::Compound(compound, redirects) => {
                 if redirects.is_empty() {
                     return self.run_compound(compound);
@@ -463,8 +558,14 @@ impl Shell {
                 let mut status = 0;
                 let result = (|| {
                     for item in items {
+                        // A read-only name ends the loop, which fails, as in
+                        // bash; it ends a POSIX shell.
                         if let Err(message) = self.assign(var, item, false) {
-                            return Err(self.fatal(&message, 1));
+                            if self.posix() {
+                                return Err(self.fatal(&message, 1));
+                            }
+                            self.error(&message);
+                            return Ok(1);
                         }
                         match self.run_program(body) {
                             Ok(s) => status = s,
@@ -490,15 +591,22 @@ impl Shell {
             }
             CompoundCommand::ArithFor { init, cond, step, body, line } => {
                 self.lineno = *line;
+                // An arithmetic error ends the loop, which fails.
                 let init = self.expand_quoted(init)?;
-                self.arith(&init)?;
+                if self.arith_command("((", &init).is_none() {
+                    return Ok(1);
+                }
                 self.loops += 1;
                 let mut status = 0;
                 let result = (|| {
                     loop {
                         let test = self.expand_quoted(cond)?;
-                        if !test.trim().is_empty() && self.arith(&test)? == 0 {
-                            return Ok(status);
+                        if !test.trim().is_empty() {
+                            match self.arith_command("((", &test) {
+                                Some(0) => return Ok(status),
+                                Some(_) => {}
+                                None => return Ok(1),
+                            }
                         }
                         match self.run_program(body) {
                             Ok(s) => status = s,
@@ -516,7 +624,9 @@ impl Shell {
                             Err(flow) => return Err(flow),
                         }
                         let next = self.expand_quoted(step)?;
-                        self.arith(&next)?;
+                        if self.arith_command("((", &next).is_none() {
+                            return Ok(1);
+                        }
                     }
                 })();
                 self.loops -= 1;
@@ -583,7 +693,7 @@ impl Shell {
                 if self.opts.xtrace {
                     self.trace(&format!("(( {} ))", text.trim()));
                 }
-                Ok(i32::from(self.arith(&text)? == 0))
+                Ok(self.arith_command("((", &text).map_or(1, |value| i32::from(value == 0)))
             }
         }
     }
@@ -709,12 +819,42 @@ impl Shell {
 
     // Simple commands.
 
+    /// Expands a command's assignments, each after the ones before it are
+    /// made, as dash and bash do (`x=5 y=$((x+2)) cmd` gives y 7): in a
+    /// scope of their own meanwhile, which goes once they are expanded.
     fn expand_assigns(&mut self, assigns: &[Assign]) -> Result<Vec<Assigned>, Flow> {
         let mut out = Vec::with_capacity(assigns.len());
-        for a in assigns {
-            out.push(self.expand_assign(a)?);
+        let staged = assigns.len() > 1;
+        if staged {
+            self.vars.push_temp();
         }
-        Ok(out)
+        let mut result = Ok(());
+        for (i, a) in assigns.iter().enumerate() {
+            match self.expand_assign(a) {
+                Ok(assigned) => {
+                    if let Assigned::Scalar { name, index: None, value, append } = &assigned
+                        && staged
+                        && i + 1 < assigns.len()
+                    {
+                        let value = if *append {
+                            self.get(name).unwrap_or_default() + value
+                        } else {
+                            value.clone()
+                        };
+                        self.vars.set_temp(name, temp_var(value, false));
+                    }
+                    out.push(assigned);
+                }
+                Err(flow) => {
+                    result = Err(flow);
+                    break;
+                }
+            }
+        }
+        if staged {
+            self.vars.pop();
+        }
+        result.map(|()| out)
     }
 
     fn expand_assign(&mut self, a: &Assign) -> Result<Assigned, Flow> {
@@ -884,8 +1024,8 @@ impl Shell {
         if fields.is_empty() {
             // Assignments alone, in the shell, each expanded after the one
             // before it is made (`IFS=, a=$(...)`); redirections alone,
-            // undone. A failed assignment abandons the command line, and
-            // ends a non-interactive shell.
+            // undone. A failed assignment abandons the command, and ends a
+            // non-interactive POSIX shell.
             for assign in &command.assigns {
                 let assigned = self.expand_assign(assign)?;
                 if self.opts.xtrace {
@@ -893,8 +1033,7 @@ impl Shell {
                     self.trace(&line);
                 }
                 if let Err(message) = self.apply_assigns(vec![assigned]) {
-                    self.error(&message);
-                    return Err(Flow::Fatal(1));
+                    return Err(self.discard(&message));
                 }
             }
             let saved = match self.redirect(&command.redirects, true) {
@@ -905,6 +1044,17 @@ impl Shell {
             self.restore(saved);
             return Ok(self.subst_status.unwrap_or(0));
         }
+        // POSIX expands the redirections' words before the assignments'
+        // (`x= cmd 2>${x=...}`), and in the shell, as dash does, for a
+        // program as for a builtin; bash does them after, and a program's
+        // in its child.
+        let expanded;
+        let redirects: &[Redirect] = if self.posix() && !command.redirects.is_empty() {
+            expanded = self.expand_redirects(&command.redirects)?;
+            &expanded
+        } else {
+            &command.redirects
+        };
         let assigns = self.expand_assigns(&command.assigns)?;
 
         if self.opts.xtrace {
@@ -930,17 +1080,24 @@ impl Shell {
             return Ok(1);
         }
 
-        // `exec` without a command makes its redirections stay.
-        if name == "exec" && fields.len() == 1 && !self.functions.contains_key("exec") {
+        // `exec` without a command makes its redirections stay, and so does
+        // `command exec`, whose failure does not end the shell.
+        let exec_alone =
+            name == "exec" && fields.len() == 1 && !self.functions.contains_key("exec");
+        let command_exec = name == "command"
+            && fields.len() == 2
+            && fields[1] == "exec"
+            && !self.functions.contains_key("command");
+        if exec_alone || command_exec {
             if let Err(message) = self.apply_assigns(assigns) {
                 self.error(&message);
                 return Ok(1);
             }
-            return match self.redirect(&command.redirects, false) {
+            return match self.redirect(redirects, false) {
                 Ok(_) => Ok(0),
                 Err(Some(flow)) => Err(flow),
                 Err(None) => {
-                    if !self.interactive {
+                    if !self.interactive && !command_exec {
                         return Err(Flow::Exit(1));
                     }
                     Ok(1)
@@ -950,13 +1107,7 @@ impl Shell {
 
         if let Some(args) = decl {
             let builtin = builtins::lookup(&name).ok_or(Flow::Fatal(1))?;
-            return self.run_builtin(
-                builtin,
-                &name,
-                BuiltinArgs::Decl(args),
-                assigns,
-                &command.redirects,
-            );
+            return self.run_builtin(builtin, &name, BuiltinArgs::Decl(args), assigns, redirects);
         }
 
         let special = builtins::is_special(&name);
@@ -969,11 +1120,11 @@ impl Shell {
                 &name,
                 BuiltinArgs::Plain(fields),
                 assigns,
-                &command.redirects,
+                redirects,
             );
         }
         if let Some(def) = self.functions.get(&name).cloned() {
-            return self.run_function_with(def, fields, assigns, &command.redirects);
+            return self.run_function_with(def, fields, assigns, redirects);
         }
         if let Some(builtin) = builtins::lookup(&name)
             && builtins::enabled(self, &name)
@@ -983,10 +1134,10 @@ impl Shell {
                 &name,
                 BuiltinArgs::Plain(fields),
                 assigns,
-                &command.redirects,
+                redirects,
             );
         }
-        self.run_external(fields, assigns, &command.redirects, last)
+        self.run_external(fields, assigns, redirects, last)
     }
 
     fn run_builtin(
@@ -999,7 +1150,8 @@ impl Shell {
     ) -> Res {
         let special = builtins::is_special(name);
         // Assignments before a special builtin stay in POSIX mode; before
-        // anything else they last for the command.
+        // anything else they last for the command, exported, as before a
+        // function: `X=1 command env` gives env X.
         let temp = !assigns.is_empty() && !(special && self.posix());
         if temp {
             self.vars.push_temp();
@@ -1007,8 +1159,7 @@ impl Shell {
                 if let Assigned::Scalar { name, index: None, value, append } = a {
                     let value =
                         if append { self.get(&name).unwrap_or_default() + &value } else { value };
-                    let exported = self.vars.get(&name).is_some_and(|v| v.has(attr::EXPORT));
-                    self.vars.set_temp(&name, temp_var(value, exported));
+                    self.vars.set_temp(&name, temp_var(value, true));
                 }
             }
         } else if let Err(message) = self.apply_assigns(assigns) {
@@ -1038,11 +1189,13 @@ impl Shell {
         if temp {
             self.vars.pop();
         }
-        // A special builtin's error ends a non-interactive POSIX shell.
+        // A special builtin's error ends a non-interactive POSIX shell: a
+        // fatal one, or misuse (status 2, as `set -Q` gives; eval's and
+        // `.`'s status is their commands').
+        let ends = special && self.posix() && !self.interactive;
         match result {
-            Err(Flow::Fatal(status)) if special && self.posix() && !self.interactive => {
-                Err(Flow::Exit(status))
-            }
+            Err(Flow::Fatal(status)) if ends => Err(Flow::Exit(status)),
+            Ok(2) if ends && name != "eval" && name != "." => Err(Flow::Exit(2)),
             other => other,
         }
     }
@@ -1164,6 +1317,22 @@ impl Shell {
         None
     }
 
+    /// The file running `name` runs: the first executable file of that
+    /// name on `PATH`, or else, as in bash, the first file, so that
+    /// running it fails with "Permission denied" (status 126) and not
+    /// "command not found".
+    pub fn find_program(&mut self, name: &str) -> Option<String> {
+        self.find_command(name).or_else(|| {
+            let path = self.get("PATH").unwrap_or_default();
+            path.split(':')
+                .map(|dir| {
+                    let dir = if dir.is_empty() { "." } else { dir.trim_end_matches('/') };
+                    format!("{dir}/{name}")
+                })
+                .find(|file| std::fs::metadata(text::to_os(file)).is_ok_and(|meta| meta.is_file()))
+        })
+    }
+
     /// `command name args`: the program on `PATH`, never a function.
     pub fn run_program_fields(&mut self, fields: Vec<String>) -> Res {
         self.run_external(fields, Vec::new(), &[], false)
@@ -1177,7 +1346,7 @@ impl Shell {
         last: bool,
     ) -> Res {
         let name = &fields[0];
-        let path = if name.contains('/') { Some(name.clone()) } else { self.find_command(name) };
+        let path = if name.contains('/') { Some(name.clone()) } else { self.find_program(name) };
         let Some(path) = path else {
             if let Some(handler) = self.functions.get("command_not_found_handle").cloned() {
                 let mut handler_args = vec!["command_not_found_handle".to_string()];
@@ -1264,20 +1433,25 @@ impl Shell {
                 } else {
                     sys::describe(&error)
                 };
-                self.error(&format!("{}: {what}", fields[0]));
+                // The file found, as bash names it.
+                self.error(&format!("{path}: {what}"));
                 sys::exit_now(126);
             }
         }
+    }
+
+    /// Whether `signal` is ignored for the commands the shell runs: by
+    /// `trap ''`, or because a script started with it ignored.
+    pub fn ignores(&self, signal: i32) -> bool {
+        let slot = signal as usize;
+        self.traps.get(slot).is_some_and(|t| t.as_deref() == Some("")) || self.ignored[slot]
     }
 
     /// Puts signals the shell catches back to their default, for a
     /// program about to run; ignored ones stay ignored.
     pub fn reset_signals_for_exec(&self) {
         for (_, signal) in trap::SIGNALS {
-            let slot = *signal as usize;
-            let ignored = self.traps.get(slot).is_some_and(|t| t.as_deref() == Some(""))
-                || self.ignored[slot];
-            if !ignored && !matches!(*signal, libc::SIGKILL | libc::SIGSTOP) {
+            if !self.ignores(*signal) && !matches!(*signal, libc::SIGKILL | libc::SIGSTOP) {
                 trap::set(*signal, trap::Disposition::Default);
             }
         }
@@ -1493,9 +1667,13 @@ impl Shell {
         let Some(command) = self.trap_command(slot).map(str::to_string) else { return Ok(()) };
         let status = self.status;
         let was = std::mem::replace(&mut self.in_trap, true);
-        self.errexit_off += 1;
+        // `set -e` holds in the action, even when the trap went off in a
+        // condition, as in dash and bash; not in the ERR trap's, which a
+        // failure runs.
+        let off = if slot == trap::ERR { self.errexit_off + 1 } else { 0 };
+        let errexit_off = std::mem::replace(&mut self.errexit_off, off);
         let result = self.eval_text(&command, "trap");
-        self.errexit_off -= 1;
+        self.errexit_off = errexit_off;
         self.in_trap = was;
         self.status = status;
         match result {
@@ -1539,7 +1717,13 @@ impl Shell {
                     if self.opts.noexec && !self.interactive {
                         continue;
                     }
-                    status = self.run_complete(&command)?;
+                    status = match self.run_complete(&command) {
+                        Err(Flow::Discard(code)) => {
+                            self.status = code;
+                            code
+                        }
+                        other => other?,
+                    };
                     self.close_procsubs();
                     self.notify_background();
                 }

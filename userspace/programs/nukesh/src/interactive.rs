@@ -65,6 +65,21 @@ pub fn take_terminal_control(shell: &mut Shell) {
     shell.tty_modes = sys::tcgetattr(tty);
 }
 
+/// `set -m` in a script: when the script runs in the foreground of the
+/// terminal on its standard error, the jobs it runs in the foreground
+/// have the terminal while they run, as in bash. The shell stays in its
+/// own process group, and the terminal's modes are the jobs' to change.
+pub fn share_terminal(shell: &mut Shell) {
+    if !sys::isatty(2) || sys::tcgetpgrp(2).ok() != Some(sys::getpgrp()) {
+        return;
+    }
+    if let Ok(tty) = sys::dup_high(2) {
+        shell.tty = Some(tty);
+        shell.shell_pgid = sys::getpgrp();
+        shell.tty_modes = None;
+    }
+}
+
 fn no_job_control(shell: &mut Shell, why: &str) {
     shell.error(&format!("{why}: no job control in this shell"));
     shell.opts.monitor = false;
@@ -243,7 +258,7 @@ fn run_line(shell: &mut Shell, line: &str, first_line: u32) -> Option<i32> {
                         return Some(code);
                     }
                     // The rest of the line is abandoned.
-                    Err(Flow::Fatal(status)) => {
+                    Err(Flow::Fatal(status) | Flow::Discard(status)) => {
                         shell.status = status;
                         return None;
                     }

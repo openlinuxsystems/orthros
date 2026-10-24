@@ -34,6 +34,9 @@ pub struct Job {
     /// `disown -h`: not sent SIGHUP when the shell hangs up.
     pub nohup: bool,
     pub background: bool,
+    /// Whether the job has process group `pgid` of its own: it started
+    /// under job control.
+    pub grouped: bool,
 }
 
 impl Job {
@@ -240,7 +243,17 @@ impl Shell {
     pub fn add_job(&mut self, pgid: i32, pids: &[i32], text: String, background: bool) -> usize {
         let id = self.jobs.next_id();
         let procs = pids.iter().map(|&pid| Proc { pid, status: None, stopped: false }).collect();
-        self.jobs.list.push(Job { id, pgid, procs, text, notify: false, nohup: false, background });
+        let grouped = self.opts.monitor;
+        self.jobs.list.push(Job {
+            id,
+            pgid,
+            procs,
+            text,
+            notify: false,
+            nohup: false,
+            background,
+            grouped,
+        });
         if background {
             self.jobs.make_current(id);
         }
@@ -249,16 +262,18 @@ impl Shell {
 
     /// Waits for a foreground job to end or stop; its status.
     pub fn wait_job(&mut self, id: usize) -> Result<i32, Flow> {
-        let monitor = self.opts.monitor && self.tty.is_some();
-        if monitor && let Some(job) = self.jobs.get(id) {
-            let pgid = job.pgid;
+        // A job of its own group can stop, and has the terminal, if the
+        // shell has it, while it runs.
+        let Some(job) = self.jobs.get(id) else { return Ok(0) };
+        let (grouped, pgid) = (job.grouped, job.pgid);
+        if grouped {
             self.give_terminal(pgid);
         }
         while let Some(job) = self.jobs.get(id) {
             if job.done() || job.stopped() {
                 break;
             }
-            let flags = if monitor { libc::WUNTRACED } else { 0 };
+            let flags = if grouped { libc::WUNTRACED } else { 0 };
             // Any child: one of this job's, or a background one that ends
             // meanwhile.
             match sys::waitpid(-1, flags) {
@@ -280,7 +295,7 @@ impl Shell {
                 }
             }
         }
-        if monitor {
+        if grouped {
             self.take_terminal();
         }
         let Some(job) = self.jobs.get(id).cloned() else { return Ok(0) };
@@ -409,7 +424,7 @@ impl Shell {
         let suffix = if state == "Running" { " &" } else { "" };
         let line = if pids {
             format!(
-                "[{}]{mark}  {} {state:<24}{}{suffix}\n",
+                "[{}]{mark} {:>5} {state:<24}{}{suffix}\n",
                 job.id,
                 job.procs.first().map_or(0, |p| p.pid),
                 job.text
@@ -444,24 +459,43 @@ impl Shell {
         for proc in &mut job.procs {
             proc.stopped = false;
         }
-        let pgid = job.pgid;
+        let (pgid, grouped) = (job.pgid, job.grouped);
         let text = job.text.clone();
         self.jobs.make_current(id);
         if foreground {
             let _ = sys::write_all(1, crate::text::encode(&format!("{text}\n")).as_slice());
-            if self.opts.monitor && self.tty.is_some() {
+            if grouped {
                 self.give_terminal(pgid);
             }
         } else {
             let _ =
                 sys::write_all(1, crate::text::encode(&format!("[{id}]+ {text} &\n")).as_slice());
         }
-        let target = if self.opts.monitor { -pgid } else { pgid };
-        let _ = sys::kill(target, libc::SIGCONT);
+        if let Some(job) = self.jobs.get(id) {
+            self.signal_job(job, libc::SIGCONT);
+        }
         if foreground {
             return self.wait_job(id);
         }
         Ok(0)
+    }
+
+    /// The process numbers that reach a job: its process group's, as a
+    /// negative number, when it has a group of its own (it started under
+    /// job control), else each of its processes still running.
+    pub fn job_targets(&self, job: &Job) -> Vec<i32> {
+        if job.grouped {
+            vec![-job.pgid]
+        } else {
+            job.procs.iter().filter(|p| p.status.is_none()).map(|p| p.pid).collect()
+        }
+    }
+
+    /// Sends `signal` to a job's processes.
+    pub fn signal_job(&self, job: &Job, signal: i32) {
+        for target in self.job_targets(job) {
+            let _ = sys::kill(target, signal);
+        }
     }
 
     /// Sends SIGHUP to every job (and SIGCONT to the stopped ones), as a
@@ -471,10 +505,9 @@ impl Shell {
             if job.nohup {
                 continue;
             }
-            let target = if self.opts.monitor { -job.pgid } else { job.pgid };
-            let _ = sys::kill(target, libc::SIGHUP);
+            self.signal_job(job, libc::SIGHUP);
             if job.stopped() {
-                let _ = sys::kill(target, libc::SIGCONT);
+                self.signal_job(job, libc::SIGCONT);
             }
         }
     }

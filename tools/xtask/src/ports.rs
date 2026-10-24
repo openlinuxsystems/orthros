@@ -1001,7 +1001,7 @@ fn rust_src(ctx: &Ctx) -> Result<(PathBuf, String)> {
 /// Fetches commit `commit` of `git` into `target/ports/sources`, once,
 /// and checks that it is that commit; with `paths`, only the files of
 /// those directories. Returns where it is.
-fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -> Result<PathBuf> {
+pub fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -> Result<PathBuf> {
     let dir = ctx.target.join("ports/sources").join(format!("{name}-{}", &commit[..12]));
     let head = |dir: &Path| -> Option<String> {
         let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output();
@@ -1174,7 +1174,7 @@ fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
 
 /// Copies the tree of `repo`'s checked-out commit, without its `.git`, to
 /// `to`; with `paths`, only those directories of it.
-fn export(ctx: &Ctx, repo: &Path, to: &Path, paths: &[String]) -> Result<()> {
+pub fn export(ctx: &Ctx, repo: &Path, to: &Path, paths: &[String]) -> Result<()> {
     process::create_dir(to)?;
     let mut archive = Command::new("git");
     archive.arg("-C").arg(repo).args(["archive", "--format=tar", "HEAD", "--"]).args(paths);

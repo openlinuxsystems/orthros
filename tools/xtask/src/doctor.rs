@@ -496,6 +496,19 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             tla::TLA_VERSION
         ),
     }
+    let corpus = ["dash", "bash", "unshare", "prlimit", "setpriv"];
+    let absent: Vec<&str> =
+        corpus.into_iter().filter(|tool| process::find_program(tool).is_none()).collect();
+    if absent.is_empty() {
+        println!("  ok       {:<15} dash, bash, unshare, prlimit and setpriv", "Shell corpus");
+    } else {
+        println!(
+            "  note     {:<15} {} not installed; only `./ob test corpus` needs them \
+             (packages dash, bash and util-linux)",
+            "Shell corpus",
+            absent.join(", ")
+        );
+    }
     if qemu::kvm_available() {
         println!("  ok       {:<15} /dev/kvm is usable", "KVM");
     } else {
