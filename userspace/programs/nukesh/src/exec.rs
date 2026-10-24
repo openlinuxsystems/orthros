@@ -14,9 +14,10 @@ use std::time::Instant;
 
 use crate::ast::*;
 use crate::builtins::{self, DeclArg};
+use crate::jobs::Proc;
 use crate::pattern::Pattern;
+use crate::redir::Scope;
 use crate::shell::{Flow, Frame, Res, Shell, temp_var};
-use crate::vars::attr;
 use crate::{show, sys, text, trap};
 
 /// How deep functions may call each other.
@@ -83,15 +84,16 @@ impl Shell {
         self.status = status;
         let compound = matches!(
             pipeline.commands.as_slice(),
-            [Command::Compound(c, _)] if !matches!(**c, CompoundCommand::Subshell(_))
+            [Command::Compound(c, _)] if !matches!(**c, CompoundCommand::Subshell(..))
         );
         if status == 0 {
             self.failed_ignored = false;
         } else if off {
             self.failed_ignored = true;
         } else if !(compound && self.failed_ignored) {
-            self.failed_ignored = false;
             self.failed(status)?;
+            // Dealt with: the compound command around it is not, as bash.
+            self.failed_ignored = true;
         }
         Ok(status)
     }
@@ -238,7 +240,7 @@ impl Shell {
     fn run_multi(&mut self, pipeline: &Pipeline, in_place: bool) -> Res {
         let count = pipeline.commands.len();
         let lastpipe = self.shopt("lastpipe") && !self.opts.monitor;
-        let mut pids = Vec::new();
+        let mut procs = Vec::new();
         let mut pgid = 0;
         let mut input: Option<i32> = None;
         let mut last_status = None;
@@ -269,8 +271,20 @@ impl Shell {
                     }
                 }
             };
+            // LINENO is the last command's line once the pipeline is run.
+            match cmd {
+                Command::Simple(simple) => self.lineno = simple.line,
+                Command::Compound(compound, _) => {
+                    if let CompoundCommand::Subshell(_, line) = **compound {
+                        self.lineno = line;
+                    }
+                }
+                Command::Function(def) => self.lineno = def.line,
+                Command::Coproc(coproc) => self.lineno = coproc.line,
+            }
             let pid = self.fork_child(pgid, false)?;
             if pid == 0 {
+                self.close_coprocs();
                 if let Some(fd) = input {
                     let _ = sys::dup2(fd, 0);
                     sys::close(fd);
@@ -291,7 +305,7 @@ impl Shell {
             if pgid == 0 {
                 pgid = pid;
             }
-            pids.push(pid);
+            procs.push(Proc::new(pid, show::job_line(cmd)));
             if let Some(fd) = input {
                 sys::close(fd);
             }
@@ -300,8 +314,8 @@ impl Shell {
             }
             input = next_read;
         }
-        let text = show::pipeline_line(pipeline);
-        let id = self.add_job(pgid, &pids, text, false);
+        let text = show::job_pipeline(pipeline);
+        let id = self.add_job(pgid, procs, text, false);
         let status = self.wait_job(id)?;
         if let Some(last_status) = last_status {
             self.pipestatus.push(last_status);
@@ -315,9 +329,12 @@ impl Shell {
 
     /// `list &`: in a child, which the shell does not wait for.
     fn run_async(&mut self, list: &AndOr) -> Res {
+        let monitor = self.opts.monitor;
         let pid = self.fork_child(0, true)?;
         if pid == 0 {
-            if !self.opts.monitor {
+            self.close_coprocs();
+            self.forget_jobs();
+            if !monitor {
                 // Without job control, Ctrl-C is not for background jobs,
                 // and their input is empty unless redirected.
                 trap::set(libc::SIGINT, trap::Disposition::Ignore);
@@ -335,7 +352,11 @@ impl Shell {
             self.exit_child(result);
         }
         self.last_bg = Some(pid);
-        let id = self.add_job(pid, &[pid], show::and_or_line(list), true);
+        // Jobs that ended meanwhile are seen first, as bash's SIGCHLD
+        // handler sees them, so that one is not taken for `%-`.
+        self.reap();
+        let text = show::job_and_or(list);
+        let id = self.add_job(pid, vec![Proc::new(pid, text.clone())], text, true);
         if self.interactive {
             let _ = sys::write_all(2, format!("[{id}] {pid}\n").as_bytes());
         }
@@ -389,7 +410,18 @@ impl Shell {
     pub fn become_subshell(&mut self) {
         self.subshell += 1;
         self.trap_status = None;
-        self.jobs = crate::jobs::Jobs::default();
+        // The jobs and coprocesses are the parent's. As in bash, a command
+        // substitution or a pipeline's command lists the jobs, and a
+        // command or process substitution keeps the coprocesses' ends
+        // open; none are this shell's to wait for, report or clean up.
+        self.jobs.reaped.clear();
+        for job in &mut self.jobs.list {
+            job.inherited = true;
+            job.notify = false;
+        }
+        for coproc in &mut self.jobs.coprocs {
+            coproc.inherited = true;
+        }
         self.opts.monitor = false;
         if self.interactive {
             self.interactive = false;
@@ -461,7 +493,7 @@ impl Shell {
             return status;
         };
         self.trap_status = Some(status);
-        match self.eval_text(&command, "trap") {
+        match self.eval_trap(&command, trap::EXIT) {
             Err(Flow::Exit(code)) => code,
             _ => status,
         }
@@ -475,14 +507,17 @@ impl Shell {
         match command {
             Command::Simple(simple) => self.run_simple(simple, last),
             // A child that ends after `( ... )` is that subshell already,
-            // and can end with the group's last command, as with `{ ...; }`.
+            // and can end with its last command. (bash runs a `{ ...; }`
+            // group's last command in a child of its own even here, so a
+            // signal that ends it is reported from inside, as here.)
             Command::Compound(compound, redirects)
                 if last
                     && self.subshell > 0
-                    && let CompoundCommand::Subshell(program) | CompoundCommand::Brace(program) =
-                        &**compound =>
+                    && let CompoundCommand::Subshell(program, _) = &**compound =>
             {
-                let saved = match self.redirect(redirects, true) {
+                // Its redirections' errors name the line bash keeps.
+                self.lineno = self.report_line;
+                let saved = match self.redirect(redirects, Scope::Command) {
                     Ok(saved) => saved,
                     Err(Some(flow)) => return Err(flow),
                     Err(None) => return Ok(1),
@@ -495,7 +530,9 @@ impl Shell {
                 if redirects.is_empty() {
                     return self.run_compound(compound);
                 }
-                let saved = match self.redirect(redirects, true) {
+                // Their errors name the line bash keeps, as it does.
+                self.lineno = self.report_line;
+                let saved = match self.redirect(redirects, Scope::Command) {
                     Ok(saved) => saved,
                     Err(Some(flow)) => return Err(flow),
                     Err(None) => return Ok(1),
@@ -517,19 +554,24 @@ impl Shell {
                 self.functions.insert(def.name.clone(), def.clone());
                 Ok(0)
             }
+            Command::Coproc(coproc) => self.run_coproc(coproc),
         }
     }
 
     fn run_compound(&mut self, compound: &CompoundCommand) -> Res {
         match compound {
             CompoundCommand::Brace(program) => self.run_program(program),
-            CompoundCommand::Subshell(program) => {
+            CompoundCommand::Subshell(program, line) => {
+                self.lineno = *line;
                 let pid = self.fork_child(0, false)?;
                 if pid == 0 {
-                    let result = self.run_program(program);
+                    self.close_coprocs();
+                    self.forget_jobs();
+                    // Its last command can replace it, as in bash.
+                    let result = self.run_program_last(program);
                     self.exit_child(result);
                 }
-                Ok(self.wait_child(pid))
+                Ok(self.wait_child(pid, show::job_compound(compound)))
             }
             CompoundCommand::If { arms, otherwise } => {
                 for (cond, then) in arms {
@@ -546,6 +588,10 @@ impl Shell {
             CompoundCommand::Until { cond, body } => self.run_loop(cond, body, false),
             CompoundCommand::For { var, words, body, line } => {
                 self.lineno = *line;
+                self.report_line = *line;
+                if !self.loop_name(var) {
+                    return Ok(1);
+                }
                 let items = match words {
                     Some(words) => self.expand_words(words)?,
                     None => self.args.clone(),
@@ -593,6 +639,7 @@ impl Shell {
             }
             CompoundCommand::ArithFor { init, cond, step, body, line } => {
                 self.lineno = *line;
+                self.report_line = *line;
                 // An arithmetic error ends the loop, which fails.
                 let init = self.expand_quoted(init)?;
                 if self.arith_command("((", &init).is_none() {
@@ -622,6 +669,7 @@ impl Shell {
                                 if n > 1 {
                                     return Err(Flow::Continue(n - 1));
                                 }
+                                status = self.status;
                             }
                             Err(flow) => return Err(flow),
                         }
@@ -636,6 +684,10 @@ impl Shell {
             }
             CompoundCommand::Select { var, words, body, line } => {
                 self.lineno = *line;
+                self.report_line = *line;
+                if !self.loop_name(var) {
+                    return Ok(1);
+                }
                 let items = match words {
                     Some(words) => self.expand_words(words)?,
                     None => self.args.clone(),
@@ -644,6 +696,7 @@ impl Shell {
             }
             CompoundCommand::Case { word, arms, line } => {
                 self.lineno = *line;
+                self.report_line = *line;
                 let subject = self.expand_string(word)?;
                 if self.opts.xtrace {
                     self.trace(&format!("case {} in", crate::expand::quote(&subject)));
@@ -678,12 +731,10 @@ impl Shell {
             }
             CompoundCommand::Cond(expr, line) => {
                 self.lineno = *line;
+                self.report_line = *line;
                 if self.opts.xtrace {
                     let mut text = String::from("[[ ");
-                    text.push_str(
-                        &show::one_line(&Command::Compound(Box::new(compound.clone()), Vec::new()))
-                            [3..],
-                    );
+                    text.push_str(&show::compound_line(compound)[3..]);
                     self.trace(&text);
                 }
                 let status = self.eval_cond(expr)?;
@@ -691,6 +742,7 @@ impl Shell {
             }
             CompoundCommand::Arith(word, line) => {
                 self.lineno = *line;
+                self.report_line = *line;
                 let text = self.expand_quoted(word)?;
                 if self.opts.xtrace {
                     self.trace(&format!("(( {} ))", text.trim()));
@@ -799,6 +851,7 @@ impl Shell {
                         if n > 1 {
                             return Err(Flow::Continue(n - 1));
                         }
+                        status = self.status;
                     }
                     Err(flow) => return Err(flow),
                 }
@@ -832,6 +885,13 @@ impl Shell {
         }
         let mut result = Ok(());
         for (i, a) in assigns.iter().enumerate() {
+            // An element has no place in a command's environment: bash's
+            // error, unexpanded, and the command runs.
+            if let Some(index) = &a.index {
+                let index = crate::show::subscript_text(index);
+                self.error(&format!("`{}[{index}]': not a valid identifier", a.name));
+                continue;
+            }
             match self.expand_assign(a) {
                 Ok(assigned) => {
                     if let Assigned::Scalar { name, index: None, value, append } = &assigned
@@ -863,7 +923,7 @@ impl Shell {
         Ok(match &a.value {
             AssignValue::Scalar(word) => {
                 let index = match &a.index {
-                    Some(index) => Some(self.expand_quoted(index)?),
+                    Some(index) => Some(self.expand_subscript(&a.name, index)?),
                     None => None,
                 };
                 let value = self.expand_assignment(word)?;
@@ -998,6 +1058,20 @@ impl Shell {
     }
 
     pub fn run_simple(&mut self, command: &SimpleCommand, last: bool) -> Res {
+        // `set -k`: the assignments after the name join those before it.
+        if self.opts.keyword && command.words.len() > 1 {
+            let mut moved = command.clone();
+            moved.words.truncate(1);
+            for word in &command.words[1..] {
+                match keyword_assign(word) {
+                    Some(assign) => moved.assigns.push(assign),
+                    None => moved.words.push(word.clone()),
+                }
+            }
+            if moved.words.len() < command.words.len() {
+                return self.run_simple(&moved, last);
+            }
+        }
         self.lineno = command.line;
         self.subst_status = None;
         self.check_interrupt()?;
@@ -1038,7 +1112,7 @@ impl Shell {
                     return Err(self.discard(&message));
                 }
             }
-            let saved = match self.redirect(&command.redirects, true) {
+            let saved = match self.redirect(&command.redirects, Scope::Command) {
                 Ok(saved) => saved,
                 Err(Some(flow)) => return Err(flow),
                 Err(None) => return Ok(1),
@@ -1060,7 +1134,15 @@ impl Shell {
         let assigns = self.expand_assigns(&command.assigns)?;
 
         if self.opts.xtrace {
-            let mut parts = self.trace_assigns(&assigns);
+            // bash shows each assignment on a line of its own, dash all on
+            // the command's.
+            let mut parts = Vec::new();
+            for assign in self.trace_assigns(&assigns) {
+                match self.posix() {
+                    true => parts.push(assign),
+                    false => self.trace(&assign),
+                }
+            }
             match &decl {
                 Some(args) => {
                     parts.push(crate::expand::quote(&fields[0]));
@@ -1076,6 +1158,19 @@ impl Shell {
             }
         }
 
+        // A read-only variable among them ends a non-interactive POSIX
+        // shell, as in dash; elsewhere bash's error, and the command runs.
+        if self.posix() && !self.interactive {
+            for a in &assigns {
+                if let Assigned::Scalar { name, .. } = a
+                    && let Err(message) = self.writable(name)
+                {
+                    self.error(&message);
+                    return Err(Flow::Exit(2));
+                }
+            }
+        }
+
         let name = fields[0].clone();
         if self.opts.restricted && name.contains('/') {
             self.error(&format!("{name}: restricted: cannot specify `/' in command names"));
@@ -1083,7 +1178,8 @@ impl Shell {
         }
 
         // `exec` without a command makes its redirections stay, and so does
-        // `command exec`, whose failure does not end the shell.
+        // `command exec`. Their failure ends a non-interactive POSIX shell,
+        // `exec`'s only; bash's goes on otherwise.
         let exec_alone =
             name == "exec" && fields.len() == 1 && !self.functions.contains_key("exec");
         let command_exec = name == "command"
@@ -1095,11 +1191,11 @@ impl Shell {
                 self.error(&message);
                 return Ok(1);
             }
-            return match self.redirect(redirects, false) {
+            return match self.redirect(redirects, Scope::Shell) {
                 Ok(_) => Ok(0),
                 Err(Some(flow)) => Err(flow),
                 Err(None) => {
-                    if !self.interactive && !command_exec {
+                    if self.posix() && !self.interactive && !command_exec {
                         return Err(Flow::Exit(1));
                     }
                     Ok(1)
@@ -1139,7 +1235,7 @@ impl Shell {
                 redirects,
             );
         }
-        self.run_external(fields, assigns, redirects, last)
+        self.run_external(fields, assigns, redirects, last, Some(command))
     }
 
     fn run_builtin(
@@ -1155,20 +1251,23 @@ impl Shell {
         // anything else they last for the command, exported, as before a
         // function: `X=1 command env` gives env X.
         let temp = !assigns.is_empty() && !(special && self.posix());
+        let expanded;
+        let redirects = if temp && !redirects.is_empty() {
+            // In bash a command's redirections do not see its own
+            // assignments: `x=1 cmd > $x` writes where $x said before.
+            expanded = self.expand_redirects(redirects)?;
+            &expanded[..]
+        } else {
+            redirects
+        };
         if temp {
             self.vars.push_temp();
-            for a in assigns {
-                if let Assigned::Scalar { name, index: None, value, append } = a {
-                    let value =
-                        if append { self.get(&name).unwrap_or_default() + &value } else { value };
-                    self.vars.set_temp(&name, temp_var(value, true));
-                }
-            }
+            self.assign_temps(assigns);
         } else if let Err(message) = self.apply_assigns(assigns) {
             self.error(&message);
             return if !self.interactive { Err(Flow::Exit(1)) } else { Ok(1) };
         }
-        let saved = match self.redirect(redirects, true) {
+        let saved = match self.redirect(redirects, Scope::Command) {
             Ok(saved) => saved,
             Err(error) => {
                 if temp {
@@ -1202,6 +1301,15 @@ impl Shell {
         }
     }
 
+    /// A command's assignments, in the scope pushed for them.
+    fn assign_temps(&mut self, assigns: Vec<Assigned>) {
+        for a in assigns {
+            if let Assigned::Scalar { name, index: None, value, append } = a {
+                self.assign_temp(&name, value, append);
+            }
+        }
+    }
+
     fn run_function_with(
         &mut self,
         def: Rc<FunctionDef>,
@@ -1210,15 +1318,19 @@ impl Shell {
         redirects: &[Redirect],
     ) -> Res {
         let temp = !assigns.is_empty();
+        let expanded;
+        let redirects = if temp && !redirects.is_empty() {
+            // As for a builtin's, without the function's assignments.
+            expanded = self.expand_redirects(redirects)?;
+            &expanded[..]
+        } else {
+            redirects
+        };
         if temp {
             self.vars.push_temp();
-            for a in assigns {
-                if let Assigned::Scalar { name, index: None, value, .. } = a {
-                    self.vars.set_temp(&name, temp_var(value, true));
-                }
-            }
+            self.assign_temps(assigns);
         }
-        let saved = match self.redirect(redirects, true) {
+        let saved = match self.redirect(redirects, Scope::Command) {
             Ok(saved) => saved,
             Err(error) => {
                 if temp {
@@ -1254,12 +1366,14 @@ impl Shell {
         }
         let args = std::mem::replace(&mut self.args, fields[1..].to_vec());
         let loops = std::mem::replace(&mut self.loops, 0);
+        let call_line = self.lineno;
         self.frames.push(Frame {
             name: def.name.clone(),
             file: def.file.clone(),
-            call_line: self.lineno,
+            call_line,
             saved_opts: None,
         });
+        let report_line = std::mem::replace(&mut self.report_line, def.body_line);
         self.vars.push_function();
         let saved_return = if self.opts.functrace { None } else { self.traps[trap::RETURN].take() };
         let result = self.run_command(&def.body, false);
@@ -1286,6 +1400,9 @@ impl Shell {
         }
         self.loops = loops;
         self.args = args;
+        // Back on the call's line, which bash names for what follows.
+        self.lineno = call_line;
+        self.report_line = report_line;
         result
     }
 
@@ -1301,22 +1418,33 @@ impl Shell {
             }
             self.hash.remove(name);
         }
+        let found = self.search_path(name, true)?;
+        if self.opts.hashall {
+            self.hash.insert(name.to_string(), found.clone());
+            self.hash_hits.insert(name.to_string(), 1);
+        }
+        Some(found)
+    }
+
+    /// The first file `name` on `PATH` that can run, or with `any`, if
+    /// none can, the first file of that name: looking only, as `type`
+    /// does, with the hash table neither read nor changed.
+    pub fn search_path(&self, name: &str, any: bool) -> Option<String> {
         let path = self.get("PATH").unwrap_or_default();
+        let mut first = None;
         for dir in path.split(':') {
-            let dir = if dir.is_empty() { "." } else { dir };
-            let candidate = format!("{}/{name}", dir.trim_end_matches('/'));
-            if let Ok(meta) = std::fs::metadata(text::to_os(&candidate))
-                && meta.is_file()
-                && sys::executable(&candidate)
-            {
-                if self.opts.hashall {
-                    self.hash.insert(name.to_string(), candidate.clone());
-                    self.hash_hits.insert(name.to_string(), 1);
+            let dir = if dir.is_empty() { "." } else { dir.trim_end_matches('/') };
+            let candidate = format!("{dir}/{name}");
+            if std::fs::metadata(text::to_os(&candidate)).is_ok_and(|meta| meta.is_file()) {
+                if sys::executable(&candidate) {
+                    return Some(candidate);
                 }
-                return Some(candidate);
+                if any && first.is_none() {
+                    first = Some(candidate);
+                }
             }
         }
-        None
+        first
     }
 
     /// The file running `name` runs: the first executable file of that
@@ -1324,28 +1452,23 @@ impl Shell {
     /// running it fails with "Permission denied" (status 126) and not
     /// "command not found".
     pub fn find_program(&mut self, name: &str) -> Option<String> {
-        self.find_command(name).or_else(|| {
-            let path = self.get("PATH").unwrap_or_default();
-            path.split(':')
-                .map(|dir| {
-                    let dir = if dir.is_empty() { "." } else { dir.trim_end_matches('/') };
-                    format!("{dir}/{name}")
-                })
-                .find(|file| std::fs::metadata(text::to_os(file)).is_ok_and(|meta| meta.is_file()))
-        })
+        self.find_command(name).or_else(|| self.search_path(name, true))
     }
 
     /// `command name args`: the program on `PATH`, never a function.
     pub fn run_program_fields(&mut self, fields: Vec<String>) -> Res {
-        self.run_external(fields, Vec::new(), &[], false)
+        self.run_external(fields, Vec::new(), &[], false, None)
     }
 
+    /// Runs the program `fields` names; `command` is the command it is
+    /// from, for a report of its end.
     fn run_external(
         &mut self,
         fields: Vec<String>,
         assigns: Vec<Assigned>,
         redirects: &[Redirect],
         last: bool,
+        command: Option<&SimpleCommand>,
     ) -> Res {
         let name = &fields[0];
         let path = if name.contains('/') { Some(name.clone()) } else { self.find_program(name) };
@@ -1358,14 +1481,18 @@ impl Shell {
                     let result = self.call_function(handler, &handler_args);
                     self.exit_child(result);
                 }
-                return Ok(self.wait_child(pid));
+                return Ok(self.wait_child(pid, handler_args.join(" ")));
             }
-            // The redirections still happen, as in other shells.
-            if let Ok(saved) = self.redirect(redirects, true) {
-                self.error(&format!("{name}: command not found"));
-                self.restore(saved);
-            } else {
-                self.error(&format!("{name}: command not found"));
+            // The redirections still happen, as in other shells, and when
+            // one fails its error is the only one, as in bash and dash.
+            match self.redirect(redirects, Scope::Command) {
+                Ok(saved) => {
+                    let name = crate::expand::printable(name);
+                    self.error(&format!("{name}: command not found"));
+                    self.restore(saved);
+                }
+                Err(Some(flow)) => return Err(flow),
+                Err(None) => return Ok(1),
             }
             return Ok(127);
         };
@@ -1376,7 +1503,8 @@ impl Shell {
         if pid == 0 {
             self.exec_program(&path, &fields, assigns, redirects);
         }
-        let id = self.add_job(pid, &[pid], fields.join(" "), false);
+        let text = command.map_or_else(|| fields.join(" "), show::simple_line);
+        let id = self.add_job(pid, vec![Proc::new(pid, text.clone())], text, false);
         self.wait_job(id)
     }
 
@@ -1398,18 +1526,11 @@ impl Shell {
         if self.subshell == 0 {
             self.become_subshell();
         }
-        if self.redirect(redirects, false).is_err() {
+        if self.redirect(redirects, Scope::Child).is_err() {
             sys::exit_now(1);
         }
-        for a in assigns {
-            if let Assigned::Scalar { name, index: None, value, append } = a {
-                let value =
-                    if append { self.get(&name).unwrap_or_default() + &value } else { value };
-                let var = self.vars.entry(&name);
-                var.value = Some(crate::vars::Value::Str(value));
-                var.attrs |= attr::EXPORT;
-            }
-        }
+        self.vars.push_temp();
+        self.assign_temps(assigns);
         self.reset_signals_for_exec();
         let argv: Vec<_> = fields.iter().map(|f| text::cstring(f)).collect();
         let envp: Vec<_> = self.environment().iter().map(|e| text::cstring(e)).collect();
@@ -1421,12 +1542,17 @@ impl Shell {
                 let status = self.run_script_file(path, &fields[1..]);
                 sys::exit_now(status);
             }
+            // The file is there, but not its `#!` interpreter or loader.
+            Some(libc::ENOENT) if std::fs::metadata(text::to_os(path)).is_ok() => {
+                self.error(&format!("{path}: cannot execute: required file not found"));
+                sys::exit_now(127);
+            }
             Some(libc::ENOENT) if !path.contains('/') || fields[0].contains('/') => {
                 self.error(&format!("{}: No such file or directory", fields[0]));
                 sys::exit_now(127);
             }
             Some(libc::ENOENT) => {
-                self.error(&format!("{}: command not found", fields[0]));
+                self.error(&format!("{}: command not found", crate::expand::printable(&fields[0])));
                 sys::exit_now(127);
             }
             _ => {
@@ -1466,7 +1592,7 @@ impl Shell {
         let bytes = match std::fs::read(text::to_os(path)) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.error(&format!("{path}: {}", error));
+                self.error(&format!("{path}: {}", sys::describe(&error)));
                 return 126;
             }
         };
@@ -1479,14 +1605,14 @@ impl Shell {
         self.args = args.to_vec();
         self.arg0 = path.to_string();
         self.source = Rc::from(path);
-        let result = self.run_text(&text::decode(&bytes), Rc::from(path));
+        let result = self.run_text(&text::decode(&bytes), Rc::from(path), None);
         let status = self.flow_status(result);
         self.run_exit_trap(status)
     }
 
-    /// Waits for a subshell's process.
-    pub fn wait_child(&mut self, pid: i32) -> i32 {
-        let id = self.add_job(pid, &[pid], String::from("subshell"), false);
+    /// Waits for child `pid`, which runs `text`.
+    pub fn wait_child(&mut self, pid: i32, text: String) -> i32 {
+        let id = self.add_job(pid, vec![Proc::new(pid, text.clone())], text, false);
         self.wait_job(id).unwrap_or(1)
     }
 
@@ -1506,11 +1632,20 @@ impl Shell {
             && let [Redirect { fd: None, op: RedirOp::Read, target: RedirTarget::Word(word) }] =
                 simple.redirects.as_slice()
         {
-            let path = self.expand_string(word)?;
+            let Some(path) = self.redirect_word(word)? else {
+                self.error(&format!("{}: ambiguous redirect", show::word_text(word)));
+                self.subst_status = Some(1);
+                return Ok(String::new());
+            };
             return match std::fs::read(text::to_os(&path)) {
                 Ok(bytes) => {
                     self.subst_status = Some(0);
-                    Ok(strip_newlines(text::decode(&bytes)))
+                    Ok(self.substituted(bytes))
+                }
+                // A directory opens, and reads as nothing, as in bash.
+                Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
+                    self.subst_status = Some(0);
+                    Ok(String::new())
                 }
                 Err(error) => {
                     self.error(&format!("{path}: {}", sys::describe(&error)));
@@ -1536,6 +1671,7 @@ impl Shell {
         self.opts.monitor = monitor;
         let pid = pid?;
         if pid == 0 {
+            self.in_subst = true;
             sys::close(read);
             let _ = sys::dup2(write, 1);
             sys::close(write);
@@ -1563,14 +1699,19 @@ impl Shell {
         let status = self.wait_pid(pid);
         self.subst_status = Some(status);
         self.status = status;
-        let mut output = output;
+        Ok(self.substituted(output))
+    }
+
+    /// A substitution's output as text: without its NUL bytes, which bash
+    /// warns of, and its final newlines.
+    fn substituted(&self, mut output: Vec<u8>) -> String {
         if output.contains(&0) {
             if !self.posix() {
                 self.error("warning: command substitution: ignored null byte in input");
             }
             output.retain(|&b| b != 0);
         }
-        Ok(strip_newlines(text::decode(&output)))
+        strip_newlines(text::decode(&output))
     }
 
     /// `<(...)` and `>(...)`: a child reading or writing a pipe, and the
@@ -1676,7 +1817,7 @@ impl Shell {
         let errexit_off = std::mem::replace(&mut self.errexit_off, off);
         let trap_status = if self.opts.posix { Some(status) } else { self.trap_status };
         let trap_status = std::mem::replace(&mut self.trap_status, trap_status);
-        let result = self.eval_text(&command, "trap");
+        let result = self.eval_trap(&command, slot);
         self.trap_status = trap_status;
         self.errexit_off = errexit_off;
         self.in_trap = was;
@@ -1697,31 +1838,72 @@ impl Shell {
 
     // Reading and running text.
 
-    /// Parses and runs `text` (from `eval`, a trap, `-c`): one command at
-    /// a time, so that aliases defined early apply later.
-    pub fn eval_text(&mut self, source_text: &str, name: &str) -> Res {
-        let file = Rc::from(name);
+    /// Parses and runs `text` (from `eval`, a trap, `fc`): one command at
+    /// a time, so that aliases defined early apply later. Functions it
+    /// defines are from `file`, and its syntax errors are named for
+    /// `label`, as bash names them.
+    pub fn eval_text(&mut self, source_text: &str, file: &str, label: &str) -> Res {
+        self.eval_text_from(source_text, file, label, self.lineno.max(1))
+    }
+
+    fn eval_text_from(&mut self, source_text: &str, file: &str, label: &str, line: u32) -> Res {
         let saved = self.source.clone();
-        let result = self.run_text_from(source_text, file, self.lineno.max(1));
+        let result = self.run_text_from(source_text, Rc::from(file), line, Some(label));
         self.source = saved;
         result
     }
 
-    /// Runs a script's text.
-    pub fn run_text(&mut self, source_text: &str, file: Rc<str>) -> Res {
-        self.run_text_from(source_text, file, 1)
+    /// Runs a trap's action. As in bash, a signal's and the EXIT trap's
+    /// lines count from 1, and the others' from the line that ran them.
+    fn eval_trap(&mut self, command: &str, slot: usize) -> Res {
+        let (label, line) = match slot {
+            trap::EXIT => ("exit trap", 1),
+            trap::ERR => ("error trap", self.lineno.max(1)),
+            trap::DEBUG => ("debug trap", self.lineno.max(1)),
+            trap::RETURN => ("return trap", self.lineno.max(1)),
+            _ => ("trap", 1),
+        };
+        let lineno = self.lineno;
+        let result = self.eval_text_from(command, label, label, line);
+        self.lineno = lineno;
+        result
     }
 
-    fn run_text_from(&mut self, source_text: &str, file: Rc<str>, line: u32) -> Res {
+    /// Runs a script's text; for `-c`'s, `label` is `-c`, which bash puts
+    /// in its syntax errors.
+    pub fn run_text(&mut self, source_text: &str, file: Rc<str>, label: Option<&str>) -> Res {
+        self.run_text_from(source_text, file, 1, label)
+    }
+
+    fn run_text_from(
+        &mut self,
+        source_text: &str,
+        file: Rc<str>,
+        line: u32,
+        label: Option<&str>,
+    ) -> Res {
         let mut parser = crate::parse::Parser::new(source_text, file, line, self.parse_options());
+        let report_line = self.report_line;
+        let result = self.run_parsed(&mut parser, label);
+        self.report_line = report_line;
+        result
+    }
+
+    /// Runs the commands `parser` reads, for [`Shell::run_text`].
+    fn run_parsed(&mut self, parser: &mut crate::parse::Parser, label: Option<&str>) -> Res {
         let mut status = 0;
         loop {
             parser.set_options(self.parse_options());
-            match parser.next_command() {
+            let next = parser.next_command();
+            self.parse_warnings(parser);
+            match next {
                 Ok(Some(command)) => {
                     if self.opts.noexec && !self.interactive {
                         continue;
                     }
+                    self.report_line = parser.command_end();
+                    // Background jobs that ended are news before it.
+                    self.notify_background();
                     status = match self.run_complete(&command) {
                         Err(Flow::Discard(code)) => {
                             self.status = code;
@@ -1730,21 +1912,10 @@ impl Shell {
                         other => other?,
                     };
                     self.close_procsubs();
-                    self.notify_background();
                 }
                 Ok(None) => return Ok(status),
                 Err(error) => {
-                    let line = error.line().unwrap_or(parser.line());
-                    self.lineno = line;
-                    let message = match &error {
-                        crate::parse::Error::Incomplete(message) => {
-                            format!("syntax error: unexpected end of file ({message})")
-                        }
-                        crate::parse::Error::Syntax { message, .. } => {
-                            format!("syntax error: {message}")
-                        }
-                    };
-                    self.error(&message);
+                    self.syntax_error(&error, label, parser.end_line());
                     self.syntax_failed = true;
                     return Err(Flow::Fatal(2));
                 }
@@ -1752,7 +1923,18 @@ impl Shell {
         }
     }
 
-    /// Without job control, finished background jobs are noted quietly.
+    /// Whether `for` and `select` can take `var` as their variable's name;
+    /// bash checks it as the loop starts (in POSIX mode the parser does).
+    fn loop_name(&self, var: &str) -> bool {
+        let valid = crate::parse::is_name(var);
+        if !valid {
+            self.error(&format!("`{var}': not a valid identifier"));
+        }
+        valid
+    }
+
+    /// Without job control, finished background jobs are noted quietly,
+    /// but for those a signal ended.
     pub fn notify_background(&mut self) {
         if !self.interactive && !self.jobs.list.is_empty() {
             self.notify_jobs();
@@ -1772,4 +1954,34 @@ fn strip_newlines(mut text: String) -> String {
         text.pop();
     }
     text
+}
+
+/// A word after a command's name that is an assignment, for `set -k`: one
+/// that starts with an unquoted `name=`, `name+=` or `name[sub]=`, as
+/// bash takes them.
+fn keyword_assign(word: &Word) -> Option<Assign> {
+    let Some(WordPart::Lit(text)) = word.parts.first() else { return None };
+    let (lhs, rest) = text.split_once('=')?;
+    let (lhs, append) = match lhs.strip_suffix('+') {
+        Some(lhs) => (lhs, true),
+        None => (lhs, false),
+    };
+    let (name, index) = match lhs.split_once('[') {
+        Some((name, sub)) => {
+            let sub = sub.strip_suffix(']')?;
+            (name, Some(Word { parts: vec![WordPart::Lit(sub.to_string())] }))
+        }
+        None => (lhs, None),
+    };
+    if !crate::parse::is_name(name) {
+        return None;
+    }
+    let mut parts = vec![WordPart::Lit(rest.to_string())];
+    parts.extend(word.parts[1..].iter().cloned());
+    Some(Assign {
+        name: name.to_string(),
+        index,
+        append,
+        value: AssignValue::Scalar(Word { parts }),
+    })
 }

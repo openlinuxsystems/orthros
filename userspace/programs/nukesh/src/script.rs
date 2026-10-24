@@ -108,7 +108,9 @@ impl Shell {
         let mut batch: usize = 1;
         loop {
             parser.set_options(self.parse_options());
-            match parser.next_command() {
+            let next = parser.next_command();
+            self.parse_warnings(&mut parser);
+            match next {
                 Ok(Some(command)) => {
                     batch = 1;
                     if self.opts.noexec {
@@ -127,6 +129,9 @@ impl Shell {
                             lines.sync(0);
                         }
                     }
+                    self.report_line = parser.command_end();
+                    // Background jobs that ended are news before it.
+                    self.notify_background();
                     status = match self.run_complete(&command) {
                         // An interactive shell reading a file (`sh -i
                         // file`) goes on after an error, as at its prompt.
@@ -142,7 +147,6 @@ impl Shell {
                         other => other?,
                     };
                     self.close_procsubs();
-                    self.notify_background();
                     parser.compact();
                 }
                 Ok(None) | Err(parse::Error::Incomplete(_)) if !at_end => {
@@ -166,14 +170,7 @@ impl Shell {
                 }
                 Ok(None) => return Ok(status),
                 Err(error) => {
-                    self.lineno = error.line().unwrap_or(parser.line());
-                    let message = match &error {
-                        parse::Error::Incomplete(message) => {
-                            format!("syntax error: unexpected end of file ({message})")
-                        }
-                        parse::Error::Syntax { message, .. } => format!("syntax error: {message}"),
-                    };
-                    self.error(&message);
+                    self.syntax_error(&error, None, parser.end_line());
                     self.syntax_failed = true;
                     return Err(Flow::Fatal(2));
                 }

@@ -33,3 +33,14 @@ x=1; [[ $x -eq 1 && ( 2 -gt 1 || 0 -eq 1 ) ]] && echo complex
 [[ -e /tmp && -d /tmp && ! -f /tmp ]] && echo files
 shopt -s nocasematch; [[ ABC == abc ]] && echo nocase; shopt -u nocasematch
 time_out=$( { time true; } 2>&1 ); [ -n "$time_out" ] && echo timed
+# break and continue leave their own status, 0, so a loop left by
+# `cmd || break` ends well under set -e; a count below 1 leaves every
+# loop with 1.
+(set -e; while true; do false || break; done; echo "while break 0")
+(set -e; for i in 1 2; do false || continue; done; echo "for continue 0")
+(set -e; until false; do false || break; done; echo "until break 0")
+(set -e; for ((i = 0; i < 2; i++)); do false || continue; done; echo "for (( continue 0")
+(set -e; select x in a; do false || break; done <<< 1 2>/dev/null; echo "select break 0")
+for i in 1 2; do for j in a b; do break 0; done; echo inner-after; done 2>/dev/null; echo "out of range $?"
+for i in 1 2; do continue -1; echo never; done 2>/dev/null; echo "out of range $?"
+break 0 2>/dev/null; echo "outside a loop $?"

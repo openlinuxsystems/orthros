@@ -15,11 +15,29 @@
 /// What the expression reads and changes.
 pub trait Env {
     /// The text of a variable, or an element of an array: `None` if it is
-    /// unset. `index` is the subscript's text, which the environment
-    /// evaluates (an indexed array) or takes as a key (an associative
-    /// one).
-    fn get(&mut self, name: &str, index: Option<&str>) -> Result<Option<String>, String>;
-    fn set(&mut self, name: &str, index: Option<&str>, value: i64) -> Result<(), String>;
+    /// unset.
+    fn get(&mut self, name: &str, index: Option<Index>) -> Result<Option<String>, String>;
+    fn set(&mut self, name: &str, index: Option<Index>, value: i64) -> Result<(), String>;
+
+    /// What the subscript `text` of `name[text]` names, made once for each
+    /// place the expression reads or writes, before the first: an indexed
+    /// array's subscript is evaluated, keeping its side effects, so that
+    /// `a[i++] += 1` changes the element it read and `$((a[i++]))` moves
+    /// `i`, as in bash; an associative array's is its key as written. Here
+    /// the subscript is passed on as it is, for `get` and `set` to make
+    /// what they will of it.
+    fn key(&mut self, _name: &str, text: &str) -> Result<String, String> {
+        Ok(text.to_string())
+    }
+}
+
+/// A subscript in an expression: `name[text]`.
+#[derive(Clone, Copy)]
+pub struct Index<'a> {
+    /// As written, for messages.
+    pub text: &'a str,
+    /// What [`Env::key`] made of it.
+    pub key: &'a str,
 }
 
 /// How deep variables whose values name other variables may go.
@@ -36,7 +54,10 @@ pub fn eval(text: &str, env: &mut dyn Env) -> Result<i64, String> {
 
 fn eval_depth(text: &str, env: &mut dyn Env, depth: u32) -> Result<i64, String> {
     if depth > MAX_DEPTH {
-        return Err("expression recursion level exceeded".into());
+        let text = text.trim_start();
+        return Err(format!(
+            "{text}: expression recursion level exceeded (error token is \"{text}\")"
+        ));
     }
     let chars: Vec<char> = text.chars().collect();
     let mut parser = Parser { chars: &chars, pos: 0, env, depth, nest: 0, text };
@@ -47,7 +68,7 @@ fn eval_depth(text: &str, env: &mut dyn Env, depth: u32) -> Result<i64, String> 
     let value = parser.comma(true)?;
     parser.skip_space();
     if parser.pos < chars.len() {
-        return Err(parser.error("syntax error in expression"));
+        return Err(parser.error_after_operand("syntax error in expression"));
     }
     Ok(value)
 }
@@ -77,14 +98,15 @@ fn number_value(text: &str) -> Result<i64, String> {
         }
         (base, digits)
     } else if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        // `0x` alone is 0, as in bash.
         (16, hex)
     } else if text.len() > 1 && text.starts_with('0') {
         (8, &text[1..])
     } else {
         (10, text)
     };
-    if digits.is_empty() {
-        return Err(bad());
+    if digits.is_empty() && !text.contains(['x', 'X']) {
+        return Err(format!("{text}: invalid integer constant"));
     }
     let mut value: i64 = 0;
     for c in digits.chars() {
@@ -108,7 +130,18 @@ fn number_value(text: &str) -> Result<i64, String> {
 /// An lvalue: a variable, perhaps with a subscript.
 struct Place {
     name: String,
+    /// The subscript as written.
     index: Option<String>,
+    /// What [`Env::key`] made of the subscript, at the place's first read
+    /// or write: after the right side of `=`, before that of `+=`, as in
+    /// bash.
+    key: Option<String>,
+}
+
+impl Place {
+    fn index(&self) -> Option<Index<'_>> {
+        Some(Index { text: self.index.as_deref()?, key: self.key.as_deref()? })
+    }
 }
 
 struct Parser<'a> {
@@ -123,12 +156,66 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn error(&self, what: &str) -> String {
-        let rest: String = self.chars[self.pos.min(self.chars.len())..].iter().collect();
-        if rest.is_empty() {
-            format!("{}: {what}", self.text.trim())
-        } else {
-            format!("{}: {what} (error token is \"{rest}\")", self.text.trim())
+        self.error_at(self.pos, what)
+    }
+
+    /// The error `what` where an operator should follow an operand, or
+    /// bash's for a character that no operator starts with.
+    fn error_after_operand(&self, what: &str) -> String {
+        let next = self.chars[self.pos.min(self.chars.len())..].iter().find(|c| !c.is_whitespace());
+        match next {
+            Some(&c) if !c.is_alphanumeric() && c != '_' && !"=><+-*/%!()&|^~?:,".contains(c) => {
+                self.error("syntax error: invalid arithmetic operator")
+            }
+            _ => self.error(what),
         }
+    }
+
+    /// An error, naming as bash does the expression and the rest of it
+    /// from the token at `at`, or the last token when only space follows.
+    fn error_at(&self, at: usize, what: &str) -> String {
+        let end = self.chars.len();
+        let mut at = at.min(end);
+        while at < end && self.chars[at].is_whitespace() {
+            at += 1;
+        }
+        if at == end {
+            at = self.last_token();
+        }
+        let rest: String = self.chars[at..].iter().collect();
+        let text = self.text.trim_start();
+        if rest.is_empty() {
+            format!("{text}: {what}")
+        } else {
+            format!("{text}: {what} (error token is \"{rest}\")")
+        }
+    }
+
+    /// Where the expression's last token starts: a word or a number, or an
+    /// operator of one or two characters.
+    fn last_token(&self) -> usize {
+        let word = |c: &char| c.is_ascii_alphanumeric() || matches!(c, '_' | '#' | '@');
+        let mut at = self.chars.len();
+        while at > 0 && self.chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        if at > 0 && word(&self.chars[at - 1]) {
+            while at > 0 && word(&self.chars[at - 1]) {
+                at -= 1;
+            }
+            return at;
+        }
+        const PAIRS: [&str; 18] = [
+            "**", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "*=", "/=", "%=",
+            "+=", "-=", "&=", "|=",
+        ];
+        if at >= 2 {
+            let pair: String = self.chars[at - 2..at].iter().collect();
+            if PAIRS.contains(&pair.as_str()) || pair == "^=" {
+                return at - 2;
+            }
+        }
+        at.saturating_sub(1)
     }
 
     fn skip_space(&mut self) {
@@ -171,13 +258,15 @@ impl Parser<'_> {
 
     fn assignment_here(&mut self, live: bool) -> Result<i64, String> {
         let start = self.pos;
-        if let Some(place) = self.place()? {
+        if let Some(mut place) = self.place()? {
             const OPS: [&str; 11] =
                 ["=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="];
             self.skip_space();
             for op in OPS {
                 let longer: &[&str] = if op == "=" { &["=="] } else { &[] };
                 if self.eat(op, longer) {
+                    self.skip_space();
+                    let right_at = self.pos;
                     let right = self.assignment(live)?;
                     if !live {
                         return Ok(0);
@@ -185,16 +274,24 @@ impl Parser<'_> {
                     let value = if op == "=" {
                         right
                     } else {
-                        let current = self.read(&place)?;
-                        self.binary(&op[..op.len() - 1], current, right)?
+                        let current = self.read(&mut place)?;
+                        self.binary(&op[..op.len() - 1], current, right, right_at)?
                     };
-                    self.write(&place, value)?;
+                    self.write(&mut place, value)?;
                     return Ok(value);
                 }
             }
         }
         self.pos = start;
-        self.conditional(live)
+        let value = self.conditional(live)?;
+        self.skip_space();
+        let assigns = ["=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="]
+            .iter()
+            .any(|op| self.at(op) && !self.at("=="));
+        if assigns {
+            return Err(self.error("attempted assignment to non-variable"));
+        }
+        Ok(value)
     }
 
     fn conditional(&mut self, live: bool) -> Result<i64, String> {
@@ -202,9 +299,15 @@ impl Parser<'_> {
         if !self.eat("?", &[]) {
             return Ok(cond);
         }
+        if self.peek().is_none() {
+            return Err(self.error("expression expected"));
+        }
         let yes = self.comma(live && cond != 0)?;
         if !self.eat(":", &[]) {
-            return Err(self.error("`:' expected for conditional expression"));
+            return Err(self.error_after_operand("`:' expected for conditional expression"));
+        }
+        if self.peek().is_none() {
+            return Err(self.error("expression expected"));
         }
         let no = self.conditional(live && cond == 0)?;
         Ok(if cond != 0 { yes } else { no })
@@ -249,8 +352,10 @@ impl Parser<'_> {
         'more: loop {
             for (op, longer) in LEVELS[level] {
                 if self.eat(op, longer) {
+                    self.skip_space();
+                    let right_at = self.pos;
                     let right = self.binary_level(level + 1, live)?;
-                    value = if live { self.binary(op, value, right)? } else { 0 };
+                    value = if live { self.binary(op, value, right, right_at)? } else { 0 };
                     continue 'more;
                 }
             }
@@ -258,7 +363,9 @@ impl Parser<'_> {
         }
     }
 
-    fn binary(&self, op: &str, a: i64, b: i64) -> Result<i64, String> {
+    /// `a op b`, where `b` started at `right_at`, which a division by 0
+    /// names, as in bash.
+    fn binary(&self, op: &str, a: i64, b: i64, right_at: usize) -> Result<i64, String> {
         Ok(match op {
             "|" => a | b,
             "^" => a ^ b,
@@ -274,7 +381,7 @@ impl Parser<'_> {
             "+" => a.wrapping_add(b),
             "-" => a.wrapping_sub(b),
             "*" => a.wrapping_mul(b),
-            "/" | "%" if b == 0 => return Err(self.error("division by 0")),
+            "/" | "%" if b == 0 => return Err(self.error_at(right_at, "division by 0")),
             "/" => a.wrapping_div(b),
             "%" => a.wrapping_rem(b),
             "**" => {
@@ -301,7 +408,7 @@ impl Parser<'_> {
         let base = self.unary(live)?;
         if self.eat("**", &["**="]) {
             let exp = self.power(live)?;
-            return if live { self.binary("**", base, exp) } else { Ok(0) };
+            return if live { self.binary("**", base, exp, self.pos) } else { Ok(0) };
         }
         Ok(base)
     }
@@ -326,14 +433,14 @@ impl Parser<'_> {
         if self.at("++") || self.at("--") {
             let up = self.at("++");
             self.pos += 2;
-            let Some(place) = self.place()? else {
+            let Some(mut place) = self.place()? else {
                 return Err(self.error("syntax error: operand expected"));
             };
             if !live {
                 return Ok(0);
             }
-            let value = self.read(&place)?.wrapping_add(if up { 1 } else { -1 });
-            self.write(&place, value)?;
+            let value = self.read(&mut place)?.wrapping_add(if up { 1 } else { -1 });
+            self.write(&mut place, value)?;
             return Ok(value);
         }
         if self.eat("-", &["-="]) {
@@ -353,18 +460,18 @@ impl Parser<'_> {
 
     fn postfix(&mut self, live: bool) -> Result<i64, String> {
         let start = self.pos;
-        if let Some(place) = self.place()? {
+        if let Some(mut place) = self.place()? {
             if self.at("++") || self.at("--") {
                 let up = self.at("++");
                 self.pos += 2;
                 if !live {
                     return Ok(0);
                 }
-                let value = self.read(&place)?;
-                self.write(&place, value.wrapping_add(if up { 1 } else { -1 }))?;
+                let value = self.read(&mut place)?;
+                self.write(&mut place, value.wrapping_add(if up { 1 } else { -1 }))?;
                 return Ok(value);
             }
-            return if live { self.read(&place) } else { Ok(0) };
+            return if live { self.read(&mut place) } else { Ok(0) };
         }
         self.pos = start;
         self.primary(live)
@@ -376,7 +483,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 let value = self.comma(live)?;
                 if !self.eat(")", &[]) {
-                    return Err(self.error("missing `)'"));
+                    return Err(self.error_after_operand("missing `)'"));
                 }
                 Ok(value)
             }
@@ -391,8 +498,15 @@ impl Parser<'_> {
                 }
                 let text: String = self.chars[start..self.pos].iter().collect();
                 number_value(&text).map_err(|message| {
+                    let what = message.rsplit(": ").next().unwrap_or(&message);
+                    if what == "invalid integer constant" {
+                        // bash shows the expression up to the constant.
+                        let before: String = self.chars[..self.pos].iter().collect();
+                        let before = before.trim_start();
+                        return format!("{before}: {what} (error token is \"{text}\")");
+                    }
                     self.pos = start;
-                    self.error(message.rsplit(": ").next().unwrap_or(&message))
+                    self.error(what)
                 })
             }
             None => Err(self.error("syntax error: operand expected")),
@@ -422,7 +536,7 @@ impl Parser<'_> {
             let mut depth = 0;
             loop {
                 match self.chars.get(self.pos) {
-                    None => return Err(self.error("missing `]'")),
+                    None => return Err(self.error_at(start, "bad array subscript")),
                     Some('[') => depth += 1,
                     Some(']') if depth == 0 => break,
                     Some(']') => depth -= 1,
@@ -433,11 +547,23 @@ impl Parser<'_> {
             index = Some(self.chars[begin..self.pos].iter().collect());
             self.pos += 1;
         }
-        Ok(Some(Place { name, index }))
+        Ok(Some(Place { name, index, key: None }))
     }
 
-    fn read(&mut self, place: &Place) -> Result<i64, String> {
-        let text = self.env.get(&place.name, place.index.as_deref())?;
+    /// Makes the key of `place`'s subscript, if it has one and it is not
+    /// yet made.
+    fn resolve(&mut self, place: &mut Place) -> Result<(), String> {
+        if place.key.is_none()
+            && let Some(text) = &place.index
+        {
+            place.key = Some(self.env.key(&place.name, text)?);
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, place: &mut Place) -> Result<i64, String> {
+        self.resolve(place)?;
+        let text = self.env.get(&place.name, place.index())?;
         match text {
             None => Ok(0),
             Some(text) => {
@@ -449,8 +575,9 @@ impl Parser<'_> {
         }
     }
 
-    fn write(&mut self, place: &Place, value: i64) -> Result<(), String> {
-        self.env.set(&place.name, place.index.as_deref(), value)
+    fn write(&mut self, place: &mut Place, value: i64) -> Result<(), String> {
+        self.resolve(place)?;
+        self.env.set(&place.name, place.index(), value)
     }
 }
 
@@ -464,21 +591,25 @@ mod tests {
     struct Vars(HashMap<String, String>);
 
     impl Env for Vars {
-        fn get(&mut self, name: &str, index: Option<&str>) -> Result<Option<String>, String> {
+        fn get(&mut self, name: &str, index: Option<Index>) -> Result<Option<String>, String> {
             let key = match index {
-                Some(i) => format!("{name}[{}]", eval(i, self)?),
+                Some(i) => format!("{name}[{}]", i.key),
                 None => name.to_string(),
             };
             Ok(self.0.get(&key).cloned())
         }
 
-        fn set(&mut self, name: &str, index: Option<&str>, value: i64) -> Result<(), String> {
+        fn set(&mut self, name: &str, index: Option<Index>, value: i64) -> Result<(), String> {
             let key = match index {
-                Some(i) => format!("{name}[{}]", eval(i, self)?),
+                Some(i) => format!("{name}[{}]", i.key),
                 None => name.to_string(),
             };
             self.0.insert(key, value.to_string());
             Ok(())
+        }
+
+        fn key(&mut self, _name: &str, text: &str) -> Result<String, String> {
+            Ok(eval(text, self)?.to_string())
         }
     }
 
@@ -566,6 +697,46 @@ mod tests {
         assert!(eval("1 +", &mut vars).unwrap_err().contains("operand expected"));
         assert!(eval("(1", &mut vars).unwrap_err().contains("missing"));
         assert!(eval("1 2", &mut vars).unwrap_err().contains("syntax error"));
+    }
+
+    #[test]
+    fn names_the_error_token_as_bash_does() {
+        let mut vars = Vars::default();
+        vars.0.insert("x".into(), "x".into());
+        let mut error = |text: &str| eval(text, &mut vars).unwrap_err();
+        assert_eq!(error("4 / 0 + 1"), "4 / 0 + 1: division by 0 (error token is \"0 + 1\")");
+        assert_eq!(error(" 1 + "), "1 + : syntax error: operand expected (error token is \"+ \")");
+        assert_eq!(error("1 ? 2 :"), "1 ? 2 :: expression expected (error token is \":\")");
+        assert_eq!(
+            error("4 ^= 1"),
+            "4 ^= 1: attempted assignment to non-variable (error token is \"^= 1\")"
+        );
+        assert_eq!(error("a[1"), "a[1: bad array subscript (error token is \"a[1\")");
+        assert_eq!(error("2 ** -1"), "2 ** -1: exponent less than 0 (error token is \"1\")");
+        assert_eq!(
+            error("1 + 10# * 2"),
+            "1 + 10#: invalid integer constant (error token is \"10#\")"
+        );
+        assert_eq!(error("x"), "x: expression recursion level exceeded (error token is \"x\")");
+        assert_eq!(eval("0x + 1", &mut vars), Ok(1));
+    }
+
+    #[test]
+    fn evaluates_a_subscript_once_for_each_place() {
+        let mut vars = Vars::default();
+        eval("a[0] = 5, a[1] = 6, i = 0", &mut vars).unwrap();
+        assert_eq!(eval("a[i++]", &mut vars), Ok(5));
+        assert_eq!(eval("i", &mut vars), Ok(1));
+        assert_eq!(eval("a[i++] += 10", &mut vars), Ok(16));
+        assert_eq!(eval("a[1] + i * 100", &mut vars), Ok(216));
+        assert_eq!(eval("a[--i]++", &mut vars), Ok(16));
+        assert_eq!(eval("a[1] + i * 100", &mut vars), Ok(117));
+        // After the right side of `=`, as bash.
+        assert_eq!(eval("a[i++] = i", &mut vars), Ok(1));
+        assert_eq!(eval("a[1] + i * 100", &mut vars), Ok(201));
+        // The side not taken leaves its subscript alone.
+        assert_eq!(eval("0 && a[i++]", &mut vars), Ok(0));
+        assert_eq!(eval("i", &mut vars), Ok(2));
     }
 
     #[test]

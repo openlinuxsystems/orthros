@@ -59,8 +59,49 @@ pub const SIGNALS: &[(&str, i32)] = &[
 ];
 
 /// The name of signal `number`, without `SIG`.
-pub fn name(number: i32) -> Option<&'static str> {
-    SIGNALS.iter().find(|(_, n)| *n == number).map(|(name, _)| *name)
+pub fn name(number: i32) -> Option<String> {
+    match SIGNALS.iter().find(|(_, n)| *n == number) {
+        Some((name, _)) => Some((*name).to_string()),
+        None => real_time_name(number),
+    }
+}
+
+/// The real-time signals, as the C library has them.
+fn real_time() -> std::ops::RangeInclusive<i32> {
+    libc::SIGRTMIN()..=libc::SIGRTMAX()
+}
+
+/// A real-time signal's name, as bash names them: RTMIN+n in the lower
+/// half, RTMAX-n in the upper.
+fn real_time_name(number: i32) -> Option<String> {
+    let range = real_time();
+    let (min, max) = (*range.start(), *range.end());
+    range.contains(&number).then(|| match number {
+        n if n == min => "RTMIN".to_string(),
+        n if n == max => "RTMAX".to_string(),
+        n if n - min <= (max - min) / 2 => format!("RTMIN+{}", n - min),
+        n => format!("RTMAX-{}", max - n),
+    })
+}
+
+/// Every signal with a name, without `SIG`, in number order.
+pub fn names() -> Vec<(String, i32)> {
+    let named = SIGNALS.iter().map(|(name, n)| ((*name).to_string(), *n));
+    named.chain(real_time().filter_map(|n| real_time_name(n).map(|name| (name, n)))).collect()
+}
+
+/// The table of signals `trap -l` and `kill -l` print, as bash prints
+/// it: five a line, each followed by a tab but the fifth.
+pub fn table() -> String {
+    let mut text = String::new();
+    for (i, (name, number)) in names().iter().enumerate() {
+        text.push_str(&format!("{number:2}) SIG{name}"));
+        text.push(if i % 5 == 4 { '\n' } else { '\t' });
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
 }
 
 /// The number of a signal given by name (with or without `SIG`, any case)
@@ -80,7 +121,21 @@ pub fn parse(text: &str, pseudo: bool) -> Option<usize> {
             _ => {}
         }
     }
-    SIGNALS.iter().find(|(name, _)| *name == bare).map(|(_, n)| *n as usize)
+    if let Some((_, n)) = SIGNALS.iter().find(|(name, _)| *name == bare) {
+        return Some(*n as usize);
+    }
+    // RTMIN+n and RTMAX-n for any n in the range, as bash takes them.
+    let range = real_time();
+    let number = match bare {
+        "RTMIN" => *range.start(),
+        "RTMAX" => *range.end(),
+        _ => match (bare.strip_prefix("RTMIN+"), bare.strip_prefix("RTMAX-")) {
+            (Some(n), _) => range.start() + n.parse::<i32>().ok()?,
+            (_, Some(n)) => range.end() - n.parse::<i32>().ok()?,
+            _ => return None,
+        },
+    };
+    range.contains(&number).then_some(number as usize)
 }
 
 /// A trap slot's name, as `trap -p` prints it.
@@ -149,15 +204,47 @@ fn foreign_handler(signal: i32) -> bool {
     current != libc::SIG_DFL && current != libc::SIG_IGN && current != ours
 }
 
-/// Whether `signal` was ignored when the shell started, which makes a
-/// non-interactive shell leave it so (XCU 2.11).
-pub fn ignored_at_start(signal: i32) -> bool {
+/// Whether `signal` is ignored now.
+fn ignored(signal: i32) -> bool {
     // SAFETY: a null new action only reads the current one.
     unsafe {
         let mut old: libc::sigaction = std::mem::zeroed();
         libc::sigaction(signal, std::ptr::null(), &mut old);
         old.sa_sigaction == libc::SIG_IGN
     }
+}
+
+/// Whether SIGPIPE was ignored when the program was started. Rust's
+/// runtime ignores SIGPIPE before `main` runs, so it is read earlier, by
+/// a constructor in `.init_array`, which the C library runs first.
+static PIPE_IGNORED_AT_EXEC: AtomicBool = AtomicBool::new(false);
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static READ_SIGPIPE: extern "C" fn() = {
+    extern "C" fn read() {
+        PIPE_IGNORED_AT_EXEC.store(ignored(libc::SIGPIPE), Ordering::Relaxed);
+    }
+    read
+};
+
+/// Gives SIGPIPE back the disposition it had when the program was
+/// started, which Rust's runtime changed: at its default, a writer to a
+/// closed pipe ends, as under bash, and the programs the shell runs get
+/// it so too.
+pub fn restore_sigpipe() {
+    if !PIPE_IGNORED_AT_EXEC.load(Ordering::Relaxed) {
+        set(libc::SIGPIPE, Disposition::Default);
+    }
+}
+
+/// Whether `signal` was ignored when the shell started, which makes a
+/// non-interactive shell leave it so (XCU 2.11).
+pub fn ignored_at_start(signal: i32) -> bool {
+    if signal == libc::SIGPIPE {
+        return PIPE_IGNORED_AT_EXEC.load(Ordering::Relaxed);
+    }
+    ignored(signal)
 }
 
 /// Unblocks every signal, for a child about to run a program.

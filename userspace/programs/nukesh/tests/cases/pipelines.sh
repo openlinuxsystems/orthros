@@ -25,3 +25,7 @@ EOF
 ); echo "$v"
 echo $(case x in x) echo case-in-subst ;; esac)
 { echo a; echo b; } | { read -r one; read -r two; echo "$two$one"; }
+# A closed pipe ends its writer: the shell's builtins and the programs it
+# runs have SIGPIPE at its default, as under bash.
+while :; do echo y; done | head -n 1; echo "pipe ${PIPESTATUS[*]}"
+yes | head -n 1; echo "pipe ${PIPESTATUS[*]}"

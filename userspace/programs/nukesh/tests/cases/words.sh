@@ -30,6 +30,14 @@ shopt -u extglob
 (set -f; echo *.txt)
 for f in *; do echo "file: $f"; done
 x='*.txt'; echo $x "$x"
+# globstar: a link to a directory is listed by **/ but not gone into;
+# dir/** is dir/ too; what comes before a pattern is kept as written.
+mkdir -p d/e real/inner && touch d/f real/g real/inner/h
+ln -s real link && ln -s d/e elink && ln -s nowhere dangling
+shopt -s globstar
+echo **/; echo ./**/; echo **; echo real/**; echo r*/**; echo **/inner/**
+echo */**; echo real//*; echo r*//g; echo **/g; echo link/**; echo d/f/**
+shopt -u globstar
 cd / && rm -r "$dir"
 case ~ in /*) echo tilde ;; esac; echo "~" '~'; HOME=/home/x; echo ~/a ~nobody_here/b
 a=~; echo $a; b=x:~/y; echo $b

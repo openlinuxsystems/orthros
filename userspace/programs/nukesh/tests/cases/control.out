@@ -50,4 +50,12 @@ literal
 files
 nocase
 timed
+while break 0
+for continue 0
+until break 0
+for (( continue 0
+select break 0
+out of range 1
+out of range 1
+outside a loop 0
 status=0

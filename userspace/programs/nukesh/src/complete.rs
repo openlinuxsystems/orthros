@@ -528,7 +528,7 @@ fn action_words(shell: &mut Shell, action: &str, word: &str) -> Vec<String> {
             .collect(),
         "setopt" => crate::shell::OPTION_TABLE.iter().map(|(n, _)| n.to_string()).collect(),
         "shopt" => crate::shell::SHOPTS.iter().map(|(n, _)| n.to_string()).collect(),
-        "signal" => trap::SIGNALS.iter().map(|(n, _)| format!("SIG{n}")).collect(),
+        "signal" => trap::names().iter().map(|(n, _)| format!("SIG{n}")).collect(),
         "helptopic" => TABLE.iter().map(|b| b.name.to_string()).collect(),
         "user" => sys::user_names(),
         "group" => groups(),

@@ -30,7 +30,7 @@ which runs the system's scripts and the commands of *system*(3),
 It is the POSIX shell (XCU, Shell Command Language), with the parts of
 bash that scripts use: arrays and associative arrays, *[[ ]]*, *(( ))*,
 *${x//a/b}* and the other parameter expansions, brace expansion,
-process substitution, here-strings, *local*, *declare*, *mapfile*,
+process substitution, here-strings, coprocesses, *local*, *declare*, *mapfile*,
 *printf -v*, *set -o pipefail*, extended patterns, *shopt*, the *ERR*,
 *DEBUG* and *RETURN* traps, *BASH_REMATCH*, *PIPESTATUS*, *FUNCNAME*,
 programmable completion and the rest. A bash script runs unchanged, and
@@ -257,7 +257,9 @@ the trap, as in the EXIT trap, not *$?* as bash does.
 *${!...}* is *$!* with an operator, as in *${!#x}*, not an indirect
 expansion. The errors that *SCRIPTS* lists end the shell with status 2.
 bash's own variables, those whose names begin with *BASH*, are not set,
-so that a script does not take the shell for bash.
+so that a script does not take the shell for bash. Started in POSIX
+mode, the shell has brace expansion off, as dash has; *set -o posix* in
+a running shell leaves it on and turns *inherit_errexit* on, as in bash.
 
 # RESTRICTED MODE
 
@@ -278,7 +280,12 @@ Each builtin is described by *help* _name_. They are bash's: *.*, *:*,
 *logout*, *mapfile*, *popd*, *printf*, *pushd*, *pwd*, *read*, *readarray*,
 *readonly*, *return*, *set*, *shift*, *shopt*, *source*, *suspend*,
 *test*, *times*, *trap*, *true*, *type*, *typeset*, *ulimit*, *umask*,
-*unalias*, *unset* and *wait*.
+*unalias*, *unset* and *wait*. *shopt* takes each of bash 5.2's options;
+those for what the shell does not do (the *compat* levels, *cdspell*,
+*dirspell*, *direxpand*, *gnu_errfmt*, *hostcomplete*, *mailwarn*,
+*no_empty_cmd_completion*) change nothing, and *restricted_shell* cannot
+be changed. With *extdebug*, *declare -F* _name_ tells where the function
+was defined.
 
 # VARIABLES
 
@@ -292,8 +299,9 @@ history and completion variables above. *NUKESH_VERSION* is its version.
 *NUKESH_COMPLETION_PATH* names the directories of completion files.
 *BASH_VERSION* and *BASH_VERSINFO* are bash 5.2's, as scripts check them
 before they use a feature of bash (*declare -A*, say), or refuse to run
-without bash; *NUKESH_VERSION* tells the shells apart. In POSIX mode
-neither is set.
+without bash; *NUKESH_VERSION* tells the shells apart. *BASH* is the
+shell's own file, for scripts that run *"$BASH" -c*. In POSIX mode none
+of the three is set.
 
 # LIMITS
 
@@ -315,6 +323,11 @@ matcher has known quirks, Nukesh does what its manual says:
 a pattern ending in *\\\** matches a literal star in *${x/pattern/text}*
 too, and an empty text matches *?(a)* and *!(a)* there as it does in
 *[[ ]]*.
+
+A coprocess started as *coproc cat* shows as that in *jobs*, where
+bash's *coproc COPROC cat* would read back as a command named COPROC.
+Each coprocess's descriptors close, and its variables go, once the shell
+has seen it end; bash cleans up only the last one started.
 
 # EXIT STATUS
 

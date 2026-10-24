@@ -149,7 +149,7 @@ static void file_tools(void) {
 	RUN_WITH(1, "", "link: cannot create link", 1, "/bin/sh", "-c",
 			"link /tmp/file-tools/t /tmp/file-tools/l 2>&1");
 	OUTPUT("", "1\n", "/bin/stat", "-c", "%h", "/tmp/file-tools/t");
-	RUN_WITH(1, "", "Operation not implemented", 1, "/bin/sh", "-c",
+	RUN_WITH(1, "", "Function not implemented", 1, "/bin/sh", "-c",
 			"mkfifo /tmp/file-tools/fifo 2>&1");
 	RUN_WITH(1, "", "Operation not permitted", 1, "/bin/sh", "-c",
 			"mknod /tmp/file-tools/node p 2>&1");

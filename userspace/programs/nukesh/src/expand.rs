@@ -16,7 +16,7 @@ use crate::ast::{ParamExp, ParamName, ParamOp, ReplaceKind, Word, WordPart};
 use crate::glob::{self, GlobOptions};
 use crate::pattern::{self, Options, Pattern};
 use crate::shell::{Flow, Shell};
-use crate::vars::{Value, attr};
+use crate::vars::{self, Value, attr};
 use crate::{brace, sys, text};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +208,62 @@ impl Shell {
         Ok(join(&pieces))
     }
 
+    /// A redirection's file or descriptor: the one word it expands to, or
+    /// `None` for none or more than one, which is an ambiguous redirect.
+    /// Outside POSIX mode it is split and globbed as an argument is, as
+    /// bash does; in POSIX mode neither happens, but in an interactive
+    /// shell a pattern still globs, and as in bash, a brace still expands
+    /// and an unquoted expansion that comes to nothing makes no word.
+    pub fn redirect_word(&mut self, word: &Word) -> Result<Option<String>, Flow> {
+        let mut fields = Vec::new();
+        if !self.posix() {
+            fields = self.expand_words(std::slice::from_ref(word))?;
+        } else {
+            let words =
+                if self.opts.braceexpand { brace::expand(word) } else { vec![word.clone()] };
+            if words.len() != 1 {
+                return Ok(None);
+            }
+            let field = one_field(self.pieces(&words[0], true)?);
+            if field.segs.iter().all(|(text, quoted)| !quoted && text.is_empty()) {
+                return Ok(None);
+            }
+            match self.interactive {
+                true => self.glob_field(field, &mut fields)?,
+                false => fields.push(field.text()),
+            }
+        }
+        Ok(match <[String; 1]>::try_from(fields) {
+            Ok([text]) => Some(text),
+            Err(_) => None,
+        })
+    }
+
+    /// The subscript of an element named in text (`unset 'a[$i]'`,
+    /// `printf -v 'a[$i]'`, `{a[$i]}>file`) with its expansions done, as
+    /// bash does them before the arithmetic or the key: parameters,
+    /// commands and arithmetic, as in double quotes.
+    pub fn expand_index(&mut self, index: &str) -> Result<String, Flow> {
+        if !index.contains(['$', '`']) {
+            return Ok(index.to_string());
+        }
+        match crate::parse::string_word(index, self.source.clone(), self.parse_options()) {
+            Ok(word) => self.expand_quoted(&word),
+            Err(_) => Ok(index.to_string()),
+        }
+    }
+
+    /// `name` or `name[subscript]` as text, its subscript expanded (see
+    /// [`Shell::expand_index`]).
+    pub fn expand_element(&mut self, name: &str) -> Result<String, Flow> {
+        match name.split_once('[') {
+            Some((base, rest)) if rest.ends_with(']') && rest.contains(['$', '`']) => {
+                Ok(format!("{base}[{}]", self.expand_index(&rest[..rest.len() - 1])?))
+            }
+            _ => Ok(name.to_string()),
+        }
+    }
+
     /// An assignment's value: as [`Shell::expand_string`], with a tilde
     /// expanded after each unquoted `:` too.
     pub fn expand_assignment(&mut self, word: &Word) -> Result<String, Flow> {
@@ -232,6 +288,32 @@ impl Shell {
             self.part_pieces(part, true, &mut pieces)?;
         }
         Ok(join(&pieces))
+    }
+
+    /// The subscript of the array `name`: an associative array's key, its
+    /// escapes and quotes taken away as a word's are, or an index for
+    /// arithmetic, which keeps a backslash before what double quotes do.
+    pub fn expand_subscript(&mut self, name: &str, word: &Word) -> Result<String, Flow> {
+        if self.assoc(name) {
+            return self.expand_quoted(word);
+        }
+        let mut out = String::new();
+        for part in &word.parts {
+            match part {
+                WordPart::Escaped('\n') => {}
+                WordPart::Escaped(c @ ('$' | '`' | '"' | '\\')) => out.push(*c),
+                WordPart::Escaped(c) => {
+                    out.push('\\');
+                    out.push(*c);
+                }
+                part => {
+                    let mut pieces = Vec::new();
+                    self.part_pieces(part, true, &mut pieces)?;
+                    out.push_str(&join(&pieces));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// A word as a pattern: quoted parts match themselves.
@@ -383,20 +465,22 @@ impl Shell {
         }
         let value = self.param_value(p)?;
         let colon_missing = |colon: bool, value: &PVal| value.missing(colon);
+        // As in bash, the pattern and replacement of an unset parameter
+        // are not expanded, so their errors do not come.
+        let unset = value.missing(false);
         let value = match &p.op {
             ParamOp::None => {
                 self.check_set(p, &value)?;
                 value
             }
             ParamOp::Length => {
-                if value == PVal::Unset && self.opts.nounset && !is_count(p) {
+                if value == PVal::Unset && self.opts.nounset {
                     return Err(self.unbound(p));
                 }
-                let n = match (&value, is_count(p)) {
-                    (PVal::List(items, _), _) => items.len(),
-                    (PVal::One(s), true) => s.parse().unwrap_or(0),
-                    (PVal::One(s), false) => s.chars().count(),
-                    (PVal::Unset, _) => 0,
+                let n = match &value {
+                    PVal::List(items, _) => items.len(),
+                    PVal::One(s) => s.chars().count(),
+                    PVal::Unset => 0,
                 };
                 PVal::One(n.to_string())
             }
@@ -434,7 +518,7 @@ impl Shell {
                             return Err(self.discard(&message));
                         };
                         let index = match &p.index {
-                            Some(index) => Some(self.expand_quoted(index)?),
+                            Some(index) => Some(self.expand_subscript(name, index)?),
                             None => None,
                         };
                         (name.clone(), index)
@@ -463,10 +547,20 @@ impl Shell {
                     } else {
                         self.operand_string(word)?
                     };
-                    let status = if self.interactive { 1 } else { 127 };
-                    let status = if self.posix() { status.min(2) } else { 1 };
-                    return Err(self.fatal(&format!("{}: {message}", param_label(p)), status));
+                    let status = if self.posix() && !self.interactive { 2 } else { 1 };
+                    let message = format!("{}: {message}", param_label(p));
+                    return Err(self.expansion_fatal(&message, status));
                 }
+                value
+            }
+            ParamOp::RemovePrefix(..)
+            | ParamOp::RemoveSuffix(..)
+            | ParamOp::Replace(..)
+            | ParamOp::Case(..)
+            | ParamOp::Toggle(..)
+                if unset =>
+            {
+                self.check_set(p, &value)?;
                 value
             }
             ParamOp::RemovePrefix(longest, word) | ParamOp::RemoveSuffix(longest, word) => {
@@ -529,20 +623,41 @@ impl Shell {
                 if *t == 'a' {
                     return self.attribute_letters(p, quoted, out);
                 }
-                if matches!(t, 'A' | 'K' | 'k') {
-                    let text = self.transform_whole(p, *t, &value);
-                    let pieces = match (text, *t) {
-                        (Some(items), 'k') if !quoted => PVal::List(items, false),
-                        (Some(items), _) => PVal::One(items.join(" ")),
-                        (None, _) => PVal::Unset,
+                if *t == 'A' {
+                    let pieces = self.assignment_form(p, &value);
+                    emit(pieces, quoted, self.ifs_first(), out);
+                    return Ok(());
+                }
+                // Every element of an array: its keys and values, as one
+                // string of quoted pairs (`K`) or as words (`k`).
+                if matches!(t, 'K' | 'k')
+                    && let Some((pairs, assoc)) = self.array_pairs(p)
+                {
+                    let pieces = if *t == 'K' {
+                        let quote_value = crate::builtins::double_quote;
+                        let pairs = pairs.iter().map(|(k, v)| match assoc {
+                            true => {
+                                format!("{} {} ", crate::builtins::quote_key(k), quote_value(v))
+                            }
+                            false => format!("{k} {}", quote_value(v)),
+                        });
+                        // bash ends an associative array's pairs with a blank.
+                        let text = match assoc {
+                            true => pairs.collect::<String>(),
+                            false => pairs.collect::<Vec<_>>().join(" "),
+                        };
+                        PVal::One(text)
+                    } else {
+                        let star = p.index.as_ref().and_then(Word::as_literal) == Some("*");
+                        PVal::List(pairs.into_iter().flat_map(|(k, v)| [k, v]).collect(), star)
                     };
                     emit(pieces, quoted, self.ifs_first(), out);
                     return Ok(());
                 }
                 self.check_set(p, &value)?;
-                let mut failed = None;
                 let result = value.map(|s| match t {
-                    'Q' => quote_always(&s),
+                    // Anything but a whole array is quoted as by `Q`.
+                    'Q' | 'K' | 'k' => quote_always(&s),
                     'E' => crate::prompt::decode_escapes(&s),
                     'U' => s.to_uppercase(),
                     'L' => s.to_lowercase(),
@@ -553,18 +668,25 @@ impl Shell {
                             None => s,
                         }
                     }
-                    'P' => s,
-                    _ => {
-                        failed = Some(*t);
-                        s
-                    }
+                    // `P`, expanded below.
+                    _ => s,
                 });
-                if let Some(t) = failed {
-                    return Err(
-                        self.fatal(&format!("${{{}@{t}}}: bad substitution", param_label(p)), 1)
-                    );
-                }
                 if *t == 'P' { result.map(|s| crate::prompt::expand(self, &s)) } else { result }
+            }
+            // An error that ends the shell, but only when there is
+            // something to transform, as in bash.
+            ParamOp::BadTransform(text) => {
+                self.check_set(p, &value)?;
+                let empty = match &value {
+                    PVal::Unset => true,
+                    PVal::List(items, _) => items.is_empty(),
+                    PVal::One(_) => false,
+                };
+                if !empty {
+                    let message = format!("${{{}@{text}}}: bad substitution", param_label(p));
+                    return Err(self.expansion_fatal(&message, 1));
+                }
+                value
             }
             ParamOp::Names(_) | ParamOp::Keys(_) => value,
             ParamOp::Bad(_) => unreachable!("an error above"),
@@ -668,11 +790,16 @@ impl Shell {
                 PVal::Unset => return Ok(PVal::Unset),
             };
             let name = if let Some((base, sub)) = parse_target(&target) {
+                let sub = match sub {
+                    Some(sub) => Some(self.expand_index(&sub)?),
+                    None => None,
+                };
                 ParamExp {
                     name: ParamName::Var(base),
                     index: sub.map(|sub| Word { parts: vec![WordPart::Lit(sub)] }),
                     op: p.op.clone(),
                     indirect: false,
+                    braced: true,
                 }
             } else if let Ok(n) = target.parse::<usize>()
                 && n > 0
@@ -682,6 +809,7 @@ impl Shell {
                     index: None,
                     op: p.op.clone(),
                     indirect: false,
+                    braced: true,
                 }
             } else if target.len() == 1 && "@*#?-$!0".contains(target.as_str()) {
                 let c = target.chars().next().unwrap_or('0');
@@ -690,6 +818,7 @@ impl Shell {
                     index: None,
                     op: p.op.clone(),
                     indirect: false,
+                    braced: true,
                 }
             } else {
                 return Err(self.discard(&format!("{target}: invalid variable name")));
@@ -716,8 +845,8 @@ impl Shell {
                         let v = self.get_value(&name).map(|v| v.elements()).unwrap_or_default();
                         v.join(" ")
                     } else {
-                        let at = self.expand_quoted(word)?;
-                        match self.element(&name, &at)? {
+                        let at = self.expand_subscript(&name, word)?;
+                        match self.element(&name, &at, None)? {
                             Some(target) => target,
                             None => return Ok(PVal::Unset),
                         }
@@ -746,7 +875,7 @@ impl Shell {
             match parse_target(&target) {
                 Some((base, Some(sub))) => {
                     name = base;
-                    index = Some(Word { parts: vec![WordPart::Lit(sub)] });
+                    index = Some(Word { parts: vec![WordPart::Lit(self.expand_index(&sub)?)] });
                 }
                 Some((base, None)) => name = base,
                 None => {
@@ -782,8 +911,11 @@ impl Shell {
                     };
                     return Ok(PVal::List(items, lit == "*"));
                 }
-                let at = self.expand_quoted(word)?;
-                Ok(match self.element(&name, &at)? {
+                let at = self.expand_subscript(&name, word)?;
+                // The subscript as written, for an error of `${#`.
+                let measured = matches!(p.op, ParamOp::Length)
+                    .then(|| if lit.is_empty() { at.clone() } else { lit.to_string() });
+                Ok(match self.element(&name, &at, measured.as_deref())? {
                     Some(value) => PVal::One(value),
                     None => PVal::Unset,
                 })
@@ -801,8 +933,16 @@ impl Shell {
         }
     }
 
-    /// `name[at]`, where `at` is already expanded.
-    fn element(&mut self, name: &str, at: &str) -> Result<Option<String>, Flow> {
+    /// `name[at]`, where `at` is already expanded. As in bash, a negative
+    /// index before the start is warned of and reads as unset, but under
+    /// `${#`, whose subscript as written is `measured`, it fails the
+    /// command, if the variable is set.
+    fn element(
+        &mut self,
+        name: &str,
+        at: &str,
+        measured: Option<&str>,
+    ) -> Result<Option<String>, Flow> {
         let name = self.resolve(name);
         let value = self.get_value(&name);
         match value {
@@ -810,16 +950,19 @@ impl Shell {
             None if self.vars.get(&name).is_some_and(|v| v.has(attr::ASSOC)) => Ok(None),
             value => {
                 let index = self.arith(at)?;
-                Ok(match value {
-                    Some(Value::Str(s)) => (index == 0 || index == -1).then_some(s),
-                    Some(Value::Array(map)) => {
-                        let index = if index < 0 {
-                            map.keys().next_back().map_or(index, |last| last + 1 + index)
-                        } else {
-                            index
-                        };
-                        map.get(&index).cloned()
+                let Some(index) = vars::position(value.as_ref(), index) else {
+                    match measured {
+                        Some(_) if value.is_none() => {}
+                        Some(text) => {
+                            return Err(self.discard(&format!("{text}]: bad array subscript")));
+                        }
+                        None => self.error(&format!("{name}: bad array subscript")),
                     }
+                    return Ok(None);
+                };
+                Ok(match value {
+                    Some(Value::Str(s)) => (index == 0).then_some(s),
+                    Some(Value::Array(map)) => map.get(&index).cloned(),
                     _ => None,
                 })
             }
@@ -854,7 +997,7 @@ impl Shell {
     /// with status 2 in POSIX mode, as in dash, and 1 as in bash.
     fn unbound(&mut self, p: &ParamExp) -> Flow {
         let status = if self.posix() { 2 } else { 1 };
-        self.fatal(&format!("{}: unbound variable", param_label(p)), status)
+        self.expansion_fatal(&format!("{}: unbound variable", param_label(p)), status)
     }
 
     fn substring(
@@ -946,49 +1089,63 @@ impl Shell {
         }
     }
 
-    /// `${name@A}`, `${name@K}` and `${name@k}`: the whole variable.
-    fn transform_whole(&self, p: &ParamExp, t: char, value: &PVal) -> Option<Vec<String>> {
-        let ParamName::Var(name) = &p.name else {
-            return match value {
-                PVal::One(s) => Some(vec![quote(s)]),
-                _ => None,
-            };
-        };
-        let whole = self.get_value(name)?;
-        let pairs = |whole: &Value| -> Vec<(String, String)> {
-            whole.keys().into_iter().zip(whole.elements()).collect()
-        };
-        match t {
-            'A' => Some(vec![match &whole {
-                Value::Str(s) => {
-                    let flags = attribute_flags(self.vars.get(name).map_or(0, |v| v.attrs));
-                    // Quoted even when it need not be, as bash does.
-                    if flags.is_empty() {
-                        format!("{name}={}", quote_always(s))
-                    } else {
-                        format!("declare -{flags} {name}={}", quote_always(s))
-                    }
+    /// The keys and values of an array named with `[@]` or `[*]`, and
+    /// whether it is associative.
+    fn array_pairs(&self, p: &ParamExp) -> Option<(Vec<(String, String)>, bool)> {
+        let ParamName::Var(name) = &p.name else { return None };
+        let all = p.index.as_ref().and_then(Word::as_literal).is_some_and(|i| i == "@" || i == "*");
+        match self.get_value(name)? {
+            whole @ (Value::Array(_) | Value::Assoc(_)) if all => {
+                let assoc = matches!(whole, Value::Assoc(_));
+                Some((whole.keys().into_iter().zip(whole.elements()).collect(), assoc))
+            }
+            _ => None,
+        }
+    }
+
+    /// `${name@A}`, as bash 5.2 gives it: for every element of an array
+    /// the words of its `declare` (`declare`, its options, the
+    /// assignment); otherwise an assignment of the value expanded, with
+    /// `declare` and the options when the variable has attributes; for
+    /// `$@` and `$*` the `set --` that makes them.
+    fn assignment_form(&self, p: &ParamExp, value: &PVal) -> PVal {
+        let star = p.index.as_ref().and_then(Word::as_literal) == Some("*");
+        let name = match &p.name {
+            ParamName::Special(c @ ('@' | '*')) => {
+                if self.args.is_empty() {
+                    return PVal::Unset;
                 }
-                _ => crate::builtins::declare_line(self, name).unwrap_or_default(),
-            }]),
-            'K' => Some(vec![match &whole {
-                Value::Str(s) => quote(s),
-                _ => pairs(&whole)
-                    .iter()
-                    .map(|(k, v)| {
-                        format!(
-                            "[{}]={}",
-                            if matches!(whole, Value::Assoc(_)) { quote(k) } else { k.clone() },
-                            quote_always(v)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            }]),
-            _ => Some(match &whole {
-                Value::Str(s) => vec![s.clone()],
-                _ => pairs(&whole).into_iter().flat_map(|(k, v)| [k, v]).collect(),
-            }),
+                let mut words = vec!["set".to_string(), "--".to_string()];
+                words.extend(self.args.iter().map(|arg| quote_always(arg)));
+                return PVal::List(words, *c == '*');
+            }
+            ParamName::Var(name) => self.resolve(name),
+            _ => return PVal::Unset,
+        };
+        let Some(var) = self.vars.get(&name) else { return PVal::Unset };
+        let mut attrs = var.attrs;
+        match var.value {
+            Some(Value::Array(_)) => attrs |= attr::ARRAY,
+            Some(Value::Assoc(_)) => attrs |= attr::ASSOC,
+            _ => {}
+        }
+        let flags = attribute_flags(attrs);
+        let all = p.index.as_ref().and_then(Word::as_literal).is_some_and(|i| i == "@" || i == "*");
+        if all && attrs & (attr::ARRAY | attr::ASSOC) != 0 {
+            let line = crate::builtins::declare_line(self, &name).unwrap_or_default();
+            let words: Vec<String> = line.splitn(3, ' ').map(str::to_string).collect();
+            return PVal::List(words, star);
+        }
+        let head = if flags.is_empty() { String::new() } else { format!("declare -{flags} ") };
+        let value = match value {
+            PVal::One(s) => Some(s),
+            PVal::List(items, _) => items.first(),
+            PVal::Unset => None,
+        };
+        match value {
+            Some(s) => PVal::One(format!("{head}{name}={}", quote_always(s))),
+            None if !flags.is_empty() => PVal::One(format!("{head}{name}")),
+            None => PVal::Unset,
         }
     }
 
@@ -1165,11 +1322,6 @@ fn param_label(p: &ParamExp) -> String {
         ParamName::Special(c) => c.to_string(),
     };
     if p.indirect { format!("!{label}") } else { label }
-}
-
-/// Whether `${#...}` counts arguments rather than measuring a string.
-fn is_count(p: &ParamExp) -> bool {
-    matches!(p.name, ParamName::Special('#'))
 }
 
 /// `name` or `name[sub]`, as `${!ref}` and `declare -n` hold them.
@@ -1352,6 +1504,33 @@ pub fn quote(s: &str) -> String {
         return s.to_string();
     }
     quote_always(s)
+}
+
+/// `s` as bash names a command or a directory in some messages: as it
+/// is, or as `$'...'` if it holds characters that do not print.
+pub fn printable(s: &str) -> String {
+    match s.chars().any(|c| c.is_control() || text::char_byte(c).is_some()) {
+        true => quote_always(s),
+        false => s.to_string(),
+    }
+}
+
+/// Whether `s` holds a character the shell would read as more than
+/// itself, as bash's sh_contains_shell_metas has it: `~` only where a
+/// tilde expands, `#` only first.
+pub fn has_shell_metas(s: &str) -> bool {
+    let mut previous = None;
+    for (i, c) in s.chars().enumerate() {
+        match c {
+            ' ' | '\t' | '\n' | '\'' | '"' | '\\' | '|' | '&' | ';' | '(' | ')' | '<' | '>'
+            | '!' | '{' | '}' | '*' | '[' | '?' | ']' | '^' | '$' | '`' => return true,
+            '~' if matches!(previous, None | Some('=' | ':')) => return true,
+            '#' if i == 0 => return true,
+            _ => {}
+        }
+        previous = Some(c);
+    }
+    false
 }
 
 /// `s` in quotes even when it needs none.

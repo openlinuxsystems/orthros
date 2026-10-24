@@ -12,10 +12,11 @@ use std::time::Instant;
 
 use indexmap::IndexMap;
 
+use crate::arith::Index;
 use crate::ast::{Command, FunctionDef, Sep};
 use crate::jobs::Jobs;
-use crate::vars::{Value, Var, Vars, attr};
-use crate::{arith, sys, text, trap};
+use crate::vars::{Assoc, Value, Var, Vars, attr};
+use crate::{arith, sys, text, trap, vars};
 
 /// What stops a command from simply finishing with a status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +69,13 @@ pub struct Opts {
     pub physical: bool,
     pub privileged: bool,
     pub interactive_comments: bool,
+    /// `set -k`: assignments after the command name go to its
+    /// environment too.
+    pub keyword: bool,
     pub restricted: bool,
     pub onecmd: bool,
+    /// bash's `nolog`, which does nothing there either.
+    pub nolog: bool,
 }
 
 /// The `set -o` options: long name, letter (or none), and where it is.
@@ -83,10 +89,12 @@ pub const OPTION_TABLE: &[(&str, Option<char>)] = &[
     ("hashall", Some('h')),
     ("ignoreeof", None),
     ("interactive-comments", None),
+    ("keyword", Some('k')),
     ("monitor", Some('m')),
     ("noclobber", Some('C')),
     ("noexec", Some('n')),
     ("noglob", Some('f')),
+    ("nolog", None),
     ("notify", Some('b')),
     ("nounset", Some('u')),
     ("onecmd", Some('t')),
@@ -111,10 +119,12 @@ impl Opts {
             "hashall" => &mut self.hashall,
             "ignoreeof" => &mut self.ignoreeof,
             "interactive-comments" => &mut self.interactive_comments,
+            "keyword" => &mut self.keyword,
             "monitor" => &mut self.monitor,
             "noclobber" => &mut self.noclobber,
             "noexec" => &mut self.noexec,
             "noglob" => &mut self.noglob,
+            "nolog" => &mut self.nolog,
             "notify" => &mut self.notify,
             "nounset" => &mut self.nounset,
             "onecmd" => &mut self.onecmd,
@@ -141,18 +151,33 @@ impl Opts {
 /// What names an exported function in the environment.
 const FUNCTION_PREFIX: &str = "BASH_FUNC_";
 
-/// `shopt` options, and whether each is on by default.
+/// `shopt` options, and whether each is on by default, in bash's order.
+/// Those nukesh has no use for (the `compat` levels, spelling correction,
+/// `mailwarn`) are taken and do nothing, so that a `.bashrc` or a script
+/// that sets them goes on; `restricted_shell` cannot be changed.
 pub const SHOPTS: &[(&str, bool)] = &[
-    ("assoc_expand_once", false),
     ("autocd", false),
+    ("assoc_expand_once", false),
     ("cdable_vars", false),
+    ("cdspell", false),
     ("checkhash", false),
     ("checkjobs", false),
     ("checkwinsize", true),
     ("cmdhist", true),
+    ("compat31", false),
+    ("compat32", false),
+    ("compat40", false),
+    ("compat41", false),
+    ("compat42", false),
+    ("compat43", false),
+    ("compat44", false),
+    ("complete_fullquote", true),
+    ("direxpand", false),
+    ("dirspell", false),
     ("dotglob", false),
     ("execfail", false),
     ("expand_aliases", false),
+    ("extdebug", false),
     ("extglob", false),
     ("extquote", true),
     ("failglob", false),
@@ -160,9 +185,11 @@ pub const SHOPTS: &[(&str, bool)] = &[
     ("globasciiranges", true),
     ("globskipdots", true),
     ("globstar", false),
-    ("histappend", true),
+    ("gnu_errfmt", false),
+    ("histappend", false),
     ("histreedit", false),
     ("histverify", false),
+    ("hostcomplete", true),
     ("huponexit", false),
     ("inherit_errexit", false),
     ("interactive_comments", true),
@@ -171,6 +198,8 @@ pub const SHOPTS: &[(&str, bool)] = &[
     ("localvar_inherit", false),
     ("localvar_unset", false),
     ("login_shell", false),
+    ("mailwarn", false),
+    ("no_empty_cmd_completion", false),
     ("nocaseglob", false),
     ("nocasematch", false),
     ("noexpand_translation", false),
@@ -179,6 +208,7 @@ pub const SHOPTS: &[(&str, bool)] = &[
     ("progcomp", true),
     ("progcomp_alias", false),
     ("promptvars", true),
+    ("restricted_shell", false),
     ("shift_verbose", false),
     ("sourcepath", true),
     ("varredir_close", false),
@@ -224,9 +254,22 @@ pub struct Shell {
     /// cannot trap.
     pub ignored: Vec<bool>,
     pub interactive: bool,
+    /// The letter `$-` ends with, as bash's: `c` for `-c`, `s` for
+    /// commands read from standard input.
+    pub source_flag: Option<char>,
+    /// Running the text of `-c`.
+    pub command_text: bool,
     pub login: bool,
     /// How many subshells deep this process is.
     pub subshell: u32,
+    /// A command substitution's child, which reports no job a signal
+    /// ended, as in bash.
+    pub in_subst: bool,
+    /// The line bash keeps for what is not a simple command's own news: a
+    /// job a signal ended, a compound command's redirections. It is where
+    /// the command read last ends, a function's body line while it runs,
+    /// and the line of a `for`, `case`, `select`, `[[` or `((` run since.
+    pub report_line: u32,
     /// Loops we are inside, for `break` and `continue`.
     pub loops: u32,
     pub frames: Vec<Frame>,
@@ -242,7 +285,9 @@ pub struct Shell {
     /// and `!` pipelines.
     pub errexit_off: u32,
     /// The last pipeline failed where `set -e` was ignored (`a` in
-    /// `a && b`), or was a compound command that failed so.
+    /// `a && b`), or was a compound command that failed so, or its failure
+    /// was dealt with: a compound command that fails because of it does
+    /// not run the ERR trap again.
     pub failed_ignored: bool,
     pub pipestatus: Vec<i32>,
     pub started: Instant,
@@ -289,6 +334,9 @@ pub struct Shell {
     pub disabled: HashSet<String>,
     /// Set when text from `eval` or `.` had a syntax error.
     pub syntax_failed: bool,
+    /// Set by an expansion error that ends the shell (`set -u`, `${x?}`),
+    /// after which bash's `-c` exits with 127.
+    pub expansion_failed: bool,
     /// How often each hashed command was used, for `hash`.
     pub hash_hits: HashMap<String, u32>,
     /// A completion function asked to be tried again (status 124).
@@ -330,8 +378,12 @@ impl Shell {
             parent_traps: None,
             ignored: vec![false; trap::MAX_SIGNAL + 1],
             interactive: false,
+            source_flag: None,
+            command_text: false,
             login: false,
             subshell: 0,
+            in_subst: false,
+            report_line: 0,
             loops: 0,
             frames: Vec::new(),
             source: Rc::from(name),
@@ -364,6 +416,7 @@ impl Shell {
             procsub_fds: Vec::new(),
             disabled: HashSet::new(),
             syntax_failed: false,
+            expansion_failed: false,
             hash_hits: HashMap::new(),
             completions_retry: false,
             in_script: false,
@@ -471,10 +524,65 @@ impl Shell {
         let _ = sys::write_all(2, &text::encode(&line));
     }
 
+    /// Prints an error as bash prints a failed system call's: naming the
+    /// shell, without a line.
+    pub fn error_unlined(&self, message: &str) {
+        let who =
+            if self.interactive && self.frames.is_empty() { &*self.name } else { &*self.source };
+        let _ = sys::write_all(2, &text::encode(&format!("{who}: {message}\n")));
+    }
+
+    /// A syntax error, as bash prints it: after `label`, what the text
+    /// came from (`eval`, `-c`, `exit trap`), when it has one; at its line,
+    /// or for text that ended, at the line bash gives, from `end` (see
+    /// [`crate::parse::Parser::end_line`]); then, but in an interactive
+    /// shell, the line it is on.
+    pub fn syntax_error(&mut self, error: &crate::parse::Error, label: Option<&str>, end: u32) {
+        let (messages, context) = match error {
+            crate::parse::Error::Incomplete(unfinished) => (unfinished.report(end), None),
+            crate::parse::Error::Syntax { messages, context } => {
+                (messages.clone(), context.clone())
+            }
+        };
+        let last = messages.last().map_or(end, |&(line, _)| line);
+        let context = context.filter(|_| !self.interactive).map(|text| (last, format!("`{text}'")));
+        for (line, text) in messages.into_iter().chain(context) {
+            self.lineno = line;
+            match label {
+                Some(label) => {
+                    let who = if self.interactive && self.frames.is_empty() {
+                        &*self.name
+                    } else {
+                        &*self.source
+                    };
+                    let text = format!("{who}: {label}: line {line}: {text}\n");
+                    let _ = sys::write_all(2, &text::encode(&text));
+                }
+                None => self.error(&text),
+            }
+        }
+        self.lineno = last;
+    }
+
+    /// Prints the parser's warnings, each at its line.
+    pub fn parse_warnings(&mut self, parser: &mut crate::parse::Parser) {
+        for (line, warning) in parser.warnings() {
+            self.lineno = line;
+            self.error(&warning);
+        }
+    }
+
     /// A fatal error: printed, and the command line abandoned.
     pub fn fatal(&mut self, message: &str, status: i32) -> Flow {
         self.error(message);
         Flow::Fatal(status)
+    }
+
+    /// [`Shell::fatal`] for an expansion that cannot go on, as bash's
+    /// FORCE_EOF.
+    pub fn expansion_fatal(&mut self, message: &str, status: i32) -> Flow {
+        self.expansion_failed = true;
+        self.fatal(message, status)
     }
 
     /// An error that abandons the command being run, after which a script
@@ -490,12 +598,16 @@ impl Shell {
         if self.posix() { Flow::Fatal(2) } else { Flow::Discard(status) }
     }
 
-    /// The parser's options for the shell's current settings. Aliases
-    /// are expanded in an interactive shell and, as POSIX has it, in every
-    /// POSIX one; elsewhere after `shopt -s expand_aliases`, as in bash.
+    /// Whether aliases are expanded: with `expand_aliases`, on in an
+    /// interactive shell, and as POSIX has it in every POSIX one, as in
+    /// bash.
+    pub fn expands_aliases(&self) -> bool {
+        self.posix() || self.shopt("expand_aliases")
+    }
+
+    /// The parser's options for the shell's current settings.
     pub fn parse_options(&self) -> crate::parse::Options {
-        let aliases = (self.interactive || self.posix() || self.shopt("expand_aliases"))
-            && !self.aliases.is_empty();
+        let aliases = self.expands_aliases() && !self.aliases.is_empty();
         crate::parse::Options {
             posix: self.posix(),
             extglob: self.shopt("extglob"),
@@ -623,35 +735,40 @@ impl Shell {
     }
 
     fn get_element(&self, name: &str, index: &str) -> Option<String> {
-        let value = self.get_value(name)?;
-        match &value {
-            Value::Assoc(map) => map.get(index).cloned(),
-            _ => {
-                let index = self.eval_index_readonly(index)?;
-                match value {
-                    Value::Str(s) => (index == 0 || index == -1).then_some(s),
-                    Value::Array(map) => {
-                        let index = if index < 0 {
-                            map.keys().next_back().map_or(index, |last| last + 1 + index)
-                        } else {
-                            index
-                        };
-                        map.get(&index).cloned()
-                    }
-                    Value::Assoc(_) => None,
-                }
-            }
+        if self.assoc(name) {
+            return match self.get_value(name)? {
+                Value::Assoc(map) => map.get(index).cloned(),
+                _ => None,
+            };
+        }
+        let index = self.eval_index_readonly(index)?;
+        let value = self.get_value(name);
+        let Some(at) = vars::position(value.as_ref(), index) else {
+            self.error(&format!("{name}: bad array subscript"));
+            return None;
+        };
+        match value? {
+            Value::Str(s) => (at == 0).then_some(s),
+            Value::Array(map) => map.get(&at).cloned(),
+            Value::Assoc(_) => None,
         }
     }
 
     /// An index of an indexed array, evaluated without side effects being
     /// kept (for reads through `get`).
     fn eval_index_readonly(&self, index: &str) -> Option<i64> {
-        if let Ok(n) = index.trim().parse() {
+        if let Some(n) = arith::parse_number(index) {
             return Some(n);
         }
         let mut copy = ReadOnlyEnv(self);
         arith::eval(index, &mut copy).ok()
+    }
+
+    /// Whether `name` is an associative array, set or only declared.
+    pub fn assoc(&self, name: &str) -> bool {
+        self.vars
+            .get(&self.resolve(name))
+            .is_some_and(|v| v.has(attr::ASSOC) || matches!(v.value, Some(Value::Assoc(_))))
     }
 
     /// Evaluates arithmetic in the shell's variables, for an expansion.
@@ -676,7 +793,7 @@ impl Shell {
     }
 
     /// Checks that `name` may be assigned.
-    fn writable(&self, name: &str) -> Result<(), String> {
+    pub fn writable(&self, name: &str) -> Result<(), String> {
         if self.vars.get(name).is_some_and(|v| v.has(attr::READONLY)) {
             return Err(format!("{name}: readonly variable"));
         }
@@ -715,6 +832,26 @@ impl Shell {
         Ok(value)
     }
 
+    /// `name=value` before a command, in the scope pushed for the
+    /// command's assignments: exported, as bash makes it. A read-only
+    /// variable is left as it is, with bash's error, and the command still
+    /// runs; `+=` appends through the variable's attributes, which a plain
+    /// `=` here does not take, as in bash.
+    pub fn assign_temp(&mut self, name: &str, value: String, append: bool) {
+        let value = match self.writable(name) {
+            Err(message) => Err(message),
+            Ok(()) if append => {
+                let old = self.get(name).unwrap_or_default();
+                self.transform(name, value, Some(&old))
+            }
+            Ok(()) => Ok(value),
+        };
+        match value {
+            Ok(value) => self.vars.set_temp(name, temp_var(value, true)),
+            Err(message) => self.error(&message),
+        }
+    }
+
     /// `name=value`, or with `append`, `name+=value`.
     pub fn assign(&mut self, name: &str, value: String, append: bool) -> Result<(), String> {
         let name = self.resolve(name);
@@ -723,6 +860,22 @@ impl Shell {
             return self.assign_element(&base, &index, value, append);
         }
         self.writable(&name)?;
+        // `x+=text` on a plain string grows it where it is, so that a loop
+        // building a string takes time in proportion to it, not to its
+        // square.
+        let plain = attr::INTEGER | attr::LOWER | attr::UPPER;
+        if append
+            && !matches!(name.as_str(), "PATH" | "RANDOM" | "SECONDS" | "OPTIND")
+            && let Some(var) = self.vars.get_mut(&name)
+            && var.attrs & plain == 0
+            && let Some(Value::Str(current)) = &mut var.value
+        {
+            current.push_str(&value);
+            if self.opts.allexport {
+                var.attrs |= attr::EXPORT;
+            }
+            return Ok(());
+        }
         let current = self.vars.get(&name).and_then(|v| v.value.as_ref());
         let old = if append {
             Some(current.and_then(Value::scalar).unwrap_or("").to_string())
@@ -744,6 +897,61 @@ impl Shell {
         Ok(())
     }
 
+    /// Sets `name`, a name or an element, for the builtin `builtin`
+    /// (`printf -v`, `read`), as bash does: false, with the error, if the
+    /// variable refuses the value (read-only, an element before the start
+    /// of the array). An arithmetic error abandons the command: one in the
+    /// subscript as an assignment's does, one in the value of an integer
+    /// variable named for the builtin.
+    pub fn assign_from(&mut self, builtin: &str, name: &str, value: String) -> Result<bool, Flow> {
+        let name = self.expand_element(name)?;
+        let name = self.resolve(&name);
+        let result = match split_element(&name) {
+            Some((base, index)) if !self.assoc(base) => {
+                let (base, index) = (self.resolve(base), index.to_string());
+                match self.writable(&base) {
+                    Err(message) => Err(message),
+                    Ok(()) => {
+                        let at = arith::eval(&index, self).map_err(|m| self.discard(&m))?;
+                        match self.assign_at(&base, at, value, false) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(format!("{base}[{index}]: bad array subscript")),
+                            Err(message) => Err(message),
+                        }
+                    }
+                }
+            }
+            _ => self.assign(&name, value, false),
+        };
+        self.builtin_assigned(builtin, result)
+    }
+
+    /// [`Shell::assign_from`] for a whole indexed array (`read -a`).
+    pub fn assign_array_from(
+        &mut self,
+        builtin: &str,
+        name: &str,
+        elements: Vec<(Option<String>, String)>,
+    ) -> Result<bool, Flow> {
+        let result = self.assign_array(name, elements, false);
+        self.builtin_assigned(builtin, result)
+    }
+
+    fn builtin_assigned(
+        &mut self,
+        builtin: &str,
+        result: Result<(), String>,
+    ) -> Result<bool, Flow> {
+        match result {
+            Ok(()) => Ok(true),
+            Err(message) if refusal(&message) => {
+                self.error(&message);
+                Ok(false)
+            }
+            Err(message) => Err(self.discard(&format!("{builtin}: {message}"))),
+        }
+    }
+
     /// `name[index]=value`.
     pub fn assign_element(
         &mut self,
@@ -754,45 +962,51 @@ impl Shell {
     ) -> Result<(), String> {
         let name = self.resolve(name);
         self.writable(&name)?;
-        let assoc = self
-            .vars
-            .get(&name)
-            .is_some_and(|v| v.has(attr::ASSOC) || matches!(v.value, Some(Value::Assoc(_))));
-        if assoc {
+        if self.assoc(&name) {
             let old = append.then(|| self.get_element(&name, index).unwrap_or_default());
             let value = self.transform(&name, value, old.as_deref())?;
             let var = self.vars.entry(&name);
             if !matches!(var.value, Some(Value::Assoc(_))) {
-                var.value = Some(Value::Assoc(IndexMap::new()));
+                var.value = Some(Value::Assoc(Assoc::new()));
             }
             if let Some(Value::Assoc(map)) = &mut var.value {
                 map.insert(index.to_string(), value);
             }
             return Ok(());
         }
-        let mut at = arith::eval(index, self)?;
-        let var = self.vars.entry(&name);
+        let at = arith::eval(index, self)?;
+        if self.assign_at(&name, at, value, append)? {
+            Ok(())
+        } else {
+            Err(format!("{name}[{index}]: bad array subscript"))
+        }
+    }
+
+    /// Element `at` of the indexed array `name` (resolved and writable),
+    /// which a string becomes, as element 0: `false`, assigning nothing,
+    /// when a negative `at` reaches before the start.
+    fn assign_at(
+        &mut self,
+        name: &str,
+        at: i64,
+        value: String,
+        append: bool,
+    ) -> Result<bool, String> {
+        let var = self.vars.entry(name);
         let map = match var.value.take() {
             Some(Value::Array(map)) => map,
             Some(Value::Str(s)) => BTreeMap::from([(0, s)]),
             Some(Value::Assoc(_)) | None => BTreeMap::new(),
         };
-        if at < 0 {
-            match map.keys().next_back() {
-                Some(last) if last + 1 + at >= 0 => at += last + 1,
-                _ => {
-                    self.vars.entry(&name).value = Some(Value::Array(map));
-                    return Err(format!("{name}[{index}]: bad array subscript"));
-                }
-            }
-        }
-        let old = append.then(|| map.get(&at).cloned().unwrap_or_default());
-        self.vars.entry(&name).value = Some(Value::Array(map));
-        let value = self.transform(&name, value, old.as_deref())?;
-        if let Some(Value::Array(map)) = &mut self.vars.entry(&name).value {
+        let at = vars::array_position(&map, at);
+        let old = at.filter(|_| append).map(|at| map.get(&at).cloned().unwrap_or_default());
+        self.vars.entry(name).value = Some(Value::Array(map));
+        let Some(at) = at else { return Ok(false) };
+        let value = self.transform(name, value, old.as_deref())?;
+        if let Some(Value::Array(map)) = &mut self.vars.entry(name).value {
             map.insert(at, value);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// `name=(elements)`, or with `append`, `name+=(elements)`.
@@ -811,25 +1025,30 @@ impl Shell {
         if assoc {
             let mut map = match (append, self.vars.get(&name).and_then(|v| v.value.clone())) {
                 (true, Some(Value::Assoc(map))) => map,
-                _ => IndexMap::new(),
+                // Emptied, the table keeps its size, as bash's does.
+                (false, Some(Value::Assoc(mut map))) => {
+                    map.clear();
+                    map
+                }
+                _ => Assoc::new(),
             };
             let mut pending_key: Option<String> = None;
             for (key, value) in elements {
                 match key {
                     Some(key) => {
-                        map.insert(key, value);
+                        map.insert(key, self.transform(&name, value, None)?);
                     }
                     // `(k1 v1 k2 v2)`: keys and values in turn.
                     None => match pending_key.take() {
                         Some(key) => {
-                            map.insert(key, value);
+                            map.insert(key, self.transform(&name, value, None)?);
                         }
                         None => pending_key = Some(value),
                     },
                 }
             }
             if let Some(key) = pending_key {
-                map.insert(key, String::new());
+                map.insert(key, self.transform(&name, String::new(), None)?);
             }
             let var = self.vars.entry(&name);
             var.value = Some(Value::Assoc(map));
@@ -841,16 +1060,20 @@ impl Shell {
             _ => BTreeMap::new(),
         };
         let mut next = map.keys().next_back().map_or(0, |last| last + 1);
-        let integer = self.vars.get(&name).is_some_and(|v| v.has(attr::INTEGER));
         for (key, value) in elements {
             if let Some(key) = key {
-                next = arith::eval(&key, self)?;
-                if next < 0 {
-                    next += map.keys().next_back().map_or(0, |last| last + 1);
+                // As bash, an index before the start is left out, warned of.
+                let at = arith::eval(&key, self)?;
+                match vars::array_position(&map, at) {
+                    Some(at) => next = at,
+                    None => {
+                        self.error(&format!("[{key}]={value}: bad array subscript"));
+                        continue;
+                    }
                 }
             }
-            let value = if integer { arith::eval(&value, self)?.to_string() } else { value };
-            map.insert(next, value);
+            // The attributes apply to each element, as in bash.
+            map.insert(next, self.transform(&name, value, None)?);
             next += 1;
         }
         let allexport = self.opts.allexport;
@@ -883,26 +1106,44 @@ impl Shell {
         var.value = Some(Value::Str(value.to_string()));
     }
 
-    /// `unset name`: false (with an error printed) if it is read-only.
+    /// Unsets a variable the shell sets itself (OPTARG, COMPREPLY): false,
+    /// with bash's error, if it is read-only.
     pub fn unset(&mut self, name: &str) -> bool {
-        let name = self.resolve(name);
+        if self.vars.get(name).is_some_and(|v| v.has(attr::READONLY)) {
+            self.error(&format!("{name}: readonly variable"));
+            return false;
+        }
+        // Only a subscript has arithmetic to fail and abandon a command.
+        self.unset_checked(name).unwrap_or(false)
+    }
+
+    /// `unset name` or `unset 'name[index]'`, as the builtin does: false,
+    /// with an error printed, if it cannot be; an error in the subscript's
+    /// arithmetic abandons the command, as in bash.
+    pub fn unset_checked(&mut self, name: &str) -> Result<bool, Flow> {
+        let name = self.expand_element(name)?;
+        let name = self.resolve(&name);
         if let Some((base, index)) = split_element(&name) {
             let (base, index) = (base.to_string(), index.to_string());
             return self.unset_element(&base, &index);
         }
-        if self.vars.is_local(&name) && !self.shopt("localvar_unset") {
+        Ok(self.unset_whole(&name))
+    }
+
+    fn unset_whole(&mut self, name: &str) -> bool {
+        if self.vars.is_local(name) && !self.shopt("localvar_unset") {
             // An unset local stays local, hiding the global.
-            let var = self.vars.local(&name, false);
+            let var = self.vars.local(name, false);
             if var.has(attr::READONLY) {
-                self.error(&format!("{name}: cannot unset: readonly variable"));
+                self.error(&format!("unset: {name}: cannot unset: readonly variable"));
                 return false;
             }
             var.value = None;
             var.attrs &= attr::EXPORT;
             return true;
         }
-        if !self.vars.unset(&name) {
-            self.error(&format!("{name}: cannot unset: readonly variable"));
+        if !self.vars.unset(name) {
+            self.error(&format!("unset: {name}: cannot unset: readonly variable"));
             return false;
         }
         if name == "PATH" {
@@ -911,35 +1152,51 @@ impl Shell {
         true
     }
 
-    fn unset_element(&mut self, name: &str, index: &str) -> bool {
+    /// `unset 'name[index]'`: as bash, a string is element 0 alone, and a
+    /// negative index counts back from an array's end.
+    fn unset_element(&mut self, name: &str, index: &str) -> Result<bool, Flow> {
         if self.vars.get(name).is_some_and(|v| v.has(attr::READONLY)) {
-            self.error(&format!("{name}: cannot unset: readonly variable"));
-            return false;
+            self.error(&format!("unset: {name}: cannot unset: readonly variable"));
+            return Ok(false);
         }
         if index == "@" || index == "*" {
-            return self.vars.unset(name);
+            return Ok(self.vars.unset(name));
         }
-        let at = match self.vars.get(name).and_then(|v| v.value.as_ref()) {
-            Some(Value::Assoc(_)) => None,
-            _ => arith::eval(index, self).ok(),
-        };
-        let Some(var) = self.vars.get_mut(name) else { return true };
-        match &mut var.value {
-            Some(Value::Assoc(map)) => {
-                map.shift_remove(index);
+        if self.assoc(name) {
+            if let Some(Value::Assoc(map)) = self.vars.get_mut(name).and_then(|v| v.value.as_mut())
+            {
+                map.remove(index);
             }
-            Some(Value::Array(map)) => {
-                if let Some(mut at) = at {
-                    if at < 0 {
-                        at += map.keys().next_back().map_or(0, |last| last + 1);
-                    }
+            return Ok(true);
+        }
+        let at = self.arith(index)?;
+        let Some(var) = self.vars.get_mut(name) else { return Ok(true) };
+        let declared_array = var.has(attr::ARRAY);
+        let bad = match &mut var.value {
+            Some(Value::Array(map)) => match vars::array_position(map, at) {
+                Some(at) => {
                     map.remove(&at);
+                    None
                 }
+                None => Some(format!("unset: [{index}]: bad array subscript")),
+            },
+            Some(Value::Str(_)) if at == 0 => {
+                var.value = None;
+                None
             }
-            Some(Value::Str(_)) if at == Some(0) => var.value = None,
-            _ => {}
+            Some(Value::Str(_)) => Some(format!("unset: {name}: not an array variable")),
+            None if at < 0 && declared_array => {
+                Some(format!("unset: [{index}]: bad array subscript"))
+            }
+            _ => None,
+        };
+        match bad {
+            Some(message) => {
+                self.error(&message);
+                Ok(false)
+            }
+            None => Ok(true),
         }
-        true
     }
 
     /// The environment for a program the shell runs, with the functions of
@@ -993,23 +1250,19 @@ impl Shell {
 
     /// `$-`.
     pub fn flags(&self) -> String {
-        let mut flags = String::new();
-        for (name, letter) in OPTION_TABLE {
-            if let Some(letter) = letter
-                && self.opts.get(name) == Some(true)
-            {
-                flags.push(*letter);
-            }
-        }
-        if self.history.expand {
-            flags.push('H');
-        }
-        if self.interactive {
-            flags.push('i');
-        }
-        if self.opts.restricted {
-            flags.push('r');
-        }
+        // bash's order.
+        let mut flags: String = "abefhikmnprtuvxBCEHPT"
+            .chars()
+            .filter(|&letter| match letter {
+                'H' => self.history.expand,
+                'i' => self.interactive,
+                'r' => self.opts.restricted,
+                _ => OPTION_TABLE
+                    .iter()
+                    .any(|(name, l)| *l == Some(letter) && self.opts.get(name) == Some(true)),
+            })
+            .collect();
+        flags.extend(self.source_flag);
         flags
     }
 
@@ -1026,11 +1279,20 @@ fn split_element(name: &str) -> Option<(&str, &str)> {
     Some((&name[..open], inner))
 }
 
+/// Whether an assignment's error only refused it (a read-only or
+/// restricted variable, an element before the start of the array), and
+/// was not arithmetic's, which abandons the command, as in bash.
+fn refusal(message: &str) -> bool {
+    [": readonly variable", ": restricted", ": bad array subscript"]
+        .iter()
+        .any(|end| message.ends_with(end))
+}
+
 /// Arithmetic through the shell's variables: assignments change them.
 impl arith::Env for Shell {
-    fn get(&mut self, name: &str, index: Option<&str>) -> Result<Option<String>, String> {
+    fn get(&mut self, name: &str, index: Option<Index>) -> Result<Option<String>, String> {
         let value = match index {
-            Some(index) => self.get_element(name, index),
+            Some(index) => self.get_element(name, index.key),
             None => Shell::get(self, name),
         };
         if value.is_none() && self.opts.nounset {
@@ -1039,11 +1301,28 @@ impl arith::Env for Shell {
         Ok(value)
     }
 
-    fn set(&mut self, name: &str, index: Option<&str>, value: i64) -> Result<(), String> {
-        match index {
-            Some(index) => self.assign_element(name, index, value.to_string(), false),
-            None => self.assign(name, value.to_string(), false),
+    fn set(&mut self, name: &str, index: Option<Index>, value: i64) -> Result<(), String> {
+        let Some(index) = index else { return self.assign(name, value.to_string(), false) };
+        if self.assoc(name) {
+            return self.assign_element(name, index.key, value.to_string(), false);
         }
+        let real = self.resolve(name);
+        self.writable(&real)?;
+        let at = arith::eval(index.key, self)?;
+        // In arithmetic, as in bash, an index before the start is warned
+        // of and the expression goes on.
+        if !self.assign_at(&real, at, value.to_string(), false)? {
+            self.error(&format!("{name}[{}]: bad array subscript", index.text));
+        }
+        Ok(())
+    }
+
+    /// An indexed array's subscript as its number, evaluated here, once.
+    fn key(&mut self, name: &str, text: &str) -> Result<String, String> {
+        if self.assoc(name) {
+            return Ok(text.to_string());
+        }
+        Ok(arith::eval(text, self)?.to_string())
     }
 }
 
@@ -1052,14 +1331,14 @@ impl arith::Env for Shell {
 struct ReadOnlyEnv<'a>(&'a Shell);
 
 impl arith::Env for ReadOnlyEnv<'_> {
-    fn get(&mut self, name: &str, index: Option<&str>) -> Result<Option<String>, String> {
+    fn get(&mut self, name: &str, index: Option<Index>) -> Result<Option<String>, String> {
         Ok(match index {
-            Some(index) => self.0.get_element(name, index),
+            Some(index) => self.0.get_element(name, index.key),
             None => self.0.get(name),
         })
     }
 
-    fn set(&mut self, _: &str, _: Option<&str>, _: i64) -> Result<(), String> {
+    fn set(&mut self, _: &str, _: Option<Index>, _: i64) -> Result<(), String> {
         Ok(())
     }
 }

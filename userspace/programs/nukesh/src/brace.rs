@@ -14,6 +14,8 @@ use crate::ast::{Word, WordPart};
 #[derive(Clone, Debug, PartialEq)]
 enum Item {
     Char(char),
+    /// A word of a sequence, which holds no brace or comma.
+    Text(String),
     Part(WordPart),
 }
 
@@ -46,6 +48,7 @@ fn to_word(items: &[Item]) -> Word {
     for item in items {
         match item {
             Item::Char(c) => lit.push(*c),
+            Item::Text(text) => lit.push_str(text),
             Item::Part(part) => {
                 if !lit.is_empty() {
                     parts.push(WordPart::Lit(std::mem::take(&mut lit)));
@@ -70,10 +73,17 @@ fn expand_items(items: &[Item], depth: u32) -> Vec<Vec<Item>> {
             let pre = &items[..open];
             let post = &items[close + 1..];
             let alternatives: Vec<Vec<Item>> = if commas.is_empty() {
-                match sequence(&items[open + 1..close]) {
-                    Some(seq) => {
-                        seq.into_iter().map(|s| s.chars().map(Item::Char).collect()).collect()
-                    }
+                match Sequence::of(&items[open + 1..close]) {
+                    // The backslash of `{Z..b}` goes in quote removal, as
+                    // in bash: an empty word of its own.
+                    Some(seq) => seq
+                        .words()
+                        .into_iter()
+                        .map(|s| match s.as_str() {
+                            "\\" => vec![Item::Part(WordPart::Quoted(String::new()))],
+                            _ => vec![Item::Text(s)],
+                        })
+                        .collect(),
                     None => {
                         start = open + 1;
                         continue;
@@ -119,7 +129,7 @@ fn find_close(items: &[Item], open: usize) -> Option<(usize, Vec<usize>)> {
         match item {
             Item::Char('{') => depth += 1,
             Item::Char('}') if depth == 0 => {
-                if commas.is_empty() && sequence(&items[open + 1..i]).is_none() {
+                if commas.is_empty() && Sequence::of(&items[open + 1..i]).is_none() {
                     return None;
                 }
                 return Some((i, commas));
@@ -133,72 +143,88 @@ fn find_close(items: &[Item], open: usize) -> Option<(usize, Vec<usize>)> {
 }
 
 /// `a..b` or `a..b..step`, as numbers or single letters.
-fn sequence(items: &[Item]) -> Option<Vec<String>> {
-    let mut text = String::new();
-    for item in items {
-        match item {
-            Item::Char(c) => text.push(*c),
-            Item::Part(_) => return None,
+struct Sequence {
+    a: i64,
+    b: i64,
+    step: i64,
+    letters: bool,
+    /// The width zero padding makes each number, when either end is
+    /// written with a leading zero.
+    width: usize,
+}
+
+impl Sequence {
+    /// The sequence `items` spell, if they spell one bash expands: its
+    /// increment's sign does not count, and an increment with no
+    /// positive value (`-2^63`), ends too far apart for 64 bits, or more
+    /// numbers than bash makes (2^31 - 3) are no sequence.
+    fn of(items: &[Item]) -> Option<Sequence> {
+        let mut text = String::new();
+        for item in items {
+            match item {
+                Item::Char(c) => text.push(*c),
+                Item::Text(_) | Item::Part(_) => return None,
+            }
         }
-    }
-    let parts: Vec<&str> = text.split("..").collect();
-    if parts.len() != 2 && parts.len() != 3 {
-        return None;
-    }
-    let step: i64 = match parts.get(2) {
-        Some(step) => step.parse().ok()?,
-        None => 1,
-    };
-    let step = step.unsigned_abs().max(1) as i64;
-    if let (Ok(a), Ok(b)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-        // Zero padding when either end is written with a leading zero.
-        let padded = |s: &str| {
-            let digits = s.trim_start_matches('-');
-            digits.len() > 1 && digits.starts_with('0')
+        let parts: Vec<&str> = text.split("..").collect();
+        if parts.len() != 2 && parts.len() != 3 {
+            return None;
+        }
+        let step: i64 = match parts.get(2) {
+            Some(step) => step.parse().ok()?,
+            None => 1,
         };
-        let width = if padded(parts[0]) || padded(parts[1]) {
-            parts[0].len().max(parts[1].len())
-        } else {
-            0
-        };
+        let step = step.checked_abs()?.max(1);
+        if let (Ok(a), Ok(b)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
+            let span = i128::from(b) - i128::from(a);
+            if span < i128::from(i64::MIN) + 3 || span > i128::from(i64::MAX) - 2 {
+                return None;
+            }
+            if span.unsigned_abs() / step as u128 > (i32::MAX - 3) as u128 {
+                return None;
+            }
+            let padded = |s: &str| {
+                let digits = s.trim_start_matches('-');
+                digits.len() > 1 && digits.starts_with('0')
+            };
+            let width = if padded(parts[0]) || padded(parts[1]) {
+                parts[0].len().max(parts[1].len())
+            } else {
+                0
+            };
+            return Some(Sequence { a, b, step, letters: false, width });
+        }
+        let (a, b) = (single_char(parts[0])?, single_char(parts[1])?);
+        if !a.is_ascii_alphabetic() || !b.is_ascii_alphabetic() {
+            return None;
+        }
+        Some(Sequence { a: a as i64, b: b as i64, step, letters: true, width: 0 })
+    }
+
+    fn words(&self) -> Vec<String> {
+        let (a, b, step, width) = (self.a, self.b, self.step, self.width);
         let mut out = Vec::new();
         let mut n = a;
         loop {
-            out.push(if width > 0 {
-                if n < 0 { format!("-{:0w$}", -n, w = width - 1) } else { format!("{n:0width$}") }
-            } else {
+            out.push(if self.letters {
+                char::from_u32(n as u32).map(String::from).unwrap_or_default()
+            } else if width == 0 {
                 n.to_string()
+            } else if n < 0 {
+                format!("-{:0w$}", n.unsigned_abs(), w = width - 1)
+            } else {
+                format!("{n:0width$}")
             });
-            if n == b || out.len() > 1_000_000 {
-                break;
+            // A next number past the end, or past what 64 bits hold, ends
+            // the sequence.
+            let next = if a <= b { n.checked_add(step) } else { n.checked_sub(step) };
+            match next {
+                Some(next) if n != b && ((a <= b && next <= b) || (a > b && next >= b)) => n = next,
+                _ => break,
             }
-            let next = if a <= b { n + step } else { n - step };
-            if (a <= b && next > b) || (a > b && next < b) {
-                break;
-            }
-            n = next;
         }
-        return Some(out);
+        out
     }
-    let (a, b) = (single_char(parts[0])?, single_char(parts[1])?);
-    if !a.is_ascii_alphabetic() || !b.is_ascii_alphabetic() {
-        return None;
-    }
-    let (a, b) = (a as i64, b as i64);
-    let mut out = Vec::new();
-    let mut n = a;
-    loop {
-        out.push(char::from_u32(n as u32)?.to_string());
-        if n == b {
-            break;
-        }
-        let next = if a <= b { n + step } else { n - step };
-        if (a <= b && next > b) || (a > b && next < b) {
-            break;
-        }
-        n = next;
-    }
-    Some(out)
 }
 
 fn single_char(s: &str) -> Option<char> {
@@ -235,6 +261,25 @@ mod tests {
         assert_eq!(texts("{01..03}"), ["01", "02", "03"]);
         assert_eq!(texts("{a..e..2}"), ["a", "c", "e"]);
         assert_eq!(texts("{-2..1}"), ["-2", "-1", "0", "1"]);
+        assert_eq!(texts("{-05..3..4}"), ["-05", "-01", "003"]);
+        assert_eq!(texts("{1..10..-3}"), ["1", "4", "7", "10"]);
+    }
+
+    #[test]
+    fn sequences_stop_where_bash_stops_them() {
+        // The next number would not fit in 64 bits.
+        assert_eq!(texts("{9223372036854775806..9223372036854775807..5}"), ["9223372036854775806"]);
+        assert_eq!(texts("{-9223372036854775807..-9223372036854775808}").len(), 2);
+        // No increment, ends too far apart, too many numbers: no sequence.
+        assert_eq!(texts("{1..3..-9223372036854775808}"), ["{1..3..-9223372036854775808}"]);
+        assert_eq!(texts("{-9223372036854775808..0}"), ["{-9223372036854775808..0}"]);
+        assert_eq!(texts("{1..2147483648}"), ["{1..2147483648}"]);
+        // No cap below bash's.
+        assert_eq!(texts("{1..3000000}").len(), 3_000_000);
+        // The backslash of a run of letters is quote removal's.
+        let words = expand(&Word::lit("{Z..b}"));
+        assert_eq!(words.len(), 9);
+        assert_eq!(words[2].parts, [WordPart::Quoted(String::new())]);
     }
 
     #[test]

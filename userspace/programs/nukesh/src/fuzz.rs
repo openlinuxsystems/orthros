@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::thread;
 
-use crate::arith::{self, Env};
+use crate::arith::{self, Env, Index};
 use crate::ast::{Command, Program, Word, WordPart};
 use crate::{brace, parse, pattern, show};
 
@@ -302,17 +302,21 @@ const PATTERNS: &[&str] = &[
 struct Vars(HashMap<String, String>);
 
 impl Env for Vars {
-    fn get(&mut self, name: &str, index: Option<&str>) -> Result<Option<String>, String> {
+    fn get(&mut self, name: &str, index: Option<Index>) -> Result<Option<String>, String> {
         let key = match index {
-            Some(i) => format!("{name}[{}]", arith::eval(i, self)?),
+            Some(i) => format!("{name}[{}]", i.key),
             None => name.to_string(),
         };
         Ok(self.0.get(&key).cloned())
     }
 
-    fn set(&mut self, name: &str, index: Option<&str>, value: i64) -> Result<(), String> {
+    fn key(&mut self, _name: &str, text: &str) -> Result<String, String> {
+        Ok(arith::eval(text, self)?.to_string())
+    }
+
+    fn set(&mut self, name: &str, index: Option<Index>, value: i64) -> Result<(), String> {
         let key = match index {
-            Some(i) => format!("{name}[{}]", arith::eval(i, self)?),
+            Some(i) => format!("{name}[{}]", i.key),
             None => name.to_string(),
         };
         self.0.insert(key, value.to_string());

@@ -39,7 +39,41 @@ type -P plain >/dev/null && echo "plain is found"
 if [ -x "$dir/plain" ]; then want=0; else want=126; fi
 plain >/dev/null 2>&1; got=$?
 [ "$got" = "$want" ] && echo "plain: as its mode says" || echo "plain: $got"
+# A syntax error in eval's text or in a file `.` reads, and a file `.`
+# cannot read, fail the builtin, and the script goes on.
+eval "if"; echo "eval syntax: $?"
+h() { eval "fi"; echo "in h: $?"; }; h
+echo "if" > "$dir/syntax"; . "$dir/syntax"; echo "source syntax: $?"
+. "$dir/missing"; echo "source missing: $?"
+. "$dir"; echo "source directory: $?"
+# A program whose `#!` interpreter is missing.
+printf '#!/no/such/interpreter\n' > "$dir/badi"; chmod +x "$dir/badi"
+msg=$(badi 2>&1); echo "missing interpreter: $? ${msg##*: }"
 rm -r "$dir"
+# `exit` and `return` with more than one operand fail their command.
+exit 3 4; echo "not reached"
+echo "after exit: $?"
+f() { return 3 4; echo "not reached"; }; f; echo "not reached"
+echo "after return: $?"
+# mapfile's callback comes after every quantum lines, before the last is
+# stored, with it in single quotes; a syntax error in it goes no further.
+mapfile -C 'echo cb' -c 2 lines < <(printf '%s\n' 1 2 3 "it's"); echo "mapfile: $? ${#lines[@]}"
+mapfile -s 1 -O 5 -C 'printf "<%s %s>\n"' -c 1 -t lines < <(printf '%s\n' a b c)
+msg=$( { mapfile -C '[[ a b ]]' -c 1 x <<< 1; echo "goes on: $?"; } 2>&1 )
+while IFS= read -r line; do echo "${line#*: stdin: }"; done <<< "$msg"
+# Status operands are decimal numbers of 64 bits; return outside a
+# function and shift with no number fail.
+for v in 010 0x10 " 7 " +7 -1 9223372036854775807 9223372036854775808 "" 7x; do
+  (exit "$v"); echo "exit [$v]: $?"
+done
+return; echo "return outside: $?"
+shift x; echo "shift x: $?"
+# A directory read by `$(<` is nothing, as bash reads it.
+x=$(< /); echo "directory: $? [$x]"
+# The pattern of an unset parameter is not expanded.
+unset u; echo "<${u/$((1/0))/}> <${u#$((1/0))}> <${u%%$((1/0))}> <${u^$((1/0))}>"
+v=; echo "<${v/$((1/0))/}>"; echo "not reached"
+echo "after set pattern: $?"
 # Indirect expansions: an unset name is an error, an unset element or
 # parameter is not, and `:=` assigns to the variable named.
 echo "<${!no_such_name:-d}>"; echo "not reached"

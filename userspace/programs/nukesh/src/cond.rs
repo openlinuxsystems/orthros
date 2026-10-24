@@ -294,6 +294,17 @@ pub fn test_builtin(shell: &mut Shell, args: &[String]) -> Res {
             }
         }
     }
+    // `-v 'a[$i]'`: the subscript is expanded, as in bash.
+    let mut expanded = None;
+    for (i, pair) in operands.windows(2).enumerate() {
+        if pair[0] == "-v" && pair[1].contains('[') {
+            let element = shell.expand_element(&pair[1])?;
+            if element != pair[1] {
+                expanded.get_or_insert_with(|| operands.to_vec())[i + 1] = element;
+            }
+        }
+    }
+    let operands = expanded.as_deref().unwrap_or(operands);
     let mut test = Test { shell, args: operands, pos: 0 };
     match test.by_count(operands) {
         Ok(value) => Ok(i32::from(!value)),
@@ -325,9 +336,13 @@ impl Shell {
             CondExpr::And(a, b) => self.cond(a)? && self.cond(b)?,
             CondExpr::Or(a, b) => self.cond(a)? || self.cond(b)?,
             CondExpr::Not(a) => !self.cond(a)?,
+            CondExpr::Group(a) => self.cond(a)?,
             CondExpr::Word(word) => !self.expand_string(word)?.is_empty(),
             CondExpr::Unary(op, word) => {
-                let arg = self.expand_string(word)?;
+                let mut arg = self.expand_string(word)?;
+                if op == "-v" {
+                    arg = self.expand_element(&arg)?;
+                }
                 unary(self, op, &arg)
                     .ok_or_else(|| CondError::Message(format!("{op}: unary operator expected")))?
             }

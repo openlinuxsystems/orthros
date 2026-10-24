@@ -5,8 +5,8 @@
 //!
 //! It follows the grammar of POSIX.1-2024's Shell Command Language
 //! (XCU 2.10) with the bash extensions Nukesh takes: `[[ ]]`, `(( ))`,
-//! arithmetic `for`, `select`, `function`, `|&`, `&>`, here-strings,
-//! process substitution, `$'...'` and brace expansion.
+//! arithmetic `for`, `select`, `function`, `coproc`, `|&`, `&>`,
+//! here-strings, process substitution, `$'...'` and brace expansion.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -66,6 +66,19 @@ pub enum Command {
     Compound(Box<CompoundCommand>, Vec<Redirect>),
     /// `name() body` or `function name body`.
     Function(Rc<FunctionDef>),
+    /// `coproc command` or `coproc NAME compound-command`.
+    Coproc(Box<Coproc>),
+}
+
+/// A command run in the background with pipes to its standard input and
+/// output, whose shell ends are in the array `name`, as bash runs it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Coproc {
+    /// `COPROC` unless a compound command is named.
+    pub name: String,
+    pub command: Command,
+    /// The line it ends on, which its messages name, as bash's do.
+    pub line: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +88,9 @@ pub struct FunctionDef {
     /// Where it was defined, for `declare -F` and error messages.
     pub file: Rc<str>,
     pub line: u32,
+    /// Where its body starts: while it runs, the line bash names for a
+    /// job a signal ended and a compound command's redirections.
+    pub body_line: u32,
 }
 
 /// Assignments, words and redirections, in any order.
@@ -105,7 +121,8 @@ pub enum AssignValue {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompoundCommand {
     Brace(Program),
-    Subshell(Program),
+    /// `( ... )`, and the line of its `)`, its LINENO once it is run.
+    Subshell(Program, u32),
     For {
         var: String,
         /// `None` for `for x; do`, which loops over `"$@"`.
@@ -181,6 +198,8 @@ pub enum CondExpr {
     Binary(Word, String, Word),
     /// A lone word: true if it is not empty.
     Word(Word),
+    /// `( expr )`, kept as written so that it shows as written.
+    Group(Box<CondExpr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -195,6 +214,7 @@ pub struct Redirect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RedirFd {
     Number(i32),
+    /// `{name}` or `{name[subscript]}`, as written.
     Var(String),
 }
 
@@ -229,6 +249,10 @@ pub enum RedirTarget {
     Word(Word),
     /// Filled in when the parser reaches the end of the line.
     HereDoc(Rc<RefCell<HereDoc>>),
+    /// A word expanded ahead of the rest of its command, as POSIX orders
+    /// them: the word as written, and the text it came to, `None` for no
+    /// word or more than one.
+    Expanded(Word, Option<String>),
 }
 
 /// A here-document's body, read after the line its `<<` is on.
@@ -238,6 +262,11 @@ pub struct HereDoc {
     /// quotes; with a quoted one, it is taken as it is.
     pub body: Word,
     pub expand: bool,
+    /// The delimiter, and as it was written, quotes and all.
+    pub delimiter: String,
+    pub written: String,
+    /// `<<-`: tabs were taken from the start of each line.
+    pub strip_tabs: bool,
 }
 
 /// A word, as its parts were written.
@@ -279,6 +308,8 @@ pub struct ParamExp {
     pub op: ParamOp,
     /// `${!name}`: indirection.
     pub indirect: bool,
+    /// Written in braces: `${x}`, which prints as written.
+    pub braced: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -314,6 +345,9 @@ pub enum ParamOp {
     Toggle(bool, Option<Word>),
     /// `${name@Q}` and the other transformations.
     Transform(char),
+    /// `${name@...}` with no transformation of that name: bash's error
+    /// once the parameter is set.
+    BadTransform(String),
     /// `${!prefix*}` (false) or `${!prefix@}` (true).
     Names(bool),
     /// `${!name[@]}` (true) or `${!name[*]}`: the array's keys.

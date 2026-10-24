@@ -17,7 +17,7 @@ mod misc;
 
 use std::rc::Rc;
 
-pub use declare::{DeclArg, declare_line, run_declaration, set_option};
+pub use declare::{DeclArg, declare_line, double_quote, quote_key, run_declaration, set_option};
 pub use io::{Escapes, escapes, read_line};
 pub use misc::KEYWORDS;
 
@@ -45,7 +45,7 @@ macro_rules! table {
 }
 
 table! {
-    "." => source, ". file [arguments]", "Run the commands of a file in this shell.";
+    "." => source, ". filename [arguments]", "Run the commands of a file in this shell.";
     ":" => colon, ": [arguments]", "Do nothing, successfully.";
     "[" => crate::cond::test_builtin, "[ expression ]", "Evaluate a conditional expression.";
     "alias" => misc::alias, "alias [-p] [name[=value] ...]", "Define or show aliases.";
@@ -92,7 +92,7 @@ table! {
     "set" => declare::set, "set [-abefhkmnptuvxBCEHPT] [-o option] [--] [argument ...]", "Set options and the positional parameters.";
     "shift" => shift, "shift [n]", "Drop positional parameters.";
     "shopt" => declare::shopt, "shopt [-pqsu] [-o] [name ...]", "Set the shell's optional behaviours.";
-    "source" => source, "source file [arguments]", "Run the commands of a file in this shell.";
+    "source" => source, "source filename [arguments]", "Run the commands of a file in this shell.";
     "suspend" => job::suspend, "suspend [-f]", "Stop the shell until it is continued.";
     "test" => crate::cond::test_builtin, "test [expression]", "Evaluate a conditional expression.";
     "times" => misc::times, "times", "Show the CPU time the shell and its children used.";
@@ -261,9 +261,9 @@ pub fn flags(
 fn count(shell: &Shell, name: &str, arg: Option<&String>) -> Result<i64, i32> {
     match arg {
         None => Ok(1),
-        Some(text) => match text.trim().parse::<i64>() {
-            Ok(n) => Ok(n),
-            Err(_) => {
+        Some(text) => match legal_number(text) {
+            Some(n) => Ok(n),
+            None => {
                 shell.error(&format!("{name}: {text}: numeric argument required"));
                 Err(2)
             }
@@ -271,18 +271,33 @@ fn count(shell: &Shell, name: &str, arg: Option<&String>) -> Result<i64, i32> {
     }
 }
 
-/// A status argument (`exit 3`, `return 1`), as a byte.
+/// A status argument (`exit 3`, `return 1`), as a byte: a decimal number
+/// of 64 bits, as bash reads one, or in POSIX mode, as dash, one from 0
+/// to 2^31 - 1.
 fn status_arg(shell: &Shell, name: &str, arg: Option<&String>) -> Result<Option<i32>, i32> {
-    match arg {
-        None => Ok(None),
-        Some(text) => match crate::arith::parse_number(text.trim()) {
-            Some(n) if !text.trim().is_empty() => Ok(Some((n & 0xff) as i32)),
-            _ => {
-                shell.error(&format!("{name}: {text}: numeric argument required"));
-                Err(2)
-            }
-        },
+    let Some(text) = arg else { return Ok(None) };
+    match legal_number(text) {
+        Some(n) if !shell.posix() || (0..=i64::from(i32::MAX)).contains(&n) => {
+            Ok(Some((n & 0xff) as i32))
+        }
+        _ => {
+            shell.error(&format!("{name}: {text}: numeric argument required"));
+            Err(2)
+        }
     }
+}
+
+/// A decimal number as bash's `legal_number` reads one: white space before
+/// it, blanks after, a sign, and no more than 64 bits; not `010` as octal
+/// or `0x10` at all.
+pub fn legal_number(text: &str) -> Option<i64> {
+    let text = text.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\x0b');
+    let text = text.trim_end_matches([' ', '\t']);
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 // The builtins of this file.
@@ -305,40 +320,64 @@ fn continue_(shell: &mut Shell, args: &[String]) -> Res {
 
 fn leave_loops(shell: &mut Shell, args: &[String], is_break: bool) -> Res {
     let name = &args[0];
+    // A count that is no number ends the script: with 128 as bash ends
+    // it, or as dash with 2, which also ends it for a count below 1.
     let n = match count(shell, name, args.get(1)) {
         Ok(n) => n,
-        Err(status) => return Err(Flow::Fatal(status)),
+        Err(status) => return Err(Flow::Fatal(if shell.posix() { status } else { 128 })),
     };
-    if n < 1 {
+    if n < 1 && shell.posix() {
         shell.error(&format!("{name}: {n}: loop count out of range"));
-        return Err(Flow::Fatal(1));
+        return Err(Flow::Fatal(2));
     }
     if shell.loops == 0 {
-        if shell.posix() {
-            return Ok(0);
+        if !shell.posix() {
+            shell.error(&format!("{name}: only meaningful in a `for', `while', or `until' loop"));
         }
-        shell.error(&format!("{name}: only meaningful in a `for', `while', or `until' loop"));
         return Ok(0);
     }
-    let n = (n as u32).min(shell.loops);
+    // The loops left end with break's own status, as in bash: 0, or 1 for
+    // a count out of range, which leaves every loop.
+    if n < 1 {
+        shell.error(&format!("{name}: {n}: loop count out of range"));
+        shell.status = 1;
+        return Err(Flow::Break(shell.loops));
+    }
+    shell.status = 0;
+    let n = u32::try_from(n).unwrap_or(u32::MAX).min(shell.loops);
     Err(if is_break { Flow::Break(n) } else { Flow::Continue(n) })
 }
 
 fn return_(shell: &mut Shell, args: &[String]) -> Res {
     if shell.frames.is_empty() {
         shell.error("return: can only `return' from a function or sourced script");
-        return Ok(1);
+        return Ok(2);
     }
     let status = match status_arg(shell, "return", args.get(1)) {
-        Ok(status) => status.unwrap_or(shell.status),
+        Ok(status) => {
+            one_operand(shell, "return", args)?;
+            status.unwrap_or(shell.status)
+        }
         Err(status) => status,
     };
     Err(Flow::Return(status))
 }
 
+/// bash's check that `exit` and `return` have one operand at most: more
+/// abandon the command. dash takes the first.
+fn one_operand(shell: &mut Shell, name: &str, args: &[String]) -> Result<(), Flow> {
+    if args.len() > 2 && !shell.posix() {
+        return Err(shell.discard(&format!("{name}: too many arguments")));
+    }
+    Ok(())
+}
+
 fn exit(shell: &mut Shell, args: &[String]) -> Res {
     let status = match status_arg(shell, "exit", args.get(1)) {
-        Ok(status) => status.or(shell.trap_status).unwrap_or(shell.status),
+        Ok(status) => {
+            one_operand(shell, "exit", args)?;
+            status.or(shell.trap_status).unwrap_or(shell.status)
+        }
         Err(status) => status,
     };
     if shell.interactive && shell.subshell == 0 {
@@ -367,9 +406,12 @@ fn logout(shell: &mut Shell, args: &[String]) -> Res {
 }
 
 fn shift(shell: &mut Shell, args: &[String]) -> Res {
+    // A count that is no number fails shift, as in bash; it ends a POSIX
+    // script, as dash's.
     let n = match count(shell, "shift", args.get(1)) {
         Ok(n) => n,
-        Err(status) => return Err(Flow::Fatal(status)),
+        Err(status) if shell.posix() => return Err(Flow::Fatal(status)),
+        Err(_) => return Ok(1),
     };
     if n < 0 {
         shell.error(&format!("shift: {n}: shift count out of range"));
@@ -413,15 +455,21 @@ fn eval(shell: &mut Shell, args: &[String]) -> Res {
     }
     shell.syntax_failed = false;
     let source = shell.source.clone();
-    let result = shell.eval_text(&text, &source);
+    let result = shell.eval_text(&text, &source, "eval");
     syntax_result(shell, result)
 }
 
 /// A syntax error in text `eval` or `.` read ends a POSIX shell's script
-/// (the builtins are special); otherwise it is the builtin's status.
+/// (the builtins are special); otherwise the builtin fails with 2 and the
+/// script goes on, as in bash.
 fn syntax_result(shell: &mut Shell, result: Res) -> Res {
-    if std::mem::take(&mut shell.syntax_failed) && shell.posix() && !shell.interactive {
-        return Err(Flow::Exit(2));
+    if std::mem::take(&mut shell.syntax_failed) {
+        if shell.posix() && !shell.interactive {
+            return Err(Flow::Exit(2));
+        }
+        if let Err(Flow::Fatal(status)) = result {
+            return Ok(status);
+        }
     }
     result
 }
@@ -463,21 +511,26 @@ fn source(shell: &mut Shell, args: &[String]) -> Res {
         shell.error(&format!("{name}: {file}: restricted"));
         return Ok(1);
     }
+    // A file that cannot be read ends a POSIX shell's script, as `.` is a
+    // special builtin; in bash, `.` fails with 1 and the script goes on.
+    let failed = |shell: &mut Shell, message: String| {
+        shell.error(&message);
+        if shell.posix() { Err(Flow::Fatal(1)) } else { Ok(1) }
+    };
     let path = find_sourced(shell, file);
     let bytes = match path.as_deref().map(|p| std::fs::read(text::to_os(p))) {
         Some(Ok(bytes)) => bytes,
+        Some(Err(error)) if error.raw_os_error() == Some(libc::EISDIR) => {
+            return failed(shell, format!("{name}: {file}: is a directory"));
+        }
         Some(Err(error)) => {
             let message = match error.raw_os_error() {
                 Some(code) => sys::describe(&std::io::Error::from_raw_os_error(code)),
                 None => error.to_string(),
             };
-            shell.error(&format!("{file}: {message}"));
-            return Err(Flow::Fatal(1));
+            return failed(shell, format!("{file}: {message}"));
         }
-        None => {
-            shell.error(&format!("{name}: {file}: file not found"));
-            return Err(Flow::Fatal(1));
-        }
+        None => return failed(shell, format!("{name}: {file}: file not found")),
     };
     let path = path.unwrap_or_default();
     let new_args = (args.len() > 2).then(|| args[2..].to_vec());
@@ -492,7 +545,7 @@ fn source(shell: &mut Shell, args: &[String]) -> Res {
         saved_opts: None,
     });
     shell.syntax_failed = false;
-    let result = shell.run_text(&text::decode(&bytes), file_name);
+    let result = shell.run_text(&text::decode(&bytes), file_name, None);
     shell.frames.pop();
     shell.source = saved_source;
     shell.lineno = saved_line;

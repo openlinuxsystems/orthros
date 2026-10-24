@@ -73,21 +73,26 @@ impl History {
     }
 }
 
-/// Parses a history file: entries with times, or one entry per line if
-/// it has no times.
+/// Parses a history file: an entry per line, but the lines after a time
+/// line are one entry, up to the next time line (as readline reads them
+/// with `lithist`), so that a multi-line command comes back whole. Lines
+/// before the first time line, as in a file bash wrote without times
+/// that this shell then added to, are an entry each.
 fn parse_file(data: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
-    let timed = data.lines().any(is_time_line);
     let mut time = 0;
+    // Whether a time line came, and the next line starts a timed entry.
+    let mut timed = false;
+    // Whether the lines that come are more of the last entry.
     let mut open = false;
     for line in data.lines() {
         if is_time_line(line) {
             time = line[1..].parse().unwrap_or(0);
+            timed = true;
             open = false;
             continue;
         }
-        if timed && open {
-            // More lines of a multi-line entry.
+        if open {
             if let Some(last) = entries.last_mut() {
                 last.line.push('\n');
                 last.line.push_str(line);
@@ -95,7 +100,7 @@ fn parse_file(data: &str) -> Vec<Entry> {
             continue;
         }
         entries.push(Entry { line: line.to_string(), time });
-        open = timed;
+        open = core::mem::take(&mut timed);
     }
     entries
 }
@@ -338,23 +343,33 @@ fn join_naively(line: &str) -> String {
 fn replace_file(path: &str, data: &[u8]) -> bool {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    // A history file that is a symbolic link (dotfiles kept elsewhere) is
+    // replaced where the link points, as readline writes through it, so
+    // that the link stays and its target keeps the history.
+    let path = std::fs::canonicalize(text::to_os(path))
+        .map_or_else(|_| path.to_string(), |real| text::from_os(real.as_os_str()));
     let temp = format!("{path}.{}.tmp", sys::getpid());
     // Made new, and readable only by the user until it has the old file's
     // permissions: never another file, or a link, already at that name.
+    // On the disk before the rename, so that a crash leaves the old file
+    // or the new one, never an empty one.
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(text::to_os(&temp))
-        .and_then(|mut file| file.write_all(data));
+        .and_then(|mut file| {
+            file.write_all(data)?;
+            file.sync_all()
+        });
     if written.is_err() {
         let _ = std::fs::remove_file(text::to_os(&temp));
         return false;
     }
-    if let Ok(meta) = std::fs::metadata(text::to_os(path)) {
+    if let Ok(meta) = std::fs::metadata(text::to_os(&path)) {
         let _ = std::fs::set_permissions(text::to_os(&temp), meta.permissions());
     }
-    if std::fs::rename(text::to_os(&temp), text::to_os(path)).is_err() {
+    if std::fs::rename(text::to_os(&temp), text::to_os(&path)).is_err() {
         let _ = std::fs::remove_file(text::to_os(&temp));
         return false;
     }
@@ -900,7 +915,7 @@ pub fn fc(shell: &mut Shell, args: &[String]) -> Res {
             shell.history.entries.pop();
         }
         shell.add_history(&line);
-        return shell.eval_text(&line, "fc");
+        return shell.eval_text(&line, "fc", "fc");
     }
     if entries.is_empty() {
         shell.error("fc: no command found");
@@ -941,15 +956,19 @@ pub fn fc(shell: &mut Shell, args: &[String]) -> Res {
         .or_else(|| shell.get("EDITOR"))
         .unwrap_or_else(|| "nano".into());
     let commands: String = range.iter().map(|&i| format!("{}\n", entries[i].line)).collect();
-    let path = format!("/tmp/nukesh-fc-{}-{}", sys::getpid(), sys::now().1);
-    if std::fs::write(text::to_os(&path), text::encode(&commands)).is_err() {
-        shell.error(&format!("fc: {path}: cannot make a file to edit"));
+    let dir = shell.get("TMPDIR").filter(|dir| !dir.is_empty()).unwrap_or_else(|| "/tmp".into());
+    let (pid, nanos) = (sys::getpid(), sys::now().1);
+    let names =
+        (0..100).map(|n| format!("{}/nukesh-fc-{pid}-{nanos}-{n}", dir.trim_end_matches('/')));
+    let Some(path) = make_edit_file(names, &text::encode(&commands)) else {
+        shell.error(&format!("fc: cannot make a file to edit in {dir}"));
         return Ok(1);
-    }
+    };
     if own {
         shell.history.entries.pop();
     }
-    let status = shell.eval_text(&format!("{editor} {}", crate::expand::quote(&path)), "fc")?;
+    let status =
+        shell.eval_text(&format!("{editor} {}", crate::expand::quote(&path)), "fc", "fc")?;
     let edited = std::fs::read(text::to_os(&path)).map(|d| text::decode(&d));
     let _ = std::fs::remove_file(text::to_os(&path));
     if status != 0 || editor == "-" {
@@ -958,12 +977,78 @@ pub fn fc(shell: &mut Shell, args: &[String]) -> Res {
     let Ok(edited) = edited else { return Ok(1) };
     let _ = sys::write_all(2, &text::encode(&edited));
     shell.add_history(edited.trim_end());
-    shell.eval_text(&edited, "fc")
+    shell.eval_text(&edited, "fc", "fc")
+}
+
+/// Makes the file `fc` hands the editor, holding `data`, at the first of
+/// `names` where nothing is yet, as mkstemp does: made new, so that a file
+/// or a symbolic link someone put at the name is never written through,
+/// and readable by its owner alone, as the commands may hold secrets.
+fn make_edit_file(names: impl Iterator<Item = String>, data: &[u8]) -> Option<String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    for path in names {
+        let made = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(text::to_os(&path));
+        match made {
+            Ok(mut file) => {
+                if file.write_all(data).is_err() {
+                    drop(file);
+                    let _ = std::fs::remove_file(text::to_os(&path));
+                    return None;
+                }
+                return Some(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fc_never_writes_through_what_is_at_its_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nukesh-fc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let taken = dir.join("a");
+        std::os::unix::fs::symlink(&victim, &taken).unwrap();
+        let names = ["a", "b"].map(|n| dir.join(n).to_string_lossy().into_owned());
+        let path = make_edit_file(names.clone().into_iter(), b"echo secret\n").unwrap();
+        assert_eq!(path, dir.join("b").to_string_lossy());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo secret\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+        // With every name taken, there is no file.
+        assert!(make_edit_file(names.into_iter(), b"").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_linked_history_file_is_replaced_where_it_points() {
+        let dir = std::env::temp_dir().join(format!("nukesh-histlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let real = dir.join("real");
+        std::fs::write(&real, "old\n").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(replace_file(&link.to_string_lossy(), b"new\n"));
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn history_files_keep_times_and_lines() {
@@ -974,6 +1059,14 @@ mod tests {
         assert_eq!(parse_file(&format_entries(&entries)), entries);
         // A file without times has a command a line.
         assert_eq!(parse_file("a\nb\n").len(), 2);
+        // One that bash wrote without times and this shell added to keeps
+        // the old commands apart.
+        let mixed = parse_file("ls\ncd /\necho old\n#30\nfor i in 1\ndo :\ndone\n");
+        let lines: Vec<_> = mixed.iter().map(|e| (e.line.as_str(), e.time)).collect();
+        assert_eq!(
+            lines,
+            [("ls", 0), ("cd /", 0), ("echo old", 0), ("for i in 1\ndo :\ndone", 30)]
+        );
     }
 
     #[test]

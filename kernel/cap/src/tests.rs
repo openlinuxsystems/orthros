@@ -219,6 +219,28 @@ fn derivation_depth_is_bounded() {
 }
 
 #[test]
+fn copying_and_deleting_in_turn_never_deepens() {
+    // A shell saving a descriptor and putting it back: copy, delete the
+    // first, copy back, delete the copy; far more rounds than MAX_DEPTH.
+    let mut caps = store();
+    let mut bin = Bin::default();
+    let a = caps.create_space(3).unwrap();
+    caps.create(at(a, 0), ObjectKind::Thread).unwrap();
+    caps.derive(at(a, 0), at(a, 1), Derivation::COPY).unwrap();
+    for _ in 0..4 * u32::from(MAX_DEPTH) {
+        caps.derive(at(a, 1), at(a, 2), Derivation::COPY).unwrap();
+        caps.delete(at(a, 1), &mut bin.sink()).unwrap();
+        caps.derive(at(a, 2), at(a, 1), Derivation::COPY).unwrap();
+        caps.delete(at(a, 2), &mut bin.sink()).unwrap();
+    }
+    assert_eq!(caps.depth(at(a, 1)), Ok(2));
+    caps.derive(at(a, 1), at(a, 2), Derivation::COPY).unwrap();
+    assert_eq!(caps.depth(at(a, 1)), Ok(1));
+    assert_eq!(caps.depth(at(a, 2)), Ok(2));
+    caps.audit().unwrap();
+}
+
+#[test]
 fn sealed_capabilities_round_trip_through_the_store() {
     let mut caps = store();
     let client = caps.create_space(4).unwrap();
@@ -587,12 +609,35 @@ impl Model {
         found
     }
 
-    fn may_derive(&self, from: (u32, u32), to: (u32, u32), cap: &Capability) -> bool {
-        (from.0 == to.0 || cap.rights().contains(Rights::TRANSFER))
-            && self.nodes[&from].depth < MAX_DEPTH
+    /// How many parents `at` has above it.
+    fn distance(&self, at: (u32, u32)) -> u8 {
+        let mut steps = 0;
+        let mut up = self.nodes[&at].parent;
+        while let Some(parent) = up {
+            steps += 1;
+            up = self.nodes[&parent].parent;
+        }
+        steps
     }
 
+    fn may_derive(&self, from: (u32, u32), to: (u32, u32), cap: &Capability) -> bool {
+        (from.0 == to.0 || cap.rights().contains(Rights::TRANSFER))
+            && self.distance(from) < MAX_DEPTH
+    }
+
+    /// A capability derived from `parent`: the depths from `parent` up
+    /// become their distances from the root first.
     fn add(&mut self, at: (u32, u32), cap: Capability, parent: Option<(u32, u32)>) {
+        if let Some(parent) = parent {
+            let mut depth = self.distance(parent);
+            let mut up = Some(parent);
+            while let Some(key) = up {
+                let node = self.nodes.get_mut(&key).unwrap();
+                node.depth = depth;
+                depth = depth.saturating_sub(1);
+                up = node.parent;
+            }
+        }
         let depth = parent.map_or(0, |p| self.nodes[&p].depth + 1);
         self.nodes.insert(at, Node { cap, parent, depth });
         if let Some(id) = cap.id() {

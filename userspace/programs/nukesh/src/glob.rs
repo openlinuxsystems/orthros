@@ -5,7 +5,8 @@
 //!
 //! The pattern is split at its slashes; a part with nothing special in it
 //! is taken as it is, and a part with a pattern is matched against the
-//! names in the directory reached so far. Names that start with a dot need
+//! names in the directory reached so far. What comes before the first part
+//! with a pattern is kept as written, as in bash: `a//*` gives `a//b`. Names that start with a dot need
 //! a dot in the pattern (unless `dotglob`), and `.` and `..` match only
 //! themselves, unless `dots` (as in dash, where `.*` matches them too).
 //! The matches are sorted by their bytes, as in the C locale.
@@ -27,13 +28,15 @@ pub struct GlobOptions {
 
 /// The paths `pattern` matches, sorted; none if it matches nothing.
 pub fn glob(pattern: &str, options: GlobOptions) -> Vec<String> {
-    let absolute = pattern.starts_with('/');
     let parts: Vec<&str> = split_slashes(pattern);
     let trailing_slash = pattern.ends_with('/') && pattern.len() > 1;
-    let mut paths: Vec<String> = vec![if absolute { "/".into() } else { String::new() }];
-    let mut literal_tail = false;
     let count = parts.len();
-    for (i, part) in parts.iter().enumerate() {
+    let first =
+        parts.iter().position(|part| pattern::has_meta(part, options.extglob)).unwrap_or(count - 1);
+    let start = parts[first].as_ptr() as usize - pattern.as_ptr() as usize;
+    let mut paths: Vec<String> = vec![pattern::unescape(&pattern[..start])];
+    let mut literal_tail = false;
+    for (i, part) in parts.iter().enumerate().skip(first) {
         if part.is_empty() {
             continue;
         }
@@ -42,18 +45,23 @@ pub fn glob(pattern: &str, options: GlobOptions) -> Vec<String> {
         if options.globstar && *part == "**" {
             for path in &paths {
                 if last {
-                    // `**` at the end matches every file and directory.
-                    walk(path, options, false, &mut next);
-                } else {
-                    next.push(path.clone());
-                    walk(path, options, true, &mut next);
-                }
-            }
-            if last {
-                for path in &mut next {
-                    if path.len() > 1 {
-                        *path = path.trim_end_matches('/').to_string();
+                    // `**` at the end matches every file and directory
+                    // below, and the directory itself: as written if
+                    // nothing before it was a pattern, as bash gives it.
+                    let below = next.len();
+                    walk(path, options, false, false, &mut next);
+                    for found in &mut next[below..] {
+                        *found = without_slash(found);
                     }
+                    if !path.is_empty() && is_dir(path) {
+                        next.push(if i == first { path.clone() } else { without_slash(path) });
+                    }
+                } else {
+                    // A trailing `**/` lists links to directories too,
+                    // though no `**` goes into them.
+                    let links = parts[i + 1..].iter().all(|part| part.is_empty());
+                    next.push(path.clone());
+                    walk(path, options, true, links, &mut next);
                 }
             }
             paths = next;
@@ -152,6 +160,14 @@ fn join(path: &str, name: &str, last: bool) -> String {
     out
 }
 
+/// `path` without its trailing slashes, unless it is only slashes.
+fn without_slash(path: &str) -> String {
+    match path.trim_end_matches('/') {
+        "" if !path.is_empty() => "/".into(),
+        trimmed => trimmed.into(),
+    }
+}
+
 fn is_dir(path: &str) -> bool {
     std::fs::metadata(text::to_os(path.trim_end_matches('/'))).is_ok_and(|m| m.is_dir())
         || path == "/"
@@ -162,8 +178,9 @@ fn exists(path: &str) -> bool {
 }
 
 /// What is below `path`, for `**`: directories with a trailing slash,
-/// and unless `dirs_only`, files too.
-fn walk(path: &str, options: GlobOptions, dirs_only: bool, out: &mut Vec<String>) {
+/// and unless `dirs_only`, files too. A link to a directory is not gone
+/// into, and with `dirs_only` is left out unless `links`.
+fn walk(path: &str, options: GlobOptions, dirs_only: bool, links: bool, out: &mut Vec<String>) {
     let dir = if path.is_empty() { "." } else { path };
     let Ok(entries) = std::fs::read_dir(text::to_os(dir)) else { return };
     let mut names: Vec<String> =
@@ -178,9 +195,11 @@ fn walk(path: &str, options: GlobOptions, dirs_only: bool, out: &mut Vec<String>
         if meta.is_dir() {
             let full = full + "/";
             out.push(full.clone());
-            walk(&full, options, dirs_only, out);
+            walk(&full, options, dirs_only, links, out);
         } else if !dirs_only {
             out.push(full);
+        } else if links && meta.is_symlink() && is_dir(&full) {
+            out.push(full + "/");
         }
     }
 }

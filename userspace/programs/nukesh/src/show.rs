@@ -4,10 +4,18 @@
 //! The syntax tree as shell text again: for `declare -f`, `type`, the
 //! commands `jobs` lists, and `set -x` of compound commands.
 //!
-//! Functions come out laid out as bash lays them out, four spaces to a
-//! level; everything else on one line.
+//! Functions and jobs come out laid out as bash lays them out, four
+//! spaces to a level; everything else on one line. A job's text is laid
+//! out as a function's is but for lists, which stay on one line, as bash
+//! has them outside a function: `while :; do` and its `done` have lines
+//! of their own, `{ a; b; }` does not.
+//!
+//! One difference from bash is deliberate: a simple command run as a
+//! coprocess comes out without the array's name, `coproc cat`, which
+//! reads back as it was, where bash's `coproc COPROC cat` would run
+//! `COPROC`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crate::ast::*;
 
@@ -15,6 +23,38 @@ thread_local! {
     /// Here-document bodies written out after the line their redirection
     /// is on.
     static PENDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// A job's text is being laid out.
+    static JOB: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Lays out a job's text with `write`.
+fn job(write: impl FnOnce(&mut String)) -> String {
+    let mut out = String::new();
+    let outer = JOB.replace(true);
+    write(&mut out);
+    JOB.set(outer);
+    drop_pending();
+    out
+}
+
+/// A command as the text of the job that runs it.
+pub fn job_line(cmd: &Command) -> String {
+    job(|out| command(cmd, 0, out))
+}
+
+/// A compound command, without redirections, as a job's text.
+pub fn job_compound(compound: &CompoundCommand) -> String {
+    job(|out| compound_multi(compound, 0, out))
+}
+
+/// An and-or list as a job's text.
+pub fn job_and_or(list: &AndOr) -> String {
+    job(|out| multi_and_or(list, 0, out))
+}
+
+/// A pipeline as a job's text.
+pub fn job_pipeline(p: &Pipeline) -> String {
+    job(|out| multi_pipeline(p, 0, out))
 }
 
 /// Ends a line of a function's text, and puts after it the bodies of the
@@ -36,21 +76,54 @@ fn drop_pending() {
 /// A function definition, as `declare -f` prints it.
 pub fn function(def: &FunctionDef) -> String {
     let mut out = format!("{} () ", def.name);
-    newline(&mut out);
-    command(&def.body, 0, &mut out);
+    function_body(&def.body, 0, &mut out);
     newline(&mut out);
     out
 }
 
-/// A command on one line.
-pub fn one_line(cmd: &Command) -> String {
+/// A function's body, after its name, on the lines after it: a group, as
+/// bash shows every one, around any other compound command.
+fn function_body(body: &Command, level: usize, out: &mut String) {
+    newline(out);
+    indent(level, out);
+    if let Command::Compound(compound, ..) = body
+        && matches!(**compound, CompoundCommand::Brace(_))
+    {
+        command(body, level, out);
+    } else {
+        out.push_str("{ ");
+        newline(out);
+        indent(level + 1, out);
+        command(body, level + 1, out);
+        newline(out);
+        indent(level, out);
+        out.push('}');
+    }
+}
+
+/// Whether here-document bodies wait for the end of the line.
+fn pending() -> bool {
+    PENDING.with(|pending| !pending.borrow().is_empty())
+}
+
+/// A simple command on one line.
+pub fn simple_line(simple: &SimpleCommand) -> String {
     let mut out = String::new();
-    flat_command(cmd, &mut out);
+    flat_simple(simple, &mut out);
+    drop_pending();
+    out
+}
+
+/// A compound command on one line, without redirections.
+pub fn compound_line(compound: &CompoundCommand) -> String {
+    let mut out = String::new();
+    flat_compound(compound, &mut out);
     drop_pending();
     out
 }
 
 /// An and-or list on one line.
+#[cfg(test)]
 pub fn and_or_line(list: &AndOr) -> String {
     let mut out = String::new();
     flat_and_or(list, &mut out);
@@ -62,14 +135,6 @@ pub fn and_or_line(list: &AndOr) -> String {
 pub fn program_line(program: &Program) -> String {
     let mut out = String::new();
     flat_program(program, &mut out);
-    drop_pending();
-    out
-}
-
-/// A pipeline on one line.
-pub fn pipeline_line(p: &Pipeline) -> String {
-    let mut out = String::new();
-    flat_pipeline(p, &mut out);
     drop_pending();
     out
 }
@@ -89,22 +154,137 @@ fn command(cmd: &Command, level: usize, out: &mut String) {
                 redirect(r, out);
             }
         }
-        other => flat_command(other, out),
+        // One inside a body, as bash shows it; in a job's text too, laid
+        // out as a function is.
+        Command::Function(def) => {
+            out.push_str("function ");
+            out.push_str(&def.name);
+            out.push_str(" () ");
+            let outer = JOB.replace(false);
+            function_body(&def.body, level, out);
+            JOB.set(outer);
+        }
+        Command::Coproc(coproc) => {
+            coproc_head(coproc, out);
+            command(&coproc.command, level, out);
+        }
+        Command::Simple(_) => flat_command(cmd, out),
     }
 }
 
-fn body(program: &Program, level: usize, out: &mut String) {
-    for complete in &program.commands {
-        for (and_or, sep) in &complete.items {
+/// `coproc`, and the array's name before a compound command.
+fn coproc_head(coproc: &Coproc, out: &mut String) {
+    out.push_str("coproc ");
+    if !matches!(coproc.command, Command::Simple(_)) {
+        out.push_str(&coproc.name);
+        out.push(' ');
+    }
+}
+
+/// A body, a command a line, as bash shows it: each line indented to
+/// `level` and ended, but a command after `&` goes on its line. A `;`
+/// ends each command but the last of a group, a function or a case arm
+/// (`!last_semicolon`), and but one with here-documents, whose bodies
+/// follow its line, then a blank line.
+fn body(program: &Program, level: usize, last_semicolon: bool, out: &mut String) {
+    items(program, level, last_semicolon, false, out);
+}
+
+/// [`body`], or with `subshell` the inside of `( )`: on the line of the
+/// `(`, the lines after it indented to its level, ending before the `)`.
+fn items(program: &Program, level: usize, last_semicolon: bool, subshell: bool, out: &mut String) {
+    if JOB.get() {
+        job_items(program, level, last_semicolon, subshell, out);
+        return;
+    }
+    let items: Vec<_> = program.commands.iter().flat_map(|c| &c.items).collect();
+    let mut on_line = subshell;
+    for (i, (and_or, sep)) in items.iter().enumerate() {
+        let last = i + 1 == items.len();
+        if !on_line {
             indent(level, out);
-            multi_and_or(and_or, level, out);
-            out.push_str(match sep {
-                Sep::Async => " &",
-                Sep::Seq => ";",
-            });
-            newline(out);
+        }
+        multi_and_or(and_or, level, out);
+        let heredocs = pending();
+        match sep {
+            Sep::Async => out.push_str(" &"),
+            Sep::Seq if heredocs || last && (subshell || !last_semicolon) => {}
+            Sep::Seq => out.push(';'),
+        }
+        if *sep == Sep::Async && !last && !heredocs {
+            out.push(' ');
+            on_line = true;
+            continue;
+        }
+        if last && subshell {
+            break;
+        }
+        newline(out);
+        if heredocs {
+            out.push('\n');
+        }
+        on_line = false;
+    }
+}
+
+/// [`items`] in a job's text: on one line, indented to `level` and ended
+/// unless `inline` in a group or a subshell.
+fn job_items(
+    program: &Program,
+    level: usize,
+    last_semicolon: bool,
+    inline: bool,
+    out: &mut String,
+) {
+    let items: Vec<_> = program.commands.iter().flat_map(|c| &c.items).collect();
+    if !inline {
+        indent(level, out);
+    }
+    for (i, (and_or, sep)) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        multi_and_or(and_or, level, out);
+        match sep {
+            Sep::Async => out.push_str(" &"),
+            Sep::Seq if i + 1 == items.len() && !last_semicolon => {}
+            Sep::Seq => out.push(';'),
         }
     }
+    if !inline {
+        newline(out);
+    }
+}
+
+/// `if`, with its `elif`s shown as bash shows them: an `if` in an `else`.
+fn if_multi(
+    arms: &[(Program, Program)],
+    otherwise: Option<&Program>,
+    level: usize,
+    out: &mut String,
+) {
+    let Some(((cond, then), rest)) = arms.split_first() else { return };
+    out.push_str("if ");
+    flat_program(cond, out);
+    out.push_str("; then");
+    newline(out);
+    body(then, level + 1, true, out);
+    if !rest.is_empty() {
+        indent(level, out);
+        out.push_str("else");
+        newline(out);
+        indent(level + 1, out);
+        if_multi(rest, otherwise, level + 1, out);
+        out.push(';');
+        newline(out);
+    } else if let Some(otherwise) = otherwise {
+        indent(level, out);
+        out.push_str("else");
+        newline(out);
+        body(otherwise, level + 1, true, out);
+    }
+    indent(level, out);
+    out.push_str("fi");
 }
 
 fn multi_and_or(list: &AndOr, level: usize, out: &mut String) {
@@ -127,7 +307,8 @@ fn multi_pipeline(p: &Pipeline, level: usize, out: &mut String) {
     }
     for (i, cmd) in p.commands.iter().enumerate() {
         if i > 0 {
-            out.push_str(if p.pipe_stderr[i - 1] { " |& " } else { " | " });
+            // `|&` as what it stands for, as bash shows it.
+            out.push_str(if p.pipe_stderr[i - 1] { " 2>&1 | " } else { " | " });
         }
         command(cmd, level, out);
     }
@@ -135,35 +316,25 @@ fn multi_pipeline(p: &Pipeline, level: usize, out: &mut String) {
 
 fn compound_multi(compound: &CompoundCommand, level: usize, out: &mut String) {
     match compound {
+        CompoundCommand::Brace(program) if JOB.get() => {
+            out.push_str("{ ");
+            job_items(program, level, true, true, out);
+            out.push_str(" }");
+        }
         CompoundCommand::Brace(program) => {
             out.push_str("{ ");
             newline(out);
-            body(program, level + 1, out);
+            body(program, level + 1, false, out);
             indent(level, out);
             out.push('}');
         }
-        CompoundCommand::Subshell(program) => {
+        CompoundCommand::Subshell(program, _) => {
+            // As bash shows it: a command a line, at the subshell's level.
             out.push_str("( ");
-            flat_program(program, out);
+            items(program, level, false, true, out);
             out.push_str(" )");
         }
-        CompoundCommand::If { arms, otherwise } => {
-            for (i, (cond, then)) in arms.iter().enumerate() {
-                out.push_str(if i == 0 { "if " } else { "elif " });
-                flat_program(cond, out);
-                out.push_str("; then");
-                newline(out);
-                body(then, level + 1, out);
-                indent(level, out);
-            }
-            if let Some(otherwise) = otherwise {
-                out.push_str("else");
-                newline(out);
-                body(otherwise, level + 1, out);
-                indent(level, out);
-            }
-            out.push_str("fi");
-        }
+        CompoundCommand::If { arms, otherwise } => if_multi(arms, otherwise.as_ref(), level, out),
         CompoundCommand::While { cond, body: inner }
         | CompoundCommand::Until { cond, body: inner } => {
             out.push_str(if matches!(compound, CompoundCommand::While { .. }) {
@@ -174,7 +345,7 @@ fn compound_multi(compound: &CompoundCommand, level: usize, out: &mut String) {
             flat_program(cond, out);
             out.push_str("; do");
             newline(out);
-            body(inner, level + 1, out);
+            body(inner, level + 1, true, out);
             indent(level, out);
             out.push_str("done");
         }
@@ -195,24 +366,26 @@ fn compound_multi(compound: &CompoundCommand, level: usize, out: &mut String) {
             }
             out.push(';');
             newline(out);
+            indent(level, out);
             out.push_str("do");
             newline(out);
-            body(inner, level + 1, out);
+            body(inner, level + 1, true, out);
             indent(level, out);
             out.push_str("done");
         }
         CompoundCommand::ArithFor { init, cond, step, body: inner, .. } => {
             out.push_str("for ((");
-            raw_word(init, out);
+            arith_part(init, out);
             out.push_str("; ");
-            raw_word(cond, out);
+            arith_part(cond, out);
             out.push_str("; ");
-            raw_word(step, out);
+            arith_part(step, out);
             out.push_str("))");
             newline(out);
+            indent(level, out);
             out.push_str("do");
             newline(out);
-            body(inner, level + 1, out);
+            body(inner, level + 1, true, out);
             indent(level, out);
             out.push_str("done");
         }
@@ -231,7 +404,7 @@ fn compound_multi(compound: &CompoundCommand, level: usize, out: &mut String) {
                 }
                 out.push(')');
                 newline(out);
-                body(&arm.body, level + 2, out);
+                body(&arm.body, level + 2, false, out);
                 indent(level + 1, out);
                 out.push_str(match arm.end {
                     CaseEnd::Break => ";;",
@@ -296,32 +469,7 @@ fn flat_pipeline(p: &Pipeline, out: &mut String) {
 
 fn flat_command(cmd: &Command, out: &mut String) {
     match cmd {
-        Command::Simple(simple) => {
-            let mut first = true;
-            let mut sep = |out: &mut String| {
-                if !first {
-                    out.push(' ');
-                }
-                first = false;
-            };
-            for a in &simple.assigns {
-                sep(out);
-                assign(a, out);
-            }
-            for (i, w) in simple.words.iter().enumerate() {
-                sep(out);
-                // A reserved word that a redirection before it kept from
-                // being one (`<&- esac`) is escaped, as it comes first here.
-                if i == 0 && w.as_literal().is_some_and(crate::parse::is_reserved) {
-                    out.push('\\');
-                }
-                word(w, out);
-            }
-            for r in &simple.redirects {
-                sep(out);
-                redirect(r, out);
-            }
-        }
+        Command::Simple(simple) => flat_simple(simple, out),
         Command::Compound(compound, redirects) => {
             flat_compound(compound, out);
             for r in redirects {
@@ -334,6 +482,37 @@ fn flat_command(cmd: &Command, out: &mut String) {
             out.push_str(" () ");
             flat_command(&def.body, out);
         }
+        Command::Coproc(coproc) => {
+            coproc_head(coproc, out);
+            flat_command(&coproc.command, out);
+        }
+    }
+}
+
+fn flat_simple(simple: &SimpleCommand, out: &mut String) {
+    let mut first = true;
+    let mut sep = |out: &mut String| {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+    };
+    for a in &simple.assigns {
+        sep(out);
+        assign(a, out);
+    }
+    for (i, w) in simple.words.iter().enumerate() {
+        sep(out);
+        // A reserved word that a redirection before it kept from being one
+        // (`<&- esac`) is escaped, as it comes first here.
+        if i == 0 && w.as_literal().is_some_and(crate::parse::is_reserved) {
+            out.push('\\');
+        }
+        word(w, out);
+    }
+    for r in &simple.redirects {
+        sep(out);
+        redirect(r, out);
     }
 }
 
@@ -344,10 +523,10 @@ fn flat_compound(compound: &CompoundCommand, out: &mut String) {
             flat_program(program, out);
             out.push_str("; }");
         }
-        CompoundCommand::Subshell(program) => {
-            out.push('(');
+        CompoundCommand::Subshell(program, _) => {
+            out.push_str("( ");
             flat_program(program, out);
-            out.push(')');
+            out.push_str(" )");
         }
         CompoundCommand::If { arms, otherwise } => {
             for (i, (cond, then)) in arms.iter().enumerate() {
@@ -396,11 +575,11 @@ fn flat_compound(compound: &CompoundCommand, out: &mut String) {
         }
         CompoundCommand::ArithFor { init, cond, step, body, .. } => {
             out.push_str("for ((");
-            raw_word(init, out);
+            arith_part(init, out);
             out.push_str("; ");
-            raw_word(cond, out);
+            arith_part(cond, out);
             out.push_str("; ");
-            raw_word(step, out);
+            arith_part(step, out);
             out.push_str(")); do ");
             flat_program(body, out);
             out.push_str("; done");
@@ -468,7 +647,16 @@ fn cond(expr: &CondExpr, out: &mut String) {
             out.push(' ');
             word(b, out);
         }
-        CondExpr::Word(w) => word(w, out),
+        // As bash shows it.
+        CondExpr::Word(w) => {
+            out.push_str("-n ");
+            word(w, out);
+        }
+        CondExpr::Group(a) => {
+            out.push_str("( ");
+            cond(a, out);
+            out.push_str(" )");
+        }
     }
 }
 
@@ -476,7 +664,7 @@ fn assign(a: &Assign, out: &mut String) {
     out.push_str(&a.name);
     if let Some(index) = &a.index {
         out.push('[');
-        raw_word(index, out);
+        subscript_word(index, out);
         out.push(']');
     }
     out.push_str(if a.append { "+=" } else { "=" });
@@ -490,7 +678,7 @@ fn assign(a: &Assign, out: &mut String) {
                 }
                 if let Some(key) = key {
                     out.push('[');
-                    raw_word(key, out);
+                    subscript_word(key, out);
                     out.push_str("]=");
                 }
                 word(w, out);
@@ -510,25 +698,34 @@ fn redirect(r: &Redirect, out: &mut String) {
         }
         None => {}
     }
-    // As bash lays them out: `> file`, `2>&1`, `0<> file`.
-    if r.op == RedirOp::ReadWrite && r.fd.is_none() {
-        out.push('0');
+    // As bash lays them out: `> file`, `2>&1`, `0<> file`, `0<&3`, and a
+    // close as `0>&-`.
+    if r.fd.is_none() {
+        match r.op {
+            RedirOp::ReadWrite | RedirOp::DupRead => out.push('0'),
+            RedirOp::DupWrite => out.push('1'),
+            _ => {}
+        }
     }
+    let close = matches!(&r.target, RedirTarget::Word(w) if w.as_literal() == Some("-"));
+    let strip_tabs = matches!(&r.target, RedirTarget::HereDoc(doc) if doc.borrow().strip_tabs);
     out.push_str(match r.op {
         RedirOp::Read => "<",
         RedirOp::Write => ">",
         RedirOp::Clobber => ">|",
         RedirOp::Append => ">>",
         RedirOp::ReadWrite => "<>",
+        RedirOp::DupRead if close => ">&",
         RedirOp::DupRead => "<&",
         RedirOp::DupWrite => ">&",
+        RedirOp::HereDoc if strip_tabs => "<<-",
         RedirOp::HereDoc => "<<",
         RedirOp::HereString => "<<<",
         RedirOp::WriteBoth => "&>",
         RedirOp::AppendBoth => "&>>",
     });
     match &r.target {
-        RedirTarget::Word(w) => {
+        RedirTarget::Word(w) | RedirTarget::Expanded(w, _) => {
             if !matches!(r.op, RedirOp::DupRead | RedirOp::DupWrite) {
                 out.push(' ');
             }
@@ -541,17 +738,9 @@ fn redirect(r: &Redirect, out: &mut String) {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
-            // A delimiter that no line of the body is.
-            let mut delimiter = "EOF".to_string();
-            while text.lines().any(|line| line == delimiter) {
-                delimiter.push('_');
-            }
-            if doc.expand {
-                out.push_str(&delimiter);
-            } else {
-                out.push_str(&format!("'{delimiter}'"));
-            }
-            text.push_str(&delimiter);
+            // The delimiter as it was written: no line of the body is it.
+            out.push_str(&doc.written);
+            text.push_str(&doc.delimiter);
             text.push('\n');
             PENDING.with(|pending| pending.borrow_mut().push(text));
         }
@@ -595,6 +784,33 @@ pub fn word_text(w: &Word) -> String {
     out
 }
 
+/// An expression of `for ((;;))`: an empty one as the 1 it stands for,
+/// as bash shows it.
+/// An expression of `for ((...))`: as written but for the blanks before
+/// it, as bash shows it, or 1 when there is none.
+fn arith_part(w: &Word, out: &mut String) {
+    let mut text = String::new();
+    raw_word(w, &mut text);
+    out.push_str(if text.trim().is_empty() { "1" } else { text.trim_start() });
+}
+
+/// A subscript as it was written, near enough: as `declare -f` shows it,
+/// and as bash names it in messages.
+pub fn subscript_text(w: &Word) -> String {
+    let mut out = String::new();
+    subscript_word(w, &mut out);
+    out
+}
+
+fn subscript_word(w: &Word, out: &mut String) {
+    for part in &w.parts {
+        match part {
+            WordPart::Lit(s) => out.push_str(s),
+            other => word_part(other, false, out),
+        }
+    }
+}
+
 /// A word whose parts are read as in double quotes (arithmetic), with no
 /// quotes added.
 fn raw_word(w: &Word, out: &mut String) {
@@ -622,7 +838,10 @@ fn word_part(part: &WordPart, in_double: bool, out: &mut String) {
                     out.push(c);
                 }
             } else {
-                out.push_str(&crate::expand::quote_always(s));
+                // In single quotes, whatever it holds, as bash shows it.
+                out.push('\'');
+                out.push_str(&s.replace('\'', "'\\''"));
+                out.push('\'');
             }
         }
         WordPart::Double(parts) => {
@@ -664,7 +883,7 @@ fn param(p: &ParamExp, out: &mut String) {
         ParamName::Positional(n) => n.to_string(),
         ParamName::Special(c) => c.to_string(),
     };
-    let simple = p.index.is_none() && matches!(p.op, ParamOp::None) && !p.indirect;
+    let simple = p.index.is_none() && matches!(p.op, ParamOp::None) && !p.indirect && !p.braced;
     if simple && !matches!(p.name, ParamName::Positional(n) if n > 9) {
         out.push('$');
         out.push_str(&name);
@@ -680,7 +899,7 @@ fn param(p: &ParamExp, out: &mut String) {
     out.push_str(&name);
     if let Some(index) = &p.index {
         out.push('[');
-        raw_word(index, out);
+        subscript_word(index, out);
         out.push(']');
     }
     let operand = |op: &str, w: &Word, out: &mut String| {
@@ -735,6 +954,10 @@ fn param(p: &ParamExp, out: &mut String) {
         ParamOp::Transform(t) => {
             out.push('@');
             out.push(*t);
+        }
+        ParamOp::BadTransform(text) => {
+            out.push('@');
+            out.push_str(text);
         }
         ParamOp::Names(all) => out.push(if *all { '@' } else { '*' }),
         ParamOp::Keys(all) => out.push_str(if *all { "[@]" } else { "[*]" }),

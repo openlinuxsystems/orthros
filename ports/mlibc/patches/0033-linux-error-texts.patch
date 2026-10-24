@@ -1,0 +1,337 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Gives strerror, perror and %m the words glibc gives each error number on
+Linux, with no "(ENOENT)" after them: "Permission denied", not "Access
+denied (EACCESS)", "File exists", not "File exists already (EEXIST)",
+so that every program's messages read as they do on Linux and the
+scripts that match them work. The texts are the host glibc 2.39's, read
+with strerror; numbers Linux leaves unused, and any other, are "Unknown
+error N" as there, and the XSI strerror_r fails with EINVAL for them, as
+glibc's does. Meant for upstream, for the Linux ABI.
+
+--- a/options/ansi/generic/string.cpp
++++ b/options/ansi/generic/string.cpp
+@@ -479,131 +479,187 @@
+ 	return ret;
+ }
+ 
+-char *strerror(int e) {
+-	const char *s;
+-	switch(e) {
+-	case 0: s = "Success"; break;
+-	case EAGAIN: s = "Operation would block (EAGAIN)"; break;
+-	case EACCES: s = "Access denied (EACCESS)"; break;
+-	case EBADF:  s = "Bad file descriptor (EBADF)"; break;
+-	case EEXIST: s = "File exists already (EEXIST)"; break;
+-	case EFAULT: s = "Access violation (EFAULT)"; break;
+-	case EINTR:  s = "Operation interrupted (EINTR)"; break;
+-	case EINVAL: s = "Invalid argument (EINVAL)"; break;
+-	case EIO:    s = "I/O error (EIO)"; break;
+-	case EISDIR: s = "Resource is directory (EISDIR)"; break;
+-	case ENOENT: s = "No such file or directory (ENOENT)"; break;
+-	case ENOMEM: s = "Out of memory (ENOMEM)"; break;
+-	case ENOTDIR: s = "Expected directory instead of file (ENOTDIR)"; break;
+-	case ENOSYS: s = "Operation not implemented (ENOSYS)"; break;
+-	case EPERM:  s = "Operation not permitted (EPERM)"; break;
+-	case EPIPE:  s = "Broken pipe (EPIPE)"; break;
+-	case ESPIPE: s = "Seek not possible (ESPIPE)"; break;
+-	case ENXIO: s = "No such device or address (ENXIO)"; break;
+-	case ENOEXEC: s = "Exec format error (ENOEXEC)"; break;
+-	case ENOSPC: s = "No space left on device (ENOSPC)"; break;
+-	case ENOTSOCK: s = "Socket operation on non-socket (ENOTSOCK)"; break;
+-	case ENOTCONN: s = "Transport endpoint is not connected (ENOTCONN)"; break;
+-	case EDOM: s = "Numerical argument out of domain (EDOM)"; break;
+-	case EILSEQ: s = "Invalid or incomplete multibyte or wide character (EILSEQ)"; break;
+-	case ERANGE: s = "Numerical result out of range (ERANGE)"; break;
+-	case E2BIG: s = "Argument list too long (E2BIG)"; break;
+-	case EADDRINUSE: s = "Address already in use (EADDRINUSE)"; break;
+-	case EADDRNOTAVAIL: s = "Cannot assign requested address (EADDRNOTAVAIL)"; break;
+-	case EAFNOSUPPORT: s = "Address family not supported by protocol (EAFNOSUPPORT)"; break;
+-	case EALREADY: s = "Operation already in progress (EALREADY)"; break;
+-	case EBADMSG: s = "Bad message (EBADMSG)"; break;
+-	case EBUSY: s = "Device or resource busy (EBUSY)"; break;
+-	case ECANCELED: s = "Operation canceled (ECANCELED)"; break;
+-	case ECHILD: s = "No child processes (ECHILD)"; break;
+-	case ECONNABORTED: s = "Software caused connection abort (ECONNABORTED)"; break;
+-	case ECONNREFUSED: s = "Connection refused (ECONNREFUSED)"; break;
+-	case ECONNRESET: s = "Connection reset by peer (ECONNRESET)"; break;
+-	case EDEADLK: s = "Resource deadlock avoided (EDEADLK)"; break;
+-	case EDESTADDRREQ: s = "Destination address required (EDESTADDRREQ)"; break;
+-	case EDQUOT: s = "Disk quota exceeded (EDQUOT)"; break;
+-	case EFBIG: s = "File too large (EFBIG)"; break;
+-	case EHOSTUNREACH: s = "No route to host (EHOSTUNREACH)"; break;
+-	case EIDRM: s = "Identifier removed (EIDRM)"; break;
+-	case EINPROGRESS: s = "Operation now in progress (EINPROGRESS)"; break;
+-	case EISCONN: s = "Transport endpoint is already connected (EISCONN)"; break;
+-	case ELOOP: s = "Too many levels of symbolic links (ELOOP)"; break;
+-	case EMFILE: s = "Too many open files (EMFILE)"; break;
+-	case EMLINK: s = "Too many links (EMLINK)"; break;
+-	case EMSGSIZE: s = "Message too long (EMSGSIZE)"; break;
+-	case EMULTIHOP: s = "Multihop attempted (EMULTIHOP)"; break;
+-	case ENAMETOOLONG: s = "File name too long (ENAMETOOLONG)"; break;
+-	case ENETDOWN: s = "Network is down (ENETDOWN)"; break;
+-	case ENETRESET: s = "Network dropped connection on reset (ENETRESET)"; break;
+-	case ENETUNREACH: s = "Network is unreachable (ENETUNREACH)"; break;
+-	case ENFILE: s = "Too many open files in system (ENFILE)"; break;
+-	case ENOBUFS: s = "No buffer space available (ENOBUFS)"; break;
+-	case ENODEV: s = "No such device (ENODEV)"; break;
+-	case ENOLCK: s = "No locks available (ENOLCK)"; break;
+-	case ENOLINK: s = "Link has been severed (ENOLINK)"; break;
+-	case ENOMSG: s = "No message of desired type (ENOMSG)"; break;
+-	case ENOPROTOOPT: s = "Protocol not available (ENOPROTOOPT)"; break;
+-	case ENOTEMPTY: s = "Directory not empty (ENOTEMPTY)"; break;
+-	case ENOTRECOVERABLE: s = "Sate not recoverable (ENOTRECOVERABLE)"; break;
+-	case ENOTSUP: s = "Operation not supported (ENOTSUP)"; break;
+-	case ENOTTY: s = "Inappropriate ioctl for device (ENOTTY)"; break;
+-	case EOVERFLOW: s = "Value too large for defined datatype (EOVERFLOW)"; break;
+-#if EOPNOTSUPP != ENOTSUP
+-	/* these are aliases on the mlibc abi */
+-	case EOPNOTSUPP: s = "Operation not supported (EOPNOTSUP)"; break;
+-#endif
+-	case EOWNERDEAD: s = "Owner died (EOWNERDEAD)"; break;
+-	case EPROTO: s = "Protocol error (EPROTO)"; break;
+-	case EPROTONOSUPPORT: s = "Protocol not supported (EPROTONOSUPPORT)"; break;
+-	case EPROTOTYPE: s = "Protocol wrong type for socket (EPROTOTYPE)"; break;
+-	case EROFS: s = "Read-only file system (EROFS)"; break;
+-	case ESRCH: s = "No such process (ESRCH)"; break;
+-	case ESTALE: s = "Stale file handle (ESTALE)"; break;
+-	case ETIMEDOUT: s = "Connection timed out (ETIMEDOUT)"; break;
+-	case ETXTBSY: s = "Text file busy (ETXTBSY)"; break;
+-	case EXDEV: s = "Invalid cross-device link (EXDEV)"; break;
+-	case ENODATA: s = "No data available (ENODATA)"; break;
+-	case ETIME: s = "Timer expired (ETIME)"; break;
+-	case ENOKEY: s = "Required key not available (ENOKEY)"; break;
+-	case ESHUTDOWN: s = "Cannot send after transport endpoint shutdown (ESHUTDOWN)"; break;
+-	case EHOSTDOWN: s = "Host is down (EHOSTDOWN)"; break;
+-	case EBADFD: s = "File descriptor in bad state (EBADFD)"; break;
+-	case ENOMEDIUM: s = "No medium found (ENOMEDIUM)"; break;
+-	case ENOTBLK: s = "Block device required (ENOTBLK)"; break;
+-	case ENONET: s = "Machine is not on the network (ENONET)"; break;
+-	case EPFNOSUPPORT: s = "Protocol family not supported (EPFNOSUPPORT)"; break;
+-	case ESOCKTNOSUPPORT: s = "Socket type not supported (ESOCKTNOSUPPORT)"; break;
+-	case ESTRPIPE: s = "Streams pipe error (ESTRPIPE)"; break;
+-	case EREMOTEIO: s = "Remote I/O error (EREMOTEIO)"; break;
+-	case ERFKILL: s = "Operation not possible due to RF-kill (ERFKILL)"; break;
+-	case EBADR: s = "Invalid request descriptor (EBADR)"; break;
+-	case EUNATCH: s = "Protocol driver not attached (EUNATCH)"; break;
+-	case EMEDIUMTYPE: s = "Wrong medium type (EMEDIUMTYPE)"; break;
+-	case EREMOTE: s = "Object is remote (EREMOTE)"; break;
+-	case EKEYREJECTED: s = "Key was rejected by service (EKEYREJECTED)"; break;
+-	case EUCLEAN: s = "Structure needs cleaning (EUCLEAN)"; break;
+-	case EBADSLT: s = "Invalid slot (EBADSLT)"; break;
+-	case ENOANO: s = "No anode (ENOANO)"; break;
+-	case ENOCSI: s = "No CSI structure available (ENOCSI)"; break;
+-	case ENOSTR: s = "Device not a stream (ENOSTR)"; break;
+-	case ETOOMANYREFS: s = "Too many references: cannot splice (ETOOMANYREFS)"; break;
+-	case ENOPKG: s = "Package not installed (ENOPKG)"; break;
+-	case EKEYREVOKED: s = "Key has been revoked (EKEYREVOKED)"; break;
+-	case EXFULL: s = "Exchange full (EXFULL)"; break;
+-	case ELNRNG: s = "Link number out of range (ELNRNG)"; break;
+-	case ENOTUNIQ: s = "Name not unique on network (ENOTUNIQ)"; break;
+-	case ERESTART: s = "Interrupted system call should be restarted (ERESTART)"; break;
+-	case EUSERS: s = "Too many users (EUSERS)"; break;
+-
+-#ifdef EIEIO
+-	case EIEIO: s = "Computer bought the farm; OS internal error (EIEIO)"; break;
+-#endif
++namespace {
+ 
+-	default:
+-		s = "Unknown error code (?)";
+-	}
+-	return const_cast<char *>(s);
++// What each error number means, in the words glibc 2.39 gives them on
++// Linux, so that messages read as they do there. Numbers Linux does not
++// use have none.
++const char *const error_texts[] = {
++	"Success", // 0
++	"Operation not permitted", // EPERM
++	"No such file or directory", // ENOENT
++	"No such process", // ESRCH
++	"Interrupted system call", // EINTR
++	"Input/output error", // EIO
++	"No such device or address", // ENXIO
++	"Argument list too long", // E2BIG
++	"Exec format error", // ENOEXEC
++	"Bad file descriptor", // EBADF
++	"No child processes", // ECHILD
++	"Resource temporarily unavailable", // EAGAIN
++	"Cannot allocate memory", // ENOMEM
++	"Permission denied", // EACCES
++	"Bad address", // EFAULT
++	"Block device required", // ENOTBLK
++	"Device or resource busy", // EBUSY
++	"File exists", // EEXIST
++	"Invalid cross-device link", // EXDEV
++	"No such device", // ENODEV
++	"Not a directory", // ENOTDIR
++	"Is a directory", // EISDIR
++	"Invalid argument", // EINVAL
++	"Too many open files in system", // ENFILE
++	"Too many open files", // EMFILE
++	"Inappropriate ioctl for device", // ENOTTY
++	"Text file busy", // ETXTBSY
++	"File too large", // EFBIG
++	"No space left on device", // ENOSPC
++	"Illegal seek", // ESPIPE
++	"Read-only file system", // EROFS
++	"Too many links", // EMLINK
++	"Broken pipe", // EPIPE
++	"Numerical argument out of domain", // EDOM
++	"Numerical result out of range", // ERANGE
++	"Resource deadlock avoided", // EDEADLOCK
++	"File name too long", // ENAMETOOLONG
++	"No locks available", // ENOLCK
++	"Function not implemented", // ENOSYS
++	"Directory not empty", // ENOTEMPTY
++	"Too many levels of symbolic links", // ELOOP
++	nullptr, // 41
++	"No message of desired type", // ENOMSG
++	"Identifier removed", // EIDRM
++	"Channel number out of range", // ECHRNG
++	"Level 2 not synchronized", // EL2NSYNC
++	"Level 3 halted", // EL3HLT
++	"Level 3 reset", // EL3RST
++	"Link number out of range", // ELNRNG
++	"Protocol driver not attached", // EUNATCH
++	"No CSI structure available", // ENOCSI
++	"Level 2 halted", // EL2HLT
++	"Invalid exchange", // EBADE
++	"Invalid request descriptor", // EBADR
++	"Exchange full", // EXFULL
++	"No anode", // ENOANO
++	"Invalid request code", // EBADRQC
++	"Invalid slot", // EBADSLT
++	nullptr, // 58
++	"Bad font file format", // EBFONT
++	"Device not a stream", // ENOSTR
++	"No data available", // ENODATA
++	"Timer expired", // ETIME
++	"Out of streams resources", // ENOSR
++	"Machine is not on the network", // ENONET
++	"Package not installed", // ENOPKG
++	"Object is remote", // EREMOTE
++	"Link has been severed", // ENOLINK
++	"Advertise error", // EADV
++	"Srmount error", // ESRMNT
++	"Communication error on send", // ECOMM
++	"Protocol error", // EPROTO
++	"Multihop attempted", // EMULTIHOP
++	"RFS specific error", // EDOTDOT
++	"Bad message", // EBADMSG
++	"Value too large for defined data type", // EOVERFLOW
++	"Name not unique on network", // ENOTUNIQ
++	"File descriptor in bad state", // EBADFD
++	"Remote address changed", // EREMCHG
++	"Can not access a needed shared library", // ELIBACC
++	"Accessing a corrupted shared library", // ELIBBAD
++	".lib section in a.out corrupted", // ELIBSCN
++	"Attempting to link in too many shared libraries", // ELIBMAX
++	"Cannot exec a shared library directly", // ELIBEXEC
++	"Invalid or incomplete multibyte or wide character", // EILSEQ
++	"Interrupted system call should be restarted", // ERESTART
++	"Streams pipe error", // ESTRPIPE
++	"Too many users", // EUSERS
++	"Socket operation on non-socket", // ENOTSOCK
++	"Destination address required", // EDESTADDRREQ
++	"Message too long", // EMSGSIZE
++	"Protocol wrong type for socket", // EPROTOTYPE
++	"Protocol not available", // ENOPROTOOPT
++	"Protocol not supported", // EPROTONOSUPPORT
++	"Socket type not supported", // ESOCKTNOSUPPORT
++	"Operation not supported", // ENOTSUP
++	"Protocol family not supported", // EPFNOSUPPORT
++	"Address family not supported by protocol", // EAFNOSUPPORT
++	"Address already in use", // EADDRINUSE
++	"Cannot assign requested address", // EADDRNOTAVAIL
++	"Network is down", // ENETDOWN
++	"Network is unreachable", // ENETUNREACH
++	"Network dropped connection on reset", // ENETRESET
++	"Software caused connection abort", // ECONNABORTED
++	"Connection reset by peer", // ECONNRESET
++	"No buffer space available", // ENOBUFS
++	"Transport endpoint is already connected", // EISCONN
++	"Transport endpoint is not connected", // ENOTCONN
++	"Cannot send after transport endpoint shutdown", // ESHUTDOWN
++	"Too many references: cannot splice", // ETOOMANYREFS
++	"Connection timed out", // ETIMEDOUT
++	"Connection refused", // ECONNREFUSED
++	"Host is down", // EHOSTDOWN
++	"No route to host", // EHOSTUNREACH
++	"Operation already in progress", // EALREADY
++	"Operation now in progress", // EINPROGRESS
++	"Stale file handle", // ESTALE
++	"Structure needs cleaning", // EUCLEAN
++	"Not a XENIX named type file", // ENOTNAM
++	"No XENIX semaphores available", // ENAVAIL
++	"Is a named type file", // EISNAM
++	"Remote I/O error", // EREMOTEIO
++	"Disk quota exceeded", // EDQUOT
++	"No medium found", // ENOMEDIUM
++	"Wrong medium type", // EMEDIUMTYPE
++	"Operation canceled", // ECANCELED
++	"Required key not available", // ENOKEY
++	"Key has expired", // EKEYEXPIRED
++	"Key has been revoked", // EKEYREVOKED
++	"Key was rejected by service", // EKEYREJECTED
++	"Owner died", // EOWNERDEAD
++	"State not recoverable", // ENOTRECOVERABLE
++	"Operation not possible due to RF-kill", // ERFKILL
++	"Memory page has hardware error", // EHWPOISON
++};
++
++// The text for `e`, or null if it is no error number.
++const char *error_text(int e) {
++	if(e < 0 || static_cast<size_t>(e) >= sizeof(error_texts) / sizeof(*error_texts))
++		return nullptr;
++	return error_texts[e];
++}
++
++// "Unknown error N", as glibc words a number it does not know, cut to
++// fit `size` bytes with its NUL.
++void unknown_error(int e, char *buffer, size_t size) {
++	if(!size)
++		return;
++	char digits[16];
++	size_t n = 0;
++	unsigned int magnitude = e < 0 ? 0u - static_cast<unsigned int>(e) : static_cast<unsigned int>(e);
++	do {
++		digits[n++] = static_cast<char>('0' + magnitude % 10);
++		magnitude /= 10;
++	} while(magnitude);
++	if(e < 0)
++		digits[n++] = '-';
++	size_t at = mlibc::strlcpy(buffer, "Unknown error ", size);
++	if(at >= size)
++		return;
++	while(n && at + 1 < size)
++		buffer[at++] = digits[--n];
++	buffer[at] = '\0';
++}
++
++} // namespace
++
++char *strerror(int e) {
++	if(auto s = error_text(e))
++		return const_cast<char *>(s);
++	static thread_local char unknown[32];
++	unknown_error(e, unknown, sizeof(unknown));
++	return unknown;
+ }
++
+ // strlen() is defined in options/internals.
+ 
+ extern "C" char *__gnu_strerror_r(int e, char *buffer, size_t bufsz) {
+@@ -615,6 +671,11 @@
+ // POSIX extensions.
+ 
+ int strerror_r(int e, char *buffer, size_t bufsz) {
++	// A number that is no error is EINVAL, with glibc's words for it.
++	if(!error_text(e)) {
++		unknown_error(e, buffer, bufsz);
++		return EINVAL;
++	}
+ 	auto s = strerror(e);
+ 	// POSIX: implementations are encouraged to null terminate strerrbuf when failing with
+ 	// [ERANGE] for any size other than bufsz of zero
