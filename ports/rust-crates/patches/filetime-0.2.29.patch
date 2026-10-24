@@ -2,12 +2,13 @@ SPDX-FileCopyrightText: Alex Crichton and the filetime crate authors
 SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: MIT OR Apache-2.0
 
-filetime sets a path's times on Radix with utimensat on the path, as it
-does on the BSDs. Elsewhere it opens the file for reading and sets the
-times through that handle, which Radix refuses: a file's capability
-needs the write right for that (ADR 0076), where Linux lets the file's
-owner do it through any descriptor. `cp -p` and `touch -r` failed with
-EACCES.
+filetime sets a path's times by opening the file for reading and
+setting them through that handle, which Radix refuses: a file's
+capability needs the write right for that (ADR 0076), where Linux lets
+the file's owner do it through any descriptor. `touch` on an existing
+file, `cp -p` and `install -p` failed with EACCES. On Radix it now sets
+them with utimensat on the path, through the module it uses on the BSDs
+for symbolic links' times, which Radix uses for those too.
 
 --- a/filetime-0.2.29/src/lib.rs
 +++ b/filetime-0.2.29/src/lib.rs
