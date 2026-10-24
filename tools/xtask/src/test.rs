@@ -2221,15 +2221,21 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("spark: 1 services in /system/tests/services, 1 enabled")?;
     vm.expect("Domains: `spark` made domain `hog` below `services` (service class, weight 100)")?;
+    vm.expect("spark: started hog (/system/tests/posix/hog) as process ")?;
+    // Spark copies the program's own lines into the log when it reads
+    // them, which may be after the kernel's line that stops it (as under
+    // KVM), so each round looks only for the kernel's lines and Spark's.
     for wait in ["0.1", "0.2"] {
-        vm.expect("spark: started hog (/system/tests/posix/hog) as process ")?;
-        vm.expect("hog: taking memory")?;
         vm.expect("Out of memory: stopped domain `hog` (service class")?;
         vm.expect("spark: hog (process ")?;
         vm.expect(" was ended by signal 9 (stopped by the out-of-memory policy)")?;
         vm.expect(&format!("spark: starting hog again in {wait} s"))?;
+        vm.expect("spark: started hog (/system/tests/posix/hog) as process ")?;
     }
-    vm.expect("spark: started hog (/system/tests/posix/hog) as process ")
+    if !vm.log().contains("hog: taking memory") {
+        return Err("the log does not show hog's own line, \"hog: taking memory\"".into());
+    }
+    Ok(())
 }
 
 fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
