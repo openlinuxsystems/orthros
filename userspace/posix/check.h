@@ -36,11 +36,13 @@ static inline void check_failed(const char *file, int line, const char *what, in
 	check_failures++;
 }
 
-// Checks that `condition` holds; if not, says so, with errno as it was.
+// Checks that `condition` holds; if not, says so, with errno as the
+// condition left it (the error of the call in it, if one failed).
 #define CHECK(condition) \
 	do { \
+		int check_ok_ = !!(condition); \
 		int check_errno_ = errno; \
-		if(!(condition)) \
+		if(!check_ok_) \
 			check_failed(__FILE__, __LINE__, #condition, check_errno_); \
 	} while(0)
 

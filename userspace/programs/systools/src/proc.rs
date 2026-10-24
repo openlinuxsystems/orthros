@@ -26,6 +26,8 @@ pub struct Process {
     pub session: u64,
     /// Its controlling terminal, as `pts/N`.
     pub terminal: Option<String>,
+    /// That terminal's foreground process group, 0 for none.
+    pub terminal_group: Option<u64>,
     /// What it is doing: running, sleeping, disk, stopped or zombie.
     pub run: String,
     /// When it was made, in nanoseconds since boot.
@@ -132,6 +134,7 @@ pub fn parse_status(text: &[u8]) -> Process {
             b"group" => p.group = number(value),
             b"session" => p.session = number(value),
             b"terminal" => p.terminal = (value != b"none").then(text),
+            b"terminal_group" => p.terminal_group = Some(number(value)),
             b"run" => p.run = text(),
             b"started_ns" => p.started_ns = number(value),
             b"user_ns" => p.user_ns = number(value),
@@ -487,13 +490,14 @@ mod tests {
     fn status_lines() {
         let p = parse_status(
             b"number: 12\nname: nukesh\nstate: running\nthreads: 1\nparent: 1\ngroup: 12\n\
-              session: 12\nterminal: pts/0\nrun: sleeping\nstarted_ns: 5000\nuser_ns: 10\n\
+              session: 12\nterminal: pts/0\nterminal_group: 12\nrun: sleeping\nstarted_ns: 5000\nuser_ns: 10\n\
               system_ns: 20\nnice: -5\nresident_memory: 1024 KiB\ntraced: no\n\
               directory: /home/a b\n",
         );
         assert_eq!(p.number, 12);
         assert_eq!(p.name, "nukesh");
         assert_eq!(p.terminal.as_deref(), Some("pts/0"));
+        assert_eq!(p.terminal_group, Some(12));
         assert_eq!(p.cpu_ns(), 30);
         assert_eq!(p.nice, -5);
         assert_eq!(p.resident_kib, 1024);

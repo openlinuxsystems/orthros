@@ -161,19 +161,7 @@ impl Match {
         }
         let mut ok = true;
         if let Some(pattern) = &self.pattern {
-            let text = if self.full {
-                let args = proc::cmdline(p.number);
-                if args.is_empty() {
-                    p.name.clone()
-                } else {
-                    args.iter()
-                        .map(|a| a.to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                }
-            } else {
-                p.name.clone()
-            };
+            let text = if self.full { command_line(p) } else { p.name.clone() };
             ok &= pattern.is_match(&text);
         }
         ok &= self.parents.is_empty() || self.parents.contains(&p.parent);
@@ -315,7 +303,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
     let mut found: Vec<Process> = proc::processes()
         .map_err(|e| util::fail_with(3, format!("/proc: {e}")))?
         .into_iter()
-        .filter(|p| !p.zombie() && m.matches(p, own))
+        .filter(|p| m.matches(p, own))
         .collect();
     if m.newest {
         found.sort_by_key(|p| p.started_ns);
@@ -354,11 +342,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
             .iter()
             .map(|p| {
                 if list_full {
-                    let args = proc::cmdline(p.number);
-                    let args: Vec<String> =
-                        args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-                    let text = if args.is_empty() { p.name.clone() } else { args.join(" ") };
-                    format!("{} {text}", p.number)
+                    format!("{} {}", p.number, command_line(p))
                 } else if list_name {
                     format!("{} {}", p.number, p.name)
                 } else {
@@ -371,6 +355,21 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
         }
     }
     Ok(if found.is_empty() { 1 } else { 0 })
+}
+
+/// The command line -f matches and -a prints, as procps has it: the
+/// arguments, or as ps shows a process without any, `[name]`, and
+/// `[name] <defunct>` for a zombie, which pgrep finds too.
+fn command_line(p: &Process) -> String {
+    if p.zombie() {
+        return format!("[{}] <defunct>", p.name);
+    }
+    let args = proc::cmdline(p.number);
+    if args.is_empty() {
+        format!("[{}]", p.name)
+    } else {
+        args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+    }
 }
 
 pub fn pgrep(args: &mut Args) -> Result<i32, Fail> {

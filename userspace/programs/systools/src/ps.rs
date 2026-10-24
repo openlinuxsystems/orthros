@@ -129,6 +129,8 @@ struct Select {
     commands: Vec<String>,
     users: Vec<u32>,
     negate: bool,
+    /// BSD `r`: of those, only the running ones.
+    running: bool,
 }
 
 impl Select {
@@ -169,7 +171,7 @@ impl Select {
                 || self.commands.contains(&p.name)
                 || (!self.users.is_empty() && self.users.contains(&0))
         };
-        chosen != self.negate
+        chosen != self.negate && (!self.running || proc::run_letter(&p.run) == 'R')
     }
 }
 
@@ -262,7 +264,7 @@ fn bsd(options: &mut Options, word: &str) -> Result<(), Fail> {
             'h' => options.no_headers = true,
             'H' | 'm' => options.threads = Threads::AsProcesses,
             'w' => options.wide = true,
-            'r' => {} // Running ones only: taken as all of them.
+            'r' => options.select.running = true,
             'c' | 'S' | 'T' | 'X' | 'n' | 'Z' => {}
             _ => return Err(usage(format!("unsupported option (BSD syntax) '{c}'"))),
         }
@@ -442,7 +444,19 @@ impl Row<'_> {
         if p.threads > 1 {
             s.push('l');
         }
+        if self.terminal_group() == p.group as i128 {
+            s.push('+');
+        }
         s
+    }
+
+    /// TPGID: its terminal's foreground process group, -1 without a
+    /// terminal.
+    fn terminal_group(&self) -> i128 {
+        match (&self.p.terminal, self.p.terminal_group) {
+            (Some(_), Some(group)) => group as i128,
+            _ => -1,
+        }
     }
 
     fn command(&self, wide_args: bool) -> String {
@@ -576,7 +590,7 @@ impl Row<'_> {
             "minflt" => p.minor_faults.to_string(),
             "f" => "0".into(),
             "addr" => "-".into(),
-            "tpgid" => "-1".into(),
+            "tpgid" => self.terminal_group().to_string(),
             "ioclass" => format!("{}/{}", p.io_class, p.io_level),
             "domain" => p.domain.clone(),
             _ => "?".into(),
@@ -595,7 +609,11 @@ impl Row<'_> {
             "c" | "pcpu" => (self.pcpu(ctx) * 1000.0) as i128,
             "pmem" | "rss" => p.resident_kib as i128,
             "vsz" | "sz" => p.virtual_kib as i128,
-            "stime" | "start" | "lstart" | "etime" | "etimes" => -(p.started_ns as i128),
+            // The oldest first by when they started, the newest by how
+            // long they have run, as procps sorts them.
+            "stime" | "start" | "lstart" => p.started_ns as i128,
+            "etime" | "etimes" => -(p.started_ns as i128),
+            "tpgid" => self.terminal_group(),
             "ni" => self.nice() as i128,
             "pri" | "priority" | "rtprio" => self.thread.map_or(p.priority, |t| t.priority) as i128,
             "psr" => self.first().map_or(0, |t| t.cpu as i128),
@@ -845,6 +863,40 @@ mod tests {
         let numbers: Vec<(u64, usize)> =
             order.iter().map(|&(i, d)| (processes[i].number, d)).collect();
         assert_eq!(numbers, vec![(1, 0), (2, 1), (3, 2), (4, 1), (9, 0)]);
+    }
+
+    #[test]
+    fn foreground_groups_and_start_order() {
+        let p = Process {
+            number: 7,
+            group: 7,
+            session: 5,
+            run: "running".into(),
+            terminal: Some("pts/1".into()),
+            terminal_group: Some(7),
+            started_ns: 10,
+            ..Process::default()
+        };
+        let row = |p| Row { p, thread: None, threads: &[], args: &[], depth: 0 };
+        assert_eq!(row(&p).stat(), "R+");
+        assert_eq!(row(&p).terminal_group(), 7);
+        let background = Process { group: 6, ..p.clone() };
+        assert_eq!(row(&background).stat(), "R");
+        let detached = Process { terminal: None, terminal_group: None, ..p.clone() };
+        assert_eq!(row(&detached).terminal_group(), -1);
+        // procps sorts start times oldest first, elapsed times newest
+        // first.
+        let ctx = Context { now_mono: 100, boot_ns: 0, memory_kib: 1, page_kib: 4, now_s: 0 };
+        let later = Process { started_ns: 20, ..p.clone() };
+        let key = |name: &str| format(name).unwrap().remove(0).key;
+        let value = |p, name: &str| row(p).sort_value(&key(name), &ctx).0;
+        assert!(value(&p, "start_time") < value(&later, "start_time"));
+        assert!(value(&p, "lstart") < value(&later, "lstart"));
+        assert!(value(&p, "etime") > value(&later, "etime"));
+        // BSD `r`: only the running ones.
+        let select = Select { all: true, running: true, ..Select::default() };
+        assert!(select.selects(&p, None));
+        assert!(!select.selects(&Process { run: "sleeping".into(), ..p.clone() }, None));
     }
 
     #[test]

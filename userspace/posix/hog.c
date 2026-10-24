@@ -16,13 +16,16 @@ static void *volatile last;
 int main(void) {
 	printf("hog: taking memory\n");
 	fflush(stdout);
-	for(size_t mib = 1;; mib++) {
+	// The MiB taken: only the blocks it got.
+	size_t mib = 0;
+	for(;;) {
 		volatile char *block = malloc(1 << 20);
 		if(!block) {
 			// A failed allocation is not the end: the policy stops us.
 			usleep(10000);
 			continue;
 		}
+		mib++;
 		// A write to every page, so each is really there.
 		for(size_t at = 0; at < 1 << 20; at += 4096)
 			block[at] = (char)mib;

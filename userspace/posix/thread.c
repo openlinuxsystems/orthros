@@ -154,6 +154,9 @@ static void signals(void) {
 	CHECK(atomic_load(&caught) && pthread_equal(caught_on, thread));
 	atomic_store(&stop, 1);
 	CHECK(pthread_join(thread, NULL) == 0);
+	// For the next one that waits (names' waiter, which must not end
+	// while it is named).
+	atomic_store(&stop, 0);
 	signal(SIGUSR1, SIG_DFL);
 }
 

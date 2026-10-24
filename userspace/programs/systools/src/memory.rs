@@ -27,16 +27,35 @@ enum Unit {
 fn show(kib: u64, unit: Unit) -> String {
     match unit {
         Unit::Scaled(bytes) => (kib * 1024 / bytes).to_string(),
-        Unit::Human { si } => {
-            let text = util::human(kib * 1024, si);
-            // free(1) says B, Ki, Mi...
-            match text.chars().last() {
-                Some(c) if c.is_ascii_alphabetic() && !si => format!("{text}i"),
-                Some(c) if c.is_ascii_digit() => format!("{text}B"),
-                _ => text,
+        Unit::Human { si } => human(kib.saturating_mul(1024), si),
+    }
+}
+
+/// `bytes` as procps' free -h prints them, which is not as coreutils
+/// does: in the first unit where the amount fits four characters (five
+/// with the binary units' i), with one decimal rounded to the nearest
+/// while that fits and then whole, cut down (15.7 GiB is 15Gi, and
+/// 9.96 GiB 9Gi, since 10.0Gi does not fit).
+fn human(bytes: u64, si: bool) -> String {
+    if bytes < 1000 {
+        return format!("{bytes}B");
+    }
+    let (base, width, suffix) = if si { (1000.0, 4, "") } else { (1024.0, 5, "i") };
+    let mut scale = 1.0;
+    let mut text = String::new();
+    for unit in ["K", "M", "G", "T", "P", "E"] {
+        scale *= base;
+        let value = bytes as f64 / scale;
+        for candidate in
+            [format!("{value:.1}{unit}{suffix}"), format!("{}{unit}{suffix}", value as u64)]
+        {
+            if candidate.len() <= width {
+                return candidate;
             }
+            text = candidate;
         }
     }
+    text
 }
 
 /// free(1).
@@ -411,4 +430,37 @@ fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit
         text += &format!(" {}", util::local_time(now_s, "%Y-%m-%d %H:%M:%S"));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_as_procps_free_prints_them() {
+        // KiB, then free -h and free -h --si as the host's procps-ng 4.0.4
+        // printed them for that MemTotal.
+        for (kib, binary, si) in [
+            (0, "0B", "0B"),
+            (1, "1.0Ki", "1.0K"),
+            (976, "976Ki", "999K"),
+            (977, "977Ki", "1.0M"),
+            (1000, "1.0Mi", "1.0M"),
+            (9472, "9.2Mi", "9.7M"),
+            (9727, "9.5Mi", "9M"),
+            (9984, "9.8Mi", "10M"),
+            (10188, "9.9Mi", "10M"),
+            (10189, "9Mi", "10M"),
+            (10240, "10Mi", "10M"),
+            (15260, "14Mi", "15M"),
+            (976_562, "953Mi", "999M"),
+            (1_023_488, "999Mi", "1.0G"),
+            (1_048_575, "1.0Gi", "1.1G"),
+            (10_433_332, "9Gi", "10G"),
+            (16_477_348, "15Gi", "16G"),
+        ] {
+            assert_eq!(show(kib, Unit::Human { si: false }), binary, "{kib}");
+            assert_eq!(show(kib, Unit::Human { si: true }), si, "{kib}");
+        }
+    }
 }

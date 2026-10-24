@@ -207,7 +207,16 @@ When a service ends, Spark logs how, and starts it again as its
 *restart* says: after 0.1 seconds, and twice as long after each end in a
 row that came less than 10 seconds after its start, up to 30 seconds. A
 service that the out-of-memory policy stopped is logged as such, and
-started again the same way.
+started again the same way. Processes a service started stay in its
+domain; when the service's own process ends and some of them still
+run, Spark stops the domain, as systemd ends a unit's control group, and
+starts the service again only once the domain is empty:
+
+```
+spark: web (process 40) exited with code 0x1
+spark: web left 2 threads behind; stopping its domain
+spark: starting web again in 0.1 s
+```
 
 ```
 spark: consoled (process 12) was ended by signal 15
@@ -233,7 +242,8 @@ with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
 
 *status*
 	A line per service, its fields by tabs: its name; *running*,
-	*waiting* (to be started again), *stopped* or *disabled*; its
+	*waiting* (to be started again), *stopping* (what it left behind
+	is ending), *stopped* or *disabled*; its
 	process number or *-*; how often it was started again; the wait
 	status of its last end, or *-*; its *restart*; its description. A
 	pending shutdown adds a line *#*, *shutdown*, its end and the
@@ -242,7 +252,9 @@ with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
 *start* | *stop* | *restart* _name_
 	Start a service, stop one and keep it stopped until it is started
 	again, or stop one and start it again, whatever its *restart*
-	says. Stopping sends it SIGTERM.
+	says. Stopping sends it SIGTERM; one that has not ended 5 seconds
+	later has its domain stopped, as systemd sends SIGKILL after
+	TimeoutStopSec.
 
 # SHUTTING DOWN
 
@@ -417,6 +429,15 @@ _name_ *holds no FAT filesystem; left alone*
 *spark: could not start* _name_*:* _reason_
 	A service could not be started: its domain, its process or *exec*
 	failed. Spark tries again as after a quick end.
+
+*spark:* _name_ *did not end in 5 s; stopping its domain*
+	A service asked to stop or restart ignored SIGTERM: Spark stops
+	every process in its domain.
+
+*spark:* _name_ *left* _n_ *threads behind; stopping its domain*
+	The service's process ended, and processes it started still ran:
+	Spark stops them, and starts the service again, if it does, once
+	they are gone.
 
 _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory policy)*
 	Memory ran out and the kernel stopped the service's domain

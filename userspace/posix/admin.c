@@ -77,6 +77,16 @@ static const char *text_of(long number, char *buffer) {
 	return buffer;
 }
 
+// The foreground process group of this process's terminal.
+static pid_t foreground(void) {
+	int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC);
+	CHECK(tty >= 0);
+	pid_t group = tcgetpgrp(tty);
+	close(tty);
+	CHECK(group > 0);
+	return group;
+}
+
 // What /proc says of processes: this one's status, arguments and
 // threads, and the system's CPUs and load.
 static void proc(void) {
@@ -88,6 +98,8 @@ static void proc(void) {
 	snprintf(line, sizeof(line), "\ngroup: %d\n", getpgrp());
 	CHECK(strstr(text, line) != NULL);
 	CHECK(strstr(text, "\nterminal: pts/") != NULL);
+	snprintf(line, sizeof(line), "\nterminal_group: %d\n", foreground());
+	CHECK(strstr(text, line) != NULL);
 	CHECK(strstr(text, "\nio_class: none\n") != NULL);
 	CHECK(strstr(text, "\ntraced: no\n") != NULL);
 	CHECK(strstr(text, "\nuser_ns: ") != NULL);
@@ -118,6 +130,12 @@ static void processes(void) {
 	OUTPUT("", "spark\n", "/bin/ps", "-o", "comm=", "-p", "1");
 	CHECK(run_program((const char *const[]){"/bin/ps", "-o", "ppid=", "-p", me, NULL}, "", 0) == 0);
 	CHECK(atol(output) == getppid());
+	// TPGID is the terminal's foreground group, and STAT has a + when
+	// that is this process's group.
+	CHECK(run_program((const char *const[]){"/bin/ps", "-o", "tpgid=", "-p", me, NULL}, "", 0) == 0);
+	CHECK(atol(output) == foreground());
+	CHECK(run_program((const char *const[]){"/bin/ps", "-o", "stat=", "-p", me, NULL}, "", 0) == 0);
+	CHECK((strchr(output, '+') != NULL) == (foreground() == getpgrp()));
 	CONTAINS(" admin\n", "/bin/ps", "-e");
 	CONTAINS("USER", "/bin/ps", "aux");
 	CONTAINS("root", "/bin/ps", "aux");
@@ -162,6 +180,26 @@ static void processes(void) {
 	STATUS(0, "/bin/kill", "-s", "KILL", text_of(sleeper, number));
 	CHECK(waitpid(sleeper, &status, 0) == sleeper && WIFSIGNALED(status) &&
 			WTERMSIG(status) == SIGKILL);
+
+	// A child that ended and is not waited for yet is a zombie, which
+	// pgrep finds, as procps's does, and -a shows as ps shows it.
+	pid_t zombie = fork();
+	if(!zombie)
+		_exit(0);
+	text_of(zombie, number);
+	for(int i = 0; i < 500; i++) {
+		CHECK(run_program((const char *const[]){"/bin/ps", "-o", "stat=", "-p", number, NULL},
+					  "", 0) == 0);
+		if(output[0] == 'Z')
+			break;
+		nanosleep(&(struct timespec){.tv_nsec = 10000000}, NULL);
+	}
+	CHECK(output[0] == 'Z');
+	snprintf(expected, sizeof(expected), "%d\n", zombie);
+	OUTPUT("", expected, "/bin/pgrep", "-P", me, "-r", "Z");
+	snprintf(expected, sizeof(expected), "%d [admin] <defunct>\n", zombie);
+	OUTPUT("", expected, "/bin/pgrep", "-a", "-P", me);
+	CHECK(waitpid(zombie, &status, 0) == zombie && WIFEXITED(status));
 }
 
 // who, w, users and uptime: the runner's session on its terminal.
@@ -291,6 +329,30 @@ static void tracing(void) {
 	CHECK(waitpid(busy, &status, 0) == busy && WIFEXITED(status) && WEXITSTATUS(status) == 0);
 	CHECK(strstr(read_file(DIR "/attached", text, sizeof(text)), "+++ exited with 0 +++") !=
 			NULL);
+
+	// As strace: a command is found before anything starts, results line
+	// up at column 40, -r's times are six wide, and a command a signal
+	// ends ends rtrace by the same signal.
+	RUN_WITH(1, "", "rtrace: Cannot find executable 'nosuchcommand'\n", 0, "/bin/sh", "-c",
+			"/bin/rtrace nosuchcommand 2>&1");
+	RUN_WITH(1, "", "rtrace: Cannot stat '" DIR "/missing': No such file or directory\n", 0,
+			"/bin/sh", "-c", "/bin/rtrace " DIR "/missing 2>&1");
+	STATUS(0, "/bin/rtrace", "-r", "-o", DIR "/relative", "/bin/true");
+	read_file(DIR "/relative", text, sizeof(text));
+	CHECK(!strncmp(text, "     0.000000 ", 14));
+	const char *equals = strstr(text, " = ");
+	const char *start = equals;
+	while(start > text && start[-1] != '\n')
+		start--;
+	CHECK(equals && (equals - start == 39 || equals[-1] != ' '));
+	pid_t tracer = fork();
+	if(!tracer) {
+		execl("/bin/rtrace", "rtrace", "-o", "/dev/null", "/bin/sh", "-c", "kill -TERM $$",
+				(char *)NULL);
+		_exit(127);
+	}
+	CHECK(waitpid(tracer, &status, 0) == tracer && WIFSIGNALED(status) &&
+			WTERMSIG(status) == SIGTERM);
 }
 
 // dmesg and /dev/kmsg: a line written to the log, the records as they
@@ -394,6 +456,57 @@ static void watching(void) {
 	CONTAINS("kB_rd/s", "/bin/pidstat", "-d", "-p", me);
 	CONTAINS("TGID", "/bin/pidstat", "-t", "-p", me);
 	CONTAINS("Average:", "/bin/pidstat", "-p", me, "1", "1");
+	CONTAINS("  /system/tests/posix/admin\n", "/bin/pidstat", "-l", "-p", me);
+	CONTAINS("    USER", "/bin/pidstat", "-U", "-p", me);
+	CONTAINS("    root ", "/bin/pidstat", "-U", "root", "-p", me);
+	CONTAINS("  admin\n", "/bin/pidstat", "-G", "^adm", "-p", "ALL");
+	CONTAINS(" threads   fd-nr  Command\n", "/bin/pidstat", "-v", "-p", me);
+	CONTAINS("    0 NORMAL  admin\n", "/bin/pidstat", "-R", "-p", me);
+	// Users and names that none of them have.
+	CHECK(run_program((const char *const[]){"/bin/pidstat", "-U", "nosuchuser", "-p", me, NULL},
+				  "", 0) == 0);
+	CHECK(strstr(output, "admin") == NULL);
+	CHECK(run_program((const char *const[]){"/bin/pidstat", "-G", "^nosuchname$", "-p", "ALL",
+						  NULL},
+				  "", 0) == 0);
+	CHECK(strstr(output, "  Command\n") != NULL && strstr(output, "  Command\n")[10] == 0);
+	// -H: the time as seconds since the epoch, in the heading too.
+	CHECK(run_program((const char *const[]){"/bin/pidstat", "-H", "-p", me, NULL}, "", 0) == 0);
+	const char *heading = strstr(output, "\n\n");
+	char *end = NULL;
+	CHECK(heading && strtoll(heading + 2, &end, 10) > 1000000000LL && *end == ' ');
+	// One process in one report: one heading, the averages under it.
+	CHECK(run_program((const char *const[]){"/bin/pidstat", "-p", me, "1", "2", NULL}, "", 0) ==
+			0);
+	CHECK(strstr(output, "%usr") && !strstr(strstr(output, "%usr") + 1, "%usr"));
+	CHECK(strstr(output, "\nAverage:    ") != NULL);
+
+	// Interrupted, it prints the averages it has, as sysstat's does.
+	int fds[2];
+	CHECK(pipe(fds) == 0);
+	pid_t watcher = fork();
+	if(!watcher) {
+		dup2(fds[1], 1);
+		close(fds[0]);
+		close(fds[1]);
+		execl("/bin/pidstat", "pidstat", "-p", me, "1", (char *)NULL);
+		_exit(127);
+	}
+	close(fds[1]);
+	// After a report or two.
+	check_sleep_ms(2500);
+	kill(watcher, SIGINT);
+	char got[4096];
+	size_t len = 0;
+	ssize_t n;
+	while(len < sizeof(got) - 1 && (n = read(fds[0], got + len, sizeof(got) - 1 - len)) > 0)
+		len += n;
+	got[len] = 0;
+	close(fds[0]);
+	int status;
+	CHECK(waitpid(watcher, &status, 0) == watcher && WIFEXITED(status) &&
+			WEXITSTATUS(status) == 0);
+	CHECK(strstr(got, "  admin\n\nAverage:    ") != NULL);
 }
 
 // shutdown, reboot, poweroff, halt and service, through Spark's control

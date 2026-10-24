@@ -58,28 +58,30 @@ pub fn strip_os_error(error: &io::Error) -> String {
 }
 
 /// `bytes` with a unit, in powers of 1024 (`si`: of 1000), as `ls -h`
-/// and `df -h` print them: one decimal below 10, none above.
+/// and `df -h` print them: rounded up, with one decimal below 10 and
+/// none above, and carried into the next unit when it rounds up to one
+/// (1048575 bytes is 1.0M).
 pub fn human(bytes: u64, si: bool) -> String {
-    let base = if si { 1000.0 } else { 1024.0 };
-    let units = ["B", "K", "M", "G", "T", "P", "E"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= base && unit + 1 < units.len() {
-        value /= base;
+    let base: u128 = if si { 1000 } else { 1024 };
+    let units = ["", "K", "M", "G", "T", "P", "E"];
+    let bytes = u128::from(bytes);
+    let (mut unit, mut scale) = (0, 1);
+    while bytes >= scale * base && unit + 1 < units.len() {
+        scale *= base;
         unit += 1;
     }
+    // Rounded up, as coreutils does, so that a size never reads less.
+    let tenths = (bytes * 10).div_ceil(scale);
+    let whole = bytes.div_ceil(scale);
     if unit == 0 {
-        format!("{bytes}")
-    } else if value < 10.0 {
-        // Rounded up, as coreutils does, so that a size never reads less.
-        let tenths = (value * 10.0).ceil() / 10.0;
-        if tenths >= 10.0 {
-            format!("{:.0}{}", tenths, units[unit])
-        } else {
-            format!("{:.1}{}", tenths, units[unit])
-        }
+        bytes.to_string()
+    } else if tenths < 100 {
+        format!("{}.{}{}", tenths / 10, tenths % 10, units[unit])
+    } else if whole == base && unit + 1 < units.len() {
+        // Rounded up to the next unit, it is one of those.
+        format!("1.0{}", units[unit + 1])
     } else {
-        format!("{:.0}{}", value.ceil(), units[unit])
+        format!("{whole}{}", units[unit])
     }
 }
 
@@ -213,7 +215,8 @@ pub fn utf8_locale() -> bool {
 
 /// uname(2)'s system name, release and machine.
 pub fn uname() -> (String, String, String) {
-    let mut names: libc::utsname = unsafe_zeroed();
+    // SAFETY: all zeros is a valid utsname: arrays of bytes.
+    let mut names: libc::utsname = unsafe { zeroed() };
     // SAFETY: uname fills the structure it is given.
     if unsafe { libc::uname(&mut names) } != 0 {
         return ("Dukovo".into(), "unknown".into(), "x86_64".into());
@@ -236,9 +239,12 @@ pub fn hostname() -> String {
     String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
-/// The name of user `uid`, or its number if it has none.
-pub fn user_name(uid: u32) -> String {
-    let mut pw: libc::passwd = unsafe_zeroed();
+/// What `read` makes of user `uid`'s entry in the user database, if it
+/// has one.
+fn with_user<T>(uid: u32, read: impl FnOnce(&libc::passwd) -> T) -> Option<T> {
+    // SAFETY: all zeros is a valid passwd: numbers, and pointers that stay
+    // null until getpwuid_r fills them.
+    let mut pw: libc::passwd = unsafe { zeroed() };
     let mut buffer = vec![0u8; 1024];
     let mut found: *mut libc::passwd = std::ptr::null_mut();
     // SAFETY: every pointer is valid for the call; the buffer for its
@@ -246,16 +252,31 @@ pub fn user_name(uid: u32) -> String {
     let e = unsafe {
         libc::getpwuid_r(uid, &mut pw, buffer.as_mut_ptr().cast(), buffer.len(), &mut found)
     };
-    if e != 0 || found.is_null() || pw.pw_name.is_null() {
-        return uid.to_string();
-    }
-    // SAFETY: getpwuid_r set pw_name to a C string in the buffer.
-    unsafe { CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned()
+    (e == 0 && !found.is_null()).then(|| read(&pw))
+}
+
+/// The name of user `uid`, or its number if it has none.
+pub fn user_name(uid: u32) -> String {
+    with_user(uid, |pw| {
+        // SAFETY: getpwuid_r set pw_name to null or to a C string in the
+        // buffer, which lives until with_user returns.
+        (!pw.pw_name.is_null())
+            .then(|| unsafe { CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned())
+    })
+    .flatten()
+    .unwrap_or_else(|| uid.to_string())
+}
+
+/// User `uid`'s login group, as the user database gives it.
+pub fn login_group(uid: u32) -> Option<u32> {
+    with_user(uid, |pw| pw.pw_gid)
 }
 
 /// The name of group `gid`, or its number if it has none.
 pub fn group_name(gid: u32) -> String {
-    let mut gr: libc::group = unsafe_zeroed();
+    // SAFETY: all zeros is a valid group: numbers, and pointers that stay
+    // null until getgrgid_r fills them.
+    let mut gr: libc::group = unsafe { zeroed() };
     let mut buffer = vec![0u8; 4096];
     let mut found: *mut libc::group = std::ptr::null_mut();
     // SAFETY: as for getpwuid_r in user_name.
@@ -294,10 +315,16 @@ pub fn group_id(name: &str) -> Option<u32> {
     (!gr.is_null()).then(|| unsafe { (*gr).gr_gid })
 }
 
-/// An all-zero value of a C structure.
-pub fn unsafe_zeroed<T: Copy>() -> T {
-    // SAFETY: only used for C structures of numbers and pointers, for
-    // which all zeros is a valid value.
+/// A C structure with every byte zero, as C code clears one before a
+/// call fills it.
+///
+/// # Safety
+///
+/// All zeros must be a valid `T`, as it is for structures of numbers,
+/// arrays and raw pointers, and is not for references, `NonZero` numbers
+/// or most enums.
+pub unsafe fn zeroed<T: Copy>() -> T {
+    // SAFETY: the caller promises that all zeros is a valid `T`.
     unsafe { std::mem::zeroed() }
 }
 
@@ -472,6 +499,24 @@ mod tests {
         assert_eq!(human(1536, false), "1.5K");
         assert_eq!(human(10 * 1024 * 1024, false), "10M");
         assert_eq!(human(1_000_000, true), "1.0M");
+        // As the host's ls -lh and ls -l --si (coreutils 9.4) print them.
+        for (bytes, binary, si) in [
+            (1025, "1.1K", "1.1K"),
+            (1100, "1.1K", "1.1K"),
+            (10240, "10K", "11K"),
+            (10241, "11K", "11K"),
+            (999_999, "977K", "1.0M"),
+            (1_047_552, "1023K", "1.1M"),
+            (1_047_553, "1.0M", "1.1M"),
+            (1_048_575, "1.0M", "1.1M"),
+            (1_153_434, "1.2M", "1.2M"),
+            (1_073_741_823, "1.0G", "1.1G"),
+        ] {
+            assert_eq!(human(bytes, false), binary, "{bytes}");
+            assert_eq!(human(bytes, true), si, "{bytes}");
+        }
+        assert_eq!(human(u64::MAX, false), "16E");
+        assert_eq!(human(u64::MAX, true), "19E");
     }
 
     #[test]

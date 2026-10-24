@@ -434,7 +434,10 @@ impl Fuzzer {
     }
 
     /// A page-aligned address to map or unmap at: mostly in the arena,
-    /// never on the program's own pages.
+    /// and almost never on the program's own pages. The last arm, any
+    /// page below 2^63, finds page-table paths far from the arena; it
+    /// lands on one of the program's few hundred pages about once in
+    /// 2^40 calls, which the run never comes near.
     fn page_address(&mut self) -> u64 {
         match self.rng.below(10) {
             0..=6 => ARENA + self.rng.below(ARENA_PAGES) * PAGE,

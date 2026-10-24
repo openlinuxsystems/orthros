@@ -16,13 +16,24 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use crate::args::{Arg, Args};
-use crate::util::{self, Fail, usage};
+use crate::util::{self, Fail, fail, usage};
 
 /// What to say about each file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verbose {
     Quiet,
     Changes,
+    All,
+}
+
+/// Which symbolic links -R follows into directories.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Follow {
+    /// -P: none.
+    Never,
+    /// -H: those named on the command line, chmod's way without it.
+    Named,
+    /// -L: every one.
     All,
 }
 
@@ -33,10 +44,20 @@ struct Common {
     recursive: bool,
     verbose: Verbose,
     silent: bool,
-    /// chown and chgrp: change a link itself, not what it points to.
-    no_dereference: bool,
+    /// chown and chgrp: -h (false) or --dereference (true), if given.
+    dereference: Option<bool>,
+    /// -H, -L or -P, if given.
+    follow: Option<Follow>,
     reference: Option<OsString>,
     operands: Vec<OsString>,
+}
+
+impl Common {
+    /// Which links -R follows into directories: chmod follows those on
+    /// the command line, and chown and chgrp none, unless told.
+    fn follow(&self) -> Follow {
+        self.follow.unwrap_or(if self.tool == "chmod" { Follow::Named } else { Follow::Never })
+    }
 }
 
 fn common(
@@ -48,7 +69,8 @@ fn common(
         recursive: false,
         verbose: Verbose::Quiet,
         silent: false,
-        no_dereference: false,
+        dereference: None,
+        follow: None,
         reference: None,
         operands: Vec::new(),
     };
@@ -65,10 +87,12 @@ fn common(
             Arg::Long(l) if l == "changes" => c.verbose = Verbose::Changes,
             Arg::Short('f') => c.silent = true,
             Arg::Long(l) if l == "silent" || l == "quiet" => c.silent = true,
-            Arg::Short('h') => c.no_dereference = true,
-            Arg::Long(l) if l == "no-dereference" => c.no_dereference = true,
-            Arg::Long(l) if l == "dereference" => c.no_dereference = false,
-            Arg::Short('H' | 'L' | 'P') => {}
+            Arg::Short('h') => c.dereference = Some(false),
+            Arg::Long(l) if l == "no-dereference" => c.dereference = Some(false),
+            Arg::Long(l) if l == "dereference" => c.dereference = Some(true),
+            Arg::Short('H') => c.follow = Some(Follow::Named),
+            Arg::Short('L') => c.follow = Some(Follow::All),
+            Arg::Short('P') => c.follow = Some(Follow::Never),
             Arg::Long(l) if l == "preserve-root" || l == "no-preserve-root" => {}
             Arg::Long(l) if l == "reference" => c.reference = Some(args.value()?),
             Arg::Operand(o) => c.operands.push(o),
@@ -79,55 +103,59 @@ fn common(
 }
 
 /// Runs `apply` on each file, and on what is under each directory with
-/// `-R`. Returns the exit status.
-fn each(c: &Common, files: &[OsString], apply: &mut dyn FnMut(&Path) -> io::Result<()>) -> i32 {
+/// `-R`, telling it whether the file was named on the command line; it
+/// says what it did and whether it worked. Returns the exit status.
+fn each(c: &Common, files: &[OsString], apply: &mut dyn FnMut(&Path, bool) -> bool) -> i32 {
     let mut code = 0;
     for file in files {
-        walk(c, Path::new(file), apply, &mut code);
+        walk(c, Path::new(file), true, apply, &mut code);
     }
     code
 }
 
-fn walk(c: &Common, path: &Path, apply: &mut dyn FnMut(&Path) -> io::Result<()>, code: &mut i32) {
-    if let Err(e) = apply(path) {
-        if !c.silent {
-            eprintln!(
-                "{}: cannot access '{}': {}",
-                c.tool,
-                path.display(),
-                util::strip_os_error(&e)
-            );
-        }
+/// [`each`] for one file. A link leads into its directory with -L, or
+/// with -H when it was named. chmod changes a directory before what is
+/// in it, and chown and chgrp after, as GNU's do.
+fn walk(
+    c: &Common,
+    path: &Path,
+    named: bool,
+    apply: &mut dyn FnMut(&Path, bool) -> bool,
+    code: &mut i32,
+) {
+    let after = c.tool != "chmod";
+    let link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let follow = c.follow();
+    let into = c.recursive
+        && (!link || follow == Follow::All || (named && follow == Follow::Named))
+        && std::fs::metadata(path).is_ok_and(|m| m.is_dir());
+    if !after && !apply(path, named) {
         *code = 1;
-        return;
     }
-    if !c.recursive {
-        return;
-    }
-    // Links are not followed into.
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return };
-    if !meta.is_dir() {
-        return;
-    }
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(e) => {
-            if !c.silent {
-                eprintln!(
-                    "{}: cannot read directory '{}': {}",
-                    c.tool,
-                    path.display(),
-                    util::strip_os_error(&e)
-                );
+    if into {
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                let mut names: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                names.sort();
+                for name in names {
+                    walk(c, &name, false, apply, code);
+                }
             }
-            *code = 1;
-            return;
+            Err(e) => {
+                if !c.silent {
+                    eprintln!(
+                        "{}: cannot read directory '{}': {}",
+                        c.tool,
+                        path.display(),
+                        util::strip_os_error(&e)
+                    );
+                }
+                *code = 1;
+            }
         }
-    };
-    let mut names: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    names.sort();
-    for name in names {
-        walk(c, &name, apply, code);
+    }
+    if after && !apply(path, named) {
+        *code = 1;
     }
 }
 
@@ -181,7 +209,8 @@ fn apply_symbolic(mode: &str, old: u32, is_dir: bool, umask: u32) -> Result<u32,
                         b'r' => 0o444,
                         b'w' => 0o222,
                         b'x' => 0o111,
-                        b'X' if is_dir || old & 0o111 != 0 => 0o111,
+                        // Judged on the mode as the clauses so far left it.
+                        b'X' if is_dir || new & 0o111 != 0 => 0o111,
                         b'X' => 0,
                         b's' => 0o6000,
                         _ => 0o1000,
@@ -264,9 +293,7 @@ pub fn chmod(args: &mut Args) -> Result<i32, Fail> {
     let mut operands = c.operands.clone();
     let mode = match (&c.reference, mode_first) {
         (Some(reference), _) => {
-            let meta = std::fs::metadata(reference)
-                .map_err(|e| util::failed(&Path::new(reference).display(), e))?;
-            format!("{:o}", meta.permissions().mode() & 0o7777)
+            format!("{:o}", reference_of(reference)?.permissions().mode() & 0o7777)
         }
         (None, Some(mode)) => mode,
         (None, None) => {
@@ -282,42 +309,142 @@ pub fn chmod(args: &mut Args) -> Result<i32, Fail> {
     let mask = umask();
     // Check the mode before touching anything.
     new_mode(&mode, 0o644, false, mask).map_err(usage)?;
-    let code = each(&c, &operands, &mut |path| {
-        let meta = std::fs::metadata(path)?;
-        let old = meta.permissions().mode() & 0o7777;
-        let new = new_mode(&mode, old, meta.is_dir(), mask)
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-        let cpath = c_path(path)?;
-        // SAFETY: `cpath` is a C string.
-        if unsafe { libc::chmod(cpath.as_ptr(), new as libc::mode_t) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let changed = new != old;
-        if c.verbose == Verbose::All || (c.verbose == Verbose::Changes && changed) {
-            if changed {
-                println!(
-                    "mode of '{}' changed from {old:04o} ({}) to {new:04o} ({})",
-                    path.display(),
-                    mode_text(old),
-                    mode_text(new)
-                );
-            } else {
-                println!("mode of '{}' retained as {old:04o} ({})", path.display(), mode_text(old));
+    let follow = c.follow();
+    let verbose = c.verbose == Verbose::All;
+    let code = each(&c, &operands, &mut |path, named| {
+        let shown = path.display();
+        let unreachable = |message: String| {
+            if !c.silent {
+                eprintln!("chmod: {message}");
             }
+            if verbose {
+                println!("'{shown}' could not be accessed");
+            }
+            false
+        };
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                return unreachable(format!(
+                    "cannot access '{shown}': {}",
+                    util::strip_os_error(&e)
+                ));
+            }
+        };
+        // A link is changed through only when it is named or -L is given;
+        // a mode of its own is not Linux's to change.
+        let meta = if meta.file_type().is_symlink() {
+            if !named && follow != Follow::All {
+                if verbose {
+                    println!("neither symbolic link '{shown}' nor referent has been changed");
+                }
+                return true;
+            }
+            match std::fs::metadata(path) {
+                Ok(meta) => meta,
+                Err(_) => {
+                    return unreachable(format!("cannot operate on dangling symlink '{shown}'"));
+                }
+            }
+        } else {
+            meta
+        };
+        let old = meta.permissions().mode() & 0o7777;
+        let (Ok(new), Ok(naive)) =
+            (new_mode(&mode, old, meta.is_dir(), mask), new_mode(&mode, old, meta.is_dir(), 0))
+        else {
+            return false;
+        };
+        let change =
+            format!("from {old:04o} ({}) to {new:04o} ({})", mode_text(old), mode_text(new));
+        let done = c_path(path).and_then(|cpath| {
+            // SAFETY: `cpath` is a C string.
+            match unsafe { libc::chmod(cpath.as_ptr(), new as libc::mode_t) } {
+                0 => Ok(()),
+                _ => Err(io::Error::last_os_error()),
+            }
+        });
+        if let Err(e) = done {
+            if !c.silent {
+                eprintln!("chmod: changing permissions of '{shown}': {}", util::strip_os_error(&e));
+            }
+            if verbose {
+                println!("failed to change mode of '{shown}' {change}");
+            }
+            return false;
         }
-        Ok(())
+        if new != old && c.verbose != Verbose::Quiet {
+            println!("mode of '{shown}' changed {change}");
+        } else if verbose {
+            println!("mode of '{shown}' retained as {old:04o} ({})", mode_text(old));
+        }
+        // The umask kept bits the mode took away (`-w` with 022): said
+        // even with -f, as GNU does, and a failure.
+        if new & !naive != 0 {
+            eprintln!(
+                "chmod: {shown}: new permissions are {}, not {}",
+                mode_text(new),
+                mode_text(naive)
+            );
+            return false;
+        }
+        true
     });
     Ok(code)
+}
+
+/// What a reference file's metadata says, or GNU's error for it.
+fn reference_of(reference: &OsString) -> Result<std::fs::Metadata, Fail> {
+    std::fs::metadata(reference).map_err(|e| {
+        let shown = Path::new(reference).display();
+        fail(format!("failed to get attributes of '{shown}': {}", util::strip_os_error(&e)))
+    })
+}
+
+/// The owner and group a chown spec names, and how messages write them:
+/// as they were typed, with the login group by name for `user:`.
+fn owner_spec(spec: &str) -> Result<(Option<u32>, Option<u32>, String, String), Fail> {
+    let invalid_user = || usage(format!("invalid user: '{spec}'"));
+    // `user.group` is an old spelling, taken when no user has that name.
+    let (owner, group, dotted) = match spec.find(':') {
+        Some(at) => (&spec[..at], Some(&spec[at + 1..]), false),
+        None => match spec.find('.') {
+            Some(at) if util::user_id(spec).is_none() => (&spec[..at], Some(&spec[at + 1..]), true),
+            _ => (spec, None, false),
+        },
+    };
+    let uid = match owner {
+        "" => None,
+        owner => Some(util::user_id(owner).ok_or_else(invalid_user)?),
+    };
+    let (gid, group_text) = match (group, uid) {
+        (None, _) | (Some(""), None) => (None, String::new()),
+        (Some(""), Some(uid)) => {
+            let gid =
+                util::login_group(uid).ok_or_else(|| usage(format!("invalid spec: '{spec}'")))?;
+            (Some(gid), util::group_name(gid))
+        }
+        (Some(group), _) => match util::group_id(group) {
+            Some(gid) => (Some(gid), group.to_string()),
+            None if dotted => return Err(invalid_user()),
+            None => return Err(usage(format!("invalid group: '{spec}'"))),
+        },
+    };
+    if dotted {
+        eprintln!("chown: warning: '.' should be ':': '{spec}'");
+    }
+    Ok((uid, gid, owner.to_string(), group_text))
 }
 
 /// Changes the owner and group of the files the arguments name.
 fn change_owner(args: &mut Args, group_only: bool) -> Result<i32, Fail> {
     let c = common(args, |_, _| Ok(false))?;
     let mut operands = c.operands.clone();
-    let (uid, gid): (Option<u32>, Option<u32>) = if let Some(reference) = &c.reference {
-        let meta = std::fs::metadata(reference)
-            .map_err(|e| util::failed(&Path::new(reference).display(), e))?;
-        (if group_only { None } else { Some(meta.uid()) }, Some(meta.gid()))
+    // The ids to give, and how messages write them.
+    let (uid, gid, user, group) = if let Some(reference) = &c.reference {
+        let meta = reference_of(reference)?;
+        let uid = (!group_only).then(|| meta.uid());
+        (uid, Some(meta.gid()), util::user_name(meta.uid()), util::group_name(meta.gid()))
     } else {
         if operands.is_empty() {
             return Err(usage("missing operand".into()));
@@ -326,58 +453,87 @@ fn change_owner(args: &mut Args, group_only: bool) -> Result<i32, Fail> {
         if group_only {
             let gid =
                 util::group_id(&spec).ok_or_else(|| usage(format!("invalid group: '{spec}'")))?;
-            (None, Some(gid))
+            (None, Some(gid), String::new(), spec)
         } else {
-            let (owner, group) = match spec.find([':', '.']) {
-                Some(at) => (&spec[..at], Some(&spec[at + 1..])),
-                None => (spec.as_str(), None),
-            };
-            let uid = if owner.is_empty() {
-                None
-            } else {
-                Some(util::user_id(owner).ok_or_else(|| usage(format!("invalid user: '{spec}'")))?)
-            };
-            let gid = match group {
-                // `owner:` is the owner's login group: root's is 0.
-                Some("") if uid.is_some() => Some(0),
-                Some("") | None => None,
-                Some(group) => Some(
-                    util::group_id(group)
-                        .ok_or_else(|| usage(format!("invalid group: '{spec}'")))?,
-                ),
-            };
-            (uid, gid)
+            owner_spec(&spec)?
         }
     };
     if operands.is_empty() {
         return Err(usage("missing operand".into()));
     }
+    // With -R and -P, the default there, no link is followed, not even
+    // one named.
+    let physical = c.recursive && c.follow() == Follow::Never;
+    if physical && c.dereference == Some(true) {
+        return Err(usage("-R --dereference requires either -H or -L".into()));
+    }
+    let dereference = c.dereference != Some(false) && !physical;
+    let what = if group_only { "group" } else { "ownership" };
+    let new = match (group_only, uid, gid) {
+        (true, ..) => group.clone(),
+        (false, Some(_), Some(_)) => format!("{user}:{group}"),
+        (false, Some(_), None) => user.clone(),
+        (false, None, Some(_)) => format!(":{group}"),
+        (false, None, None) => String::new(),
+    };
+    let verbose = c.verbose == Verbose::All;
     let to_id = |id: Option<u32>| id.unwrap_or(u32::MAX);
-    let code = each(&c, &operands, &mut |path| {
-        let meta = if c.no_dereference {
-            std::fs::symlink_metadata(path)?
-        } else {
-            std::fs::metadata(path)?
-        };
-        let cpath = c_path(path)?;
-        // SAFETY: `cpath` is a C string; -1 leaves an id as it is.
-        let result = unsafe {
-            if c.no_dereference {
-                libc::lchown(cpath.as_ptr(), to_id(uid), to_id(gid))
-            } else {
-                libc::chown(cpath.as_ptr(), to_id(uid), to_id(gid))
+    let code = each(&c, &operands, &mut |path, _| {
+        let shown = path.display();
+        let found =
+            if dereference { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) };
+        let meta = match found {
+            Ok(meta) => meta,
+            Err(e) => {
+                if !c.silent {
+                    let dangling = dereference && std::fs::symlink_metadata(path).is_ok();
+                    let verb = if dangling { "dereference" } else { "access" };
+                    eprintln!("{}: cannot {verb} '{shown}': {}", c.tool, util::strip_os_error(&e));
+                }
+                if verbose {
+                    let to = if new.is_empty() { String::new() } else { format!(" to {new}") };
+                    println!("failed to change {what} of '{shown}'{to}");
+                }
+                return false;
             }
         };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
+        let old = match (group_only, uid, gid) {
+            (true, ..) => util::group_name(meta.gid()),
+            (false, None, None) => String::new(),
+            (false, _, None) => util::user_name(meta.uid()),
+            (false, _, Some(_)) => {
+                format!("{}:{}", util::user_name(meta.uid()), util::group_name(meta.gid()))
+            }
+        };
+        let done = c_path(path).and_then(|cpath| {
+            // SAFETY: `cpath` is a C string; -1 leaves an id as it is.
+            let result = unsafe {
+                if dereference {
+                    libc::chown(cpath.as_ptr(), to_id(uid), to_id(gid))
+                } else {
+                    libc::lchown(cpath.as_ptr(), to_id(uid), to_id(gid))
+                }
+            };
+            if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        });
+        if let Err(e) = done {
+            if !c.silent {
+                eprintln!("{}: changing {what} of '{shown}': {}", c.tool, util::strip_os_error(&e));
+            }
+            if verbose {
+                println!("failed to change {what} of '{shown}' from {old} to {new}");
+            }
+            return false;
         }
         let changed = uid.is_some_and(|u| u != meta.uid()) || gid.is_some_and(|g| g != meta.gid());
-        if c.verbose == Verbose::All || (c.verbose == Verbose::Changes && changed) {
-            let what = if group_only { "group" } else { "ownership" };
-            let verb = if changed { "changed" } else { "retained" };
-            println!("{what} of '{}' {verb}", path.display());
+        if changed && c.verbose != Verbose::Quiet {
+            println!("changed {what} of '{shown}' from {old} to {new}");
+        } else if verbose && old.is_empty() {
+            println!("{what} of '{shown}' retained");
+        } else if verbose {
+            println!("{what} of '{shown}' retained as {old}");
         }
-        Ok(())
+        true
     });
     Ok(code)
 }
@@ -418,6 +574,29 @@ mod tests {
         assert_eq!(new_mode("+t", 0o755, true, 0o022), Ok(0o1755));
         assert!(new_mode("u*x", 0o644, false, 0o022).is_err());
         assert!(new_mode("u", 0o644, false, 0o022).is_err());
+    }
+
+    #[test]
+    fn x_follows_the_clauses_before_it() {
+        // As the host's chmod (coreutils 9.4) gives them.
+        assert_eq!(new_mode("u+x,g+X", 0o644, false, 0o022), Ok(0o754));
+        assert_eq!(new_mode("g+X,u+x", 0o644, false, 0o022), Ok(0o744));
+        assert_eq!(new_mode("g=u-w", 0o700, false, 0o022), Ok(0o750));
+        // The umask keeps what a mode without who takes away.
+        assert_eq!(new_mode("-w", 0o666, false, 0o022), Ok(0o466));
+        assert_eq!(new_mode("-w", 0o666, false, 0), Ok(0o444));
+    }
+
+    #[test]
+    fn owner_specs() {
+        let spec = |text: &str| owner_spec(text).map_err(|fail| fail.message);
+        assert_eq!(spec(""), Ok((None, None, String::new(), String::new())));
+        assert_eq!(spec(":"), Ok((None, None, String::new(), String::new())));
+        assert_eq!(spec("0:0"), Ok((Some(0), Some(0), "0".into(), "0".into())));
+        assert_eq!(spec("7"), Ok((Some(7), None, "7".into(), String::new())));
+        assert_eq!(spec(":5"), Ok((None, Some(5), String::new(), "5".into())));
+        assert_eq!(spec("0.0"), Ok((Some(0), Some(0), "0".into(), "0".into())));
+        assert_eq!(spec("0:0:"), Err("invalid group: '0:0:'".to_string()));
     }
 
     #[test]

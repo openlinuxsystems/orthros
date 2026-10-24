@@ -168,6 +168,11 @@ impl Tty {
         self.session.load(Ordering::Acquire)
     }
 
+    /// Its session's foreground process group, 0 for none.
+    pub fn foreground(&self) -> u64 {
+        self.foreground.load(Ordering::Acquire)
+    }
+
     /// The events `poll` finds on a side of it, as Linux's: the terminal
     /// side is readable when the line discipline says so
     /// (`Ldisc::ready`) and writable while output is not stopped and the

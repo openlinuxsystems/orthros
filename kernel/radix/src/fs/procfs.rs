@@ -119,6 +119,7 @@ impl Listing for Root {
             }
         }
         let mut numbers = objects::process_numbers();
+        posix::zombie_numbers(&mut numbers);
         numbers.sort_unstable();
         numbers.dedup();
         for number in numbers.iter() {
@@ -139,7 +140,7 @@ impl Listing for Root {
             "uptime" => uptime,
             _ => {
                 let number: u64 = name.parse().map_err(|_| Error::NotFound)?;
-                if name.starts_with('0') || objects::process_by_number(number).is_none() {
+                if name.starts_with('0') || process_by_number(number).is_none() {
                     return Err(Error::NotFound);
                 }
                 let listing: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(ProcessDir { number })?;
@@ -174,13 +175,19 @@ impl Listing for ProcessDir {
         };
         let number = self.number;
         let generate: Generator =
-            mem::boxed(move |text: &mut Text| match objects::process_by_number(number) {
+            mem::boxed(move |text: &mut Text| match process_by_number(number) {
                 Some(process) => write(&process, text),
                 // It has gone since: an empty file.
                 None => Ok(()),
             })?;
         Generated::make(PROCESS_ID_BASE + PER_PROCESS * number + 1 + index as u64, generate)
     }
+}
+
+/// The process numbered `number`: one the registry holds, or a zombie,
+/// which `/proc` shows as Linux's does until its parent waits for it.
+fn process_by_number(number: u64) -> Option<ProcessRef> {
+    objects::process_by_number(number).or_else(|| posix::zombie(number))
 }
 
 /// A process's threads, with their program sides: taken out first, so
@@ -226,7 +233,10 @@ fn status(process: &ProcessRef, text: &mut Text) -> fmt::Result {
         writeln!(text, "session: {session}")?;
     }
     match super::tty::controlling(process) {
-        Some(tty) => writeln!(text, "terminal: pts/{}", tty.number())?,
+        Some(tty) => {
+            writeln!(text, "terminal: pts/{}", tty.number())?;
+            writeln!(text, "terminal_group: {}", tty.foreground())?;
+        }
         None => writeln!(text, "terminal: none")?,
     }
     let threads = threads_of(process);

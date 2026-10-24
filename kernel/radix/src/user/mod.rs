@@ -194,6 +194,7 @@ fn thread_main(_: usize) {
         user.ready.load(Ordering::Acquire) || thread.should_stop()
     });
     if thread.should_stop() {
+        note_domain_stop(&thread, &user);
         drop(thread);
         exit_current(user, EXIT_STOPPED, Ending::Stop);
     }
@@ -318,16 +319,22 @@ fn returning_interrupted(me: &ThreadRef) {
     let Some(user) = me.user() else { return };
     if me.should_stop() {
         info!("User: thread {} ({}) stopped", me.id(), me.name());
-        if me.domain().is_stopping() {
-            // Stopped with its domain, by the out-of-memory policy or the
-            // domain's `stop`: to its parent, as if killed.
-            user.process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
-        }
+        note_domain_stop(me, user);
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
     posix::signal::deliver(me, user);
     if me.should_stop() {
+        note_domain_stop(me, user);
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
+    }
+}
+
+/// A thread stopped with its domain, by the out-of-memory policy or the
+/// domain's `stop`, ends its process to its parent as if killed: as
+/// SIGKILL, unless a signal ended it first.
+pub(super) fn note_domain_stop(me: &ThreadRef, user: &UserRef) {
+    if me.domain().is_stopping() {
+        user.process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
     }
 }
 

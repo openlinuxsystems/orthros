@@ -50,7 +50,8 @@ output, for a log or a pipe, and reads no keys.
 
 *-o* _field_
 	Sort by _field_: *%CPU* (the default), *%MEM*, *TIME+*, *PID* or
-	*COMMAND*; with *-* before it, the other way round.
+	*COMMAND*, highest first (for *COMMAND*, the names last in
+	alphabetical order); with *-* before it, lowest first.
 
 *-c*
 	The command with its arguments, not only its name.

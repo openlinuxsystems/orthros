@@ -52,6 +52,9 @@ struct Settings {
     quiet: bool,
     only: Vec<String>,
     prefix: bool,
+    /// Where results start (`-a`), the line's start counted: 40, as for
+    /// strace.
+    column: usize,
 }
 
 /// A record, read from the trace.
@@ -367,21 +370,37 @@ impl Printer<'_> {
             Stamp::Relative => {
                 let since =
                     if self.last_ns == 0 { 0 } else { r.time_ns.saturating_sub(self.last_ns) };
-                format!("{:>3}.{:06} ", since / 1_000_000_000, since % 1_000_000_000 / 1000)
+                format!("{:>6}.{:06} ", since / 1_000_000_000, since % 1_000_000_000 / 1000)
             }
         };
         self.last_ns = r.time_ns;
         text
     }
 
-    fn line(&mut self, r: &Record, text: &str) -> io::Result<()> {
+    /// What starts a line: the thread, when it is not the only one, and
+    /// the time.
+    fn start(&mut self, r: &Record) -> String {
         let mut line = String::new();
         if self.s.prefix || r.thread != r.process {
             line.push_str(&format!("[pid {:>5}] ", r.thread));
         }
         line.push_str(&self.stamp(r));
-        line.push_str(text);
+        line
+    }
+
+    fn line(&mut self, r: &Record, text: &str) -> io::Result<()> {
+        let line = self.start(r) + text;
         writeln!(self.out, "{line}")
+    }
+
+    /// A call's line: the call, then ` = ` and its result from the column
+    /// `-a` names when the call ends before it, as strace lines them up.
+    fn call_line(&mut self, r: &Record, call: &str, result: &str) -> io::Result<()> {
+        let mut line = self.start(r) + call;
+        let width = line.chars().count();
+        let to = self.s.column.saturating_sub(1);
+        line.extend(std::iter::repeat_n(' ', to.saturating_sub(width)));
+        writeln!(self.out, "{line} = {result}")
     }
 
     /// Whether `-e trace=` lets a call through.
@@ -417,16 +436,16 @@ impl Printer<'_> {
                     }
                 }
                 let call = call_of(r);
-                let mut text =
-                    format!("{name}({}) = {}", args_text(r, call, self.s), result_text(r, call));
+                let text = format!("{name}({})", args_text(r, call, self.s));
+                let mut result = result_text(r, call);
                 if self.s.durations {
-                    text.push_str(&format!(
+                    result.push_str(&format!(
                         " <{}.{:06}>",
                         r.duration_ns / 1_000_000_000,
                         r.duration_ns % 1_000_000_000 / 1000
                     ));
                 }
-                self.line(r, &text)
+                self.call_line(r, &text, &result)
             }
             _ if self.s.count => Ok(()),
             TraceEvent::Signal => {
@@ -442,7 +461,7 @@ impl Printer<'_> {
                     r.flags.contains(TraceRecordFlags::INPUT_CUT),
                     self.s.hex,
                 );
-                self.line(r, &format!("exec({path}) = 0"))
+                self.call_line(r, &format!("exec({path})"), "0")
             }
             TraceEvent::Fork => self.line(r, &format!("--- child {} started ---", r.value)),
             TraceEvent::Exit => {
@@ -531,6 +550,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         quiet: false,
         only: Vec::new(),
         prefix: false,
+        column: 40,
     };
     let mut pids: Vec<u64> = Vec::new();
     let mut output: Option<OsString> = None;
@@ -551,6 +571,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Short('c') => s.count = true,
             Arg::Short('C') => s.count_too = true,
             Arg::Short('s') => s.string_max = args.number()?,
+            Arg::Short('a') => {
+                let text = args.text()?;
+                s.column =
+                    text.parse().map_err(|_| fail(format!("invalid -a argument: '{text}'")))?;
+            }
             Arg::Short('x') => s.hex += 1,
             Arg::Short('q') => s.quiet = true,
             Arg::Short('n') => no_data = true,
@@ -569,7 +594,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             }
             Arg::Short('h') => {
                 println!(
-                    "usage: rtrace [-cCfqrTtx] [-e trace=NAME,...] [-o FILE] [-s SIZE] {{-p PID | COMMAND [ARGUMENT...]}}"
+                    "usage: rtrace [-cCfnqrTtx] [-a COLUMN] [-e trace=NAME,...] [-o FILE] [-s SIZE] {{-p PID | COMMAND [ARGUMENT...]}}"
                 );
                 return Ok(0);
             }
@@ -621,13 +646,15 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             }
         }
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            let mut action: libc::sigaction = util::unsafe_zeroed();
+            // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a function address.
+            let mut action: libc::sigaction = unsafe { util::zeroed() };
             action.sa_sigaction = on_signal as *const () as usize;
             // SAFETY: the handler only stores to an atomic.
             unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
         }
     } else {
-        let (pid, file) = start(&command, flags)?;
+        let program = program(&command[0])?;
+        let (pid, file) = start(&program, &command, flags)?;
         child = Some(pid);
         traces.push(file);
         // The terminal's Ctrl-C is for the command: rtrace reads on to
@@ -653,16 +680,62 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut status = 0;
     // SAFETY: waits for our own child.
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    Ok(if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else {
-        128 + libc::WTERMSIG(status)
-    })
+    if libc::WIFEXITED(status) {
+        return Ok(libc::WEXITSTATUS(status));
+    }
+    // A command a signal ended ends rtrace by the same signal, as strace
+    // does, so that what runs rtrace sees what ended the command.
+    let signal = libc::WTERMSIG(status);
+    // SAFETY: setting a disposition and the signal mask touches only the
+    // set built here; raising a signal at ourselves.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        let mut set: libc::sigset_t = util::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, signal);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(signal);
+    }
+    Ok(128 + signal)
 }
 
-/// Starts `command`, traced: forks a child that waits for word to run it,
-/// traces the child, and tells it to go on.
-fn start(command: &[OsString], flags: TraceFlags) -> Result<(libc::pid_t, File), Fail> {
+/// The program `name` names, found as strace finds it before it starts
+/// anything: a name with a `/` must exist; another must be an executable
+/// file in a directory of PATH.
+fn program(name: &OsString) -> Result<CString, Fail> {
+    let bytes = name.as_bytes();
+    let c = |path: &[u8]| CString::new(path).map_err(|_| fail("a NUL in the command".into()));
+    if bytes.contains(&b'/') {
+        return match std::fs::metadata(name) {
+            Ok(_) => c(bytes),
+            Err(e) => Err(fail(format!(
+                "Cannot stat '{}': {}",
+                name.to_string_lossy(),
+                util::strip_os_error(&e)
+            ))),
+        };
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        let Ok(found) = c(candidate.as_os_str().as_bytes()) else { continue };
+        // SAFETY: access takes a C string.
+        let runs = unsafe { libc::access(found.as_ptr(), libc::X_OK) } == 0;
+        if runs && candidate.is_file() {
+            return Ok(found);
+        }
+    }
+    Err(fail(format!("Cannot find executable '{}'", name.to_string_lossy())))
+}
+
+/// Starts `command`, whose program is `program`, traced: forks a child
+/// that waits for word to run it, traces the child, and tells it to go
+/// on.
+fn start(
+    program: &CString,
+    command: &[OsString],
+    flags: TraceFlags,
+) -> Result<(libc::pid_t, File), Fail> {
     let c: Vec<CString> = command.iter().filter_map(|a| CString::new(a.as_bytes()).ok()).collect();
     let mut argv: Vec<*const libc::c_char> = c.iter().map(|a| a.as_ptr()).collect();
     argv.push(std::ptr::null());
@@ -685,10 +758,14 @@ fn start(command: &[OsString], flags: TraceFlags) -> Result<(libc::pid_t, File),
             let mut byte = 0u8;
             libc::read(go[0], (&mut byte as *mut u8).cast(), 1);
             libc::close(go[0]);
-            libc::execvp(argv[0], argv.as_ptr());
-            let message = b"rtrace: cannot run the command\n";
+            libc::execv(program.as_ptr(), argv.as_ptr());
+            // As strace says it, with the error's text.
+            let error = libc::strerror(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+            let message = b"rtrace: exec: ";
             libc::write(2, message.as_ptr().cast(), message.len());
-            libc::_exit(127);
+            libc::write(2, error.cast(), libc::strlen(error));
+            libc::write(2, b"\n".as_ptr().cast(), 1);
+            libc::_exit(1);
         }
     }
     // SAFETY: closing our copy of the read end.
@@ -802,7 +879,74 @@ mod tests {
         assert_eq!(r.process, 7);
         assert_eq!(r.data_in, b"hello");
         assert_eq!(call_name(r), "debug_log");
-        let s = Settings {
+        let s = settings();
+        assert!(
+            args_text(r, call_of(r), &s).contains("\"hello\", 5"),
+            "{}",
+            args_text(r, call_of(r), &s)
+        );
+        pending.extend_from_slice(&second[100..]);
+        assert_eq!(split_records(&mut pending).len(), 1);
+    }
+
+    /// What strace 6.8 prints for these: results from column 40 (or
+    /// `-a`), the stamps of `-r` six wide.
+    #[test]
+    fn results_line_up_as_straces() {
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let r = decode(&record(TraceEvent::Call, 0, 0, [0; 10], b"")).unwrap();
+        let printed = |stamp, column, call: &str, result: &str| {
+            let s = Settings { stamp, column, ..settings() };
+            let text = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut p = Printer {
+                s: &s,
+                out: Box::new(Shared(text.clone())),
+                boot_ns: 0,
+                last_ns: 0,
+                totals: HashMap::new(),
+            };
+            p.call_line(&r, call, result).unwrap();
+            String::from_utf8(text.borrow().clone()).unwrap()
+        };
+        assert_eq!(
+            printed(Stamp::None, 40, "getpid()", "29509"),
+            "getpid()                                = 29509\n"
+        );
+        assert_eq!(
+            printed(Stamp::Relative, 40, "write(1, \"hi\\n\", 3)", "3"),
+            "     0.000000 write(1, \"hi\\n\", 3)       = 3\n"
+        );
+        assert_eq!(printed(Stamp::None, 20, "getpid()", "1"), "getpid()            = 1\n");
+        assert_eq!(printed(Stamp::Relative, 20, "getpid()", "1"), "     0.000000 getpid() = 1\n");
+        assert_eq!(printed(Stamp::None, 0, "getpid()", "1"), "getpid() = 1\n");
+    }
+
+    /// strace's words for a command it cannot start.
+    #[test]
+    fn commands_are_found_first() {
+        let error = |name: &str| program(&name.into()).err().map(|e| e.message);
+        assert_eq!(
+            error("no-such-command-here"),
+            Some("Cannot find executable 'no-such-command-here'".into())
+        );
+        assert_eq!(
+            error("./no-such-file-here"),
+            Some("Cannot stat './no-such-file-here': No such file or directory".into())
+        );
+        assert_eq!(error("sh"), None);
+    }
+
+    fn settings() -> Settings {
+        Settings {
             follow: false,
             stamp: Stamp::None,
             durations: false,
@@ -813,14 +957,8 @@ mod tests {
             quiet: false,
             only: Vec::new(),
             prefix: false,
-        };
-        assert!(
-            args_text(r, call_of(r), &s).contains("\"hello\", 5"),
-            "{}",
-            args_text(r, call_of(r), &s)
-        );
-        pending.extend_from_slice(&second[100..]);
-        assert_eq!(split_records(&mut pending).len(), 1);
+            column: 40,
+        }
     }
 
     #[test]

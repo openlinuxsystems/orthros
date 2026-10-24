@@ -13,6 +13,13 @@
 //! the out-of-memory policy stopped ends as if killed, and is started
 //! again the same way.
 //!
+//! `service stop` and `restart` send SIGTERM, and stop the service's
+//! domain if it has not ended after STOP_WAIT, as systemd sends SIGKILL
+//! after TimeoutStopSec. Once a service's process ends, the processes it
+//! left in its domain end too, as systemd's default KillMode=control-group
+//! ends them: Spark stops the domain, and starts the service again only
+//! once the domain is empty.
+//!
 //! Spark hears of its children's ends from a notification the kernel
 //! signals (radix-process(2)'s `notify_children`), and waits in `poll`
 //! for it, the services' output, the program it was asked to run, and the
@@ -69,9 +76,11 @@ const STEADY: u64 = 10 * SECOND;
 /// the longest.
 const BACKOFF_FIRST: u64 = 100 * MS;
 const BACKOFF_MAX: u64 = 30 * SECOND;
-/// How long shutting down waits for a group of services to end after
-/// SIGTERM, before it stops their domains.
+/// How long stopping a service, or a group of them when shutting down,
+/// waits for it to end after SIGTERM, before it stops its domain.
 const STOP_WAIT: u64 = 5 * SECOND;
+/// How often Spark looks whether what a service left behind has ended.
+const DRAIN_POLL: u64 = 100 * MS;
 /// How long it waits after stopping them.
 const KILL_WAIT: u64 = SECOND;
 
@@ -80,6 +89,9 @@ const LINE_MAX: usize = 1024;
 
 /// The most control connections served at once.
 const CONNECTIONS_MAX: usize = 8;
+/// How long a control connection may take to send its request: one that
+/// sends nothing does not keep its place for good.
+const CONNECTION_WAIT: u64 = 10 * SECOND;
 
 /// The monotonic clock, in nanoseconds.
 pub fn now() -> u64 {
@@ -143,6 +155,11 @@ enum State {
     Running(u64),
     /// To start at this time.
     Waiting(u64),
+    /// Its process ended with this status, and Spark stopped its domain,
+    /// where processes it left still run; once they have gone, it is
+    /// started again or not, as the status says. Spark looks again at the
+    /// time given.
+    Draining(u32, u64),
 }
 
 /// A service and its process.
@@ -163,6 +180,11 @@ struct Service {
     held: bool,
     /// Asked to restart: started again whatever its file says.
     restarting: bool,
+    /// Asked to stop or restart: when Spark stops its domain if it has
+    /// not ended.
+    stop_by: Option<u64>,
+    /// Spark stopped its domain, so what is left in it is ending already.
+    killed: bool,
     /// How many times the out-of-memory policy had stopped its domain.
     oom_stops: u32,
 }
@@ -174,6 +196,9 @@ pub struct Program {
     pub number: u64,
     pub master: File,
     pub line: Vec<u8>,
+    /// Every descriptor of its terminal has closed: the master is not
+    /// polled any more, which would say so again at once, for good.
+    pub hung_up: bool,
 }
 
 /// What shutting down ends with.
@@ -204,10 +229,12 @@ enum Shutdown {
     Stopping { end: End, order: u32, deadline: u64, killed: bool },
 }
 
-/// A connection to the control socket, and what it has sent so far.
+/// A connection to the control socket, what it has sent so far, and
+/// when it is closed if its request is not whole by then.
 struct Connection {
     file: File,
     request: Vec<u8>,
+    until: u64,
 }
 
 /// Spark's supervision.
@@ -334,6 +361,8 @@ impl Supervisor {
                 last: None,
                 held: false,
                 restarting: false,
+                stop_by: None,
+                killed: false,
                 oom_stops: 0,
             });
             if enabled {
@@ -583,7 +612,72 @@ impl Supervisor {
         service.oom_stops = stops;
         let cause = if stopped { " (stopped by the out-of-memory policy)" } else { "" };
         println!("spark: {} (process {pid}) {}{cause}", service.spec.name, ending(status));
-        self.schedule(index, Some(status));
+        service.stop_by = None;
+        if !self.drain(index, status) {
+            self.schedule(index, Some(status));
+        }
+    }
+
+    /// Service `index`'s process ended with `status`: stops what it left
+    /// in its domain, if anything. Returns whether it waits for that to
+    /// end before the service is started again.
+    fn drain(&mut self, index: usize, status: u32) -> bool {
+        let service = &mut self.services[index];
+        let killed = core::mem::take(&mut service.killed);
+        let Some(domain) = service.domain else { return false };
+        let threads = resource_domain::info(&SYS, domain).map_or(0, |info| info.threads);
+        if threads == 0 {
+            return false;
+        }
+        if !killed {
+            let plural = if threads == 1 { "" } else { "s" };
+            println!(
+                "spark: {} left {threads} thread{plural} behind; stopping its domain",
+                service.spec.name
+            );
+            let _ = resource_domain::stop(&SYS, domain);
+        }
+        service.state = State::Draining(status, now() + DRAIN_POLL);
+        true
+    }
+
+    /// Moves on the stops that are due: a service that did not end in
+    /// STOP_WAIT has its domain stopped, and one whose domain has emptied
+    /// is started again or not.
+    fn step_stops(&mut self, time: u64) {
+        for index in 0..self.services.len() {
+            let service = &mut self.services[index];
+            match service.state {
+                State::Running(pid) if service.stop_by.is_some_and(|by| by <= time) => {
+                    service.stop_by = None;
+                    println!(
+                        "spark: {} did not end in {} s; stopping its domain",
+                        service.spec.name,
+                        STOP_WAIT / SECOND
+                    );
+                    match service.domain {
+                        Some(domain) => {
+                            service.killed = true;
+                            let _ = resource_domain::stop(&SYS, domain);
+                        }
+                        None => {
+                            let _ = process::kill(&SYS, SLOT_PROCESS, pid as i64, signal::SIGKILL);
+                        }
+                    }
+                }
+                State::Draining(status, _) => {
+                    let empty = service.domain.is_none_or(|d| {
+                        resource_domain::info(&SYS, d).is_ok_and(|i| i.threads == 0)
+                    });
+                    if empty {
+                        self.schedule(index, Some(status));
+                    } else {
+                        service.state = State::Draining(status, time + DRAIN_POLL);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Takes the connections that wait at the control socket.
@@ -596,7 +690,8 @@ impl Supervisor {
                 return;
             }
             if let Ok(file) = File::own(slot) {
-                self.connections.push(Connection { file, request: Vec::new() });
+                let until = now() + CONNECTION_WAIT;
+                self.connections.push(Connection { file, request: Vec::new(), until });
             }
         }
     }
@@ -643,7 +738,9 @@ impl Supervisor {
                     println!("spark: asked to {} the machine at once", end.words());
                     self.power(end);
                 }
-                self.shutdown = Some(Shutdown::Pending { end, at: now() + delay * SECOND });
+                // A delay of centuries waits for good, not round to soon.
+                let at = now().saturating_add(delay.saturating_mul(SECOND));
+                self.shutdown = Some(Shutdown::Pending { end, at });
                 if delay == 0 {
                     println!("spark: asked to {} the machine", end.words());
                     format!("ok: going to {} now\n", end.words())
@@ -667,6 +764,7 @@ impl Supervisor {
                     let (state, pid) = match service.state {
                         State::Running(pid) => ("running", pid.to_string()),
                         State::Waiting(_) => ("waiting", "-".into()),
+                        State::Draining(..) => ("stopping", "-".into()),
                         State::Stopped if !service.spec.enabled => ("disabled", "-".into()),
                         State::Stopped => ("stopped", "-".into()),
                     };
@@ -699,14 +797,27 @@ impl Supervisor {
                 if verb != "start"
                     && let State::Running(pid) = state
                 {
-                    // It ends, and `ended` starts it again unless stopped.
+                    // It ends, and `ended` starts it again unless stopped;
+                    // `step_stops` stops its domain if it does not.
                     let service = &mut self.services[index];
                     service.held = verb == "stop";
                     service.restarting = verb == "restart";
                     service.quick = 0;
+                    service.stop_by.get_or_insert(now() + STOP_WAIT);
                     let _ = process::kill(&SYS, SLOT_PROCESS, pid as i64, signal::SIGTERM);
                     println!("spark: asked to {verb} {name}");
                     return format!("ok: {verb}ping {name}\n");
+                }
+                if let State::Draining(..) = state {
+                    // What it left is ending; then it starts again or not.
+                    let service = &mut self.services[index];
+                    service.held = verb == "stop";
+                    service.restarting = verb != "stop";
+                    println!("spark: asked to {verb} {name}");
+                    return match verb {
+                        "stop" => format!("ok: stopping {name}\n"),
+                        _ => format!("ok: {name} starts once what it left has ended\n"),
+                    };
                 }
                 if verb == "stop" {
                     self.services[index].state = State::Stopped;
@@ -824,6 +935,11 @@ impl Supervisor {
                         let _ = resource_domain::stop(&SYS, domain);
                     }
                 }
+                for service in &mut self.services {
+                    if matches!(service.state, State::Running(_)) && service.spec.order >= order {
+                        service.killed = true;
+                    }
+                }
                 self.shutdown = Some(Shutdown::Stopping {
                     end,
                     order,
@@ -864,15 +980,17 @@ impl Supervisor {
     /// or shutdown step.
     fn deadline(&self) -> Option<u64> {
         let restarts = self.services.iter().filter_map(|s| match s.state {
-            State::Waiting(at) => Some(at),
-            _ => None,
+            State::Waiting(at) | State::Draining(_, at) => Some(at),
+            State::Running(_) => s.stop_by,
+            State::Stopped => None,
         });
         let shutdown = match self.shutdown {
             Some(Shutdown::Pending { at, .. }) => Some(at),
             Some(Shutdown::Stopping { deadline, .. }) => Some(deadline),
             None => None,
         };
-        restarts.chain(shutdown).min()
+        let connections = self.connections.iter().map(|c| c.until);
+        restarts.chain(shutdown).chain(connections).min()
     }
 
     /// Supervises for good.
@@ -900,7 +1018,9 @@ impl Supervisor {
                     add(output.slot(), Source::Output(i));
                 }
             }
-            if let Some(program) = &self.program {
+            if let Some(program) = &self.program
+                && !program.hung_up
+            {
                 add(program.master.slot(), Source::Program);
             }
             let mut polled: Vec<PollEntry> = entries.iter().map(|(entry, _)| *entry).collect();
@@ -944,7 +1064,10 @@ impl Supervisor {
                         }
                         Source::Program => {
                             if let Some(program) = &mut self.program {
-                                let _ = Self::copy_lines(&program.master, &mut program.line, None);
+                                let open =
+                                    Self::copy_lines(&program.master, &mut program.line, None);
+                                let hang_up = PollEvents::HANG_UP.0 as u16;
+                                program.hung_up = !open || entry.found & hang_up != 0;
                             }
                         }
                     }
@@ -952,6 +1075,10 @@ impl Supervisor {
             }
             self.reap();
             let time = now();
+            // A connection that sent no whole request in time is closed;
+            // its client reads the end.
+            self.connections.retain(|c| c.until > time);
+            self.step_stops(time);
             for index in 0..self.services.len() {
                 if let State::Waiting(at) = self.services[index].state
                     && at <= time

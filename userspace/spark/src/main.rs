@@ -272,7 +272,7 @@ fn run_posix(root: &Dir, path: &str, args: &[&str]) -> Result<Program, String> {
     slots::give_back(child);
     started?;
     println!("spark: started {path} as process {number}, on a pseudo-terminal");
-    Ok(Program { path: path.into(), number, master, line: Vec::new() })
+    Ok(Program { path: path.into(), number, master, line: Vec::new(), hung_up: false })
 }
 
 /// Opens a new pseudo-terminal: its master, and the terminal (which does

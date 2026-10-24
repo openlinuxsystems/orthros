@@ -33,7 +33,8 @@ It was written for Dukovo: it has none of Vim's code.
 
 *-c*, *--cols* _columns_
 	Bytes a line: 16 by default, 30 with *-p*, 12 with *-i* and 6
-	with *-b*; at most 256.
+	with *-b*; at most 256, but for *-p* and *-i*, which take any
+	number. 0 is the default, but with *-p* one line for everything.
 
 *-g*, *--groupsize* _bytes_
 	Bytes a group: 2 by default, 4 with *-e*, 1 with *-b*; 0 for one
@@ -75,7 +76,9 @@ It was written for Dukovo: it has none of Vim's code.
 	Hex in capitals.
 
 *-a*, *--autoskip*
-	A single *\** for a run of lines of zeros.
+	A single *\** for a run of lines of zeros after its first line
+	(when only one line would go, it shows). The last line always
+	shows, so the length does. Not with *-p* and *-i*.
 
 *-r*, *--revert*
 	Turn a dump back into bytes.

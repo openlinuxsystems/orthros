@@ -20,12 +20,15 @@ an extended regular expression, and that the other options
 select; pkill sends them a signal, TERM unless another is named, as
 Linux's pgrep and pkill (procps-ng) do. Neither ever selects itself.
 Every option that selects narrows the selection: a process must match
-them all.
+them all. Zombies, processes that ended and wait for their parent, are
+found too (*-r Z* lists them).
 
 # OPTIONS
 
 *-f*, *--full*
-	Match the pattern against the whole command line, not the name.
+	Match the pattern against the whole command line, not the name. A
+	process without arguments has *[*_name_*]* for one, and a zombie
+	*[*_name_*] <defunct>*, as *ps*(1) shows them.
 
 *-x*, *--exact*
 	The pattern must match all of the name (or command line).

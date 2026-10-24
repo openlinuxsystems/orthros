@@ -126,7 +126,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         return Err(usage("usage: watch [-bdegptx] [-n SECONDS] COMMAND".into()));
     }
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        let mut action: libc::sigaction = util::unsafe_zeroed();
+        // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a function address.
+        let mut action: libc::sigaction = unsafe { util::zeroed() };
         action.sa_sigaction = on_signal as *const () as usize;
         // SAFETY: the handler only stores to an atomic.
         unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
@@ -249,7 +250,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 /// Waits for a key on standard input, a terminal read a key at a time;
 /// returns at once if it is not a terminal, or on a signal.
 fn wait_for_key() {
-    let mut saved: libc::termios = util::unsafe_zeroed();
+    // SAFETY: all zeros is a valid termios: numbers.
+    let mut saved: libc::termios = unsafe { util::zeroed() };
     // SAFETY: tcgetattr fills `saved`.
     let tty = unsafe { libc::tcgetattr(0, &mut saved) } == 0;
     if !tty {

@@ -9,7 +9,7 @@ rtrace - trace a process's system calls and capability messages
 
 # SYNOPSIS
 
-*rtrace* [*-cCfnqrTtx*] [*-e* [*trace=*]_name_,...] [*-o* _file_] [*-s* _size_] _command_ [_argument_ ...]
+*rtrace* [*-cCfnqrTtx*] [*-a* _column_] [*-e* [*trace=*]_name_,...] [*-o* _file_] [*-s* _size_] _command_ [_argument_ ...]
 
 *rtrace* [_option_ ...] *-p* _pid_[,_pid_...]
 
@@ -71,7 +71,12 @@ fails, and rtrace cannot trace itself.
 	*-ttt* as seconds since 1970.
 
 *-r*
-	The time since the line before, before each line.
+	The time since the line before, before each line, as
+	*     0.000012*.
+
+*-a* _column_
+	Start results at _column_ (40 by default), the line's start
+	counted, when the call ends before it; 0 to never pad.
 
 *-s* _size_
 	Show at most _size_ bytes of each string (32 by default); a cut
@@ -99,8 +104,11 @@ fails, and rtrace cannot trace itself.
 
 # EXIT STATUS
 
-With a _command_, the command's status, or 128 and the signal's number
-if a signal ended it; with *-p*, 0.
+With a _command_, the command's status. If a signal ended the command,
+rtrace ends itself with the same signal, as strace does. 1 if the
+command cannot be found before it starts (*Cannot find executable*, or
+*Cannot stat* for a path), or cannot be run (*exec:* and why). With
+*-p*, 0.
 
 # EXAMPLES
 

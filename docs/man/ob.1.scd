@@ -279,6 +279,13 @@ _target/userspace/_).
 		domain; check that Spark says so and starts it again, waiting
 		longer the second time (*spark*(8)).
 
+	*spark-stop*
+		Point Spark at three test services: _stubborn_ ignores SIGTERM,
+		and Spark stops its domain 5 seconds after *service stubborn
+		restart* and again after *stop*; _leaver_ ends and leaves a
+		process in its domain, which Spark stops; _driver_ makes the
+		requests and powers the machine off (*spark*(8)).
+
 	*page-fault*
 		Boot with *selftest=page-fault* and check the panic report on the
 		serial port and on the screen, with its symbolized backtrace.

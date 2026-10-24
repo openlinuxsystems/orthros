@@ -153,7 +153,8 @@ int main(int argc, char **argv) {
 	int count = argc > 1 ? argc - 1 : COUNT;
 	int passed = 0;
 	for(int i = 0; i < count; i++) {
-		const struct test *test = &TESTS[i];
+		// With names, &TESTS[i] could point past the array.
+		const struct test *test = argc > 1 ? NULL : &TESTS[i];
 		const char *one[] = {NULL, NULL, NULL};
 		struct test suite_one = {argc > 1 ? argv[i + 1] : NULL, NULL, one};
 		if(argc > 1 && !strncmp(argv[i + 1], "libc:", 5)) {

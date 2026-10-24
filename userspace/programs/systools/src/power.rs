@@ -63,7 +63,7 @@ fn delay(time: &str, local_hm: (u32, u32)) -> Option<u64> {
         return Some(0);
     }
     if let Some(minutes) = time.strip_prefix('+') {
-        return minutes.parse::<u64>().ok().map(|m| m * 60);
+        return minutes.parse::<u64>().ok().map(|m| m.saturating_mul(60));
     }
     let (h, m) = time.split_once(':')?;
     let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
@@ -146,7 +146,8 @@ pub fn shutdown(args: &mut Args) -> Result<i32, Fail> {
     }
     ask(&format!("{} {seconds}", end.verb()))?;
     if seconds > 0 {
-        let at = (util::now_ns() / 1_000_000_000) as i64 + seconds as i64;
+        let now = (util::now_ns() / 1_000_000_000) as i64;
+        let at = now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX));
         let when = util::local_time(at, "%a %Y-%m-%d %H:%M:%S %Z");
         eprintln!("The system {what} is scheduled for {when}, use 'shutdown -c' to cancel.");
     }
@@ -295,6 +296,7 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
             let active = match status.state.as_str() {
                 "running" => format!("active (running) as process {}", status.pid),
                 "waiting" => "activating (waiting to start again)".into(),
+                "stopping" => "deactivating (stopping what it left running)".into(),
                 "disabled" => "inactive (disabled)".into(),
                 _ => "inactive (dead)".into(),
             };
@@ -320,6 +322,9 @@ mod tests {
     fn times() {
         assert_eq!(delay("now", (10, 0)), Some(0));
         assert_eq!(delay("+5", (10, 0)), Some(300));
+        // 584 years does not wrap round to 26 seconds.
+        assert_eq!(delay("+307445735", (10, 0)), Some(18_446_744_100));
+        assert_eq!(delay("+18446744073709551615", (10, 0)), Some(u64::MAX));
         assert_eq!(delay("10:30", (10, 0)), Some(1800));
         // A time that has passed today is tomorrow's.
         assert_eq!(delay("09:00", (10, 0)), Some(23 * 3600));

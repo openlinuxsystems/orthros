@@ -378,7 +378,8 @@ fn param(params: &Params, index: usize, default: usize) -> usize {
 }
 
 /// The 256-colour palette index nearest to the colour (`r`, `g`, `b`),
-/// for SGR 38;2 and 48;2: one of the 6x6x6 cube or the grey ramp.
+/// each 0 to 255, for SGR 38;2 and 48;2: one of the 6x6x6 cube or the
+/// grey ramp.
 fn nearest(r: u16, g: u16, b: u16) -> u8 {
     let level = |v: u16| -> u16 {
         if v < 48 {
@@ -608,7 +609,9 @@ impl State {
                     let colour = match words.as_slice() {
                         [5, n, ..] => Some((*n).min(255) as u8),
                         // A colon form may name a colour space first.
-                        [2, _, r, g, b] | [2, r, g, b] => Some(nearest(*r, *g, *b)),
+                        [2, _, r, g, b] | [2, r, g, b] => {
+                            Some(nearest((*r).min(255), (*g).min(255), (*b).min(255)))
+                        }
                         _ => None,
                     };
                     if let Some(colour) = colour {
@@ -664,6 +667,11 @@ impl State {
         self.charsets = saved.charsets;
         self.shift = saved.shift;
         self.modes.origin = saved.origin;
+        // A row saved above or below the scrolling region set since is
+        // brought into it, where origin mode keeps the cursor.
+        if saved.origin {
+            self.y = self.y.clamp(self.top, self.bottom);
+        }
         self.wrap_pending = false;
     }
 
@@ -839,7 +847,8 @@ impl Perform for State {
             'n' => match param(params, 0, 0) {
                 5 => self.reply("\x1b[0n"),
                 6 => {
-                    let y = if self.modes.origin { self.y - self.top } else { self.y };
+                    let y =
+                        if self.modes.origin { self.y.saturating_sub(self.top) } else { self.y };
                     let text = format!("\x1b[{};{}R", y + 1, self.x + 1);
                     self.reply(&text);
                 }
@@ -1015,5 +1024,16 @@ mod tests {
         assert_eq!(nearest(0, 0, 0), 16);
         assert_eq!(nearest(255, 255, 255), 231);
         assert_eq!(nearest(128, 128, 128), 244);
+        // Parameters past 255 are 255, not an overflow.
+        let term = term("\x1b[38;2;65535;65535;65535mw");
+        assert_eq!(term.cell(0, 0).fg, 231);
+    }
+
+    #[test]
+    fn origin_mode_reports_within_the_region() {
+        // The saved row is above the region set after it.
+        let mut term = term("\x1b[?6h\x1b7\x1b[3;5r\x1b8\x1b[6n");
+        assert_eq!(term.take_replies(), b"\x1b[1;1R");
+        assert_eq!(term.cursor().map(|(_, y)| y), Some(2));
     }
 }

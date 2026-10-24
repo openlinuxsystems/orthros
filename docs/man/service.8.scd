@@ -21,8 +21,9 @@ _/system/etc/spark/services_ describes, a file each.
 
 *start* starts a service that is stopped or disabled, *stop* stops one
 and keeps it stopped until it is started again or the system restarts,
-and *restart* stops it and starts it again. *status* shows what Spark
-knows of it:
+and *restart* stops it and starts it again; Spark stops the domain of
+one that has not ended 5 seconds after SIGTERM. *status* shows what
+Spark knows of it:
 
 ```
 consoled - Virtual consoles

@@ -75,6 +75,7 @@ pub fn handle(regs: &mut SyscallRegs) {
         if user.process.posix.lock().ended_by.is_none() {
             stopped(me, number, info);
         }
+        super::note_domain_stop(me, user);
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
 }

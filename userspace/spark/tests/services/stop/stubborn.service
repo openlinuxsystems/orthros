@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The spark-stop boot test's service that ignores SIGTERM: Spark stops
+# its domain 5 s after `service stubborn restart` or `stop`.
+
+description = Ignores SIGTERM
+program = /system/bin/nukesh
+arguments = -c "trap '' TERM; echo up; while :; do sleep 1; done"
+restart = always
