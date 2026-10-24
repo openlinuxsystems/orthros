@@ -1,0 +1,148 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+A new thread's signal mask (after patch 0038). pthread_create logged and
+ignored a mask set with pthread_attr_setsigmask_np, and a thread made by
+one whose cancellation was disabled, which blocks SIGCANCEL, started with
+SIGCANCEL blocked though its own cancellation was enabled, so a cancel
+could not end a wait it was in. Now such a thread starts with every
+signal blocked and takes its mask, the attributes' with the C library's
+own signals as its creator has them, and never SIGCANCEL, before its
+function runs, as glibc's and musl's threads do; other threads start as
+before. An affinity in the attributes, which Radix cannot honour yet, is
+logged once rather than on every create. Meant for upstream.
+
+--- a/options/internal/generic/threads.cpp
++++ b/options/internal/generic/threads.cpp
+@@ -7,10 +7,13 @@
+ #include <mlibc/allocator.hpp>
+ #include <mlibc/debug.hpp>
+ #include <mlibc/lock.hpp>
++#include <mlibc/sigset.hpp>
+ #include <mlibc/threads.hpp>
+ #include <mlibc/tcb.hpp>
+ #include <mlibc/time-helpers.hpp>
++#include <signal.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ extern "C" Tcb *__rtld_allocateTcb();
+ 
+@@ -34,6 +37,35 @@
+ // exits, the process exits with 0, as POSIX says.
+ constinit unsigned int live_threads = 1;
+ 
++// What a thread whose signal mask is not its creator's starts with: its
++// function and argument, and its mask.
++struct masked_start {
++	void *entry;
++	void *user_arg;
++	sigset_t mask;
++};
++
++int thread_mask(int how, const sigset_t *set, sigset_t *old) {
++	if constexpr (mlibc::IsImplemented<ThreadSigmask>)
++		return mlibc::sysdep<ThreadSigmask>(how, set, old);
++	else
++		return mlibc::sysdep_or_enosys<Sigprocmask>(how, set, old);
++}
++
++// The function such a thread runs first: its creator started it with
++// every signal blocked, so that none reaches it before it takes its own
++// mask.
++template<typename R>
++R start_masked(void *argument) {
++	auto start = static_cast<masked_start *>(argument);
++	auto entry = reinterpret_cast<R (*)(void *)>(start->entry);
++	void *user_arg = start->user_arg;
++	sigset_t mask = start->mask;
++	frg::destruct(getAllocator(), start);
++	thread_mask(SIG_SETMASK, &mask, nullptr);
++	return entry(user_arg);
++}
++
+ } // namespace
+ 
+ extern "C" int __cxa_thread_atexit_impl(void (*function)(void *), void *argument,
+@@ -108,35 +140,68 @@
+ 	if (attrp)
+ 		attr = *attrp;
+ 
+-	if (attr.__cpuset)
+-		mlibc::infoLogger() << "pthread_create(): cpuset is ignored!" << frg::endlog;
+-	if (attr.__sigmaskset)
+-		mlibc::infoLogger() << "pthread_create(): sigmask is ignored!" << frg::endlog;
++	if (!IsImplemented<PrepareStack> || !IsImplemented<Clone>) {
++		MLIBC_MISSING_SYSDEP();
++		return ENOSYS;
++	}
++
++	static constinit bool told_cpuset = false;
++	if (attr.__cpuset && !__atomic_exchange_n(&told_cpuset, true, __ATOMIC_RELAXED))
++		mlibc::infoLogger() << "pthread_create(): CPU affinity is not supported; "
++				"threads run on any CPU" << frg::endlog;
++
++	// A thread starts with its creator's signal mask, as POSIX has it,
++	// but for the mask its attributes name (pthread_attr_setsigmask_np)
++	// and SIGCANCEL, which a new thread, whose cancellation is enabled,
++	// has unblocked even when its creator's is disabled and blocks it.
++	masked_start *start = nullptr;
++	auto self = get_current_tcb();
++	if (attr.__sigmaskset
++			|| !tcb_cancel_enabled(__atomic_load_n(&self->cancelBits, __ATOMIC_RELAXED))) {
++		sigset_t now;
++		if (int e = thread_mask(SIG_BLOCK, nullptr, &now); e)
++			return e;
++		start = frg::construct<masked_start>(getAllocator());
++		if (!start)
++			return EAGAIN;
++		start->entry = entry;
++		start->user_arg = user_arg;
++		start->mask = now;
++		if (attr.__sigmaskset)
++			program_sigset(SIG_SETMASK, &attr.__sigmask, &now, &start->mask);
++		sigdelset(&start->mask, SIGCANCEL);
++		entry = returns_int ? reinterpret_cast<void *>(&start_masked<int>)
++				: reinterpret_cast<void *>(&start_masked<void *>);
++		user_arg = start;
++	}
+ 
+ 	// TODO: due to alignment guarantees, the stackaddr and stacksize might change
+ 	// when the stack is allocated. Currently this isn't propagated to the TCB,
+ 	// but it should be.
+ 	void *stack = attr.__stackaddr;
+-	if (!IsImplemented<PrepareStack>) {
+-		MLIBC_MISSING_SYSDEP();
+-		return ENOSYS;
+-	}
+ 	int ret = sysdep_or_panic<PrepareStack>(&stack, entry,
+ 			user_arg, new_tcb, &attr.__stacksize, &attr.__guardsize, &new_tcb->stackAddr);
+-	if (ret)
++	if (ret) {
++		if (start)
++			frg::destruct(getAllocator(), start);
+ 		return ret;
+-
+-	if (!IsImplemented<Clone>) {
+-		MLIBC_MISSING_SYSDEP();
+-		return ENOSYS;
+ 	}
++
+ 	new_tcb->stackSize = attr.__stacksize;
+ 	new_tcb->guardSize = attr.__guardsize;
+ 	new_tcb->returnValueType = (returns_int) ? TcbThreadReturnValue::Integer : TcbThreadReturnValue::Pointer;
+ 	new_tcb->isJoinable = (attr.__detachstate == __MLIBC_THREAD_CREATE_JOINABLE);
+ 	__atomic_store_n(&new_tcb->cancelBits, 0, __ATOMIC_RELAXED);
+ 	__atomic_fetch_add(&live_threads, 1, __ATOMIC_RELAXED);
++	sigset_t creator_mask;
++	if (start) {
++		sigset_t all;
++		memset(&all, ~0, sizeof(all));
++		thread_mask(SIG_SETMASK, &all, &creator_mask);
++	}
+ 	sysdep_or_panic<Clone>(new_tcb, &tid, stack);
++	if (start)
++		thread_mask(SIG_SETMASK, &creator_mask, nullptr);
+ 	*thread = reinterpret_cast<struct __mlibc_thread_data *>(new_tcb);
+ 
+ 	__atomic_store_n(&new_tcb->tid, tid, __ATOMIC_RELAXED);

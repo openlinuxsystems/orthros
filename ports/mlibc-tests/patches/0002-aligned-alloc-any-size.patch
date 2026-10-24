@@ -1,0 +1,32 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+mlibc's aligned_alloc test asked that a size which is not a multiple of
+the alignment fail with EINVAL, as C11 first had it. C17 (DR 460) takes
+any size, as glibc and musl do, and so does the C library's aligned_alloc
+now (ports/mlibc/patches/0035-large-and-aligned-allocations.patch): the
+test checks that such a block comes out aligned instead, on every C
+library. Goes upstream with that patch.
+
+diff -ruN a/tests/ansi/alloc.c b/tests/ansi/alloc.c
+--- a/tests/ansi/alloc.c
++++ b/tests/ansi/alloc.c
+@@ -22,13 +22,13 @@
+ 	assert(p != NULL);
+ 	free(p);
+ 
+-	// It seems that glibc doesn't report error in these cases.
+-#if !((defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)) && defined(__GLIBC__))
+-	// size % align must be 0
++	// Any size, not only a multiple of the alignment, as C17 has it.
+ 	p = aligned_alloc(256, 1);
+-	assert(errno == EINVAL);
+-	assert(p == NULL);
++	assert(p != NULL && (uintptr_t)p % 256 == 0);
++	free(p);
+ 
++	// It seems that glibc doesn't report error in these cases.
++#if !((defined(USE_HOST_LIBC) || defined(USE_CROSS_LIBC)) && defined(__GLIBC__))
+ 	// align must be a 'valid alignment supported by the implementation'
+ 	p = aligned_alloc(3, 1);
+ 	assert(errno == EINVAL);

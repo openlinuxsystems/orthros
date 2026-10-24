@@ -1,0 +1,158 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+The C library's own signals stay out of programs' masks (after patch
+0022). sigprocmask and pthread_sigmask gave the kernel a program's set
+as it was, so a set filled by hand (memset to all ones, as some programs
+make "every signal") blocked SIGCANCEL and SIGTIMER, and a SIG_SETMASK
+with a mask read back earlier, which never holds them, unblocked
+SIGCANCEL in a thread that had disabled cancellation, so a cancel that
+came then ran its handler and cancelled the thread anyway; mlibc's own
+ppoll, wordexp and siglongjmp do that SIG_SETMASK. Now a program's set
+neither blocks nor unblocks the signals from 32 up to SIGRTMIN, as in
+glibc and musl: SIG_SETMASK keeps them as the thread has them (one more
+call to read the mask), SIG_BLOCK and SIG_UNBLOCK leave them out
+(mlibc::program_sigset), and pthread_setcancelstate asks the kernel
+itself. Meant for upstream.
+
+--- a/options/internal/include/mlibc/sigset.hpp
++++ b/options/internal/include/mlibc/sigset.hpp
+@@ -8,4 +8,13 @@
+ // from 32 up to SIGRTMIN (SIGCANCEL, SIGTIMER), which programs cannot add.
+ int sigaddset_internal(sigset_t *sigset, int sig);
+ 
++// The set a program's sigprocmask() or pthread_sigmask() gives the
++// kernel, in `copy`: `set` with the C library's own signals as they are
++// in `now`, the calling thread's mask, so that a program can neither
++// block nor unblock them. `now` is needed for SIG_SETMASK alone, and
++// may be null otherwise. Returns `set` itself for a `how` that is no
++// operation, for the kernel to refuse.
++const sigset_t *program_sigset(int how, const sigset_t *set, const sigset_t *now,
++		sigset_t *copy);
++
+ } // namespace mlibc
+--- a/options/internal/generic/sigset.cpp
++++ b/options/internal/generic/sigset.cpp
+@@ -74,6 +74,20 @@
+ 	return 0;
+ }
+ 
++const sigset_t *mlibc::program_sigset(int how, const sigset_t *set, const sigset_t *now,
++		sigset_t *copy) {
++	if(how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK)
++		return set;
++	*copy = *set;
++	for(int sig = 32; sig < SIGRTMIN; sig++) {
++		if(how == SIG_SETMASK && sigismember(now, sig))
++			sigaddset_internal(copy, sig);
++		else
++			sigdelset(copy, sig);
++	}
++	return copy;
++}
++
+ int sigaddset(sigset_t *sigset, int sig) {
+ 	if(sig >= 32 && sig < SIGRTMIN) {
+ 		errno = EINVAL;
+--- a/options/ansi/generic/signal.cpp
++++ b/options/ansi/generic/signal.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/debug.hpp>
++#include <mlibc/sigset.hpp>
+ #include <mlibc/tid.hpp>
+ 
+ __sighandler signal(int sn, __sighandler handler) {
+@@ -58,8 +59,20 @@
+ 
+ // This is a POSIX extension, but we have it in here for sigsetjmp
+ // The C library's own signals (32 up to SIGRTMIN) never show in a mask
+-// a program gets back, as in musl.
++// a program gets back, and a program's set neither blocks nor unblocks
++// them, as in glibc and musl: SIGCANCEL stays blocked while the thread's
++// cancellation is disabled, and SIGTIMER in a timer's thread.
+ int sigprocmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
++	sigset_t copy, now;
++	if(set) {
++		if(how == SIG_SETMASK) {
++			if(int e = mlibc::sysdep_or_enosys<Sigprocmask>(SIG_BLOCK, nullptr, &now); e) {
++				errno = e;
++				return -1;
++			}
++		}
++		set = mlibc::program_sigset(how, set, &now, &copy);
++	}
+ 	if(int e = mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve); e) {
+ 		errno = e;
+ 		return -1;
+--- a/options/posix/generic/posix_signal.cpp
++++ b/options/posix/generic/posix_signal.cpp
+@@ -8,6 +8,7 @@
+ #include <bits/ensure.h>
+ 
+ #include <mlibc/all-sysdeps.hpp>
++#include <mlibc/sigset.hpp>
+ #include <mlibc/tcb.hpp>
+ 
+ int sigsuspend(const sigset_t *sigmask) {
+@@ -16,15 +17,31 @@
+ 	return -1;
+ }
+ 
+-// The C library's own signals (32 up to SIGRTMIN) never show in a mask
+-// a program gets back, as in musl.
+-int pthread_sigmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
+-	int e;
++namespace {
++
++int thread_sigmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
+ 	if constexpr (mlibc::IsImplemented<ThreadSigmask>)
+-		e = mlibc::sysdep_or_enosys<ThreadSigmask>(how, set, retrieve);
++		return mlibc::sysdep_or_enosys<ThreadSigmask>(how, set, retrieve);
+ 	else
+-		e = mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve);
+-	if(e)
++		return mlibc::sysdep_or_enosys<Sigprocmask>(how, set, retrieve);
++}
++
++} // namespace
++
++// The C library's own signals (32 up to SIGRTMIN) never show in a mask
++// a program gets back, and a program's set neither blocks nor unblocks
++// them, as in glibc and musl: SIGCANCEL stays blocked while the thread's
++// cancellation is disabled, and SIGTIMER in a timer's thread.
++int pthread_sigmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
++	sigset_t copy, now;
++	if(set) {
++		if(how == SIG_SETMASK) {
++			if(int e = thread_sigmask(SIG_BLOCK, nullptr, &now); e)
++				return e;
++		}
++		set = mlibc::program_sigset(how, set, &now, &copy);
++	}
++	if(int e = thread_sigmask(how, set, retrieve); e)
+ 		return e;
+ 	if(retrieve)
+ 		for(int sig = 32; sig < SIGRTMIN; sig++)
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -642,12 +642,15 @@
+ 			if (mlibc::tcb_async_cancelled(new_value))
+ 				__mlibc_do_cancel();
+ 
++			// Programs' mask calls leave SIGCANCEL as it is, so the
++			// kernel's is called here.
+ 			sigset_t set = {};
+ 			mlibc::sigaddset_internal(&set, SIGCANCEL);
+-			if (mlibc::tcb_cancel_enabled(new_value))
+-				sigprocmask(SIG_UNBLOCK, &set, nullptr);
++			int how = mlibc::tcb_cancel_enabled(new_value) ? SIG_UNBLOCK : SIG_BLOCK;
++			if constexpr (mlibc::IsImplemented<ThreadSigmask>)
++				mlibc::sysdep_or_enosys<ThreadSigmask>(how, &set, nullptr);
+ 			else
+-				sigprocmask(SIG_BLOCK, &set, nullptr);
++				mlibc::sysdep_or_enosys<Sigprocmask>(how, &set, nullptr);
+ 			break;
+ 		}
+ 

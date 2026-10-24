@@ -107,6 +107,10 @@ int access_mode(int flags) {
 
 // Opens `path` as POSIX's openat does.
 int open_path(const radix::Path &path, int flags, int *fd) {
+	// Linux 6.4 and later refuse to make a file that must be a directory,
+	// and make nothing.
+	if((flags & O_CREAT) && (flags & O_DIRECTORY))
+		return EINVAL;
 	uint32_t kernel_flags = open_flags(flags);
 	uint64_t rights;
 	switch(access_mode(flags)) {
@@ -239,7 +243,6 @@ int rights_of(int fd, uint64_t *rights) {
 	return 0;
 }
 
-// Copies descriptor `fd` into the lowest free descriptor from `min_fd`.
 // The errno of a lock that failed with `status`, as POSIX has it: a
 // descriptor not open for what the lock guards is a bad one for it, and
 // no memory for it is no locks.
@@ -328,6 +331,7 @@ int record_lock(int fd, int request, struct flock *lock) {
 	return 0;
 }
 
+// Copies descriptor `fd` into the lowest free descriptor from `min_fd`.
 int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 	uint64_t rights;
 	if(int e = rights_of(fd, &rights); e)
@@ -583,8 +587,11 @@ int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t n, off_t off,
 }
 
 int Sysdeps<Readv>::operator()(int fd, const struct iovec *iovs, int iovc, ssize_t *bytes_read) {
+	size_t sum;
 	if(iovc < 0 || iovc > IOV_MAX)
 		return EINVAL;
+	if(int e = radix::iov_total(iovs, iovc, &sum); e)
+		return e;
 	ssize_t total = 0;
 	for(int i = 0; i < iovc; i++) {
 		if(!iovs[i].iov_len)
@@ -605,11 +612,11 @@ int Sysdeps<Readv>::operator()(int fd, const struct iovec *iovs, int iovc, ssize
 
 int Sysdeps<Writev>::operator()(int fd, const struct iovec *iovs, int iovc,
 		ssize_t *bytes_written) {
+	size_t sum;
 	if(iovc < 0 || iovc > IOV_MAX)
 		return EINVAL;
-	size_t sum = 0;
-	for(int i = 0; i < iovc; i++)
-		sum += iovs[i].iov_len;
+	if(int e = radix::iov_total(iovs, iovc, &sum); e)
+		return e;
 	// Up to PIPE_BUF bytes go in one write, which a pipe never mixes with
 	// another's.
 	if(iovc > 1 && sum <= PIPE_BUF) {
@@ -815,8 +822,10 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 // Not in the dynamic linker, which has no strnlen (core.cpp).
 #ifndef MLIBC_BUILDING_RTLD
 int Sysdeps<Statvfs>::operator()(const char *path, struct statvfs *out) {
+	// Opened only to be asked about: a terminal does not become the
+	// controlling one, and a named pipe does not wait for a writer.
 	int fd;
-	if(int e = sysdep<Open>(path, O_RDONLY | O_CLOEXEC, 0, &fd); e)
+	if(int e = sysdep<Open>(path, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK, 0, &fd); e)
 		return e;
 	int e = sysdep<Fstatvfs>(fd, out);
 	sysdep<Close>(fd);
@@ -931,6 +940,8 @@ int Sysdeps<Renameat>::operator()(int olddirfd, const char *old_path, int newdir
 }
 
 int Sysdeps<Truncate>::operator()(const char *path, off_t length) {
+	if(length < 0)
+		return EINVAL;
 	int fd;
 	if(int e = sysdep<Open>(path, O_WRONLY | O_CLOEXEC, 0, &fd); e)
 		return e;
@@ -939,24 +950,45 @@ int Sysdeps<Truncate>::operator()(const char *path, off_t length) {
 	return e;
 }
 
+// As on Linux, a negative length, a descriptor not open for writing and
+// one that is no file are EINVAL. ftruncate passes its off_t as it is.
 int Sysdeps<Ftruncate>::operator()(int fd, size_t size) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
-	uint64_t status = radix_file_set_size(slot, size);
-	if(other_kind(status))
+	if(static_cast<off_t>(size) < 0)
 		return EINVAL;
-	return radix::to_errno(status);
+	uint64_t status = radix_file_set_size(slot, size);
+	if(other_kind(status) || is(status, RADIX_KERNEL_MISSING_RIGHTS))
+		return EINVAL;
+	int e = radix::to_errno(status);
+	return e == EOPNOTSUPP ? EINVAL : e;
 }
 
+// posix_fallocate's errors in Linux's order: a negative offset or a
+// length that is not positive, then a descriptor not open for writing (a
+// directory never is), a pipe, anything but a file, and an end past the
+// largest offset. posix_fallocate passes its off_t length as it is.
 int Sysdeps<Fallocate>::operator()(int fd, off_t offset, size_t size) {
+	auto length = static_cast<off_t>(size);
+	if(offset < 0 || length <= 0)
+		return EINVAL;
 	struct stat st;
 	if(int e = stat_fd(fd, &st); e)
 		return e;
-	if(offset < 0)
-		return EINVAL;
-	uint64_t end = static_cast<uint64_t>(offset) + size;
-	if(end <= static_cast<uint64_t>(st.st_size))
+	uint64_t rights;
+	if(int e = rights_of(fd, &rights); e)
+		return e;
+	if(S_ISDIR(st.st_mode) || !(rights & RADIX_RIGHTS_WRITE))
+		return EBADF;
+	if(S_ISFIFO(st.st_mode))
+		return ESPIPE;
+	if(!S_ISREG(st.st_mode))
+		return ENODEV;
+	if(length > INT64_MAX - offset)
+		return EFBIG;
+	off_t end = offset + length;
+	if(end <= st.st_size)
 		return 0;
 	return sysdep<Ftruncate>(fd, end);
 }

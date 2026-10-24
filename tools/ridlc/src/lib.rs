@@ -319,40 +319,63 @@ impl Abi {
         })
     }
 
-    /// How many machine words a type takes as a parameter.
+    /// How many machine words a type takes as a parameter (saturating, so
+    /// an absurd array is too many words instead of an overflow).
     pub fn words(&self, ty: &Type) -> usize {
         match ty {
-            Type::Array(inner, len) => self.words(inner) * len,
+            Type::Array(inner, len) => self.words(inner).saturating_mul(*len),
             Type::Bytes(_) => 2,
             _ => 1,
         }
     }
 
-    /// The size and alignment of a type in a structure.
+    /// The size and alignment of a type in a structure: none for a type
+    /// that has none, a structure that holds itself, or a size that does
+    /// not fit a `usize`.
     pub fn layout(&self, ty: &Type) -> Option<(usize, usize)> {
+        self.layout_inside(ty, &mut Vec::new())
+    }
+
+    /// `layout`, inside the structures named in `outer`.
+    fn layout_inside<'a>(
+        &'a self,
+        ty: &'a Type,
+        outer: &mut Vec<&'a str>,
+    ) -> Option<(usize, usize)> {
         match ty {
             Type::Prim(prim) => Some((prim.size(), prim.size())),
             Type::Slot => Some((4, 4)),
             Type::Addr => Some((8, 8)),
             Type::Array(inner, len) => {
-                let (size, align) = self.layout(inner)?;
-                Some((size * len, align))
+                let (size, align) = self.layout_inside(inner, outer)?;
+                Some((size.checked_mul(*len)?, align))
             }
             Type::Named(name) => match &self.find(name)?.1.kind {
-                ItemKind::Struct { fields } => {
-                    let mut offset: usize = 0;
-                    let mut align: usize = 1;
-                    for field in fields {
-                        let (size, field_align) = self.layout(&field.ty)?;
-                        offset = offset.next_multiple_of(field_align) + size;
-                        align = align.max(field_align);
-                    }
-                    Some((offset.next_multiple_of(align), align))
+                ItemKind::Struct { fields } if !outer.contains(&name.as_str()) => {
+                    outer.push(name);
+                    let layout = self.struct_layout(fields, outer);
+                    outer.pop();
+                    layout
                 }
                 _ => None,
             },
             Type::Bytes(_) => None,
         }
+    }
+
+    fn struct_layout<'a>(
+        &'a self,
+        fields: &'a [Field],
+        outer: &mut Vec<&'a str>,
+    ) -> Option<(usize, usize)> {
+        let mut offset: usize = 0;
+        let mut align: usize = 1;
+        for field in fields {
+            let (size, field_align) = self.layout_inside(&field.ty, outer)?;
+            offset = offset.checked_next_multiple_of(field_align)?.checked_add(size)?;
+            align = align.max(field_align);
+        }
+        Some((offset.checked_next_multiple_of(align)?, align))
     }
 }
 

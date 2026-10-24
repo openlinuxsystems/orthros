@@ -101,6 +101,47 @@ static void sleeps(void) {
 	}
 	CHECK(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL) == 0);
 	CHECK(check_now_ns() >= ns(&until));
+	// clock_nanosleep returns its error, on Linux's clocks: those that
+	// drive no timers are not supported, a thread's CPU time and unknown
+	// clocks are invalid.
+	struct timespec short_one = {0, 1000000};
+	CHECK(clock_nanosleep(CLOCK_BOOTTIME, 0, &short_one, NULL) == 0);
+	CHECK(clock_nanosleep(CLOCK_TAI, 0, &short_one, NULL) == 0);
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC_RAW, 0, &short_one, NULL) == EOPNOTSUPP);
+	CHECK(clock_nanosleep(CLOCK_REALTIME_COARSE, 0, &short_one, NULL) == EOPNOTSUPP);
+	CHECK(clock_nanosleep(CLOCK_THREAD_CPUTIME_ID, 0, &short_one, NULL) == EINVAL);
+	CHECK(clock_nanosleep(12345, 0, &short_one, NULL) == EINVAL);
+	errno = 0;
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, 0, &bad, NULL) == EINVAL && errno == 0);
+	struct timespec negative = {-1, 0};
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, 0, &negative, NULL) == EINVAL);
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &negative, NULL) == EINVAL);
+}
+
+static void on_interrupt(int signal) {
+	(void)signal;
+}
+
+// A signal whose handler does not restart calls ends a sleep with EINTR,
+// returned, and a relative one says what was left of it.
+static void interrupted_sleeps(void) {
+	struct sigaction action = {0};
+	action.sa_handler = on_interrupt;
+	sigemptyset(&action.sa_mask);
+	sigaction(SIGALRM, &action, NULL);
+	struct itimerval soon = {{0, 0}, {0, 20000}};
+	CHECK(setitimer(ITIMER_REAL, &soon, NULL) == 0);
+	struct timespec long_one = {10, 0}, left = {0, 0};
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, 0, &long_one, &left) == EINTR);
+	CHECK(left.tv_sec >= 8 && left.tv_sec <= 10);
+	CHECK(setitimer(ITIMER_REAL, &soon, NULL) == 0);
+	struct timespec until;
+	clock_gettime(CLOCK_MONOTONIC, &until);
+	until.tv_sec += 10;
+	left = (struct timespec){-1, -1};
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, &left) == EINTR);
+	CHECK(left.tv_sec == -1 && left.tv_nsec == -1);
+	signal(SIGALRM, SIG_DFL);
 }
 
 static void cpu_time(void) {
@@ -195,6 +236,11 @@ static void timers(void) {
 	CHECK(alarm(5) == 0);
 	CHECK(alarm(0) >= 4);
 	CHECK_ERROR(setitimer(99, &off, NULL), EINVAL);
+	// Microseconds are 0 to 999,999.
+	struct itimerval wrong = {{0, 0}, {0, 1000000}};
+	CHECK_ERROR(setitimer(ITIMER_REAL, &wrong, NULL), EINVAL);
+	wrong.it_value.tv_usec = -1;
+	CHECK_ERROR(setitimer(ITIMER_REAL, &wrong, NULL), EINVAL);
 	signal(SIGALRM, SIG_DFL);
 	signal(SIGVTALRM, SIG_DFL);
 	signal(SIGPROF, SIG_DFL);
@@ -336,7 +382,16 @@ static void posix_timers(void) {
 	CHECK_CHILD(child);
 	CHECK(timer_delete(timer) == 0);
 	CHECK_ERROR(timer_delete(timer), EINVAL);
-	CHECK_ERROR(timer_create(CLOCK_MONOTONIC_RAW, NULL, &timer), EINVAL);
+	// Linux's clocks that drive no timers.
+	CHECK_ERROR(timer_create(CLOCK_MONOTONIC_RAW, NULL, &timer), EOPNOTSUPP);
+	CHECK_ERROR(timer_create(CLOCK_REALTIME_COARSE, NULL, &timer), EOPNOTSUPP);
+	// A time far off stays far off, not wrapped to a near one.
+	struct sigevent quiet_one = {.sigev_notify = SIGEV_NONE};
+	CHECK(timer_create(CLOCK_MONOTONIC, &quiet_one, &timer) == 0);
+	struct itimerspec far = {{0, 0}, {(time_t)1 << 40, 0}};
+	CHECK(timer_settime(timer, 0, &far, NULL) == 0);
+	CHECK(timer_gettime(timer, &left) == 0 && left.it_value.tv_sec > (time_t)1 << 32);
+	CHECK(timer_delete(timer) == 0);
 	sigprocmask(SIG_UNBLOCK, &set, NULL);
 }
 
@@ -344,6 +399,7 @@ int main(void) {
 	check_start("time");
 	RUN(clocks);
 	RUN(sleeps);
+	RUN(interrupted_sleeps);
 	RUN(cpu_time);
 	RUN(timers);
 	RUN(posix_timers);

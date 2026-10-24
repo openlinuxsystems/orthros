@@ -116,6 +116,10 @@ fn tmpfs_files_and_directories() {
     );
     let dir = OpenFlags { directory: true, ..OpenFlags::default() };
     assert_eq!(vfs.open(&root, "etc/hostname", dir).err(), Some(Error::NotDirectory));
+    // A directory is neither made again nor cut.
+    assert_eq!(vfs.open(&root, "etc", create()).err(), Some(Error::IsDirectory));
+    assert_eq!(vfs.open(&root, "etc", trunc).err(), Some(Error::IsDirectory));
+    assert!(vfs.open(&root, "etc", dir).is_ok());
     vfs.remove(&root, "etc/hostname").unwrap();
     // The handle still works after the name is gone.
     file.node.write(0, &Slice(b"kept")).unwrap();

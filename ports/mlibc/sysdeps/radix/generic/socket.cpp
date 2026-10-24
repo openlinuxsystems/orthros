@@ -472,9 +472,13 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 	size_t files;
 	if(int e = rights_of(hdr, slots, &files); e)
 		return e;
-	size_t sum = 0;
-	for(size_t i = 0; i < hdr->msg_iovlen; i++)
-		sum += hdr->msg_iov[i].iov_len;
+	size_t sum;
+	// POSIX's int, which Linux reads as an unsigned count: a negative
+	// one is too many.
+	if(hdr->msg_iovlen < 0 || hdr->msg_iovlen > IOV_MAX)
+		return EMSGSIZE;
+	if(int e = radix::iov_total(hdr->msg_iov, hdr->msg_iovlen, &sum); e)
+		return e;
 	// Descriptors go with a byte, and a stream with no bytes sends none,
 	// as on Linux.
 	if(!sum) {
@@ -489,7 +493,7 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 	if(hdr->msg_iovlen > 1 && sum <= PIPE_BUF) {
 		char gathered[PIPE_BUF];
 		size_t at = 0;
-		for(size_t i = 0; i < hdr->msg_iovlen; i++) {
+		for(int i = 0; i < hdr->msg_iovlen; i++) {
 			memcpy(gathered + at, hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len);
 			at += hdr->msg_iov[i].iov_len;
 		}
@@ -499,7 +503,7 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 		return 0;
 	}
 	size_t total = 0;
-	for(size_t i = 0; i < hdr->msg_iovlen; i++) {
+	for(int i = 0; i < hdr->msg_iovlen; i++) {
 		if(!hdr->msg_iov[i].iov_len)
 			continue;
 		// The descriptors go with the first bytes.
@@ -533,8 +537,13 @@ int Sysdeps<Recvfrom>::operator()(int fd, void *buffer, size_t size, int flags,
 }
 
 int Sysdeps<MsgRecv>::operator()(int fd, struct msghdr *hdr, int flags, ssize_t *length) {
-	if(hdr->msg_iovlen > IOV_MAX)
+	size_t sum;
+	// POSIX's int, which Linux reads as an unsigned count: a negative
+	// one is too many.
+	if(hdr->msg_iovlen < 0 || hdr->msg_iovlen > IOV_MAX)
 		return EMSGSIZE;
+	if(int e = radix::iov_total(hdr->msg_iov, hdr->msg_iovlen, &sum); e)
+		return e;
 	// Room for as many descriptors as the control buffer holds: those
 	// with nowhere to go are closed, and MSG_CTRUNC says so.
 	uint32_t slots[RADIX_FILE_SEND_FILES_MAX];

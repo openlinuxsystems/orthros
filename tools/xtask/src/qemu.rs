@@ -39,6 +39,12 @@ pub fn find_ovmf() -> Option<(PathBuf, PathBuf)> {
         .find(|(code, vars)| code.is_file() && vars.is_file())
 }
 
+/// `path` as the value of a QEMU option such as `-drive file=`, where a
+/// comma ends the value unless it is doubled.
+pub fn option_value(path: &Path) -> String {
+    path.display().to_string().replace(',', ",,")
+}
+
 /// Whether this user can open /dev/kvm for hardware acceleration.
 pub fn kvm_available() -> bool {
     std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok()
@@ -123,7 +129,10 @@ impl Machine {
             }
         }
         if let Some(socket) = &self.qmp {
-            args.extend(["-qmp".into(), format!("unix:{},server=on,wait=off", socket.display())]);
+            args.extend([
+                "-qmp".into(),
+                format!("unix:{},server=on,wait=off", option_value(socket)),
+            ]);
         }
         if self.gdb {
             args.extend(["-gdb".into(), format!("tcp:localhost:{GDB_PORT}"), "-S".into()]);
@@ -139,12 +148,13 @@ impl Machine {
     fn image_args(&self, args: &mut Vec<String>) {
         if let (Firmware::Uefi, Some((code, vars))) = (self.firmware, &self.ovmf) {
             args.push("-drive".into());
-            args.push(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
+            args.push(format!("if=pflash,format=raw,readonly=on,file={}", option_value(code)));
             args.push("-drive".into());
-            args.push(format!("if=pflash,format=raw,file={}", vars.display()));
+            args.push(format!("if=pflash,format=raw,file={}", option_value(vars)));
         }
         // `snapshot=on` keeps the image file unchanged whatever the guest writes.
-        let drive = format!("if=none,id=boot,format=raw,snapshot=on,file={}", self.image.display());
+        let drive =
+            format!("if=none,id=boot,format=raw,snapshot=on,file={}", option_value(&self.image));
         args.extend(["-drive".into(), drive]);
         match self.media {
             Media::Usb => args.extend([
@@ -316,6 +326,12 @@ mod tests {
             extra: vec!["-s".into()],
             direct: None,
         }
+    }
+
+    #[test]
+    fn option_values_double_their_commas() {
+        assert_eq!(option_value(Path::new("/a,b/c.img")), "/a,,b/c.img");
+        assert_eq!(option_value(Path::new("plain.img")), "plain.img");
     }
 
     #[test]

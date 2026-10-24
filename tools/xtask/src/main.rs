@@ -175,6 +175,12 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    lock checker on, uefi-cdrom in xAPIC mode, bios-cdrom
                    without KASLR and PCIDs)
   screen           the boot log on the UEFI framebuffer
+  consoles         a shell on consoled's virtual consoles: typing, Alt+F2,
+                   poweroff
+  spark-oom        a service that runs the machine out of memory is stopped
+                   and started again
+  spark-stop       Spark stops a service that ignores SIGTERM, and what a
+                   service leaves behind
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
   crash-log-bios   the same under BIOS
@@ -196,6 +202,13 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    8 kinds of fault each end only their program
   ipc              user programs ping-pong over endpoints, capabilities in
                    messages, notifications, channels and rings, on 1 and 2 CPUs
+  fuzz             groups of programs make random system calls; nothing leaks
+  spark            the kernel starts Spark, which starts a program and reaps it
+  storage          four FAT disks: what is written reads back after a reboot
+                   and on the host
+  posix            C programs on mlibc, a Rust std one and the ported
+                   utilities: fork, exec, signals, pipes, terminals, files,
+                   threads
   oom              out of memory stops an app, then a restarted service
 
   --case <name>         Run only this boot test; repeat for more
@@ -637,6 +650,18 @@ mod tests {
     fn every_command_has_usage() {
         for (name, _) in COMMANDS {
             assert!(command_usage(name).is_some(), "{name} has no usage text");
+        }
+    }
+
+    #[test]
+    fn test_usage_lists_every_boot_test() {
+        let usage = command_usage("test").unwrap();
+        let words: Vec<&str> = usage
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|w| !w.is_empty())
+            .collect();
+        for case in test::CASES {
+            assert!(words.contains(&case.name), "`ob help test` does not list {}", case.name);
         }
     }
 

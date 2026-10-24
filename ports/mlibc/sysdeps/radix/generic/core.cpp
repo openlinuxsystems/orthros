@@ -249,12 +249,11 @@ int Sysdeps<FutexWake>::operator()(int *pointer, bool all) {
 }
 
 int Sysdeps<ClockGet>::operator()(int clock, time_t *secs, long *nanos) {
-	// Linux's clock numbers are the kernel's ClockKind.
-	if(clock < 0 || clock > RADIX_CLOCK_KIND_BOOTTIME)
-		return EINVAL;
+	enum radix_clock_kind kind;
+	if(int e = radix::clock_kind(clock, &kind); e)
+		return e;
 	struct radix_process_clock_results r;
-	uint64_t status = radix_process_clock(radix::SLOT_PROCESS,
-			static_cast<enum radix_clock_kind>(clock), &r);
+	uint64_t status = radix_process_clock(radix::SLOT_PROCESS, kind, &r);
 	if(status)
 		return radix::to_errno(status);
 	*secs = static_cast<time_t>(r.ns / 1000000000);
@@ -263,8 +262,9 @@ int Sysdeps<ClockGet>::operator()(int clock, time_t *secs, long *nanos) {
 }
 
 int Sysdeps<ClockGetres>::operator()(int clock, time_t *secs, long *nanos) {
-	if(clock < 0 || clock > RADIX_CLOCK_KIND_BOOTTIME)
-		return EINVAL;
+	enum radix_clock_kind kind;
+	if(int e = radix::clock_kind(clock, &kind); e)
+		return e;
 	*secs = 0;
 	*nanos = 1;
 	return 0;
@@ -386,6 +386,13 @@ int Sysdeps<Uname>::operator()(struct utsname *buf) {
 		length = sizeof(buf->release) - 1;
 	memcpy(buf->release, release, length);
 	strncpy(buf->machine, "x86_64", sizeof(buf->machine) - 1);
+	// No domain until networking (Phase 12): "(none)", Linux's text for
+	// none, which getdomainname gives.
+#if defined(_GNU_SOURCE)
+	strcpy(buf->domainname, "(none)");
+#else
+	strcpy(buf->__domainname, "(none)");
+#endif
 	return 0;
 }
 

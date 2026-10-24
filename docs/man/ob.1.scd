@@ -704,7 +704,9 @@ against the C library: the size and alignment of every structure and
 type, the offset and size of every field and the value of every
 constant the crate's Radix module declares, as Clang sees them in the
 C library's headers, and that the C library defines every function it
-declares. Any difference fails the build.
+declares and declares it with as many parameters, each of the same
+kind and size as the crate's, and the same result. Any difference
+fails the build.
 
 # ENVIRONMENT
 

@@ -776,7 +776,11 @@ pub fn parse(text: &str) -> Vec<Measurement> {
             for field in fields.split_whitespace() {
                 match field.split_once('=') {
                     Some(("name", value)) => name = Some(value.to_string()),
-                    Some(("ns", value)) => ns = value.parse::<f64>().ok(),
+                    // A time is a finite number, never below 0: `nan`
+                    // and `inf` parse as f64 but no JSON reader takes them.
+                    Some(("ns", value)) => {
+                        ns = value.parse::<f64>().ok().filter(|ns| ns.is_finite() && *ns >= 0.0);
+                    }
                     Some(("iterations", value)) => iterations = value.parse::<u64>().ok(),
                     _ => {}
                 }
@@ -960,7 +964,8 @@ fn json_list(out: &mut String, measurements: &[Measurement]) {
     out.push_str("\n  ]");
 }
 
-fn json_string(text: &str) -> String {
+/// `text` as a JSON string, quoted.
+pub(crate) fn json_string(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
@@ -1005,7 +1010,10 @@ mod tests {
         let log = "[    0.6] bench[7]: BENCH name=syscall_null ns=965.01 iterations=200000\n\
                    noise\n\
                    BENCH name=getppid ns=98.00 iterations=40000\n\
-                   BENCH name=broken ns=x iterations=1\n";
+                   BENCH name=broken ns=x iterations=1\n\
+                   BENCH name=nan ns=nan iterations=1\n\
+                   BENCH name=inf ns=inf iterations=1\n\
+                   BENCH name=negative ns=-1 iterations=1\n";
         assert_eq!(
             parse(log),
             [
