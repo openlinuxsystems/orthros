@@ -23,6 +23,7 @@ mod lsof;
 mod memory;
 mod modes;
 mod pidstat;
+mod power;
 mod priority;
 mod proc;
 mod ps;
@@ -58,6 +59,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("df", df::main),
     ("dmesg", dmesg::main),
     ("free", memory::free),
+    ("halt", power::halt),
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
     ("ionice", priority::ionice),
@@ -66,10 +68,14 @@ const TOOLS: &[(&str, Tool)] = &[
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
+    ("poweroff", power::poweroff),
     ("ps", ps::main),
+    ("reboot", power::reboot),
     ("renice", priority::renice),
     ("rtrace", rtrace::main),
     ("script", script::main),
+    ("service", power::service),
+    ("shutdown", power::shutdown),
     ("taskset", priority::taskset),
     ("top", top::main),
     ("tree", tree::main),

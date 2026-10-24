@@ -404,8 +404,10 @@ that asked:
 2. It takes the policy mutex. If another thread stopped a domain while
    this one waited, it returns to retry the allocation.
 3. It chooses the domain to stop: the lowest class below `system` (apps,
-   then services), then the most memory charged, skipping domains being
-   stopped and empty ones. If there is none, it logs an error and the
+   then services), then the most memory charged, with the domains below
+   it, skipping domains being stopped and those without threads of their
+   own (such as `services`, whose threads are all in its children, which
+   are chosen one at a time). If there is none, it logs an error and the
    allocation fails.
 4. It marks that domain and every domain below it as stopping, asks
    their threads to stop (`request_stop`) and wakes them, logs a warning

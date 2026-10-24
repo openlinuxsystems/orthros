@@ -7,7 +7,8 @@
 //! and timers: the RSDP and its root table (RSDT or XSDT), the MADT (APIC),
 //! the HPET table, the MCFG (PCI Express configuration space) and the FADT
 //! (for the ACPI timer, the reset register and legacy devices). Phase 2
-//! adds the NUMA topology: the SRAT and the SLIT. Everything
+//! adds the NUMA topology: the SRAT and the SLIT; Phase 9 the sleep types
+//! that powering off needs, from the DSDT's AML. Everything
 //! here works on byte slices and is unit-tested on the build host; the
 //! kernel supplies a [`Memory`] that maps physical addresses for it. The
 //! AML interpreter, which later phases need, is a separate decision (ADR
@@ -22,10 +23,12 @@
 mod fadt;
 mod madt;
 mod numa;
+mod sleep;
 
 pub use fadt::{Fadt, GenericAddress};
 pub use madt::{Madt, MadtEntry};
 pub use numa::{Slit, Srat, SratEntry};
+pub use sleep::sleep_types;
 
 use core::fmt;
 

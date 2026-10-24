@@ -52,6 +52,7 @@ use radix_abi::errors::Kernel;
 use radix_abi::process::{self, ChildWaitFlags, ClockKind};
 use radix_abi::signal::{SIGCHLD, SIGNALS};
 use radix_abi::startup;
+use radix_cap::Rights;
 use radix_hal::UserMode;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_posix::signal::{Action, Actions, Info, Pending};
@@ -62,6 +63,7 @@ use radix_sync::Mutex;
 pub use signal::ThreadSignals;
 
 use super::methods::{Answer, answer};
+use super::objects;
 use super::process::{ProcessObject, ProcessRef};
 use super::{Result, UserRef, cap_error, error};
 use crate::sched::{self, Name, ThreadRef, wait};
@@ -399,10 +401,15 @@ pub fn exited(process: &ProcessObject) {
     }
 }
 
-/// One of `process`'s children changed: its `wait` looks again.
+/// One of `process`'s children changed: its `wait` looks again, and its
+/// `notify_children` notification is signalled.
 pub(super) fn children_changed(process: &ProcessObject) {
     process.child_events.fetch_add(1, Ordering::AcqRel);
     wait::wake_all(child_key(process));
+    let notify = process.child_notify.lock().clone();
+    if let Some((notification, badge)) = notify {
+        notification.notify(badge);
+    }
 }
 
 /// The methods of radix-process(2) from `fork` on, called by `user`'s
@@ -525,6 +532,13 @@ pub fn method(
             if !keep_directory(me, path) {
                 return Err(error(Kernel::NoMemory));
             }
+            answer(label, 0, [0; 8])
+        }
+        process::NOTIFY_CHILDREN => {
+            let a = process::NotifyChildrenArgs::decode(args)?;
+            let (cap, notification) =
+                objects::notification(user.cspace, a.notification, Rights::SEND)?;
+            *target.child_notify.lock() = Some((notification, cap.badge()));
             answer(label, 0, [0; 8])
         }
         process::TRACE => {

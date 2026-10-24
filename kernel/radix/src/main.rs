@@ -215,6 +215,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::disk::init();
     fs::writeback::start();
     fs::kmsg::start();
+    fs::keyboard::start();
     check_timers(online);
     check_ipis(online);
 

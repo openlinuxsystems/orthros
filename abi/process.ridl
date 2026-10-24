@@ -292,7 +292,7 @@ enum ProcessState: u8 {
 }
 
 /// A process.
-interface process = 0x000a version 5 {
+interface process = 0x000a version 6 {
     kind = process;
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
@@ -666,4 +666,13 @@ interface process = 0x000a version 5 {
     method trace = 53 (pid: u64, flags: TraceFlags, to: slot) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, occupied,
                 no_such_process, not_permitted, busy, no_memory];
+    /// Signals the notification in slot `notification` each time a child
+    /// of the process ends, stops or continues, whatever the process does
+    /// with SIGCHLD, with the bits of that capability's badge (bit 0 if it
+    /// has none): how a program that waits in `poll`, as Spark does
+    /// (spark(8)), hears of its children without a signal handler. A later
+    /// call replaces the notification. Needs the control right on the
+    /// process, and the send right on the notification.
+    method notify_children = 54 (notification: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed];
 }

@@ -3,12 +3,13 @@
 
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Twelve kinds are kernel objects with an entry in the store's object
+//! Fifteen kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
 //! spaces, threads, processes, endpoints, notifications, resource domains
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
 //! are charged to, after Linux's cgroups), and from Phase 5 the kernel's
-//! random number generator, rings and the kernel log. Three kinds are
+//! random number generator, rings and the kernel log, files and
+//! directories, and from Phase 9 the machine's power. Three kinds are
 //! ranges of hardware resources, named by the range itself: interrupt
 //! lines, I/O ports and device registers (MMIO). The kernel creates the
 //! first capability to each; every other capability is derived from one.
@@ -57,10 +58,12 @@ pub enum ObjectKind {
     File = 15,
     /// A directory of the VFS: what paths are resolved beneath.
     Directory = 16,
+    /// The machine's power: turning it off, restarting it or halting it.
+    Power = 17,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 17;
+pub const KINDS: usize = 18;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -82,6 +85,7 @@ impl ObjectKind {
         ObjectKind::KernelLog,
         ObjectKind::File,
         ObjectKind::Directory,
+        ObjectKind::Power,
     ];
 
     /// The kind numbered `n`.
@@ -122,6 +126,7 @@ impl ObjectKind {
             ObjectKind::KernelLog => Rights::WRITE,
             ObjectKind::File => Rights::READ.union(Rights::WRITE),
             ObjectKind::Directory => Rights::READ.union(Rights::WRITE).union(Rights::CONTROL),
+            ObjectKind::Power => Rights::CONTROL,
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -176,6 +181,7 @@ impl ObjectKind {
             ObjectKind::KernelLog => "kernel log",
             ObjectKind::File => "file",
             ObjectKind::Directory => "directory",
+            ObjectKind::Power => "power",
         }
     }
 }

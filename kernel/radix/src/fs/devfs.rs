@@ -6,10 +6,11 @@
 //! One tree of device nodes, which every `dev` mount shows: `null`,
 //! `zero`, `random` and `urandom` (both the kernel's generator, which
 //! never blocks once seeded at boot), a block device for each disk and
-//! partition `disk` finds, the terminals (Phase 8, `tty`): `ptmx`,
-//! `tty` and `pts/N`, and the kernel log (Phase 9, `kmsg`). Programs make and remove nothing in it; only the
-//! kernel adds devices, and `pts/N` comes and goes with its
-//! pseudo-terminal.
+//! partition `disk` finds, the terminals (Phase 8, `tty`): `ptmx`, `tty`
+//! and `pts/N`, and since Phase 9 the kernel log (`kmsg`), the keyboards
+//! (`kbd`, from `keyboard`) and the screen (`fb0`, from `framebuffer`). Programs
+//! make and remove nothing in it; only the kernel adds devices, and
+//! `pts/N` comes and goes with its pseudo-terminal.
 
 use radix_block::DeviceRef;
 use radix_klog::{error, warn};
@@ -34,6 +35,10 @@ pub fn init() {
         }
         let kmsg: NodeRef = mem::arc(super::kmsg::Kmsg(next_id()))?;
         root.add("kmsg", kmsg)?;
+        let kbd: NodeRef = mem::arc(super::keyboard::Keyboard(next_id()))?;
+        root.add("kbd", kbd)?;
+        let fb0: NodeRef = mem::arc(super::framebuffer::Framebuffer(next_id()))?;
+        root.add("fb0", fb0)?;
         super::tty::init(&root)?;
         Ok(root)
     })();

@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The framebuffer console: the kernel log on the screen, and the screen
-//! the panic report takes over.
+//! the panic report takes over. Since Phase 9 a program may take the screen
+//! to draw on through `/dev/fb0` (`fs::framebuffer`): the log stays off it
+//! until the program gives it back.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_fbcon::Console;
-use radix_hal::Framebuffer;
+use radix_hal::{Framebuffer, PixelFormat};
 use radix_klog::{Sink, Style, info, warn};
 use radix_sync::{SpinLock, TakeOnce};
 
@@ -19,6 +21,8 @@ static STORAGE: TakeOnce<[u32; STORAGE_CELLS]> = TakeOnce::new([0; STORAGE_CELLS
 static SCREEN: SpinLock<Option<Console>> = SpinLock::new(None);
 /// Set by the panic path, which draws its report itself.
 static TAKEN_OVER: AtomicBool = AtomicBool::new(false);
+/// Set while a program holds the screen (`/dev/fb0`).
+static HANDED_OVER: AtomicBool = AtomicBool::new(false);
 
 /// The kernel log's framebuffer console.
 struct ScreenSink;
@@ -30,7 +34,11 @@ impl Sink for ScreenSink {
         }
         if let Some(console) = SCREEN.lock().as_mut() {
             console.write(text, style);
-            console.flush();
+            // Kept in the grid while a program holds the screen, for when
+            // it gives it back.
+            if !HANDED_OVER.load(Ordering::Relaxed) {
+                console.flush();
+            }
         }
     }
 }
@@ -89,17 +97,70 @@ pub fn present() -> bool {
 }
 
 /// Stops log output to the screen and hands it to `draw`, for the panic
-/// report.
+/// report, over whatever a program drew there.
 pub fn take_over(draw: impl FnOnce(&mut Console)) {
     TAKEN_OVER.store(true, Ordering::Relaxed);
     if let Some(console) = SCREEN.lock().as_mut() {
+        if HANDED_OVER.load(Ordering::Relaxed) {
+            console.repaint();
+        }
         draw(console);
         console.flush();
     }
 }
 
+/// The screen's size and layout, as (width, height, pitch, format), if
+/// there is a framebuffer console.
+pub fn screen() -> Option<(usize, usize, usize, PixelFormat)> {
+    let screen = SCREEN.lock_irq();
+    let fb = screen.as_ref()?.framebuffer();
+    Some((fb.width, fb.height, fb.pitch, fb.format))
+}
+
+/// Gives the screen to a program (`/dev/fb0`): the log stops drawing on
+/// it.
+pub fn hand_over() {
+    HANDED_OVER.store(true, Ordering::Relaxed);
+}
+
+/// Takes the screen back from the program that held it, and draws the log
+/// on it again.
+pub fn give_back() {
+    // With interrupts masked, as the log writes the screen from them.
+    let mut screen = SCREEN.lock_irq();
+    HANDED_OVER.store(false, Ordering::Relaxed);
+    if let Some(console) = screen.as_mut()
+        && !TAKEN_OVER.load(Ordering::Relaxed)
+    {
+        console.repaint();
+    }
+}
+
+/// Copies `bytes` into the framebuffer at byte `offset`, for the program
+/// that holds the screen. Returns false past its end.
+pub fn put_pixels(offset: usize, bytes: &[u8]) -> bool {
+    let mut screen = SCREEN.lock_irq();
+    if TAKEN_OVER.load(Ordering::Relaxed) || !HANDED_OVER.load(Ordering::Relaxed) {
+        // The panic report owns the screen now, or the kernel took it back
+        // to show the end of a shutdown.
+        return true;
+    }
+    let Some(console) = screen.as_mut() else { return false };
+    let Some(end) = offset.checked_add(bytes.len()) else { return false };
+    match console.pixels_mut().get_mut(offset..end) {
+        Some(target) => {
+            target.copy_from_slice(bytes);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Changes one line of the screen in place, such as a restart countdown.
 pub fn update_line(row_from_bottom: usize, text: &str, style: Style) {
+    if HANDED_OVER.load(Ordering::Relaxed) && !TAKEN_OVER.load(Ordering::Relaxed) {
+        return;
+    }
     if let Some(console) = SCREEN.lock().as_mut() {
         let row = console.rows().saturating_sub(1 + row_from_bottom);
         console.fill_row(row, Style::Plain);

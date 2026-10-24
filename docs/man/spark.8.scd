@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--posix*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -20,13 +20,22 @@ a program Spark started. The kernel keeps Spark's process for good, and
 Spark must not end. If it does, the kernel stops with a panic that names
 its exit code, since nothing could start a program again.
 
-This page describes Spark v1, as of Phase 8 of the roadmap. It builds
+This page describes Spark v2, as of Phase 9 of the roadmap. It builds
 the directory hierarchy and mounts the filesystems on it, mounts the FAT
-filesystem of each disk under _/volumes_, then starts the one program its
-arguments name, logs over the kernel log, waits for the program to exit,
+filesystem of each disk under _/volumes_, and then supervises: it starts
+the system's services (see *SERVICES*), each in a resource domain of its
+own, starts them again when they end, answers requests on its control
+socket (see *CONTROL SOCKET*), and stops them all in order when the
+machine is to be turned off or restarted (see *SHUTTING DOWN*).
+
+A boot test instead names one program on the kernel command line. Spark
+starts that program, logs over the kernel log, waits for it to exit,
 reaps it and checks that all of the program's memory came back, or runs
-it as a POSIX program (see *POSIX PROGRAMS*). Then it waits. Phase 9 makes it the supervisor of the system's services, with
-restarts and resource domains.
+it as a POSIX program (see *POSIX PROGRAMS*); it starts the services too
+only when *--services* comes first. *--service-dir* _directory_ starts
+the services that _directory_ describes instead of
+_/system/etc/spark/services_, with or without a program: the *spark-oom*
+boot test points it at _/system/tests/services_.
 
 # STARTING
 
@@ -38,26 +47,29 @@ first one without rebuilding anything. Its arguments are its path and
 then the words after a lone *--* on the kernel command line, at most 32;
 the kernel's own flags end at the *--*.
 
-Spark gets what every program gets (see *radix-startup*(2)) and four
-things more:
+Spark gets what every program gets (see *radix-startup*(2)) and more:
 
 - the boot archive, mapped read-only at a random address, whose place
   and size the start-up page gives;
 - the root of the system's file tree, an empty tmpfs, as a directory
   capability with every right in *SLOT_ROOT* (7);
 - a memory object of 4 MiB in slot 8, the first of the extra slots, from
-  which it makes the memory of the programs it starts;
+  which it makes the memory of the program a boot test names;
+- the *services* resource domain in slot 9, below the root domain, in
+  which it makes a domain for each service (*radix-resource-domain*(2));
+- the power capability in slot 10, which turns the machine off,
+  restarts it or halts it (*radix-power*(2)), and which only Spark holds;
 - an image placed at a random address, as every position-independent
   program is (see *radix-processes*(7)).
 
 The kernel logs:
 
 ```
-Init: the boot archive is 206 KiB with 9 entries; starting /system/bin/spark
+Init: the boot archive is 86929 KiB with 706 entries; starting /system/bin/spark
 Init: /system/bin/spark is process 1
 ```
 
-# WHAT SPARK v1 DOES
+# WHAT SPARK v2 DOES
 
 . It checks the boot archive whole.
 . It makes the root's ten directories, _/system_, _/applications_,
@@ -74,39 +86,185 @@ Init: /system/bin/spark is process 1
   and _/var_ to _system/var_.
 . It copies each default setting in _/system/lib/defaults/etc_ that
   _/system/etc_ lacks into it, with the directories it is in: the
-  defaults the system ships, such as nano's _nanorc_, which an
-  administrator edits in _/system/etc_. A file already there is never
-  replaced, so an update can add settings without undoing edits; until
-  _/system/etc_ is kept on a disk, each boot starts it with all of
-  them.
+  defaults the system ships, such as nano's _nanorc_ and the service
+  files, which an administrator edits in _/system/etc_. A file already
+  there is never replaced, so an update can add settings without
+  undoing edits; until _/system/etc_ is kept on a disk, each boot starts
+  it with all of them.
 . It looks for disks in _/dev_ and mounts the FAT filesystem of each
   partition, or of each disk with no partition table, at
   _/volumes/_*name*: read-write, or read-only when the device is. A
   device that holds no FAT filesystem is left alone.
-. It reads the program its first argument names from _/system_,
-  _/system/tests/hello_ by default, and passes it the arguments after
-  that one.
-. It starts the program in a process made for Spark, with 2 MiB of
-  memory from its pool, the capabilities every program gets, the root
-  directory with the read and write rights in *SLOT_ROOT*, and an exit
-  notification for itself (radix-rt's *spawn*).
-. It waits for the program to exit and logs the exit code.
-. It reaps the program by deleting its capabilities, and checks that every
-  page of the memory it gave came back to the pool.
-. It waits for good.
+. It listens at _/run/spark/control_.
+. With no program on the command line, as on a normal boot, it starts
+  the services that _/system/etc/spark/services_ enables, the lowest
+  *order* first.
+. With a program, it reads it from _/system_ and passes it the arguments
+  after it. It starts the program in a process made for Spark, with 2
+  MiB of memory from its pool, the capabilities every program gets, the
+  root directory with the read and write rights in *SLOT_ROOT*, and an
+  exit notification for itself (radix-rt's *spawn*); waits for it to
+  exit and logs the exit code; then reaps it by deleting its
+  capabilities, and checks that every page of the memory it gave came
+  back to the pool.
+. It supervises for good.
 
 Its lines in the kernel log start with *spark:*, after the kernel's
 *spark[*_thread_*]:* prefix:
 
 ```
-spark: Spark v1 is process 1, moved by 0x10ae4974a000
-spark: boot archive of 206 KiB with 3 files at 0x20e61a756000
+spark: Spark v2 is process 1, moved by 0x10ae4974a000
+spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
 spark: built the hierarchy of 10 directories and mounted 8 filesystems
-spark: started /system/tests/hello as process 2
-spark: process 2 (/system/tests/hello) exited with code 0x0
-spark: reaped process 2; all of its memory came back
+spark: added 4 default settings to /system/etc
+spark: listening at /run/spark/control
+spark: 1 services in /system/etc/spark/services, 1 enabled
+spark: started consoled (/system/bin/consoled) as process 12
+```
+
+and in a boot test that names a program:
+
+```
+spark: started /system/tests/hello as process 12
+spark: process 12 (/system/tests/hello) exited with code 0x0
+spark: reaped process 12; all of its memory came back
 spark: nothing more to do; waiting
 ```
+
+# SERVICES
+
+A service is a program Spark starts at boot and keeps running. Each is
+described by a file _/system/etc/spark/services/_*name*_.service_, whose
+_name_, of 1 to 23 bytes, is the service's and its domain's. The
+system's own come from _/system/lib/defaults/etc/spark/services_; to
+turn one off, set *enabled = no* in its file rather than removing it,
+or the next boot brings it back.
+
+A service file is lines of _key_ *=* _value_; blank lines and lines
+that start with *#* are left out. The keys:
+
+*program* = _path_
+	The program's absolute path. The only key a file must have.
+
+*arguments* = _word_ ...
+	Its arguments, after its path. Double quotes keep blanks in a word.
+
+*description* = _text_
+	What it is, for *service*(8).
+
+*order* = _number_
+	When it starts: lower first, 50 by default. Shutting down stops the
+	highest first, so the services that others need want a low one.
+
+*restart* = *always* | *on-failure* | *never*
+	When it is started again after it ended: whatever its end (the
+	default), only after an exit code other than 0 or a signal, or not
+	at all.
+
+*weight* = _number_
+	Its domain's CPU weight, 1 to 10000, 100 by default: a busy domain
+	of weight 200 gets twice the CPU time of one of 100 when they
+	compete (*radix-scheduling*(7)).
+
+*memory* = _size_ | *none*
+	Its domain's memory limit, as bytes or with *K*, *M* or *G*, such as
+	*64M*; none by default.
+
+*oom* = *service* | *app*
+	Its domain's out-of-memory class: *service*, the default, is stopped
+	only after every app domain, when memory runs out
+	(*radix-resource-domain*(2)).
+
+*environment* = _NAME_*=*_value_ ...
+	More of its environment.
+
+*enabled* = *yes* | *no*
+	Whether Spark starts it at boot; *yes* by default. *service* _name_
+	*start* starts a disabled one.
+
+A file Spark cannot read, or with a key it does not know, is logged and
+left out. For example, _consoled.service_:
+
+```
+description = Virtual consoles
+program = /system/bin/consoled
+order = 10
+restart = on-failure
+weight = 200
+memory = none
+```
+
+Spark starts each service as a POSIX program (*radix-posix*(7)) in a
+domain of its own below *services*, which it makes the first time and
+keeps for the restarts, with _/dev/null_ as its standard input, a pipe as
+its standard output and error, _/_ as its working directory, and the
+environment *PATH=/system/bin*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8*
+and *EDITOR=nano* with the file's *environment* over it. It copies what
+the service writes, line by line, to the kernel log, after the service's
+name and a colon unless the line starts with them already.
+
+When a service ends, Spark logs how, and starts it again as its
+*restart* says: after 0.1 seconds, and twice as long after each end in a
+row that came less than 10 seconds after its start, up to 30 seconds. A
+service that the out-of-memory policy stopped is logged as such, and
+started again the same way.
+
+```
+spark: consoled (process 12) was ended by signal 15
+spark: starting consoled again in 0.1 s
+spark: started consoled (/system/bin/consoled) as process 31
+```
+
+# CONTROL SOCKET
+
+Spark listens at the Unix socket _/run/spark/control_. A request is one
+line; Spark answers it with text and closes the connection. An answer
+that starts with *ok:* or a status table is a success, one that starts
+with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
+*halt*(8) and *service*(8) are its clients.
+
+*poweroff* | *reboot* | *halt* [_seconds_] [*--force*]
+	Shut down to that end, in _seconds_ (now by default). A later
+	request replaces a pending one. With *--force*, Spark ends the
+	machine at once, without stopping the services.
+
+*cancel*
+	Cancel a pending shutdown.
+
+*status*
+	A line per service, its fields by tabs: its name; *running*,
+	*waiting* (to be started again), *stopped* or *disabled*; its
+	process number or *-*; how often it was started again; the wait
+	status of its last end, or *-*; its *restart*; its description. A
+	pending shutdown adds a line *#*, *shutdown*, its end and the
+	seconds left.
+
+*start* | *stop* | *restart* _name_
+	Start a service, stop one and keep it stopped until it is started
+	again, or stop one and start it again, whatever its *restart*
+	says. Stopping sends it SIGTERM.
+
+# SHUTTING DOWN
+
+When a shutdown is due, Spark stops the services in groups by *order*,
+the highest first: it sends each in the group SIGTERM, waits up to 5
+seconds for them to end, then stops the domains of those that did not
+(*radix-resource-domain*(2)'s *stop*, which ends every process in one)
+and waits a second more. Once no service runs, it stops every service's
+domain, for whatever they left behind, and calls the power capability.
+The kernel writes back every filesystem's changes and gives the screen
+back to its log, then powers the machine off through ACPI, restarts it,
+or halts its processors (*radix-power*(2)):
+
+```
+spark: asked to power off the machine
+spark: shutting down to power off: stopping 1 services
+spark: consoled (process 12) was ended by signal 15
+spark: every service has stopped
+Power: `spark` asked to power off the machine; syncing the filesystems
+```
+
+A machine the kernel cannot power off, with no ACPI, is halted instead.
 
 # POSIX PROGRAMS
 
@@ -132,17 +290,35 @@ The lines the program writes come without Spark's *spark:* prefix.
 
 A POSIX program and its children may *fork* and *exec* freely; Spark
 waits only for the one it started. The *posix* boot test (*ob*(1))
-boots with *-- --posix /system/tests/posix/run*.
+boots with *-- --posix /system/tests/posix/run*. A shutdown sends the
+program SIGTERM along with the first group of services.
 
 # EXAMPLES
 
-Boot the default image in QEMU, where Spark starts _/system/tests/hello_:
+Boot the default image in QEMU, where Spark starts the services and
+consoled shows a shell on the screen (*consoled*(8)):
 
 	./ob run
 
-Give the test program arguments, with no other kernel flags:
+Start the test program with arguments instead, with no other kernel
+flags:
 
 	./ob run --cmdline "-- /system/tests/hello one two"
+
+Start it and the services too:
+
+	./ob run --cmdline "-- --services /system/tests/hello"
+
+See what Spark supervises, restart a service, and turn the machine off
+in five minutes:
+
+	service --status-all++
+service consoled restart++
+shutdown +5
+
+The *consoles* boot test boots with no program, types on tty1 and tty2,
+restarts consoled with *service*(8) and powers the machine off with
+*poweroff*(8).
 
 The *spark* boot test (see *ob*(1)) boots with the command line
 *lockdep -- /system/tests/hello one two* under UEFI and checks each of
@@ -175,10 +351,17 @@ _/boot/bootfs_
 _/system/bin/spark_
 	Spark, in the boot archive.
 
+_/system/etc/spark/services/_*name*_.service_
+	The services (see *SERVICES*); the system's own come from
+	_/system/lib/defaults/etc/spark/services_.
+
+_/run/spark/control_
+	The control socket (see *CONTROL SOCKET*).
+
 _/system/tests/hello_
-	The test program Spark starts by default. It prints its process
-	number, its arguments and how far it was moved, fills its heap, and
-	exits with 0.
+	A test program for the boot tests. It prints its process number,
+	its arguments and how far it was moved, fills its heap, and exits
+	with 0.
 
 _/system/tests/storage_
 	The *storage* boot test's program: *storage write* writes files to
@@ -227,8 +410,32 @@ _name_ *holds no FAT filesystem; left alone*
 *spark: process* _n_ *(*_path_*) was ended by signal* _signal_
 	The POSIX program was killed by a signal.
 
+*spark: /*_path_*:* _reason_*; it is not started*
+	A service file that could not be read: the line and what is wrong
+	with it.
+
+*spark: could not start* _name_*:* _reason_
+	A service could not be started: its domain, its process or *exec*
+	failed. Spark tries again as after a quick end.
+
+_name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory policy)*
+	Memory ran out and the kernel stopped the service's domain
+	(*radix-resource-domain*(2)).
+
+*spark: cannot hear of children ending; services are not watched*
+	The kernel could not make the notification Spark waits on; the
+	services start but are not started again.
+
+*spark: the kernel gave no power capability; nothing can be turned off*
+	A shutdown found no power capability in slot 10. Spark waits for
+	good instead.
+
+*spark: could not* _end_ *the machine:* _error_*; halting it*
+	The kernel could not power the machine off (no ACPI) or restart it.
+
 # SEE ALSO
 
-*dukovo-boot*(7), *radix-files*(7), *radix-processes*(7), *radix-posix*(7),
-*radix-proc*(5), *radix-sysfs*(5), *radix-directory*(2),
-*radix-process*(2), *radix-startup*(2), *ob*(1)
+*service*(8), *shutdown*(8), *reboot*(8), *consoled*(8), *dukovo-boot*(7),
+*radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
+*radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
+*radix-resource-domain*(2), *radix-power*(2), *radix-startup*(2), *ob*(1)

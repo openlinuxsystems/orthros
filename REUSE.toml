@@ -53,9 +53,9 @@ path = "userspace/programs/nukesh/tests/cases/*.out"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
 
-# The system's default user and group lists (ADR 0090), whose formats
-# have no comments.
+# The system's default user and group lists (ADR 0090) and the console
+# greeting (consoled(8)), whose formats have no comments.
 [[annotations]]
-path = ["userspace/defaults/group", "userspace/defaults/passwd"]
+path = ["userspace/defaults/group", "userspace/defaults/issue", "userspace/defaults/passwd"]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"

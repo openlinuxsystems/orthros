@@ -18,9 +18,12 @@
 //! - an out-of-memory class, [`OomClass`]: when the machine as a whole runs
 //!   out of memory, `oom` stops whole domains, apps first and services
 //!   next, and never `system` ones, which hold the trusted computing base;
-//! - optionally a supervisor, which restarts the domain after an
-//!   out-of-memory stop: Spark's job once it supervises services (Phase
-//!   9); until then a kernel stand-in does it (`oom`).
+//! - optionally a supervisor in the kernel, which restarts the domain
+//!   after an out-of-memory stop on the `supervisor` thread (`oom`). The
+//!   domains programs make through capabilities (radix-resource-domain(2),
+//!   Phase 9) have none: Spark, which makes one for each service it
+//!   starts, restarts the service itself once the domain's last thread has
+//!   gone, which lets the domain take threads again.
 //!
 //! Domains are kernel objects that capabilities name
 //! ([`radix_cap::ObjectKind::ResourceDomain`]); `caps::create_domain` makes
@@ -278,9 +281,15 @@ impl Domain {
     }
 
     /// A thread in it exited (or was freed without running). Returns
-    /// whether it was the domain's last.
+    /// whether it was the domain's last. A stopped domain without a
+    /// supervisor in the kernel takes new threads again once its last has
+    /// gone: Spark, which made it, starts its service again (Phase 9).
     pub(crate) fn thread_left(&self) -> bool {
-        self.threads.fetch_sub(1, Ordering::AcqRel) == 1
+        let last = self.threads.fetch_sub(1, Ordering::AcqRel) == 1;
+        if last && self.supervisor.is_none() {
+            self.stopping.store(false, Ordering::Release);
+        }
+        last
     }
 
     /// What to wait on (`sched::wait`) for its last thread to exit.
@@ -288,11 +297,16 @@ impl Domain {
         self as *const Domain as usize
     }
 
-    /// Marks it stopping (or not): from the out-of-memory policy, and from
-    /// its supervisor once it has restarted it.
-    pub(crate) fn set_stopping(&self, stopping: bool) {
-        if stopping {
+    /// Marks it stopping (or not): from the out-of-memory policy, counted
+    /// in [`Domain::oom_stops`], or from its holder's `stop`; and not, from
+    /// its supervisor once it has restarted it. A domain without threads
+    /// or a supervisor has nothing to wait for and is not marked.
+    pub(crate) fn set_stopping(&self, stopping: bool, oom: bool) {
+        if stopping && oom {
             self.oom_stops.fetch_add(1, Ordering::Relaxed);
+        }
+        if stopping && self.supervisor.is_none() && self.threads() == 0 {
+            return;
         }
         self.stopping.store(stopping, Ordering::Release);
     }

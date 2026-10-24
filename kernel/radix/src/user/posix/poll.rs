@@ -117,6 +117,8 @@ fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
                 handle.events()
             } else if file.is_kmsg() {
                 crate::fs::kmsg::events(file) | WRITABLE
+            } else if file.is_keyboard() {
+                crate::fs::keyboard::events(file)
             } else {
                 READABLE | WRITABLE
             }

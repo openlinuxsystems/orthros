@@ -82,9 +82,15 @@ pub struct Geometry {
 
 impl Geometry {
     /// Finds the kernel's line
-    /// `Framebuffer: console of 160x50 cells with font 8x16 at (0, 0)`.
+    /// `Framebuffer: console of 160x50 cells with font 8x16 at (0, 0)`,
+    /// or consoled's `consoled: console of ...` once it has taken the
+    /// screen over: the last of them.
     pub fn from_log(log: &str) -> Option<Geometry> {
-        let line = log.lines().find_map(|l| l.split("Framebuffer: console of ").nth(1))?;
+        let line = log.lines().rev().find_map(|l| {
+            ["Framebuffer: console of ", "consoled: console of "]
+                .iter()
+                .find_map(|prefix| l.split(prefix).nth(1))
+        })?;
         let (grid, rest) = line.split_once(" cells with font ")?;
         let (font, rest) = rest.split_once(" at (")?;
         let (x, y) = rest.trim_end_matches(')').split_once(", ")?;
@@ -199,6 +205,12 @@ mod tests {
         let geometry = Geometry::from_log(log).unwrap();
         assert_eq!(geometry, Geometry { cols: 160, rows: 50, font: (8, 16), origin: (0, 0) });
         assert!(Geometry::from_log("nothing here").is_none());
+        // consoled's, once it has the screen, wins.
+        let log = format!(
+            "{log}[    2.5 cpu1] consoled: console of 128x48 cells with font 8x16 at (0, 0)\n"
+        );
+        let geometry = Geometry::from_log(&log).unwrap();
+        assert_eq!((geometry.cols, geometry.rows), (128, 48));
     }
 
     #[test]

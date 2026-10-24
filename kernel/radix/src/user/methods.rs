@@ -59,6 +59,8 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::KernelLog => radix_abi::kernel_log::VERSION,
         ObjectKind::File => radix_abi::file::VERSION,
         ObjectKind::Directory => radix_abi::directory::VERSION,
+        ObjectKind::ResourceDomain => radix_abi::resource_domain::VERSION,
+        ObjectKind::Power => radix_abi::power::VERSION,
         _ => 0,
     }
 }
@@ -145,6 +147,8 @@ pub fn call(
         (ObjectKind::AddressSpace, _) => address_space_method(user, slot, info.label, &args),
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
         (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
+        (ObjectKind::ResourceDomain, _) => super::domain::method(user, slot, info.label, &args),
+        (ObjectKind::Power, _) => super::power::method(user, cap, info.label, &args),
         (ObjectKind::Directory, _) => {
             super::files::directory_method(user, found, info.label, &args)
         }

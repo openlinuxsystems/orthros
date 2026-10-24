@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-input"
+description = "Keyboards for the Radix kernel: what a PS/2 keyboard sends, as key events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+radix-abi = { path = "../../abi" }
+
+[lints]
+workspace = true

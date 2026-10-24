@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The virtual consoles on the screen and keyboard: consoled(8). Each
+# console runs root's shell; Alt+F1 to Alt+F6 switch between them.
+
+description = Virtual consoles
+program = /system/bin/consoled
+# First up, last down: the consoles show the other services stopping.
+order = 10
+# A machine with no screen has no consoles: consoled exits with 0 there,
+# and stays stopped.
+restart = on-failure
+# The shells and all they run share its domain, so it has no memory
+# limit; twice the default CPU weight keeps typing quick when services
+# are busy.
+weight = 200
+memory = none

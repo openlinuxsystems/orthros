@@ -38,6 +38,8 @@
 
 pub mod devfs;
 pub mod disk;
+pub mod framebuffer;
+pub mod keyboard;
 pub mod kmsg;
 pub mod locks;
 pub mod pipe;
@@ -98,7 +100,7 @@ impl Description {
 
 /// What kind of node a [`FileObject`] is of, as its reads and writes see
 /// it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Special {
     /// A file or directory of a filesystem.
     No,
@@ -110,6 +112,10 @@ enum Special {
     Tty,
     /// `/dev/kmsg`.
     Kmsg,
+    /// `/dev/kbd`.
+    Keyboard,
+    /// `/dev/fb0`.
+    Framebuffer,
 }
 
 /// The most bytes of a path an [`Opened`] keeps.
@@ -274,14 +280,15 @@ impl FileObject {
             Kind::Socket if socket::socket_of(&at.node).is_some() => Special::Socket,
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
             Kind::CharDevice if kmsg::is_kmsg(&at.node) => Special::Kmsg,
+            Kind::CharDevice if keyboard::is_keyboard(&at.node) => Special::Keyboard,
+            Kind::CharDevice if framebuffer::is_framebuffer(&at.node) => Special::Framebuffer,
             _ => Special::No,
         };
-        if special == Special::Kmsg {
-            kmsg::opened();
-        }
+        // The devices are the last kinds: one comparison for the others.
+        let offset = if special >= Special::Kmsg { device_opened(special) } else { 0 };
         let object = FileObject {
             at,
-            offset: Mutex::new(0),
+            offset: Mutex::new(offset),
             flags: AtomicU32::new(description.bits()),
             locked: AtomicBool::new(false),
             special,
@@ -336,12 +343,44 @@ impl FileObject {
     pub fn is_kmsg(&self) -> bool {
         self.special == Special::Kmsg
     }
+
+    /// Whether it is of `/dev/kbd`.
+    pub fn is_keyboard(&self) -> bool {
+        self.special == Special::Keyboard
+    }
+
+    /// Whether it is of `/dev/fb0`.
+    pub fn is_framebuffer(&self) -> bool {
+        self.special == Special::Framebuffer
+    }
+
+    /// Whether its reads and writes are a pipe's, a socket's, a terminal's
+    /// or a device's, not a node's: one comparison, for the paths that
+    /// plain files take.
+    pub fn is_special(&self) -> bool {
+        self.special != Special::No
+    }
+}
+
+/// A description of a device was made: returns its first offset.
+#[cold]
+fn device_opened(special: Special) -> u64 {
+    match special {
+        Special::Kmsg => {
+            kmsg::opened();
+            0
+        }
+        Special::Keyboard => keyboard::opened(),
+        _ => 0,
+    }
 }
 
 impl Drop for FileObject {
     fn drop(&mut self) {
-        if self.special == Special::Kmsg {
-            kmsg::closed();
+        match self.special {
+            Special::Kmsg => kmsg::closed(),
+            Special::Framebuffer => framebuffer::closed(self.address()),
+            _ => {}
         }
         if self.locked.load(Ordering::Acquire) {
             locks::description_gone(&self.at.node, self.address());

@@ -131,9 +131,12 @@ capability goes, then its space is freed.
 	layout (*radix-sysfs*(5)).
 
 *dev*
-	The devices: _null_, _zero_, _random_, _urandom_, a block device per
-	disk and partition, and the terminals: _ptmx_, _tty_ and _pts/_*N*
-	(*radix-posix*(7)).
+	The devices: _null_, _zero_, _random_, _urandom_, _kmsg_ (the kernel
+	log, *radix-kernel-log*(2)), a block device per disk and partition,
+	the terminals: _ptmx_, _tty_ and _pts/_*N* (*radix-posix*(7)), and
+	from Phase 9 the screen and the keyboard: _fb0_, the framebuffer
+	the firmware set up (*radix-framebuffer*(2)), and _kbd_, the PS/2
+	keyboard's key events (*radix-input*(2)), which *consoled*(8) uses.
 
 *bootfs*
 	The boot archive (*radix-processes*(7)), read-only, with the

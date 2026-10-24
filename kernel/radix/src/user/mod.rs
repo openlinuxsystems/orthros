@@ -45,6 +45,7 @@
 //! a thread's IPC state; a ring's queues. None is held across a block.
 
 mod account;
+mod domain;
 pub(crate) mod files;
 pub mod init;
 mod ipc;
@@ -55,6 +56,7 @@ mod methods;
 mod notify;
 pub mod objects;
 pub(crate) mod posix;
+mod power;
 pub mod process;
 pub mod random;
 mod ring;
@@ -316,6 +318,11 @@ fn returning_interrupted(me: &ThreadRef) {
     let Some(user) = me.user() else { return };
     if me.should_stop() {
         info!("User: thread {} ({}) stopped", me.id(), me.name());
+        if me.domain().is_stopping() {
+            // Stopped with its domain, by the out-of-memory policy or the
+            // domain's `stop`: to its parent, as if killed.
+            user.process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
+        }
         exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
     }
     posix::signal::deliver(me, user);

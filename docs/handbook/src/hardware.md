@@ -114,8 +114,8 @@ checks of every phase so far:
    end with `passed` before `Boot complete.` Then boot with
    `selftest=bench` and note the `BENCH` lines, which are the first
    numbers from real hardware.
-10. From Phase 6: the log must end with Spark's lines, from `spark: Spark
-    v1 is process 1` to `spark: nothing more to do; waiting`, with
+10. In Phases 6 to 8: the log must end with Spark's lines, from `spark:
+    Spark v1 is process 1` to `spark: nothing more to do; waiting`, with
     `hello` exiting with code `0x0` and all of its memory coming back.
 11. From Phase 7: Spark must say `built the hierarchy of 10 directories
     and mounted 8 filesystems`. Photograph the `PCI:` lines, which list
@@ -124,6 +124,15 @@ checks of every phase so far:
     (class `0200xx`) that Phases 10 and 12 drive. No `Disk:` line is
     expected, since the laptop has no virtio disks and its SATA drives
     wait for the AHCI driver, so `/volumes` stays empty.
+12. From Phase 9: the log gives way to the first virtual console, which
+    shows `Dukovo` and `(tty1)` and a `#` prompt. Type `echo hello` on
+    the built-in keyboard and check that `hello` comes back; press Caps
+    Lock and check its light; press Alt+F2 for tty2 and Alt+F1 to come
+    back. Run `dmesg | grep Keyboard`, which must say `PS/2 keyboard on
+    the i8042 controller`, and `service --status-all`, which must list
+    `[ + ]  consoled`. Then run `poweroff`: the screen shows the log
+    again, ending with `Power: powering off (ACPI S5`, and the laptop
+    must turn itself off.
 
 Record the result in the table below, with the commit tested, and open an
 issue for anything that fails, with the photos.

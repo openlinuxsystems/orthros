@@ -247,7 +247,10 @@ memory from the pool, waits for its exit notification, reaps it, checks
 that the pool has no page in use, and then waits for good on a
 notification nothing signals. Since Phase 7 the kernel also gives Spark
 the root of the file tree, and Spark v1 builds the hierarchy on it first
-(docs/design/storage.md).
+(docs/design/storage.md). Since Phase 9, Spark v2 supervises the
+system's services, each in a resource domain of its own made through the
+`services` domain the kernel gives it, and shuts the machine down with
+the power capability (spark(8), ADRs 0098, 0099 and 0101).
 
 ## radix-rt
 
@@ -329,12 +332,13 @@ property tests that feed them garbage.
 
 - The lower page tables a process's mappings need are made from the
   kernel's memory and not charged yet; only the top table is.
-- Every process runs in the root domain; Spark makes domains for the
-  services it supervises in Phase 9, and until then the kernel's own
-  stand-in applies the out-of-memory policy (ADR 0029).
-- Spark starts one program at a time, and restarts nothing. Phase 7's
-  Spark v1 also builds the directory hierarchy and mounts the disks
-  (docs/design/storage.md).
+- Until Phase 9 every process ran in the root domain. Since then Spark
+  makes a domain for each service it supervises, below `services`, and
+  starts the service again after the out-of-memory policy stops it; the
+  kernel's own stand-in supervisor remains for the domains it makes
+  (ADRs 0029 and 0098).
+- Spark v2 orders services only by their `order`, with no dependencies
+  or readiness between them (ADR 0101).
 - radix-rt's heap never gives its 64 KiB chunks back, and the address
   ranges it maps at are not reused. A freed large block stays mapped and
   is reused only for a later block of the same size (since Phase 7, when
