@@ -19,7 +19,8 @@
 //! deadline passes) or an entity with an earlier deadline wakes up.
 //!
 //! An entity that leaves the queue (to sleep, or to move to another CPU)
-//! takes its lag along, clamped to a little more than a slice; it comes back
+//! takes its lag along, clamped to two slices or a tick, whichever is
+//! longer, as Linux clamps it ([`FairQueue::lag_limit`]); it comes back
 //! at that lag, so sleeping neither earns credit nor costs any, and a
 //! thread that moves between CPUs keeps its place. A new entity starts at
 //! lag 0 with half a slice, so it runs soon without crowding the others.
@@ -28,7 +29,9 @@
 //! `v`), so `V` and eligibility are exact integer arithmetic: an entity is
 //! eligible when `(v - v0) Σ w <= Σ w (v - v0)`. Some entity always is (the
 //! one with the smallest `v`), so picking never fails on a non-empty queue
-//! (proved in `proofs.rs`). Virtual times are `u64` that may wrap; only
+//! (argued in `docs/design/scheduler.md` and checked by the host tests:
+//! the products of symbolic 64-bit values are beyond Kani, see
+//! `proofs.rs`). Virtual times are `u64` that may wrap; only
 //! differences, as `i64`, are compared.
 //!
 //! Entities live in a vector and picking scans it: the queues are short in

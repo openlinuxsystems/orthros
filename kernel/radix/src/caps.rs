@@ -253,12 +253,21 @@ pub fn delete(at: SlotRef) -> Result<(), CapError> {
 
 /// Revokes everything derived from the capability in `at`, in steps of
 /// [`REVOKE_STEP`] with the lock let go in between. Returns how many
-/// steps it took.
+/// steps it took. A step after the first goes on only while the slot
+/// keeps its revoke mark, so a capability another thread puts in the
+/// slot meanwhile keeps its descendants.
 pub fn revoke(at: SlotRef) -> Result<u32, CapError> {
     let mut steps = 0;
     loop {
         steps += 1;
-        match with(|store| store.revoke(at, REVOKE_STEP, &mut release))?? {
+        let step = |store: &mut Store| {
+            if steps == 1 {
+                store.revoke(at, REVOKE_STEP, &mut release)
+            } else {
+                store.continue_revoke(at, REVOKE_STEP, &mut release)
+            }
+        };
+        match with(step)?? {
             Progress::Done => return Ok(steps),
             Progress::More => crate::sched::yield_now(),
         }

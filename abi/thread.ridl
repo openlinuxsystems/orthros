@@ -5,7 +5,9 @@
 //!
 //! A thread runs in one address space with one capability space. A thread
 //! that faults (touches memory it may not, runs an instruction it may not)
-//! is stopped and the kernel logs why.
+//! ends its process with EXIT_FAULT, and the kernel logs why
+//! (radix-processes(7)); a POSIX program first gets the fault's signal,
+//! which a handler may take (radix-posix(7)).
 
 module thread;
 

@@ -166,6 +166,41 @@ fn revoke_in_steps_blocks_new_derivations() {
     caps.audit().unwrap();
 }
 
+/// A revoke in steps whose capability is deleted between steps, and
+/// another put in its slot, stops: the newcomer keeps its descendants.
+#[test]
+fn a_revoke_ends_with_its_capability() {
+    let mut caps = store();
+    let a = caps.create_space(64).unwrap();
+    caps.create(at(a, 0), ObjectKind::Endpoint).unwrap();
+    for slot in 1..20 {
+        caps.derive(at(a, 0), at(a, slot), Derivation::COPY).unwrap();
+    }
+    let mut bin = Bin::default();
+    assert_eq!(caps.revoke(at(a, 0), 5, &mut bin.sink()), Ok(Progress::More));
+    // Another thread deletes it and puts a new endpoint, with copies of
+    // its own, in the slot.
+    caps.delete(at(a, 0), &mut bin.sink()).unwrap();
+    caps.create(at(a, 0), ObjectKind::Endpoint).unwrap();
+    for slot in 40..44 {
+        caps.derive(at(a, 0), at(a, slot), Derivation::COPY).unwrap();
+    }
+    let left = caps.census().total_caps();
+    assert_eq!(caps.continue_revoke(at(a, 0), 5, &mut bin.sink()), Ok(Progress::Done));
+    assert_eq!(caps.census().total_caps(), left);
+    for slot in 40..44 {
+        assert!(caps.get(at(a, slot)).is_ok());
+    }
+    // A revoke that a second caller finished is done for the first too.
+    assert_eq!(caps.revoke(at(a, 0), 1, &mut bin.sink()), Ok(Progress::More));
+    assert_eq!(caps.revoke(at(a, 0), 100, &mut bin.sink()), Ok(Progress::Done));
+    assert_eq!(caps.continue_revoke(at(a, 0), 1, &mut bin.sink()), Ok(Progress::Done));
+    // An empty slot, or a space that is gone, has nothing left to revoke.
+    caps.delete(at(a, 0), &mut bin.sink()).unwrap();
+    assert_eq!(caps.continue_revoke(at(a, 0), 1, &mut bin.sink()), Ok(Progress::Done));
+    caps.audit().unwrap();
+}
+
 #[test]
 fn derivation_depth_is_bounded() {
     let mut caps = store();
