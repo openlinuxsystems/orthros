@@ -1,0 +1,87 @@
+SPDX-FileCopyrightText: Alex Crichton and the filetime crate authors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+filetime sets a path's times by opening the file for reading and
+setting them through that handle, which Radix refuses: a file's
+capability needs the write right for that (ADR 0076), where Linux lets
+the file's owner do it through any descriptor. `touch` on an existing
+file, `cp -p` and `install -p` failed with EACCES. On Radix it now sets
+them with utimensat on the path, through the module it uses on the BSDs
+for symbolic links' times, which Radix uses for those too.
+
+--- a/filetime-0.2.29/src/lib.rs
++++ b/filetime-0.2.29/src/lib.rs
+@@ -248,11 +248,26 @@
+ where
+     P: AsRef<Path>,
+ {
+-    imp::open(p.as_ref())?.set_times(
+-        fs::FileTimes::new()
+-            .set_accessed(atime.into())
+-            .set_modified(mtime.into()),
+-    )
++    set_path_times(p.as_ref(), Some(atime), Some(mtime))
++}
++
++// Sets a file's times by its path. On Radix through the path's directory:
++// a handle that may only read the file may not set them there.
++#[cfg(target_os = "radix")]
++fn set_path_times(p: &Path, atime: Option<FileTime>, mtime: Option<FileTime>) -> io::Result<()> {
++    imp::set_times(p, atime, mtime, false)
++}
++
++#[cfg(not(target_os = "radix"))]
++fn set_path_times(p: &Path, atime: Option<FileTime>, mtime: Option<FileTime>) -> io::Result<()> {
++    let mut times = fs::FileTimes::new();
++    if let Some(t) = atime {
++        times = times.set_accessed(t.into());
++    }
++    if let Some(t) = mtime {
++        times = times.set_modified(t.into());
++    }
++    imp::open(p)?.set_times(times)
+ }
+ 
+ /// Set the last access and modification times for a file handle.
+@@ -302,7 +317,7 @@
+ where
+     P: AsRef<Path>,
+ {
+-    imp::open(p.as_ref())?.set_times(fs::FileTimes::new().set_modified(mtime.into()))
++    set_path_times(p.as_ref(), None, Some(mtime))
+ }
+ 
+ /// Set the last access time for a file on the filesystem.
+@@ -319,7 +334,7 @@
+ where
+     P: AsRef<Path>,
+ {
+-    imp::open(p.as_ref())?.set_times(fs::FileTimes::new().set_accessed(atime.into()))
++    set_path_times(p.as_ref(), Some(atime), None)
+ }
+ 
+ #[cfg(test)]
+--- a/filetime-0.2.29/src/unix/mod.rs
++++ b/filetime-0.2.29/src/unix/mod.rs
+@@ -25,7 +25,8 @@
+                         target_os = "freebsd",
+                         target_os = "netbsd",
+                         target_os = "openbsd",
+-                        target_os = "haiku"))] {
++                        target_os = "haiku",
++                        target_os = "radix"))] {
+         mod utimensat;
+         pub use self::utimensat::*;
+     } else {
+--- a/filetime-0.2.29/src/unix/utimensat.rs
++++ b/filetime-0.2.29/src/unix/utimensat.rs
+@@ -8,7 +8,7 @@
+     set_times(p, Some(atime), Some(mtime), true)
+ }
+ 
+-fn set_times(
++pub fn set_times(
+     p: &Path,
+     atime: Option<FileTime>,
+     mtime: Option<FileTime>,

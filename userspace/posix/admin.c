@@ -5,9 +5,10 @@
 // administrator's commands and scripts use them, each through its link
 // in /bin: the process tools and their signals, sessions, memory and
 // disks, priorities, CPU affinity and I/O classes, held files, traces,
-// the kernel log, the dump and layout tools, and script, watch and
-// pidstat. With them, what the kernel tells them: /proc (radix-proc(5)),
-// /dev/kmsg, getloadavg, and the priorities a child inherits.
+// the kernel log, the dump and layout tools, script, watch and pidstat,
+// and shutdown and service through Spark. With them, what the kernel
+// tells them: /proc (radix-proc(5)), /dev/kmsg, getloadavg, and the
+// priorities a child inherits.
 
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -395,6 +396,29 @@ static void watching(void) {
 	CONTAINS("Average:", "/bin/pidstat", "-p", me, "1", "1");
 }
 
+// shutdown, reboot, poweroff, halt and service, through Spark's control
+// socket (spark(8)): shutdowns planned and called off, and what Spark
+// answers in a boot that starts no services. The `consoles` boot test
+// powers the machine off, and `spark-oom` has Spark restart a service.
+static void power(void) {
+	STATUS(1, "/bin/shutdown", "-c");
+	STATUS(0, "/bin/shutdown", "-r", "+30", "a planned restart");
+	STATUS(0, "/bin/shutdown", "-c");
+	STATUS(1, "/bin/shutdown", "-c");
+	STATUS(0, "/bin/shutdown", "-H", "--no-wall", "23:59");
+	STATUS(0, "/bin/shutdown", "--no-wall", "-c");
+	STATUS(0, "/bin/shutdown", "-k", "now");
+	STATUS(1, "/bin/shutdown", "tomorrow");
+	CONTAINS("Reboot the system.", "/bin/reboot", "--help");
+	CONTAINS("Power off the system.", "/bin/poweroff", "--help");
+	CONTAINS("Halt the system.", "/bin/halt", "--help");
+	STATUS(1, "/bin/halt", "--no-such-option");
+	OUTPUT("", "", "/bin/service", "--status-all");
+	STATUS(4, "/bin/service", "nothing", "status");
+	STATUS(1, "/bin/service", "nothing", "start");
+	STATUS(1, "/bin/service");
+}
+
 // The program behind the links.
 static void links(void) {
 	CONTAINS("\nxxd\n", "/system/bin/systools", "--list");
@@ -416,6 +440,7 @@ int main(void) {
 	RUN(kernel_log);
 	RUN(dumping);
 	RUN(watching);
+	RUN(power);
 	RUN(links);
 	return check_end();
 }

@@ -204,7 +204,9 @@ times on tmpfs and FAT, which keeps them in two-second steps and the
 last read only to the day, as Linux's vfat does. Times before 1970 fail
 with EINVAL, and devices and pipes, which keep no times, with EPERM.
 *futimens* needs a descriptor open for writing (EACCES otherwise),
-where Linux lets the file's owner.
+where Linux lets the file's owner, and so does Rust's *File::set_times*;
+the filetime crate, which the core utilities use, sets a path's times by
+its path.
 
 _/dev/fd/_*N* names descriptor _N_, and _/dev/stdin_, _/dev/stdout_ and
 _/dev/stderr_ name 0, 1 and 2, for *open*, *stat* and *access* and
@@ -411,7 +413,8 @@ offset, every constant, and every function the C library must define.
 
 Users come with Phase 13. Until then every process is user 0 and group
 0, *setuid* and its kin succeed only for 0, files have no permissions to
-check, and *chmod*, *chown* and *umask* change nothing.
+check, and *chmod*, *chown* and *umask* change nothing. There are no
+login records, so *getlogin* fails and *logname* finds no login name.
 
 # TESTS
 
@@ -424,7 +427,7 @@ tests are:
 *hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *spawn*, *limits*, *format*
 	C programs in _userspace/posix_, one per area. *format* holds
 	*printf*, *strtod*, *scanf*, *strftime* and the time conversions to
-	1,428 answers generated with glibc 2.39.
+	1,461 answers generated with glibc 2.39.
 
 *dynamic*
 	A program with a private library found through *$ORIGIN*, and a
@@ -435,9 +438,13 @@ tests are:
 
 *utilities*
 	The ported utilities as scripts use them, through the links in
-	_/bin_: uutils' core utilities, *find* and *xargs*, each given text
-	on its standard input and checked for what it writes and its exit
-	status, and their manual pages.
+	_/bin_: uutils' core utilities, *find* and *xargs*, GNU grep, sed,
+	diff and patch, awk, bc, the compressors and their scripts, the
+	archivers, *file*, *jq*, mandoc's tools and ncurses', each given
+	text on its standard input and checked for what it writes and its
+	exit status; the editors and the terminal tools typed at on a
+	pseudo-terminal; *tmux*; the shell by each of its names; and every
+	program's manual page and completion file.
 
 *admin*
 	The native administration tools (*systools*(1)) as administrators
@@ -447,8 +454,14 @@ tests are:
 	inherited through *exec*; lsof on a file it holds; rtrace on a
 	command, its children and a running process; dmesg and
 	_/dev/kmsg_; xxd, hexdump, hd, column and tree against what the
-	Linux tools write; script, watch and pidstat; and the _/proc_
-	files they read (*radix-proc*(5)).
+	Linux tools write; script, watch and pidstat; shutdown and service
+	through Spark; and the _/proc_ files they read (*radix-proc*(5)).
+
+*commands*
+	Every program in _/system/bin_ was run by *utilities* or *admin*,
+	which note each program they run in _/tmp/posix-commands_; Spark
+	and consoled, which other boot tests run, are the exceptions. A
+	new program fails this test until a test runs it.
 
 *shell*
 	The shell, *nukesh*(1): the scripts of its test suite, each giving

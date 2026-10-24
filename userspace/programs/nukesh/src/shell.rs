@@ -268,6 +268,10 @@ pub struct Shell {
     pub command_number: u64,
     /// The trap running now, which a nested signal does not rerun.
     pub in_trap: bool,
+    /// The status from before the trap action running now, which `exit`
+    /// with no number leaves, as POSIX has it: in the EXIT trap, and in
+    /// POSIX mode in every trap. bash's other traps leave `$?`.
+    pub trap_status: Option<i32>,
     /// The descriptors of `{name}>file` redirections.
     pub named_fds: Vec<i32>,
     /// The program name for messages: `nukesh` or `sh`.
@@ -351,6 +355,7 @@ impl Shell {
             exit_warned: false,
             command_number: 1,
             in_trap: false,
+            trap_status: None,
             named_fds: Vec::new(),
             name: name.to_string(),
             held: Vec::new(),

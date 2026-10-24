@@ -252,6 +252,8 @@ process substitution, *[[* and *name[i]=* assignments are not taken,
 history expansion is off, and _~/.profile_ and *$ENV* are the start-up
 files. Aliases are expanded in scripts too, *.\** matches _._ and _.._,
 and a command's redirections are expanded before its assignments.
+In a signal's trap, *exit* with no number leaves the status from before
+the trap, as in the EXIT trap, not *$?* as bash does.
 *${!...}* is *$!* with an operator, as in *${!#x}*, not an indirect
 expansion. The errors that *SCRIPTS* lists end the shell with status 2.
 bash's own variables, those whose names begin with *BASH*, are not set,

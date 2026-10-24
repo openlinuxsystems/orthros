@@ -1,0 +1,74 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+`more` with standard output that is not a terminal copies its input
+whole, as POSIX and util-linux have it. Before, it still read keys
+from the terminal to page through, so `zmore file.gz | cat`, or any
+`more` in a script, waited forever. With several files, each starts
+with util-linux's header naming it, and -s squeezes blank lines.
+
+--- a/src/uu/more/src/more.rs
++++ b/src/uu/more/src/more.rs
+@@ -339,6 +339,10 @@
+         self.reader.read_line(buf)
+     }
+ 
++    fn read_bytes_line(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
++        self.reader.read_until(b'\n', buf)
++    }
++
+     fn len(&self) -> Option<u64> {
+         self.file_size
+     }
+@@ -430,6 +434,12 @@
+     next_file: Option<&str>,
+     options: &mut Options,
+ ) -> UResult<()> {
++    // When standard output is not a terminal, the input is copied to it
++    // whole, as POSIX and util-linux have it: no pages, and no keys to
++    // wait for.
++    if !stdout().is_tty() {
++        return copy_whole(input, multiple_file, file_name, options.squeeze);
++    }
+     // Initialize output
+     let out = setup_term()?;
+     // Ensure raw mode is disabled on drop
+@@ -459,6 +469,37 @@
+     pager.process_events(options)
+ }
+ 
++/// Copies `input` to standard output as it is: after util-linux's
++/// header naming the file when there are several, and with runs of
++/// blank lines squeezed to one for `-s`.
++fn copy_whole(
++    mut input: Input,
++    multiple_file: bool,
++    file_name: Option<&str>,
++    squeeze: bool,
++) -> UResult<()> {
++    let mut out = stdout().lock();
++    if let (true, Some(name)) = (multiple_file, file_name) {
++        writeln!(out, "::::::::::::::\n{name}\n::::::::::::::")?;
++    }
++    let mut line = Vec::new();
++    let mut after_blank = false;
++    loop {
++        line.clear();
++        if input.read_bytes_line(&mut line)? == 0 {
++            break;
++        }
++        let blank = line == b"\n";
++        if squeeze && blank && after_blank {
++            continue;
++        }
++        after_blank = blank;
++        out.write_all(&line)?;
++    }
++    out.flush()?;
++    Ok(())
++}
++
+ struct Pager<'a> {
+     /// Source of the content (file, stdin); also holds the cached file size.
+     input: Input,

@@ -70,6 +70,7 @@ static const struct test TESTS[] = {
 		{"cxx", NULL, NULL},
 		{"utilities", NULL, NULL},
 		{"admin", NULL, NULL},
+		{"commands", NULL, NULL},
 		{"std-test", NULL, NULL},
 		{"shell", NULL, NULL},
 		{"libc", NULL, LIBC},

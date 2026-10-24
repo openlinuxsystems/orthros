@@ -388,6 +388,7 @@ impl Shell {
     /// What a child does to stop being the parent shell.
     pub fn become_subshell(&mut self) {
         self.subshell += 1;
+        self.trap_status = None;
         self.jobs = crate::jobs::Jobs::default();
         self.opts.monitor = false;
         if self.interactive {
@@ -459,6 +460,7 @@ impl Shell {
         let Some(command) = self.traps[trap::EXIT].take().filter(|c| !c.is_empty()) else {
             return status;
         };
+        self.trap_status = Some(status);
         match self.eval_text(&command, "trap") {
             Err(Flow::Exit(code)) => code,
             _ => status,
@@ -1672,7 +1674,10 @@ impl Shell {
         // failure runs.
         let off = if slot == trap::ERR { self.errexit_off + 1 } else { 0 };
         let errexit_off = std::mem::replace(&mut self.errexit_off, off);
+        let trap_status = if self.opts.posix { Some(status) } else { self.trap_status };
+        let trap_status = std::mem::replace(&mut self.trap_status, trap_status);
         let result = self.eval_text(&command, "trap");
+        self.trap_status = trap_status;
         self.errexit_off = errexit_off;
         self.in_trap = was;
         self.status = status;
