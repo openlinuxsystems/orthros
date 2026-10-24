@@ -9,7 +9,9 @@
 //! character of a range of the last private use plane, U+10FF80 to
 //! U+10FFFF (the byte plus U+10FF00), and turns back into that byte on its
 //! way out, so `for f in *; do rm -- "$f"; done` works on any name. Those
-//! characters are never typed, so text never means them by accident.
+//! characters are never typed, so text never means them by accident; one
+//! that does come as UTF-8 is held as its four bytes, and comes back the
+//! same too.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -40,13 +42,13 @@ pub fn decode(mut bytes: &[u8]) -> String {
     loop {
         match std::str::from_utf8(bytes) {
             Ok(text) => {
-                out.push_str(text);
+                push_valid(&mut out, text);
                 return out;
             }
             Err(error) => {
                 let (good, rest) = bytes.split_at(error.valid_up_to());
                 // SAFETY: from_utf8 checked the first valid_up_to bytes.
-                out.push_str(unsafe { std::str::from_utf8_unchecked(good) });
+                push_valid(&mut out, unsafe { std::str::from_utf8_unchecked(good) });
                 let bad = error.error_len().unwrap_or(rest.len());
                 for &byte in &rest[..bad] {
                     out.push(byte_char(byte));
@@ -55,6 +57,36 @@ pub fn decode(mut bytes: &[u8]) -> String {
             }
         }
     }
+}
+
+/// Appends valid UTF-8 text. A character that is itself one of the
+/// stand-ins (U+10FF80 to U+10FFFF, bytes F4 8F BE 80 to F4 8F BF BF) is
+/// taken as its four bytes, each a stand-in, so that [`encode`] gives
+/// those bytes back and not one.
+fn push_valid(out: &mut String, text: &str) {
+    let mut rest = text;
+    while let Some(at) = stand_in_at(rest.as_bytes()) {
+        out.push_str(&rest[..at]);
+        for &byte in &rest.as_bytes()[at..at + 4] {
+            out.push(byte_char(byte));
+        }
+        rest = &rest[at + 4..];
+    }
+    out.push_str(rest);
+}
+
+/// Where the first stand-in character starts in valid UTF-8.
+fn stand_in_at(bytes: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(i) = bytes[from..].iter().position(|&b| b == 0xf4) {
+        let at = from + i;
+        // In valid UTF-8, F4 starts a character of four bytes.
+        if bytes[at + 1] == 0x8f && matches!(bytes[at + 2], 0xbe | 0xbf) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
 }
 
 /// Text to bytes.
@@ -109,6 +141,16 @@ mod tests {
         let text = decode(mixed);
         assert!(text.starts_with("café "));
         assert_eq!(encode(&text), mixed);
+    }
+
+    #[test]
+    fn round_trips_utf8_that_looks_like_a_stand_in() {
+        // U+10FF80, U+10FFFF and U+10FF7F (not a stand-in), among others.
+        let bytes = b"a\xf4\x8f\xbe\x80b\xf4\x8f\xbf\xbf\xf4\x8f\xbd\xbf\xff\xf4\x8f\xbe";
+        let text = decode(bytes);
+        assert_eq!(encode(&text), bytes);
+        assert_eq!(text.chars().count(), 2 + 8 + 1 + 1 + 3);
+        assert!(text.contains('\u{10FF7F}'));
     }
 
     #[test]

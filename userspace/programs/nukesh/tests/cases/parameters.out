@@ -32,4 +32,42 @@ val
 new
 fn 2
 32
+<0 "x" 1 "y z" 2 "">
+<0><"x"><1><"y><z"><2><"">
+<0 "x" 1 "y z" 2 "">
+<'x'>
+<'y z'>
+<"c d" "e" k "v" j "a b" >
+<>
+<'v'>
+<'it'\''s'>
+<'it'\''s'>
+<0><x><1><y z><2><>
+<0><x><1><y><z><2>
+<0 x 1 y z 2 >
+<c d><e><k><v><j><a b>
+<'it'\''s'>
+<'a'><'b c'>
+<'a' 'b c'>
+<'a'><'b c'>
+<set><--><'a'><'b c'>
+<set -- 'a' 'b c'>
+<declare -a a='x'>
+<declare><-a><a=([0]="x" [1]="y z" [2]="")>
+<declare -a a=([0]="x" [1]="y z" [2]="")>
+<declare -a a='y z'>
+<declare -A m><declare><-A><m=(["c d"]="e" [k]="v" [j]="a b" )>
+<'5'><declare -i n='5'><declare -a w><declare><-a><w>
+<3 "x" 7 $'a\nb'>
+<3><x><7><a
+b>
+<2><2><2><'2'><1><2><2>
+${#=}: 1
+<><>
+@Z: 1
+-c: 127
+trap 127
+-c set -u: 127
+subshell 1
+-c subshell: 0
 status=0

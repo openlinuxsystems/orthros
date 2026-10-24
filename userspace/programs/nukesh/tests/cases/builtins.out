@@ -91,4 +91,57 @@ via-builtin
 called from wrapper
 / /tmp /tmp
 /tmp /tmp
+declare -x LX="2"
+2
+declare -x LX
+1
+1
+4
+flags hB
+tf 1
+tf 0
+printenv 1
+3
+tg ab 
+tg a XY
+tg a abz
+in dgf: L
+global: G
+declare -- dgy
+convert 1
+declare -A dga
+convert 1
+declare -a dgb
+declare -fx fa
+declare -frx fb
+declare -fx fa
+declare -frx fb
+fa () 
+{ 
+    :
+}
+declare -fx fa
+fb () 
+{ 
+    :
+}
+declare -frx fb
+fb () 
+{ 
+    :
+}
+declare -frx fb
+fb () 
+{ 
+    :
+}
+declare -frx fb
+declare -frx fb
+shopt 0
+shopt -u restricted_shell
+57
+a b
+shopt -s inherit_errexit
+nolog 0
+getopts 1 2
 status=0

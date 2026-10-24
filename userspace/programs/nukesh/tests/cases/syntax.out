@@ -1,0 +1,337 @@
+[[[
+a ]] && echo yes] 0
+  yes
+[[[ a &&
+ b ]] && echo yes] 0
+  yes
+[[[ ( a == b
+) ]] && echo yes] 1
+[[[ -f /
+]] && echo yes] 1
+[[[ a
+]]] 2
+  line 8: unexpected token `newline', conditional binary operator expected
+  line 8: syntax error near `a'
+  line 8: `[[ a'
+[[[ ( a
+== b ) ]]] 2
+  line 8: unexpected token `newline', conditional binary operator expected
+  line 8: expected `)'
+  line 8: syntax error near `a'
+  line 8: `[[ ( a'
+[[[ a ==
+ b ]]] 2
+  line 8: unexpected argument `newline' to conditional binary operator
+  line 8: syntax error near `=='
+  line 8: `[[ a =='
+[[[ -f
+/ ]]] 2
+  line 8: unexpected argument `newline' to conditional unary operator
+  line 8: syntax error near `-f'
+  line 8: `[[ -f'
+[[[ ]]] 2
+  line 8: syntax error near `]]'
+  line 8: `[[ ]]'
+[[[ ! ]]] 2
+  line 8: syntax error near `]]'
+  line 8: `[[ ! ]]'
+[[[ a && ]]] 2
+  line 8: syntax error near `]]'
+  line 8: `[[ a && ]]'
+[[[ && a ]]] 2
+  line 8: unexpected token `&&' in conditional command
+  line 8: syntax error near `&'
+  line 8: `[[ && a ]]'
+[[[ || a ]]] 2
+  line 8: unexpected token `||' in conditional command
+  line 8: syntax error near `|'
+  line 8: `[[ || a ]]'
+[[[ ( ) ]]] 2
+  line 8: unexpected token `)' in conditional command
+  line 8: expected `)'
+  line 8: syntax error near `)'
+  line 8: `[[ ( ) ]]'
+[[[ & ]]] 2
+  line 8: unexpected token `&' in conditional command
+  line 8: syntax error near `&'
+  line 8: `[[ & ]]'
+[[[ < a ]]] 2
+  line 8: unexpected token `<' in conditional command
+  line 8: syntax error near `<'
+  line 8: `[[ < a ]]'
+[[[ ;; ]]] 2
+  line 8: unexpected token `;;' in conditional command
+  line 8: syntax error near `;'
+  line 8: `[[ ;; ]]'
+[[[ a b ]]] 2
+  line 8: conditional binary operator expected
+  line 8: syntax error near `b'
+  line 8: `[[ a b ]]'
+[[[ a ; ]]] 2
+  line 8: unexpected token `;', conditional binary operator expected
+  line 8: syntax error near `;'
+  line 8: `[[ a ; ]]'
+[[[ a | b ]]] 2
+  line 8: unexpected token `|', conditional binary operator expected
+  line 8: syntax error near `|'
+  line 8: `[[ a | b ]]'
+[[[ a << b ]]] 2
+  line 8: unexpected token `<<', conditional binary operator expected
+  line 8: syntax error near `<<'
+  line 8: `[[ a << b ]]'
+[[[ a |& b ]]] 2
+  line 8: unexpected token `|&', conditional binary operator expected
+  line 8: syntax error near `&'
+  line 8: `[[ a |& b ]]'
+[[[ a ]]]] 2
+  line 8: conditional binary operator expected
+  line 8: syntax error near `]]]'
+  line 8: `[[ a ]]]'
+[[[ a !=b ]]] 2
+  line 8: conditional binary operator expected
+  line 8: syntax error near `!=b'
+  line 8: `[[ a !=b ]]'
+[[[ a -a b ]]] 2
+  line 8: conditional binary operator expected
+  line 8: syntax error near `-a'
+  line 8: `[[ a -a b ]]'
+[[[ a <(echo) ]]] 2
+  line 8: conditional binary operator expected
+  line 8: syntax error near `<(echo)'
+  line 8: `[[ a <(echo) ]]'
+[[[ -f ]]] 2
+  line 8: unexpected argument `]]' to conditional unary operator
+  line 8: syntax error near `]]'
+  line 8: `[[ -f ]]'
+[[[ -f && b ]]] 2
+  line 8: unexpected argument `&&' to conditional unary operator
+  line 8: syntax error near `&'
+  line 8: `[[ -f && b ]]'
+[[[ ( -f ) ]]] 2
+  line 8: unexpected argument `)' to conditional unary operator
+  line 8: expected `)'
+  line 8: syntax error near `)'
+  line 8: `[[ ( -f ) ]]'
+[[[ a == ]]] 2
+  line 8: unexpected argument `]]' to conditional binary operator
+  line 8: syntax error near `]]'
+  line 8: `[[ a == ]]'
+[[[ a == && b ]]] 2
+  line 8: unexpected argument `&&' to conditional binary operator
+  line 8: syntax error near `&'
+  line 8: `[[ a == && b ]]'
+[[[ a < (b) ]]] 2
+  line 8: unexpected argument `(' to conditional binary operator
+  line 8: syntax error near `(b'
+  line 8: `[[ a < (b) ]]'
+[[[ a == (b|c) ]]] 2
+  line 8: unexpected argument `(' to conditional binary operator
+  line 8: syntax error near `(b'
+  line 8: `[[ a == (b|c) ]]'
+[[[ a -eq ]]] 2
+  line 8: unexpected argument `]]' to conditional binary operator
+  line 8: syntax error near `]]'
+  line 8: `[[ a -eq ]]'
+[[[ a =~ ]]] 2
+  line 8: unexpected argument `]]' to conditional binary operator
+  line 8: syntax error near `]]'
+  line 8: `[[ a =~ ]]'
+[[[ -n == -n ]]] 2
+  line 8: syntax error in conditional expression
+  line 8: syntax error near `-n'
+  line 8: `[[ -n == -n ]]'
+[[[ -f == x ]]] 2
+  line 8: syntax error in conditional expression
+  line 8: syntax error near `x'
+  line 8: `[[ -f == x ]]'
+[[[ x == -n ]] && echo yes] 1
+[[[ -a == ]] && echo yes] 1
+[[[ -ef ]] && echo yes] 0
+  yes
+[[[ a == b c ]]] 2
+  line 8: syntax error in conditional expression
+  line 8: syntax error near `c'
+  line 8: `[[ a == b c ]]'
+[[[ a ) ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `)'
+  line 8: syntax error near `)'
+  line 8: `[[ a ) ]]'
+[[[ a == b ; ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `;'
+  line 8: syntax error near `;'
+  line 8: `[[ a == b ; ]]'
+[[[ ( a ) ( b ) ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `('
+  line 8: syntax error near `('
+  line 8: `[[ ( a ) ( b ) ]]'
+[[[ a == b > c ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `>'
+  line 8: syntax error near `>'
+  line 8: `[[ a == b > c ]]'
+[[[ -z a b ]]] 2
+  line 8: syntax error in conditional expression
+  line 8: syntax error near `b'
+  line 8: `[[ -z a b ]]'
+[[[ ( a ) == b ]]] 2
+  line 8: syntax error in conditional expression
+  line 8: syntax error near `=='
+  line 8: `[[ ( a ) == b ]]'
+[[[ a == b
+
+) ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `)'
+  line 10: syntax error near `)'
+  line 10: `) ]]'
+[[[ ( a ]]] 2
+  line 8: unexpected token `]]', expected `)'
+  line 8: syntax error near `]]'
+  line 8: `[[ ( a ]]'
+[[[ ( a == b ; ]]] 2
+  line 8: unexpected token `;', expected `)'
+  line 8: syntax error near `;'
+  line 8: `[[ ( a == b ; ]]'
+[[[ ( -f a b ) ]]] 2
+  line 8: expected `)'
+  line 8: syntax error near `b'
+  line 8: `[[ ( -f a b ) ]]'
+[[[ ( a b ) ]]] 2
+  line 8: conditional binary operator expected
+  line 8: expected `)'
+  line 8: syntax error near `b'
+  line 8: `[[ ( a b ) ]]'
+[[[ (
+( a b] 2
+  line 9: conditional binary operator expected
+  line 9: expected `)'
+  line 8: expected `)'
+  line 9: syntax error near `b'
+  line 9: `( a b'
+[[[ ( ( a ) ) ]] && echo yes] 0
+  yes
+[[[ $'a\nb' =~ (a
+b) ]] && echo yes] 0
+  yes
+[[[ a =~ x|a ]] && echo yes] 0
+  yes
+[[[ a =~ && b ]] && echo yes] 0
+  yes
+[[[ a =~ || ]] && echo yes] 0
+  yes
+[[[ a =~ ; ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `;'
+  line 8: syntax error near `;'
+  line 8: `[[ a =~ ; ]]'
+[[[ a =~ a) ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `)'
+  line 8: syntax error near `a)'
+  line 8: `[[ a =~ a) ]]'
+[[[ a =~ <a> ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `<'
+  line 8: syntax error near `<a'
+  line 8: `[[ a =~ <a> ]]'
+[[[ a =~ [&] ]]] 2
+  line 8: syntax error in conditional expression: unexpected token `&'
+  line 8: syntax error near `&]'
+  line 8: `[[ a =~ [&] ]]'
+[[[ a &&] 2
+  line 9: unexpected token `EOF' in conditional command
+  line 9: syntax error: unexpected end of file
+[[[ ( (] 2
+  line 9: unexpected token `EOF' in conditional command
+  line 8: expected `)'
+  line 8: expected `)'
+  line 9: syntax error: unexpected end of file
+[[[ ( ( a == b] 2
+  line 8: unexpected token `EOF', expected `)'
+  line 8: expected `)'
+  line 9: syntax error: unexpected end of file
+[[[ a == b] 2
+  line 8: unexpected EOF while looking for `]]'
+  line 9: syntax error: unexpected end of file
+[[[ a ==] 2
+  line 8: unexpected argument `newline' to conditional binary operator
+  line 8: syntax error near `=='
+  line 8: `[[ a =='
+[[[ -f] 2
+  line 8: unexpected argument `newline' to conditional unary operator
+  line 8: syntax error near `-f'
+  line 8: `[[ -f'
+[[[ a =~ ( ]]] 2
+  line 8: unexpected EOF while looking for matching `)'
+  line 9: unexpected argument to conditional binary operator
+[{ echo a; } b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `{ echo a; } b'
+[if true; then :; fi b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `if true; then :; fi b'
+[(echo a) b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `(echo a) b'
+[[[ a ]] b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `[[ a ]] b'
+[for i in 1; do :; done b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `for i in 1; do :; done b'
+[f() { :; } b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `f() { :; } b'
+[{ :; } >/dev/null b] 2
+  line 8: syntax error near unexpected token `b'
+  line 8: `{ :; } >/dev/null b'
+[[[ a ]] (b)] 2
+  line 8: syntax error near unexpected token `('
+  line 8: `[[ a ]] (b)'
+[{ :; } !] 2
+  line 8: syntax error near unexpected token `!'
+  line 8: `{ :; } !'
+[{ echo a; }; echo b & wait] 0
+  a
+  b
+[for 1x in a; do echo in; done] 1
+  line 8: `1x': not a valid identifier
+[select a-b in x; do break; done] 1
+  line 8: `a-b': not a valid identifier
+[for a[1] in $(echo x >&2); do echo in; done] 1
+  line 8: `a[1]': not a valid identifier
+[for x y in 1; do :; done] 2
+  line 8: syntax error near unexpected token `y'
+  line 8: `for x y in 1; do :; done'
+f () 
+{ 
+    [[ ( -n a ) && ( -n b || ! ( -n c ) ) ]];
+    [[ ! a == b ]]
+}
+[a[1
++ 1]=x; declare -p a] 0
+  declare -a a=([2]="x")
+[b[1 b] 2
+  line 8: unexpected EOF while looking for matching `]'
+[nosuch1 \
+ x] 127
+  line 9: nosuch1: command not found
+["no
+such2" x] 127
+  line 9: $'no\nsuch2': command not found
+[c[1]=2 echo hi] 0
+  line 8: `c[1]': not a valid identifier
+  hi
+[d[$(echo s >&2)]=$(echo v >&2) true] 0
+  line 8: `d[$(echo s 1>&2)]': not a valid identifier
+[e[1 b] x] 127
+  line 8: e[1 b]: command not found
+[echo $LINENO \
+ $LINENO] 0
+  8 8
+[x=1 \
+ nosuch3] 127
+  line 8: nosuch3: command not found
+[cd '/nonexistent-dir
+x'] 1
+  line 9: cd: $'/nonexistent-dir\nx': No such file or directory
+[nosuch4 >/nonexistent-dir/x] 1
+  line 8: /nonexistent-dir/x: No such file or directory
+[declare -p nosuch5] 1
+  line 8: declare: nosuch5: not found
+status=0

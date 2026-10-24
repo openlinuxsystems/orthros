@@ -45,7 +45,10 @@ pub fn jobs(shell: &mut Shell, args: &[String]) -> Res {
     let mut text = String::new();
     for id in &ids {
         let Some(job) = shell.jobs.get(*id).cloned() else { continue };
-        if flags.has('r') && (job.stopped() || job.done()) || flags.has('s') && !job.stopped() {
+        if job.told
+            || flags.has('r') && (job.stopped() || job.done())
+            || flags.has('s') && !job.stopped()
+        {
             continue;
         }
         if flags.has('n') && !job.notify {
@@ -74,11 +77,11 @@ pub fn jobs(shell: &mut Shell, args: &[String]) -> Res {
         }
     }
     let written = out(shell, "jobs", &text);
-    // Jobs reported as done are forgotten.
+    // Jobs listed as done are forgotten before the next command, as in
+    // bash: `jobs; kill %1` still finds the first.
     for id in ids {
-        if shell.jobs.get(id).is_some_and(|j| j.done()) {
-            shell.jobs.remove(id);
-        } else if let Some(job) = shell.jobs.get_mut(id) {
+        if let Some(job) = shell.jobs.get_mut(id) {
+            job.told = job.done();
             job.notify = false;
         }
     }
@@ -201,112 +204,170 @@ enum Target {
 }
 
 pub fn wait(shell: &mut Shell, args: &[String]) -> Res {
+    // A job a signal ended is reported at wait's line, as bash does.
+    let report_line = std::mem::replace(&mut shell.report_line, shell.lineno);
+    let result = wait_for(shell, args);
+    shell.report_line = report_line;
+    shell.reap_coprocs();
+    result
+}
+
+fn wait_for(shell: &mut Shell, args: &[String]) -> Res {
     let flags = match flags(shell, "wait", &args[1..], "fnp:", false) {
         Ok(flags) => flags,
         Err(status) => return Ok(status),
     };
     let pid_var = flags.value('p').map(str::to_string);
-    let mut targets = Vec::new();
-    for spec in &flags.rest {
-        if spec.starts_with('%') {
-            match shell.jobs.find(spec) {
-                Ok(id) => targets.push(Target::Job(id)),
-                Err(message) => {
-                    shell.error(&format!("wait: {message}"));
-                    if flags.rest.len() == 1 {
-                        return Ok(127);
-                    }
-                }
-            }
-        } else {
-            match spec.parse::<i32>() {
-                Ok(pid) if pid > 0 => targets.push(Target::Pid(pid)),
-                _ => {
-                    shell.error(&format!("wait: `{spec}': not a pid or valid job spec"));
-                    return Ok(2);
-                }
+    if flags.has('n') {
+        // An operand that is not a job of this shell's is reported and
+        // left out, as in bash; with none left, the status is 127.
+        let mut targets = Vec::new();
+        for spec in &flags.rest {
+            let target = if spec.starts_with('%') {
+                shell
+                    .jobs
+                    .find(spec)
+                    .ok()
+                    .filter(|id| shell.jobs.get(*id).is_some_and(|j| !j.inherited))
+                    .map(Target::Job)
+            } else {
+                spec.parse::<i32>()
+                    .ok()
+                    .filter(|pid| {
+                        *pid > 0
+                            && shell
+                                .jobs
+                                .list
+                                .iter()
+                                .any(|j| !j.inherited && j.procs.iter().any(|p| p.pid == *pid))
+                    })
+                    .map(Target::Pid)
+            };
+            match target {
+                Some(target) => targets.push(target),
+                None => shell.error(&format!("wait: {spec}: no such job")),
             }
         }
-    }
-    if flags.has('n') {
+        if targets.is_empty() && !flags.rest.is_empty() {
+            return Ok(127);
+        }
         return wait_next(shell, &targets, pid_var.as_deref());
     }
-    if targets.is_empty() {
+    if flags.rest.is_empty() {
         // Every background job.
         loop {
             shell.reap_into_jobs();
-            if shell.jobs.list.iter().all(|j| j.done() || j.stopped()) {
+            if shell.jobs.list.iter().all(|j| j.inherited || j.done() || j.stopped()) {
                 break;
             }
             if let Some(signal) = wait_any(shell)? {
                 return Ok(128 + signal);
             }
         }
-        let done: Vec<usize> = shell.jobs.list.iter().filter(|j| j.done()).map(|j| j.id).collect();
+        // Those a script held from before stay held, as in bash.
+        let done: Vec<usize> = shell
+            .jobs
+            .list
+            .iter()
+            .filter(|j| !j.inherited && !j.held && j.done())
+            .map(|j| j.id)
+            .collect();
         for id in done {
             shell.forget_waited(id);
         }
         shell.jobs.reaped.clear();
         return Ok(0);
     }
+    // Each operand in turn; the status is the last one's, as in bash.
     let mut status = 0;
-    for target in targets {
-        status = loop {
-            shell.reap_into_jobs();
-            let finished = match target {
-                Target::Job(id) => match shell.jobs.get(id) {
-                    Some(job) if job.done() => {
-                        let status = job.status(shell.opts.pipefail);
-                        shell.forget_waited(id);
-                        Some(status)
-                    }
-                    Some(_) => None,
-                    None => Some(127),
-                },
-                Target::Pid(pid) => {
-                    let job = shell
-                        .jobs
-                        .list
-                        .iter()
-                        .find(|j| j.procs.iter().any(|p| p.pid == pid))
-                        .cloned();
-                    match job {
-                        Some(job) => {
-                            let proc = job.procs.iter().find(|p| p.pid == pid);
-                            match proc.and_then(|p| p.status) {
-                                Some(raw) => {
-                                    if job.done() {
-                                        shell.forget_waited(job.id);
-                                    }
-                                    Some(status_of(raw))
-                                }
-                                None => None,
-                            }
-                        }
-                        None => match shell.jobs.reaped.remove(&pid) {
-                            Some(raw) => Some(status_of(raw)),
-                            None => {
-                                shell.error(&format!(
-                                    "wait: pid {pid} is not a child of this shell"
-                                ));
-                                Some(127)
-                            }
-                        },
-                    }
+    for spec in &flags.rest {
+        let target = if spec.starts_with('%') {
+            match shell.jobs.find(spec) {
+                Ok(id) => Target::Job(id),
+                Err(message) => {
+                    shell.error(&format!("wait: {message}"));
+                    status = 127;
+                    continue;
                 }
-            };
-            if let Some(status) = finished {
-                break status;
             }
-            if let Some(signal) = wait_any(shell)? {
-                return Ok(128 + signal);
+        } else {
+            match spec.parse::<i32>() {
+                Ok(pid) if pid > 0 => Target::Pid(pid),
+                _ => {
+                    shell.error(&format!("wait: `{spec}': not a pid or valid job spec"));
+                    status = 1;
+                    continue;
+                }
             }
         };
+        match wait_target(shell, target)? {
+            Ok(done) => status = done,
+            // A trapped signal ends the wait at once.
+            Err(signal) => return Ok(128 + signal),
+        }
     }
     Ok(status)
 }
 
-/// `wait -n`: the next job (of `targets`, if any) to end.
+/// Waits for one job or process: its status, or the trapped signal that
+/// came first.
+fn wait_target(shell: &mut Shell, target: Target) -> Result<Result<i32, i32>, Flow> {
+    loop {
+        shell.reap_into_jobs();
+        let finished = match target {
+            Target::Job(id) => match shell.jobs.get(id) {
+                Some(job) if job.inherited => {
+                    let pid = job.procs.last().map_or(0, |p| p.pid);
+                    shell.error(&format!("wait: pid {pid} is not a child of this shell"));
+                    Some(127)
+                }
+                Some(job) if job.done() => {
+                    let status = job.status(shell.opts.pipefail);
+                    shell.forget_waited(id);
+                    Some(status)
+                }
+                Some(_) => None,
+                None => Some(127),
+            },
+            Target::Pid(pid) => {
+                let job = shell
+                    .jobs
+                    .list
+                    .iter()
+                    .find(|j| !j.inherited && j.procs.iter().any(|p| p.pid == pid))
+                    .cloned();
+                match job {
+                    Some(job) => {
+                        let proc = job.procs.iter().find(|p| p.pid == pid);
+                        match proc.and_then(|p| p.status) {
+                            Some(raw) => {
+                                if job.done() {
+                                    shell.forget_waited(job.id);
+                                }
+                                Some(status_of(raw))
+                            }
+                            None => None,
+                        }
+                    }
+                    None => match shell.jobs.reaped.remove(pid) {
+                        Some(raw) => Some(status_of(raw)),
+                        None => {
+                            shell.error(&format!("wait: pid {pid} is not a child of this shell"));
+                            Some(127)
+                        }
+                    },
+                }
+            }
+        };
+        if let Some(status) = finished {
+            return Ok(Ok(status));
+        }
+        if let Some(signal) = wait_any(shell)? {
+            return Ok(Err(signal));
+        }
+    }
+}
+
 fn wait_next(shell: &mut Shell, targets: &[Target], pid_var: Option<&str>) -> Res {
     loop {
         shell.reap_into_jobs();
@@ -319,7 +380,12 @@ fn wait_next(shell: &mut Shell, targets: &[Target], pid_var: Option<&str>) -> Re
                     }
                 })
         };
-        let done = shell.jobs.list.iter().find(|j| j.done() && wanted(j.id, shell)).cloned();
+        let done = shell
+            .jobs
+            .list
+            .iter()
+            .find(|j| !j.inherited && j.done() && wanted(j.id, shell))
+            .cloned();
         if let Some(job) = done {
             let status = job.status(shell.opts.pipefail);
             if let Some(var) = pid_var {
@@ -331,15 +397,15 @@ fn wait_next(shell: &mut Shell, targets: &[Target], pid_var: Option<&str>) -> Re
         }
         // A background child that ended before it was looked at.
         if targets.is_empty()
-            && let Some((&pid, &raw)) = shell.jobs.reaped.iter().next()
+            && let Some((pid, raw)) = shell.jobs.reaped.oldest()
         {
-            shell.jobs.reaped.remove(&pid);
+            shell.jobs.reaped.remove(pid);
             if let Some(var) = pid_var {
                 let _ = shell.assign(var, pid.to_string(), false);
             }
             return Ok(status_of(raw));
         }
-        if !shell.jobs.list.iter().any(|j| !j.done() && wanted(j.id, shell)) {
+        if !shell.jobs.list.iter().any(|j| !j.inherited && !j.done() && wanted(j.id, shell)) {
             return Ok(127);
         }
         if let Some(signal) = wait_any(shell)? {
@@ -352,9 +418,7 @@ impl Shell {
     /// Notes every child that ended, without waiting.
     fn reap_into_jobs(&mut self) {
         while let Ok(Some((pid, status))) = sys::waitpid(-1, libc::WNOHANG) {
-            if !self.jobs.record(pid, status) {
-                self.jobs.reaped.insert(pid, status);
-            }
+            self.jobs.note(pid, status);
         }
     }
 }
@@ -364,9 +428,7 @@ impl Shell {
 fn wait_any(shell: &mut Shell) -> Result<Option<i32>, Flow> {
     match sys::waitpid(-1, 0) {
         Ok(Some((pid, status))) => {
-            if !shell.jobs.record(pid, status) {
-                shell.jobs.reaped.insert(pid, status);
-            }
+            shell.jobs.note(pid, status);
             Ok(None)
         }
         Ok(None) => Ok(None),
@@ -388,7 +450,7 @@ fn wait_any(shell: &mut Shell) -> Result<Option<i32>, Flow> {
         }
         Err(_) => {
             // No children: every job left has ended.
-            for job in &mut shell.jobs.list {
+            for job in shell.jobs.list.iter_mut().filter(|j| !j.inherited) {
                 for proc in &mut job.procs {
                     proc.status.get_or_insert(0);
                 }
@@ -410,7 +472,6 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
     let mut signal = libc::SIGTERM;
     let mut i = 1;
     let mut list = false;
-    let mut table = false;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "--" => {
@@ -419,7 +480,6 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
             }
             "-l" | "-L" => {
                 list = true;
-                table = arg == "-L";
                 i += 1;
             }
             "-s" | "-n" => {
@@ -451,44 +511,32 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
     if list {
         let rest = &args[i..];
         if rest.is_empty() {
-            let mut text = String::new();
-            for (n, (name, number)) in trap::SIGNALS.iter().enumerate() {
-                if table {
-                    text.push_str(&format!("{number:2}) SIG{name:<8}"));
-                    if n % 5 == 4 {
-                        text.push('\n');
-                    }
-                } else {
-                    text.push_str(&format!("{name}\n"));
-                }
-            }
-            if table && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            return Ok(i32::from(!out(shell, "kill", &text)));
+            return Ok(i32::from(!out(shell, "kill", &trap::table())));
         }
-        let mut text = String::new();
+        // Each answer goes out as it comes, between the errors, as in bash.
         let mut status = 0;
         for arg in rest {
-            match arg.parse::<i32>() {
-                // An exit status of a signal's death names the signal.
-                Ok(n) => match trap::name(if n > 128 { n - 128 } else { n }) {
-                    Some(name) => text.push_str(&format!("{name}\n")),
-                    None => {
-                        shell.error(&format!("kill: {arg}: invalid signal specification"));
-                        status = 1;
+            let answer = match arg.parse::<i32>() {
+                // An exit status of a signal's death names the signal; 0
+                // is EXIT, as for trap.
+                Ok(0) => Some("EXIT".to_string()),
+                Ok(n) => trap::name(if n > 128 { n - 128 } else { n }),
+                Err(_) if arg.eq_ignore_ascii_case("EXIT") => Some("0".to_string()),
+                Err(_) => trap::parse(arg, false).map(|n| n.to_string()),
+            };
+            match answer {
+                Some(answer) => {
+                    if !out(shell, "kill", &format!("{answer}\n")) {
+                        return Ok(1);
                     }
-                },
-                Err(_) => match trap::parse(arg, false) {
-                    Some(n) => text.push_str(&format!("{n}\n")),
-                    None => {
-                        shell.error(&format!("kill: {arg}: invalid signal specification"));
-                        status = 1;
-                    }
-                },
+                }
+                None => {
+                    shell.error(&format!("kill: {arg}: invalid signal specification"));
+                    status = 1;
+                }
             }
         }
-        return Ok(if out(shell, "kill", &text) { status } else { 1 });
+        return Ok(status);
     }
     let targets = &args[i..];
     if targets.is_empty() {
@@ -501,8 +549,10 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                 Ok(id) => {
                     let job = shell.jobs.get(id).cloned();
                     match job {
-                        Some(job) => shell.job_targets(&job),
-                        None => Vec::new(),
+                        // One that ended takes the signal as done, as in
+                        // bash.
+                        Some(job) if !job.done() => shell.job_targets(&job),
+                        _ => Vec::new(),
                     }
                 }
                 Err(message) => {

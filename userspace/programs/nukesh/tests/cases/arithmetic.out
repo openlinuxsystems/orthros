@@ -24,4 +24,26 @@ big
 small
 15
 65 16 8
+5 1
+15 6 7 1
+16 7 7 2
+0 7 7 1
+loop 3 4
+i++ 0
+8 8
+a[i]: bad array subscript
+status 0
+a: bad array subscript
+0
+4 / 0 + 1 : division by 0 (error token is "0 + 1 ")
+x /= 0  : division by 0 (error token is "0  ")
+1 +  : syntax error: operand expected (error token is "+  ")
+2 ** -1 : exponent less than 0 (error token is "1 ")
+1 ? 2 :  : expression expected (error token is ":  ")
+4 ^= 1 : attempted assignment to non-variable (error token is "^= 1 ")
+a[1 : bad array subscript (error token is "a[1 ")
+0 1
+10#: invalid integer constant (error token is "10#")
+1 + 16#: invalid integer constant (error token is "16#")
+r1: expression recursion level exceeded (error token is "r1")
 status=0

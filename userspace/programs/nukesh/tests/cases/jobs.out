@@ -14,4 +14,35 @@ not a child 127
 has-last-pid
 grouped
 outer
+line 34: PID Segmentation fault      sh -c 'kill -SEGV $$'
+line 34: PID Done                    true
+     PID Exit 3                  | sh -c 'exit 3'
+     PID Bus error               | sh -c 'kill -BUS $$'
+Terminated
+line 34: PID Illegal instruction     ( :; sh -c 'kill -ILL $$' )
+line 27: PID Segmentation fault      sh -c 'kill -SEGV $$'
+line 32: PID Aborted                 sh -c 'kill -ABRT $$'
+substituted 1
+[1]+ Running sleep 5 &
+0
+throttled
+[1]   Running                 while :; do
+    sleep 5;
+done &
+[2]-  Running                 if :; then
+    sleep 5;
+fi &
+[3]+  Running                 case x in 
+    x)
+        sleep 5
+    ;;
+esac &
+kept
+[1]+  Done                    true
+[1]+  Exit 3                  ( exit 3 )
+listed
+waited 4
+none left
+[1]   Exit 1                  false
+[2]+  Done                    true
 status=0

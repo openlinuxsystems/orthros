@@ -1,3 +1,8 @@
+read-only 2
+read-only 2
+exit -1: 2
+exit 2^31: 2
+exit 2^31-1: 255
 untaken
 f defined
 in f

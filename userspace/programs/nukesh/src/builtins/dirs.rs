@@ -51,8 +51,14 @@ impl Shell {
     }
 
     /// Goes to `dir`; with `physical`, through symbolic links. Sets `PWD`
-    /// and `OLDPWD`. An error message on failure.
-    pub fn change_dir(&mut self, dir: &str, physical_mode: bool) -> Result<(), String> {
+    /// and `OLDPWD`, which is exported, as bash does: the new directory,
+    /// and bash's errors for those of the two that are read-only (the
+    /// change stays made). An error message on failure.
+    pub fn change_dir(
+        &mut self,
+        dir: &str,
+        physical_mode: bool,
+    ) -> Result<(String, Vec<String>), String> {
         let old = self.logical_pwd().or_else(physical).unwrap_or_default();
         let mut target = match dir.starts_with('/') {
             true => dir.to_string(),
@@ -71,7 +77,8 @@ impl Shell {
                 target = physical().unwrap_or(target);
             } else {
                 return Err(format!(
-                    "{dir}: {}",
+                    "{}: {}",
+                    crate::expand::printable(dir),
                     crate::sys::describe(&std::io::Error::from_raw_os_error(
                         error.raw_os_error().unwrap_or(libc::ENOENT)
                     ))
@@ -79,15 +86,53 @@ impl Shell {
             }
         }
         let new = if physical_mode { physical().unwrap_or(target) } else { target };
-        let export = |shell: &mut Shell, name: &str, value: String| {
-            let readonly = shell.vars.get(name).is_some_and(|v| v.has(attr::READONLY));
-            if !readonly {
-                shell.set_var(name, &value);
+        let mut refused = Vec::new();
+        for (name, value) in [("OLDPWD", &old), ("PWD", &new)] {
+            if let Err(message) = self.writable(name) {
+                refused.push(message);
+                continue;
             }
-        };
-        export(self, "OLDPWD", old);
-        export(self, "PWD", new);
-        Ok(())
+            self.set_var(name, value);
+            if name == "OLDPWD" {
+                self.vars.entry(name).attrs |= attr::EXPORT;
+            }
+        }
+        Ok((new, refused))
+    }
+
+    /// The shell's own file, as bash finds it for BASH: `arg0` made
+    /// absolute, or found on `PATH`; else the program's path.
+    pub fn own_path(&self, arg0: &str) -> String {
+        let arg0 = arg0.trim_start_matches('-');
+        if arg0.starts_with('/') {
+            return arg0.to_string();
+        }
+        if arg0.contains('/') {
+            if let Some(cwd) = self.logical_pwd().or_else(physical) {
+                return canonical(&format!("{cwd}/{arg0}"));
+            }
+        } else if let Some(found) = self.search_path(arg0, false) {
+            return found;
+        }
+        std::env::current_exe().map(|path| text::from_os(path.as_os_str())).unwrap_or_default()
+    }
+
+    /// [`Shell::change_dir`] for `pushd` and `popd`: the new directory, or
+    /// None with the errors given.
+    fn go(&mut self, builtin: &str, dir: &str) -> Option<String> {
+        match self.change_dir(dir, self.opts.physical) {
+            Ok((new, refused)) if refused.is_empty() => Some(new),
+            Ok((_, refused)) => {
+                for message in refused {
+                    self.error(&message);
+                }
+                None
+            }
+            Err(message) => {
+                self.error(&format!("{builtin}: {message}"));
+                None
+            }
+        }
     }
 
     /// `~`-abbreviated `path`, as `dirs` shows it.
@@ -194,20 +239,23 @@ pub fn cd(shell: &mut Shell, args: &[String]) -> Res {
     } else {
         target
     };
-    if let Err(message) = shell.change_dir(&target, physical_mode) {
-        shell.error(&format!("cd: {message}"));
-        return Ok(1);
-    }
+    let (new, refused) = match shell.change_dir(&target, physical_mode) {
+        Ok(changed) => changed,
+        Err(message) => {
+            shell.error(&format!("cd: {message}"));
+            return Ok(1);
+        }
+    };
     if flags.has('e') && physical_mode && physical().is_none() {
         return Ok(1);
     }
-    if print {
-        let pwd = shell.get("PWD").unwrap_or_default();
-        if !out(shell, "cd", &format!("{pwd}\n")) {
-            return Ok(1);
-        }
+    if print && !out(shell, "cd", &format!("{new}\n")) {
+        return Ok(1);
     }
-    Ok(0)
+    for message in &refused {
+        shell.error(message);
+    }
+    Ok(i32::from(!refused.is_empty()))
 }
 
 fn is_dir_target(shell: &Shell, dir: &str) -> bool {
@@ -363,11 +411,8 @@ pub fn pushd(shell: &mut Shell, args: &[String]) -> Res {
                 return Ok(0);
             }
             let current = all[0].clone();
-            if let Err(message) = shell.change_dir(&dir, shell.opts.physical) {
-                shell.error(&format!("pushd: {message}"));
-                return Ok(1);
-            }
-            all[0] = shell.get("PWD").unwrap_or_default();
+            let Some(new) = shell.go("pushd", &dir) else { return Ok(1) };
+            all[0] = new;
             all.insert(1, current);
             set_stack(shell, &all);
             print_stack(shell, false, false, false);
@@ -376,8 +421,7 @@ pub fn pushd(shell: &mut Shell, args: &[String]) -> Res {
     }
     if !no_cd {
         let dir = all[0].clone();
-        if let Err(message) = shell.change_dir(&dir, shell.opts.physical) {
-            shell.error(&format!("pushd: {message}"));
+        if shell.go("pushd", &dir).is_none() {
             return Ok(1);
         }
     }
@@ -416,8 +460,7 @@ pub fn popd(shell: &mut Shell, args: &[String]) -> Res {
     all.remove(i);
     if i == 0 && !no_cd {
         let dir = all[0].clone();
-        if let Err(message) = shell.change_dir(&dir, shell.opts.physical) {
-            shell.error(&format!("popd: {message}"));
+        if shell.go("popd", &dir).is_none() {
             return Ok(1);
         }
     }

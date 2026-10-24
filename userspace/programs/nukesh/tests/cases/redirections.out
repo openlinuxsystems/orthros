@@ -12,6 +12,12 @@ more
 read text
 noclobber
 y
+noclobber dangling
+none made
+device written
+took
+line 28: TMP/missing: No such file or directory
+line 28: TMP/missing: No such file or directory
 12
 x|y z
 Hello, world!
@@ -35,14 +41,61 @@ stderr
 stdout
 null-ok
 empty-made
+$x: ambiguous redirect
+s=1
+"$@": ambiguous redirect
+s=1
+p*: ambiguous redirect
+s=1
+four
+five
+$x: ambiguous redirect
+s=1
+{g,h}: ambiguous redirect
+s=1
+$x: ambiguous redirect
+s=1
+here a
+$x: ambiguous redirect
+s=1
+nine
+ten
+a x
+s=1
+$fd: Bad file descriptor
+2: Bad file descriptor
+7: Bad file descriptor
+redirection error: cannot duplicate fd: Bad file descriptor
+1: Bad file descriptor
+3: Bad file descriptor
+$x: ambiguous redirect
+"": Bad file descriptor
+2: Bad file descriptor
+1: Bad file descriptor
+i
+s=0
+to an element
+keys 2
+r[@]: bad array subscript
+r[@]: cannot assign fd to variable
+went on 1
+a b
 both
+dangling
+e
+element
 empty
 err
 f
 g
 in
+lock
 named
 out
+p*
+p1
+p2
+q1
 rw
 std
 cleaned

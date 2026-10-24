@@ -125,7 +125,10 @@ fn describe_all(
         text.push('\n');
     };
     if !path_only {
-        if let Some(value) = shell.aliases.get(name) {
+        // Aliases count where they are expanded, as in bash.
+        if shell.expands_aliases()
+            && let Some(value) = shell.aliases.get(name)
+        {
             say(
                 &mut text,
                 format!("alias {name}={}", quote_alias(value)),
@@ -161,8 +164,12 @@ fn describe_all(
         }
     }
     if all || !found {
+        let runs = |path: &str| {
+            std::fs::metadata(crate::text::to_os(path)).is_ok_and(|m| m.is_file())
+                && sys::executable(path)
+        };
         let paths: Vec<String> = if name.contains('/') {
-            if sys::executable(name) { vec![name.to_string()] } else { Vec::new() }
+            if runs(name) { vec![name.to_string()] } else { Vec::new() }
         } else if all {
             let path = shell.get("PATH").unwrap_or_default();
             path.split(':')
@@ -172,19 +179,13 @@ fn describe_all(
                         if dir.is_empty() { "." } else { dir.trim_end_matches('/') }
                     )
                 })
-                .filter(|p| {
-                    std::fs::metadata(crate::text::to_os(p)).is_ok_and(|m| m.is_file())
-                        && sys::executable(p)
-                })
+                .filter(|p| runs(p))
                 .collect()
         } else {
             // Outside POSIX mode, a file that is not executable is found
-            // as running it finds it, as in bash.
+            // as running it finds it, as in bash; looking hashes nothing.
             let hashed = shell.hash.get(name).cloned();
-            let found = |shell: &mut Shell| {
-                if shell.posix() { shell.find_command(name) } else { shell.find_program(name) }
-            };
-            match hashed.or_else(|| found(shell)) {
+            match hashed.or_else(|| shell.search_path(name, !shell.posix())) {
                 Some(path) => vec![path],
                 None => Vec::new(),
             }
@@ -255,10 +256,9 @@ pub fn hash(shell: &mut Shell, args: &[String]) -> Res {
             return Ok(0);
         }
         if shell.hash.is_empty() {
-            if !shell.posix() {
-                shell.error("hash: hash table empty");
-            }
-            return Ok(0);
+            // On standard output, as bash says it.
+            let empty = !shell.posix() && !out(shell, "hash", "hash: hash table empty\n");
+            return Ok(i32::from(empty));
         }
         let mut names: Vec<(&String, &String)> = shell.hash.iter().collect();
         names.sort();
@@ -319,15 +319,7 @@ pub fn trap(shell: &mut Shell, args: &[String]) -> Res {
         Err(status) => return Ok(status),
     };
     if flags.has('l') {
-        let mut text = String::new();
-        for (n, (name, number)) in trap::SIGNALS.iter().enumerate() {
-            text.push_str(&format!("{number:2}) SIG{name:<8}"));
-            text.push(if n % 5 == 4 { '\n' } else { '\t' });
-        }
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        return Ok(i32::from(!out(shell, "trap", &text)));
+        return Ok(i32::from(!out(shell, "trap", &trap::table())));
     }
     if flags.has('p') || flags.rest.is_empty() {
         let slots: Vec<usize> = if flags.rest.is_empty() {
@@ -409,10 +401,6 @@ pub fn getopts(shell: &mut Shell, args: &[String]) -> Res {
     }
     let optstring = args[1].clone();
     let name = args[2].clone();
-    if !crate::parse::is_name(&name) {
-        shell.error(&format!("getopts: `{name}': not a valid identifier"));
-        return Ok(1);
-    }
     let operands: Vec<String> =
         if args.len() > 3 { args[3..].to_vec() } else { shell.args.clone() };
     let silent = optstring.starts_with(':');
@@ -420,12 +408,21 @@ pub fn getopts(shell: &mut Shell, args: &[String]) -> Res {
     let report = !silent && shell.get("OPTERR").is_none_or(|v| v != "0");
     let mut optind =
         shell.get("OPTIND").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).max(1);
-    let set_name = |shell: &mut Shell, value: &str| shell.assign(&name, value.to_string(), false);
+    // As in bash, a name that cannot be set fails the command once the
+    // option is taken: the status is 1, and OPTIND has moved.
+    let set_name = |shell: &mut Shell, value: &str| -> i32 {
+        if !crate::parse::is_name(&name) {
+            shell.error(&format!("getopts: `{name}': not a valid identifier"));
+            return 1;
+        }
+        let _ = shell.assign(&name, value.to_string(), false);
+        0
+    };
     let end = |shell: &mut Shell, optind: usize| -> Res {
         shell.getopts_char = 0;
         shell.set_var("OPTIND", &optind.to_string());
         shell.unset("OPTARG");
-        let _ = set_name(shell, "?");
+        set_name(shell, "?");
         Ok(1)
     };
     if shell.getopts_char == 0 {
@@ -466,8 +463,7 @@ pub fn getopts(shell: &mut Shell, args: &[String]) -> Res {
             shell.unset("OPTARG");
         }
         shell.set_var("OPTIND", &optind.to_string());
-        let _ = set_name(shell, "?");
-        return Ok(0);
+        return Ok(set_name(shell, "?"));
     }
     if takes {
         if !at_end {
@@ -482,23 +478,20 @@ pub fn getopts(shell: &mut Shell, args: &[String]) -> Res {
             shell.set_var("OPTIND", &optind.to_string());
             if silent {
                 let _ = shell.assign("OPTARG", letter.to_string(), false);
-                let _ = set_name(shell, ":");
-            } else {
-                if report {
-                    let line = format!("{program}: option requires an argument -- {letter}\n");
-                    let _ = sys::write_all(2, crate::text::encode(&line).as_slice());
-                }
-                shell.unset("OPTARG");
-                let _ = set_name(shell, "?");
+                return Ok(set_name(shell, ":"));
             }
-            return Ok(0);
+            if report {
+                let line = format!("{program}: option requires an argument -- {letter}\n");
+                let _ = sys::write_all(2, crate::text::encode(&line).as_slice());
+            }
+            shell.unset("OPTARG");
+            return Ok(set_name(shell, "?"));
         }
     } else {
         shell.unset("OPTARG");
     }
     shell.set_var("OPTIND", &optind.to_string());
-    let _ = set_name(shell, &letter.to_string());
-    Ok(0)
+    Ok(set_name(shell, &letter.to_string()))
 }
 
 /// `ulimit`'s resources: letter, resource, unit and its size, description.
@@ -528,8 +521,9 @@ pub fn ulimit(shell: &mut Shell, args: &[String]) -> Res {
     let mut hard = false;
     let mut soft = false;
     let mut all = false;
-    let mut wanted: Vec<char> = Vec::new();
-    let mut value: Option<String> = None;
+    // Each resource asked for, with the value to set it to: the rest of
+    // its word, or the next word unless that is an option, as in bash.
+    let mut commands: Vec<(char, Option<String>)> = Vec::new();
     let mut i = 1;
     while let Some(arg) = args.get(i) {
         if arg == "--" {
@@ -537,109 +531,132 @@ pub fn ulimit(shell: &mut Shell, args: &[String]) -> Res {
             break;
         }
         let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else { break };
-        for c in letters.chars() {
+        i += 1;
+        for (at, c) in letters.char_indices() {
             match c {
                 'H' => hard = true,
                 'S' => soft = true,
                 'a' => all = true,
-                c if LIMITS.iter().any(|l| l.0 == c) => wanted.push(c),
+                c if LIMITS.iter().any(|l| l.0 == c) => {
+                    let rest = &letters[at + c.len_utf8()..];
+                    let value = if !rest.is_empty() {
+                        Some(rest.to_string())
+                    } else if let Some(next) = args.get(i).filter(|a| !a.starts_with('-')) {
+                        i += 1;
+                        Some(next.clone())
+                    } else {
+                        None
+                    };
+                    commands.push((c, value));
+                    break;
+                }
                 c => return usage(shell, "ulimit", &format!("-{c}: invalid option")),
             }
         }
-        i += 1;
     }
+    // An operand is the value of the last resource, or of -f.
     if let Some(arg) = args.get(i) {
-        value = Some(arg.clone());
+        match commands.last_mut() {
+            None => commands.push(('f', Some(arg.clone()))),
+            Some((_, value @ None)) => *value = Some(arg.clone()),
+            Some(_) => {}
+        }
     }
     // POSIX counts file sizes in 512-byte blocks.
     let block = if shell.posix() { 512 } else { 1024 };
     let scale = |letter: char, size: u64| if matches!(letter, 'c' | 'f') { block } else { size };
+    // A resource's line when several are shown, as bash prints it.
+    let described = |letter: char, shown: &str| {
+        let Some((_, _, unit, _, description)) = LIMITS.iter().find(|l| l.0 == letter) else {
+            return String::new();
+        };
+        let unit_text = match unit {
+            Some(_) if matches!(letter, 'c' | 'f') => format!("(blocks, -{letter}) "),
+            Some(unit) => format!("({unit}, -{letter}) "),
+            None => format!("(-{letter}) "),
+        };
+        format!("{description:<20} {unit_text:>20}{shown}\n")
+    };
     if all {
         let mut text = String::new();
-        for (letter, resource, unit, size, description) in LIMITS {
-            let unit_text = match unit {
-                Some(unit) if matches!(letter, 'c' | 'f') && block == 512 => {
-                    format!("(blocks, -{letter}) ")
-                }
-                Some(unit) => format!("({unit}, -{letter}) "),
-                None => format!("(-{letter}) "),
-            };
+        for (letter, resource, _, size, _) in LIMITS {
             let shown = show_limit(*resource, hard && !soft, scale(*letter, *size));
-            text.push_str(&format!("{description:<20} {unit_text:>20}{shown}\n"));
+            text.push_str(&described(*letter, &shown));
         }
         return Ok(i32::from(!out(shell, "ulimit", &text)));
     }
-    if wanted.is_empty() {
-        wanted.push('f');
+    if commands.is_empty() {
+        commands.push(('f', None));
     }
-    let Some(value) = value else {
-        let mut text = String::new();
-        for letter in &wanted {
-            let Some((_, resource, _, size, description)) = LIMITS.iter().find(|l| l.0 == *letter)
-            else {
-                continue;
-            };
+    let several = commands.len() > 1;
+    for (letter, value) in &commands {
+        let Some((_, resource, _, size, description)) = LIMITS.iter().find(|l| l.0 == *letter)
+        else {
+            continue;
+        };
+        let Some(value) = value else {
             let shown = show_limit(*resource, hard && !soft, scale(*letter, *size));
-            if wanted.len() > 1 {
-                text.push_str(&format!("{description:<20} {shown}\n"));
-            } else {
-                text.push_str(&format!("{shown}\n"));
-            }
-        }
-        return Ok(i32::from(!out(shell, "ulimit", &text)));
-    };
-    let letter = wanted[0];
-    let Some((_, resource, _, size, _)) = LIMITS.iter().find(|l| l.0 == letter) else {
-        return Ok(1);
-    };
-    if *resource < 0 {
-        shell.error(&format!(
-            "ulimit: {}: cannot modify limit: Invalid argument",
-            LIMITS.iter().find(|l| l.0 == letter).map_or("", |l| l.4)
-        ));
-        return Ok(1);
-    }
-    let mut limit = match sys::getrlimit(*resource) {
-        Ok(limit) => limit,
-        Err(error) => {
-            shell.error(&format!("ulimit: cannot get limit: {}", sys::describe(&error)));
-            return Ok(1);
-        }
-    };
-    let new = match value.as_str() {
-        "unlimited" => libc::RLIM_INFINITY,
-        "hard" => limit.rlim_max,
-        "soft" => limit.rlim_cur,
-        text => match shell.arith(text) {
-            Ok(n) if n >= 0 => (n as u64).saturating_mul(scale(letter, *size)) as libc::rlim_t,
-            _ => {
-                shell.error(&format!("ulimit: {text}: invalid number"));
+            let text = if several { described(*letter, &shown) } else { format!("{shown}\n") };
+            if !out(shell, "ulimit", &text) {
                 return Ok(1);
             }
-        },
-    };
-    // Neither -H nor -S sets both.
-    if hard || !soft {
-        limit.rlim_max = new;
-    }
-    if soft || !hard {
-        limit.rlim_cur = new;
-    }
-    if let Err(error) = sys::setrlimit(*resource, &limit) {
-        let description = LIMITS.iter().find(|l| l.0 == letter).map_or("", |l| l.4);
-        shell.error(&format!(
-            "ulimit: {description}: cannot modify limit: {}",
-            sys::describe(&error)
-        ));
-        return Ok(1);
+            continue;
+        };
+        if *resource < 0 {
+            shell.error(&format!("ulimit: {description}: cannot modify limit: Invalid argument"));
+            return Ok(1);
+        }
+        let mut limit = match sys::getrlimit(*resource) {
+            Ok(limit) => limit,
+            Err(error) => {
+                shell.error(&format!("ulimit: cannot get limit: {}", sys::describe(&error)));
+                return Ok(1);
+            }
+        };
+        // A decimal number, as bash takes it, or a word.
+        let new = match value.as_str() {
+            "unlimited" => libc::RLIM_INFINITY,
+            "hard" => limit.rlim_max,
+            "soft" => limit.rlim_cur,
+            text => match text.parse::<u64>() {
+                Ok(n) if text.bytes().all(|b| b.is_ascii_digit()) => {
+                    n.saturating_mul(scale(*letter, *size)) as libc::rlim_t
+                }
+                _ => {
+                    let kind = if text.starts_with("0x") || text.starts_with("0X") {
+                        "hex number"
+                    } else {
+                        "number"
+                    };
+                    shell.error(&format!("ulimit: {text}: invalid {kind}"));
+                    return Ok(1);
+                }
+            },
+        };
+        // Neither -H nor -S sets both.
+        if hard || !soft {
+            limit.rlim_max = new;
+        }
+        if soft || !hard {
+            limit.rlim_cur = new;
+        }
+        if let Err(error) = sys::setrlimit(*resource, &limit) {
+            shell.error(&format!(
+                "ulimit: {description}: cannot modify limit: {}",
+                sys::describe(&error)
+            ));
+            return Ok(1);
+        }
     }
     Ok(0)
 }
 
 fn show_limit(resource: i32, hard: bool, size: u64) -> String {
     if resource < 0 {
-        // The pipe size, in 512-byte blocks: Radix's pipes hold 64 KiB.
-        return (65536 / size).to_string();
+        // The pipe size as bash shows it: PIPE_BUF, the most a write puts
+        // in a pipe at once (4096 on Radix as on Linux), in 512-byte
+        // blocks.
+        return (4096 / size).to_string();
     }
     match sys::getrlimit(resource) {
         Ok(limit) => {
@@ -670,7 +687,8 @@ pub fn umask(shell: &mut Shell, args: &[String]) -> Res {
         };
         return Ok(i32::from(!out(shell, "umask", &text)));
     };
-    let new = if mode.chars().all(|c| c.is_digit(8)) {
+    // A mode that starts with a digit is octal, as in bash.
+    let new = if mode.starts_with(|c: char| c.is_ascii_digit()) {
         match u32::from_str_radix(mode, 8) {
             Ok(n) if n <= 0o7777 => n,
             _ => {
@@ -680,9 +698,9 @@ pub fn umask(shell: &mut Shell, args: &[String]) -> Res {
         }
     } else {
         match apply_symbolic(current, mode) {
-            Some(mask) => mask,
-            None => {
-                shell.error(&format!("umask: `{}': invalid symbolic mode operator", mode));
+            Ok(mask) => mask,
+            Err(message) => {
+                shell.error(&format!("umask: {message}"));
                 return Ok(1);
             }
         }
@@ -715,8 +733,9 @@ fn symbolic_mask(mask: u32) -> String {
 }
 
 /// A symbolic mode (`u=rwx,g+w,o-r`) applied to the permissions a mask
-/// leaves; the new mask.
-fn apply_symbolic(mask: u32, mode: &str) -> Option<u32> {
+/// leaves: the new mask, or bash's error, which names the character that
+/// is wrong (NUL for a missing operator at the end).
+fn apply_symbolic(mask: u32, mode: &str) -> Result<u32, String> {
     let mut allowed = !mask & 0o777;
     for clause in mode.split(',') {
         let mut chars = clause.chars().peekable();
@@ -734,9 +753,9 @@ fn apply_symbolic(mask: u32, mode: &str) -> Option<u32> {
         if who == 0 {
             who = 0o777;
         }
-        let op = chars.next()?;
+        let op = chars.next().unwrap_or('\0');
         if !matches!(op, '+' | '-' | '=') {
-            return None;
+            return Err(format!("`{op}': invalid symbolic mode operator"));
         }
         let mut perms = 0u32;
         for c in chars {
@@ -744,7 +763,7 @@ fn apply_symbolic(mask: u32, mode: &str) -> Option<u32> {
                 'r' => 0o444,
                 'w' => 0o222,
                 'x' => 0o111,
-                _ => return None,
+                _ => return Err(format!("`{c}': invalid symbolic mode character")),
             };
         }
         let bits = perms & who;
@@ -754,7 +773,7 @@ fn apply_symbolic(mask: u32, mode: &str) -> Option<u32> {
             _ => allowed = (allowed & !who) | bits,
         }
     }
-    Some(!allowed & 0o777)
+    Ok(!allowed & 0o777)
 }
 
 pub fn times(shell: &mut Shell, _: &[String]) -> Res {
@@ -880,9 +899,14 @@ mod tests {
     #[test]
     fn symbolic_masks() {
         assert_eq!(symbolic_mask(0o022), "u=rwx,g=rx,o=rx");
-        assert_eq!(apply_symbolic(0o022, "g+w"), Some(0o002));
-        assert_eq!(apply_symbolic(0o022, "u=rwx,go="), Some(0o077));
-        assert_eq!(apply_symbolic(0o022, "a-x"), Some(0o133));
+        assert_eq!(apply_symbolic(0o022, "g+w"), Ok(0o002));
+        assert_eq!(apply_symbolic(0o022, "u=rwx,go="), Ok(0o077));
+        assert_eq!(apply_symbolic(0o022, "a-x"), Ok(0o133));
+        assert_eq!(apply_symbolic(0o022, "u"), Err("`\0': invalid symbolic mode operator".into()));
+        assert_eq!(
+            apply_symbolic(0o022, "u+s"),
+            Err("`s': invalid symbolic mode character".into())
+        );
     }
 
     #[test]

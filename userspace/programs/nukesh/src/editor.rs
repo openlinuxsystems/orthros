@@ -449,7 +449,10 @@ pub fn needs_more(text: &str, options: parse::Options) -> bool {
     }
     let mut whole = text.to_string();
     whole.push('\n');
-    let parser = parse::Parser::new(&whole, Rc::from("stdin"), 1, options);
+    // More text may come: a here-document without its delimiter line
+    // goes on in it.
+    let mut parser = parse::Parser::new("", Rc::from("stdin"), 1, options);
+    parser.push_text(&whole);
     matches!(parser.parse(), Err(parse::Error::Incomplete(_)))
 }
 

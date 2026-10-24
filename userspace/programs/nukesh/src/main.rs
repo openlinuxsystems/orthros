@@ -21,6 +21,7 @@ mod brace;
 mod builtins;
 mod complete;
 mod cond;
+mod coproc;
 mod editor;
 mod exec;
 mod expand;
@@ -75,6 +76,7 @@ const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [-
 ";
 
 fn main() {
+    trap::restore_sigpipe();
     let args: Vec<String> = std::env::args_os().map(|a| text::from_os(&a)).collect();
     let status = run(&args);
     sys::exit_now(status & 0xff);
@@ -97,6 +99,12 @@ fn run(args: &[String]) -> i32 {
     let posix = invocation.posix || invocation.options.iter().any(|(o, on)| o == "posix" && *on);
     let mut shell = Shell::new(&name, posix);
     shell.arg0 = arg0.clone();
+    // The shell's own file, as bash sets BASH, for the scripts that run
+    // `"$BASH" -c` or `exec "$BASH" "$0"`; not in POSIX mode, as in dash.
+    if !posix {
+        let own = shell.own_path(&arg0);
+        shell.set_var("BASH", &own);
+    }
 
     // What to run, and the positional parameters.
     let mut operands = invocation.operands.clone().into_iter();
@@ -121,6 +129,13 @@ fn run(args: &[String]) -> i32 {
         script = Some(path);
     }
     shell.args = operands.collect();
+    shell.command_text = command_text.is_some();
+    shell.source_flag = match (&command_text, &script) {
+        // dash, which POSIX mode follows, has no `c`.
+        (Some(_), _) => (!posix).then_some('c'),
+        (None, None) => Some('s'),
+        (None, Some(_)) => None,
+    };
 
     let interactive = invocation.interactive
         || (command_text.is_none() && script.is_none() && sys::isatty(0) && sys::isatty(2));
@@ -144,6 +159,14 @@ fn run(args: &[String]) -> i32 {
     // Signals ignored when the shell started stay so in a script.
     for (_, signal) in trap::SIGNALS {
         shell.ignored[*signal as usize] = !interactive && trap::ignored_at_start(*signal);
+    }
+    // The line editor's keys, aliases and appending to the history file are
+    // for a shell typed at, as bash (and Debian's bash.bashrc) has them.
+    shell.opts.emacs = interactive;
+    shell.shopts.insert("expand_aliases", interactive);
+    shell.shopts.insert("histappend", interactive);
+    if posix {
+        shell.shopts.insert("inherit_errexit", true);
     }
     if interactive {
         shell.opts.monitor = true;
@@ -187,8 +210,13 @@ fn run(args: &[String]) -> i32 {
 
     if let Some(text) = command_text {
         let source: Rc<str> = Rc::from(shell.arg0.as_str());
-        let result = shell.run_text(&text, source);
-        let status = shell.flow_status(result);
+        let result = shell.run_text(&text, source, Some("-c"));
+        // bash's -c ends with 127 after an expansion that ends the shell,
+        // where a script ends with 1.
+        let status = match result {
+            Err(Flow::Fatal(_)) if shell.expansion_failed && !shell.posix() => 127,
+            result => shell.flow_status(result),
+        };
         return shell.run_exit_trap(status);
     }
     if let Some(path) = script {
@@ -271,7 +299,6 @@ fn parse_args(args: &[String], invocation: &mut Invocation) -> Result<(), String
                     }
                 }
                 'H' => invocation.options.push(("histexpand".into(), on)),
-                'k' => {}
                 _ => match shell::Opts::by_letter(letter) {
                     Some(option) => invocation.options.push((option.into(), on)),
                     None => {

@@ -21,6 +21,39 @@ a:b b: :b a :b:
 5 6
 plain is found
 plain: as its mode says
+eval syntax: 2
+in h: 2
+source syntax: 2
+source missing: 1
+source directory: 1
+missing interpreter: 127 required file not found
+after exit: 1
+after return: 1
+cb 1 2
+
+cb 3 it's
+
+mapfile: 0 4
+<5 b>
+<6 c>
+line 62: conditional binary operator expected
+line 62: syntax error near `b'
+line 62: `[[ a b ]] 0 '1'
+goes on: 0
+exit [010]: 10
+exit [0x10]: 2
+exit [ 7 ]: 7
+exit [+7]: 7
+exit [-1]: 255
+exit [9223372036854775807]: 255
+exit [9223372036854775808]: 2
+exit []: 2
+exit [7x]: 2
+return outside: 2
+shift x: 1
+directory: 0 []
+<> <> <> <>
+after set pattern: 1
 after unset name: 1
 <> <> <>
 <assigned> <target>

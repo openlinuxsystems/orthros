@@ -92,6 +92,26 @@ static void descriptions(void) {
 	unlink("/tmp/files-b");
 }
 
+// A descriptor saved and put back, as a shell does around each
+// redirection, far more often than capabilities may be derived from one
+// another: it still copies, and a child still gets it.
+static void saved_and_restored(void) {
+	int fd = open("/dev/null", O_RDONLY);
+	CHECK(fd >= 0);
+	for(int i = 0; i < 1000; i++) {
+		int saved = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+		CHECK(saved >= 10 && dup2(saved, fd) == fd && close(saved) == 0);
+	}
+	int copy = dup(fd);
+	CHECK(copy >= 0);
+	pid_t pid = check_fork();
+	if(pid == 0)
+		_exit(fcntl(fd, F_GETFD) < 0);
+	CHECK_CHILD(pid);
+	close(copy);
+	close(fd);
+}
+
 static void standard_io(void) {
 	FILE *file = fopen("/tmp/files-c", "w+");
 	CHECK(file != NULL);
@@ -621,6 +641,7 @@ int main(void) {
 	check_start("files");
 	RUN(basics);
 	RUN(descriptions);
+	RUN(saved_and_restored);
 	RUN(standard_io);
 	RUN(directories);
 	RUN(directory_descriptors);

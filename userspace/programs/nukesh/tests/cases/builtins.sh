@@ -38,3 +38,28 @@ set -o | while read -r name state; do [ "$name" = errexit ] && echo "errexit $st
 command echo via-command; builtin echo via-builtin
 caller_test() { caller 0 | { read -r line fn file; echo "called from $fn"; }; }; wrapper() { caller_test; }; wrapper
 pushd /tmp >/dev/null; pushd / >/dev/null; dirs; popd >/dev/null; dirs; popd >/dev/null
+export LX=1
+lf() { local LX=2; declare -p LX; printenv LX; }; lf
+lg() { local LX; declare -p LX; printenv LX; }; lg
+lh() { local +x LX=3; printenv LX; }; lh
+lm() { local LX=4; ln; }; ln() { local LX; printenv LX; }; lm
+echo "flags $-"
+readonly tro=1; tf() { echo "tf $tro"; }; tro=2 tf 2>/dev/null; echo "tf $?"
+tro=2 printenv tro 2>/dev/null; echo "printenv $?"
+declare -i tn=1; tn+=2 printenv tn
+tx=a; tg() { echo "tg $tx $tl"; }; tx+=b tg
+declare -l tl=ab; tl=XY tg; tl+=Z tg
+# declare -g is the global variable even under a local one; an array
+# declared without a value converts no more than one with one; functions
+# are listed with the declare lines that give their attributes back.
+dg=G0; dgf() { local dg=L; declare -g dg=G dgy; echo "in dgf: $dg"; }; dgf; echo "global: $dg"; declare -p dgy
+declare -A dga; declare -a dga 2>/dev/null; echo "convert $?"; declare -p dga
+declare -a dgb; declare -A dgb 2>/dev/null; echo "convert $?"; declare -p dgb
+unset -f $(compgen -A function); fa() { :; }; fb() { :; }; export -f fa fb; readonly -f fb
+declare -F; declare -Fx; export -f; readonly -f; declare -fp fb; declare -Fp fb
+# bash's shopt names are all taken; set -o posix keeps brace expansion.
+for o in cdspell compat31 compat44 direxpand extdebug gnu_errfmt mailwarn; do shopt -s $o && shopt -u $o; done; echo "shopt $?"
+shopt -s restricted_shell; shopt -p restricted_shell; shopt -p | wc -l
+(set -o posix; echo {a,b}; shopt -p inherit_errexit); set -o nolog; echo "nolog $?"
+# getopts takes the option before it refuses a name it cannot set.
+OPTIND=1; getopts a: 'o[1]' -a 2>/dev/null; echo "getopts $? $OPTIND"

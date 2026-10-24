@@ -128,7 +128,14 @@ the time it was derived, at most `MAX_DEPTH` (64). A delete moves children
 nearer the root without lowering their depth, so the stored depth is an
 upper bound on the distance to a root, and strictly greater than the
 parent's. That makes every walk up the tree end within 64 steps without a
-visited set. Deriving from a capability at depth 64 fails with `TooDeep`.
+visited set. Deriving from a capability 64 steps from its root fails with
+`TooDeep`. The limit is judged by that distance, which `may_derive` walks
+anyway, and the walk sets the depths on the way to their distances
+(lowering a depth to one more than its parent's new one keeps the order).
+Judged by the stored depth instead, a descriptor copied and deleted in
+turn, as a shell saves and restores one around a redirection, grew two
+deeper each round, and after about 30 rounds nothing could be derived
+from it: no dup, and no fork, which copies every descriptor.
 
 **Revocation.** `revoke` sets the mark on the capability, then walks its
 subtree depth-first and deletes leaves (a post-order walk that needs no
@@ -342,7 +349,8 @@ check, carving, and store scenarios
 (`revoke_reaches_every_space_and_survives_deletes`,
 `revoke_in_steps_blocks_new_derivations`,
 `a_revoke_ends_with_its_capability`,
-`derivation_depth_is_bounded`, `sealed_capabilities_round_trip_through_the_store`,
+`derivation_depth_is_bounded`, `copying_and_deleting_in_turn_never_deepens`,
+`sealed_capabilities_round_trip_through_the_store`,
 `retyped_memory_comes_back`, `stale_names_are_refused`,
 `device_ranges_narrow`, and others).
 

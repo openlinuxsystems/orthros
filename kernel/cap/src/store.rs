@@ -1057,21 +1057,43 @@ impl<A: Allocator + Clone> Capabilities<A> {
     /// Whether a capability made from `src` may be placed: not too deep,
     /// not below a revoke under way, and with `transfer` if it goes to
     /// another space.
-    fn may_derive(&self, src: Link, cap: &Capability, elsewhere: bool) -> Result<(), CapError> {
+    ///
+    /// Deleting a capability moves its children nearer the root while
+    /// their depths stay, so a depth may be more than the distance to the
+    /// root. Too deep is judged by the distance, and the depths on the way
+    /// from `src` to its root become their distances: otherwise a
+    /// capability copied and deleted in turn, as a shell saves and
+    /// restores a descriptor with dup, grew deeper each time until
+    /// nothing more could be derived from it.
+    fn may_derive(&mut self, src: Link, cap: &Capability, elsewhere: bool) -> Result<(), CapError> {
         if elsewhere && !cap.rights.contains(Rights::TRANSFER) {
             return Err(CapError::MissingRights(Rights::TRANSFER));
         }
-        if self.slot(src).depth >= MAX_DEPTH {
-            return Err(CapError::TooDeep);
-        }
-        // Depths fall strictly towards the root, so this ends within
-        // MAX_DEPTH steps.
+        // Depths fall strictly towards the root, so these end within
+        // MAX_DEPTH steps, and the distance fits.
+        let mut distance = 0u8;
+        let mut revoking = false;
         let mut at = Some(src);
         while let Some(link) = at {
             let slot = self.slot(link);
-            if slot.revoking {
-                return Err(CapError::Revoking);
-            }
+            revoking |= slot.revoking;
+            at = slot.parent;
+            distance += u8::from(at.is_some());
+        }
+        if distance >= MAX_DEPTH {
+            return Err(CapError::TooDeep);
+        }
+        if revoking {
+            return Err(CapError::Revoking);
+        }
+        // Each depth only falls, and to one more than its parent's new
+        // one, so every depth stays more than its parent's.
+        let mut depth = distance;
+        let mut at = Some(src);
+        while let Some(link) = at {
+            let slot = self.slot_mut(link);
+            slot.depth = depth;
+            depth = depth.saturating_sub(1);
             at = slot.parent;
         }
         Ok(())

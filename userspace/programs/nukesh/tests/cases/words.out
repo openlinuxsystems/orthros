@@ -46,6 +46,18 @@ file: b.txt
 file: c.log
 file: with space
 a.txt b.txt *.txt
+d/ d/e/ elink/ link/ real/ real/inner/
+./ ./d/ ./d/e/ ./elink/ ./link/ ./real/ ./real/inner/
+a.txt b.txt c.log d d/e d/f dangling elink link real real/g real/inner real/inner/h with space
+real/ real/g real/inner real/inner/h
+real real/g real/inner real/inner/h
+real/inner real/inner/h
+d d/e d/f elink link link/g link/inner link/inner/h real real/g real/inner real/inner/h
+real//g real//inner
+real/g
+real/g
+link/ link/g link/inner link/inner/h
+d/f/**
 tilde
 ~ ~
 /home/x/a ~nobody_here/b

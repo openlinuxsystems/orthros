@@ -73,6 +73,17 @@ Descendants(s) == {t \in Full : s \in Ancestors(t)}
 \* The store's may_derive: a revoke under way above `s`, or on `s`.
 Blocked(s) == \E a \in Ancestors(s) \cup {s} : revoking[a]
 
+\* How far `s` is from its root, which may be less than its depth: a
+\* delete moves children up without lowering theirs.
+Distance(s) == Cardinality(Ancestors(s))
+
+\* The depths once `t` is derived from `f`: those from `f` up to the root
+\* become their distances, as may_derive sets them, and `t` is one deeper.
+Settled(f, t) == [x \in Slots |->
+                    IF x = t THEN Distance(f) + 1
+                    ELSE IF x \in Ancestors(f) \cup {f} THEN Distance(x)
+                    ELSE depth[x]]
+
 \* The objects `o` lies inside: what it was retyped from, and so on.
 RECURSIVE Origins(_, _)
 Origins(o, n) == IF n = 0 \/ origin[o] = None THEN {}
@@ -105,14 +116,14 @@ Derive(f, t, mask, b) ==
     /\ f \in Full
     /\ t \notin Full
     /\ "copy" \in cap[f].rights
-    /\ depth[f] < MaxDepth
+    /\ Distance(f) < MaxDepth
     /\ ~Blocked(f)
     /\ b = 0 \/ cap[f].badge = 0
     /\ cap' = [cap EXCEPT ![t] = [obj |-> cap[f].obj,
                                   rights |-> cap[f].rights \cap mask,
                                   badge |-> IF b = 0 THEN cap[f].badge ELSE b]]
     /\ parent' = [parent EXCEPT ![t] = f]
-    /\ depth' = [depth EXCEPT ![t] = depth[f] + 1]
+    /\ depth' = Settled(f, t)
     /\ src' = [src EXCEPT ![t] = src[f] \cup {f}]
     /\ UNCHANGED <<revoking, origin>>
 
@@ -124,13 +135,13 @@ Retype(f, t, o) ==
     /\ t \notin Full
     /\ "copy" \in cap[f].rights
     /\ cap[f].badge = 0
-    /\ depth[f] < MaxDepth
+    /\ Distance(f) < MaxDepth
     /\ ~Blocked(f)
     /\ o \notin Live
     /\ cap' = [cap EXCEPT ![t] = [obj |-> o, rights |-> cap[f].rights, badge |-> 0]]
     /\ origin' = [origin EXCEPT ![o] = cap[f].obj]
     /\ parent' = [parent EXCEPT ![t] = f]
-    /\ depth' = [depth EXCEPT ![t] = depth[f] + 1]
+    /\ depth' = Settled(f, t)
     /\ src' = [src EXCEPT ![t] = src[f] \cup {f}]
     /\ UNCHANGED revoking
 

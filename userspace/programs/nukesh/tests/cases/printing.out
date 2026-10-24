@@ -1,0 +1,207 @@
+f1 () 
+{ 
+    echo a > out 2>&1 < in >> app 2> /dev/null;
+    cat <<EOF
+line $x
+EOF
+
+    cat <<'Q'
+raw $y
+Q
+
+    cat <<-T
+tab
+T
+
+    echo after
+}
+f2 () 
+{ 
+    a | b 2>&1 | c;
+    ! a | b;
+    time a;
+    time -p b;
+    a && b || c;
+    a & b
+}
+f3 () 
+{ 
+    case $x in 
+        a | b)
+            p
+        ;;
+        c)
+            q
+        ;&
+        d)
+            r
+        ;;&
+        *)
+            s
+        ;;
+    esac;
+    case y in 
+    esac
+}
+f4 () 
+{ 
+    (( x = 1 + 2 ));
+    for ((1; 1; 1))
+    do
+        break;
+    done;
+    let x++;
+    [[ a == b && c != d || -f e ]];
+    [[ a =~ ^x(y)$ ]];
+    [[ a < b ]]
+}
+f5 () 
+{ 
+    local a=1 b;
+    declare -a arr=(1 2 "3 4");
+    arr+=(5);
+    x=${y:-z} z=$(( 1+2 )) cmd arg;
+    export E=1
+}
+f6 () 
+{ 
+    echo kw
+}
+f7 () 
+{ 
+    function f8 () 
+    { 
+        echo inner
+    };
+    f8
+}
+f9 () 
+{ 
+    echo "$(cmd "q")" 'ansi
+' "${x[@]}" ${#y} ${z//a/b} 'it'\''s'
+}
+f10 () 
+{ 
+    while read -r l; do
+        echo "$l";
+    done < file;
+    { 
+        a;
+        b
+    } | c;
+    if ! a; then
+        :;
+    fi
+}
+f11 () 
+{ 
+    echo a;
+    echo b
+}
+f12 () 
+{ 
+    exec 3>&1 4>&- 5<> f 1>&- 0<&6;
+    echo {fd}> f;
+    a <<< "here"
+}
+f13 () 
+{ 
+    select x in "a b" c;
+    do
+        echo $x;
+        break;
+    done;
+    until false; do
+        :;
+    done
+}
+f14 () 
+{ 
+    [[ ! -z $a ]] && echo;
+    [[ ( -n a ) && ( -n b || ! ( -n c ) ) ]];
+    [[ -n x ]]
+}
+f15 () 
+{ 
+    a 2>&1 | b;
+    a > >(b) 2> >(c);
+    d < <(e)
+}
+f16 () 
+{ 
+    echo "a
+b";
+    x='single
+quote'
+}
+f17 () 
+{ 
+    if a; then
+        b;
+        c;
+    else
+        if d; then
+            e;
+        else
+            if g; then
+                h;
+            else
+                i;
+            fi;
+        fi;
+    fi
+}
+f18 () 
+{ 
+    ( a );
+    ( a;
+    b;
+    c );
+    ( a;
+    b ) | c;
+    ( if x; then
+        y;
+    fi );
+    ( a & );
+    ( a & b );
+    { 
+        a & b
+    }
+}
+f19 () 
+{ 
+    function g () 
+    { 
+        ( a;
+        b )
+    };
+    function k () 
+    { 
+        y
+    } > out;
+    if a; then
+        function m () 
+        { 
+            z
+        };
+    fi
+}
+f20 () 
+{ 
+    ( subshell body )
+}
+inner
+f8 () 
+{ 
+    echo inner
+}
+f6 is a function
+f6 () 
+{ 
+    echo kw
+}
+f21 () 
+{ 
+    echo ${x}y "${x}" $x ${1} ${@}
+}
+status=0

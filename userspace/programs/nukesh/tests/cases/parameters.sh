@@ -30,3 +30,25 @@ echo $((RANDOM >= 0 && RANDOM < 32768)) ${#BASHPID} >/dev/null; echo randoms
 declare -n ref=target; target=val; echo $ref; ref=new; echo $target
 fn() { echo "${FUNCNAME[0]} ${#FUNCNAME[@]}"; }; fn
 echo ${LINENO}
+# @K, @k and @A as bash 5.2 has them: the keys and values of a whole
+# array, quoted as pairs or as words, and `declare`'s words; anything
+# else quoted as by @Q.
+p() { printf '<%s>' "$@"; echo; }
+a=(x "y z" ''); declare -A m=([k]=v [j]="a b" ["c d"]=e); s='it'"'"'s'
+p "${a[@]@K}"; p ${a[@]@K}; p "${a[*]@K}"; p "${a@K}"; p "${a[1]@K}"
+p "${m[@]@K}"; p "${m@K}"; p "${m[k]@K}"; p "${s@K}"; p "${s[@]@K}"
+p "${a[@]@k}"; p ${a[@]@k}; p "${a[*]@k}"; p "${m[@]@k}"; p "${s@k}"
+set -- a "b c"; p "${@@K}"; p "${*@K}"; p "${@@k}"; p "${@@A}"; p "${*@A}"
+p "${a@A}"; p "${a[@]@A}"; p "${a[*]@A}"; p "${a[1]@A}"; p "${m@A}" "${m[@]@A}"
+declare -i n=5; declare -a w; p "${n@K}" "${n@A}" "${w@A}" "${w[@]@A}"
+b=([3]=x [7]=$'a\nb'); p "${b[@]@K}"; p "${b[@]@k}"
+# `${#` and an operator is `$#` with it; an @ operator with no meaning
+# ends the script, but only when there is something to transform.
+set -- a b; p ${#-x} ${#?x} ${##x} ${#@Q} ${##} ${#-} ${#@}
+(: ${#=}; echo "not reached") 2>/dev/null; echo "\${#=}: $?"
+unset z; p "${z@Z}" "${z@ZZ}"; z=1; (: ${z@Z}; echo "not reached") 2>/dev/null; echo "@Z: $?"
+# bash's -c ends with 127 after an expansion that ends the shell.
+self=$BASH
+"$self" -c 'echo ${y?}; echo "not reached"' 2>/dev/null; echo "-c: $?"
+"$self" -c 'set -u; trap "echo trap \$?" EXIT; echo $nope' 2>/dev/null; echo "-c set -u: $?"
+"$self" -c '(echo ${y?}); echo "subshell $?"' 2>/dev/null; echo "-c subshell: $?"

@@ -1,0 +1,52 @@
+its pid is $!
+high descriptors
+got hello
+closed in a subshell
+closed in a pipeline 1
+closed in the background 1
+got substituted
+got processed
+[1]+  Running                 coproc cat &
+warning: execute_coproc: coproc [PID:COPROC] still exists
+declare -a COPROC=([0]="N" [1]="-1")
+cat ended 0
+no array no pid
+[one]
+[1]+  Running                 coproc LOOP { while read -r l; do
+    echo "[$l]";
+done; } &
+killed 143
+subshell 3
+gone
+one two
+assigned
+f1 () 
+{ 
+    coproc cat -u
+}
+f2 () 
+{ 
+    coproc NAME { 
+        cat
+    } > /dev/null
+}
+f3 () 
+{ 
+    coproc W while read -r l; do
+        echo "$l";
+    done
+}
+f4 () 
+{ 
+    coproc N2 ( echo a ) &
+}
+status 1 line 46: `1x': not a valid identifier
+coproc: 2
+coproc ! true: 2
+coproc N then: 2
+coproc N function g { :; }: 2
+true | !: 2
+bang 1
+time 0
+both 1
+status=0

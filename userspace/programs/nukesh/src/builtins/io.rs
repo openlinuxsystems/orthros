@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{flags, out, usage};
+use super::{flags, legal_number, out, usage};
 use crate::shell::{Res, Shell};
 use crate::{sys, text, trap};
 
@@ -19,9 +19,11 @@ use crate::{sys, text, trap};
 /// Which escapes a string has.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Escapes {
-    /// `echo -e` and `printf %b`: `\c` ends the output, octal is `\0nnn`
-    /// (and, for `%b`, `\nnn`).
+    /// `echo -e`: `\c` ends the output, octal is `\0nnn` only (`\101`
+    /// stays as it is).
     Echo,
+    /// `printf %b`: as `echo -e`, but octal is `\nnn` as well.
+    PrintfB,
     /// `printf`'s format: octal is `\nnn`.
     Format,
     /// `$'...'` and `${x@E}`: also `\'`, `\"`, `\?` and `\cX`.
@@ -30,6 +32,7 @@ pub enum Escapes {
 
 /// Expands the backslash escapes of `s`; true as well if a `\c` ended it.
 pub fn escapes(s: &str, mode: Escapes) -> (String, bool) {
+    let echo = matches!(mode, Escapes::Echo | Escapes::PrintfB);
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -52,7 +55,7 @@ pub fn escapes(s: &str, mode: Escapes) -> (String, bool) {
             't' => Some('\t'),
             'v' => Some('\x0b'),
             '\\' => Some('\\'),
-            '\'' | '"' | '?' if mode != Escapes::Echo => Some(e),
+            '\'' | '"' | '?' if !echo => Some(e),
             _ => None,
         };
         if let Some(c) = simple {
@@ -60,25 +63,25 @@ pub fn escapes(s: &str, mode: Escapes) -> (String, bool) {
             continue;
         }
         match e {
-            'c' if mode == Escapes::Echo => return (out, true),
+            'c' if echo => return (out, true),
             'c' if mode == Escapes::AnsiC && i < chars.len() => {
                 // `\cX`: the control character of X.
                 let x = chars[i];
                 i += 1;
                 out.push(char::from_u32(x.to_ascii_uppercase() as u32 ^ 0x40).unwrap_or(x));
             }
+            '1'..='7' if mode == Escapes::Echo => {
+                out.push('\\');
+                out.push(e);
+            }
             '0'..='7' => {
-                // Octal: up to three digits, after a leading 0 for echo.
-                let mut digits = 3;
+                // Octal: up to three digits, which for echo and %b come
+                // after a leading 0 (`\0101` is A there, `\010` and 1
+                // in a format).
+                let start = if echo && e == '0' { i } else { i - 1 };
                 let mut value = 0u32;
-                let mut j = i - 1;
-                if mode == Escapes::Echo && e == '0' {
-                    j = i;
-                } else if mode == Escapes::Echo {
-                    digits = 3;
-                }
-                let start = j;
-                while j < chars.len() && j - start < digits && chars[j].is_digit(8) {
+                let mut j = start;
+                while j < chars.len() && j - start < 3 && chars[j].is_digit(8) {
                     value = value * 8 + chars[j].to_digit(8).unwrap_or(0);
                     j += 1;
                 }
@@ -175,16 +178,23 @@ pub fn printf(shell: &mut Shell, args: &[String]) -> Res {
         Ok(flags) => flags,
         Err(status) => return Ok(status),
     };
+    let var = flags.value('v');
+    if let Some(var) = var
+        && !crate::parse::is_reference(var)
+    {
+        shell.error(&format!("printf: `{var}': not a valid identifier"));
+        return Ok(2);
+    }
     let Some(format) = flags.rest.first() else {
         return usage(shell, "printf", "");
     };
-    let (output, status) = format_all(shell, format, &flags.rest[1..]);
-    if let Some(var) = flags.value('v') {
-        if let Err(message) = shell.assign(var, output, false) {
-            shell.error(&format!("printf: {message}"));
-            return Ok(1);
+    let (mut output, status) = format_all(shell, format, &flags.rest[1..], var.is_none());
+    if let Some(var) = var {
+        // A variable holds no NUL: one ends the value, as in C.
+        if let Some(nul) = output.find('\0') {
+            output.truncate(nul);
         }
-        return Ok(status);
+        return Ok(if shell.assign_from("printf", var, output)? { status } else { 1 });
     }
     if !out(shell, "printf", &output) {
         return Ok(1);
@@ -198,44 +208,61 @@ struct Spec {
     flags: String,
     width: Option<i64>,
     precision: Option<i64>,
+    /// Whether the precision was written in the format, as digits, and
+    /// not taken from an argument (`*`) or left out after the `.`.
+    precision_digits: bool,
+    /// Whether it was taken from an argument.
+    precision_arg: bool,
 }
 
 impl Spec {
-    /// The C format for this conversion.
+    /// The C format for this conversion. A negative precision is as if
+    /// none was given, as in C.
     fn c_format(&self, conversion: &str) -> String {
         let mut f = String::from("%");
         f.push_str(&self.flags);
         if let Some(w) = self.width {
             f.push_str(&w.to_string());
         }
-        if let Some(p) = self.precision {
+        if let Some(p) = self.precision.filter(|p| *p >= 0) {
             f.push('.');
-            f.push_str(&p.max(0).to_string());
+            f.push_str(&p.to_string());
         }
         f.push_str(conversion);
         f
     }
 
-    /// Pads `s` to the width, counting characters.
+    /// `s` cut to the precision and padded to the width, both counted in
+    /// bytes, as C's printf counts them: a character can be cut in two.
     fn pad(&self, s: &str) -> String {
-        let s: String = match self.precision {
-            Some(p) if p >= 0 => s.chars().take(p as usize).collect(),
-            _ => s.to_string(),
-        };
+        let precision = self.precision.and_then(|p| usize::try_from(p).ok());
         let width = self.width.unwrap_or(0);
         let left = self.flags.contains('-') || width < 0;
         let width = width.unsigned_abs() as usize;
-        let len = s.chars().count();
-        if len >= width {
-            return s;
+        if precision.is_none_or(|p| p >= s.len()) && s.len() >= width {
+            return s.to_string();
         }
-        let fill = " ".repeat(width - len);
-        if left { s + &fill } else { fill + &s }
+        let mut bytes = text::encode(s);
+        if let Some(p) = precision {
+            bytes.truncate(p);
+        }
+        if bytes.len() < width {
+            let fill = std::iter::repeat_n(b' ', width - bytes.len());
+            if left {
+                bytes.extend(fill);
+            } else {
+                bytes.splice(0..0, fill);
+            }
+        }
+        text::decode(&bytes)
     }
 }
 
-/// Runs `format` over `args`, again while arguments are left.
-fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32) {
+/// Runs `format` over `args`, again while arguments are left: the text
+/// and the status. With `direct`, each pass but the last is written as
+/// it ends, as bash writes them, so that its errors come between them;
+/// the text is then the last pass's, still to write.
+fn format_all(shell: &mut Shell, format: &str, args: &[String], direct: bool) -> (String, i32) {
     let format: Vec<char> = format.chars().collect();
     let mut output = String::new();
     let mut status = 0;
@@ -282,29 +309,35 @@ fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32)
                     break;
                 }
             }
+            // A width or precision, an int as in C: from the format, or
+            // from the next argument for `*`.
             let number = |i: &mut usize, next: &mut usize, status: &mut i32| -> Option<i64> {
                 if format.get(*i) == Some(&'*') {
                     *i += 1;
-                    let arg = args.get(*next).map(String::as_str).unwrap_or("");
+                    let arg = args.get(*next).map_or("", String::as_str);
                     *next += 1;
-                    let (n, ok) = parse_integer(arg);
-                    if !ok {
-                        shell.error(&format!("printf: {arg}: invalid number"));
-                        *status = 1;
-                    }
-                    return Some(n);
+                    let (n, how) = parse_signed(arg);
+                    let int = n.clamp(i32::MIN.into(), i32::MAX.into());
+                    let how = if how == Number::Whole && int != n { Number::Range } else { how };
+                    check_number(shell, arg, how, status);
+                    return Some(int);
                 }
                 let start = *i;
-                while format.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+                while format.get(*i).is_some_and(char::is_ascii_digit) {
                     *i += 1;
                 }
-                (*i > start)
-                    .then(|| format[start..*i].iter().collect::<String>().parse().unwrap_or(0))
+                (*i > start).then(|| {
+                    let digits: String = format[start..*i].iter().collect();
+                    digits.parse::<i64>().map_or(i32::MAX.into(), |n| n.min(i32::MAX.into()))
+                })
             };
             spec.width = number(&mut i, &mut next, &mut status);
             if format.get(i) == Some(&'.') {
                 i += 1;
-                spec.precision = Some(number(&mut i, &mut next, &mut status).unwrap_or(0));
+                spec.precision_arg = format.get(i) == Some(&'*');
+                let precision = number(&mut i, &mut next, &mut status);
+                spec.precision_digits = precision.is_some() && !spec.precision_arg;
+                spec.precision = Some(precision.unwrap_or(0));
             }
             if let Some(w) = spec.width
                 && w < 0
@@ -337,7 +370,7 @@ fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32)
             match conversion {
                 's' => output.push_str(&spec.pad(&arg_text)),
                 'b' => {
-                    let (expanded, stopped) = escapes(&arg_text, Escapes::Echo);
+                    let (expanded, stopped) = escapes(&arg_text, Escapes::PrintfB);
                     output.push_str(&spec.pad(&expanded));
                     if stopped {
                         return (output, status);
@@ -345,38 +378,45 @@ fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32)
                 }
                 'q' => output.push_str(&spec.pad(&backslash_quote(&arg_text))),
                 'Q' => {
-                    let cut: String = match spec.precision {
-                        Some(p) => arg_text.chars().take(p.max(0) as usize).collect(),
-                        None => arg_text.clone(),
+                    // A precision written in the format cuts the argument,
+                    // which is then quoted; one from an argument does
+                    // nothing, as in bash.
+                    let quoted = if spec.precision_digits {
+                        let mut bytes = text::encode(&arg_text);
+                        bytes.truncate(spec.precision.unwrap_or(0).max(0) as usize);
+                        backslash_quote(&text::decode(&bytes))
+                    } else {
+                        backslash_quote(&arg_text)
                     };
-                    let quoted = backslash_quote(&cut);
-                    spec.precision = None;
+                    if spec.precision_digits || spec.precision_arg {
+                        spec.precision = None;
+                    }
                     output.push_str(&spec.pad(&quoted));
                 }
                 'c' => {
-                    let first: String = arg_text.chars().take(1).collect();
+                    // The first byte, as C has it; NUL for nothing.
+                    let first =
+                        text::encode(&arg_text).first().map_or('\0', |&b| text::byte_char(b));
                     spec.precision = None;
-                    output.push_str(&spec.pad(&first));
+                    output.push_str(&spec.pad(&first.to_string()));
                 }
-                'd' | 'i' | 'o' | 'u' | 'x' | 'X' => {
-                    let (n, ok) = parse_integer(&arg_text);
-                    if !ok {
-                        shell.error(&format!("printf: {arg_text}: invalid number"));
-                        status = 1;
-                    }
-                    let conv = if conversion == 'i' {
-                        "lld".to_string()
-                    } else {
-                        format!("ll{conversion}")
-                    };
-                    output.push_str(&c_format_int(&spec.c_format(&conv), n));
+                'd' | 'i' => {
+                    let (n, how) = parse_signed(&arg_text);
+                    check_number(shell, &arg_text, how, &mut status);
+                    output.push_str(&c_format_int(&spec.c_format("lld"), n));
+                }
+                'o' | 'u' | 'x' | 'X' => {
+                    let (n, how) = parse_unsigned(&arg_text);
+                    check_number(shell, &arg_text, how, &mut status);
+                    // The same bits, which the conversion takes as unsigned.
+                    output.push_str(&c_format_int(
+                        &spec.c_format(&format!("ll{conversion}")),
+                        n as i64,
+                    ));
                 }
                 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
-                    let (x, ok) = parse_float(&arg_text);
-                    if !ok {
-                        shell.error(&format!("printf: {arg_text}: invalid number"));
-                        status = 1;
-                    }
+                    let (x, how) = parse_float(&arg_text);
+                    check_number(shell, &arg_text, how, &mut status);
                     output.push_str(&c_format_float(&spec.c_format(&conversion.to_string()), x));
                 }
                 '(' => {
@@ -396,14 +436,18 @@ fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32)
                     i += 1;
                     let arg = args.get(next).cloned();
                     next += 1;
-                    let seconds = match arg.as_deref().map(parse_integer) {
-                        None | Some((-1, _)) => sys::now().0,
-                        Some((-2, _)) => sys::now().0 - shell.started.elapsed().as_secs() as i64,
-                        Some((n, _)) => n,
+                    let given = arg.map_or(-1, |arg| {
+                        let (n, how) = parse_signed(&arg);
+                        check_number(shell, &arg, how, &mut status);
+                        n
+                    });
+                    let seconds = match given {
+                        -1 => sys::now().0,
+                        -2 => sys::now().0 - shell.started.elapsed().as_secs() as i64,
+                        n => n,
                     };
                     let time_format =
                         if time_format.is_empty() { "%X".to_string() } else { time_format };
-                    spec.precision = spec.precision.filter(|p| *p >= 0);
                     output.push_str(&spec.pad(&sys::strftime(&time_format, seconds)));
                 }
                 _ => {}
@@ -413,6 +457,12 @@ fn format_all(shell: &mut Shell, format: &str, args: &[String]) -> (String, i32)
         // any.
         if next >= args.len() || next == before {
             break;
+        }
+        if direct {
+            if !out(shell, "printf", &output) {
+                return (String::new(), 1);
+            }
+            output.clear();
         }
     }
     (output, status)
@@ -451,19 +501,47 @@ fn escape_prefix(piece: &str) -> (String, usize) {
     (expanded, len)
 }
 
-/// A number as printf takes it: a C integer constant, or `'c` for the
-/// code of c. False as well if it was not all a number.
-fn parse_integer(text: &str) -> (i64, bool) {
-    let trimmed = text.trim_start();
-    if trimmed.is_empty() {
-        return (0, true);
+/// How much of an argument was the number printf took from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Number {
+    Whole,
+    /// It went on past the number, which is taken as far as it went.
+    Partial,
+    /// All number, but past what the conversion holds, which takes the
+    /// nearest value it does.
+    Range,
+}
+
+/// Reports a number that was not all number, an error that makes the
+/// status 1, or out of range, a warning, as bash does.
+fn check_number(shell: &Shell, arg: &str, how: Number, status: &mut i32) {
+    match how {
+        Number::Whole => {}
+        Number::Partial => {
+            shell.error(&format!("printf: {arg}: invalid number"));
+            *status = 1;
+        }
+        Number::Range => {
+            let reason = sys::describe(&std::io::Error::from_raw_os_error(libc::ERANGE));
+            shell.error(&format!("printf: warning: {arg}: {reason}"));
+        }
     }
-    if let Some(rest) = trimmed.strip_prefix('\'').or_else(|| trimmed.strip_prefix('"')) {
-        return (
-            rest.chars().next().map_or(0, |c| text::char_byte(c).map_or(c as i64, i64::from)),
-            true,
-        );
+}
+
+/// `'c` or `"c`: the code of c.
+fn char_code(text: &str) -> Option<i64> {
+    let rest = text.strip_prefix('\'').or_else(|| text.strip_prefix('"'))?;
+    Some(rest.chars().next().map_or(0, |c| text::char_byte(c).map_or(c as i64, i64::from)))
+}
+
+/// A C integer constant as strtoimax and strtoumax read one, after
+/// blanks: whether it is negative, its size (None past u64), and whether
+/// it was all of `text`.
+fn c_integer(text: &str) -> (bool, Option<u64>, Number) {
+    if text.is_empty() {
+        return (false, Some(0), Number::Whole);
     }
+    let trimmed = text.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
     let (negative, digits) = match trimmed.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
@@ -477,60 +555,101 @@ fn parse_integer(text: &str) -> (i64, bool) {
             (10, digits)
         };
     let end = body.find(|c: char| !c.is_digit(radix)).unwrap_or(body.len());
-    let value =
-        u64::from_str_radix(&body[..end], radix).unwrap_or(if end == 0 { 0 } else { u64::MAX });
-    let value = if negative { (value as i64).wrapping_neg() } else { value as i64 };
-    (value, end == body.len() && end > 0)
+    let size = if end == 0 { Some(0) } else { u64::from_str_radix(&body[..end], radix).ok() };
+    let how = if end == body.len() && end > 0 { Number::Whole } else { Number::Partial };
+    (negative, size, how)
 }
 
-fn parse_float(text: &str) -> (f64, bool) {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return (0.0, true);
+/// A number for `%d` and `%i`, as strtoimax reads it, or `'c`.
+fn parse_signed(text: &str) -> (i64, Number) {
+    if let Some(code) = char_code(text) {
+        return (code, Number::Whole);
     }
-    if trimmed.starts_with('\'') || trimmed.starts_with('"') {
-        return (parse_integer(trimmed).0 as f64, true);
+    let (negative, size, how) = c_integer(text);
+    match size {
+        Some(n) if negative && n <= 1 << 63 => ((n as i64).wrapping_neg(), how),
+        Some(n) if !negative && n <= i64::MAX as u64 => (n as i64, how),
+        _ => (
+            if negative { i64::MIN } else { i64::MAX },
+            if how == Number::Whole { Number::Range } else { how },
+        ),
     }
-    if let Ok(x) = trimmed.parse::<f64>() {
-        return (x, true);
+}
+
+/// A number for `%o`, `%u`, `%x` and `%X`, as strtoumax reads it: `-n`
+/// is 2^64 - n.
+fn parse_unsigned(text: &str) -> (u64, Number) {
+    if let Some(code) = char_code(text) {
+        return (code as u64, Number::Whole);
     }
-    let (n, ok) = parse_integer(trimmed);
-    if ok {
-        return (n as f64, true);
+    match c_integer(text) {
+        (negative, Some(n), how) => (if negative { n.wrapping_neg() } else { n }, how),
+        (_, None, how) => (u64::MAX, if how == Number::Whole { Number::Range } else { how }),
     }
-    // The longest number at the start.
-    for end in (1..trimmed.len()).rev() {
-        if let Some(prefix) = trimmed.get(..end)
-            && let Ok(x) = prefix.parse::<f64>()
-        {
-            return (x, false);
+}
+
+/// A number for the floating-point conversions, as strtod reads it (hex
+/// too), or `'c`.
+fn parse_float(text: &str) -> (f64, Number) {
+    if let Some(code) = char_code(text) {
+        return (code as f64, Number::Whole);
+    }
+    let c = text::cstring(text);
+    let start = c.as_ptr();
+    let mut end = start.cast_mut();
+    // SAFETY: `c` is NUL-terminated, and strtod leaves `end` inside it;
+    // errno is this thread's.
+    let (x, range, used) = unsafe {
+        *libc::__errno_location() = 0;
+        let x = libc::strtod(start, &mut end);
+        (x, *libc::__errno_location() == libc::ERANGE, end.offset_from(start))
+    };
+    let how = if used.unsigned_abs() < c.as_bytes().len() {
+        Number::Partial
+    } else if range {
+        Number::Range
+    } else {
+        Number::Whole
+    };
+    (x, how)
+}
+
+/// What C's snprintf makes of a format with one conversion, through
+/// `print`, which calls it with a buffer, its size and the format; as
+/// long as it comes.
+fn c_format(
+    format: &str,
+    print: impl Fn(*mut libc::c_char, usize, *const libc::c_char) -> i32,
+) -> String {
+    let format = text::cstring(format);
+    let mut buf = vec![0u8; 128];
+    loop {
+        let Ok(n) = usize::try_from(print(buf.as_mut_ptr().cast(), buf.len(), format.as_ptr()))
+        else {
+            return String::new();
+        };
+        if n < buf.len() {
+            buf.truncate(n);
+            return text::decode(&buf);
         }
+        buf.resize(n + 1, 0);
     }
-    (0.0, false)
 }
 
 fn c_format_int(format: &str, value: i64) -> String {
-    let mut buf = vec![0u8; 512];
-    let c = text::cstring(format);
     // SAFETY: the format has one integer conversion (`ll`), which gets a
-    // long long; snprintf writes at most buf.len() bytes.
-    let n = unsafe {
-        libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c.as_ptr(), value as libc::c_longlong)
-    };
-    buf.truncate((n.max(0) as usize).min(buf.len() - 1));
-    text::decode(&buf)
+    // long long; snprintf writes at most `size` bytes to `buf`.
+    c_format(format, |buf, size, format| unsafe {
+        libc::snprintf(buf, size, format, value as libc::c_longlong)
+    })
 }
 
 fn c_format_float(format: &str, value: f64) -> String {
-    let mut buf = vec![0u8; 512];
-    let c = text::cstring(format);
     // SAFETY: the format has one floating-point conversion, which gets a
-    // double; snprintf writes at most buf.len() bytes.
-    let n = unsafe {
-        libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c.as_ptr(), value as libc::c_double)
-    };
-    buf.truncate((n.max(0) as usize).min(buf.len() - 1));
-    text::decode(&buf)
+    // double; snprintf writes at most `size` bytes to `buf`.
+    c_format(format, |buf, size, format| unsafe {
+        libc::snprintf(buf, size, format, value as libc::c_double)
+    })
 }
 
 /// `s` quoted with backslashes, as `printf %q` does; `$'...'` if it has
@@ -567,8 +686,7 @@ pub fn backslash_quote(s: &str) -> String {
                 | '$'
                 | '`'
                 | ','
-        ) || (i == 0 && matches!(c, '~' | '#'))
-            || (c == '=' && i == 0);
+        ) || (i == 0 && matches!(c, '~' | '#'));
         if special {
             out.push('\\');
         }
@@ -728,50 +846,53 @@ fn split_fields(line: &[(char, bool)], ifs: &str, count: Option<usize>) -> Vec<S
     let is_ws =
         |c: char, escaped: bool| !escaped && matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
     let is_delim = |c: char, escaped: bool| !escaped && ifs.contains(c);
+    let ws_at = |i: usize| i < line.len() && is_ws(line[i].0, line[i].1);
+    let text = |from: usize, to: usize| line[from..to].iter().map(|(c, _)| *c).collect::<String>();
+    // The word at `pos`: where it ends, and where the delimiter after it
+    // ends, white space around at most one other character.
+    let word = |pos: usize| -> (usize, usize) {
+        let mut end = pos;
+        while end < line.len() && !is_delim(line[end].0, line[end].1) {
+            end += 1;
+        }
+        let mut next = end;
+        while ws_at(next) {
+            next += 1;
+        }
+        if next < line.len() && !ws_at(next) && is_delim(line[next].0, line[next].1) {
+            next += 1;
+            while ws_at(next) {
+                next += 1;
+            }
+        }
+        (end, next)
+    };
     let mut fields = Vec::new();
     let mut pos = 0;
-    while pos < line.len() && is_ws(line[pos].0, line[pos].1) {
+    while ws_at(pos) {
         pos += 1;
     }
     loop {
         if count.is_some_and(|n| fields.len() + 1 == n) {
-            // The last name: the rest, without trailing white space.
-            let mut end = line.len();
-            while end > pos && is_ws(line[end - 1].0, line[end - 1].1) {
-                end -= 1;
+            // The last name: the one word left, if it and its delimiter
+            // are all that is left, else the rest without trailing white
+            // space, as bash has it (`IFS=: read a b <<< 1:2:` gives b 2).
+            let (mut end, next) = word(pos);
+            if next < line.len() {
+                end = line.len();
+                while end > pos && ws_at(end - 1) {
+                    end -= 1;
+                }
             }
-            fields.push(line[pos..end].iter().map(|(c, _)| *c).collect());
+            fields.push(text(pos, end));
             break;
         }
         if pos >= line.len() {
             break;
         }
-        let start = pos;
-        while pos < line.len() && !is_delim(line[pos].0, line[pos].1) {
-            pos += 1;
-        }
-        fields.push(line[start..pos].iter().map(|(c, _)| *c).collect());
-        // The delimiter: white space around at most one other character.
-        while pos < line.len() && is_ws(line[pos].0, line[pos].1) {
-            pos += 1;
-        }
-        if pos < line.len()
-            && is_delim(line[pos].0, line[pos].1)
-            && !is_ws(line[pos].0, line[pos].1)
-        {
-            pos += 1;
-            while pos < line.len() && is_ws(line[pos].0, line[pos].1) {
-                pos += 1;
-            }
-            // A delimiter at the very end makes no empty last field.
-            if pos >= line.len() && count.is_none() {
-                break;
-            }
-            if pos >= line.len() {
-                fields.push(String::new());
-                break;
-            }
-        }
+        let (end, next) = word(pos);
+        fields.push(text(pos, end));
+        pos = next;
     }
     if let Some(n) = count {
         while fields.len() < n {
@@ -823,22 +944,20 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
         Ok(flags) => flags,
         Err(status) => return Ok(status),
     };
-    let fd = match flags.value('u') {
-        Some(text) => match text.parse::<i32>() {
-            Ok(fd) if fd >= 0 && sys::is_open(fd) => fd,
-            _ => {
-                shell.error(&format!("read: {text}: invalid file descriptor: Bad file descriptor"));
-                return Ok(1);
-            }
-        },
+    let fd = match flags.value('u').map(|text| descriptor(shell, "read", text)) {
+        Some(Some(fd)) => fd,
+        Some(None) => return Ok(1),
         None => 0,
     };
     let names: Vec<String> = flags.rest.clone();
-    for name in names.iter().chain(flags.value('a').map(str::to_string).iter()) {
-        if !crate::parse::is_name(name.split('[').next().unwrap_or("")) {
-            shell.error(&format!("read: `{name}': not a valid identifier"));
-            return Ok(1);
-        }
+    // The first name is checked before reading, the rest (and `-a`'s)
+    // as they are set, as in bash.
+    if let Some(name) = names.first()
+        && !flags.has('a')
+        && !crate::parse::is_reference(name)
+    {
+        shell.error(&format!("read: `{name}': not a valid identifier"));
+        return Ok(1);
     }
     let raw_mode = flags.has('r');
     let delimiter = match flags.value('d') {
@@ -848,13 +967,15 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
     let parse_count = |shell: &Shell, letter: char| -> Result<Option<usize>, i32> {
         match flags.value(letter) {
             None => Ok(None),
-            Some(text) => match text.parse::<usize>() {
-                Ok(n) => Ok(Some(n)),
-                Err(_) => {
-                    shell.error(&format!("read: {text}: invalid number"));
-                    Err(1)
+            Some(text) => {
+                match legal_number(text).filter(|n| i32::try_from(*n).is_ok_and(|n| n >= 0)) {
+                    Some(n) => Ok(Some(n as usize)),
+                    None => {
+                        shell.error(&format!("read: {text}: invalid number"));
+                        Err(1)
+                    }
                 }
-            },
+            }
         }
     };
     let (limit, exact) = match (parse_count(shell, 'n'), parse_count(shell, 'N')) {
@@ -863,16 +984,16 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
         (Ok(n), Ok(None)) => (n, false),
     };
     let timeout = match flags.value('t') {
-        Some(text) => match text.parse::<f64>() {
-            Ok(t) if t >= 0.0 => Some(t),
-            _ => {
+        Some(text) => match parse_timeout(text) {
+            Some(t) => Some(t),
+            None => {
                 shell.error(&format!("read: {text}: invalid timeout specification"));
                 return Ok(1);
             }
         },
         None => shell
             .get("TMOUT")
-            .and_then(|t| t.parse::<f64>().ok())
+            .and_then(|t| parse_timeout(&t))
             .filter(|t| *t > 0.0 && sys::isatty(fd)),
     };
     if timeout == Some(0.0) {
@@ -899,7 +1020,10 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
         };
     }
 
-    let deadline = timeout.map(|t| Instant::now() + Duration::from_secs_f64(t));
+    // A timeout too long for the clock is none.
+    let deadline = timeout
+        .and_then(|t| Duration::try_from_secs_f64(t).ok())
+        .and_then(|t| Instant::now().checked_add(t));
     let _guard = TermGuard::new(fd, flags.has('s'), limit.is_some() || delimiter != b'\n');
     let mut input = Input::new(fd, deadline);
     let mut bytes: Vec<(u8, bool)> = Vec::new();
@@ -918,6 +1042,10 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
         };
         if byte == delimiter && !exact {
             break;
+        }
+        // NUL bytes are left out, as bash leaves them.
+        if byte == 0 {
+            continue;
         }
         if byte == b'\\' && !raw_mode {
             match input.byte(shell) {
@@ -999,7 +1127,40 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
     Ok(if assigned != 0 { assigned } else { status })
 }
 
-/// Puts what `read` read into its variables.
+/// The descriptor `-u` names, for `read` and `mapfile`: None, with
+/// bash's error, if it is not a number or not open.
+fn descriptor(shell: &Shell, builtin: &str, text: &str) -> Option<i32> {
+    let Some(fd) = legal_number(text).and_then(|n| i32::try_from(n).ok()).filter(|n| *n >= 0)
+    else {
+        shell.error(&format!("{builtin}: {text}: invalid file descriptor specification"));
+        return None;
+    };
+    if !sys::is_open(fd) {
+        let reason = sys::describe(&std::io::Error::from_raw_os_error(libc::EBADF));
+        shell.error(&format!("{builtin}: {fd}: invalid file descriptor: {reason}"));
+        return None;
+    }
+    Some(fd)
+}
+
+/// A timeout as `read -t` and TMOUT take one: decimal seconds, with a
+/// fraction and a sign, not negative. Nothing at all, or `.`, is 0.
+fn parse_timeout(text: &str) -> Option<f64> {
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (whole, fraction) = body.split_once('.').unwrap_or((body, ""));
+    if !whole.bytes().chain(fraction.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let t: f64 = format!("0{whole}.{fraction}0").parse().ok()?;
+    (!negative || t == 0.0).then_some(t)
+}
+
+/// Puts what `read` read into its variables, in order: a name that is
+/// not valid, or a variable that refuses its value, stops it there, with
+/// status 1, as in bash.
 fn assign_read(
     shell: &mut Shell,
     line: &[(char, bool)],
@@ -1008,38 +1169,37 @@ fn assign_read(
     exact: bool,
 ) -> Res {
     let ifs = shell.get("IFS").unwrap_or_else(|| " \t\n".into());
-    let result = if let Some(array) = array {
-        let fields = if exact {
-            vec![line.iter().map(|(c, _)| *c).collect()]
-        } else {
-            split_fields(line, &ifs, None)
-        };
-        shell.assign_array(array, fields.into_iter().map(|f| (None, f)).collect(), false)
-    } else if names.is_empty() {
-        shell.assign("REPLY", line.iter().map(|(c, _)| *c).collect(), false)
+    let whole = || line.iter().map(|(c, _)| *c).collect::<String>();
+    if let Some(array) = array {
+        if !crate::parse::is_name(array) {
+            shell.error(&format!("read: `{array}': not a valid identifier"));
+            return Ok(1);
+        }
+        let fields = if exact { vec![whole()] } else { split_fields(line, &ifs, None) };
+        let elements = fields.into_iter().map(|f| (None, f)).collect();
+        return Ok(if shell.assign_array_from("read", array, elements)? { 0 } else { 1 });
+    }
+    // With no name, REPLY gets the line as it is.
+    let reply = ["REPLY".to_string()];
+    let (names, values) = if names.is_empty() {
+        (&reply[..], vec![whole()])
     } else if exact {
-        let mut result = shell.assign(&names[0], line.iter().map(|(c, _)| *c).collect(), false);
-        for name in &names[1..] {
-            result = result.and(shell.assign(name, String::new(), false));
-        }
-        result
+        let mut values = vec![String::new(); names.len()];
+        values[0] = whole();
+        (names, values)
     } else {
-        let fields = split_fields(line, &ifs, Some(names.len()));
-        let mut result = Ok(());
-        for (name, field) in names.iter().zip(fields) {
-            if let Err(message) = shell.assign(name, field, false) {
-                result = Err(message);
-            }
-        }
-        result
+        (names, split_fields(line, &ifs, Some(names.len())))
     };
-    match result {
-        Ok(()) => Ok(0),
-        Err(message) => {
-            shell.error(&format!("read: {message}"));
-            Ok(1)
+    for (name, value) in names.iter().zip(values) {
+        if !crate::parse::is_reference(name) {
+            shell.error(&format!("read: `{name}': not a valid identifier"));
+            return Ok(1);
+        }
+        if !shell.assign_from("read", name, value)? {
+            return Ok(1);
         }
     }
+    Ok(0)
 }
 
 pub fn mapfile(shell: &mut Shell, args: &[String]) -> Res {
@@ -1048,37 +1208,43 @@ pub fn mapfile(shell: &mut Shell, args: &[String]) -> Res {
         Ok(flags) => flags,
         Err(status) => return Ok(status),
     };
-    let number = |shell: &Shell, letter: char, default: i64| -> Result<i64, i32> {
-        match flags.value(letter) {
-            None => Ok(default),
-            Some(text) => text.parse::<i64>().map_err(|_| {
-                shell.error(&format!("{name}: {text}: invalid number"));
-                1
-            }),
-        }
-    };
-    let (count, origin, skip, quantum) = match (
-        number(shell, 'n', 0),
-        number(shell, 'O', 0),
-        number(shell, 's', 0),
-        number(shell, 'c', 5000),
-    ) {
-        (Ok(n), Ok(o), Ok(s), Ok(c)) => (n, o, s, c.max(1)),
-        _ => return Ok(1),
-    };
-    let fd = match flags.value('u') {
-        Some(text) => match text.parse::<i32>() {
-            Ok(fd) if sys::is_open(fd) => fd,
-            _ => {
-                shell.error(&format!("{name}: {text}: invalid file descriptor specification"));
-                return Ok(1);
+    // The numbers, checked in order, as bash does.
+    let (mut count, mut origin, mut skip, mut quantum, mut fd) = (0, 0, 0, 5000, 0);
+    for (letter, value) in &flags.on {
+        let text = value.as_deref().unwrap_or("");
+        let (least, what) = match letter {
+            'n' | 's' => (0, "line count"),
+            'O' => (0, "array origin"),
+            'c' => (1, "callback quantum"),
+            'u' => {
+                let Some(given) = descriptor(shell, &name, text) else { return Ok(1) };
+                fd = given;
+                continue;
             }
-        },
-        None => 0,
-    };
+            _ => continue,
+        };
+        let Some(n) = legal_number(text).filter(|n| *n >= least) else {
+            shell.error(&format!("{name}: {text}: invalid {what}"));
+            return Ok(1);
+        };
+        match letter {
+            'n' => count = n,
+            's' => skip = n,
+            'O' => origin = n,
+            _ => quantum = n,
+        }
+    }
     let array = flags.rest.first().cloned().unwrap_or_else(|| "MAPFILE".into());
     if !crate::parse::is_name(&array) {
         shell.error(&format!("{name}: `{array}': not a valid identifier"));
+        return Ok(1);
+    }
+    if let Err(message) = shell.writable(&shell.resolve(&array)) {
+        shell.error(&message);
+        return Ok(1);
+    }
+    if shell.assoc(&array) {
+        shell.error(&format!("{name}: {array}: not an indexed array"));
         return Ok(1);
     }
     let delimiter = match flags.value('d') {
@@ -1120,16 +1286,28 @@ pub fn mapfile(shell: &mut Shell, args: &[String]) -> Res {
         if byte.is_none() && line.is_empty() {
             break;
         }
-        let text_line = text::decode(&std::mem::take(&mut line));
+        // A NUL ends the line's value, as in bash.
+        let mut bytes = std::mem::take(&mut line);
+        if let Some(nul) = bytes.iter().position(|&b| b == 0) {
+            bytes.truncate(nul);
+        }
+        let text_line = text::decode(&bytes);
         if skipped < skip {
             skipped += 1;
         } else {
+            // After every `quantum` lines, before the last is stored, with
+            // the line in single quotes. bash names the callback's text for
+            // no file, "stdin", and goes on after a syntax error in it.
             if let Some(callback) = &callback
-                && (index - origin) % quantum == 0
-                && index > origin
+                && (index - origin + 1) % quantum == 0
             {
-                let command = format!("{callback} {index} {}", crate::expand::quote(&text_line));
-                shell.eval_text(&command, &name)?;
+                let line = text_line.replace('\'', "'\\''");
+                let command = format!("{callback} {index} '{line}'");
+                shell.syntax_failed = false;
+                let result = shell.eval_text(&command, &name, "stdin");
+                if !std::mem::take(&mut shell.syntax_failed) {
+                    result?;
+                }
             }
             if let Err(message) = shell.assign_element(&array, &index.to_string(), text_line, false)
             {
@@ -1171,17 +1349,41 @@ mod tests {
         assert_eq!(escapes("a\\tb\\n", Escapes::Echo).0, "a\tb\n");
         assert_eq!(escapes("x\\cy", Escapes::Echo), ("x".to_string(), true));
         assert_eq!(escapes("\\0101", Escapes::Echo).0, "A");
+        assert_eq!(escapes("\\101|\\1", Escapes::Echo).0, "\\101|\\1");
+        assert_eq!(escapes("\\101|\\0101", Escapes::PrintfB).0, "A|A");
+        assert_eq!(escapes("\\0101", Escapes::Format).0, "\x081");
         assert_eq!(escapes("\\101", Escapes::Format).0, "A");
         assert_eq!(escapes("\\x41\\u00e9", Escapes::AnsiC).0, "Aé");
     }
 
     #[test]
     fn printf_numbers_parse_as_c_does() {
-        assert_eq!(parse_integer("0x1f"), (31, true));
-        assert_eq!(parse_integer("010"), (8, true));
-        assert_eq!(parse_integer("'A"), (65, true));
-        assert_eq!(parse_integer("12abc"), (12, false));
-        assert_eq!(parse_integer("-5"), (-5, true));
+        assert_eq!(parse_signed("0x1f"), (31, Number::Whole));
+        assert_eq!(parse_signed("010"), (8, Number::Whole));
+        assert_eq!(parse_signed("'A"), (65, Number::Whole));
+        assert_eq!(parse_signed("12abc"), (12, Number::Partial));
+        assert_eq!(parse_signed("-5"), (-5, Number::Whole));
+        assert_eq!(parse_signed("  "), (0, Number::Partial));
+        assert_eq!(parse_signed(""), (0, Number::Whole));
+        assert_eq!(parse_signed("-9223372036854775808"), (i64::MIN, Number::Whole));
+        assert_eq!(parse_signed("9223372036854775808"), (i64::MAX, Number::Range));
+        assert_eq!(parse_signed("99999999999999999999x"), (i64::MAX, Number::Partial));
+        assert_eq!(parse_unsigned("-1"), (u64::MAX, Number::Whole));
+        assert_eq!(parse_unsigned("18446744073709551616"), (u64::MAX, Number::Range));
+        assert_eq!(parse_float("0x1.8p1"), (3.0, Number::Whole));
+        assert_eq!(parse_float("1e"), (1.0, Number::Partial));
+        assert_eq!(parse_float("1e5000").1, Number::Range);
+    }
+
+    #[test]
+    fn printf_pads_in_bytes() {
+        let spec = Spec { width: Some(3), ..Spec::default() };
+        assert_eq!(spec.pad("é"), " é");
+        let spec = Spec { precision: Some(1), ..Spec::default() };
+        assert_eq!(spec.pad("é"), text::decode(&[0xc3]));
+        let spec = Spec { precision: Some(-1), ..Spec::default() };
+        assert_eq!(spec.pad("abc"), "abc");
+        assert_eq!(c_format_int("%600d", 1).len(), 600);
     }
 
     #[test]

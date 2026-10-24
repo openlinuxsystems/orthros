@@ -122,7 +122,7 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
     let print = flags.has('p') || operands.is_empty();
     if print && operands.is_empty() {
         if functions {
-            return Ok(print_functions(shell, kind, &flags));
+            return Ok(print_functions(shell, &flags, set));
         }
         return Ok(print_variables(shell, kind, &flags, set));
     }
@@ -130,21 +130,22 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
         let mut status = 0;
         let mut text = String::new();
         for arg in operands {
-            let DeclArg::Plain(name) = arg else { continue };
+            let DeclArg::Plain(var) = arg else { continue };
             if functions {
-                match shell.functions.get(name.as_str()) {
-                    Some(def) => text.push_str(&show::function(def)),
-                    None => status = 1,
+                if shell.functions.contains_key(var.as_str()) {
+                    text.push_str(&function_text(shell, var, flags.has('F')));
+                } else {
+                    status = 1;
                 }
                 continue;
             }
-            match declare_line(shell, name) {
+            match declare_line(shell, var) {
                 Some(line) => {
                     text.push_str(&line);
                     text.push('\n');
                 }
                 None => {
-                    shell.error(&format!("{}: {name}: not found", kind_name(kind, name)));
+                    shell.error(&format!("{}: {var}: not found", kind_name(kind, name)));
                     status = 1;
                 }
             }
@@ -183,6 +184,17 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
                 _ if set & attr::READONLY != 0 => {
                     shell.readonly_functions.insert(name.clone());
                 }
+                // With extdebug, where it was defined too, as in bash
+                // (which names -c's text "environment").
+                _ if flags.has('F') && shell.shopt("extdebug") => {
+                    let def = &shell.functions[name.as_str()];
+                    let file = if shell.source_flag == Some('c') && *def.file == *shell.arg0 {
+                        "environment"
+                    } else {
+                        &def.file
+                    };
+                    text.push_str(&format!("{name} {} {file}\n", def.line));
+                }
                 _ if flags.has('F') => text.push_str(&format!("{name}\n")),
                 _ => text.push_str(&show::function(&shell.functions[name.as_str()])),
             }
@@ -197,9 +209,34 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
     } else {
         Scope::Global
     };
+    // `-g` is the global variable even where a local one hides it, as in
+    // bash; export and readonly take the nearest.
+    let hidden = flags.has('g').then(|| shell.vars.hide_locals());
     let mut status = 0;
+    let mut result = Ok(());
     for arg in operands {
-        if let Err(message) = declare_one(shell, kind, scope, set, clear, arg) {
+        // `declare 'a[$i]=x'`: the subscript is expanded, as in bash.
+        let mut arg = std::borrow::Cow::Borrowed(arg);
+        if let DeclArg::Plain(word) = &*arg
+            && !matches!(kind, Kind::Export | Kind::Readonly)
+        {
+            let end = word.find('=').unwrap_or(word.len());
+            let lhs = word[..end].strip_suffix('+').unwrap_or(&word[..end]);
+            match shell.expand_element(lhs) {
+                Ok(element) if element != lhs => {
+                    arg = std::borrow::Cow::Owned(DeclArg::Plain(format!(
+                        "{element}{}",
+                        &word[lhs.len()..]
+                    )));
+                }
+                Ok(_) => {}
+                Err(flow) => {
+                    result = Err(flow);
+                    break;
+                }
+            }
+        }
+        if let Err(message) = declare_one(shell, kind, scope, set, clear, &arg) {
             if !message.is_empty() {
                 shell.error(&format!("{}: {message}", kind_name(kind, name)));
             }
@@ -207,11 +244,15 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
             // Assigning a read-only variable ends a POSIX script, with
             // dash's status.
             if shell.posix() && !shell.interactive && message.ends_with("readonly variable") {
-                return Err(Flow::Fatal(2));
+                result = Err(Flow::Fatal(2));
+                break;
             }
         }
     }
-    Ok(status)
+    if let Some(hidden) = hidden {
+        shell.vars.reveal(hidden);
+    }
+    result.map(|()| status)
 }
 
 fn kind_name(kind: Kind, given: &str) -> &str {
@@ -258,6 +299,10 @@ fn declare_one(
                 None => (word.clone(), None),
             };
             let (name, index) = match lhs.find('[') {
+                // export and readonly take names only, as in bash.
+                Some(_) if matches!(kind, Kind::Export | Kind::Readonly) => {
+                    return Err(format!("`{lhs}': not a valid identifier"));
+                }
                 Some(open) if lhs.ends_with(']') => {
                     (lhs[..open].to_string(), Some(lhs[open + 1..lhs.len() - 1].to_string()))
                 }
@@ -322,15 +367,19 @@ fn declare_one(
     let var = shell.vars.get_mut(&target).ok_or_else(String::new)?;
     let was = var.attrs;
     // Arrays: `-a` makes a string element 0; `-A` makes it key `0`.
+    // One declared but not yet given a value converts no more than one
+    // that has one.
     if set & attr::ASSOC != 0 {
-        if matches!(var.value, Some(Value::Array(_))) {
+        if matches!(var.value, Some(Value::Array(_))) || var.value.is_none() && var.has(attr::ARRAY)
+        {
             return Err(format!("{target}: cannot convert indexed to associative array"));
         }
         if let Some(Value::Str(s)) = var.value.take() {
             var.value = Some(Value::Assoc([("0".to_string(), s)].into_iter().collect()));
         }
     } else if set & attr::ARRAY != 0 {
-        if matches!(var.value, Some(Value::Assoc(_))) {
+        if matches!(var.value, Some(Value::Assoc(_))) || var.value.is_none() && var.has(attr::ASSOC)
+        {
             return Err(format!("{target}: cannot convert associative to indexed array"));
         }
         if let Some(Value::Str(s)) = var.value.take() {
@@ -403,7 +452,7 @@ fn compound_elements(
     let words = match crate::parse::words(inner, shell.parse_options()) {
         Ok(words) => words,
         Err(error) => {
-            shell.error(&format!("syntax error: {}", error.message()));
+            shell.error(&error.message());
             return Err(Flow::Fatal(1));
         }
     };
@@ -489,38 +538,55 @@ pub fn double_quote(s: &str) -> String {
     out
 }
 
-fn quote_key(key: &str) -> String {
-    if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        key.to_string()
-    } else {
+/// An associative array's key as bash writes one: as it is, unless it
+/// holds what the shell would read otherwise or is `@` or `*`.
+pub fn quote_key(key: &str) -> String {
+    if key.is_empty() || key == "@" || key == "*" || crate::expand::has_shell_metas(key) {
         double_quote(key)
+    } else if key.chars().any(|c| c.is_control() || text::char_byte(c).is_some()) {
+        crate::expand::quote_always(key)
+    } else {
+        key.to_string()
     }
 }
 
 /// `declare -f`, `declare -F` and their kin with no names.
-fn print_functions(shell: &Shell, kind: Kind, flags: &Flags) -> i32 {
+/// `declare -f` and `-F`, `export -f` and `readonly -f` with no names: the
+/// functions with the attributes asked for (`set`), each with its text
+/// unless `-F`, and a `declare` line that gives it its attributes back.
+fn print_functions(shell: &Shell, flags: &Flags, set: u16) -> i32 {
     let mut names: Vec<&String> = shell.functions.keys().collect();
     names.sort();
     let mut text = String::new();
     for name in names {
-        let marked = match kind {
-            Kind::Export => shell.exported_functions.contains(name),
-            Kind::Readonly => shell.readonly_functions.contains(name),
-            _ => true,
-        };
-        if !marked {
-            continue;
-        }
-        match kind {
-            Kind::Export => text.push_str(&format!("declare -fx {name}\n")),
-            Kind::Readonly => text.push_str(&format!("declare -fr {name}\n")),
-            _ if flags.has('F') => text.push_str(&format!("declare -f {name}\n")),
-            _ => {
-                text.push_str(&show::function(&shell.functions[name.as_str()]));
-            }
+        let marked = (set & attr::EXPORT == 0 || shell.exported_functions.contains(name))
+            && (set & attr::READONLY == 0 || shell.readonly_functions.contains(name));
+        if marked {
+            text.push_str(&function_text(shell, name, flags.has('F')));
         }
     }
     i32::from(!out(shell, "declare", &text))
+}
+
+/// A function as `declare -f` shows it: its text, then a `declare -frx`
+/// line if it has attributes; with `names_only`, that line alone.
+fn function_text(shell: &Shell, name: &str, names_only: bool) -> String {
+    let mut letters = String::new();
+    if shell.readonly_functions.contains(name) {
+        letters.push('r');
+    }
+    if shell.exported_functions.contains(name) {
+        letters.push('x');
+    }
+    let line = format!("declare -f{letters} {name}\n");
+    if names_only {
+        return line;
+    }
+    let mut text = show::function(&shell.functions[name]);
+    if !letters.is_empty() {
+        text.push_str(&line);
+    }
+    text
 }
 
 /// `declare` (and `export`, `readonly`) with no names: the variables,
@@ -608,7 +674,7 @@ pub fn unset(shell: &mut Shell, args: &[String]) -> Res {
             shell.functions.remove(name.as_str());
             continue;
         }
-        if !shell.unset(name) {
+        if !shell.unset_checked(name)? {
             status = 1;
             if shell.posix() && !shell.interactive {
                 return Err(Flow::Fatal(2));
@@ -689,10 +755,6 @@ pub fn set(shell: &mut Shell, args: &[String]) -> Res {
                 }
                 'r' => continue,
                 'H' => "histexpand",
-                'k' => {
-                    // Accepted for bash's sake; nothing changes.
-                    continue;
-                }
                 _ => match Opts::by_letter(letter) {
                     Some(name) => name,
                     None => {
@@ -719,13 +781,13 @@ pub fn set(shell: &mut Shell, args: &[String]) -> Res {
 
 /// `set -o name` and `set +o name`.
 pub fn set_option(shell: &mut Shell, name: &str, on: bool) -> Result<(), i32> {
-    if name == "history" || name == "histexpand" || name == "keyword" {
+    if name == "history" || name == "histexpand" {
         shell.history_option(name, on);
         return Ok(());
     }
     if name == "posix" && on {
-        // Switching to POSIX mode changes the defaults that differ.
-        shell.opts.braceexpand = false;
+        // As in bash, which leaves it on when POSIX mode goes off.
+        shell.shopts.insert("inherit_errexit", true);
     }
     if name == "restricted" || (name == "privileged" && on) {
         return Ok(());
@@ -749,12 +811,12 @@ pub fn set_option(shell: &mut Shell, name: &str, on: bool) -> Result<(), i32> {
 /// `set -o` and `set +o` with no name.
 fn print_options(shell: &Shell, minus: bool) -> bool {
     let mut names: Vec<&str> = OPTION_TABLE.iter().map(|(name, _)| *name).collect();
-    names.extend(["history", "histexpand", "keyword"]);
+    names.extend(["history", "histexpand"]);
     names.sort();
     let mut text = String::new();
     for name in names {
         let on = match name {
-            "history" | "histexpand" | "keyword" => shell.history_option_on(name),
+            "history" | "histexpand" => shell.history_option_on(name),
             _ => shell.opts.get(name).unwrap_or(false),
         };
         if minus {
@@ -810,7 +872,7 @@ pub fn shopt(shell: &mut Shell, args: &[String]) -> Res {
                 continue;
             }
             match SHOPTS.iter().find(|(n, _)| *n == name.as_str()) {
-                Some((key, _)) if *key == "login_shell" => {}
+                Some((key, _)) if *key == "login_shell" || *key == "restricted_shell" => {}
                 Some((key, _)) => {
                     shell.shopts.insert(key, on);
                 }

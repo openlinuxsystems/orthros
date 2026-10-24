@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::editor::{Editor, Input};
 use crate::history::Expanded;
-use crate::parse::{self, Parser};
+use crate::parse::Parser;
 use crate::shell::{Flow, Shell};
 use crate::vars::Value;
 use crate::{sys, text, trap};
@@ -186,6 +186,7 @@ fn refuse_exit(shell: &mut Shell) -> bool {
 /// asked for on the way is its status.
 fn before_prompt(shell: &mut Shell) -> Option<i32> {
     shell.notify_jobs();
+    shell.reap_coprocs();
     if let Err(Flow::Exit(code)) = shell.run_pending_traps() {
         return Some(code);
     }
@@ -199,7 +200,7 @@ fn before_prompt(shell: &mut Shell) -> Option<i32> {
     };
     for command in commands.iter().filter(|c| !c.is_empty()) {
         let status = shell.status;
-        let result = shell.eval_text(command, "PROMPT_COMMAND");
+        let result = shell.eval_text(command, "PROMPT_COMMAND", "PROMPT_COMMAND");
         shell.status = status;
         if let Err(Flow::Exit(code)) = result {
             return Some(code);
@@ -244,7 +245,9 @@ fn run_line(shell: &mut Shell, line: &str, first_line: u32) -> Option<i32> {
         Parser::new(&line, Rc::from(shell.name.as_str()), first_line, shell.parse_options());
     loop {
         parser.set_options(shell.parse_options());
-        match parser.next_command() {
+        let next = parser.next_command();
+        shell.parse_warnings(&mut parser);
+        match next {
             Ok(Some(command)) => {
                 let result = shell.run_complete(&command);
                 shell.close_procsubs();
@@ -273,14 +276,7 @@ fn run_line(shell: &mut Shell, line: &str, first_line: u32) -> Option<i32> {
             }
             Ok(None) => return None,
             Err(error) => {
-                shell.lineno = error.line().unwrap_or(first_line);
-                let message = match &error {
-                    parse::Error::Incomplete(message) => {
-                        format!("syntax error: unexpected end of file ({message})")
-                    }
-                    parse::Error::Syntax { message, .. } => format!("syntax error: {message}"),
-                };
-                shell.error(&message);
+                shell.syntax_error(&error, None, parser.end_line());
                 shell.status = 2;
                 return None;
             }

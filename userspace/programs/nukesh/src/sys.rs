@@ -426,6 +426,18 @@ pub fn is_regular(fd: i32) -> bool {
     }
 }
 
+/// `fd`'s device, inode and whether it is a regular file.
+pub fn identity(fd: i32) -> Option<(u64, u64, bool)> {
+    // SAFETY: stat is plain data that fstat fills in.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut st) != 0 {
+            return None;
+        }
+        Some((st.st_dev as u64, st.st_ino as u64, st.st_mode & libc::S_IFMT == libc::S_IFREG))
+    }
+}
+
 /// Waits up to `millis` (forever if negative) for `fd` to have input:
 /// whether it has.
 pub fn poll_in(fd: i32, millis: i32) -> Result<bool> {
