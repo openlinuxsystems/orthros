@@ -27,7 +27,8 @@ struct Space {
 fn statvfs(path: &OsStr) -> io::Result<Space> {
     let path =
         CString::new(path.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-    let mut st: libc::statvfs = util::unsafe_zeroed();
+    // SAFETY: all zeros is a valid statvfs: numbers.
+    let mut st: libc::statvfs = unsafe { util::zeroed() };
     // SAFETY: the path is a C string and `st` a statvfs for the call.
     if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
@@ -49,14 +50,18 @@ const PSEUDO: &[&str] = &["proc", "sys", "dev"];
 /// How sizes are shown.
 #[derive(Clone, Copy)]
 enum Unit {
-    Blocks(u64),
-    Human { si: bool },
+    /// Blocks of this many bytes, each number followed by the unit when
+    /// -B named one without a number (`-BM` prints 258020M).
+    Blocks(u64, Option<&'static str>),
+    Human {
+        si: bool,
+    },
 }
 
 /// df(1).
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut all = false;
-    let mut unit = Unit::Blocks(1024);
+    let mut unit = Unit::Blocks(1024, None);
     let mut inodes = false;
     let mut kinds = false;
     let mut only: Vec<String> = Vec::new();
@@ -72,10 +77,16 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Long(l) if l == "human-readable" => unit = Unit::Human { si: false },
             Arg::Short('H') => unit = Unit::Human { si: true },
             Arg::Long(l) if l == "si" => unit = Unit::Human { si: true },
-            Arg::Short('k') => unit = Unit::Blocks(1024),
-            Arg::Short('m') => unit = Unit::Blocks(1 << 20),
-            Arg::Short('B') => unit = Unit::Blocks(block_size(&args.text()?)?),
-            Arg::Long(l) if l == "block-size" => unit = Unit::Blocks(block_size(&args.text()?)?),
+            Arg::Short('k') => unit = Unit::Blocks(1024, None),
+            Arg::Short('m') => unit = Unit::Blocks(1 << 20, None),
+            Arg::Short('B') => {
+                let (bytes, suffix) = block_size("-B", &args.text()?)?;
+                unit = Unit::Blocks(bytes, suffix);
+            }
+            Arg::Long(l) if l == "block-size" => {
+                let (bytes, suffix) = block_size("--block-size", &args.text()?)?;
+                unit = Unit::Blocks(bytes, suffix);
+            }
             Arg::Short('i') => inodes = true,
             Arg::Long(l) if l == "inodes" => inodes = true,
             Arg::Short('T') => kinds = true,
@@ -124,8 +135,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     }
     let size_header = match (unit, posix) {
         (Unit::Human { .. }, _) => "Size".to_string(),
-        (Unit::Blocks(bytes), true) => format!("{bytes}-blocks"),
-        (Unit::Blocks(bytes), _) => format!("{}-blocks", block_name(bytes)),
+        (Unit::Blocks(bytes, _), true) => format!("{bytes}-blocks"),
+        (Unit::Blocks(_, Some(suffix)), _) => format!("1{suffix}-blocks"),
+        (Unit::Blocks(bytes, None), _) => format!("{}-blocks", block_name(bytes)),
     };
     let mut header = vec!["Filesystem".to_string()];
     if kinds {
@@ -234,7 +246,9 @@ fn row(
     } else {
         let used = s.size.saturating_sub(s.free);
         let show = |bytes: u64| match unit {
-            Unit::Blocks(block) => bytes.div_ceil(block).to_string(),
+            Unit::Blocks(block, suffix) => {
+                format!("{}{}", bytes.div_ceil(block), suffix.unwrap_or(""))
+            }
             // Coreutils writes SI's kilo as k.
             Unit::Human { si: true } => {
                 let text = util::human(bytes, true);
@@ -257,38 +271,73 @@ fn row(
     row
 }
 
-/// A block size: a number with an optional unit (`K`, `M`, `G`, `KB`...).
-fn block_size(text: &str) -> Result<u64, Fail> {
-    let digits: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let suffix = &text[digits.len()..];
-    let n: u64 = if digits.is_empty() {
-        1
-    } else {
-        digits.parse().map_err(|_| usage(format!("invalid block size: '{text}'")))?
+/// The units a block size may name, from K up: as binary ones are
+/// written alone and with iB, and as SI ones are written.
+const UNITS: [[&str; 3]; 8] = [
+    ["K", "KiB", "kB"],
+    ["M", "MiB", "MB"],
+    ["G", "GiB", "GB"],
+    ["T", "TiB", "TB"],
+    ["P", "PiB", "PB"],
+    ["E", "EiB", "EB"],
+    ["Z", "ZiB", "ZB"],
+    ["Y", "YiB", "YB"],
+];
+
+/// A block size given to `option`, as GNU df reads one: a number, a unit
+/// (`K` or `KiB` for 1024, `KB` or `kB` for 1000, then M, G, T, P and E,
+/// in either case), or both. A unit given alone also follows every
+/// number shown, and comes back too.
+fn block_size(option: &str, text: &str) -> Result<(u64, Option<&'static str>), Fail> {
+    let invalid = || usage(format!("invalid {option} argument '{text}'"));
+    let large = || usage(format!("{option} argument '{text}' too large"));
+    let body = text.strip_prefix('+').unwrap_or(text);
+    let (number, suffix) = body.split_at(body.bytes().take_while(u8::is_ascii_digit).count());
+    let unit = suffix.chars().next().and_then(|letter| {
+        let power = "KMGTPEZY".find(letter.to_ascii_uppercase())?;
+        let form = ["", "iB", "B"].iter().position(|&form| form == &suffix[1..])?;
+        Some((power, form))
+    });
+    let (scale, name) = match unit {
+        _ if suffix.is_empty() => (Some(1), None),
+        Some((power, form)) => {
+            let base: u64 = if form == 2 { 1000 } else { 1024 };
+            (base.checked_pow(power as u32 + 1), Some(UNITS[power][form]))
+        }
+        None if number.is_empty() => return Err(invalid()),
+        None => return Err(usage(format!("invalid suffix in {option} argument '{text}'"))),
     };
-    let scale: u64 = match suffix {
-        "" => 1,
-        "K" | "k" | "KiB" => 1 << 10,
-        "M" | "MiB" => 1 << 20,
-        "G" | "GiB" => 1 << 30,
-        "T" | "TiB" => 1 << 40,
-        "KB" | "kB" => 1000,
-        "MB" => 1_000_000,
-        "GB" => 1_000_000_000,
-        "TB" => 1_000_000_000_000,
-        _ => return Err(usage(format!("invalid block size: '{text}'"))),
-    };
-    Ok(n * scale)
+    if number.is_empty() && name.is_none() {
+        return Err(invalid());
+    }
+    let n = if number.is_empty() { Some(1) } else { number.parse::<u64>().ok() };
+    let bytes = n.zip(scale).and_then(|(n, scale)| n.checked_mul(scale)).ok_or_else(large)?;
+    if bytes == 0 {
+        return Err(invalid());
+    }
+    Ok((bytes, if number.is_empty() { name } else { None }))
 }
 
-/// A block size's name in a header: `1K`, `1M`, or bytes.
+/// A block size's name in a header, as GNU df writes it: in powers of
+/// 1024 (`4K`) or of 1000 with a B (`3kB`, `512B`), whichever divides it
+/// evenly more times (1000 when they do as often), rounded up as -h
+/// rounds, with no `.0`.
 fn block_name(bytes: u64) -> String {
-    for (scale, unit) in [(1u64 << 40, "T"), (1 << 30, "G"), (1 << 20, "M"), (1 << 10, "K")] {
-        if bytes.is_multiple_of(scale) {
-            return format!("{}{unit}", bytes / scale);
+    let (mut thousands, mut kibis) = (bytes, bytes);
+    let binary = loop {
+        let (by_1000, by_1024) = (thousands % 1000 == 0, kibis % 1024 == 0);
+        if by_1000 != by_1024 || !by_1000 {
+            break by_1024;
         }
+        thousands /= 1000;
+        kibis /= 1024;
+    };
+    let text = util::human(bytes, !binary).replace(".0", "");
+    match text.strip_suffix('K') {
+        _ if binary => text,
+        Some(number) => format!("{number}kB"),
+        None => format!("{text}B"),
     }
-    bytes.to_string()
 }
 
 #[cfg(test)]
@@ -297,13 +346,63 @@ mod tests {
 
     #[test]
     fn block_sizes() {
-        assert_eq!(block_size("1K").unwrap(), 1024);
-        assert_eq!(block_size("4M").unwrap(), 4 << 20);
-        assert_eq!(block_size("1000").unwrap(), 1000);
-        assert_eq!(block_size("MB").unwrap(), 1_000_000);
-        assert!(block_size("3Q").is_err());
-        assert_eq!(block_name(1024), "1K");
-        assert_eq!(block_name(512), "512");
+        let size = |text: &str| block_size("-B", text).map_err(|fail| fail.message);
+        assert_eq!(size("1K"), Ok((1024, None)));
+        assert_eq!(size("4M"), Ok((4 << 20, None)));
+        assert_eq!(size("1000"), Ok((1000, None)));
+        assert_eq!(size("+1"), Ok((1, None)));
+        assert_eq!(size("1kiB"), Ok((1024, None)));
+        assert_eq!(size("1mB"), Ok((1_000_000, None)));
+        assert_eq!(size("15E"), Ok((15 << 60, None)));
+        assert_eq!(size("18446744073709551615"), Ok((u64::MAX, None)));
+        // A unit alone follows the numbers, written as GNU df writes it.
+        assert_eq!(size("MB"), Ok((1_000_000, Some("MB"))));
+        assert_eq!(size("k"), Ok((1024, Some("K"))));
+        assert_eq!(size("KB"), Ok((1000, Some("kB"))));
+        assert_eq!(size("miB"), Ok((1 << 20, Some("MiB"))));
+        // As the host's df (coreutils 9.4) words them.
+        for (text, message) in [
+            ("0", "invalid -B argument '0'"),
+            ("0K", "invalid -B argument '0K'"),
+            ("", "invalid -B argument ''"),
+            ("x", "invalid -B argument 'x'"),
+            ("B", "invalid -B argument 'B'"),
+            ("-1", "invalid -B argument '-1'"),
+            ("3Q", "invalid suffix in -B argument '3Q'"),
+            ("1.5K", "invalid suffix in -B argument '1.5K'"),
+            ("1KIB", "invalid suffix in -B argument '1KIB'"),
+            ("1KBB", "invalid suffix in -B argument '1KBB'"),
+            ("99999999999T", "-B argument '99999999999T' too large"),
+            ("16E", "-B argument '16E' too large"),
+            ("Y", "-B argument 'Y' too large"),
+            ("18446744073709551616", "-B argument '18446744073709551616' too large"),
+        ] {
+            assert_eq!(size(text), Err(message.to_string()), "{text}");
+        }
+        assert_eq!(
+            block_size("--block-size", "0").map_err(|fail| fail.message),
+            Err("invalid --block-size argument '0'".to_string())
+        );
+    }
+
+    #[test]
+    fn block_names() {
+        for (bytes, name) in [
+            (1, "1B"),
+            (512, "512B"),
+            (1000, "1kB"),
+            (1024, "1K"),
+            (1536, "1.6kB"),
+            (3000, "3kB"),
+            (4096, "4K"),
+            (10240, "10K"),
+            (1_000_000, "1MB"),
+            (1 << 20, "1M"),
+            (1_024_000, "1.1MB"),
+            (u64::MAX, "19EB"),
+        ] {
+            assert_eq!(block_name(bytes), name, "{bytes}");
+        }
     }
 
     #[test]

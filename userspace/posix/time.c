@@ -320,9 +320,12 @@ static void posix_timers(void) {
 		check_sleep_ms(5);
 	CHECK(thread_calls >= 3 && thread_value == 77);
 	CHECK(timer_delete(timer) == 0);
-	int calls = thread_calls;
+	// An expiry already handed to the helper thread may still land:
+	// give it time, then no more come.
+	check_sleep_ms(20);
+	int calls = __atomic_load_n(&thread_calls, __ATOMIC_RELAXED);
 	check_sleep_ms(30);
-	CHECK(thread_calls == calls);
+	CHECK(__atomic_load_n(&thread_calls, __ATOMIC_RELAXED) == calls);
 	// A forked child has none of its parent's timers.
 	timer = timer_for(CLOCK_MONOTONIC, rt, 1);
 	pid_t child = check_fork();

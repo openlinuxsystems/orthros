@@ -295,6 +295,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "spark-stop",
+        about: "Spark stops a service that ignores SIGTERM, and what a service leaves behind",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --service-dir /system/tests/services/stop",
+        cpus: 2,
+        memory: "256M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: spark_stop,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "page-fault",
         about: "a page fault panics with registers and a symbolized backtrace, on screen too",
         firmware: Firmware::Bios,
@@ -2238,6 +2254,49 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     if !vm.log().contains("hog: taking memory") {
         return Err("the log does not show hog's own line, \"hog: taking memory\"".into());
+    }
+    Ok(())
+}
+
+/// Spark supervises three services: `stubborn` ignores SIGTERM, so 5 s
+/// after `service stubborn restart`, and again after `stop`, Spark stops
+/// its domain; `leaver` ends and leaves a process in its domain, which
+/// Spark stops; `driver` makes the requests and powers the machine off.
+fn spark_stop(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("spark: 3 services in /system/tests/services/stop, 3 enabled")?;
+    vm.expect("spark: started leaver (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: started stubborn (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: started driver (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: asked to restart stubborn")?;
+    vm.expect("spark: stubborn did not end in 5 s; stopping its domain")?;
+    vm.expect("spark: stubborn (process ")?;
+    vm.expect(" was ended by signal 9")?;
+    vm.expect("spark: starting stubborn again in 0.1 s")?;
+    vm.expect("spark: started stubborn (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: asked to stop stubborn")?;
+    vm.expect("spark: stubborn did not end in 5 s; stopping its domain")?;
+    vm.expect(" was ended by signal 9")?;
+    vm.expect("driver:  [ - ]  stubborn")?;
+    vm.expect("driver:    Active: inactive (dead)")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)?;
+    // leaver's lines come whenever it ends, among the others.
+    let log = vm.log();
+    for line in [
+        "leaver: left",
+        "spark: leaver (process ",
+        "spark: leaver left 1 thread behind; stopping its domain",
+        "stubborn: up",
+    ] {
+        if !log.contains(line) {
+            return Err(format!("the log does not show \"{line}\""));
+        }
+    }
+    if log.contains("starting leaver again") || log.matches("starting stubborn again").count() != 1
+    {
+        return Err("a service was started again that should not have been".into());
     }
     Ok(())
 }

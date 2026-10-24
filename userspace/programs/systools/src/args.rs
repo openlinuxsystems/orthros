@@ -165,6 +165,21 @@ impl Args {
         if at < bytes.len() { Some(OsString::from_vec(bytes[at..].to_vec())) } else { None }
     }
 
+    /// The value of a short option that may have one (`-U [user]`): the
+    /// rest of its cluster, or the next argument if it is no option and
+    /// `wanted` takes it; else none.
+    pub fn optional_operand(&mut self, wanted: impl Fn(&OsStr) -> bool) -> Option<OsString> {
+        if let Some(value) = self.joined_value() {
+            return Some(value);
+        }
+        let item = self.items.get(self.next)?;
+        if self.ended || item.as_bytes().first() == Some(&b'-') || !wanted(item) {
+            return None;
+        }
+        self.next += 1;
+        Some(item.clone())
+    }
+
     /// Takes a long option's value if it has one (`--color=never`), or none
     /// (`--color`).
     pub fn optional_value(&mut self) -> Option<OsString> {

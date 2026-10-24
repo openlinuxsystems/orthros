@@ -75,6 +75,11 @@ _/proc/_*n*_/status_
 		*pts/*_n_ for the pseudo-terminal that is its session's
 		controlling terminal, or *none*.
 
+	*terminal_group*
+		Only with a terminal: the number of its foreground process
+		group, 0 for none, which *ps*(1) shows as TPGID and with a
+		*+* in STAT for the processes in it.
+
 	*run*
 		What it is doing: *running* (a thread of it runs or is ready
 		to), *disk* (a thread waits for a disk), *sleeping*, *stopped*
@@ -208,6 +213,7 @@ parent: 1
 group: 9
 session: 9
 terminal: pts/0
+terminal_group: 9
 run: sleeping
 started_ns: 1832004113
 cpu_ns: 41202770

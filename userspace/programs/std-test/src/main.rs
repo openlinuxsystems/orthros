@@ -117,7 +117,7 @@ fn child(args: &[String]) -> ! {
             print!("{value} {others} {}", dir.display());
             process::exit(0)
         }
-        // Prints its process group, and whether it leads it.
+        // Prints whether it leads its process group.
         Some("group") => {
             // SAFETY: getpgrp has no preconditions.
             let group = unsafe { libc::getpgrp() };

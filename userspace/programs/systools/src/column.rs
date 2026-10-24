@@ -374,7 +374,13 @@ fn table(out: &mut dyn Write, lines: &[&str], t: &Table, term_width: usize) -> R
     if t.json {
         for &n in &order {
             if t.names.get(n).is_none_or(String::is_empty) {
-                return Err(fail(format!("for JSON the name of the column {} is required", n + 1)));
+                // As util-linux's column says it: one past the row where
+                // the column first has a cell.
+                let line = rows.iter().position(|r| r.cells.len() > n).unwrap_or(rows.len()) + 2;
+                return Err(fail(format!(
+                    "line {line}: for JSON the name of the column {} is required",
+                    n + 1
+                )));
             }
         }
         let name = t.name.as_deref().unwrap_or("table");
@@ -666,5 +672,16 @@ mod tests {
             tabled("a\nb \"c\"\n", &t),
             "{\n   \"table\": [\n      {\n         \"a\": \"a\",\n         \"b\": null\n      },{\n         \"a\": \"b\",\n         \"b\": \"\\\"c\\\"\"\n      }\n   ]\n}\n"
         );
+        // What util-linux 2.39.3's column says of a column with no name.
+        let t = Table { names: vec!["one".into()], json: true, ..Table::default() };
+        let error = |text: &str| {
+            let lines: Vec<&str> = text.lines().collect();
+            table(&mut Vec::new(), &lines, &t, 80).err().map(|e| e.message)
+        };
+        let message =
+            |line| Some(format!("line {line}: for JSON the name of the column 2 is required"));
+        assert_eq!(error("a b\nc d e\nf\n"), message(2));
+        assert_eq!(error("a\nb\nc d\n"), message(4));
+        assert_eq!(error("x\n\n\nz w q\n"), message(3));
     }
 }

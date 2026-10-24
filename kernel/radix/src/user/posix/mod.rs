@@ -256,6 +256,35 @@ pub fn tree_place(pid: u64) -> Option<(u64, u64, u64, bool)> {
     })
 }
 
+/// The process numbered `pid` if it has ended and its parent has not
+/// waited for it (a zombie), for `/proc`: the registry holds a process
+/// only while a capability names it, which a zombie's seldom does.
+pub fn zombie(pid: u64) -> Option<ProcessRef> {
+    with_tree(|tree| {
+        let member = tree.get(pid)?;
+        matches!(member.life, radix_posix::tree::Life::Zombie { .. }).then(|| member.handle.clone())
+    })
+}
+
+/// Adds the numbers of the zombies to `numbers`, as many as it has room
+/// for after room for those there are now was asked for.
+pub fn zombie_numbers(numbers: &mut Vec<u64, Kmalloc>) {
+    let is_zombie = |m: &radix_posix::tree::Member<ProcessRef>| {
+        matches!(m.life, radix_posix::tree::Life::Zombie { .. })
+    };
+    let count = with_tree(|tree| tree.members().filter(|m| is_zombie(m)).count());
+    if numbers.try_reserve(count).is_err() {
+        return;
+    }
+    with_tree(|tree| {
+        for member in tree.members().filter(|m| is_zombie(m)) {
+            if numbers.push_within_capacity(member.pid).is_err() {
+                break;
+            }
+        }
+    });
+}
+
 /// Whether process group `group` has a live member in session `session`.
 pub fn group_in_session(group: u64, session: u64) -> bool {
     with_tree(|tree| {

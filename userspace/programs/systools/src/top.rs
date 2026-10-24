@@ -59,6 +59,7 @@ struct Settings {
 }
 
 /// One row: a process or a thread of one.
+#[derive(Default)]
 struct Row {
     pid: u64,
     name: String,
@@ -94,7 +95,8 @@ extern "C" fn on_signal(_: libc::c_int) {
 /// the calls they interrupt, so that a wait for a key ends.
 fn catch_signals() {
     for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGWINCH] {
-        let mut action: libc::sigaction = util::unsafe_zeroed();
+        // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a function address.
+        let mut action: libc::sigaction = unsafe { util::zeroed() };
         action.sa_sigaction = if signal == libc::SIGWINCH {
             // Only to wake the wait: the size is read each frame.
             noop as *const () as usize
@@ -116,7 +118,8 @@ struct Screen {
 
 impl Screen {
     fn new() -> Screen {
-        let mut saved: libc::termios = util::unsafe_zeroed();
+        // SAFETY: all zeros is a valid termios: numbers.
+        let mut saved: libc::termios = unsafe { util::zeroed() };
         // SAFETY: tcgetattr fills the termios it is given.
         let ok = unsafe { libc::tcgetattr(0, &mut saved) } == 0;
         if ok {
@@ -361,6 +364,19 @@ fn thread_row(p: &Process, t: &Thread, args: &[OsString], before: &Before, span:
 }
 
 /// A frame: the summary and the rows that fit.
+/// How two rows go in a frame: highest first by every field, PID and
+/// COMMAND too, as procps's top sorts them; lowest first reversed.
+fn order(by: SortBy, reverse: bool, a: &Row, b: &Row) -> std::cmp::Ordering {
+    let ord = match by {
+        SortBy::Cpu => b.percent.total_cmp(&a.percent).then(b.cpu_ns.cmp(&a.cpu_ns)),
+        SortBy::Memory => b.resident_kib.cmp(&a.resident_kib),
+        SortBy::Time => b.cpu_ns.cmp(&a.cpu_ns),
+        SortBy::Pid => b.pid.cmp(&a.pid),
+        SortBy::Command => b.name.cmp(&a.name),
+    };
+    if reverse { ord.reverse() } else { ord }
+}
+
 fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
     let (width, height) = if s.batch {
         (s.width.unwrap_or(usize::MAX), usize::MAX)
@@ -457,16 +473,7 @@ fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
     ));
     let mut shown: Vec<&Row> =
         rows.iter().filter(|r| !s.hide_idle || r.percent > 0.0 || r.state == 'R').collect();
-    shown.sort_by(|a, b| {
-        let ord = match s.sort {
-            SortBy::Cpu => b.percent.total_cmp(&a.percent).then(b.cpu_ns.cmp(&a.cpu_ns)),
-            SortBy::Memory => b.resident_kib.cmp(&a.resident_kib),
-            SortBy::Time => b.cpu_ns.cmp(&a.cpu_ns),
-            SortBy::Pid => a.pid.cmp(&b.pid),
-            SortBy::Command => a.name.cmp(&b.name),
-        };
-        if s.reverse { ord.reverse() } else { ord }
-    });
+    shown.sort_by(|a, b| order(s.sort, s.reverse, a, b));
     let user = util::user_name(0);
     let room = height.saturating_sub(lines.len());
     for r in shown.into_iter().take(room) {
@@ -506,4 +513,35 @@ fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
         text.push('\n');
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What procps-ng 4.0.4's top -b -o gives: every field highest
+    /// first, `-` before it for lowest first.
+    #[test]
+    fn every_field_sorts_highest_first() {
+        let row = |pid, name: &str, percent| Row {
+            pid,
+            name: name.into(),
+            percent,
+            cpu_ns: pid,
+            resident_kib: pid,
+            ..Row::default()
+        };
+        let rows = [row(1, "spark", 0.5), row(30, "admin", 2.0), row(7, "nukesh", 1.0)];
+        let sorted = |by, reverse| {
+            let mut shown: Vec<&Row> = rows.iter().collect();
+            shown.sort_by(|a, b| order(by, reverse, a, b));
+            shown.iter().map(|r| r.pid).collect::<Vec<_>>()
+        };
+        for by in [SortBy::Pid, SortBy::Cpu, SortBy::Memory, SortBy::Time] {
+            assert_eq!(sorted(by, false), [30, 7, 1]);
+            assert_eq!(sorted(by, true), [1, 7, 30]);
+        }
+        assert_eq!(sorted(SortBy::Command, false), [1, 7, 30]);
+        assert_eq!(sorted(SortBy::Command, true), [30, 7, 1]);
+    }
 }

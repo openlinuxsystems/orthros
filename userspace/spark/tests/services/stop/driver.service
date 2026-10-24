@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The spark-stop boot test's driver: restarts and stops stubborn with
+# service(8), shows what Spark says of the services, and powers off.
+
+description = Drives the spark-stop boot test
+program = /system/bin/nukesh
+arguments = -c "sleep 1; service stubborn restart; sleep 7; service stubborn stop; sleep 7; service --status-all; service leaver status; poweroff"
+order = 90
+restart = never

@@ -28,7 +28,8 @@ own: _/proc_, _/sys_ and _/dev_.
 	Every filesystem.
 
 *-h*, *--human-readable*
-	Sizes with a unit, in powers of 1024 (*1.5G*).
+	Sizes with a unit, in powers of 1024 (*1.5G*), rounded up, so that
+	none reads less than it is.
 
 *-H*, *--si*
 	Sizes with a unit, in powers of 1000.
@@ -37,8 +38,11 @@ own: _/proc_, _/sys_ and _/dev_.
 	Blocks of 1 KiB; of 1 MiB.
 
 *-B*, *--block-size* _size_
-	Blocks of _size_: a number with an optional unit (*K*, *M*, *G*,
-	*T*, *KB*, *MB*...).
+	Blocks of _size_: a number, a unit, or both. *K* and *KiB* are
+	1024 bytes and *KB* or *kB* 1000, and likewise *M*, *G*, *T*, *P* and
+	*E*, in either case. A unit given without a number follows every
+	size too (*-BM* shows *258020M*). The header names the block size in
+	the powers that divide it more evenly (*4K-blocks*, *3kB-blocks*).
 
 *-i*, *--inodes*
 	Files (inodes) in place of blocks.

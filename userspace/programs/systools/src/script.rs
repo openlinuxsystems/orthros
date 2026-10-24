@@ -77,7 +77,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     // The child's terminal: the size of ours.
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    let mut size: libc::winsize = util::unsafe_zeroed();
+    // SAFETY: all zeros is a valid winsize: numbers.
+    let mut size: libc::winsize = unsafe { util::zeroed() };
     // SAFETY: TIOCGWINSZ fills `size`; failing leaves it zero.
     unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut size) };
     // SAFETY: openpty writes the two descriptors; the name may be null.
@@ -122,19 +123,27 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     }
     // SAFETY: closing our copy of the child's end.
     unsafe { libc::close(slave) };
-    let mut saved: Option<libc::termios> = None;
+    // A closed output is an error to stop at with the terminal put back
+    // (util-linux's script dies of the SIGPIPE and leaves it raw). Only
+    // here, after the fork, so the child keeps the default.
+    // SAFETY: ignoring a signal.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    let log_name = std::path::Path::new(&path).display();
+    let mut saved = Restore(None);
     if tty {
-        let mut t: libc::termios = util::unsafe_zeroed();
+        // SAFETY: all zeros is a valid termios: numbers.
+        let mut t: libc::termios = unsafe { util::zeroed() };
         // SAFETY: tcgetattr fills `t`.
         if unsafe { libc::tcgetattr(0, &mut t) } == 0 {
-            saved = Some(t);
+            saved.0 = Some(t);
             let mut raw = t;
             // SAFETY: cfmakeraw changes the termios it is given.
             unsafe { libc::cfmakeraw(&mut raw) };
             // SAFETY: `raw` is a valid termios.
             unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) };
         }
-        let mut action: libc::sigaction = util::unsafe_zeroed();
+        // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a function address.
+        let mut action: libc::sigaction = unsafe { util::zeroed() };
         action.sa_sigaction = on_winch as *const () as usize;
         // SAFETY: the handler only stores to an atomic.
         unsafe { libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut()) };
@@ -184,18 +193,16 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                 break;
             }
             let data = &buffer[..n as usize];
-            stdout.write_all(data)?;
-            stdout.flush()?;
-            log.write_all(data)?;
-            if flush {
-                log.flush()?;
-            }
+            stdout
+                .write_all(data)
+                .and_then(|()| stdout.flush())
+                .map_err(|e| util::failed(&"write error", e))?;
+            log.write_all(data)
+                .and_then(|()| if flush { log.flush() } else { Ok(()) })
+                .map_err(|e| util::failed(&log_name, e))?;
         }
     }
-    if let Some(t) = saved {
-        // SAFETY: `t` is the termios read at the start.
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
-    }
+    drop(saved);
     let mut status = 0;
     // SAFETY: waits for our own child.
     unsafe { libc::waitpid(pid, &mut status, 0) };
@@ -218,6 +225,19 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         println!("Script done.");
     }
     Ok(if return_code { code } else { 0 })
+}
+
+/// The terminal's settings from before it was made raw, put back when it
+/// is dropped: also when a write to the log or the output fails.
+struct Restore(Option<libc::termios>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        if let Some(t) = &self.0 {
+            // SAFETY: `t` is the termios read at the start.
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, t) };
+        }
+    }
 }
 
 fn c_string(text: &str) -> CString {

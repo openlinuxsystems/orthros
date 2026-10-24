@@ -34,7 +34,10 @@ otherwise.
 	Powers of 1000 for the units of the options above and *-h*.
 
 *-h*, *--human*
-	Each size with a unit that keeps it short.
+	Each size with a unit that keeps it short, as procps writes it: in
+	the first unit where it fits four characters besides the *i* of
+	*Ki*, *Mi*, *Gi*..., with one decimal while that fits and whole
+	after, so 15.7 GiB reads *15Gi*.
 
 *-w*, *--wide*
 	The page cache in a column of its own, *cache*, with *buffers* 0.

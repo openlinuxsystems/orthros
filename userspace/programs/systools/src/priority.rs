@@ -93,7 +93,7 @@ pub fn renice(args: &mut Args) -> Result<i32, Fail> {
                     code = 1;
                     continue;
                 }
-                let new = if relative { old + n } else { n }.clamp(-20, 19);
+                let new = if relative { old.saturating_add(n) } else { n }.clamp(-20, 19);
                 // SAFETY: as above.
                 if unsafe { libc::setpriority(which as _, who as _, new) } != 0 {
                     eprintln!(

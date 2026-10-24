@@ -67,7 +67,13 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             }
             Arg::Short('e') => o.layout = Layout::Little,
             Arg::Short('c') | Arg::Long(_) if is(&arg, 'c', &["cols"]) => {
-                o.columns = Some(number(args)? as usize)
+                let text = args.text()?;
+                if text.starts_with('-') {
+                    return Err(too_wide());
+                }
+                let n =
+                    parse_number(&text).ok_or_else(|| usage(format!("invalid number '{text}'")))?;
+                o.columns = Some(usize::try_from(n).unwrap_or(usize::MAX));
             }
             Arg::Short('g') | Arg::Long(_) if is(&arg, 'g', &["groupsize"]) => {
                 o.group = Some(number(args)? as usize)
@@ -112,6 +118,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Operand(file) if files.len() < 2 => files.push(file),
             other => return Err(args.unknown(&other)),
         }
+    }
+    // Plain hex and C take lines of any length; the others up to 256
+    // bytes.
+    if o.columns.is_some_and(|c| c > 256) && !matches!(o.layout, Layout::Plain | Layout::Include) {
+        return Err(too_wide());
     }
     let input_name = files.first().filter(|f| f.as_os_str() != "-").cloned();
     // Where in the input the dump starts, which its offsets count from.
@@ -187,6 +198,11 @@ fn failed(code: i32, path: &OsString, e: io::Error) -> Fail {
     util::fail_with(code, what.message)
 }
 
+/// A `-c` that is negative, or over 256 where it cannot be.
+fn too_wide() -> Fail {
+    util::fail("invalid number of columns (max. 256).".into())
+}
+
 /// Whether `arg` is short option `c` or one of the long `names`.
 fn is(arg: &Arg, c: char, names: &[&str]) -> bool {
     match arg {
@@ -234,13 +250,16 @@ fn dump(
     start: u64,
     name: Option<&OsString>,
 ) -> io::Result<()> {
-    let columns = o.columns.unwrap_or(match o.layout {
-        Layout::Plain => 30,
-        Layout::Bits => 6,
-        Layout::Include => 12,
-        _ => 16,
-    });
-    let columns = if columns == 0 { 16 } else { columns.min(256) };
+    // `-c 0` is the layout's default, but for plain hex one long line.
+    let columns = match o.columns {
+        Some(n) if n > 0 => n,
+        _ => match o.layout {
+            Layout::Plain => 30,
+            Layout::Bits => 6,
+            Layout::Include => 12,
+            _ => 16,
+        },
+    };
     let group = o.group.unwrap_or(match o.layout {
         Layout::Bits => 1,
         Layout::Little => 4,
@@ -290,31 +309,28 @@ fn dump(
         }
         return Ok(());
     }
-    let mut buffer = vec![0u8; columns];
-    let mut at = start + o.offset;
-    let mut skipping = false;
-    loop {
-        let n = fill(input, &mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        let line = &buffer[..n];
-        if o.layout == Layout::Plain {
-            let text: String = line.iter().map(|&b| hex(b)).collect();
-            writeln!(out, "{text}")?;
-            at += n as u64;
-            continue;
-        }
-        if o.autoskip && n == columns && line.iter().all(|&b| b == 0) {
-            if skipping {
-                at += n as u64;
-                continue;
+    if o.layout == Layout::Plain {
+        let one_line = o.columns == Some(0);
+        let mut buffer = vec![0u8; if one_line { 4096 } else { columns }];
+        loop {
+            let n = fill(input, &mut buffer)?;
+            if n == 0 {
+                break;
             }
-            skipping = true;
-        } else if skipping {
-            writeln!(out, "*")?;
-            skipping = false;
+            let text: String = buffer[..n].iter().map(|&b| hex(b)).collect();
+            if one_line {
+                write!(out, "{text}")?;
+            } else {
+                writeln!(out, "{text}")?;
+            }
         }
+        // Vim's xxd ends the one line even when there was nothing.
+        if one_line {
+            writeln!(out)?;
+        }
+        return Ok(());
+    }
+    let line_text = |at: u64, line: &[u8]| -> String {
         let mut text = if o.decimal { format!("{at:08}: ") } else { format!("{at:08x}: ") };
         let width_of = |bytes: usize| -> usize {
             let digits = if o.layout == Layout::Bits { 8 } else { 2 };
@@ -356,11 +372,42 @@ fn dump(
         // xxd leaves a space more after little-endian groups.
         text.push_str(if o.layout == Layout::Little { "   " } else { "  " });
         text.extend(line.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }));
-        writeln!(out, "{text}")?;
+        text
+    };
+    // With -a a run of whole lines of zeros shows its first line, then a
+    // `*` for the rest, or the one line itself when only one is left;
+    // and the last line always shows, so the length does, as with Vim's
+    // xxd.
+    let zero_line = vec![0u8; columns];
+    let mut buffer = vec![0u8; columns];
+    let mut next = vec![0u8; columns];
+    let mut n = fill(input, &mut buffer)?;
+    let mut at = start + o.offset;
+    let mut zeros_before = false;
+    let mut skipped = 0u64;
+    let mut skipped_at = 0;
+    while n > 0 {
+        let following = fill(input, &mut next)?;
+        let line = &buffer[..n];
+        let zeros = n == columns && line.iter().all(|&b| b == 0);
+        if o.autoskip && zeros && zeros_before && following > 0 {
+            if skipped == 0 {
+                skipped_at = at;
+            }
+            skipped += 1;
+        } else {
+            match skipped {
+                0 => {}
+                1 => writeln!(out, "{}", line_text(skipped_at, &zero_line))?,
+                _ => writeln!(out, "*")?,
+            }
+            skipped = 0;
+            writeln!(out, "{}", line_text(at, line))?;
+        }
+        zeros_before = zeros;
         at += n as u64;
-    }
-    if skipping {
-        writeln!(out, "*")?;
+        std::mem::swap(&mut buffer, &mut next);
+        n = following;
     }
     Ok(())
 }
@@ -500,6 +547,56 @@ mod tests {
             dumped(b"Hello", &options(Layout::Little), None),
             "00000000: 6c6c6548       6f                     Hello\n"
         );
+    }
+
+    /// What Vim's xxd 2023-10-25 prints for these, with -a and -c.
+    #[test]
+    fn skips_zeros_and_takes_columns_as_xxd_does() {
+        let mut o = options(Layout::Normal);
+        o.autoskip = true;
+        o.columns = Some(8);
+        let zeros = |n| vec![0u8; n];
+        let line = |at: u32| format!("{at:08x}: 0000 0000 0000 0000  ........\n");
+        // A lone line of zeros after the first shows in full.
+        assert_eq!(dumped(&zeros(16), &o, None), line(0) + &line(8));
+        let mut data = zeros(16);
+        data.push(b'a');
+        assert_eq!(
+            dumped(&data, &o, None),
+            line(0) + &line(8) + "00000010: 61                   a\n"
+        );
+        data.insert(0, 0);
+        data.splice(0..0, zeros(7));
+        assert_eq!(dumped(&data, &o, None), line(0) + "*\n" + "00000018: 61                   a\n");
+        // More than one is a star, and the last line always shows.
+        assert_eq!(dumped(&zeros(32), &o, None), line(0) + "*\n" + &line(24));
+        assert_eq!(
+            dumped(&zeros(36), &o, None),
+            line(0) + "*\n" + "00000020: 0000 0000            ....\n"
+        );
+        let mut data = b"x".repeat(8);
+        data.extend(zeros(32));
+        data.push(b'z');
+        assert_eq!(
+            dumped(&data, &o, None),
+            "00000000: 7878 7878 7878 7878  xxxxxxxx\n".to_string()
+                + &line(8)
+                + "*\n"
+                + "00000028: 7a                   z\n"
+        );
+        // -c 0 is the default width, but one line of plain hex.
+        o.autoskip = false;
+        o.columns = Some(0);
+        assert_eq!(
+            dumped(b"ab", &o, None),
+            "00000000: 6162                                     ab\n"
+        );
+        let mut plain = options(Layout::Plain);
+        plain.columns = Some(0);
+        assert_eq!(dumped(&[0xab; 40], &plain, None), "ab".repeat(40) + "\n");
+        assert_eq!(dumped(b"", &plain, None), "\n");
+        plain.columns = Some(300);
+        assert_eq!(dumped(&[1; 300], &plain, None), "01".repeat(300) + "\n");
     }
 
     #[test]

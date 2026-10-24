@@ -1,0 +1,141 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+clock_nanosleep as POSIX and Linux have it. mlibc's asserted that the
+clock was CLOCK_REALTIME or CLOCK_MONOTONIC, so CLOCK_BOOTTIME or any
+other ended the program with SIGABRT; it returned -1 and set errno where
+POSIX returns the error number and leaves errno alone, so the usual
+`while(clock_nanosleep(...) == EINTR)` loop ended at the first signal;
+it took any time, and wrote `rem` for an interrupted absolute sleep.
+Now: REALTIME, MONOTONIC, BOOTTIME, TAI and the process's CPU time are
+slept on; the clocks Linux has but drives no timers with (MONOTONIC_RAW,
+the COARSE and the ALARM clocks) are ENOTSUP, a thread's CPU time and
+unknown clocks EINVAL, as Linux answers, checked on Linux 6.8; a time
+that is not one is EINVAL; a sleep waits until the clock reads the end,
+looking again after each wait (so a sleep on a clock that ran slower than
+the wait goes on), and a sleep on the process's CPU time waits at most
+the share of what is left that every CPU together could use. A relative
+time past the clock's last is a sleep without end. Meant for upstream.
+
+--- a/options/ansi/generic/time.cpp
++++ b/options/ansi/generic/time.cpp
+@@ -626,36 +626,95 @@
+ 	return 0;
+ }
+ 
+-int clock_nanosleep(clockid_t clockid, int flags, const struct timespec *req, struct timespec *rem) {
+-	__ensure(clockid == CLOCK_REALTIME || clockid == CLOCK_MONOTONIC);
++namespace {
+ 
+-	if (flags & TIMER_ABSTIME) {
+-		time_t secs = 0;
+-		long nanos = 0;
+-		if(int e = mlibc::sysdep<ClockGet>(clockid, &secs, &nanos); e) {
+-			errno = e;
+-			return -1;
+-		}
++bool timespec_before(const struct timespec &a, const struct timespec &b) {
++	return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
++}
+ 
+-		struct timespec relativeTime;
++// a - b, for b before a.
++struct timespec timespec_minus(const struct timespec &a, const struct timespec &b) {
++	struct timespec d = {a.tv_sec - b.tv_sec, a.tv_nsec - b.tv_nsec};
++	if(d.tv_nsec < 0) {
++		d.tv_sec--;
++		d.tv_nsec += 1000000000;
++	}
++	return d;
++}
+ 
+-		if (secs > req->tv_sec)
+-			return 0;
+-		else if (secs == req->tv_sec && nanos >= req->tv_nsec)
+-			return 0;
+-		else {
+-			relativeTime.tv_sec = req->tv_sec - secs;
+-			relativeTime.tv_nsec = req->tv_nsec - nanos;
+-			if (relativeTime.tv_nsec < 0) {
+-				relativeTime.tv_sec -= 1;
+-				relativeTime.tv_nsec += 1e9;
+-			}
+-		}
++} // namespace
+ 
+-		return nanosleep(&relativeTime, rem);
++int clock_nanosleep(clockid_t clockid, int flags, const struct timespec *req, struct timespec *rem) {
++	// clock_nanosleep returns the error number and leaves errno alone.
++	// The clocks are Linux's, and so are the answers: those that drive no
++	// timers are not supported, a thread's CPU time and unknown clocks are
++	// invalid.
++	switch(clockid) {
++	case CLOCK_REALTIME:
++	case CLOCK_MONOTONIC:
++	case CLOCK_BOOTTIME:
++	case CLOCK_TAI:
++	case CLOCK_PROCESS_CPUTIME_ID:
++		break;
++	case CLOCK_MONOTONIC_RAW:
++	case CLOCK_REALTIME_COARSE:
++	case CLOCK_MONOTONIC_COARSE:
++	case CLOCK_REALTIME_ALARM:
++	case CLOCK_BOOTTIME_ALARM:
++		return ENOTSUP;
++	default:
++		return EINVAL;
+ 	}
++	if(req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec > 999999999)
++		return EINVAL;
+ 
+-	return nanosleep(req, rem);
++	struct timespec now;
++	if(int e = mlibc::sysdep<ClockGet>(clockid, &now.tv_sec, &now.tv_nsec); e)
++		return e;
++	// The time on the clock to wake at. A relative time past the clock's
++	// last is a sleep without end.
++	struct timespec end = *req;
++	if(!(flags & TIMER_ABSTIME)) {
++		constexpr time_t last = static_cast<time_t>(~0ULL >> 1);
++		if(req->tv_sec >= last - now.tv_sec) {
++			end = {last, 999999999};
++		} else {
++			end.tv_sec = now.tv_sec + req->tv_sec;
++			end.tv_nsec = now.tv_nsec + req->tv_nsec;
++			if(end.tv_nsec > 999999999) {
++				end.tv_sec++;
++				end.tv_nsec -= 1000000000;
++			}
++		}
++	}
++	// The process's CPU time grows at most as fast as every CPU together,
++	// so a sleep on it waits the share of what is left that cannot be too
++	// long, and looks again; the other clocks run with the time the sleep
++	// waits on, and are looked at again only in case they ran slower.
++	long cpus = 1;
++	if(clockid == CLOCK_PROCESS_CPUTIME_ID) {
++		long online = sysconf(_SC_NPROCESSORS_ONLN);
++		if(online > 1)
++			cpus = online;
++	}
++	while(timespec_before(now, end)) {
++		struct timespec left = timespec_minus(end, now);
++		struct timespec wait = {left.tv_sec / cpus,
++				((left.tv_sec % cpus) * 1000000000 + left.tv_nsec) / cpus};
++		if(int e = mlibc::sysdep_or_enosys<Sleep>(&wait.tv_sec, &wait.tv_nsec); e) {
++			// An interrupted relative sleep tells what was left of it.
++			if(e == EINTR && rem && !(flags & TIMER_ABSTIME)) {
++				*rem = {0, 0};
++				if(!mlibc::sysdep<ClockGet>(clockid, &now.tv_sec, &now.tv_nsec)
++						&& timespec_before(now, end))
++					*rem = timespec_minus(end, now);
++			}
++			return e;
++		}
++		if(int e = mlibc::sysdep<ClockGet>(clockid, &now.tv_sec, &now.tv_nsec); e)
++			return e;
++	}
++	return 0;
+ }
+ 
+ int clock_settime(clockid_t clock, const struct timespec *time) {
