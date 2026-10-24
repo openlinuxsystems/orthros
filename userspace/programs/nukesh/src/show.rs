@@ -653,6 +653,12 @@ fn word_part(part: &WordPart, in_double: bool, out: &mut String) {
 }
 
 fn param(p: &ParamExp, out: &mut String) {
+    if let ParamOp::Bad(text) = &p.op {
+        out.push_str("${");
+        out.push_str(text);
+        out.push('}');
+        return;
+    }
     let name = match &p.name {
         ParamName::Var(name) => name.clone(),
         ParamName::Positional(n) => n.to_string(),
@@ -732,6 +738,7 @@ fn param(p: &ParamExp, out: &mut String) {
         }
         ParamOp::Names(all) => out.push(if *all { '@' } else { '*' }),
         ParamOp::Keys(all) => out.push_str(if *all { "[@]" } else { "[*]" }),
+        ParamOp::Bad(_) => unreachable!("written above"),
     }
     out.push('}');
 }

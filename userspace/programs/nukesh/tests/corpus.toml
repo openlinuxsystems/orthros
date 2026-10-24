@@ -1,0 +1,540 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The shell corpus, which `ob test corpus` runs in a sandbox (ob(1),
+# ADR 0103): the POSIX conformance suite, whose tests give the results
+# their files expect, and real-world scripts and test suites, which give
+# under Nukesh what they give under dash or bash. Each source is a git
+# repository pinned by its commit. A source's `known` table lists the
+# tests whose results are expected to differ, each with the reason.
+
+# smoosh's tests of the POSIX shell, by Michael Greenberg and others.
+[[source]]
+name = "smoosh"
+git = "https://github.com/mgree/smoosh"
+commit = "cc67dbe6a4953e51431997eac025b5e3f46c3d2d"
+license = "MIT"
+paths = ["tests"]
+kind = "smoosh"
+tests = "tests/shell"
+util = "tests/util"
+timeout = 5
+
+[source.known]
+# Tests that dash and bash, in POSIX mode, fail too.
+"builtin.break.nonlexical" = "needs smoosh's own `set -o nonlexicalctrl`; as in dash and bash, the unknown option ends the script"
+"builtin.continue.nonlexical" = "needs smoosh's own `set -o nonlexicalctrl`; as in dash and bash, the unknown option ends the script"
+"builtin.dot.break" = "`break` in a script run by `.` leaves the loop around the `.`, as in dash and bash"
+"builtin.kill.jobs" = "`kill %1` finds the job without `set -m`, as in bash; the test expects it to fail"
+"builtin.trap.exitcode" = "a special builtin's error in a trap ends the script, as in dash and bash"
+"builtin.trap.subshell.false.exit" = "a script ends with the status it had before its EXIT trap ran, as in dash and bash; the test expects the trap's"
+"builtin.trap.subshell.loud" = "a script ends with the status it had before its EXIT trap ran, as in dash and bash; the test expects the trap's"
+"builtin.trap.subshell.loud2" = "a special builtin's error in a trap ends the script, as in dash and bash"
+"builtin.trap.subshell.true.ec1" = "a script ends with the status it had before its EXIT trap ran, as in dash and bash; the test expects the trap's"
+"semantics.-h.nonposix" = "`set -h` does not find the commands of a function as it is defined, which neither dash nor bash does"
+"semantics.interactive.expansion.exit" = "an expansion error in an interactive shell abandons the rest of its `-c` string, as in dash and bash; the test expects the next command to run"
+"semantics.return.trap" = "a function whose body is a subshell returns the status `return` gives, after its EXIT trap, as in dash and bash; the test expects the trap's"
+"sh.interactive.ps1" = "an interactive shell without a terminal says that it has no job control, and prints `exit` at the end of its input, as bash does"
+"sh.ps1.override" = "an interactive shell without a terminal says that it has no job control, and prints `exit` at the end of its input, as bash does"
+# Messages in other words than smoosh's.
+"builtin.command.nospecial" = "Nukesh's message is bash's: `readonly: x: readonly variable`"
+"builtin.dot.nonexistent" = "Nukesh's message: `./nonesuch: No such file or directory`"
+"builtin.source.nonexistent" = "Nukesh's message is bash's: `source: nonesuch: file not found`"
+"builtin.unset" = "Nukesh's message is bash's: `x: cannot unset: readonly variable`"
+"builtin.times.ioerror" = "a builtin's write error gives status 1, as in bash, with Nukesh's message; the test expects 2"
+# Choices POSIX leaves open.
+"semantics.error.noninteractive" = "an expansion error ends the script with status 2, as dash's does; the test expects 1, and POSIX only a status other than 0"
+"builtin.readonly.assign.noninteractive" = "`export` of a read-only variable ends the script with status 2, as dash's does; the test expects bash's 1, and POSIX only a status other than 0"
+"semantics.noninteractive.expansion.exit" = "an expansion error ends the script with status 2, as dash's does; the test expects 1, and POSIX only a status other than 0"
+"builtin.history.nonposix" = "a script that `sh -i` runs is kept out of the history, unlike bash's"
+
+[source.timing]
+"sh.monitor.bg" = "`kill -TSTP` only queues the signal: when the machine is busy, the job may not have stopped yet when `bg` looks, in bash too, and `bg` says it is running"
+
+# nvm, the Node.js version manager, in POSIX sh: its fast tests, run as
+# urchin runs them, with its mocks and without the network.
+[[source]]
+name = "nvm"
+git = "https://github.com/nvm-sh/nvm"
+commit = "e780535240ee3ba67048b434cec6f7f509ee7b31"
+license = "MIT"
+kind = "urchin"
+tests = "test/fast"
+skip = ["mocks"]
+env = { NVM_DIR = "{src}" }
+
+[source.known]
+"Running 'nvm current' should display current nvm environment" = "the test compares `set -x` output: Nukesh quotes words as bash does (`'[' 1 -lt 1 ']'`), dash leaves them bare"
+"Running 'nvm use system' should work as expected" = "the test compares `set -x` output: Nukesh quotes words as bash does (`'[' 2 -lt 1 ']'`), dash leaves them bare"
+"Running 'nvm use' and 'nvm deactivate' with hashing disabled" = "dash has no `set +h`, which POSIX has, so the test fails under dash; Nukesh runs it"
+
+# shUnit2, the xUnit test framework for shell scripts, by Kate Ward:
+# its own tests, each a script.
+[[source]]
+name = "shunit2"
+git = "https://github.com/kward/shunit2"
+commit = "f39734a3dd56495c2fee1d4b0925bb31082e36d2"
+license = "Apache-2.0"
+kind = "scripts"
+
+[[source.run]]
+name = "{file}"
+each = "shunit2_*_test.sh"
+args = ["{file}"]
+
+[source.known]
+"shunit2_misc_test.sh" = "testPipefail needs `set -o pipefail`, which POSIX.1-2024 has and dash 0.5.12 lacks, so it fails under dash; Nukesh runs it"
+
+# Bats, the Bash Automated Testing System, which the next sources' tests
+# use; it runs under the host's bash.
+[[source]]
+name = "bats-core"
+git = "https://github.com/bats-core/bats-core"
+commit = "5b61d8f22b46abf001e218cdd63f2938c356fa93"
+license = "MIT"
+paths = ["bin", "lib", "libexec"]
+kind = "tool"
+shebangs = ["bin/*", "libexec/bats-core/*"]
+
+# rbenv, the Ruby version manager, in bash: its commands run under the
+# shell compared, and its bats tests check them.
+[[source]]
+name = "rbenv"
+git = "https://github.com/rbenv/rbenv"
+commit = "07e9b1e297a5977298c6aadc9971ae0e9eb7f0dc"
+license = "MIT"
+kind = "scripts"
+shell = "bash"
+needs = ["bats-core"]
+shebangs = ["libexec/*", "test/libexec/*"]
+timeout = 600
+
+[[source.run]]
+name = "bats"
+exec = true
+tap = true
+args = ["{bash}", "{tool:bats-core}/bin/bats", "--tap", "test"]
+
+# pyenv, the Python version manager, in bash, which began as rbenv's:
+# the same way.
+[[source]]
+name = "pyenv"
+git = "https://github.com/pyenv/pyenv"
+commit = "0effba62c4bbf8f8ca2ad8f0eabbfd8221cc7bc6"
+license = "MIT"
+paths = ["bin", "completions", "libexec", "pyenv.d", "test"]
+kind = "scripts"
+shell = "bash"
+needs = ["bats-core"]
+shebangs = ["libexec/*", "test/libexec/*"]
+timeout = 600
+
+[[source.run]]
+name = "bats"
+exec = true
+tap = true
+args = ["{bash}", "{tool:bats-core}/bin/bats", "--tap", "test"]
+
+
+# Install scripts, each run as far as it goes without the network (curl
+# and wget fail as they would with no connection, and sudo is refused).
+
+# Starship's installer.
+[[source]]
+name = "starship-install"
+git = "https://github.com/starship/starship"
+commit = "2e90baef3a21532f1406554eba2f18332a9feb04"
+license = "ISC"
+paths = ["install"]
+kind = "scripts"
+
+[[source.run]]
+name = "help"
+args = ["install/install.sh", "--help"]
+
+[[source.run]]
+name = "install to a directory"
+args = ["install/install.sh", "--yes", "--bin-dir", "{home}/bin"]
+
+[[source.run]]
+name = "install for Windows on Arm"
+args = ["install/install.sh", "--yes", "--platform=pc-windows-msvc", "--arch", "aarch64", "-b", "{home}/bin"]
+
+[[source.run]]
+name = "an unknown option"
+args = ["install/install.sh", "--frobnicate"]
+
+# Deno's installer.
+[[source]]
+name = "deno-install"
+git = "https://github.com/denoland/deno_install"
+commit = "41d4676f8677ec16449b9e2303e7bd52ed81f03b"
+license = "MIT"
+kind = "scripts"
+
+[[source.run]]
+name = "help"
+args = ["install.sh", "--help"]
+
+[[source.run]]
+name = "install a version"
+args = ["install.sh", "v2.0.0"]
+
+[[source.run]]
+name = "install a version and set up the shell"
+args = ["install.sh", "--yes", "--no-modify-path", "v1.46.0"]
+env = { DENO_INSTALL = "{home}/deno" }
+
+# Docker's get.docker.com installer.
+[[source]]
+name = "docker-install"
+git = "https://github.com/docker/docker-install"
+commit = "ada7a567e59b3935bd601bb21e422da50e80e376"
+license = "Apache-2.0"
+kind = "scripts"
+
+[[source.run]]
+name = "help"
+args = ["install.sh", "--help"]
+
+[[source.run]]
+name = "dry run"
+args = ["install.sh", "--dry-run", "--setup-repo"]
+
+[[source.run]]
+name = "dry run of a version from a mirror"
+args = ["install.sh", "--dry-run", "--version", "v27.5.1", "--mirror", "Aliyun", "--setup-repo"]
+
+[[source.run]]
+name = "an unknown mirror"
+args = ["install.sh", "--mirror", "Elsewhere"]
+
+[[source.run]]
+name = "an illegal option"
+args = ["install.sh", "--frobnicate"]
+
+# rustup's installer.
+[[source]]
+name = "rustup-init"
+git = "https://github.com/rust-lang/rustup"
+commit = "5c8ff3f907c37688d20d9e7038a2f826042cd763"
+license = "MIT OR Apache-2.0"
+paths = ["ci"]
+kind = "scripts"
+
+[[source.run]]
+name = "the architecture"
+args = ["rustup-init.sh"]
+env = { RUSTUP_INIT_SH_PRINT = "arch" }
+
+[[source.run]]
+name = "install"
+args = ["rustup-init.sh", "-y", "--no-modify-path"]
+env = { CARGO_HOME = "{home}/cargo", RUSTUP_HOME = "{home}/rustup" }
+
+# Helm's installer.
+[[source]]
+name = "helm-install"
+git = "https://github.com/helm/helm"
+commit = "2fe5d209e61162bd4b268ba0319c0782b9f49ca1"
+license = "Apache-2.0"
+paths = ["scripts"]
+kind = "scripts"
+shell = "bash"
+
+[[source.run]]
+name = "help"
+args = ["scripts/get-helm-3", "--help"]
+
+[[source.run]]
+name = "install a version"
+args = ["scripts/get-helm-3", "--version", "v3.16.0", "--no-sudo"]
+env = { HELM_INSTALL_DIR = "{home}/bin" }
+
+[[source.run]]
+name = "install the latest version"
+args = ["scripts/get-helm-3"]
+env = { HELM_INSTALL_DIR = "{home}/bin", USE_SUDO = "false", DEBUG = "true" }
+
+# K3s's installer, without downloading or starting anything.
+[[source]]
+name = "k3s-install"
+git = "https://github.com/k3s-io/k3s"
+commit = "65d71277db7a81c2d498bfbb62e198102889a795"
+license = "Apache-2.0"
+paths = ["contrib"]
+kind = "scripts"
+
+[[source.run]]
+name = "install without downloading"
+args = ["install.sh"]
+env = { INSTALL_K3S_SKIP_DOWNLOAD = "true", INSTALL_K3S_SKIP_START = "true", INSTALL_K3S_SKIP_ENABLE = "true", INSTALL_K3S_BIN_DIR = "{home}/bin", INSTALL_K3S_SYSTEMD_DIR = "{home}/systemd" }
+
+[[source.run]]
+name = "install a version as an agent"
+args = ["install.sh", "agent", "--node-label", "a=b"]
+env = { INSTALL_K3S_VERSION = "v1.31.0+k3s1", K3S_URL = "https://k3s.example:6443", K3S_TOKEN = "secret", INSTALL_K3S_BIN_DIR = "{home}/bin" }
+
+# Homebrew's installer.
+[[source]]
+name = "homebrew-install"
+git = "https://github.com/Homebrew/install"
+commit = "85d1a3fc80d8a63932f632aca8f787de11d14a64"
+license = "BSD-2-Clause"
+kind = "scripts"
+shell = "bash"
+
+[[source.run]]
+name = "install without asking"
+args = ["install.sh"]
+env = { NONINTERACTIVE = "1" }
+
+[[source.run]]
+name = "install as CI does"
+args = ["install.sh"]
+env = { CI = "1", HOMEBREW_PREFIX = "{home}/brew" }
+
+[[source.run]]
+name = "uninstall, dry run"
+args = ["uninstall.sh", "--dry-run", "--force"]
+
+# Oh My Zsh's installer.
+[[source]]
+name = "ohmyzsh-install"
+git = "https://github.com/ohmyzsh/ohmyzsh"
+commit = "2100c630ba4bd67bb48802c3e7da893a4fdaa1a0"
+license = "MIT"
+paths = ["tools"]
+kind = "scripts"
+
+[[source.run]]
+name = "install unattended"
+args = ["tools/install.sh", "--unattended"]
+env = { ZSH = "{home}/.oh-my-zsh" }
+
+[[source.run]]
+name = "install without changing the shell"
+args = ["tools/install.sh", "--skip-chsh", "--keep-zshrc"]
+env = { ZSH = "{home}/.oh-my-zsh", RUNZSH = "no" }
+
+# Container entrypoints, run as a container runs them: with its own
+# command, with the server's, and their functions as the entrypoint
+# calls them.
+
+# PostgreSQL's official image.
+[[source]]
+name = "postgres-entrypoint"
+git = "https://github.com/docker-library/postgres"
+commit = "dfc76bb299b057785026eb2eea39556b6fe52983"
+license = "MIT"
+kind = "scripts"
+shell = "bash"
+stubs = ["gosu", "initdb", "pg_ctl", "postgres", "psql"]
+env = { PGDATA = "{home}/data", PG_MAJOR = "18" }
+
+[[source.run]]
+name = "a command of its own"
+args = ["docker-entrypoint.sh", "echo", "hello", "from", "the container"]
+
+[[source.run]]
+name = "the server without a password"
+args = ["docker-entrypoint.sh", "postgres"]
+
+[[source.run]]
+name = "the server with a password"
+args = ["docker-entrypoint.sh", "postgres", "-c", "max_connections=50"]
+env = { POSTGRES_PASSWORD = "secret", POSTGRES_USER = "app" }
+
+[[source.run]]
+name = "its functions"
+args = ["-c", ". ./docker-entrypoint.sh; echo s3cret > pw; POSTGRES_PASSWORD_FILE=pw; docker_setup_env; declare -p POSTGRES_PASSWORD POSTGRES_USER POSTGRES_DB DATABASE_ALREADY_EXISTS OLD_DATABASES; _pg_want_help postgres -C config_file && echo help; _pg_want_help postgres || echo no help; docker_verify_minimum_env; echo verified", "entrypoint"]
+
+[[source.run]]
+name = "both a variable and its file"
+args = ["-c", ". ./docker-entrypoint.sh; POSTGRES_USER=a POSTGRES_USER_FILE=b file_env POSTGRES_USER", "entrypoint"]
+
+# Redis's official image.
+[[source]]
+name = "redis-entrypoint"
+git = "https://github.com/docker-library/redis"
+commit = "30e7d6b51c8e9e99cd28b6665a3fa363fdc5a45a"
+license = "BSD-3-Clause"
+kind = "scripts"
+stubs = ["gosu", "redis-server"]
+
+[[source.run]]
+name = "a command of its own"
+args = ["docker-entrypoint.sh", "echo", "hello"]
+
+[[source.run]]
+name = "the server with an option"
+args = ["docker-entrypoint.sh", "--appendonly", "yes"]
+
+[[source.run]]
+name = "the server"
+args = ["docker-entrypoint.sh", "redis-server", "/etc/redis.conf"]
+
+# MongoDB's official image.
+[[source]]
+name = "mongo-entrypoint"
+git = "https://github.com/docker-library/mongo"
+commit = "5aed6b90c49b50c4cc1bbd54376087db445d2cbe"
+license = "Apache-2.0"
+kind = "scripts"
+shell = "bash"
+stubs = ["gosu", "mongo", "mongod", "mongosh", "numactl"]
+
+[[source.run]]
+name = "a command of its own"
+args = ["docker-entrypoint.sh", "echo", "hello"]
+
+[[source.run]]
+name = "the server with an option"
+args = ["docker-entrypoint.sh", "--bind_ip_all", "--port", "27018"]
+
+[[source.run]]
+name = "the server with a root user"
+args = ["docker-entrypoint.sh", "mongod", "--config", "/etc/mongod.conf"]
+env = { MONGO_INITDB_ROOT_USERNAME = "admin", MONGO_INITDB_ROOT_PASSWORD = "secret" }
+
+# RabbitMQ's official image.
+[[source]]
+name = "rabbitmq-entrypoint"
+git = "https://github.com/docker-library/rabbitmq"
+commit = "0b2a146a189d6d604a77e5a474e3f12f46abdbe4"
+license = "MIT"
+kind = "scripts"
+shell = "bash"
+stubs = ["gosu", "rabbitmq-server", "rabbitmqctl"]
+env = { RABBITMQ_DATA_DIR = "{home}/rabbitmq" }
+
+[[source.run]]
+name = "a command of its own"
+args = ["docker-entrypoint.sh", "echo", "hello"]
+
+[[source.run]]
+name = "the server"
+args = ["docker-entrypoint.sh", "rabbitmq-server"]
+
+[[source.run]]
+name = "a deprecated variable"
+args = ["docker-entrypoint.sh", "rabbitmq-server"]
+env = { RABBITMQ_DEFAULT_PASS_FILE = "/nonexistent", RABBITMQ_VM_MEMORY_HIGH_WATERMARK = "0.4" }
+
+# NGINX's official image.
+[[source]]
+name = "nginx-entrypoint"
+git = "https://github.com/nginxinc/docker-nginx"
+commit = "d99174e2cecfc7e5db51c05aff54c2c9dee45803"
+license = "BSD-2-Clause"
+kind = "scripts"
+paths = ["entrypoint"]
+stubs = ["nginx", "nginx-debug"]
+
+[[source.run]]
+name = "a command of its own"
+args = ["entrypoint/docker-entrypoint.sh", "echo", "hello"]
+
+[[source.run]]
+name = "the server"
+args = ["entrypoint/docker-entrypoint.sh", "nginx", "-g", "daemon off;"]
+
+[[source.run]]
+name = "the server, quietly"
+args = ["entrypoint/docker-entrypoint.sh", "nginx-debug"]
+env = { NGINX_ENTRYPOINT_QUIET_LOGS = "1" }
+
+# Programs written in bash.
+
+# neofetch, by Dylan Araps: the system's details, without those that
+# change from moment to moment.
+[[source]]
+name = "neofetch"
+git = "https://github.com/dylanaraps/neofetch"
+commit = "ccd5d9f52609bbdcd5d8fa78c4fdb0f12954125f"
+license = "MIT"
+kind = "scripts"
+shell = "bash"
+
+[[source.run]]
+name = "version"
+args = ["neofetch", "--version"]
+
+[[source.run]]
+name = "help"
+args = ["neofetch", "--help"]
+
+[[source.run]]
+name = "details"
+args = ["neofetch", "--stdout", "--config", "none", "--disable", "uptime", "memory", "packages", "cpu_usage", "resolution", "shell", "term", "term_font", "de", "wm", "theme", "icons", "font", "--cpu_speed", "off"]
+
+[[source.run]]
+name = "the Debian logo"
+args = ["neofetch", "--config", "none", "--ascii_distro", "Debian", "-L"]
+
+[[source.run]]
+name = "the Arch logo, small"
+args = ["neofetch", "--config", "none", "--ascii_distro", "arch_small", "-L"]
+
+[[source.run]]
+name = "the default config"
+args = ["neofetch", "--print_config"]
+
+# dehydrated, the ACME client in bash, by Lukas Schauer.
+[[source]]
+name = "dehydrated"
+git = "https://github.com/dehydrated-io/dehydrated"
+commit = "48866b0e85b474e3971d6425a14212608c355c1c"
+license = "MIT"
+kind = "scripts"
+shell = "bash"
+env = { BASEDIR = "{home}/dehydrated" }
+
+[[source.run]]
+name = "help"
+args = ["dehydrated", "--help"]
+
+[[source.run]]
+name = "version"
+args = ["dehydrated", "--version"]
+
+[[source.run]]
+name = "environment"
+args = ["dehydrated", "--env"]
+
+[[source.run]]
+name = "an unknown command"
+args = ["dehydrated", "--frobnicate"]
+
+[[source.run]]
+name = "register"
+args = ["dehydrated", "--register", "--accept-terms"]
+
+[source.known]
+"version" = "it prints `$BASH_VERSION`: Nukesh's is bash 5.2's, 5.2.0(1)-release, where the host's bash gives its own"
+
+# The configure script of Oils, which is POSIX sh, and its tests.
+[[source]]
+name = "oils-configure"
+git = "https://github.com/oils-for-unix/oils"
+commit = "6778e71bec2d91b0e6e1fa492675ad4f64d4377e"
+license = "Apache-2.0"
+paths = ["build"]
+kind = "scripts"
+
+[[source.run]]
+name = "help"
+args = ["configure", "--help"]
+
+[[source.run]]
+name = "configure"
+args = ["configure", "--prefix", "{home}/oils"]
+
+[[source.run]]
+name = "configure without readline"
+args = ["configure", "--without-readline", "--datarootdir=/opt/share"]
+
+[[source.run]]
+name = "its tests"
+args = ["configure-test.sh", "soil_run"]
+env = { TMP = "{home}" }

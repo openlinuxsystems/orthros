@@ -65,9 +65,11 @@ pub const STD_ARCHIVE: &[(&str, &str)] = &[
 
 /// Symbolic links to those programs in the boot archive: each link's path,
 /// and its target. Nukesh is the POSIX shell when it is started as `sh`,
-/// and a restricted shell as `rnukesh` (nukesh(1)); the native tools are
-/// one program, which each tool's name runs (ADR 0096).
+/// a restricted shell as `rnukesh`, and runs bash's scripts as `bash`
+/// (nukesh(1), ADR 0103); the native tools are one program, which each
+/// tool's name runs (ADR 0096).
 pub const STD_LINKS: &[(&str, &str)] = &[
+    ("system/bin/bash", "nukesh"),
     ("system/bin/sh", "nukesh"),
     ("system/bin/rnukesh", "nukesh"),
     ("system/bin/chgrp", "systools"),

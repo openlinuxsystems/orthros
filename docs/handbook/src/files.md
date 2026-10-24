@@ -30,8 +30,9 @@ Every boot, Spark, the first program, builds the same tree:
 | `/sys` | The kernel's devices and settings, one value per file |
 | `/volumes` | Disks, USB sticks and SD cards, one directory each |
 
-Unix programs and scripts look for `/bin/sh`, `/usr/bin/env`, `/etc` and
-`/var/log`, so the root also has five symbolic links into `/system`:
+Unix programs and scripts look for `/bin/sh`, `/bin/bash`,
+`/usr/bin/env`, `/etc` and `/var/log`, so the root also has five
+symbolic links into `/system`:
 `/bin` and `/sbin` lead to `/system/bin`, `/usr` to `/system`, `/etc` to
 `/system/etc` and `/var` to `/system/var`. Everything is still kept in
 one place, `/system`.

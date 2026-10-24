@@ -285,6 +285,32 @@ jobs:
       - name: ./ob test tla
         run: ./ob test tla
 
+  corpus:
+    name: Shell corpus
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The corpus's sandbox is a user namespace, which Ubuntu's AppArmor
+      # otherwise refuses to unprivileged users (ADR 0103).
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dash bash util-linux
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: ./ob test corpus
+        run: ./ob test corpus
+
   container:
     name: Build container
     runs-on: ubuntu-24.04

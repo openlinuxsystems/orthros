@@ -243,7 +243,7 @@ fn run_line(shell: &mut Shell, line: &str, first_line: u32) -> Option<i32> {
                         return Some(code);
                     }
                     // The rest of the line is abandoned.
-                    Err(Flow::Fatal(status)) => {
+                    Err(Flow::Fatal(status) | Flow::Discard(status)) => {
                         shell.status = status;
                         return None;
                     }

@@ -7,7 +7,8 @@
 //! is taken as it is, and a part with a pattern is matched against the
 //! names in the directory reached so far. Names that start with a dot need
 //! a dot in the pattern (unless `dotglob`), and `.` and `..` match only
-//! themselves. The matches are sorted by their bytes, as in the C locale.
+//! themselves, unless `dots` (as in dash, where `.*` matches them too).
+//! The matches are sorted by their bytes, as in the C locale.
 
 use std::os::unix::ffi::OsStrExt;
 
@@ -20,6 +21,8 @@ pub struct GlobOptions {
     pub nocase: bool,
     pub dotglob: bool,
     pub globstar: bool,
+    /// A pattern that starts with a dot matches `.` and `..` too.
+    pub dots: bool,
 }
 
 /// The paths `pattern` matches, sorted; none if it matches nothing.
@@ -85,10 +88,10 @@ pub fn glob(pattern: &str, options: GlobOptions) -> Vec<String> {
                 names.push(text::decode(entry.file_name().as_bytes()));
             }
             if explicit_dot {
-                // read_dir leaves these out, but `.*` can still name them
-                // when written out.
+                // read_dir leaves these out, but a pattern can still name
+                // them when written out, or with `dots` match them.
                 for dots in [".", ".."] {
-                    if part == &dots {
+                    if part == &dots || options.dots {
                         names.push(dots.to_string());
                     }
                 }

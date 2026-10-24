@@ -72,7 +72,7 @@ the pinned build container with Podman or Docker:
 | `./ob ports` | Build the software Dukovo ports from elsewhere (mlibc, Rust's standard library, Lua and the rest) at their pinned commits |
 | `./ob image` | Build the hybrid USB/disk image `out/dukovo-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
-| `./ob test` | Run unit tests, then the boot tests in QEMU, from the boot paths and the memory manager to processes, storage and POSIX (`kani` for the Kani proofs, `tla` for the TLA+ models instead) |
+| `./ob test` | Run unit tests, then the boot tests in QEMU, from the boot paths and the memory manager to processes, storage and POSIX (`kani` for the Kani proofs, `tla` for the TLA+ models, `corpus` for the shell corpus instead) |
 | `./ob bench` | Measure kernel operations against Linux in the same virtual machine (`--gate` fails if Radix is slower; `--instructions` counts instructions per operation) |
 | `./ob docs` | Build the man pages and the handbook into `out/docs/` (`--check` for completeness checks) |
 | `./ob lint` / `./ob fmt` | Check or apply formatting, and run Clippy with warnings denied |

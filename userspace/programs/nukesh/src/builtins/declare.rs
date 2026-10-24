@@ -149,8 +149,7 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
                 }
             }
         }
-        out(shell, "declare", &text);
-        return Ok(status);
+        return Ok(if out(shell, "declare", &text) { status } else { 1 });
     }
 
     // Functions: `declare -f name` prints them; export and readonly mark
@@ -188,8 +187,7 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
                 _ => text.push_str(&show::function(&shell.functions[name.as_str()])),
             }
         }
-        out(shell, "declare", &text);
-        return Ok(status);
+        return Ok(if out(shell, "declare", &text) { status } else { 1 });
     }
 
     let scope = if flags.has('g') || kind == Kind::Export || kind == Kind::Readonly {
@@ -206,9 +204,10 @@ pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res
                 shell.error(&format!("{}: {message}", kind_name(kind, name)));
             }
             status = 1;
-            // Assigning a read-only variable ends a POSIX script.
+            // Assigning a read-only variable ends a POSIX script, with
+            // dash's status.
             if shell.posix() && !shell.interactive && message.ends_with("readonly variable") {
-                return Err(Flow::Fatal(1));
+                return Err(Flow::Fatal(2));
             }
         }
     }
@@ -612,7 +611,7 @@ pub fn unset(shell: &mut Shell, args: &[String]) -> Res {
         if !shell.unset(name) {
             status = 1;
             if shell.posix() && !shell.interactive {
-                return Err(Flow::Fatal(1));
+                return Err(Flow::Fatal(2));
             }
         }
     }
@@ -672,7 +671,9 @@ pub fn set(shell: &mut Shell, args: &[String]) -> Res {
                         }
                     }
                     _ => {
-                        print_options(shell, on);
+                        if !print_options(shell, on) {
+                            return Ok(1);
+                        }
                     }
                 }
                 continue;
@@ -746,7 +747,7 @@ pub fn set_option(shell: &mut Shell, name: &str, on: bool) -> Result<(), i32> {
 }
 
 /// `set -o` and `set +o` with no name.
-fn print_options(shell: &Shell, minus: bool) {
+fn print_options(shell: &Shell, minus: bool) -> bool {
     let mut names: Vec<&str> = OPTION_TABLE.iter().map(|(name, _)| *name).collect();
     names.extend(["history", "histexpand", "keyword"]);
     names.sort();
@@ -762,7 +763,7 @@ fn print_options(shell: &Shell, minus: bool) {
             text.push_str(&format!("set {}o {name}\n", if on { '-' } else { '+' }));
         }
     }
-    out(shell, "set", &text);
+    out(shell, "set", &text)
 }
 
 pub fn shopt(shell: &mut Shell, args: &[String]) -> Res {
@@ -850,8 +851,7 @@ pub fn shopt(shell: &mut Shell, args: &[String]) -> Res {
             }
         }
     }
-    out(shell, "shopt", &text);
-    Ok(status)
+    Ok(if out(shell, "shopt", &text) { status } else { 1 })
 }
 
 /// `shopt -s` or `shopt -u` with no names: the options in that state.
@@ -876,8 +876,5 @@ fn list_shopts(
             text.push_str(&format!("{name:<15}\t{}\n", if on { "on" } else { "off" }));
         }
     }
-    if !quiet {
-        out(shell, "shopt", &text);
-    }
-    0
+    i32::from(!quiet && !out(shell, "shopt", &text))
 }

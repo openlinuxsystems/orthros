@@ -54,8 +54,7 @@ pub fn alias(shell: &mut Shell, args: &[String]) -> Res {
             },
         }
     }
-    out(shell, "alias", &text);
-    Ok(status)
+    Ok(if out(shell, "alias", &text) { status } else { 1 })
 }
 
 /// An alias's value, as `alias` prints it: always in single quotes.
@@ -179,8 +178,13 @@ fn describe_all(
                 })
                 .collect()
         } else {
+            // Outside POSIX mode, a file that is not executable is found
+            // as running it finds it, as in bash.
             let hashed = shell.hash.get(name).cloned();
-            match hashed.or_else(|| shell.find_command(name)) {
+            let found = |shell: &mut Shell| {
+                if shell.posix() { shell.find_command(name) } else { shell.find_program(name) }
+            };
+            match hashed.or_else(|| found(shell)) {
                 Some(path) => vec![path],
                 None => Vec::new(),
             }
@@ -200,8 +204,7 @@ fn describe_all(
             found = true;
         }
     }
-    out(shell, "type", &text);
-    found
+    out(shell, "type", &text) && found
 }
 
 pub fn type_(shell: &mut Shell, args: &[String]) -> Res {
@@ -307,8 +310,7 @@ pub fn hash(shell: &mut Shell, args: &[String]) -> Res {
             status = 1;
         }
     }
-    out(shell, "hash", &text);
-    Ok(status)
+    Ok(if out(shell, "hash", &text) { status } else { 1 })
 }
 
 pub fn trap(shell: &mut Shell, args: &[String]) -> Res {
@@ -343,9 +345,10 @@ pub fn trap(shell: &mut Shell, args: &[String]) -> Res {
             }
             slots
         };
+        let traps = shell.parent_traps.as_ref().unwrap_or(&shell.traps);
         let mut text = String::new();
         for slot in slots {
-            if let Some(command) = shell.traps.get(slot).and_then(|t| t.as_deref()) {
+            if let Some(command) = traps.get(slot).and_then(|t| t.as_deref()) {
                 text.push_str(&format!(
                     "trap -- {} {}\n",
                     quote_trap(command),
@@ -358,7 +361,8 @@ pub fn trap(shell: &mut Shell, args: &[String]) -> Res {
         return Ok(i32::from(!out(shell, "trap", &text)));
     }
     // `trap action sig...`, or `trap sig...` (one sig, or a number first)
-    // to reset.
+    // to reset. A subshell's own traps are listed from then on.
+    shell.parent_traps = None;
     let rest = &flags.rest;
     let first = &rest[0];
     let reset_all = rest.len() == 1 && trap::parse(first, true).is_some()
@@ -385,13 +389,10 @@ pub fn trap(shell: &mut Shell, args: &[String]) -> Res {
         if is_signal && shell.ignored[slot] && !shell.interactive {
             continue;
         }
-        if is_signal && matches!(slot as i32, libc::SIGKILL | libc::SIGSTOP) {
-            shell.error(&format!("trap: {name}: cannot trap"));
-            status = 1;
-            continue;
-        }
+        // SIGKILL and SIGSTOP cannot be caught: their traps are kept, and
+        // never run, as in dash and bash (POSIX leaves it undefined).
         shell.traps[slot] = action.map(str::to_string);
-        if is_signal {
+        if is_signal && !matches!(slot as i32, libc::SIGKILL | libc::SIGSTOP) {
             shell.apply_disposition(slot as i32);
         }
     }
@@ -688,7 +689,7 @@ pub fn umask(shell: &mut Shell, args: &[String]) -> Res {
     };
     sys::umask(new & 0o777);
     if flags.has('S') {
-        out(shell, "umask", &format!("{}\n", symbolic_mask(new)));
+        return Ok(i32::from(!out(shell, "umask", &format!("{}\n", symbolic_mask(new)))));
     }
     Ok(0)
 }
@@ -869,8 +870,7 @@ pub fn help(shell: &mut Shell, args: &[String]) -> Res {
             }
         }
     }
-    out(shell, "help", &text);
-    Ok(status)
+    Ok(if out(shell, "help", &text) { status } else { 1 })
 }
 
 #[cfg(test)]

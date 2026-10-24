@@ -456,12 +456,32 @@ impl Shell {
             let _ =
                 sys::write_all(1, crate::text::encode(&format!("[{id}]+ {text} &\n")).as_slice());
         }
-        let target = if self.opts.monitor { -pgid } else { pgid };
-        let _ = sys::kill(target, libc::SIGCONT);
+        if let Some(job) = self.jobs.get(id) {
+            self.signal_job(job, libc::SIGCONT);
+        }
         if foreground {
             return self.wait_job(id);
         }
         Ok(0)
+    }
+
+    /// The process numbers that reach a job: its process group's, as a
+    /// negative number, when jobs have groups of their own (job control on
+    /// a terminal), else each of its processes still running. `set -m`
+    /// in a script without a terminal tracks jobs, but makes no groups.
+    pub fn job_targets(&self, job: &Job) -> Vec<i32> {
+        if self.opts.monitor && self.tty.is_some() {
+            vec![-job.pgid]
+        } else {
+            job.procs.iter().filter(|p| p.status.is_none()).map(|p| p.pid).collect()
+        }
+    }
+
+    /// Sends `signal` to a job's processes.
+    pub fn signal_job(&self, job: &Job, signal: i32) {
+        for target in self.job_targets(job) {
+            let _ = sys::kill(target, signal);
+        }
     }
 
     /// Sends SIGHUP to every job (and SIGCONT to the stopped ones), as a
@@ -471,10 +491,9 @@ impl Shell {
             if job.nohup {
                 continue;
             }
-            let target = if self.opts.monitor { -job.pgid } else { job.pgid };
-            let _ = sys::kill(target, libc::SIGHUP);
+            self.signal_job(job, libc::SIGHUP);
             if job.stopped() {
-                let _ = sys::kill(target, libc::SIGCONT);
+                self.signal_job(job, libc::SIGCONT);
             }
         }
     }

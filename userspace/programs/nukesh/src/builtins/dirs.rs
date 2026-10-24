@@ -203,7 +203,9 @@ pub fn cd(shell: &mut Shell, args: &[String]) -> Res {
     }
     if print {
         let pwd = shell.get("PWD").unwrap_or_default();
-        out(shell, "cd", &format!("{pwd}\n"));
+        if !out(shell, "cd", &format!("{pwd}\n")) {
+            return Ok(1);
+        }
     }
     Ok(0)
 }

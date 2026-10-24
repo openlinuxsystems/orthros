@@ -38,6 +38,9 @@ not
 2
 abc b
 34.12
+alternation
+bar
+empty alternative
 complex
 lt
 numlt

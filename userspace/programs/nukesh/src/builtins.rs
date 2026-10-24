@@ -398,7 +398,10 @@ fn let_(shell: &mut Shell, args: &[String]) -> Res {
     }
     let mut last = 0;
     for expression in &args[1..] {
-        last = shell.arith(expression)?;
+        match shell.arith_command("let", expression) {
+            Some(value) => last = value,
+            None => return Ok(1),
+        }
     }
     Ok(i32::from(last == 0))
 }
@@ -423,8 +426,9 @@ fn syntax_result(shell: &mut Shell, result: Res) -> Res {
     result
 }
 
-/// Where `.` finds `name`: as given if it has a `/`, else on `PATH`, then
-/// (outside POSIX mode) in the working directory.
+/// Where `.` finds `name`: as given if it has a `/`, else on `PATH` (the
+/// first readable file by that name, as POSIX has it), then (outside POSIX
+/// mode) in the working directory.
 fn find_sourced(shell: &Shell, name: &str) -> Option<String> {
     if name.contains('/') {
         return Some(name.to_string());
@@ -434,7 +438,9 @@ fn find_sourced(shell: &Shell, name: &str) -> Option<String> {
         for dir in path.split(':') {
             let dir = if dir.is_empty() { "." } else { dir };
             let candidate = format!("{}/{name}", dir.trim_end_matches('/'));
-            if std::fs::metadata(text::to_os(&candidate)).is_ok_and(|m| m.is_file()) {
+            if std::fs::metadata(text::to_os(&candidate)).is_ok_and(|m| m.is_file())
+                && sys::access(&candidate, libc::R_OK)
+            {
                 return Some(candidate);
             }
         }
@@ -510,7 +516,7 @@ fn exec(shell: &mut Shell, args: &[String]) -> Res {
         shell.error("exec: restricted");
         return Ok(1);
     }
-    let path = if name.contains('/') { Some(name.clone()) } else { shell.find_command(name) };
+    let path = if name.contains('/') { Some(name.clone()) } else { shell.find_program(name) };
     let Some(path) = path else {
         shell.error(&format!("exec: {name}: not found"));
         return if shell.interactive || shell.shopt("execfail") {
@@ -592,15 +598,18 @@ fn command(shell: &mut Shell, args: &[String]) -> Res {
     }
     let Some(name) = flags.rest.first().cloned() else { return Ok(0) };
     if let Some(builtin) = lookup(&name).filter(|_| enabled(shell, &name)) {
-        if is_declaration(&name) {
-            return run_declaration(
+        let result = if is_declaration(&name) {
+            run_declaration(
                 shell,
                 &name,
                 flags.rest[1..].iter().cloned().map(DeclArg::Plain).collect(),
-            );
-        }
-        // A special builtin's error does not end the shell under `command`.
-        return match (builtin.run)(shell, &flags.rest) {
+            )
+        } else {
+            (builtin.run)(shell, &flags.rest)
+        };
+        // A special builtin's error does not end the shell under `command`:
+        // `command readonly x=1` of a read-only x only fails.
+        return match result {
             Err(Flow::Fatal(status)) if is_special(&name) => Ok(status),
             other => other,
         };

@@ -94,7 +94,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0080](0080-crates-patched-for-radix.md) | Programs in Rust from elsewhere build with crates.io crates patched for Radix | Accepted |
 | [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted |
 | [0082](0082-copies-under-the-page-cache-never-wait-for-a-page.md) | Copies under a file's page cache lock never wait for a page | Accepted |
-| [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted |
+| [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted; changed by [0103](0103-the-shell-corpus.md) |
 | [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted |
 | [0085](0085-socket-pairs.md) | Socket pairs are two pipes, one each way | Accepted |
 | [0086](0086-release-archives-and-autoconf-ports.md) | Ports come from release archives or git, and autoconf packages build through one wrapper | Accepted |
@@ -114,3 +114,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0100](0100-consoled-virtual-consoles-in-a-program.md) | consoled draws the virtual consoles as a program, a terminal for TERM=linux built on the vte crate | Accepted |
 | [0101](0101-spark-supervises-services.md) | Spark supervises services from simple key-value files, in a domain each, and answers a control socket | Accepted |
 | [0102](0102-manual-pages-and-completions-in-the-image.md) | Every program in /system/bin has its manual page, indexed, and the shell completes its options from that page | Accepted |
+| [0103](0103-the-shell-corpus.md) | Nukesh is checked against POSIX's shell tests and real projects' scripts, run in a sandbox | Accepted |

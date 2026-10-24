@@ -5,7 +5,7 @@ nukesh(1) "Dukovo" "Dukovo Manual"
 
 # NAME
 
-nukesh, sh, rnukesh - Dukovo's shell
+nukesh, sh, bash, rnukesh - Dukovo's shell
 
 # SYNOPSIS
 
@@ -16,6 +16,8 @@ nukesh, sh, rnukesh - Dukovo's shell
 *nukesh* [_options_] *-s* [_argument_ ...]
 
 *sh* ...
+
+*bash* ...
 
 *rnukesh* ...
 
@@ -38,6 +40,8 @@ checks it on the build host and at every boot test.
 
 Started as *sh* (its link _/bin/sh_), it is in POSIX mode (see *POSIX
 MODE*); started as *rnukesh*, it is restricted (see *RESTRICTED MODE*).
+Started as *bash* (_/bin/bash_), it is itself, so that scripts written
+for bash, whose first line names it, run unchanged.
 
 # OPTIONS
 
@@ -118,10 +122,17 @@ as *read* in a script on a pipe or *cat* in *sh <<EOF*, gets what comes
 after it. A file is read in blocks and its offset put back to the end of
 the command before each command runs.
 
-A syntax error in a script ends it with status 2. An error in an
-expansion, an assignment to a read-only variable, or a special
-builtin's error, ends a shell that is not interactive with status 1, as
-in bash (dash gives 2).
+A syntax error in a script ends it with status 2. Other errors are
+bash's. An error in arithmetic, a bad substitution, an assignment to a
+read-only variable, an indirect expansion that names no variable, or a
+pattern that matches nothing under *failglob* abandons the command it is
+in: the shell goes on with the next command it reads, with status 1, and
+a subshell ends. In *((*, *let*, *for ((* and the comparisons of numbers
+of *[[*, an error in arithmetic only fails the command, with status 1.
+*${name:?}*, and an unset variable under *set -u*, end a shell that is
+not interactive, with status 1. In POSIX mode, each of these errors, and
+a special builtin's (an unknown option to *set*, say), ends a shell that
+is not interactive with status 2, as in dash.
 
 A file that is a directory, or whose first line has a NUL byte, is not
 run: status 126. One that is not found: 127.
@@ -231,11 +242,17 @@ to those stopped), except those *disown -h* marked, then ends;
 # POSIX MODE
 
 As *sh* or with *--posix* or *set -o posix*, the shell does what POSIX
-says where bash does otherwise. *echo* takes escapes (*xpg_echo*) and
-no options, *alias* lists aliases without *alias*, *shift* past the
-end is an error that ends the shell, *PS4* is *+ *, process substitution
-and *name[i]=* assignments are not taken, history expansion is off, and
-_~/.profile_ and *$ENV* are the start-up files.
+says, as dash does, where bash does otherwise. *echo* takes escapes
+(*xpg_echo*) and no options, *alias* lists aliases without *alias*,
+*shift* past the end is an error that ends the shell, *PS4* is *+ *,
+process substitution, *[[* and *name[i]=* assignments are not taken,
+history expansion is off, and _~/.profile_ and *$ENV* are the start-up
+files. Aliases are expanded in scripts too, *.\** matches _._ and _.._,
+and a command's redirections are expanded before its assignments.
+*${!...}* is *$!* with an operator, as in *${!#x}*, not an indirect
+expansion. The errors that *SCRIPTS* lists end the shell with status 2.
+bash's own variables, those whose names begin with *BASH*, are not set,
+so that a script does not take the shell for bash.
 
 # RESTRICTED MODE
 
@@ -268,7 +285,10 @@ shell keeps bash's: *RANDOM*, *SRANDOM*, *SECONDS*, *EPOCHSECONDS*,
 *HOSTNAME*, *REPLY*, *COLUMNS* and *LINES* (with *checkwinsize*), and the
 history and completion variables above. *NUKESH_VERSION* is its version.
 *NUKESH_COMPLETION_PATH* names the directories of completion files.
-*BASH_VERSION* is not set, so that scripts can tell the shells apart.
+*BASH_VERSION* and *BASH_VERSINFO* are bash 5.2's, as scripts check them
+before they use a feature of bash (*declare -A*, say), or refuse to run
+without bash; *NUKESH_VERSION* tells the shells apart. In POSIX mode
+neither is set.
 
 # LIMITS
 
@@ -278,6 +298,10 @@ where bash would run out of stack. Functions call each other at most
 2,000 deep, unless *FUNCNEST* says otherwise. Arithmetic's parentheses
 nest at most 1,024 deep. Extended patterns opened more than 64 deep, and
 braces past the 256th in a word, are left as plain text.
+
+Text is UTF-8 in every locale: *${#x}*, *${x:i:n}* and *?* count
+characters, as bash's do in a UTF-8 locale; in the C locale bash counts
+bytes.
 
 Matching a pattern takes time that grows with the length of the text
 times that of the pattern, never exponentially: *${x//+(ab)/x}* on
@@ -295,8 +319,8 @@ wrongly; 126 for a file that cannot be run, 127 for one not found;
 
 # FILES
 
-_/system/bin/nukesh_, and its links _/system/bin/sh_ and
-_/system/bin/rnukesh_ (_/bin_ is _/system/bin_).
+_/system/bin/nukesh_, and its links _/system/bin/sh_, _/system/bin/bash_
+and _/system/bin/rnukesh_ (_/bin_ is _/system/bin_).
 
 _/etc/profile_, _/etc/nukeshrc_, _~/.nukesh_profile_, _~/.nukesh_login_,
 _~/.profile_, _~/.nukeshrc_, _~/.nukesh_logout_: the start-up files.

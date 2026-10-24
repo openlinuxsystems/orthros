@@ -30,6 +30,12 @@ pub enum Flow {
     /// An error that abandons the command line: a non-interactive shell
     /// exits with the status, an interactive one goes back to the prompt.
     Fatal(i32),
+    /// An error that abandons the command being run from the script, the
+    /// `.` file, the `eval` string or the trap, which then goes on with
+    /// its next command, as in bash: an arithmetic error, a bad
+    /// substitution, an assignment to a read-only variable. A subshell
+    /// ends. In POSIX mode, these are `Fatal`, as in dash.
+    Discard(i32),
     /// Ctrl-C at the prompt's command: back to the prompt.
     Interrupt,
 }
@@ -211,6 +217,9 @@ pub struct Shell {
     pub jobs: Jobs,
     /// Each trap's command: `None` for the default, `Some("")` to ignore.
     pub traps: Vec<Option<String>>,
+    /// In a subshell, until it sets a trap of its own: the traps of the
+    /// shell it was made from, which `trap` lists, as POSIX has it.
+    pub parent_traps: Option<Vec<Option<String>>>,
     /// Signals ignored when a non-interactive shell started, which it
     /// cannot trap.
     pub ignored: Vec<bool>,
@@ -232,6 +241,9 @@ pub struct Shell {
     /// condition of `if`, `while` and `until`, the left of `&&` and `||`,
     /// and `!` pipelines.
     pub errexit_off: u32,
+    /// The last pipeline failed where `set -e` was ignored (`a` in
+    /// `a && b`), or was a compound command that failed so.
+    pub failed_ignored: bool,
     pub pipestatus: Vec<i32>,
     pub started: Instant,
     pub seconds_offset: i64,
@@ -311,6 +323,7 @@ impl Shell {
             pid: sys::getpid(),
             jobs: Jobs::default(),
             traps: vec![None; trap::SLOTS],
+            parent_traps: None,
             ignored: vec![false; trap::MAX_SIGNAL + 1],
             interactive: false,
             login: false,
@@ -322,6 +335,7 @@ impl Shell {
             hash: HashMap::new(),
             dirstack: Vec::new(),
             errexit_off: 0,
+            failed_ignored: false,
             pipestatus: vec![0],
             started: Instant::now(),
             seconds_offset: 0,
@@ -392,6 +406,20 @@ impl Shell {
         readonly(self, "EUID", sys::geteuid().to_string());
         let version = env!("CARGO_PKG_VERSION");
         self.vars.entry("NUKESH_VERSION").value = Some(Value::Str(version.into()));
+        if !self.opts.posix {
+            // The version of bash whose language the shell runs, for the
+            // scripts that check it before they use a feature, such as
+            // `((BASH_VERSINFO[0] >= 4))` before `declare -A`, or that
+            // refuse to run without bash (ADR 0103). NUKESH_VERSION tells
+            // the shells apart.
+            let machine = format!("{}-unknown-{}", std::env::consts::ARCH, std::env::consts::OS);
+            let parts = ["5", "2", "0", "1", "release", &machine];
+            self.vars.entry("BASH_VERSION").value = Some(Value::Str("5.2.0(1)-release".into()));
+            let var = self.vars.entry("BASH_VERSINFO");
+            let map = (0..).zip(parts.iter().map(|part| part.to_string())).collect();
+            var.value = Some(Value::Array(map));
+            var.attrs |= attr::READONLY | attr::ARRAY;
+        }
         if self.vars.get("HOSTNAME").is_none() {
             self.vars.entry("HOSTNAME").value = Some(Value::Str(sys::hostname()));
         }
@@ -444,10 +472,25 @@ impl Shell {
         Flow::Fatal(status)
     }
 
-    /// The parser's options for the shell's current settings.
+    /// An error that abandons the command being run, after which a script
+    /// goes on with the next ([`Flow::Discard`]); fatal in POSIX mode,
+    /// with dash's status.
+    pub fn discard(&mut self, message: &str) -> Flow {
+        self.discard_with(message, 1)
+    }
+
+    /// [`Shell::discard`], with the status the shell then has.
+    pub fn discard_with(&mut self, message: &str, status: i32) -> Flow {
+        self.error(message);
+        if self.posix() { Flow::Fatal(2) } else { Flow::Discard(status) }
+    }
+
+    /// The parser's options for the shell's current settings. Aliases
+    /// are expanded in an interactive shell and, as POSIX has it, in every
+    /// POSIX one; elsewhere after `shopt -s expand_aliases`, as in bash.
     pub fn parse_options(&self) -> crate::parse::Options {
-        let aliases =
-            (self.interactive || self.shopt("expand_aliases")) && !self.aliases.is_empty();
+        let aliases = (self.interactive || self.posix() || self.shopt("expand_aliases"))
+            && !self.aliases.is_empty();
         crate::parse::Options {
             posix: self.posix(),
             extglob: self.shopt("extglob"),
@@ -508,6 +551,11 @@ impl Shell {
 
     /// The variables whose value comes from the shell's state.
     fn dynamic(&self, name: &str) -> Option<Value> {
+        // In POSIX mode, which takes no `[[`, bash's own are not set, as
+        // in dash: scripts take `BASH_SUBSHELL` for a sign of bash.
+        if self.opts.posix && name.starts_with("BASH") {
+            return None;
+        }
         let s = |text: String| Some(Value::Str(text));
         let array = |items: Vec<String>| {
             Some(Value::Array(items.into_iter().enumerate().map(|(i, v)| (i as i64, v)).collect()))
@@ -601,11 +649,24 @@ impl Shell {
         arith::eval(index, &mut copy).ok()
     }
 
-    /// Evaluates arithmetic in the shell's variables.
+    /// Evaluates arithmetic in the shell's variables, for an expansion.
     pub fn arith(&mut self, text: &str) -> Result<i64, Flow> {
         match arith::eval(text, self) {
             Ok(value) => Ok(value),
-            Err(message) => Err(self.fatal(&message, 1)),
+            Err(message) => Err(self.discard(&message)),
+        }
+    }
+
+    /// Evaluates arithmetic for a command (`((...))`, `let`, `for ((`,
+    /// `[[`'s integers), which fails on an error instead, as in bash;
+    /// the error is printed after `what`.
+    pub fn arith_command(&mut self, what: &str, text: &str) -> Option<i64> {
+        match arith::eval(text, self) {
+            Ok(value) => Some(value),
+            Err(message) => {
+                self.error(&format!("{what}: {message}"));
+                None
+            }
         }
     }
 

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0083. Nukesh is the shell and /bin/sh, written in Rust and checked against bash
 
-- Status: Accepted
+- Status: Accepted; its rules for errors in POSIX mode and for `BASH_VERSION` are changed by [0103](0103-the-shell-corpus.md)
 - Date: 2026-10-23
 
 ## Context

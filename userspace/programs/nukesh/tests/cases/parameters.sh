@@ -10,6 +10,9 @@ unset x; echo ${x-unset} ${x+set}; x=; echo ${x-unset} ${x+set} ${x:-empty} ${x:
 str="hello world"; echo ${str^} ${str~~} ${str~} ${str,,} ${str^^[lo]}
 up=HELLO; echo ${up,} ${up,,}
 x='a*b'; echo "${x//\*/-}" ${x/#a/A} ${x/%b/B}
+# Backslashes and & in a replacement, as written and from a variable.
+x=abca; r='\e&'; s='\&'; t='\\'; echo "${x//a/$r}" ${x//a/$s} "${x//a/$t}" "${x//a/\e}" "${x//a/\\&}" "${x/b/[&]}"
+shopt -u patsub_replacement; echo "${x//a/$r}" "${x//a/&}"; shopt -s patsub_replacement
 p=/usr/local/lib/libfoo.so.1; echo ${p##*/} ${p%/*} ${p%%.*} ${p#*.}
 f=archive.tar.gz; echo "${f%.*}" "${f%%.*}" "${f#*.}" "${f##*.}"
 v=abc; echo ${v:0:1}${v: -1} ${v:5} "[${v:1:0}]"
