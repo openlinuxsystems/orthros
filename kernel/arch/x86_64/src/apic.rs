@@ -443,13 +443,71 @@ pub struct IoApic {
     pub inputs: u32,
     /// Version register.
     pub version: u32,
+    /// Where its register page is mapped, uncached.
+    base: usize,
+}
+
+impl IoApic {
+    /// Writes register `index` through IOREGSEL and IOWIN.
+    fn write(&self, index: u32, value: u32) {
+        // SAFETY: `base` maps the I/O APIC's register page uncached for the
+        // kernel's life (`init_ioapics`); IOREGSEL at offset 0 selects the
+        // register that IOWIN at 0x10 shows. The caller holds IOAPICS, so
+        // no other CPU selects a register in between.
+        unsafe {
+            (self.base as *mut u32).write_volatile(index);
+            ((self.base + 0x10) as *mut u32).write_volatile(value);
+        }
+    }
+}
+
+/// A redirection entry's bit for an active-low input.
+const ACTIVE_LOW: u32 = 1 << 13;
+/// A redirection entry's bit for a level-triggered input.
+const LEVEL: u32 = 1 << 15;
+
+/// Sends ISA interrupt `irq` to `vector` on the CPU whose APIC ID is
+/// `destination`, as fixed, physical delivery: through the global system
+/// interrupt and with the polarity and trigger mode the MADT's interrupt
+/// source overrides give it, or else ISA's own (the same number, edge
+/// triggered and active high). Returns the global system interrupt, or
+/// `None` if no I/O APIC has it.
+pub fn route_isa(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32) -> Option<u32> {
+    let (gsi, flags) = madt
+        .and_then(|madt| {
+            madt.entries().find_map(|entry| match entry {
+                MadtEntry::InterruptSourceOverride { source, gsi, flags } if source == irq => {
+                    Some((gsi, flags))
+                }
+                _ => None,
+            })
+        })
+        .unwrap_or((u32::from(irq), 0));
+    // MPS INTI flags: polarity in bits 0-1 and trigger mode in bits 2-3,
+    // 3 for active low and for level; 0 conforms to the bus, which for ISA
+    // is active high and edge.
+    let mut low = u32::from(vector);
+    if flags & 3 == 3 {
+        low |= ACTIVE_LOW;
+    }
+    if (flags >> 2) & 3 == 3 {
+        low |= LEVEL;
+    }
+    let list = IOAPICS.lock_irq();
+    let io =
+        list.0.iter().flatten().find(|io| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi))?;
+    let input = gsi - io.gsi_base;
+    io.write(0x10 + 2 * input, low | MASKED);
+    io.write(0x11 + 2 * input, (destination & 0xff) << 24);
+    io.write(0x10 + 2 * input, low);
+    Some(gsi)
 }
 
 static IOAPICS: SpinLock<([Option<IoApic>; 8], usize)> = SpinLock::new(([None; 8], 0));
 
 /// Masks every input of every I/O APIC in the MADT.
 pub fn init_ioapics(madt: &Madt<'_>) {
-    let mut list = IOAPICS.lock();
+    let mut list = IOAPICS.lock_irq();
     for entry in madt.entries() {
         let MadtEntry::IoApic { id, address, gsi_base } = entry else { continue };
         let base = paging::map_physical(address, 4096, Access::ReadWrite, Cache::Uncached);
@@ -475,7 +533,8 @@ pub fn init_ioapics(madt: &Madt<'_>) {
         }
         let count = list.1;
         if count < list.0.len() {
-            list.0[count] = Some(IoApic { id, address, gsi_base, inputs, version: version & 0xff });
+            let version = version & 0xff;
+            list.0[count] = Some(IoApic { id, address, gsi_base, inputs, version, base });
             list.1 += 1;
         }
     }
@@ -483,6 +542,6 @@ pub fn init_ioapics(madt: &Madt<'_>) {
 
 /// The I/O APICs found.
 pub fn ioapics(mut f: impl FnMut(&IoApic)) {
-    let list = IOAPICS.lock();
+    let list = IOAPICS.lock_irq();
     list.0.iter().flatten().for_each(&mut f);
 }

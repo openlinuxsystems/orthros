@@ -326,6 +326,19 @@ pub trait Devices {
 
     /// How many interrupts vector `vector` has delivered.
     fn interrupt_count(vector: u32) -> u64;
+
+    /// Starts the machine's built-in keyboard, if it has one: on a PC the
+    /// PS/2 keyboard behind the i8042 controller (Phase 9). `byte` is
+    /// called, in an interrupt handler with interrupts masked, with each
+    /// byte the keyboard sends. Returns what the keyboard is, for the log,
+    /// or `None` if the machine has none.
+    fn start_keyboard(byte: fn(u8)) -> Option<&'static str>;
+
+    /// Sends `byte` to the built-in keyboard: a command, or a command's
+    /// argument, which the keyboard answers through the `byte` function of
+    /// [`Devices::start_keyboard`]. Returns false if the controller did
+    /// not take it in time.
+    fn keyboard_send(byte: u8) -> bool;
 }
 
 /// Kernel threads: their saved contexts and switching between them.
@@ -473,6 +486,12 @@ pub trait Platform {
     /// Restarts the machine without powering it off, so RAM keeps its
     /// contents where the hardware allows.
     fn reset() -> !;
+
+    /// Cuts the power: ACPI's soft-off state, S5, on a PC (Phase 9). The
+    /// caller has put everything on disk first. Returns only if the
+    /// machine cannot be powered off, and then the caller halts or
+    /// restarts it.
+    fn power_off();
 
     /// A byte typed on the debug console (the serial port), if any.
     fn console_read() -> Option<u8>;

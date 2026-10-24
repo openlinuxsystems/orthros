@@ -40,8 +40,8 @@ impl GenericAddress {
     }
 }
 
-/// The FADT fields the kernel uses (Phase 1, and the century register
-/// since Phase 7).
+/// The FADT fields the kernel uses (Phase 1, the century register since
+/// Phase 7, and what powering off needs since Phase 9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fadt {
     /// The ACPI power-management timer: (address, 32-bit counter). The
@@ -59,6 +59,14 @@ pub struct Fadt {
     /// The CMOS RAM index of the real-time clock's century register, or 0
     /// if it has none.
     pub century: u8,
+    /// The PM1a control register, which powering off writes (Phase 9).
+    pub pm1a_control: Option<GenericAddress>,
+    /// The PM1b control register, if the machine has a second one.
+    pub pm1b_control: Option<GenericAddress>,
+    /// The port that takes the machine from its firmware's mode into ACPI
+    /// mode, and the value to write there; `None` if it is in ACPI mode
+    /// for good.
+    pub acpi_enable: Option<(u16, u8)>,
 }
 
 const FLAG_TMR_VAL_EXT: u32 = 1 << 8;
@@ -101,6 +109,20 @@ impl Fadt {
         let reset =
             (flags & FLAG_RESET_REG_SUP != 0).then(|| gas(116).zip(t.get(128).copied())).flatten();
 
+        // A PM1 control block: the extended address, or else the 32-bit
+        // port, two bytes wide (PM1_CNT_LEN).
+        let control_block = |extended: usize, legacy: usize| {
+            gas(extended).or_else(|| {
+                u32_at(t, legacy).filter(|&port| port != 0).map(|port| GenericAddress {
+                    space: GenericAddress::IO,
+                    bit_width: 16,
+                    bit_offset: 0,
+                    access_size: 2,
+                    address: u64::from(port),
+                })
+            })
+        };
+
         Ok(Fadt {
             pm_timer,
             reset,
@@ -111,6 +133,12 @@ impl Fadt {
                 .or_else(|| u32_at(t, 40).map(u64::from))
                 .unwrap_or(0),
             century: t.get(108).copied().unwrap_or(0),
+            pm1a_control: control_block(172, 64),
+            pm1b_control: control_block(184, 68),
+            acpi_enable: u32_at(t, 48)
+                .filter(|&port| port != 0 && port <= 0xffff)
+                .zip(t.get(52).copied().filter(|&value| value != 0))
+                .map(|(port, value)| (port as u16, value)),
         })
     }
 }
@@ -125,6 +153,9 @@ mod tests {
         let body = |offset: usize| offset - 36;
         t[body(40)..body(44)].copy_from_slice(&0x7fe0_0000u32.to_le_bytes());
         t[body(76)..body(80)].copy_from_slice(&0x608u32.to_le_bytes());
+        t[body(48)..body(52)].copy_from_slice(&0xb2u32.to_le_bytes());
+        t[body(52)] = 0xf1;
+        t[body(64)..body(68)].copy_from_slice(&0x604u32.to_le_bytes());
         t[body(91)] = 4;
         t[body(109)..body(111)].copy_from_slice(&BOOT_ARCH_8042.to_le_bytes());
         let flags = FLAG_TMR_VAL_EXT | FLAG_RESET_REG_SUP;
@@ -149,6 +180,13 @@ mod tests {
         assert!(fadt.has_8042);
         assert!(!fadt.hardware_reduced);
         assert_eq!(fadt.dsdt, 0x7fe0_0000);
+        let control = fadt.pm1a_control.unwrap();
+        assert_eq!(
+            (control.space, control.address, control.bit_width),
+            (GenericAddress::IO, 0x604, 16)
+        );
+        assert_eq!(fadt.pm1b_control, None);
+        assert_eq!(fadt.acpi_enable, Some((0xb2, 0xf1)));
     }
 
     #[test]

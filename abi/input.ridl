@@ -1,0 +1,331 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Keyboards (Phase 9, ADR 0097): the keys pressed on them, as events.
+//!
+//! _/dev/kbd_ (radix-files(7)) is every keyboard of the machine as one:
+//! since Phase 9 the built-in PS/2 one behind the i8042 controller, which
+//! is QEMU's default keyboard and how laptops such as the reference Dell
+//! connect theirs, and from Phase 11 USB keyboards too. A read returns
+//! whole Event structures, as many as fit, the oldest the reader has not
+//! read: each description keeps its own place, so two readers each see
+//! every event, and a new description starts with the events after it was
+//! opened, never the keys typed before. A read waits for an event unless
+//! the file is non-blocking, and fails with invalid_argument if the buffer
+//! cannot hold one; one that falls more than EVENTS_KEPT events behind
+//! fails with gone once, then goes on with the oldest kept. `poll` finds
+//! it readable while an event waits.
+//!
+//! The kernel turns no key into text: consoled(8) does, with its key map,
+//! and handles the virtual terminal keys (Alt+F1 to Alt+F6). Key codes are
+//! Linux's (<linux/input-event-codes.h>), so that key maps and programs
+//! made for Linux's evdev read them as they would there. A key held down
+//! repeats, as the keyboard sends it again: the events after the first
+//! are REPEATED.
+
+module input;
+
+/// How many events _/dev/kbd_ keeps for readers that fall behind.
+const EVENTS_KEPT: u32 = 512;
+
+/// The key went up.
+const RELEASED: u16 = 0;
+/// The key went down.
+const PRESSED: u16 = 1;
+/// The key is held down, and the keyboard repeats it.
+const REPEATED: u16 = 2;
+
+/// radix-file(2)'s `control` request on _/dev/kbd_ that lights the
+/// keyboard's lock lights: `argument` holds LED_* bits, and the lights
+/// whose bits are clear go out. Needs the write right.
+const SET_LEDS: u32 = 0x4b420001;
+/// The Scroll Lock light.
+const LED_SCROLL_LOCK: u32 = 1;
+/// The Num Lock light.
+const LED_NUM_LOCK: u32 = 2;
+/// The Caps Lock light.
+const LED_CAPS_LOCK: u32 = 4;
+
+/// One key going down, repeating or going up.
+struct Event {
+    /// When: nanoseconds since boot, on the clock radix-process(2)'s
+    /// `clock` calls monotonic.
+    time_ns: u64;
+    /// Which key: a KEY_* code.
+    code: u16;
+    /// What it did: RELEASED, PRESSED or REPEATED.
+    value: u16;
+    /// Always 0.
+    reserved: u32;
+}
+
+/// Escape.
+const KEY_ESC: u16 = 1;
+/// The 1 key; 2 to 9 follow it, then 0.
+const KEY_1: u16 = 2;
+/// The 2 key.
+const KEY_2: u16 = 3;
+/// The 3 key.
+const KEY_3: u16 = 4;
+/// The 4 key.
+const KEY_4: u16 = 5;
+/// The 5 key.
+const KEY_5: u16 = 6;
+/// The 6 key.
+const KEY_6: u16 = 7;
+/// The 7 key.
+const KEY_7: u16 = 8;
+/// The 8 key.
+const KEY_8: u16 = 9;
+/// The 9 key.
+const KEY_9: u16 = 10;
+/// The 0 key.
+const KEY_0: u16 = 11;
+/// Minus.
+const KEY_MINUS: u16 = 12;
+/// Equals.
+const KEY_EQUAL: u16 = 13;
+/// Backspace.
+const KEY_BACKSPACE: u16 = 14;
+/// Tab.
+const KEY_TAB: u16 = 15;
+/// Q.
+const KEY_Q: u16 = 16;
+/// W.
+const KEY_W: u16 = 17;
+/// E.
+const KEY_E: u16 = 18;
+/// R.
+const KEY_R: u16 = 19;
+/// T.
+const KEY_T: u16 = 20;
+/// Y.
+const KEY_Y: u16 = 21;
+/// U.
+const KEY_U: u16 = 22;
+/// I.
+const KEY_I: u16 = 23;
+/// O.
+const KEY_O: u16 = 24;
+/// P.
+const KEY_P: u16 = 25;
+/// Left bracket.
+const KEY_LEFTBRACE: u16 = 26;
+/// Right bracket.
+const KEY_RIGHTBRACE: u16 = 27;
+/// Enter.
+const KEY_ENTER: u16 = 28;
+/// The left Ctrl.
+const KEY_LEFTCTRL: u16 = 29;
+/// A.
+const KEY_A: u16 = 30;
+/// S.
+const KEY_S: u16 = 31;
+/// D.
+const KEY_D: u16 = 32;
+/// F.
+const KEY_F: u16 = 33;
+/// G.
+const KEY_G: u16 = 34;
+/// H.
+const KEY_H: u16 = 35;
+/// J.
+const KEY_J: u16 = 36;
+/// K.
+const KEY_K: u16 = 37;
+/// L.
+const KEY_L: u16 = 38;
+/// Semicolon.
+const KEY_SEMICOLON: u16 = 39;
+/// Apostrophe.
+const KEY_APOSTROPHE: u16 = 40;
+/// Grave accent, left of 1.
+const KEY_GRAVE: u16 = 41;
+/// The left Shift.
+const KEY_LEFTSHIFT: u16 = 42;
+/// Backslash.
+const KEY_BACKSLASH: u16 = 43;
+/// Z.
+const KEY_Z: u16 = 44;
+/// X.
+const KEY_X: u16 = 45;
+/// C.
+const KEY_C: u16 = 46;
+/// V.
+const KEY_V: u16 = 47;
+/// B.
+const KEY_B: u16 = 48;
+/// N.
+const KEY_N: u16 = 49;
+/// M.
+const KEY_M: u16 = 50;
+/// Comma.
+const KEY_COMMA: u16 = 51;
+/// Full stop.
+const KEY_DOT: u16 = 52;
+/// Slash.
+const KEY_SLASH: u16 = 53;
+/// The right Shift.
+const KEY_RIGHTSHIFT: u16 = 54;
+/// The keypad's *.
+const KEY_KPASTERISK: u16 = 55;
+/// The left Alt.
+const KEY_LEFTALT: u16 = 56;
+/// Space.
+const KEY_SPACE: u16 = 57;
+/// Caps Lock.
+const KEY_CAPSLOCK: u16 = 58;
+/// F1; F2 to F10 follow it.
+const KEY_F1: u16 = 59;
+/// F2.
+const KEY_F2: u16 = 60;
+/// F3.
+const KEY_F3: u16 = 61;
+/// F4.
+const KEY_F4: u16 = 62;
+/// F5.
+const KEY_F5: u16 = 63;
+/// F6.
+const KEY_F6: u16 = 64;
+/// F7.
+const KEY_F7: u16 = 65;
+/// F8.
+const KEY_F8: u16 = 66;
+/// F9.
+const KEY_F9: u16 = 67;
+/// F10.
+const KEY_F10: u16 = 68;
+/// Num Lock.
+const KEY_NUMLOCK: u16 = 69;
+/// Scroll Lock.
+const KEY_SCROLLLOCK: u16 = 70;
+/// The keypad's 7 (Home).
+const KEY_KP7: u16 = 71;
+/// The keypad's 8 (Up).
+const KEY_KP8: u16 = 72;
+/// The keypad's 9 (Page Up).
+const KEY_KP9: u16 = 73;
+/// The keypad's minus.
+const KEY_KPMINUS: u16 = 74;
+/// The keypad's 4 (Left).
+const KEY_KP4: u16 = 75;
+/// The keypad's 5.
+const KEY_KP5: u16 = 76;
+/// The keypad's 6 (Right).
+const KEY_KP6: u16 = 77;
+/// The keypad's plus.
+const KEY_KPPLUS: u16 = 78;
+/// The keypad's 1 (End).
+const KEY_KP1: u16 = 79;
+/// The keypad's 2 (Down).
+const KEY_KP2: u16 = 80;
+/// The keypad's 3 (Page Down).
+const KEY_KP3: u16 = 81;
+/// The keypad's 0 (Insert).
+const KEY_KP0: u16 = 82;
+/// The keypad's full stop (Delete).
+const KEY_KPDOT: u16 = 83;
+/// The key between the left Shift and Z on ISO keyboards.
+const KEY_102ND: u16 = 86;
+/// F11.
+const KEY_F11: u16 = 87;
+/// F12.
+const KEY_F12: u16 = 88;
+/// The Japanese Ro key.
+const KEY_RO: u16 = 89;
+/// The Japanese Henkan key.
+const KEY_HENKAN: u16 = 92;
+/// The Japanese Katakana/Hiragana key.
+const KEY_KATAKANAHIRAGANA: u16 = 93;
+/// The Japanese Muhenkan key.
+const KEY_MUHENKAN: u16 = 94;
+/// The keypad's Enter.
+const KEY_KPENTER: u16 = 96;
+/// The right Ctrl.
+const KEY_RIGHTCTRL: u16 = 97;
+/// The keypad's slash.
+const KEY_KPSLASH: u16 = 98;
+/// Print Screen, which is SysRq with Alt.
+const KEY_SYSRQ: u16 = 99;
+/// The right Alt (AltGr).
+const KEY_RIGHTALT: u16 = 100;
+/// Home.
+const KEY_HOME: u16 = 102;
+/// Up.
+const KEY_UP: u16 = 103;
+/// Page Up.
+const KEY_PAGEUP: u16 = 104;
+/// Left.
+const KEY_LEFT: u16 = 105;
+/// Right.
+const KEY_RIGHT: u16 = 106;
+/// End.
+const KEY_END: u16 = 107;
+/// Down.
+const KEY_DOWN: u16 = 108;
+/// Page Down.
+const KEY_PAGEDOWN: u16 = 109;
+/// Insert.
+const KEY_INSERT: u16 = 110;
+/// Delete.
+const KEY_DELETE: u16 = 111;
+/// Mute.
+const KEY_MUTE: u16 = 113;
+/// Volume down.
+const KEY_VOLUMEDOWN: u16 = 114;
+/// Volume up.
+const KEY_VOLUMEUP: u16 = 115;
+/// Power.
+const KEY_POWER: u16 = 116;
+/// The keypad's equals.
+const KEY_KPEQUAL: u16 = 117;
+/// Pause, which is Break with Ctrl.
+const KEY_PAUSE: u16 = 119;
+/// The keypad's comma.
+const KEY_KPCOMMA: u16 = 121;
+/// The Japanese Yen key.
+const KEY_YEN: u16 = 124;
+/// The left Windows (Super) key.
+const KEY_LEFTMETA: u16 = 125;
+/// The right Windows (Super) key.
+const KEY_RIGHTMETA: u16 = 126;
+/// The menu key.
+const KEY_COMPOSE: u16 = 127;
+/// Stop.
+const KEY_STOP: u16 = 128;
+/// Calculator.
+const KEY_CALC: u16 = 140;
+/// Sleep.
+const KEY_SLEEP: u16 = 142;
+/// Wake up.
+const KEY_WAKEUP: u16 = 143;
+/// Mail.
+const KEY_MAIL: u16 = 155;
+/// Bookmarks.
+const KEY_BOOKMARKS: u16 = 156;
+/// My Computer.
+const KEY_COMPUTER: u16 = 157;
+/// Back.
+const KEY_BACK: u16 = 158;
+/// Forward.
+const KEY_FORWARD: u16 = 159;
+/// Next track.
+const KEY_NEXTSONG: u16 = 163;
+/// Play or pause.
+const KEY_PLAYPAUSE: u16 = 164;
+/// Previous track.
+const KEY_PREVIOUSSONG: u16 = 165;
+/// Stop playing.
+const KEY_STOPCD: u16 = 166;
+/// Home page.
+const KEY_HOMEPAGE: u16 = 172;
+/// Refresh.
+const KEY_REFRESH: u16 = 173;
+/// F13; F14 to F24 follow it.
+const KEY_F13: u16 = 183;
+/// F24.
+const KEY_F24: u16 = 194;
+/// Search.
+const KEY_SEARCH: u16 = 217;
+/// Media.
+const KEY_MEDIA: u16 = 226;

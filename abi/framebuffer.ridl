@@ -1,0 +1,60 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The screen (Phase 9, ADR 0097): the framebuffer the firmware set up,
+//! for consoled(8) to draw its virtual terminals on.
+//!
+//! _/dev/fb0_ (radix-files(7)) is the pixels of the screen the boot loader
+//! left in graphics mode, row after row, `pitch` bytes apart, each pixel
+//! `bytes_per_pixel` bytes with its colours where FramebufferInfo says.
+//! The kernel draws its log there until a program takes the screen with
+//! TAKE: from then on only the description that took it writes, and the
+//! kernel draws nothing, until that description goes or gives the screen
+//! back with GIVE_BACK; then the kernel draws its log again. A panic
+//! report is drawn whoever holds the screen.
+//!
+//! A write puts its bytes at its offset, the byte `y * pitch + x *
+//! bytes_per_pixel` of pixel (x, y), and fails with invalid_argument past
+//! the end; a read reads nothing, as video memory is slow to read. The
+//! file's size is `pitch * height`.
+
+module framebuffer;
+
+/// radix-file(2)'s `control` request that writes a FramebufferInfo to
+/// `buffer`.
+const GET_INFO: u32 = 0x46420001;
+/// radix-file(2)'s `control` request that takes the screen for this
+/// description: the kernel stops drawing its log, and only this
+/// description writes. Fails with busy while another holds it. Needs the
+/// write right.
+const TAKE: u32 = 0x46420002;
+/// radix-file(2)'s `control` request that gives the screen back to the
+/// kernel, which draws its log on it again.
+const GIVE_BACK: u32 = 0x46420003;
+
+/// The screen's size and pixel layout.
+struct FramebufferInfo {
+    /// Width in pixels.
+    width: u32;
+    /// Height in pixels.
+    height: u32;
+    /// Bytes from the start of one row to the next.
+    pitch: u32;
+    /// Bytes per pixel: 2, 3 or 4.
+    bytes_per_pixel: u8;
+    /// The lowest bit of red in a pixel's value, read as a little-endian
+    /// number.
+    red_shift: u8;
+    /// How many bits red has.
+    red_bits: u8;
+    /// The lowest bit of green.
+    green_shift: u8;
+    /// How many bits green has.
+    green_bits: u8;
+    /// The lowest bit of blue.
+    blue_shift: u8;
+    /// How many bits blue has.
+    blue_bits: u8;
+    /// Always 0.
+    reserved: u8;
+}

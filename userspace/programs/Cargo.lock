@@ -61,6 +61,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "consoled"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "radix-abi",
+ "radix-fbcon",
+ "vte",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -377,6 +387,36 @@ version = "0.0.1"
 dependencies = [
  "ridlc",
 ]
+
+[[package]]
+name = "radix-fbcon"
+version = "0.0.1"
+dependencies = [
+ "radix-hal",
+ "radix-klog",
+]
+
+[[package]]
+name = "radix-hal"
+version = "0.0.1"
+dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-hw"
+version = "0.0.1"
+
+[[package]]
+name = "radix-klog"
+version = "0.0.1"
+dependencies = [
+ "radix-sync",
+]
+
+[[package]]
+name = "radix-sync"
+version = "0.0.1"
 
 [[package]]
 name = "redox_syscall"

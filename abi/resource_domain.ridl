@@ -1,0 +1,101 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Resource domains (Phase 9, ADR 0098): groups of processes that share a
+//! CPU weight and a memory limit, as Linux's cgroups (v2) do, and their
+//! class for the out-of-memory policy (radix-processes(7)).
+//!
+//! Domains form a tree under the kernel's root domain, `system`. Each has
+//! a CPU weight, 1 to WEIGHT_MAX: the scheduler shares the CPU between a
+//! domain's threads and its child domains in proportion to their weights,
+//! its own threads together counting as one child of the default weight.
+//! Each may have a memory limit, in pages, that what is charged to it and
+//! to the domains below it together may not pass: a charge that would
+//! fails, and the allocation behind it fails with no_memory for the
+//! caller; nothing is stopped for it. And each has an out-of-memory class:
+//! when the machine as a whole runs out of memory, the kernel stops whole
+//! domains, apps first and services next, never `system` ones, each time
+//! the one with threads of its own using the most memory, counting the
+//! domains below it, which stop with it; their processes end with
+//! EXIT_STOPPED, as if killed, and `info`'s `oom_stops` counts it.
+//!
+//! Spark gets a capability with every right to `services`, a domain below
+//! the root, and makes a domain below it for each service it starts
+//! (spark(8)). A process runs in the domain it was made in by
+//! `create_process`, and its forked children in its own: they cannot leave
+//! it. A domain lives while a capability to it does or a process runs in
+//! it; deleting its last capability does not stop its processes.
+
+module resource_domain;
+
+/// The heaviest CPU weight.
+const WEIGHT_MAX: u32 = 10000;
+/// The weight a domain has unless it is given another.
+const WEIGHT_DEFAULT: u32 = 100;
+/// A memory limit that is no limit.
+const NO_LIMIT: u64 = 0xffffffffffffffff;
+/// The longest name a domain may have, in bytes.
+const NAME_MAX: u64 = 23;
+/// The most domains below the root, counted down from it.
+const DEPTH_MAX: u32 = 4;
+
+/// What the out-of-memory policy may do to a domain, least protected
+/// first.
+enum OomClass: u32 {
+    /// A user's app: stopped first.
+    app = 0;
+    /// A system service: stopped once no app is left to stop; its
+    /// supervisor starts it again.
+    service = 1;
+    /// The kernel and the trusted computing base: never stopped. An
+    /// allocation fails instead.
+    system = 2;
+}
+
+/// A resource domain. `info` needs the read right; the other methods need
+/// the control right.
+interface resource_domain = 0x000d version 1 {
+    kind = resource_domain;
+    /// Makes a domain named `name` below this one, with CPU weight
+    /// `weight`, memory limit `limit_pages` (NO_LIMIT for none beyond this
+    /// domain's) and out-of-memory class `oom_class`, no more protected than
+    /// this domain's, and puts a capability with every right to it in slot
+    /// `to`. Fails with invalid_argument for a weight out of range, a
+    /// class more protected than this one's, a name longer than NAME_MAX,
+    /// or a tree deeper than DEPTH_MAX, and with no_memory when the
+    /// kernel's table of domains is full.
+    method create = 1 (name: in bytes, weight: u32, limit_pages: u64, oom_class: OomClass,
+                       to: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                occupied, no_memory, bad_address];
+    /// Changes the CPU weight, which applies from the run queues' next
+    /// look at their shares.
+    method set_weight = 2 (weight: u32) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument];
+    /// Changes the memory limit, in pages; NO_LIMIT for none. A limit
+    /// below what is charged already refuses new charges until enough is
+    /// given back.
+    method set_limit = 3 (limit_pages: u64) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights];
+    /// The domain's class, weight, threads, how many times the
+    /// out-of-memory policy has stopped it, the pages charged to it and the
+    /// domains below it now and at most, its limit, and how many charges
+    /// its limit (or one above it) refused.
+    method info = 4 ()
+        -> (oom_class: OomClass, weight: u32, threads: u32, oom_stops: u32, usage_pages: u64,
+            peak_pages: u64, limit_pages: u64, refused: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights];
+    /// Makes a process in this domain with `slots` slots, as
+    /// radix-process(2)'s `create` makes one on the caller's process: it
+    /// belongs to the caller's process, which may `exec` a program in it;
+    /// its threads, objects and memory are charged to this domain.
+    method create_process = 5 (slots: u32, to: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                occupied, no_memory, over_limit];
+    /// Stops every process in the domain and the domains below it, as the
+    /// out-of-memory policy would: each ends with EXIT_STOPPED, as if
+    /// killed by SIGKILL, and the domain takes new processes again once
+    /// they are gone. Returns how many threads were asked to stop.
+    method stop = 6 () -> (threads: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights];
+}

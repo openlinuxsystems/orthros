@@ -110,6 +110,7 @@ dependencies = [
  "radix-fbcon",
  "radix-hal",
  "radix-hw",
+ "radix-input",
  "radix-ipc",
  "radix-kdb",
  "radix-klog",
@@ -223,6 +224,13 @@ dependencies = [
 [[package]]
 name = "radix-hw"
 version = "0.0.1"
+
+[[package]]
+name = "radix-input"
+version = "0.0.1"
+dependencies = [
+ "radix-abi",
+]
 
 [[package]]
 name = "radix-ipc"

@@ -689,6 +689,23 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     fs::kmsg::clear();
                     0
                 }
+                Target::Keyboard if a.request == radix_abi::input::SET_LEDS => {
+                    found.cap.check(ObjectKind::File, Rights::WRITE).map_err(cap_error)?;
+                    fs::keyboard::set_lights(a.argument as u32);
+                    0
+                }
+                Target::Framebuffer if a.request == radix_abi::framebuffer::GET_INFO => {
+                    let bytes = fs::framebuffer::info_bytes()?;
+                    if a.size < bytes.len() as u64 || !Arch::copy_to_user(a.buffer, &bytes) {
+                        return Err(error(Kernel::BadAddress));
+                    }
+                    0
+                }
+                Target::Framebuffer => {
+                    let may_write = found.cap.check(ObjectKind::File, Rights::WRITE).is_ok();
+                    fs::framebuffer::control(file, a.request, may_write)?;
+                    0
+                }
                 _ => return Err(error(Kernel::NotTerminal)),
             };
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())
@@ -1035,6 +1052,10 @@ enum Target<'a> {
     Tty(&'a tty::Handle),
     /// `/dev/kmsg`.
     Kmsg,
+    /// `/dev/kbd`.
+    Keyboard,
+    /// `/dev/fb0`.
+    Framebuffer,
     /// A file of the tree, through its node.
     Node,
 }
@@ -1048,6 +1069,10 @@ fn target(file: &FileObject) -> Target<'_> {
         Target::Tty(handle)
     } else if file.is_kmsg() {
         Target::Kmsg
+    } else if file.is_keyboard() {
+        Target::Keyboard
+    } else if file.is_framebuffer() {
+        Target::Framebuffer
     } else {
         Target::Node
     }
@@ -1068,7 +1093,7 @@ pub fn read(
     never_wait: bool,
 ) -> Result<u64> {
     let mut out = UserOut { address, len };
-    if !matches!(target(file), Target::Node) {
+    if file.is_special() {
         let read = read_special(user, file, &mut out, never_wait)?;
         user.process.note_read(read);
         return Ok(read);
@@ -1103,7 +1128,8 @@ fn read_special(
         Target::Socket(socket) => socket.receive(out, non_blocking).map(|n| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::read(file, out, non_blocking).map(|n| n as u64),
-        Target::Node => Ok(0),
+        Target::Keyboard => fs::keyboard::read(file, out, non_blocking).map(|n| n as u64),
+        Target::Framebuffer | Target::Node => Ok(0),
     }
 }
 
@@ -1121,8 +1147,8 @@ pub fn write(
     never_wait: bool,
 ) -> Result<u64> {
     let data = UserIn { address, len };
-    if !matches!(target(file), Target::Node) {
-        let written = write_special(user, file, &data, never_wait)?;
+    if file.is_special() {
+        let written = write_special(user, file, offset, &data, never_wait)?;
         user.process.note_written(written);
         return Ok(written);
     }
@@ -1152,6 +1178,7 @@ pub fn write(
 fn write_special(
     user: &UserThread,
     file: &FileObject,
+    offset: u64,
     data: &UserIn,
     never_wait: bool,
 ) -> Result<u64> {
@@ -1161,6 +1188,14 @@ fn write_special(
         Target::Socket(socket) => socket.send(data, non_blocking, true).map(|n| n as u64),
         Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::write(data).map(|n| n as u64),
+        Target::Framebuffer if offset == file::CURRENT => {
+            let mut at = file.offset.lock();
+            let written = fs::framebuffer::write(file, *at, data)? as u64;
+            *at += written;
+            Ok(written)
+        }
+        Target::Framebuffer => fs::framebuffer::write(file, offset, data).map(|n| n as u64),
+        Target::Keyboard => Err(error(Kernel::InvalidArgument)),
         Target::Node => Ok(0),
     }
 }
@@ -1168,7 +1203,7 @@ fn write_special(
 /// `seek`: moves `file`'s offset `offset` bytes from where `whence` says.
 fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
     match target(file) {
-        Target::Node => {}
+        Target::Node | Target::Framebuffer => {}
         Target::Kmsg => return fs::kmsg::seek(file, offset, whence),
         _ => return Err(error(Kernel::NotSeekable)),
     }

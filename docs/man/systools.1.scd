@@ -30,9 +30,11 @@ name, and *systools --list* lists them.
 The tools that show processes read *radix-proc*(5); *lsof*(8) lists the
 capabilities each process holds; *rtrace*(1) reads a trace of a
 process's system calls (*radix-trace*(2)); *dmesg*(1) reads the kernel's
-log through _/dev/kmsg_ (*radix-files*(7)). Until users come, in Phase
-13 of the roadmap, every process is root's, so the user columns all say
-root and the options that select users select all or nothing.
+log through _/dev/kmsg_ (*radix-files*(7)); *shutdown*(8), *reboot*(8),
+*poweroff*(8), *halt*(8) and *service*(8) ask Spark over its control
+socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
+every process is root's, so the user columns all say root and the
+options that select users select all or nothing.
 
 A mistake in the command line makes a tool fail with exit status 2 (1
 for those whose Linux versions use 1), after a message on standard
@@ -52,6 +54,8 @@ error that starts with the tool's name.
 :  the kernel's log
 |  *free*(1)
 :  memory in use and free
+|  *halt*(8), *poweroff*(8), *reboot*(8)
+:  halt, power off or restart the machine
 |  *hexdump*(1), *hd*(1)
 :  a file's bytes, in hexadecimal or other formats
 |  *ionice*(1)
@@ -72,6 +76,10 @@ error that starts with the tool's name.
 :  trace a process's system calls
 |  *script*(1)
 :  record a terminal session
+|  *service*(8)
+:  start, stop and look at the services
+|  *shutdown*(8)
+:  stop the system, now or later
 |  *taskset*(1)
 :  the CPUs a process may run on
 |  *top*(1)
@@ -93,4 +101,4 @@ error that starts with the tool's name.
 
 # SEE ALSO
 
-*radix-proc*(5), *radix-posix*(7), *nukesh*(1)
+*radix-proc*(5), *radix-posix*(7), *nukesh*(1), *spark*(8)

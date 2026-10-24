@@ -71,6 +71,8 @@ pub enum Object {
     File(FileRef),
     /// A directory (radix-directory(2)).
     Directory(FileRef),
+    /// The machine's power (radix-power(2)).
+    Power,
 }
 
 impl Object {
@@ -88,6 +90,7 @@ impl Object {
             Object::KernelLog => ObjectKind::KernelLog,
             Object::File(_) => ObjectKind::File,
             Object::Directory(_) => ObjectKind::Directory,
+            Object::Power => ObjectKind::Power,
         }
     }
 }
@@ -231,6 +234,7 @@ enum Kept {
     KernelLog,
     File(Weak<FileObject, Kmalloc>),
     Directory(Weak<FileObject, Kmalloc>),
+    Power,
 }
 
 impl Kept {
@@ -247,6 +251,7 @@ impl Kept {
             Object::KernelLog => Kept::KernelLog,
             Object::File(file) => Kept::File(Arc::downgrade(file)),
             Object::Directory(dir) => Kept::Directory(Arc::downgrade(dir)),
+            Object::Power => Kept::Power,
         }
     }
 
@@ -264,6 +269,7 @@ impl Kept {
             Kept::KernelLog => Object::KernelLog,
             Kept::File(file) => Object::File(file.upgrade()?),
             Kept::Directory(dir) => Object::Directory(dir.upgrade()?),
+            Kept::Power => Object::Power,
         })
     }
 }
@@ -506,7 +512,7 @@ pub fn released(released: &Released) {
         // whose space is freed on the disk when it goes: that waits until
         // the store's lock has gone (`fs::release`, `fs::drop_deferred`).
         Object::File(file) | Object::Directory(file) => crate::fs::release(file),
-        Object::Space(_) | Object::Random | Object::KernelLog => {}
+        Object::Space(_) | Object::Random | Object::KernelLog | Object::Power => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);

@@ -41,6 +41,7 @@ project's design, it adds the project here (see
 | [errno](https://github.com/lambda-fairy/rust-errno), [getrandom](https://github.com/rust-random/getrandom), [mio](https://github.com/tokio-rs/mio), [nix](https://github.com/nix-rust/nix), [rustix](https://github.com/bytecodealliance/rustix) and [uucore](https://github.com/uutils/coreutils) from crates.io | Patched for Radix in `ports/rust-crates` ([ADR 0080](docs/adr/0080-crates-patched-for-radix.md)), for the programs above | MIT OR Apache-2.0 (nix, mio, uucore: MIT; rustix also Apache-2.0 WITH LLVM-exception) |
 | The other crates the uutils programs link, from crates.io, among them [clap](https://github.com/clap-rs/clap), [regex](https://github.com/rust-lang/regex), [jiff](https://github.com/BurntSushi/jiff), [memchr](https://github.com/BurntSushi/memchr) and [bstr](https://github.com/BurntSushi/bstr) by Andrew Gallant, [chrono](https://github.com/chronotope/chrono), [ICU4X](https://github.com/unicode-org/icu4x) by the Unicode Consortium, [Fluent](https://github.com/projectfluent/fluent-rs) by Mozilla, the [RustCrypto](https://github.com/RustCrypto) hashes, [BLAKE3](https://github.com/BLAKE3-team/BLAKE3), [num-bigint](https://github.com/rust-num/num-bigint), [rayon](https://github.com/rayon-rs/rayon), [crossterm](https://github.com/crossterm-rs/crossterm), [indicatif](https://github.com/console-rs/indicatif), [notify](https://github.com/notify-rs/notify) and [Oniguruma](https://github.com/kkos/oniguruma) by K. Kosako, built by onig_sys for `expr` | What the utilities are made of; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0, Unlicense, Unicode-3.0, BSD-2-Clause, BSD-3-Clause, Zlib, CC0-1.0 (each as the manifest gives it) |
 | [reedline](https://github.com/nushell/reedline) 0.52.1 by the Nushell project, with [crossterm](https://github.com/crossterm-rs/crossterm) 0.29, [signal-hook](https://github.com/vorner/signal-hook) and signal-hook-mio by Michal Vaner, [nu-ansi-term](https://github.com/nushell/nu-ansi-term), [vte](https://github.com/alacritty/vte) by the Alacritty project, [strip-ansi-escapes](https://github.com/luser/strip-ansi-escapes), [unicode-width](https://github.com/unicode-rs/unicode-width), [unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation), [chrono](https://github.com/chronotope/chrono), [parking_lot](https://github.com/Amanieu/parking_lot) by Amanieu d'Antras, [strum](https://github.com/Peternator7/strum), [derive_more](https://github.com/JelteF/derive_more), [indexmap](https://github.com/indexmap-rs/indexmap) and the crates they use, from crates.io | Nukesh's line editor and the terminal handling under it ([ADR 0083](docs/adr/0083-nukesh-the-shell.md)), and the ordered tables of its variables and functions; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0 OR MIT (each as the manifest gives it; unicode-ident also Unicode-3.0, memchr Unlicense OR MIT) |
+| [vte](https://github.com/alacritty/vte) 0.14.1 by Joe Wilm and Christian Duerr of the Alacritty project, after Paul Williams' state machine of DEC's terminals, with [memchr](https://github.com/BurntSushi/memchr) by Andrew Gallant, from crates.io | The escape-sequence parser of consoled's virtual consoles ([ADR 0100](docs/adr/0100-consoled-virtual-consoles-in-a-program.md)) | Apache-2.0 OR MIT (memchr: Unlicense OR MIT) |
 | [ncurses](https://invisible-island.net/ncurses/) 6.6 by Thomas E. Dickey, and before him Zeyd M. Ben-Halim, Eric S. Raymond, Juergen Pfeifer and the Free Software Foundation | The terminal library less is built on, the terminal descriptions in `/system/share/terminfo`, and `tput`, `tset`, `reset`, `clear`, `tic` and `infocmp` ([ADR 0086](docs/adr/0086-release-archives-and-autoconf-ports.md)) | X11-distribute-modifications-variant |
 | [zlib](https://zlib.net) 1.3.2 by Jean-loup Gailly and Mark Adler | Compression, for `man` to read compressed manual pages | Zlib |
 | [less](https://www.greenwoodsoftware.com/less/) 668 by Mark Nudelman | The pager | GPL-3.0-or-later OR BSD-2-Clause (the Less License, which Dukovo takes it under) |
@@ -338,6 +339,19 @@ are grateful.
   by Steve Baker and its other authors. Their output was compared with
   ours on Linux while ours were written. No code is taken: ours are
   written from their manual pages and behaviour.
+- Linux's console, whose escape sequences (console_codes(4)), `linux`
+  terminfo entry, key sequences and Alt+F1 to Alt+F6 switching are what
+  consoled's terminals do
+  ([ADR 0100](docs/adr/0100-consoled-virtual-consoles-in-a-program.md));
+  its input event codes, which `/dev/kbd` gives
+  ([ADR 0097](docs/adr/0097-keyboard-events-and-the-framebuffer-for-programs.md));
+  and the OSDev wiki's pages on the 8042 PS/2 controller and the PS/2
+  keyboard, which the i8042 driver follows. systemd's `shutdown`,
+  `reboot`, `poweroff` and `halt`, and Debian's `service`, whose command
+  lines ours take, and runit, s6 and systemd as points of comparison for
+  Spark's supervision
+  ([ADR 0101](docs/adr/0101-spark-supervises-services.md)). No code is
+  taken.
 - Rust's `std` for the GNU Hurd, whose `stat` fields ours takes, and for
   Xous, which unwinds with the `unwinding` crate as ours does
   ([ADR 0070](docs/adr/0070-rust-standard-library-port.md)).

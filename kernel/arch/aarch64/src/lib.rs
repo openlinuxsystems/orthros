@@ -211,6 +211,14 @@ impl Devices for Arch {
     fn interrupt_count(_vector: u32) -> u64 {
         0
     }
+
+    fn start_keyboard(_byte: fn(u8)) -> Option<&'static str> {
+        None
+    }
+
+    fn keyboard_send(_byte: u8) -> bool {
+        false
+    }
 }
 
 /// A placeholder thread context.
@@ -442,6 +450,8 @@ impl Platform for Arch {
     fn reset() -> ! {
         Self::halt()
     }
+
+    fn power_off() {}
 
     fn console_read() -> Option<u8> {
         None

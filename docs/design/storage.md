@@ -37,7 +37,7 @@ kernel/radix            fs/: the tree, disks, devfs, procfs, sysfs, the
                         file methods
 abi                     directory.ridl, file.ridl
 userspace/radix-rt      fs.rs: Dir and File for programs
-userspace/spark         Spark v1: the hierarchy and /volumes
+userspace/spark         Spark: the hierarchy and /volumes (since v1)
 userspace/storage       the `storage` boot test's program
 tools/xtask             frames.rs: the stack frame budget; test.rs: disks,
                         a second boot, and the host checks with dosfstools
@@ -282,14 +282,15 @@ never inside an allocation.
 ## The hierarchy
 
 The kernel makes only the root, an empty tmpfs, and gives it to Spark in
-`SLOT_ROOT`. Spark v1 (spark(8)) makes `/system`, `/applications`,
+`SLOT_ROOT`. Spark (spark(8), since v1) makes `/system`, `/applications`,
 `/users`, `/data`, `/tmp`, `/run`, `/dev`, `/proc`, `/sys` and
 `/volumes`; mounts the boot archive read-only on `/system`, tmpfs on
 `/system/etc`, `/system/var`, `/tmp` and `/run`, and the `dev`, `proc`
 and `sys` trees; and mounts the FAT filesystem of each disk or partition
 in `/dev` at `/volumes/<name>`, read-only when the device is. A disk
 with a partition table is not mounted whole. It then starts the program
-its arguments name with the root, read and write.
+its arguments name with the root, read and write, or since Phase 9 the
+services.
 
 ## Lock order
 

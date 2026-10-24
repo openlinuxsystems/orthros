@@ -49,6 +49,9 @@ enum ObjectKind: u8 {
     file = 15;
     /// A directory (radix-directory(2)).
     directory = 16;
+    /// The machine's power: turning it off or restarting it
+    /// (radix-power(2)).
+    power = 17;
 }
 
 /// What a capability lets its holder do.

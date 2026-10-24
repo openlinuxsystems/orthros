@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The spark-oom boot test's service: it takes memory until the
+# out-of-memory policy stops it, and Spark starts it again.
+
+description = Takes all the memory there is
+program = /system/tests/posix/hog
+restart = always

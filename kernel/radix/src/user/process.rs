@@ -78,6 +78,7 @@ use super::{
 };
 use crate::Arch;
 use crate::caps::{self, Store};
+use crate::domains::DomainRef;
 use crate::fs::trace::TraceRef;
 use crate::sched::{self, Name, Options, SpawnError, ThreadRef, wait};
 
@@ -155,6 +156,9 @@ pub struct ProcessObject {
     pub posix: SpinLock<PosixState>,
     /// Moves when one of its children changes, for `wait`.
     pub child_events: AtomicU64,
+    /// Signalled when one of its children changes (`notify_children`): a
+    /// notification and the bits to set.
+    pub child_notify: SpinLock<Option<(NotificationRef, u64)>>,
     /// Moves when a signal is sent to it or one of its threads, for
     /// `signal_wait`.
     pub signal_events: AtomicU64,
@@ -325,6 +329,7 @@ fn allocate(
         args: SpinLock::new(None),
         posix: SpinLock::new(posix),
         child_events: AtomicU64::new(0),
+        child_notify: SpinLock::new(None),
         signal_events: AtomicU64::new(0),
         stopped: AtomicBool::new(false),
         posix_child: AtomicBool::new(false),
@@ -1123,6 +1128,22 @@ fn create_for(target: &ProcessRef, kind: AbiKind, size: u32, to: SlotRef) -> Res
         }
         _ => Err(Kernel::InvalidArgument.status(0)),
     }
+}
+
+/// radix-resource-domain(2)'s `create_process`: makes a process with
+/// `slots` slots in `domain` for `maker`, the caller's process, with its
+/// capability in `to`. The process itself is charged to `domain`, as
+/// everything it makes is.
+pub fn create_in(maker: &ProcessRef, domain: DomainRef, slots: u32, to: SlotRef) -> Result<()> {
+    if !matches!(maker.state.lock().phase, ProcessState::Created | ProcessState::Running) {
+        return Err(error(Kernel::Gone));
+    }
+    if !(MIN_SLOTS..=MAX_SLOTS).contains(&slots) {
+        return Err(Kernel::InvalidArgument.status(0));
+    }
+    let account = Account::new(domain).ok_or(error(Kernel::NoMemory))?;
+    let charge = Account::charge(&account, bytes_of(slots))?;
+    create(Some(to), "process", slots, account, Some(charge), Some(&**maker), None).map(|_| ())
 }
 
 /// `process.keep`: moves the capability in `from` to the first free slot

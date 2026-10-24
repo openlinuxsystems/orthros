@@ -349,6 +349,18 @@ impl File {
         Ok(File { held: Held { slot, owned: false } })
     }
 
+    /// The file whose capability a call put in `slot`, a slot from
+    /// [`slots::take`] that the [`File`] takes over: dropping it deletes the
+    /// capability and gives the slot back. A slot of another kind is given
+    /// back empty.
+    pub fn own(slot: u32) -> Result<File> {
+        let held = Held { slot, owned: true };
+        if !holds(slot, ObjectKind::File) {
+            return Err(Error::WrongKind);
+        }
+        Ok(File { held })
+    }
+
     /// The slot of its capability, to share it with a program.
     pub fn slot(&self) -> u32 {
         self.held.slot

@@ -8,9 +8,11 @@
 //! kernel checks it whole, finds the first program in it (`init=PATH`,
 //! `/system/bin/spark` by default) and starts it in a process of its own
 //! (`loader`), with the archive mapped read-only for it, the root of the
-//! file tree in `SLOT_ROOT` (`crate::fs`), a memory object for the
-//! programs it starts in `SLOT_FIRST_EXTRA`, and the words after
-//! a lone `--` on the command line as its arguments. From then on Spark
+//! file tree in `SLOT_ROOT` (`crate::fs`), from `SLOT_FIRST_EXTRA` on a
+//! memory object for the programs it starts, a capability to `services`,
+//! the resource domain below the root that its services run in, and the
+//! power capability (Phase 9), and the words after a lone `--` on the
+//! command line as its arguments. From then on Spark
 //! starts every other program. The kernel keeps Spark's process
 //! capability, and Spark is the one program that must not end: if it
 //! does, the kernel stops.
@@ -25,8 +27,10 @@ use radix_mm::{Flags, HEAP, MAX_ORDER};
 use radix_sync::Once;
 
 use super::loader::{self, Program};
-use super::process::ProcessObject;
+use super::objects::Object;
+use super::process::{self, ProcessObject};
 use super::{Result, cap_error, error as status};
+use crate::domains::{OomClass, Settings};
 use crate::{caps, domains};
 
 /// The word on the boot loader's module line that marks the boot archive.
@@ -41,6 +45,9 @@ const MEMORY_ORDER: u32 = MAX_ORDER;
 
 /// The most arguments Spark gets.
 const ARGS_MAX: usize = 32;
+
+/// The domain below the root that Spark makes its services' domains in.
+const SERVICES: &str = "services";
 
 static ARCHIVE: Once<&'static [u8]> = Once::new();
 
@@ -115,13 +122,18 @@ fn start_spark(
         let _ = words.push_within_capacity(arg);
     }
     // The kernel's own capability space for Spark: its process's original
-    // capability, the memory for the programs it starts, and the boot
+    // capability, the memory for the programs it starts, the domain its
+    // services' domains go below, the machine's power, and the boot
     // archive's memory and frames. It is never destroyed.
-    let slots = loader::archive_slots(archive.len()).saturating_add(2);
+    let slots = loader::archive_slots(archive.len()).saturating_add(4);
     let kept =
         caps::with(|store| store.create_space(slots)).and_then(|made| made).map_err(cap_error)?;
-    let (at, pool) = (SlotRef::new(kept, 0), SlotRef::new(kept, 1));
+    let slot = |n| SlotRef::new(kept, n);
+    let (at, pool, services, power) = (slot(0), slot(1), slot(2), slot(3));
     caps::create_memory(pool, MEMORY_ORDER).map_err(cap_error)?;
+    let settings = Settings::new(OomClass::Service);
+    caps::create_domain(services, &domains::root(), SERVICES, settings).map_err(cap_error)?;
+    process::install(power, ObjectKind::Power, Object::Power)?;
     let program = Program {
         name: "spark",
         image,
@@ -130,8 +142,12 @@ fn start_spark(
         role: 0,
         argument: 0,
         args: &words,
-        extra: &[(pool, ObjectKind::Memory.rights(), 0)],
-        archive: Some((archive, SlotRef::new(kept, 2))),
+        extra: &[
+            (pool, ObjectKind::Memory.rights(), 0),
+            (services, ObjectKind::ResourceDomain.rights(), 0),
+            (power, ObjectKind::Power.rights(), 0),
+        ],
+        archive: Some((archive, slot(4))),
         root: true,
         domain: domains::root(),
         on_exit: Some(spark_exited),

@@ -64,6 +64,32 @@ pub unsafe fn inl(port: u16) -> u32 {
     value
 }
 
+/// Reads a 16-bit value from an I/O port.
+///
+/// # Safety
+///
+/// As for [`inb`].
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: the caller upholds the contract above; `in` touches no memory.
+    unsafe {
+        asm!("in ax, dx", in("dx") port, out("ax") value, options(nomem, nostack, preserves_flags))
+    };
+    value
+}
+
+/// Writes a 16-bit value to an I/O port.
+///
+/// # Safety
+///
+/// As for [`outb`].
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: the caller upholds the contract above; `out` touches no memory.
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
 /// Waits about a microsecond by writing to the POST diagnostic port, which
 /// nothing listens to on a running system.
 pub fn io_delay() {

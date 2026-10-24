@@ -1,13 +1,117 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Restarting the machine, leaving QEMU, and polling the keyboard.
+//! Restarting the machine, powering it off, leaving QEMU, and polling the
+//! keyboard.
 
-use radix_acpi::GenericAddress;
+use radix_acpi::{GenericAddress, Memory, Sdt};
 
-use crate::io::{inb, outb, outl};
+use crate::io::{inb, inw, outb, outl, outw};
 use crate::paging::{self, Access, Cache};
 use crate::{acpi, cpu, time};
+
+/// PM1 control: the SCI interrupt is on, so ACPI owns the hardware.
+const SCI_EN: u16 = 1 << 0;
+/// PM1 control: where SLP_TYP goes.
+const SLP_TYP_SHIFT: u16 = 10;
+/// PM1 control: enter the sleep state SLP_TYP names.
+const SLP_EN: u16 = 1 << 13;
+
+/// Reads a PM1 control register.
+fn read_control(register: GenericAddress) -> Option<u16> {
+    match register.space {
+        GenericAddress::IO if register.address <= 0xffff => {
+            // SAFETY: the FADT names this port as a PM1 control register;
+            // reading it has no side effects.
+            let value = unsafe { inw(register.address as u16) };
+            Some(value)
+        }
+        GenericAddress::MEMORY => {
+            let virt =
+                paging::map_physical(register.address, 2, Access::ReadWrite, Cache::Uncached);
+            // SAFETY: `virt` maps the register the FADT names, uncached.
+            Some(unsafe { (virt as *const u16).read_volatile() })
+        }
+        _ => None,
+    }
+}
+
+/// Writes a PM1 control register.
+fn write_control(register: GenericAddress, value: u16) {
+    match register.space {
+        // SAFETY: the FADT names this port as a PM1 control register, and
+        // writing it with SLP_EN is how ACPI powers the machine off.
+        GenericAddress::IO if register.address <= 0xffff => unsafe {
+            outw(register.address as u16, value)
+        },
+        GenericAddress::MEMORY => {
+            let virt =
+                paging::map_physical(register.address, 2, Access::ReadWrite, Cache::Uncached);
+            // SAFETY: as above, for a memory-mapped register.
+            unsafe { (virt as *mut u16).write_volatile(value) };
+        }
+        _ => {}
+    }
+}
+
+/// The SLP_TYPa and SLP_TYPb values of S5, from the DSDT or else an SSDT.
+fn s5_types(acpi: &acpi::Acpi, dsdt: u64) -> Option<(u8, u8)> {
+    let memory = acpi::PhysicalMemory;
+    let dsdt = Sdt::load(&memory, dsdt, Some(b"DSDT")).ok();
+    dsdt.and_then(|dsdt| radix_acpi::sleep_types(dsdt.body(), 5)).or_else(|| {
+        acpi.tables
+            .iter()
+            .filter(|table| &table.signature == b"SSDT" && table.status.is_ok())
+            .filter_map(|table| memory.bytes(table.address, table.length as usize))
+            .find_map(|bytes| radix_acpi::sleep_types(bytes, 5))
+    })
+}
+
+/// Powers the machine off through ACPI's soft-off state, S5: writes S5's
+/// sleep types with SLP_EN into the PM1 control registers, after taking
+/// the machine into ACPI mode if the firmware left it out. Returns if the
+/// machine has no such registers or no S5, or is still on a second later.
+pub fn power_off() {
+    let Some(acpi) = acpi::get() else { return };
+    let Some(fadt) = acpi.fadt else { return };
+    let (Some(control), false) = (fadt.pm1a_control, fadt.hardware_reduced) else {
+        radix_klog::warn!("Power: the firmware describes no way to power off");
+        return;
+    };
+    let Some((type_a, type_b)) = s5_types(acpi, fadt.dsdt) else {
+        radix_klog::warn!("Power: the ACPI tables have no S5 sleep state");
+        return;
+    };
+    radix_klog::info!("Power: powering off (ACPI S5, sleep types {type_a} and {type_b})");
+    if let Some((port, value)) = fadt.acpi_enable
+        && read_control(control).is_some_and(|now| now & SCI_EN == 0)
+    {
+        // SAFETY: the FADT names this port and value as the way into ACPI
+        // mode; the firmware hands the power-management hardware over.
+        unsafe { outb(port, value) };
+        for _ in 0..300 {
+            if read_control(control).is_some_and(|now| now & SCI_EN != 0) {
+                break;
+            }
+            time::delay_us(10_000);
+        }
+    }
+    let were_enabled = cpu::disable_interrupts();
+    cpu::wbinvd();
+    let sleep = |register: GenericAddress, sleep_type: u8| {
+        let kept = read_control(register).unwrap_or(0) & !(7 << SLP_TYP_SHIFT) & !SLP_EN;
+        write_control(register, kept | (u16::from(sleep_type) << SLP_TYP_SHIFT) | SLP_EN);
+    };
+    sleep(control, type_a);
+    if let Some(control) = fadt.pm1b_control {
+        sleep(control, type_b);
+    }
+    time::delay_us(1_000_000);
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
+    radix_klog::error!("Power: the machine is still on a second after S5");
+}
 
 /// Restarts the machine without cutting power, so RAM keeps the crash log
 /// where the hardware allows. Tries, in order: the FADT's reset register,

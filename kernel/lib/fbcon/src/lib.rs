@@ -201,8 +201,33 @@ impl Console {
         &self.fb
     }
 
+    /// The framebuffer's pixels, for a program that draws on the screen
+    /// itself (consoled, through `/dev/fb0`).
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        self.fb.memory
+    }
+
     /// Blanks the screen and moves the cursor to the top-left corner.
     pub fn clear(&mut self) {
+        self.blank();
+        self.cells.fill(0);
+        self.drawn.fill(0);
+        self.col = 0;
+        self.row = 0;
+        self.wrap_pending = false;
+    }
+
+    /// Draws the whole screen again from the grid, for when something else
+    /// has drawn on it: consoled, before it gave the screen back.
+    pub fn repaint(&mut self) {
+        self.blank();
+        // No cell holds this value, so every one is drawn.
+        self.drawn.fill(u32::MAX);
+        self.flush();
+    }
+
+    /// Paints every pixel in the plain background.
+    fn blank(&mut self) {
         let bpp = usize::from(self.fb.format.bytes_per_pixel);
         let background = self.colors[0].1.to_le_bytes();
         let row_bytes = self.fb.width * bpp;
@@ -217,11 +242,6 @@ impl Console {
                 }
             }
         }
-        self.cells.fill(0);
-        self.drawn.fill(0);
-        self.col = 0;
-        self.row = 0;
-        self.wrap_pending = false;
     }
 
     /// The cursor position, as (column, row).
@@ -470,6 +490,19 @@ mod tests {
         assert_eq!(pixel(&console, 0, 0), band);
         assert_eq!(pixel(&console, 127, 15), band);
         assert_eq!(pixel(&console, 0, 16), 0);
+    }
+
+    #[test]
+    fn repaints_over_what_others_drew() {
+        let mut console = console(16 * 8, 4 * 16);
+        console.write("A", Style::Plain);
+        console.flush();
+        let drawn = console.cells_drawn();
+        console.pixels_mut().fill(0x77);
+        console.repaint();
+        assert_eq!(console.cells_drawn(), drawn + 64, "every cell again");
+        assert_ne!(pixel(&console, 0, 0) & 0xff, 0x77);
+        assert_eq!(pixel(&console, 127, 63), 0);
     }
 
     #[test]

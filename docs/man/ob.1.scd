@@ -239,6 +239,20 @@ _target/userspace/_).
 	*screen*
 		Boot under UEFI and read the boot log back from the framebuffer.
 
+	*consoles*
+		Boot normally, with no program on the command line, so Spark
+		starts its services: read Nukesh's prompt off consoled's tty1,
+		type a command on QEMU's PS/2 keyboard and read its answer back,
+		switch to tty2 with Alt+F2, restart consoled with *service*(8),
+		and power the machine off with *poweroff*(8) (*consoled*(8),
+		*spark*(8)).
+
+	*spark-oom*
+		Boot with 256 MiB and point Spark at the test service _hog_,
+		which takes memory until the out-of-memory policy stops its
+		domain; check that Spark says so and starts it again, waiting
+		longer the second time (*spark*(8)).
+
 	*page-fault*
 		Boot with *selftest=page-fault* and check the panic report on the
 		serial port and on the screen, with its symbolized backtrace.

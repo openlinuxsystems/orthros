@@ -35,6 +35,7 @@ mod cpu;
 mod devices;
 mod entry;
 mod fpu;
+mod i8042;
 mod interrupts;
 mod io;
 mod kaslr;
@@ -358,6 +359,14 @@ impl Devices for Arch {
 
     fn interrupt_count(vector: u32) -> u64 {
         devices::count(vector)
+    }
+
+    fn start_keyboard(byte: fn(u8)) -> Option<&'static str> {
+        i8042::start(byte)
+    }
+
+    fn keyboard_send(byte: u8) -> bool {
+        i8042::send(byte)
     }
 }
 
@@ -825,6 +834,10 @@ impl Platform for Arch {
 
     fn reset() -> ! {
         power::reset()
+    }
+
+    fn power_off() {
+        power::power_off();
     }
 
     fn console_read() -> Option<u8> {

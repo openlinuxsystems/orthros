@@ -30,6 +30,8 @@ pub const QEMU_EXIT_SUCCESS: i32 = 33;
 const QEMU_EXIT_PANIC: i32 = 35;
 /// QEMU's exit status when the guest restarts under `-no-reboot`.
 const QEMU_EXIT_RESET: i32 = 0;
+/// QEMU's exit status when the guest powers the machine off.
+const QEMU_EXIT_POWER_OFF: i32 = 0;
 
 /// Every library of the kernel workspace with host unit tests.
 pub const KERNEL_LIBRARIES: &[&str] = &[
@@ -44,6 +46,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-fbcon",
     "radix-hal",
     "radix-hw",
+    "radix-input",
     "radix-ipc",
     "radix-kdb",
     "radix-klog",
@@ -242,7 +245,9 @@ pub const CASES: &[Case] = &[
         about: "the boot log is readable on the UEFI framebuffer",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "",
+        // A program, so that Spark starts no services: consoled would take
+        // the screen from the log.
+        cmdline: "-- /system/tests/hello",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -250,6 +255,39 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: screen_log,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "consoles",
+        about: "a normal boot shows a shell on consoled's virtual consoles; typing, Alt+F2, poweroff",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark starts the services, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: consoles,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "spark-oom",
+        about: "a service that runs the machine out of memory is stopped, and Spark starts it again",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --service-dir /system/tests/services",
+        cpus: 2,
+        memory: "256M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: spark_oom,
         disks: &[],
         second: None,
     },
@@ -1184,6 +1222,33 @@ impl Vm {
         Ok(())
     }
 
+    /// Presses keys on the PS/2 keyboard through QMP's `send-key`: each
+    /// of `combos` is QEMU key codes held together, joined by `-`, such as
+    /// `alt-f2` or `shift-a`.
+    pub fn press(&mut self, combos: &[&str]) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        let mut qmp = Qmp::connect(&socket)?;
+        for combo in combos {
+            let keys: Vec<String> = combo
+                .split('-')
+                .map(|key| format!(r#"{{"type":"qcode","data":"{key}"}}"#))
+                .collect();
+            qmp.execute(&format!(
+                r#"{{"execute":"send-key","arguments":{{"keys":[{}],"hold-time":20}}}}"#,
+                keys.join(",")
+            ))?;
+            // The next key after this one's release, as a typist would.
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        Ok(())
+    }
+
+    /// Types `text` on the PS/2 keyboard, a key at a time on a US layout.
+    pub fn type_text(&mut self, text: &str) -> Result<(), String> {
+        let combos = text.chars().map(key_combo).collect::<Result<Vec<_>, _>>()?;
+        self.press(&combos.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
     /// Runs a `kdb` command and waits for each of `expected`, then for the
     /// next prompt.
     pub fn kdb(&mut self, command: &str, expected: &[&str]) -> Result<(), String> {
@@ -1317,6 +1382,65 @@ impl Qmp {
     }
 }
 
+/// The QEMU key codes (`send-key`'s qcodes) that type `c` on a US
+/// keyboard, joined by `-`.
+fn key_combo(c: char) -> Result<String, String> {
+    const PLAIN: [(char, &str); 15] = [
+        (' ', "spc"),
+        ('\n', "ret"),
+        ('\t', "tab"),
+        ('-', "minus"),
+        ('=', "equal"),
+        ('[', "bracket_left"),
+        (']', "bracket_right"),
+        (';', "semicolon"),
+        ('\'', "apostrophe"),
+        ('`', "grave_accent"),
+        ('\\', "backslash"),
+        (',', "comma"),
+        ('.', "dot"),
+        ('/', "slash"),
+        ('\u{8}', "backspace"),
+    ];
+    // Each shifted character and the key it is on.
+    const SHIFTED: [(char, &str); 21] = [
+        ('!', "1"),
+        ('@', "2"),
+        ('#', "3"),
+        ('$', "4"),
+        ('%', "5"),
+        ('^', "6"),
+        ('&', "7"),
+        ('*', "8"),
+        ('(', "9"),
+        (')', "0"),
+        ('_', "minus"),
+        ('+', "equal"),
+        ('{', "bracket_left"),
+        ('}', "bracket_right"),
+        (':', "semicolon"),
+        ('"', "apostrophe"),
+        ('~', "grave_accent"),
+        ('|', "backslash"),
+        ('<', "comma"),
+        ('>', "dot"),
+        ('?', "slash"),
+    ];
+    if c.is_ascii_lowercase() || c.is_ascii_digit() {
+        return Ok(c.to_string());
+    }
+    if c.is_ascii_uppercase() {
+        return Ok(format!("shift-{}", c.to_ascii_lowercase()));
+    }
+    if let Some((_, key)) = PLAIN.iter().find(|&&(p, _)| p == c) {
+        return Ok(key.to_string());
+    }
+    match SHIFTED.iter().find(|&&(s, _)| s == c) {
+        Some((_, key)) => Ok(format!("shift-{key}")),
+        None => Err(format!("no key types {c:?}")),
+    }
+}
+
 /// Removes carriage returns and terminal escape sequences from a serial log.
 pub fn clean_log(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -1424,7 +1548,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 17 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 18 object kinds, 12 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -1498,6 +1622,49 @@ fn screen_log(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
     vm.expect_screen(&["Timer: all 2 CPUs take timer interrupts", "Boot complete."])
+}
+
+/// A normal boot: Spark starts consoled, which takes the screen and shows
+/// a shell on tty1. Types a command on the PS/2 keyboard and reads its
+/// answer off the screen, switches to tty2, restarts consoled with
+/// service(8), and powers the machine off from the shell.
+fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: Spark v2 is process ")?;
+    vm.expect("spark: listening at /run/spark/control")?;
+    vm.expect("spark: 1 services in /system/etc/spark/services, 1 enabled")?;
+    vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
+    vm.expect("consoled: console of ")?;
+    vm.expect("consoled: started /system/bin/nukesh on tty1 as process ")?;
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("Dukovo Radix {VERSION} "), "(tty1)", "# "])?;
+    vm.type_text("echo $((6 * 7)) consoles\n")?;
+    vm.expect_screen(&["# echo $((6 * 7)) consoles", "42 consoles"])?;
+    vm.press(&["alt-f2"])?;
+    vm.expect("consoled: started /system/bin/nukesh on tty2 as process ")?;
+    vm.expect_screen(&["(tty2)"])?;
+    vm.type_text("service --status-all; service consoled status\n")?;
+    vm.expect_screen(&[
+        " [ + ]  consoled",
+        "consoled - Virtual consoles",
+        "Active: active (running)",
+    ])?;
+    // Its shells end with it, and Spark starts it again.
+    vm.type_text("service consoled restart\n")?;
+    vm.expect("spark: asked to restart consoled")?;
+    vm.expect("spark: consoled (process ")?;
+    vm.expect(" was ended by signal 15")?;
+    vm.expect("spark: starting consoled again in ")?;
+    vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("Dukovo Radix {VERSION} "), "(tty1)", "# "])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
 fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
@@ -1833,7 +2000,7 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("Init: the boot archive is ")?;
     vm.expect("Init: /system/bin/spark is process ")?;
-    let rest = program_line(vm, "spark: Spark v1 is process ")?;
+    let rest = program_line(vm, "spark: Spark v2 is process ")?;
     let spark = image_bias(&rest, "Spark")?;
     vm.expect("spark: boot archive of ")?;
     vm.expect(" KiB with ")?;
@@ -2046,6 +2213,25 @@ fn oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
+/// Spark supervises `hog`, which takes memory until the out-of-memory
+/// policy stops its domain: Spark sees it end as stopped by the policy and
+/// starts it again in the same domain, after a wait that doubles when it
+/// happens again soon.
+fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("spark: 1 services in /system/tests/services, 1 enabled")?;
+    vm.expect("Domains: `spark` made domain `hog` below `services` (service class, weight 100)")?;
+    for wait in ["0.1", "0.2"] {
+        vm.expect("spark: started hog (/system/tests/posix/hog) as process ")?;
+        vm.expect("hog: taking memory")?;
+        vm.expect("Out of memory: stopped domain `hog` (service class")?;
+        vm.expect("spark: hog (process ")?;
+        vm.expect(" was ended by signal 9 (stopped by the out-of-memory policy)")?;
+        vm.expect(&format!("spark: starting hog again in {wait} s"))?;
+    }
+    vm.expect("spark: started hog (/system/tests/posix/hog) as process ")
+}
+
 fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // The boot CPU loads microcode before anything else, so these lines
     // come before the kernel's banner.
@@ -2066,6 +2252,16 @@ fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn types_on_a_us_keyboard() {
+        assert_eq!(key_combo('a').unwrap(), "a");
+        assert_eq!(key_combo('Q').unwrap(), "shift-q");
+        assert_eq!(key_combo('$').unwrap(), "shift-4");
+        assert_eq!(key_combo('-').unwrap(), "minus");
+        assert_eq!(key_combo('\n').unwrap(), "ret");
+        assert!(key_combo('é').is_err());
+    }
 
     #[test]
     fn disk_sizes_read_as_the_kernel_logs_them() {

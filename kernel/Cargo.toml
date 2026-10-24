@@ -26,6 +26,7 @@ members = [
     "lib/elf",
     "lib/fbcon",
     "lib/hw",
+    "lib/input",
     "lib/kdb",
     "lib/klog",
     "lib/lockdep",

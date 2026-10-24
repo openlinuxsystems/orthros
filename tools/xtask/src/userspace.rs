@@ -57,6 +57,7 @@ pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
 /// The programs on Rust's standard library that the boot archive holds:
 /// each one's path in it, and its package in userspace/programs.
 pub const STD_ARCHIVE: &[(&str, &str)] = &[
+    ("system/bin/consoled", "consoled"),
     ("system/bin/nukesh", "nukesh"),
     ("system/bin/systools", "systools"),
     ("system/tests/posix/std-test", "std-test"),
@@ -77,6 +78,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/bin/dmesg", "systools"),
     ("system/bin/free", "systools"),
     ("system/bin/hd", "systools"),
+    ("system/bin/halt", "systools"),
     ("system/bin/hexdump", "systools"),
     ("system/bin/ionice", "systools"),
     ("system/bin/kill", "systools"),
@@ -84,10 +86,14 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/bin/pgrep", "systools"),
     ("system/bin/pidstat", "systools"),
     ("system/bin/pkill", "systools"),
+    ("system/bin/poweroff", "systools"),
     ("system/bin/ps", "systools"),
+    ("system/bin/reboot", "systools"),
     ("system/bin/renice", "systools"),
     ("system/bin/rtrace", "systools"),
     ("system/bin/script", "systools"),
+    ("system/bin/service", "systools"),
+    ("system/bin/shutdown", "systools"),
     ("system/bin/taskset", "systools"),
     ("system/bin/top", "systools"),
     ("system/bin/tree", "systools"),
@@ -111,6 +117,11 @@ pub const SHELL_CASES_DIR: &str = "system/tests/shell";
 /// `/system/etc` (spark(8)).
 pub const DEFAULTS: &str = "userspace/defaults";
 pub const DEFAULTS_DIR: &str = "system/lib/defaults/etc";
+
+/// The service files of the boot tests that Spark is pointed at with
+/// `--service-dir` (spark(8)), and where in the boot archive they go.
+pub const TEST_SERVICES: &str = "userspace/spark/tests/services";
+pub const TEST_SERVICES_DIR: &str = "system/tests/services";
 
 /// The C and C++ test programs' sources, and where in the boot archive
 /// they go.
@@ -168,7 +179,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] = &["nukesh", "systools"];
+pub const HOST_TESTED: &[&str] = &["consoled", "nukesh", "systools"];
 
 /// A Cargo command for the workspace of programs on Rust's standard
 /// library, building for the host, writing to `target/programs-host`:
@@ -264,7 +275,8 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     install_headers(ctx)?;
     let ports = ports::build_all(ctx, &[])?;
     let mut files = build_posix(ctx, &ports.toolchain)?;
-    files.extend(install_defaults(ctx)?);
+    install_tree(ctx, DEFAULTS, DEFAULTS_DIR, &mut files)?;
+    install_tree(ctx, TEST_SERVICES, TEST_SERVICES_DIR, &mut files)?;
     for port in &ports.ports {
         files.extend(ports::image_files(ctx, &port.recipe, &ctx.out.join("sysroot"))?);
     }
@@ -309,22 +321,35 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     Ok(Programs { usertests: installed, bootfs, ports })
 }
 
-/// Copies the files of [`DEFAULTS`] into `out/sysroot`, and returns each
-/// one's place in the boot archive and file.
-fn install_defaults(ctx: &Ctx) -> Result<Vec<(String, PathBuf)>> {
-    let dir = ctx.root.join(DEFAULTS);
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .context(|| format!("reading {}", dir.display()))?
-        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+/// Copies the files beneath `source`, a directory of the repository,
+/// into `out/sysroot` at `dir`, in name order, and adds each one's place
+/// in the boot archive and file to `files`.
+fn install_tree(
+    ctx: &Ctx,
+    source: &str,
+    dir: &str,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    let from = ctx.root.join(source);
+    let mut entries: Vec<(String, bool)> = std::fs::read_dir(&from)
+        .context(|| format!("reading {}", from.display()))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let is_dir = entry.file_type().ok()?.is_dir();
+            Some((entry.file_name().to_string_lossy().into_owned(), is_dir))
+        })
         .collect();
-    names.sort();
-    let mut files = Vec::new();
-    for name in names {
-        let installed = ctx.out.join("sysroot").join(DEFAULTS_DIR).join(&name);
-        process::copy(&dir.join(&name), &installed)?;
-        files.push((format!("{DEFAULTS_DIR}/{name}"), installed));
+    entries.sort();
+    for (name, is_dir) in entries {
+        if is_dir {
+            install_tree(ctx, &format!("{source}/{name}"), &format!("{dir}/{name}"), files)?;
+            continue;
+        }
+        let installed = ctx.out.join("sysroot").join(dir).join(&name);
+        process::copy(&from.join(&name), &installed)?;
+        files.push((format!("{dir}/{name}"), installed));
     }
-    Ok(files)
+    Ok(())
 }
 
 /// Builds the programs of [`STD_ARCHIVE`] into `out/sysroot`, with their
