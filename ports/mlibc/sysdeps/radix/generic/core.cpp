@@ -11,6 +11,8 @@
 #include <mlibc/all-sysdeps.hpp>
 #include <mlibc/debug.hpp>
 #include <mlibc/tcb.hpp>
+#include <mlibc/threads.hpp>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
@@ -20,9 +22,13 @@
 
 #include "radix.hpp"
 
-// Where new threads start (x86_64/thread-entry.S).
+// Where new threads start (x86_64/thread-entry.S), and the labels of the
+// cancellable system call (x86_64/cancel.S).
 #ifndef MLIBC_BUILDING_RTLD
 extern "C" void __mlibc_thread_entry();
+extern "C" [[gnu::visibility("hidden")]] const char __radix_cancel_begin[];
+extern "C" [[gnu::visibility("hidden")]] const char __radix_cancel_end[];
+extern "C" [[gnu::visibility("hidden")]] const char __radix_cancel_now[];
 #endif
 
 // frigg's assertions call frg_panic (options/internal/generic/frigg.cpp)
@@ -225,11 +231,19 @@ int Sysdeps<Msync>::operator()(void *addr, size_t length, int flags) {
 	(void)addr;
 	(void)length;
 	(void)flags;
+#ifndef MLIBC_BUILDING_RTLD
+	// A cancellation point.
+	thread_testcancel();
+#endif
 	// Mappings of files are private copies: nothing to write back.
 	return 0;
 }
 
-int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct timespec *time) {
+namespace {
+
+// Waits on the futex at `pointer`, made with `syscall`.
+int futex_wait(radix_syscall_fn *syscall, int *pointer, int expected,
+		const struct timespec *time) {
 	uint64_t timeout = 0;
 	if(time) {
 		timeout = ns_of(time);
@@ -237,10 +251,38 @@ int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct time
 		if(!timeout)
 			timeout = 1;
 	}
-	uint64_t status = radix_address_space_futex_wait(radix::SLOT_SPACE,
+	uint64_t status = radix_address_space_futex_wait_with(syscall, radix::SLOT_SPACE,
 			reinterpret_cast<uint64_t>(pointer), static_cast<uint32_t>(expected), timeout);
 	return radix::to_errno(status);
 }
+
+} // namespace
+
+int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct timespec *time) {
+	return futex_wait(radix_syscall, pointer, expected, time);
+}
+
+#ifndef MLIBC_BUILDING_RTLD
+// The wait of a cancellation point: ECANCELED for a cancel that is due,
+// which the caller acts on (radix.hpp's cancellable_masked).
+int Sysdeps<CancellableFutexWait>::operator()(int *pointer, int expected,
+		const struct timespec *time) {
+	return futex_wait(radix::cancellable_masked, pointer, expected, time);
+}
+
+// SIGCANCEL's handler found the thread at `uctx`, whose cancellation is
+// enabled and asked for: if it is about to make a cancellable system call
+// (x86_64/cancel.S), or to make one again, it acts on the cancel there as
+// the handler returns.
+int Sysdeps<CancelInContext>::operator()(ucontext_t *uctx) {
+	auto &pc = uctx->uc_mcontext.gregs[REG_RIP];
+	if(pc < reinterpret_cast<uintptr_t>(__radix_cancel_begin)
+			|| pc >= reinterpret_cast<uintptr_t>(__radix_cancel_end))
+		return 0;
+	pc = reinterpret_cast<uintptr_t>(__radix_cancel_now);
+	return 1;
+}
+#endif
 
 int Sysdeps<FutexWake>::operator()(int *pointer, bool all) {
 	struct radix_address_space_futex_wake_results r;
@@ -280,15 +322,20 @@ int Sysdeps<ClockSet>::operator()(int clock, time_t secs, long nanos) {
 int Sysdeps<Sleep>::operator()(time_t *secs, long *nanos) {
 	struct timespec want = {*secs, *nanos};
 	uint64_t ns = ns_of(&want);
-	if(!ns)
+	if(!ns) {
+#ifndef MLIBC_BUILDING_RTLD
+		// A cancellation point all the same.
+		thread_testcancel();
+#endif
 		return 0;
+	}
 	time_t start_secs;
 	long start_nanos;
 	sysdep<ClockGet>(CLOCK_MONOTONIC, &start_secs, &start_nanos);
 	// A futex nobody wakes: the wait ends when the time has passed, or
-	// when a signal comes.
+	// when a signal comes. A cancellation point.
 	int word = 0;
-	uint64_t status = radix_address_space_futex_wait(radix::SLOT_SPACE,
+	uint64_t status = radix_address_space_futex_wait_with(radix::cancellable, radix::SLOT_SPACE,
 			reinterpret_cast<uint64_t>(&word), 0, ns);
 	int e = radix::to_errno(status);
 	if(e == ETIMEDOUT || !e) {

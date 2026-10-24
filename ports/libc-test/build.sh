@@ -26,9 +26,6 @@
 #     networking and the resolver (Phase 12)
 #   regression/syscall-sign-extend: Linux's syscall(2), which the C
 #     library leaves out on Radix (ADR 0068)
-#   functional/pthread_cancel, pthread_cancel-points,
-#     regression/pthread_cancel-sem_wait, pthread_cond_wait-cancel_ignored:
-#     thread cancellation, which mlibc leaves out of its cross builds
 #   functional/pthread_robust, regression/pthread-robust-detach: robust
 #     mutexes, and functional/pthread_mutex_pi: priority-inheritance
 #     mutexes, neither of which mlibc has
@@ -84,8 +81,6 @@ for source in "$PORT_SRC"/src/functional/*.c "$PORT_SRC"/src/regression/*.c; do
 	functional/ipc_msg | functional/ipc_sem | functional/ipc_shm) continue ;;
 	functional/socket | regression/dn_expand-empty | regression/dn_expand-ptr-0) continue ;;
 	regression/syscall-sign-extend) continue ;;
-	functional/pthread_cancel | functional/pthread_cancel-points) continue ;;
-	regression/pthread_cancel-sem_wait | regression/pthread_cond_wait-cancel_ignored) continue ;;
 	functional/pthread_robust | regression/pthread-robust-detach) continue ;;
 	functional/pthread_mutex_pi) continue ;;
 	functional/sem_open | regression/sem_close-unmap) continue ;;

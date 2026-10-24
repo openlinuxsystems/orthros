@@ -8,6 +8,7 @@
 #include <bits/ensure.h>
 #include <errno.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/threads.hpp>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +52,7 @@ short found_events(short events, short found) {
 }
 
 // Polls `fds` for at most `timeout_ns` (forever if negative), with the
-// signal mask `mask` while it waits if there is one.
+// signal mask `mask` while it waits if there is one. A cancellation point.
 int poll_ns(struct pollfd *fds, nfds_t count, int64_t timeout_ns, const sigset_t *mask,
 		int *num_events) {
 	if(count > RADIX_PROCESS_MAX_SLOTS)
@@ -80,9 +81,10 @@ int poll_ns(struct pollfd *fds, nfds_t count, int64_t timeout_ns, const sigset_t
 			entries[i].revents = 0;
 		}
 	}
+	// A cancel is acted on once the copy is freed.
 	struct radix_process_poll_results r;
-	uint64_t status = radix_process_poll(radix::SLOT_PROCESS, reinterpret_cast<uint64_t>(entries),
-			static_cast<uint32_t>(count), radix::FD_BASE,
+	uint64_t status = radix_process_poll_with(radix::cancellable_masked, radix::SLOT_PROCESS,
+			reinterpret_cast<uint64_t>(entries), static_cast<uint32_t>(count), radix::FD_BASE,
 			timeout_ns < 0 ? 0 : static_cast<uint64_t>(timeout_ns), kernel_mask, flags, &r);
 	if(!plain) {
 		if(!status) {
@@ -91,6 +93,8 @@ int poll_ns(struct pollfd *fds, nfds_t count, int64_t timeout_ns, const sigset_t
 		}
 		free(entries);
 	}
+	if(status == radix::CANCELED)
+		mlibc::thread_testcancel();
 	if(status)
 		return radix::to_errno(status);
 	*num_events = static_cast<int>(r.ready);

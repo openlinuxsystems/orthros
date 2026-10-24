@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/threads.hpp>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -136,7 +137,9 @@ int Sysdeps<Tcflush>::operator()(int fd, int queue) {
 
 int Sysdeps<Tcdrain>::operator()(int fd) {
 	// A terminal's output is in its master's ring as soon as it is
-	// written: there is nothing to wait for.
+	// written: there is nothing to wait for, but it is a cancellation
+	// point all the same.
+	thread_testcancel();
 	return sysdep<Isatty>(fd);
 }
 

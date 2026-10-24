@@ -1,0 +1,36 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+sigwait returned -1 on failure, where POSIX has it return an error
+number, and failed with EINTR when a handler ran while it waited, as
+sigwaitinfo may; glibc's goes on waiting then, and so does this one.
+Meant for upstream.
+
+--- a/options/posix/generic/posix_signal.cpp
++++ b/options/posix/generic/posix_signal.cpp
+@@ -111,14 +111,17 @@
+ }
+ 
+ int sigwait(const sigset_t *__restrict set, int *__restrict sig) {
+-	if (int e = sigwaitinfo(set, nullptr); e < 0) {
+-		return e;
+-	} else {
+-		if (sig)
+-			*sig = e;
+-
+-		return 0;
+-	}
++	// An error number, as POSIX has it, and never EINTR, which a handler
++	// that runs gives sigwaitinfo: as on glibc.
++	int e;
++	do {
++		e = sigwaitinfo(set, nullptr);
++	} while (e < 0 && errno == EINTR);
++	if (e < 0)
++		return errno;
++	if (sig)
++		*sig = e;
++	return 0;
+ }
+ 
+ int sigpending(sigset_t *set) {

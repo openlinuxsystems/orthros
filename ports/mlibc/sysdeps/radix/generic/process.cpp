@@ -168,6 +168,7 @@ int Sysdeps<Fexecve>::operator()(int fd, char *const argv[], char *const envp[])
 	return exec_fd(fd, execfn, argv, envp);
 }
 
+// The waits from here to Sigtimedwait are cancellation points.
 int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *ru,
 		pid_t *ret_pid) {
 	uint32_t wait_flags = 0;
@@ -180,7 +181,8 @@ int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusag
 	if(flags & WNOWAIT)
 		wait_flags |= RADIX_CHILD_WAIT_FLAGS_NO_REAP;
 	struct radix_process_wait_results r;
-	uint64_t result = radix_process_wait(radix::SLOT_PROCESS, pid, wait_flags, &r);
+	uint64_t result = radix_process_wait_with(radix::cancellable, radix::SLOT_PROCESS, pid,
+			wait_flags, &r);
 	if(result)
 		return radix::to_errno(result);
 	if(status)
@@ -227,7 +229,8 @@ int Sysdeps<Waitid>::operator()(idtype_t idtype, id_t id, siginfo_t *info, int o
 	if(!(options & WEXITED))
 		wait_flags |= RADIX_CHILD_WAIT_FLAGS_SKIP_ENDED;
 	struct radix_process_wait_results r;
-	if(uint64_t result = radix_process_wait(radix::SLOT_PROCESS, pid, wait_flags, &r); result)
+	if(uint64_t result = radix_process_wait_with(radix::cancellable, radix::SLOT_PROCESS, pid,
+			wait_flags, &r); result)
 		return radix::to_errno(result);
 	memset(info, 0, sizeof(*info));
 	if(!r.pid)
@@ -625,7 +628,8 @@ int Sysdeps<Sigprocmask>::operator()(int how, const sigset_t *__restrict set,
 }
 
 int Sysdeps<Sigsuspend>::operator()(const sigset_t *set) {
-	return radix::to_errno(radix_process_signal_suspend(radix::SLOT_PROCESS, mask_of(set)));
+	return radix::to_errno(radix_process_signal_suspend_with(radix::cancellable,
+			radix::SLOT_PROCESS, mask_of(set)));
 }
 
 int Sysdeps<Pause>::operator()() {
@@ -659,8 +663,12 @@ int Sysdeps<Sigaltstack>::operator()(const stack_t *ss, stack_t *oss) {
 	return 0;
 }
 
-int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
-		siginfo_t *__restrict info, const struct timespec *__restrict timeout, int *out_signal) {
+namespace {
+
+// Waits for a signal of `wanted`, signal n's bit 1 << (n - 1), as
+// sigtimedwait does, making the call with `syscall`.
+int signal_wait(radix_syscall_fn *syscall, uint64_t wanted, siginfo_t *__restrict info,
+		const struct timespec *__restrict timeout, int *out_signal) {
 	uint64_t timeout_ns = 0;
 	if(timeout) {
 		if(timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000)
@@ -669,8 +677,8 @@ int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
 				static_cast<uint64_t>(timeout->tv_nsec));
 	}
 	struct radix_process_signal_wait_results r;
-	uint64_t status = radix_process_signal_wait(radix::SLOT_PROCESS, mask_of(set), timeout_ns,
-			timeout == nullptr, &r);
+	uint64_t status = radix_process_signal_wait_with(syscall, radix::SLOT_PROCESS, wanted,
+			timeout_ns, timeout == nullptr, &r);
 	if(status) {
 		int e = radix::to_errno(status);
 		return e == ETIMEDOUT ? EAGAIN : e;
@@ -687,6 +695,18 @@ int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
 	}
 	*out_signal = static_cast<int>(r.signal);
 	return 0;
+}
+
+} // namespace
+
+int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
+		siginfo_t *__restrict info, const struct timespec *__restrict timeout, int *out_signal) {
+	// Never the C library's own signals, which a set filled by hand would
+	// take from it, as glibc has it.
+	uint64_t wanted = mask_of(set);
+	for(int sig = 32; sig < SIGRTMIN; sig++)
+		wanted &= ~(UINT64_C(1) << (sig - 1));
+	return signal_wait(radix::cancellable, wanted, info, timeout, out_signal);
 }
 
 namespace {
@@ -723,13 +743,13 @@ TimerThread *timer_threads[RADIX_PROCESS_TIMERS_MAX];
 
 void *run_timer_thread(void *argument) {
 	auto timer = static_cast<TimerThread *>(argument);
-	sigset_t set;
-	sigemptyset(&set);
-	mlibc::sigaddset_internal(&set, SIGTIMER);
+	// SIGTIMER, which sigtimedwait does not take, with a plain call: the
+	// thread is the C library's, and no cancel is meant for it.
+	constexpr uint64_t wanted = UINT64_C(1) << (SIGTIMER - 1);
 	for(;;) {
 		siginfo_t info;
 		int signal;
-		if(sysdep<Sigtimedwait>(&set, &info, nullptr, &signal))
+		if(signal_wait(radix_syscall, wanted, &info, nullptr, &signal))
 			continue;
 		if(__atomic_load_n(&timer->deleted, __ATOMIC_ACQUIRE))
 			break;

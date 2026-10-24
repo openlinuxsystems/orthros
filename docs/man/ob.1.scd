@@ -430,13 +430,13 @@ _target/userspace/_).
 		runs a job, in a process group of its own in the foreground:
 		the C programs of _userspace/posix/_, on the C library (fork,
 		exec, signals, pipes, *poll*, terminals and job control, clocks
-		and timers, files and their locks, threads, *posix_spawn*,
-		resource limits and *printf*'s formats), a program linked
-		dynamically with a library of its own and one it opens with
-		*dlopen*, the test of Rust's standard library, the C library's
-		own tests and Lua's test suite (see *radix-posix*(7)). The case
-		checks that every test passed and that the runner exited
-		with 0.
+		and timers, files and their locks, threads and their
+		cancellation, *posix_spawn*, resource limits and *printf*'s
+		formats), a program linked dynamically with a library of its
+		own and one it opens with *dlopen*, the test of Rust's standard
+		library, the C library's own tests and Lua's test suite (see
+		*radix-posix*(7)). The case checks that every test passed and
+		that the runner exited with 0.
 
 	*oom*
 		Boot 4 CPUs with *selftest=oom*: a resource domain's memory limit

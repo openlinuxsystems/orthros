@@ -35,6 +35,7 @@ libc_sources += radix_sources + files(
 	'generic/process.cpp',
 	'generic/socket.cpp',
 	'generic/terminal.cpp',
+	'x86_64/cancel.S',
 	'x86_64/signal.S',
 	'x86_64/thread-entry.S',
 	'x86_64/thread.cpp',

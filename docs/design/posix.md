@@ -296,6 +296,50 @@ one that leaves for another reason (a timeout, a signal) takes itself
 off unless a waker already did, which then counts as its wake-up, so a
 wake is never spent on a waiter that has gone.
 
+## Thread cancellation
+
+A cancellation point is a system call made as musl makes one (ADR
+0104). `ridlc` gives each method's C function a `radix_<object>_<method>_with`
+form that takes the system call function, so the Radix layer makes a
+point's call through `radix::cancellable`, the stub in `x86_64/cancel.S`,
+and every other call through `radix_syscall`, which inlines as before.
+Between its labels `__radix_cancel_begin` and `__radix_cancel_end` the
+stub reads the thread's cancel bits and, if cancellation is enabled and
+a cancel is due, jumps to `__radix_cancel_now` instead of making the
+call. There `__radix_cancel` ends the thread, or, for
+`radix::cancellable_masked`, returns a status that maps to ECANCELED, to
+a caller that must first put back what it holds: a condition's mutex,
+`poll`'s copy of the entries.
+
+`pthread_cancel` sets the bit and sends SIGCANCEL. Its handler (patch
+0041) asks the layer's `CancelInContext` about the context it
+interrupted: one whose instruction pointer lies between the labels has
+not made its call, or the kernel has put it back on the `syscall`
+instruction to make it again (`Restart::Always`, since the handler has
+SA_RESTART), so the handler moves it to `__radix_cancel_now` and
+returns, and the thread acts on the cancel in its own frame, where
+cleanup handlers may run. A wait that a signal ends for good
+(`NoHandler`) returns interrupted at the end label, where the stub's
+caller looks at the bits again. Anywhere else the handler leaves
+SIGCANCEL blocked in the interrupted context and sends it again: if it
+came while another signal's handler ran over a point, it arrives once
+that handler returns there, and ends the point; otherwise the next point
+the thread comes to acts on the bit, which needs no signal.
+
+Points that need not wait act on a due cancel all the same, as POSIX's
+"shall occur" asks and musl does: `open`, `openat`, `creat`, `close`,
+`sem_wait`, `pthread_join`, `pthread_cond_wait`, `clock_nanosleep`, a
+zero `sleep` or `nanosleep`, `msync`, `tcdrain`, and `readv`, `writev`,
+`recvmsg` and `sendmsg` of no bytes. stdio, `popen`, `pclose`,
+`wordexp`, `opendir` and `closedir` make plain calls, as on musl, so
+that no child or stream is left to nobody. A cancelled `system` kills its
+command and waits for it, and SIGINT and SIGQUIT come back only when the
+last thread's command is done, as on glibc. `sigtimedwait` never takes
+the C library's own signals. An exiting thread disables its
+cancellation, so a point in a cleanup handler or a destructor goes on,
+and its cleanup handlers run before its `thread_local` destructors, as
+on glibc.
+
 ## File locks
 
 The kernel keeps every file's locks in one `TABLE`, a spin lock taken
@@ -367,12 +411,38 @@ and why:
 | 0020 | `strptime`'s conversions as POSIX has them |
 | 0021 | `inet_pton` and `inet_ntop` from musl 1.2.5 |
 | 0022 | `raise` signals the calling thread; the C library's own signals kept out of programs' masks |
+| 0023 | `madvise` and `getrandom` without the Linux option |
+| 0024 | A `Realpath` system call for `realpath` |
+| 0025 | Calls a signal interrupts around children: `signal` with SA_RESTART, `pclose` and `system` waiting again |
+| 0026 | `drem`, `scalb` and `significand` declared |
+| 0027 | `getopt`'s clusters of short options |
+| 0028 | Message catalogs (`catopen`, `catgets`, `catclose`) from musl 1.2.5 |
+| 0029 | `struct winsize` in `<sys/ioctl.h>` on every system |
+| 0030 | Symbol lookups in a statically linked program |
+| 0031 | Every name of `pathconf`, with musl's values |
+| 0032 | `printf`'s `L` before an integer conversion, as glibc reads it |
+| 0033 | Linux's error texts in `strerror`, `perror` and `%m` |
+| 0034 | `clock_nanosleep` as POSIX and Linux have it |
+| 0035 | Large and aligned allocations |
+| 0036 | A null `environ`, and `realpath`'s corner cases |
+| 0037 | Functions mlibc left unfinished, as glibc has them |
+| 0038 | The C library's own signals kept out of programs' sets |
+| 0039 | `popen` as POSIX and glibc have it |
+| 0040 | A new thread's signal mask |
+| 0041 | Cancellation points as POSIX has them, made as musl makes them |
+| 0042 | `sigwait`'s error number, and no EINTR |
 
 Patches 0013 to 0022 fix what libc-test found (below); each says which
 of its tests it answers. One of mlibc's own tests changes with patch
 0021 (`ports/mlibc-tests/patches`): as in glibc and musl, `inet_pton`
 refuses leading zeros in an IPv4 address and lets any IPv6 address end
-in a dotted IPv4 one, where mlibc did the opposite.
+in a dotted IPv4 one, where mlibc did the opposite. Another changes
+with patch 0035: `aligned_alloc` takes any size, as C17 has it. Patch
+0041 lets mlibc's own `pthread_cancel` test and four of libc-test's run
+(`pthread_cancel`, `pthread_cancel-points`, `pthread_cancel-sem_wait`
+and `pthread_cond_wait-cancel_ignored`); libc-test's
+`pthread_cancel-points` leaves out its `shm_open` case, since Radix has
+no shared memory objects yet (`ports/libc-test/patches`).
 
 The musl code lives in `ports/mlibc/musl/` with musl's copyright lines,
 and `build.sh` copies it into the source (ADR 0072).
@@ -515,6 +585,17 @@ both ways a descriptor closes: `capability.delete` and `exec`'s emptying
 of `close_on_exec` slots. The table's lock is a leaf, so these may run
 under any other lock, the store's included.
 
+**A cancel acts at a point that did nothing, and is never lost.**
+`pthread_cancel` sets the bit before it sends SIGCANCEL. If the stub
+reads the bit set, it makes no call. If the bit is set after the read,
+the signal comes before the `syscall` instruction (the context is
+between the labels and is sent to act), during the wait (which the
+kernel rewinds to the instruction, or ends at the end label, where the
+caller reads the bit again), or after the call has done its work (the
+context is at the end label or past it, so the call's result stands and
+the next point acts). The kernel rewinds a call only when it has done
+nothing, so a context between the labels never has work to undo.
+
 **A failed exec leaves the caller as it was.** Everything that can fail
 (reading and checking the program, finding the interpreter, making the
 space, its regions, its stack and start-up page, and charging them)
@@ -568,6 +649,9 @@ and timer protocols are candidates for the audit after Phase 9.
   (Phase 9 decides where the shell is), `/etc/localtime`, `/etc/hosts`,
   `/etc/resolv.conf` and `/etc/protocols` (Phase 12), `/etc/passwd`,
   `/etc/group` and `/etc/shadow` (Phase 13).
+- A thread cancelled in `getaddrinfo` or another resolver call leaves
+  the resolver's socket open, until the resolver is redone with
+  networking in Phase 12.
 - Rust's standard library cannot catch a stack overflow: it needs
   `pthread_getattr_np` for the guard page's place.
 - Library search does not yet know bundles' layout (Phase 13).

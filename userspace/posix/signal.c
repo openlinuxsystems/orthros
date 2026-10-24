@@ -159,8 +159,24 @@ static void suspends(void) {
 	int got;
 	raise(SIGUSR1);
 	CHECK(sigwait(&block, &got) == 0 && got == SIGUSR1);
+	// A handler that runs while sigwait waits does not end the wait, as
+	// on glibc.
+	handle(SIGUSR2, on_signal, 0);
+	caught = 0;
+	pid = check_fork();
+	if(pid == 0) {
+		check_sleep_ms(20);
+		kill(parent, SIGUSR2);
+		check_sleep_ms(20);
+		kill(parent, SIGUSR1);
+		_exit(0);
+	}
+	got = 0;
+	CHECK(sigwait(&block, &got) == 0 && got == SIGUSR1 && caught == 1);
+	CHECK_CHILD(pid);
 	sigprocmask(SIG_SETMASK, &old, NULL);
 	signal(SIGUSR1, SIG_DFL);
+	signal(SIGUSR2, SIG_DFL);
 }
 
 // What a signal's default action does to a child.
