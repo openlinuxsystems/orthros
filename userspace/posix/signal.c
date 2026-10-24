@@ -4,11 +4,13 @@
 // Signals: handlers and what they are told, masks, pending signals,
 // sigsuspend, sigtimedwait, default actions, stopping and continuing,
 // faults, interrupted calls, timers set again just after being
-// cancelled, the alternate stack, timers, and the values sigqueue sends
-// and real-time signals queue.
+// cancelled, the alternate stack, timers, floating-point state a handler
+// moves, and the values sigqueue sends and real-time signals queue.
 
+#include <fcntl.h>
 #include <setjmp.h>
 #include <stdint.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 
 #include "check.h"
@@ -420,6 +422,64 @@ static void floats(void) {
 	signal(SIGUSR1, SIG_DFL);
 }
 
+static void *volatile moved_to;
+static volatile size_t moved_len;
+
+// Moves the floating-point state the frame holds into a file, with
+// rounding toward zero, and points the frame at the file mapped where
+// nothing has touched it yet.
+static void on_move(int signal, siginfo_t *info, void *context) {
+	(void)signal;
+	(void)info;
+	ucontext_t *frame = context;
+	struct _fpstate *image = frame->uc_mcontext.fpregs;
+	// It runs to the top of the alternate stack.
+	size_t len = (size_t)(alternate + sizeof(alternate) - (char *)image);
+	image->mxcsr |= 0x6000;
+	int fd = open("/tmp/signal-image", O_RDWR | O_CREAT | O_TRUNC, 0600);
+	if(fd < 0)
+		return;
+	void *mapped = MAP_FAILED;
+	if(write(fd, image, len) == (ssize_t)len)
+		mapped = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	unlink("/tmp/signal-image");
+	if(mapped == MAP_FAILED)
+		return;
+	moved_to = mapped;
+	moved_len = len;
+	frame->uc_mcontext.fpregs = mapped;
+}
+
+static unsigned int mxcsr(void) {
+	unsigned int value;
+	__asm__ volatile("stmxcsr %0" : "=m"(value) : : "memory");
+	return value;
+}
+
+// Returning loads the floating-point state from wherever the handler
+// pointed the frame, even a page the process has never touched.
+static void moves(void) {
+	stack_t stack = {.ss_sp = alternate, .ss_size = sizeof(alternate), .ss_flags = 0};
+	CHECK(sigaltstack(&stack, NULL) == 0);
+	struct sigaction action;
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = on_move;
+	action.sa_flags = SA_ONSTACK | SA_SIGINFO;
+	sigemptyset(&action.sa_mask);
+	CHECK(sigaction(SIGUSR1, &action, NULL) == 0);
+	unsigned int before = mxcsr();
+	CHECK((before & 0x6000) == 0);
+	raise(SIGUSR1);
+	CHECK(moved_to != NULL);
+	CHECK(mxcsr() == (before | 0x6000));
+	__asm__ volatile("ldmxcsr %0" : : "m"(before) : "memory");
+	munmap(moved_to, moved_len);
+	stack.ss_flags = SS_DISABLE;
+	CHECK(sigaltstack(&stack, NULL) == 0);
+	signal(SIGUSR1, SIG_DFL);
+}
+
 static volatile int order[4];
 static volatile int order_count;
 
@@ -523,6 +583,7 @@ int main(void) {
 	RUN(rearms);
 	RUN(stacks);
 	RUN(floats);
+	RUN(moves);
 	RUN(nested);
 	RUN(queued);
 	return check_end();

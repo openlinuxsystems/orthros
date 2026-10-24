@@ -24,7 +24,8 @@
 //! heap's [`crate::Heap::drain`]) and tries once more. If that fails too
 //! and the block is small (at most [`OOM_MAX_ORDER`]), it runs the kernel's
 //! out-of-memory hook, which may free memory by stopping a resource domain
-//! and asks for another try (Phase 4; `docs/design/scheduler.md`). Larger
+//! and asks for another try, at most four times for one allocation (Phase
+//! 4; `docs/design/scheduler.md`). Larger
 //! blocks fail instead: running out of contiguous memory is not running out
 //! of memory.
 
@@ -403,7 +404,11 @@ impl Frames {
             NodePolicy::Prefer(node) | NodePolicy::Only(node) => usize::from(node),
         }
         .min(self.nodes() - 1);
-        for attempt in 0..2 + OOM_ATTEMPTS {
+        // Reclaim once, then the out-of-memory hook up to OOM_ATTEMPTS
+        // times, each followed by another try: a hook that freed memory is
+        // never asked again before that memory has been tried.
+        let (mut reclaimed, mut oom_calls) = (false, 0);
+        loop {
             if let Some(pfn) = self.try_zones(origin, order, flags, owner, tag) {
                 self.owner_pages[owner as usize].fetch_add(1 << order, Ordering::Relaxed);
                 let phys = pfn << PAGE_SHIFT;
@@ -421,9 +426,14 @@ impl Frames {
             if flags.context != Context::MaySleep || !reclaim {
                 break;
             }
-            match (attempt, self.reclaim.get(), self.oom.get()) {
-                (0, Some(hook), _) => hook(),
-                (_, _, Some(oom)) if order <= OOM_MAX_ORDER => {
+            if !reclaimed && let Some(hook) = self.reclaim.get() {
+                reclaimed = true;
+                hook();
+                continue;
+            }
+            match self.oom.get() {
+                Some(oom) if order <= OOM_MAX_ORDER && oom_calls < OOM_ATTEMPTS => {
+                    oom_calls += 1;
                     self.oom_calls.fetch_add(1, Ordering::Relaxed);
                     if !oom(order) {
                         break;
@@ -647,6 +657,30 @@ mod tests {
         assert!(frames.alloc(OOM_MAX_ORDER + 1, Flags::MAY_SLEEP, Owner::Kernel).is_err());
         assert_eq!(frames.oom_calls(), before);
         for phys in taken.into_iter().chain([again]) {
+            frames.free(phys, 0, Owner::Kernel).unwrap();
+        }
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn the_out_of_memory_hook_is_asked_a_bounded_number_of_times() {
+        // A hook that says it freed memory but did not: each call stops a
+        // domain for nothing, so an allocation asks at most OOM_ATTEMPTS
+        // times, and tries again after each.
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        fn oom(_order: u32) -> bool {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        let frames = frames_with(&[(0, 256, 2048)]);
+        frames.set_oom(oom);
+        let mut taken = Vec::new();
+        while let Ok(phys) = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel) {
+            taken.push(phys);
+        }
+        assert_eq!(CALLS.load(Ordering::Relaxed), u64::from(OOM_ATTEMPTS));
+        assert_eq!(frames.oom_calls(), u64::from(OOM_ATTEMPTS));
+        for phys in taken {
             frames.free(phys, 0, Owner::Kernel).unwrap();
         }
         frames.check().unwrap();

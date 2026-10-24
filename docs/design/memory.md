@@ -97,8 +97,9 @@ is `AllocError`, never a panic.
 ## Kernel heap
 
 `radix_mm::Heap` (`heap.rs`) serves requests up to 8 KiB from 32 size
-classes (`class.rs`), 16 bytes to 8 KiB, a quarter of a power of two
-apart. An object's alignment is the largest power of two dividing its size,
+classes (`class.rs`), 16 bytes to 8 KiB: 16 bytes apart up to 64 bytes,
+then a quarter of a power of two apart, so above 64 bytes rounding wastes
+less than a fifth of an object. An object's alignment is the largest power of two dividing its size,
 up to a page; a request with a stricter alignment moves up to the first
 class that provides it. Larger requests get a block of frames of their own
 from the frame allocator.

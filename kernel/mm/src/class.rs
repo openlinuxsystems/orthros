@@ -4,9 +4,10 @@
 //! The heap's size classes.
 //!
 //! Requests up to [`MAX_SMALL`] bytes are rounded up to one of
-//! [`CLASSES`] sizes, a quarter of a power of two apart, so no more than a
-//! fifth of an object is ever wasted on rounding (a quarter for the
-//! smallest sizes). Each class has its own slab cache. An object's
+//! [`CLASSES`] sizes, a quarter of a power of two apart above 64 bytes, so
+//! less than a fifth of an object is wasted on rounding there. The
+//! smallest classes are 16 bytes apart, so up to 15 bytes are: nearly half
+//! of a 32-byte object. Each class has its own slab cache. An object's
 //! alignment is the largest power of two dividing its size (capped at a
 //! page), because slabs start on a page boundary and objects follow each
 //! other without gaps; a request with a stricter alignment moves up to the
@@ -197,8 +198,10 @@ mod tests {
             if class.index() > 0 {
                 let smaller = Class(class.0 - 1).size();
                 assert!(smaller < class.size());
-                // Rounding up wastes at most a quarter (a fifth above 64 bytes).
-                assert!((class.size() - smaller) * 4 <= class.size() || class.size() <= 64);
+                // Rounding up wastes less than a fifth above 64 bytes, and
+                // less than 16 bytes below.
+                let gap = class.size() - smaller;
+                assert!(if class.size() > 64 { gap * 5 <= class.size() } else { gap <= 16 });
             }
             let waste = class.slab_bytes() - class.objects() * class.size();
             assert!(class.objects() >= 4 && waste * 8 <= class.slab_bytes(), "{class:?}");

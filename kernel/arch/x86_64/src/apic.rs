@@ -7,9 +7,10 @@
 //! The local APIC runs in x2APIC mode (registers as MSRs) when the CPU
 //! supports it, unless the `nox2apic` flag is given, and in xAPIC mode
 //! (registers in memory) otherwise. The 8259 PICs are remapped away from
-//! the exception vectors and masked, and every I/O APIC input is masked:
-//! the kernel takes no device interrupts yet (drivers come with Phase 7),
-//! only the local APIC timer and inter-processor interrupts.
+//! the exception vectors and masked, and every I/O APIC input is masked
+//! at boot. PCI devices interrupt by message (MSI or MSI-X, ADR 0052),
+//! which needs no I/O APIC; the only input unmasked is the built-in
+//! keyboard's, which [`route_isa`] sends to one CPU.
 //!
 //! Under KVM, an EOI written to the APIC leaves the virtual machine, as
 //! most APIC writes do. KVM offers a cheaper way, which Linux guests use

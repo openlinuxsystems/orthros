@@ -56,9 +56,9 @@ const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
 /// The page attribute table the kernel programs: index 0 write-back,
-/// 1 write-combining, 2 uncached-minus, 3 uncached, then the defaults for
-/// the indices it does not use (write-back, write-protect, uncached-minus,
-/// write-through).
+/// 1 write-combining, 2 uncached-minus, 3 uncached, then for the indices it
+/// does not use the types Linux gives them (write-back, write-protect,
+/// uncached-minus, write-through), not the power-on ones.
 const PAT_VALUE: u64 = 0x0407_0506_0007_0106;
 
 /// Where the SMEP and SMAP self-tests map their user page.
@@ -728,8 +728,9 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
     SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
     SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
+    // Release: a CPU that sees its bit sees this range (`serve_shootdown`).
     for (slot, &word) in SHOOTDOWN.pending.iter().zip(&targets) {
-        slot.store(word, Ordering::Relaxed);
+        slot.store(word, Ordering::Release);
     }
     SHOOTDOWN.generation.store(generation, Ordering::Release);
     for index in (0..cpus).filter(|&i| targets[i / 64] & (1 << (i % 64)) != 0) {
@@ -764,7 +765,12 @@ pub fn serve_shootdown() {
     let index = cpu.index();
     let bit = 1u64 << (index % 64);
     let pending = &SHOOTDOWN.pending[index / 64];
-    if pending.load(Ordering::Relaxed) & bit != 0 {
+    // Acquire, to pair with the requester's store: a CPU whose last served
+    // number is older can get here while the next request is being
+    // posted, with the old number, and see its new bit. The range it then
+    // reads must be the new one, or it would flush the old range, clear
+    // its bit, and leave the new range in its TLB.
+    if pending.load(Ordering::Acquire) & bit != 0 {
         let start = SHOOTDOWN.start.load(Ordering::Relaxed);
         let end = SHOOTDOWN.end.load(Ordering::Relaxed);
         flush_local(start..end);
