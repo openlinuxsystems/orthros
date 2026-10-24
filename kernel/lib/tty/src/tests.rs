@@ -5,19 +5,31 @@
 
 use proptest::prelude::*;
 use radix_abi::signal::{SIGINT, SIGTSTP};
-use radix_abi::terminal::{ECHO, ICANON, ISIG, VMIN};
+use radix_abi::terminal::{ECHO, ICANON, ISIG, VLNEXT, VMIN, VTIME};
 
-use crate::{Ldisc, Ring, Settings, TERMIOS_SIZE};
+use crate::{Ldisc, Received, Ring, Settings, TERMIOS_SIZE};
 
 /// Types `bytes`, collecting the echo and the signals.
 fn typed(ldisc: &mut Ldisc<[u8; 64]>, bytes: &[u8]) -> (Vec<u8>, Vec<u32>) {
     let mut echo = Vec::new();
     let mut signals = Vec::new();
     for &byte in bytes {
-        let (signal, _) = ldisc.receive(byte, &mut |out| echo.extend_from_slice(out));
-        signals.extend(signal);
+        if let Received::Signal(signal) =
+            ldisc.receive(byte, &mut |out| echo.extend_from_slice(out))
+        {
+            signals.push(signal);
+        }
     }
     (echo, signals)
+}
+
+/// The settings with ICANON off, VMIN and VTIME as given.
+fn raw(ldisc: &Ldisc<[u8; 64]>, min: u8, time: u8) -> Settings {
+    let mut raw = ldisc.settings;
+    raw.lflag &= !(ICANON | ECHO);
+    raw.cc[VMIN as usize] = min;
+    raw.cc[VTIME as usize] = time;
+    raw
 }
 
 fn read_all(ldisc: &mut Ldisc<[u8; 64]>) -> Vec<u8> {
@@ -120,6 +132,83 @@ fn non_canonical_reads_wait_for_vmin() {
     typed(&mut ldisc, b"c");
     assert!(ldisc.ready());
     assert_eq!(read_all(&mut ldisc), b"abc");
+}
+
+#[test]
+fn poll_wants_vmin_bytes_only_without_vtime() {
+    // As Linux's input_available_p: with VTIME a read returns at its
+    // timer, so a byte makes the terminal readable.
+    let mut ldisc = Ldisc::new([0u8; 64]);
+    ldisc.set(raw(&ldisc, 3, 5));
+    typed(&mut ldisc, b"a");
+    assert!(ldisc.ready());
+    ldisc.set(raw(&ldisc, 3, 0));
+    assert!(!ldisc.ready());
+    ldisc.set(raw(&ldisc, 0, 0));
+    assert!(ldisc.ready());
+}
+
+#[test]
+fn raw_input_past_its_room_waits_for_a_reader() {
+    let mut ldisc = Ldisc::new([0u8; 64]);
+    ldisc.set(raw(&ldisc, 1, 0));
+    for i in 0..64u8 {
+        assert_eq!(ldisc.receive(b'a' + i % 26, &mut |_| {}), Received::Taken);
+    }
+    assert!(!ldisc.has_room());
+    assert_eq!(ldisc.receive(b'z', &mut |_| {}), Received::Full);
+    assert_eq!(ldisc.pending(), 64);
+    let mut first = [0u8; 4];
+    let mut at = 0;
+    ldisc
+        .read_with::<()>(4, &mut |run| {
+            first[at..at + run.len()].copy_from_slice(run);
+            at += run.len();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(&first, b"abcd");
+    assert!(ldisc.has_room());
+    assert_eq!(ldisc.receive(b'z', &mut |_| {}), Received::Taken);
+    assert_eq!(ldisc.pending(), 61);
+}
+
+#[test]
+fn canonical_input_past_its_room_waits_only_behind_a_line() {
+    let mut ldisc = Ldisc::new([0u8; 64]);
+    // A line of 62 and its end fill the input: the next waits for it to
+    // be read, but ^C needs no room.
+    typed(&mut ldisc, &[b'x'; 62]);
+    typed(&mut ldisc, b"\n");
+    assert!(!ldisc.has_room());
+    assert_eq!(ldisc.receive(b'y', &mut |_| {}), Received::Full);
+    assert_eq!(ldisc.receive(0x03, &mut |_| {}), Received::Signal(SIGINT));
+    // The interrupt flushed the input: there is room again.
+    assert!(ldisc.has_room() && ldisc.pending() == 0);
+    // A line being edited that fills the input, with nothing to read
+    // before it, drops what is typed past it: nothing could make room.
+    typed(&mut ldisc, &[b'x'; 63]);
+    assert!(ldisc.has_room());
+    assert_eq!(ldisc.receive(b'y', &mut |_| {}), Received::Dropped);
+    assert_eq!(ldisc.receive(b'\n', &mut |_| {}), Received::Taken);
+    assert_eq!(read_all(&mut ldisc).len(), 64);
+}
+
+#[test]
+fn entering_canonical_mode_makes_typeahead_a_line() {
+    let mut ldisc = Ldisc::new([0u8; 64]);
+    let canonical = ldisc.settings;
+    ldisc.set(raw(&ldisc, 1, 0));
+    typed(&mut ldisc, b"ls");
+    ldisc.set(canonical);
+    assert!(ldisc.ready());
+    assert_eq!(read_all(&mut ldisc), b"ls");
+    // A pending LNEXT is forgotten across the change.
+    typed(&mut ldisc, &[canonical.cc[VLNEXT as usize]]);
+    ldisc.set(raw(&ldisc, 1, 0));
+    ldisc.set(canonical);
+    let (_, signals) = typed(&mut ldisc, b"\x03");
+    assert_eq!(signals, [SIGINT]);
 }
 
 #[test]

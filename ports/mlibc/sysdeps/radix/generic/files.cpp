@@ -968,9 +968,6 @@ int Sysdeps<Fsync>::operator()(int fd) {
 	uint64_t status = radix_file_sync(slot);
 	if(other_kind(status))
 		status = radix_directory_sync(slot);
-	// Pipes and terminals have nothing to write back.
-	if(is(status, RADIX_KERNEL_MISSING_RIGHTS))
-		return 0;
 	return radix::to_errno(status);
 }
 

@@ -44,7 +44,7 @@ use radix_abi::terminal::{self as abi, TOSTOP, WindowSize};
 use radix_hal::UserMode;
 use radix_mm::Kmalloc;
 use radix_sync::{Mutex, Once};
-use radix_tty::{Ldisc, Ring, Settings, TERMIOS_SIZE};
+use radix_tty::{Ldisc, Received, Ring, Settings, TERMIOS_SIZE};
 use radix_vfs::synthetic::FixedDir;
 use radix_vfs::{In, KArc, Kind, Node, NodeRef, Out, Stat, mem, next_id};
 
@@ -78,9 +78,13 @@ pub struct Tty {
     /// The node number `/dev/pts/N` shows.
     id: u64,
     state: Mutex<State>,
-    /// Whether a terminal read would find something, as the line
-    /// discipline says, for the waits.
+    /// Whether `poll` finds the terminal side readable, how many bytes a
+    /// read could take, whether typing would be taken, and whether output
+    /// is stopped, as the line discipline says, for the waits.
     input_ready: AtomicBool,
+    input_pending: AtomicUsize,
+    input_room: AtomicBool,
+    output_stopped: AtomicBool,
     /// How many bytes of output wait for the master.
     output_len: AtomicUsize,
     /// How many descriptions of the master and of the terminal are open,
@@ -143,7 +147,15 @@ impl Tty {
     /// Updates the atomics the waits read, with the state locked.
     fn mirror(&self, state: &State) {
         self.input_ready.store(state.ldisc.ready(), Ordering::Release);
+        self.input_pending.store(state.ldisc.pending(), Ordering::Release);
+        self.input_room.store(state.ldisc.has_room(), Ordering::Release);
+        self.output_stopped.store(state.ldisc.output_stopped, Ordering::Release);
         self.output_len.store(state.output.len(), Ordering::Release);
+    }
+
+    /// Whether the terminal side was opened and is open no more.
+    fn closed(&self) -> bool {
+        self.opened.load(Ordering::Acquire) && self.slaves.load(Ordering::Acquire) == 0
     }
 
     /// N, of its `/dev/pts/N`.
@@ -157,21 +169,23 @@ impl Tty {
     }
 
     /// The events `poll` finds on a side of it, as Linux's: the terminal
-    /// side is readable when a read would find something and writable
-    /// while the master's output has room, and once the master has gone,
-    /// readable, writable, in error and hung up at once. The master is
-    /// readable while output waits, always writable (typing past what the
-    /// terminal holds is dropped), and hung up once the terminal, opened
-    /// before, is open no more.
+    /// side is readable when the line discipline says so
+    /// (`Ldisc::ready`) and writable while output is not stopped and the
+    /// master's output has room, and once the master has gone, readable,
+    /// writable, in error and hung up at once. The master is readable
+    /// while output waits, writable while typing would be taken, and hung
+    /// up (and writable, typing then going nowhere) once the terminal,
+    /// opened before, is open no more.
     pub fn events(&self, master: bool) -> u16 {
         let mut events = 0;
         if master {
-            events |= poll::WRITABLE;
             if self.output_len.load(Ordering::Acquire) > 0 {
                 events |= poll::READABLE;
             }
-            if self.opened.load(Ordering::Acquire) && self.slaves.load(Ordering::Acquire) == 0 {
-                events |= poll::HANG_UP;
+            if self.closed() {
+                events |= poll::HANG_UP | poll::WRITABLE;
+            } else if self.input_room.load(Ordering::Acquire) {
+                events |= poll::WRITABLE;
             }
         } else if self.masters.load(Ordering::Acquire) == 0 {
             events = poll::READABLE | poll::WRITABLE | poll::ERROR | poll::HANG_UP;
@@ -179,7 +193,9 @@ impl Tty {
             if self.input_ready.load(Ordering::Acquire) {
                 events |= poll::READABLE;
             }
-            if self.output_len.load(Ordering::Acquire) + WRITE_ROOM <= OUTPUT {
+            if !self.output_stopped.load(Ordering::Acquire)
+                && self.output_len.load(Ordering::Acquire) + WRITE_ROOM <= OUTPUT
+            {
                 events |= poll::WRITABLE;
             }
         }
@@ -277,8 +293,11 @@ impl Tty {
         }
     }
 
-    /// The terminal side's read: a line, or in non-canonical mode what
-    /// VMIN asks for.
+    /// The terminal side's read: in canonical mode a line. Otherwise, as
+    /// POSIX's four cases go on Linux: with VMIN, until VMIN bytes have
+    /// come (or as many as asked for), or with VTIME too, until VTIME has
+    /// passed since the last byte once one came; with VTIME alone, what
+    /// comes within VTIME; with neither, what there is.
     fn read(
         &self,
         user: &UserThread,
@@ -287,17 +306,36 @@ impl Tty {
     ) -> Result<usize, Status> {
         self.job_control(user, SIGTTIN)?;
         let want = out.len();
+        if want == 0 {
+            return Ok(0);
+        }
+        let mut got = 0;
         let mut deadline = None;
         loop {
             {
                 let mut state = self.state.lock();
                 let (min, time) = state.ldisc.settings.min_time();
-                let canonical = state.ldisc.settings.canonical();
-                let now =
-                    state.ldisc.ready() || (!canonical && min == 0 && state.ldisc.pending() > 0);
-                if now {
-                    let mut at = 0;
-                    let read = state.ldisc.read_with(want, &mut |run| {
+                let tenths = |time: u8| sched::now_ns() + u64::from(time) * 100_000_000;
+                if state.ldisc.settings.canonical() {
+                    // Settings changed under a read that has bytes already.
+                    if got > 0 {
+                        return Ok(got);
+                    }
+                    if state.ldisc.ready() {
+                        let mut at = 0;
+                        let read = state.ldisc.read_with(want, &mut |run| {
+                            out.put(at, run)?;
+                            at += run.len();
+                            Ok::<(), radix_vfs::Error>(())
+                        });
+                        self.mirror(&state);
+                        drop(state);
+                        self.changed();
+                        return read.map_err(super::status);
+                    }
+                } else if state.ldisc.pending() > 0 {
+                    let mut at = got;
+                    let read = state.ldisc.read_with(want - got, &mut |run| {
                         out.put(at, run)?;
                         at += run.len();
                         Ok::<(), radix_vfs::Error>(())
@@ -305,24 +343,41 @@ impl Tty {
                     self.mirror(&state);
                     drop(state);
                     self.changed();
-                    return read.map_err(super::status);
-                }
-                if self.masters.load(Ordering::Acquire) == 0 {
-                    return Ok(0);
-                }
-                if !canonical && min == 0 {
-                    // VTIME alone: wait that long for a byte.
-                    if time == 0 || deadline.is_some_and(|d| sched::now_ns() >= d) {
-                        return Ok(0);
+                    match read {
+                        Ok(n) => got += n,
+                        Err(_) if got > 0 => return Ok(got),
+                        Err(err) => return Err(super::status(err)),
                     }
-                    deadline.get_or_insert(sched::now_ns() + u64::from(time) * 100_000_000);
+                    let enough = if min == 0 { 1 } else { usize::from(min).min(want) };
+                    if got >= enough {
+                        return Ok(got);
+                    }
+                    // With VMIN, VTIME runs again from each byte.
+                    if time > 0 {
+                        deadline = Some(tenths(time));
+                    }
+                    continue;
+                } else if min == 0 {
+                    // VTIME alone runs from the read's start; with neither,
+                    // there is nothing to wait for.
+                    if time == 0 || deadline.is_some_and(|d| sched::now_ns() >= d) {
+                        return Ok(got);
+                    }
+                    deadline.get_or_insert_with(|| tenths(time));
+                } else if deadline.is_some_and(|d| sched::now_ns() >= d) {
+                    // VMIN and VTIME: no byte came for VTIME.
+                    return Ok(got);
                 }
             }
+            if self.masters.load(Ordering::Acquire) == 0 {
+                return Ok(got);
+            }
             if non_blocking {
-                return Err(Kernel::WouldBlock.status(0));
+                return if got > 0 { Ok(got) } else { Err(Kernel::WouldBlock.status(0)) };
             }
             let ready = || {
                 self.input_ready.load(Ordering::Acquire)
+                    || self.input_pending.load(Ordering::Acquire) > 0
                     || self.masters.load(Ordering::Acquire) == 0
                     || sched::interrupted()
             };
@@ -332,8 +387,15 @@ impl Tty {
                 }
                 None => wait::wait_until(self.key(), "terminal read", ready),
             }
-            if sched::interrupted() && !self.input_ready.load(Ordering::Acquire) {
-                return Err(interrupted(Restart::Always));
+            if sched::interrupted() {
+                if got > 0 {
+                    return Ok(got);
+                }
+                if !self.input_ready.load(Ordering::Acquire)
+                    && self.input_pending.load(Ordering::Acquire) == 0
+                {
+                    return Err(interrupted(Restart::Always));
+                }
             }
         }
     }
@@ -375,8 +437,10 @@ impl Tty {
             if non_blocking {
                 return if done > 0 { Ok(done) } else { Err(Kernel::WouldBlock.status(0)) };
             }
+            // Until output may go on (^Q, or tcflow) and has room.
             wait::wait_until(self.key(), "terminal write", || {
-                self.output_len.load(Ordering::Acquire) + 2 <= OUTPUT
+                (!self.output_stopped.load(Ordering::Acquire)
+                    && self.output_len.load(Ordering::Acquire) + 2 <= OUTPUT)
                     || self.masters.load(Ordering::Acquire) == 0
                     || sched::interrupted()
             });
@@ -425,9 +489,12 @@ impl Tty {
     }
 
     /// The master's write: typing. Signal characters send their signals
-    /// to the foreground process group; input past what the terminal holds
-    /// is dropped, as a terminal's typing is.
-    fn master_write(&self, data: &dyn In) -> Result<usize, Status> {
+    /// to the foreground process group. Typing the terminal has no room
+    /// for (`Ldisc::receive`) waits for a read there to make some, as on
+    /// Linux; `non_blocking`, the write stops there, failing with
+    /// would_block if it took nothing. Once the terminal side, opened
+    /// before, is open no more, such typing goes nowhere.
+    fn master_write(&self, data: &dyn In, non_blocking: bool) -> Result<usize, Status> {
         let total = data.len();
         let mut done = 0;
         let mut chunk = [0u8; 256];
@@ -436,28 +503,48 @@ impl Tty {
             data.get(done, &mut chunk[..n]).map_err(super::status)?;
             let mut signals = [0u32; 4];
             let mut count = 0;
+            let mut taken = 0;
             {
                 let mut state = self.state.lock();
+                let closed = self.closed();
                 let State { ldisc, output, .. } = &mut *state;
                 for &byte in &chunk[..n] {
-                    let (signal, _) = ldisc.receive(byte, &mut |echo| {
+                    match ldisc.receive(byte, &mut |echo| {
                         output.push(echo);
-                    });
-                    if let Some(signal) = signal
-                        && count < signals.len()
-                    {
-                        signals[count] = signal;
-                        count += 1;
+                    }) {
+                        Received::Full if !closed => break,
+                        Received::Signal(signal) => {
+                            signals[count] = signal;
+                            count += 1;
+                        }
+                        _ => {}
+                    }
+                    taken += 1;
+                    // The rest after the signals are sent.
+                    if count == signals.len() {
+                        break;
                     }
                 }
                 self.mirror(&state);
             }
-            self.changed();
-            for &signal in &signals[..count] {
-                debug_assert!(matches!(signal, SIGINT | SIGQUIT | SIGTSTP));
-                self.signal_foreground(signal);
+            if taken > 0 {
+                self.changed();
+                for &signal in &signals[..count] {
+                    debug_assert!(matches!(signal, SIGINT | SIGQUIT | SIGTSTP));
+                    self.signal_foreground(signal);
+                }
+                done += taken;
+                continue;
             }
-            done += n;
+            if non_blocking {
+                return if done > 0 { Ok(done) } else { Err(Kernel::WouldBlock.status(0)) };
+            }
+            wait::wait_until(self.key(), "terminal input", || {
+                self.input_room.load(Ordering::Acquire) || self.closed() || sched::interrupted()
+            });
+            if sched::interrupted() {
+                return if done > 0 { Ok(done) } else { Err(interrupted(Restart::Always)) };
+            }
         }
         Ok(done)
     }
@@ -518,6 +605,7 @@ impl Tty {
                     2 | 3 => {}
                     _ => return Err(Kernel::InvalidArgument.status(1)),
                 }
+                this.mirror(&state);
                 drop(state);
                 this.changed();
                 Ok(0)
@@ -616,7 +704,6 @@ impl Tty {
     }
 }
 
-/// Whether a session other than `session` already has `tty`.
 /// One open of a side of a terminal: what a file description of it
 /// holds.
 pub struct Handle {
@@ -653,7 +740,7 @@ impl Handle {
         non_blocking: bool,
     ) -> Result<usize, Status> {
         if self.master {
-            self.tty.master_write(data)
+            self.tty.master_write(data, non_blocking)
         } else {
             self.tty.write(user, data, non_blocking)
         }
@@ -683,12 +770,7 @@ impl Drop for Handle {
             if self.tty.masters.fetch_sub(1, Ordering::AcqRel) == 1 {
                 // The terminal goes with its master.
                 self.tty.hang_up();
-                if let Some(pts) = PTS.get() {
-                    let mut name = radix_klog::TextBuf::<12>::new();
-                    let _ =
-                        core::fmt::Write::write_fmt(&mut name, format_args!("{}", self.tty.number));
-                    pts.remove_entry(name.as_str());
-                }
+                remove_entry(&self.tty);
             }
         } else {
             self.tty.slaves.fetch_sub(1, Ordering::AcqRel);
@@ -781,7 +863,9 @@ impl Node for Ptmx {
 
     fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
         let tty = make()?;
-        open_side(&tty, true)
+        // Without its master, nothing would ever take the terminal's
+        // `/dev/pts/N` away, and its number with it.
+        open_side(&tty, true).inspect_err(|_| remove_entry(&tty))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -849,6 +933,9 @@ fn make() -> radix_vfs::Result<TtyRef> {
             locked: false,
         }),
         input_ready: AtomicBool::new(false),
+        input_pending: AtomicUsize::new(0),
+        input_room: AtomicBool::new(true),
+        output_stopped: AtomicBool::new(false),
         output_len: AtomicUsize::new(0),
         masters: AtomicU32::new(0),
         slaves: AtomicU32::new(0),
@@ -863,6 +950,15 @@ fn make() -> radix_vfs::Result<TtyRef> {
     let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{number}"));
     pts.add(name.as_str(), entry)?;
     Ok(tty)
+}
+
+/// Takes `tty`'s `/dev/pts/N` away.
+fn remove_entry(tty: &Tty) {
+    if let Some(pts) = PTS.get() {
+        let mut name = radix_klog::TextBuf::<12>::new();
+        let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{}", tty.number));
+        pts.remove_entry(name.as_str());
+    }
 }
 
 /// Makes `/dev/pts` in the device tree `root`, with `/dev/ptmx` and

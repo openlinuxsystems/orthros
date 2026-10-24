@@ -225,6 +225,10 @@ fn write_volume(root: &Dir, name: &str) {
         ),
         Err(err) => fail(&format!("/volumes/{name}: sync: {err}")),
     }
+    // As POSIX's fsync, a file open only for reading is synced too.
+    if let Err(err) = dir.open("hello.txt", OpenFlags::NONE, Rights::READ).and_then(|f| f.sync()) {
+        fail(&format!("/volumes/{name}/hello.txt: sync, open for reading: {err}"));
+    }
     // What is in the cache reads back now, before the reboot too.
     match dir.read_file("hello.txt") {
         Ok(data) => check(data == HELLO, || format!("/volumes/{name}/hello.txt reads back wrong")),

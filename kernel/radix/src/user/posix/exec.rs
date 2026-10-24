@@ -580,6 +580,9 @@ fn replace_own(
     path: &[u8],
 ) -> Result<Answer> {
     let me = sched::current().ok_or(error(Kernel::Gone))?;
+    // The new program's empty set of pending signals, made while a lack of
+    // memory can still go back to the old program.
+    let fresh = super::new_pending().ok_or(error(Kernel::NoMemory))?;
     // The other threads stop before anything changes: none of them may see
     // the old program's capabilities after the new program starts.
     process.stop_other_threads(&me);
@@ -611,10 +614,7 @@ fn replace_own(
     }
     let (mask, mut pending) = {
         let mut signals = user.signals.lock();
-        let pending = core::mem::replace(
-            &mut signals.pending,
-            super::new_pending().ok_or(error(Kernel::NoMemory))?,
-        );
+        let pending = core::mem::replace(&mut signals.pending, fresh);
         (signals.mask, pending)
     };
     process.posix.lock().actions.reset_for_exec();

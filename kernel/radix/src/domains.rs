@@ -35,7 +35,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use radix_cap::ObjectId;
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -136,10 +136,19 @@ pub struct Domain {
     usage: AtomicU64,
     peak: AtomicU64,
     refused: AtomicU64,
-    threads: AtomicU32,
-    stopping: AtomicBool,
+    /// Its threads, in the low 32 bits, and [`STOPPING`]: one word, so
+    /// that no thread joins a domain being stopped and the last thread to
+    /// leave clears the mark, with no moment in between for the other
+    /// side to come in.
+    state: AtomicU64,
     oom_stops: AtomicU32,
 }
+
+/// The bit of [`Domain`]'s state that says it is being stopped.
+const STOPPING: u64 = 1 << 32;
+
+/// The bits of [`Domain`]'s state that count its threads.
+const THREAD_COUNT: u64 = STOPPING - 1;
 
 impl Domain {
     /// Its number, unique for as long as the kernel runs.
@@ -215,7 +224,7 @@ impl Domain {
 
     /// Threads in it now.
     pub fn threads(&self) -> u32 {
-        self.threads.load(Ordering::Relaxed)
+        (self.state.load(Ordering::Relaxed) & THREAD_COUNT) as u32
     }
 
     /// How many times the out-of-memory policy has stopped it.
@@ -225,7 +234,7 @@ impl Domain {
 
     /// Whether it is being stopped by the out-of-memory policy.
     pub fn is_stopping(&self) -> bool {
-        self.stopping.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & STOPPING != 0
     }
 
     /// Whether it is `other` or below it.
@@ -275,9 +284,9 @@ impl Domain {
         }
     }
 
-    /// A thread joined it.
-    pub(crate) fn thread_joined(&self) {
-        self.threads.fetch_add(1, Ordering::Relaxed);
+    /// A thread joins it; refused (false) while it is being stopped.
+    pub(crate) fn thread_joined(&self) -> bool {
+        self.update(|state| (state & STOPPING == 0).then_some(state + 1)).is_some()
     }
 
     /// A thread in it exited (or was freed without running). Returns
@@ -285,11 +294,20 @@ impl Domain {
     /// supervisor in the kernel takes new threads again once its last has
     /// gone: Spark, which made it, starts its service again (Phase 9).
     pub(crate) fn thread_left(&self) -> bool {
-        let last = self.threads.fetch_sub(1, Ordering::AcqRel) == 1;
-        if last && self.supervisor.is_none() {
-            self.stopping.store(false, Ordering::Release);
-        }
-        last
+        let unsupervised = self.supervisor.is_none();
+        let before = self
+            .update(|state| {
+                let left = state - 1;
+                Some(if left & THREAD_COUNT == 0 && unsupervised { left & !STOPPING } else { left })
+            })
+            .unwrap_or(0);
+        before & THREAD_COUNT == 1
+    }
+
+    /// Changes the state word with `change` (None: leave it), as one
+    /// atomic step; returns the word as it was, if it changed.
+    fn update(&self, change: impl FnMut(u64) -> Option<u64>) -> Option<u64> {
+        self.state.try_update(Ordering::AcqRel, Ordering::Acquire, change).ok()
     }
 
     /// What to wait on (`sched::wait`) for its last thread to exit.
@@ -305,10 +323,12 @@ impl Domain {
         if stopping && oom {
             self.oom_stops.fetch_add(1, Ordering::Relaxed);
         }
-        if stopping && self.supervisor.is_none() && self.threads() == 0 {
-            return;
-        }
-        self.stopping.store(stopping, Ordering::Release);
+        let unsupervised = self.supervisor.is_none();
+        self.update(|state| match stopping {
+            true if unsupervised && state & THREAD_COUNT == 0 => None,
+            true => Some(state | STOPPING),
+            false => Some(state & !STOPPING),
+        });
     }
 }
 
@@ -359,8 +379,7 @@ fn new_domain(
         usage: AtomicU64::new(0),
         peak: AtomicU64::new(0),
         refused: AtomicU64::new(0),
-        threads: AtomicU32::new(0),
-        stopping: AtomicBool::new(false),
+        state: AtomicU64::new(0),
         oom_stops: AtomicU32::new(0),
     }
 }

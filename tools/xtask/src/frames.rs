@@ -30,6 +30,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("radix::user::loader::start", "starts Spark, once, on the boot CPU's 64 KiB stack"),
     ("radix::fs::make", "builds the root, once, on the boot CPU's 64 KiB stack"),
+    ("radix::fs::disk::bind", "sets up a disk at boot, on the boot CPU's 64 KiB stack"),
     ("__rustc::rust_begin_unwind", "the panic handler: the stack is not used again"),
     ("radix::captest::run", "a boot test, run from the boot CPU's 64 KiB stack"),
     ("radix::schedtest::balance", "a boot test, run from the boot CPU's 64 KiB stack"),

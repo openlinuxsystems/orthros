@@ -11,6 +11,8 @@ use radix_sync::SpinLock;
 
 use crate::Arch;
 
+/// The crash log. Its sink takes it from interrupts too (the log masks
+/// them around its sinks), so everything else takes it with them masked.
 static LOG: SpinLock<Option<CrashLog>> = SpinLock::new(None);
 
 /// The log's console sink. It takes every message, debug ones included.
@@ -37,7 +39,7 @@ pub fn init() {
     let len = region.len();
     match CrashLog::open(region) {
         Some(log) => {
-            *LOG.lock() = Some(log);
+            *LOG.lock_irq() = Some(log);
             radix_klog::add_sink(&SINK, true);
         }
         None => radix_klog::warn!("Crash log: region of {len} bytes is too small"),
@@ -46,24 +48,24 @@ pub fn init() {
 
 /// Whether this boot has a crash log.
 pub fn active() -> bool {
-    LOG.lock().is_some()
+    LOG.lock_irq().is_some()
 }
 
 /// This boot's number, counted by the crash log (1 if there is none).
 pub fn boot_number() -> u32 {
-    LOG.lock().as_ref().map_or(1, CrashLog::boot)
+    LOG.lock_irq().as_ref().map_or(1, CrashLog::boot)
 }
 
 /// Records how this boot ends.
 pub fn set_ending(ending: Ending) {
-    if let Some(log) = LOG.lock().as_mut() {
+    if let Some(log) = LOG.lock_irq().as_mut() {
         log.set_ending(ending, &mut |bytes| Arch::flush_to_memory(bytes));
     }
 }
 
 /// How the previous boot ended, and whether its log contains `needle`.
 pub fn previous(needle: &str) -> Option<(Ending, bool)> {
-    let log = LOG.lock();
+    let log = LOG.lock_irq();
     let previous = log.as_ref()?.previous()?;
     Some((previous.ending, previous.contains(needle)))
 }
@@ -75,7 +77,7 @@ const SHOWN_OTHERWISE: usize = 12;
 /// Reports the previous boot's log, if the region held one: how that boot
 /// ended and its last lines.
 pub fn report_previous() {
-    let guard = LOG.lock();
+    let guard = LOG.lock_irq();
     let Some(current) = guard.as_ref() else {
         drop(guard);
         info!("Crash log: none (no region reserved, or disabled with crashlog=off)");

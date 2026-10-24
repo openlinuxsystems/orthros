@@ -88,6 +88,29 @@ fn pairs(text: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
     })
 }
 
+/// A value with `/proc`'s escapes undone: a backslash and three octal
+/// digits stand for a byte (`\040` a space), as on Linux.
+pub fn unescape(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        let digits =
+            value.get(i + 1..i + 4).filter(|d| d.iter().all(|b| (b'0'..=b'7').contains(b)));
+        match digits {
+            Some(d) if value[i] == b'\\' => {
+                let n = d.iter().fold(0u32, |n, &b| n * 8 + u32::from(b - b'0'));
+                out.push(n as u8);
+                i += 4;
+            }
+            _ => {
+                out.push(value[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// A number at the start of a value (`12 KiB` is 12).
 fn number<T: std::str::FromStr + Default>(value: &[u8]) -> T {
     let text = String::from_utf8_lossy(value);
@@ -101,7 +124,7 @@ pub fn parse_status(text: &[u8]) -> Process {
         let text = || String::from_utf8_lossy(value).into_owned();
         match key {
             b"number" => p.number = number(value),
-            b"name" => p.name = text(),
+            b"name" => p.name = String::from_utf8_lossy(&unescape(value)).into_owned(),
             b"state" => p.state = text(),
             b"threads" => p.threads = number(value),
             b"domain" => p.domain = text(),
@@ -127,7 +150,7 @@ pub fn parse_status(text: &[u8]) -> Process {
             b"voluntary_switches" => p.voluntary_switches = number(value),
             b"involuntary_switches" => p.involuntary_switches = number(value),
             b"traced" => p.traced = value == b"yes",
-            b"directory" => p.directory = Some(OsString::from_vec(value.to_vec())),
+            b"directory" => p.directory = Some(OsString::from_vec(unescape(value))),
             _ => {}
         }
     }
@@ -220,7 +243,7 @@ pub fn parse_threads(text: &[u8]) -> Vec<Thread> {
                 b"priority" => t.priority = number(value),
                 b"nice" => t.nice = number(value),
                 b"waits" => t.waits = Some(text()),
-                b"name" => t.name = text(),
+                b"name" => t.name = String::from_utf8_lossy(&unescape(value)).into_owned(),
                 _ => {}
             }
         }
@@ -283,7 +306,7 @@ pub fn parse_files(text: &[u8]) -> Vec<Held> {
                 b"mount" => h.mount = number(value),
                 b"offset" => h.offset = Some(number(value)),
                 b"cut" => h.cut = value == b"yes",
-                b"path" => h.path = Some(OsString::from_vec(value.to_vec())),
+                b"path" => h.path = Some(OsString::from_vec(unescape(value))),
                 _ => {}
             }
         }
@@ -443,8 +466,8 @@ pub fn mounts() -> io::Result<Vec<Mount>> {
         let parts: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
         let [source, path, kind, ..] = parts.as_slice() else { continue };
         mounts.push(Mount {
-            source: String::from_utf8_lossy(source).into_owned(),
-            path: OsString::from_vec(path.to_vec()),
+            source: String::from_utf8_lossy(&unescape(source)).into_owned(),
+            path: OsString::from_vec(unescape(path)),
             kind: String::from_utf8_lossy(kind).into_owned(),
         });
     }
@@ -475,6 +498,9 @@ mod tests {
         assert_eq!(p.nice, -5);
         assert_eq!(p.resident_kib, 1024);
         assert_eq!(p.directory, Some(OsString::from("/home/a b")));
+        let escaped = parse_status(b"name: a\\012b\ndirectory: /x\\134\\012y\n");
+        assert_eq!(escaped.name, "a\nb");
+        assert_eq!(escaped.directory, Some(OsString::from("/x\\\ny")));
         assert_eq!(p.state_letter(), 'S');
         assert!(parse_status(b"terminal: none\n").terminal.is_none());
     }
@@ -500,6 +526,13 @@ mod tests {
         assert_eq!(f[1].fd, Some(1));
         assert_eq!(f[1].offset, Some(3));
         assert_eq!(f[1].path, Some(OsString::from("/tmp/x y")));
+    }
+
+    #[test]
+    fn escapes_are_undone() {
+        assert_eq!(unescape(b"a\\040b\\011c\\012\\134"), b"a b\tc\n\\");
+        // Not an escape: left as it is.
+        assert_eq!(unescape(b"\\9x\\04"), b"\\9x\\04");
     }
 
     #[test]

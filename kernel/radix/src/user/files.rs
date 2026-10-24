@@ -633,7 +633,8 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         }
         file::SYNC => {
             file::SyncArgs::decode(args)?;
-            let file = file_of(found, Rights::WRITE)?;
+            // As POSIX's fsync, whatever the file was opened for.
+            let file = file_of(found, Rights::NONE)?;
             sync(file)?;
             answer(label, 0, [0; 8])
         }
@@ -1278,7 +1279,7 @@ pub fn ring_write(user: &UserThread, cap: u32, args: [u64; 3]) -> Result<[u64; 2
 
 /// The ring's sync operation.
 pub fn ring_sync(user: &UserThread, cap: u32) -> Result<[u64; 2]> {
-    let (_, file) = objects::file(user.cspace, cap, Rights::WRITE)?;
+    let (_, file) = objects::file(user.cspace, cap, Rights::NONE)?;
     sync(&file)?;
     Ok([0; 2])
 }

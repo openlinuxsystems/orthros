@@ -46,7 +46,7 @@ pub mod weight;
 #[cfg(kani)]
 mod proofs;
 
-pub use account::{LOAD_INTERVAL_NS, LoadAverage, split_time};
+pub use account::{LOAD_INTERVAL_NS, LoadAverage, Split, split_time};
 pub use cpuset::{CpuSet, MAX_CPUS};
 pub use fair::{
     BASE_SLICE_NS, Entity, FairQueue, Placement, mul_div, mul_div_unsigned, virtual_ns,

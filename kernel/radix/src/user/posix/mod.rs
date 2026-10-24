@@ -335,27 +335,24 @@ pub fn exited(process: &ProcessObject) {
     let mut gone: Vec<ProcessRef, Kmalloc> = Vec::new_in(kmalloc());
     let mut leftover = None;
     let (parent, hangups) = with_tree(|tree| {
-        let Some(me) = tree.get(pid) else { return (None, None) };
+        let Some(me) = tree.get(pid) else { return (None, Vec::new_in(kmalloc())) };
         let session = me.session;
         let parent = find(tree, me.parent);
         let auto_reap =
             parent.as_ref().is_some_and(|parent| parent.posix.lock().actions.reaps_children());
         // Groups this end may leave orphaned with stopped members: its
-        // own, and its children's.
-        let mut groups = [0u64; 8];
-        let mut count = 0;
+        // own, and its children's, each with whether it is orphaned now.
+        // Only a group there is no memory to note is left out.
+        let mut groups: Vec<(u64, bool), Kmalloc> = Vec::new_in(kmalloc());
         for member in tree.members() {
             if (member.pid == pid || member.parent == pid)
                 && member.session == session
-                && !groups[..count].contains(&member.group)
-                && count < groups.len()
+                && !groups.iter().any(|&(group, _)| group == member.group)
+                && groups.try_reserve(1).is_ok()
             {
-                groups[count] = member.group;
-                count += 1;
+                let _ = groups.push_within_capacity((member.group, tree.orphaned(member.group)));
             }
         }
-        let was_orphaned: [bool; 8] =
-            core::array::from_fn(|i| i < count && tree.orphaned(groups[i]));
         tree.exit(pid, ended, times, auto_reap, &mut |handle| {
             if gone.try_reserve(1).is_ok() {
                 let _ = gone.push_within_capacity(handle);
@@ -367,15 +364,8 @@ pub fn exited(process: &ProcessObject) {
         });
         // POSIX: a process group newly orphaned with a stopped member gets
         // SIGHUP and SIGCONT.
-        let mut hangups = [0u64; 8];
-        let mut n = 0;
-        for i in 0..count {
-            if !was_orphaned[i] && tree.orphaned(groups[i]) && tree.has_stopped(groups[i]) {
-                hangups[n] = groups[i];
-                n += 1;
-            }
-        }
-        (parent, (n > 0).then_some((hangups, n)))
+        groups.retain(|&(group, was)| !was && tree.orphaned(group) && tree.has_stopped(group));
+        (parent, groups)
     });
     drop(leftover);
     drop(gone);
@@ -388,16 +378,11 @@ pub fn exited(process: &ProcessObject) {
         signal::send_process(&parent, SIGCHLD, info);
         children_changed(&parent);
     }
-    if let Some((groups, n)) = hangups {
-        for &group in &groups[..n] {
-            let info = radix_posix::signal::Info {
-                code: radix_posix::signal::SI_KERNEL,
-                pid: 0,
-                status: 0,
-            };
-            signal::send_group(group, radix_abi::signal::SIGHUP, info);
-            signal::send_group(group, radix_abi::signal::SIGCONT, info);
-        }
+    for &(group, _) in &hangups {
+        let info =
+            radix_posix::signal::Info { code: radix_posix::signal::SI_KERNEL, pid: 0, status: 0 };
+        signal::send_group(group, radix_abi::signal::SIGHUP, info);
+        signal::send_group(group, radix_abi::signal::SIGCONT, info);
     }
 }
 

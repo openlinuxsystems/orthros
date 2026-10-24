@@ -18,7 +18,8 @@
 //! with release ordering, so a program that sees the tail sees the entry.
 //! Some operations finish later: `wait` when its notification is signalled
 //! and `timeout` when its time is up, which is checked whenever a thread
-//! enters the ring and while one waits in it.
+//! enters the ring and while one waits in it: a thread waiting there wakes
+//! when another adds a timeout, to wait for its deadline too.
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -59,6 +60,10 @@ pub struct RingObject {
     /// Timeouts under way: deadline and user data. Room for every
     /// reserved completion is made at setup.
     timeouts: SpinLock<Vec<(u64, u64), Kmalloc>>,
+    /// How many timeouts were added, so that a thread waiting with the
+    /// deadlines there were knows to look again when another thread adds
+    /// one.
+    timeouts_added: AtomicU32,
     /// Threads waiting in `ring_enter`.
     waiting: AtomicU32,
     /// Set when its last capability is gone.
@@ -109,7 +114,7 @@ impl RingObject {
     }
 
     /// Wakes the threads waiting in `ring_enter`, if there are any, after
-    /// a completion was published.
+    /// a completion was published or a timeout added.
     fn wake(&self) {
         // Pairs with the barrier a waiter makes after counting itself in
         // `waiting`: either this sees its count, or its look at the tail
@@ -249,6 +254,7 @@ fn new(space: &SpaceRef, layout: Layout) -> Result<RingRef> {
         queues: SpinLock::new(Queues::new(&layout)),
         tail: AtomicU32::new(0),
         timeouts: SpinLock::new(timeouts),
+        timeouts_added: AtomicU32::new(0),
         waiting: AtomicU32::new(0),
         closed: AtomicBool::new(false),
         space: Arc::downgrade(space),
@@ -318,6 +324,9 @@ pub fn enter(
         return Err(error(Kernel::Busy));
     }
     loop {
+        // Read before the deadlines are: a timeout added after this moves
+        // it, and ends the wait below so the new deadline is seen.
+        let added = ring.timeouts_added.load(Ordering::Acquire);
         let next = ring.expire();
         let ready = ring.ready();
         if ready >= min_complete {
@@ -339,6 +348,7 @@ pub fn enter(
         let done = || {
             ring.ready() >= min_complete
                 || ring.closed.load(Ordering::Relaxed)
+                || ring.timeouts_added.load(Ordering::Relaxed) != added
                 || sched::interrupted()
         };
         ring.waiting.fetch_add(1, Ordering::Relaxed);
@@ -406,10 +416,15 @@ fn execute(user: &UserThread, ring: &RingRef, entry: &[u8; Sqe::SIZE]) {
             let deadline = sched::now_ns().saturating_add(arg(0));
             let mut timeouts = ring.timeouts.lock();
             // Room for every reserved completion was made at setup.
-            if timeouts.push_within_capacity((deadline, user_data)).is_ok() {
+            let added = timeouts.push_within_capacity((deadline, user_data)).is_ok();
+            drop(timeouts);
+            if added {
+                // A thread waiting in the ring with a later deadline, or
+                // none, wakes to wait for this one too.
+                ring.timeouts_added.fetch_add(1, Ordering::Release);
+                ring.wake();
                 return;
             }
-            drop(timeouts);
             Err(error(Kernel::NoMemory))
         }
     };

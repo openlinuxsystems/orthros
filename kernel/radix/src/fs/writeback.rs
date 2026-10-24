@@ -60,8 +60,17 @@ fn run(_: usize) {
         wait::wait_until_or_timeout(asked_key(), "writeback", next_sync, || {
             ASKED.load(Ordering::Acquire) != DONE.load(Ordering::Acquire)
         });
-        let Some(vfs) = super::vfs() else { continue };
         let asked = ASKED.load(Ordering::Acquire);
+        let Some(vfs) = super::vfs() else {
+            // No files, for now or for good: an ask is answered with
+            // nothing dropped, and the next look waits its turn.
+            DONE.store(asked, Ordering::Release);
+            wait::wake_all(done_key());
+            if sched::now_ns() >= next_sync {
+                next_sync = sched::now_ns().saturating_add(INTERVAL_NS);
+            }
+            continue;
+        };
         let short = FRAMES.free_pages() < FRAMES.managed_pages() / 64;
         if asked != DONE.load(Ordering::Acquire) || short {
             let cached = radix_block::mem::pages() as usize;

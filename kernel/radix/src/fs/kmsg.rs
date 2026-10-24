@@ -175,7 +175,7 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
 }
 
 /// Logs `data`, a line, as a program's: with a `<N>` before it, at
-/// syslog(3) level N.
+/// syslog(3) level N & 7 (N is a facility times eight plus a level).
 pub fn write(data: &dyn In) -> Result<usize, Status> {
     let len = data.len();
     let mut bytes = [0u8; WRITE_MAX as usize];
@@ -185,10 +185,18 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     while let [rest @ .., b'\n' | b'\r'] = text {
         text = rest;
     }
+    // `<priority>` first, as Linux takes it: the facility times eight and
+    // the level (systemd writes `<30>` for a daemon's information); only
+    // the level counts here.
     let mut level = 6;
-    if let [b'<', digit @ b'0'..=b'9', b'>', rest @ ..] = text {
-        level = digit - b'0';
-        text = rest;
+    if let [b'<', after @ ..] = text
+        && let Some(end) = after.iter().position(|&b| b == b'>')
+        && (1..=9).contains(&end)
+        && after[..end].iter().all(u8::is_ascii_digit)
+    {
+        let priority = after[..end].iter().fold(0u32, |n, &d| n * 10 + u32::from(d - b'0'));
+        level = (priority & 7) as u8;
+        text = &after[end + 1..];
     }
     let text = core::str::from_utf8(text).unwrap_or("<not UTF-8>");
     let name = sched::running().map(|me| me.name());

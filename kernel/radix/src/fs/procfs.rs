@@ -19,12 +19,16 @@
 //!   `key=value` fields, with a file's or directory's path last: what
 //!   lsof(1) lists;
 //! - `/proc/mounts`: one line per mount, `source /path kind rw|ro`, with
-//!   the filesystem's label if it has one;
+//!   the filesystem's label if it has one; a space, tab, newline or
+//!   backslash in a field is written as Linux writes it, `\040` and so on;
 //! - `/proc/meminfo`: memory in KiB, in all, free, and by owner;
 //! - `/proc/stat`: what each CPU has done, the threads ready to run and
 //!   waiting for a disk, and what the disks have read and written;
 //! - `/proc/loadavg`: the load averages;
 //! - `/proc/uptime`: nanoseconds since boot.
+//!
+//! A newline or a backslash in a name or a path is written the same way,
+//! so that it cannot end its line early.
 
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
@@ -42,6 +46,41 @@ use crate::user::UserRef;
 use crate::user::objects::{self, Object};
 use crate::user::posix;
 use crate::user::process::ProcessRef;
+
+/// The bytes a name or a path escapes in a line of fields: a newline
+/// would end the line early, and a backslash begins an escape.
+pub const LINE_SPECIAL: &[u8] = b"\n\\";
+
+/// The bytes a field of `/proc/mounts` escapes, as on Linux.
+const FIELD_SPECIAL: &[u8] = b" \t\n\\";
+
+/// Writes `bytes`, with each of those in `special` as `/proc` on Linux
+/// writes it: a backslash and three octal digits (`\040` for a space).
+fn write_escaped(text: &mut Text, bytes: &[u8], special: &[u8]) -> fmt::Result {
+    let mut start = 0;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if special.contains(&byte) {
+            text.write_bytes(&bytes[start..i])?;
+            write!(text, "\\{byte:03o}")?;
+            start = i + 1;
+        }
+    }
+    text.write_bytes(&bytes[start..])
+}
+
+/// [`write_escaped`] for text, to any writer: the special bytes are
+/// ASCII, so the text is cut only between characters.
+pub fn write_escaped_str(out: &mut dyn Write, text: &str, special: &[u8]) -> fmt::Result {
+    let mut start = 0;
+    for (i, byte) in text.bytes().enumerate() {
+        if special.contains(&byte) {
+            out.write_str(&text[start..i])?;
+            write!(out, "\\{byte:03o}")?;
+            start = i + 1;
+        }
+    }
+    out.write_str(&text[start..])
+}
 
 /// The files of `/proc` besides the processes' directories.
 const FILES: [&str; 5] = ["loadavg", "meminfo", "mounts", "stat", "uptime"];
@@ -250,7 +289,7 @@ fn status(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     let directory = process.posix.lock().directory.clone();
     if let Some(directory) = directory {
         text.write_str("directory: ")?;
-        text.write_bytes(&directory)?;
+        write_escaped(text, &directory, LINE_SPECIAL)?;
         text.write_char('\n')?;
     }
     Ok(())
@@ -290,7 +329,9 @@ fn threads(process: &ProcessRef, text: &mut Text) -> fmt::Result {
                 text.write_char(if c == ' ' { '_' } else { c })?;
             }
         }
-        writeln!(text, " name={}", thread.name().as_str())?;
+        text.write_str(" name=")?;
+        write_escaped_str(text, thread.name().as_str(), LINE_SPECIAL)?;
+        text.write_char('\n')?;
     }
     Ok(())
 }
@@ -387,7 +428,7 @@ fn files(process: &ProcessRef, text: &mut Text) -> fmt::Result {
                 text.write_str(" cut=yes")?;
             }
             text.write_str(" path=")?;
-            text.write_bytes(path)?;
+            write_escaped(text, path, LINE_SPECIAL)?;
         }
         text.write_char('\n')?;
     }
@@ -405,16 +446,14 @@ fn mounts(text: &mut Text) -> fmt::Result {
         let mut label = TextBuf::<64>::new();
         let _ = mount.fs.label(&mut label);
         result = (|| {
-            write!(
-                text,
-                "{} /{} {} {}",
-                mount.source(),
-                mount.path(),
-                mount.fs.kind().name(),
-                if mount.read_only() { "ro" } else { "rw" }
-            )?;
+            write_escaped(text, mount.source().as_bytes(), FIELD_SPECIAL)?;
+            text.write_str(" /")?;
+            write_escaped(text, mount.path().as_bytes(), FIELD_SPECIAL)?;
+            let access = if mount.read_only() { "ro" } else { "rw" };
+            write!(text, " {} {access}", mount.fs.kind().name())?;
             if !label.as_str().is_empty() {
-                write!(text, " label={}", label.as_str())?;
+                text.write_str(" label=")?;
+                write_escaped(text, label.as_str().as_bytes(), FIELD_SPECIAL)?;
             }
             text.write_char('\n')
         })();

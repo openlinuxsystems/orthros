@@ -105,7 +105,6 @@ fn running_rank() -> usize {
 
 /// A virtio block device.
 pub struct VirtioDisk {
-    index: usize,
     queue: SpinLock<Queue>,
     /// Each request slot's state.
     requests: [AtomicU8; REQUESTS],
@@ -279,6 +278,17 @@ impl VirtioDisk {
     }
 }
 
+/// Only a disk whose setup failed is dropped: the device stops using
+/// what it was given, and its interrupt is let go.
+impl Drop for VirtioDisk {
+    fn drop(&mut self) {
+        self.queue.get_mut().blk.reset();
+        if let Some(vector) = self.vector {
+            <Arch as Devices>::free_interrupt(vector);
+        }
+    }
+}
+
 impl BlockDevice for VirtioDisk {
     fn info(&self) -> Info {
         Info {
@@ -433,6 +443,9 @@ fn describe(function: &Function) {
 }
 
 /// Sets up the virtio block device `function` as disk number `index`.
+/// Its frame holds the disk before it goes on the heap: kept out of
+/// `init`'s (tools/xtask/src/frames.rs allows it).
+#[inline(never)]
 fn bind(function: Function, index: usize) -> Result<(), &'static str> {
     if index >= MAX_DISKS {
         return Err("too many disks");
@@ -471,10 +484,13 @@ fn bind(function: Function, index: usize) -> Result<(), &'static str> {
     let info = blk.info();
     if info.max_segment_size != 0 && (info.max_segment_size as usize) < radix_hw::PAGE_SIZE {
         blk.reset();
+        if let Some(vector) = interrupt {
+            <Arch as Devices>::free_interrupt(vector);
+        }
         return Err("its segments are smaller than a page");
     }
+    // From here a failure drops the disk, which lets the device go.
     let disk = VirtioDisk {
-        index,
         queue: SpinLock::new(Queue { blk, owner: [0; radix_virtio::queue::MAX_SIZE as usize] }),
         requests: [const { AtomicU8::new(FREE) }; REQUESTS],
         events: AtomicU64::new(0),
@@ -506,7 +522,6 @@ fn bind(function: Function, index: usize) -> Result<(), &'static str> {
         if info.read_only { ", read-only" } else { "" },
         if info.flush { ", write cache" } else { "" },
     );
-    let _ = disk.index;
     let device: DeviceRef = disk;
     register(&name, device.clone());
     partitions(&name, &device);
@@ -574,7 +589,6 @@ fn partitions(name: &Name, device: &DeviceRef) {
     }
 }
 
-/// Adds a disk or partition under `name`, to `/dev` and `/sys/block`.
 /// A size for the log, in the largest binary unit it reaches, with a
 /// tenth when it is not a whole number of them: `1.4 MiB` for a floppy
 /// disk, `32 MiB`.
@@ -595,6 +609,7 @@ impl core::fmt::Display for Size {
     }
 }
 
+/// Adds a disk or partition under `name`, to `/dev` and `/sys/block`.
 fn register(name: &Name, device: DeviceRef) {
     {
         let mut disks = DISKS.lock();

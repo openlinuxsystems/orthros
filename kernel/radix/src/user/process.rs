@@ -64,6 +64,7 @@ use radix_cap::{Derivation, ObjectKind, Rights, SLOT_BYTES, SlotRef, SpaceId};
 use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP, Kmalloc, PAGE_SIZE};
+use radix_sched::Split;
 use radix_sync::{Mutex, SpinLock};
 
 use super::account::{Account, AccountRef, Charge};
@@ -140,6 +141,8 @@ pub struct ProcessObject {
     /// kernel, and their voluntary and involuntary switches.
     exited_ticks: [AtomicU64; 2],
     exited_switches: [AtomicU64; 2],
+    /// Its CPU time as [`ProcessObject::cpu_times`] last split it.
+    split: SpinLock<Split>,
     /// When it was made, in nanoseconds since boot.
     started_ns: u64,
     /// The bytes its threads have read and written with radix-file(2)'s
@@ -322,6 +325,7 @@ fn allocate(
         exited_ns: AtomicU64::new(0),
         exited_ticks: [const { AtomicU64::new(0) }; 2],
         exited_switches: [const { AtomicU64::new(0) }; 2],
+        split: SpinLock::new(Split::new()),
         started_ns: sched::now_ns(),
         read_bytes: AtomicU64::new(0),
         written_bytes: AtomicU64::new(0),
@@ -442,21 +446,21 @@ impl ProcessObject {
     }
 
     /// Its CPU time so far in user mode and in the kernel: its threads',
-    /// live and exited, each split as the timer's samples of it share it
-    /// (`radix_sched::split_time`).
+    /// live and exited, split as the timer's samples of them all share it,
+    /// neither part ever less than it was ([`Split`]), as Linux splits a
+    /// process's.
     pub fn cpu_times(&self) -> (u64, u64) {
         let state = self.state.lock();
-        let (mut user, mut system) = radix_sched::split_time(
-            self.exited_ns.load(Ordering::Relaxed),
-            self.exited_ticks[0].load(Ordering::Relaxed),
-            self.exited_ticks[1].load(Ordering::Relaxed),
-        );
+        let mut runtime = self.exited_ns.load(Ordering::Relaxed);
+        let mut user = self.exited_ticks[0].load(Ordering::Relaxed);
+        let mut system = self.exited_ticks[1].load(Ordering::Relaxed);
         for thread in state.threads.iter() {
-            let (u, s) = thread.cpu_times();
+            let (u, s) = thread.ticks();
+            runtime += thread.runtime_ns();
             user += u;
             system += s;
         }
-        (user, system)
+        self.split.lock().update(runtime, user, system)
     }
 
     /// The times its threads, live and exited, gave the CPU up to wait,
@@ -575,7 +579,9 @@ impl ProcessObject {
             (state.phase, state.code, state.threads.len())
         };
         writeln!(out, "number: {}", self.number)?;
-        writeln!(out, "name: {}", name.as_str())?;
+        out.write_str("name: ")?;
+        crate::fs::procfs::write_escaped_str(out, name.as_str(), crate::fs::procfs::LINE_SPECIAL)?;
+        out.write_char('\n')?;
         writeln!(out, "state: {}", phase.name())?;
         if phase == ProcessState::Exited {
             writeln!(out, "code: {code:#x}")?;
