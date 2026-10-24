@@ -228,7 +228,10 @@ in a process group of its own, Ctrl-Z stops the one in the foreground,
 and *jobs*, *fg*, *bg*, *kill %*_n_, *wait*, *disown* and *suspend* work
 as in bash. The shell reports each background job that ends or stops
 before the next prompt. Ctrl-C drops the line being typed, with status
-130.
+130. *set -m* in a script gives its jobs process groups of their own
+too, so that stop signals reach them, and, when the script runs in the
+foreground of the terminal on its standard error, its foreground jobs
+have the terminal while they run, as in bash.
 
 Ctrl-D at an empty line ends the shell, unless *IGNOREEOF* says how many
 times it must come first, or *set -o ignoreeof* is on (ten times). A

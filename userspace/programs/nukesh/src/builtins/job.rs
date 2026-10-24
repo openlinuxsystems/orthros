@@ -66,7 +66,7 @@ pub fn jobs(shell: &mut Shell, args: &[String]) -> Res {
         let suffix = if state == "Running" { " &" } else { "" };
         if flags.has('l') {
             text.push_str(&format!(
-                "[{}]{mark} {:>6} {state:<24}{}{suffix}\n",
+                "[{}]{mark} {:>5} {state:<24}{}{suffix}\n",
                 job.id, job.pgid, job.text
             ));
         } else {

@@ -205,9 +205,24 @@ pub fn tcgetpgrp(fd: i32) -> Result<i32> {
     check(unsafe { libc::tcgetpgrp(fd) })
 }
 
+/// Gives the terminal on `fd` to process group `pgid`. From a group in
+/// the background the change raises SIGTTOU, which would stop a script's
+/// shell taking the terminal back, or a job about to have it; with the
+/// signal blocked meanwhile, the change goes ahead, as in bash.
 pub fn tcsetpgrp(fd: i32, pgid: i32) -> Result<()> {
-    // SAFETY: tcsetpgrp only changes the terminal's foreground group.
-    check(unsafe { libc::tcsetpgrp(fd, pgid) }).map(drop)
+    // SAFETY: the sets are filled in before they are used, the old mask
+    // comes back, and tcsetpgrp only changes the terminal's foreground
+    // group.
+    unsafe {
+        let mut ttou: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut ttou);
+        libc::sigaddset(&mut ttou, libc::SIGTTOU);
+        libc::sigprocmask(libc::SIG_BLOCK, &ttou, &mut old);
+        let result = check(libc::tcsetpgrp(fd, pgid)).map(drop);
+        libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+        result
+    }
 }
 
 pub fn isatty(fd: i32) -> bool {

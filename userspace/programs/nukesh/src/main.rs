@@ -169,7 +169,7 @@ fn run(args: &[String]) -> i32 {
             }
         }
     }
-    if interactive && shell.opts.monitor {
+    if interactive && shell.opts.monitor && shell.tty.is_none() {
         interactive::take_terminal_control(&mut shell);
     }
     shell.install_signals();

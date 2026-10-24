@@ -976,8 +976,12 @@ impl Shell {
 
     /// `set -m` or `set +m`: job control taken up or given up.
     pub fn monitor_changed(&mut self) {
-        if self.opts.monitor && self.interactive && self.tty.is_none() {
-            crate::interactive::take_terminal_control(self);
+        if self.opts.monitor && self.tty.is_none() {
+            if self.interactive {
+                crate::interactive::take_terminal_control(self);
+            } else {
+                crate::interactive::share_terminal(self);
+            }
         }
         self.install_signals();
     }

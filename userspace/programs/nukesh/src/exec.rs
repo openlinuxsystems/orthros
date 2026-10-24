@@ -344,8 +344,8 @@ impl Shell {
 
     /// Forks a child of the shell. The child is a subshell: it forgets the
     /// jobs and traps, and with job control joins (or starts) process
-    /// group `pgid`, taking the terminal unless `background`. Returns the
-    /// child's number, or 0 in the child.
+    /// group `pgid`, taking the terminal, if the shell has it, unless
+    /// `background`. Returns the child's number, or 0 in the child.
     pub fn fork_child(&mut self, pgid: i32, background: bool) -> Result<i32, Flow> {
         let pid = match sys::fork() {
             Ok(pid) => pid,
@@ -353,23 +353,32 @@ impl Shell {
                 return Err(self.fatal(&format!("fork: {}", sys::describe(&error)), 1));
             }
         };
-        let monitor = self.opts.monitor && self.tty.is_some();
+        // With job control every job has a process group of its own, as
+        // POSIX asks, with a terminal or without: so a stop signal stops
+        // it even where the shell's own group is orphaned, as under
+        // `setsid` or a CI runner, and the kernel throws such signals
+        // away.
+        let groups = self.opts.monitor;
         if pid != 0 {
-            if monitor {
+            if groups {
                 let _ = sys::setpgid(pid, if pgid == 0 { pid } else { pgid });
             }
             return Ok(pid);
         }
         // The child.
-        if monitor {
+        if groups {
             let own = sys::getpid();
             let group = if pgid == 0 { own } else { pgid };
             let _ = sys::setpgid(0, group);
             if !background && let Some(tty) = self.tty {
                 let _ = sys::tcsetpgrp(tty, group);
             }
+            // The job stops as programs do, unless the shell ignores the
+            // signal for it.
             for signal in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
-                trap::set(signal, trap::Disposition::Default);
+                if !self.ignores(signal) {
+                    trap::set(signal, trap::Disposition::Default);
+                }
             }
         }
         self.become_subshell();
@@ -1431,14 +1440,18 @@ impl Shell {
         }
     }
 
+    /// Whether `signal` is ignored for the commands the shell runs: by
+    /// `trap ''`, or because a script started with it ignored.
+    pub fn ignores(&self, signal: i32) -> bool {
+        let slot = signal as usize;
+        self.traps.get(slot).is_some_and(|t| t.as_deref() == Some("")) || self.ignored[slot]
+    }
+
     /// Puts signals the shell catches back to their default, for a
     /// program about to run; ignored ones stay ignored.
     pub fn reset_signals_for_exec(&self) {
         for (_, signal) in trap::SIGNALS {
-            let slot = *signal as usize;
-            let ignored = self.traps.get(slot).is_some_and(|t| t.as_deref() == Some(""))
-                || self.ignored[slot];
-            if !ignored && !matches!(*signal, libc::SIGKILL | libc::SIGSTOP) {
+            if !self.ignores(*signal) && !matches!(*signal, libc::SIGKILL | libc::SIGSTOP) {
                 trap::set(*signal, trap::Disposition::Default);
             }
         }

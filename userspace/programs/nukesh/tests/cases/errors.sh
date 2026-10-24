@@ -30,10 +30,15 @@ if false; then y=${x@Z}; fi; echo "untaken"
 s=:a:b:; echo "${s:1:${#s}-2}" "${s: -2}" "${s:${#s}-3:2}" "${s:$((1)):1}" "${s:1?2:3}"
 unset u; echo "[${u:1+}]"
 echo "${BASH_VERSINFO[0]}" "${#BASH_VERSINFO[@]}"; BASH_VERSINFO=1; echo "not reached"
-# A file on PATH that is not executable is found, and fails to run.
+# A file on PATH that is not executable is found, and fails to run with
+# 126. On Radix, whose files have mode 0755 until users come
+# (radix-posix(7)), it runs, as a script.
 dir=/tmp/nukesh-errors-$$; mkdir "$dir"; echo 'echo ran' > "$dir/plain"
 PATH=$dir:$PATH
-type -P plain >/dev/null && echo "plain is found"; plain; echo "plain: $?"
+type -P plain >/dev/null && echo "plain is found"
+if [ -x "$dir/plain" ]; then want=0; else want=126; fi
+plain >/dev/null 2>&1; got=$?
+[ "$got" = "$want" ] && echo "plain: as its mode says" || echo "plain: $got"
 rm -r "$dir"
 # Indirect expansions: an unset name is an error, an unset element or
 # parameter is not, and `:=` assigns to the variable named.

@@ -20,7 +20,7 @@ a:b b: :b a :b:
 []
 5 6
 plain is found
-plain: 126
+plain: as its mode says
 after unset name: 1
 <> <> <>
 <assigned> <target>
