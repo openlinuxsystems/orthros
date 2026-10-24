@@ -315,14 +315,22 @@ static void interrupts(void) {
 	CHECK(read(fds[0], &byte, 1) == 1 && byte == 'y');
 	CHECK(caught == 1);
 	CHECK_CHILD(pid);
-	// pause() returns once a handler has run.
+	// A wait returns once a handler has run (time.c waits with pause(), for
+	// a timer that goes off again and again).
 	alarm(1);
 	struct itimerval left;
 	CHECK(getitimer(ITIMER_REAL, &left) == 0 && left.it_value.tv_sec <= 1);
 	CHECK(left.it_value.tv_sec > 0 || left.it_value.tv_usec > 0);
 	alarm(0);
+	// SIGALRM is blocked until sigsuspend() waits, as a timer that went off
+	// before pause() would leave it waiting for good.
+	sigset_t alarm_set, before;
+	sigemptyset(&alarm_set);
+	sigaddset(&alarm_set, SIGALRM);
+	CHECK(sigprocmask(SIG_BLOCK, &alarm_set, &before) == 0);
 	CHECK(setitimer(ITIMER_REAL, &timer, NULL) == 0);
-	CHECK_ERROR(pause(), EINTR);
+	CHECK_ERROR(sigsuspend(&before), EINTR);
+	CHECK(sigprocmask(SIG_SETMASK, &before, NULL) == 0);
 	// nanosleep says how much was left.
 	CHECK(setitimer(ITIMER_REAL, &timer, NULL) == 0);
 	struct timespec sleep_for = {2, 0}, remaining = {0, 0};
@@ -340,14 +348,21 @@ static void interrupts(void) {
 static void rearms(void) {
 	handle(SIGALRM, on_signal, 0);
 	struct itimerval later = {{0, 0}, {1, 0}}, off = {{0, 0}, {0, 0}}, soon = {{0, 0}, {0, 1000}};
+	// The 1 ms timer can go off before the wait starts, on a busy machine:
+	// SIGALRM stays blocked until sigsuspend() waits for it.
+	sigset_t alarm_set, before;
+	sigemptyset(&alarm_set);
+	sigaddset(&alarm_set, SIGALRM);
+	CHECK(sigprocmask(SIG_BLOCK, &alarm_set, &before) == 0);
 	for(int i = 0; i < 300; i++) {
 		CHECK(setitimer(ITIMER_REAL, &later, NULL) == 0);
 		CHECK(setitimer(ITIMER_REAL, &off, NULL) == 0);
 		for(volatile int spin = 0; spin < i * 20; spin++) {
 		}
 		CHECK(setitimer(ITIMER_REAL, &soon, NULL) == 0);
-		CHECK_ERROR(pause(), EINTR);
+		CHECK_ERROR(sigsuspend(&before), EINTR);
 	}
+	CHECK(sigprocmask(SIG_SETMASK, &before, NULL) == 0);
 	signal(SIGALRM, SIG_DFL);
 }
 

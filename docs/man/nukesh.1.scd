@@ -172,6 +172,44 @@ arguments: words, functions (with *COMP_WORDS*, *COMP_CWORD*,
 *COMP_LINE*, *COMP_POINT* and *COMPREPLY*), commands, patterns and
 filters, as bash's *complete*, *compgen* and *compopt* do.
 
+A program that *complete* says nothing for completes from its completion
+file, if it has one, which every program in _/system/bin_ does: a word
+that starts with *-* completes to the program's options, shown with what
+each does, and the word after an option completes as that option's
+argument, a file, a directory, a user and the like; *--name=* and an
+argument joined to its option, as in *7zz*(1)'s *-o*{_directory_},
+complete too. The operands complete as the file says, and as files when
+it does not.
+
+## Completion files
+
+A program's completion file is the file of its name in the first of the
+directories of *NUKESH_COMPLETION_PATH* that has one or, without that
+variable, in _$XDG_DATA_HOME/nukesh/completions_ (by default
+_~/.local/share/nukesh/completions_), so that a user's own come first,
+then in _/system/share/nukesh/completions_. The system's are written from
+each program's manual page when the system is built. A shell reads each
+file once.
+
+Each line holds fields separated by tabs; lines of any other kind, such
+as comments after *#*, are left out:
+
+*option* _forms_ _argument_ _description_
+	An option: its forms, separated by spaces (*-i --ignore-case*);
+	what its argument completes as, empty if it takes none, or after a
+	*+* if the argument is joined to the option (*+directory*); and what
+	it does, which the menu shows.
+
+*operand* _n_ _what_
+	What the _n_-th operand, from 1, completes as, or every operand not
+	named, for 0.
+
+An argument or an operand completes as one of *complete*'s actions
+(*file*, *directory*, *command*, *user*, *group*, *service*, *signal*,
+*hostname* and the rest of *-A*'s), as *value* or *none* for nothing
+(anything can be typed), or, for an operand, as *words* and a list of
+words separated by spaces.
+
 ## Job control
 
 An interactive shell has job control (*set -m*): each pipeline is a job
@@ -229,6 +267,7 @@ shell keeps bash's: *RANDOM*, *SRANDOM*, *SECONDS*, *EPOCHSECONDS*,
 *FUNCNAME*, *BASH_REMATCH*, *PIPESTATUS*, *SHLVL*, *UID*, *EUID*,
 *HOSTNAME*, *REPLY*, *COLUMNS* and *LINES* (with *checkwinsize*), and the
 history and completion variables above. *NUKESH_VERSION* is its version.
+*NUKESH_COMPLETION_PATH* names the directories of completion files.
 *BASH_VERSION* is not set, so that scripts can tell the shells apart.
 
 # LIMITS
@@ -264,6 +303,9 @@ _~/.profile_, _~/.nukeshrc_, _~/.nukesh_logout_: the start-up files.
 
 _~/.nukesh_history_: the history.
 
+_/system/share/nukesh/completions_ and
+_~/.local/share/nukesh/completions_: completion files.
+
 # STANDARDS
 
 POSIX.1-2024, XCU Shell Command Language, in POSIX mode. bash 5.2 for
@@ -271,6 +313,6 @@ the rest.
 
 # SEE ALSO
 
-*radix-posix*(7), *spark*(8)
+*man*(1), *makewhatis*(8), *radix-posix*(7), *spark*(8)
 
 The Bash Reference Manual, for what each bash feature does.

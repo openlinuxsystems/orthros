@@ -28,7 +28,9 @@ devices and settings, and settings that can be changed.
 
 _/sys/kernel/version_
 	The kernel's name and version, and the phase of the roadmap it is
-	from: *Radix 0.0.1 (Dukovo Phase 7)*.
+	from: *Radix 0.0.1 (Dukovo Phase 9)*. The C library gives the
+	second word as the release, and the whole line as the version, in
+	uname(3)'s *struct utsname*.
 
 _/sys/kernel/cmdline_
 	The kernel command line the boot loader gave (*dukovo-boot*(7)).

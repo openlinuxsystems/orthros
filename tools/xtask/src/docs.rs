@@ -86,15 +86,7 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
     let mut problems = Vec::new();
     for page in &pages {
         let output = page.output(&man_dir);
-        process::create_dir(output.parent().expect("man page has a section directory"))?;
-        let input = std::fs::File::open(&page.source)
-            .context(|| format!("opening {}", page.source.display()))?;
-        let out_file =
-            std::fs::File::create(&output).context(|| format!("creating {}", output.display()))?;
-        let mut cmd = Command::new("scdoc");
-        cmd.stdin(input).stdout(out_file).stderr(Stdio::piped());
-        let result = process::output(ctx, &mut cmd);
-        if let Err(err) = result {
+        if let Err(err) = compile(ctx, page, &output) {
             problems.push(format!("{}: {err}", ctx.display(&page.source)));
             continue;
         }
@@ -127,6 +119,49 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
     ));
     eprintln!("    Read a page with: man -l {}", ctx.display(&man_dir.join("man1/ob.1")));
     Ok(())
+}
+
+/// Compiles `page` with scdoc into `output`.
+fn compile(ctx: &Ctx, page: &Page, output: &Path) -> Result<()> {
+    process::create_dir(output.parent().expect("man page has a section directory"))?;
+    let input = std::fs::File::open(&page.source)
+        .context(|| format!("opening {}", page.source.display()))?;
+    let out_file =
+        std::fs::File::create(output).context(|| format!("creating {}", output.display()))?;
+    let mut cmd = Command::new("scdoc");
+    cmd.stdin(input).stdout(out_file).stderr(Stdio::piped());
+    process::output(ctx, &mut cmd).map(|_| ())
+}
+
+/// The pages of what runs on the build host, which the image leaves out.
+const HOST_PAGES: &[&str] = &["ob.1", "dukovo.toml.5"];
+
+/// Compiles Dukovo's own manual pages, and those generated from
+/// `abi/*.ridl`, into `out/sysroot/system/share/man` for the image, but
+/// not the build host's ([`HOST_PAGES`]), and returns each one's place in
+/// the boot archive and file.
+pub fn image_pages(ctx: &Ctx) -> Result<Vec<(String, PathBuf)>> {
+    if process::find_program("scdoc").is_none() {
+        return Err(
+            Error::new("scdoc is not installed").hint("run `./ob doctor` to see what is missing")
+        );
+    }
+    let mut pages = pages(ctx)?;
+    pages.extend(generated_pages(ctx)?);
+    let sysroot = ctx.out.join("sysroot");
+    let man_dir = sysroot.join(crate::manuals::MAN_DIR);
+    let mut files = Vec::new();
+    for page in &pages {
+        if HOST_PAGES.contains(&format!("{}.{}", page.name, page.section).as_str()) {
+            continue;
+        }
+        let output = page.output(&man_dir);
+        compile(ctx, page, &output)
+            .map_err(|err| Error::new(format!("compiling {}: {err}", ctx.display(&page.source))))?;
+        let path = output.strip_prefix(&sysroot).expect("the page is in the sysroot");
+        files.push((path.to_string_lossy().into_owned(), output));
+    }
+    Ok(files)
 }
 
 /// Runs `mandoc -T lint` and reports warnings and errors.

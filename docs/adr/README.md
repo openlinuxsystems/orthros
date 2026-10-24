@@ -113,3 +113,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0099](0099-power-capability-and-ordered-shutdown.md) | Turning the machine off is a capability only Spark holds, and Spark stops the services first | Accepted |
 | [0100](0100-consoled-virtual-consoles-in-a-program.md) | consoled draws the virtual consoles as a program, a terminal for TERM=linux built on the vte crate | Accepted |
 | [0101](0101-spark-supervises-services.md) | Spark supervises services from simple key-value files, in a domain each, and answers a control socket | Accepted |
+| [0102](0102-manual-pages-and-completions-in-the-image.md) | Every program in /system/bin has its manual page, indexed, and the shell completes its options from that page | Accepted |

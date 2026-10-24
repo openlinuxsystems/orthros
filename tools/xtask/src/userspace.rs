@@ -310,6 +310,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     for (path, package) in ARCHIVE {
         files.push((path.to_string(), built.join(package)));
     }
+    crate::manuals::install(ctx, &mut files)?;
     let archive = write_archive(&files, crate::image::source_date_epoch(ctx))?;
     std::fs::write(&bootfs, &archive).context(|| format!("writing {}", bootfs.display()))?;
     step(&format!(

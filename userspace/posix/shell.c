@@ -6,7 +6,8 @@
 // gives (or dash, for the posix-* ones, run as /bin/sh); then the shell
 // at a terminal, both with its plain line reader (TERM=dumb) and with its
 // line editor, typed at through a pseudo-terminal: commands, job control
-// with ^Z and ^C, completion, history and the exit status.
+// with ^Z and ^C, completion of commands and of a program's options,
+// history and the exit status.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -337,6 +338,11 @@ static void editor(void) {
 	EXPECT(s, "echo");
 	send(s, " $((1+1))tab\r");
 	EXPECT(s, "2tab");
+	// And an option, from the program's completion file (ADR 0102).
+	send(s, "grep --ignore-c\t");
+	EXPECT(s, "--ignore-case");
+	send(s, " x /dev/null; echo option-$?\r");
+	EXPECT(s, "option-1");
 	// The up arrow brings the last command back.
 	send(s, "echo $((3+4))up\r");
 	EXPECT(s, "7up");

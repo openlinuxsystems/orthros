@@ -100,6 +100,12 @@ pub struct Settings {
 
 static SETTINGS: Once<Settings> = Once::new();
 
+/// The kernel's name and version, and the phase of the roadmap it is
+/// from: the first line of the boot log and `/sys/kernel/version`
+/// (radix-sysfs(5)), whose second word the C library gives as the
+/// release (uname(1)).
+pub const BANNER: &str = concat!("Radix ", env!("CARGO_PKG_VERSION"), " (Dukovo Phase 9)");
+
 /// The settings, or defaults before they are parsed.
 pub fn settings() -> Settings {
     SETTINGS.get().copied().unwrap_or(Settings {
@@ -164,7 +170,7 @@ pub fn radix_kernel_main(mut params: BootParams) -> ! {
     }
     crashlog::init();
 
-    info!("Radix {} (Dukovo Phase 7)", env!("CARGO_PKG_VERSION"));
+    info!("{BANNER}");
     info!("Boot loader: {}", params.boot_loader);
     info!("Firmware: {}", params.firmware);
     info!("Command line: {}", params.command_line);

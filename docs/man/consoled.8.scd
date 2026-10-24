@@ -43,7 +43,7 @@ release, *\\l* the console's name, *\\n* the host's name, *\\v* the
 kernel's version and *\\m* the machine:
 
 ```
-Dukovo Radix 0.0.1 (Dukovo Phase 7) (tty1)
+Dukovo 0.0.1 (tty1)
 
 #
 ```
