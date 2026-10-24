@@ -308,9 +308,9 @@ pub trait Devices {
     fn alloc_dma(pages: usize, below_4g: bool) -> Option<radix_hw::Dma>;
 
     /// Allocates a zeroed page of ordinary RAM for the page cache, which
-    /// disks read into and write from by DMA. It may sleep, and comes out
-    /// of the frame allocator's reserves never; `None` when memory runs
-    /// out even after reclaim. It is given back when the
+    /// disks read into and write from by DMA. It may sleep, and never takes
+    /// the frame allocator's reserves; `None` when memory runs out even
+    /// after reclaim. It is given back when the
     /// [`radix_hw::Page`] is dropped.
     fn alloc_cache_page() -> Option<radix_hw::Page>;
 

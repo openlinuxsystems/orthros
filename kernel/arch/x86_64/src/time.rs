@@ -28,6 +28,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_acpi::{Fadt, GenericAddress, Hpet};
+use radix_hal::clock;
 use radix_sync::Once;
 
 use crate::apic;
@@ -96,7 +97,7 @@ pub fn now_ns() -> u64 {
         return 0;
     }
     let ticks = cpu::rdtsc().wrapping_sub(TSC_START.load(Ordering::Relaxed));
-    ((u128::from(ticks) * u128::from(ns_per_tick)) >> 32) as u64
+    clock::ticks_to_ns(ticks, ns_per_tick)
 }
 
 /// Waits at least `us` microseconds.
@@ -288,7 +289,7 @@ pub fn calibrate(hpet: Option<&Hpet>, fadt: Option<&Fadt>) {
         (u128::from(apic_ticks) * 16 * 1_000_000_000 / u128::from(elapsed_ns.max(1))) as u64;
 
     TSC_HZ.store(tsc_hz, Ordering::Relaxed);
-    NS_PER_TICK.store(((1_000_000_000u128 << 32) / u128::from(tsc_hz)) as u64, Ordering::Relaxed);
+    NS_PER_TICK.store(clock::ns_per_tick(tsc_hz), Ordering::Relaxed);
     APIC_TIMER_HZ.store(apic_hz, Ordering::Relaxed);
     let per_tick = apic_hz / 16 / u64::from(TICK_HZ);
     TICK_COUNT.store(per_tick.clamp(1, u64::from(u32::MAX)) as u32, Ordering::Relaxed);
@@ -346,14 +347,15 @@ fn program(at_ns: u64) {
     }
     cpu.armed_ns.store(at_ns, Ordering::Relaxed);
     cpu.timer_writes.fetch_add(1, Ordering::Relaxed);
+    // Both round up: a timer that fires before `now_ns` reads `at_ns`
+    // finds nothing due and is armed again at once.
     if DEADLINE_MODE.load(Ordering::Relaxed) {
-        let hz = TSC_HZ.load(Ordering::Relaxed);
-        let ticks = (u128::from(at_ns) * u128::from(hz) / 1_000_000_000) as u64;
+        let ticks = clock::first_tick_at(at_ns, NS_PER_TICK.load(Ordering::Relaxed));
         apic::timer_arm_deadline(TSC_START.load(Ordering::Relaxed).wrapping_add(ticks));
     } else {
         let delta = at_ns.saturating_sub(now_ns()).max(1_000);
         let rate = APIC_TIMER_HZ.load(Ordering::Relaxed) / 16;
-        let count = u128::from(delta) * u128::from(rate) / 1_000_000_000;
+        let count = (u128::from(delta) * u128::from(rate)).div_ceil(1_000_000_000);
         apic::timer_arm(count.clamp(1, u128::from(u32::MAX)) as u32);
     }
 }

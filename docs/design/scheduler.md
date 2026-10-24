@@ -196,8 +196,12 @@ end and the 100 Hz tick, so sleeps end on time without a fast tick. It is
 written only when that deadline is earlier than the one it is armed for
 (ADR 0037): a write is an exit under a hypervisor, and a switch usually
 leaves the next deadline where it was. A timer armed too early fires,
-finds nothing due and is armed again. Each CPU counts its timer writes,
-and `ob bench` reports them per operation.
+finds nothing due and is armed again. A deadline in nanoseconds is
+turned into the first counter value at which the clock reads it, rounding
+up: the clock's scale is rounded down, so scaling by the counter's rate
+would land early, by tens of microseconds a day after boot, and the
+timer would fire again and again until the clock caught up. Each CPU
+counts its timer writes, and `ob bench` reports them per operation.
 
 ## Blocking and waking
 

@@ -17,40 +17,53 @@ const SLP_TYP_SHIFT: u16 = 10;
 /// PM1 control: enter the sleep state SLP_TYP names.
 const SLP_EN: u16 = 1 << 13;
 
-/// Reads a PM1 control register.
-fn read_control(register: GenericAddress) -> Option<u16> {
-    match register.space {
-        GenericAddress::IO if register.address <= 0xffff => {
-            // SAFETY: the FADT names this port as a PM1 control register;
-            // reading it has no side effects.
-            let value = unsafe { inw(register.address as u16) };
-            Some(value)
-        }
-        GenericAddress::MEMORY => {
-            let virt =
-                paging::map_physical(register.address, 2, Access::ReadWrite, Cache::Uncached);
-            // SAFETY: `virt` maps the register the FADT names, uncached.
-            Some(unsafe { (virt as *const u16).read_volatile() })
-        }
-        _ => None,
-    }
+/// A PM1 control register.
+#[derive(Clone, Copy)]
+enum Control {
+    /// In I/O space, at this port.
+    Port(u16),
+    /// In memory, mapped uncached at this address.
+    Mapped(usize),
 }
 
-/// Writes a PM1 control register.
-fn write_control(register: GenericAddress, value: u16) {
-    match register.space {
-        // SAFETY: the FADT names this port as a PM1 control register, and
-        // writing it with SLP_EN is how ACPI powers the machine off.
-        GenericAddress::IO if register.address <= 0xffff => unsafe {
-            outw(register.address as u16, value)
-        },
-        GenericAddress::MEMORY => {
-            let virt =
-                paging::map_physical(register.address, 2, Access::ReadWrite, Cache::Uncached);
-            // SAFETY: as above, for a memory-mapped register.
-            unsafe { (virt as *mut u16).write_volatile(value) };
+impl Control {
+    /// The register `register` names, mapped once if it is in memory (the
+    /// wait for ACPI mode reads it hundreds of times); `None` if it is in
+    /// neither space.
+    fn find(register: GenericAddress) -> Option<Self> {
+        match register.space {
+            GenericAddress::IO if register.address <= 0xffff => {
+                Some(Self::Port(register.address as u16))
+            }
+            GenericAddress::MEMORY => Some(Self::Mapped(paging::map_physical(
+                register.address,
+                2,
+                Access::ReadWrite,
+                Cache::Uncached,
+            ))),
+            _ => None,
         }
-        _ => {}
+    }
+
+    fn read(self) -> u16 {
+        match self {
+            // SAFETY: the FADT names this port as a PM1 control register;
+            // reading it has no side effects.
+            Self::Port(port) => unsafe { inw(port) },
+            // SAFETY: `virt` maps the register the FADT names, uncached.
+            Self::Mapped(virt) => unsafe { (virt as *const u16).read_volatile() },
+        }
+    }
+
+    fn write(self, value: u16) {
+        match self {
+            // SAFETY: the FADT names this port as a PM1 control register,
+            // and writing it with SLP_EN is how ACPI powers the machine
+            // off.
+            Self::Port(port) => unsafe { outw(port, value) },
+            // SAFETY: as above, for a memory-mapped register.
+            Self::Mapped(virt) => unsafe { (virt as *mut u16).write_volatile(value) },
+        }
     }
 }
 
@@ -74,7 +87,8 @@ fn s5_types(acpi: &acpi::Acpi, dsdt: u64) -> Option<(u8, u8)> {
 pub fn power_off() {
     let Some(acpi) = acpi::get() else { return };
     let Some(fadt) = acpi.fadt else { return };
-    let (Some(control), false) = (fadt.pm1a_control, fadt.hardware_reduced) else {
+    let (Some(control), false) = (fadt.pm1a_control.and_then(Control::find), fadt.hardware_reduced)
+    else {
         radix_klog::warn!("Power: the firmware describes no way to power off");
         return;
     };
@@ -83,14 +97,16 @@ pub fn power_off() {
         return;
     };
     radix_klog::info!("Power: powering off (ACPI S5, sleep types {type_a} and {type_b})");
+    // Mapped now: with interrupts masked, below, mapping could not wait.
+    let second = fadt.pm1b_control.and_then(Control::find);
     if let Some((port, value)) = fadt.acpi_enable
-        && read_control(control).is_some_and(|now| now & SCI_EN == 0)
+        && control.read() & SCI_EN == 0
     {
         // SAFETY: the FADT names this port and value as the way into ACPI
         // mode; the firmware hands the power-management hardware over.
         unsafe { outb(port, value) };
         for _ in 0..300 {
-            if read_control(control).is_some_and(|now| now & SCI_EN != 0) {
+            if control.read() & SCI_EN != 0 {
                 break;
             }
             time::delay_us(10_000);
@@ -98,12 +114,12 @@ pub fn power_off() {
     }
     let were_enabled = cpu::disable_interrupts();
     cpu::wbinvd();
-    let sleep = |register: GenericAddress, sleep_type: u8| {
-        let kept = read_control(register).unwrap_or(0) & !(7 << SLP_TYP_SHIFT) & !SLP_EN;
-        write_control(register, kept | (u16::from(sleep_type) << SLP_TYP_SHIFT) | SLP_EN);
+    let sleep = |control: Control, sleep_type: u8| {
+        let kept = control.read() & !(7 << SLP_TYP_SHIFT) & !SLP_EN;
+        control.write(kept | (u16::from(sleep_type) << SLP_TYP_SHIFT) | SLP_EN);
     };
     sleep(control, type_a);
-    if let Some(control) = fadt.pm1b_control {
+    if let Some(control) = second {
         sleep(control, type_b);
     }
     time::delay_us(1_000_000);
@@ -180,7 +196,8 @@ pub fn emulator_exit(success: bool) {
 }
 
 /// Whether a key was pressed on the built-in keyboard (the i8042 port),
-/// draining any waiting bytes.
+/// draining any waiting bytes. For the panic screen, where interrupts are
+/// off and the keyboard driver no longer runs.
 pub fn key_pressed() -> bool {
     let mut pressed = false;
     for _ in 0..16 {
@@ -192,7 +209,8 @@ pub fn key_pressed() -> bool {
             break;
         }
         // SAFETY: port 0x60 is the 8042's data port; reading it takes the
-        // waiting byte, which nothing else in the kernel wants.
+        // waiting byte, which the stopped keyboard driver can no longer
+        // want.
         let byte = unsafe { inb(0x60) };
         // Bit 5 marks mouse data; scan codes below 0x80 are key presses.
         if status & 0x20 == 0 && byte < 0x80 {

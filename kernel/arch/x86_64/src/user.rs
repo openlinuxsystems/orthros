@@ -760,6 +760,19 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
         return None;
     }
     let mask = word(layout::SIGMASK);
+    // The image is copied below with interrupts masked, when a page that
+    // is not there cannot be made, so touch each of its pages first: a
+    // handler may point the frame at memory it has never touched.
+    if fpstate != 0 {
+        let end = fpstate + size as u64;
+        let mut at = fpstate;
+        while at < end {
+            if !copy_from_user(&mut [0], at) {
+                return None;
+            }
+            at = (at & !(PAGE - 1)) + PAGE;
+        }
+    }
 
     let area = thread::current_area();
     let were = cpu::disable_interrupts();
@@ -774,7 +787,8 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
         } else {
             let image = core::slice::from_raw_parts_mut(area as *mut u8, size);
             // Interrupts are masked, so a page that is not there is not
-            // made: the frame's pages were all written when it was pushed.
+            // made; each was touched above, so only one given back since
+            // fails the copy.
             if copy_from_user(image, fpstate) {
                 fpu::sanitize(image);
                 fpu::restore(area);
