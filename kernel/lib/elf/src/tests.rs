@@ -209,6 +209,30 @@ fn random_biases_fit_and_spread() {
 }
 
 #[test]
+fn a_pie_linked_above_its_place_moves_down() {
+    // An ET_DYN linked at 0x400000, placed below that: the bias wraps.
+    let mut bytes = typical();
+    bytes[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
+    let image = read(&bytes).unwrap();
+    assert_eq!(image.kind, Kind::Relocatable);
+    let window = 0x10000..0x20_0000;
+    for random in 0..64u64 {
+        let bias = image.random_bias(window.clone(), random).unwrap();
+        let placed = image.place(bias, window.clone()).unwrap();
+        let start = 0x40_0000u64.wrapping_add(bias);
+        assert!(window.contains(&start), "bias {bias:#x}");
+        assert_eq!(placed.entry(), start + 0x1000);
+    }
+    // A move that leaves the image wrapped around the top of the
+    // addresses, or below the range, is refused.
+    assert_eq!(
+        image.place(0u64.wrapping_sub(0x40_1000), 0..u64::MAX).err(),
+        Some(ElfError::OutOfRange)
+    );
+    assert_eq!(image.place(0u64.wrapping_sub(0x40_0000), RANGE).err(), Some(ElfError::OutOfRange));
+}
+
+#[test]
 fn refuses_what_it_must() {
     let rx = PF_R | PF_X;
     let cases: &[(u64, &[Phdr], ElfError)] = &[

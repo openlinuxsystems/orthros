@@ -148,6 +148,12 @@ impl Blk {
                 return Err(err);
             }
         };
+        // A request takes three descriptors at least: its header, a
+        // buffer and its status.
+        if queue.size() < 3 {
+            transport.add_status(status::FAILED);
+            return Err(Error::NoQueue);
+        }
         let size = usize::from(queue.size());
         let Some(slots) = alloc((size * (HEADER + 1)).div_ceil(4096)) else {
             transport.reset();
@@ -257,6 +263,20 @@ impl Blk {
 
     /// Resets the device: it stops using every buffer it was given.
     pub fn reset(&self) {
+        self.transport.reset();
+    }
+
+    /// How many completions the device gave that named no request in
+    /// flight, and were skipped: a device that misbehaves.
+    pub fn bad_entries(&self) -> u32 {
+        self.queue.bad_entries()
+    }
+}
+
+impl Drop for Blk {
+    /// Resets the device before its queue's memory and the requests'
+    /// headers are given back, so that it writes to none of them after.
+    fn drop(&mut self) {
         self.transport.reset();
     }
 }

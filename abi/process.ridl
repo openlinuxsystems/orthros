@@ -89,6 +89,9 @@ flags ChildWaitFlags: u32 {
     continued = 2;
     /// Leave the child as it is, to be waited for again.
     no_reap = 3;
+    /// Leave out children that have ended, for POSIX's `waitid` without
+    /// WEXITED: only stops and continues are reported (since version 7).
+    skip_ended = 4;
 }
 
 /// What `pipe`, `socket_pair` and `socket`, and radix-file(2)'s
@@ -292,7 +295,7 @@ enum ProcessState: u8 {
 }
 
 /// A process.
-interface process = 0x000a version 6 {
+interface process = 0x000a version 7 {
     kind = process;
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
@@ -400,7 +403,8 @@ interface process = 0x000a version 6 {
     /// `pid` names the child, or is -1
     /// for any child, 0 for any in the caller's process group, or minus a
     /// process group. With no_hang it returns at once, with process 0 if
-    /// none has changed. A child that ended is reaped, unless no_reap.
+    /// none has changed. A child that ended is reaped, unless no_reap;
+    /// with skip_ended it is left out, though it still counts as a child.
     method wait = 13 (pid: i64, flags: ChildWaitFlags)
         -> (pid: u64, status: u32, user_ns: u64, system_ns: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_child,

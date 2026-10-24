@@ -13,15 +13,19 @@
 //! - the used ring: flags, an index, and `size` (head, length) pairs the
 //!   device hands back.
 //!
-//! The driver keeps its free descriptors as a list threaded through their
-//! `next` fields. A request is a chain of descriptors ([`Queue::add`]);
-//! the driver publishes the chain's head in the available ring and moves
-//! the ring's index after a barrier, then rings the queue's doorbell
-//! ([`Queue::notify`]). The device writes into the used ring and moves its
-//! index; [`Queue::used`] reads past where it read last, after a barrier,
-//! and puts the chain's descriptors back on the free list. The indexes run
-//! freely and wrap at 2^16; positions are taken modulo the size, a power
-//! of two.
+//! The driver keeps its free descriptors as a list, and each chain's
+//! links and length, in its own memory, never reading back what is
+//! shared with the device (as Linux keeps `desc_extra`). A request is a
+//! chain of descriptors ([`Queue::add`]); the driver publishes the
+//! chain's head in the available ring and moves the ring's index after a
+//! barrier, then rings the queue's doorbell ([`Queue::notify`]). The
+//! device writes into the used ring and moves its index; [`Queue::used`]
+//! reads past where it read last, after a barrier, and puts the chain's
+//! descriptors back on the free list. A used entry that names no chain in
+//! flight (a head out of range, or one given back twice) is the device's
+//! mistake: it is skipped and counted, and changes nothing. The indexes
+//! run freely and wrap at 2^16; positions are taken modulo the size, a
+//! power of two.
 
 use radix_hw::{Dma, Mmio, device_barrier};
 
@@ -59,6 +63,13 @@ pub struct Queue {
     avail_idx: u16,
     /// The used index up to which completions were taken.
     last_used: u16,
+    /// Each descriptor's next: in the free list, or in its chain.
+    next: [u16; MAX_SIZE as usize],
+    /// For the head of each chain in flight, how many descriptors the
+    /// chain has; 0 for every other descriptor.
+    in_flight: [u16; MAX_SIZE as usize],
+    /// Used entries skipped as naming no chain in flight.
+    bad: u32,
 }
 
 /// Where the available and used rings start, and the bytes all three
@@ -120,10 +131,10 @@ impl Queue {
             free_count: size,
             avail_idx: 0,
             last_used: 0,
+            next: core::array::from_fn(|desc| (desc as u16 + 1) % size),
+            in_flight: [0; MAX_SIZE as usize],
+            bad: 0,
         };
-        for desc in 0..size {
-            queue.set_next(desc, (desc + 1) % size);
-        }
         config.write16(common::QUEUE_ENABLE, 1);
         Ok(queue)
     }
@@ -143,16 +154,17 @@ impl Queue {
         self.free_head
     }
 
+    /// How many used entries were skipped as naming no chain in flight.
+    pub fn bad_entries(&self) -> u32 {
+        self.bad
+    }
+
     fn desc(&self, index: u16) -> usize {
         usize::from(index) * DESC_SIZE
     }
 
     fn next(&self, index: u16) -> u16 {
-        self.memory.read16(self.desc(index) + 14)
-    }
-
-    fn set_next(&self, index: u16, next: u16) {
-        self.memory.write16(self.desc(index) + 14, next);
+        self.next[usize::from(index)]
     }
 
     /// Hands the device a chain of `buffers`, in order: those it reads
@@ -178,12 +190,16 @@ impl Queue {
             self.memory.write64(at, buffer.phys);
             self.memory.write32(at + 8, buffer.len);
             self.memory.write16(at + 12, flags);
+            let next = self.next(desc);
             if last {
-                self.free_head = self.next(desc);
+                self.free_head = next;
             } else {
-                desc = self.next(desc);
+                self.memory.write16(at + 14, next);
+                desc = next;
             }
         }
+        // At most the queue's size, checked above.
+        self.in_flight[usize::from(head)] = buffers.len() as u16;
         self.free_count -= buffers.len() as u16;
         let slot = self.avail + 4 + 2 * usize::from(self.avail_idx % self.size);
         self.memory.write16(slot, head);
@@ -200,32 +216,40 @@ impl Queue {
     }
 
     /// The next chain the device has used: its head and the bytes the
-    /// device wrote. Its descriptors are free again.
+    /// device wrote. Its descriptors are free again. Entries that name no
+    /// chain in flight are skipped ([`Queue::bad_entries`]), at most a
+    /// queue's worth a call, so that a device writing nonsense cannot
+    /// keep the driver here.
     pub fn used(&mut self) -> Option<(u16, u32)> {
-        let device_idx = self.memory.read16(self.used + 2);
-        if device_idx == self.last_used {
-            return None;
+        for _ in 0..self.size {
+            let device_idx = self.memory.read16(self.used + 2);
+            if device_idx == self.last_used {
+                return None;
+            }
+            device_barrier();
+            let slot = self.used + 4 + 8 * usize::from(self.last_used % self.size);
+            let head = self.memory.read32(slot);
+            let len = self.memory.read32(slot + 4);
+            self.last_used = self.last_used.wrapping_add(1);
+            match u16::try_from(head) {
+                Ok(head) if head < self.size && self.in_flight[usize::from(head)] != 0 => {
+                    self.release(head);
+                    return Some((head, len));
+                }
+                _ => self.bad = self.bad.saturating_add(1),
+            }
         }
-        device_barrier();
-        let slot = self.used + 4 + 8 * usize::from(self.last_used % self.size);
-        let head = self.memory.read32(slot) as u16;
-        let len = self.memory.read32(slot + 4);
-        self.last_used = self.last_used.wrapping_add(1);
-        if head < self.size {
-            self.release(head);
-        }
-        Some((head, len))
+        None
     }
 
-    /// Puts the chain from `head` back on the free list.
+    /// Puts the chain from `head`, in flight, back on the free list.
     fn release(&mut self, head: u16) {
-        let mut desc = head;
-        let mut count = 1;
-        while self.memory.read16(self.desc(desc) + 12) & FLAG_NEXT != 0 && count < self.size {
-            desc = self.next(desc);
-            count += 1;
+        let count = core::mem::take(&mut self.in_flight[usize::from(head)]);
+        let mut last = head;
+        for _ in 1..count {
+            last = self.next(last);
         }
-        self.set_next(desc, self.free_head);
+        self.next[usize::from(last)] = self.free_head;
         self.free_head = head;
         self.free_count += count;
     }

@@ -580,9 +580,14 @@ fn partitions(name: &Name, device: &DeviceRef) {
             }
         }
         info!(
-            "Disk: {part_name}: {} from sector {}, {kind}",
+            "Disk: {part_name}: {} from sector {}, {kind}{}",
             Size(part.sectors * radix_block::SECTOR),
-            part.first
+            part.first,
+            if part.truncated {
+                ", cut to the disk's end (its table has it reach past)"
+            } else {
+                ""
+            }
         );
         let device: DeviceRef = slice;
         register(&part_name, device);

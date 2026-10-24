@@ -555,8 +555,6 @@ and timer protocols are candidates for the audit after Phase 9.
 - The kernel keeps no time of the last change to a file's status, so
   `st_ctim` is `st_mtim`; reading a file never changes `st_atim`
   (ADR 0076).
-- `waitid` needs `WEXITED`: the kernel always reports children that
-  ended.
 - CPU time is split between user mode and the kernel by the timer's
   samples, 100 a second, as Linux splits it (`times`, `getrusage`,
   `wait`'s times; ADR 0092); CPU-time timers fire within a tick (10 ms).

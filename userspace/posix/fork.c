@@ -149,6 +149,24 @@ static void waits(void) {
 	CHECK(waitid(P_PID, pid, &info, WEXITED | WNOWAIT) == 0);
 	CHECK(info.si_pid == pid && info.si_code == CLD_EXITED && info.si_status == 5);
 	CHECK(waitpid(pid, &status, 0) == pid && WEXITSTATUS(status) == 5);
+	// waitid without WEXITED passes over children that ended, as on
+	// Linux: WSTOPPED alone hears of a stop, and the ended child stays.
+	pid = check_fork();
+	if(pid == 0)
+		_exit(6);
+	pid_t stopper = check_fork();
+	if(stopper == 0) {
+		raise(SIGSTOP);
+		_exit(0);
+	}
+	memset(&info, 0, sizeof(info));
+	CHECK(waitid(P_ALL, 0, &info, WSTOPPED) == 0);
+	CHECK(info.si_pid == stopper && info.si_code == CLD_STOPPED && info.si_status == SIGSTOP);
+	CHECK(waitid(P_PID, pid, &info, WSTOPPED | WNOHANG) == 0 && info.si_pid == 0);
+	CHECK_ERROR(waitid(P_ALL, 0, &info, WNOHANG), EINVAL);
+	CHECK(kill(stopper, SIGCONT) == 0);
+	CHECK_CHILD(stopper);
+	CHECK(waitpid(pid, &status, 0) == pid && WEXITSTATUS(status) == 6);
 }
 
 // Descriptors are copied, and a copy shares its description's offset.

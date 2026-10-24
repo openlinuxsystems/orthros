@@ -432,17 +432,19 @@ impl Inner {
         if !space.fsinfo_dirty {
             return Ok(());
         }
-        space.fsinfo_dirty = false;
-        let Some(at) = self.geo.fsinfo else { return Ok(()) };
+        // Clean only once it is written, so that a write that fails is
+        // tried again at the next sync.
         let mut sector = [0u8; 512];
-        self.cache.read(at, &mut sector)?;
-        if !fsinfo_valid(&sector) {
-            return Ok(());
+        if let Some(at) = self.geo.fsinfo {
+            self.cache.read(at, &mut sector)?;
+            if fsinfo_valid(&sector) {
+                let free = space.free.unwrap_or(u32::MAX);
+                let hint = if self.geo.valid(space.hint) { space.hint } else { u32::MAX };
+                self.cache.write(at + 488, &free.to_le_bytes())?;
+                self.cache.write(at + 492, &hint.to_le_bytes())?;
+            }
         }
-        let free = space.free.unwrap_or(u32::MAX);
-        let hint = if self.geo.valid(space.hint) { space.hint } else { u32::MAX };
-        self.cache.write(at + 488, &free.to_le_bytes())?;
-        self.cache.write(at + 492, &hint.to_le_bytes())?;
+        space.fsinfo_dirty = false;
         Ok(())
     }
 

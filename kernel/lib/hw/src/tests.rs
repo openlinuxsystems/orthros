@@ -245,6 +245,13 @@ fn misaligned_register_accesses_are_refused() {
 }
 
 #[test]
+#[should_panic(expected = "unaligned")]
+fn accesses_are_aligned_in_memory_not_only_in_their_window() {
+    let window = Mmio::fake(bus(), 64).window(2, 16).unwrap();
+    window.read32(0);
+}
+
+#[test]
 fn windows_stay_inside() {
     let window = Mmio::fake(bus(), 64);
     assert!(window.window(32, 32).is_some());

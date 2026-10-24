@@ -195,6 +195,17 @@ mod proofs {
             assert_eq!(bytes / SECTOR, len);
         }
     }
+
+    /// A partition [`partition::fit`] keeps is on the disk, after its
+    /// first sector, not empty, and no bigger than the table says.
+    #[kani::proof]
+    fn partitions_fit() {
+        let (first, sectors, disk): (u64, u64, u64) = kani::any();
+        if let Some((kept, truncated)) = partition::fit(first, sectors, disk) {
+            assert!(partition::within(first, kept, disk));
+            assert!(kept <= sectors && truncated == (kept < sectors));
+        }
+    }
 }
 
 /// Part of a device as a device of its own: a partition.

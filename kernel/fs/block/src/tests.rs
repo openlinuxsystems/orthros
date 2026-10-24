@@ -167,8 +167,25 @@ fn mbr_primary_and_logical_partitions() {
     let (scheme, found) = table(&disk).unwrap();
     assert_eq!(scheme, Scheme::Mbr);
     let numbers: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors)).collect();
-    assert_eq!(numbers, [(1, 2048, 1024), (2, 3072, 1000), (5, 3135, 100), (6, 3335, 200)]);
+    // The extended one shows its first two sectors only.
+    assert_eq!(numbers, [(1, 2048, 1024), (2, 3072, 2), (5, 3135, 100), (6, 3335, 200)]);
     assert_eq!(found[0].kind, Kind::Mbr(0x0c));
+    assert!(found.iter().all(|p| !p.truncated));
+}
+
+#[test]
+fn a_broken_chain_of_logical_partitions_keeps_what_came_before() {
+    let disk = RamDisk::new(4096, false);
+    disk.load(0, &mbr(&[(0x80, 0x0c, 2048, 1024), (0, 0x05, 3072, 1000)])).unwrap();
+    // The second record has no signature.
+    disk.load(3072 * 512, &mbr(&[(0, 0x83, 63, 100), (0, 0x05, 200, 300)])).unwrap();
+    let (_, found) = table(&disk).unwrap();
+    let numbers: Vec<_> = found.iter().map(|p| p.number).collect();
+    assert_eq!(numbers, [1, 2, 5]);
+    // A link backwards ends it after the record that holds it.
+    disk.load((3072 + 200) * 512, &mbr(&[(0, 0x83, 63, 50), (0, 0x05, 100, 50)])).unwrap();
+    let numbers: Vec<_> = table(&disk).unwrap().1.iter().map(|p| p.number).collect();
+    assert_eq!(numbers, [1, 2, 5, 6]);
 }
 
 #[test]
@@ -186,10 +203,17 @@ fn whole_disk_filesystems_have_no_table() {
 }
 
 #[test]
-fn mbr_partitions_past_the_end_are_refused() {
+fn mbr_partitions_past_the_end_are_cut_or_skipped() {
+    // As on Linux: one that reaches past the end is cut to fit, one that
+    // starts past it, or has no size, is skipped, and the others stay.
     let disk = RamDisk::new(4096, false);
-    disk.load(0, &mbr(&[(0, 0x83, 2048, 4096)])).unwrap();
-    assert!(matches!(table(&disk), Err(partition::Error::Damaged(_))));
+    let entries =
+        [(0, 0x83, 2048, 4096), (0, 0x83, 5000, 10), (0, 0x0c, 64, 0), (0, 0x0c, 64, 1984)];
+    disk.load(0, &mbr(&entries)).unwrap();
+    let (scheme, found) = table(&disk).unwrap();
+    assert_eq!(scheme, Scheme::Mbr);
+    let kept: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors, p.truncated)).collect();
+    assert_eq!(kept, [(1, 2048, 2048, true), (4, 64, 1984, false)]);
 }
 
 /// A GPT disk of `sectors` with `parts` (first, last, name), both headers
@@ -247,9 +271,15 @@ fn gpt_partitions_and_the_backup_header() {
         assert_eq!((found[0].number, found[0].first, found[0].sectors), (1, 2048, 2048));
         assert_eq!(found[1].name().collect::<std::string::String>(), "data");
     }
-    // Entries outside the usable sectors damage the table.
-    let disk = gpt_disk(8192, &[(10, 4095, "low")], false);
-    assert!(matches!(table(&disk), Err(partition::Error::Damaged(_))));
+    // An entry past the disk's end, or ending before it starts, is
+    // skipped; one outside the usable sectors but on the disk is shown,
+    // as on Linux.
+    let parts =
+        [(10, 4095, "low"), (4096, 9000, "past"), (6000, 5000, "backwards"), (8100, 8150, "")];
+    let disk = gpt_disk(8192, &parts, false);
+    let (_, found) = table(&disk).unwrap();
+    let kept: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors)).collect();
+    assert_eq!(kept, [(1, 10, 4086), (4, 8100, 51)]);
 }
 
 proptest! {

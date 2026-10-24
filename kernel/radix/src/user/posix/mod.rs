@@ -671,6 +671,7 @@ fn wait_child(me: &ProcessRef, pid: i64, flags: ChildWaitFlags) -> Result<(u64, 
         stopped: flags.contains(ChildWaitFlags::STOPPED),
         continued: flags.contains(ChildWaitFlags::CONTINUED),
         no_reap: flags.contains(ChildWaitFlags::NO_REAP),
+        skip_ended: flags.contains(ChildWaitFlags::SKIP_ENDED),
     };
     if pid == i64::MIN {
         return Err(Kernel::InvalidArgument.status(0));

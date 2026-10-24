@@ -13,8 +13,13 @@
 //! Everything read from the disk is checked before use: GPT headers and
 //! entry arrays by their CRC-32, with the backup header at the disk's
 //! last sector when the primary one is damaged, and every partition
-//! against the disk's size ([`within`], which Kani proves never lets one
-//! reach past the end). A damaged table yields an error, never a panic.
+//! against the disk's size ([`fit`], which Kani proves never lets one
+//! reach past the end). As on Linux, one bad entry costs only itself: a
+//! partition that starts past the disk's end is skipped, an MBR one that
+//! reaches past it is cut to fit ([`Partition::truncated`]), and a broken
+//! chain of logical partitions ends where it breaks. Only a table that is
+//! damaged as a whole, a GPT with neither copy intact, yields an error,
+//! and nothing read panics.
 
 use crate::crc32::{Crc32, crc32};
 use crate::mem::{self, KVec, NoMemory};
@@ -50,6 +55,9 @@ pub struct Partition {
     pub kind: Kind,
     /// Its name, for GPT: UTF-16, up to the first NUL.
     pub name: [u16; 36],
+    /// Whether the table has it reach past the disk's end, and it was cut
+    /// to end there.
+    pub truncated: bool,
 }
 
 impl Partition {
@@ -106,6 +114,18 @@ pub type ReadSector<'a> = &'a mut dyn FnMut(u64, &mut [u8; SECTOR]) -> Result<()
 /// sectors, after its first (where the table is), and are not empty.
 pub fn within(first: u64, sectors: u64, disk: u64) -> bool {
     sectors > 0 && first >= 1 && first.checked_add(sectors).is_some_and(|end| end <= disk)
+}
+
+/// What is on a disk of `disk` sectors of a partition of `sectors` from
+/// `first`, as Linux takes one: nothing if it is empty or starts outside
+/// the disk after its first sector, else its size cut to end at the
+/// disk's end, and whether it was cut.
+pub fn fit(first: u64, sectors: u64, disk: u64) -> Option<(u64, bool)> {
+    if sectors == 0 || first == 0 || first >= disk {
+        return None;
+    }
+    let room = disk - first;
+    Some((sectors.min(room), sectors > room))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
@@ -180,25 +200,35 @@ pub fn read(disk: u64, read: ReadSector<'_>) -> Result<(Scheme, KVec<Partition>)
         if entry.kind == 0 {
             continue;
         }
-        let (first, sectors) = (u64::from(entry.first), u64::from(entry.sectors));
-        if !within(first, sectors, disk) {
-            return Err(Error::Damaged("an MBR partition reaches past the end of the disk"));
-        }
-        mem::push(&mut found, mbr_partition(i as u32 + 1, first, sectors, entry.kind))?;
+        // One of no size or that starts past the disk's end is skipped,
+        // and one that reaches past the end cut to fit, as Linux does.
+        let first = u64::from(entry.first);
+        let Some((sectors, truncated)) = fit(first, u64::from(entry.sectors), disk) else {
+            continue;
+        };
+        let number = i as u32 + 1;
         if is_extended(entry.kind) {
+            // Shown as its first two sectors only, as on Linux, so that a
+            // filesystem made on it by mistake cannot wipe the logical
+            // partitions inside.
+            mem::push(&mut found, mbr_partition(number, first, sectors.min(2), entry.kind, false))?;
             logical(disk, first, sectors, read, &mut found)?;
+        } else {
+            mem::push(&mut found, mbr_partition(number, first, sectors, entry.kind, truncated))?;
         }
     }
     Ok((Scheme::Mbr, found))
 }
 
-fn mbr_partition(number: u32, first: u64, sectors: u64, kind: u8) -> Partition {
-    Partition { number, first, sectors, kind: Kind::Mbr(kind), name: [0; 36] }
+fn mbr_partition(number: u32, first: u64, sectors: u64, kind: u8, truncated: bool) -> Partition {
+    Partition { number, first, sectors, kind: Kind::Mbr(kind), name: [0; 36], truncated }
 }
 
-/// The logical partitions of the extended partition at `base`: a chain of
-/// extended boot records, each with a partition (relative to it) and the
-/// next record (relative to `base`).
+/// The logical partitions of the extended partition at `base`, of `size`
+/// sectors: a chain of extended boot records, each with a partition
+/// (relative to it) and the next record (relative to `base`). A record
+/// that cannot be read or is not one, or a link backwards or outside,
+/// ends the chain there, as on Linux, keeping what came before.
 fn logical(
     disk: u64,
     base: u64,
@@ -209,19 +239,16 @@ fn logical(
     let mut record = base;
     let mut sector = [0u8; SECTOR];
     for number in 5..5 + MAX_LOGICAL as u32 {
-        read(record, &mut sector)?;
-        let Some(entries) = mbr_entries(&sector) else {
-            return Err(Error::Damaged("an extended boot record has no signature"));
-        };
+        if read(record, &mut sector).is_err() {
+            return Ok(());
+        }
+        let Some(entries) = mbr_entries(&sector) else { return Ok(()) };
         let this = entries[0];
-        if this.kind != 0 {
-            let first =
-                record.checked_add(u64::from(this.first)).ok_or(Error::Damaged("overflow"))?;
-            let sectors = u64::from(this.sectors);
-            if !within(first, sectors, disk) || !within(first, sectors, base + size) {
-                return Err(Error::Damaged("a logical partition reaches past its extended one"));
-            }
-            mem::push(found, mbr_partition(number, first, sectors, this.kind))?;
+        if this.kind != 0
+            && let Some(first) = record.checked_add(u64::from(this.first))
+            && let Some((sectors, truncated)) = fit(first, u64::from(this.sectors), disk)
+        {
+            mem::push(found, mbr_partition(number, first, sectors, this.kind, truncated))?;
         }
         let next = entries[1];
         if !is_extended(next.kind) || next.first == 0 {
@@ -229,7 +256,7 @@ fn logical(
         }
         let at = base + u64::from(next.first);
         if at <= record || at >= base + size {
-            return Err(Error::Damaged("an extended boot record points backwards or outside"));
+            return Ok(());
         }
         record = at;
     }
@@ -325,14 +352,13 @@ fn gpt_entries(
             if kind == [0; 16] {
                 continue;
             }
+            // One that is not wholly on the disk is skipped, as Linux
+            // skips it; the table's CRC says it was written so.
             let (first, last) = (u64_at(entry, 32), u64_at(entry, 40));
-            if first < header.first_usable || last > header.last_usable || last < first {
-                return Err(Error::Damaged("a GPT partition is outside the usable sectors"));
+            if last < first || !within(first, last - first + 1, disk) {
+                continue;
             }
             let sectors = last - first + 1;
-            if !within(first, sectors, disk) {
-                return Err(Error::Damaged("a GPT partition reaches past the end of the disk"));
-            }
             let mut name = [0u16; 36];
             for (j, c) in name.iter_mut().enumerate() {
                 *c = u16::from_le_bytes([entry[56 + 2 * j], entry[57 + 2 * j]]);
@@ -340,7 +366,14 @@ fn gpt_entries(
             if found.len() < MAX_PARTITIONS {
                 mem::push(
                     found,
-                    Partition { number, first, sectors, kind: Kind::Gpt(kind), name },
+                    Partition {
+                        number,
+                        first,
+                        sectors,
+                        kind: Kind::Gpt(kind),
+                        name,
+                        truncated: false,
+                    },
                 )?;
             }
         }

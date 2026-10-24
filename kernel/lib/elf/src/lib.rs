@@ -210,14 +210,16 @@ impl Image {
     }
 
     /// The image moved by `bias` (0 for a fixed image), if that keeps it
-    /// inside `range`.
+    /// inside `range`. The bias is a difference that wraps, as Linux's
+    /// load bias is: an image linked above its place moves down, as
+    /// [`Image::random_bias`] may say.
     pub fn place(&self, bias: u64, range: Range<u64>) -> Result<Placed<'_>, ElfError> {
         if !bias.is_multiple_of(PAGE) || (self.kind == Kind::Fixed && bias != 0) {
             return Err(ElfError::OutOfRange);
         }
         let span = self.span();
-        let start = span.start.checked_add(bias).ok_or(ElfError::OutOfRange)?;
-        let end = span.end.checked_add(bias).ok_or(ElfError::OutOfRange)?;
+        let start = span.start.wrapping_add(bias);
+        let end = start.checked_add(span.end - span.start).ok_or(ElfError::OutOfRange)?;
         if start < range.start || end > range.end {
             return Err(ElfError::OutOfRange);
         }

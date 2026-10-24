@@ -245,6 +245,8 @@ impl TableEntry {
 pub struct Tables {
     root: TableEntry,
     entries: [Option<TableEntry>; MAX_TABLES],
+    /// How many the root table lists, kept or not.
+    listed: usize,
 }
 
 impl Tables {
@@ -265,6 +267,7 @@ impl Tables {
                 status: Ok(()),
             },
             entries: [None; MAX_TABLES],
+            listed: root.body().len() / width,
         };
         let pointers = root.body().chunks_exact(width).map(|chunk| match width {
             8 => u64_at(chunk, 0).unwrap_or(0),
@@ -294,9 +297,15 @@ impl Tables {
         &self.root
     }
 
-    /// Every listed table.
+    /// Every listed table, up to [`MAX_TABLES`].
     pub fn iter(&self) -> impl Iterator<Item = &TableEntry> {
         self.entries.iter().flatten()
+    }
+
+    /// How many tables the root table lists past the first
+    /// [`MAX_TABLES`], which are not read.
+    pub fn dropped(&self) -> usize {
+        self.listed.saturating_sub(MAX_TABLES)
     }
 
     /// Loads the first valid table with `signature`.
@@ -511,5 +520,20 @@ mod tests {
         );
         assert!(tables.find(&memory, b"BRKN").is_none());
         assert!(tables.find(&memory, b"APIC").is_none());
+        assert_eq!(tables.dropped(), 0);
+    }
+
+    #[test]
+    fn tables_past_the_most_kept_are_counted() {
+        let mut memory = FakeMemory::default();
+        let mut xsdt = Vec::new();
+        for n in 0..MAX_TABLES as u64 + 6 {
+            xsdt.extend_from_slice(&(0x10_0000 + n * 0x1000).to_le_bytes());
+        }
+        memory.insert(0x1000, table(b"XSDT", 1, &xsdt));
+        let rsdp = Rsdp::parse(&rsdp_v2(0x1000)).unwrap();
+        let tables = Tables::load(&rsdp, &memory).unwrap();
+        assert_eq!(tables.iter().count(), MAX_TABLES);
+        assert_eq!(tables.dropped(), 6);
     }
 }
