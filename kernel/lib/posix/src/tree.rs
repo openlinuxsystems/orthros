@@ -112,6 +112,9 @@ pub struct WaitFor {
     pub continued: bool,
     /// Leave the child as it is, to be waited for again.
     pub no_reap: bool,
+    /// Leave out children that have ended: POSIX's `waitid` without
+    /// WEXITED.
+    pub skip_ended: bool,
 }
 
 /// What `wait` found.
@@ -296,8 +299,8 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
     }
 
     /// Looks for a child of `caller` that `which` names and has something
-    /// to report: an end, or with `for_` a stop or a continue. An ended
-    /// child is reaped unless `no_reap`.
+    /// to report: an end (unless `skip_ended`), or with `for_` a stop or a
+    /// continue. An ended child is reaped unless `no_reap`.
     pub fn wait(&mut self, caller: u64, which: Which, for_: WaitFor) -> Found<T> {
         let mut any = false;
         let mut found = None;
@@ -313,7 +316,7 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
             }
             any = true;
             let ready = match member.life {
-                Life::Zombie { .. } => true,
+                Life::Zombie { .. } => !for_.skip_ended,
                 _ => {
                     (for_.stopped && member.report.stopped.is_some())
                         || (for_.continued && member.report.continued)

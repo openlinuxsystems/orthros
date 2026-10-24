@@ -277,7 +277,7 @@ fn wait_reports_ends_stops_and_continues() {
     tree.insert_root(1, 1).unwrap();
     tree.insert_child(2, 1, 2).unwrap();
     tree.insert_child(3, 1, 3).unwrap();
-    let all = WaitFor { stopped: true, continued: true, no_reap: false };
+    let all = WaitFor { stopped: true, continued: true, ..WaitFor::default() };
     assert_eq!(tree.wait(1, Which::Any, all), Found::NotYet);
     assert_eq!(tree.wait(2, Which::Any, all), Found::NoChild);
     assert_eq!(tree.wait(1, Which::Pid(9), all), Found::NoChild);
@@ -300,6 +300,28 @@ fn wait_reports_ends_stops_and_continues() {
     assert_eq!(tree.wait(1, Which::Any, peek), ended(None));
     assert_eq!(tree.wait(1, Which::Group(1), WaitFor::default()), ended(Some(2)));
     assert!(tree.get(2).is_none());
+    tree.check().unwrap();
+}
+
+#[test]
+fn wait_can_leave_out_ends() {
+    // waitid(WSTOPPED) without WEXITED: an ended child is passed over,
+    // left to be reaped later, and a stop of another is reported.
+    let mut tree = T::new(Global);
+    tree.insert_root(1, 1).unwrap();
+    tree.insert_child(2, 1, 2).unwrap();
+    tree.insert_child(3, 1, 3).unwrap();
+    let mut gone = Vec::new();
+    tree.exit(2, Ended::Exited(7), (5, 6), false, &mut |h| gone.push(h));
+    let stops = WaitFor { stopped: true, skip_ended: true, ..WaitFor::default() };
+    assert_eq!(tree.wait(1, Which::Any, stops), Found::NotYet);
+    assert_eq!(tree.wait(1, Which::Pid(2), stops), Found::NotYet);
+    tree.stopped(3, SIGTSTP);
+    let stopped =
+        Found::Child { pid: 3, status: status::stopped(SIGTSTP), times: (0, 0), reaped: None };
+    assert_eq!(tree.wait(1, Which::Any, stops), stopped);
+    let ended = Found::Child { pid: 2, status: status::exited(7), times: (5, 6), reaped: Some(2) };
+    assert_eq!(tree.wait(1, Which::Any, WaitFor::default()), ended);
     tree.check().unwrap();
 }
 
@@ -421,7 +443,7 @@ proptest! {
                 }
                 Op::Wait(i) => {
                     let pid = pick(&tree, i);
-                    let _ = tree.wait(pid, Which::Any, WaitFor { stopped: true, continued: true, no_reap: false });
+                    let _ = tree.wait(pid, Which::Any, WaitFor { stopped: true, continued: true, ..WaitFor::default() });
                 }
                 Op::SetGroup(a, b, c) => {
                     let (caller, pid, group) = (pick(&tree, a), pick(&tree, b), pick(&tree, c));

@@ -56,9 +56,9 @@ impl Width {
         self.mask() - 8
     }
 
-    /// Whether `value` ends a chain (anything from the bad mark up, as
-    /// every driver reads it, and marks 0xff8 to 0xfff and their wider
-    /// forms).
+    /// Whether `value` ends a chain: one of the end marks, 0xff8 to 0xfff
+    /// for FAT12 and their wider forms, the eight values above the bad
+    /// mark.
     pub fn is_end(self, value: u32) -> bool {
         value >= self.mask() - 7
     }

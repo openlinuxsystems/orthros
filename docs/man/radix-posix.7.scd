@@ -506,7 +506,6 @@ passed*; the boot test fails on any failure.
 - A directory descriptor from before exec has no path: *..* above it
   fails with EXDEV, and *fchdir* to it with ENOSYS. One whose directory
   was moved while it was open still goes by the old path for both.
-  *waitid* needs *WEXITED*.
 - Futexes in memory several processes share are not shared: a
   process-shared mutex or semaphore does not wake waiters in another
   process.

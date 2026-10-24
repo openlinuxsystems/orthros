@@ -607,6 +607,7 @@ impl<const CPUS: usize> Checker<CPUS> {
         let mut held = self.held[cpu].lock();
         let mut index = 0;
         let mut spin = None;
+        let mut full = false;
         while index < held.len {
             match held.locks[index] {
                 Some(lock) if lock.context == 0 => {
@@ -616,12 +617,19 @@ impl<const CPUS: usize> Checker<CPUS> {
                     } else if let Some(slot) = saved.locks.get_mut(saved.len) {
                         *slot = Some(lock);
                         saved.len += 1;
+                    } else {
+                        full = true;
                     }
                 }
                 _ => index += 1,
             }
         }
         drop(held);
+        if full {
+            // The locks that did not fit would come back missing, and
+            // their orders unseen: stop rather than check with holes.
+            self.out_of_room(cpu, "more than 8 mutexes held by a thread switched out");
+        }
         if let Some(lock) = spin {
             self.report(Report {
                 problem: Problem::SleepInAtomic,
@@ -1246,6 +1254,31 @@ mod tests {
         assert_eq!(problems, [Problem::SleepInAtomic, Problem::SleepInAtomic]);
         assert!(checker.enabled(), "expected reports leave the checker on");
         assert_eq!(checker.reports(), 2);
+    }
+
+    #[test]
+    fn a_thread_switched_out_with_too_many_mutexes_turns_the_checker_off() {
+        let checker = checker();
+        let mutexes = [
+            Fake::mutex(1),
+            Fake::mutex(2),
+            Fake::mutex(3),
+            Fake::mutex(4),
+            Fake::mutex(5),
+            Fake::mutex(6),
+            Fake::mutex(7),
+            Fake::mutex(8),
+            Fake::mutex(9),
+        ];
+        assert_eq!(mutexes.len(), MAX_SAVED + 1);
+        for mutex in &mutexes {
+            mutex.take(&checker, THREAD);
+        }
+        let mut saved = Saved::new();
+        checker.switch_out(0, &mut saved);
+        let problems: Vec<_> = seen().into_iter().map(|(p, _)| p).collect();
+        assert_eq!(problems, [Problem::OutOfRoom]);
+        assert!(!checker.enabled());
     }
 
     #[test]

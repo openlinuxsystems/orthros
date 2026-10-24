@@ -248,15 +248,19 @@ impl FileCache {
         if *offset == APPEND {
             *offset = state.size;
         }
-        let len = data.len() - from;
-        let Some(start) = offset.checked_add(from as u64) else { return (0, Err(Error::TooBig)) };
-        let Some(end) = start.checked_add(len as u64) else { return (0, Err(Error::TooBig)) };
-        if end > backing.max_size() {
-            return (0, Err(Error::TooBig));
-        }
-        if len == 0 {
+        if data.len() == from {
             return (0, Ok(Copied::All(from)));
         }
+        // As on Linux, a write that would pass the largest size the
+        // filesystem allows writes what fits, and only one that starts
+        // there fails.
+        let max = backing.max_size();
+        let start = match offset.checked_add(from as u64) {
+            Some(start) if start < max => start,
+            _ => return (0, Err(Error::TooBig)),
+        };
+        let len = (data.len() - from).min(usize::try_from(max - start).unwrap_or(usize::MAX));
+        let end = start + len as u64;
         if end > state.size {
             if let Err(err) = backing.reserve(end) {
                 return (0, Err(err));
@@ -264,6 +268,8 @@ impl FileCache {
             if start > state.size {
                 let size = state.size;
                 if let Err(err) = zero_gap(&mut state, size, start, backing) {
+                    // The room just reserved goes back with the write.
+                    let _ = backing.truncate(size);
                     return (0, Err(err));
                 }
             }

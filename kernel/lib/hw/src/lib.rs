@@ -63,9 +63,10 @@ enum Backing {
 /// A window of device registers (memory-mapped I/O).
 ///
 /// Every access is volatile and checked: an offset outside the window, or
-/// not a multiple of the access's size, panics, because it can only come
-/// from a bug in the driver (the driver checks offsets it reads from the
-/// device itself before it uses them, with [`Mmio::window`]). Device
+/// an address in memory that is not a multiple of the access's size,
+/// panics, because it can only come from a bug in the driver (the driver
+/// checks offsets it reads from the device itself before it uses them,
+/// with [`Mmio::window`] and their alignment). Device
 /// mappings last for the kernel's life, so copies of a window can be kept
 /// freely.
 #[derive(Clone)]
@@ -129,12 +130,18 @@ impl Mmio {
         Some(Mmio { backing, len })
     }
 
-    /// The address of `size` bytes at `offset`, after the checks.
+    /// The address of `size` bytes at `offset`, after the checks: inside
+    /// the window, and aligned in memory, wherever the window starts.
     fn at(&self, offset: usize, size: usize) -> usize {
+        let start = match &self.backing {
+            Backing::Mapped(base) => *base,
+            #[cfg(any(test, feature = "fake"))]
+            Backing::Fake(_, start) => *start,
+        };
         assert!(
-            offset.is_multiple_of(size)
+            start.wrapping_add(offset).is_multiple_of(size)
                 && offset.checked_add(size).is_some_and(|end| end <= self.len),
-            "register access of {size} bytes at {offset:#x} outside {self:?}"
+            "register access of {size} bytes at {offset:#x} outside {self:?}, or unaligned"
         );
         offset
     }

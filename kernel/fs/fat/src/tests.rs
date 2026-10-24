@@ -23,6 +23,7 @@ use radix_vfs::mem::{self, KArc};
 use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use crate::FatFs;
+use crate::bpb::Geometry;
 use crate::table::Width;
 
 /// 2026-10-22 00:42:22 UTC, for files' times.
@@ -758,4 +759,34 @@ proptest! {
         }
         fsck(&volume.image());
     }
+}
+
+#[test]
+fn a_small_fat32_volume_mounts_as_fat32() {
+    // `mkfs.fat -F 32` makes one with fewer clusters than FAT32 is meant
+    // to have, with a warning; Linux goes by the table-size field, and
+    // so does Radix.
+    let volume = Volume::new(&mkfs(32, 16384, 1));
+    let geo = volume.fs.geometry();
+    assert_eq!(geo.width, Width::Fat32);
+    assert!(geo.clusters < 65525);
+    let data = pattern(7, 33_000);
+    make_file(&volume.root(), "small.txt", &data);
+    let mut image = volume.image();
+    fsck(&image);
+    assert_eq!(mtools(&mut image, "mtype", &["::/small.txt"]), data);
+}
+
+#[test]
+fn the_older_boot_signature_gives_the_serial_alone() {
+    let image = mkfs(16, 32768, 4);
+    let mut sector: [u8; 512] = image[..512].try_into().unwrap();
+    let geo = Geometry::parse(&sector, image.len() as u64).unwrap();
+    assert_eq!(&geo.label, b"RADIXTEST  ");
+    sector[38] = 0x28;
+    let older = Geometry::parse(&sector, image.len() as u64).unwrap();
+    assert_eq!(older.serial, geo.serial);
+    assert_eq!(&older.label, b"           ");
+    sector[38] = 0;
+    assert_eq!(Geometry::parse(&sector, image.len() as u64).unwrap().serial, 0);
 }

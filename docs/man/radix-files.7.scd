@@ -120,7 +120,9 @@ capability goes, then its space is freed.
 	device whose file capability the call names (a disk or a partition,
 	from _/dev_). Names compare without regard to case, as FAT requires,
 	and may not hold control characters or any of *" \* / : < > ? \\ |*.
-	A file is at most 4 GiB less one byte. FAT has no symbolic links
+	A file is at most 4 GiB less one byte: as on Linux, a write that
+	would pass that writes what fits, and one at the limit fails with
+	EFBIG. FAT has no symbolic links
 	(*make_link* fails with EPERM). exFAT comes in Phase 10.
 
 *proc*
@@ -189,7 +191,9 @@ _/users_ and _/data_ are empty directories of the root's tmpfs.
 At boot the kernel finds each disk, reads its partition table (MBR or
 GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
 virtio disks, _vda1_ for a partition. Each appears in _/dev_ and
-_/sys/block_. Spark mounts the FAT filesystem of each partition, or of
+_/sys/block_. As on Linux, an entry that starts past the disk's end is
+skipped, an MBR one that reaches past it is cut to end there, and an
+extended partition shows only its first two sectors. Spark mounts the FAT filesystem of each partition, or of
 each disk with no partition table, at _/volumes/_*name*, read-write, or
 read-only when the device is. A device with no FAT filesystem is left
 alone. Disks are found once, at boot. Removable media, mounted by label

@@ -174,7 +174,12 @@ request reads or writes sectors from one place into a list of
 `Segment`s, each a range of a page, and blocks the calling thread until
 the device is done. `partition` reads MBR and GPT tables (the GPT's CRC32
 checked, the backup header when the primary is bad) and `Slice` is a
-partition as a device of its own.
+partition as a device of its own. As on Linux, a bad entry costs only
+itself: one that starts past the disk's end is skipped, an MBR one that
+reaches past it is cut to fit (and logged so), a broken chain of logical
+partitions ends where it breaks, and an extended partition shows only
+its first two sectors, so that nothing made on it can wipe the logical
+ones.
 
 A filesystem's metadata goes through a `BlockCache` of its device: page
 `n` holds the device's bytes from `n * 4096`, with a bit per sector for

@@ -16,8 +16,16 @@ const SCI_EN: u16 = 1 << 0;
 const SLP_TYP_SHIFT: u16 = 10;
 /// PM1 control: enter the sleep state SLP_TYP names.
 const SLP_EN: u16 = 1 << 13;
+/// Sleep control (hardware-reduced ACPI, ACPI 6.5 4.8.3.7): where
+/// SLP_TYP goes, three bits from bit 2.
+const SLEEP_TYPE_SHIFT: u8 = 2;
+/// Sleep control: enter the sleep state SLP_TYP names.
+const SLEEP_ENABLE: u8 = 1 << 5;
+/// Sleep status: the wake status bit, cleared by writing it.
+const WAKE_STATUS: u8 = 1 << 7;
 
-/// A PM1 control register.
+/// A register of ACPI's power management: a PM1 control register, or a
+/// hardware-reduced machine's sleep control or status register.
 #[derive(Clone, Copy)]
 enum Control {
     /// In I/O space, at this port.
@@ -65,6 +73,28 @@ impl Control {
             Self::Mapped(virt) => unsafe { (virt as *mut u16).write_volatile(value) },
         }
     }
+
+    /// Writes an 8-bit register: the sleep control and status registers
+    /// of a hardware-reduced machine.
+    fn write8(self, value: u8) {
+        match self {
+            // SAFETY: the FADT names this port as a sleep control or status
+            // register; writing it with SLP_EN is how such a machine powers
+            // off, and writing the wake status bit clears it.
+            Self::Port(port) => unsafe { outb(port, value) },
+            // SAFETY: as above, for a memory-mapped register.
+            Self::Mapped(virt) => unsafe { (virt as *mut u8).write_volatile(value) },
+        }
+    }
+}
+
+/// How the machine enters a sleep state.
+enum Sleep {
+    /// Through the PM1 control registers: the second if there is one.
+    Pm1(Control, Option<Control>),
+    /// Through the sleep control register of a hardware-reduced machine,
+    /// with its status register if there is one.
+    Reduced(Control, Option<Control>),
 }
 
 /// The SLP_TYPa and SLP_TYPb values of S5, from the DSDT or else an SSDT.
@@ -82,13 +112,24 @@ fn s5_types(acpi: &acpi::Acpi, dsdt: u64) -> Option<(u8, u8)> {
 
 /// Powers the machine off through ACPI's soft-off state, S5: writes S5's
 /// sleep types with SLP_EN into the PM1 control registers, after taking
-/// the machine into ACPI mode if the firmware left it out. Returns if the
-/// machine has no such registers or no S5, or is still on a second later.
+/// the machine into ACPI mode if the firmware left it out, or on a
+/// hardware-reduced machine, which has none, into its sleep control
+/// register. Returns if the machine has no such registers or no S5, or is
+/// still on a second later.
 pub fn power_off() {
     let Some(acpi) = acpi::get() else { return };
     let Some(fadt) = acpi.fadt else { return };
-    let (Some(control), false) = (fadt.pm1a_control.and_then(Control::find), fadt.hardware_reduced)
-    else {
+    // Mapped now: with interrupts masked, below, mapping could not wait.
+    let sleep = if fadt.hardware_reduced {
+        fadt.sleep_control
+            .and_then(Control::find)
+            .map(|control| Sleep::Reduced(control, fadt.sleep_status.and_then(Control::find)))
+    } else {
+        fadt.pm1a_control
+            .and_then(Control::find)
+            .map(|control| Sleep::Pm1(control, fadt.pm1b_control.and_then(Control::find)))
+    };
+    let Some(sleep) = sleep else {
         radix_klog::warn!("Power: the firmware describes no way to power off");
         return;
     };
@@ -97,9 +138,8 @@ pub fn power_off() {
         return;
     };
     radix_klog::info!("Power: powering off (ACPI S5, sleep types {type_a} and {type_b})");
-    // Mapped now: with interrupts masked, below, mapping could not wait.
-    let second = fadt.pm1b_control.and_then(Control::find);
-    if let Some((port, value)) = fadt.acpi_enable
+    if let Sleep::Pm1(control, _) = sleep
+        && let Some((port, value)) = fadt.acpi_enable
         && control.read() & SCI_EN == 0
     {
         // SAFETY: the FADT names this port and value as the way into ACPI
@@ -114,13 +154,24 @@ pub fn power_off() {
     }
     let were_enabled = cpu::disable_interrupts();
     cpu::wbinvd();
-    let sleep = |control: Control, sleep_type: u8| {
-        let kept = control.read() & !(7 << SLP_TYP_SHIFT) & !SLP_EN;
-        control.write(kept | (u16::from(sleep_type) << SLP_TYP_SHIFT) | SLP_EN);
-    };
-    sleep(control, type_a);
-    if let Some(control) = second {
-        sleep(control, type_b);
+    match sleep {
+        Sleep::Pm1(first, second) => {
+            let enter = |control: Control, sleep_type: u8| {
+                let kept = control.read() & !(7 << SLP_TYP_SHIFT) & !SLP_EN;
+                control.write(kept | (u16::from(sleep_type) << SLP_TYP_SHIFT) | SLP_EN);
+            };
+            enter(first, type_a);
+            if let Some(control) = second {
+                enter(control, type_b);
+            }
+        }
+        Sleep::Reduced(control, status) => {
+            // A wake event still marked would wake the machine at once.
+            if let Some(status) = status {
+                status.write8(WAKE_STATUS);
+            }
+            control.write8(((type_a & 7) << SLEEP_TYPE_SHIFT) | SLEEP_ENABLE);
+        }
     }
     time::delay_us(1_000_000);
     if were_enabled {

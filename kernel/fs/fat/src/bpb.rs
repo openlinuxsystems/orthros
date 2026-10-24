@@ -6,7 +6,8 @@
 //! The first sector of a FAT volume says how big its sectors and clusters
 //! are, where the tables, the root directory (fixed in size on FAT12 and
 //! FAT16, a cluster chain on FAT32) and the data are, and how many
-//! clusters there are, which decides the table's width. Every number is
+//! clusters there are, which decides between FAT12 and FAT16 (FAT32 says
+//! so by where it gives its table's size). Every number is
 //! checked before use, as it comes from the disk: a volume that does not
 //! add up is refused as [`Error::UnknownFilesystem`] (not FAT) or
 //! [`Error::Corrupt`].
@@ -98,14 +99,25 @@ impl Geometry {
             return Err(Error::Corrupt);
         }
         let clusters = ((total - meta) / u64::from(per_cluster)).min(0x0fff_fff5) as u32;
-        let width = Width::of(clusters);
+        // A volume whose table size is only in the FAT32 field is FAT32,
+        // whatever its cluster count: `mkfs.fat -F 32` makes small ones,
+        // and Linux mounts them. Otherwise the count decides between
+        // FAT12 and FAT16, and one too big for FAT16 is refused.
+        let width = if fat16 == 0 {
+            Width::Fat32
+        } else {
+            match Width::of(clusters) {
+                Width::Fat32 => return Err(Error::Corrupt),
+                narrow => narrow,
+            }
+        };
         // The table must hold an entry for every cluster, and for 0 and 1.
         let needed = crate::table::offset(width, clusters + 1) + crate::table::span(width) as u64;
         if needed > fat_sectors * ss {
             return Err(Error::Corrupt);
         }
         let (root_cluster, fsinfo, serial_at, label_at) = if width == Width::Fat32 {
-            if root_entries != 0 || fat16 != 0 {
+            if root_entries != 0 {
                 return Err(Error::Corrupt);
             }
             let root = u32_at(sector, 44);
@@ -122,13 +134,16 @@ impl Geometry {
         if width == Width::Fat32 && !(2..clusters + 2).contains(&root_cluster) {
             return Err(Error::Corrupt);
         }
-        // The extended boot signature says the serial and label are there.
-        let extended = sector[if width == Width::Fat32 { 66 } else { 38 }] == 0x29;
+        // The extended boot signature says the serial is there, and with
+        // 0x29 the label too (0x28 is the older form, without it).
+        let signature = sector[if width == Width::Fat32 { 66 } else { 38 }];
         let mut label = [b' '; 11];
         let mut serial = 0;
-        if extended {
-            label.copy_from_slice(&sector[label_at..label_at + 11]);
+        if matches!(signature, 0x28 | 0x29) {
             serial = u32_at(sector, serial_at);
+        }
+        if signature == 0x29 {
+            label.copy_from_slice(&sector[label_at..label_at + 11]);
         }
         Ok(Geometry {
             width,

@@ -646,6 +646,10 @@ struct FakeDisk {
     pages: StdMutex<BTreeMap<u64, Vec<u8>>>,
     reserved: StdMutex<u64>,
     limit: u64,
+    /// The largest size a file may have, if not 0.
+    max: u64,
+    /// Whether zeroing fails, as a disk error would make it.
+    zero_fails: bool,
 }
 
 impl Backing for FakeDisk {
@@ -680,6 +684,9 @@ impl Backing for FakeDisk {
     }
 
     fn zero(&self, from: u64, to: u64) -> Result<()> {
+        if self.zero_fails {
+            return Err(Error::Io);
+        }
         let mut pages = self.pages.lock().unwrap();
         for index in from / 4096..to / 4096 {
             pages.insert(index, std::vec![0; 4096]);
@@ -694,6 +701,33 @@ impl Backing for FakeDisk {
         pages.retain(|&index, _| index * 4096 < size);
         Ok(())
     }
+
+    fn max_size(&self) -> u64 {
+        if self.max == 0 { u64::MAX / 2 } else { self.max }
+    }
+}
+
+#[test]
+fn a_write_past_the_largest_size_writes_what_fits() {
+    // As on Linux: a short write up to the limit, then EFBIG at it.
+    let disk = FakeDisk { limit: 1 << 20, max: 10_000, ..FakeDisk::default() };
+    let cache = FileCache::new(0, 0);
+    assert_eq!(cache.write(9_000, &Slice(&[7; 3000]), &disk), Ok(1000));
+    assert_eq!(cache.size(), 10_000);
+    assert_eq!(*disk.reserved.lock().unwrap(), 10_000);
+    assert_eq!(cache.write(10_000, &Slice(b"x"), &disk), Err(Error::TooBig));
+    assert_eq!(cache.write(APPEND, &Slice(b"x"), &disk), Err(Error::TooBig));
+    assert_eq!(cache.write(20_000, &Slice(b""), &disk), Ok(0));
+    assert_eq!(cache.write(u64::MAX - 1, &Slice(b"xy"), &disk), Err(Error::TooBig));
+}
+
+#[test]
+fn a_gap_that_cannot_be_zeroed_gives_its_room_back() {
+    let disk = FakeDisk { limit: 1 << 20, zero_fails: true, ..FakeDisk::default() };
+    let cache = FileCache::new(0, 0);
+    assert_eq!(cache.write(100_000, &Slice(b"x"), &disk), Err(Error::Io));
+    assert_eq!(*disk.reserved.lock().unwrap(), 0);
+    assert_eq!(cache.size(), 0);
 }
 
 /// Which pages of a program's buffer of `len` bytes are there, `skew`

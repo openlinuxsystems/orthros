@@ -67,6 +67,11 @@ pub struct Fadt {
     /// mode, and the value to write there; `None` if it is in ACPI mode
     /// for good.
     pub acpi_enable: Option<(u16, u8)>,
+    /// The sleep control register, through which a hardware-reduced
+    /// machine sleeps and powers off (ACPI 5 and later).
+    pub sleep_control: Option<GenericAddress>,
+    /// The sleep status register that goes with it.
+    pub sleep_status: Option<GenericAddress>,
 }
 
 const FLAG_TMR_VAL_EXT: u32 = 1 << 8;
@@ -139,6 +144,8 @@ impl Fadt {
                 .filter(|&port| port != 0 && port <= 0xffff)
                 .zip(t.get(52).copied().filter(|&value| value != 0))
                 .map(|(port, value)| (port as u16, value)),
+            sleep_control: gas(244),
+            sleep_status: gas(256),
         })
     }
 }
@@ -195,5 +202,29 @@ mod tests {
         let fadt = Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
         assert!(fadt.pm_timer.is_some());
         assert_eq!(fadt.reset, None);
+        let bytes = table(b"FACP", 6, &fadt_body(276 - 36));
+        assert_eq!(Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap().sleep_control, None);
+    }
+
+    #[test]
+    fn reads_the_sleep_registers_of_acpi_5() {
+        let mut body = fadt_body(276 - 36);
+        body[112 - 36..116 - 36]
+            .copy_from_slice(&(FLAG_HW_REDUCED_ACPI | FLAG_RESET_REG_SUP).to_le_bytes());
+        for (at, port) in [(244 - 36, 0x620u64), (256 - 36, 0x621)] {
+            body[at] = GenericAddress::IO;
+            body[at + 1] = 8;
+            body[at + 3] = 1;
+            body[at + 4..at + 12].copy_from_slice(&port.to_le_bytes());
+        }
+        let bytes = table(b"FACP", 6, &body);
+        let fadt = Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
+        assert!(fadt.hardware_reduced);
+        let control = fadt.sleep_control.unwrap();
+        assert_eq!(
+            (control.space, control.bit_width, control.address),
+            (GenericAddress::IO, 8, 0x620)
+        );
+        assert_eq!(fadt.sleep_status.unwrap().address, 0x621);
     }
 }

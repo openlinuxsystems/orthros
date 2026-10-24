@@ -141,6 +141,13 @@ pub fn describe(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
         root.length,
         acpi.tables.iter().count()
     ));
+    if acpi.tables.dropped() > 0 {
+        line(format_args!(
+            "ACPI:   and {} more, not read: the kernel keeps the first {}",
+            acpi.tables.dropped(),
+            radix_acpi::MAX_TABLES
+        ));
+    }
     for table in acpi.tables.iter() {
         match table.status {
             Ok(()) => line(format_args!(

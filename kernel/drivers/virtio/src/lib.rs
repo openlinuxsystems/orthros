@@ -194,6 +194,14 @@ impl Transport {
             if !matches!(kind, CAP_COMMON | CAP_NOTIFY | CAP_DEVICE) || bar >= 6 {
                 continue;
             }
+            // The registers are read whole, so a structure must start
+            // aligned to its widest one: 4 bytes for the common and
+            // device structures, 2 for the doorbells (virtio 1.2, 4.1.4).
+            // One that does not is skipped, as one the driver cannot use.
+            let align = if kind == CAP_NOTIFY { 2 } else { 4 };
+            if !start.is_multiple_of(align) {
+                continue;
+            }
             // The first structure of each kind the driver can use wins
             // (virtio 1.2, 4.1.4).
             let slot = match kind {
@@ -302,9 +310,13 @@ impl Transport {
     }
 
     /// The doorbell window of queue `queue`, whose notification offset is
-    /// `notify_off`.
+    /// `notify_off`: `None` if the device puts it outside the structure,
+    /// or where a 16-bit write cannot go (an odd multiplier).
     pub(crate) fn doorbell(&self, notify_off: u16) -> Option<Mmio> {
         let offset = usize::from(notify_off).checked_mul(self.notify_multiplier as usize)?;
+        if !offset.is_multiple_of(2) {
+            return None;
+        }
         self.notify.window(offset, 2)
     }
 }

@@ -190,22 +190,31 @@ int Sysdeps<Waitid>::operator()(idtype_t idtype, id_t id, siginfo_t *info, int o
 	default:
 		return EINVAL;
 	}
-	// The kernel always reports children that ended: waitid without
-	// WEXITED is not supported (docs/design/posix.md).
-	if(!(options & WEXITED) || (options & ~(WEXITED | WSTOPPED | WCONTINUED | WNOHANG | WNOWAIT)))
+	// As on Linux: at least one of the changes to wait for, and nothing
+	// else but WNOHANG and WNOWAIT.
+	if(!(options & (WEXITED | WSTOPPED | WCONTINUED))
+			|| (options & ~(WEXITED | WSTOPPED | WCONTINUED | WNOHANG | WNOWAIT)))
 		return EINVAL;
-	int status;
-	pid_t found;
-	int flags = options & (WNOHANG | WCONTINUED | WNOWAIT);
+	uint32_t wait_flags = 0;
+	if(options & WNOHANG)
+		wait_flags |= RADIX_CHILD_WAIT_FLAGS_NO_HANG;
 	if(options & WSTOPPED)
-		flags |= WUNTRACED;
-	if(int e = sysdep<Waitpid>(pid, &status, flags, nullptr, &found); e)
-		return e;
+		wait_flags |= RADIX_CHILD_WAIT_FLAGS_STOPPED;
+	if(options & WCONTINUED)
+		wait_flags |= RADIX_CHILD_WAIT_FLAGS_CONTINUED;
+	if(options & WNOWAIT)
+		wait_flags |= RADIX_CHILD_WAIT_FLAGS_NO_REAP;
+	if(!(options & WEXITED))
+		wait_flags |= RADIX_CHILD_WAIT_FLAGS_SKIP_ENDED;
+	struct radix_process_wait_results r;
+	if(uint64_t result = radix_process_wait(radix::SLOT_PROCESS, pid, wait_flags, &r); result)
+		return radix::to_errno(result);
 	memset(info, 0, sizeof(*info));
-	if(!found)
+	if(!r.pid)
 		return 0;
+	int status = static_cast<int>(r.status);
 	info->si_signo = SIGCHLD;
-	info->si_pid = found;
+	info->si_pid = static_cast<pid_t>(r.pid);
 	if(WIFEXITED(status)) {
 		info->si_code = CLD_EXITED;
 		info->si_status = WEXITSTATUS(status);

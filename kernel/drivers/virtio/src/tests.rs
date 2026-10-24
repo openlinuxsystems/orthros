@@ -413,3 +413,76 @@ impl Registers for Paused {
         }
     }
 }
+
+/// Puts an entry naming `head` on the used ring, as a device that
+/// misbehaves would.
+fn used_entry(device: &Device, head: u32) {
+    let mut s = device.state.lock().unwrap();
+    let slot = s.device + 4 + 8 * (u64::from(s.used_idx) % u64::from(s.queue_size));
+    fake_memory_write(slot, &head.to_le_bytes());
+    fake_memory_write(slot + 4, &0u32.to_le_bytes());
+    s.used_idx = s.used_idx.wrapping_add(1);
+    fake_memory_write(s.device + 2, &s.used_idx.to_le_bytes());
+}
+
+#[test]
+fn used_entries_naming_no_request_are_skipped() {
+    // A descriptor out of range, one inside a chain but not its head, and
+    // a chain given back twice: the driver frees nothing it did not hand
+    // over, and goes on with the requests it did.
+    let paused = Arc::new(Paused(Device::new(FEATURES)));
+    let f = function(2, 0x1042);
+    let transport =
+        Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
+    let mut blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    let buffer = Dma::fake(4096);
+    let first = blk.submit(Op::Read, 0, &[(buffer.phys(), 512)]).unwrap();
+    let second = blk.submit(Op::Read, 1, &[(buffer.phys(), 512)]).unwrap();
+    used_entry(&paused.0, 9999);
+    used_entry(&paused.0, u32::from(first) + 1);
+    paused.0.serve(&mut paused.0.state.lock().unwrap());
+    assert_eq!(wait(&mut blk, first), Outcome::Done);
+    used_entry(&paused.0, u32::from(first));
+    assert_eq!(wait(&mut blk, second), Outcome::Done);
+    assert!(blk.complete().is_none());
+    assert_eq!(blk.bad_entries(), 3);
+    assert_eq!(blk.room(1), 256 / 3);
+}
+
+#[test]
+fn a_flood_of_bad_entries_is_read_a_queue_at_a_time() {
+    let paused = Arc::new(Paused(Device::new(FEATURES)));
+    let f = function(2, 0x1042);
+    let transport =
+        Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
+    let mut blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    for _ in 0..300 {
+        used_entry(&paused.0, 7);
+    }
+    assert!(blk.complete().is_none());
+    assert_eq!(blk.bad_entries(), 256);
+    assert!(blk.complete().is_none());
+    assert_eq!(blk.bad_entries(), 300);
+}
+
+#[test]
+fn structures_that_start_unaligned_are_skipped() {
+    // A device structure at an odd offset would be read with misaligned
+    // 32-bit accesses: the driver does without it, so without the device.
+    let config = config_space(2, 0x1042);
+    config.0.lock().unwrap()[0x74 + 8..0x74 + 12].copy_from_slice(&0x2001u32.to_le_bytes());
+    let address = Address { segment: 0, bus: 0, device: 3, function: 0 };
+    let f = Function::probe(address, Mmio::fake(config, pci::CONFIG_SIZE)).unwrap();
+    let device = Device::new(FEATURES);
+    let found = Transport::find(&f, &mut |_, _| Some(Mmio::fake(device.clone(), BAR_SIZE)));
+    assert_eq!(found.err(), Some(Error::MissingStructure("device configuration")));
+}
+
+#[test]
+fn dropping_the_driver_resets_the_device() {
+    let (device, blk) = setup(FEATURES);
+    drop(blk);
+    let s = device.state.lock().unwrap();
+    assert_eq!(s.status, 0);
+    assert!(!s.enabled);
+}
