@@ -486,7 +486,9 @@ fn build_dynamic(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String,
 /// it holds (a symbolic link stays one, with its target), the
 /// directories above them and those of [`ARCHIVE_DIRS`], owned by root
 /// and dated `epoch` (the commit's time), so the same programs make the
-/// same bytes.
+/// same bytes. A file is 0755 if its source may be run by anyone (a
+/// program or a script), and 0644 otherwise (settings, manual pages, a
+/// test's expected output), as Linux installs them.
 fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<Vec<u8>> {
     let mtime = epoch.and_then(|epoch| epoch.parse().ok()).unwrap_or(0);
     let mut entries: Vec<(String, Option<&Path>)> = Vec::new();
@@ -519,7 +521,8 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
             }
             Some(file) => {
                 let data = std::fs::read(file).context(|| format!("reading {}", file.display()))?;
-                writer.file(path, 0o755, mtime, &data)
+                let mode = if is_executable(file)? { 0o755 } else { 0o644 };
+                writer.file(path, mode, mtime, &data)
             }
         };
         written.map_err(|err| crate::Error::new(format!("the boot archive: {path}: {err}")))?;
@@ -527,8 +530,18 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
     Ok(writer.finish())
 }
 
+/// Whether the file at `path` has an execute bit set.
+fn is_executable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let meta = std::fs::metadata(path).context(|| format!("reading {}", path.display()))?;
+    Ok(meta.permissions().mode() & 0o111 != 0)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -538,8 +551,12 @@ mod tests {
         let mut files = Vec::new();
         for (path, package) in ARCHIVE {
             std::fs::write(dir.join(package), format!("the {package} program")).unwrap();
+            std::fs::set_permissions(dir.join(package), Permissions::from_mode(0o755)).unwrap();
             files.push((path.to_string(), dir.join(package)));
         }
+        std::fs::write(dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
+        std::fs::set_permissions(dir.join("hosts"), Permissions::from_mode(0o644)).unwrap();
+        files.push(("system/etc/hosts".to_string(), dir.join("hosts")));
         std::os::unix::fs::symlink("spark", dir.join("init")).unwrap();
         files.push(("system/bin/init".to_string(), dir.join("init")));
         let bytes = write_archive(&files, Some("1700000000".into())).unwrap();
@@ -555,6 +572,7 @@ mod tests {
                 "system/bin/spark",
                 "system/boot",
                 "system/etc",
+                "system/etc/hosts",
                 "system/tests",
                 "system/tests/hello",
                 "system/tests/storage",
@@ -564,6 +582,7 @@ mod tests {
         let spark = archive.find("/system/bin/spark").unwrap();
         assert_eq!(spark.data, b"the spark program");
         assert_eq!((spark.mode, spark.mtime), (0o755, 1_700_000_000));
+        assert_eq!(archive.find("/system/etc/hosts").unwrap().mode, 0o644);
         let init = archive.find("/system/bin/init").unwrap();
         assert_eq!((init.kind, init.data), (radix_bootfs::Kind::Symlink, &b"spark"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");

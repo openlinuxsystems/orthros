@@ -336,6 +336,11 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
             )));
         }
     }
+    if let Some(path) = outside_path(recipe) {
+        return Err(Error::new(format!(
+            "{what}: `{path}` is not a path inside the tree it is taken from"
+        )));
+    }
     if !dir.join("build.sh").is_file() {
         return Err(Error::new(format!("{what}: the port has no build.sh")));
     }
@@ -343,6 +348,24 @@ fn check(ctx: &Ctx, recipe: &Recipe, dir: &Path) -> Result<()> {
         return Err(Error::new(format!("{what}: a toolchain port puts nothing in the image")));
     }
     Ok(())
+}
+
+/// The first path `recipe` names that leaves the tree it is taken from:
+/// an extra source's place in the source, the source's paths, the
+/// sysroot's files for the image (a directory ends in `/`), and the
+/// notices in the source or in the port's directory.
+fn outside_path(recipe: &Recipe) -> Option<&str> {
+    let image = recipe.image.iter().map(|p| p.strip_suffix('/').unwrap_or(p));
+    let bundled = recipe.bundled.iter().flat_map(|b| b.notices.iter().map(String::as_str));
+    recipe
+        .extra
+        .iter()
+        .map(|e| e.path.as_str())
+        .chain(recipe.source.paths.iter().map(String::as_str))
+        .chain(image)
+        .chain(recipe.notices.iter().map(String::as_str))
+        .chain(bundled)
+        .find(|path| !inside(path))
 }
 
 /// Whether `path` is a relative path that stays inside the directory it
@@ -1404,6 +1427,37 @@ mod tests {
         );
         let recipe: Recipe = toml::from_str(&bundled).unwrap();
         assert_eq!(recipe.bundled[0].notices, ["musl/COPYRIGHT"]);
+        assert_eq!(outside_path(&recipe), None);
+    }
+
+    #[test]
+    fn named_paths_stay_inside() {
+        let text = r#"
+            name = "x"
+            version = "1"
+            summary = "x"
+            license = "MIT"
+            homepage = "https://x"
+            image = ["system/bin/x", "system/share/x/"]
+            [source]
+            git = "https://x/x.git"
+            commit = "0123456789012345678901234567890123456789"
+        "#;
+        let recipe: Recipe = toml::from_str(text).unwrap();
+        assert_eq!(outside_path(&recipe), None);
+        for (from, to) in [
+            ("\"system/bin/x\"", "\"/etc/x\""),
+            ("\"system/bin/x\"", "\"system/../../x\""),
+            ("image = [", "notices = [\"../COPYING\"]\nimage = ["),
+            (
+                "[source]",
+                "[[extra]]\npath = \"/tmp/x\"\ngit = \"https://y\"\ncommit = \"0123456789012345678901234567890123456789\"\nlicense = \"MIT\"\n[source]",
+            ),
+            ("commit = ", "paths = [\"a/../../b\"]\ncommit = "),
+        ] {
+            let recipe: Recipe = toml::from_str(&text.replacen(from, to, 1)).unwrap();
+            assert!(outside_path(&recipe).is_some(), "{to}");
+        }
     }
 
     #[test]

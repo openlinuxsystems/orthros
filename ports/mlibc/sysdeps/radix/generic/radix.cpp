@@ -9,7 +9,10 @@
 #include <bits/ensure.h>
 #include <elf.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
+#include <sys/uio.h>
+#include <time.h>
 
 #include "radix.hpp"
 
@@ -485,6 +488,32 @@ size_t dir_path(int fd, char *out) {
 	size_t len = strlen(dir_paths[n].text);
 	memcpy(out, dir_paths[n].text, len + 1);
 	return len;
+}
+
+// The numbers are the same up to CLOCK_BOOTTIME. TAI reads as REALTIME,
+// which it is until something sets the offset between them: nothing does
+// on Radix, nor by default on Linux. The alarm clocks are EINVAL, as on a
+// Linux machine without a clock that can wake it.
+int clock_kind(int clock, enum radix_clock_kind *kind) {
+	if(clock == CLOCK_TAI) {
+		*kind = RADIX_CLOCK_KIND_REALTIME;
+		return 0;
+	}
+	if(clock < 0 || clock > RADIX_CLOCK_KIND_BOOTTIME)
+		return EINVAL;
+	*kind = static_cast<enum radix_clock_kind>(clock);
+	return 0;
+}
+
+int iov_total(const struct iovec *iov, size_t count, size_t *sum) {
+	size_t total = 0;
+	for(size_t i = 0; i < count; i++) {
+		if(iov[i].iov_len > static_cast<size_t>(SSIZE_MAX) - total)
+			return EINVAL;
+		total += iov[i].iov_len;
+	}
+	*sum = total;
+	return 0;
 }
 
 void log(const char *text, size_t len) {

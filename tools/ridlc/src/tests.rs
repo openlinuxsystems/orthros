@@ -139,6 +139,47 @@ fn structures_have_no_hidden_padding() {
 }
 
 #[test]
+fn structures_do_not_hold_themselves() {
+    let problems = messages(&with_module("/// S.\nstruct S { /// A.\n a: S; }"));
+    assert!(problems.iter().any(|m| m.contains("structure `S` holds itself")), "{problems:?}");
+    let problems = messages(&with_module(
+        "/// A.\nstruct A { /// B.\n b: B; }\n/// B.\nstruct B { /// A.\n a: A; }",
+    ));
+    assert!(problems.iter().any(|m| m.contains("structure `A` holds itself")), "{problems:?}");
+    assert!(problems.iter().any(|m| m.contains("structure `B` holds itself")), "{problems:?}");
+}
+
+#[test]
+fn sizes_do_not_overflow() {
+    let huge = usize::MAX / 2 + 1;
+    let problems =
+        messages(&with_module(&format!("/// S.\nstruct S {{ /// A.\n a: [u16; {huge}]; }}")));
+    assert!(problems.iter().any(|m| m.contains("field `a` is too large")), "{problems:?}");
+    let half = usize::MAX / 2;
+    let problems = messages(&with_module(&format!(
+        "/// S.\nstruct S {{ /// A.\n a: [u8; {half}]; /// B.\n b: [u8; {half}]; /// C.\n c: [u8; 2]; }}"
+    )));
+    assert!(problems.iter().any(|m| m.contains("structure `S` is too large")), "{problems:?}");
+    let problems = messages(&with_module(&format!(
+        "/// Too many.\nsyscall big = 1 (a: [u64; {}], b: [u64; 2]) -> ();",
+        usize::MAX
+    )));
+    assert!(problems.iter().any(|m| m.contains("at most 10 fit")), "{problems:?}");
+}
+
+#[test]
+fn error_domains_and_names_are_unique() {
+    let problems = messages(&with_module(
+        "/// A.\nerrors a = 1 { /// X.\n x = 1 => EINVAL; }\n/// B.\nerrors b = 1 { /// X.\n x = 1 => EINVAL; }",
+    ));
+    assert!(problems.iter().any(|m| m.contains("error domain 1 is taken by `a`")), "{problems:?}");
+    assert!(
+        problems.iter().any(|m| m.contains("error `x` is also in error set `a`")),
+        "{problems:?}"
+    );
+}
+
+#[test]
 fn syntax_errors_name_the_line() {
     let error = one("//! Doc.\nmodule test;\n\n/// Doc.\nconst X: u64 = ;").unwrap_err();
     assert_eq!(error[0].line, 5);

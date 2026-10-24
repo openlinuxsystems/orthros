@@ -48,7 +48,8 @@ it needs, vendored.
   module against mlibc's headers: every type's and structure's size and
   alignment, every field's offset and every constant, as Clang sees
   them, and that the C library defines every function the module
-  declares (ob(1), PORTS). Any difference fails the build.
+  declares, with the module's parameters and result (ob(1), PORTS). Any
+  difference fails the build.
 - The image's license manifest lists the crates a program on std links,
   with the notices of those rust-src vendors.
 

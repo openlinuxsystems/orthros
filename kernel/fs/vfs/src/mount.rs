@@ -148,11 +148,13 @@ impl Location {
 /// How `open` opens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OpenFlags {
-    /// Make the file if it is not there.
+    /// Make the file if it is not there; a directory there fails with
+    /// [`Error::IsDirectory`].
     pub create: bool,
     /// With `create`: fail if it is there.
     pub exclusive: bool,
-    /// Cut the file to nothing.
+    /// Cut the file to nothing; a directory fails with
+    /// [`Error::IsDirectory`].
     pub truncate: bool,
     /// Fail unless it is a directory.
     pub directory: bool,
@@ -417,6 +419,10 @@ impl Vfs {
         let kind = at.node.kind();
         if kind == Kind::Symlink {
             return Err(Error::Loop);
+        }
+        // Open neither makes nor cuts a directory, as POSIX has it.
+        if kind == Kind::Directory && (flags.create || flags.truncate) {
+            return Err(Error::IsDirectory);
         }
         if flags.directory && kind != Kind::Directory {
             return Err(Error::NotDirectory);

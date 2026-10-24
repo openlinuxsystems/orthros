@@ -26,8 +26,9 @@ radix_sources = files(
 rtld_dso_sources += radix_sources
 
 libc_sources += radix_sources + files(
-	# The Linux option's getrandom, which needs nothing of Linux's
-	# (patch 0023).
+	# The Linux option's getrandom (patch 0023) and memalign (0035),
+	# which need nothing of Linux's.
+	'../../options/linux/generic/malloc.cpp',
 	'../../options/linux/generic/sys-random.cpp',
 	'generic/entry.cpp',
 	'generic/poll.cpp',
@@ -115,6 +116,12 @@ if not no_headers
 		'include/sys/random.h',
 		'include/sys/sysmacros.h',
 		subdir: 'sys',
+		follow_symlinks: true,
+	)
+	# And its malloc.h, of memalign and the glibc option's
+	# malloc_usable_size.
+	install_headers(
+		'include/malloc.h',
 		follow_symlinks: true,
 	)
 	install_headers(

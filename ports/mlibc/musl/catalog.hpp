@@ -28,10 +28,12 @@
 
 namespace mlibc::catalog {
 
-// The numbers of a catalog are big-endian 32-bit words.
+// The numbers of a catalog are big-endian 32-bit words, at any offset.
 inline uint32_t word(const void *p)
 {
-	return __builtin_bswap32(*static_cast<const uint32_t *>(p));
+	uint32_t w;
+	memcpy(&w, p, sizeof w);
+	return __builtin_bswap32(w);
 }
 
 // The first byte after s that is c or the end of the string.
@@ -62,8 +64,12 @@ inline nl_catd do_catopen(const char *name)
 	size_t size;
 	const unsigned char *map = map_file(name, &size);
 	/* Size recorded in the file must match file size; otherwise
-	 * the information needed to unmap the file will be lost. */
-	if (!map || word(map) != 0xff88ff89 || 20+word(map+8) != size) {
+	 * the information needed to unmap the file will be lost. The
+	 * table of sets, and the starts of the messages and of their
+	 * texts, must lie in the file; catgets checks the rest. */
+	if (!map || size < 20 || word(map) != 0xff88ff89 || 20+(size_t)word(map+8) != size
+			|| (uint64_t)word(map+4)*12 > size-20 || word(map+12) > size-20
+			|| word(map+16) > size-20) {
 		if(map) munmap(const_cast<unsigned char *>(map), size);
 		errno = ENOENT;
 		return (nl_catd)-1;
@@ -133,6 +139,7 @@ inline int cmp(const void *a, const void *b)
 inline char *message(nl_catd catd, int set_id, int msg_id, const char *s)
 {
 	const char *map = (const char *)catd;
+	size_t size = 20+(size_t)word(map+8);
 	uint32_t nsets = word(map+4);
 	const char *sets = map+20;
 	const char *msgs = map+20+word(map+12);
@@ -145,13 +152,21 @@ inline char *message(nl_catd catd, int set_id, int msg_id, const char *s)
 		return (char *)s;
 	}
 	uint32_t nmsgs = word(set+4);
-	msgs += 12*word(set+8);
-	const char *msg = static_cast<const char *>(bsearch(&msg_id_be, msgs, nmsgs, 12, cmp));
-	if (!msg) {
+	uint64_t first = word(set+8);
+	/* A corrupt catalog, whose set's messages or whose text runs past
+	 * its end, has no such message: musl reads past the end. */
+	if ((first+nmsgs)*12 > (uint64_t)(map+size-msgs)) {
 		errno = ENOMSG;
 		return (char *)s;
 	}
-	return (char *)(strings + word(msg+8));
+	msgs += 12*first;
+	const char *msg = static_cast<const char *>(bsearch(&msg_id_be, msgs, nmsgs, 12, cmp));
+	size_t text = msg ? (size_t)(strings-map)+word(msg+8) : size;
+	if (text >= size || !memchr(map+text, 0, size-text)) {
+		errno = ENOMSG;
+		return (char *)s;
+	}
+	return (char *)(map + text);
 }
 
 inline int close_catalog(nl_catd catd)

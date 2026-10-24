@@ -897,8 +897,11 @@ pub fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
     if cmdline.len() > CMDLINE_SLOT {
         return Err(format!("the command line is longer than {CMDLINE_SLOT} bytes"));
     }
+    // Padded with spaces by bytes: a character may take more than one.
     let mut copy = image.to_vec();
-    copy[at..at + CMDLINE_SLOT].copy_from_slice(format!("{cmdline:<CMDLINE_SLOT$}").as_bytes());
+    let field = &mut copy[at..at + CMDLINE_SLOT];
+    field.fill(b' ');
+    field[..cmdline.len()].copy_from_slice(cmdline.as_bytes());
     Ok(copy)
 }
 
@@ -966,7 +969,8 @@ fn run_case(
     let mut extra: Vec<String> = case.qemu.iter().map(|arg| arg.to_string()).collect();
     for (i, disk) in disks.iter().enumerate() {
         extra.push("-drive".into());
-        extra.push(format!("file={},if=none,id=disk{i},format=raw", disk.path.display()));
+        extra
+            .push(format!("file={},if=none,id=disk{i},format=raw", qemu::option_value(&disk.path)));
         extra.push("-device".into());
         extra.push(format!("virtio-blk-pci,drive=disk{i}"));
     }
@@ -1321,8 +1325,8 @@ impl Vm {
         let _ = std::fs::remove_file(&self.screenshot);
         let mut qmp = Qmp::connect(&socket)?;
         qmp.execute(&format!(
-            r#"{{"execute":"screendump","arguments":{{"filename":"{}"}}}}"#,
-            self.screenshot.display()
+            r#"{{"execute":"screendump","arguments":{{"filename":{}}}}}"#,
+            crate::bench::json_string(&self.screenshot.to_string_lossy())
         ))?;
         let bytes = std::fs::read(&self.screenshot)
             .map_err(|err| format!("reading {}: {err}", self.screenshot.display()))?;
@@ -2118,7 +2122,6 @@ fn storage_end(vm: &mut Vm, mode: &str) -> Result<(), String> {
     vm.expect("spark: nothing more to do; waiting")
 }
 
-/// The first boot: the program writes its files to every volume.
 /// A disk's size as the kernel logs it: in the largest binary unit it
 /// reaches, with a tenth when it is not a whole number of them.
 fn disk_size(kib: u64) -> String {
@@ -2127,6 +2130,7 @@ fn disk_size(kib: u64) -> String {
     if tenths == 0 { format!("{whole} {unit}") } else { format!("{whole}.{tenths} {unit}") }
 }
 
+/// The first boot: the program writes its files to every volume.
 fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_boot(vm, case)?;
     for name in STORAGE_VOLUMES {
@@ -2150,9 +2154,12 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// Between the boots: the host reads what the program wrote with mtools,
-/// and writes a file of its own to each disk.
+/// and writes a file of its own to each disk, from beside the disks in
+/// out/test (not the shared temporary directory, where another user could
+/// put a link in its place).
 fn storage_host(disks: &[DiskImage]) -> Result<(), String> {
-    let source = std::env::temp_dir().join(format!("ob-storage-{}.txt", std::process::id()));
+    let Some(first) = disks.first() else { return Err("the case has no disks".into()) };
+    let source = first.path.with_file_name("storage-from-host.txt");
     std::fs::write(&source, STORAGE_FROM_HOST)
         .map_err(|err| format!("writing {}: {err}", source.display()))?;
     let result = disks.iter().zip(STORAGE_VOLUMES).try_for_each(|(disk, name)| {
@@ -2356,6 +2363,10 @@ mod tests {
         assert!(with_cmdline(b"no slot", "x").is_err());
         let twice = format!("{slot}{slot}").into_bytes();
         assert!(with_cmdline(&twice, "x").is_err());
+        // Padded by bytes, so a line with wider characters fills it too.
+        let wide = String::from_utf8(with_cmdline(&image, "hostname=Dukovó").unwrap()).unwrap();
+        assert_eq!(wide.len(), image.len());
+        assert!(with_cmdline(&image, &"é".repeat(CMDLINE_SLOT)).is_err());
     }
 
     #[test]

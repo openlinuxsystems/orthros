@@ -6,12 +6,14 @@
 // their descriptors, temporary files, renaming and removing, times,
 // symbolic links, `..` beneath directory descriptors and fchdir, reading
 // into and writing from memory not made yet, and descriptors by their
-// names in /dev/fd, on the tmpfs at /tmp and the read-only /system.
+// names in /dev/fd, on the tmpfs at /tmp and the read-only /system; and
+// what each refuses, with Linux's errors.
 
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <ftw.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -637,6 +639,66 @@ static void named_descriptors(void) {
 	CHECK(unlink("/tmp/named") == 0);
 }
 
+// What open, truncation, preallocation and scattered reads and writes
+// refuse, with the errors Linux 6.8 gives.
+static void refusals(void) {
+	CHECK(mkdir("/tmp/files-r", 0755) == 0);
+	// Open neither makes nor cuts a directory, and makes none with
+	// O_DIRECTORY (Linux 6.4 and later).
+	CHECK_ERROR(open("/tmp/files-r", O_RDONLY | O_CREAT, 0644), EISDIR);
+	CHECK_ERROR(open("/tmp/files-r", O_RDONLY | O_TRUNC), EISDIR);
+	CHECK_ERROR(open("/tmp/files-r", O_RDONLY | O_CREAT | O_DIRECTORY, 0755), EINVAL);
+	CHECK_ERROR(open("/tmp/files-r/new", O_RDONLY | O_CREAT | O_DIRECTORY, 0755), EINVAL);
+	CHECK_ERROR(access("/tmp/files-r/new", F_OK), ENOENT);
+	int fd = open("/tmp/files-r/f", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	int read_only = open("/tmp/files-r/f", O_RDONLY);
+	CHECK(fd >= 0 && read_only >= 0);
+	CHECK_ERROR(ftruncate(fd, -1), EINVAL);
+	CHECK_ERROR(truncate("/tmp/files-r/f", -1), EINVAL);
+	CHECK_ERROR(ftruncate(read_only, 0), EINVAL);
+	// posix_fallocate returns its error.
+	CHECK(posix_fallocate(fd, -1, 10) == EINVAL);
+	CHECK(posix_fallocate(fd, 0, 0) == EINVAL);
+	CHECK(posix_fallocate(fd, 0, -5) == EINVAL);
+	CHECK(posix_fallocate(read_only, 0, 10) == EBADF);
+	CHECK(posix_fallocate(fd, 1, INT64_MAX) == EFBIG);
+	int ends[2];
+	CHECK(pipe(ends) == 0);
+	CHECK(posix_fallocate(ends[0], 0, 10) == EBADF);
+	CHECK(posix_fallocate(ends[1], 0, 10) == ESPIPE);
+	close(ends[0]);
+	close(ends[1]);
+	int dir = open("/tmp/files-r", O_RDONLY);
+	CHECK(posix_fallocate(dir, 0, 10) == EBADF);
+	close(dir);
+	struct stat st;
+	CHECK(posix_fallocate(fd, 0, 100) == 0 && fstat(fd, &st) == 0 && st.st_size == 100);
+	CHECK(posix_fallocate(fd, 10, 20) == 0 && fstat(fd, &st) == 0 && st.st_size == 100);
+	// More vectors than IOV_MAX, or fewer than none; a sum past
+	// SSIZE_MAX fails rather than overrunning anything.
+	static struct iovec many[IOV_MAX + 1];
+	char byte;
+	for(int i = 0; i <= IOV_MAX; i++)
+		many[i] = (struct iovec){&byte, 1};
+	CHECK_ERROR(readv(fd, many, IOV_MAX + 1), EINVAL);
+	CHECK_ERROR(writev(fd, many, IOV_MAX + 1), EINVAL);
+	CHECK_ERROR(readv(fd, many, -1), EINVAL);
+	char small[4];
+	struct iovec huge[2] = {{small, SSIZE_MAX}, {small, SSIZE_MAX}};
+	errno = 0;
+	CHECK(readv(fd, huge, 2) == -1 && (errno == EINVAL || errno == EFAULT));
+	errno = 0;
+	CHECK(writev(fd, huge, 2) == -1 && (errno == EINVAL || errno == EFAULT));
+	close(read_only);
+	close(fd);
+	// statvfs of a file tells of its filesystem (and of a named pipe it
+	// would not wait for a writer, but Radix has none yet).
+	struct statvfs vfs;
+	CHECK(statvfs("/tmp/files-r/f", &vfs) == 0 && vfs.f_bsize > 0);
+	CHECK(unlink("/tmp/files-r/f") == 0);
+	CHECK(rmdir("/tmp/files-r") == 0);
+}
+
 int main(void) {
 	check_start("files");
 	RUN(basics);
@@ -651,5 +713,6 @@ int main(void) {
 	RUN(climbing);
 	RUN(mapped);
 	RUN(named_descriptors);
+	RUN(refusals);
 	return check_end();
 }

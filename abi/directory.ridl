@@ -76,11 +76,14 @@ enum FilesystemKind: u8 {
 
 /// How `open` opens.
 flags OpenFlags: u32 {
-    /// Make the file if it does not exist (needs the write right).
+    /// Make the file if it does not exist (needs the write right); a
+    /// directory fails with is_directory, and with `directory`
+    /// invalid_argument, as Linux has it.
     create = 0;
     /// With `create`: fail with exists if it does.
     exclusive = 1;
-    /// Cut the file to 0 bytes (needs the write right).
+    /// Cut the file to 0 bytes (needs the write right); a directory fails
+    /// with is_directory.
     truncate = 2;
     /// Fail with not_directory unless it is a directory.
     directory = 3;

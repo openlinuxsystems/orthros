@@ -230,11 +230,11 @@ pub fn validate_cmdline(cmdline: &str) -> Result<()> {
 }
 
 fn validate_memory(memory: &str) -> Result<()> {
-    let (digits, unit) = memory.split_at(memory.len().saturating_sub(1));
-    let valid = matches!(unit, "M" | "G")
-        && !digits.is_empty()
-        && digits.chars().all(|c| c.is_ascii_digit())
-        && digits.parse::<u32>().is_ok_and(|n| n > 0);
+    let valid = memory.strip_suffix(['M', 'G']).is_some_and(|digits| {
+        !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && digits.parse::<u32>().is_ok_and(|n| n > 0)
+    });
     if !valid {
         crate::bail!("run.memory must look like 512M or 2G, not `{memory}`");
     }
@@ -269,6 +269,10 @@ mod tests {
         assert!(Config::parse("[build]\nprofile = \"fast\"").is_err());
         assert!(Config::parse("[build]\narch = \"riscv64\"").is_err());
         assert!(Config::parse("[run]\nmemory = \"lots\"").is_err());
+        // A unit that is not one byte is refused, not cut in two.
+        assert!(Config::parse("[run]\nmemory = \"2ГБ\"").is_err());
+        assert!(Config::parse("[run]\nmemory = \"M\"").is_err());
+        assert!(Config::parse("[run]\nmemory = \"512M\"").is_ok());
         assert!(Config::parse("[run]\ncpus = 0").is_err());
     }
 

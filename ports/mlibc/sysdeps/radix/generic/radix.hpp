@@ -14,6 +14,7 @@
 
 #include <radix/radix.h>
 
+struct iovec;
 struct stat;
 
 namespace radix {
@@ -159,6 +160,15 @@ void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocate
 // The cursor of the directory listing descriptor `fd` reads next.
 uint64_t dir_cursor(int fd);
 void set_dir_cursor(int fd, uint64_t cursor);
+
+// The kernel's ClockKind for Linux's clock number `clock`, or EINVAL for
+// one Linux does not have.
+int clock_kind(int clock, enum radix_clock_kind *kind);
+
+// The bytes of the `count` buffers at `iov` in all, in `sum`; EINVAL if
+// they pass SSIZE_MAX, as readv, writev, sendmsg and recvmsg fail then
+// on Linux.
+int iov_total(const struct iovec *iov, size_t count, size_t *sum);
 
 // Writes `len` bytes of `text` to the kernel log.
 void log(const char *text, size_t len);

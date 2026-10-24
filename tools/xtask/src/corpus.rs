@@ -985,7 +985,6 @@ fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
 }
 
-/// An empty directory at `path`, emptied if it was there.
 /// Writes an executable script.
 fn write_script(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).context(|| format!("writing {}", path.display()))?;
@@ -993,6 +992,7 @@ fn write_script(path: &Path, text: &str) -> Result<()> {
         .context(|| format!("making {} executable", path.display()))
 }
 
+/// An empty directory at `path`, emptied if it was there.
 fn fresh_dir(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         std::fs::remove_dir_all(path).context(|| format!("removing {}", path.display()))?;

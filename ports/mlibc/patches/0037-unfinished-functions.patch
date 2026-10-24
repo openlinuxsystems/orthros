@@ -1,0 +1,1267 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Functions mlibc left unfinished, as glibc has them, each checked against
+glibc 2.39 on Linux 6.8. These ended the program with "Not implemented"
+or crashed when memory ran out.
+
+Out of memory: frg::construct and construct_n give a null pointer when
+the allocation fails, and fopen, fdopen, tmpfile, fmemopen,
+open_memstream, fopencookie and pthread_rwlockattr_init fail with ENOMEM
+then (fopen and tmpfile close what they opened), where they wrote
+through the null pointer.
+
+Streams: tmpnam takes a name only when nothing has it (it took a file it
+could not open for a free name); tempnam is glibc's (TMPDIR unless the
+program is set-ID, then the directory asked for, P_tmpdir and /tmp,
+whichever is a directory, a prefix of up to five bytes, "file" without
+one); fgetln is the BSDs'; <stdio_ext.h>'s __freadable, __fwritable,
+__freadptr, __freadptrinc and _flushlbf work.
+
+Clocks: adjtimex, ntp_adjtime and clock_adjtime tell what Linux tells
+of a clock no time server synchronized (TIME_ERROR, STA_UNSYNC), setting
+anything is EPERM, and clocks other than CLOCK_REALTIME are EOPNOTSUPP
+or EINVAL, as there.
+
+Names: dn_expand, dn_comp, ns_initparse, ns_parserr and
+ns_name_uncompress read and write the names of DNS messages as glibc
+does, its escapes included; res_query fails with NO_RECOVERY, as there
+is no name server to ask yet. ether_ntoa writes lower-case hex without
+leading zeros and ether_aton reads one or two digits a byte, with the
+_r forms; inet_makeaddr, inet_netof and inet_lnaof are the classful
+ones; getdomainname gives uname's domain ("(none)") and setdomainname is
+EPERM.
+
+The rest: parse_printf_format gives glibc's argument types, positional
+arguments included; backtrace_symbols gives glibc's lines in one block
+the caller frees; recvmmsg and sendmmsg send and receive one message at
+a time, with MSG_WAITFORONE and the timeout; prlimit works on the calling
+process; pthread_rwlockattr_setkind_np and getkind_np keep the kind;
+semop is ENOSYS as System V semaphores are not there; remap_file_pages
+is ENOSYS; getsgnam_r finds no group (ENOENT). Meant for upstream.
+
+--- a/subprojects/frigg/include/frg/allocation.hpp
++++ b/subprojects/frigg/include/frg/allocation.hpp
+@@ -12,12 +12,17 @@
+ 
+ template<typename T, typename Allocator, typename... Args>
+ T *construct(Allocator &allocator, Args &&... args) {
++	// Out of memory is a null pointer, not an object built at null.
+ 	void *pointer = allocator.allocate(sizeof(T));
++	if(!pointer)
++		return nullptr;
+ 	return new(pointer) T(std::forward<Args>(args)...);
+ }
+ template<typename T, typename Allocator, typename... Args>
+ T *construct_n(Allocator &allocator, size_t n, Args &&... args) {
+ 	T *pointer = (T *)allocator.allocate(sizeof(T) * n);
++	if(!pointer)
++		return nullptr;
+ 	for(size_t i = 0; i < n; i++)
+ 		new(&pointer[i]) T(std::forward<Args>(args)...);
+ 	return pointer;
+--- a/options/ansi/generic/file-io.cpp
++++ b/options/ansi/generic/file-io.cpp
+@@ -739,6 +739,11 @@
+ 
+ 	auto file = frg::construct<mlibc::fd_file>(getAllocator(), fd,
+ 			mlibc::file_dispose_cb<mlibc::fd_file>);
++	if(!file) {
++		mlibc::sysdep<Close>(fd);
++		errno = ENOMEM;
++		return nullptr;
++	}
+ 	file->set_access(flags);
+ 	return file;
+ }
+--- a/options/ansi/include/mlibc/file-io.hpp
++++ b/options/ansi/include/mlibc/file-io.hpp
+@@ -118,6 +118,14 @@
+ 		return _bufmode;
+ 	}
+ 
++	bool readable() const {
++		return _readable;
++	}
++
++	bool writable() const {
++		return _writable;
++	}
++
+ 	// lock for file operations
+ 	StdioLock _lock;
+ 	// All files are stored in a global linked list, so that they can be flushed at exit().
+--- a/options/ansi/generic/stdio.cpp
++++ b/options/ansi/generic/stdio.cpp
+@@ -888,8 +888,13 @@
+ 		return nullptr;
+ 	}
+ 
+-	return frg::construct<mlibc::fd_file>(getAllocator(), fd, mlibc::file_dispose_cb<mlibc::fd_file>);
+-
++	auto file = frg::construct<mlibc::fd_file>(getAllocator(), fd,
++			mlibc::file_dispose_cb<mlibc::fd_file>);
++	if(!file) {
++		mlibc::sysdep<Close>(fd);
++		errno = ENOMEM;
++	}
++	return file;
+ }
+ 
+ char *tmpnam(char *buf) {
+@@ -904,13 +909,12 @@
+ 		if (ret < 18)
+ 			return nullptr;
+ 
+-		int fd;
+-		ret = mlibc::sysdep<Open>(result, O_RDONLY, 0666, &fd);
+-		if (ret == 0) {
+-			mlibc::sysdep<Close>(fd);
+-		} else {
++		// A name nothing has, not even a file this program may not open.
++		struct stat st;
++		int e = mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, result,
++				AT_SYMLINK_NOFOLLOW, &st);
++		if (e == ENOENT)
+ 			return result;
+-		}
+ 	}
+ 
+ 	return nullptr;
+--- a/options/posix/generic/posix-file-io.cpp
++++ b/options/posix/generic/posix-file-io.cpp
+@@ -279,6 +279,10 @@
+ 
+ 	auto file = frg::construct<mlibc::fd_file>(getAllocator(), fd,
+ 			mlibc::file_dispose_cb<mlibc::fd_file>);
++	if(!file) {
++		errno = ENOMEM;
++		return nullptr;
++	}
+ 	file->set_access(flags);
+ 	return file;
+ }
+--- a/options/posix/generic/posix_stdio.cpp
++++ b/options/posix/generic/posix_stdio.cpp
+@@ -14,6 +14,7 @@
+ #include <mlibc/debug.hpp>
+ #include <mlibc/file-io.hpp>
+ #include <mlibc/posix-file-io.hpp>
++#include <mlibc/stdlib.hpp>
+ 
+ struct popen_file : mlibc::fd_file {
+ 	popen_file(int fd, void (*do_dispose)(abstract_file *) = nullptr)
+@@ -35,8 +36,11 @@
+ FILE *fmemopen(void *buf, size_t size, const char *__restrict mode) {
+ 	int flags = mlibc::fd_file::parse_modestring(mode);
+ 
+-	return frg::construct<mlibc::fmemopen_mem_file>(getAllocator(), buf, size, flags,
++	auto file = frg::construct<mlibc::fmemopen_mem_file>(getAllocator(), buf, size, flags,
+ 		mlibc::file_dispose_cb<mlibc::fmemopen_mem_file>);
++	if(!file)
++		errno = ENOMEM;
++	return file;
+ }
+ 
+ int pclose(FILE *stream) {
+@@ -167,8 +171,11 @@
+ }
+ 
+ FILE *open_memstream(char **buf, size_t *sizeloc) {
+-	return frg::construct<mlibc::memstream_mem_file>(getAllocator(), buf, sizeloc, O_RDWR,
++	auto file = frg::construct<mlibc::memstream_mem_file>(getAllocator(), buf, sizeloc, O_RDWR,
+ 			mlibc::file_dispose_cb<mlibc::memstream_mem_file>);
++	if(!file)
++		errno = ENOMEM;
++	return file;
+ }
+ 
+ int fseeko(FILE *file_base, off_t offset, int whence) {
+@@ -213,21 +220,76 @@
+ 	return ret;
+ }
+ 
+-char *fgetln(FILE *, size_t *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// BSD's: the next line with its newline, or what is left before the end
++// of the file, valid until the next read. It is kept in the calling
++// thread's buffer, so reading another stream with fgetln ends it too.
++char *fgetln(FILE *stream, size_t *size) {
++	static thread_local char *line;
++	static thread_local size_t room;
++	ssize_t n = getline(&line, &room, stream);
++	if(n <= 0)
++		return nullptr;
++	*size = n;
++	return line;
+ }
+ 
+-char *tempnam(const char *, const char *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++namespace {
++
++bool is_directory(const char *path) {
++	struct stat st;
++	return path && !stat(path, &st) && S_ISDIR(st.st_mode);
++}
++
++} // namespace
++
++// As glibc's: in $TMPDIR (unless the program runs set-user-ID), else
++// `dir`, else P_tmpdir, else /tmp, whichever is a directory; the first
++// five bytes of `pfx`, "file" without one, and six random letters.
++char *tempnam(const char *dir, const char *pfx) {
++	const char *base = secure_getenv("TMPDIR");
++	if(!is_directory(base))
++		base = dir;
++	if(!is_directory(base))
++		base = P_tmpdir;
++	if(!is_directory(base))
++		base = "/tmp";
++	if(!is_directory(base)) {
++		errno = ENOENT;
++		return nullptr;
++	}
++	size_t length = strlen(base);
++	while(length > 1 && base[length - 1] == '/')
++		length--;
++	if(!pfx || !*pfx)
++		pfx = "file";
++	size_t room = length + 1 + 5 + 6 + 1;
++	auto name = static_cast<char *>(malloc(room));
++	if(!name) {
++		errno = ENOMEM;
++		return nullptr;
++	}
++	for(int i = 0; i < mlibc::TEMP_TRIES; i++) {
++		char x[6];
++		if(mlibc::random_name(x))
++			break;
++		snprintf(name, room, "%.*s/%.5s%.6s", static_cast<int>(length), base, pfx, x);
++		struct stat st;
++		if(lstat(name, &st) && errno == ENOENT)
++			return name;
++	}
++	free(name);
++	errno = EEXIST;
++	return nullptr;
+ }
+ 
+ FILE *fopencookie(void *cookie, const char *__restrict mode, cookie_io_functions_t funcs) {
+ 	int flags = mlibc::fd_file::parse_modestring(mode);
+ 
+-	return frg::construct<mlibc::cookie_file>(getAllocator(), cookie, flags, funcs,
++	auto file = frg::construct<mlibc::cookie_file>(getAllocator(), cookie, flags, funcs,
+ 		mlibc::file_dispose_cb<mlibc::cookie_file>);
++	if(!file)
++		errno = ENOMEM;
++	return file;
+ }
+ 
+ int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
+--- a/options/glibc/generic/stdio_ext.cpp
++++ b/options/glibc/generic/stdio_ext.cpp
+@@ -22,13 +22,11 @@
+ 	return file->bufmode() == mlibc::buffer_mode::line_buffer;
+ }
+ 
+-int __freadable(FILE *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
+-}
+-int __fwritable(FILE *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int __freadable(FILE *file_base) {
++	return static_cast<mlibc::abstract_file *>(file_base)->readable();
++}
++int __fwritable(FILE *file_base) {
++	return static_cast<mlibc::abstract_file *>(file_base)->writable();
+ }
+ 
+ int __freading(FILE *file_base) {
+@@ -56,9 +54,9 @@
+ 	}
+ }
+ 
++// Flushes every stream, the line-buffered ones among them.
+ void _flushlbf(void) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++	fflush(nullptr);
+ }
+ 
+ // The following functions are defined by musl.
+@@ -71,14 +69,19 @@
+ 	return file_base->__valid_limit - file_base->__offset;
+ }
+ 
+-const char *__freadptr(FILE *, size_t *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// The bytes read ahead into the buffer and not yet taken, or a null
++// pointer when there are none (or bytes ungetc pushed come first).
++const char *__freadptr(FILE *file_base, size_t *size) {
++	if(file_base->__io_mode != 0 || file_base->__unget_ptr != file_base->__buffer_ptr
++			|| file_base->__offset >= file_base->__valid_limit)
++		return nullptr;
++	*size = file_base->__valid_limit - file_base->__offset;
++	return file_base->__buffer_ptr + file_base->__offset;
+ }
+ 
+-void __freadptrinc(FILE *, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// Takes `increment` of the bytes __freadptr gave.
++void __freadptrinc(FILE *file_base, size_t increment) {
++	file_base->__offset += increment;
+ }
+ 
+ void __fseterr(FILE *file_base) {
+--- a/options/glibc/generic/sys-timex.cpp
++++ b/options/glibc/generic/sys-timex.cpp
+@@ -1,17 +1,41 @@
+-#include <bits/ensure.h>
++#include <errno.h>
++#include <string.h>
++#include <sys/time.h>
+ #include <sys/timex.h>
++#include <time.h>
+ 
+-int adjtimex(struct timex *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// The clock is read but never set, so this is what Linux tells a program
++// that may not set it, about a clock no time server has synchronized:
++// TIME_ERROR, STA_UNSYNC, the largest errors, a tick of 10 ms.
++int adjtimex(struct timex *buf) {
++	if(buf->modes) {
++		errno = EPERM;
++		return -1;
++	}
++	struct timespec now;
++	clock_gettime(CLOCK_REALTIME, &now);
++	memset(buf, 0, sizeof(*buf));
++	buf->maxerror = 16000000;
++	buf->esterror = 16000000;
++	buf->status = STA_UNSYNC;
++	buf->constant = 2;
++	buf->precision = 1;
++	buf->tolerance = 32768000;
++	buf->time.tv_sec = now.tv_sec;
++	buf->time.tv_usec = now.tv_nsec / 1000;
++	buf->tick = 10000;
++	return TIME_ERROR;
+ }
+ 
+-int clock_adjtime(clockid_t, struct timex *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// Linux's answers: the realtime clock is adjtimex's, the other clocks
++// cannot be adjusted, and an unknown one is invalid.
++int clock_adjtime(clockid_t clock, struct timex *buf) {
++	if(clock == CLOCK_REALTIME)
++		return adjtimex(buf);
++	errno = clock >= 0 && clock <= CLOCK_TAI && clock != 10 ? EOPNOTSUPP : EINVAL;
++	return -1;
+ }
+ 
+-int ntp_adjtime(struct timex *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int ntp_adjtime(struct timex *buf) {
++	return adjtimex(buf);
+ }
+--- a/options/glibc/generic/resolv.cpp
++++ b/options/glibc/generic/resolv.cpp
+@@ -1,16 +1,25 @@
++#include <errno.h>
++#include <netdb.h>
+ #include <resolv.h>
++#include <arpa/nameser.h>
+ #include <bits/ensure.h>
+ #include <mlibc/debug.hpp>
+ 
+-int dn_expand(const unsigned char *, const unsigned char *,
+-		const unsigned char *, char *, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int dn_expand(const unsigned char *msg, const unsigned char *eom,
++		const unsigned char *src, char *dst, int size) {
++	if(size < 0) {
++		errno = EMSGSIZE;
++		return -1;
++	}
++	return ns_name_uncompress(msg, eom, src, dst, size);
+ }
+ 
++// No name server is there to ask: the query fails as a lookup does that
++// cannot be done.
+ int res_query(const char *, int, int, unsigned char *, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();	
++	h_errno = NO_RECOVERY;
++	errno = ECONNREFUSED;
++	return -1;
+ }
+ 
+ int res_init() {
+@@ -28,9 +37,52 @@
+ 	return;
+ }
+ 
+-int dn_comp(const char *, unsigned char *, int, unsigned char **, unsigned char **) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// Writes the dotted name `name` as a DNS name at `out`, in at most
++// `length` bytes, with glibc's escapes (\. and \DDD). The labels are
++// written whole: pointers to names earlier in the message are optional
++// in DNS, so `dnptrs` is neither searched nor added to.
++int dn_comp(const char *name, unsigned char *out, int length, unsigned char **, unsigned char **) {
++	int at = 0;
++	const char *p = name;
++	// "." alone is the root.
++	if(p[0] == '.' && !p[1])
++		p++;
++	while(*p) {
++		int start = at++;
++		int label = 0;
++		for(; *p && *p != '.'; label++) {
++			unsigned c = static_cast<unsigned char>(*p++);
++			if(c == '\\') {
++				if(p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9'
++						&& p[2] >= '0' && p[2] <= '9') {
++					c = (p[0] - '0') * 100 + (p[1] - '0') * 10 + (p[2] - '0');
++					p += 3;
++				}else if(*p) {
++					c = static_cast<unsigned char>(*p++);
++				}else{
++					goto bad;
++				}
++				if(c > 255)
++					goto bad;
++			}
++			if(label == NS_MAXLABEL || at >= length || at >= NS_MAXCDNAME - 1)
++				goto bad;
++			out[at++] = c;
++		}
++		// Only the root's label is empty, and it is the last.
++		if(!label)
++			goto bad;
++		out[start] = label;
++		if(*p == '.')
++			p++;
++	}
++	if(at >= length)
++		goto bad;
++	out[at++] = 0;
++	return at;
++bad:
++	errno = EMSGSIZE;
++	return -1;
+ }
+ 
+ /* Taken from musl */
+--- a/options/bsd/generic/arpa-nameser.cpp
++++ b/options/bsd/generic/arpa-nameser.cpp
+@@ -1,4 +1,5 @@
+ #include <errno.h>
++#include <string.h>
+ #include <arpa/nameser.h>
+ #include <bits/ensure.h>
+ #include <mlibc/debug.hpp>
+@@ -24,18 +25,215 @@
+ 	*cp++ = l;
+ }
+ 
+-int ns_initparse(const unsigned char *, int, ns_msg *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
+-}
+-
+-int ns_parserr(ns_msg *, ns_sect, int, ns_rr *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
+-}
++namespace {
+ 
+-int ns_name_uncompress(const unsigned char *, const unsigned char *,
+-				    const unsigned char *, char *, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// The bytes the name at `p` takes there, or -1 if it runs past `eom`.
++int skip_name(const unsigned char *p, const unsigned char *eom) {
++	const unsigned char *start = p;
++	while(p < eom) {
++		unsigned c = *p;
++		if(!c)
++			return p + 1 - start;
++		if((c & NS_CMPRSFLGS) == NS_CMPRSFLGS)
++			return eom - p < 2 ? -1 : p + 2 - start;
++		if(c & NS_CMPRSFLGS || eom - p <= c)
++			return -1;
++		p += c + 1;
++	}
++	return -1;
++}
++
++// The resource records of `count` from `p`, questions for the first
++// section, or a null pointer if they run past `eom`.
++const unsigned char *skip_records(const unsigned char *p, const unsigned char *eom,
++		ns_sect section, int count) {
++	for(int i = 0; i < count; i++) {
++		int name = skip_name(p, eom);
++		if(name < 0)
++			return nullptr;
++		p += name;
++		if(eom - p < 4)
++			return nullptr;
++		p += 4;
++		if(section != ns_s_qd) {
++			if(eom - p < 6)
++				return nullptr;
++			unsigned length = ns_get16(p + 4);
++			p += 6;
++			if(static_cast<unsigned>(eom - p) < length)
++				return nullptr;
++			p += length;
++		}
++	}
++	return p;
++}
++
++} // namespace
++
++// Reads the header of the DNS message `msg` and finds its sections.
++int ns_initparse(const unsigned char *msg, int length, ns_msg *handle) {
++	if(length < NS_HFIXEDSZ) {
++		errno = EMSGSIZE;
++		return -1;
++	}
++	const unsigned char *eom = msg + length;
++	handle->_msg = msg;
++	handle->_eom = eom;
++	handle->_id = ns_get16(msg);
++	handle->_flags = ns_get16(msg + 2);
++	const unsigned char *p = msg + 4;
++	for(int i = 0; i < ns_s_max; i++, p += 2)
++		handle->_counts[i] = ns_get16(p);
++	for(int i = 0; i < ns_s_max; i++) {
++		handle->_sections[i] = handle->_counts[i] ? p : nullptr;
++		p = skip_records(p, eom, static_cast<ns_sect>(i), handle->_counts[i]);
++		if(!p) {
++			errno = EMSGSIZE;
++			return -1;
++		}
++	}
++	// As in glibc, a message ends with its last section.
++	if(p != eom) {
++		errno = EMSGSIZE;
++		return -1;
++	}
++	handle->_sect = ns_s_max;
++	handle->_rrnum = -1;
++	handle->_msg_ptr = nullptr;
++	return 0;
++}
++
++// Reads record `rrnum` of `section` (the next one for -1).
++int ns_parserr(ns_msg *handle, ns_sect section, int rrnum, ns_rr *rr) {
++	if(section < 0 || section >= ns_s_max) {
++		errno = ENODEV;
++		return -1;
++	}
++	if(section != handle->_sect) {
++		handle->_sect = section;
++		handle->_rrnum = 0;
++		handle->_msg_ptr = handle->_sections[section];
++	}
++	if(rrnum == -1)
++		rrnum = handle->_rrnum;
++	if(rrnum < 0 || rrnum >= handle->_counts[section]) {
++		errno = ENODEV;
++		return -1;
++	}
++	if(rrnum < handle->_rrnum) {
++		handle->_rrnum = 0;
++		handle->_msg_ptr = handle->_sections[section];
++	}
++	if(rrnum > handle->_rrnum) {
++		handle->_msg_ptr = skip_records(handle->_msg_ptr, handle->_eom, section,
++				rrnum - handle->_rrnum);
++		if(!handle->_msg_ptr) {
++			errno = EMSGSIZE;
++			return -1;
++		}
++		handle->_rrnum = rrnum;
++	}
++	const unsigned char *eom = handle->_eom;
++	int name = ns_name_uncompress(handle->_msg, eom, handle->_msg_ptr, rr->name, NS_MAXDNAME);
++	if(name < 0)
++		return -1;
++	const unsigned char *p = handle->_msg_ptr + name;
++	if(eom - p < 4) {
++		errno = EMSGSIZE;
++		return -1;
++	}
++	rr->type = ns_get16(p);
++	rr->rr_class = ns_get16(p + 2);
++	p += 4;
++	if(section == ns_s_qd) {
++		rr->ttl = 0;
++		rr->rdlength = 0;
++		rr->rdata = nullptr;
++	}else{
++		if(eom - p < 6) {
++			errno = EMSGSIZE;
++			return -1;
++		}
++		rr->ttl = ns_get32(p);
++		rr->rdlength = ns_get16(p + 4);
++		p += 6;
++		if(eom - p < rr->rdlength) {
++			errno = EMSGSIZE;
++			return -1;
++		}
++		rr->rdata = p;
++		p += rr->rdlength;
++	}
++	handle->_rrnum++;
++	handle->_msg_ptr = p;
++	return 0;
++}
++
++// Writes the name at `src`, in the message from `msg` to `eom`, dotted,
++// with glibc's escapes: a backslash before . \ " ( ) ; @ $, and \DDD for
++// other bytes outside the printable ones; the root is ".". Returns the
++// bytes the name takes at `src`.
++int ns_name_uncompress(const unsigned char *msg, const unsigned char *eom,
++		const unsigned char *src, char *dst, size_t size) {
++	const unsigned char *p = src;
++	long taken = -1;
++	size_t at = 0;
++	// As in glibc, a name that reads more bytes than the message has
++	// follows its pointers round a loop.
++	long checked = 0;
++	auto put = [&](char c) {
++		if(at + 1 >= size)
++			return false;
++		dst[at++] = c;
++		return true;
++	};
++	if(src < msg || src >= eom)
++		goto bad;
++	for(;;) {
++		if(p >= eom)
++			goto bad;
++		unsigned c = *p;
++		if((c & NS_CMPRSFLGS) == NS_CMPRSFLGS) {
++			if(eom - p < 2)
++				goto bad;
++			if(taken < 0)
++				taken = p + 2 - src;
++			p = msg + (((c & 0x3f) << 8) | p[1]);
++			checked += 2;
++			if(p >= eom || checked >= eom - msg)
++				goto bad;
++			continue;
++		}
++		if(c & NS_CMPRSFLGS)
++			goto bad;
++		p++;
++		if(!c)
++			break;
++		checked += c + 1;
++		if(eom - p < c || checked >= eom - msg)
++			goto bad;
++		if(at && !put('.'))
++			goto bad;
++		for(unsigned i = 0; i < c; i++, p++) {
++			unsigned char b = *p;
++			bool ok;
++			if(strchr(".\\\"();@$", b) && b) {
++				ok = put('\\') && put(b);
++			}else if(b <= 0x20 || b >= 0x7f) {
++				ok = put('\\') && put('0' + b / 100) && put('0' + b / 10 % 10)
++						&& put('0' + b % 10);
++			}else{
++				ok = put(b);
++			}
++			if(!ok)
++				goto bad;
++		}
++	}
++	if(!at && !put('.'))
++		goto bad;
++	dst[at] = 0;
++	return taken >= 0 ? taken : p - src;
++bad:
++	errno = EMSGSIZE;
++	return -1;
+ }
+--- a/options/bsd/generic/ether.cpp
++++ b/options/bsd/generic/ether.cpp
+@@ -1,5 +1,5 @@
++#include <ctype.h>
+ #include <stdio.h>
+-#include <bits/ensure.h>
+ #include <netinet/ether.h>
+ 
+ char *ether_ntoa(const struct ether_addr *addr) {
+@@ -11,13 +11,49 @@
+ 	char *orig_ptr = buf;
+ 
+ 	for(int i = 0; i < ETH_ALEN; i++) {
+-		buf += sprintf(buf, i == 0 ? "%.2X" : ":%.2X", addr->ether_addr_octet[i]);
++		buf += sprintf(buf, i == 0 ? "%x" : ":%x", addr->ether_addr_octet[i]);
+ 	}
+ 
+ 	return orig_ptr;
+ }
+ 
+-struct ether_addr *ether_aton(const char *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++namespace {
++
++int hex_digit(char c) {
++	if(c >= '0' && c <= '9')
++		return c - '0';
++	if(c >= 'a' && c <= 'f')
++		return c - 'a' + 10;
++	if(c >= 'A' && c <= 'F')
++		return c - 'A' + 10;
++	return -1;
++}
++
++} // namespace
++
++// Six bytes of one or two hex digits, with colons between them, and then
++// the end or a space, as in glibc.
++struct ether_addr *ether_aton_r(const char *text, struct ether_addr *addr) {
++	for(int i = 0; i < ETH_ALEN; i++) {
++		int high = hex_digit(*text++);
++		if(high < 0)
++			return nullptr;
++		int low = hex_digit(*text);
++		unsigned byte = high;
++		if(low >= 0) {
++			byte = byte * 16 + low;
++			text++;
++		}
++		if(i < ETH_ALEN - 1 && *text++ != ':')
++			return nullptr;
++		if(i == ETH_ALEN - 1 && *text && !isspace(static_cast<unsigned char>(*text)))
++			return nullptr;
++		addr->ether_addr_octet[i] = byte;
++	}
++	return addr;
++}
++
++struct ether_addr *ether_aton(const char *text) {
++	static struct ether_addr addr;
++	return ether_aton_r(text, &addr);
+ }
+--- a/options/bsd/include/netinet/ether.h
++++ b/options/bsd/include/netinet/ether.h
+@@ -14,6 +14,7 @@
+ char *ether_ntoa_r(const struct ether_addr *__p_a, char *__x);
+ 
+ struct ether_addr *ether_aton(const char *__asc);
++struct ether_addr *ether_aton_r(const char *__asc, struct ether_addr *__addr);
+ 
+ #endif /* !__MLIBC_ABI_ONLY */
+ 
+--- a/options/posix/generic/arpa-inet.cpp
++++ b/options/posix/generic/arpa-inet.cpp
+@@ -152,12 +152,33 @@
+ 	return mlibc::inet::pton(af, src, dst);
+ }
+ 
+-struct in_addr inet_makeaddr(in_addr_t, in_addr_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++struct in_addr inet_makeaddr(in_addr_t net, in_addr_t host) {
++	in_addr_t address;
++	if(net < 128)
++		address = (net << IN_CLASSA_NSHIFT) | (host & IN_CLASSA_HOST);
++	else if(net < 65536)
++		address = (net << IN_CLASSB_NSHIFT) | (host & IN_CLASSB_HOST);
++	else if(net < 16777216)
++		address = (net << IN_CLASSC_NSHIFT) | (host & IN_CLASSC_HOST);
++	else
++		address = net | host;
++	return {htonl(address)};
+ }
+ 
+-in_addr_t inet_netof(struct in_addr) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++in_addr_t inet_netof(struct in_addr in) {
++	in_addr_t address = ntohl(in.s_addr);
++	if(IN_CLASSA(address))
++		return (address & IN_CLASSA_NET) >> IN_CLASSA_NSHIFT;
++	if(IN_CLASSB(address))
++		return (address & IN_CLASSB_NET) >> IN_CLASSB_NSHIFT;
++	return (address & IN_CLASSC_NET) >> IN_CLASSC_NSHIFT;
++}
++
++in_addr_t inet_lnaof(struct in_addr in) {
++	in_addr_t address = ntohl(in.s_addr);
++	if(IN_CLASSA(address))
++		return address & IN_CLASSA_HOST;
++	if(IN_CLASSB(address))
++		return address & IN_CLASSB_HOST;
++	return address & IN_CLASSC_HOST;
+ }
+--- a/options/posix/include/arpa/inet.h
++++ b/options/posix/include/arpa/inet.h
+@@ -36,6 +36,7 @@
+ 
+ struct in_addr inet_makeaddr(in_addr_t __net, in_addr_t __host);
+ in_addr_t inet_netof(struct in_addr __in);
++in_addr_t inet_lnaof(struct in_addr __in);
+ 
+ #endif /* !__MLIBC_ABI_ONLY */
+ 
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -11,6 +11,7 @@
+ #include <string.h>
+ #include <sys/resource.h>
+ #include <sys/stat.h>
++#include <sys/utsname.h>
+ #include <termios.h>
+ #include <unistd.h>
+ #include <utmpx.h>
+@@ -1572,14 +1573,26 @@
+ 	return 0;
+ }
+ 
+-int getdomainname(char *, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// As glibc's on Linux: the domain name uname gives, cut to `length`
++// bytes (and then without its NUL) if it is longer.
++int getdomainname(char *name, size_t length) {
++	struct utsname u;
++	if(uname(&u))
++		return -1;
++#if defined(_GNU_SOURCE)
++	const char *domain = u.domainname;
++#else
++	const char *domain = u.__domainname;
++#endif
++	size_t size = strlen(domain) + 1;
++	memcpy(name, domain, size < length ? size : length);
++	return 0;
+ }
+ 
++// Radix has no domain name to set.
+ int setdomainname(const char *, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++	errno = EPERM;
++	return -1;
+ }
+ 
+ int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
+--- a/options/glibc/generic/printf.cpp
++++ b/options/glibc/generic/printf.cpp
+@@ -1,7 +1,124 @@
+-#include <bits/ensure.h>
+ #include <printf.h>
+ 
+-size_t parse_printf_format(const char * __restrict, size_t, int * __restrict) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++namespace {
++
++// Reads a decimal number at `p`, and a `$` after it: an argument's
++// position, from 1, or 0 for none.
++size_t position(const char *&p) {
++	const char *q = p;
++	size_t n = 0;
++	while(*q >= '0' && *q <= '9')
++		n = n * 10 + (*q++ - '0');
++	if(*q != '$' || !n)
++		return 0;
++	p = q + 1;
++	return n;
++}
++
++} // namespace
++
++// The types of the arguments `format` takes, as glibc's on x86-64 has
++// them, its oddities included: `l` changes neither %s nor %c, `ll`, `z`,
++// `j` and `t` are long, `q` and `L` change no integer, %n's are pointers
++// to int whatever their size. Returns how many arguments there are (the
++// highest position, with positions), and writes the first `n` types.
++size_t parse_printf_format(const char *__restrict format, size_t n, int *__restrict types) {
++	size_t next = 0;
++	size_t highest = 0;
++	auto put = [&](size_t at, int type) {
++		if(at < n)
++			types[at] = type;
++		if(at + 1 > highest)
++			highest = at + 1;
++	};
++	// An argument: at its position, or the next one.
++	auto argument = [&](size_t at, int type) {
++		put(at ? at - 1 : next++, type);
++	};
++	for(const char *p = format; *p; p++) {
++		if(*p != '%')
++			continue;
++		p++;
++		if(*p == '%')
++			continue;
++		size_t at = position(p);
++		while(*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0' || *p == '\''
++				|| *p == 'I')
++			p++;
++		if(*p == '*') {
++			p++;
++			argument(position(p), PA_INT);
++		}else{
++			while(*p >= '0' && *p <= '9')
++				p++;
++		}
++		if(*p == '.') {
++			p++;
++			if(*p == '*') {
++				p++;
++				argument(position(p), PA_INT);
++			}else{
++				while(*p >= '0' && *p <= '9')
++					p++;
++			}
++		}
++		int flags = 0;
++		bool chars = false;
++		switch(*p) {
++		case 'h':
++			if(*++p == 'h') {
++				p++;
++				chars = true;
++			}else{
++				flags = PA_FLAG_SHORT;
++			}
++			break;
++		case 'l':
++			if(*++p == 'l')
++				p++;
++			flags = PA_FLAG_LONG;
++			break;
++		case 'z': case 'Z': case 'j': case 't':
++			p++;
++			flags = PA_FLAG_LONG;
++			break;
++		case 'q': case 'L':
++			p++;
++			flags = PA_FLAG_LONG_DOUBLE;
++			break;
++		}
++		switch(*p) {
++		case 'd': case 'i': case 'o': case 'u': case 'x': case 'X':
++			argument(at, chars ? PA_CHAR : PA_INT | (flags & (PA_FLAG_SHORT | PA_FLAG_LONG)));
++			break;
++		case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A':
++			argument(at, PA_DOUBLE | (flags & PA_FLAG_LONG_DOUBLE));
++			break;
++		case 'c':
++			argument(at, PA_CHAR);
++			break;
++		case 'C':
++			argument(at, PA_WCHAR);
++			break;
++		case 's':
++			argument(at, PA_STRING);
++			break;
++		case 'S':
++			argument(at, PA_WSTRING);
++			break;
++		case 'p':
++			argument(at, PA_POINTER);
++			break;
++		case 'n':
++			argument(at, PA_INT | PA_FLAG_PTR);
++			break;
++		case '\0':
++			// A % at the end takes nothing.
++			return highest;
++		default:
++			// %m, and conversions there are none of, take nothing.
++			break;
++		}
++	}
++	return highest;
+ }
+--- a/options/glibc/generic/execinfo.cpp
++++ b/options/glibc/generic/execinfo.cpp
+@@ -2,6 +2,8 @@
+ #include <execinfo.h>
+ #include <inttypes.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <unistd.h>
+ #include <unwind.h>
+ 
+@@ -80,9 +82,58 @@
+ 	return state.current_frame;
+ }
+ 
+-char **backtrace_symbols(void *const *, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++char **backtrace_symbols(void *const *buffer, int size) {
++	if(size < 0)
++		size = 0;
++	// Each frame's line as backtrace_symbols_fd writes it, without the
++	// newline, after the array of pointers to them.
++	char *text = nullptr;
++	size_t length = 0;
++	FILE *memory = open_memstream(&text, &length);
++	if(!memory)
++		return nullptr;
++	size_t *ends = static_cast<size_t *>(malloc((size + 1) * sizeof(size_t)));
++	if(!ends) {
++		fclose(memory);
++		free(text);
++		return nullptr;
++	}
++	for(int i = 0; i < size; i++) {
++		Dl_info info;
++		if(dladdr(buffer[i], &info) != 0) {
++			if(info.dli_fname)
++				fputs(info.dli_fname, memory);
++			if(info.dli_sname)
++				fprintf(memory, "(%s+0x%" PRIxPTR ") ", info.dli_sname,
++					reinterpret_cast<uintptr_t>(buffer[i]) - reinterpret_cast<uintptr_t>(info.dli_saddr));
++			else if(info.dli_saddr)
++				fprintf(memory, "(+%p) ", info.dli_saddr);
++			else
++				fputs("() ", memory);
++		}
++		fprintf(memory, "[%p]", buffer[i]);
++		fputc(0, memory);
++		fflush(memory);
++		ends[i] = length;
++	}
++	if(fclose(memory)) {
++		free(ends);
++		free(text);
++		return nullptr;
++	}
++	auto result = static_cast<char **>(malloc(size * sizeof(char *) + length + 1));
++	if(result) {
++		char *strings = reinterpret_cast<char *>(result + size);
++		memcpy(strings, text ? text : "", length);
++		size_t start = 0;
++		for(int i = 0; i < size; i++) {
++			result[i] = strings + start;
++			start = ends[i];
++		}
++	}
++	free(ends);
++	free(text);
++	return result;
+ }
+ 
+ void backtrace_symbols_fd(void *const *buffer, int size, int fd) {
+--- a/options/posix/generic/sys-socket.cpp
++++ b/options/posix/generic/sys-socket.cpp
+@@ -3,6 +3,7 @@
+ #include <fcntl.h>
+ #include <limits.h>
+ #include <sys/socket.h>
++#include <time.h>
+ 
+ #include <bits/ensure.h>
+ #include <mlibc/all-sysdeps.hpp>
+@@ -127,9 +128,46 @@
+ 	return length;
+ }
+ 
+-int recvmmsg(int, struct mmsghdr *, unsigned int, int, struct timespec *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// Messages are received one by one, so after the first, MSG_WAITFORONE
++// takes only those already there. The time limit is looked at after each
++// message, as Linux does.
++int recvmmsg(int fd, struct mmsghdr *msgs, unsigned int count, int flags,
++		struct timespec *timeout) {
++	struct timespec end;
++	if(timeout) {
++		if(timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec > 999999999) {
++			errno = EINVAL;
++			return -1;
++		}
++		clock_gettime(CLOCK_MONOTONIC, &end);
++		end.tv_sec += timeout->tv_sec;
++		end.tv_nsec += timeout->tv_nsec;
++		if(end.tv_nsec > 999999999) {
++			end.tv_sec++;
++			end.tv_nsec -= 1000000000;
++		}
++	}
++	if(count > IOV_MAX)
++		count = IOV_MAX;
++	unsigned int i = 0;
++	for(; i < count; i++) {
++		int message_flags = flags & ~MSG_WAITFORONE;
++		if(i && flags & MSG_WAITFORONE)
++			message_flags |= MSG_DONTWAIT;
++		ssize_t n = recvmsg(fd, &msgs[i].msg_hdr, message_flags);
++		if(n < 0)
++			break;
++		msgs[i].msg_len = n;
++		if(timeout) {
++			struct timespec now;
++			clock_gettime(CLOCK_MONOTONIC, &now);
++			if(now.tv_sec > end.tv_sec || (now.tv_sec == end.tv_sec && now.tv_nsec >= end.tv_nsec)) {
++				i++;
++				break;
++			}
++		}
++	}
++	return i ? static_cast<int>(i) : -1;
+ }
+ 
+ ssize_t send(int fd, const void *buffer, size_t size, int flags) {
+@@ -174,9 +212,17 @@
+ 	return length;
+ }
+ 
+-int sendmmsg(int, struct mmsghdr *, unsigned int, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int sendmmsg(int fd, struct mmsghdr *msgs, unsigned int count, int flags) {
++	if(count > IOV_MAX)
++		count = IOV_MAX;
++	unsigned int i = 0;
++	for(; i < count; i++) {
++		ssize_t n = sendmsg(fd, &msgs[i].msg_hdr, flags);
++		if(n < 0)
++			break;
++		msgs[i].msg_len = n;
++	}
++	return i ? static_cast<int>(i) : -1;
+ }
+ 
+ int setsockopt(int fd, int layer, int number,
+--- a/options/posix/generic/sys-resource.cpp
++++ b/options/posix/generic/sys-resource.cpp
+@@ -56,7 +56,17 @@
+ [[gnu::alias("setrlimit")]] int setrlimit64(int resource, const struct rlimit *limit);
+ #endif /* !__MLIBC_LINUX_OPTION */
+ 
+-int prlimit(pid_t, int, const struct rlimit *, struct rlimit *) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int prlimit(pid_t pid, int resource, const struct rlimit *new_limit, struct rlimit *old_limit) {
++	if(pid && pid != getpid()) {
++		errno = ENOSYS;
++		return -1;
++	}
++	struct rlimit old;
++	if(getrlimit(resource, &old))
++		return -1;
++	if(new_limit && setrlimit(resource, new_limit))
++		return -1;
++	if(old_limit)
++		*old_limit = old;
++	return 0;
+ }
+--- a/options/internal/include/mlibc/thread-types.hpp
++++ b/options/internal/include/mlibc/thread-types.hpp
+@@ -214,6 +214,9 @@
+ 	}
+ 
+ 	int __mlibc_pshared = __MLIBC_THREAD_PROCESS_PRIVATE;
++	// pthread_rwlockattr_setkind_np's: glibc's preference, which mlibc's
++	// lock does not act on.
++	int __mlibc_kind = 0;
+ };
+ 
+ struct __mlibc_once {
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -1267,7 +1267,7 @@
+ 
+ int pthread_rwlockattr_init(pthread_rwlockattr_t *attr) {
+ 	attr->__heap_ptr = frg::construct<__mlibc_rwlockattr>(getAllocator());
+-	return 0;
++	return attr->__heap_ptr ? 0 : ENOMEM;
+ }
+ 
+ int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *__restrict attr,
+@@ -1571,12 +1571,16 @@
+ 	return 0;
+ }
+ 
+-int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *attr, int kind) {
++	if(kind != PTHREAD_RWLOCK_PREFER_READER_NP && kind != PTHREAD_RWLOCK_PREFER_WRITER_NP
++			&& kind != PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP)
++		return EINVAL;
++	__mlibc_rwlockattr::from(attr)->__mlibc_kind = kind;
++	return 0;
+ }
+ 
+-int pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *__restrict, int *__restrict) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++int pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *__restrict attr,
++		int *__restrict kind) {
++	*kind = __mlibc_rwlockattr::from(attr)->__mlibc_kind;
++	return 0;
+ }
+--- a/options/posix/generic/sys-sem.cpp
++++ b/options/posix/generic/sys-sem.cpp
+@@ -21,8 +21,8 @@
+ }
+ 
+ int semop(int, struct sembuf *, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++	errno = ENOSYS;
++	return -1;
+ }
+ 
+ union semun {
+--- a/options/posix/generic/sys-mman.cpp
++++ b/options/posix/generic/sys-mman.cpp
+@@ -143,9 +143,10 @@
+ 	return window;
+ }
+ 
++// Linux's has been deprecated since 3.16; Radix has no nonlinear mappings.
+ int remap_file_pages(void *, size_t, int, size_t, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++	errno = ENOSYS;
++	return -1;
+ }
+ 
+ int memfd_create(const char *name, unsigned int flags) {
+--- a/options/glibc/generic/gshadow.cpp
++++ b/options/glibc/generic/gshadow.cpp
+@@ -1,7 +1,8 @@
++#include <errno.h>
+ #include <gshadow.h>
+-#include <bits/ensure.h>
+ 
+-int getsgnam_r(const char *, struct sgrp *, char *, size_t, struct sgrp **) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++// Dukovo keeps no group passwords: there is no /etc/gshadow to look in.
++int getsgnam_r(const char *, struct sgrp *, char *, size_t, struct sgrp **result) {
++	*result = nullptr;
++	return ENOENT;
+ }

@@ -1,0 +1,115 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+A null environ, and realpath's corner cases. glibc's clearenv(3) names
+`environ = NULL` as the other way to clear the environment, and glibc
+and musl take a null environ as an empty one; mlibc's getenv, setenv,
+unsetenv and putenv read through it. A string without an equals sign
+in the environment is no variable, and is passed over in silence, as in
+glibc and musl: mlibc wrote each to the kernel's log on every lookup, so
+a crafted environment could fill the log. realpath with a null buffer
+used its allocation without checking it, and realpath(NULL, buf) is
+EINVAL, as in glibc, not EFAULT. Meant for upstream.
+
+--- a/options/ansi/generic/environment.cpp
++++ b/options/ansi/generic/environment.cpp
+@@ -4,7 +4,6 @@
+ #include <string.h>
+ 
+ #include <bits/ensure.h>
+-#include <mlibc/debug.hpp>
+ 
+ #include <frg/string.hpp>
+ 
+@@ -16,17 +15,15 @@
+ 
+ namespace {
+ 
++// environ may be a null pointer, which glibc's clearenv(3) names as the
++// other way to clear the environment: it is empty then. A string without
++// an equals sign is no variable, and is passed over without a word, as
++// glibc and musl do.
+ size_t find_environ_index(frg::string_view name) {
+-	for(size_t i = 0; environ[i]; i++) {
++	for(size_t i = 0; environ && environ[i]; i++) {
+ 		frg::string_view view{environ[i]};
+ 		size_t s = view.find_first('=');
+-		if(s == size_t(-1)) {
+-			mlibc::infoLogger() << "mlibc: environment string \""
+-					<< frg::escape_fmt{view.data(), view.size()}
+-					<< "\" does not contain an equals sign (=)" << frg::endlog;
+-			continue;
+-		}
+-		if(view.sub_string(0, s) == name)
++		if(s != size_t(-1) && view.sub_string(0, s) == name)
+ 			return i;
+ 	}
+ 
+@@ -35,7 +32,7 @@
+ 
+ size_t environ_size() {
+ 	size_t size = 0;
+-	while(environ[size])
++	while(environ && environ[size])
+ 		size++;
+ 	return size;
+ }
+@@ -57,7 +54,9 @@
+ 	auto array = static_cast<char **>(malloc(room * sizeof(char *)));
+ 	if(!array)
+ 		return false;
+-	memcpy(array, environ, (size + 1) * sizeof(char *));
++	if(environ)
++		memcpy(array, environ, size * sizeof(char *));
++	array[size] = nullptr;
+ 	free(owned_environ);
+ 	owned_environ = array;
+ 	owned_room = room;
+@@ -83,6 +82,8 @@
+ // Takes every string for the name out of environ where it is, keeping
+ // the others in order, as glibc and musl do; nothing is allocated.
+ void unassign_variable(frg::string_view name) {
++	if(!environ)
++		return;
+ 	size_t kept = 0;
+ 	for(size_t i = 0; environ[i]; i++) {
+ 		frg::string_view view{environ[i]};
+@@ -143,9 +144,6 @@
+ 	frg::string_view view{name};
+ 	size_t s = view.find_first('=');
+ 	if(s != size_t(-1)) {
+-		mlibc::infoLogger() << "mlibc: environment variable \""
+-				<< frg::escape_fmt{view.data(), view.size()} << "\" contains an equals sign"
+-				<< frg::endlog;
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
+--- a/options/posix/generic/posix_stdlib.cpp
++++ b/options/posix/generic/posix_stdlib.cpp
+@@ -252,6 +252,11 @@
+ }
+ 
+ char *realpath(const char *path, char *out) {
++	// glibc's answer for no path.
++	if(!path) {
++		errno = EINVAL;
++		return nullptr;
++	}
+ 	if(mlibc::globalConfig().debugPathResolution)
+ 		mlibc::infoLogger() << "mlibc realpath(): Called on '" << path << "'" << frg::endlog;
+ 
+@@ -263,8 +268,13 @@
+ 			errno = e;
+ 			return nullptr;
+ 		}
+-		if(!out)
++		if(!out) {
+ 			out = reinterpret_cast<char *>(getAllocator().allocate(strlen(resolved) + 1));
++			if(!out) {
++				errno = ENOMEM;
++				return nullptr;
++			}
++		}
+ 		strcpy(out, resolved);
+ 		return out;
+ 	}

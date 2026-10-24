@@ -33,11 +33,21 @@ namespace {
 
 constexpr uint64_t NS_PER_SEC = 1000000000;
 
-// Nanoseconds in `tv`.
-uint64_t ns_of(const struct timeval &tv) {
-	if(tv.tv_sec < 0)
-		return 0;
-	return static_cast<uint64_t>(tv.tv_sec) * NS_PER_SEC + static_cast<uint64_t>(tv.tv_usec) * 1000;
+// `secs` seconds and `ns` nanoseconds as nanoseconds, at most UINT64_MAX:
+// some 584 years, which the kernel takes as never, as Linux keeps a time
+// past its 292.
+uint64_t saturating_ns(uint64_t secs, uint64_t ns) {
+	if(secs > (UINT64_MAX - ns) / NS_PER_SEC)
+		return UINT64_MAX;
+	return secs * NS_PER_SEC + ns;
+}
+
+// Nanoseconds in `tv`, or EINVAL if it is not a time.
+int timeval_ns(const struct timeval &tv, uint64_t *ns) {
+	if(tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
+		return EINVAL;
+	*ns = saturating_ns(static_cast<uint64_t>(tv.tv_sec), static_cast<uint64_t>(tv.tv_usec) * 1000);
+	return 0;
 }
 
 struct timeval timeval_of(uint64_t ns) {
@@ -74,6 +84,16 @@ int exec_fd(int fd, const char *execfn, char *const argv[], char *const envp[]) 
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
+	// As on Linux, a null argv or envp is an empty one, and a program
+	// never starts with no arguments: it gets one empty string, as Linux
+	// 5.18 and later give it, for programs that take argv[0] as there.
+	static char empty[] = "";
+	static char *const no_args[] = {empty, nullptr};
+	static char *const no_env[] = {nullptr};
+	if(!argv || !argv[0])
+		argv = no_args;
+	if(!envp)
+		envp = no_env;
 	size_t args = 0;
 	size_t size = sizeof(uint32_t) * 4;
 	for(; argv[args]; args++)
@@ -645,8 +665,8 @@ int Sysdeps<Sigtimedwait>::operator()(const sigset_t *__restrict set,
 	if(timeout) {
 		if(timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000)
 			return EINVAL;
-		timeout_ns = static_cast<uint64_t>(timeout->tv_sec) * NS_PER_SEC
-				+ static_cast<uint64_t>(timeout->tv_nsec);
+		timeout_ns = saturating_ns(static_cast<uint64_t>(timeout->tv_sec),
+				static_cast<uint64_t>(timeout->tv_nsec));
 	}
 	struct radix_process_signal_wait_results r;
 	uint64_t status = radix_process_signal_wait(radix::SLOT_PROCESS, mask_of(set), timeout_ns,
@@ -675,7 +695,7 @@ namespace {
 int timespec_ns(const struct timespec &ts, uint64_t *ns) {
 	if(ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= static_cast<long>(NS_PER_SEC))
 		return EINVAL;
-	*ns = static_cast<uint64_t>(ts.tv_sec) * NS_PER_SEC + static_cast<uint64_t>(ts.tv_nsec);
+	*ns = saturating_ns(static_cast<uint64_t>(ts.tv_sec), static_cast<uint64_t>(ts.tv_nsec));
 	return 0;
 }
 
@@ -777,9 +797,19 @@ int timer_number(timer_t t, uint32_t *number) {
 
 int Sysdeps<TimerCreate>::operator()(clockid_t clk, struct sigevent *__restrict evp,
 		timer_t *__restrict res) {
-	// The kernel's ClockKind numbers the clocks as Linux does.
-	if(clk < 0)
-		return EINVAL;
+	// Linux's clocks that drive no timers are EOPNOTSUPP there, and the
+	// alarm clocks on a machine without a clock that can wake it.
+	switch(clk) {
+	case CLOCK_MONOTONIC_RAW:
+	case CLOCK_REALTIME_COARSE:
+	case CLOCK_MONOTONIC_COARSE:
+	case CLOCK_REALTIME_ALARM:
+	case CLOCK_BOOTTIME_ALARM:
+		return EOPNOTSUPP;
+	}
+	enum radix_clock_kind kind;
+	if(int e = radix::clock_kind(clk, &kind); e)
+		return e;
 	// Without a sigevent, SIGALRM carrying the timer's number.
 	enum radix_timer_notify notify = RADIX_TIMER_NOTIFY_ALARM;
 	uint32_t signal = 0;
@@ -812,8 +842,7 @@ int Sysdeps<TimerCreate>::operator()(clockid_t clk, struct sigevent *__restrict 
 		}
 	}
 	struct radix_process_timer_create_results r;
-	uint64_t status = radix_process_timer_create(radix::SLOT_PROCESS,
-			static_cast<enum radix_clock_kind>(clk), notify, signal, value,
+	uint64_t status = radix_process_timer_create(radix::SLOT_PROCESS, kind, notify, signal, value,
 			static_cast<uint64_t>(thread), &r);
 	if(status) {
 		if(helper)
@@ -888,10 +917,15 @@ int Sysdeps<SetItimer>::operator()(int which, const struct itimerval *new_value,
 	// TimerKind.
 	if(which < ITIMER_REAL || which > ITIMER_PROF)
 		return EINVAL;
+	uint64_t value_ns;
+	uint64_t interval_ns;
+	if(int e = timeval_ns(new_value->it_value, &value_ns); e)
+		return e;
+	if(int e = timeval_ns(new_value->it_interval, &interval_ns); e)
+		return e;
 	struct radix_process_set_timer_results r;
 	uint64_t status = radix_process_set_timer(radix::SLOT_PROCESS,
-			static_cast<enum radix_timer_kind>(which), ns_of(new_value->it_value),
-			ns_of(new_value->it_interval), &r);
+			static_cast<enum radix_timer_kind>(which), value_ns, interval_ns, &r);
 	if(status)
 		return radix::to_errno(status);
 	if(old_value) {

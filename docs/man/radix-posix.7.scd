@@ -414,7 +414,8 @@ their locks, directories, threads, processes and pipes, time,
 environment, panics that unwind, and backtraces with symbols. The
 *libc* crate's Radix module is checked against the C library's headers
 after every build: every type's size and alignment, every field's
-offset, every constant, and every function the C library must define.
+offset, every constant, and every function, which the C library must
+define and declare with the same parameters and result.
 
 # USERS
 
@@ -435,6 +436,13 @@ tests are:
 	C programs in _userspace/posix_, one per area. *format* holds
 	*printf*, *strtod*, *scanf*, *strftime* and the time conversions to
 	1,461 answers generated with glibc 2.39.
+
+*library*
+	The C library's corners, as glibc 2.39 has them: allocations near
+	the top of memory and on large alignments, a null *environ*,
+	*popen*, message catalogs, the functions mlibc had left
+	unfinished, stacks a thread's creator gives it, and new threads'
+	signal masks.
 
 *dynamic*
 	A program with a private library found through *$ORIGIN*, and a

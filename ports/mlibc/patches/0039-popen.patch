@@ -1,0 +1,235 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+popen as POSIX and glibc have it (after patch 0037). The child of a
+popen kept every stream an earlier popen had opened, which POSIX has it
+close: a reader of a command's output then waited forever, its writer
+held open in a later child. The mode was searched for "w" anywhere, so
+"rw" wrote and "rx" read; glibc takes 'r' or 'w' and any 'e'
+(FD_CLOEXEC), in any order, and fails with EINVAL otherwise. When the
+pipe's child end already had the number it moves to (stdin or stdout
+closed in the caller), the child closed it after the no-op dup2. A
+failed allocation panicked, and SIGINT and SIGQUIT were ignored in the
+caller and SIGCHLD blocked while the child started, as system() does but
+popen does not. Now the pipe is close-on-exec from the start, so that a
+program another thread starts holds neither end, a lock-protected list
+of open popen streams is closed in each child, the child's end keeps its
+number when it has it, and an allocation failure is ENOMEM. Meant for
+upstream.
+
+--- a/options/posix/generic/posix_stdio.cpp
++++ b/options/posix/generic/posix_stdio.cpp
+@@ -13,6 +13,7 @@
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/debug.hpp>
+ #include <mlibc/file-io.hpp>
++#include <mlibc/lock.hpp>
+ #include <mlibc/posix-file-io.hpp>
+ #include <mlibc/stdlib.hpp>
+ 
+@@ -28,11 +29,23 @@
+ 		_popen_pid = new_pid;
+ 	}
+ 
++	// The next stream popen() opened that is still open.
++	popen_file *popen_next = nullptr;
++
+ private:
+ 	// Underlying PID in case of popen()
+ 	pid_t _popen_pid;
+ };
+ 
++namespace {
++
++// The streams popen() opened that are open, whose descriptors POSIX has
++// closed in the child of every later popen().
++FutexLock popen_lock;
++popen_file *popen_streams;
++
++} // namespace
++
+ FILE *fmemopen(void *buf, size_t size, const char *__restrict mode) {
+ 	int flags = mlibc::fd_file::parse_modestring(mode);
+ 
+@@ -51,6 +64,15 @@
+ 	int status;
+ 	pid_t pid = file->get_popen_pid();
+ 
++	{
++		frg::unique_lock guard(popen_lock);
++		for(popen_file **link = &popen_streams; *link; link = &(*link)->popen_next) {
++			if(*link == file) {
++				*link = file->popen_next;
++				break;
++			}
++		}
++	}
+ 	fclose(file);
+ 
+ 	// A signal handler that does not restart calls must not lose the
+@@ -67,107 +89,92 @@
+ }
+ 
+ FILE *popen(const char *command, const char *typestr) {
+-	bool is_write;
+-	pid_t child;
+-	FILE *ret = nullptr;
+-
+ 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<Fork> && mlibc::IsImplemented<Dup2> && mlibc::IsImplemented<Execve> &&
+-			mlibc::IsImplemented<Sigprocmask> && mlibc::IsImplemented<Sigaction> && mlibc::IsImplemented<Pipe>, nullptr);
++			mlibc::IsImplemented<Pipe>, nullptr);
+ 
+-	if (typestr == nullptr) {
+-		errno = EINVAL;
+-		return nullptr;
++	// glibc's modes: 'r' or 'w', and 'e' for FD_CLOEXEC, in any order.
++	bool is_read = false, is_write = false, cloexec = false;
++	for(const char *c = typestr ? typestr : ""; *c; c++) {
++		if(*c == 'r') {
++			is_read = true;
++		} else if(*c == 'w') {
++			is_write = true;
++		} else if(*c == 'e') {
++			cloexec = true;
++		} else {
++			is_read = is_write = false;
++			break;
++		}
+ 	}
+-
+-	if (strstr(typestr, "w") != nullptr) {
+-		is_write = true;
+-	} else if (strstr(typestr, "r") != nullptr) {
+-		is_write = false;
+-	} else {
++	if(is_read == is_write) {
+ 		errno = EINVAL;
+ 		return nullptr;
+ 	}
+ 
+-	bool cloexec = false;
+-	if (strstr(typestr, "e") != nullptr) {
+-		// Set FD_CLOEXEC on the new file descriptor
+-		cloexec = true;
+-	}
+-
++	// Close-on-exec from the start, so that a program another thread
++	// starts meanwhile does not hold either end.
+ 	int fds[2];
+-	if (int e = mlibc::sysdep_or_panic<Pipe>(fds, 0)) {
++	if (int e = mlibc::sysdep_or_panic<Pipe>(fds, O_CLOEXEC)) {
+ 		errno = e;
+ 		return nullptr;
+ 	}
++	int parent_end = is_write ? fds[1] : fds[0];
++	int child_end = is_write ? fds[0] : fds[1];
++	int target = is_write ? 0 : 1;
++
++	auto file = frg::construct<popen_file>(getAllocator(), parent_end,
++			mlibc::file_dispose_cb<popen_file>);
++	if(!file) {
++		mlibc::sysdep<Close>(fds[0]);
++		mlibc::sysdep<Close>(fds[1]);
++		errno = ENOMEM;
++		return nullptr;
++	}
+ 
+-	struct sigaction new_sa, old_int, old_quit;
+-	sigset_t new_mask, old_mask;
+-
+-	new_sa.sa_handler = SIG_IGN;
+-	new_sa.sa_flags = 0;
+-	sigemptyset(&new_sa.sa_mask);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGINT, &new_sa, &old_int);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &new_sa, &old_quit);
+-
+-	sigemptyset(&new_mask);
+-	sigaddset(&new_mask, SIGCHLD);
+-	mlibc::sysdep_or_panic<Sigprocmask>(SIG_BLOCK, &new_mask, &old_mask);
+-
+-	int parent_end = is_write ? 1 : 0;
+-	int child_end = is_write ? 0 : 1;
+-
++	// The list may not change while the child copies it.
++	frg::unique_lock guard(popen_lock);
++	pid_t child;
+ 	if (int e = mlibc::sysdep_or_panic<Fork>(&child)) {
++		guard.unlock();
++		// The stream owns the parent's end.
++		fclose(file);
++		mlibc::sysdep<Close>(child_end);
+ 		errno = e;
+-		mlibc::sysdep<Close>(fds[0]);
+-		mlibc::sysdep<Close>(fds[1]);
+-	} else if (!child) {
++		return nullptr;
++	}
++	if (!child) {
+ 		// update the cached TID in the TCB
+ 		auto self = mlibc::get_current_tcb();
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
+ 
+-		// For the child
+-		mlibc::sysdep_or_panic<Sigaction>(SIGINT, &old_int, nullptr);
+-		mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &old_quit, nullptr);
+-		mlibc::sysdep_or_panic<Sigprocmask>(SIG_SETMASK, &old_mask, nullptr);
+-
+-		mlibc::sysdep<Close>(fds[parent_end]);
+-
+-		if (mlibc::sysdep_or_panic<Dup2>(fds[child_end], 0, is_write ? 0 : 1)) {
+-			__ensure(!"sys_dup2() failed in popen()");
++		for(popen_file *other = popen_streams; other; other = other->popen_next)
++			mlibc::sysdep<Close>(other->fd());
++		if(child_end == target) {
++			// Already in place; only close-on-exec goes.
++			if(fcntl(child_end, F_SETFD, 0))
++				_Exit(127);
++		} else if(mlibc::sysdep<Dup2>(child_end, 0, target)) {
++			_Exit(127);
+ 		}
+-		mlibc::sysdep<Close>(fds[child_end]);
+ 
+ 		const char *args[] = {
+ 			"sh", "-c", command, nullptr
+ 		};
+ 
+-		mlibc::sysdep_or_panic<Execve>("/bin/sh", const_cast<char **>(args), environ);
++		mlibc::sysdep<Execve>("/bin/sh", const_cast<char **>(args), environ);
+ 		_Exit(127);
+-	} else {
+-		// For the parent
+-		mlibc::sysdep<Close>(fds[child_end]);
+-
+-		ret = frg::construct<popen_file>(
+-			getAllocator(),
+-			fds[parent_end],
+-			mlibc::file_dispose_cb<popen_file>
+-		);
+-		__ensure(ret);
+-
+-		auto file = static_cast<popen_file *>(ret);
+-
+-		file->set_popen_pid(child);
+-
+-		if (cloexec == true) {
+-			fcntl(file->fd(), F_SETFD, FD_CLOEXEC);
+-		}
+ 	}
+ 
+-	mlibc::sysdep_or_panic<Sigaction>(SIGINT, &old_int, nullptr);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &old_quit, nullptr);
+-	mlibc::sysdep_or_panic<Sigprocmask>(SIG_SETMASK, &old_mask, nullptr);
++	// For the parent
++	mlibc::sysdep<Close>(child_end);
++	file->set_popen_pid(child);
++	file->popen_next = popen_streams;
++	popen_streams = file;
++	guard.unlock();
+ 
+-	return ret;
++	if (!cloexec)
++		fcntl(parent_end, F_SETFD, 0);
++	return file;
+ }
+ 
+ FILE *open_memstream(char **buf, size_t *sizeloc) {

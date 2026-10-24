@@ -209,7 +209,9 @@ impl Checker<'_> {
                     self.fail(module, field.line, "results cannot be buffers".into());
                 }
             }
-            let words: usize = list.iter().map(|field| self.abi.words(&field.ty)).sum();
+            let words = list
+                .iter()
+                .fold(0, |sum: usize, field| sum.saturating_add(self.abi.words(&field.ty)));
             if words > limit {
                 self.fail(
                     module,
@@ -233,6 +235,11 @@ impl Checker<'_> {
     }
 
     fn structure(&mut self, module: &Module, name: &str, fields: &[Field], line: usize) {
+        let mut seen = HashSet::new();
+        if fields.iter().any(|field| holds(self.abi, &field.ty, name, &mut seen)) {
+            self.fail(module, line, format!("structure `{name}` holds itself"));
+            return;
+        }
         let mut offset: usize = 0;
         let mut names = HashSet::new();
         for field in fields {
@@ -263,7 +270,13 @@ impl Checker<'_> {
                 );
                 continue;
             }
-            let Some((size, align)) = self.abi.layout(&field.ty) else { continue };
+            let Some((size, align)) = self.abi.layout(&field.ty) else {
+                // A structure's own check names its problem.
+                if !matches!(field.ty, Type::Named(_)) {
+                    self.fail(module, field.line, format!("field `{}` is too large", field.name));
+                }
+                return;
+            };
             if !offset.is_multiple_of(align) {
                 self.fail(
                     module,
@@ -275,7 +288,13 @@ impl Checker<'_> {
                     ),
                 );
             }
-            offset = offset.next_multiple_of(align) + size;
+            let Some(end) =
+                offset.checked_next_multiple_of(align).and_then(|at| at.checked_add(size))
+            else {
+                self.fail(module, field.line, format!("structure `{name}` is too large"));
+                return;
+            };
+            offset = end;
         }
         if let Some((size, _)) = self.abi.layout(&Type::Named(name.to_string()))
             && size != offset
@@ -309,6 +328,8 @@ pub fn check(abi: &Abi) -> Vec<Error> {
 
     let mut modules = HashSet::new();
     let mut types: HashMap<&str, &str> = HashMap::new();
+    let mut domains = HashMap::new();
+    let mut error_sets: HashMap<&str, &str> = HashMap::new();
     let mut syscalls = HashMap::new();
     let mut interfaces = HashMap::new();
     for module in &abi.modules {
@@ -390,8 +411,24 @@ pub fn check(abi: &Abi) -> Vec<Error> {
                             "an error domain is from 1 to 65535".into(),
                         );
                     }
+                    if let Some(other) = domains.insert(*domain, &item.name) {
+                        checker.fail(
+                            module,
+                            item.line,
+                            format!("error domain {domain} is taken by `{other}`"),
+                        );
+                    }
                     checker.members(module, list, "error", u64::from(u16::MAX));
                     for error in list {
+                        if let Some(other) = error_sets.insert(&error.name, &item.name)
+                            && other != item.name
+                        {
+                            checker.fail(
+                                module,
+                                error.line,
+                                format!("error `{}` is also in error set `{other}`", error.name),
+                            );
+                        }
                         if error.value == 0 {
                             checker.fail(module, error.line, "error code 0 means success".into());
                         }
@@ -486,6 +523,24 @@ pub fn check(abi: &Abi) -> Vec<Error> {
     problems.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
     problems.dedup();
     problems
+}
+
+/// Whether `ty` holds the structure `name`, itself or inside other
+/// structures; `seen` holds the structures already looked in.
+fn holds<'a>(abi: &'a Abi, ty: &'a Type, name: &str, seen: &mut HashSet<&'a str>) -> bool {
+    match ty {
+        Type::Array(inner, _) => holds(abi, inner, name, seen),
+        Type::Named(other) if other == name => true,
+        Type::Named(other) if seen.insert(other) => {
+            match abi.find(other).map(|(_, item)| &item.kind) {
+                Some(ItemKind::Struct { fields }) => {
+                    fields.iter().any(|field| holds(abi, &field.ty, name, seen))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 fn type_name<'a>(

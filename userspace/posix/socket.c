@@ -12,6 +12,7 @@
 // MSG_CTRUNC, MSG_CMSG_CLOEXEC, the bytes they ride on, and the limits.
 
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
@@ -111,6 +112,19 @@ static void vectors(void) {
 	CHECK(recvmsg(fds[1], &received, 0) == 13);
 	CHECK(!memcmp(first, "one ", 4) && !memcmp(second, "two three", 9));
 	CHECK(received.msg_flags == 0 && received.msg_controllen == 0);
+	// More vectors than IOV_MAX, or a negative count, which Linux reads
+	// as a huge unsigned one, are too many.
+	static struct iovec many[IOV_MAX + 1];
+	char byte = 0;
+	for(int i = 0; i <= IOV_MAX; i++)
+		many[i] = (struct iovec){&byte, 1};
+	struct msghdr too_many = {.msg_iov = many, .msg_iovlen = IOV_MAX + 1};
+	CHECK_ERROR(sendmsg(fds[0], &too_many, 0), EMSGSIZE);
+	CHECK_ERROR(recvmsg(fds[1], &too_many, MSG_DONTWAIT), EMSGSIZE);
+	struct msghdr negative = {.msg_iov = many};
+	negative.msg_iovlen = -1;
+	CHECK_ERROR(sendmsg(fds[0], &negative, 0), EMSGSIZE);
+	CHECK_ERROR(recvmsg(fds[1], &negative, MSG_DONTWAIT), EMSGSIZE);
 	close(fds[0]);
 	close(fds[1]);
 }

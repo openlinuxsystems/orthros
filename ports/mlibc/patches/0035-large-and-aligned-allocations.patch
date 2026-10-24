@@ -1,0 +1,268 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Large and aligned allocations. frigg's slab_pool rounded a large length
+up to pages and added its padding unchecked, so malloc, realloc and
+posix_memalign of a size within some 260 KiB of SIZE_MAX wrapped to a
+tiny mapping that was handed out as a block of the size asked; anything
+above PTRDIFF_MAX now fails with ENOMEM, as in glibc and musl.
+posix_memalign allocated max(size, alignment) and asserted that the
+block came out aligned, but large blocks sit one page past a header at
+the start of a 256 KiB unit, so any alignment above 4 KiB of a block
+above 32 KiB aborted the program (posix_memalign(&p, 8192, 65536),
+aligned_alloc(65536, 65536), and Rust's System allocator for any such
+Layout). slab_pool has allocate_aligned now, which places a large block
+on its alignment, with its header where free, realloc and
+malloc_usable_size look for it; small ones are aligned by their bucket
+as before. aligned_alloc takes any size, as C17 and glibc do (C11 first
+asked for a multiple of the alignment), and fails only for an alignment
+that is not a power of two (EINVAL). memalign is glibc's: an alignment is
+rounded up to a power of two, past the largest one it is EINVAL; it was
+"Not implemented" and aborted. build.sh and meson.build install the
+Linux option's <malloc.h>, which programs and ports include. Meant for
+upstream, in frigg and mlibc.
+
+--- a/subprojects/frigg/include/frg/slab.hpp
++++ b/subprojects/frigg/include/frg/slab.hpp
+@@ -186,6 +186,8 @@
+ 	slab_pool &operator= (const slab_pool &) = delete;
+ 
+ 	void *allocate(size_t length);
++	// A block of `length` bytes at a multiple of `align`, a power of two.
++	void *allocate_aligned(size_t length, size_t align);
+ 	void *realloc(void *pointer, size_t new_length);
+ 	void free(void *pointer);
+ 	void deallocate(void *pointer, size_t size);
+@@ -386,7 +388,13 @@
+ 	// Huge superblock handling.
+ 	//--------------------------------------------------------------------------------------
+ 
+-	frame *_construct_large(size_t area_size);
++	frame *_construct_large(size_t area_size, size_t align);
++	void *_allocate_large(size_t length, size_t align);
++
++	// The longest block there is: what is longer, with a frame's padding
++	// and rounded to pages, would not fit in the address space. glibc and
++	// musl refuse anything past PTRDIFF_MAX too.
++	static constexpr size_t max_length = ~size_t(0) >> 1;
+ 
+ 	bool reallocate_huge_(frame *sup, void *p, size_t new_size) {
+ 		FRG_ASSERT(sup->address == reinterpret_cast<uintptr_t>(p));
+@@ -461,6 +469,8 @@
+ 	// so we round up the length.
+ 	if(!length)
+ 		length = 1;
++	if(length > max_length)
++		return nullptr;
+ 
+ 	if(length <= policy_traits::max_bucket_size) {
+ 		int index = policy_traits::size_to_bucket(length);
+@@ -531,26 +541,49 @@
+ 		slab::trace(_plcy, 'a', object, length);
+ 		return object;
+ 	}else{
+-		auto area_size = (length + page_size - 1) & ~(page_size - 1);
+-		auto fra = _construct_large(area_size);
+-		if(!fra)
+-			return nullptr;
++		return _allocate_large(length, page_size);
++	}
++}
++
++template<typename Policy, typename Mutex>
++void *slab_pool<Policy, Mutex>::allocate_aligned(size_t length, size_t align) {
++	FRG_ASSERT(align && !(align & (align - 1)));
++	// A small block lies at a multiple of its bucket's size, and a large
++	// one at a multiple of the page size.
++	if(!length)
++		length = 1;
++	if(align <= page_size || frg::max(length, align) <= policy_traits::max_bucket_size)
++		return allocate(frg::max(length, align));
++	// The mapping holds the block, its padding and the alignment's slack.
++	if(align > max_length || length > max_length - align)
++		return nullptr;
++	return _allocate_large(length, align);
++}
++
++template<typename Policy, typename Mutex>
++void *slab_pool<Policy, Mutex>::_allocate_large(size_t length, size_t align) {
++	if(enable_checking)
++		_verify_integrity();
+ 
+-		unique_lock<Mutex> tree_guard(_tree_mutex);
++	auto area_size = (length + page_size - 1) & ~(page_size - 1);
++	auto fra = _construct_large(area_size, align);
++	if(!fra)
++		return nullptr;
++
++	unique_lock<Mutex> tree_guard(_tree_mutex);
+ #ifdef FRG_SLAB_TRACK_REGIONS
+-		_frame_tree.insert(fra);
++	_frame_tree.insert(fra);
+ #endif
+-		_usedPages += (fra->length + huge_padding) / page_size;
+-		tree_guard.unlock();
++	_usedPages += (fra->length + huge_padding) / page_size;
++	tree_guard.unlock();
+ 
+-		//if(logAllocations)
+-		//	std::cout << "frg/slab: Allocate large-object at " <<
+-		//			(void *)fra->address << std::endl;
+-		if(enable_checking)
+-			_verify_integrity();
+-		slab::trace(_plcy, 'a', reinterpret_cast<void *>(fra->address), length);
+-		return reinterpret_cast<void *>(fra->address);
+-	}
++	//if(logAllocations)
++	//	std::cout << "frg/slab: Allocate large-object at " <<
++	//			(void *)fra->address << std::endl;
++	if(enable_checking)
++		_verify_integrity();
++	slab::trace(_plcy, 'a', reinterpret_cast<void *>(fra->address), length);
++	return reinterpret_cast<void *>(fra->address);
+ }
+ 
+ template<typename Policy, typename Mutex>
+@@ -723,35 +756,55 @@
+ }
+ 
+ template<typename Policy, typename Mutex>
+-auto slab_pool<Policy, Mutex>::_construct_large(size_t area_size)
++auto slab_pool<Policy, Mutex>::_construct_large(size_t area_size, size_t align)
+ -> frame * {
+ //	frg::infoLogger() << "Allocate new area for " << (void *)area_size << frg::endLog;
+ 
+-	// Allocate virtual memory for the frame.
++	// Allocate virtual memory for the frame. Its header is at a multiple
++	// of sb_size, where free() looks for it below the block, and the block
++	// follows `offset` bytes after it: a page, or `align` bytes, which
++	// keeps the block at a multiple of an alignment up to sb_size. A
++	// larger alignment places the block first and the header sb_size
++	// bytes below it.
+ 	FRG_ASSERT(!(area_size & (page_size - 1)));
++	FRG_ASSERT(align && !(align & (align - 1)));
++	size_t offset = frg::min(frg::max(align, huge_padding), sb_size);
++	size_t alignment = frg::max(align, sb_size);
+ 	size_t sb_reservation;
+ 	uintptr_t sb_base;
+ 	uintptr_t address;
+ 	if constexpr (is_detected_v<policy_map_aligned_t, Policy>) {
+-		sb_reservation = area_size + huge_padding;
+-		sb_base = _plcy.map(sb_reservation, sb_size);
+-		if(!sb_base)
+-			return nullptr;
+-		address = sb_base;
++		if(alignment == sb_size) {
++			sb_reservation = area_size + offset;
++			sb_base = _plcy.map(sb_reservation, sb_size);
++			if(!sb_base)
++				return nullptr;
++			address = sb_base;
++		}else{
++			sb_reservation = area_size + alignment;
++			sb_base = _plcy.map(sb_reservation, alignment);
++			if(!sb_base)
++				return nullptr;
++			address = sb_base + alignment - offset;
++		}
+ 	} else {
+-		sb_reservation = area_size + huge_padding + sb_size;
+-		sb_base = _plcy.map(area_size + huge_padding + sb_size);
++		sb_reservation = area_size + offset + alignment;
++		sb_base = _plcy.map(sb_reservation);
+ 		if(!sb_base)
+ 			return nullptr;
+-		address = (sb_base + sb_size - 1) & ~(sb_size - 1);
++		if(alignment == sb_size) {
++			address = (sb_base + sb_size - 1) & ~(sb_size - 1);
++		}else{
++			address = ((sb_base + offset + alignment - 1) & ~(alignment - 1)) - offset;
++		}
+ 	}
+ 	if constexpr (slab::has_poisoning_support<Policy>) {
+ 		_plcy.unpoison(reinterpret_cast<void *>(address), sizeof(frame));
+-		_plcy.unpoison(reinterpret_cast<void *>(address + huge_padding), area_size);
++		_plcy.unpoison(reinterpret_cast<void *>(address + offset), area_size);
+ 	}
+ 
+ 	auto fra = new ((void *)address) frame(frame_type::large,
+-			address + huge_padding, area_size);
++			address + offset, area_size);
+ 	fra->sb_base = sb_base;
+ 	fra->sb_reservation = sb_reservation;
+ 
+@@ -806,6 +859,10 @@
+ 		return pool_->allocate(size);
+ 	}
+ 
++	void *allocate_aligned(size_t size, size_t align) {
++		return pool_->allocate_aligned(size, align);
++	}
++
+ 	void deallocate(void *pointer, size_t size) {
+ 		pool_->deallocate(pointer, size);
+ 	}
+--- a/options/ansi/generic/stdlib.cpp
++++ b/options/ansi/generic/stdlib.cpp
+@@ -125,8 +125,9 @@
+ void *aligned_alloc(size_t alignment, size_t size) {
+ 	void *ptr;
+ 
+-	// alignment must be a power of two, and size % alignment must be 0
+-	if (alignment & (alignment - 1) || size & (alignment - 1)) {
++	// The alignment must be a power of two; the size may be any, as C17
++	// and glibc have it.
++	if (!alignment || alignment & (alignment - 1)) {
+ 		errno = EINVAL;
+ 		return nullptr;
+ 	}
+@@ -629,12 +630,18 @@
+ 		return EINVAL;
+ 	if(align & (align - 1)) // Make sure that align is a power of two.
+ 		return EINVAL;
++#if !MLIBC_DEBUG_ALLOCATOR
++	// The slab pool places a block at any alignment.
++	auto p = getAllocator().allocate_aligned(size, align);
++#else
+ 	auto p = getAllocator().allocate(frg::max(align, size));
++#endif
+ 	if(!p)
+ 		return ENOMEM;
+-	// Hope that the alignment was respected. This works on the current allocator.
+-	// TODO: Make the allocator alignment-aware.
++#if MLIBC_DEBUG_ALLOCATOR
++	// Hope that the alignment was respected.
+ 	__ensure(!(reinterpret_cast<uintptr_t>(p) & (align - 1)));
++#endif
+ 	*out = p;
+ 	return 0;
+ }
+--- a/options/linux/generic/malloc.cpp
++++ b/options/linux/generic/malloc.cpp
+@@ -1,7 +1,22 @@
+-#include <bits/ensure.h>
++#include <errno.h>
+ #include <malloc.h>
++#include <stdint.h>
++#include <stdlib.h>
+ 
+-void *memalign(size_t, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++void *memalign(size_t alignment, size_t size) {
++	// As glibc's: an alignment that is not a power of two is rounded up to
++	// one, and one past the largest power of two fails with EINVAL.
++	if(alignment > SIZE_MAX / 2 + 1) {
++		errno = EINVAL;
++		return nullptr;
++	}
++	size_t power = sizeof(void *);
++	while(power < alignment)
++		power <<= 1;
++	void *p;
++	if(int e = posix_memalign(&p, power, size); e) {
++		errno = e;
++		return nullptr;
++	}
++	return p;
+ }

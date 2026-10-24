@@ -254,6 +254,10 @@ pub fn directory_method(
     match label {
         directory::OPEN => {
             let a = directory::OpenArgs::decode(args)?;
+            // Linux refuses to make a directory by open since 6.4.
+            if a.flags.contains(OpenFlags::CREATE) && a.flags.contains(OpenFlags::DIRECTORY) {
+                return Err(error(Kernel::InvalidArgument));
+            }
             let asked = cap_rights(a.rights).intersection(OPEN_RIGHTS);
             let changes =
                 a.flags.contains(OpenFlags::CREATE) || a.flags.contains(OpenFlags::TRUNCATE);
