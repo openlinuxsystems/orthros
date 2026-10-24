@@ -1,0 +1,48 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+functional/pthread_cancel-points checks that shm_open is no cancellation
+point by making a POSIX shared memory object, which Radix does not have
+yet (radix-posix(7)): its mappings of files are copies, and there is no
+/dev/shm. That scenario is left out, and the test checks the others: a
+cancel that came before sem_wait, sem_timedwait and pthread_join, which
+must wait or need not, ends the thread there. The posix boot test's own
+cancel checks that open, which shm_open uses, acts on no cancel when
+cancellation is disabled. Radix's alone.
+
+--- a/src/functional/pthread_cancel-points.c
++++ b/src/functional/pthread_cancel-points.c
+@@ -74,25 +74,6 @@
+ 	td_test = 0;
+ }
+ 
+-static void prepare_dummy(void *arg)
+-{
+-}
+-
+-static void execute_shm_open(void *arg)
+-{
+-	int *fd = arg;
+-	TESTE(*fd = shm_open("/testshm", O_RDWR|O_CREAT, 0666), "");
+-}
+-
+-static void cleanup_shm(void *arg)
+-{
+-	int *fd = arg;
+-	if (*fd > 0) {
+-		TESTE(close(*fd), "shm fd");
+-		TESTE(shm_unlink("/testshm"), "");
+-	}
+-}
+-
+ static struct {
+ 	int want_cancel;
+ 	void (*prepare)(void *);
+@@ -107,7 +88,6 @@
+ 	{1, prepare_sem, execute_sem_timedwait, cleanup_sem, (void*)1, "non-blocking sem_timedwait"},
+ 	{1, prepare_thread, execute_thread_join, cleanup_thread, 0, "blocking pthread_join"},
+ 	{1, prepare_thread, execute_thread_join, cleanup_thread, (void*)1, "non-blocking pthread_join"},
+-	{0, prepare_dummy, execute_shm_open, cleanup_shm, &(int){0}, "shm_open"},
+ 	{ 0 }
+ }, *cur_sc = scenarios;
+ 

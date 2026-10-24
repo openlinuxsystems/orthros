@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/threads.hpp>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -311,8 +312,10 @@ int record_lock(int fd, int request, struct flock *lock) {
 		return EOVERFLOW;
 	auto owner = ofd ? RADIX_LOCK_OWNER_DESCRIPTION_RANGE : RADIX_LOCK_OWNER_PROCESS;
 	if(!testing) {
+		// The wait for a lock is a cancellation point.
 		bool wait = request == F_SETLKW || request == F_OFD_SETLKW;
-		uint64_t status = radix_file_lock(slot, owner, kind, start, length, wait);
+		uint64_t status = radix_file_lock_with(wait ? radix::cancellable : radix_syscall, slot,
+				owner, kind, start, length, wait);
 		return status ? lock_errno(status) : 0;
 	}
 	struct radix_file_lock_holder_results r;
@@ -533,59 +536,78 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 	return 0;
 }
 
-int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
+namespace {
+
+// Reads up to `count` bytes of `fd` into `buf`, from `offset` or, with
+// RADIX_FILE_CURRENT, the description's offset, made with `syscall`.
+int read_with(radix_syscall_fn *syscall, int fd, uint64_t offset, void *buf, size_t count,
+		ssize_t *bytes_read) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
 	struct radix_file_read_results r;
-	uint64_t status = radix_file_read(slot, RADIX_FILE_CURRENT, buf, count, &r);
+	uint64_t status = radix_file_read_with(syscall, slot, offset, buf, count, &r);
 	if(status)
 		return io_errno(status, false);
 	*bytes_read = static_cast<ssize_t>(r.count);
 	return 0;
 }
 
-int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
-	uint32_t slot = radix::slot_of(fd);
-	if(slot == radix::NO_SLOT)
-		return EBADF;
-	struct radix_file_write_results r;
-	uint64_t status = radix_file_write(slot, RADIX_FILE_CURRENT, buf, count, &r);
-	if(status)
-		return io_errno(status, true);
-	*bytes_written = static_cast<ssize_t>(r.count);
-	return 0;
-}
-
-int Sysdeps<Pread>::operator()(int fd, void *buf, size_t n, off_t off, ssize_t *bytes_read) {
-	uint32_t slot = radix::slot_of(fd);
-	if(slot == radix::NO_SLOT)
-		return EBADF;
-	if(off < 0)
-		return EINVAL;
-	struct radix_file_read_results r;
-	uint64_t status = radix_file_read(slot, static_cast<uint64_t>(off), buf, n, &r);
-	if(status)
-		return io_errno(status, false);
-	*bytes_read = static_cast<ssize_t>(r.count);
-	return 0;
-}
-
-int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t n, off_t off,
+// Writes `count` bytes of `buf` to `fd` as read_with reads.
+int write_with(radix_syscall_fn *syscall, int fd, uint64_t offset, const void *buf, size_t count,
 		ssize_t *bytes_written) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
-	if(off < 0)
-		return EINVAL;
 	struct radix_file_write_results r;
-	uint64_t status = radix_file_write(slot, static_cast<uint64_t>(off), buf, n, &r);
+	uint64_t status = radix_file_write_with(syscall, slot, offset, buf, count, &r);
 	if(status)
 		return io_errno(status, true);
 	*bytes_written = static_cast<ssize_t>(r.count);
 	return 0;
 }
 
+} // namespace
+
+int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
+	return read_with(radix_syscall, fd, RADIX_FILE_CURRENT, buf, count, bytes_read);
+}
+
+int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
+	return write_with(radix_syscall, fd, RADIX_FILE_CURRENT, buf, count, bytes_written);
+}
+
+// Not in the dynamic linker, which has no threads to cancel; nor are the
+// rest of the cancellation points.
+#ifndef MLIBC_BUILDING_RTLD
+// read(2) and write(2), cancellation points, unlike the C library's own
+// reads and writes.
+int Sysdeps<CancellableRead>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
+	return read_with(radix::cancellable, fd, RADIX_FILE_CURRENT, buf, count, bytes_read);
+}
+
+int Sysdeps<CancellableWrite>::operator()(int fd, const void *buf, size_t count,
+		ssize_t *bytes_written) {
+	return write_with(radix::cancellable, fd, RADIX_FILE_CURRENT, buf, count, bytes_written);
+}
+
+int Sysdeps<Pread>::operator()(int fd, void *buf, size_t n, off_t off, ssize_t *bytes_read) {
+	if(off < 0)
+		return radix::slot_of(fd) == radix::NO_SLOT ? EBADF : EINVAL;
+	return read_with(radix::cancellable, fd, static_cast<uint64_t>(off), buf, n, bytes_read);
+}
+
+int Sysdeps<Pwrite>::operator()(int fd, const void *buf, size_t n, off_t off,
+		ssize_t *bytes_written) {
+	if(off < 0)
+		return radix::slot_of(fd) == radix::NO_SLOT ? EBADF : EINVAL;
+	return write_with(radix::cancellable, fd, static_cast<uint64_t>(off), buf, n,
+			bytes_written);
+}
+
+// Only the first read of readv, and the first write of writev, can act on
+// a cancel: one that comes after it has taken bytes leaves them for the
+// call to return.
 int Sysdeps<Readv>::operator()(int fd, const struct iovec *iovs, int iovc, ssize_t *bytes_read) {
 	size_t sum;
 	if(iovc < 0 || iovc > IOV_MAX)
@@ -593,11 +615,15 @@ int Sysdeps<Readv>::operator()(int fd, const struct iovec *iovs, int iovc, ssize
 	if(int e = radix::iov_total(iovs, iovc, &sum); e)
 		return e;
 	ssize_t total = 0;
+	radix_syscall_fn *syscall = radix::cancellable;
 	for(int i = 0; i < iovc; i++) {
 		if(!iovs[i].iov_len)
 			continue;
 		ssize_t got;
-		if(int e = sysdep<Read>(fd, iovs[i].iov_base, iovs[i].iov_len, &got); e) {
+		int e = read_with(syscall, fd, RADIX_FILE_CURRENT, iovs[i].iov_base, iovs[i].iov_len,
+				&got);
+		syscall = radix_syscall;
+		if(e) {
 			if(total)
 				break;
 			return e;
@@ -606,6 +632,9 @@ int Sysdeps<Readv>::operator()(int fd, const struct iovec *iovs, int iovc, ssize
 		if(static_cast<size_t>(got) < iovs[i].iov_len)
 			break;
 	}
+	// With no bytes to move it is a cancellation point all the same.
+	if(syscall == radix::cancellable)
+		thread_testcancel();
 	*bytes_read = total;
 	return 0;
 }
@@ -626,14 +655,19 @@ int Sysdeps<Writev>::operator()(int fd, const struct iovec *iovs, int iovc,
 			memcpy(gathered + at, iovs[i].iov_base, iovs[i].iov_len);
 			at += iovs[i].iov_len;
 		}
-		return sysdep<Write>(fd, gathered, sum, bytes_written);
+		return write_with(radix::cancellable, fd, RADIX_FILE_CURRENT, gathered, sum,
+				bytes_written);
 	}
 	ssize_t total = 0;
+	radix_syscall_fn *syscall = radix::cancellable;
 	for(int i = 0; i < iovc; i++) {
 		if(!iovs[i].iov_len)
 			continue;
 		ssize_t put;
-		if(int e = sysdep<Write>(fd, iovs[i].iov_base, iovs[i].iov_len, &put); e) {
+		int e = write_with(syscall, fd, RADIX_FILE_CURRENT, iovs[i].iov_base, iovs[i].iov_len,
+				&put);
+		syscall = radix_syscall;
+		if(e) {
 			if(total)
 				break;
 			return e;
@@ -642,9 +676,13 @@ int Sysdeps<Writev>::operator()(int fd, const struct iovec *iovs, int iovc,
 		if(static_cast<size_t>(put) < iovs[i].iov_len)
 			break;
 	}
+	// With no bytes to move it is a cancellation point all the same.
+	if(syscall == radix::cancellable)
+		thread_testcancel();
 	*bytes_written = total;
 	return 0;
 }
+#endif
 
 int Sysdeps<Seek>::operator()(int fd, off_t offset, int whence, off_t *new_offset) {
 	uint32_t slot = radix::slot_of(fd);
@@ -993,13 +1031,14 @@ int Sysdeps<Fallocate>::operator()(int fd, off_t offset, size_t size) {
 	return sysdep<Ftruncate>(fd, end);
 }
 
+// A cancellation point, as fdatasync is.
 int Sysdeps<Fsync>::operator()(int fd) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
-	uint64_t status = radix_file_sync(slot);
+	uint64_t status = radix_file_sync_with(radix::cancellable, slot);
 	if(other_kind(status))
-		status = radix_directory_sync(slot);
+		status = radix_directory_sync_with(radix::cancellable, slot);
 	return radix::to_errno(status);
 }
 

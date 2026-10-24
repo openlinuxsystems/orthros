@@ -1,0 +1,601 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Cancellation points as POSIX has them, made as musl makes them (after
+patches 0038 and 0040). mlibc's SIGCANCEL handler acted on a deferred
+cancel only through BeforeCancellableSyscall, which Radix lacked, so a
+deferred cancel ended a thread at pthread_testcancel alone: a thread
+blocked in read, accept, sleep, a condition or a semaphore was never
+cancelled. Four sysdeps are new. CancelInContext is all the handler asks
+of a system layer whose cancellation points are cancellable system calls
+of musl's kind: a context about to make such a call, or to make it again
+after another handler ran, is sent where the call acts on the cancel once
+the handler returns, so that cleanup handlers run outside the signal
+handler; SIGCANCEL stays blocked there, and anywhere else it is sent
+again, for a cancellation point that another handler interrupted. The
+handler has SA_RESTART then, so that other calls go on as they would
+without it. CancellableRead and CancellableWrite are read(2) and
+write(2) as cancellation points, while stdio's and the C library's own
+reads and writes are not; CancellableFutexWait is the wait of
+pthread_cond_wait, sem_wait and pthread_join, which fails with ECANCELED
+so that a condition's mutex is locked again before the cancel is acted
+on. open, openat, close, sem_wait and clock_nanosleep are cancellation
+points also when they need not wait, as on musl. system is one, with a cleanup handler of its own,
+which needs no memory, that kills the command and puts the signals back,
+as glibc's does; and its SIGINT and SIGQUIT are counted across threads,
+as glibc's are: one thread's system that ended while another's command
+ran let SIGINT reach the process, and the later one then put SIG_IGN
+back for good. pclose, wordexp and closedir are no cancellation points,
+as on musl, which would leave a child or a stream to nobody. A thread
+that exits disables its cancellation, so that a cancellation point in a
+cleanup handler or a destructor no longer ends it before the rest have
+run, and its cleanup handlers run before the destructors of its
+thread_local objects, which they may use, as on glibc. A program's first
+thread starts with SIGCANCEL unblocked, which a thread whose
+cancellation was disabled when it called exec left blocked. Meant for
+upstream.
+
+--- a/options/internal/include/mlibc/sysdep-tags.hpp
++++ b/options/internal/include/mlibc/sysdep-tags.hpp
+@@ -438,6 +438,24 @@
+ struct Umask {};
+ // int sys_before_cancellable_syscall(ucontext_t *uctx);
+ struct BeforeCancellableSyscall {};
++// The cancellation points as a system layer can make them, which is then
++// all SIGCANCEL's handler asks of it:
++// int sys_cancel_in_context(ucontext_t *uctx): if `uctx` is in a
++// cancellable system call that it has not made yet, or that the kernel is
++// to make again, sends it where the call acts on the cancel, and returns 1;
++// returns 0 elsewhere.
++struct CancelInContext {};
++// read(2) and write(2): as Read and Write, but cancellation points; the C
++// library's own reads and writes, stdio's among them, are not.
++// int sys_cancellable_read(int fd, void *buf, size_t count, ssize_t *bytes_read);
++struct CancellableRead {};
++// int sys_cancellable_write(int fd, const void *buf, size_t count, ssize_t *bytes_written);
++struct CancellableWrite {};
++// The wait of a condition, a semaphore or a join: as FutexWait, but a
++// cancellation point that fails with ECANCELED rather than act on the
++// cancel, which its caller does once it has put back what it holds.
++// int sys_cancellable_futex_wait(int *pointer, int expected, const struct timespec *time);
++struct CancellableFutexWait {};
+ // int sys_tgkill(int tgid, int tid, int sig);
+ struct Tgkill {};
+ // int sys_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags);
+--- a/options/internal/include/mlibc/sysdep-signatures.hpp
++++ b/options/internal/include/mlibc/sysdep-signatures.hpp
+@@ -210,6 +210,10 @@
+ SYSDEP_FUNC(Mknodat, int dirfd, const char *path, int mode, int dev);
+ SYSDEP_FUNC(Umask, mode_t mode, mode_t *old);
+ SYSDEP_FUNC(BeforeCancellableSyscall, ucontext_t *uctx);
++SYSDEP_FUNC(CancelInContext, ucontext_t *uctx);
++SYSDEP_FUNC(CancellableRead, int fd, void *buf, size_t count, ssize_t *bytes_read);
++SYSDEP_FUNC(CancellableWrite, int fd, const void *buf, size_t count, ssize_t *bytes_written);
++SYSDEP_FUNC(CancellableFutexWait, int *pointer, int expected, const struct timespec *time);
+ SYSDEP_FUNC(Tgkill, int tgid, int tid, int sig);
+ SYSDEP_FUNC(Fchownat, int dirfd, const char *pathname, uid_t owner, gid_t group, int flags);
+ SYSDEP_FUNC(Sigaltstack, const stack_t *ss, stack_t *oss);
+--- a/options/internal/include/mlibc/threads.hpp
++++ b/options/internal/include/mlibc/threads.hpp
+@@ -67,4 +67,10 @@
+ //   insert a cancellation point there.
+ void thread_testcancel(void);
+ 
++// The futex wait of a cancellation point: FutexWait's, but where the
++// system layer has CancellableFutexWait, it fails with ECANCELED when a
++// cancel is to be acted on, which the caller does with thread_testcancel
++// once it has put back what it holds (a condition wait's mutex).
++int thread_cancellable_futex_wait(int *pointer, int expected, const struct timespec *time);
++
+ } // namespace mlibc
+--- a/options/internal/include/mlibc/tcb.hpp
++++ b/options/internal/include/mlibc/tcb.hpp
+@@ -120,6 +120,9 @@
+ 		void *arg;
+ 
+ 		frg::default_list_hook<CleanupHandler> hook_;
++		// Whether pthread_cleanup_push allocated it: the C library's own
++		// are on the stack of the function that pushes them.
++		bool allocated = true;
+ 	};
+ 
+ 	using CleanupHandlerList = frg::intrusive_list<
+--- a/options/internal/generic/threads.cpp
++++ b/options/internal/generic/threads.cpp
+@@ -224,7 +224,8 @@
+ 	mlibc::thread_testcancel();
+ 
+ 	while (!__atomic_load_n(&tcb->didExit, __ATOMIC_ACQUIRE)) {
+-		if (int e = sysdep<FutexWait>(&tcb->didExit, 0, nullptr); e == EINTR)
++		if (int e = thread_cancellable_futex_wait(&tcb->didExit, 0, nullptr);
++				e == EINTR || e == ECANCELED)
+ 			mlibc::thread_testcancel();
+ 	}
+ 
+@@ -266,16 +267,26 @@
+ 	if (__atomic_load_n(&self->cancelBits, __ATOMIC_RELAXED) & tcbExitingBit)
+ 		mlibc::do_exit();
+ 
++	// Cancellation is disabled from here on, as pthread_exit's is: a
++	// cancellation point in a destructor or a cleanup handler of a thread
++	// that returned or was cancelled would end it before the rest had run,
++	// and before its joiners were woken.
++	__atomic_fetch_and(&self->cancelBits, ~(tcbCancelEnableBit | tcbCancelAsyncBit),
++			__ATOMIC_RELAXED);
+ 	__atomic_fetch_or(&self->cancelBits, tcbExitingBit, __ATOMIC_RELAXED);
+ 
+-	run_thread_local_destructors();
+-
++	// The cleanup handlers first, then the destructors of thread_local
++	// objects and those of keys, as glibc runs them: a handler can still
++	// use the thread's objects.
+ 	while (!self->cleanupHandlers.empty()) {
+ 		auto hand = self->cleanupHandlers.pop_back();
+ 		hand->func(hand->arg);
+-		frg::destruct(getAllocator(), hand);
++		if (hand->allocated)
++			frg::destruct(getAllocator(), hand);
+ 	}
+ 
++	run_thread_local_destructors();
++
+ 	for (size_t j = 0; j < __MLIBC_THREAD_DESTRUCTOR_ITERATIONS; j++) {
+ 		for (size_t i = 0; i < PTHREAD_KEYS_MAX; i++) {
+ 			if (auto v = thread_key_get(i)) {
+@@ -553,9 +564,9 @@
+ 				return ETIMEDOUT;
+ 			}
+ 
+-			e = sysdep<FutexWait>((int *)&cond->__mlibc_seq, seq, &timeout);
++			e = thread_cancellable_futex_wait((int *)&cond->__mlibc_seq, seq, &timeout);
+ 		} else {
+-			e = sysdep<FutexWait>((int *)&cond->__mlibc_seq, seq, nullptr);
++			e = thread_cancellable_futex_wait((int *)&cond->__mlibc_seq, seq, nullptr);
+ 		}
+ 
+ 		if (thread_mutex_lock(mutex))
+@@ -568,7 +579,8 @@
+ 		//      went to sleep. We don't need to check seq in this case.
+ 		//   3. e == EINTR: a signal was delivered. The man page allows us to choose
+ 		//      whether to go to sleep again or to return 0, but we do the former
+-		//      to match other libcs.
++		//      to match other libcs. ECANCELED: a cancel, acted on now that the
++		//      mutex is held again, as POSIX asks.
+ 		//   4. e == ETIMEDOUT: this should only happen if abstime is set.
+ 		if (e == 0) {
+ 			auto cur_seq = cond->__mlibc_seq.load(std::memory_order_acquire);
+@@ -577,7 +589,7 @@
+ 		} else if (e == EAGAIN) {
+ 			__ensure(cond->__mlibc_seq.load(std::memory_order_acquire) > seq);
+ 			return 0;
+-		} else if (e == EINTR) {
++		} else if (e == EINTR || e == ECANCELED) {
+ 			mlibc::thread_testcancel();
+ 			continue;
+ 		} else if (e == ETIMEDOUT) {
+@@ -661,6 +673,13 @@
+ 	}
+ }
+ 
++int thread_cancellable_futex_wait(int *pointer, int expected, const struct timespec *time) {
++	if constexpr (IsImplemented<CancellableFutexWait>)
++		return sysdep<CancellableFutexWait>(pointer, expected, time);
++	else
++		return sysdep<FutexWait>(pointer, expected, time);
++}
++
+ } // namespace mlibc
+ 
+ __mlibc_threadattr::__mlibc_threadattr(const __mlibc_threadattr &other) {
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -511,6 +511,26 @@
+ 		auto tcb = mlibc::get_current_tcb();
+ 		int old_value = __atomic_load_n(&tcb->cancelBits, __ATOMIC_RELAXED);
+ 
++		// A system layer with CancelInContext makes its cancellation points
++		// as musl does. A deferred cancel is acted on by a cancellable system
++		// call that the signal came before, which the system layer sends to
++		// act on it once the handler returns. Either way SIGCANCEL stays
++		// blocked where the handler returns to, and anywhere else it is sent
++		// again: if a signal handler that interrupted a cancellable call is
++		// what returns there, SIGCANCEL comes once more as that handler
++		// returns, to the call it makes again; otherwise the next
++		// cancellation point acts on the cancel.
++		if constexpr (mlibc::IsImplemented<CancelInContext>) {
++			if (!(old_value & tcbCancelAsyncBit)) {
++				if (!mlibc::tcb_cancelled(old_value) || (old_value & tcbExitingBit))
++					return;
++				mlibc::sigaddset_internal(&uctx->uc_sigmask, SIGCANCEL);
++				if (!mlibc::sysdep<CancelInContext>(uctx))
++					mlibc::sysdep<Tgkill>(getpid(), tcb->tid, SIGCANCEL);
++				return;
++			}
++		}
++
+ 		/*
+ 		 * When a thread is marked with deferred cancellation and performs a blocking syscall,
+ 		 * the spec mandates that the syscall can get interrupted before it has caused any side
+@@ -564,6 +584,10 @@
+ 		struct sigaction sa{};
+ 		sa.sa_sigaction = sigcancel_handler;
+ 		sa.sa_flags = SA_SIGINFO;
++		// A call that is not a cancellation point goes on as though SIGCANCEL
++		// had not come, as on glibc and musl.
++		if constexpr (mlibc::IsImplemented<CancelInContext>)
++			sa.sa_flags |= SA_RESTART;
+ 		auto e = ENOSYS;
+ 		if constexpr (mlibc::IsImplemented<Sigaction>)
+ 			e = mlibc::sysdep_or_panic<Sigaction>(SIGCANCEL, &sa, nullptr);
+@@ -571,6 +595,13 @@
+ 		if(e == ENOSYS)
+ 			return;
+ 		__ensure(!e);
++		// A program can start with SIGCANCEL blocked, by a thread whose
++		// cancellation was disabled when it called exec; the program's first
++		// thread has its cancellation enabled.
++		sigset_t set = {};
++		mlibc::sigaddset_internal(&set, SIGCANCEL);
++		if constexpr (mlibc::IsImplemented<Sigprocmask>)
++			mlibc::sysdep<Sigprocmask>(SIG_UNBLOCK, &set, nullptr);
+ 	}
+ };
+ 
+--- a/options/posix/generic/semaphore.cpp
++++ b/options/posix/generic/semaphore.cpp
+@@ -4,6 +4,7 @@
+ #include <bits/ensure.h>
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/debug.hpp>
++#include <mlibc/threads.hpp>
+ #include <mlibc/time-helpers.hpp>
+ 
+ static constexpr unsigned int semaphoreHasWaiters = static_cast<uint32_t>(1 << 31);
+@@ -31,15 +32,20 @@
+ }
+ 
+ int sem_wait(sem_t *sem) {
++	// A cancellation point, also when the semaphore need not be waited for.
++	mlibc::thread_testcancel();
+ 	unsigned int state = 0;
+ 
+ 	while (1) {
+ 		if (!(state & semaphoreCountMask)) {
+ 			if (__atomic_compare_exchange_n(&sem->__mlibc_count, &state, semaphoreHasWaiters,
+ 						false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+-				int e = mlibc::sysdep<FutexWait>((int *)&sem->__mlibc_count, state, nullptr);
++				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count, state, nullptr);
+ 				if (e == 0 || e == EAGAIN) {
+ 					continue;
++				} else if (e == ECANCELED) {
++					mlibc::thread_testcancel();
++					continue;
+ 				} else if (e == EINTR) {
+ 					errno = EINTR;
+ 					return -1;
+@@ -61,6 +67,8 @@
+ }
+ 
+ int sem_clockwait(sem_t *sem, clockid_t clockid, const struct timespec *abstime) {
++	// A cancellation point, as sem_wait's is.
++	mlibc::thread_testcancel();
+ 	unsigned int state = 0;
+ 
+ 	while (1) {
+@@ -86,10 +94,13 @@
+ 					return -1;
+ 				}
+ 
+-				int e = mlibc::sysdep<FutexWait>((int *)&sem->__mlibc_count, state, &timeout);
++				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count, state, &timeout);
+ 
+ 				if (e == 0 || e == EAGAIN) {
+ 					continue;
++				} else if (e == ECANCELED) {
++					mlibc::thread_testcancel();
++					continue;
+ 				} else if (e == EINTR || e == ETIMEDOUT) {
+ 					errno = e;
+ 					return -1;
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -1195,7 +1195,14 @@
+ 
+ ssize_t write(int fd, const void *buf, size_t count) {
+ 	ssize_t bytes_written;
+-	if(int e = mlibc::sysdep<Write>(fd, buf, count, &bytes_written); e) {
++	// A cancellation point, where the system layer can make one; the C
++	// library's own writes are not.
++	int e;
++	if constexpr (mlibc::IsImplemented<CancellableWrite>)
++		e = mlibc::sysdep<CancellableWrite>(fd, buf, count, &bytes_written);
++	else
++		e = mlibc::sysdep<Write>(fd, buf, count, &bytes_written);
++	if(e) {
+ 		errno = e;
+ 		return (ssize_t)-1;
+ 	}
+@@ -1204,7 +1211,13 @@
+ 
+ ssize_t read(int fd, void *buf, size_t count) {
+ 	ssize_t bytes_read;
+-	if(int e = mlibc::sysdep<Read>(fd, buf, count, &bytes_read); e) {
++	// A cancellation point, as write's is.
++	int e;
++	if constexpr (mlibc::IsImplemented<CancellableRead>)
++		e = mlibc::sysdep<CancellableRead>(fd, buf, count, &bytes_read);
++	else
++		e = mlibc::sysdep<Read>(fd, buf, count, &bytes_read);
++	if(e) {
+ 		errno = e;
+ 		return (ssize_t)-1;
+ 	}
+@@ -1230,6 +1243,8 @@
+ }
+ 
+ int close(int fd) {
++	// A cancellation point, before the descriptor is closed.
++	mlibc::thread_testcancel();
+ 	if(int e = mlibc::sysdep<Close>(fd); e) {
+ 		errno = e;
+ 		return -1;
+--- a/options/posix/generic/fcntl.cpp
++++ b/options/posix/generic/fcntl.cpp
+@@ -7,6 +7,7 @@
+ #include <mlibc-config.h>
+ #include <mlibc/all-sysdeps.hpp>
+ #include <mlibc/debug.hpp>
++#include <mlibc/threads.hpp>
+ 
+ int creat(const char *pathname, mode_t mode) {
+ 	return open(pathname, O_CREAT|O_WRONLY|O_TRUNC, mode);
+@@ -34,6 +35,8 @@
+ 	if((flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE))
+ 		mode = va_arg(args, mode_t);
+ 
++	// A cancellation point, before the file is opened.
++	mlibc::thread_testcancel();
+ 	if(int e = mlibc::sysdep_or_enosys<Openat>(dirfd, pathname, flags, mode, &fd); e) {
+ 		va_end(args);
+ 		errno = e;
+@@ -64,6 +67,8 @@
+ 	}
+ 
+ 	int fd;
++	// A cancellation point, as openat's is.
++	mlibc::thread_testcancel();
+ 	if(int e = mlibc::sysdep<Open>(pathname, flags, mode, &fd); e) {
+ 		errno = e;
+ 		return -1;
+--- a/options/posix/generic/posix_stdio.cpp
++++ b/options/posix/generic/posix_stdio.cpp
+@@ -7,6 +7,7 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <fcntl.h>
++#include <pthread.h>
+ 
+ #include <bits/ensure.h>
+ #include <mlibc-config.h>
+@@ -76,10 +77,14 @@
+ 	fclose(file);
+ 
+ 	// A signal handler that does not restart calls must not lose the
+-	// child's status.
++	// child's status. Nor does a cancel, which would leave the child for
++	// nobody to wait for: pclose is no cancellation point, as on musl.
++	int cancel_state;
++	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+ 	int e;
+ 	while ((e = mlibc::sysdep_or_panic<Waitpid>(pid, &status, 0, nullptr, &pid)) == EINTR)
+ 		;
++	pthread_setcancelstate(cancel_state, nullptr);
+ 	if (e) {
+ 	    errno = ECHILD;
+ 	    return -1;
+--- a/options/posix/generic/wordexp.cpp
++++ b/options/posix/generic/wordexp.cpp
+@@ -35,6 +35,7 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <stdint.h>
+ 
+@@ -304,7 +305,9 @@
+ 	return 0;
+ }
+ 
+-int wordexp(const char * __restrict words, wordexp_t * __restrict we, int flags) {
++namespace {
++
++int do_wordexp(const char * __restrict words, wordexp_t * __restrict we, int flags) {
+ 	int error;
+ 
+ 	if(flags & WRDE_REUSE)
+@@ -330,6 +333,18 @@
+ 	return 0;
+ }
+ 
++} // namespace
++
++// No cancellation point, as on musl: a cancel while the shell runs would
++// leave it for nobody to wait for, and its pipe open.
++int wordexp(const char * __restrict words, wordexp_t * __restrict we, int flags) {
++	int cs;
++	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
++	int error = do_wordexp(words, we, flags);
++	pthread_setcancelstate(cs, nullptr);
++	return error;
++}
++
+ void wordfree(wordexp_t *we) {
+ 	if (we == nullptr)
+ 		return;
+--- a/options/posix/generic/dirent.cpp
++++ b/options/posix/generic/dirent.cpp
+@@ -20,7 +20,9 @@
+ }
+ 
+ int closedir(DIR *dir) {
+-	close(dir->__handle);
++	// Not close(2), a cancellation point, which would leave the stream
++	// and its descriptor to nobody.
++	mlibc::sysdep<Close>(dir->__handle);
+ 	frg::destruct<__mlibc_dir_struct>(getAllocator(), dir);
+ 	return 0;
+ }
+--- a/options/ansi/generic/stdlib.cpp
++++ b/options/ansi/generic/stdlib.cpp
+@@ -25,6 +25,8 @@
+ #include <mlibc/strtol.hpp>
+ #include <mlibc/threads.hpp>
+ #include <mlibc/global-config.hpp>
++#include <mlibc/lock.hpp>
++#include <mlibc/tcb.hpp>
+ #include <mlibc/exit.hpp>
+ 
+ #if __MLIBC_POSIX_OPTION
+@@ -259,26 +261,70 @@
+ 
+ extern char **environ;
+ 
++namespace {
++
++// The process's callers of system: SIGINT and SIGQUIT are ignored from
++// when the first starts its command until the last is done with its,
++// then put back as they were before the first, as glibc has it.
++FutexLock system_lock;
++int system_callers;
++struct sigaction system_int, system_quit;
++
++void system_leave() {
++	frg::unique_lock guard(system_lock);
++	if (!--system_callers) {
++		mlibc::sysdep_or_panic<Sigaction>(SIGINT, &system_int, nullptr);
++		mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &system_quit, nullptr);
++	}
++}
++
++struct SystemWait {
++	pid_t child;
++	sigset_t old_mask;
++};
++
++// A cancel that comes while system waits for its command: the command is
++// killed and waited for, and the signals are put back, as glibc does.
++void system_cancelled(void *argument) {
++	auto wait = static_cast<SystemWait *>(argument);
++	mlibc::sysdep_or_panic<Kill>(wait->child, SIGKILL);
++	int status;
++	pid_t unused;
++	while (mlibc::sysdep_or_panic<Waitpid>(wait->child, &status, 0, nullptr, &unused) == EINTR)
++		;
++	system_leave();
++	mlibc::sysdep_or_panic<Sigprocmask>(SIG_SETMASK, &wait->old_mask, nullptr);
++}
++
++} // namespace
++
+ int system(const char *command) {
+ 	int status = -1;
+ 	pid_t child;
+ 
+ 	MLIBC_CHECK_OR_ENOSYS(mlibc::IsImplemented<Fork> && mlibc::IsImplemented<Waitpid> &&
+-			mlibc::IsImplemented<Execve> && mlibc::IsImplemented<Sigprocmask> && mlibc::IsImplemented<Sigaction>, -1);
++			mlibc::IsImplemented<Execve> && mlibc::IsImplemented<Sigprocmask> && mlibc::IsImplemented<Sigaction>
++			&& mlibc::IsImplemented<Kill>, -1);
++
++	// A cancellation point, with a command or without.
++	mlibc::thread_testcancel();
+ 
+ 	if (!command) {
+ 		return 1;
+ 	}
+ 
+-	struct sigaction new_sa, old_int, old_quit;
+-	sigset_t new_mask, old_mask;
+-
+-	new_sa.sa_handler = SIG_IGN;
+-	new_sa.sa_flags = 0;
+-	sigemptyset(&new_sa.sa_mask);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGINT, &new_sa, &old_int);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &new_sa, &old_quit);
++	struct sigaction ignore{};
++	ignore.sa_handler = SIG_IGN;
++	sigemptyset(&ignore.sa_mask);
++	{
++		frg::unique_lock guard(system_lock);
++		if (!system_callers++) {
++			mlibc::sysdep_or_panic<Sigaction>(SIGINT, &ignore, &system_int);
++			mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &ignore, &system_quit);
++		}
++	}
+ 
++	sigset_t new_mask, old_mask;
+ 	sigemptyset(&new_mask);
+ 	sigaddset(&new_mask, SIGCHLD);
+ 	mlibc::sysdep_or_panic<Sigprocmask>(SIG_BLOCK, &new_mask, &old_mask);
+@@ -290,8 +336,8 @@
+ 		auto self = mlibc::get_current_tcb();
+ 		__atomic_store_n(&self->tid, mlibc::refetch_tid(), __ATOMIC_RELAXED);
+ 
+-		mlibc::sysdep_or_panic<Sigaction>(SIGINT, &old_int, nullptr);
+-		mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &old_quit, nullptr);
++		mlibc::sysdep_or_panic<Sigaction>(SIGINT, &system_int, nullptr);
++		mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &system_quit, nullptr);
+ 		mlibc::sysdep_or_panic<Sigprocmask>(SIG_SETMASK, &old_mask, nullptr);
+ 
+ 		const char *args[] = {
+@@ -304,6 +350,17 @@
+ 		int err;
+ 		pid_t unused;
+ 
++		// The wait is a cancellation point where the system layer's waitpid
++		// is one; a cleanup handler of the C library's own, which needs no
++		// memory, ends the command then.
++		SystemWait wait{child, old_mask};
++		Tcb::CleanupHandler cleanup{};
++		cleanup.func = system_cancelled;
++		cleanup.arg = &wait;
++		cleanup.allocated = false;
++		auto self = mlibc::get_current_tcb();
++		self->cleanupHandlers.push_back(&cleanup);
++
+ 		// The system call layer returns an error number, not -1.
+ 		while ((err = mlibc::sysdep_or_panic<Waitpid>(child, &status, 0, nullptr, &unused)) != 0) {
+ 			if (err == EINTR)
+@@ -313,10 +370,11 @@
+ 			status = -1;
+ 			break;
+ 		}
++
++		self->cleanupHandlers.pop_back();
+ 	}
+ 
+-	mlibc::sysdep_or_panic<Sigaction>(SIGINT, &old_int, nullptr);
+-	mlibc::sysdep_or_panic<Sigaction>(SIGQUIT, &old_quit, nullptr);
++	system_leave();
+ 	mlibc::sysdep_or_panic<Sigprocmask>(SIG_SETMASK, &old_mask, nullptr);
+ 
+ 	return status;
+--- a/options/ansi/generic/time.cpp
++++ b/options/ansi/generic/time.cpp
+@@ -23,6 +23,7 @@
+ #include <mlibc/locale.hpp>
+ #include <mlibc/bitutil.hpp>
+ #include <mlibc/strings.hpp>
++#include <mlibc/threads.hpp>
+ #include <mlibc/calendar.hpp>
+ #include <mlibc/time.hpp>
+ 
+@@ -697,6 +698,8 @@
+ 		if(online > 1)
+ 			cpus = online;
+ 	}
++	// A cancellation point also when the time has come already.
++	mlibc::thread_testcancel();
+ 	while(timespec_before(now, end)) {
+ 		struct timespec left = timespec_minus(end, now);
+ 		struct timespec wait = {left.tv_sec / cpus,

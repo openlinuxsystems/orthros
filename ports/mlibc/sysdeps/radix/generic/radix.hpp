@@ -45,6 +45,27 @@ constexpr size_t PATH_MAX_BYTES = RADIX_DIRECTORY_PATH_MAX;
 // The errno a kernel status maps to: 0 for success.
 int to_errno(uint64_t status);
 
+// What a masked cancellation point returns for a cancel that is due: no
+// status the kernel gives. to_errno maps it to ECANCELED.
+constexpr uint64_t CANCELED = UINT64_MAX;
+
+// The system call function (radix/abi.h's radix_syscall_fn) of a
+// cancellation point, which acts on a cancel that is due when the call is
+// to be made, or that came while it waited and a signal interrupted it
+// before it did anything: the thread ends (pthread_cancel(3)). The
+// x86_64/cancel.S stub makes the call; the C library's own calls, and the
+// dynamic linker's, are plain ones. `cancellable_masked` returns CANCELED
+// instead, for a caller that acts on the cancel itself once it has put
+// back what it holds.
+#ifdef MLIBC_BUILDING_RTLD
+inline uint64_t cancellable(uint64_t number, const uint64_t in[10], uint64_t out[10]) {
+	return radix_syscall(number, in, out);
+}
+#else
+uint64_t cancellable(uint64_t number, const uint64_t in[10], uint64_t out[10]);
+uint64_t cancellable_masked(uint64_t number, const uint64_t in[10], uint64_t out[10]);
+#endif
+
 // The slot of file descriptor `fd`, or NO_SLOT if it cannot be one.
 inline uint32_t slot_of(int fd) {
 	if(fd < 0 || fd >= MAX_FDS)

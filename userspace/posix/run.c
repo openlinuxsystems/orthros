@@ -63,6 +63,7 @@ static const struct test TESTS[] = {
 		{"files", NULL, NULL},
 		{"locks", NULL, NULL},
 		{"thread", NULL, NULL},
+		{"cancel", NULL, NULL},
 		{"spawn", NULL, NULL},
 		{"limits", NULL, NULL},
 		{"format", NULL, NULL},

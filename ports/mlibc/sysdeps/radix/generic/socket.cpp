@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <mlibc/threads.hpp>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -79,9 +80,10 @@ uint32_t send_flags(int flags) {
 }
 
 // Sends `size` bytes from `data` on `fd`, as send(2) with `flags`, with
-// the `count` files whose slots `slots` holds riding on the first byte.
-int send_bytes(int fd, const void *data, size_t size, int flags, const uint32_t *slots,
-		size_t count, size_t *sent) {
+// the `count` files whose slots `slots` holds riding on the first byte,
+// made with `syscall`.
+int send_bytes(radix_syscall_fn *syscall, int fd, const void *data, size_t size, int flags,
+		const uint32_t *slots, size_t count, size_t *sent) {
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
@@ -90,12 +92,12 @@ int send_bytes(int fd, const void *data, size_t size, int flags, const uint32_t 
 	uint64_t status;
 	if(count) {
 		struct radix_file_send_files_results r;
-		status = radix_file_send_files(slot, data, size, slots, count * sizeof(uint32_t),
-				send_flags(flags), &r);
+		status = radix_file_send_files_with(syscall, slot, data, size, slots,
+				count * sizeof(uint32_t), send_flags(flags), &r);
 		*sent = r.count;
 	} else {
 		struct radix_file_send_results r;
-		status = radix_file_send(slot, data, size, send_flags(flags), &r);
+		status = radix_file_send_with(syscall, slot, data, size, send_flags(flags), &r);
 		*sent = r.count;
 	}
 	if(status)
@@ -115,9 +117,9 @@ struct Received {
 // Receives up to `size` bytes on `fd` into `buffer`, waiting for some
 // unless `dont_wait`: 0 bytes once the other end has stopped sending.
 // With `files`, the descriptors that came with the bytes go there, closed
-// by exec if `close_on_exec`.
-int receive_bytes(int fd, void *buffer, size_t size, bool dont_wait, Received *files,
-		bool close_on_exec, size_t *got) {
+// by exec if `close_on_exec`. Made with `syscall`.
+int receive_bytes(radix_syscall_fn *syscall, int fd, void *buffer, size_t size, bool dont_wait,
+		Received *files, bool close_on_exec, size_t *got) {
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
@@ -127,8 +129,9 @@ int receive_bytes(int fd, void *buffer, size_t size, bool dont_wait, Received *f
 		if(close_on_exec)
 			flags |= RADIX_SOCKET_FLAGS_CLOSE_ON_EXEC;
 		struct radix_file_receive_files_results r;
-		status = radix_file_receive_files(slot, buffer, size, files->slots + files->count,
-				(files->room - files->count) * sizeof(uint32_t), flags, &r);
+		status = radix_file_receive_files_with(syscall, slot, buffer, size,
+				files->slots + files->count, (files->room - files->count) * sizeof(uint32_t),
+				flags, &r);
 		if(!status) {
 			*got = r.count;
 			files->count += r.files;
@@ -136,7 +139,7 @@ int receive_bytes(int fd, void *buffer, size_t size, bool dont_wait, Received *f
 		}
 	} else {
 		struct radix_file_receive_results r;
-		status = radix_file_receive(slot, buffer, size, flags, &r);
+		status = radix_file_receive_with(syscall, slot, buffer, size, flags, &r);
 		*got = r.count;
 	}
 	if(status)
@@ -149,7 +152,8 @@ int receive_bytes(int fd, void *buffer, size_t size, bool dont_wait, Received *f
 // until the buffers are full, the other end stops sending, or an error
 // comes after some bytes (which are then what it returns). With `files`,
 // the descriptors that come with the bytes go there, and the receive ends
-// with the bytes they came with, as on Linux.
+// with the bytes they came with, as on Linux. A cancellation point until
+// bytes come.
 int receive_vector(int fd, const struct iovec *iov, size_t count, int flags, Received *files,
 		ssize_t *length) {
 	if(flags & ~RECEIVE_FLAGS)
@@ -165,8 +169,8 @@ int receive_vector(int fd, const struct iovec *iov, size_t count, int flags, Rec
 			// Once some bytes are in, only MSG_WAITALL waits for more.
 			size_t got = 0;
 			bool now = dont_wait || (total && !wait_all);
-			int e = receive_bytes(fd, base + at, iov[i].iov_len - at, now, files,
-					close_on_exec, &got);
+			int e = receive_bytes(total ? radix_syscall : radix::cancellable, fd, base + at,
+					iov[i].iov_len - at, now, files, close_on_exec, &got);
 			if(e && !total)
 				return e;
 			at += got;
@@ -180,6 +184,9 @@ int receive_vector(int fd, const struct iovec *iov, size_t count, int flags, Rec
 			}
 		}
 	}
+	// With no room for a byte it is a cancellation point all the same.
+	if(!total)
+		mlibc::thread_testcancel();
 	*length = static_cast<ssize_t>(total);
 	return 0;
 }
@@ -408,7 +415,9 @@ int Sysdeps<Connect>::operator()(int fd, const struct sockaddr *addr, socklen_t 
 	radix::Path path;
 	if(int e = radix::resolve(AT_FDCWD, name, &path); e)
 		return e;
-	uint64_t status = radix_directory_connect_socket(path.dir, path.text, path.len, slot);
+	// A cancellation point, as accept is.
+	uint64_t status = radix_directory_connect_socket_with(radix::cancellable, path.dir, path.text,
+			path.len, slot);
 	// Another thread's connect is under way.
 	if(is(status, RADIX_KERNEL_BUSY))
 		return EALREADY;
@@ -427,7 +436,7 @@ int Sysdeps<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr, sockl
 		uint32_t to;
 		if(int e = radix::free_slot(0, &to); e)
 			return e;
-		uint64_t status = radix_file_accept(slot, to, kernel);
+		uint64_t status = radix_file_accept_with(radix::cancellable, slot, to, kernel);
 		// Another thread took the slot first.
 		if(is(status, RADIX_KERNEL_OCCUPIED))
 			continue;
@@ -456,7 +465,7 @@ int Sysdeps<Sendto>::operator()(int fd, const void *buffer, size_t size, int fla
 		return EISCONN;
 	}
 	size_t sent;
-	if(int e = send_bytes(fd, buffer, size, flags, nullptr, 0, &sent); e)
+	if(int e = send_bytes(radix::cancellable, fd, buffer, size, flags, nullptr, 0, &sent); e)
 		return e;
 	*length = static_cast<ssize_t>(sent);
 	return 0;
@@ -484,6 +493,7 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 	if(!sum) {
 		if(int e = check_socket(fd); e)
 			return e;
+		thread_testcancel();
 		*length = 0;
 		return 0;
 	}
@@ -497,7 +507,8 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 			memcpy(gathered + at, hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len);
 			at += hdr->msg_iov[i].iov_len;
 		}
-		if(int e = send_bytes(fd, gathered, sum, flags, slots, files, &sent); e)
+		if(int e = send_bytes(radix::cancellable, fd, gathered, sum, flags, slots, files, &sent);
+				e)
 			return e;
 		*length = static_cast<ssize_t>(sent);
 		return 0;
@@ -506,8 +517,10 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 	for(int i = 0; i < hdr->msg_iovlen; i++) {
 		if(!hdr->msg_iov[i].iov_len)
 			continue;
-		// The descriptors go with the first bytes.
-		if(int e = send_bytes(fd, hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, flags,
+		// The descriptors go with the first bytes, and only the first send
+		// can act on a cancel, as writev's first write.
+		if(int e = send_bytes(total ? radix_syscall : radix::cancellable, fd,
+				hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, flags,
 				total ? nullptr : slots, total ? 0 : files, &sent); e) {
 			if(total)
 				break;

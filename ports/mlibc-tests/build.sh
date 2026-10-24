@@ -30,8 +30,7 @@
 #   ansi/tz, glibc/error, glibc/error_at_line: mlibc runs them through a
 #     Python wrapper that checks their output; ansi/tz needs time zones
 #     (Phase 12)
-#   ansi/fenv, posix/pthread_cancel: mlibc leaves them out of its cross
-#     builds too
+#   ansi/fenv: mlibc leaves it out of its cross builds too
 #   ansi/sscanf, sprintf, swprintf, swscanf, fwscanf, strftime, locale,
 #     mbrtoc32, mbrtowc, mbsrtowcs, mbsnrtowcs, wcsnrtombs, mblen, mbrlen,
 #     mbstowcs, fputwc, fgetws, posix/getwchar, locale, strfmon,
@@ -70,7 +69,7 @@ for test in $(sed -n "/^all_test_cases = \[/,/^\]/s/^	'\([a-z-]*\/[A-Za-z0-9_-]*
 	posix/pwd | posix/grp | glibc/shadow | glibc/getgrouplist) continue ;;
 	posix/getlogin_r | posix/wordexp) continue ;;
 	ansi/tz | glibc/error | glibc/error_at_line) continue ;;
-	ansi/fenv | posix/pthread_cancel) continue ;;
+	ansi/fenv) continue ;;
 	ansi/sscanf | ansi/sprintf | ansi/swprintf | ansi/swscanf | ansi/fwscanf) continue ;;
 	ansi/strftime | ansi/locale | ansi/mbrtoc32 | ansi/mbrtowc) continue ;;
 	ansi/mbsrtowcs | ansi/mbsnrtowcs | ansi/wcsnrtombs | ansi/mblen) continue ;;

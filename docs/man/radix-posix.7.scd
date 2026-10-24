@@ -337,6 +337,24 @@ are private to a process. *pthread_setname_np* names a thread in up to
 15 bytes, as Linux allows, and the kernel log and the debugger show the
 name. *gettid* returns the thread's number.
 
+*pthread_cancel* is deferred, as POSIX has it: the thread ends at the
+next cancellation point it waits in or comes to, before the call there
+has done anything, and nowhere else; its cleanup handlers run, last
+pushed first, then its keys' destructors. The points are POSIX's: the
+calls that may wait (*read*, *write*, their vector and positioned forms,
+*send*, *recv* and their kin, *accept*, *connect*, *poll*, *ppoll*,
+*select*, *pselect*, the sleeps, *pause*, *sigsuspend*, *sigwait*,
+*sigtimedwait*, *sigwaitinfo*, the waits for children, *sem_wait*,
+*sem_timedwait*, *pthread_cond_wait*, *pthread_cond_timedwait*,
+*pthread_join*, *F_SETLKW* and *F_OFD_SETLKW*, *tcdrain* and *system*),
+*open*, *openat*, *creat*, *close*, *fsync*, *fdatasync*, *msync* and
+*pthread_testcancel*. As on musl, stdio, *popen*, *pclose*, *opendir*,
+*closedir* and the mutexes are none. A cancel that comes while a signal
+handler runs ends the wait the handler interrupted once it returns there.
+A *system* whose thread is cancelled kills its command and waits for it;
+SIGINT and SIGQUIT stay ignored while any thread's command runs, as on
+glibc. *PTHREAD_CANCEL_ASYNCHRONOUS* ends the thread wherever it runs.
+
 # SCHEDULING AND LIMITS
 
 *nice*, *setpriority*, *sched_setscheduler* and *sched_setparam* set a
@@ -432,7 +450,7 @@ of its own with it as the controlling terminal and runs each test as a
 shell runs a job, in a process group of its own, in the foreground. The
 tests are:
 
-*hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *spawn*, *limits*, *format*
+*hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *cancel*, *spawn*, *limits*, *format*
 	C programs in _userspace/posix_, one per area. *format* holds
 	*printf*, *strtod*, *scanf*, *strftime* and the time conversions to
 	1,461 answers generated with glibc 2.39.
