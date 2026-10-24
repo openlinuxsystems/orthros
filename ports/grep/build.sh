@@ -4,7 +4,8 @@
 
 # Builds grep for Radix (ob(1), PORTS), without translations, and
 # installs it, its manual page and the egrep and fgrep scripts, which run
-# it as grep -E and grep -F; not gnulib's tests, which are not run here.
+# it as grep -E and grep -F, with a page for each that leads to grep's;
+# not gnulib's tests, which are not run here.
 set -eu
 
 cd "$PORT_BUILD"
@@ -20,6 +21,10 @@ make install SUBDIRS="lib doc src" DESTDIR="$SYSROOT" >/dev/null
 
 : >"$PORT_INFO/image"
 $STRIP "$SYSROOT/system/bin/grep"
-for file in bin/grep bin/egrep bin/fgrep share/man/man1/grep.1; do
+for name in egrep fgrep; do
+	echo ".so man1/grep.1" >"$SYSROOT/system/share/man/man1/$name.1"
+done
+for file in bin/grep bin/egrep bin/fgrep share/man/man1/grep.1 share/man/man1/egrep.1 \
+	share/man/man1/fgrep.1; do
 	echo "system/$file" >>"$PORT_INFO/image"
 done

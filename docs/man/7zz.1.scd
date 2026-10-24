@@ -9,7 +9,7 @@
 
 # SYNOPSIS
 
-*7zz* _command_ [_switch_ ...] _archive_ [_file_ ...] [*@*_listfile_ ...]
+*7zz* _command_ [_switch_ ...] _archive_ [_file_ ...] [@_listfile_ ...]
 
 # DESCRIPTION
 
@@ -69,22 +69,23 @@ The command is the first argument, one letter or two.
 
 # SWITCHES
 
-Switches go anywhere after the command, until a lone *--*.
+Switches go anywhere after the command, until a lone *--*. A switch's
+argument follows it with no space between them; the braces, as in
+7-Zip's own help, show where it goes and are not typed.
 
-*-o*_directory_
-	Extract into _directory_, made if it does not exist (no space
-	between the switch and its argument).
+*-o*{_directory_}
+	Extract into _directory_, made if it does not exist.
 
 *-p*[_password_]
 	The password to encrypt or decrypt with; with none, 7zz asks for it
 	on the terminal, without showing it as it is typed.
 
-*-t*_type_
+*-t*{_type_}
 	The archive's type: *7z*, *zip*, *tar*, *xz*, *gzip*, *bzip2*,
 	*wim* and the rest that *i* lists. A new archive's type
 	otherwise follows its name's ending, and is 7z for any other.
 
-*-mx*_N_
+*-mx*{_N_}
 	The level of compression, from *-mx0* (none: only stored) and
 	*-mx1* (fastest) to *-mx9* (ultra); 5 by default.
 
@@ -96,21 +97,21 @@ Switches go anywhere after the command, until a lone *--*.
 	In a 7z archive with a password, encrypt the names of the files as
 	well.
 
-*-m*_parameter_
+*-m*{_parameter_}
 	Other settings of the method, such as *-m0=lzma2* or *-md=64m* for
 	the dictionary's size.
 
 *-r*
 	Look for files whose names match in each subdirectory too.
 
-*-x*_!wildcard_, *-x@*_listfile_
+*-x*!_wildcard_, *-x*@_listfile_
 	Leave out the files the wildcard, or each line of the list file,
 	matches. *-i* takes in only those that match, the same way.
 
-*-v*_size_[*b*|*k*|*m*|*g*]
+*-v*{_size_}[*b*|*k*|*m*|*g*]
 	Make volumes of _size_ bytes, kibibytes, mebibytes or gibibytes.
 
-*-ao*_mode_
+*-ao*{_mode_}
 	What extracting does when a file is already there: overwrite it
 	(*a*), skip it (*s*), rename the new one (*u*) or the old one (*t*).
 

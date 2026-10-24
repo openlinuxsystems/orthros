@@ -414,6 +414,7 @@ impl Completer for ShellCompleter {
                 display_override: (candidate.display != candidate.text)
                     .then_some(candidate.display),
                 value: candidate.text,
+                description: candidate.description,
                 span: Span::new(start, pos),
                 append_whitespace: candidate.space,
                 ..Suggestion::default()

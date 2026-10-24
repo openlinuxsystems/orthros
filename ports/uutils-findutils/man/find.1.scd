@@ -9,7 +9,7 @@ find - search for files in a directory tree
 
 # SYNOPSIS
 
-*find* [*-H* | *-L* | *-P*] [*-O*_level_] [_path_ ...] [_expression_]
+*find* [*-H* | *-L* | *-P*] [*-O*{_level_}] [_path_ ...] [_expression_]
 
 # DESCRIPTION
 
@@ -36,8 +36,9 @@ These come before the paths.
 *-H*
 	Follow symbolic links named on the command line, and no others.
 
-*-O*_level_
-	Accepted for GNU find's sake; the level is ignored.
+*-O*{_level_}
+	Accepted for GNU find's sake, with no space before the level,
+	which is ignored.
 
 # EXPRESSIONS
 

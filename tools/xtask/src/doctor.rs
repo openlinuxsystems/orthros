@@ -427,14 +427,14 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "scdoc",
-            purpose: "compiles the man pages",
+            purpose: "compiles the man pages, for the docs and the image",
             found: |_| process::find_program("scdoc").map(|p| p.display().to_string()),
             packages: all("scdoc"),
             fallback: None,
         },
         Requirement {
             name: "mandoc",
-            purpose: "checks the man pages",
+            purpose: "checks the man pages, and indexes the image's (makewhatis)",
             found: |_| process::find_program("mandoc").map(|p| p.display().to_string()),
             packages: all("mandoc"),
             fallback: None,

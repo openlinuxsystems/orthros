@@ -6,8 +6,13 @@
 //! that fills `COMPREPLY`), `compgen` runs a specification, and `compopt`
 //! changes one while it runs. Scripts written for bash's completion work
 //! unchanged, among them the ones the programs' argument parsers generate.
+//! A command that `complete` says nothing for completes from its
+//! completion file, if it has one (`files`).
+
+mod files;
 
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use crate::builtins::{TABLE, flags, out, usage};
 use crate::pattern::{Options, Pattern};
@@ -39,6 +44,9 @@ pub struct Specs {
     pub initial: Option<Spec>,
     /// The options `compopt` changes while a completion runs.
     pub current: Option<BTreeSet<String>>,
+    /// The completion files read so far, by program, and the programs
+    /// found to have none.
+    pub files: HashMap<String, Option<Rc<files::CompletionFile>>>,
 }
 
 const ACTIONS: &[(char, &str)] = &[
@@ -564,14 +572,16 @@ fn hostnames() -> Vec<String> {
     names
 }
 
-/// Spark's services, as `service` and `sparkctl` take them.
+/// Spark's services, as `service` takes them: the names of their files.
 fn services() -> Vec<String> {
     let mut names = Vec::new();
     for dir in ["/system/etc/spark/services", "/etc/spark/services"] {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let name = text::from_os(&entry.file_name());
-                names.push(name.trim_end_matches(".toml").to_string());
+                if let Some(service) = name.strip_suffix(".service") {
+                    names.push(service.to_string());
+                }
             }
         }
     }
@@ -681,6 +691,8 @@ pub struct Candidate {
     pub display: String,
     /// Whether a space goes after it when it is the only one.
     pub space: bool,
+    /// What it does, as the menu shows beside it: an option's.
+    pub description: Option<String>,
 }
 
 /// The words of a command line up to the cursor: each word and where it
@@ -790,6 +802,7 @@ impl Shell {
                     text: if braced { format!("${{{n}}}") } else { format!("${n}") },
                     display: n,
                     space: false,
+                    description: None,
                 })
                 .collect();
             return (start, candidates);
@@ -824,7 +837,25 @@ impl Shell {
                 break;
             }
         }
-        let (mut list, options, is_files) = match results {
+        if results.is_none() && !word_is_command {
+            let program = words[0].1.rsplit('/').next().unwrap_or_default().to_string();
+            if let Some(file) = self.completion_file(&program) {
+                let all: Vec<String> = words.iter().map(|(_, w)| w.clone()).collect();
+                let candidates = match self.complete_from_file(&file, &all, index) {
+                    files::FromFile::Options(candidates) => candidates,
+                    files::FromFile::Words { list, is_files, prefix, word } => {
+                        let mut candidates =
+                            self.candidates(&word, list, &BTreeSet::new(), is_files, false);
+                        for candidate in &mut candidates {
+                            candidate.text.insert_str(0, &prefix);
+                        }
+                        candidates
+                    }
+                };
+                return (start, candidates);
+            }
+        }
+        let (list, options, is_files) = match results {
             Some((list, options))
                 if !list.is_empty()
                     || !(options.contains("default")
@@ -852,13 +883,26 @@ impl Shell {
             None if word_is_command => (commands(self, &word), BTreeSet::new(), word.contains('/')),
             None => (files(self, &word, false), BTreeSet::new(), true),
         };
+        (start, self.candidates(&word, list, &options, is_files, word_is_command))
+    }
+
+    /// The candidates for `word` from `list`, as `options` (`compopt`'s)
+    /// say: sorted, quoted, and shown by their last part if they are
+    /// files.
+    fn candidates(
+        &self,
+        word: &str,
+        mut list: Vec<String>,
+        options: &BTreeSet<String>,
+        is_files: bool,
+        word_is_command: bool,
+    ) -> Vec<Candidate> {
         if !options.contains("nosort") {
             list.sort();
         }
         list.dedup();
         let quote = !options.contains("noquote") && (is_files || word_is_command);
-        let candidates = list
-            .into_iter()
+        list.into_iter()
             .map(|item| {
                 let dir = is_files && item.ends_with('/');
                 let display = if is_files {
@@ -880,10 +924,14 @@ impl Shell {
                 } else {
                     item
                 };
-                Candidate { text, display, space: !dir && !options.contains("nospace") }
+                Candidate {
+                    text,
+                    display,
+                    space: !dir && !options.contains("nospace"),
+                    description: None,
+                }
             })
-            .collect();
-        (start, candidates)
+            .collect()
     }
 
     /// Runs a spec while the user edits a line: errors and Ctrl-C are not

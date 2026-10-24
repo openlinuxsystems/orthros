@@ -85,7 +85,12 @@ _target/userspace/_).
 	test image goes to _out/sysroot/boot/usertests_, which every image
 	loads as a boot module, and Spark, the programs it starts and the
 	files the ports put there go into the boot archive,
-	_out/sysroot/boot/bootfs_ (see *spark*(8)).
+	_out/sysroot/boot/bootfs_ (see *spark*(8)). Dukovo's own manual
+	pages from _docs/man/_ go there too, but not this one or
+	*dukovo.toml*(5), and *makewhatis*(8) indexes every page. The build
+	fails if a program in _/system/bin_ has no page; from each program's
+	page it writes the program's completion file for *nukesh*(1) into
+	_/system/share/nukesh/completions/_.
 
 	*--debug*
 		Build without optimisation.

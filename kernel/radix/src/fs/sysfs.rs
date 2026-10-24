@@ -59,7 +59,7 @@ pub fn make() -> Result<FsRef> {
 }
 
 fn version(text: &mut Text) -> fmt::Result {
-    writeln!(text, "Radix {} (Dukovo Phase 7)", env!("CARGO_PKG_VERSION"))
+    writeln!(text, "{}", crate::BANNER)
 }
 
 fn cmdline(text: &mut Text) -> fmt::Result {

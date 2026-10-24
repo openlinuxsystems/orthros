@@ -10,6 +10,7 @@
 // pages; the editors, nano and vi, typed at on a pseudo-terminal; and
 // tmux, its server and a client attached at a pseudo-terminal.
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -48,6 +49,17 @@ static void text(void) {
 	OUTPUT("", "/a/b\n", "/bin/dirname", "/a/b/c.txt");
 	OUTPUT("", "1970\n", "/bin/date", "-u", "-d", "@0", "+%Y");
 	OUTPUT("", "Dukovo\n", "/bin/uname", "-s");
+	// The release is the kernel's version number, the second word of
+	// "Radix 0.0.1 (Dukovo Phase 9)", and the version the whole line.
+	char line[64] = "", release[32] = "";
+	FILE *version = fopen("/sys/kernel/version", "r");
+	CHECK(version && fgets(line, sizeof(line), version));
+	fclose(version);
+	CHECK(sscanf(line, "Radix %31s", release) == 1);
+	char expected[40];
+	snprintf(expected, sizeof(expected), "%s\n", release);
+	OUTPUT("", expected, "/bin/uname", "-r");
+	CONTAINS("Radix ", "/bin/uname", "-v");
 }
 
 // Exit statuses: test and its other name, true and false, timeout.
@@ -514,20 +526,42 @@ static void multiplexing(void) {
 	STATUS(0, "/bin/tmux", "kill-server");
 }
 
-// Every utility has its manual page.
+// Every program in /system/bin has its manual page, which man finds by
+// the program's name, and its completion file for the shell; ob checks
+// both when it builds the system (ADR 0102).
 static void manuals(void) {
-	const char *const pages[] = {"ls", "cat", "sort", "test", "[", "find", "xargs", "grep", "sed",
-			"awk", "diff", "cmp", "diff3", "sdiff", "patch", "bc", "dc", "less", "man", "mandoc",
-			"apropos", "tput", "tset", "clear", "gzip", "gunzip", "zcat", "zgrep", "bzip2",
-			"bunzip2", "bzcat", "xz", "unxz", "xzcat", "lzma", "xzgrep", "zstd", "unzstd",
-			"zstdcat", "lz4", "unlz4", "tar", "cpio", "unzip", "bsdcat", "zip", "file", "jq",
-			"nano", "rnano", "vi", "ex", "view", "tmux"};
-	for(size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
-		char path[64];
-		snprintf(path, sizeof(path), "/usr/share/man/man1/%s.1", pages[i]);
+	DIR *bin = opendir("/system/bin");
+	CHECK(bin != NULL);
+	int programs = 0;
+	struct dirent *entry;
+	while((entry = readdir(bin))) {
+		if(entry->d_name[0] == '.')
+			continue;
+		const char *const argv[] = {"/bin/man", "-w", entry->d_name, NULL};
+		int status = run_program(argv, "", 0);
+		char completions[128];
+		snprintf(completions, sizeof(completions), "/system/share/nukesh/completions/%s",
+				entry->d_name);
 		struct stat st;
-		CHECK(stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
+		if(status != 0 || !strstr(output, "/share/man/man") || stat(completions, &st) != 0) {
+			char what[192];
+			snprintf(what, sizeof(what), "man -w %s exited with %d and wrote \"%.100s\"",
+					entry->d_name, status, output);
+			check_failed(__FILE__, __LINE__, what, 0);
+		}
+		programs++;
 	}
+	closedir(bin);
+	CHECK(programs > 200);
+	// A page is found by each name its NAME section gives, through the
+	// index makewhatis made, which whatis and apropos read too.
+	CONTAINS("/share/man/man8/reboot.8", "/bin/man", "-w", "poweroff");
+	CONTAINS("poweroff(8) - restart, power off or halt the machine", "/bin/whatis", "poweroff");
+	CONTAINS("nukesh", "/bin/apropos", "shell");
+	CONTAINS("the 7-Zip archiver", "/bin/sh", "-c", "man 7z | head -n 8");
+	CONTAINS("Dukovo's shell", "/bin/sh", "-c", "man sh | head -n 8");
+	// The options of a program's completion file come from its page.
+	CONTAINS("option\t-i --ignore-case\t", "/bin/cat", "/system/share/nukesh/completions/grep");
 }
 
 int main(void) {

@@ -90,7 +90,7 @@ screen: you see GRUB's menu, then the kernel's log, which reports what it
 found and ends like this:
 
 ```text
-[    0.000000] Radix 0.0.1 (Dukovo Phase 7)
+[    0.000000] Radix 0.0.1 (Dukovo Phase 9)
 [    0.000000] Boot loader: GRUB 2.12
 [    0.000000] Firmware: UEFI
 [    0.000000] Command line:

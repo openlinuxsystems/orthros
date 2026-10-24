@@ -20,6 +20,7 @@ mod ksyms;
 mod libc_check;
 mod licenses;
 mod lint;
+mod manuals;
 mod ports;
 mod process;
 mod qemu;
