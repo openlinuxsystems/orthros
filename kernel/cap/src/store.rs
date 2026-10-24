@@ -776,6 +776,25 @@ impl<A: Allocator + Clone> Capabilities<A> {
         Ok(Progress::Done)
     }
 
+    /// Goes on with a revoke of the capability in `at` that
+    /// [`Capabilities::revoke`] left at [`Progress::More`]. The caller let
+    /// go of the store in between, so the capability may have gone (it was
+    /// deleted, and another may be in its slot now, whose descendants
+    /// nobody asked to revoke), or another revoke of it may have finished:
+    /// either way the slot has no revoke mark, and nothing is left of what
+    /// was asked, so this is [`Progress::Done`].
+    pub fn continue_revoke(
+        &mut self,
+        at: SlotRef,
+        budget: usize,
+        released: &mut dyn FnMut(Released),
+    ) -> Result<Progress, CapError> {
+        match self.link(at) {
+            Ok(link) if self.slot(link).revoking => self.revoke(at, budget, released),
+            _ => Ok(Progress::Done),
+        }
+    }
+
     // ---- Checking ----
 
     /// Counts what the store holds.

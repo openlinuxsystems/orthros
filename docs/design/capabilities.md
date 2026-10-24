@@ -145,7 +145,11 @@ when nothing is left below, it clears the mark and returns
 
 The kernel calls `revoke` in steps of 64 deletions and lets go of the lock
 in between (`caps::revoke`), so a revoke of a million capabilities does not
-shut out other CPUs.
+shut out other CPUs. Each step after the first is `continue_revoke`, which
+goes on only while the slot keeps its mark. Deleting a capability clears
+its mark, as the model's `Remove` does, so if another thread deletes the
+capability between steps and puts a new one in its slot, the revoke ends
+there and the newcomer keeps what was derived from it.
 
 **Audit.** `audit` checks every invariant of the store: the tree's links
 agree with each other and only join full slots, depths fall towards the
@@ -337,6 +341,7 @@ each module with hand-written cases: rights algebra, the kind table, each
 check, carving, and store scenarios
 (`revoke_reaches_every_space_and_survives_deletes`,
 `revoke_in_steps_blocks_new_derivations`,
+`a_revoke_ends_with_its_capability`,
 `derivation_depth_is_bounded`, `sealed_capabilities_round_trip_through_the_store`,
 `retyped_memory_comes_back`, `stale_names_are_refused`,
 `device_ranges_narrow`, and others).

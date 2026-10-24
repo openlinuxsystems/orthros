@@ -10,8 +10,8 @@
 //!
 //! Since Phase 8 an address space also holds anonymous memory, as POSIX's
 //! `mmap` makes it: zeroed pages the kernel makes when they are first
-//! touched (`map_anonymous`), or filled from a file when they are mapped
-//! (`map_file`). Each page of it is charged to the resource domain of the
+//! touched (`map_anonymous`), or filled from a file when they are first
+//! touched (`map_file`). Each page of it is charged to the resource domain of the
 //! process the space belongs to while the space maps it, so a domain's
 //! limit bounds its programs' memory. A forked process (radix-process(2))
 //! gets the same pages, shared until either side writes to one, which
@@ -79,11 +79,11 @@ interface address_space = 0x0003 version 2 {
     method discard = 4 (address: addr, size: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory];
     /// Maps `size` bytes of the file in slot `file`, from byte `offset` (a
-    /// multiple of the page size), as `map_anonymous` does, filled with
-    /// the file's contents from there and zeros past its end. The pages
-    /// are the process's own copy: neither side sees what the other
-    /// writes later. Needs the control right, and the read right on the
-    /// file.
+    /// multiple of the page size), as `map_anonymous` does: each page is
+    /// filled the first time it is touched, with the file's contents from
+    /// there and zeros past its end. Once filled, a page is the process's
+    /// own copy: neither side sees what the other writes later. Needs the
+    /// control right, and the read right on the file.
     method map_file = 5 (address: addr, size: u64, rights: Rights, flags: MapFlags, file: slot,
                          offset: u64) -> (address: addr)
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,

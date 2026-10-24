@@ -124,7 +124,8 @@ pub const fn is_cache_hot(since_ns: u64, level: Level) -> bool {
 /// Whether moving one thread from a group of `from_cpus` CPUs running
 /// `from` threads to a group of `to_cpus` running `to` makes the load more
 /// even. It never reverses the imbalance, so two groups cannot pass a
-/// thread back and forth (proved in `proofs.rs`).
+/// thread back and forth (argued in `docs/design/scheduler.md` and checked
+/// by the host tests, as `proofs.rs` says).
 pub const fn should_pull(from: u32, from_cpus: u32, to: u32, to_cpus: u32) -> bool {
     if from == 0 || from_cpus == 0 || to_cpus == 0 {
         return false;
