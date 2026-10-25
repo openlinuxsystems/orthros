@@ -423,7 +423,7 @@ impl Thread {
     /// The token that names it in mutex words: its address, which is
     /// non-zero and even.
     pub fn token(&self) -> usize {
-        self as *const Thread as usize
+        core::ptr::from_ref::<Thread>(self) as usize
     }
 
     /// Where it is in its life: ready, blocked and why, or dead.

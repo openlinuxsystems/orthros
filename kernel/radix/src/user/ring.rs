@@ -81,7 +81,7 @@ impl RingObject {
     }
 
     fn key(&self) -> usize {
-        self as *const RingObject as usize
+        core::ptr::from_ref::<RingObject>(self) as usize
     }
 
     /// The completion head the program last wrote.

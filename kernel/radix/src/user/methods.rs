@@ -472,7 +472,7 @@ fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         address_space::FUTEX_WAIT => {
             let a = address_space::FutexWaitArgs::decode(args)?;
             // The word is read where the caller runs.
-            if !core::ptr::eq(&*space, user.space()) {
+            if !core::ptr::eq(&raw const *space, user.space()) {
                 return Err(Kernel::InvalidArgument.status(0));
             }
             let deadline =

@@ -566,7 +566,7 @@ pub fn downcast<T: Node>(node: &dyn Node) -> Option<&T> {
 
 /// The address of a node: equal for two references to the same node.
 pub fn address(node: &NodeRef) -> usize {
-    KArc::as_ptr(node) as *const u8 as usize
+    KArc::as_ptr(node).cast::<u8>() as usize
 }
 
 static CLOCK: radix_sync::Once<fn() -> u64> = radix_sync::Once::new();

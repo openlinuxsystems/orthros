@@ -270,7 +270,7 @@ pub fn load() {
     // SAFETY: the IDT is a fully initialised static that is never written
     // again, and every gate points at an entry stub.
     unsafe {
-        core::arch::asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags))
+        core::arch::asm!("lidt [{}]", in(reg) &raw const pointer, options(readonly, nostack, preserves_flags));
     };
 }
 

@@ -46,14 +46,14 @@ fn say(args: fmt::Arguments<'_>) {
 }
 
 /// Why `kdb` was entered, and what it can show about that.
-struct Session {
+struct Session<'a> {
     /// Registers saved by the breakpoint or exception, if any.
-    fault: Option<Fault>,
+    fault: Option<&'a Fault>,
     /// The backtrace of the panic, if `kdb` runs after one.
-    panic_backtrace: Option<Backtrace>,
+    panic_backtrace: Option<&'a Backtrace>,
 }
 
-impl Session {
+impl Session<'_> {
     fn after_panic(&self) -> bool {
         self.panic_backtrace.is_some()
     }
@@ -66,7 +66,7 @@ pub fn run_at_boot() {
         return;
     }
     info!("kdb: boot complete; waiting for commands on the serial port");
-    enter(Session { fault: None, panic_backtrace: None }, "boot complete");
+    enter(&Session { fault: None, panic_backtrace: None }, "boot complete");
 }
 
 /// The breakpoint handler: runs `kdb` with the registers the breakpoint
@@ -85,22 +85,22 @@ pub fn on_breakpoint(fault: &Fault) {
         Some(location) => write!(why, "breakpoint at {:#x} in {location}", fault.pc),
         None => write!(why, "breakpoint at {:#x}", fault.pc),
     };
-    enter(Session { fault: Some(*fault), panic_backtrace: None }, why.as_str());
+    enter(&Session { fault: Some(fault), panic_backtrace: None }, why.as_str());
 }
 
 /// Runs `kdb` after a panic, with the other CPUs stopped. Returns when the
 /// user leaves, and the panic handler goes on to restart.
-pub fn run_after_panic(fault: Option<Fault>, backtrace: Backtrace) {
+pub fn run_after_panic(fault: Option<&Fault>, backtrace: &Backtrace) {
     if !Arch::has_debug_console() {
         return;
     }
     // A panic inside a session (the `panic` command) starts a new one.
     ACTIVE.store(false, Ordering::Release);
-    enter(Session { fault, panic_backtrace: Some(backtrace) }, "after the panic above");
+    enter(&Session { fault, panic_backtrace: Some(backtrace) }, "after the panic above");
 }
 
 /// The command loop.
-fn enter(session: Session, why: &str) {
+fn enter(session: &Session<'_>, why: &str) {
     if ACTIVE.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -128,7 +128,7 @@ fn enter(session: Session, why: &str) {
                 say(format_args!("kdb: continuing"));
                 break;
             }
-            Ok(command) => run(&session, command),
+            Ok(command) => run(session, command),
             Err(error) => say(format_args!("{error}")),
         }
         Arch::console_write("kdb> ");
@@ -137,7 +137,7 @@ fn enter(session: Session, why: &str) {
 }
 
 /// Carries out one command.
-fn run(session: &Session, command: Command<'_>) {
+fn run(session: &Session<'_>, command: Command<'_>) {
     match command {
         Command::Nothing | Command::Continue => {}
         Command::Help => {
@@ -162,14 +162,14 @@ fn run(session: &Session, command: Command<'_>) {
         Command::Locks => sched::write_lockdep(&mut |args| say(args)),
         Command::Acpi => Arch::describe_firmware(&mut |args| say(args)),
         Command::Backtrace => {
-            let backtrace = match (&session.panic_backtrace, &session.fault) {
+            let backtrace = match (session.panic_backtrace, session.fault) {
                 (Some(backtrace), _) => *backtrace,
                 (None, Some(fault)) => Backtrace::from_fault(fault.pc, fault.frame_pointer),
                 (None, None) => Backtrace::here(),
             };
             backtrace.write(&mut |args| say(args));
         }
-        Command::Registers => match &session.fault {
+        Command::Registers => match session.fault {
             Some(fault) => {
                 for row in fault.registers().chunks(4) {
                     for (name, value) in row {

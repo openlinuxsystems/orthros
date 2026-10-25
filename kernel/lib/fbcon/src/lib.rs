@@ -131,7 +131,7 @@ impl core::fmt::Debug for Console {
             .field("font", &self.font)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -113,7 +113,7 @@ impl Device {
     }
 
     /// Serves every request the driver made available.
-    fn serve(&self, s: &mut State) {
+    fn serve(s: &mut State) {
         let size = u64::from(s.queue_size);
         let avail_idx = Device::u16_at(s.driver + 2);
         while s.last_avail != avail_idx {
@@ -226,7 +226,7 @@ impl Registers for Device {
             0x30 => s.device = value,
             0x3000 => {
                 assert!(s.enabled && s.status & status::DRIVER_OK != 0, "notified before ready");
-                self.serve(&mut s);
+                Device::serve(&mut s);
             }
             _ => {}
         }
@@ -391,7 +391,7 @@ fn the_queue_fills_and_empties() {
     }
     assert_eq!(tokens.len(), 256 / 3);
     assert!(blk.complete().is_none());
-    paused.0.serve(&mut paused.0.state.lock().unwrap());
+    Device::serve(&mut paused.0.state.lock().unwrap());
     for token in tokens {
         assert_eq!(wait(&mut blk, token), Outcome::Done);
     }
@@ -440,7 +440,7 @@ fn used_entries_naming_no_request_are_skipped() {
     let second = blk.submit(Op::Read, 1, &[(buffer.phys(), 512)]).unwrap();
     used_entry(&paused.0, 9999);
     used_entry(&paused.0, u32::from(first) + 1);
-    paused.0.serve(&mut paused.0.state.lock().unwrap());
+    Device::serve(&mut paused.0.state.lock().unwrap());
     assert_eq!(wait(&mut blk, first), Outcome::Done);
     used_entry(&paused.0, u32::from(first));
     assert_eq!(wait(&mut blk, second), Outcome::Done);

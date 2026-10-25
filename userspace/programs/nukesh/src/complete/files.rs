@@ -271,7 +271,7 @@ operand\t1\tvalue
 
     fn complete(shell: &mut Shell, line: &[&str]) -> Vec<String> {
         let file = CompletionFile::parse(GREP);
-        let words: Vec<String> = line.iter().map(|w| w.to_string()).collect();
+        let words: Vec<String> = line.iter().map(ToString::to_string).collect();
         texts(shell.complete_from_file(&file, &words, words.len() - 1))
     }
 
@@ -296,7 +296,7 @@ operand\t1\tvalue
         );
         assert_eq!(complete(&mut shell, &["grep", "-"]).len(), 7);
         let file = CompletionFile::parse(GREP);
-        let words: Vec<String> = ["grep", "--ig"].iter().map(|w| w.to_string()).collect();
+        let words: Vec<String> = ["grep", "--ig"].iter().map(ToString::to_string).collect();
         let FromFile::Options(found) = shell.complete_from_file(&file, &words, 1) else {
             panic!("options expected");
         };

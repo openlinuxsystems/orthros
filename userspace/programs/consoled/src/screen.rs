@@ -223,7 +223,7 @@ impl Screen {
         let (cols, rows) = (self.cols.min(term.cols()), self.rows.min(term.rows()));
         for y in 0..rows {
             let cursor_here = cursor.filter(|&(_, cy)| cy == y).map(|(cx, _)| cx);
-            let cursor_was = self.drawn_cursor.filter(|&(_, cy)| cy == y).is_some();
+            let cursor_was = self.drawn_cursor.as_ref().is_some_and(|&(_, cy)| cy == y);
             let changed = cursor_here.is_some() != cursor_was
                 || (cursor_here.is_some() && self.drawn_cursor != cursor)
                 || (0..cols).any(|x| self.drawn[y * self.cols + x] != Some(term.shown(x, y)));

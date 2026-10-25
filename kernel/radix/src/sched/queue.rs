@@ -187,7 +187,7 @@ impl Rq {
     pub(super) fn dequeue(&mut self, thread: &Thread) -> Option<i64> {
         match thread.queued.load(Ordering::Relaxed) {
             FAIR => {
-                let index = self.fair.position(|t| core::ptr::eq(&**t, thread))?;
+                let index = self.fair.position(|t| core::ptr::eq(&raw const **t, thread))?;
                 let weight = self.fair.entities()[index].weight();
                 let (key, lag) = self.fair.dequeue(index)?;
                 key.queued.store(NOT_QUEUED, Ordering::Relaxed);
@@ -195,7 +195,7 @@ impl Rq {
                 Some(to_real(lag, weight))
             }
             REAL_TIME => {
-                let index = self.rt.position(|t| core::ptr::eq(&**t, thread))?;
+                let index = self.rt.position(|t| core::ptr::eq(&raw const **t, thread))?;
                 let entry = self.rt.dequeue(index)?;
                 entry.key().queued.store(NOT_QUEUED, Ordering::Relaxed);
                 Some(0)
@@ -378,7 +378,10 @@ impl Rq {
         let scale = NICE_0_WEIGHT as u128 * count as u128;
         let entities = self.fair.entities();
         let first: &Domain = entities[0].key().domain();
-        if entities.iter().all(|entity| core::ptr::eq::<Domain>(&**entity.key().domain(), first)) {
+        if entities
+            .iter()
+            .all(|entity| core::ptr::eq::<Domain>(&raw const **entity.key().domain(), first))
+        {
             // The usual case: every thread in one domain. Its branch of the
             // tree has nothing beside it, so its weights cancel out of
             // `Shares::weight` and each thread gets its part of the nice
@@ -453,7 +456,7 @@ impl Shares {
 
     /// The node of `domain`, added with the domains above it if new.
     fn node(&mut self, domain: &Domain) -> Option<usize> {
-        let key = domain as *const Domain as usize;
+        let key = core::ptr::from_ref::<Domain>(domain) as usize;
         if let Some(index) = self.find(key) {
             return Some(index);
         }
@@ -483,7 +486,7 @@ impl Shares {
     /// The queue weight of a thread of nice weight `base` in `domain`, with
     /// `scale` the total to share out.
     fn weight(&self, domain: &Domain, base: u64, scale: u128) -> u64 {
-        let found = self.find(domain as *const Domain as usize);
+        let found = self.find(core::ptr::from_ref::<Domain>(domain) as usize);
         let (Some(index), false) = (found, self.full) else { return base };
         let node = &self.nodes[index];
         let default = u128::from(DOMAIN_WEIGHT_DEFAULT);

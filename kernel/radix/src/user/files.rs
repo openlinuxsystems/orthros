@@ -867,9 +867,8 @@ fn files_to_send(user: &UserRef, slots: UserBuffer) -> Result<Option<pipe::Files
             return Err(error(Kernel::WrongKind));
         }
         found.cap.check(kind, Rights::COPY).map_err(cap_error)?;
-        let file = match found.object.take() {
-            Some(Object::File(file) | Object::Directory(file)) => file,
-            _ => return Err(error(Kernel::Gone)),
+        let Some(Object::File(file) | Object::Directory(file)) = found.object.take() else {
+            return Err(error(Kernel::Gone));
         };
         // A socket sent could hold itself open (`fs::socket`).
         if file.socket().is_some() {

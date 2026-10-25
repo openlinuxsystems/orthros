@@ -394,7 +394,7 @@ fn growth_reads_zeros_and_cuts_free_clusters() {
         let root = volume.root();
         // Fill the volume's first clusters with junk, then free them, so
         // that new files get clusters that do not read as zeros.
-        let junk = make_file(&root, "junk", &[0xee; 64 * 1024]);
+        let junk = make_file(&root, "junk", &vec![0xee; 64 * 1024]);
         drop(junk);
         root.remove("junk").unwrap();
         let file = root.create("sparse", Kind::File).unwrap();
@@ -789,4 +789,98 @@ fn the_older_boot_signature_gives_the_serial_alone() {
     assert_eq!(&older.label, b"           ");
     sector[38] = 0;
     assert_eq!(Geometry::parse(&sector, image.len() as u64).unwrap().serial, 0);
+}
+
+/// A volume of each width holding files and directories, made once.
+fn populated() -> &'static [Vec<u8>] {
+    static IMAGES: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    IMAGES.get_or_init(|| {
+        [(12, 1440, 1), (16, 32768, 4), (32, 40960, 1)]
+            .into_iter()
+            .map(|(bits, kib, per_cluster)| {
+                let volume = Volume::new(&mkfs(bits, kib, per_cluster));
+                let root = volume.root();
+                let dir = root.create("A long directory name", Kind::Directory).unwrap();
+                let inner = dir.create("inner", Kind::Directory).unwrap();
+                for (i, (name, size)) in NAMES.iter().zip(SIZES).enumerate() {
+                    let parent = [&root, &dir, &inner][i % 3];
+                    make_file(parent, name, &pattern(u32::try_from(i).unwrap(), size));
+                }
+                volume.image()
+            })
+            .collect()
+    })
+}
+
+/// Everything under `node`, read: at most `budget` nodes, and files only
+/// up to 256 KiB, as damage can make them look huge.
+fn read_everything(node: &NodeRef, depth: usize, budget: &mut usize) {
+    if *budget == 0 || depth > 8 {
+        return;
+    }
+    *budget -= 1;
+    let _ = node.stat();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut offset = 0;
+    while offset < 256 * 1024 {
+        match node.read(offset, &mut SliceMut(&mut buffer)) {
+            Ok(n) if n > 0 => offset += n as u64,
+            _ => break,
+        }
+    }
+    let mut found = Vec::new();
+    let _ = node.list(0, &mut |_, name, _| {
+        found.push(String::from(name));
+        found.len() < 64
+    });
+    for name in found.iter().filter(|n| *n != "." && *n != "..") {
+        if let Ok(child) = node.lookup(name) {
+            read_everything(&child, depth + 1, budget);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// A volume with any of its metadata bytes changed is refused, or
+    /// works: reads, lists, writes, removes and syncs give errors, never
+    /// a panic or a hang.
+    #[test]
+    fn damaged_volumes_never_panic(
+        width in 0..3usize,
+        changes in proptest::collection::vec((any::<bool>(), any::<u32>(), any::<u8>()), 1..24),
+    ) {
+        let mut image = populated()[width].clone();
+        for (boot, at, value) in changes {
+            // Half in the boot sector, the rest in the tables, directories
+            // and first data clusters.
+            let span = if boot { 512 } else { image.len().min(512 * 1024) };
+            image[at as usize % span] = value;
+        }
+        let disk = mem::arc(RamDisk::new(image.len() as u64 / 512, false)).unwrap();
+        disk.load(0, &image).unwrap();
+        let device: DeviceRef = disk.clone();
+        if let Ok(fs) = FatFs::mount(device, false) {
+            let root = fs.root();
+            read_everything(&root, 0, &mut 200);
+            if let Ok(file) = root.create("new file.txt", Kind::File) {
+                let _ = file.write(0, &Slice(&pattern(99, 5000)));
+            }
+            for name in names_or_none(&root).iter().take(3) {
+                let _ = root.remove(name);
+            }
+            let _ = fs.sync();
+        }
+    }
+}
+
+/// The names in `dir`, or none if it cannot be listed.
+fn names_or_none(dir: &NodeRef) -> Vec<String> {
+    let mut out = Vec::new();
+    let _ = dir.list(0, &mut |_, name, _| {
+        out.push(String::from(name));
+        out.len() < 64
+    });
+    out
 }

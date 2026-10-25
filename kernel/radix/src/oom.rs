@@ -67,7 +67,7 @@ static PENDING_RESTARTS: SpinLock<[Option<DomainRef>; PENDING]> =
     SpinLock::new([const { None }; PENDING]);
 
 fn restart_key() -> usize {
-    &RESTARTS as *const AtomicU64 as usize
+    &raw const RESTARTS as usize
 }
 
 /// Registers the policy with the frame allocator.
@@ -234,7 +234,7 @@ fn stop(victim: &DomainRef) {
 /// Takes the next restart off the list.
 fn next_restart() -> Option<DomainRef> {
     let mut pending = PENDING_RESTARTS.lock_irq();
-    pending.iter_mut().find_map(|slot| slot.take())
+    pending.iter_mut().find_map(Option::take)
 }
 
 fn has_restart() -> bool {

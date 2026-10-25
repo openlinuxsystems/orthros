@@ -619,7 +619,7 @@ pub fn enter_user_registers(regs: &UserRegisters) -> ! {
     // are ones a program may hold, so `iretq` cannot fault; the stub reads
     // `regs`, on this stack above where it pushes, before it leaves. The
     // kernel stack is abandoned, as in `enter_user`.
-    unsafe { radix_enter_user_registers(&regs) }
+    unsafe { radix_enter_user_registers(&raw const regs) }
 }
 
 /// Makes the running thread's system call run again when it returns to
@@ -1020,7 +1020,7 @@ pub fn zero_frames(phys: u64, pages: u64) {
     // SAFETY: the range is RAM (checked above), which the direct map
     // covers; the caller owns the frames and nothing else uses them.
     unsafe {
-        core::ptr::write_bytes(memory::phys_to_virt(phys) as *mut u8, 0, (pages * PAGE) as usize)
+        core::ptr::write_bytes(memory::phys_to_virt(phys) as *mut u8, 0, (pages * PAGE) as usize);
     };
 }
 
@@ -1034,7 +1034,7 @@ pub fn write_frames(phys: u64, src: &[u8]) {
             src.as_ptr(),
             memory::phys_to_virt(phys) as *mut u8,
             src.len(),
-        )
+        );
     };
 }
 
@@ -1052,7 +1052,7 @@ pub fn copy_frame(dst: u64, src: u64) {
             memory::phys_to_virt(src) as *const u8,
             memory::phys_to_virt(dst) as *mut u8,
             PAGE as usize,
-        )
+        );
     };
 }
 
@@ -1066,7 +1066,7 @@ pub fn read_frames(phys: u64, dst: &mut [u8]) {
             memory::phys_to_virt(phys) as *const u8,
             dst.as_mut_ptr(),
             dst.len(),
-        )
+        );
     };
 }
 

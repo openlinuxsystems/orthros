@@ -34,7 +34,7 @@ fn statuses_read_as_linux_reads_them() {
     assert_eq!((stopped & 0xff, (stopped >> 8) & 0xff), (0x7f, SIGTSTP));
     assert_eq!(status::CONTINUED, 0xffff);
     assert_eq!(Ended::Killed(SIGINT).code(), 2);
-    assert_eq!(Ended::Exited(300).value(), 300 & 0xff);
+    assert_eq!(Ended::Exited(300).value(), 300 % 256);
 }
 
 #[test]
@@ -378,7 +378,7 @@ fn groups_and_sessions_follow_posix() {
     assert_eq!(named, [11]);
     named.clear();
     tree.targets(10, 10, -1, &mut |m| named.push(m.pid));
-    named.sort();
+    named.sort_unstable();
     assert_eq!(named, [11, 12]);
     // Group 11's only member's parent is in another group of its session:
     // not orphaned until that parent goes.

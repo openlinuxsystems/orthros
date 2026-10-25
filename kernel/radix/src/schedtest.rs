@@ -54,7 +54,7 @@ fn kmalloc() -> Kmalloc {
 }
 
 fn key<T>(value: &'static T) -> usize {
-    value as *const T as usize
+    core::ptr::from_ref::<T>(value) as usize
 }
 
 /// Tells the threads of the running test to stop.
@@ -807,6 +807,7 @@ fn pulled() -> Pulled {
     Pulled(total)
 }
 
+#[derive(Clone, Copy)]
 struct Pulled([u64; 4]);
 
 impl Pulled {

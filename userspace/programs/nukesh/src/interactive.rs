@@ -173,7 +173,7 @@ const EXIT_REFUSED: i32 = -1;
 /// Ctrl-D with stopped jobs: refused once, as `exit` is.
 fn refuse_exit(shell: &mut Shell) -> bool {
     shell.reap();
-    if shell.jobs.list.iter().any(|job| job.stopped()) && !shell.exit_warned {
+    if shell.jobs.list.iter().any(crate::jobs::Job::stopped) && !shell.exit_warned {
         shell.exit_warned = true;
         let _ = sys::write_all(2, b"There are stopped jobs.\n");
         return true;

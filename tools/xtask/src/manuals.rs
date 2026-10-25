@@ -277,7 +277,7 @@ fn parse_options(text: &str) -> Vec<Opt> {
             after_tag = true;
             continue;
         }
-        let previous = n.checked_sub(1).map(|p| lines[p]).unwrap_or_default();
+        let previous = n.checked_sub(1).map_or_default(|p| lines[p]);
         let previous_indent = previous.len() - previous.trim_start().len();
         // A tag follows a blank line, the text of the item before it
         // (indented further), or another item's tag at its indent; a line
@@ -440,7 +440,7 @@ fn summary(text: &str) -> String {
         let follows_word = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b')');
         if matches!(b, b'.' | b';' | b':')
             && follows_word
-            && bytes.get(i + 1).is_none_or(|c| c.is_ascii_whitespace())
+            && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace)
         {
             end = i;
             break;

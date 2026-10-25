@@ -51,3 +51,4 @@ done
 !; echo "bang $?"
 time -p 2>/dev/null; echo "time $?"
 ! time -p true 2>/dev/null; echo "both $?"
+eval 'coproc coproc <&-' 2>/dev/null; echo "coproc coproc $?"

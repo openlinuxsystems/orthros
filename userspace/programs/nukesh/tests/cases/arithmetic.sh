@@ -36,3 +36,8 @@ done
 echo $((0x)) $((0x + 1))
 for e in '10#-3' '1 + 16# * 2'; do msg=$( { echo $(( $e )); } 2>&1 ); echo "${msg#*: line *: }"; done
 r1=r1; msg=$( { echo $((r1)); } 2>&1 ); echo "${msg#*: line *: }"
+# `$"..."` and `$'...'` lose their `$` in arithmetic, and `'` is itself.
+x=5; a=(10 20 30 40 50 60); echo $((1+$"x")) $(( "x" + 1 )) ${a[$"x"]} ${a[1+$"x"-5]}
+msg=$( { echo $((1+$'2')); } 2>&1 ); echo "${msg#*: line *: }"
+msg=$( { echo $((1+'2')); } 2>&1 ); echo "${msg#*: line *: }"
+msg=$( { echo $(( \"1\" )); } 2>&1 ); echo "${msg#*: line *: }"

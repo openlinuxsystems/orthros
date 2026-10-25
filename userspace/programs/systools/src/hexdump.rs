@@ -342,6 +342,7 @@ fn prepare(formats: &mut [Format], block: usize) {
 }
 
 /// A value for printf(3).
+#[derive(Clone, Copy)]
 enum Value<'a> {
     Signed(i64),
     Unsigned(u64),
@@ -531,11 +532,12 @@ impl Input {
                 Some(path) => match File::open(path) {
                     Ok(mut file) => {
                         if self.skip > 0
-                            && let Some(meta) = file.metadata().ok().filter(|m| m.is_file())
+                            && let Some(meta) =
+                                file.metadata().ok().filter(std::fs::Metadata::is_file)
                         {
                             let n = self.skip.min(meta.len());
                             if let Err(e) = file.seek(SeekFrom::Start(n)) {
-                                self.report(path, e);
+                                self.report(path, &e);
                                 continue;
                             }
                             self.skip -= n;
@@ -544,7 +546,7 @@ impl Input {
                         Box::new(file)
                     }
                     Err(e) => {
-                        self.report(path, e);
+                        self.report(path, &e);
                         continue;
                     }
                 },
@@ -558,7 +560,7 @@ impl Input {
                         self.skipped += n;
                     }
                     Err(e) => {
-                        self.report(name.as_ref().map_or("stdin".as_ref(), |n| n.as_os_str()), e);
+                        self.report(name.as_ref().map_or("stdin".as_ref(), |n| n.as_os_str()), &e);
                         continue;
                     }
                 }
@@ -568,8 +570,8 @@ impl Input {
         }
     }
 
-    fn report(&mut self, name: &std::ffi::OsStr, error: io::Error) {
-        eprintln!("hexdump: {}: {}", name.to_string_lossy(), util::strip_os_error(&error));
+    fn report(&mut self, name: &std::ffi::OsStr, error: &io::Error) {
+        eprintln!("hexdump: {}: {}", name.to_string_lossy(), util::strip_os_error(error));
         self.failed = true;
     }
 
@@ -595,7 +597,7 @@ impl Input {
                         .get(self.next.wrapping_sub(1))
                         .cloned()
                         .unwrap_or_else(|| "stdin".into());
-                    self.report(&name, e);
+                    self.report(&name, &e);
                     self.current = None;
                 }
             }
@@ -655,7 +657,7 @@ fn run(args: &mut Args, canonical: bool) -> Result<i32, Fail> {
     let mut verbose = false;
     let mut files = Vec::new();
     let add = |texts: &mut Vec<String>, formats: &[&str]| {
-        texts.extend(formats.iter().map(|f| f.to_string()))
+        texts.extend(formats.iter().map(ToString::to_string));
     };
     while let Some(arg) = args.next()? {
         match arg {

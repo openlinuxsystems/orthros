@@ -70,7 +70,7 @@ fn screen_lines(output: &[u8], width: usize, rows: usize) -> Vec<Vec<char>> {
         cells.truncate(width);
         lines.push(cells);
     }
-    if lines.last().is_some_and(|l| l.is_empty()) {
+    if lines.last().is_some_and(Vec::is_empty) {
         lines.pop();
     }
     lines
@@ -130,7 +130,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         let mut action: libc::sigaction = unsafe { util::zeroed() };
         action.sa_sigaction = on_signal as *const () as usize;
         // SAFETY: the handler only stores to an atomic.
-        unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+        unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
     }
     let terminal = util::is_terminal(1);
     let mut out = io::stdout().lock();
@@ -253,7 +253,7 @@ fn wait_for_key() {
     // SAFETY: all zeros is a valid termios: numbers.
     let mut saved: libc::termios = unsafe { util::zeroed() };
     // SAFETY: tcgetattr fills `saved`.
-    let tty = unsafe { libc::tcgetattr(0, &mut saved) } == 0;
+    let tty = unsafe { libc::tcgetattr(0, &raw mut saved) } == 0;
     if !tty {
         return;
     }
@@ -264,9 +264,9 @@ fn wait_for_key() {
     let mut byte = 0u8;
     // SAFETY: valid termios structures and a one-byte buffer of ours.
     unsafe {
-        libc::tcsetattr(0, libc::TCSANOW, &keys);
-        libc::read(0, (&mut byte as *mut u8).cast(), 1);
-        libc::tcsetattr(0, libc::TCSANOW, &saved);
+        libc::tcsetattr(0, libc::TCSANOW, &raw const keys);
+        libc::read(0, (&raw mut byte).cast(), 1);
+        libc::tcsetattr(0, libc::TCSANOW, &raw const saved);
     }
 }
 

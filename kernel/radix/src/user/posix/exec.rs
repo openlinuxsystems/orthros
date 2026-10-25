@@ -225,11 +225,8 @@ fn relocate(space: &SpaceObject, file: &File, program: &Program, bias: u64) -> R
     let Some((offset, size)) = program.dynamic else { return Ok(()) };
     let mut table = zeroed(size.min(4096) as usize)?;
     read_exact(&file.node, offset, &mut table)?;
-    let (start, count) = match program.relocations(&table) {
-        Ok(found) => found,
-        // Not something this loader understands: the program's own.
-        Err(_) => return Ok(()),
-    };
+    // Relocations this loader does not understand are the program's own.
+    let Ok((start, count)) = program.relocations(&table) else { return Ok(()) };
     let placed = program.image.place(bias, 0..u64::MAX).map_err(not_executable)?;
     let entry_size = radix_elf::Placed::RELOCATION_SIZE;
     let mut chunk = zeroed(4096 / entry_size as usize * entry_size as usize)?;
@@ -388,9 +385,9 @@ pub fn exec(
     }
 
     if own {
-        replace_own(user, target, space, [entry, sp, 0], name, run_as)
+        replace_own(user, target, &space, [entry, sp, 0], name, run_as)
     } else {
-        start_created(user, target, slot, space, [entry, sp, 0], name, run_as)?;
+        start_created(user, target, slot, &space, [entry, sp, 0], name, run_as)?;
         answer(label, 0, [0; 8])
     }
 }
@@ -574,7 +571,7 @@ fn install_space(process: &ProcessRef, space: &SpaceRef, empty_thread: bool) -> 
 fn replace_own(
     user: &UserRef,
     process: &ProcessRef,
-    space: SpaceRef,
+    space: &SpaceRef,
     start: [u64; 3],
     name: Name,
     path: &[u8],
@@ -600,7 +597,7 @@ fn replace_own(
             member.execed = true;
         }
     });
-    if let Err(err) = install_space(process, &space, true) {
+    if let Err(err) = install_space(process, space, true) {
         // Past saving: the old program's capabilities may be gone.
         warn!("User: process {} could not run its new program: {:#x}", process.number(), err.0);
         process.posix.lock().ended_by.get_or_insert(radix_abi::signal::SIGKILL);
@@ -659,12 +656,12 @@ fn start_created(
     user: &UserRef,
     process: &ProcessRef,
     slot: u32,
-    space: SpaceRef,
+    space: &SpaceRef,
     start: [u64; 3],
     name: Name,
     path: &[u8],
 ) -> Result<()> {
-    install_space(process, &space, false)?;
+    install_space(process, space, false)?;
     let me = &user.process;
     let own = SlotRef::new(process.cspace(), startup::SLOT_PROCESS);
     if matches!(caps::get(own), Err(radix_cap::CapError::Empty)) {
@@ -688,7 +685,7 @@ fn start_created(
         // The new process is not in use yet: nothing else takes its lock.
         let mut posix = process.posix.lock_nested(1);
         posix.in_tree = true;
-        posix.terminal = parent.terminal.clone();
+        posix.terminal.clone_from(&parent.terminal);
         posix.inherit(&parent);
     }
     let (class, level) = me.io_priority();

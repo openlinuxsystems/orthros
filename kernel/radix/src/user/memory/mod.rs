@@ -356,7 +356,7 @@ impl Drop for SpaceObject {
         // Unmap first, so nothing the regions held stays mapped while it
         // goes; the tables themselves go with the last handle.
         let regions = core::mem::replace(self.regions.get_mut(), Vec::new_in(kmalloc()));
-        for region in regions.iter() {
+        for region in &regions {
             self.clear_region(region);
         }
     }
@@ -503,6 +503,9 @@ pub fn rights_of(access: UserAccess) -> AbiRights {
 
 /// The store's rights for the ABI's.
 pub fn cap_rights(rights: AbiRights) -> radix_cap::Rights {
+    // The two sets are the same bits (decoding refuses any other), so the
+    // cast keeps every right.
+    const { assert!(AbiRights::ALL.bits() == radix_cap::Rights::ALL.bits() as u64) };
     radix_cap::Rights::from_bits_truncate(rights.bits() as u16)
 }
 

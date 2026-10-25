@@ -207,7 +207,7 @@ impl Sequence {
         let mut n = a;
         loop {
             out.push(if self.letters {
-                char::from_u32(n as u32).map(String::from).unwrap_or_default()
+                char::from_u32(n as u32).map_or_default(String::from)
             } else if width == 0 {
                 n.to_string()
             } else if n < 0 {

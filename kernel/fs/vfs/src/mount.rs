@@ -680,7 +680,7 @@ impl Vfs {
         }
         // Each is held by the table, by `doomed`, by every mount on it,
         // and `top` by `top` too; anything more is a handle.
-        for mount in doomed.iter() {
+        for mount in &doomed {
             let on_it = doomed
                 .iter()
                 .filter(|m| m.on.as_ref().is_some_and(|(on, _)| KArc::ptr_eq(on, mount)))
@@ -690,7 +690,7 @@ impl Vfs {
                 return Err(Error::InUse);
             }
         }
-        for mount in doomed.iter() {
+        for mount in &doomed {
             mount.fs.sync()?;
         }
         mounts.retain(|m| !doomed.iter().any(|d| KArc::ptr_eq(m, d)));
@@ -711,7 +711,7 @@ impl Vfs {
     /// Syncs every filesystem with changes; returns the first error.
     pub fn sync_all(&self) -> Result<()> {
         let mut first = Ok(());
-        for fs in self.filesystems()?.iter() {
+        for fs in &self.filesystems()? {
             if fs.is_dirty()
                 && let Err(err) = fs.sync()
                 && first.is_ok()
@@ -727,7 +727,7 @@ impl Vfs {
     pub fn shrink(&self, max: usize) -> usize {
         let Ok(filesystems) = self.filesystems() else { return 0 };
         let mut dropped = 0;
-        for fs in filesystems.iter() {
+        for fs in &filesystems {
             if dropped >= max {
                 break;
             }

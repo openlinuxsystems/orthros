@@ -178,7 +178,7 @@ impl Shell {
             sys::close(fd);
             self.tty = Some(moved);
         }
-        for entry in self.held.iter_mut() {
+        for entry in &mut self.held {
             if *entry == Some(fd)
                 && let Ok(moved) = sys::dup_high(fd)
             {
@@ -246,8 +246,7 @@ impl Shell {
                 } else {
                     doc.body
                         .as_literal()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| crate::show::word_text(&doc.body))
+                        .map_or_else(|| crate::show::word_text(&doc.body), str::to_string)
                 };
                 let body = match doc.body.parts.as_slice() {
                     [crate::ast::WordPart::Quoted(text)] if !doc.expand => text.clone(),

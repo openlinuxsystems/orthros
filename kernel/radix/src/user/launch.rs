@@ -55,6 +55,7 @@ pub fn image() -> Option<&'static [u8]> {
 }
 
 /// What to start.
+#[derive(Clone, Copy)]
 pub struct Spec<'a> {
     /// The program's name.
     pub name: &'a str,

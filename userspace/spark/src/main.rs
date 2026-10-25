@@ -39,6 +39,7 @@
 
 #![no_std]
 #![no_main]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -220,13 +221,13 @@ fn run_native(root: &Dir, path: &str, args: &[&str]) {
     child.reap();
     match memory::info(&SYS, pool) {
         Ok(info) if info.used == 0 => {
-            println!("spark: reaped process {number}; all of its memory came back")
+            println!("spark: reaped process {number}; all of its memory came back");
         }
         Ok(info) => {
-            println!("spark: reaped process {number}, but {} pages are still used", info.used)
+            println!("spark: reaped process {number}, but {} pages are still used", info.used);
         }
         Err(status) => {
-            println!("spark: reaped process {number}; memory info failed: {:#x}", status.0)
+            println!("spark: reaped process {number}; memory info failed: {:#x}", status.0);
         }
     }
 }

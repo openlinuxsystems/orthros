@@ -4,6 +4,8 @@
 //! The other builtins: aliases, `type` and `hash`, `trap`, `getopts`,
 //! `ulimit`, `umask`, `times`, `caller`, `enable` and `help`.
 
+use std::fmt::Write;
+
 use super::{TABLE, flags, is_special, lookup, out, usage};
 use crate::shell::{Res, Shell};
 use crate::{show, sys, trap};
@@ -27,10 +29,10 @@ pub fn alias(shell: &mut Shell, args: &[String]) -> Res {
     if flags.rest.is_empty() {
         let mut names: Vec<&String> = shell.aliases.keys().collect();
         names.sort();
-        let text: String = names
-            .iter()
-            .map(|n| format!("{prefix}{n}={}\n", quote_alias(&shell.aliases[*n])))
-            .collect();
+        let mut text = String::new();
+        for name in names {
+            let _ = writeln!(text, "{prefix}{name}={}", quote_alias(&shell.aliases[name]));
+        }
         return Ok(i32::from(!out(shell, "alias", &text)));
     }
     let mut status = 0;
@@ -262,16 +264,18 @@ pub fn hash(shell: &mut Shell, args: &[String]) -> Res {
         }
         let mut names: Vec<(&String, &String)> = shell.hash.iter().collect();
         names.sort();
-        let text: String = if flags.has('l') {
-            names.iter().map(|(n, p)| format!("builtin hash -p {p} {n}\n")).collect()
+        let mut text = String::new();
+        if flags.has('l') {
+            for (name, path) in names {
+                let _ = writeln!(text, "builtin hash -p {path} {name}");
+            }
         } else {
-            let mut text = String::from("hits\tcommand\n");
+            text.push_str("hits\tcommand\n");
             for (name, path) in names {
                 let hits = shell.hash_hits.get(name.as_str()).copied().unwrap_or(0);
-                text.push_str(&format!("{hits:4}\t{path}\n"));
+                let _ = writeln!(text, "{hits:4}\t{path}");
             }
-            text
-        };
+        }
         return Ok(i32::from(!out(shell, "hash", &text)));
     }
     let mut status = 0;
@@ -435,7 +439,7 @@ pub fn getopts(shell: &mut Shell, args: &[String]) -> Res {
         }
         shell.getopts_char = 1;
     }
-    let arg: Vec<char> = operands.get(optind - 1).map(|a| a.chars().collect()).unwrap_or_default();
+    let arg: Vec<char> = operands.get(optind - 1).map_or_default(|a| a.chars().collect());
     let Some(&letter) = arg.get(shell.getopts_char) else {
         shell.getopts_char = 0;
         return end(shell, optind + 1);

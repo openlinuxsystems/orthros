@@ -37,7 +37,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
             inout("ecx") subleaf => ecx,
             out("edx") edx,
             options(nomem, nostack, preserves_flags),
-        )
+        );
     };
     CpuidResult { eax, ebx, ecx, edx }
 }
@@ -211,7 +211,7 @@ pub fn rdseed() -> Option<u64> {
         // SAFETY: CPUID says the instruction exists; it only returns a
         // number and sets the carry flag.
         unsafe {
-            asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+            asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
         };
         if ok != 0 {
             return Some(value);
@@ -231,7 +231,7 @@ pub fn rdrand() -> Option<u64> {
         let (value, ok): (u64, u8);
         // SAFETY: as for `rdseed`.
         unsafe {
-            asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
+            asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
         };
         if ok != 0 {
             return Some(value);
@@ -267,7 +267,7 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
     let (low, high): (u32, u32);
     // SAFETY: the caller guarantees the MSR exists and may be read.
     unsafe {
-        asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
+        asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
     };
     (u64::from(high) << 32) | u64::from(low)
 }
@@ -287,7 +287,7 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
             in("eax") value as u32,
             in("edx") (value >> 32) as u32,
             options(nostack, preserves_flags),
-        )
+        );
     };
 }
 
@@ -407,7 +407,7 @@ pub fn ensure_kernel_ss() {
                 "mov ss, {0:x}",
                 in(reg) crate::percpu::KERNEL_DS,
                 options(nomem, nostack, preserves_flags)
-            )
+            );
         };
     }
 }
@@ -430,7 +430,7 @@ pub fn rdtsc() -> u64 {
     let (low, high): (u32, u32);
     // SAFETY: RDTSC only reads a counter.
     unsafe {
-        asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
+        asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
     };
     (u64::from(high) << 32) | u64::from(low)
 }
@@ -535,7 +535,7 @@ pub unsafe fn xsetbv(index: u32, value: u64) {
     // SAFETY: the caller guarantees the value is valid.
     unsafe {
         asm!("xsetbv", in("ecx") index, in("eax") value as u32, in("edx") (value >> 32) as u32,
-             options(nomem, nostack, preserves_flags))
+             options(nomem, nostack, preserves_flags));
     };
 }
 
@@ -547,7 +547,7 @@ pub fn monitor(addr: usize) {
     // so the caller's check of the line comes after it.
     unsafe {
         asm!("monitor", in("rax") addr, in("ecx") 0u32, in("edx") 0u32,
-             options(nostack, preserves_flags))
+             options(nostack, preserves_flags));
     };
 }
 

@@ -266,7 +266,7 @@ pub fn is_reference(s: &str) -> bool {
 const DECLARATIONS: [&str; 5] = ["declare", "typeset", "local", "export", "readonly"];
 
 /// Reserved words, which are not commands where a command starts.
-const RESERVED: [&str; 22] = [
+pub const RESERVED: [&str; 22] = [
     "!", "{", "}", "case", "do", "done", "elif", "else", "esac", "fi", "for", "if", "in", "then",
     "until", "while", "[[", "]]", "function", "select", "time", "coproc",
 ];
@@ -376,7 +376,7 @@ impl Parser {
         self.continued = false;
         let mut result = self.next_command_here();
         if self.more && self.continued && matches!(result, Ok(Some(_))) {
-            result = Err(self.unfinished());
+            result = Err(Self::unfinished());
         }
         if let Err(Error::Incomplete(_)) = result {
             if let Some(text) = self.unspliced.take() {
@@ -605,7 +605,7 @@ impl Parser {
     }
 
     /// Text that ends inside a command.
-    fn unfinished(&self) -> Error {
+    fn unfinished() -> Error {
         Error::Incomplete(Unfinished::Command)
     }
 
@@ -623,7 +623,7 @@ impl Parser {
     /// The text ends where a word must come: at its real end, bash, which
     /// ends text with a newline, finds the newline unexpected.
     fn ends_here(&mut self) -> Error {
-        if self.more { self.unfinished() } else { self.unexpected('\n') }
+        if self.more { Self::unfinished() } else { self.unexpected('\n') }
     }
 
     /// The error for something the grammar does not allow here.
@@ -774,7 +774,7 @@ impl Parser {
         let program = self.list(end)?;
         if program.commands.is_empty() {
             return Err(match self.peek() {
-                None => self.unfinished(),
+                None => Self::unfinished(),
                 Some(c) => self.unexpected(c),
             });
         }
@@ -810,7 +810,7 @@ impl Parser {
             };
             self.linebreak()?;
             if self.peek().is_none() {
-                return Err(self.unfinished());
+                return Err(Self::unfinished());
             }
             rest.push((op, self.pipeline()?));
         }
@@ -871,7 +871,7 @@ impl Parser {
             pipe_stderr.push(both);
             self.linebreak()?;
             if self.peek().is_none() {
-                return Err(self.unfinished());
+                return Err(Self::unfinished());
             }
             commands.push(self.command()?);
         }
@@ -896,7 +896,7 @@ impl Parser {
             return Ok(Command::Simple(SimpleCommand { line, ..SimpleCommand::default() }));
         }
         let compound = match self.peek() {
-            None => return Err(self.unfinished()),
+            None => return Err(Self::unfinished()),
             Some('(') if self.at("((") && !self.options.posix => match self.arith_command()? {
                 Some(compound) => compound,
                 None => self.subshell()?,
@@ -960,8 +960,12 @@ impl Parser {
     /// reserved word after it is out of place.
     fn coproc_command(&mut self) -> Result<Command> {
         self.skip_blanks();
-        if self.at_word("!") {
-            return Err(self.syntax_here("syntax error near unexpected token `!'"));
+        for refused in ["!", "coproc"] {
+            if self.at_word(refused) {
+                return Err(
+                    self.syntax_here(format!("syntax error near unexpected token `{refused}'"))
+                );
+            }
         }
         if matches!(self.peek(), None | Some('\n')) {
             return Err(self.syntax_here("syntax error near unexpected token `newline'"));
@@ -999,7 +1003,7 @@ impl Parser {
             return Ok(());
         }
         match self.peek() {
-            None => Err(self.unfinished()),
+            None => Err(Self::unfinished()),
             Some(c) => Err(self.unexpected(c)),
         }
     }
@@ -1010,7 +1014,7 @@ impl Parser {
         self.linebreak()?;
         if !self.eat(")") {
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         }
@@ -1057,6 +1061,14 @@ impl Parser {
                         return Ok(Some(text));
                     }
                     return Ok(None);
+                }
+                '\\' => {
+                    // An escaped character is read as it is: `\"` opens no quotes.
+                    text.push(c);
+                    if let Some(n) = self.bump_raw() {
+                        text.push(n);
+                    }
+                    continue;
                 }
                 '\'' | '"' | '`' => {
                     // Quotes are read as they are, for the expander.
@@ -1118,7 +1130,7 @@ impl Parser {
         let start = (self.pos, self.line);
         let Some(word) = self.word(Ctx::Normal)? else {
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         };
@@ -1149,7 +1161,7 @@ impl Parser {
         loop {
             self.skip_blanks();
             match self.peek() {
-                None => return Err(self.unfinished()),
+                None => return Err(Self::unfinished()),
                 Some(';') => {
                     self.bump();
                     break;
@@ -1215,14 +1227,14 @@ impl Parser {
         self.skip_blanks();
         let Some(word) = self.word(Ctx::Normal)? else {
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         };
         self.linebreak()?;
         if !self.eat_word("in") {
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         }
@@ -1233,7 +1245,7 @@ impl Parser {
                 return Ok(CompoundCommand::Case { word, arms, line });
             }
             if self.peek().is_none() {
-                return Err(self.unfinished());
+                return Err(Self::unfinished());
             }
             self.eat("(");
             let mut patterns = Vec::new();
@@ -1243,7 +1255,7 @@ impl Parser {
                     Some(pattern) => patterns.push(pattern),
                     None => {
                         return match self.peek() {
-                            None => Err(self.unfinished()),
+                            None => Err(Self::unfinished()),
                             Some(c) => Err(self.unexpected(c)),
                         };
                     }
@@ -1256,7 +1268,7 @@ impl Parser {
                     break;
                 }
                 return match self.peek() {
-                    None => Err(self.unfinished()),
+                    None => Err(Self::unfinished()),
                     Some(c) => Err(self.unexpected(c)),
                 };
             }
@@ -1272,7 +1284,7 @@ impl Parser {
                 CaseEnd::Break
             } else {
                 return match self.peek() {
-                    None => Err(self.unfinished()),
+                    None => Err(Self::unfinished()),
                     Some(c) => Err(self.unexpected(c)),
                 };
             };
@@ -1287,7 +1299,7 @@ impl Parser {
         let Some(name_word) = self.word(Ctx::Normal)? else {
             self.pos = start;
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         };
@@ -1301,7 +1313,7 @@ impl Parser {
             self.skip_blanks();
             if !self.eat(")") {
                 return match self.peek() {
-                    None => Err(self.unfinished()),
+                    None => Err(Self::unfinished()),
                     Some(c) => Err(self.unexpected(c)),
                 };
             }
@@ -1313,7 +1325,7 @@ impl Parser {
     fn function_body(&mut self, name: String, line: u32) -> Result<Command> {
         self.linebreak()?;
         if self.peek().is_none() {
-            return Err(self.unfinished());
+            return Err(Self::unfinished());
         }
         let start = (self.pos, self.line);
         let body = self.command()?;
@@ -1424,7 +1436,7 @@ impl Parser {
         }
         if command.words.is_empty() && command.assigns.is_empty() && command.redirects.is_empty() {
             return match self.peek() {
-                None => Err(self.unfinished()),
+                None => Err(Self::unfinished()),
                 Some(c) => Err(self.unexpected(c)),
             };
         }
@@ -1736,6 +1748,7 @@ impl Parser {
         let pending = std::mem::take(&mut self.pending);
         for doc in pending {
             let first_line = self.line;
+            let expand = doc.doc.borrow().expand;
             let mut body = String::new();
             loop {
                 if self.peek_raw().is_none() {
@@ -1748,11 +1761,21 @@ impl Parser {
                     break;
                 }
                 let mut text = String::new();
-                while let Some(c) = self.bump_raw() {
-                    if c == '\n' {
+                loop {
+                    while let Some(c) = self.bump_raw() {
+                        if c == '\n' {
+                            break;
+                        }
+                        text.push(c);
+                    }
+                    // In a body that is expanded, a `\` that ends a line
+                    // joins the next to it before the delimiter is looked
+                    // for, as in bash: `x\` then `EOF` is the line `xEOF`.
+                    let escapes = text.len() - text.trim_end_matches('\\').len();
+                    if !expand || escapes.is_multiple_of(2) || self.peek_raw().is_none() {
                         break;
                     }
-                    text.push(c);
+                    text.pop();
                 }
                 let line = if doc.strip_tabs { text.trim_start_matches('\t') } else { &text };
                 if line == doc.delimiter {
@@ -1761,7 +1784,6 @@ impl Parser {
                 body.push_str(line);
                 body.push('\n');
             }
-            let expand = doc.doc.borrow().expand;
             let word = if expand {
                 self.sub_word(&body, first_line, WordMode::HereDoc)?
             } else {
@@ -2012,7 +2034,7 @@ impl Parser {
     fn cond_next_in_term(&mut self) -> Result<CondNext> {
         self.skip_blanks();
         match self.cond_next() {
-            CondNext::End if self.more => Err(self.unfinished()),
+            CondNext::End if self.more => Err(Self::unfinished()),
             CondNext::End => Ok(CondNext::Newline),
             next => Ok(next),
         }
@@ -3060,6 +3082,14 @@ impl Parser {
                     flush_text(&mut lit, &mut parts);
                     parts.push(parser.backquoted(false).map_err(incomplete)?);
                 }
+                // `$"..."` and `$'...'` lose their `$`, as in bash: the
+                // quotes are read as quotes are here.
+                '$' if mode != WordMode::HereDoc
+                    && (parser.peek2() == Some('"')
+                        || (mode == WordMode::Arith && parser.peek2() == Some('\''))) =>
+                {
+                    parser.bump();
+                }
                 '$' => {
                     flush_text(&mut lit, &mut parts);
                     match parser.dollar(true).map_err(incomplete)? {
@@ -3071,7 +3101,8 @@ impl Parser {
                     // Double quotes in arithmetic group nothing.
                     parser.bump();
                 }
-                '\'' if mode != WordMode::HereDoc => {
+                // In arithmetic, as in double quotes, `'` is itself.
+                '\'' if mode == WordMode::Subscript => {
                     parser.bump();
                     flush_text(&mut lit, &mut parts);
                     let mut text = String::new();

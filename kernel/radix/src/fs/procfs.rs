@@ -122,7 +122,7 @@ impl Listing for Root {
         posix::zombie_numbers(&mut numbers);
         numbers.sort_unstable();
         numbers.dedup();
-        for number in numbers.iter() {
+        for number in &numbers {
             let mut name = TextBuf::<24>::new();
             let _ = write!(name, "{number}");
             if !f(name.as_str(), Kind::Directory) {

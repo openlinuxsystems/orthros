@@ -204,4 +204,10 @@ f21 ()
 { 
     echo ${x}y "${x}" $x ${1} ${@}
 }
+6 7 $d 5y 2
+aEOF
+b
+6 7 $d 5y 2
+aEOF
+b
 status=0

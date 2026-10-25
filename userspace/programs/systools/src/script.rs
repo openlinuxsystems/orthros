@@ -84,11 +84,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     // SAFETY: openpty writes the two descriptors; the name may be null.
     let opened = unsafe {
         libc::openpty(
-            &mut master,
-            &mut slave,
+            &raw mut master,
+            &raw mut slave,
             std::ptr::null_mut(),
             std::ptr::null(),
-            if tty { &size } else { std::ptr::null() },
+            if tty { &raw const size } else { std::ptr::null() },
         )
     };
     if opened != 0 {
@@ -134,19 +134,19 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         // SAFETY: all zeros is a valid termios: numbers.
         let mut t: libc::termios = unsafe { util::zeroed() };
         // SAFETY: tcgetattr fills `t`.
-        if unsafe { libc::tcgetattr(0, &mut t) } == 0 {
+        if unsafe { libc::tcgetattr(0, &raw mut t) } == 0 {
             saved.0 = Some(t);
             let mut raw = t;
             // SAFETY: cfmakeraw changes the termios it is given.
-            unsafe { libc::cfmakeraw(&mut raw) };
+            unsafe { libc::cfmakeraw(&raw mut raw) };
             // SAFETY: `raw` is a valid termios.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) };
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const raw) };
         }
         // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a function address.
         let mut action: libc::sigaction = unsafe { util::zeroed() };
         action.sa_sigaction = on_winch as *const () as usize;
         // SAFETY: the handler only stores to an atomic.
-        unsafe { libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut()) };
+        unsafe { libc::sigaction(libc::SIGWINCH, &raw const action, std::ptr::null_mut()) };
     }
     let mut stdin_open = true;
     let mut buffer = [0u8; 4096];
@@ -205,7 +205,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     drop(saved);
     let mut status = 0;
     // SAFETY: waits for our own child.
-    unsafe { libc::waitpid(pid, &mut status, 0) };
+    unsafe { libc::waitpid(pid, &raw mut status, 0) };
     // SAFETY: closing our descriptor.
     unsafe { libc::close(master) };
     let code = if libc::WIFEXITED(status) {

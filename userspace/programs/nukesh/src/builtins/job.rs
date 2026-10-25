@@ -197,6 +197,7 @@ pub fn suspend(shell: &mut Shell, args: &[String]) -> Res {
 }
 
 /// What `wait` waits for.
+#[derive(Clone, Copy)]
 enum Target {
     /// A process, or the last of a job.
     Pid(i32),
@@ -551,7 +552,7 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                     match job {
                         // One that ended takes the signal as done, as in
                         // bash.
-                        Some(job) if !job.done() => shell.job_targets(&job),
+                        Some(job) if !job.done() => job.targets(),
                         _ => Vec::new(),
                     }
                 }
@@ -581,7 +582,7 @@ pub fn kill(shell: &mut Shell, args: &[String]) -> Res {
                     j.stopped() && (j.pgid == -pid || j.procs.iter().any(|p| p.pid == pid))
                 }) {
                     if pid < 0 {
-                        shell.signal_job(job, libc::SIGCONT);
+                        job.signal(libc::SIGCONT);
                     } else {
                         let _ = sys::kill(pid, libc::SIGCONT);
                     }

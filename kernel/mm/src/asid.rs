@@ -60,7 +60,7 @@ impl<const BITS: u32, const CPUS: usize> Asids<BITS, CPUS> {
 
     /// A fresh allocator, in generation 1.
     pub const fn new() -> Self {
-        assert!(BITS >= 1 && BITS <= 12);
+        const { assert!(BITS >= 1 && BITS <= 12) };
         let mut map = [0; MAP_WORDS];
         map[0] = 1;
         Asids {
@@ -258,7 +258,7 @@ mod tests {
             let asids = Asids::<3, 4>::new();
             let spaces: Vec<AtomicU64> = (0..6).map(|_| AtomicU64::new(0)).collect();
             // What each CPU's TLB may hold: identifier -> space.
-            let mut tlb: Vec<std::collections::HashMap<u16, usize>> = vec![Default::default(); 4];
+            let mut tlb = vec![std::collections::HashMap::<u16, usize>::new(); 4];
             let mut running = [None; 4];
             for (cpu, space) in switches {
                 let (id, flush) = asids.switch(cpu, &spaces[space]);

@@ -312,7 +312,7 @@ impl Domain {
 
     /// What to wait on (`sched::wait`) for its last thread to exit.
     pub fn key(&self) -> usize {
-        self as *const Domain as usize
+        core::ptr::from_ref::<Domain>(self) as usize
     }
 
     /// Marks it stopping (or not): from the out-of-memory policy, counted

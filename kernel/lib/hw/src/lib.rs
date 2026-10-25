@@ -176,7 +176,7 @@ impl Mmio {
             #[cfg(any(test, feature = "fake"))]
             Backing::Fake(regs, start) => {
                 let _ = value;
-                regs.write(start + offset, SIZE, wide)
+                regs.write(start + offset, SIZE, wide);
             }
         }
     }
@@ -229,10 +229,12 @@ pub type Release = fn(virt: usize, phys: u64, len: usize);
 /// Physically contiguous memory that a device reads and writes by itself.
 ///
 /// The device may change it at any time it owns a part, so the CPU reaches
-/// it only with volatile accesses at checked offsets, like registers; a
-/// driver orders its writes before telling the device with
-/// [`device_barrier`]. It is given back when dropped, so a driver must not
-/// drop it while the device may still use it (resetting the device first).
+/// it only with volatile accesses at checked offsets, like registers (an
+/// access outside it, or a word's at an offset that is not a multiple of
+/// its size, panics); a driver orders its writes before telling the device
+/// with [`device_barrier`]. It is given back when dropped, so a driver must
+/// not drop it while the device may still use it (resetting the device
+/// first).
 pub struct Dma {
     virt: usize,
     phys: u64,
@@ -266,15 +268,14 @@ impl Dma {
     #[cfg(any(test, feature = "fake"))]
     pub fn fake(len: usize) -> Dma {
         let pages = len.div_ceil(4096).max(1);
-        let memory: &'static mut [u64] = std::vec![0u64; pages * 512].leak();
+        let memory = std::boxed::Box::leak(std::vec![0u64; pages * 512].into_boxed_slice());
         let virt = memory.as_mut_ptr() as usize;
         fn release(virt: usize, _phys: u64, len: usize) {
             let pages = len.div_ceil(4096).max(1);
-            // SAFETY: `fake` leaked exactly this vector.
+            let memory = core::ptr::slice_from_raw_parts_mut(virt as *mut u64, pages * 512);
+            // SAFETY: `fake` leaked exactly this boxed slice.
             #[allow(unsafe_code)]
-            drop(unsafe {
-                std::vec::Vec::from_raw_parts(virt as *mut u64, pages * 512, pages * 512)
-            });
+            drop(unsafe { std::boxed::Box::from_raw(memory) });
         }
         Dma { virt, phys: virt as u64, len, release }
     }
@@ -302,29 +303,32 @@ impl Dma {
         self.virt + offset
     }
 
+    /// As `at`, for a word of `size` bytes, which must also be aligned.
+    fn word(&self, offset: usize, size: usize) -> usize {
+        assert!(offset.is_multiple_of(size), "unaligned DMA access of {size} bytes at {offset:#x}");
+        self.at(offset, size)
+    }
+
     /// Reads the `u16` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn read16(&self, offset: usize) -> u16 {
-        assert!(offset.is_multiple_of(2));
         // SAFETY: `new`'s contract makes the memory ours and mapped, and
-        // `at` kept the access inside it; the access is aligned.
-        unsafe { core::ptr::read_volatile(self.at(offset, 2) as *const u16) }
+        // `word` kept the access inside it and aligned.
+        unsafe { core::ptr::read_volatile(self.word(offset, 2) as *const u16) }
     }
 
     /// Reads the `u32` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn read32(&self, offset: usize) -> u32 {
-        assert!(offset.is_multiple_of(4));
         // SAFETY: as in `read16`.
-        unsafe { core::ptr::read_volatile(self.at(offset, 4) as *const u32) }
+        unsafe { core::ptr::read_volatile(self.word(offset, 4) as *const u32) }
     }
 
     /// Reads the `u64` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn read64(&self, offset: usize) -> u64 {
-        assert!(offset.is_multiple_of(8));
         // SAFETY: as in `read16`.
-        unsafe { core::ptr::read_volatile(self.at(offset, 8) as *const u64) }
+        unsafe { core::ptr::read_volatile(self.word(offset, 8) as *const u64) }
     }
 
     /// Reads the byte at `offset`.
@@ -344,25 +348,22 @@ impl Dma {
     /// Writes the `u16` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn write16(&self, offset: usize, value: u16) {
-        assert!(offset.is_multiple_of(2));
         // SAFETY: as in `read16`.
-        unsafe { core::ptr::write_volatile(self.at(offset, 2) as *mut u16, value) }
+        unsafe { core::ptr::write_volatile(self.word(offset, 2) as *mut u16, value) }
     }
 
     /// Writes the `u32` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn write32(&self, offset: usize, value: u32) {
-        assert!(offset.is_multiple_of(4));
         // SAFETY: as in `read16`.
-        unsafe { core::ptr::write_volatile(self.at(offset, 4) as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(self.word(offset, 4) as *mut u32, value) }
     }
 
     /// Writes the `u64` at `offset` (aligned).
     #[allow(unsafe_code)]
     pub fn write64(&self, offset: usize, value: u64) {
-        assert!(offset.is_multiple_of(8));
         // SAFETY: as in `read16`.
-        unsafe { core::ptr::write_volatile(self.at(offset, 8) as *mut u64, value) }
+        unsafe { core::ptr::write_volatile(self.word(offset, 8) as *mut u64, value) }
     }
 
     /// Copies `out.len()` bytes from `offset` into `out`.
@@ -447,14 +448,13 @@ impl Page {
     /// address (for tests).
     #[cfg(any(test, feature = "fake"))]
     pub fn fake() -> Page {
-        let memory: &'static mut [u64] = std::vec![0u64; PAGE_SIZE / 8].leak();
+        let memory = std::boxed::Box::leak(std::vec![0u64; PAGE_SIZE / 8].into_boxed_slice());
         let virt = memory.as_mut_ptr() as usize;
         fn release(virt: usize, _phys: u64) {
-            // SAFETY: `fake` leaked exactly this vector.
+            let memory = core::ptr::slice_from_raw_parts_mut(virt as *mut u64, PAGE_SIZE / 8);
+            // SAFETY: `fake` leaked exactly this boxed slice.
             #[allow(unsafe_code)]
-            drop(unsafe {
-                std::vec::Vec::from_raw_parts(virt as *mut u64, PAGE_SIZE / 8, PAGE_SIZE / 8)
-            });
+            drop(unsafe { std::boxed::Box::from_raw(memory) });
         }
         Page { virt, phys: virt as u64, release }
     }

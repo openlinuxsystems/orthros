@@ -601,7 +601,7 @@ fn parse_float(text: &str) -> (f64, Number) {
     // errno is this thread's.
     let (x, range, used) = unsafe {
         *libc::__errno_location() = 0;
-        let x = libc::strtod(start, &mut end);
+        let x = libc::strtod(start, &raw mut end);
         (x, *libc::__errno_location() == libc::ERANGE, end.offset_from(start))
     };
     let how = if used.unsigned_abs() < c.as_bytes().len() {
@@ -1024,7 +1024,7 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
     let deadline = timeout
         .and_then(|t| Duration::try_from_secs_f64(t).ok())
         .and_then(|t| Instant::now().checked_add(t));
-    let _guard = TermGuard::new(fd, flags.has('s'), limit.is_some() || delimiter != b'\n');
+    let guard = TermGuard::new(fd, flags.has('s'), limit.is_some() || delimiter != b'\n');
     let mut input = Input::new(fd, deadline);
     let mut bytes: Vec<(u8, bool)> = Vec::new();
     let mut chars_read = 0usize;
@@ -1109,7 +1109,7 @@ pub fn read(shell: &mut Shell, args: &[String]) -> Res {
         }
     }
     input.finish();
-    drop(_guard);
+    drop(guard);
     let line = decode_flagged(&bytes);
     let status = match &stop {
         None => 0,
@@ -1177,7 +1177,7 @@ fn assign_read(
         }
         let fields = if exact { vec![whole()] } else { split_fields(line, &ifs, None) };
         let elements = fields.into_iter().map(|f| (None, f)).collect();
-        return Ok(if shell.assign_array_from("read", array, elements)? { 0 } else { 1 });
+        return Ok(i32::from(!shell.assign_array_from("read", array, elements)?));
     }
     // With no name, REPLY gets the line as it is.
     let reply = ["REPLY".to_string()];

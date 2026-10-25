@@ -108,7 +108,7 @@ fn main() -> ExitCode {
     }
     let mut argv: Vec<OsString> = std::env::args_os().collect();
     let called = argv.first().map(Path::new).and_then(Path::file_name);
-    let mut name = called.map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut name = called.map_or_default(|name| name.to_string_lossy().into_owned());
     if tool(&name).is_none() {
         // `systools <tool> ...`, or `systools --list`.
         match argv.get(1).map(|arg| arg.to_string_lossy().into_owned()) {

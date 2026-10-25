@@ -7,6 +7,7 @@
 //! (radix-process(2)'s `io_priority`, `set_affinity` and `affinity`).
 
 use std::ffi::{CString, OsString};
+use std::fmt::Write;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 
@@ -298,7 +299,10 @@ fn parse_list(text: &str) -> Option<Mask> {
 
 /// A mask in hexadecimal, without leading zeros.
 fn mask_hex(mask: &[u8]) -> String {
-    let mut text: String = mask.iter().rev().map(|b| format!("{b:02x}")).collect();
+    let mut text = String::new();
+    for b in mask.iter().rev() {
+        let _ = write!(text, "{b:02x}");
+    }
     while text.len() > 1 && text.starts_with('0') {
         text.remove(0);
     }
@@ -349,7 +353,7 @@ pub fn taskset(args: &mut Args) -> Result<i32, Fail> {
             Arg::Operand(first) => {
                 let mut rest = vec![first];
                 rest.extend(args.rest());
-                return taskset_run(rest, pid_mode, list, all_threads);
+                return taskset_run(&rest, pid_mode, list, all_threads);
             }
             other => return Err(args.unknown(&other)),
         }
@@ -357,12 +361,7 @@ pub fn taskset(args: &mut Args) -> Result<i32, Fail> {
     Err(usage("usage: taskset [-p] [-c] [MASK|LIST] [PID | COMMAND [ARGUMENT...]]".into()))
 }
 
-fn taskset_run(
-    operands: Vec<OsString>,
-    pid_mode: bool,
-    list: bool,
-    all: bool,
-) -> Result<i32, Fail> {
+fn taskset_run(operands: &[OsString], pid_mode: bool, list: bool, all: bool) -> Result<i32, Fail> {
     let text: Vec<String> = operands.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let parse = |t: &str| -> Result<Mask, Fail> {
         let mask = if list { parse_list(t) } else { parse_mask(t) };

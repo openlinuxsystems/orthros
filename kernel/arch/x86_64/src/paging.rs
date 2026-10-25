@@ -560,7 +560,7 @@ pub fn unmap_area(virt: usize, pages: usize) {
             let entry = slot.map_or(0, |slot| slot.load(Ordering::Relaxed));
             match slot {
                 Some(slot) if entry & PRESENT != 0 => {
-                    slot.store(entry & !PRESENT, Ordering::Relaxed)
+                    slot.store(entry & !PRESENT, Ordering::Relaxed);
                 }
                 _ => panic!("unmapping {:#x}: not a mapped area", area + page * PAGE),
             }

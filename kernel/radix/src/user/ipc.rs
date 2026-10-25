@@ -275,7 +275,8 @@ pub fn recv(
                 IpcState::Delivered(delivery) => break delivery,
                 _ => unreachable!("a receiver's wait ends with a message or a failure"),
             },
-            Taken::NeedStore => continue,
+            // Again, with the store.
+            Taken::NeedStore => {}
         }
     };
     if let Some(caller) = delivery.caller.take() {
@@ -317,7 +318,7 @@ fn take(
             endpoint.cap_senders.fetch_sub(1, Ordering::Relaxed);
             match transfer(store, &message, user) {
                 Ok(slots) => {
-                    words[..message.info.caps].copy_from_slice(&slots[..message.info.caps])
+                    words[..message.info.caps].copy_from_slice(&slots[..message.info.caps]);
                 }
                 Err(err) => {
                     // The sender gets the error; the next one may fit.

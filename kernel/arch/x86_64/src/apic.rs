@@ -185,7 +185,7 @@ fn enable_pv_eoi() {
     let word = &percpu::current().pv_eoi;
     // The word must be zero when the hypervisor is given it.
     word.store(0, Ordering::Relaxed);
-    let Some(phys) = paging::translate(word as *const _ as usize) else { return };
+    let Some(phys) = paging::translate(core::ptr::from_ref(word) as usize) else { return };
     // SAFETY: KVM advertised the MSR. It takes the physical address of a
     // 4-byte aligned word in RAM, this CPU's own, which lives as long as
     // the kernel and which the hypervisor only changes from this CPU.
@@ -254,7 +254,7 @@ pub fn enable() {
 /// processor UID `uid`, if the table says.
 fn nmi_pin(madt: Option<&Madt<'_>>, uid: Option<u32>) -> (u8, u16) {
     madt.into_iter()
-        .flat_map(|madt| madt.entries())
+        .flat_map(radix_acpi::Madt::entries)
         .find_map(|entry| match entry {
             MadtEntry::LocalApicNmi { processor_uid, flags, lint }
                 if processor_uid == u32::MAX || Some(processor_uid) == uid =>

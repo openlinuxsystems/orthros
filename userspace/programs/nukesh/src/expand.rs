@@ -161,13 +161,13 @@ impl Shell {
     fn expand_into(&mut self, word: &Word, out: &mut Vec<String>) -> Result<(), Flow> {
         let pieces = self.pieces(word, true)?;
         for field in self.split(pieces) {
-            self.glob_field(field, out)?;
+            self.glob_field(&field, out)?;
         }
         Ok(())
     }
 
     /// Pathname expansion of one field.
-    fn glob_field(&mut self, field: Field, out: &mut Vec<String>) -> Result<(), Flow> {
+    fn glob_field(&mut self, field: &Field, out: &mut Vec<String>) -> Result<(), Flow> {
         if !self.opts.noglob {
             let pattern = field.pattern();
             if pattern::has_meta(&pattern, self.shopt("extglob")) {
@@ -228,9 +228,10 @@ impl Shell {
             if field.segs.iter().all(|(text, quoted)| !quoted && text.is_empty()) {
                 return Ok(None);
             }
-            match self.interactive {
-                true => self.glob_field(field, &mut fields)?,
-                false => fields.push(field.text()),
+            if self.interactive {
+                self.glob_field(&field, &mut fields)?;
+            } else {
+                fields.push(field.text());
             }
         }
         Ok(match <[String; 1]>::try_from(fields) {
@@ -408,7 +409,7 @@ impl Shell {
     ) -> Result<(), Flow> {
         match part {
             WordPart::Lit(s) => {
-                out.push(if quoted { Piece::Quoted(s.clone()) } else { Piece::Lit(s.clone()) })
+                out.push(if quoted { Piece::Quoted(s.clone()) } else { Piece::Lit(s.clone()) });
             }
             WordPart::Escaped(c) => out.push(Piece::Quoted(c.to_string())),
             WordPart::Quoted(s) => out.push(Piece::Quoted(s.clone())),
@@ -625,7 +626,7 @@ impl Shell {
                 }
                 if *t == 'A' {
                     let pieces = self.assignment_form(p, &value);
-                    emit(pieces, quoted, self.ifs_first(), out);
+                    emit(pieces, quoted, &self.ifs_first(), out);
                     return Ok(());
                 }
                 // Every element of an array: its keys and values, as one
@@ -635,23 +636,25 @@ impl Shell {
                 {
                     let pieces = if *t == 'K' {
                         let quote_value = crate::builtins::double_quote;
-                        let pairs = pairs.iter().map(|(k, v)| match assoc {
-                            true => {
+                        let pairs = pairs.iter().map(|(k, v)| {
+                            if assoc {
                                 format!("{} {} ", crate::builtins::quote_key(k), quote_value(v))
+                            } else {
+                                format!("{k} {}", quote_value(v))
                             }
-                            false => format!("{k} {}", quote_value(v)),
                         });
                         // bash ends an associative array's pairs with a blank.
-                        let text = match assoc {
-                            true => pairs.collect::<String>(),
-                            false => pairs.collect::<Vec<_>>().join(" "),
+                        let text = if assoc {
+                            pairs.collect::<String>()
+                        } else {
+                            pairs.collect::<Vec<_>>().join(" ")
                         };
                         PVal::One(text)
                     } else {
                         let star = p.index.as_ref().and_then(Word::as_literal) == Some("*");
                         PVal::List(pairs.into_iter().flat_map(|(k, v)| [k, v]).collect(), star)
                     };
-                    emit(pieces, quoted, self.ifs_first(), out);
+                    emit(pieces, quoted, &self.ifs_first(), out);
                     return Ok(());
                 }
                 self.check_set(p, &value)?;
@@ -691,7 +694,7 @@ impl Shell {
             ParamOp::Names(_) | ParamOp::Keys(_) => value,
             ParamOp::Bad(_) => unreachable!("an error above"),
         };
-        emit(value, quoted, self.ifs_first(), out);
+        emit(value, quoted, &self.ifs_first(), out);
         Ok(())
     }
 
@@ -756,7 +759,7 @@ impl Shell {
     /// `IFS` is unset.
     fn ifs_first(&self) -> String {
         match self.get("IFS") {
-            Some(ifs) => ifs.chars().next().map(String::from).unwrap_or_default(),
+            Some(ifs) => ifs.chars().next().map_or_default(String::from),
             None => " ".into(),
         }
     }
@@ -778,7 +781,7 @@ impl Shell {
         }
         if let ParamOp::Keys(all) = p.op {
             let ParamName::Var(name) = &p.name else { return Ok(PVal::List(Vec::new(), !all)) };
-            let keys = self.get_value(name).map(|v| v.keys()).unwrap_or_default();
+            let keys = self.get_value(name).map_or_default(|v| v.keys());
             return Ok(PVal::List(keys, !all));
         }
         if p.indirect && !matches!(p.name, ParamName::Var(_)) {
@@ -842,7 +845,7 @@ impl Shell {
                 Some(word) => {
                     let lit = word.as_literal().unwrap_or("");
                     if lit == "@" || lit == "*" {
-                        let v = self.get_value(&name).map(|v| v.elements()).unwrap_or_default();
+                        let v = self.get_value(&name).map_or_default(|v| v.elements());
                         v.join(" ")
                     } else {
                         let at = self.expand_subscript(&name, word)?;
@@ -1168,7 +1171,7 @@ impl Shell {
             }),
             _ => 0,
         };
-        emit(PVal::One(attribute_flags(attrs)), quoted, self.ifs_first(), out);
+        emit(PVal::One(attribute_flags(attrs)), quoted, &self.ifs_first(), out);
         Ok(())
     }
 
@@ -1259,20 +1262,20 @@ impl Shell {
 }
 
 /// Puts a parameter's value into pieces, quoted or not.
-fn emit(value: PVal, quoted: bool, ifs_first: String, out: &mut Vec<Piece>) {
+fn emit(value: PVal, quoted: bool, ifs_first: &str, out: &mut Vec<Piece>) {
     match value {
         PVal::Unset => {}
         PVal::One(s) => out.push(if quoted { Piece::Quoted(s) } else { Piece::Split(s) }),
         PVal::List(items, star) => {
             if quoted && star {
-                out.push(Piece::Quoted(items.join(&ifs_first)));
+                out.push(Piece::Quoted(items.join(ifs_first)));
             } else {
                 for (i, item) in items.into_iter().enumerate() {
                     if i > 0 {
                         out.push(if quoted {
                             Piece::Break
                         } else {
-                            Piece::SoftBreak(if star { ifs_first.clone() } else { " ".into() })
+                            Piece::SoftBreak(if star { ifs_first.to_string() } else { " ".into() })
                         });
                     }
                     out.push(if quoted { Piece::Quoted(item) } else { Piece::Split(item) });
@@ -1289,7 +1292,7 @@ fn join(pieces: &[Piece]) -> String {
     for piece in pieces {
         match piece {
             Piece::Lit(s) | Piece::Quoted(s) | Piece::Split(s) | Piece::SoftBreak(s) => {
-                out.push_str(s)
+                out.push_str(s);
             }
             Piece::Break => out.push(' '),
         }
@@ -1509,9 +1512,10 @@ pub fn quote(s: &str) -> String {
 /// `s` as bash names a command or a directory in some messages: as it
 /// is, or as `$'...'` if it holds characters that do not print.
 pub fn printable(s: &str) -> String {
-    match s.chars().any(|c| c.is_control() || text::char_byte(c).is_some()) {
-        true => quote_always(s),
-        false => s.to_string(),
+    if s.chars().any(|c| c.is_control() || text::char_byte(c).is_some()) {
+        quote_always(s)
+    } else {
+        s.to_string()
     }
 }
 

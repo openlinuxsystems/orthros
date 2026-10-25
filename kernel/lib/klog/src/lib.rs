@@ -178,7 +178,7 @@ impl fmt::Debug for Record {
             .field("level", &self.level)
             .field("cpu", &self.cpu)
             .field("text", &self.text())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

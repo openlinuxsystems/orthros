@@ -180,7 +180,7 @@ pub fn write_lockdep(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
             if class.subclass > 0 { " (nested)" } else { "" },
             if class.in_irq { ", in interrupts" } else { "" },
             if class.irqs_on { ", with interrupts on" } else { "" }
-        ))
+        ));
     });
     for cpu in 0..CHECKED_CPUS.min(<Arch as radix_hal::Smp>::cpu_count()) {
         let mut first = true;

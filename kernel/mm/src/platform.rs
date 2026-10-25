@@ -45,7 +45,7 @@ pub(crate) struct NoInterrupts<'a> {
 
 impl<'a> NoInterrupts<'a> {
     pub(crate) fn new(platform: Option<&'a dyn Platform>) -> NoInterrupts<'a> {
-        let were_enabled = platform.is_some_and(|p| p.disable_interrupts());
+        let were_enabled = platform.is_some_and(Platform::disable_interrupts);
         NoInterrupts { platform, were_enabled }
     }
 }

@@ -196,6 +196,8 @@ impl Args {
     }
 
     /// Fails for an option the tool does not know.
+    // A method, so that a tool's option loop reads `args.unknown(&other)`.
+    #[allow(clippy::unused_self)]
     pub fn unknown(&self, arg: &Arg) -> Fail {
         match arg {
             Arg::Short(c) => usage(format!("invalid option -- '{c}'")),

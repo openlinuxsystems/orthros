@@ -185,18 +185,17 @@ pub fn discover_cpus() {
         CpuTable { entries: [CpuEntry { apic_id: 0, acpi_uid: None }; MAX_CPUS], count: 1 };
     table.entries[0] = CpuEntry { apic_id: boot_id, acpi_uid: None };
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
-    for entry in madt.into_iter().flat_map(|madt| madt.entries()) {
+    for entry in madt.into_iter().flat_map(radix_acpi::Madt::entries) {
         if let radix_acpi::MadtEntry::LocalApic { processor_uid, apic_id, enabled: true, .. } =
             entry
         {
+            // A CPU listed twice (as xAPIC and x2APIC), or out of reach of
+            // xAPIC's 8-bit destinations, is left out.
             let listed = table.entries[1..table.count].iter().any(|e| e.apic_id == apic_id);
+            let reachable = apic_id <= 0xfe || apic::is_x2apic();
             if apic_id == boot_id {
                 table.entries[0].acpi_uid = Some(processor_uid);
-            } else if listed || (apic_id > 0xfe && !apic::is_x2apic()) {
-                // Listed twice (as xAPIC and x2APIC), or out of reach of
-                // xAPIC's 8-bit destinations.
-                continue;
-            } else if table.count < MAX_CPUS {
+            } else if !listed && reachable && table.count < MAX_CPUS {
                 table.entries[table.count] = CpuEntry { apic_id, acpi_uid: Some(processor_uid) };
                 table.count += 1;
             }
@@ -309,7 +308,7 @@ fn patch(base: usize, offset: usize, value: &[u8]) {
     // page, and every offset is inside the copied trampoline, which is
     // smaller than a page (checked when copying).
     unsafe {
-        core::ptr::copy_nonoverlapping(value.as_ptr(), (base + offset) as *mut u8, value.len())
+        core::ptr::copy_nonoverlapping(value.as_ptr(), (base + offset) as *mut u8, value.len());
     };
 }
 

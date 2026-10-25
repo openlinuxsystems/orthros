@@ -46,4 +46,8 @@ a[1 : bad array subscript (error token is "a[1 ")
 10#: invalid integer constant (error token is "10#")
 1 + 16#: invalid integer constant (error token is "16#")
 r1: expression recursion level exceeded (error token is "r1")
+6 6 60 20
+1+'2': syntax error: operand expected (error token is "'2'")
+1+'2': syntax error: operand expected (error token is "'2'")
+"1" : syntax error: operand expected (error token is ""1" ")
 status=0

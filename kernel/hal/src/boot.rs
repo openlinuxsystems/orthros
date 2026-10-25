@@ -194,7 +194,7 @@ impl fmt::Debug for Framebuffer {
             .field("height", &self.height)
             .field("pitch", &self.pitch)
             .field("format", &self.format)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

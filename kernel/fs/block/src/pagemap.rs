@@ -200,7 +200,7 @@ impl<T> PageMap<T> {
         let taken = remove_in(root, index, self.height - 1);
         if taken.is_some() {
             self.len -= 1;
-            if self.root.as_ref().is_some_and(|root| root.is_empty()) {
+            if self.root.as_ref().is_some_and(Node::is_empty) {
                 self.root = None;
                 self.height = 0;
             }
@@ -241,7 +241,7 @@ impl<T> PageMap<T> {
         let Some(root) = self.root.as_mut() else { return };
         let removed = retain_in(root, self.height - 1, 0, &mut keep, &mut taken);
         self.len -= removed;
-        if self.root.as_ref().is_some_and(|root| root.is_empty()) {
+        if self.root.as_ref().is_some_and(Node::is_empty) {
             self.root = None;
             self.height = 0;
         }

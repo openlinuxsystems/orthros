@@ -44,6 +44,8 @@ impl From<io::Error> for Fail {
 }
 
 /// `what: error`, as a failure.
+// It takes the error as `map_err` hands it over.
+#[allow(clippy::needless_pass_by_value)]
 pub fn failed(what: &dyn fmt::Display, error: io::Error) -> Fail {
     fail(format!("{what}: {}", strip_os_error(&error)))
 }
@@ -95,7 +97,7 @@ pub fn now_ns() -> u64 {
 pub fn monotonic_ns() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: `ts` is a valid timespec for the call to fill.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
@@ -105,14 +107,15 @@ pub fn local_time(seconds: i64, format: &str) -> String {
     // SAFETY: an all-zero tm is valid; localtime_r fills it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: both pointers are valid for the call.
-    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+    if unsafe { libc::localtime_r(&raw const time, &raw mut tm) }.is_null() {
         return seconds.to_string();
     }
     let Ok(format) = CString::new(format) else { return String::new() };
     let mut buffer = [0u8; 128];
     // SAFETY: the buffer is valid for its length, the format a C string.
-    let len =
-        unsafe { libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), format.as_ptr(), &tm) };
+    let len = unsafe {
+        libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), format.as_ptr(), &raw const tm)
+    };
     String::from_utf8_lossy(&buffer[..len]).into_owned()
 }
 
@@ -218,7 +221,7 @@ pub fn uname() -> (String, String, String) {
     // SAFETY: all zeros is a valid utsname: arrays of bytes.
     let mut names: libc::utsname = unsafe { zeroed() };
     // SAFETY: uname fills the structure it is given.
-    if unsafe { libc::uname(&mut names) } != 0 {
+    if unsafe { libc::uname(&raw mut names) } != 0 {
         return ("Dukovo".into(), "unknown".into(), "x86_64".into());
     }
     let text = |field: &[libc::c_char]| {
@@ -250,7 +253,7 @@ fn with_user<T>(uid: u32, read: impl FnOnce(&libc::passwd) -> T) -> Option<T> {
     // SAFETY: every pointer is valid for the call; the buffer for its
     // length.
     let e = unsafe {
-        libc::getpwuid_r(uid, &mut pw, buffer.as_mut_ptr().cast(), buffer.len(), &mut found)
+        libc::getpwuid_r(uid, &raw mut pw, buffer.as_mut_ptr().cast(), buffer.len(), &raw mut found)
     };
     (e == 0 && !found.is_null()).then(|| read(&pw))
 }
@@ -281,7 +284,7 @@ pub fn group_name(gid: u32) -> String {
     let mut found: *mut libc::group = std::ptr::null_mut();
     // SAFETY: as for getpwuid_r in user_name.
     let e = unsafe {
-        libc::getgrgid_r(gid, &mut gr, buffer.as_mut_ptr().cast(), buffer.len(), &mut found)
+        libc::getgrgid_r(gid, &raw mut gr, buffer.as_mut_ptr().cast(), buffer.len(), &raw mut found)
     };
     if e != 0 || found.is_null() || gr.gr_name.is_null() {
         return gid.to_string();
@@ -426,12 +429,14 @@ impl Regex {
         let mut compiled = Box::new(RegexT([0; 256]));
         let flags = REG_EXTENDED | REG_NOSUB | if ignore_case { REG_ICASE } else { 0 };
         // SAFETY: `compiled` has room for a regex_t, `text` is a C string.
-        let code = unsafe { regcomp(&mut *compiled, text.as_ptr(), flags) };
+        let code = unsafe { regcomp(&raw mut *compiled, text.as_ptr(), flags) };
         if code != 0 {
             let mut buffer = [0u8; 256];
             // SAFETY: the buffer is valid for its length; regerror only
             // reads `compiled`.
-            unsafe { regerror(code, &*compiled, buffer.as_mut_ptr().cast(), buffer.len()) };
+            unsafe {
+                regerror(code, &raw const *compiled, buffer.as_mut_ptr().cast(), buffer.len())
+            };
             let end = buffer.iter().position(|&b| b == 0).unwrap_or(0);
             return Err(String::from_utf8_lossy(&buffer[..end]).into_owned());
         }
@@ -442,14 +447,16 @@ impl Regex {
     pub fn is_match(&self, text: &str) -> bool {
         let Ok(text) = CString::new(text) else { return false };
         // SAFETY: the expression was compiled; no matches are asked for.
-        unsafe { regexec(&*self.compiled, text.as_ptr(), 0, std::ptr::null_mut(), 0) == 0 }
+        unsafe {
+            regexec(&raw const *self.compiled, text.as_ptr(), 0, std::ptr::null_mut(), 0) == 0
+        }
     }
 }
 
 impl Drop for Regex {
     fn drop(&mut self) {
         // SAFETY: it was compiled, and is freed once.
-        unsafe { regfree(&mut *self.compiled) };
+        unsafe { regfree(&raw mut *self.compiled) };
     }
 }
 

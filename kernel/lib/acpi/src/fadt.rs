@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn reads_timer_reset_and_8042() {
-        let bytes = table(b"FACP", 6, &fadt_body(276 - 36));
+        let bytes = table(*b"FACP", 6, &fadt_body(276 - 36));
         let fadt = Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
         let (timer, extended) = fadt.pm_timer.unwrap();
         assert_eq!((timer.space, timer.address, extended), (GenericAddress::IO, 0x608, true));
@@ -198,11 +198,11 @@ mod tests {
 
     #[test]
     fn short_tables_lack_newer_fields() {
-        let bytes = table(b"FACP", 1, &fadt_body(116 - 36));
+        let bytes = table(*b"FACP", 1, &fadt_body(116 - 36));
         let fadt = Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
         assert!(fadt.pm_timer.is_some());
         assert_eq!(fadt.reset, None);
-        let bytes = table(b"FACP", 6, &fadt_body(276 - 36));
+        let bytes = table(*b"FACP", 6, &fadt_body(276 - 36));
         assert_eq!(Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap().sleep_control, None);
     }
 
@@ -217,7 +217,7 @@ mod tests {
             body[at + 3] = 1;
             body[at + 4..at + 12].copy_from_slice(&port.to_le_bytes());
         }
-        let bytes = table(b"FACP", 6, &body);
+        let bytes = table(*b"FACP", 6, &body);
         let fadt = Fadt::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
         assert!(fadt.hardware_reduced);
         let control = fadt.sleep_control.unwrap();

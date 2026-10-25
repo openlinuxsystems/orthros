@@ -147,7 +147,7 @@ extern "C" fn radix_kaslr_relocate(slide: u64) {
                 // address inside the loaded image, below 4 GiB, where the
                 // boot page tables map memory one to one and writably.
                 unsafe {
-                    slot.write_unaligned(radix_relocs::slide64(slot.read_unaligned(), slide))
+                    slot.write_unaligned(radix_relocs::slide64(slot.read_unaligned(), slide));
                 };
                 moved += 1;
             }

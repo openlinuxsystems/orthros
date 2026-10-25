@@ -417,6 +417,9 @@ pub struct Checker<const CPUS: usize> {
 
 impl<const CPUS: usize> Checker<CPUS> {
     /// A checker that is off and has seen nothing.
+    // Its arrays are large, but the kernel's checker is built at compile
+    // time, as a static, and tests box theirs.
+    #[allow(clippy::large_stack_arrays)]
     pub const fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),

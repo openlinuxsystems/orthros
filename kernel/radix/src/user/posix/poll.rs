@@ -65,7 +65,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 static POLLERS: AtomicUsize = AtomicUsize::new(0);
 
 fn key() -> usize {
-    &GENERATION as *const AtomicU64 as usize
+    &raw const GENERATION as usize
 }
 
 /// Something a poll may look at has changed: waiting pollers look again.

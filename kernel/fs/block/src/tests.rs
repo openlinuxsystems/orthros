@@ -154,7 +154,7 @@ fn table(disk: &RamDisk) -> Result<(Scheme, Vec<partition::Partition>), partitio
     let (scheme, found) = partition::read(sectors, &mut |at, out| {
         crate::read_sector(disk, at, out).map_err(|_| partition::Error::Io)
     })?;
-    Ok((scheme, found.to_vec()))
+    Ok((scheme, found.clone()))
 }
 
 #[test]

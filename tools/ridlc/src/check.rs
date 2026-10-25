@@ -195,7 +195,7 @@ impl Checker<'_> {
         self.name(module, call.line, &call.name, what);
         for (list, side) in [(&call.args, "arguments"), (&call.results, "results")] {
             let mut names = HashSet::new();
-            for field in list.iter() {
+            for field in list {
                 self.field_name(module, field.line, &field.name, "parameter");
                 if !names.insert(field.name.as_str()) {
                     self.fail(

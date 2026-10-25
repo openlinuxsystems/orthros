@@ -131,7 +131,7 @@ pub fn shutdown(args: &mut Args) -> Result<i32, Fail> {
     let Some(seconds) = delay(&time, local_hm()) else {
         return Err(usage(format!("Failed to parse time specification: {time}")));
     };
-    let message = operands.get(1..).map(|words| words.join(" ")).unwrap_or_default();
+    let message = operands.get(1..).map_or_default(|words| words.join(" "));
     let what = match end {
         End::PowerOff => "power-off",
         End::Reboot => "reboot",

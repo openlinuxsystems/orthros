@@ -79,7 +79,7 @@ impl Assoc {
             entry.0 = value;
             return;
         }
-        if self.entries.len() >= self.buckets(self.growths) * 2 {
+        if self.entries.len() >= Self::buckets(self.growths) * 2 {
             self.growths += 1;
         }
         self.entries.insert(key, (value, self.growths));
@@ -94,7 +94,7 @@ impl Assoc {
         self.entries.clear();
     }
 
-    fn buckets(&self, growths: u32) -> usize {
+    fn buckets(growths: u32) -> usize {
         ASSOC_BUCKETS << (2 * growths)
     }
 
@@ -123,7 +123,7 @@ impl Assoc {
         for (i, (_, (_, grown))) in self.entries.iter().enumerate() {
             while growths < *grown {
                 growths += 1;
-                let mask = (self.buckets(growths) - 1) as u32;
+                let mask = (Self::buckets(growths) - 1) as u32;
                 let mut grown_table: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
                 for list in table.values() {
                     for &j in list.iter().rev() {
@@ -132,7 +132,7 @@ impl Assoc {
                 }
                 table = grown_table;
             }
-            let mask = (self.buckets(growths) - 1) as u32;
+            let mask = (Self::buckets(growths) - 1) as u32;
             table.entry(hashes[i] & mask).or_default().push(i);
         }
         table.values().flat_map(|list| list.iter().rev().copied()).collect()
@@ -192,7 +192,7 @@ impl Value {
     pub fn keys(&self) -> Vec<String> {
         match self {
             Value::Str(_) => vec!["0".into()],
-            Value::Array(map) => map.keys().map(|k| k.to_string()).collect(),
+            Value::Array(map) => map.keys().map(ToString::to_string).collect(),
             Value::Assoc(map) => map.keys().cloned().collect(),
         }
     }

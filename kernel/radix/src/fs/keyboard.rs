@@ -250,7 +250,8 @@ fn send(byte: u8) -> bool {
         WAITING.store(false, Ordering::Release);
         match answer as u8 {
             ACK => return true,
-            RESEND => continue,
+            // Asked for it again.
+            RESEND => {}
             _ => break,
         }
     }

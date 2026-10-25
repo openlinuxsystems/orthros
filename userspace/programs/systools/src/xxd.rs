@@ -59,11 +59,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     while let Some(arg) = args.next()? {
         match arg {
             Arg::Short('p') | Arg::Long(_) if is(&arg, 'p', &["ps", "postscript", "plain"]) => {
-                o.layout = Layout::Plain
+                o.layout = Layout::Plain;
             }
             Arg::Short('b') | Arg::Long(_) if is(&arg, 'b', &["bits"]) => o.layout = Layout::Bits,
             Arg::Short('i') | Arg::Long(_) if is(&arg, 'i', &["include"]) => {
-                o.layout = Layout::Include
+                o.layout = Layout::Include;
             }
             Arg::Short('e') => o.layout = Layout::Little,
             Arg::Short('c') | Arg::Long(_) if is(&arg, 'c', &["cols"]) => {
@@ -76,10 +76,10 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                 o.columns = Some(usize::try_from(n).unwrap_or(usize::MAX));
             }
             Arg::Short('g') | Arg::Long(_) if is(&arg, 'g', &["groupsize"]) => {
-                o.group = Some(number(args)? as usize)
+                o.group = Some(number(args)? as usize);
             }
             Arg::Short('l') | Arg::Long(_) if is(&arg, 'l', &["len"]) => {
-                o.length = Some(number(args)?)
+                o.length = Some(number(args)?);
             }
             Arg::Short('o') => o.offset = number(args)?,
             Arg::Short('s') | Arg::Long(_) if is(&arg, 's', &["seek"]) => {
@@ -90,8 +90,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                     None => (false, body),
                 };
                 let n = parse_number(body)
-                    .ok_or_else(|| usage(format!("invalid seek offset '{text}'")))?
-                    as i64;
+                    .ok_or_else(|| usage(format!("invalid seek offset '{text}'")))?;
+                // Too big an offset is the biggest one, as strtol gives.
+                let n = i64::try_from(n).unwrap_or(i64::MAX);
                 o.seek = Some(if negative { -n } else { n });
             }
             Arg::Short('u') => o.upper = true,
@@ -99,7 +100,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Short('d') => o.decimal = true,
             Arg::Short('C') | Arg::Long(_) if is(&arg, 'C', &["capitalize"]) => o.capitalize = true,
             Arg::Short('n') | Arg::Long(_) if is(&arg, 'n', &["name"]) => {
-                o.name = Some(args.text()?)
+                o.name = Some(args.text()?);
             }
             Arg::Short('r') | Arg::Long(_) if is(&arg, 'r', &["revert"]) => o.reverse = true,
             Arg::Short('R') => {
@@ -360,7 +361,7 @@ fn dump(
                     }
                 }
                 _ => {
-                    for &b in chunk.iter() {
+                    for &b in *chunk {
                         hex_part.push_str(&hex(b));
                     }
                 }

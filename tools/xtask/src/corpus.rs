@@ -855,8 +855,7 @@ fn point_shebangs(tree: &Path, patterns: &[String], bin: &Path) -> Result<()> {
         let dir = tree.join(dir);
         for entry in std::fs::read_dir(&dir).context(|| format!("reading {}", dir.display()))? {
             let path = entry.context(|| format!("reading {}", dir.display()))?.path();
-            let name =
-                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path.file_name().map_or_default(|n| n.to_string_lossy().into_owned());
             if !path.is_file() || !matches(files, &name) {
                 continue;
             }
@@ -1027,7 +1026,7 @@ fn first_difference(what: &str, expected_by: &str, expected: &[u8], got: &[u8]) 
 fn last_lines(bytes: &[u8], count: usize) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<_> = text.lines().filter(|line| !line.trim().is_empty()).collect();
-    lines[lines.len().saturating_sub(count)..].iter().map(|line| line.to_string()).collect()
+    lines[lines.len().saturating_sub(count)..].iter().map(ToString::to_string).collect()
 }
 
 #[cfg(test)]

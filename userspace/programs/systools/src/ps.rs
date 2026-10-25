@@ -291,20 +291,20 @@ fn options(args: &mut Args) -> Result<Options, Fail> {
             Arg::Short('x') => o.select.without_terminal = true,
             Arg::Short('p' | 'q') => o.select.pids.extend(numbers(&args.text()?)?),
             Arg::Long(l) if l == "pid" || l == "quick-pid" => {
-                o.select.pids.extend(numbers(&args.text()?)?)
+                o.select.pids.extend(numbers(&args.text()?)?);
             }
             Arg::Long(l) if l == "ppid" => o.select.parents.extend(numbers(&args.text()?)?),
             Arg::Short('s') => o.select.sessions.extend(numbers(&args.text()?)?),
             Arg::Long(l) if l == "sid" => o.select.sessions.extend(numbers(&args.text()?)?),
             Arg::Short('g') => o.select.groups.extend(numbers(&args.text()?)?),
             Arg::Short('t') => {
-                o.select.terminals.extend(util::list(&args.text()?).map(String::from))
+                o.select.terminals.extend(util::list(&args.text()?).map(String::from));
             }
             Arg::Long(l) if l == "tty" => {
-                o.select.terminals.extend(util::list(&args.text()?).map(String::from))
+                o.select.terminals.extend(util::list(&args.text()?).map(String::from));
             }
             Arg::Short('C') => {
-                o.select.commands.extend(util::list(&args.text()?).map(String::from))
+                o.select.commands.extend(util::list(&args.text()?).map(String::from));
             }
             Arg::Short('u' | 'U') => users(&mut o.select, &args.text()?)?,
             Arg::Long(l) if l == "user" || l == "User" => users(&mut o.select, &args.text()?)?,
@@ -764,7 +764,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let rights: Vec<bool> = o.columns.iter().map(|c| c.key.right).collect();
     print_table(&table, &rights, width)?;
     // Like procps-ng, 1 when nothing was selected.
-    Ok(if order.is_empty() { 1 } else { 0 })
+    Ok(i32::from(order.is_empty()))
 }
 
 /// The terminal ps runs on, as `pts/N`.
@@ -813,7 +813,7 @@ pub fn print_table(table: &[Vec<String>], right: &[bool], width: Option<usize>) 
         let line = line.trim_end();
         match width {
             Some(width) if line.chars().count() > width => {
-                writeln!(out, "{}", line.chars().take(width).collect::<String>())?
+                writeln!(out, "{}", line.chars().take(width).collect::<String>())?;
             }
             _ => writeln!(out, "{line}")?,
         }

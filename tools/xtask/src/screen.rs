@@ -154,7 +154,7 @@ fn cell_bits(image: &Image, x0: usize, y0: usize, width: usize, height: usize) -
             *counts.entry(image.pixel(x, y)).or_default() += 1;
         }
     }
-    let background = counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or_default();
+    let background = counts.into_iter().max_by_key(|&(_, n)| n).map_or_default(|(c, _)| c);
     (y0..y0 + height)
         .map(|y| {
             (0..width).fold(0u32, |bits, gx| {

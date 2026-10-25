@@ -49,4 +49,5 @@ true | !: 2
 bang 1
 time 0
 both 1
+coproc coproc 2
 status=0

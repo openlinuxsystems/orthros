@@ -56,7 +56,7 @@ impl RawMutex {
 
     /// The lock's address, which names it to the kernel's wait queues.
     pub fn key(&self) -> usize {
-        self as *const RawMutex as usize
+        core::ptr::from_ref::<RawMutex>(self) as usize
     }
 
     /// Where the lock was created.
@@ -109,7 +109,7 @@ impl<T: ?Sized> Mutex<T> {
         if let Some(hooks) = hooks::checking(hooks) {
             hooks.lock_acquire(self.acquire_info(at, subclass, false));
         }
-        let me = hooks.map_or(0, |h| h.current_thread());
+        let me = hooks.map_or(0, Hooks::current_thread);
         let token = if me == 0 { NO_THREAD } else { me };
         if self.claim(token) {
             return self.guard(hooks, token);
@@ -125,7 +125,7 @@ impl<T: ?Sized> Mutex<T> {
     #[track_caller]
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let hooks = hooks::active();
-        let me = hooks.map_or(0, |h| h.current_thread());
+        let me = hooks.map_or(0, Hooks::current_thread);
         let token = if me == 0 { NO_THREAD } else { me };
         if !self.claim(token) {
             return None;
@@ -294,6 +294,6 @@ mod tests {
     fn mutexes_name_their_site() {
         let a = Mutex::new(());
         assert!(a.raw().site().location().file().ends_with("mutex.rs"));
-        assert_eq!(a.raw().key(), a.raw() as *const RawMutex as usize);
+        assert_eq!(a.raw().key(), std::ptr::from_ref::<RawMutex>(a.raw()) as usize);
     }
 }

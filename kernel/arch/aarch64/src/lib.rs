@@ -311,13 +311,13 @@ impl UserMode for Arch {
         None
     }
 
-    fn set_results(_: &mut (), _: &SyscallRegs) {}
+    fn set_results((): &mut (), _: &SyscallRegs) {}
 
-    fn thread_pointer(_: &()) -> u64 {
+    fn thread_pointer((): &()) -> u64 {
         0
     }
 
-    fn enter_user_registers(_: &()) -> ! {
+    fn enter_user_registers((): &()) -> ! {
         Self::halt()
     }
 

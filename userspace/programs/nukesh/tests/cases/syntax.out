@@ -334,4 +334,7 @@ x'] 1
   line 8: /nonexistent-dir/x: No such file or directory
 [declare -p nosuch5] 1
   line 8: declare: nosuch5: not found
+aEOF
+b
+c\
 status=0

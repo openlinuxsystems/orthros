@@ -142,7 +142,7 @@ static CHANGES: AtomicU64 = AtomicU64::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 fn changes_key() -> usize {
-    &CHANGES as *const AtomicU64 as usize
+    &raw const CHANGES as usize
 }
 
 /// The signal interval timer `index` sends.

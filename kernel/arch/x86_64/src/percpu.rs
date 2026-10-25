@@ -287,8 +287,7 @@ impl PerCpu {
         let [start, end] = &self.thread_stack;
         let (start, end) = (start.load(Ordering::Relaxed), end.load(Ordering::Relaxed));
         let stacks = self.stacks.get();
-        (start < end && !stacks.is_some_and(|s| s.containing(start).is_some()))
-            .then_some(start..end)
+        (start < end && stacks.is_none_or(|s| s.containing(start).is_none())).then_some(start..end)
     }
 
     /// The stack containing `addr`: one of this CPU's own, or the running
@@ -337,7 +336,7 @@ pub fn preempt_count() -> u32 {
     let count: u32;
     // SAFETY: as in `preempt_disable`, reading only.
     unsafe {
-        asm!("mov {:e}, gs:[16]", out(reg) count, options(nostack, readonly, preserves_flags))
+        asm!("mov {:e}, gs:[16]", out(reg) count, options(nostack, readonly, preserves_flags));
     };
     count
 }
@@ -393,7 +392,7 @@ pub fn interrupt_depth() -> u32 {
     let depth: u32;
     // SAFETY: as in `interrupt_enter`, reading only.
     unsafe {
-        asm!("mov {:e}, gs:[20]", out(reg) depth, options(nostack, readonly, preserves_flags))
+        asm!("mov {:e}, gs:[20]", out(reg) depth, options(nostack, readonly, preserves_flags));
     };
     depth
 }
@@ -445,11 +444,11 @@ pub fn current() -> &'static PerCpu {
 /// Points GS base at CPU `index`'s data. Called first thing on each CPU.
 pub fn set_current(index: usize) {
     let cpu = &CPUS[index];
-    cpu.self_addr.store(cpu as *const PerCpu as usize, Ordering::Relaxed);
+    cpu.self_addr.store(core::ptr::from_ref::<PerCpu>(cpu) as usize, Ordering::Relaxed);
     cpu.index.store(index, Ordering::Relaxed);
     // SAFETY: GS_BASE exists on every x86-64 CPU, and the kernel uses GS
     // only to reach `PerCpu`, which this now points at for this CPU.
-    unsafe { cpu::wrmsr(msr::GS_BASE, cpu as *const PerCpu as u64) };
+    unsafe { cpu::wrmsr(msr::GS_BASE, core::ptr::from_ref::<PerCpu>(cpu) as u64) };
 }
 
 fn tss_descriptor(base: u64, limit: u32) -> [u64; 2] {
@@ -481,7 +480,7 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
         _reserved3: 0,
         iomap_base: core::mem::size_of::<Tss>() as u16,
     };
-    let tss_base = &descriptors.tss as *const Tss as u64;
+    let tss_base = &raw const descriptors.tss as u64;
     let [tss_low, tss_high] = tss_descriptor(tss_base, core::mem::size_of::<Tss>() as u32 - 1);
     // The user descriptors have DPL 3 and their accessed bits set, so the
     // CPU never writes the table to set them.
@@ -528,12 +527,12 @@ pub fn load_descriptors(ist_tops: [usize; IST_STACKS]) {
             "mov fs, {tmp:x}",
             "mov gs, {tmp:x}",
             "ltr {tss:x}",
-            pointer = in(reg) &pointer,
+            pointer = in(reg) &raw const pointer,
             cs = in(reg) u64::from(KERNEL_CS),
             ds = in(reg) u64::from(KERNEL_DS),
             tss = in(reg) u64::from(TSS_SELECTOR),
             tmp = out(reg) _,
-        )
+        );
     };
     // Loading GS zeroed its base; point it back at this CPU.
     set_current(cpu.index());

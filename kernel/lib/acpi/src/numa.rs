@@ -179,7 +179,7 @@ mod tests {
         body.extend_from_slice(&memory_entry(0, 0, 0xa_0000, 0));
         // An unknown entry type is skipped.
         body.extend_from_slice(&[3, 4, 0, 0]);
-        let bytes = table(b"SRAT", 3, &body);
+        let bytes = table(*b"SRAT", 3, &body);
         let sdt = Sdt::parse(0x1000, &bytes).unwrap();
         let srat = Srat::parse(&sdt).unwrap();
         let entries: Vec<_> = srat.entries().collect();
@@ -203,13 +203,13 @@ mod tests {
     fn parses_distances() {
         let mut body = 2u64.to_le_bytes().to_vec();
         body.extend_from_slice(&[10, 21, 21, 255]);
-        let bytes = table(b"SLIT", 1, &body);
+        let bytes = table(*b"SLIT", 1, &body);
         let slit = Slit::parse(&Sdt::parse(0, &bytes).unwrap()).unwrap();
         assert_eq!(slit.localities, 2);
         assert_eq!(slit.distance(0, 1), Some(21));
         assert_eq!(slit.distance(1, 1), None);
         assert_eq!(slit.distance(2, 0), None);
-        let short = table(b"SLIT", 1, &3u64.to_le_bytes());
+        let short = table(*b"SLIT", 1, &3u64.to_le_bytes());
         assert!(Slit::parse(&Sdt::parse(0, &short).unwrap()).is_err());
     }
 }

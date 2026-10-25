@@ -174,12 +174,12 @@ pub unsafe fn save(area: usize) {
         // every enabled component.
         XSAVEOPT => unsafe {
             asm!("xsaveopt64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
-                 options(nostack, preserves_flags))
+                 options(nostack, preserves_flags));
         },
         // SAFETY: as above.
         XSAVE => unsafe {
             asm!("xsave64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
-                 options(nostack, preserves_flags))
+                 options(nostack, preserves_flags));
         },
         // SAFETY: as above, for the 512-byte legacy area.
         FXSAVE => unsafe { asm!("fxsave64 [{}]", in(reg) area, options(nostack, preserves_flags)) },
@@ -199,11 +199,11 @@ pub unsafe fn restore(area: usize) {
         // reserved header bytes are zero, MXCSR has no reserved bits set).
         XSAVE | XSAVEOPT => unsafe {
             asm!("xrstor64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
-                 options(nostack, preserves_flags, readonly))
+                 options(nostack, preserves_flags, readonly));
         },
         // SAFETY: as above.
         FXSAVE => unsafe {
-            asm!("fxrstor64 [{}]", in(reg) area, options(nostack, preserves_flags, readonly))
+            asm!("fxrstor64 [{}]", in(reg) area, options(nostack, preserves_flags, readonly));
         },
         _ => {}
     }
@@ -273,7 +273,7 @@ fn cpu_mxcsr_mask() -> u32 {
         // SAFETY: FXSAVE writes 512 bytes at a 16-byte aligned address,
         // which `legacy` is; it reads the FPU and changes nothing.
         unsafe {
-            asm!("fxsave64 [{}]", in(reg) legacy.0.as_mut_ptr(), options(nostack, preserves_flags))
+            asm!("fxsave64 [{}]", in(reg) legacy.0.as_mut_ptr(), options(nostack, preserves_flags));
         };
     }
     let mask = match u32::from_le_bytes(legacy.0[28..32].try_into().unwrap()) {
@@ -311,7 +311,7 @@ pub fn fill(seed: u64) {
             "movq xmm14, rax", "inc rax", "movq xmm15, rax",
             inout("rax") seed => _,
             options(nomem, nostack),
-        )
+        );
     };
     if avx() {
         // SAFETY: as above; VPERM2F128 with 0 copies each register's low
@@ -335,7 +335,7 @@ pub fn fill(seed: u64) {
                 "vperm2f128 ymm14, ymm14, ymm14, 0",
                 "vperm2f128 ymm15, ymm15, ymm15, 0",
                 options(nomem, nostack, preserves_flags),
-            )
+            );
         };
     }
 }
@@ -359,7 +359,7 @@ pub fn holds(seed: u64) -> bool {
             "movq [rdi + 120], xmm15",
             in("rdi") low.as_mut_ptr(),
             options(nostack, preserves_flags),
-        )
+        );
     };
     let mut ok = low.iter().enumerate().all(|(i, &v)| v == seed.wrapping_add(i as u64));
     if ok && avx() {
@@ -387,7 +387,7 @@ pub fn holds(seed: u64) -> bool {
                 "vextractf128 xmm0, ymm15, 1", "movq [rdi + 120], xmm0",
                 in("rdi") high.as_mut_ptr(),
                 options(nostack, preserves_flags),
-            )
+            );
         };
         ok = high.iter().enumerate().all(|(i, &v)| v == seed.wrapping_add(i as u64));
         // Put XMM0 and the high half of YMM0 back as `fill` left them.

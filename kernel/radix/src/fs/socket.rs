@@ -208,7 +208,7 @@ pub struct Listener {
 
 impl Listener {
     fn key(&self) -> usize {
-        self as *const Listener as usize
+        core::ptr::from_ref::<Listener>(self) as usize
     }
 
     /// Something changed: the waits look again, and so does `poll`.

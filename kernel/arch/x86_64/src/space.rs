@@ -294,7 +294,7 @@ impl AddressSpace {
     pub fn switch_to(&'static self) {
         let were_enabled = cpu::disable_interrupts();
         let me = percpu::current_index();
-        let this = self as *const AddressSpace as usize;
+        let this = core::ptr::from_ref::<AddressSpace>(self) as usize;
         let previous = percpu::current().space.swap(this, Ordering::Relaxed);
         if previous != this {
             if previous != 0 {
@@ -680,7 +680,7 @@ pub fn self_test(on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
         .and_then(|()| spaces[1].map(USER_TEST, b, Access::ReadOnly));
     let result = mapped.map_err(|_| "out of memory").and_then(|()| {
         for (slot, space) in TEST.spaces.iter().zip(&spaces) {
-            slot.store(*space as *const AddressSpace as u64, Ordering::Relaxed);
+            slot.store(core::ptr::from_ref::<AddressSpace>(*space) as u64, Ordering::Relaxed);
         }
         TEST.expect_space[0].store(A, Ordering::Relaxed);
         TEST.expect_space[1].store(B, Ordering::Release);

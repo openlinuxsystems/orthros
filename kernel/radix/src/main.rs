@@ -140,7 +140,7 @@ pub fn boot_summary() -> Option<&'static BootSummary> {
 // (`radix_hal::KernelMain`), so exporting it unmangled is sound.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub fn radix_kernel_main(mut params: BootParams) -> ! {
+pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     let flags = CommandLine::new(params.command_line);
     let settings = Settings {
         qemu_exit: flags.has("qemu-exit"),

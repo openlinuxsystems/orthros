@@ -367,7 +367,7 @@ fn listed_packages(
                     BUNDLED_C.iter().find(|(name, ..)| *name == package.name)
                 {
                     package.license = format!("({}) AND {license}", package.license);
-                    for file in files.iter() {
+                    for file in *files {
                         let Some(notice) = dir.as_ref().map(|dir| dir.join(file)) else { break };
                         if !notice.is_file() {
                             crate::bail!(
@@ -474,7 +474,7 @@ fn std_packages(ctx: &Ctx, ports: &Ports) -> Result<Vec<Package>> {
         match entry.source {
             Source::Path(_) => {
                 if package.version == "0.0.0" {
-                    package.version = rustc.release.clone();
+                    package.version.clone_from(&rustc.release);
                 }
                 package.download =
                     format!("git+https://github.com/rust-lang/rust@{}", rustc.commit);
@@ -719,8 +719,7 @@ fn rustc_info(ctx: &Ctx) -> Result<Rustc> {
         verbose
             .lines()
             .find_map(|line| line.strip_prefix(key))
-            .map(|v| v.trim().to_string())
-            .unwrap_or_else(|| "unknown".into())
+            .map_or_else(|| "unknown".into(), |v| v.trim().to_string())
     };
     Ok(Rustc { sysroot, release: field("release:"), commit: field("commit-hash:") })
 }
@@ -922,10 +921,10 @@ fn check(packages: &[Package], kernel_allow: &[String]) -> Result<()> {
             Area::Port => kernel_allow
                 .iter()
                 .cloned()
-                .chain(PORT_EXTRA_ALLOW.iter().map(|s| s.to_string()))
+                .chain(PORT_EXTRA_ALLOW.iter().map(ToString::to_string))
                 .collect(),
-            Area::Bootloader => BOOTLOADER_ALLOW.iter().map(|s| s.to_string()).collect(),
-            Area::Firmware => FIRMWARE_ALLOW.iter().map(|s| s.to_string()).collect(),
+            Area::Bootloader => BOOTLOADER_ALLOW.iter().map(ToString::to_string).collect(),
+            Area::Firmware => FIRMWARE_ALLOW.iter().map(ToString::to_string).collect(),
         };
         let what = format!("{} {}", package.name, package.version);
         if package.license.is_empty() {
@@ -1225,7 +1224,7 @@ mod tests {
     }
 
     fn allow(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+        list.iter().map(ToString::to_string).collect()
     }
 
     #[test]

@@ -8,6 +8,8 @@
 //! symbolic link remembers the link's name, and `cd ..` goes back up
 //! through it (XCU cd, "-L"). With `-P` or `set -P`, links are resolved.
 
+use std::fmt::Write;
+
 use super::{flags, out, usage};
 use crate::shell::{Res, Shell};
 use crate::text;
@@ -114,7 +116,7 @@ impl Shell {
         } else if let Some(found) = self.search_path(arg0, false) {
             return found;
         }
-        std::env::current_exe().map(|path| text::from_os(path.as_os_str())).unwrap_or_default()
+        std::env::current_exe().map_or_default(|path| text::from_os(path.as_os_str()))
     }
 
     /// [`Shell::change_dir`] for `pushd` and `popd`: the new directory, or
@@ -318,13 +320,18 @@ fn print_stack(shell: &Shell, long: bool, lines: bool, numbered: bool) -> bool {
     let all = stack(shell);
     let shown: Vec<String> =
         all.iter().map(|d| if long { d.clone() } else { shell.tilde_short(d) }).collect();
-    let text = if numbered {
-        shown.iter().enumerate().map(|(i, d)| format!("{i:2}  {d}\n")).collect()
+    let mut text = String::new();
+    if numbered {
+        for (i, d) in shown.iter().enumerate() {
+            let _ = writeln!(text, "{i:2}  {d}");
+        }
     } else if lines {
-        shown.iter().map(|d| format!("{d}\n")).collect()
+        for d in &shown {
+            let _ = writeln!(text, "{d}");
+        }
     } else {
-        format!("{}\n", shown.join(" "))
-    };
+        let _ = writeln!(text, "{}", shown.join(" "));
+    }
     out(shell, "dirs", &text)
 }
 

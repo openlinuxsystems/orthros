@@ -211,7 +211,7 @@ fn thread_main(_: usize) {
 /// Lets a thread that waits to start go: it was set up, or is to stop.
 fn set_ready(user: &UserThread) {
     user.ready.store(true, Ordering::Release);
-    wait::wake_all(user as *const UserThread as usize);
+    wait::wake_all(core::ptr::from_ref::<UserThread>(user) as usize);
 }
 
 /// Ends the running program thread with exit status `status`, which

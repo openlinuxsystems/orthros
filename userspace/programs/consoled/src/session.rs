@@ -100,7 +100,13 @@ impl Console {
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: openpty writes the two descriptors; the name may be null.
         let opened = unsafe {
-            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size)
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &raw const size,
+            )
         };
         if opened != 0 {
             return Err(io::Error::last_os_error());
@@ -183,9 +189,7 @@ impl Console {
             let n = unsafe { libc::write(fd, bytes[at..].as_ptr().cast(), bytes.len() - at) };
             if n > 0 {
                 at += n as usize;
-            } else if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            } else {
+            } else if n == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                 break;
             }
         }
@@ -245,7 +249,7 @@ pub fn expand_issue(issue: &str, number: usize) -> String {
     // SAFETY: uname fills the structure.
     let mut names: libc::utsname = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    let named = unsafe { libc::uname(&mut names) } == 0;
+    let named = unsafe { libc::uname(&raw mut names) } == 0;
     let field = |field: &[libc::c_char]| -> String {
         if !named {
             return String::new();

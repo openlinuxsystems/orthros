@@ -249,7 +249,12 @@ pub(crate) mod tests {
 
     /// Bytes as lowercase hexadecimal.
     pub fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        use core::fmt::Write;
+        let mut text = String::new();
+        for b in bytes {
+            let _ = write!(text, "{b:02x}");
+        }
+        text
     }
 
     /// A key given as bytes, as ChaCha20's words.

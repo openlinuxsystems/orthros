@@ -191,7 +191,7 @@ impl PosixState {
         *self.limits = *parent.limits;
         self.file_mask = parent.file_mask;
         if self.directory.is_none() {
-            self.directory = parent.directory.clone();
+            self.directory.clone_from(&parent.directory);
         }
     }
 }

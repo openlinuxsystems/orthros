@@ -235,7 +235,7 @@ pub fn reset() -> ! {
     let empty: [u8; 10] = [0; 10];
     // SAFETY: deliberately loads an empty IDT and raises an exception so
     // the processor shuts down and the chipset resets it.
-    unsafe { core::arch::asm!("lidt [{}]", "int3", in(reg) &empty, options(noreturn)) };
+    unsafe { core::arch::asm!("lidt [{}]", "int3", in(reg) &raw const empty, options(noreturn)) };
 }
 
 /// Tells QEMU's isa-debug-exit device to quit with status 33 (success) or

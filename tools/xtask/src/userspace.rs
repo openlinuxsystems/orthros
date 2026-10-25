@@ -302,7 +302,7 @@ pub fn build(ctx: &Ctx, profile: Profile) -> Result<Programs> {
     let usertests = built.join("usertests");
     std::fs::copy(&usertests, &installed)
         .context(|| format!("copying {} to {}", usertests.display(), installed.display()))?;
-    let size = std::fs::metadata(&installed).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&installed).map_or(0, |m| m.len());
     step(&format!(
         "User test programs installed at {} ({} KiB)",
         ctx.display(&installed),
@@ -393,7 +393,7 @@ fn build_std(
     let mut names: Vec<String> = std::fs::read_dir(&cases)
         .context(|| format!("reading {}", cases.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .filter(|name| name.ends_with(".sh") || name.ends_with(".out"))
+        .filter(|name| matches!(Path::new(name).extension(), Some(e) if e == "sh" || e == "out"))
         .collect();
     names.sort();
     for name in names {
@@ -503,7 +503,7 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
                 entries.push((dir.to_string(), None));
             }
         }
-        entries.push((path.to_string(), Some(file)));
+        entries.push((path.clone(), Some(file)));
     }
     // A directory before what is in it, as the archive's reader wants.
     entries.sort_by(|a, b| a.0.split('/').cmp(b.0.split('/')));

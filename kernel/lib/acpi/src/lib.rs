@@ -397,9 +397,9 @@ pub(crate) mod testutil {
     }
 
     /// Builds a table with a correct header and checksum.
-    pub fn table(signature: &[u8; 4], revision: u8, body: &[u8]) -> Vec<u8> {
+    pub fn table(signature: [u8; 4], revision: u8, body: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(signature);
+        bytes.extend_from_slice(&signature);
         bytes.extend_from_slice(&((36 + body.len()) as u32).to_le_bytes());
         bytes.push(revision);
         bytes.push(0); // checksum, fixed below
@@ -451,15 +451,15 @@ mod tests {
         hpet[8..16].copy_from_slice(&0xfed0_0000u64.to_le_bytes());
         hpet[16] = 0;
         hpet[17..19].copy_from_slice(&0x80u16.to_le_bytes());
-        memory.insert(0x2000, table(b"HPET", 1, &hpet));
+        memory.insert(0x2000, table(*b"HPET", 1, &hpet));
 
         let mut mcfg = vec![0u8; 8];
         mcfg.extend_from_slice(&0xb000_0000u64.to_le_bytes());
         mcfg.extend_from_slice(&0u16.to_le_bytes());
         mcfg.extend_from_slice(&[0, 0xff, 0, 0, 0, 0]);
-        memory.insert(0x3000, table(b"MCFG", 1, &mcfg));
+        memory.insert(0x3000, table(*b"MCFG", 1, &mcfg));
 
-        let mut broken = table(b"BRKN", 1, &[1, 2, 3]);
+        let mut broken = table(*b"BRKN", 1, &[1, 2, 3]);
         broken[9] ^= 1;
         memory.insert(0x4000, broken);
 
@@ -467,7 +467,7 @@ mod tests {
         for address in [0x2000u64, 0x3000, 0x4000, 0x9000] {
             xsdt.extend_from_slice(&address.to_le_bytes());
         }
-        memory.insert(0x1000, table(b"XSDT", 1, &xsdt));
+        memory.insert(0x1000, table(*b"XSDT", 1, &xsdt));
         let rsdp = Rsdp::parse(&rsdp_v2(0x1000)).unwrap();
         (rsdp, memory)
     }
@@ -530,7 +530,7 @@ mod tests {
         for n in 0..MAX_TABLES as u64 + 6 {
             xsdt.extend_from_slice(&(0x10_0000 + n * 0x1000).to_le_bytes());
         }
-        memory.insert(0x1000, table(b"XSDT", 1, &xsdt));
+        memory.insert(0x1000, table(*b"XSDT", 1, &xsdt));
         let rsdp = Rsdp::parse(&rsdp_v2(0x1000)).unwrap();
         let tables = Tables::load(&rsdp, &memory).unwrap();
         assert_eq!(tables.iter().count(), MAX_TABLES);

@@ -139,7 +139,7 @@ struct Test<'a> {
 type TestResult = Result<bool, String>;
 
 impl Test<'_> {
-    fn binary(&self, a: &str, op: &str, b: &str) -> TestResult {
+    fn binary(a: &str, op: &str, b: &str) -> TestResult {
         Ok(match op {
             "=" | "==" => a == b,
             "!=" => a != b,
@@ -213,7 +213,7 @@ impl Test<'_> {
         {
             let b = self.args[self.pos + 2].clone();
             self.pos += 3;
-            return self.binary(&first, op, &b);
+            return Self::binary(&first, op, &b);
         }
         if first.starts_with('-')
             && first.len() == 2
@@ -245,7 +245,7 @@ impl Test<'_> {
             }
             3 => {
                 if is_binary(a(1)) {
-                    return self.binary(a(0), a(1), a(2));
+                    return Self::binary(a(0), a(1), a(2));
                 }
                 if a(1) == "-a" || a(1) == "-o" {
                     let (x, y) = (!args[0].is_empty(), !args[2].is_empty());

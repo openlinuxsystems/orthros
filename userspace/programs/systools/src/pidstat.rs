@@ -388,7 +388,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     if count == Some(0) {
         return Err(usage("the count must be above 0".into()));
     }
-    let cpus = proc::stat().map(|s| s.cpus.len()).unwrap_or(1).max(1);
+    let cpus = proc::stat().map_or(1, |s| s.cpus.len()).max(1);
     let once = select.pids.as_ref().is_some_and(|l| l.len() == 1) && reports.len() == 1;
     let shown = Shown {
         reports,
@@ -400,7 +400,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         epoch,
         once,
         cpus,
-        memory_kib: proc::memory().map(|m| m.total).unwrap_or(0).max(1),
+        memory_kib: proc::memory().map_or(0, |m| m.total).max(1),
     };
     let mut out = io::stdout().lock();
     let now_s = (util::now_ns() / 1_000_000_000) as i64;
@@ -423,7 +423,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut action: libc::sigaction = unsafe { util::zeroed() };
     action.sa_sigaction = on_interrupt as *const () as usize;
     // SAFETY: the handler only stores to an atomic.
-    unsafe { libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) };
+    unsafe { libc::sigaction(libc::SIGINT, &raw const action, std::ptr::null_mut()) };
     let mut before = sample(&select);
     let mut at = util::monotonic_ns();
     let first: HashMap<Key, (Use, u64)> =

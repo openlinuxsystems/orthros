@@ -98,7 +98,7 @@ fn run(args: &[String]) -> i32 {
     }
     let posix = invocation.posix || invocation.options.iter().any(|(o, on)| o == "posix" && *on);
     let mut shell = Shell::new(&name, posix);
-    shell.arg0 = arg0.clone();
+    shell.arg0.clone_from(&arg0);
     // The shell's own file, as bash sets BASH, for the scripts that run
     // `"$BASH" -c` or `exec "$BASH" "$0"`; not in POSIX mode, as in dash.
     if !posix {
@@ -125,7 +125,7 @@ fn run(args: &[String]) -> i32 {
     } else if !invocation.stdin
         && let Some(path) = operands.next()
     {
-        shell.arg0 = path.clone();
+        shell.arg0.clone_from(&path);
         script = Some(path);
     }
     shell.args = operands.collect();

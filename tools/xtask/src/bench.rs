@@ -62,7 +62,7 @@ const RUNS: u32 = 3;
 
 /// How long the benchmark boot may take: minutes under KVM, about three
 /// without it.
-const TIMEOUT: Duration = Duration::from_secs(900);
+const TIMEOUT: Duration = Duration::from_mins(15);
 
 /// QEMU's instruction counting: each instruction advances the guest's
 /// clock by 2^0 ns, and the clock does not run ahead to catch up with the
@@ -844,8 +844,7 @@ fn host_cpu() -> String {
 
 fn host_kernel() -> String {
     std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|release| release.trim().to_string())
-        .unwrap_or_else(|_| "unknown".into())
+        .map_or_else(|_| "unknown".into(), |release| release.trim().to_string())
 }
 
 /// The Markdown report.
@@ -884,7 +883,8 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
         "| Operation | Radix | Linux (VM) | Ratio | Linux (host) | Linux equivalent |"
     );
     let _ = writeln!(out, "| --- | ---: | ---: | ---: | ---: | --- |");
-    let measured = |list: &[Measurement], name| find(list, name).map_or("".into(), |m| show(m.ns));
+    let measured =
+        |list: &[Measurement], name| find(list, name).map_or(String::new(), |m| show(m.ns));
     for row in ROWS {
         let ours = find(&numbers.radix, row.radix).map_or("missing".into(), |m| show(m.ns));
         let (vm, host, how) = match row.linux {

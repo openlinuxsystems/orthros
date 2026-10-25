@@ -37,3 +37,11 @@ f7; declare -f f8
 type f6
 # A parameter written in braces is shown in braces, as written.
 f21() { echo ${x}y "${x}" $x ${1} ${@}; }; declare -f f21
+# What declare -f prints reads back as the same commands.
+f22() { x=5 xy=7; echo $((1+$"x")) $((xy)) \$`echo d` "$x"y $(( (2) )); cat <<EOF
+a\
+EOF
+b
+EOF
+}
+f22; eval "$(declare -f f22)"; f22

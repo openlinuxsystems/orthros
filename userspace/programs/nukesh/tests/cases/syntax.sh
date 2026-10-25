@@ -122,3 +122,13 @@ check $'x=1 \\\n nosuch3'
 check $'cd \'/nonexistent-dir\nx\''
 check 'nosuch4 >/nonexistent-dir/x'
 check 'declare -p nosuch5'
+# In an expanded here-document a `\` at the end of a line joins the next
+# to it before the delimiter is looked for.
+cat <<EOF
+a\
+EOF
+b
+EOF
+cat <<'EOF'
+c\
+EOF

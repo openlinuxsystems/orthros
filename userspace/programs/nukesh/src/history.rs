@@ -11,6 +11,7 @@
 //! `HISTFILESIZE` writes a new file and renames it over the old one, and a
 //! shell that waited for the lock on the old file opens the new one.
 
+use std::cmp::Ordering;
 use std::os::unix::fs::MetadataExt;
 
 use crate::builtins::{flags, out};
@@ -575,7 +576,7 @@ impl Shell {
                             .iter()
                             .map(|w| format!("'{}'", w.replace('\'', "'\\''")))
                             .collect::<Vec<_>>()
-                            .join(" ")
+                            .join(" ");
                     }
                     's' | 'g' | '&' => {
                         let global = m == 'g';
@@ -646,7 +647,7 @@ impl Shell {
                     i += 1;
                 }
                 let start = i;
-                while chars.get(i).is_some_and(|c| c.is_ascii_digit()) {
+                while chars.get(i).is_some_and(char::is_ascii_digit) {
                     i += 1;
                 }
                 let digits: String = chars[start..i].iter().collect();
@@ -859,7 +860,7 @@ pub fn history(shell: &mut Shell, args: &[String]) -> Res {
     let time_format = shell.get("HISTTIMEFORMAT");
     let mut text = String::new();
     for (i, entry) in entries.iter().enumerate().skip(start) {
-        let when = time_format.as_deref().map(|f| sys::strftime(f, entry.time)).unwrap_or_default();
+        let when = time_format.as_deref().map_or_default(|f| sys::strftime(f, entry.time));
         text.push_str(&format!("{:5}  {when}{}\n", shell.history.number(i), entry.line));
     }
     Ok(i32::from(!out(shell, "history", &text)))
@@ -880,12 +881,12 @@ pub fn fc(shell: &mut Shell, args: &[String]) -> Res {
     let base = shell.history.base;
     let find = |spec: &str| -> Option<usize> {
         if let Ok(n) = spec.parse::<i64>() {
-            return if n < 0 {
-                entries.len().checked_sub(n.unsigned_abs() as usize)
-            } else if n == 0 {
-                entries.len().checked_sub(1)
-            } else {
-                (n as usize).checked_sub(base + 1).map(|i| i.min(entries.len().saturating_sub(1)))
+            return match n.cmp(&0) {
+                Ordering::Less => entries.len().checked_sub(n.unsigned_abs() as usize),
+                Ordering::Equal => entries.len().checked_sub(1),
+                Ordering::Greater => (n as usize)
+                    .checked_sub(base + 1)
+                    .map(|i| i.min(entries.len().saturating_sub(1))),
             };
         }
         entries.iter().rposition(|e| e.line.starts_with(spec))
@@ -955,7 +956,11 @@ pub fn fc(shell: &mut Shell, args: &[String]) -> Res {
         .or_else(|| shell.get("FCEDIT"))
         .or_else(|| shell.get("EDITOR"))
         .unwrap_or_else(|| "nano".into());
-    let commands: String = range.iter().map(|&i| format!("{}\n", entries[i].line)).collect();
+    let mut commands = String::new();
+    for &i in &range {
+        commands.push_str(&entries[i].line);
+        commands.push('\n');
+    }
     let dir = shell.get("TMPDIR").filter(|dir| !dir.is_empty()).unwrap_or_else(|| "/tmp".into());
     let (pid, nanos) = (sys::getpid(), sys::now().1);
     let names =

@@ -966,7 +966,7 @@ fn run_case(
     let image = dir.join(format!("{}.img", case.name));
     let qmp = dir.join(format!("{}.qmp", case.name));
     let disks = make_disks(dir, case)?;
-    let mut extra: Vec<String> = case.qemu.iter().map(|arg| arg.to_string()).collect();
+    let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     for (i, disk) in disks.iter().enumerate() {
         extra.push("-drive".into());
         extra
@@ -2194,8 +2194,11 @@ fn storage_host(disks: &[DiskImage]) -> Result<(), String> {
         }
         let listing =
             host_tool(std::process::Command::new("mdir").args(["-i", &image, "-b", "::/many"]))?;
-        let files =
-            String::from_utf8_lossy(&listing).lines().filter(|line| line.ends_with(".txt")).count();
+        // FAT names match without regard to case.
+        let txt = |line: &&str| {
+            Path::new(line).extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+        };
+        let files = String::from_utf8_lossy(&listing).lines().filter(txt).count();
         if files != STORAGE_MANY {
             return Err(format!("{image}: mdir lists {files} files in many/, not {STORAGE_MANY}"));
         }
@@ -2414,7 +2417,7 @@ mod tests {
     #[test]
     fn test_microcode_parses() {
         let file = test_microcode();
-        assert_eq!(radix_microcode::updates(&file).filter(Result::is_ok).count(), 2);
+        assert_eq!(radix_microcode::updates(&file).flatten().count(), 2);
         let cpu = radix_microcode::CpuId { signature: MICROCODE_SIGNATURE, platform: 1 };
         assert_eq!(radix_microcode::find(&file, cpu).unwrap().revision(), MICROCODE_REVISION);
     }

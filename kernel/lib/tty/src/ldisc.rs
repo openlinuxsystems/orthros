@@ -181,7 +181,13 @@ pub struct Ldisc<B> {
 impl<B: AsRef<[u8]> + AsMut<[u8]>> Ldisc<B> {
     /// A line discipline with the default settings, whose input goes in
     /// `buf` (4 KiB is Linux's).
+    ///
+    /// # Panics
+    ///
+    /// If `buf` is 64 KiB or longer.
     pub fn new(buf: B) -> Ldisc<B> {
+        // A line can fill the buffer, and its length is kept in `lines`.
+        assert!(buf.as_ref().len() <= usize::from(u16::MAX), "line discipline buffer too big");
         Ldisc {
             settings: Settings::new(),
             input: Ring::new(buf),

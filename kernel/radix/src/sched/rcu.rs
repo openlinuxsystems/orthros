@@ -49,7 +49,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 
 fn key() -> usize {
-    &COMPLETED as *const AtomicU64 as usize
+    &raw const COMPLETED as usize
 }
 
 fn start(state: &mut GracePeriods) {

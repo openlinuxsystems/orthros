@@ -17,7 +17,6 @@ bench = false
 
 [dependencies]
 libradix = { path = "../libradix" }
-radix-abi = { path = "../../kernel/abi" }
 
 [lints]
 workspace = true
