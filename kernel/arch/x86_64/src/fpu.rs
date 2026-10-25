@@ -40,7 +40,14 @@ const XSAVEOPT: u8 = 3;
 static MODE: AtomicU8 = AtomicU8::new(NONE);
 static XCR0: AtomicU64 = AtomicU64::new(0);
 static SIZE: AtomicU32 = AtomicU32::new(512);
+/// Where each component beyond SSE that XCR0 enables (2 to 7) ends in an
+/// image, from CPUID leaf 0xD; 0 for one not enabled.
+static ENDS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 static DESCRIPTION: Once<TextBuf<96>> = Once::new();
+
+/// The legacy region and the XSAVE header: the head of an image, which a
+/// signal frame always holds.
+const HEAD: usize = 576;
 
 /// XCR0 bits: x87, SSE, AVX, and the three AVX-512 components.
 const X87: u64 = 1;
@@ -83,6 +90,14 @@ pub fn init_boot_cpu() {
             MODE.store(FXSAVE, Ordering::Relaxed);
         } else {
             SIZE.store(size, Ordering::Relaxed);
+            let xcr0 = XCR0.load(Ordering::Relaxed);
+            for (component, end) in ENDS.iter().enumerate().skip(2) {
+                if xcr0 & (1 << component) != 0 {
+                    // EBX is the component's offset, EAX its size.
+                    let leaf = cpu::cpuid(0xd, component as u32);
+                    end.store(leaf.ebx + leaf.eax, Ordering::Relaxed);
+                }
+            }
         }
     }
     let mut text = TextBuf::<96>::new();
@@ -231,6 +246,36 @@ pub unsafe fn load_initial(area: usize) {
 /// reads, and what a signal frame holds.
 pub fn image_size() -> usize {
     SIZE.load(Ordering::Relaxed) as usize
+}
+
+/// The length of an image's head: the legacy region and, with XSAVE, the
+/// header; with FXSAVE, the whole image.
+pub fn head_size() -> usize {
+    if MODE.load(Ordering::Relaxed) >= XSAVE { HEAD } else { image_size() }
+}
+
+/// How much of an image a signal frame holds, from its head: up to the
+/// end of the last component the header names as not in its initial
+/// state, since XRSTOR reads no other (components lie in the order of
+/// their numbers), or the head alone if none is. Linux's XSAVE into the
+/// frame writes no more: for a program that never used AVX-512, 832 bytes
+/// instead of the 2.7 KiB area.
+pub fn used_size(head: &[u8]) -> usize {
+    let size = image_size();
+    let bv = match head.get(512..520) {
+        Some(bv) if MODE.load(Ordering::Relaxed) >= XSAVE => {
+            u64::from_le_bytes(bv.try_into().unwrap())
+        }
+        _ => return size,
+    };
+    let beyond = bv & XCR0.load(Ordering::Relaxed) & !(X87 | SSE);
+    let end = match beyond.checked_ilog2() {
+        Some(last) => {
+            ENDS.get(last as usize).map_or(size, |end| end.load(Ordering::Relaxed) as usize)
+        }
+        None => HEAD,
+    };
+    end.min(size).max(HEAD.min(size))
 }
 
 /// Makes an image that came from user memory (a signal frame's) safe to
