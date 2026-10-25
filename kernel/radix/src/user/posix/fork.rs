@@ -101,6 +101,7 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
         Start::Registers(regs),
         startup::SLOT_THREAD,
         None,
+        None,
         mask,
         &mut |thread| {
             thread.copy_extended_state();

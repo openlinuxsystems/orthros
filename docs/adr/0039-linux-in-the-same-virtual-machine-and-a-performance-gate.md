@@ -12,10 +12,11 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ADR 0035 compared Radix, in a virtual machine, with the Linux of the
 machine around it, and kept CI from failing on a slow number because the
-runners vary too much. Chase then set the performance gate of the plan:
-context switches, system calls, IPC, page faults, TLB shootdowns, memory
-bandwidth and scaling over several CPUs must match Linux or beat it,
-measured in the same CI run, and CI must fail when they stop doing so.
+runners vary too much. The project lead then set the performance gate of
+the plan: context switches, system calls, IPC, page faults, TLB
+shootdowns, memory bandwidth and scaling over several CPUs must match
+Linux or beat it, measured in the same CI run, and CI must fail when they
+stop doing so.
 Two things stood in the way. The host's Linux runs without a hypervisor,
 so every operation that exits to it (an interrupt sent, a halt, a timer
 written) costs Radix more than it costs the baseline, and the comparison

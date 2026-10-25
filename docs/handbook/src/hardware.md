@@ -141,7 +141,7 @@ issue for anything that fails, with the photos.
 | --- | --- | --- | --- | --- | --- |
 | 1 | not yet run | | | | |
 | 2 | not yet run | | | | |
-| 6 | 2026-10-22 | `daa2682` (Phase 6) | not recorded | not recorded | Chase: "Latest P6 build boots on my laptop without issue". Which firmware mode, and the individual checks above, were not reported. |
+| 6 | 2026-10-22 | `daa2682` (Phase 6) | not recorded | not recorded | The project lead reported that it boots without issue. Which firmware mode, and the individual checks above, were not recorded. |
 
 ### Help wanted: the Ethernet chip
 

@@ -55,7 +55,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{self, AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use radix_hal::{Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, Smp, Threads, Timer, UserMode};
+use radix_hal::{
+    Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, PageTable, Smp, Threads, Timer, UserMode,
+};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
 use radix_sched::{
@@ -253,6 +255,7 @@ pub struct Options {
     user: Option<crate::user::UserRef>,
     held: bool,
     number: Option<u64>,
+    replacing: Option<ThreadRef>,
 }
 
 impl Options {
@@ -267,6 +270,7 @@ impl Options {
             user: None,
             held: false,
             number: None,
+            replacing: None,
         }
     }
 
@@ -311,6 +315,15 @@ impl Options {
     /// A thread of a program: it runs in the program's address space.
     pub fn user(mut self, user: crate::user::UserRef) -> Options {
         self.user = Some(user);
+        self
+    }
+
+    /// In the place of `thread`, which is about to exit (`exec`'s caller,
+    /// for the new program's thread): in the same domain it takes over
+    /// `thread`'s place there, so that the domain never counts both, as
+    /// Linux's `exec` keeps one task.
+    pub fn replacing(mut self, thread: ThreadRef) -> Options {
+        self.replacing = Some(thread);
         self
     }
 }
@@ -371,6 +384,7 @@ pub fn init(lockdep: Option<bool>) {
             CpuSet::single(cpu),
             domains::root(),
             0,
+            None,
         )
         .ok()?;
         let idle = idle_thread(cpu, Arch::new_context(thread_start, 0, STACK_PAGES)?)?;
@@ -451,6 +465,7 @@ fn idle_thread(cpu: usize, context: Context) -> Option<ThreadRef> {
         CpuSet::single(cpu),
         domains::root(),
         0,
+        None,
     )
     .ok()?;
     // Never queued, always ready: it runs whenever nothing else is.
@@ -459,9 +474,10 @@ fn idle_thread(cpu: usize, context: Context) -> Option<ThreadRef> {
 }
 
 /// Makes a thread in `domain`, which `charged` pages were charged to for
-/// it, and puts it in the registry. On failure the charge is given back:
-/// here if the domain refused the thread, or by the thread itself, made
-/// and dropped, as it leaves the domain.
+/// it, and puts it in the registry; in the place of `replacing`, if that
+/// is in the same domain ([`Options::replacing`]). On failure the charge
+/// is given back: here if the domain refused the thread, or by the thread
+/// itself, made and dropped, as it leaves the domain.
 #[allow(clippy::too_many_arguments)]
 fn make_thread(
     id: u64,
@@ -473,8 +489,13 @@ fn make_thread(
     affinity: CpuSet,
     domain: DomainRef,
     charged: u64,
+    replacing: Option<&ThreadRef>,
 ) -> Result<ThreadRef, SpawnError> {
-    if !domain.thread_joined() {
+    let joined = match replacing {
+        Some(old) if Arc::ptr_eq(old.domain(), &domain) => old.hand_over_domain(),
+        _ => domain.thread_joined(),
+    };
+    if !joined {
         domain.uncharge(charged);
         return Err(SpawnError::Stopping);
     }
@@ -648,6 +669,7 @@ pub fn spawn(
             allowed,
             domain.clone(),
             charged,
+            options.replacing.as_ref(),
         ),
         Err(err) => {
             domain.uncharge(charged);
@@ -1680,6 +1702,10 @@ pub struct Counters {
     /// Idle periods that halted, and that a wake-up ended while polling.
     pub halts: u64,
     pub polls: u64,
+    /// Nanoseconds TLB shootdowns waited for other CPUs, and the CPUs
+    /// they left to the hypervisor instead.
+    pub shootdown_wait_ns: u64,
+    pub shootdowns_left: u64,
 }
 
 impl Counters {
@@ -1691,6 +1717,8 @@ impl Counters {
             ipis: self.ipis.wrapping_sub(earlier.ipis),
             halts: self.halts.wrapping_sub(earlier.halts),
             polls: self.polls.wrapping_sub(earlier.polls),
+            shootdown_wait_ns: self.shootdown_wait_ns.wrapping_sub(earlier.shootdown_wait_ns),
+            shootdowns_left: self.shootdowns_left.wrapping_sub(earlier.shootdowns_left),
         }
     }
 }
@@ -1705,6 +1733,9 @@ pub fn counters() -> Counters {
         total.ipis += Arch::ipis_sent(cpu);
         total.halts += slot.halts.load(Ordering::Relaxed);
         total.polls += slot.polls.load(Ordering::Relaxed);
+        let shootdowns = Arch::shootdowns(cpu);
+        total.shootdown_wait_ns += shootdowns.wait_ns;
+        total.shootdowns_left += shootdowns.left;
     }
     total
 }

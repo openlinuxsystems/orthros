@@ -489,8 +489,9 @@ boots.
 	measurement is a line the program logs, *BENCH name=*_name_ *ns=*_ns_
 	*iterations=*_count_, and after each benchmark the kernel logs what
 	it did meanwhile, *BENCHCOUNT group=*_name_ *rounds=*_count_ followed
-	by its switches, timer writes, interrupts sent, halts and polls; *ob
-	bench* collects both.
+	by its switches, timer writes, interrupts sent, halts and polls,
+	the nanoseconds TLB shootdowns waited for other CPUs and the CPUs
+	they left to the hypervisor to flush; *ob bench* collects both.
 
 *stack-overflow*
 	Recurses until the boot CPU's stack runs into its guard page. The

@@ -24,6 +24,14 @@
 //! each write of the timer is a VM exit costing microseconds. A timer
 //! armed too early fires, finds nothing due, and is armed again, at most
 //! once per deadline; it is never armed too late (ADR 0037).
+//!
+//! Some hosts hold an interrupt for a running virtual CPU until it next
+//! leaves the guest for another reason, often for hundreds of
+//! microseconds. Under KVM, a CPU that answers a TLB shootdown late
+//! therefore rings a doorbell ([`ring_doorbell`]): for the next
+//! [`DOORBELL_HOLD_NS`] its timer also fires every [`DOORBELL_NS`], and
+//! each firing is such a way out, where the held interrupt is delivered.
+//! Late answers keep it ringing; going idle stops it (ADR 0109).
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -40,6 +48,12 @@ use crate::percpu;
 
 /// Rate of the periodic timer interrupt.
 pub const TICK_HZ: u32 = 100;
+
+/// How often the timer fires while the doorbell rings.
+pub const DOORBELL_NS: u64 = 250_000;
+
+/// How long the doorbell rings after a late answer.
+pub const DOORBELL_HOLD_NS: u64 = 10_000_000;
 
 /// How long calibration measures for.
 const CALIBRATION_NS: u64 = 50_000_000;
@@ -58,6 +72,8 @@ static TICKING: AtomicBool = AtomicBool::new(false);
 static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Whether the timer runs in TSC-deadline mode.
 static DEADLINE_MODE: AtomicBool = AtomicBool::new(false);
+/// Whether the tick runs under KVM, where the doorbell rings.
+static DOORBELL: AtomicBool = AtomicBool::new(false);
 /// The kernel's timer handler.
 static HANDLER: Once<fn(bool)> = Once::new();
 /// One tick period.
@@ -311,6 +327,7 @@ pub fn start_tick() {
     let deadline = cpu::feature::tsc_deadline();
     if percpu::current_index() == 0 {
         DEADLINE_MODE.store(deadline, Ordering::Relaxed);
+        DOORBELL.store(crate::kvm::features() != 0, Ordering::Relaxed);
     }
     radix_klog::tracepoint!("timer.start", percpu::current_index(), count);
     let cpu = percpu::current();
@@ -376,6 +393,29 @@ pub fn set_deadline(deadline_ns: u64) {
     program(cpu.next_tick_ns.load(Ordering::Relaxed).min(deadline_ns));
 }
 
+/// Under KVM, makes this CPU's timer also fire every
+/// [`DOORBELL_NS`] for the next [`DOORBELL_HOLD_NS`]: for a CPU that
+/// answered another CPU's interrupt late (`paging::serve_shootdown`).
+pub fn ring_doorbell() {
+    if !DOORBELL.load(Ordering::Relaxed) || !TICKING.load(Ordering::Relaxed) {
+        return;
+    }
+    let were = cpu::disable_interrupts();
+    let cpu = percpu::current();
+    let now = now_ns();
+    cpu.doorbell_until_ns.store(now + DOORBELL_HOLD_NS, Ordering::Relaxed);
+    program(now + DOORBELL_NS);
+    if were {
+        cpu::enable_interrupts();
+    }
+}
+
+/// Stops this CPU's doorbell, as it goes idle: a halted virtual CPU
+/// leaves the guest, so its interrupts are not held.
+pub fn doorbell_off() {
+    percpu::current().doorbell_until_ns.store(0, Ordering::Relaxed);
+}
+
 /// Times CPU `cpu` wrote its timer.
 pub fn writes(cpu: usize) -> u64 {
     percpu::get(cpu).map_or(0, |c| c.timer_writes.load(Ordering::Relaxed))
@@ -411,7 +451,12 @@ pub fn on_tick() {
         cpu.deadline_ns.store(u64::MAX, Ordering::Relaxed);
     }
     crate::paging::serve_shootdown();
-    program(cpu.next_tick_ns.load(Ordering::Relaxed).min(cpu.deadline_ns.load(Ordering::Relaxed)));
+    let mut at =
+        cpu.next_tick_ns.load(Ordering::Relaxed).min(cpu.deadline_ns.load(Ordering::Relaxed));
+    if now < cpu.doorbell_until_ns.load(Ordering::Relaxed) {
+        at = at.min(now + DOORBELL_NS);
+    }
+    program(at);
     apic::end_of_interrupt();
     if (tick || due)
         && let Some(handler) = HANDLER.get()

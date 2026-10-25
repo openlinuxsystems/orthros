@@ -11,8 +11,9 @@ descriptors and paths, pipes and `poll`, pseudo-terminals, clocks and
 timers, futexes, file locks, scheduling and limits; then the C library
 (mlibc and its Radix system layer), the toolchain and ports, Rust's
 standard library, dynamic linking and the locale. It ends with the lock
-order, the semi-formal arguments that no wake-up or timer is lost and
-that every lock goes with its owner, and the known limits. The
+order, the arguments that no wake-up or timer is lost and that every
+lock goes with its owner, which TLA+ models check, and the known
+limits. The
 user-facing description is radix-posix(7), with radix-process(2),
 radix-signal(2), radix-terminal(2) and radix-file(2); the decisions are
 ADRs 0060 to 0075.
@@ -182,7 +183,11 @@ start-up page. Only then does the second half touch the caller: stop its
 other threads, swap the space in (remaking the original capability in
 the hidden slot 0, so every capability to the old space goes), empty the
 `close_on_exec` slots, reset handled signals, delete POSIX timers, and
-start the new thread. On a process `create` made that has not started,
+start the new thread, which takes the caller's place among its domain's
+threads as the caller exits: the domain counts one thread throughout, as
+Linux's `exec` keeps one task, so a supervisor that counts what a service
+left behind never finds two for a process changing its program. On a
+process `create` made that has not started,
 the second half instead joins it to the tree as the caller's child and
 starts it: `posix_spawn`'s way, which Spark uses.
 
@@ -650,8 +655,19 @@ TLC checks the futex argument with `kernel/radix/tla/Futex.tla`: no
 waiter sleeps through its wake, a wait ends as woken exactly when a waker
 took it off the list, and every wait ends, with a waiter that may be
 interrupted at any moment and wakers that take one waiter or several at a
-time. The other arguments are not yet checked by a model; the timer race
-above shows the kind of bug one would catch.
+time. It checks the others with a model each, beside it: `Poll.tla`
+(three pollers of one or both of two objects: none sleeps while an
+object it looks at is ready with no wake on its way, and every poll
+ends), `Timers.tla` (two processes setting and turning off their timers
+at any moment of the timer thread's look: a set timer's process is
+always listed, and every expired timer fires) and `FileLocks.tla`
+(three processes locking one of two files: none sleeps while its lock is
+free with no wake on its way, and every lock is taken). Each fails when
+its order is broken: the poller counting itself after it looks, or
+`changed` reading the count before the change; the setter letting the
+list go before it sets the timer, the race above; a waiter reading
+`CHANGES` after it looks, or a release waking before it moves
+`CHANGES`.
 
 ## Known limits
 

@@ -473,7 +473,15 @@ interrupt to the other CPU and its answer; under KVM most of that time
 is the host sending and delivering the interrupt, which Linux pays too.
 On a busy host the other virtual CPU may be stopped; both kernels then
 skip the interrupt and have the hypervisor flush it before it runs
-again (paravirtual TLB flush, ADR 0105).
+again (paravirtual TLB flush, ADR 0105). Some hosts also hold the
+interrupt for a virtual CPU that is running until it next leaves the
+guest; a CPU that answers late then has its timer fire every 250 µs
+while it stays busy, each firing such a way out (ADR 0109), so its timer
+writes per operation rise there. The report's kernel events say
+how long Radix's shootdowns waited and how many targets they left to
+the hypervisor, and give Linux's own count beside them: the TLB
+interrupts its other CPU took (the `TLB` line of `/proc/interrupts`,
+which `linux-bench` reads as the virtual machine's init).
 The receiving CPU ends the interrupt before it flushes, so the
 initiator's next request is not yet pending when the hypervisor decides
 whether to offer paravirtual EOI (ADR 0041).

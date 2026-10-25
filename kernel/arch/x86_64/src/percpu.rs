@@ -192,10 +192,18 @@ pub struct PerCpu {
     /// When the timer is armed to fire, or `u64::MAX` when it is not (or
     /// has fired and its interrupt is not handled yet).
     pub armed_ns: AtomicU64,
+    /// Until when the timer also fires every `time::DOORBELL_NS`, since
+    /// this CPU answered a TLB shootdown late; 0 when it does not.
+    pub doorbell_until_ns: AtomicU64,
     /// Times the timer was written to arm it.
     pub timer_writes: AtomicU64,
     /// Interprocessor interrupts this CPU sent.
     pub ipis_sent: AtomicU64,
+    /// The nanoseconds this CPU's TLB shootdowns waited for other CPUs'
+    /// answers, and the CPUs they left to the hypervisor to flush instead
+    /// (`paging::shootdown_on`).
+    pub shootdown_wait_ns: AtomicU64,
+    pub shootdowns_left: AtomicU64,
     /// KVM's paravirtual end-of-interrupt word: the hypervisor sets bit 0
     /// when the interrupt it delivers needs no EOI write (`apic`).
     pub pv_eoi: AtomicU32,
@@ -237,8 +245,11 @@ impl PerCpu {
             next_tick_ns: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(u64::MAX),
             armed_ns: AtomicU64::new(u64::MAX),
+            doorbell_until_ns: AtomicU64::new(0),
             timer_writes: AtomicU64::new(0),
             ipis_sent: AtomicU64::new(0),
+            shootdown_wait_ns: AtomicU64::new(0),
+            shootdowns_left: AtomicU64::new(0),
             pv_eoi: AtomicU32::new(0),
             steal_time: StealTime::new(),
             descriptors: TakeOnce::new(Descriptors {

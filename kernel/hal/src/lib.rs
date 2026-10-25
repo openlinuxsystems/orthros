@@ -431,6 +431,20 @@ pub trait PageTable {
     /// function on every other online CPU and returns once all have run
     /// it. Returns what went wrong, if anything.
     fn self_test_tlb(on_others: &dyn Fn(fn())) -> Result<(), &'static str>;
+
+    /// What the TLB shootdowns CPU `cpu` made cost it, for the
+    /// benchmarks.
+    fn shootdowns(cpu: usize) -> Shootdowns;
+}
+
+/// What a CPU's TLB shootdowns cost it, counted since boot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shootdowns {
+    /// Nanoseconds spent waiting for other CPUs' answers.
+    pub wait_ns: u64,
+    /// Other CPUs left to the hypervisor to flush, because the host had
+    /// stopped them, instead of being interrupted or waited for.
+    pub left: u64,
 }
 
 /// A deliberate fault for a self-test of the fault path.

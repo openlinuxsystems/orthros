@@ -249,12 +249,21 @@ the shootdown lock, publishes the range and a new request number, sets a
 pending bit for each target CPU, sends them the TLB IPI, flushes its own
 TLB while the IPIs travel and waits for the pending bits to clear; each
 target flushes the range (the whole TLB above 32 pages) and clears its
-bit. Under KVM with steal time and paravirtual TLB flush, a target the
+bit. The wait has nothing but loads between its pauses, as Linux's waits
+for other CPUs do, and reads the clock only every 65,536 pauses: a
+hypervisor that sees a tight PAUSE loop (pause-loop exiting) takes the
+virtual CPU for a spinning one and may run another, perhaps the one
+waited for, in its place. Under KVM with steal time and paravirtual TLB flush, a target the
 host has stopped gets no IPI: the initiator sets the flush bit of its
 steal-time record, and the hypervisor flushes its whole TLB before it
 runs it again. A target the host stops after the IPI was sent is handled
 the same way while the initiator waits (`kvm::flush_when_resumed`, ADR
-0105). Two CPUs may start
+0105). Some hosts hold the IPI for a running virtual CPU until it next
+leaves the guest, hundreds of microseconds on some CI runners: under KVM
+a target that serves a request more than 50 µs after it was sent rings
+its doorbell, and its timer then also fires every 250 µs while it keeps
+answering late and does not go idle, each firing a way out of the guest
+where the IPI is delivered (`time::ring_doorbell`, ADR 0109). Two CPUs may start
 shootdowns at once with interrupts disabled, so a CPU waiting for the lock,
 or for its targets, serves pending requests itself; the timer tick serves
 them too, in case an IPI was missed. A shootdown with no target CPU
@@ -263,6 +272,9 @@ request it sends as served for itself, so a number it took without
 sending would make it skip the next real request under that number, and
 that request's initiator would wait for it in vain. A shootdown that is
 not answered within 2 seconds panics, naming a CPU that did not answer.
+Each CPU counts how long its shootdowns waited and how many targets they
+left to the hypervisor; the benchmarks report both (`BENCHCOUNT`
+`shootdown_wait_ns` and `shootdowns_left`).
 
 ## KASLR
 

@@ -625,13 +625,16 @@ fn replace_own(
     crate::fs::trace::exec(process, me.id(), path);
     // The new program's thread has the process's number, as on Linux,
     // whichever thread called exec; the caller, which has it if it was the
-    // first, exits as the new one starts.
+    // first, exits as the new one starts, and gives it its place in the
+    // process's domain, so that a supervisor counting the domain's threads
+    // never finds two for this one.
     process.number_next_thread();
     let started = ProcessObject::start(
         process,
         Start::Fresh(start),
         startup::SLOT_THREAD,
         None,
+        Some(&me),
         mask,
         &mut |thread| {
             // The signals pending for the old thread are the new one's.
@@ -704,6 +707,7 @@ fn start_created(
         process,
         Start::Fresh(start),
         startup::SLOT_THREAD,
+        None,
         None,
         mask,
         &mut |_| Ok(()),

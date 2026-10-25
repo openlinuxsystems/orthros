@@ -18,11 +18,12 @@
 //! lock it allocates without sleeping.
 //!
 //! A lock in another's way waits until a lock of the file is let go of
-//! (or a signal comes) and tries again. Before a process lock waits, the
-//! chain of processes waiting for each other's locks is followed from
-//! the holder in its way: if it leads back to the caller's process, the
-//! wait would never end, and the lock fails with deadlock instead, as
-//! Linux's do (following ten links at most).
+//! (or a signal comes) and tries again; the TLA+ model
+//! `kernel/radix/tla/FileLocks.tla` checks that no such wake-up is lost.
+//! Before a process lock waits, the chain of processes waiting for each
+//! other's locks is followed from the holder in its way: if it leads back
+//! to the caller's process, the wait would never end, and the lock fails
+//! with deadlock instead, as Linux's do (following ten links at most).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

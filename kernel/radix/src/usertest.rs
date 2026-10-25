@@ -571,12 +571,19 @@ const COPY_ORDER: u32 = 10;
 /// Logs what the kernel did for a benchmark since `before`: switches,
 /// timer writes, interrupts sent, halts and polls, which `ob bench` divides
 /// by the rounds. Each is a VM exit or more under a hypervisor, so they
-/// explain the numbers.
+/// explain the numbers. With them, the time TLB shootdowns waited for
+/// other CPUs and the CPUs they left to the hypervisor.
 fn report_counters(group: &str, rounds: u64, before: &sched::Counters) {
     let counts = sched::counters().since(before);
     info!(
         "BENCHCOUNT group={group} rounds={rounds} switches={} timer_writes={} ipis={} halts={} \
-         polls={}",
-        counts.switches, counts.timer_writes, counts.ipis, counts.halts, counts.polls
+         polls={} shootdown_wait_ns={} shootdowns_left={}",
+        counts.switches,
+        counts.timer_writes,
+        counts.ipis,
+        counts.halts,
+        counts.polls,
+        counts.shootdown_wait_ns,
+        counts.shootdowns_left
     );
 }

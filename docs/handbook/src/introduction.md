@@ -36,7 +36,7 @@ in Dukovo 1.1.
 ## Where the project is
 
 Dukovo is built in phases, each ending in something that runs. This
-handbook describes **Phase 8**.
+handbook describes **Phase 9**.
 
 - **Boot and hardware.** The Radix kernel boots through GRUB under UEFI
   and legacy BIOS at a random address, starts every CPU and reads the
@@ -58,12 +58,16 @@ handbook describes **Phase 8**.
 - **POSIX.** Programs written for Unix run on a POSIX layer with fork,
   exec, signals, pipes, terminals and job control (see `radix-posix(7)`),
   through the mlibc C library and a port of Rust's standard library.
+- **Shell and tools.** It boots to the Nukesh shell on six virtual
+  consoles, with the commands of a Linux server and a manual page for
+  each (see the Nukesh guide chapter, `nukesh(1)` and `consoled(8)`).
+  Spark supervises the services it starts (see `service(8)`).
 - **Debugging.** Crash reports, a kernel debugger and a crash log help
   when things go wrong.
 
-The shell and the command-line tools arrive in Phase 9. Chapters for later
-phases are listed in the table of contents and are written as those
-phases land. The full plan is in
+Native storage, Btrfs on NVMe and SATA disks, arrives in Phase 10.
+Chapters for later phases are listed in the table of contents and are
+written as those phases land. The full plan is in
 [`docs/roadmap.md`](https://github.com/openlinuxsystems/orthros/blob/main/docs/roadmap.md).
 
 ## How this handbook is organised
