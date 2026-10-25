@@ -257,14 +257,42 @@ every request from then on.
 ### Raw access
 
 A block device in `/dev` reads and writes raw (`radix_vfs::raw`):
-through pages of the kernel's, straight to the disk, with nothing cached
-between, as Linux's do when opened with `O_DIRECT`, but at any offset
-and length. Each request moves up to 16 pages. A write that covers part
-of a sector first reads the sector (the first and last of the request),
-under the node's lock, so that two such writes to one sector cannot lose
-each other's bytes. Reads end at the device's end; a write at or past it
-fails with ENOSPC, as on Linux. An error after some bytes moved ends the
-transfer short. `fsync` empties the disk's write cache.
+straight to the disk, with nothing cached between, as Linux's do when
+opened with `O_DIRECT`, but at any offset and length.
+
+The whole sectors of a transfer that starts on a sector's boundary, into
+or from memory on a sector's boundary, go straight between the disk and
+the program's memory, as Linux's `O_DIRECT` has them: the buffer lends
+its pages (`Out::lend`, `In::lend`), as many as 256 parts of pages at a
+time, a mebibyte from a page's start, and the device moves them
+(`BlockDevice::read_frames`, `write_frames`). Only anonymous memory is
+lent, the memory C programs have; a frame's or a ring's is copied.
+`SpaceObject::lend` makes the pages as faults would (writable, for a
+read), pins each in its page record (`PageInfo::pin`) under the space's
+regions lock, and lets go of them when the device is done. A page the
+program unmaps meanwhile stays until then. A pin is not a sharer, so the
+program's own write to the page does not copy it away from the device.
+A fork waits for the lendings under way: it would make the page
+read-only in both processes, and the first write would copy it while the
+device still writes the original.
+
+The rest goes through pages of the kernel's, up to 16 pages a request: a
+transfer off a sector's boundary, a part of a sector at either end, a
+device that cannot reach memory it is lent (the RAM disk). A write that
+covers part of a sector first reads the sector (the first and last of
+the request), under the node's lock, so that two such writes to one
+sector cannot lose each other's bytes. Reads end at the device's end; a
+write at or past it fails with ENOSPC, as on Linux. An error after some
+bytes moved ends the transfer short. `fsync` empties the disk's write
+cache.
+
+A transfer of more parts of pages than the device takes in one request
+goes as several (`Disk::request_all`), up to 16 in flight at once, and
+each is settled, retried or failed, before the call returns, even after
+another failed, since the device may still be reaching the memory. The
+device hears of them together: virtio-blk rings its doorbell once, after
+the last, which lets QEMU merge requests for adjacent sectors into one
+read or write of its file.
 
 `ioctl` on a block device takes Linux's requests (radix-block(2)): the
 size in bytes and in sectors, the logical and physical sector sizes, the
@@ -377,7 +405,10 @@ From outermost to innermost:
 10. the disk's queue (with interrupts off).
 
 A block device node's lock for raw writes of parts of sectors is taken
-with nothing else held, and its holder takes only the disk's queue.
+with nothing else held, and its holder takes only the disk's queue. A
+raw transfer lends a program's pages under its address space's regions
+lock, with nothing else held, and lets go of the lock before the disk
+works; a fork holds it while it waits for such transfers to end.
 
 The mount table's lock is taken alone, around lookups and changes to the
 table, never while a filesystem works. The lock checker checks this

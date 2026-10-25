@@ -13,7 +13,8 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use libradix::SYS;
-use radix_abi::address_space::PAGE_SIZE;
+use radix_abi::address_space::{self, MapFlags, PAGE_SIZE};
+use radix_abi::capability::Rights;
 use radix_abi::{random, startup};
 
 /// The next free address, or 0 before the first run is handed out.
@@ -46,4 +47,23 @@ pub fn take(pages: u64, align: u64) -> Option<u64> {
             Err(now) => next = now,
         }
     }
+}
+
+/// `len` bytes of anonymous memory (radix-address-space(2)), from a page's
+/// start: pages the kernel makes, zeroed, when the program first touches
+/// them, readable and writable, mapped for the rest of the program's
+/// life where the kernel places them. The heap is the program's own
+/// frames instead; this is for what the kernel does with the memory C
+/// programs have (a disk's transfers straight into it).
+pub fn anonymous(len: usize) -> Option<&'static mut [u8]> {
+    let size = u64::try_from(len).ok()?.checked_next_multiple_of(PAGE_SIZE)?.max(PAGE_SIZE);
+    let rights = Rights::READ.union(Rights::WRITE);
+    let mapped =
+        address_space::map_anonymous(&SYS, startup::SLOT_SPACE, 0, size, rights, MapFlags::NONE)
+            .ok()?;
+    // SAFETY: the kernel mapped `size` bytes from `mapped.address`, at
+    // least `len`, readable and writable, where nothing else in the
+    // program is, and nothing unmaps them; the slice is the only way to
+    // them.
+    Some(unsafe { core::slice::from_raw_parts_mut(mapped.address as *mut u8, len) })
 }

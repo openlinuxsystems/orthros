@@ -207,6 +207,16 @@ impl Blk {
     /// [`Blk::complete`] gives back. The buffers must stay the request's
     /// alone until then.
     pub fn submit(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u16, Error> {
+        let token = self.submit_held(op, sector, data)?;
+        self.notify();
+        Ok(token)
+    }
+
+    /// Adds a request to the queue as [`Blk::submit`] does, but without
+    /// ringing the device's doorbell: [`Blk::notify`] does, for every
+    /// request held back meanwhile, so that the device takes them
+    /// together.
+    pub fn submit_held(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u16, Error> {
         let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
         let fits =
             |sectors: u64| sector.checked_add(sectors).is_some_and(|end| end <= self.info.sectors);
@@ -282,8 +292,13 @@ impl Blk {
             Buffer { phys: self.slots.phys() + status as u64, len: 1, device_writes: true };
         let added = self.queue.add(&chain[..buffers + 2])?;
         debug_assert_eq!(added, head);
-        self.queue.notify();
         Ok(added)
+    }
+
+    /// Rings the device's doorbell for the requests added since it last
+    /// rang.
+    pub fn notify(&self) {
+        self.queue.notify();
     }
 
     /// Where the status byte of the chain at `head` is in the slots: after

@@ -220,6 +220,10 @@ pub type NodeRef = KArc<dyn Node>;
 /// the filesystem only keeps.
 pub type SocketBinding = KArc<dyn Any + Send + Sync>;
 
+/// What [`Out::lend`] and [`In::lend`] call with the memory they lend: the
+/// physical address and length of each part of a page of it, in order.
+pub type Borrower<'a> = &'a mut dyn FnMut(&[(u64, u32)]) -> Result<()>;
+
 /// Where a read puts what it reads: the caller's buffer.
 pub trait Out {
     /// Its length in bytes.
@@ -257,6 +261,24 @@ pub trait Out {
     fn fault_in(&mut self, _at: usize, _len: usize) -> Result<()> {
         Ok(())
     }
+    /// Lends its memory to a device to write into, if it can, as
+    /// [`radix_block::BlockDevice::read_frames`] takes it: as much of the
+    /// `len` bytes from `at` as [`radix_block::MAX_FRAMES`] parts of pages
+    /// hold. Calls `with` with them (physical address, length), which
+    /// stay in place and the program's until it returns, and returns how
+    /// many bytes it lent, or what `with` failed with. `None` if it
+    /// cannot lend them (memory that is not the program's own, or `at`'s
+    /// address not a multiple of `align`): the caller copies instead,
+    /// which the default has it do.
+    fn lend(
+        &mut self,
+        _at: usize,
+        _len: usize,
+        _align: usize,
+        _with: Borrower<'_>,
+    ) -> Option<Result<usize>> {
+        None
+    }
 }
 
 /// Where a write takes what it writes from: the caller's buffer.
@@ -278,6 +300,16 @@ pub trait In {
     /// [`Out::fault_in`] does.
     fn fault_in(&self, _at: usize, _len: usize) -> Result<()> {
         Ok(())
+    }
+    /// Lends its memory to a device to read from, as [`Out::lend`] does.
+    fn lend(
+        &self,
+        _at: usize,
+        _len: usize,
+        _align: usize,
+        _with: Borrower<'_>,
+    ) -> Option<Result<usize>> {
+        None
     }
 }
 

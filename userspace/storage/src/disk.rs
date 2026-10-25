@@ -12,11 +12,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use libradix::abi::Status;
+use libradix::abi::address_space;
 use libradix::abi::block;
 use libradix::abi::capability::Rights;
 use libradix::abi::directory::OpenFlags;
 use libradix::abi::errors::{File as FileError, Kernel};
 use libradix::abi::file;
+use libradix::abi::startup::SLOT_SPACE;
 use radix_rt::fs::{Dir, Error, File};
 use radix_rt::{SYS, println};
 
@@ -27,6 +29,10 @@ use crate::{big_byte, check, fail};
 /// the end, of which 10 fit. tools/xtask/src/test.rs has the same list.
 const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
+/// Where the `raw` mode's transfers with anonymous memory go ([`lent`]),
+/// past what it writes and discards, and which it leaves as it was: the
+/// disks hold 8 MiB.
+const LENT_AT: u64 = 5 << 20;
 /// The range the `raw` mode discards, which the host finds zeroed.
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 /// The reads of the `raw` mode, before it writes: from these offsets
@@ -191,6 +197,7 @@ pub fn raw(root: &Dir, name: &str) {
         other => fail(&format!("/dev/{name}: a write at the end: {other:?}, not no_space")),
     }
     println!("storage: /dev/{name}: raw writes at odd offsets read back");
+    lent(&disk, name);
 
     for (offset, len) in [(513, 512), (512, 100), (size - 512, 1024)] {
         match discard(&disk, offset, len) {
@@ -224,6 +231,86 @@ pub fn raw(root: &Dir, name: &str) {
     let flushed = control(&disk, block::FLUSH, &mut []).map_err(named);
     check(flushed.is_ok(), || format!("/dev/{name}: BLKFLSBUF: {flushed:?}"));
     println!("storage: /dev/{name}: discards, flushes and refusals work");
+}
+
+/// Raw transfers between `disk` and anonymous memory, the memory C
+/// programs have, which go straight between the disk and the memory when
+/// both are on a sector's boundary (radix-files(7)): reads into pages not
+/// touched yet and touched, from a page's start, a sector's and neither,
+/// more than a mebibyte at a time; writes of the complement read back
+/// through the heap, and the bytes before written back; and memory that
+/// is read-only, which a read cannot fill. From [`LENT_AT`], which the
+/// test leaves as it was.
+fn lent(disk: &File, name: &str) {
+    const LEN: usize = (2 << 20) + 4096 + 512;
+    const LAST: usize = LEN.next_multiple_of(4096);
+    let Some(memory) = radix_rt::vm::anonymous(LAST + 4096) else {
+        return fail(&format!("/dev/{name}: no anonymous memory to lend"));
+    };
+    for (start, at, len) in [
+        (0, LENT_AT, LEN),
+        (0, LENT_AT + 4096, 1 << 20),
+        (512, LENT_AT + 512, LEN),
+        (4096 + 1, LENT_AT, 70_000),
+        (0, LENT_AT + 100, 8192),
+    ] {
+        let buffer = &mut memory[start..start + len];
+        match disk.read_at(at, buffer) {
+            Ok(got) => check(got == len && as_held(at, buffer, &[]), || {
+                format!(
+                    "/dev/{name}: a read of {len} bytes at {at} into anonymous memory at {start}"
+                )
+            }),
+            Err(err) => fail(&format!("/dev/{name}: a read of {len} bytes at {at}: {err}")),
+        }
+    }
+    // Read back through the heap, which is copied, 64 KiB at a time.
+    let mut back = vec![0u8; 64 << 10];
+    for (start, at, len) in [(0, LENT_AT, LEN), (512, LENT_AT + 3 * 512, 100_000)] {
+        for (flip, written) in [(true, &[(at, len as u64)][..]), (false, &[][..])] {
+            let buffer = &mut memory[start..start + len];
+            for (byte, at) in buffer.iter_mut().zip(at..) {
+                *byte = if flip { !big_byte(at as usize) } else { big_byte(at as usize) };
+            }
+            let wrote = disk.write_at(at, buffer);
+            check(wrote.as_ref().is_ok_and(|&n| n == len), || {
+                format!(
+                    "/dev/{name}: a write of {len} bytes at {at} from anonymous memory: {wrote:?}"
+                )
+            });
+            for from in (at..at + len as u64).step_by(back.len()) {
+                let n = back.len().min((at + len as u64 - from) as usize);
+                let read = disk.read_at(from, &mut back[..n]);
+                check(read.is_ok() && as_held(from, &back[..n], written), || {
+                    format!(
+                        "/dev/{name}: what was written at {at} from anonymous memory reads back \
+                         otherwise at {from}"
+                    )
+                });
+            }
+        }
+    }
+    // Its last page read-only: written from, not read into.
+    let last = &mut memory[LAST..];
+    let address = last.as_ptr() as u64;
+    let protected = address_space::protect(&SYS, SLOT_SPACE, address, 4096, Rights::READ);
+    check(protected.is_ok(), || format!("/dev/{name}: making memory read-only: {protected:?}"));
+    let wrote = disk.write_at(LENT_AT, last);
+    check(wrote.as_ref().is_ok_and(|&n| n == 4096), || {
+        format!("/dev/{name}: a write from read-only memory: {wrote:?}")
+    });
+    match disk.read_at(LENT_AT, last) {
+        Err(Error::Status(status)) if is(status, Kernel::BadAddress) => {}
+        other => fail(&format!("/dev/{name}: a read into read-only memory: {other:?}")),
+    }
+    let zeros = disk.read_at(LENT_AT, &mut back[..4096]);
+    check(zeros.is_ok() && back[..4096].iter().all(|&byte| byte == 0), || {
+        format!("/dev/{name}: what was written from read-only memory reads back otherwise")
+    });
+    let held: Vec<u8> = (0..4096).map(|at| big_byte(LENT_AT as usize + at)).collect();
+    let restored = disk.write_at(LENT_AT, &held);
+    check(restored.is_ok(), || format!("/dev/{name}: a write at {LENT_AT}: {restored:?}"));
+    println!("storage: /dev/{name}: raw transfers straight between the disk and anonymous memory");
 }
 
 /// The `errors` mode on `/dev/<name>`: reads and writes of the sectors

@@ -204,9 +204,13 @@ A disk or partition in _/dev_ is read and written raw, at any offset and
 length, with nothing cached between, as Linux's are when opened with
 *O_DIRECT*; *fsync*(2) empties the disk's write cache, and *ioctl*(2)
 takes Linux's requests for its size, sector size and discards
-(*radix-block*(2)). A write that covers part of a sector reads the rest
-of the sector first. Writing to a disk that holds a mounted filesystem
-damages the filesystem, as on every system.
+(*radix-block*(2)). The whole sectors of a transfer that starts on a
+sector's boundary, into or out of memory on a sector's boundary (an
+aligned *posix_memalign*(3) or *mmap*(2) buffer), go straight between
+the disk and the program's memory; the rest is copied. A write that
+covers part of a sector reads the rest of the sector first. Writing to
+a disk that holds a mounted filesystem damages the filesystem, as on
+every system.
 
 # DIAGNOSTICS
 

@@ -149,6 +149,16 @@ impl Out for UserOut {
         }
         Ok(())
     }
+
+    fn lend(
+        &mut self,
+        at: usize,
+        len: usize,
+        align: usize,
+        with: radix_vfs::Borrower<'_>,
+    ) -> Option<radix_vfs::Result<usize>> {
+        lend(self.address, self.len, (at, len, align), true, with)
+    }
 }
 
 /// A caller's buffer to write from.
@@ -186,6 +196,43 @@ impl In for UserIn {
         }
         Ok(())
     }
+
+    fn lend(
+        &self,
+        at: usize,
+        len: usize,
+        align: usize,
+        with: radix_vfs::Borrower<'_>,
+    ) -> Option<radix_vfs::Result<usize>> {
+        lend(self.address, self.len, (at, len, align), false, with)
+    }
+}
+
+/// [`Out::lend`] and [`In::lend`] for a caller's buffer of `size` bytes
+/// at `address`: `len` bytes from `at`, as far as
+/// [`radix_block::MAX_FRAMES`] parts of pages reach, if their address is
+/// a multiple of `align`, to a device that writes them if `write`. A
+/// range outside the buffer, or memory that cannot be lent, is copied
+/// instead, which reports the bad address if there is one.
+fn lend(
+    address: u64,
+    size: usize,
+    (at, len, align): (usize, usize, usize),
+    write: bool,
+    with: radix_vfs::Borrower<'_>,
+) -> Option<radix_vfs::Result<usize>> {
+    let start = address + at as u64;
+    if len == 0
+        || at.checked_add(len).is_none_or(|end| end > size)
+        || align == 0
+        || !start.is_multiple_of(align as u64)
+    {
+        return None;
+    }
+    let page = radix_abi::address_space::PAGE_SIZE;
+    let head = (page - start % page) as usize;
+    let n = len.min(head + (radix_block::MAX_FRAMES - 1) * page as usize);
+    super::lend(start, n, write, |frames| with(frames).map(|()| n))
 }
 
 /// Checks a caller's buffer and caps it at [`IO_MAX`].

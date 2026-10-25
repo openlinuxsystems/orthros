@@ -90,7 +90,14 @@ impl Controller for SataPort {
         self.port.alone(port_op(op))
     }
 
-    fn submit(&mut self, slot: u8, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
+    fn submit(
+        &mut self,
+        slot: u8,
+        op: Op,
+        sector: u64,
+        data: &[(u64, u32)],
+        _more: bool,
+    ) -> Result<(), Error> {
         let tag = self.port.submit(port_op(op), sector, data).map_err(|err| match err {
             radix_ahci::Error::BadRequest => Error::OutOfRange,
             _ => Error::Io,

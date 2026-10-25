@@ -2550,6 +2550,9 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("storage: /dev/{name}: raw reads at odd offsets read what it holds"))?;
         vm.expect(&format!("storage: /dev/{name}: raw writes at odd offsets read back"))?;
+        vm.expect(&format!(
+            "storage: /dev/{name}: raw transfers straight between the disk and anonymous memory"
+        ))?;
         vm.expect(&format!("storage: /dev/{name}: discards, flushes and refusals work"))?;
     }
     storage_end(vm, "raw")

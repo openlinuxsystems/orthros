@@ -83,7 +83,8 @@ pub enum Owner {
     /// A page of a program's anonymous memory, which the kernel hands out
     /// when the program first touches it; `aux` counts the address spaces
     /// that map it ([`PageInfo::share_count`]), more than one after a fork
-    /// until each has written to it.
+    /// until each has written to it, and the devices it is lent to
+    /// ([`PageInfo::pin`]).
     Anon = 8,
 }
 
@@ -250,7 +251,7 @@ impl PageInfo {
     /// read-modify-writes, since two spaces that share a page after a fork
     /// let go of it under locks of their own.
     pub fn share_count(&self) -> u32 {
-        self.aux.load(Acquire)
+        self.aux.load(Acquire) & SHARES
     }
 
     /// Sets the count of a page of anonymous memory just allocated, which
@@ -265,11 +266,44 @@ impl PageInfo {
     }
 
     /// One address space fewer maps a page of anonymous memory: returns
-    /// how many still do. The one that sees 0 frees the page.
+    /// what still holds it, spaces and pins. The one that sees 0 frees the
+    /// page.
     pub fn unshare(&self) -> u32 {
         self.aux.fetch_sub(1, AcqRel) - 1
     }
+
+    /// Holds a page of anonymous memory that a space maps in place for a
+    /// device that reads or writes it, until [`PageInfo::unpin`]: if the
+    /// space lets go of it meanwhile, the page stays until then. A pin
+    /// does not count as a sharer, so the space still writes to a page
+    /// only it maps in place. `false` if the page has as many pins as it
+    /// holds already (255).
+    pub fn pin(&self) -> bool {
+        self.aux
+            .try_update(AcqRel, Acquire, |aux| (aux >> PIN_SHIFT != 0xff).then(|| aux + PIN))
+            .is_ok()
+    }
+
+    /// Lets go of a pin, as [`PageInfo::unshare`] lets go of a space.
+    pub fn unpin(&self) -> u32 {
+        self.aux.fetch_sub(PIN, AcqRel) - PIN
+    }
+
+    /// How many pins a page of anonymous memory has.
+    pub fn pins(&self) -> u32 {
+        self.aux.load(Acquire) >> PIN_SHIFT
+    }
 }
+
+/// Where the pins of a page of anonymous memory start in `aux`, above its
+/// share count.
+const PIN_SHIFT: u32 = 24;
+
+/// One pin.
+const PIN: u32 = 1 << PIN_SHIFT;
+
+/// The share count's bits of `aux`.
+const SHARES: u32 = PIN - 1;
 
 /// A run of frames with metadata: frame `base + i` is described by
 /// `pages[i]`.
@@ -327,6 +361,29 @@ mod tests {
         assert!(info.cache(Owner::Anon));
         assert_eq!((info.state(), info.owner(), info.tag()), (State::Cached, Owner::Anon, 7));
         assert!(!info.cache(Owner::Anon), "a second free");
+    }
+
+    #[test]
+    fn pins_hold_a_page_without_sharing_it() {
+        let info = PageInfo::new();
+        info.set_share_count(1);
+        assert!(info.pin() && info.pin());
+        assert_eq!((info.share_count(), info.pins()), (1, 2));
+        info.share();
+        assert_eq!(info.share_count(), 2);
+        // The spaces let go first: the pins keep it.
+        assert_ne!(info.unshare(), 0);
+        assert_ne!(info.unshare(), 0);
+        assert_eq!((info.share_count(), info.pins()), (0, 2));
+        assert_ne!(info.unpin(), 0);
+        assert_eq!(info.unpin(), 0);
+        // At most 255 at once.
+        info.set_share_count(1);
+        for _ in 0..255 {
+            assert!(info.pin());
+        }
+        assert!(!info.pin());
+        assert_eq!((info.share_count(), info.pins()), (1, 255));
     }
 
     #[test]

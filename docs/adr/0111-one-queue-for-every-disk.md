@@ -53,19 +53,46 @@ Linux's `ioctl` requests.
   unanswered for 30 seconds, as long as Linux gives ATA and SCSI disks,
   has its thread reset the controller the same way. virtio has no reset
   and its requests wait on, with a line in the log every 30 seconds.
-- A block device node reads and writes raw, straight to the disk
-  through the kernel's pages, with nothing cached: as FreeBSD's disks
-  do, and as Linux's do when opened with `O_DIRECT`. Any offset and
-  length work: a write of part of a sector reads the sector first, under
-  the node's lock. Reads stop at the end; writes there fail with ENOSPC,
-  as Linux's do. `fsync` empties the disk's write cache.
+- A block device node reads and writes raw, straight to the disk, with
+  nothing cached: as FreeBSD's disks do, and as Linux's do when opened
+  with `O_DIRECT`. Any offset and length work: a write of part of a
+  sector reads the sector first, under the node's lock. Reads stop at
+  the end; writes there fail with ENOSPC, as Linux's do. `fsync` empties
+  the disk's write cache.
+- The whole sectors of a transfer on a sector's boundary, into or from
+  memory on a sector's boundary, go straight between the disk and the
+  program's anonymous memory, as Linux's `O_DIRECT` moves them: the
+  buffer lends its pages, up to 256 parts of pages at a time, and the
+  device reads or writes them in place. The rest goes through the
+  kernel's pages. A lent page is pinned while the device works, with a
+  count of pins in its page record next to its count of sharers: a page
+  the program unmaps meanwhile stays until the device is done, and a pin
+  is not a sharer, so the program's own write to the page keeps it
+  rather than copying it away from the device. A fork waits for the
+  lendings under way, since it makes a private page read-only on both
+  sides and the next write copies it; with the device still writing the
+  original, the parent's copy would miss the rest of the read.
+- A transfer of more parts of pages than the device takes in one
+  request goes as several, up to 16 in flight at once, each settled
+  before the call returns even after another fails, since the device
+  may still reach the memory. virtio-blk rings its doorbell once for
+  them all, so QEMU merges requests for adjacent sectors into one read
+  or write of its file.
 - `ioctl` on a block device takes Linux's requests for its size
   (BLKGETSIZE64, BLKGETSIZE), sector and block sizes (BLKSSZGET,
   BLKPBSZGET, BLKIOMIN, BLKIOOPT, BLKALIGNOFF), read-only and rotational
   flags (BLKROGET, BLKROTATIONAL), BLKDISCARDZEROES, and BLKDISCARD and
   BLKFLSBUF, which need the write right (radix-block(2)).
 
-Two alternatives were set aside:
+Four alternatives were set aside:
+
+- Copying every transfer through the kernel's pages, as the first
+  version of this decision had it. A mebibyte went as 16 requests of
+  64 KiB, one after the other, and a copy: seven times as long as
+  Linux's under KVM.
+- Pins counted as sharers. The page then looks shared to the program's
+  next write fault, which copies it, and the device writes a page the
+  program no longer maps.
 
 - A kernel thread per controller for error handling, as Linux's SCSI
   layer has. Every request in flight has a thread waiting for it, so
@@ -83,11 +110,19 @@ Two alternatives were set aside:
   with its I/O classes, retries and recovery.
 - The `disk-raw` boot test writes and reads raw at odd offsets on a
   virtio and a SATA disk, discards, asks every request, and the host
-  checks the bytes; `disk-errors` has QEMU fail SATA reads, once and
+  checks the bytes; it also reads into and writes from anonymous
+  memory, straight and copied, into pages not yet touched, from a page's
+  start and from a sector's, and into read-only memory, which fails; `disk-errors` has QEMU fail SATA reads, once and
   for good, and checks that the first is retried and the second ends in
   EIO.
 - `ob bench` has rows for raw reads and writes of 4 KiB, 64 KiB and 1
   MiB of a virtio disk, next to Linux's with `O_DIRECT`, and the gate
   holds them to parity like every other row.
+- A fork of a process waits for its raw transfers under way, as long as
+  a disk takes; Linux instead copies a pinned page for the child at
+  once. Programs that fork while another thread reads a disk are rare,
+  and the wait is shorter than the copy is complex.
+- Memory other than anonymous memory (a frame, a ring, a mapped file's
+  pages) is still copied, and so is everything for the RAM disk.
 - Raw writes of parts of one sector through two different nodes (a
   disk and its partition) are not kept apart.

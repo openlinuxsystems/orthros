@@ -8,7 +8,8 @@
 //! MSI-X vector to spare is polled by the threads waiting for it. A
 //! request's descriptor chain is matched to its slot by the chain's head,
 //! which may be reused as soon as the chain is handed back, so under the
-//! queue's lock at that moment.
+//! queue's lock at that moment. Requests of one transfer ring the
+//! doorbell once, after the last of them, so that QEMU merges them.
 
 use alloc::sync::Arc;
 use core::fmt::Write;
@@ -36,6 +37,8 @@ pub struct Virtio {
     owner: [u8; radix_virtio::queue::MAX_SIZE as usize],
     /// Its interrupt vector, if it has one.
     vector: Option<u32>,
+    /// Whether requests wait in the queue for the doorbell.
+    held: bool,
 }
 
 impl Controller for Virtio {
@@ -44,7 +47,14 @@ impl Controller for Virtio {
         self.blk.room(segments.max(1)) > 0
     }
 
-    fn submit(&mut self, slot: u8, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
+    fn submit(
+        &mut self,
+        slot: u8,
+        op: Op,
+        sector: u64,
+        data: &[(u64, u32)],
+        more: bool,
+    ) -> Result<(), Error> {
         let op = match op {
             Op::Read => blk::Op::Read,
             // Never asked for: the disk does not say it writes through.
@@ -54,13 +64,24 @@ impl Controller for Virtio {
                 blk::Op::Discard(u32::try_from(count).map_err(|_| Error::OutOfRange)?)
             }
         };
-        let head = self.blk.submit(op, sector, data).map_err(|err| match err {
+        let head = self.blk.submit_held(op, sector, data).map_err(|err| match err {
             radix_virtio::Error::BadRequest => Error::OutOfRange,
             _ => Error::Io,
         })?;
         let len = self.owner.len();
         self.owner[usize::from(head) % len] = slot;
+        self.held = more;
+        if !more {
+            self.blk.notify();
+        }
         Ok(())
+    }
+
+    fn kick(&mut self) {
+        if self.held {
+            self.held = false;
+            self.blk.notify();
+        }
     }
 
     fn complete(&mut self) -> Option<(u8, Outcome)> {
@@ -129,8 +150,12 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     };
     let found = blk.info();
     // From here a failure drops the driver, which lets the device go.
-    let controller =
-        Virtio { blk, owner: [0; radix_virtio::queue::MAX_SIZE as usize], vector: interrupt };
+    let controller = Virtio {
+        blk,
+        owner: [0; radix_virtio::queue::MAX_SIZE as usize],
+        vector: interrupt,
+        held: false,
+    };
     if found.max_segment_size != 0 && (found.max_segment_size as usize) < radix_hw::PAGE_SIZE {
         return Err("its segments are smaller than a page");
     }

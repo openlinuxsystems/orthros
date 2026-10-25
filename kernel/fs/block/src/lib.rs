@@ -53,6 +53,10 @@ pub const SECTOR: u64 = 512;
 /// Sectors in a page.
 pub const SECTORS_PER_PAGE: u64 = PAGE_SIZE as u64 / SECTOR;
 
+/// The most frames one [`BlockDevice::read_frames`] or
+/// [`BlockDevice::write_frames`] takes: a mebibyte of whole pages.
+pub const MAX_FRAMES: usize = 256;
+
 /// What can go wrong with a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -154,6 +158,29 @@ pub trait BlockDevice: Send + Sync {
         self.flush()
     }
 
+    /// Reads the sectors from `sector` straight into `frames` (physical
+    /// address, length), in order, as [`read`] does into pages: memory
+    /// that its owner, a program, lends for the request, at most
+    /// [`MAX_FRAMES`] parts of pages, each a multiple of [`SECTOR`] long
+    /// and starting at one. They stay in place, and their owner's, until
+    /// it returns, so it returns only once the device is done with every
+    /// one of them, even when the request fails. Fails with
+    /// [`Error::Unsupported`] on a device that cannot, which the default
+    /// does; the caller then reads through pages of its own.
+    ///
+    /// [`read`]: BlockDevice::read
+    fn read_frames(&self, _sector: u64, _frames: &[(u64, u32)]) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Writes `frames` to the sectors from `sector`, as [`write`] does,
+    /// from memory lent as [`BlockDevice::read_frames`] has it.
+    ///
+    /// [`write`]: BlockDevice::write
+    fn write_frames(&self, _sector: u64, _frames: &[(u64, u32)]) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
     /// Tells the device that the `count` sectors from `sector` hold
     /// nothing worth keeping (ATA's TRIM, NVMe's deallocate): it may free
     /// them, and what they read afterwards is the device's choice. Fails
@@ -198,6 +225,16 @@ pub fn check(
         Some(end) if end <= sectors => Ok(length),
         _ => Err(Error::OutOfRange),
     }
+}
+
+/// Checks a request to or from lent memory ([`BlockDevice::read_frames`]),
+/// as [`check`] does pages: each frame (physical address, length) whole
+/// sectors inside its page, and no more than [`MAX_FRAMES`] of them.
+/// Returns the request's length in sectors.
+pub fn check_frames(sectors: u64, sector: u64, frames: &[(u64, u32)]) -> Result<u64, Error> {
+    let lengths =
+        frames.iter().map(|&(phys, len)| ((phys % PAGE_SIZE as u64) as usize, len as usize));
+    check(sectors, MAX_FRAMES, sector, lengths)
 }
 
 /// Checks a discard of `count` sectors from `sector` on a device of
@@ -298,6 +335,16 @@ impl BlockDevice for Slice {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         check(self.sectors, usize::MAX, sector, lengths)?;
         self.device.write_through(self.first + sector, segments)
+    }
+
+    fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        check_frames(self.sectors, sector, frames)?;
+        self.device.read_frames(self.first + sector, frames)
+    }
+
+    fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        check_frames(self.sectors, sector, frames)?;
+        self.device.write_frames(self.first + sector, frames)
     }
 
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {

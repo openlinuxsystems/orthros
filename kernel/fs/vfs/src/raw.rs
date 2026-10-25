@@ -7,11 +7,15 @@
 //! Nothing is cached, as with FreeBSD's disks, or Linux's opened with
 //! `O_DIRECT`: a read reads what the device holds when it is made, a
 //! write has reached the device when it returns, and fsync(2) empties
-//! the device's own cache. Unlike them, any offset and length work: a
-//! write that covers part of a sector reads that sector first and writes
-//! it back whole, under the node's lock so that two such writes to one
-//! sector cannot lose each other's bytes. Each request moves at most
-//! [`MAX_PAGES`] pages, as many as the device takes in one.
+//! the device's own cache. Whole sectors to or from a program's memory
+//! on a sector boundary go straight between the device and that memory,
+//! which the program lends for the request ([`Out::lend`]), a mebibyte
+//! at a time, as Linux's `O_DIRECT` has them. Unlike Linux, any offset,
+//! length and buffer work: the rest goes through pages of the kernel's,
+//! at most [`MAX_PAGES`] a request, and a write that covers part of a
+//! sector reads that sector first and writes it back whole, under the
+//! node's lock so that two such writes to one sector cannot lose each
+//! other's bytes.
 
 use radix_block::mem::CachePage;
 use radix_block::{BlockDevice, PAGE_SIZE, SECTOR, Segment, SegmentMut};
@@ -138,6 +142,73 @@ fn read_sector(
     Ok(device.read(sector, &mut [segment])?)
 }
 
+/// How many of `len` bytes from byte `offset` of a device can go
+/// straight to or from lent memory: the whole sectors, if `offset` is on
+/// a sector's boundary.
+fn whole_sectors(offset: u64, len: usize) -> usize {
+    if offset.is_multiple_of(SECTOR) { len - len % SECTOR_BYTES } else { 0 }
+}
+
+/// Reads the whole sectors of the `len` bytes from byte `offset` of
+/// `device` straight into `out`'s memory, lent a piece at a time, for as
+/// long as `out` lends it and the device takes it: returns how many bytes
+/// it read, and what stopped it, if something failed.
+fn read_lent(
+    device: &dyn BlockDevice,
+    offset: u64,
+    len: usize,
+    out: &mut dyn Out,
+) -> (usize, Result<()>) {
+    let whole = whole_sectors(offset, len);
+    let mut done = 0;
+    while done < whole {
+        let sector = (offset + done as u64) / SECTOR;
+        let mut unsupported = false;
+        let mut with = |frames: &[(u64, u32)]| match device.read_frames(sector, frames) {
+            Err(radix_block::Error::Unsupported) => {
+                unsupported = true;
+                Ok(())
+            }
+            result => Ok(result?),
+        };
+        match out.lend(done, whole - done, SECTOR_BYTES, &mut with) {
+            Some(Ok(n)) if n > 0 && !unsupported => done += n,
+            Some(Err(err)) => return (done, Err(err)),
+            _ => break,
+        }
+    }
+    (done, Ok(()))
+}
+
+/// Writes the whole sectors of the `len` bytes from byte `offset` of
+/// `device` straight from `data`'s memory, as [`read_lent`] reads.
+fn write_lent(
+    device: &dyn BlockDevice,
+    offset: u64,
+    len: usize,
+    data: &dyn In,
+) -> (usize, Result<()>) {
+    let whole = whole_sectors(offset, len);
+    let mut done = 0;
+    while done < whole {
+        let sector = (offset + done as u64) / SECTOR;
+        let mut unsupported = false;
+        let mut with = |frames: &[(u64, u32)]| match device.write_frames(sector, frames) {
+            Err(radix_block::Error::Unsupported) => {
+                unsupported = true;
+                Ok(())
+            }
+            result => Ok(result?),
+        };
+        match data.lend(done, whole - done, SECTOR_BYTES, &mut with) {
+            Some(Ok(n)) if n > 0 && !unsupported => done += n,
+            Some(Err(err)) => return (done, Err(err)),
+            _ => break,
+        }
+    }
+    (done, Ok(()))
+}
+
 /// Reads from byte `offset` of `device` into `out`: as much as `out`
 /// holds, fewer at the device's end. An error after some bytes came ends
 /// the read short.
@@ -147,9 +218,12 @@ pub fn read(device: &dyn BlockDevice, offset: u64, out: &mut dyn Out) -> Result<
         return Ok(0);
     }
     let len = (out.len() as u64).min(size - offset) as usize;
+    let (mut done, lent) = read_lent(device, offset, len, out);
+    if let Err(err) = lent {
+        return if done > 0 { Ok(done) } else { Err(err) };
+    }
     let most = request_pages(device);
     let mut pages = mem::vec();
-    let mut done = 0;
     while done < len {
         let chunk = Chunk::at(offset + done as u64, len - done, most);
         let result = grow(&mut pages, chunk.pages())
@@ -220,9 +294,12 @@ pub fn write(
         return Err(Error::NoSpace);
     }
     let len = (data.len() as u64).min(size - offset) as usize;
+    let (mut done, lent) = write_lent(device, offset, len, data);
+    if let Err(err) = lent {
+        return if done > 0 { Ok(done) } else { Err(err) };
+    }
     let most = request_pages(device);
     let mut pages = mem::vec();
-    let mut done = 0;
     while done < len {
         let chunk = Chunk::at(offset + done as u64, len - done, most);
         let result = grow(&mut pages, chunk.pages()).and_then(|()| {

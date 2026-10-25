@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::string::String;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 
 use proptest::prelude::*;
@@ -1272,18 +1273,155 @@ mod lock_lists {
 /// A disk in memory behind a block device node, filled with a pattern:
 /// byte `i` is `i % 251`.
 fn raw_disk(sectors: u64, max_segments: usize) -> (std::sync::Arc<RawDisk>, NodeRef) {
+    lending_disk(sectors, max_segments, None)
+}
+
+/// [`raw_disk`], reaching `memory` straight if there is one.
+fn lending_disk(
+    sectors: u64,
+    max_segments: usize,
+    memory: Option<std::sync::Arc<ProgramMemory>>,
+) -> (std::sync::Arc<RawDisk>, NodeRef) {
     let ram = radix_block::ram::RamDisk::new(sectors, false);
     let pattern: Vec<u8> = (0..sectors * 512).map(|i| (i % 251) as u8).collect();
     ram.load(0, &pattern).unwrap();
-    let disk = std::sync::Arc::new(RawDisk { ram, max_segments });
+    let disk = std::sync::Arc::new(RawDisk {
+        ram,
+        max_segments,
+        memory,
+        lent: AtomicUsize::new(0),
+        fail_lent_after: AtomicUsize::new(usize::MAX),
+    });
     let device: radix_block::DeviceRef = disk.clone();
     (disk, crate::synthetic::BlockNode::make(7, device).unwrap())
 }
 
-/// A RAM disk that takes at most `max_segments` segments a request.
+/// A RAM disk that takes at most `max_segments` segments a request, and
+/// reaches `memory` straight, if it has one.
 struct RawDisk {
     ram: radix_block::ram::RamDisk,
     max_segments: usize,
+    memory: Option<std::sync::Arc<ProgramMemory>>,
+    /// How many requests it took to or from lent memory.
+    lent: AtomicUsize,
+    /// How many more of them it carries out before the rest fail.
+    fail_lent_after: AtomicUsize,
+}
+
+impl RawDisk {
+    /// The lent memory, and whether the next request to it fails.
+    fn lent_memory(&self) -> core::result::Result<&ProgramMemory, radix_block::Error> {
+        let memory = self.memory.as_deref().ok_or(radix_block::Error::Unsupported)?;
+        let left = self.fail_lent_after.load(Ordering::Relaxed);
+        if left == 0 {
+            return Err(radix_block::Error::Io);
+        }
+        if left != usize::MAX {
+            self.fail_lent_after.store(left - 1, Ordering::Relaxed);
+        }
+        self.lent.fetch_add(1, Ordering::Relaxed);
+        Ok(memory)
+    }
+}
+
+/// Memory a program lends to [`RawDisk`]: its bytes are at "physical"
+/// addresses from [`BASE`], a page's start.
+struct ProgramMemory {
+    bytes: StdMutex<Vec<u8>>,
+}
+
+/// Where [`ProgramMemory`] starts.
+const BASE: u64 = 0x10_0000_0000;
+
+/// A program's buffer of `len` bytes, from byte `start` of [`ProgramMemory`]:
+/// copied into and out of, or lent.
+struct Lending {
+    memory: std::sync::Arc<ProgramMemory>,
+    start: usize,
+    len: usize,
+}
+
+impl Lending {
+    /// What [`Out::lend`] and [`In::lend`] do: as much as fits in
+    /// `MAX_FRAMES` parts of pages, if the address suits `align`.
+    fn lend_frames(
+        &self,
+        at: usize,
+        len: usize,
+        align: usize,
+        with: crate::Borrower<'_>,
+    ) -> Option<Result<usize>> {
+        assert!(at + len <= self.len);
+        let address = BASE + (self.start + at) as u64;
+        if !address.is_multiple_of(align as u64) {
+            return None;
+        }
+        let head = 4096 - (address % 4096) as usize;
+        let n = len.min(head + (radix_block::MAX_FRAMES - 1) * 4096);
+        let mut frames = Vec::new();
+        let mut done = 0;
+        while done < n {
+            let phys = address + done as u64;
+            let piece = (4096 - (phys % 4096) as usize).min(n - done);
+            frames.push((phys, piece as u32));
+            done += piece;
+        }
+        assert!(frames.len() <= radix_block::MAX_FRAMES);
+        Some(with(&frames).map(|()| n))
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.memory.bytes.lock().unwrap()[self.start..self.start + self.len].to_vec()
+    }
+}
+
+impl crate::Out for Lending {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn put(&mut self, at: usize, bytes: &[u8]) -> Result<()> {
+        let from = self.start + at;
+        self.memory.bytes.lock().unwrap()[from..from + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn lend(
+        &mut self,
+        at: usize,
+        len: usize,
+        align: usize,
+        with: crate::Borrower<'_>,
+    ) -> Option<Result<usize>> {
+        self.lend_frames(at, len, align, with)
+    }
+}
+
+impl crate::In for Lending {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, at: usize, out: &mut [u8]) -> Result<()> {
+        let from = self.start + at;
+        out.copy_from_slice(&self.memory.bytes.lock().unwrap()[from..from + out.len()]);
+        Ok(())
+    }
+
+    fn lend(
+        &self,
+        at: usize,
+        len: usize,
+        align: usize,
+        with: crate::Borrower<'_>,
+    ) -> Option<Result<usize>> {
+        self.lend_frames(at, len, align, with)
+    }
+}
+
+/// [`ProgramMemory`] of `len` bytes, every one `fill`.
+fn program_memory(len: usize, fill: u8) -> std::sync::Arc<ProgramMemory> {
+    std::sync::Arc::new(ProgramMemory { bytes: StdMutex::new(std::vec![fill; len]) })
 }
 
 impl radix_block::BlockDevice for RawDisk {
@@ -1312,6 +1450,89 @@ impl radix_block::BlockDevice for RawDisk {
     fn flush(&self) -> core::result::Result<(), radix_block::Error> {
         self.ram.flush()
     }
+
+    fn read_frames(
+        &self,
+        sector: u64,
+        frames: &[(u64, u32)],
+    ) -> core::result::Result<(), radix_block::Error> {
+        radix_block::check_frames(self.ram.info().sectors, sector, frames)?;
+        let memory = self.lent_memory()?;
+        let mut bytes = memory.bytes.lock().unwrap();
+        let mut at = sector * 512;
+        for &(phys, len) in frames {
+            let from = (phys - BASE) as usize;
+            self.ram.dump(at, &mut bytes[from..from + len as usize]);
+            at += u64::from(len);
+        }
+        Ok(())
+    }
+
+    fn write_frames(
+        &self,
+        sector: u64,
+        frames: &[(u64, u32)],
+    ) -> core::result::Result<(), radix_block::Error> {
+        radix_block::check_frames(self.ram.info().sectors, sector, frames)?;
+        let memory = self.lent_memory()?;
+        let bytes = memory.bytes.lock().unwrap();
+        let mut at = sector * 512;
+        for &(phys, len) in frames {
+            let from = (phys - BASE) as usize;
+            self.ram.load(at, &bytes[from..from + len as usize])?;
+            at += u64::from(len);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn whole_sectors_go_straight_to_lent_memory() {
+    const SECTORS: u64 = 4096;
+    let expected =
+        |at: usize, len: usize| -> Vec<u8> { (at..at + len).map(|i| (i % 251) as u8).collect() };
+    let room = program_memory(3 << 20, 0);
+    let (disk, node) = lending_disk(SECTORS, 16, Some(room.clone()));
+    // (offset, length, where the buffer starts, requests to lent memory):
+    // a mebibyte a request from a page's start, less from a sector's,
+    // none for a buffer or an offset off a sector's boundary, and a tail
+    // of part of a sector copied after the whole ones.
+    for (at, len, start, lent) in [
+        (0, 2 << 20, 0, 2),
+        (512, 1 << 20, 512, 2),
+        (4096, 8192, 100, 0),
+        (100, 8192, 0, 0),
+        (1024, 5000, 4096, 1),
+    ] {
+        disk.lent.store(0, Ordering::Relaxed);
+        room.bytes.lock().unwrap().fill(0);
+        let mut out = Lending { memory: room.clone(), start, len };
+        assert_eq!(node.read(at as u64, &mut out).unwrap(), len, "at {at}");
+        assert!(out.bytes() == expected(at, len), "at {at}, {len} bytes from {start}");
+        assert_eq!(disk.lent.load(Ordering::Relaxed), lent, "at {at}, {len} bytes from {start}");
+    }
+    // Writes the same way, and the disk holds them.
+    let mut model: Vec<u8> = (0..SECTORS as usize * 512).map(|i| (i % 251) as u8).collect();
+    for (at, len, start, byte, lent) in
+        [(0, (1 << 20) + 4096, 0, 0xa1, 2), (3072, 70_000, 1536, 0xa2, 1), (777, 4096, 0, 0xa3, 0)]
+    {
+        disk.lent.store(0, Ordering::Relaxed);
+        room.bytes.lock().unwrap()[start..start + len].fill(byte);
+        let data = Lending { memory: room.clone(), start, len };
+        assert_eq!(node.write(at as u64, &data).unwrap(), len, "at {at}");
+        model[at..at + len].fill(byte);
+        assert_eq!(disk.lent.load(Ordering::Relaxed), lent, "at {at}, {len} bytes from {start}");
+    }
+    let mut back = std::vec![0u8; model.len()];
+    disk.ram.dump(0, &mut back);
+    assert!(back == model, "the disk is not what was written");
+    // An error ends a transfer short after the requests that worked, or
+    // fails it.
+    disk.fail_lent_after.store(1, Ordering::Relaxed);
+    let mut out = Lending { memory: room.clone(), start: 0, len: 2 << 20 };
+    assert_eq!(node.read(0, &mut out).unwrap(), 1 << 20);
+    assert_eq!(node.read(0, &mut out), Err(Error::Io));
+    assert_eq!(node.write(0, &Lending { memory: room, start: 0, len: 4096 }), Err(Error::Io));
 }
 
 #[test]
@@ -1394,6 +1615,43 @@ proptest! {
                 let mut out = std::vec![0u8; len];
                 prop_assert_eq!(node.read(at, &mut SliceMut(&mut out)).unwrap(), end - at as usize);
                 prop_assert_eq!(&out[..end - at as usize], &model[at as usize..end]);
+            }
+        }
+        let mut back = std::vec![0u8; model.len()];
+        disk.ram.dump(0, &mut back);
+        prop_assert!(back == model);
+    }
+
+    /// The same, with buffers in memory the disk reaches straight, from
+    /// any byte of it.
+    #[test]
+    fn lent_transfers_match_a_model(
+        max_segments in 1usize..5,
+        ops in proptest::collection::vec(
+            (0u64..80, 0usize..512, 1usize..40, 0usize..512, 0usize..4096, any::<u8>(), any::<bool>()),
+            1..20,
+        ),
+    ) {
+        let room = program_memory(1 << 20, 0);
+        let (disk, node) = lending_disk(80, max_segments, Some(room.clone()));
+        let mut model: Vec<u8> = (0..80 * 512).map(|i| (i % 251) as u8).collect();
+        for (sector, skew, sectors, extra, start, byte, write) in ops {
+            // Mostly whole sectors, from a sector's boundary or not.
+            let at = sector * 512 + if skew < 400 { 0 } else { skew as u64 };
+            let len = sectors * 512 + if extra < 400 { 0 } else { extra };
+            let end = (at as usize + len).min(model.len());
+            if at as usize >= model.len() {
+                continue;
+            }
+            if write {
+                room.bytes.lock().unwrap()[start..start + len].fill(byte);
+                let data = Lending { memory: room.clone(), start, len };
+                prop_assert_eq!(node.write(at, &data).unwrap(), end - at as usize);
+                model[at as usize..end].fill(byte);
+            } else {
+                let mut out = Lending { memory: room.clone(), start, len };
+                prop_assert_eq!(node.read(at, &mut out).unwrap(), end - at as usize);
+                prop_assert_eq!(&out.bytes()[..end - at as usize], &model[at as usize..end]);
             }
         }
         let mut back = std::vec![0u8; model.len()];

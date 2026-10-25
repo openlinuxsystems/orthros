@@ -365,8 +365,8 @@ static void futex_processes(const char *name, int other, uint64_t rounds) {
 static void disk_transfers(int fd, const char *name, int writing, size_t size, uint64_t rounds) {
 	void *buffer;
 	// Linux's O_DIRECT moves data straight between the disk and the
-	// program's memory, which must be aligned for it; Radix copies
-	// through pages of its own, so any buffer does.
+	// program's memory, which must be aligned for it; so does Radix for
+	// any transfer on a sector's boundary, and copies the rest.
 	if(posix_memalign(&buffer, 4096, size) != 0)
 		fail("posix_memalign");
 	memset(buffer, 0x5a, size);

@@ -22,6 +22,13 @@
 //! device empties for it. Once in flight, every request is the device's
 //! alike.
 //!
+//! A transfer of more segments than the device takes in one
+//! ([`BlockDevice::read_frames`], into memory a program lends) goes as
+//! several requests, all in flight at once, and the device hears of them
+//! together: a controller may hold back the doorbell of a request that
+//! has another right behind it ([`Controller::submit`]'s `more`), which
+//! lets QEMU's virtio disk merge them into one read or write of its file.
+//!
 //! A request the device fails ends in an I/O error. One it hands back to
 //! go again (another request's error stopped it, or the link was reset)
 //! goes again, up to [`TRIES`] times in all. A controller an error stopped
@@ -47,6 +54,9 @@ use crate::user::posix::priority;
 
 /// Requests in flight or waiting to be collected, per disk.
 pub const SLOTS: usize = 64;
+/// The most requests one transfer has in flight at once: a mebibyte of
+/// pages, in requests of [`MAX_SEGMENTS`].
+pub const PARTS: usize = 16;
 /// The most segments one request takes: a page cache's requests take one
 /// page each, so this is plenty.
 pub const MAX_SEGMENTS: usize = 16;
@@ -113,7 +123,20 @@ pub trait Controller: Send {
 
     /// Starts a request, `op` on the sectors from `sector` with the
     /// `data` buffers (physical address, length), as the queue's `slot`.
-    fn submit(&mut self, slot: u8, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error>;
+    /// With `more`, another request follows at once: the controller may
+    /// wait to tell the device until one comes without it, or until
+    /// [`Controller::kick`].
+    fn submit(
+        &mut self,
+        slot: u8,
+        op: Op,
+        sector: u64,
+        data: &[(u64, u32)],
+        more: bool,
+    ) -> Result<(), Error>;
+
+    /// Tells the device of the requests [`Controller::submit`] held back.
+    fn kick(&mut self) {}
 
     /// The next finished request: its slot and how it ended.
     fn complete(&mut self) -> Option<(u8, Outcome)>;
@@ -153,6 +176,11 @@ impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// How many sectors `data` (physical address, length) covers.
+fn sectors(data: &[(u64, u32)]) -> u64 {
+    data.iter().map(|&(_, len)| u64::from(len)).sum::<u64>() / radix_block::SECTOR
 }
 
 /// How urgently the running thread's requests are served: by its
@@ -341,7 +369,8 @@ impl<C: Controller> Disk<C> {
     }
 
     /// Takes room for a request and starts it, in slot `held` (a request
-    /// that goes again) or a free one; returns the slot.
+    /// that goes again) or a free one; returns the slot. With `more`,
+    /// another request follows at once ([`Controller::submit`]).
     fn issue(
         &self,
         rank: usize,
@@ -349,6 +378,7 @@ impl<C: Controller> Disk<C> {
         op: Op,
         sector: u64,
         data: &[(u64, u32)],
+        more: bool,
     ) -> Result<usize, Error> {
         self.waiting[rank].fetch_add(1, Ordering::AcqRel);
         let waiting = Waiting(&self.waiting[rank]);
@@ -369,7 +399,7 @@ impl<C: Controller> Disk<C> {
                     });
                     if let Some(slot) = free {
                         if controller.room(op, data.len()) {
-                            controller.submit(slot as u8, op, sector, data)?;
+                            controller.submit(slot as u8, op, sector, data, more)?;
                             self.requests[slot].store(PENDING, Ordering::Release);
                             break slot;
                         }
@@ -382,7 +412,9 @@ impl<C: Controller> Disk<C> {
             }
             // No room, or a more urgent request comes first, or the
             // controller is being recovered: wait for a completion, or a
-            // slot freed.
+            // slot freed, once the device knows of what was held back
+            // for it.
+            self.kick();
             self.wait(u64::MAX, || self.events.load(Ordering::Acquire) != seen);
         };
         drop(lone);
@@ -413,6 +445,13 @@ impl<C: Controller> Disk<C> {
         }
     }
 
+    /// Tells the device of the requests held back for it.
+    fn kick(&self) {
+        if let Some(controller) = self.queue.lock_irq().as_mut() {
+            controller.kick();
+        }
+    }
+
     /// Frees `slot`, and wakes those waiting for one.
     fn free(&self, slot: usize) {
         self.requests[slot].store(FREE, Ordering::Release);
@@ -423,7 +462,60 @@ impl<C: Controller> Disk<C> {
     /// device hands it back to go again, up to [`TRIES`] times.
     fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
         let rank = running_rank();
-        let mut slot = self.issue(rank, None, op, sector, data)?;
+        let slot = self.issue(rank, None, op, sector, data, false)?;
+        self.settle(rank, slot, op, sector, data)
+    }
+
+    /// Carries out a transfer of any number of buffers as requests of as
+    /// many as the device takes, up to [`PARTS`] of them in flight at
+    /// once, and waits for every one: each goes again as [`Disk::request`]
+    /// has it. Returns only once the device is done with every buffer,
+    /// whatever failed.
+    fn request_all(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
+        let rank = running_rank();
+        let most = self.info.max_segments.max(1);
+        let mut result = Ok(());
+        let mut at = sector;
+        for window in data.chunks(most * PARTS) {
+            // Each part's slot, buffers and first sector.
+            let mut parts = [(0usize, 0usize, 0u64); PARTS];
+            let mut issued = 0;
+            for (i, part) in window.chunks(most).enumerate() {
+                let more = (i + 1) * most < window.len();
+                match self.issue(rank, None, op, at, part, more) {
+                    Ok(slot) => parts[i] = (slot, i * most, at),
+                    Err(err) => {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                issued += 1;
+                at += sectors(part);
+            }
+            self.kick();
+            for &(slot, first, start) in &parts[..issued] {
+                let part = &window[first..(first + most).min(window.len())];
+                let settled = self.settle(rank, slot, op, start, part);
+                if result.is_ok() {
+                    result = settled;
+                }
+            }
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Waits for the request in `slot` to end, sending it again while the
+    /// device hands it back to go again, up to [`TRIES`] times in all;
+    /// frees the slot.
+    fn settle(
+        &self,
+        rank: usize,
+        mut slot: usize,
+        op: Op,
+        sector: u64,
+        data: &[(u64, u32)],
+    ) -> Result<(), Error> {
         let mut tries = 1;
         loop {
             self.finish(slot);
@@ -432,7 +524,7 @@ impl<C: Controller> Disk<C> {
                 RETRY if tries < TRIES => {
                     tries += 1;
                     self.requests[slot].store(HELD, Ordering::Release);
-                    slot = match self.issue(rank, Some(slot), op, sector, data) {
+                    slot = match self.issue(rank, Some(slot), op, sector, data, false) {
                         Ok(slot) => slot,
                         Err(err) => {
                             self.free(slot);
@@ -447,7 +539,7 @@ impl<C: Controller> Disk<C> {
             }
         }
         self.free(slot);
-        let sectors = data.iter().map(|&(_, len)| u64::from(len)).sum::<u64>() / 512;
+        let sectors = sectors(data);
         let (count, moved) = match op {
             Op::Read => (&READS, &READ_SECTORS),
             Op::Write | Op::WriteThrough => (&WRITES, &WRITTEN_SECTORS),
@@ -504,6 +596,22 @@ impl<C: Controller> BlockDevice for Disk<C> {
         }
         self.write_as(Op::Write, sector, segments)?;
         self.flush()
+    }
+
+    fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        radix_block::check_frames(self.info.sectors, sector, frames)?;
+        self.request_all(Op::Read, sector, frames)?;
+        radix_hw::device_barrier();
+        Ok(())
+    }
+
+    fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        if self.info.read_only {
+            return Err(Error::ReadOnly);
+        }
+        radix_block::check_frames(self.info.sectors, sector, frames)?;
+        radix_hw::device_barrier();
+        self.request_all(Op::Write, sector, frames)
     }
 
     fn flush(&self) -> Result<(), Error> {

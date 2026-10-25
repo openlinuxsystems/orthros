@@ -299,6 +299,19 @@ pub(crate) fn fault_in(address: u64, len: usize, write: bool) -> bool {
     user.space.fault_in(address, len, write)
 }
 
+/// Lends `len` bytes of the running program's memory from `address` to a
+/// device ([`memory::SpaceObject::lend`]): `None` if they cannot be.
+pub(crate) fn lend<R>(
+    address: u64,
+    len: usize,
+    write: bool,
+    with: impl FnOnce(&[(u64, u32)]) -> R,
+) -> Option<R> {
+    let thread = sched::running()?;
+    let user = thread.user()?;
+    user.space.lend(address, len, write, with)
+}
+
 /// On the way back to user mode, from a system call, an interrupt or a
 /// fault: a thread asked to stop ends here, and one with signals to take
 /// takes them (`posix::signal::deliver`).

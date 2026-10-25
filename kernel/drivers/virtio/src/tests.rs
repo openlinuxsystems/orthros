@@ -315,6 +315,22 @@ fn sets_up_with_the_features_it_wants() {
 }
 
 #[test]
+fn held_requests_wait_for_the_doorbell() {
+    let (_device, mut blk) = setup(FEATURES);
+    let buffer = Dma::fake(8192);
+    let first = blk.submit_held(Op::Read, 0, &[(buffer.phys(), 512)]).unwrap();
+    let second = blk.submit_held(Op::Read, 1, &[(buffer.phys() + 512, 512)]).unwrap();
+    assert_eq!(blk.complete(), None, "the device was not told yet");
+    blk.notify();
+    assert_eq!(blk.complete(), Some((first, Outcome::Done)));
+    assert_eq!(blk.complete(), Some((second, Outcome::Done)));
+    let mut got = [0u8; 1024];
+    buffer.read(0, &mut got);
+    let expected: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+    assert_eq!(&got[..], &expected[..]);
+}
+
+#[test]
 fn refuses_legacy_devices() {
     let device = Device::new(FEATURES & !common_feature::VERSION_1);
     let f = function(2, 0x1042);
