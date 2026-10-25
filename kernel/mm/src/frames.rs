@@ -53,6 +53,14 @@ use crate::platform::{MAX_CPUS, NoInterrupts, Platform};
 pub const MAX_NODES: usize = 8;
 /// Most regions of RAM across all zones.
 pub const MAX_REGIONS: usize = 64;
+/// Frames per section of physical memory, 2^15 (128 MiB, Linux's section
+/// size on x86_64): `Frames::entry` finds a frame's region through the
+/// section it is in.
+const SECTION_SHIFT: u32 = 15;
+/// Sections the map covers: the first 1 TiB of physical addresses. A
+/// frame above is found by a binary search.
+const SECTIONS: usize = 8192;
+const _: () = assert!(MAX_REGIONS < u8::MAX as usize, "a section names its region in a byte");
 /// First frame of the `Normal` zone: 4 GiB.
 const DMA32_END_PFN: u64 = 1 << (32 - PAGE_SHIFT);
 /// Zones per node.
@@ -205,37 +213,34 @@ struct RegionEntry {
 struct RegionTable {
     entries: [Option<RegionEntry>; MAX_REGIONS],
     len: usize,
-    /// The entry the last search found, which the next lookup most likely
-    /// lands in too (the heap takes its slabs from one region at a time):
-    /// looked at before searching. Written only when it changes.
-    last: AtomicUsize,
+    /// The entry with the most frames, which most lookups land in: looked
+    /// at first.
+    largest: usize,
 }
 
 impl RegionTable {
     const fn new() -> RegionTable {
-        RegionTable { entries: [None; MAX_REGIONS], len: 0, last: AtomicUsize::new(0) }
+        RegionTable { entries: [None; MAX_REGIONS], len: 0, largest: 0 }
     }
 
     fn iter(&self) -> impl Iterator<Item = &RegionEntry> {
         self.entries[..self.len].iter().flatten()
     }
 
-    /// The entry containing frame `pfn`: the one the last search found,
-    /// or a binary search (the entries are sorted by base).
+    /// The entry containing frame `pfn`, from entry `first` on: the
+    /// entries are sorted by base, so the first that starts above `pfn`
+    /// ends the search.
     #[inline]
-    fn find(&self, pfn: u64) -> Option<&RegionEntry> {
-        match self.entries.get(self.last.load(Ordering::Relaxed)) {
-            Some(Some(entry)) if entry.region.contains(pfn) => Some(entry),
-            _ => self.search(pfn),
-        }
+    fn find_from(&self, first: usize, pfn: u64) -> Option<&RegionEntry> {
+        let entries = self.entries.get(first..self.len)?.iter().flatten();
+        entries.take_while(|e| e.region.base <= pfn).find(|e| e.region.contains(pfn))
     }
 
+    /// The entry containing frame `pfn`, by a binary search.
     fn search(&self, pfn: u64) -> Option<&RegionEntry> {
         let entries = &self.entries[..self.len];
         let index = entries.partition_point(|e| e.is_some_and(|e| e.region.end() <= pfn));
-        let found = entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))?;
-        self.last.store(index, Ordering::Relaxed);
-        Some(found)
+        entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))
     }
 }
 
@@ -245,6 +250,10 @@ pub struct Frames {
     platform: Once<&'static dyn Platform>,
     building: SpinLock<RegionTable>,
     regions: Once<RegionTable>,
+    /// For each section of physical memory, 1 + the index of the first
+    /// entry of `regions` with frames in it, or 0 for none: set before
+    /// `regions` is, and never changed after.
+    sections: [AtomicU8; SECTIONS],
     nodes: AtomicUsize,
     /// Nodes in fallback order, per node: nearest first.
     fallback: [[AtomicU8; MAX_NODES]; MAX_NODES],
@@ -269,6 +278,7 @@ impl Frames {
             platform: Once::new(),
             building: SpinLock::new(RegionTable::new()),
             regions: Once::new(),
+            sections: [const { AtomicU8::new(0) }; SECTIONS],
             nodes: AtomicUsize::new(1),
             fallback: [const { [const { AtomicU8::new(0) }; MAX_NODES] }; MAX_NODES],
             distance: [const { [const { AtomicU8::new(10) }; MAX_NODES] }; MAX_NODES],
@@ -380,6 +390,20 @@ impl Frames {
         copy.entries = table.entries;
         copy.len = table.len;
         drop(table);
+        let frames = |index: usize| copy.entries[index].map_or(0, |e| e.region.pages.len());
+        copy.largest = (0..copy.len).max_by_key(|&index| frames(index)).unwrap_or(0);
+        // The lowest entry with frames in a section is written last.
+        for (index, entry) in copy.entries[..copy.len].iter().enumerate().rev() {
+            let Some(entry) = entry else { continue };
+            let first = usize::try_from(entry.region.base >> SECTION_SHIFT).unwrap_or(usize::MAX);
+            let last = usize::try_from((entry.region.end() - 1) >> SECTION_SHIFT);
+            let number = (index + 1) as u8;
+            for section in
+                self.sections.iter().take(last.map_or(SECTIONS, |last| last + 1)).skip(first)
+            {
+                section.store(number, Ordering::Relaxed);
+            }
+        }
         let normal = (0..MAX_NODES).any(|node| {
             self.zones[node * KINDS + ZoneKind::Normal.index()].buddy.lock().managed_pages() > 0
         });
@@ -687,10 +711,31 @@ impl Frames {
         }
     }
 
+    /// The entry of the region containing frame `pfn`: the largest
+    /// region's, which holds most frames, or else one found through the
+    /// frame's section, as Linux finds a frame's record. Neither look
+    /// writes anything, so the CPUs share the lines they read.
+    #[inline]
+    fn entry(&self, pfn: u64) -> Option<&RegionEntry> {
+        let table = self.regions.get()?;
+        if let Some(Some(entry)) = table.entries.get(table.largest)
+            && entry.region.contains(pfn)
+        {
+            return Some(entry);
+        }
+        match self.sections.get(usize::try_from(pfn >> SECTION_SHIFT).ok()?) {
+            Some(first) => {
+                let first = usize::from(first.load(Ordering::Relaxed)).checked_sub(1)?;
+                table.find_from(first, pfn)
+            }
+            None => table.search(pfn),
+        }
+    }
+
     /// The record of frame `pfn`.
     #[inline]
     fn record(&self, pfn: u64) -> Option<&'static PageInfo> {
-        self.regions.get()?.find(pfn)?.region.info(pfn)
+        self.entry(pfn)?.region.info(pfn)
     }
 
     /// Frees the block of 2^`order` frames at physical address `phys`,
@@ -700,8 +745,7 @@ impl Frames {
         if !phys.is_multiple_of(PAGE_SIZE as u64) {
             return Err(FreeError::Misaligned);
         }
-        let table = self.regions.get().ok_or(FreeError::NotManaged)?;
-        let entry = table.find(pfn).ok_or(FreeError::NotManaged)?;
+        let entry = self.entry(pfn).ok_or(FreeError::NotManaged)?;
         if order == 0
             && let Some(platform) = self.platform()
             && self.free_cached(platform, entry.zone, pfn, owner)
@@ -717,12 +761,12 @@ impl Frames {
 
     /// The record of the frame at physical address `phys`.
     pub fn info(&self, phys: u64) -> Option<&'static PageInfo> {
-        self.regions.get()?.find(phys >> PAGE_SHIFT)?.region.info(phys >> PAGE_SHIFT)
+        self.record(phys >> PAGE_SHIFT)
     }
 
     /// The node whose memory holds physical address `phys`.
     pub fn node_of(&self, phys: u64) -> Option<usize> {
-        Some(self.regions.get()?.find(phys >> PAGE_SHIFT)?.zone / KINDS)
+        Some(self.entry(phys >> PAGE_SHIFT)?.zone / KINDS)
     }
 
     /// Free frames in all zones, those CPUs' caches hold included.
@@ -794,7 +838,7 @@ impl Frames {
                 if len == cache.len {
                     return Err("a CPU's cache holds more frames than it counts (a cycle?)");
                 }
-                let entry = self.regions.get().and_then(|table| table.find(u64::from(pfn)));
+                let entry = self.entry(u64::from(pfn));
                 let info = self.record(u64::from(pfn)).ok_or("a CPU's cache names no frame")?;
                 if info.state() != State::Cached || info.order() != 0 {
                     return Err("a frame in a CPU's cache is not a cached frame");
@@ -852,6 +896,28 @@ mod tests {
         // Below, between and above them.
         for pfn in [0, 63, 96, 255, 4352, 8191, 8208, u64::MAX >> PAGE_SHIFT] {
             assert!(frames.info(pfn << PAGE_SHIFT).is_none(), "frame {pfn}");
+        }
+    }
+
+    #[test]
+    fn frames_are_found_through_their_sections() {
+        // Three regions in the first section, the last of them reaching
+        // into the second, one above 4 GiB and one above the sections the
+        // map covers.
+        let above = (SECTIONS as u64) << SECTION_SHIFT;
+        let regions =
+            [(64u64, 32u64), (256, 4096), (32760, 16), (DMA32_END_PFN + 8, 64), (above + 8, 16)];
+        let frames = frames_with(&regions.map(|(base, pages)| (0, base, pages as usize)));
+        for (base, pages) in regions {
+            for pfn in [base, base + pages / 2, base + pages - 1] {
+                let entry = frames.entry(pfn).expect("a frame of a region");
+                assert_eq!(entry.region.base, base, "frame {pfn}");
+                let info = frames.info(pfn << PAGE_SHIFT).unwrap();
+                assert!(core::ptr::eq(info, &raw const entry.region.pages[(pfn - base) as usize]));
+            }
+            for pfn in [base - 1, base + pages] {
+                assert!(frames.entry(pfn).is_none(), "frame {pfn}");
+            }
         }
     }
 

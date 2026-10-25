@@ -61,7 +61,14 @@ Memory comes up in four steps, because each needs the one before:
 `radix_mm::Frames` (`frames.rs`) keeps one buddy allocator per zone. Each
 NUMA node (at most 8) has two zones: `Dma32`, its RAM below 4 GiB, and
 `Normal`, the rest. A zone may hold up to 32 regions of RAM, each with its
-array of frame records.
+array of frame records. A frame's record is looked for first in the
+largest region, which holds most frames, then through the section of
+physical memory the frame is in (128 MiB, as Linux's sections on x86_64):
+a map of the first 1 TiB names the first region with frames in each
+section, which holds the frame as a rule. Either way a lookup costs a few
+loads and compares, not a search, and writes nothing, so CPUs looking up
+frames at once share the lines. Frames above 1 TiB are found by a binary
+search.
 
 `buddy.rs` hands out blocks of 2^order frames, order 0 to 10 (4 KiB to
 4 MiB), naturally aligned. The free lists are doubly linked through the
@@ -132,12 +139,12 @@ have no headers. Free objects form a list through the objects: the first
 word holds a marker and the next free index, the second a poison pattern.
 Both are checked when the object is handed out, and a free checks that the
 address is the start of an object that is in use. A free finds its frame's
-region starting with the region the last lookup found, and the object's
-index by multiplying by the class's reciprocal (2^32 / size + 1, which
-is exact for every offset below 2^15, beyond the largest slab), so it
-divides by nothing (Phase 8, ADR 0077). Damage is reported to
-the corruption handler (the kernel panics with a `heap corruption:` message)
-and the object or slab is quarantined, never used again.
+region as any frame lookup does, and the object's index by multiplying
+by the class's reciprocal (2^32 / size + 1, which is exact for every
+offset below 2^15, beyond the largest slab), so it divides by nothing
+(Phase 8, ADR 0077). Damage is reported to the corruption handler (the
+kernel panics with a `heap corruption:` message) and the object or slab
+is quarantined, never used again.
 
 In front of each slab cache is a magazine layer (`magazine.rs`, after
 Bonwick and Adams). Each CPU has two magazines per class, *loaded* and
