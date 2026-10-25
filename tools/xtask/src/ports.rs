@@ -1279,7 +1279,7 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
     process::create_dir(&info)?;
     let sysroot = ctx.out.join("sysroot");
     process::create_dir(&sysroot)?;
-    let jobs = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let jobs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![toolchain.bin()];
     paths.extend(std::env::split_paths(&path));

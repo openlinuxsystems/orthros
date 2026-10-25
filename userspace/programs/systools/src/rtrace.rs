@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::FromRawFd;
@@ -164,7 +165,11 @@ fn call_name(r: &Record) -> String {
 fn quoted(bytes: &[u8], max: usize, cut: bool, hex: u8) -> String {
     let shown = &bytes[..bytes.len().min(max)];
     let text = if hex >= 2 {
-        shown.iter().map(|b| format!("\\x{b:02x}")).collect()
+        let mut text = String::new();
+        for b in shown {
+            let _ = write!(text, "\\x{b:02x}");
+        }
+        text
     } else {
         util::escape(shown, hex == 1)
     };
@@ -624,7 +629,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         )),
         None => Box::new(io::stderr()),
     };
-    let boot_ns = proc::stat().map(|s| s.boot_time_ns).unwrap_or(0);
+    let boot_ns = proc::stat().map_or(0, |s| s.boot_time_ns);
     let mut printer = Printer { s: &s, out, boot_ns, last_ns: 0, totals: HashMap::new() };
     let mut traces: Vec<File> = Vec::new();
     let mut child: Option<libc::pid_t> = None;
@@ -650,7 +655,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             let mut action: libc::sigaction = unsafe { util::zeroed() };
             action.sa_sigaction = on_signal as *const () as usize;
             // SAFETY: the handler only stores to an atomic.
-            unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
         }
     } else {
         let program = program(&command[0])?;
@@ -679,7 +684,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let Some(pid) = child else { return Ok(0) };
     let mut status = 0;
     // SAFETY: waits for our own child.
-    unsafe { libc::waitpid(pid, &mut status, 0) };
+    unsafe { libc::waitpid(pid, &raw mut status, 0) };
     if libc::WIFEXITED(status) {
         return Ok(libc::WEXITSTATUS(status));
     }
@@ -691,9 +696,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
         let mut set: libc::sigset_t = util::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, signal);
-        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut set);
+        libc::sigaddset(&raw mut set, signal);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
         libc::raise(signal);
     }
     Ok(128 + signal)
@@ -756,7 +761,7 @@ fn start(
         unsafe {
             libc::close(go[1]);
             let mut byte = 0u8;
-            libc::read(go[0], (&mut byte as *mut u8).cast(), 1);
+            libc::read(go[0], (&raw mut byte).cast(), 1);
             libc::close(go[0]);
             libc::execv(program.as_ptr(), argv.as_ptr());
             // As strace says it, with the error's text.

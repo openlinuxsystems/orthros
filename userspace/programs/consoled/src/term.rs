@@ -630,7 +630,7 @@ impl State {
     }
 
     fn set_mode(&mut self, private: bool, params: &Params, on: bool) {
-        for item in params.iter() {
+        for item in params {
             let mode = item.first().copied().unwrap_or(0);
             match (private, mode) {
                 (true, 1) => self.modes.app_cursor = on,
@@ -879,7 +879,7 @@ impl Perform for State {
             ([], b'=') => self.modes.app_keypad = true,
             ([], b'>') => self.modes.app_keypad = false,
             ([], b'Z') => self.reply("\x1b[?6c"),
-            ([b'('], set) | ([b')'], set) => {
+            ([b'(' | b')'], set) => {
                 let g = usize::from(intermediates[0] == b')');
                 self.charsets[g] = if set == b'0' { Charset::Graphics } else { Charset::Ascii };
             }

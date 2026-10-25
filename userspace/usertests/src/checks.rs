@@ -52,9 +52,9 @@ pub fn ok<T>(result: Result<T, Status>, what: fmt::Arguments<'_>) -> Option<T> {
 
 /// Checks that `result` failed with `want`.
 pub fn fails<T>(result: Result<T, Status>, want: Kernel, what: fmt::Arguments<'_>) -> bool {
-    match result {
-        Ok(_) => that(false, format_args!("{what}: succeeded, not {}", want.name())),
-        Err(status) => that(
+    match result.err() {
+        None => that(false, format_args!("{what}: succeeded, not {}", want.name())),
+        Some(status) => that(
             Kernel::from_status(status) == Some(want),
             format_args!("{what}: {}, not {}", Shown(status), want.name()),
         ),

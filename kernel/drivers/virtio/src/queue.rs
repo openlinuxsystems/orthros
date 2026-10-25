@@ -104,7 +104,7 @@ impl Queue {
             return Err(Error::NoQueue);
         }
         if !size.is_power_of_two() {
-            size = 1 << (15 - size.leading_zeros());
+            size = 1 << size.ilog2();
         }
         let (avail, used, end) = layout(size);
         let memory = alloc(end.div_ceil(4096)).ok_or(Error::NoMemory)?;
@@ -159,7 +159,7 @@ impl Queue {
         self.bad
     }
 
-    fn desc(&self, index: u16) -> usize {
+    fn desc(index: u16) -> usize {
         usize::from(index) * DESC_SIZE
     }
 
@@ -181,7 +181,7 @@ impl Queue {
         let head = self.free_head;
         let mut desc = head;
         for (i, buffer) in buffers.iter().enumerate() {
-            let at = self.desc(desc);
+            let at = Self::desc(desc);
             let last = i + 1 == buffers.len();
             let mut flags = if buffer.device_writes { FLAG_WRITE } else { 0 };
             if !last {

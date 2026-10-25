@@ -275,6 +275,8 @@ impl Drop for Ending {
 }
 
 /// Uses `depth` MiB of stack; returns `depth`.
+// The large array on the stack is the point.
+#[allow(clippy::large_stack_arrays)]
 #[inline(never)]
 fn deep(depth: usize) -> usize {
     let mut block = [0u8; 1 << 20];
@@ -420,7 +422,7 @@ fn synchronisation() -> Outcome {
     }
     drop(send);
     let mut got: Vec<u32> = receive.iter().collect();
-    got.sort();
+    got.sort_unstable();
     check!(got == (0..400).collect::<Vec<_>>());
     let (send, receive) = mpsc::sync_channel(0);
     let sender = thread::spawn(move || send.send("met").is_ok());
@@ -540,7 +542,7 @@ fn processes() -> Outcome {
 /// reader is gone.
 fn pipes() -> Outcome {
     let (mut reader, mut writer) = io::pipe()?;
-    let writing = thread::spawn(move || writer.write_all(&[7u8; 100_000]));
+    let writing = thread::spawn(move || writer.write_all(&vec![7u8; 100_000]));
     let mut got = Vec::new();
     reader.read_to_end(&mut got)?;
     writing.join().map_err(|_| "the writer panicked")??;
@@ -583,7 +585,7 @@ fn sockets() -> Outcome {
     // A thread streams into it while this one reads.
     let mut writer = one.try_clone()?;
     let writing = thread::spawn(move || {
-        writer.write_all(&[9u8; 200_000])?;
+        writer.write_all(&vec![9u8; 200_000])?;
         writer.shutdown(Shutdown::Write)
     });
     let mut all = Vec::new();

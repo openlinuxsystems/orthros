@@ -242,11 +242,11 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
             Arg::Long(l) if l == "pgroup" => m.groups.extend(numbers(&args.text()?, me.group)?),
             Arg::Short('s') => m.sessions.extend(numbers(&args.text()?, me.session)?),
             Arg::Long(l) if l == "session" => {
-                m.sessions.extend(numbers(&args.text()?, me.session)?)
+                m.sessions.extend(numbers(&args.text()?, me.session)?);
             }
             Arg::Short('t') => m.terminals.extend(util::list(&args.text()?).map(String::from)),
             Arg::Long(l) if l == "terminal" => {
-                m.terminals.extend(util::list(&args.text()?).map(String::from))
+                m.terminals.extend(util::list(&args.text()?).map(String::from));
             }
             Arg::Short('u' | 'U') => {
                 for name in util::list(&args.text()?) {
@@ -276,7 +276,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
                     .ok_or_else(|| usage(format!("Unknown signal \"{name}\".")))?;
             }
             Arg::Operand(p) if pattern.is_none() => {
-                pattern = Some(p.to_string_lossy().into_owned())
+                pattern = Some(p.to_string_lossy().into_owned());
             }
             Arg::Operand(_) => return Err(usage("only one pattern can be provided".into())),
             other => return Err(args.unknown(&other)),
@@ -333,7 +333,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
         if count {
             writeln!(out, "{sent}")?;
         }
-        return Ok(if sent > 0 { 0 } else { 1 });
+        return Ok(i32::from(sent <= 0));
     }
     if count {
         writeln!(out, "{}", found.len())?;
@@ -354,7 +354,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
             writeln!(out, "{}", items.join(&delimiter))?;
         }
     }
-    Ok(if found.is_empty() { 1 } else { 0 })
+    Ok(i32::from(found.is_empty()))
 }
 
 /// The command line -f matches and -a prints, as procps has it: the

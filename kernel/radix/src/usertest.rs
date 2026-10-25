@@ -116,7 +116,7 @@ impl Outcome {
             match group.status(index) {
                 Some(status) if status == want => {}
                 Some(EXIT_STOPPED) => {
-                    self.fail(format_args!("{what}: {} was stopped", group.name(index)))
+                    self.fail(format_args!("{what}: {} was stopped", group.name(index)));
                 }
                 Some(status) => self.fail(format_args!(
                     "{what}: {} exited with {status:#x}, not {want:#x}",
@@ -129,9 +129,9 @@ impl Outcome {
 
     /// Fails unless the store and the registry hold what they held
     /// `before` the test's programs started.
-    fn nothing_left(&mut self, before: Option<Census>) {
+    fn nothing_left(&mut self, before: Option<&Census>) {
         let after = census();
-        if before.is_none() || after != before {
+        if before.is_none() || after.as_ref() != before {
             self.fail(format_args!("objects were left behind: {before:?} before, {after:?} after"));
         }
     }
@@ -232,7 +232,7 @@ pub fn user() {
             outcome.check(fault, &group, EXIT_FAULT);
         }
     }
-    outcome.nothing_left(before);
+    outcome.nothing_left(before.as_ref());
     outcome.end(format_args!(
         "the probe passed every check and {} kinds of fault each ended only their program",
         FAULTS.len()
@@ -357,7 +357,7 @@ pub fn fuzz() {
                     "the fuzzer with seed {argument:#x} exited with {status:#x}"
                 )),
                 None => {
-                    outcome.fail(format_args!("the fuzzer with seed {argument:#x} did not exit"))
+                    outcome.fail(format_args!("the fuzzer with seed {argument:#x} did not exit"));
                 }
             }
         }
@@ -380,7 +380,7 @@ pub fn fuzz() {
         Ok(Err(problem)) => outcome.fail(format_args!("the capability store's audit: {problem}")),
         Err(err) => outcome.fail(format_args!("no capability store: {err}")),
     }
-    outcome.nothing_left(before);
+    outcome.nothing_left(before.as_ref());
     outcome.end(format_args!(
         "{finished} of {fuzzers} fuzzers got through their calls and {stopped} were stopped while \
          waiting; every failed call returned a kernel error its documentation lists and nothing \
@@ -429,7 +429,7 @@ pub fn ipc() {
             ran += 1;
         }
     }
-    outcome.nothing_left(before);
+    outcome.nothing_left(before.as_ref());
     outcome.end(format_args!(
         "{ran} pairs of programs ping-ponged over endpoints, capabilities in messages, \
          notifications, shared memory and rings, on one CPU and across two"

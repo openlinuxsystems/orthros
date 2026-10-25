@@ -8,6 +8,7 @@
 //! a USB stick, a hard disk or optical media. Phase 14 replaces it with the
 //! GPT disk image assembled by Dukovo's own rdisk and mkfs tools.
 
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -137,13 +138,15 @@ pub fn render_grub_cfg(
     modules: &[(&str, &str)],
 ) -> Result<String> {
     config::validate_cmdline(cmdline)?;
-    let modules: String =
-        modules.iter().map(|(path, args)| format!("    module2 {path} {args}\n")).collect();
+    let mut lines = String::new();
+    for (path, args) in modules {
+        let _ = writeln!(lines, "    module2 {path} {args}");
+    }
     let rendered = template
         .replace("@VERSION@", VERSION)
         .replace("@TIMEOUT@", &timeout.to_string())
         .replace("@CMDLINE@", cmdline.trim())
-        .replace("@MODULES@", &modules);
+        .replace("@MODULES@", &lines);
     if let Some(name) = find_placeholder(&rendered) {
         crate::bail!("image/grub/grub.cfg.in uses unknown placeholder {name}");
     }

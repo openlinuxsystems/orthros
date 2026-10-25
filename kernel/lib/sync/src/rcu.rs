@@ -83,6 +83,8 @@ impl<T, A: Allocator + Clone> RcuCell<T, A> {
 
     /// Runs `f` on the current value inside a read section. `f` must not
     /// sleep.
+    // The cell always holds a value, so the `expect` never fails.
+    #[allow(clippy::missing_panics_doc)]
     pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         let _section = read_lock();
         let ptr =

@@ -46,11 +46,11 @@ static DONE: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: SpinLock<CpuSet> = SpinLock::new(CpuSet::EMPTY);
 
 fn job_key() -> usize {
-    &NUMBER as *const AtomicU64 as usize
+    &raw const NUMBER as usize
 }
 
 fn done_key() -> usize {
-    &DONE as *const AtomicUsize as usize
+    &raw const DONE as usize
 }
 
 /// Starts a worker on every CPU that runs threads.

@@ -181,7 +181,7 @@ impl FileSystem for FatFs {
         let mut dropped = self.inner.cache.shrink(max);
         if dropped < max {
             let Ok(live) = self.inner.live_nodes() else { return dropped };
-            for node in live.iter() {
+            for node in &live {
                 if dropped >= max {
                     break;
                 }
@@ -544,7 +544,7 @@ impl Inner {
         }
         let pinned = core::mem::replace(&mut *self.dirty.lock(), mem::vec());
         let mut failed = None;
-        for node in pinned.iter() {
+        for node in &pinned {
             node.unpinned();
             if let Err(err) = node.flush() {
                 failed.get_or_insert(err);

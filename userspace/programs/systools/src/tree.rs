@@ -185,7 +185,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Long(l) if l == "prune" => o.prune = true,
             Arg::Long(l) if l == "noreport" => o.no_report = true,
             Arg::Long(l) if l == "charset" => {
-                o.ascii = !matches!(args.text()?.to_ascii_lowercase().as_str(), "utf-8" | "utf8")
+                o.ascii = !matches!(args.text()?.to_ascii_lowercase().as_str(), "utf-8" | "utf8");
             }
             Arg::Long(l) if l == "filelimit" => o.file_limit = Some(args.number()?),
             Arg::Short('o') => output = Some(args.value()?),
@@ -344,7 +344,7 @@ fn read(
         return;
     };
     let names: Vec<OsString> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .map(|e| e.file_name())
         .filter(|n| o.all || !n.as_bytes().starts_with(b"."))
         .collect();

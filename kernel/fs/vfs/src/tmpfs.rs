@@ -303,9 +303,8 @@ impl TmpNode {
         let name_bytes = mem::copy(name.as_bytes())?;
         let _namespace = self.shared.namespace.lock();
         let mut dir = dir.lock();
-        let at = match dir.find(name) {
-            Ok(_) => return Err(Error::Exists),
-            Err(at) => at,
+        let Err(at) = dir.find(name) else {
+            return Err(Error::Exists);
         };
         *node.parent.lock() = self.weak();
         dir.insert(at, name_bytes, node.clone())?;
@@ -551,7 +550,7 @@ impl Node for TmpNode {
                 Body::Dir(dir) => dir.lock().modified = modified,
                 Body::File { cache, .. } => cache.set_modified(modified),
                 Body::Link { modified: time, .. } | Body::Socket { modified: time, .. } => {
-                    time.store(modified, Ordering::Relaxed)
+                    time.store(modified, Ordering::Relaxed);
                 }
             }
         }

@@ -168,7 +168,7 @@ fn on_interrupt(index: usize) {
 
 impl VirtioDisk {
     fn key(&self) -> usize {
-        self as *const VirtioDisk as usize
+        core::ptr::from_ref::<VirtioDisk>(self) as usize
     }
 
     /// Takes the completions the device has handed back, and wakes the
@@ -373,7 +373,7 @@ pub fn init() {
             functions += 1;
             describe(&function);
             if device_type(&function) == Some(radix_virtio::device_type::BLOCK) {
-                match bind(function, disks) {
+                match bind(&function, disks) {
                     Ok(()) => disks += 1,
                     Err(why) => warn!("Disk: could not set up a virtio block device: {why}"),
                 }
@@ -430,7 +430,7 @@ fn describe(function: &Function) {
         (0x0d, _) => "wireless controller",
         (0x10, _) => "encryption controller",
         (0x11, _) => "signal processing controller",
-        (0xff, _) | (0x00, _) => "unclassified device",
+        (0xff | 0x00, _) => "unclassified device",
         _ => "device",
     };
     let virtio = if device_type(function).is_some() { ", virtio" } else { "" };
@@ -446,7 +446,7 @@ fn describe(function: &Function) {
 /// Its frame holds the disk before it goes on the heap: kept out of
 /// `init`'s (tools/xtask/src/frames.rs allows it).
 #[inline(never)]
-fn bind(function: Function, index: usize) -> Result<(), &'static str> {
+fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     if index >= MAX_DISKS {
         return Err("too many disks");
     }
@@ -457,29 +457,26 @@ fn bind(function: Function, index: usize) -> Result<(), &'static str> {
         }
         Bar::Io { .. } => None,
     };
-    let transport = Transport::find(&function, &mut map_bar).map_err(|_| "no modern transport")?;
+    let transport = Transport::find(function, &mut map_bar).map_err(|_| "no modern transport")?;
     // One MSI-X entry, for the queue, if the device and the kernel have
     // them; otherwise the device is polled.
-    let interrupt = MsiX::find(&function).and_then(|msix| {
+    let interrupt = MsiX::find(function).and_then(|msix| {
         let (bar, offset) = msix.table_location();
         let Some(Bar::Memory { address, .. }) = function.bar(bar) else { return None };
         let table = <Arch as Devices>::map_device(address + offset, msix.table_len())?;
         let (vector, message) = <Arch as Devices>::allocate_interrupt(on_interrupt, index)?;
-        msix.enable_masked(&function);
+        msix.enable_masked(function);
         msix.set_entry(&table, 0, message);
-        msix.unmask_all(&function);
+        msix.unmask_all(function);
         Some(vector)
     });
     let entry = if interrupt.is_some() { 0 } else { NO_VECTOR };
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(pages, false);
-    let blk = match Blk::new(transport, entry, &mut alloc) {
-        Ok(blk) => blk,
-        Err(_) => {
-            if let Some(vector) = interrupt {
-                <Arch as Devices>::free_interrupt(vector);
-            }
-            return Err("the device refused to be set up");
+    let Ok(blk) = Blk::new(transport, entry, &mut alloc) else {
+        if let Some(vector) = interrupt {
+            <Arch as Devices>::free_interrupt(vector);
         }
+        return Err("the device refused to be set up");
     };
     let info = blk.info();
     if info.max_segment_size != 0 && (info.max_segment_size as usize) < radix_hw::PAGE_SIZE {
@@ -555,7 +552,7 @@ fn partitions(name: &Name, device: &DeviceRef) {
         "Disk: {name} has {scheme} with {count} {}",
         if count == 1 { "partition" } else { "partitions" }
     );
-    for part in found.iter() {
+    for part in &found {
         let Some(slice) = radix_block::Slice::new(device.clone(), part.first, part.sectors) else {
             continue;
         };

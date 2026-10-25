@@ -47,7 +47,7 @@ impl Notification {
 
     /// What threads waiting for it wait on.
     fn key(&self) -> usize {
-        self as *const Notification as usize
+        core::ptr::from_ref::<Notification>(self) as usize
     }
 
     /// Signals it through a capability with `badge`.

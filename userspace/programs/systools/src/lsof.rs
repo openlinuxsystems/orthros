@@ -240,7 +240,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                 ..Held::default()
             };
             if s.line_chosen(&cwd, "cwd") {
-                let node = std::fs::metadata(dir).map(|m| m.ino()).unwrap_or(0);
+                let node = std::fs::metadata(dir).map_or(0, |m| m.ino());
                 lines.push(row(p, &user, "cwd".into(), &cwd, node, offsets, sizes));
             }
         }
@@ -265,7 +265,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         let rights = [false, true, false, true, false, false, true, true, false];
         crate::ps::print_table(&table, &rights, None)?;
     }
-    Ok(if searching && pids_found.is_empty() { 1 } else { 0 })
+    Ok(i32::from(searching && pids_found.is_empty()))
 }
 
 /// A line of the table.

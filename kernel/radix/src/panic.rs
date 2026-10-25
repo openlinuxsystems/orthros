@@ -277,7 +277,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         Arch::emulator_exit(false);
     }
     if settings.kdb {
-        kdb::run_after_panic(fault, backtrace);
+        kdb::run_after_panic(fault.as_ref(), &backtrace);
     }
     wait_then_restart()
 }

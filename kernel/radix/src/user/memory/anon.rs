@@ -262,7 +262,7 @@ impl SpaceObject {
                 region.start,
                 region.end(),
                 &mut |_, phys, _| {
-                    let sharers = FRAMES.info(phys).map_or(1, |info| info.share_count());
+                    let sharers = FRAMES.info(phys).map_or(1, radix_mm::PageInfo::share_count);
                     PageEdit::Set(
                         access.map(|a| if shared { a } else { private_access(a, sharers) }),
                     )
@@ -357,7 +357,7 @@ impl SpaceObject {
                     // Another thread made it meanwhile.
                     return Fault::Resolved;
                 }
-                let sharers = FRAMES.info(phys).map_or(1, |info| info.share_count());
+                let sharers = FRAMES.info(phys).map_or(1, radix_mm::PageInfo::share_count);
                 // Only a fork of this space, which holds its regions' lock,
                 // makes a page more shared: one space alone stays alone.
                 if anon.shared || sharers <= 1 {
@@ -384,7 +384,7 @@ impl SpaceObject {
             }
             Some((phys, None)) => {
                 // Held without access, from before its region allowed it.
-                let sharers = FRAMES.info(phys).map_or(1, |info| info.share_count());
+                let sharers = FRAMES.info(phys).map_or(1, radix_mm::PageInfo::share_count);
                 let now = if anon.shared { access } else { private_access(access, sharers) };
                 // Still shared, a write faults again, and copies.
                 match Arch::set_entry(&self.arch, page, phys, Some(now), true) {

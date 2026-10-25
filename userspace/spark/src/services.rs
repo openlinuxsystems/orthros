@@ -157,7 +157,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
             }
             "arguments" => spec.arguments = words(value),
             "order" => {
-                spec.order = value.parse().map_err(|_| at(format!("`{value}` is not a number")))?
+                spec.order = value.parse().map_err(|_| at(format!("`{value}` is not a number")))?;
             }
             "restart" => {
                 spec.restart = match value {

@@ -454,7 +454,7 @@ impl ProcessObject {
         let mut runtime = self.exited_ns.load(Ordering::Relaxed);
         let mut user = self.exited_ticks[0].load(Ordering::Relaxed);
         let mut system = self.exited_ticks[1].load(Ordering::Relaxed);
-        for thread in state.threads.iter() {
+        for thread in &state.threads {
             let (u, s) = thread.ticks();
             runtime += thread.runtime_ns();
             user += u;
@@ -469,7 +469,7 @@ impl ProcessObject {
         let state = self.state.lock();
         let mut voluntary = self.exited_switches[0].load(Ordering::Relaxed);
         let mut involuntary = self.exited_switches[1].load(Ordering::Relaxed);
-        for thread in state.threads.iter() {
+        for thread in &state.threads {
             let (v, i) = thread.switch_counts();
             voluntary += v;
             involuntary += i;
@@ -621,7 +621,7 @@ impl ProcessObject {
 
     /// What waiters for its end wait on.
     pub fn key(&self) -> usize {
-        self as *const ProcessObject as usize
+        core::ptr::from_ref::<ProcessObject>(self) as usize
     }
 
     /// Waits until it has exited, or the kernel's clock reaches

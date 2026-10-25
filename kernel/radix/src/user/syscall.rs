@@ -173,6 +173,8 @@ fn results(registers: &mut [u64; 10], words: [u64; 10]) -> Result<Done> {
 
 /// Puts a method's answer in the argument registers, or says how the
 /// thread goes on.
+// It takes the answer as the method gave it; inlined, a move costs nothing.
+#[allow(clippy::needless_pass_by_value)]
 #[inline(always)]
 fn answered(registers: &mut [u64; 10], answer: Result<Answer>) -> Result<Done> {
     // Matched in place rather than through `?`, which would copy the
@@ -195,6 +197,9 @@ fn message_info(word: u64) -> Result<Info> {
     Info::decode(word).map_err(|_| Kernel::InvalidArgument.status(1))
 }
 
+/// A received message's results.
+// As `answered`, it takes what `ipc::recv` gave.
+#[allow(clippy::needless_pass_by_value)]
 fn delivered(delivery: Delivery) -> [u64; 10] {
     sys::RecvResults { badge: delivery.badge, info: delivery.info, words: delivery.words }.encode()
 }

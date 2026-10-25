@@ -127,6 +127,8 @@ impl Heap {
     }
 
     fn free_small(&mut self, block: *mut u8, class: usize) {
+        // Aligned to its size, as below.
+        #[allow(clippy::cast_ptr_alignment)]
         let block = block.cast::<Free>();
         // SAFETY: the block is a free block of this size class now, at
         // least 16 bytes and aligned to its size, so it holds a link.

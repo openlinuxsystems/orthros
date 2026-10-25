@@ -32,7 +32,7 @@ fn sessions(processes: &[Process]) -> Vec<Session> {
 
 /// When the system started, in seconds since the epoch.
 fn boot_seconds() -> i64 {
-    let boot = proc::stat().map(|s| s.boot_time_ns).unwrap_or(0);
+    let boot = proc::stat().map_or(0, |s| s.boot_time_ns);
     let boot = if boot == 0 { util::now_ns().saturating_sub(proc::uptime_ns()) } else { boot };
     (boot / 1_000_000_000) as i64
 }

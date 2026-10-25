@@ -157,7 +157,7 @@ pub fn write_all(fd: i32, mut bytes: &[u8]) -> Result<()> {
 pub fn waitpid(pid: i32, flags: i32) -> Result<Option<(i32, i32)>> {
     let mut status = 0;
     // SAFETY: status is a valid place for the status.
-    let got = unsafe { libc::waitpid(pid, &mut status, flags) };
+    let got = unsafe { libc::waitpid(pid, &raw mut status, flags) };
     match got {
         0 => Ok(None),
         n if n > 0 => Ok(Some((n, status))),
@@ -216,11 +216,11 @@ pub fn tcsetpgrp(fd: i32, pgid: i32) -> Result<()> {
     unsafe {
         let mut ttou: libc::sigset_t = std::mem::zeroed();
         let mut old: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut ttou);
-        libc::sigaddset(&mut ttou, libc::SIGTTOU);
-        libc::sigprocmask(libc::SIG_BLOCK, &ttou, &mut old);
+        libc::sigemptyset(&raw mut ttou);
+        libc::sigaddset(&raw mut ttou, libc::SIGTTOU);
+        libc::sigprocmask(libc::SIG_BLOCK, &raw const ttou, &raw mut old);
         let result = check(libc::tcsetpgrp(fd, pgid)).map(drop);
-        libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+        libc::sigprocmask(libc::SIG_SETMASK, &raw const old, std::ptr::null_mut());
         result
     }
 }
@@ -244,7 +244,7 @@ pub fn tcgetattr(fd: i32) -> Option<libc::termios> {
     // SAFETY: termios is plain data; tcgetattr fills it in.
     let mut termios: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: termios is a valid place to fill.
-    (unsafe { libc::tcgetattr(fd, &mut termios) } == 0).then_some(termios)
+    (unsafe { libc::tcgetattr(fd, &raw mut termios) } == 0).then_some(termios)
 }
 
 pub fn tcsetattr(fd: i32, termios: &libc::termios) {
@@ -329,7 +329,7 @@ pub fn getrlimit(resource: i32) -> Result<Rlimit> {
     // SAFETY: rlimit is plain data that getrlimit fills in.
     let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: limit is a valid place to fill.
-    check(unsafe { libc::getrlimit(resource as _, &mut limit) })?;
+    check(unsafe { libc::getrlimit(resource as _, &raw mut limit) })?;
     Ok(limit)
 }
 
@@ -345,7 +345,7 @@ pub fn times() -> (f64, f64, f64, f64) {
         // SAFETY: rusage is plain data that getrusage fills in.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         // SAFETY: usage is a valid place to fill.
-        unsafe { libc::getrusage(who, &mut usage) };
+        unsafe { libc::getrusage(who, &raw mut usage) };
         let secs = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1e6;
         (secs(usage.ru_utime), secs(usage.ru_stime))
     };
@@ -396,8 +396,8 @@ pub fn strftime(format: &str, time: i64) -> String {
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         let t = time as libc::time_t;
-        libc::localtime_r(&t, &mut tm);
-        let n = libc::strftime(out.as_mut_ptr().cast(), out.len(), c.as_ptr(), &tm);
+        libc::localtime_r(&raw const t, &raw mut tm);
+        let n = libc::strftime(out.as_mut_ptr().cast(), out.len(), c.as_ptr(), &raw const tm);
         out.truncate(n);
     }
     crate::text::decode(&out)
@@ -422,7 +422,7 @@ pub fn is_regular(fd: i32) -> bool {
     // SAFETY: stat is plain data that fstat fills in.
     unsafe {
         let mut st: libc::stat = std::mem::zeroed();
-        libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFREG
+        libc::fstat(fd, &raw mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFREG
     }
 }
 
@@ -431,7 +431,7 @@ pub fn identity(fd: i32) -> Option<(u64, u64, bool)> {
     // SAFETY: stat is plain data that fstat fills in.
     unsafe {
         let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd, &mut st) != 0 {
+        if libc::fstat(fd, &raw mut st) != 0 {
             return None;
         }
         Some((st.st_dev as u64, st.st_ino as u64, st.st_mode & libc::S_IFMT == libc::S_IFREG))
@@ -443,6 +443,6 @@ pub fn identity(fd: i32) -> Option<(u64, u64, bool)> {
 pub fn poll_in(fd: i32, millis: i32) -> Result<bool> {
     let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     // SAFETY: pfd is one valid pollfd.
-    let n = unsafe { libc::poll(&mut pfd, 1, millis) };
+    let n = unsafe { libc::poll(&raw mut pfd, 1, millis) };
     if n < 0 { Err(Error::last_os_error()) } else { Ok(n > 0) }
 }

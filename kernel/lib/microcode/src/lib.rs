@@ -55,11 +55,7 @@ impl fmt::Display for Error {
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    bytes
-        .get(offset..offset + 4)
-        .and_then(|b| b.try_into().ok())
-        .map(u32::from_le_bytes)
-        .unwrap_or(0)
+    bytes.get(offset..offset + 4).and_then(|b| b.try_into().ok()).map_or(0, u32::from_le_bytes)
 }
 
 /// Sum of the little-endian 32-bit words of `bytes`.
@@ -230,7 +226,7 @@ pub fn updates(file: &[u8]) -> impl Iterator<Item = Result<Update<'_>, Error>> {
 
 /// The newest update in `file` for `cpu`.
 pub fn find(file: &[u8], cpu: CpuId) -> Option<Update<'_>> {
-    updates(file).filter_map(Result::ok).filter(|u| u.matches(cpu)).max_by_key(|u| u.revision())
+    updates(file).filter_map(Result::ok).filter(|u| u.matches(cpu)).max_by_key(Update::revision)
 }
 
 /// Builds update files for tests, here and in `ob`'s boot tests.

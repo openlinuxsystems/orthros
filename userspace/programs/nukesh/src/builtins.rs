@@ -382,7 +382,7 @@ fn exit(shell: &mut Shell, args: &[String]) -> Res {
     };
     if shell.interactive && shell.subshell == 0 {
         // Stopped jobs are reported once before the shell leaves them.
-        let stopped = shell.jobs.list.iter().any(|j| j.stopped());
+        let stopped = shell.jobs.list.iter().any(crate::jobs::Job::stopped);
         if stopped && !shell.exit_warned {
             shell.exit_warned = true;
             let _ = sys::write_all(2, b"There are stopped jobs.\n");
@@ -671,7 +671,7 @@ fn command(shell: &mut Shell, args: &[String]) -> Res {
         let saved = shell.get("PATH");
         shell.set_var("PATH", misc::DEFAULT_PATH);
         shell.hash.clear();
-        let result = shell.run_program_fields(flags.rest.clone());
+        let result = shell.run_program_fields(&flags.rest);
         match saved {
             Some(path) => shell.set_var("PATH", &path),
             None => {
@@ -681,7 +681,7 @@ fn command(shell: &mut Shell, args: &[String]) -> Res {
         shell.hash.clear();
         return result;
     }
-    shell.run_program_fields(flags.rest.clone())
+    shell.run_program_fields(&flags.rest)
 }
 
 /// The trap and signal state a shell starts with: an interactive shell

@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use crate::ast::{Command, Coproc};
-use crate::jobs::Proc;
+use crate::jobs::{Job, Proc};
 use crate::parse::is_name;
 use crate::shell::{Res, Shell};
 use crate::vars::{Value, attr};
@@ -127,7 +127,7 @@ impl Shell {
             pid,
             fds,
             // It may have ended already.
-            ended: self.jobs.get(id).is_some_and(|j| j.done()),
+            ended: self.jobs.get(id).is_some_and(Job::done),
             inherited: false,
         });
         let array = self.resolve(name);

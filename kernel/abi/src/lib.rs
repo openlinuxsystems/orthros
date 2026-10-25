@@ -12,6 +12,7 @@
 //! and the man(2) pages come from the same files.
 
 #![no_std]
+#![forbid(unsafe_code)]
 
 include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 

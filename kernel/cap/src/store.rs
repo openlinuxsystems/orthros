@@ -803,7 +803,7 @@ impl<A: Allocator + Clone> Capabilities<A> {
         for space in self.spaces.iter().filter(|space| space.live) {
             census.spaces += 1;
             census.slots += space.slots.len() as u64;
-            for slot in space.slots.iter() {
+            for slot in &space.slots {
                 if let Some(cap) = slot.cap {
                     census.caps[cap.kind().index()] += 1;
                     census.deepest = census.deepest.max(slot.depth);
@@ -948,7 +948,7 @@ impl<A: Allocator + Clone> Capabilities<A> {
         if children_listed != non_roots {
             return Err(fail("a capability is missing from its parent's children", None));
         }
-        for record in self.objects.iter() {
+        for record in &self.objects {
             if let Some(entry) = &record.entry
                 && let Some(origin) = entry.origin
             {

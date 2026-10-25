@@ -143,7 +143,7 @@ impl Pipe {
     }
 
     fn key(&self) -> usize {
-        self as *const Pipe as usize
+        core::ptr::from_ref::<Pipe>(self) as usize
     }
 
     /// Something changed: the waits look again, and so does `poll`.
@@ -342,7 +342,7 @@ impl Pipe {
                 let free = buffer.ring.free();
                 if (atomic && free >= left + keep) || (!atomic && free > 0) {
                     // The files go with the first piece written.
-                    let count = files.as_ref().map_or(0, |files| files.len());
+                    let count = files.as_ref().map_or(0, alloc::vec::Vec::len);
                     if count > 0 {
                         let flying = self.files.load(Ordering::Acquire);
                         if flying + count > FILES_IN_FLIGHT_MAX as usize {

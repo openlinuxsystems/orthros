@@ -474,7 +474,7 @@ impl Shell {
             let parts = ["5", "2", "0", "1", "release", &machine];
             self.vars.entry("BASH_VERSION").value = Some(Value::Str("5.2.0(1)-release".into()));
             let var = self.vars.entry("BASH_VERSINFO");
-            let map = (0..).zip(parts.iter().map(|part| part.to_string())).collect();
+            let map = (0..).zip(parts.iter().map(ToString::to_string)).collect();
             var.value = Some(Value::Array(map));
             var.attrs |= attr::READONLY | attr::ARRAY;
         }
@@ -630,7 +630,7 @@ impl Shell {
                         if !crate::parse::is_name(target) {
                             return target.clone();
                         }
-                        name = target.clone();
+                        name.clone_from(target);
                     }
                     _ => return name,
                 },
@@ -714,7 +714,7 @@ impl Shell {
                 lines.push("0".into());
                 array(lines)
             }
-            "PIPESTATUS" => array(self.pipestatus.iter().map(|s| s.to_string()).collect()),
+            "PIPESTATUS" => array(self.pipestatus.iter().map(ToString::to_string).collect()),
             "BASH_REMATCH" if !self.rematch.is_empty() => array(self.rematch.clone()),
             "BASH_ARGV0" => s(self.arg0.clone()),
             "HISTCMD" => s(self.history.count().to_string()),
@@ -1092,7 +1092,7 @@ impl Shell {
             "RANDOM" => self.random = value.parse().unwrap_or(0),
             "SECONDS" => {
                 self.seconds_offset =
-                    value.parse::<i64>().unwrap_or(0) - self.started.elapsed().as_secs() as i64
+                    value.parse::<i64>().unwrap_or(0) - self.started.elapsed().as_secs() as i64;
             }
             "OPTIND" => self.getopts_char = 0,
             "LINENO" => {}

@@ -138,7 +138,7 @@ fn watch_children() -> io::Result<File> {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_child as *const () as usize;
         action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
-        libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGCHLD, &raw const action, std::ptr::null_mut());
         Ok(File::from_raw_fd(fds[0]))
     }
 }
@@ -235,7 +235,7 @@ impl Consoled {
         loop {
             let mut status = 0;
             // SAFETY: waitpid fills `status`.
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            let pid = unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) };
             if pid <= 0 {
                 return;
             }
@@ -255,7 +255,7 @@ impl Consoled {
             let mut fds =
                 vec![libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             fds.push(libc::pollfd {
-                fd: self.kbd.as_ref().map_or(-1, |kbd| kbd.as_raw_fd()),
+                fd: self.kbd.as_ref().map_or(-1, AsRawFd::as_raw_fd),
                 events: libc::POLLIN,
                 revents: 0,
             });

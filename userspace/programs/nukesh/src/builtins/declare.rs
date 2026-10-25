@@ -58,6 +58,8 @@ pub fn readonly(shell: &mut Shell, args: &[String]) -> Res {
 }
 
 /// Runs `declare`, `typeset`, `local`, `export` or `readonly`.
+// Its callers make the arguments for it.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run_declaration(shell: &mut Shell, name: &str, args: Vec<DeclArg>) -> Res {
     let kind = match name {
         "local" => Kind::Local,
@@ -424,7 +426,7 @@ fn declare_one(
                 }
             }
             Some(Assignment::Array(append, elements)) => {
-                shell.assign_array(&target, elements, append)?
+                shell.assign_array(&target, elements, append)?;
             }
             None => {}
         }
@@ -812,7 +814,7 @@ pub fn set_option(shell: &mut Shell, name: &str, on: bool) -> Result<(), i32> {
 fn print_options(shell: &Shell, minus: bool) -> bool {
     let mut names: Vec<&str> = OPTION_TABLE.iter().map(|(name, _)| *name).collect();
     names.extend(["history", "histexpand"]);
-    names.sort();
+    names.sort_unstable();
     let mut text = String::new();
     for name in names {
         let on = match name {

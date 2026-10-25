@@ -5,8 +5,9 @@
 //! random text, made of pieces of shell so that most of it gets past the
 //! first token, and must answer or fail for all of it: never panic, loop
 //! or overflow the stack. What the parser reads must also print, as
-//! `type` and `declare -f` print commands, as text that reads back the
-//! same. Text nested past the parser's limit must be an error.
+//! `type` and `declare -f` print commands, as text that reads back as
+//! the same commands. Text nested past the parser's limit must be an
+//! error.
 //!
 //! The seed is fixed, so a failure repeats; `NUKESH_FUZZ_SEED` and
 //! `NUKESH_FUZZ_ROUNDS` change it and how many inputs each test tries.
@@ -338,6 +339,100 @@ fn printed(function: &Command) -> String {
     }
 }
 
+/// Whether a tree has a `|&`.
+fn joins_stderr(tree: &str) -> bool {
+    tree.split("pipe_stderr: [")
+        .skip(1)
+        .any(|list| list.split(']').next().is_some_and(|l| l.contains("true")))
+}
+
+/// Whether a tree has a function whose body is not in braces.
+fn unbraced_function(tree: &str) -> bool {
+    let body = "body: Compound(";
+    tree.match_indices(body).any(|(at, _)| !tree[at + body.len()..].starts_with("Brace("))
+}
+
+/// A command's tree without its line numbers, which printing changes.
+fn shape(command: &Command) -> String {
+    let tree = format!("{command:?}");
+    let mut out = String::with_capacity(tree.len());
+    let mut rest = tree.as_str();
+    while let Some(at) = rest.find("line: ") {
+        out.push_str(&rest[..at]);
+        rest = rest[at + "line: ".len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out.push_str(rest);
+    // A subshell's, `[[`'s and `((`'s line follows their tree: `}, 3)`.
+    let mut tree = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(at) = rest.find(", ") {
+        let after = &rest[at + 2..];
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let numbered =
+            digits > 0 && after[digits..].starts_with(')') && rest[..at].ends_with(['}', ')']);
+        tree.push_str(&rest[..at + 2]);
+        rest = if numbered { &after[digits..] } else { after };
+    }
+    tree.push_str(rest);
+    let mut out = tree;
+    // Some redirections print with the descriptor they default to, as
+    // bash prints them (`<&3` as `0<&3`), and a close as `0>&-`.
+    for (from, to) in [
+        ("fd: None, op: ReadWrite", "fd: Some(Number(0)), op: ReadWrite"),
+        ("fd: None, op: DupRead", "fd: Some(Number(0)), op: DupRead"),
+        ("fd: None, op: DupWrite", "fd: Some(Number(1)), op: DupWrite"),
+    ] {
+        out = out.replace(from, to);
+    }
+    let close = r#", target: Word(Word { parts: [Lit("-")] }) }"#;
+    out = out.replace(&format!("op: DupRead{close}"), &format!("op: DupWrite{close}"));
+    // A reserved word that a redirection kept from being one prints
+    // escaped, as it comes first then (`<&- esac` as `\esac 0>&-`).
+    for word in parse::RESERVED {
+        let (first, rest) = word.split_at(1);
+        let escaped = if rest.is_empty() {
+            format!("[Escaped('{first}')]")
+        } else {
+            format!("[Escaped('{first}'), Lit(\"{rest}\")]")
+        };
+        out = out.replace(&escaped, &format!("[Lit(\"{word}\")]"));
+    }
+    // Braces around a name change how it prints, not what it is.
+    out = out.replace("braced: true", "braced: false");
+    // A `$` that stands for itself prints escaped before an expansion.
+    out = out.replace("Escaped('$')", r#"Lit("$")"#);
+    // Text the parser read in two pieces can print as one.
+    for kind in ["Quoted", "Lit"] {
+        out = merge_pieces(&out, kind);
+    }
+    // Commands print one to a line: inside a function, `a; b` on one line
+    // is the same as on two.
+    for sep in ["Seq", "Async"] {
+        out = out
+            .replace(&format!("{sep})] }}, CompleteCommand {{ items: [("), &format!("{sep}), ("));
+    }
+    out
+}
+
+/// `tree` with each two `kind` pieces next to each other made one. In
+/// the tree's text a string's own quotes are escaped, so `("` opens one.
+fn merge_pieces(tree: &str, kind: &str) -> String {
+    let joint = format!("\"), {kind}(\"");
+    let mut out = String::with_capacity(tree.len());
+    let mut rest = tree;
+    while let Some(at) = rest.find(&joint) {
+        let before = format!("{out}{}", &rest[..at]);
+        let opened = before.rfind("(\"").is_some_and(|open| before[..open].ends_with(kind));
+        out = before;
+        if !opened {
+            out.push_str(&joint);
+        }
+        rest = &rest[at + joint.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn parser_takes_anything() {
     with_stack(STACK, || {
@@ -354,8 +449,26 @@ fn parser_takes_anything() {
             let shown = printed(function);
             let again = parse::parse(&shown, "fuzz")
                 .unwrap_or_else(|e| panic!("{text:?} printed as {shown:?}, which fails: {e:?}"));
-            let function = first_function(&again).expect("a function");
-            assert_eq!(printed(function), shown, "{text:?}");
+            let reread = first_function(&again).expect("a function");
+            assert_eq!(printed(reread), shown, "{text:?}");
+            // And it reads back as the same commands, which printing the
+            // two the same way does not show (finding 109's `${x}y`).
+            let (before, after) = (shape(function), shape(reread));
+            if joins_stderr(&before) || unbraced_function(&before) {
+                // `a |& b` prints as bash prints it, `a 2>&1 | b`, and
+                // `g() ((x))` as `g () { ((x)) }`: the same commands, but
+                // other trees.
+                continue;
+            }
+            if let Some(at) = before.bytes().zip(after.bytes()).position(|(a, b)| a != b) {
+                let from = before.floor_char_boundary(at.saturating_sub(80));
+                panic!(
+                    "{text:?} printed as {shown:?}, which reads back as other commands:\n{}\n{}",
+                    &before[from..before.floor_char_boundary(at + 80)],
+                    &after[from..after.floor_char_boundary(at + 80)],
+                );
+            }
+            assert_eq!(before.len(), after.len(), "{text:?} printed as {shown:?}");
         }
     });
 }

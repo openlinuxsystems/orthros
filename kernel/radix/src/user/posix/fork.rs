@@ -74,7 +74,7 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
             // The child is new: nothing else takes its lock yet.
             let mut posix = child.posix.lock_nested(1);
             posix.actions.copy_from(&parent.actions);
-            posix.terminal = parent.terminal.clone();
+            posix.terminal.clone_from(&parent.terminal);
             posix.inherit(&parent);
         }
         let (class, level) = parent.io_priority();
@@ -160,7 +160,7 @@ fn copy_capabilities(parent: &ProcessObject, child: &ProcessObject, slots: u32) 
             let from = SlotRef::new(parent.keep_space(), slot);
             match store.get(from) {
                 Ok(_) => {
-                    store.derive(from, SlotRef::new(child.keep_space(), slot), Derivation::COPY)?
+                    store.derive(from, SlotRef::new(child.keep_space(), slot), Derivation::COPY)?;
                 }
                 Err(CapError::Empty) => {}
                 Err(err) => return Err(err),

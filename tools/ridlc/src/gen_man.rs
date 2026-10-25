@@ -204,7 +204,7 @@ fn syscall_page(abi: &Abi, module: &Module, call: &Call) -> String {
                     words.push(format!("{} (length)", field.name));
                 }
                 _ if count > 1 => {
-                    (0..count).for_each(|i| words.push(format!("{}[{i}]", field.name)))
+                    (0..count).for_each(|i| words.push(format!("{}[{i}]", field.name)));
                 }
                 _ => words.push(field.name.clone()),
             }
@@ -301,9 +301,7 @@ fn module_page(abi: &Abi, module: &Module) -> String {
         let _ = writeln!(
             out,
             "Interface number {id:#06x}, version {version}{}.\n",
-            kind.as_ref()
-                .map(|k| format!(", answered by *{}* objects", escape(k)))
-                .unwrap_or_default()
+            kind.as_ref().map_or_default(|k| format!(", answered by *{}* objects", escape(k)))
         );
         if methods.is_empty() {
             out.push_str("It has no methods of its own.\n\n");

@@ -475,7 +475,7 @@ impl Nodes {
 /// SRAT's ranges begin or end (where a region must be split).
 fn node_at(nodes: &Nodes, srat: Option<&Srat<'_>>, phys: u64) -> (usize, u64) {
     let (mut node, mut boundary) = (0, u64::MAX);
-    for entry in srat.into_iter().flat_map(|srat| srat.entries()) {
+    for entry in srat.into_iter().flat_map(radix_acpi::Srat::entries) {
         if let SratEntry::Memory { domain, base, length, .. } = entry {
             let end = base.saturating_add(length);
             if (base..end).contains(&phys) {
@@ -521,7 +521,7 @@ pub fn start_frame_allocator(srat: Option<&Srat<'_>>, slit: Option<&Slit<'_>>) {
     let nodes = Nodes::from_srat(srat);
     for cpu in (0..radix_hal::MAX_CPUS).filter_map(percpu::get) {
         let apic_id = cpu.apic_id.load(Ordering::Relaxed);
-        let domain = srat.into_iter().flat_map(|srat| srat.entries()).find_map(|e| match e {
+        let domain = srat.into_iter().flat_map(radix_acpi::Srat::entries).find_map(|e| match e {
             SratEntry::Cpu { domain, apic_id: id } if id == apic_id => Some(domain),
             _ => None,
         });

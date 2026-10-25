@@ -193,7 +193,7 @@ mod tests {
         body.extend_from_slice(&[0x7f, 4, 0, 0]);
         body.extend_from_slice(&[5, 12, 0, 0]);
         body.extend_from_slice(&0x1_fee0_0000u64.to_le_bytes());
-        table(b"APIC", 4, &body)
+        table(*b"APIC", 4, &body)
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
         body.extend_from_slice(&0u32.to_le_bytes());
         body.extend_from_slice(&[0, 8, 0, 0, 1, 0, 0, 0]);
         body.extend_from_slice(&[1, 0, 9, 9]);
-        let bytes = table(b"APIC", 4, &body);
+        let bytes = table(*b"APIC", 4, &body);
         let sdt = Sdt::parse(0, &bytes).unwrap();
         let madt = Madt::parse(&sdt).unwrap();
         assert_eq!(madt.entries().count(), 1);

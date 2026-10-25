@@ -579,11 +579,8 @@ fn chunks(text: &str, columns: usize) -> Vec<String> {
     let mut rest = text;
     while !rest.is_empty() {
         let piece = cut(rest, columns.max(1));
-        let piece = if piece.is_empty() {
-            rest.chars().next().map(String::from).unwrap_or_default()
-        } else {
-            piece
-        };
+        let piece =
+            if piece.is_empty() { rest.chars().next().map_or_default(String::from) } else { piece };
         rest = &rest[piece.len()..];
         pieces.push(piece);
     }

@@ -59,7 +59,7 @@ fn list(space: usize, address: u64) -> &'static Mutex<Option<Vec<Waiter, Kmalloc
 
 /// What a waiter waits on: its own flag.
 fn key_of(user: &UserRef) -> usize {
-    &user.futex_woken as *const _ as usize
+    &raw const user.futex_woken as usize
 }
 
 /// Waits while the word at `address` of `space`, the running thread's,
@@ -76,7 +76,7 @@ pub fn wait(
         return Err(Kernel::InvalidArgument.status(0));
     }
     let me = sched::current().ok_or(error(Kernel::Gone))?;
-    let key = space as *const SpaceObject as usize;
+    let key = core::ptr::from_ref::<SpaceObject>(space) as usize;
     let bucket = list(key, address);
     {
         let mut waiters = bucket.lock();
@@ -132,7 +132,7 @@ pub fn wake(space: &SpaceObject, address: u64, count: u32) -> Result<u32> {
     if !address.is_multiple_of(4) {
         return Err(Kernel::InvalidArgument.status(0));
     }
-    let key = space as *const SpaceObject as usize;
+    let key = core::ptr::from_ref::<SpaceObject>(space) as usize;
     let mut woken = 0;
     let mut waiters = list(key, address).lock();
     let Some(waiters) = waiters.as_mut() else { return Ok(0) };

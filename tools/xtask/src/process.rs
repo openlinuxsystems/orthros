@@ -37,7 +37,7 @@ pub fn status(ctx: &Ctx, cmd: &mut Command) -> Result<ExitStatus> {
         eprintln!("+ {}", render(cmd));
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
-    cmd.status().map_err(|err| spawn_error(&program, err))
+    cmd.status().map_err(|err| spawn_error(&program, &err))
 }
 
 /// Runs `cmd` with inherited standard streams and fails on a non-zero exit.
@@ -59,7 +59,7 @@ pub fn output(ctx: &Ctx, cmd: &mut Command) -> Result<Output> {
         eprintln!("+ {}", render(cmd));
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
-    let output = cmd.output().map_err(|err| spawn_error(&program, err))?;
+    let output = cmd.output().map_err(|err| spawn_error(&program, &err))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::new(format!(
@@ -72,7 +72,7 @@ pub fn output(ctx: &Ctx, cmd: &mut Command) -> Result<Output> {
     Ok(output)
 }
 
-fn spawn_error(program: &str, err: std::io::Error) -> Error {
+fn spawn_error(program: &str, err: &std::io::Error) -> Error {
     if err.kind() == std::io::ErrorKind::NotFound {
         Error::new(format!("`{program}` is not installed"))
             .hint("run `./ob doctor` to see what is missing")

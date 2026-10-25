@@ -954,26 +954,26 @@ impl Shell {
         for a in assigns {
             match a {
                 Assigned::Scalar { name, index: Some(index), append, value } => {
-                    self.assign_element(&name, &index, value, append)?
+                    self.assign_element(&name, &index, value, append)?;
                 }
                 Assigned::Scalar { name, index: None, append, value } => {
-                    self.assign(&name, value, append)?
+                    self.assign(&name, value, append)?;
                 }
                 Assigned::Array { name, append, elements } => {
-                    self.assign_array(&name, elements, append)?
+                    self.assign_array(&name, elements, append)?;
                 }
             }
         }
         Ok(())
     }
 
-    fn trace_assigns(&self, assigns: &[Assigned]) -> Vec<String> {
+    fn trace_assigns(assigns: &[Assigned]) -> Vec<String> {
         assigns
             .iter()
             .map(|a| match a {
                 Assigned::Scalar { name, index, append, value } => format!(
                     "{name}{}{}{}",
-                    index.as_ref().map(|i| format!("[{i}]")).unwrap_or_default(),
+                    index.as_ref().map_or_default(|i| format!("[{i}]")),
                     if *append { "+=" } else { "=" },
                     crate::expand::quote(value)
                 ),
@@ -1020,14 +1020,14 @@ impl Shell {
             if let [WordPart::ArrayAssign(assign)] = word.parts.as_slice() {
                 match self.expand_assign(assign)? {
                     Assigned::Array { name, append, elements } => {
-                        out.push(DeclArg::Array { name, append, elements })
+                        out.push(DeclArg::Array { name, append, elements });
                     }
                     Assigned::Scalar { name, index, append, value } => {
                         out.push(DeclArg::Plain(format!(
                             "{name}{}{}{value}",
-                            index.map(|i| format!("[{i}]")).unwrap_or_default(),
+                            index.map_or_default(|i| format!("[{i}]")),
                             if append { "+=" } else { "=" }
-                        )))
+                        )));
                     }
                 }
                 continue;
@@ -1081,7 +1081,7 @@ impl Shell {
         let mut rest = 0;
         let mut decl = None;
         while rest < command.words.len() && fields.is_empty() {
-            fields = self.expand_words(&command.words[rest..rest + 1])?;
+            fields = self.expand_words(&command.words[rest..=rest])?;
             rest += 1;
         }
         if let Some(name) = fields.first()
@@ -1105,7 +1105,7 @@ impl Shell {
             for assign in &command.assigns {
                 let assigned = self.expand_assign(assign)?;
                 if self.opts.xtrace {
-                    let line = self.trace_assigns(std::slice::from_ref(&assigned)).join(" ");
+                    let line = Self::trace_assigns(std::slice::from_ref(&assigned)).join(" ");
                     self.trace(&line);
                 }
                 if let Err(message) = self.apply_assigns(vec![assigned]) {
@@ -1137,11 +1137,8 @@ impl Shell {
             // bash shows each assignment on a line of its own, dash all on
             // the command's.
             let mut parts = Vec::new();
-            for assign in self.trace_assigns(&assigns) {
-                match self.posix() {
-                    true => parts.push(assign),
-                    false => self.trace(&assign),
-                }
+            for assign in Self::trace_assigns(&assigns) {
+                if self.posix() { parts.push(assign) } else { self.trace(&assign) }
             }
             match &decl {
                 Some(args) => {
@@ -1222,7 +1219,7 @@ impl Shell {
             );
         }
         if let Some(def) = self.functions.get(&name).cloned() {
-            return self.run_function_with(def, fields, assigns, redirects);
+            return self.run_function_with(def, &fields, assigns, redirects);
         }
         if let Some(builtin) = builtins::lookup(&name)
             && builtins::enabled(self, &name)
@@ -1235,7 +1232,7 @@ impl Shell {
                 redirects,
             );
         }
-        self.run_external(fields, assigns, redirects, last, Some(command))
+        self.run_external(&fields, assigns, redirects, last, Some(command))
     }
 
     fn run_builtin(
@@ -1250,7 +1247,8 @@ impl Shell {
         // Assignments before a special builtin stay in POSIX mode; before
         // anything else they last for the command, exported, as before a
         // function: `X=1 command env` gives env X.
-        let temp = !assigns.is_empty() && !(special && self.posix());
+        let stay = special && self.posix();
+        let temp = !assigns.is_empty() && !stay;
         let expanded;
         let redirects = if temp && !redirects.is_empty() {
             // In bash a command's redirections do not see its own
@@ -1313,7 +1311,7 @@ impl Shell {
     fn run_function_with(
         &mut self,
         def: Rc<FunctionDef>,
-        fields: Vec<String>,
+        fields: &[String],
         assigns: Vec<Assigned>,
         redirects: &[Redirect],
     ) -> Res {
@@ -1342,7 +1340,7 @@ impl Shell {
                 };
             }
         };
-        let result = self.call_function(def, &fields);
+        let result = self.call_function(def, fields);
         self.restore(saved);
         if temp {
             self.vars.pop();
@@ -1351,6 +1349,9 @@ impl Shell {
     }
 
     /// Calls a function with `fields` (its name, then its arguments).
+    // It holds the definition while the function runs, which may define
+    // the function anew.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn call_function(&mut self, def: Rc<FunctionDef>, fields: &[String]) -> Res {
         let nest = self.frames.iter().filter(|f| f.name != "source").count();
         let limit = self.get("FUNCNEST").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0);
@@ -1456,7 +1457,7 @@ impl Shell {
     }
 
     /// `command name args`: the program on `PATH`, never a function.
-    pub fn run_program_fields(&mut self, fields: Vec<String>) -> Res {
+    pub fn run_program_fields(&mut self, fields: &[String]) -> Res {
         self.run_external(fields, Vec::new(), &[], false, None)
     }
 
@@ -1464,7 +1465,7 @@ impl Shell {
     /// from, for a report of its end.
     fn run_external(
         &mut self,
-        fields: Vec<String>,
+        fields: &[String],
         assigns: Vec<Assigned>,
         redirects: &[Redirect],
         last: bool,
@@ -1497,11 +1498,11 @@ impl Shell {
             return Ok(127);
         };
         if last && self.can_exec_directly() {
-            self.exec_program(&path, &fields, assigns, redirects);
+            self.exec_program(&path, fields, assigns, redirects);
         }
         let pid = self.fork_child(0, false)?;
         if pid == 0 {
-            self.exec_program(&path, &fields, assigns, redirects);
+            self.exec_program(&path, fields, assigns, redirects);
         }
         let text = command.map_or_else(|| fields.join(" "), show::simple_line);
         let id = self.add_job(pid, vec![Proc::new(pid, text.clone())], text, false);

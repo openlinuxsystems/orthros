@@ -145,7 +145,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         // SAFETY: lseek on our own descriptor.
         unsafe { libc::lseek(kmsg.as_raw_fd(), 0, libc::SEEK_END) };
     }
-    let boot_s = proc::stat().map(|s| s.boot_time_ns / 1_000_000_000).unwrap_or(0) as i64;
+    let boot_s = proc::stat().map_or(0, |s| s.boot_time_ns / 1_000_000_000) as i64;
     let mut out = io::BufWriter::new(io::stdout().lock());
     let mut buffer = vec![0u8; 4096];
     let mut last_usec = None;

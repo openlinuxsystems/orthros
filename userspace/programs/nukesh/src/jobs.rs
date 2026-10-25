@@ -58,6 +58,24 @@ pub struct Job {
 }
 
 impl Job {
+    /// The process numbers that reach the job: its process group's, as a
+    /// negative number, when it has a group of its own (it started under
+    /// job control), else each of its processes still running.
+    pub fn targets(&self) -> Vec<i32> {
+        if self.grouped {
+            vec![-self.pgid]
+        } else {
+            self.procs.iter().filter(|p| p.status.is_none()).map(|p| p.pid).collect()
+        }
+    }
+
+    /// Sends `signal` to the job's processes.
+    pub fn signal(&self, signal: i32) {
+        for target in self.targets() {
+            let _ = sys::kill(target, signal);
+        }
+    }
+
     pub fn done(&self) -> bool {
         self.procs.iter().all(|p| p.status.is_some())
     }
@@ -419,11 +437,8 @@ impl Shell {
             told: false,
         });
         // A process may have ended, and been seen, before its job was made.
-        for pid in self
-            .jobs
-            .get(id)
-            .map(|j| j.procs.iter().map(|p| p.pid).collect::<Vec<_>>())
-            .unwrap_or_default()
+        for pid in
+            self.jobs.get(id).map_or_default(|j| j.procs.iter().map(|p| p.pid).collect::<Vec<_>>())
         {
             if let Some(status) = self.jobs.reaped.remove(pid) {
                 self.jobs.record(pid, status);
@@ -728,30 +743,12 @@ impl Shell {
                 sys::write_all(1, crate::text::encode(&format!("[{id}]+ {text} &\n")).as_slice());
         }
         if let Some(job) = self.jobs.get(id) {
-            self.signal_job(job, libc::SIGCONT);
+            job.signal(libc::SIGCONT);
         }
         if foreground {
             return self.wait_job(id);
         }
         Ok(0)
-    }
-
-    /// The process numbers that reach a job: its process group's, as a
-    /// negative number, when it has a group of its own (it started under
-    /// job control), else each of its processes still running.
-    pub fn job_targets(&self, job: &Job) -> Vec<i32> {
-        if job.grouped {
-            vec![-job.pgid]
-        } else {
-            job.procs.iter().filter(|p| p.status.is_none()).map(|p| p.pid).collect()
-        }
-    }
-
-    /// Sends `signal` to a job's processes.
-    pub fn signal_job(&self, job: &Job, signal: i32) {
-        for target in self.job_targets(job) {
-            let _ = sys::kill(target, signal);
-        }
     }
 
     /// Sends SIGHUP to every job (and SIGCONT to the stopped ones), as a
@@ -761,9 +758,9 @@ impl Shell {
             if job.nohup {
                 continue;
             }
-            self.signal_job(job, libc::SIGHUP);
+            job.signal(libc::SIGHUP);
             if job.stopped() {
-                self.signal_job(job, libc::SIGCONT);
+                job.signal(libc::SIGCONT);
             }
         }
     }

@@ -434,7 +434,7 @@ pub fn with_tail(basis: &[u8; 11], n: u32) -> [u8; 11] {
     let base_len = basis[..8].iter().rposition(|&b| b != b' ').map_or(0, |p| p + 1);
     let keep = base_len.min(8 - tail);
     let mut out = *basis;
-    for byte in out[keep..8].iter_mut() {
+    for byte in &mut out[keep..8] {
         *byte = b' ';
     }
     out[keep] = b'~';

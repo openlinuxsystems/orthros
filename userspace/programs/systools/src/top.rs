@@ -105,7 +105,7 @@ fn catch_signals() {
         };
         // SAFETY: the handlers only store to an atomic; the action is
         // valid for the call.
-        unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+        unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
     }
 }
 
@@ -121,14 +121,14 @@ impl Screen {
         // SAFETY: all zeros is a valid termios: numbers.
         let mut saved: libc::termios = unsafe { util::zeroed() };
         // SAFETY: tcgetattr fills the termios it is given.
-        let ok = unsafe { libc::tcgetattr(0, &mut saved) } == 0;
+        let ok = unsafe { libc::tcgetattr(0, &raw mut saved) } == 0;
         if ok {
             let mut raw = saved;
             raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
             raw.c_cc[libc::VMIN] = 0;
             raw.c_cc[libc::VTIME] = 0;
             // SAFETY: `raw` is a valid termios.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) };
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const raw) };
         }
         print!("\x1b[?1049h\x1b[?25l");
         let _ = io::stdout().flush();
@@ -142,7 +142,7 @@ impl Drop for Screen {
         let _ = io::stdout().flush();
         if let Some(saved) = self.saved {
             // SAFETY: `saved` is the termios read at the start.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const saved) };
         }
     }
 }
@@ -152,13 +152,13 @@ fn wait_key(delay: Duration) -> Option<u8> {
     let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     let ms = delay.as_millis().min(i32::MAX as u128) as i32;
     // SAFETY: one valid pollfd.
-    let ready = unsafe { libc::poll(&mut fds, 1, ms) };
+    let ready = unsafe { libc::poll(&raw mut fds, 1, ms) };
     if ready <= 0 {
         return None;
     }
     let mut key = 0u8;
     // SAFETY: reads one byte into `key`.
-    let n = unsafe { libc::read(0, (&mut key as *mut u8).cast(), 1) };
+    let n = unsafe { libc::read(0, (&raw mut key).cast(), 1) };
     (n == 1).then_some(key)
 }
 
@@ -223,7 +223,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Short('w') => {
                 s.width = Some(args.joined_value().map_or(Ok(512), |w| {
                     w.to_string_lossy().parse().map_err(|_| usage("bad width".into()))
-                })?)
+                })?);
             }
             Arg::Short('s' | 'S' | 'E' | 'e') => {}
             Arg::Short('h') => {
@@ -423,8 +423,7 @@ fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
         };
         if s.per_cpu {
             for (cpu, times) in &now.cpus {
-                let was =
-                    stat.cpus.iter().find(|(c, _)| c == cpu).map(|(_, t)| *t).unwrap_or_default();
+                let was = stat.cpus.iter().find(|(c, _)| c == cpu).map_or_default(|(_, t)| *t);
                 lines.push(cpu_line(
                     &format!("%Cpu{cpu:<3}"),
                     times.user_ns.saturating_sub(was.user_ns),

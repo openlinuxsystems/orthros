@@ -220,7 +220,10 @@ pub fn begin(user: &UserRef, number: u64, args: &[u64; 10]) -> Option<Begun> {
     let object = if number == sys::YIELD {
         NO_OBJECT
     } else {
-        crate::caps::get(SlotRef::new(user.process.cspace(), args[0] as u32))
+        // A slot number that does not fit is refused by the call itself.
+        u32::try_from(args[0])
+            .ok()
+            .and_then(|slot| crate::caps::get(SlotRef::new(user.process.cspace(), slot)).ok())
             .map_or(NO_OBJECT, |cap| cap.kind() as u32)
     };
     let mut flags = TraceRecordFlags::NONE;

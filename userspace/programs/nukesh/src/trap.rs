@@ -187,8 +187,8 @@ pub fn set(signal: i32, disposition: Disposition) {
         action.sa_sigaction = handler;
         // No SA_RESTART: a caught signal interrupts `wait` and `read`.
         action.sa_flags = 0;
-        libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(signal, &action, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut action.sa_mask);
+        libc::sigaction(signal, &raw const action, std::ptr::null_mut());
     }
 }
 
@@ -197,7 +197,7 @@ fn foreign_handler(signal: i32) -> bool {
     // SAFETY: a null new action only reads the current one.
     let current = unsafe {
         let mut old: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(signal, std::ptr::null(), &mut old);
+        libc::sigaction(signal, std::ptr::null(), &raw mut old);
         old.sa_sigaction
     };
     let ours = note as extern "C" fn(libc::c_int) as libc::sighandler_t;
@@ -209,7 +209,7 @@ fn ignored(signal: i32) -> bool {
     // SAFETY: a null new action only reads the current one.
     unsafe {
         let mut old: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(signal, std::ptr::null(), &mut old);
+        libc::sigaction(signal, std::ptr::null(), &raw mut old);
         old.sa_sigaction == libc::SIG_IGN
     }
 }
@@ -252,8 +252,8 @@ pub fn unblock_all() {
     // SAFETY: an empty set is filled in before it is installed.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut set);
+        libc::sigprocmask(libc::SIG_SETMASK, &raw const set, std::ptr::null_mut());
     }
 }
 

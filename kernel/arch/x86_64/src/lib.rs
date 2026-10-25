@@ -85,7 +85,7 @@ impl Cpu for Arch {
 
     fn idle_until(wake: &AtomicU32) {
         if IDLE_MWAIT.load(Ordering::Relaxed) {
-            cpu::monitor(wake as *const AtomicU32 as usize);
+            cpu::monitor(core::ptr::from_ref::<AtomicU32>(wake) as usize);
             // A write between the check and MWAIT still ends the wait: the
             // monitor is armed already.
             if wake.load(Ordering::Acquire) == 0 {

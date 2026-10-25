@@ -37,11 +37,11 @@ static FAILED: AtomicU64 = AtomicU64::new(0);
 static THREAD: Once<ThreadRef> = Once::new();
 
 fn asked_key() -> usize {
-    &ASKED as *const AtomicU64 as usize
+    &raw const ASKED as usize
 }
 
 fn done_key() -> usize {
-    &DONE as *const AtomicU64 as usize
+    &raw const DONE as usize
 }
 
 /// Starts the thread.

@@ -12,6 +12,7 @@
 mod files;
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write;
 use std::rc::Rc;
 
 use crate::builtins::{TABLE, flags, out, usage};
@@ -294,9 +295,9 @@ pub fn compopt(shell: &mut Shell, args: &[String]) -> Res {
                     return Ok(2);
                 }
                 if arg == "-o" {
-                    on.push(option.clone())
+                    on.push(option.clone());
                 } else {
-                    off.push(option.clone())
+                    off.push(option.clone());
                 }
                 i += 2;
                 continue;
@@ -364,7 +365,10 @@ pub fn compgen(shell: &mut Shell, args: &[String]) -> Res {
     if results.is_empty() {
         return Ok(1);
     }
-    let text: String = results.iter().map(|r| format!("{r}\n")).collect();
+    let mut text = String::new();
+    for result in &results {
+        let _ = writeln!(text, "{result}");
+    }
     Ok(i32::from(!out(shell, "compgen", &text)))
 }
 
@@ -488,7 +492,7 @@ fn run_function(
         sys::close(saved);
     }
     let status = status?;
-    let reply = shell.get_value("COMPREPLY").map(|v| v.elements()).unwrap_or_default();
+    let reply = shell.get_value("COMPREPLY").map_or_default(|v| v.elements());
     // 124: the function loaded a new spec; the caller tries again.
     if status == 124 {
         shell.completions_retry = true;
@@ -507,9 +511,9 @@ fn action_words(shell: &mut Shell, action: &str, word: &str) -> Vec<String> {
             .map(|b| b.name.to_string())
             .collect(),
         "disabled" => shell.disabled.iter().cloned().collect(),
-        "keyword" => crate::builtins::KEYWORDS.iter().map(|k| k.to_string()).collect(),
+        "keyword" => crate::builtins::KEYWORDS.iter().map(ToString::to_string).collect(),
         "function" => shell.functions.keys().cloned().collect(),
-        "variable" => shell.vars.all().keys().map(|k| k.to_string()).collect(),
+        "variable" => shell.vars.all().keys().map(ToString::to_string).collect(),
         "arrayvar" => shell
             .vars
             .all()
@@ -602,7 +606,7 @@ pub fn commands(shell: &mut Shell, word: &str) -> Vec<String> {
     names.extend(shell.functions.keys().filter(|k| k.starts_with(word)).cloned());
     names.extend(TABLE.iter().filter(|b| b.name.starts_with(word)).map(|b| b.name.to_string()));
     names.extend(
-        crate::builtins::KEYWORDS.iter().filter(|k| k.starts_with(word)).map(|k| k.to_string()),
+        crate::builtins::KEYWORDS.iter().filter(|k| k.starts_with(word)).map(ToString::to_string),
     );
     let path = shell.get("PATH").unwrap_or_default();
     for dir in path.split(':') {
@@ -793,7 +797,7 @@ impl Shell {
                 .all()
                 .keys()
                 .filter(|k| k.starts_with(name))
-                .map(|k| k.to_string())
+                .map(ToString::to_string)
                 .collect();
             names.sort();
             let candidates = names
@@ -845,7 +849,7 @@ impl Shell {
                     files::FromFile::Options(candidates) => candidates,
                     files::FromFile::Words { list, is_files, prefix, word } => {
                         let mut candidates =
-                            self.candidates(&word, list, &BTreeSet::new(), is_files, false);
+                            Self::candidates(&word, list, &BTreeSet::new(), is_files, false);
                         for candidate in &mut candidates {
                             candidate.text.insert_str(0, &prefix);
                         }
@@ -883,14 +887,13 @@ impl Shell {
             None if word_is_command => (commands(self, &word), BTreeSet::new(), word.contains('/')),
             None => (files(self, &word, false), BTreeSet::new(), true),
         };
-        (start, self.candidates(&word, list, &options, is_files, word_is_command))
+        (start, Self::candidates(&word, list, &options, is_files, word_is_command))
     }
 
     /// The candidates for `word` from `list`, as `options` (`compopt`'s)
     /// say: sorted, quoted, and shown by their last part if they are
     /// files.
     fn candidates(
-        &self,
         word: &str,
         mut list: Vec<String>,
         options: &BTreeSet<String>,

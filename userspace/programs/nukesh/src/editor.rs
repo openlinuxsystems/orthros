@@ -343,6 +343,8 @@ fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
 struct Plain;
 
 impl Highlighter for Plain {
+    // The style's type is nu-ansi-term's, which reedline does not export.
+    #[allow(clippy::default_trait_access)]
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
         styled.buffer.push((Default::default(), line.to_string()));
@@ -429,7 +431,7 @@ struct ShellValidator(Handle);
 
 impl Validator for ShellValidator {
     fn validate(&self, line: &str) -> ValidationResult {
-        let options = self.0.0.try_borrow().map(|shell| shell.parse_options()).unwrap_or_default();
+        let options = self.0.0.try_borrow().map_or_default(|shell| shell.parse_options());
         if needs_more(line, options) {
             ValidationResult::Incomplete
         } else {

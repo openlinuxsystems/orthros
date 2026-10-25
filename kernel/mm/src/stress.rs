@@ -95,6 +95,7 @@ pub fn run(heap: &Heap, seed: u64, operations: u64) -> StressReport {
     };
     // SAFETY: the heap gave us this zeroed, suitably aligned memory, and a
     // slot of zeros is a valid (empty) `Slot`.
+    #[allow(clippy::cast_ptr_alignment)]
     let slots = unsafe { &mut *base.as_ptr().cast::<[Slot; SLOTS]>() };
     let mut random = Random(seed | 1);
     let mut live = 0;

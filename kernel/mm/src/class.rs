@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn classes_are_sorted_and_slabs_are_full_enough() {
         for class in Class::all() {
-            assert!(class.size() % 16 == 0);
+            assert_eq!(class.size() % 16, 0);
             if class.index() > 0 {
                 let smaller = Class(class.0 - 1).size();
                 assert!(smaller < class.size());

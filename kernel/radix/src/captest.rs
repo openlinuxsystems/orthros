@@ -90,13 +90,13 @@ fn refused<T>(
     what: &'static str,
     count: &mut u64,
 ) -> Check {
-    match result {
-        Err(err) if err == want => {
+    match result.err() {
+        Some(err) if err == want => {
             *count += 1;
             Ok(())
         }
-        Err(err) => Err(Failure { what, got: Some(err) }),
-        Ok(_) => fail(what),
+        Some(err) => Err(Failure { what, got: Some(err) }),
+        None => fail(what),
     }
 }
 

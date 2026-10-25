@@ -94,7 +94,9 @@ impl Backtrace {
                 (Some(location), _) => line(format_args!("  #{i:<2} {address:#018x}  {location}")),
                 (None, Some(_)) => line(format_args!("  #{i:<2} {address:#018x}  ?")),
                 (None, None) => {
-                    line(format_args!("  #{i:<2} {address:#018x}  (no symbol table in this image)"))
+                    line(format_args!(
+                        "  #{i:<2} {address:#018x}  (no symbol table in this image)"
+                    ));
                 }
             }
         }

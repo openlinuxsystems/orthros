@@ -185,7 +185,7 @@ fn dependencies(abi: &Abi, module: &Module) -> BTreeSet<String> {
         match &item.kind {
             ItemKind::Struct { fields } => fields.iter().for_each(|f| add(&f.ty)),
             ItemKind::Syscall(call) => {
-                call.args.iter().chain(&call.results).for_each(|f| add(&f.ty))
+                call.args.iter().chain(&call.results).for_each(|f| add(&f.ty));
             }
             ItemKind::Interface { kind, methods, .. } => {
                 if kind.is_some() {

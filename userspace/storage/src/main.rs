@@ -18,6 +18,7 @@
 
 #![no_std]
 #![no_main]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -388,7 +389,7 @@ fn check_sys(root: &Dir, volumes: &[String]) {
     }
     match root.read_file("sys/kernel/version") {
         Ok(text) => {
-            println!("storage: /sys/kernel/version: {}", String::from_utf8_lossy(&text).trim_end())
+            println!("storage: /sys/kernel/version: {}", String::from_utf8_lossy(&text).trim_end());
         }
         Err(err) => fail(&format!("/sys/kernel/version: {err}")),
     }
@@ -433,7 +434,7 @@ fn check_proc(root: &Dir, me: u64) {
             }
         };
         let field = |key: &str| {
-            status.lines().find_map(|line| line.strip_prefix(key)).map(str::trim).unwrap_or("?")
+            status.lines().find_map(|line| line.strip_prefix(key)).map_or("?", str::trim)
         };
         listed.push_str(&format!(
             "{}{number} {} ({})",

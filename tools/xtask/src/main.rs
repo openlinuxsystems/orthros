@@ -362,14 +362,12 @@ pub struct Ctx {
 impl Ctx {
     fn load(verbose: bool) -> Result<Self> {
         let root = std::env::var_os("OB_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").to_path_buf());
+            .map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."), PathBuf::from);
         let root = root
             .canonicalize()
             .context(|| format!("cannot find the repository root at {}", root.display()))?;
-        let target = std::env::var_os("OB_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("target"));
+        let target =
+            std::env::var_os("OB_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
         let config = Config::load(&root.join("dukovo.toml"))?;
         Ok(Self { out: root.join("out"), target, config, verbose, root })
     }
@@ -621,7 +619,7 @@ mod tests {
     use super::*;
 
     fn args(list: &[&str]) -> Args {
-        Args::new("run", list.iter().map(|s| s.to_string()).collect())
+        Args::new("run", list.iter().map(ToString::to_string).collect())
     }
 
     #[test]

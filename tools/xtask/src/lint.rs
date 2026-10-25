@@ -77,3 +77,42 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
     cmd.arg("--workspace").args(["--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::MANIFESTS;
+
+    /// The manifest of the bench program, which lints as the workspaces do
+    /// but with lints of its own.
+    const BENCH: &str = "tools/linux-bench/Cargo.toml";
+
+    /// The comment that opens each manifest's set of Clippy's pedantic lints.
+    const OPENS: &str = "# Clippy's pedantic lints that find bugs";
+
+    /// The lines of the set in `manifest`, after its comment, up to a blank
+    /// line or the next table.
+    fn pedantic(manifest: &str) -> Vec<&str> {
+        manifest
+            .lines()
+            .skip_while(|line| !line.starts_with(OPENS))
+            .skip_while(|line| line.starts_with('#'))
+            .take_while(|line| !line.is_empty() && !line.starts_with('['))
+            .collect()
+    }
+
+    #[test]
+    fn every_workspace_turns_on_the_same_pedantic_lints() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+        let first = read(MANIFESTS[0]);
+        let set = pedantic(&first);
+        assert!(set.len() > 30, "{} has no set of pedantic lints", MANIFESTS[0]);
+        assert!(set.iter().all(|line| line.ends_with(" = \"warn\"")), "{set:?}");
+        for manifest in MANIFESTS[1..].iter().chain([&BENCH]) {
+            let text = read(manifest);
+            assert_eq!(pedantic(&text), set, "{manifest}'s set differs from {}'s", MANIFESTS[0]);
+        }
+    }
+}

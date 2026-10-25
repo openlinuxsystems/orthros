@@ -418,7 +418,7 @@ impl Frames {
                     // maps every managed frame writable (`Platform`).
                     #[allow(unsafe_code)]
                     unsafe {
-                        crate::raw::zero(platform.direct_map() + phys as usize, PAGE_SIZE << order)
+                        crate::raw::zero(platform.direct_map() + phys as usize, PAGE_SIZE << order);
                     };
                 }
                 return Ok(phys);

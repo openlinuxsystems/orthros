@@ -441,6 +441,17 @@ fn flat_program(program: &Program, out: &mut String) {
     }
 }
 
+/// A program that a `)` closes: a `!` or `time` with no command ends
+/// the line, for `! )` does not read back.
+fn flat_closed(program: &Program, out: &mut String) {
+    let start = out.len();
+    flat_program(program, out);
+    if out.len() > start && out.ends_with(' ') {
+        out.pop();
+        out.push('\n');
+    }
+}
+
 fn flat_and_or(list: &AndOr, out: &mut String) {
     flat_pipeline(&list.first, out);
     for (op, p) in &list.rest {
@@ -525,7 +536,7 @@ fn flat_compound(compound: &CompoundCommand, out: &mut String) {
         }
         CompoundCommand::Subshell(program, _) => {
             out.push_str("( ");
-            flat_program(program, out);
+            flat_closed(program, out);
             out.push_str(" )");
         }
         CompoundCommand::If { arms, otherwise } => {
@@ -773,7 +784,17 @@ fn heredoc_text(body: &Word, expand: bool, out: &mut String) {
 
 /// A word as it would be written.
 pub fn word(w: &Word, out: &mut String) {
-    for part in &w.parts {
+    for (i, part) in w.parts.iter().enumerate() {
+        // A `$` that stood for itself before an expansion is escaped:
+        // `` $`date` `` prints as `\$$(date)`, not `$$(date)`.
+        if let WordPart::Lit(s) = part
+            && let Some(text) = s.strip_suffix('$')
+            && w.parts.get(i + 1).is_some_and(|next| !matches!(next, WordPart::Lit(_)))
+        {
+            out.push_str(text);
+            out.push_str("\\$");
+            continue;
+        }
         word_part(part, false, out);
     }
 }
@@ -812,12 +833,61 @@ fn subscript_word(w: &Word, out: &mut String) {
 }
 
 /// A word whose parts are read as in double quotes (arithmetic), with no
-/// quotes added.
+/// quotes added: `$`, `` ` ``, `\` and `"` that stand for themselves are
+/// escaped. A `'` or a parenthesis without its partner, which double
+/// quotes kept from opening quotes or closing the expression, is put back
+/// in double quotes, which arithmetic reads as nothing.
 fn raw_word(w: &Word, out: &mut String) {
+    // Text the parser read in pieces prints as one.
+    let mut runs: Vec<Result<String, &WordPart>> = Vec::new();
     for part in &w.parts {
-        match part {
-            WordPart::Quoted(s) | WordPart::Lit(s) => out.push_str(s),
-            other => word_part(other, true, out),
+        match (part, runs.last_mut()) {
+            (WordPart::Quoted(s) | WordPart::Lit(s), Some(Ok(run))) => run.push_str(s),
+            (WordPart::Quoted(s) | WordPart::Lit(s), _) => runs.push(Ok(s.clone())),
+            (other, _) => runs.push(Err(other)),
+        }
+    }
+    let mut depth = 0i64;
+    let mut unpaired = false;
+    for c in runs.iter().filter_map(|run| run.as_ref().ok()).flat_map(|s| s.chars()) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                unpaired |= depth < 0;
+            }
+            '\'' => unpaired = true,
+            _ => {}
+        }
+    }
+    unpaired |= depth != 0;
+    for (i, run) in runs.iter().enumerate() {
+        match run {
+            Ok(s) => {
+                let quote = unpaired && s.contains(['\'', '(', ')']);
+                if quote {
+                    out.push('"');
+                }
+                for c in s.chars() {
+                    if matches!(c, '$' | '`' | '\\' | '"') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                if quote {
+                    out.push('"');
+                }
+            }
+            // Quotes that kept a name from going on (`$x"y"`) are gone
+            // here, so braces do it.
+            Err(WordPart::Param(p))
+                if matches!(p.name, ParamName::Var(_))
+                    && matches!(runs.get(i + 1), Some(Ok(s))
+                        if s.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')) =>
+            {
+                param(&ParamExp { braced: true, ..(**p).clone() }, out);
+            }
+            Err(other) => word_part(other, true, out),
         }
     }
 }
@@ -854,7 +924,7 @@ fn word_part(part: &WordPart, in_double: bool, out: &mut String) {
         WordPart::Param(p) => param(p, out),
         WordPart::Command(program) => {
             out.push_str("$(");
-            flat_program(program, out);
+            flat_closed(program, out);
             out.push(')');
         }
         WordPart::Arith(w) => {
@@ -864,7 +934,7 @@ fn word_part(part: &WordPart, in_double: bool, out: &mut String) {
         }
         WordPart::ProcSub(output, program) => {
             out.push_str(if *output { ">(" } else { "<(" });
-            flat_program(program, out);
+            flat_closed(program, out);
             out.push(')');
         }
         WordPart::ArrayAssign(a) => assign(a, out),

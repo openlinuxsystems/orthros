@@ -18,7 +18,7 @@ fn ident(name: &str) -> String {
     if RUST_ONLY_KEYWORDS.contains(&name) { format!("r#{name}") } else { name.to_string() }
 }
 
-const PRELUDE: &str = r#"
+const PRELUDE: &str = r"
 /// A system call's status: 0 for success, otherwise an error's domain (bits
 /// 16 to 31), code (bits 0 to 15) and detail (bits 32 to 63).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -117,7 +117,7 @@ fn word_array<const N: usize>(words: &[u64], from: usize) -> [u64; N] {
     array.copy_from_slice(&words[from..from + N]);
     array
 }
-"#;
+";
 
 /// Generates the Rust bindings for `abi`, as one source file.
 pub fn rust(abi: &Abi) -> String {
@@ -330,7 +330,7 @@ fn catalog_module(out: &mut String, abi: &Abi) {
     out.push_str("            _ => &[],\n        }\n    }\n}\n");
 }
 
-const CATALOG_PRELUDE: &str = r#"
+const CATALOG_PRELUDE: &str = r"
 /// What tracing needs to know of each call (radix-trace(2)): where its
 /// byte arguments are, for the kernel to copy their data, and the names
 /// and shapes of its arguments and results, for a tracer to print them.
@@ -393,7 +393,7 @@ pub mod catalog {
         pub results: &'static [Param],
     }
 
-"#;
+";
 
 /// The `Param` list of `fields`, as Rust.
 fn params(abi: &Abi, fields: &[Field]) -> String {
@@ -442,8 +442,7 @@ fn error_set_of(abi: &Abi, error: &str) -> String {
             ItemKind::Errors { errors, .. } => errors.iter().any(|e| e.name == error),
             _ => false,
         })
-        .map(|(_, item)| camel(&item.name))
-        .unwrap_or_default()
+        .map_or_default(|(_, item)| camel(&item.name))
 }
 
 /// Writes documentation lines with `marker` (`///` or `//!`), indented.
@@ -883,7 +882,7 @@ fn decode_field(abi: &Abi, module: &Module, field: &Field, position: usize, at: 
         Type::Named(other) => {
             let path = qualified(abi, module, other);
             match abi.find(other).map(|(_, item)| &item.kind) {
-                Some(ItemKind::Flags { repr, .. }) | Some(ItemKind::Enum { repr, .. }) => {
+                Some(ItemKind::Flags { repr, .. } | ItemKind::Enum { repr, .. }) => {
                     let method = if matches!(
                         abi.find(other).map(|(_, i)| &i.kind),
                         Some(ItemKind::Flags { .. })

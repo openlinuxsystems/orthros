@@ -148,7 +148,7 @@ impl<T: ?Sized> SpinLock<T> {
     ) -> Acquire<'_> {
         Acquire {
             site: &self.site,
-            addr: self as *const Self as *const () as usize,
+            addr: core::ptr::from_ref::<Self>(self).cast::<()>() as usize,
             kind: LockKind::Spin,
             subclass,
             at,
@@ -267,7 +267,7 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
         if let Some(hooks) = hooks::checking(self.hooks) {
             hooks.lock_release(
                 &self.lock.site,
-                self.lock as *const SpinLock<T> as *const () as usize,
+                core::ptr::from_ref::<SpinLock<T>>(self.lock).cast::<()>() as usize,
             );
         }
         leave(self.hooks, self.irq);

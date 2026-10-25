@@ -369,7 +369,7 @@ pub fn init(lockdep: Option<bool>) {
         .ok()?;
         let idle = idle_thread(cpu, Arch::new_context(thread_start, 0, STACK_PAGES)?)?;
         kmain.state.lock_irq().run = Run::Ready;
-        start_cpu_with(cpu, kmain.clone(), idle, true)?;
+        start_cpu_with(cpu, &kmain, idle, true)?;
         Some(())
     })();
     if made.is_none() {
@@ -404,7 +404,7 @@ pub fn run_cpu(cpu: usize) -> ! {
     reserve_thread();
     let started = (|| {
         let idle = idle_thread(cpu, Arch::adopt_current()?)?;
-        start_cpu_with(cpu, idle.clone(), idle, false)
+        start_cpu_with(cpu, &idle.clone(), idle, false)
     })();
     if started.is_none() {
         error!("Scheduler: no memory to start CPU {cpu}; it stays idle");
@@ -490,7 +490,7 @@ fn reserve_thread() -> usize {
     THREADS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-fn start_cpu_with(cpu: usize, current: ThreadRef, idle: ThreadRef, boot: bool) -> Option<()> {
+fn start_cpu_with(cpu: usize, current: &ThreadRef, idle: ThreadRef, boot: bool) -> Option<()> {
     let now = Arch::now_ns();
     let room = ROOM.load(Ordering::Relaxed);
     let tick = TICK_NS.load(Ordering::Relaxed);
@@ -1524,7 +1524,7 @@ fn poll(slot: &CpuSched, until: u64) -> bool {
 // ---- The reaper ----
 
 fn reaper_key() -> usize {
-    &REAPER as *const AtomicU64 as usize
+    &raw const REAPER as usize
 }
 
 /// Frees exited threads once their CPUs have switched away from them.

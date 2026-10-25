@@ -165,8 +165,11 @@ fn map_anonymous(len: usize) -> *mut u8 {
 /// A fresh page: mapped, touched (a page fault that zeroes it), unmapped.
 fn fresh_page() {
     let at = map_anonymous(PAGE);
-    // SAFETY: `at` is a page mapped read-write just above.
-    unsafe { at.cast::<u64>().write_volatile(1) };
+    // SAFETY: `at` is a page mapped read-write just above (so aligned).
+    #[allow(clippy::cast_ptr_alignment)]
+    unsafe {
+        at.cast::<u64>().write_volatile(1);
+    }
     // SAFETY: the page was mapped above and nothing refers to it any more.
     let result = unsafe { libc::munmap(at.cast(), PAGE) };
     assert_eq!(result, 0, "munmap: {}", std::io::Error::last_os_error());
@@ -271,7 +274,7 @@ fn context_switch(rounds: u64) {
     println!("BENCH name=context_switch ns={ns:.2} iterations={total}");
     let mut status = 0;
     // SAFETY: `child` is this process's child, and `status` is writable.
-    unsafe { libc::waitpid(child, &mut status, 0) };
+    unsafe { libc::waitpid(child, &raw mut status, 0) };
 }
 
 /// The context switches of this process so far, voluntary or not.
@@ -279,7 +282,7 @@ fn switches() -> u64 {
     // SAFETY: an all-zero rusage is valid, and getrusage writes into it.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: `usage` is writable.
-    let done = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let done = unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) };
     assert_eq!(done, 0, "getrusage: {}", std::io::Error::last_os_error());
     (usage.ru_nvcsw + usage.ru_nivcsw) as u64
 }
@@ -599,7 +602,7 @@ fn allowed_cpus() -> Vec<usize> {
     // SAFETY: cpu_set_t is plain data, and all zeroes is the empty set.
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
     // SAFETY: `set` is a writable cpu_set_t of the size given.
-    let result = unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) };
+    let result = unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &raw mut set) };
     assert_eq!(result, 0, "sched_getaffinity: {}", std::io::Error::last_os_error());
     // SAFETY: every index is below CPU_SETSIZE, so within the set.
     (0..libc::CPU_SETSIZE as usize).filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) }).collect()
@@ -613,6 +616,7 @@ fn pin(cpu: usize) {
     unsafe { libc::CPU_SET(cpu, &mut set) };
     // SAFETY: pid 0 is the calling thread, and `set` is a cpu_set_t of the
     // size given.
-    let result = unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set) };
+    let result =
+        unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &raw const set) };
     assert_eq!(result, 0, "cannot pin a thread to CPU {cpu}: {}", std::io::Error::last_os_error());
 }

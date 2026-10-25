@@ -135,7 +135,7 @@ fn hung_up() -> Status {
 
 impl Tty {
     fn key(&self) -> usize {
-        self as *const Tty as usize
+        core::ptr::from_ref::<Tty>(self) as usize
     }
 
     /// Something changed: the waits look again, and so does `poll`.

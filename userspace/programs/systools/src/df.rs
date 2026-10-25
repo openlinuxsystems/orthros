@@ -30,7 +30,7 @@ fn statvfs(path: &OsStr) -> io::Result<Space> {
     // SAFETY: all zeros is a valid statvfs: numbers.
     let mut st: libc::statvfs = unsafe { util::zeroed() };
     // SAFETY: the path is a C string and `st` a statvfs for the call.
-    if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+    if unsafe { libc::statvfs(path.as_ptr(), &raw mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
     let unit = if st.f_frsize > 0 { st.f_frsize } else { st.f_bsize };
@@ -199,7 +199,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     }
     let columns = table[0].len();
     let rights: Vec<bool> =
-        (0..columns).map(|i| i > (if kinds { 1 } else { 0 }) && i + 1 < columns).collect();
+        (0..columns).map(|i| i > usize::from(kinds) && i + 1 < columns).collect();
     // The last column is a path: line it up too, as df does.
     print_table(&table, &rights, None)?;
     Ok(code)

@@ -321,6 +321,8 @@ impl Abi {
 
     /// How many machine words a type takes as a parameter (saturating, so
     /// an absurd array is too many words instead of an overflow).
+    // A method, as the other layout questions are.
+    #[allow(clippy::self_only_used_in_recursion)]
     pub fn words(&self, ty: &Type) -> usize {
         match ty {
             Type::Array(inner, len) => self.words(inner).saturating_mul(*len),
