@@ -20,7 +20,7 @@ use radix_ipc::info::Info;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 
-use super::memory::{Anon, FileSource, Placement, cap_rights, frame_made, futex};
+use super::memory::{Anon, FileSource, Placement, SharedPages, cap_rights, frame_made, futex};
 use super::objects::{self, Found, Object};
 use super::{Result, UserRef, cap_error, error};
 use crate::caps;
@@ -414,11 +414,15 @@ fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
         address_space::MAP_ANONYMOUS => {
             let a = address_space::MapAnonymousArgs::decode(args)?;
             let access = anonymous_access(a.rights)?;
-            let shared = a.flags.contains(address_space::MapFlags::SHARED);
             let placement = placement(a.address, a.flags);
             if !matches!(placement, Placement::Hint(_)) && !aligned(a.address) {
                 return Err(Kernel::InvalidArgument.status(0));
             }
+            let shared = if a.flags.contains(address_space::MapFlags::SHARED) {
+                Some(SharedPages::new(&space)?)
+            } else {
+                None
+            };
             let anon = Anon { access, shared, file: None };
             let address = space.map_anonymous(pages_of(a.size)?, anon, placement)?;
             let results = address_space::MapAnonymousResults { address };
@@ -466,7 +470,7 @@ fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
                 base: a.offset,
                 size: stat.size.saturating_sub(a.offset),
             };
-            let anon = Anon { access, shared: false, file: Some(source) };
+            let anon = Anon { access, shared: None, file: Some(source) };
             let address = space.map_anonymous(pages_of(a.size)?, anon, placement)?;
             let results = address_space::MapFileResults { address };
             answer(label, address_space::MapFileResults::WORDS, results.encode())

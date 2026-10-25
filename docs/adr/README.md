@@ -121,3 +121,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0107](0107-the-gate-is-parity-and-measures-again.md) | The performance gate is parity with Linux, and an operation over it is measured again on both systems | Accepted |
 | [0108](0108-the-registry-under-the-store-lock.md) | The object registry is guarded by the capability store's lock | Accepted |
 | [0109](0109-a-doorbell-for-late-shootdown-answers.md) | Under KVM, a CPU that answers a TLB shootdown late gets a faster timer while it runs | Accepted |
+| [0110](0110-shared-mappings-keep-their-pages.md) | A shared mapping keeps its pages in one place, which also names the futex words in it | Accepted |

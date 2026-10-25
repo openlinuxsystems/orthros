@@ -122,6 +122,7 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_signal", 5_900),                   // 5,300
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
+    ("posix_futex_shared_same_cpu", 5_800),    // 5,248
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.
@@ -317,6 +318,14 @@ const ROWS: &[Row] = &[
     posix(
         "posix_futex_cross_cpu",
         "POSIX: futex wake and wait each way (semaphores), two threads, two CPUs",
+    ),
+    posix(
+        "posix_futex_shared_same_cpu",
+        "POSIX: futex wake and wait each way (semaphores in shared memory), two processes, one CPU",
+    ),
+    posix(
+        "posix_futex_shared_cross_cpu",
+        "POSIX: futex wake and wait each way (semaphores in shared memory), two processes, two CPUs",
     ),
 ];
 

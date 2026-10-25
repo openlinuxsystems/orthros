@@ -19,9 +19,16 @@
 //! allows, so the first write to it faults: a page shared by more than one
 //! space is copied for the writer, which maps its copy writable and lets
 //! go of the original; a page no other space maps any more is made
-//! writable again in place. A page of a shared region (`MAP_SHARED`) stays
-//! writable in both, and both see every write. A page goes back to the
-//! allocator when the last space that maps it lets go of it.
+//! writable again in place. A page goes back to the allocator when the
+//! last space that maps it lets go of it.
+//!
+//! A shared mapping (`MAP_SHARED`) keeps its pages in a [`SharedPages`],
+//! which the regions of every space that maps it hold: a fault in any of
+//! them maps the mapping's page, made by whichever space touched it first,
+//! so a page first touched after a fork is the same page on both sides.
+//! The mapping counts as one more sharer of each of its pages and keeps
+//! them until the last region that maps it goes; they stay writable
+//! wherever the region allows it, and every space sees every write.
 //!
 //! Every page a space maps is charged to its domain once, shared or not,
 //! so a fork charges the child's domain for all the parent's pages up
@@ -39,8 +46,15 @@ use radix_hal::{PageEdit, UserAccess, UserMode};
 use radix_mm::{FRAMES, Flags, Owner};
 use radix_vfs::{NodeRef, Out};
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use radix_mm::Kmalloc;
+use radix_sync::Mutex;
+
 use super::{Backing, Region, SpaceObject, SpaceRef, first_after, insert, overlaps};
 use crate::Arch;
+use crate::domains::DomainRef;
 use crate::user::{Result, error};
 
 /// The most the place of anonymous memory moves below ANONYMOUS_TOP, at
@@ -59,11 +73,106 @@ pub struct Anon {
     /// What the program may do with its pages; none (`PROT_NONE`) keeps
     /// them out of reach.
     pub access: Option<UserAccess>,
-    /// Whether a forked space shares its pages for good (`MAP_SHARED`)
-    /// rather than each side getting a copy when it writes.
-    pub shared: bool,
+    /// The pages of a shared mapping (`MAP_SHARED`), which every space
+    /// that maps it uses, rather than each side of a fork getting a copy
+    /// when it writes; `None` for a private one.
+    pub shared: Option<SharedRef>,
     /// The file its pages are filled from, if any.
     pub file: Option<FileSource>,
+}
+
+/// How many pages a chunk of a [`SharedPages`] holds the frames of.
+const CHUNK: u64 = 512;
+
+/// A chunk's number, and the frames of its pages (0 for one not made).
+type Chunk = (u64, Vec<u64, Kmalloc>);
+
+/// A shared mapping's pages: page `n` is the one at the region's offset
+/// plus `n`, wherever each space maps the region. It holds each page it
+/// made as one of the page's sharers, so a page stays while the mapping
+/// does, mapped in a space at the moment or not, and is charged meanwhile
+/// to the domain of the space that made the mapping, as well as to each
+/// space while it maps the page.
+pub struct SharedPages {
+    /// Its pages' frames in chunks of [`CHUNK`], each made with the first
+    /// of its pages and kept in order of its number.
+    chunks: Mutex<Vec<Chunk, Kmalloc>>,
+    /// The domain its pages are charged to.
+    domain: Option<DomainRef>,
+}
+
+pub type SharedRef = Arc<SharedPages, Kmalloc>;
+
+impl SharedPages {
+    /// A shared mapping's pages, none made yet, charged to `space`'s
+    /// domain.
+    pub fn new(space: &SpaceObject) -> Result<SharedRef> {
+        let pages = SharedPages {
+            chunks: Mutex::new(Vec::new_in(super::kmalloc())),
+            domain: space.domain.clone(),
+        };
+        Arc::try_new_in(pages, super::kmalloc()).map_err(|_| error(Kernel::NoMemory))
+    }
+
+    /// The frame of page `index`, zeroed and charged if it is new, counted
+    /// as shared once more for the space about to map it.
+    fn get(&self, index: u64) -> core::result::Result<u64, Fault> {
+        let mut chunks = self.chunks.lock();
+        let number = index / CHUNK;
+        let at = match chunks.binary_search_by_key(&number, |&(n, _)| n) {
+            Ok(at) => at,
+            Err(at) => {
+                chunks.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+                let mut chunk = Vec::new_in(super::kmalloc());
+                chunk.try_reserve_exact(CHUNK as usize).map_err(|_| Fault::NoMemory)?;
+                // The room for both was reserved; the chunks stay in order.
+                for _ in 0..CHUNK {
+                    let _ = chunk.push_within_capacity(0);
+                }
+                let _ = chunks.push_within_capacity((number, chunk));
+                chunks[at..].rotate_right(1);
+                at
+            }
+        };
+        let slot = &mut chunks[at].1[(index % CHUNK) as usize];
+        if *slot != 0 {
+            if let Some(info) = FRAMES.info(*slot) {
+                info.share();
+            }
+            return Ok(*slot);
+        }
+        if let Some(domain) = &self.domain {
+            domain.charge(1).map_err(|_| Fault::NoMemory)?;
+        }
+        let Ok(phys) = FRAMES.alloc(0, Flags { zero: true, ..Flags::MAY_SLEEP }, Owner::Anon)
+        else {
+            if let Some(domain) = &self.domain {
+                domain.uncharge(1);
+            }
+            return Err(Fault::NoMemory);
+        };
+        // The mapping's share, and the space's about to map it.
+        if let Some(info) = FRAMES.info(phys) {
+            info.set_share_count(2);
+        }
+        *slot = phys;
+        Ok(phys)
+    }
+}
+
+impl Drop for SharedPages {
+    fn drop(&mut self) {
+        let mut made = 0;
+        for (_, chunk) in self.chunks.get_mut().iter() {
+            for &phys in chunk.iter().filter(|&&phys| phys != 0) {
+                unshare(phys);
+                made += 1;
+            }
+        }
+        if let Some(domain) = &self.domain {
+            domain.uncharge(made);
+        }
+    }
 }
 
 /// The file an anonymous region's pages are filled from when they are
@@ -244,6 +353,7 @@ impl SpaceObject {
             }
         };
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+        let shared = anon.shared.is_some();
         let region = Region {
             start,
             pages: (end - start) / PAGE_SIZE,
@@ -251,6 +361,9 @@ impl SpaceObject {
             offset: 0,
         };
         insert(&mut regions, region);
+        if shared {
+            self.may_share.store(true, Ordering::Release);
+        }
         Ok(start)
     }
 
@@ -280,7 +393,7 @@ impl SpaceObject {
         for region in regions[first..].iter_mut().take_while(|r| r.start < end) {
             let Backing::Anon(anon) = &mut region.backing else { continue };
             anon.access = access;
-            let shared = anon.shared;
+            let shared = anon.shared.is_some();
             Arch::edit_pages(
                 &self.arch,
                 region.start,
@@ -304,6 +417,35 @@ impl SpaceObject {
             radix_ipc::range::user_pages(start, pages).ok_or(Kernel::InvalidArgument.status(0))?;
         let mut regions = self.regions.lock();
         self.cut(&mut regions, start, end)
+    }
+
+    /// Maps page `page` of shared `region` with `access`: the mapping's
+    /// page, made now if no space has touched it yet. The page is charged
+    /// to the space.
+    fn map_shared(
+        &self,
+        pages: &SharedPages,
+        region: &Region,
+        page: u64,
+        access: UserAccess,
+    ) -> Fault {
+        if self.charge(1).is_err() {
+            return Fault::NoMemory;
+        }
+        let phys = match pages.get(region.offset + (page - region.start) / PAGE_SIZE) {
+            Ok(phys) => phys,
+            Err(fault) => {
+                self.uncharge(1);
+                return fault;
+            }
+        };
+        if Arch::set_entry(&self.arch, page, phys, Some(access), false).is_err() {
+            // The mapping keeps its share.
+            unshare(phys);
+            self.uncharge(1);
+            return Fault::NoMemory;
+        }
+        Fault::Resolved
     }
 
     /// Makes a new page for page `page` of `region`, filled as it says;
@@ -384,7 +526,7 @@ impl SpaceObject {
                 let sharers = FRAMES.info(phys).map_or(1, radix_mm::PageInfo::share_count);
                 // Only a fork of this space, which holds its regions' lock,
                 // makes a page more shared: one space alone stays alone.
-                if anon.shared || sharers <= 1 {
+                if anon.shared.is_some() || sharers <= 1 {
                     return match Arch::set_entry(&self.arch, page, phys, Some(access), true) {
                         Ok(()) => Fault::Resolved,
                         Err(_) => Fault::NoMemory,
@@ -409,7 +551,8 @@ impl SpaceObject {
             Some((phys, None)) => {
                 // Held without access, from before its region allowed it.
                 let sharers = FRAMES.info(phys).map_or(1, radix_mm::PageInfo::share_count);
-                let now = if anon.shared { access } else { private_access(access, sharers) };
+                let now =
+                    if anon.shared.is_some() { access } else { private_access(access, sharers) };
                 // Still shared, a write faults again, and copies.
                 match Arch::set_entry(&self.arch, page, phys, Some(now), true) {
                     Ok(()) => Fault::Resolved,
@@ -417,6 +560,9 @@ impl SpaceObject {
                 }
             }
             None => {
+                if let Some(pages) = &anon.shared {
+                    return self.map_shared(pages, region, page, access);
+                }
                 let phys = match self.new_page(region, anon, page) {
                     Ok(phys) => phys,
                     Err(fault) => return fault,
@@ -501,6 +647,8 @@ impl SpaceObject {
             // go of, so these are the pages the child gets.
             let total = self.anon_pages.load(Ordering::Relaxed);
             child.charge(total)?;
+            // The child maps what this space does, shared memory included.
+            child.may_share.store(self.may_share.load(Ordering::Relaxed), Ordering::Release);
             for region in regions.iter() {
                 match &region.backing {
                     Backing::Anon(_) => {}
@@ -548,7 +696,7 @@ impl SpaceObject {
                     last = Some(phys);
                     given += 1;
                     match access {
-                        Some(UserAccess::ReadWrite) if !anon.shared => {
+                        Some(UserAccess::ReadWrite) if anon.shared.is_none() => {
                             (PageEdit::Set(Some(UserAccess::Read)), Some(Some(UserAccess::Read)))
                         }
                         access => (PageEdit::Keep, Some(access)),

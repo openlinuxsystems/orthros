@@ -88,10 +88,18 @@ counts each shared; a private page is then mapped read-only in both. A
 write fault on a page shared by more than one space copies it for the
 writer: the copy is mapped writable (with the old entry's TLB entries
 gone) before the original's count drops. A page whose count is one is
-made writable in place. A `MAP_SHARED` region stays writable in both.
+made writable in place. A `MAP_SHARED` region stays writable in both,
+and keeps its pages in a `SharedPages` that every region mapping it
+holds, in the parent, in each child and in the parts a split leaves: a
+fault on a page with no entry takes the mapping's page, made by
+whichever space touched it first, so a page first touched after a fork
+is the same page in both (ADR 0110). The mapping counts as one more
+sharer of each page and keeps it until the last region holding it goes.
 Every page a space maps is charged to its domain once, so a fork charges
 the child's domain for everything up front and a domain's limit bounds
-what its programs can touch.
+what its programs can touch; a shared mapping's pages are also charged
+to the domain of the space that made it, while it lasts, so that a page
+no space maps at the moment still counts.
 
 `exec` and `mmap` of a file map the file's pages as the process's own
 copy, filled when touched (ADR 0060). A shared writable mapping of a file
@@ -315,9 +323,15 @@ signal is taken, then counts the expiries missed meanwhile as overruns
 
 ## Futexes
 
-A futex word is named by its address space and address, hashed into one
-of 64 buckets, each a spin lock around a list of waiters in arrival
-order. `futex_wait` compares the word with the bucket locked and queues
+A futex word in memory only its address space maps is named by the
+space and its address. One in memory other spaces may map too, at
+addresses of their own (a shared mapping, a frame, a ring), is named by
+that memory and the word's place in it, so a wake in one process reaches
+waiters in another, and the waiter holds the memory while it waits so
+that the name stays its own (ADR 0110). A space that never mapped such
+memory names its words without looking at its regions. The name is
+hashed into one of 64 buckets, each a lock around a list of waiters in
+arrival order. `futex_wait` compares the word with the bucket locked and queues
 the waiter before letting go; `futex_wake` takes the same lock. A woken
 waiter is taken off the list by its waker and told through its own flag,
 with the lock held; the waker wakes the thread only once it has let the
@@ -671,10 +685,6 @@ list go before it sets the timer, the race above; a waiter reading
 
 ## Known limits
 
-- Futex words in `MAP_SHARED` memory are named by each process's own
-  space, so a wake in one process does not reach waiters in another:
-  process-shared mutexes, condition variables and semaphores do not
-  work across processes yet.
 - A shared writable mapping of a file fails with ENODEV, and `msync` has
   nothing to write back: file mappings are private copies until the page
   cache maps its own pages.

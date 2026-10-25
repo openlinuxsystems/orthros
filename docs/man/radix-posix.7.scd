@@ -338,8 +338,11 @@ CPU-time timer fires within 10 ms of when it is due.
 *pthread_create* starts a thread in the same process
 (radix-process(2)'s *start*), with its thread-local storage set up by the
 C library. Locks, condition variables and *pthread_join* sleep on
-futexes (radix-address-space(2)'s *futex_wait* and *futex_wake*), which
-are private to a process. *pthread_setname_np* names a thread in up to
+futexes (radix-address-space(2)'s *futex_wait* and *futex_wake*). A
+futex in memory several processes map, such as a *MAP_SHARED* mapping
+from before a *fork*, is the same futex in each, so process-shared
+mutexes, condition variables and semaphores (*PTHREAD_PROCESS_SHARED*,
+*sem_init* with _pshared_ set) work across processes. *pthread_setname_np* names a thread in up to
 15 bytes, as Linux allows, and the kernel log and the debugger show the
 name. *gettid* returns the thread's number.
 
@@ -402,7 +405,8 @@ waiting for each other's locks fails with EDEADLK instead.
 *mmap* of anonymous memory makes a region whose pages are made, zeroed,
 the first time the program touches them, and charged to its process's
 resource domain. After a *fork* private pages are shared copy-on-write
-and *MAP_SHARED* ones stay shared. *mmap* of a file gives the process its
+and *MAP_SHARED* ones stay shared, including those first touched after
+the *fork*. *mmap* of a file gives the process its
 own copy of the file's pages, filled as they are touched; a shared
 writable mapping of a file fails with ENODEV. *mprotect* and *munmap*
 work as on Linux, *msync* has nothing to write back, and
@@ -538,9 +542,6 @@ passed*; the boot test fails on any failure.
 - A directory descriptor from before exec has no path: *..* above it
   fails with EXDEV, and *fchdir* to it with ENOSYS. One whose directory
   was moved while it was open still goes by the old path for both.
-- Futexes in memory several processes share are not shared: a
-  process-shared mutex or semaphore does not wake waiters in another
-  process.
 - A shared writable mapping of a file fails with ENODEV.
 - *clock_gettime* is a system call; there is no vDSO.
 - A *poll* waits for a change anywhere, so many pollers on a busy system

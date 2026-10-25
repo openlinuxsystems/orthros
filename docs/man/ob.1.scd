@@ -492,7 +492,8 @@ _target/userspace/_).
 	(_userspace/posix/bench.c_): *fork*(2) and *waitpid*(2), a program
 	run with *execv*(3), a pipe's throughput, a signal to itself,
 	*poll*(2), and futex round trips through semaphores between two
-	threads on one CPU and on two.
+	threads, and between two processes in shared memory, on one CPU and
+	on two.
 
 	Then boot Linux in a virtual machine set up the same way, with
 	_tools/linux-bench_ built as a static program and run as its only

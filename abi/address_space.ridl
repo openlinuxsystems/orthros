@@ -16,12 +16,16 @@
 //! limit bounds its programs' memory. A forked process (radix-process(2))
 //! gets the same pages, shared until either side writes to one, which
 //! then gets a copy of its own, unless the mapping is SHARED, when both
-//! keep writing to the same pages.
+//! keep writing to the same pages, those first touched after the fork
+//! included.
 //!
 //! Futexes (`futex_wait`, `futex_wake`) are the waiting that a C library's
 //! locks and condition variables are built on, as Linux's: a thread waits
 //! on a 32-bit word of this address space while it holds a value, until a
-//! thread wakes the word's waiters.
+//! thread wakes the word's waiters. A word of memory other address spaces
+//! map too (a SHARED mapping, a frame, a ring) is the same word in each,
+//! wherever each maps it, so a wake in one process reaches the waiters in
+//! another.
 
 module address_space;
 
@@ -97,8 +101,9 @@ interface address_space = 0x0003 version 2 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
                 would_block, timed_out, interrupted];
     /// Wakes up to `count` of the threads waiting on the word at `address`
-    /// in this address space, first come first woken, and returns how many
-    /// it woke. Needs the control right.
+    /// in this address space, or on the same word of shared memory in
+    /// another, first come first woken, and returns how many it woke.
+    /// Needs the control right.
     method futex_wake = 7 (address: addr, count: u32) -> (woken: u32)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument];
 }
