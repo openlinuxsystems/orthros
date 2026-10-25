@@ -19,6 +19,11 @@
 //! A thread's `signalled` flag is set and cleared with its process's POSIX
 //! state and the thread's signals both locked, so a signal sent while the
 //! thread decides it has nothing to do is never missed.
+//!
+//! Spark, whose end stops the kernel, takes only the signals it has a
+//! handler for, as Linux's init does: the others, SIGKILL and SIGSTOP
+//! included, pass it by ([`spared`]). A fault it has no handler for still
+//! ends it.
 
 use core::sync::atomic::Ordering;
 use radix_abi::Status;
@@ -145,6 +150,12 @@ fn ending(process: &ProcessObject) -> bool {
     !matches!(process.state().0, ProcessState::Created | ProcessState::Running)
 }
 
+/// Whether `signal`, whose action for `process` is `disposition`, passes
+/// it by: Spark takes only the signals it handles.
+fn spared(process: &ProcessObject, disposition: Disposition) -> bool {
+    process.is_vital() && !matches!(disposition, Disposition::Handle(_))
+}
+
 /// Ends `process`, killed by `signal`: its threads stop, as for `exit`.
 fn kill_process(process: &ProcessObject, signal: u32) {
     process.posix.lock().ended_by.get_or_insert(signal);
@@ -179,6 +190,9 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
         return Sent::Dropped;
     }
     if signal == SIGKILL {
+        if process.is_vital() {
+            return Sent::Dropped;
+        }
         continue_process(process);
         kill_process(process, signal);
         return Sent::Queued;
@@ -201,7 +215,7 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
             timer::discarded(process, &mut posix, on.discard);
         }
         let disposition = posix.actions.disposition(signal);
-        let ignored = posix.actions.ignores(signal);
+        let ignored = posix.actions.ignores(signal) || spared(process, disposition);
         // An ignored signal is dropped, unless every thread blocks it (its
         // action may change before it is taken).
         let mut target = None;
@@ -274,6 +288,9 @@ pub fn send_thread(thread: &ThreadRef, user: &UserThread, signal: u32, info: Inf
         return Sent::Dropped;
     }
     if signal == SIGKILL {
+        if process.is_vital() {
+            return Sent::Dropped;
+        }
         continue_process(process);
         kill_process(process, signal);
         return Sent::Queued;
@@ -287,12 +304,13 @@ pub fn send_thread(thread: &ThreadRef, user: &UserThread, signal: u32, info: Inf
         let mut signals = user.signals.lock();
         signals.pending.discard(on.discard);
         let blocked = signals.mask & bit(signal) != 0;
-        if posix.actions.ignores(signal) && !blocked {
+        let disposition = posix.actions.disposition(signal);
+        if (posix.actions.ignores(signal) || spared(process, disposition)) && !blocked {
             drop(signals);
             timer::discarded(process, &mut posix, on.discard);
             return Sent::Dropped;
         }
-        if posix.actions.disposition(signal) == Disposition::Terminate && !blocked {
+        if disposition == Disposition::Terminate && !blocked {
             None
         } else {
             let result = sent(signal, signals.pending.add(signal, info));
@@ -379,7 +397,9 @@ pub fn end_masked_wait(user: &UserThread) {
 pub fn send_group(group: u64, signal: u32, info: Info) {
     let mut targets = alloc::vec::Vec::new_in(super::kmalloc());
     with_tree(|tree| {
-        tree.targets(0, group, -(group as i64), &mut |member| {
+        // Named by the group (pid 0) rather than by -group, which for group
+        // 1 would be -1: every process.
+        tree.targets(0, group, 0, &mut |member| {
             if !matches!(member.life, radix_posix::tree::Life::Zombie { .. })
                 && targets.try_reserve(1).is_ok()
             {
@@ -585,6 +605,11 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                         match posix.actions.disposition(signal) {
                             Disposition::Ignore if process.traced() => Step::Ignored(signal),
                             Disposition::Ignore => continue,
+                            // Queued while blocked; Spark takes only what
+                            // it handles.
+                            Disposition::Stop | Disposition::Terminate if process.is_vital() => {
+                                continue;
+                            }
                             Disposition::Stop => Step::Stop(signal),
                             Disposition::Terminate => Step::Kill(signal),
                             Disposition::Handle(action) => {

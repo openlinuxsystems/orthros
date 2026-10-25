@@ -412,9 +412,10 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
 
     /// The members `kill`'s `pid` names, for a sender numbered `sender` in
     /// process group `group`: a positive number that process, 0 the
-    /// sender's process group, -1 every member but the sender, another
-    /// negative number that process group. Gives each one's number and
-    /// handle to `each`; returns how many there were.
+    /// sender's process group, -1 every member but the sender and process
+    /// 1 (as Linux leaves init out), another negative number that process
+    /// group. Gives each one's number and handle to `each`; returns how
+    /// many there were.
     pub fn targets(
         &self,
         sender: u64,
@@ -425,7 +426,7 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
         let mut count = 0;
         for member in &self.members {
             let named = match pid {
-                -1 => member.pid != sender,
+                -1 => member.pid != sender && member.pid != 1,
                 0 => member.group == group,
                 p if p < 0 => member.group == p.unsigned_abs(),
                 p => member.pid == p as u64,

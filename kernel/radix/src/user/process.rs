@@ -369,6 +369,13 @@ impl ProcessObject {
         self.number
     }
 
+    /// Whether the system cannot go on without it: Spark, whose end stops
+    /// the kernel. As Linux's init, it takes only the signals it has a
+    /// handler for (`posix::signal`).
+    pub fn is_vital(&self) -> bool {
+        self.on_exit.is_some()
+    }
+
     /// Notes that it has taken a POSIX record lock.
     pub fn note_record_locks(&self) {
         self.record_locks.store(true, Ordering::Release);

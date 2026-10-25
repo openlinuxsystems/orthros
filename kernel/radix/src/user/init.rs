@@ -70,7 +70,14 @@ pub fn has_archive() -> bool {
 
 /// Spark has exited: the system cannot go on without it.
 fn spark_exited(process: &ProcessObject, code: u64) {
-    panic!("Spark (process {}) exited with code {code:#x}", process.number());
+    let signal = process.posix.lock().ended_by;
+    match signal {
+        Some(signal) => panic!(
+            "Spark (process {}) was ended by signal {signal} (exit code {code:#x})",
+            process.number()
+        ),
+        None => panic!("Spark (process {}) exited with code {code:#x}", process.number()),
+    }
 }
 
 /// Starts `path` from the boot archive with `args` after it, as Spark.
