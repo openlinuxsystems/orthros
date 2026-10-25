@@ -209,6 +209,15 @@ We implement these from their published descriptions. No code is copied.
 - The OASIS Virtual I/O Device (virtio) specification, version 1.2: its
   modern PCI transport, split virtqueues and block device
   ([ADR 0053](docs/adr/0053-modern-virtio-only.md)).
+- Intel's Serial ATA Advanced Host Controller Interface (AHCI)
+  specification, revision 1.3.1, the INCITS ATA/ATAPI Command Set
+  (ACS-4) and the Serial ATA Revision 3 specification (SATA-IO), from
+  which `radix-ahci` drives SATA disks: native command queuing, TRIM, the
+  NCQ Command Error log and error recovery
+  ([ADR 0112](docs/adr/0112-ahci-from-the-specification.md)).
+- The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
+  BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
+  devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).
 - The PCI Local Bus, PCI Express Base and PCI Firmware specifications
   (PCI-SIG): configuration space through ECAM and the ACPI MCFG table,
   base address registers, and MSI and MSI-X

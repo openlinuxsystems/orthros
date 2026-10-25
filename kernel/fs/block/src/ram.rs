@@ -10,7 +10,10 @@ use radix_sync::Mutex;
 
 use crate::mem::CachePage;
 use crate::pagemap::PageMap;
-use crate::{BlockDevice, Error, Info, PAGE_SIZE, SECTOR, Segment, SegmentMut, check};
+use crate::{
+    BlockDevice, Error, Info, PAGE_SIZE, SECTOR, SECTORS_PER_PAGE, Segment, SegmentMut, check,
+    check_discard,
+};
 
 /// A disk whose sectors are pages of memory, allocated as they are
 /// first written (unwritten sectors read as zeros).
@@ -22,6 +25,8 @@ pub struct RamDisk {
     requests: AtomicU64,
     /// Flushes.
     flushes: AtomicU64,
+    /// Sectors discarded.
+    discarded: AtomicU64,
     /// Fail every request after this many more (u32::MAX: never), to test
     /// what sits above against a failing disk.
     fail_after: AtomicU32,
@@ -36,6 +41,7 @@ impl RamDisk {
             pages: Mutex::new(PageMap::new()),
             requests: AtomicU64::new(0),
             flushes: AtomicU64::new(0),
+            discarded: AtomicU64::new(0),
             fail_after: AtomicU32::new(u32::MAX),
         }
     }
@@ -87,6 +93,11 @@ impl RamDisk {
         self.flushes.load(Ordering::Relaxed)
     }
 
+    /// Sectors discarded so far.
+    pub fn discarded(&self) -> u64 {
+        self.discarded.load(Ordering::Relaxed)
+    }
+
     /// Makes every request after the next `count` fail with an I/O error.
     pub fn fail_after(&self, count: u32) {
         self.fail_after.store(count, Ordering::Relaxed);
@@ -115,7 +126,14 @@ fn page_mut(pages: &mut PageMap<CachePage>, index: u64) -> Result<&mut CachePage
 
 impl BlockDevice for RamDisk {
     fn info(&self) -> Info {
-        Info { sectors: self.sectors, block_size: 512, read_only: self.read_only, max_segments: 64 }
+        Info {
+            sectors: self.sectors,
+            block_size: 512,
+            read_only: self.read_only,
+            max_segments: 64,
+            discard_sectors: self.sectors,
+            rotational: false,
+        }
     }
 
     fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
@@ -147,6 +165,32 @@ impl BlockDevice for RamDisk {
     fn flush(&self) -> Result<(), Error> {
         self.start()?;
         self.flushes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Discarded sectors read as zeros: whole pages are let go, and the
+    /// rest zeroed.
+    fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
+        check_discard(self.sectors, sector, count)?;
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        self.start()?;
+        let mut pages = self.pages.lock();
+        let (mut at, end) = (sector, sector + count);
+        while at < end {
+            let index = at / SECTORS_PER_PAGE;
+            let within = at % SECTORS_PER_PAGE;
+            let n = (SECTORS_PER_PAGE - within).min(end - at);
+            if n == SECTORS_PER_PAGE {
+                pages.remove(index);
+            } else if let Some(page) = pages.get_mut(index) {
+                let from = (within * SECTOR) as usize;
+                page.bytes_mut()[from..from + (n * SECTOR) as usize].fill(0);
+            }
+            at += n;
+        }
+        self.discarded.fetch_add(count, Ordering::Relaxed);
         Ok(())
     }
 }

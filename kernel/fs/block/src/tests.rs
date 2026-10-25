@@ -134,6 +134,38 @@ fn ram_disk_and_slices() {
     assert_eq!(ro.write(0, &seg), Err(Error::ReadOnly));
 }
 
+#[test]
+fn discards_and_writes_through() {
+    let (disk, device) = shared(RamDisk::new(64, false));
+    disk.load(0, &std::vec![0xaa; 64 * 512]).unwrap();
+    assert_eq!(crate::check_discard(64, 0, 64), Ok(()));
+    assert_eq!(crate::check_discard(64, 0, 0), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 60, 5), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, u64::MAX, 2), Err(Error::OutOfRange));
+    // Through a partition: sectors 8 to 23 of the disk. Its sectors 3 to
+    // 12 (disk 11 to 20) go: part of the disk's second page, the third
+    // whole, and part of the fourth.
+    let slice = Slice::new(device.clone(), 8, 16).unwrap();
+    assert_eq!(slice.discard(3, 14), Err(Error::OutOfRange));
+    slice.discard(3, 10).unwrap();
+    assert_eq!(disk.discarded(), 10);
+    let mut raw = std::vec![0u8; 64 * 512];
+    disk.dump(0, &mut raw);
+    for (sector, bytes) in raw.chunks(512).enumerate() {
+        let gone = (11..21).contains(&sector);
+        assert!(bytes.iter().all(|&b| b == if gone { 0 } else { 0xaa }), "sector {sector}");
+    }
+    let flushes = disk.flushes();
+    let mut page = CachePage::new().unwrap();
+    page.bytes_mut()[..512].fill(0x5a);
+    slice.write_through(0, &[crate::Segment { page: &page, offset: 0, len: 512 }]).unwrap();
+    assert_eq!(disk.flushes(), flushes + 1);
+    disk.dump(8 * 512, &mut raw[..512]);
+    assert!(raw[..512].iter().all(|&b| b == 0x5a));
+    let ro = RamDisk::new(8, true);
+    assert_eq!(ro.discard(0, 8), Err(Error::ReadOnly));
+}
+
 /// An MBR with `entries` (status, type, first, sectors).
 fn mbr(entries: &[(u8, u8, u32, u32)]) -> [u8; 512] {
     let mut s = [0u8; 512];

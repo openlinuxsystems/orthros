@@ -83,6 +83,7 @@ struct State {
     used_idx: u16,
     disk: Vec<u8>,
     flushes: u32,
+    discarded: u64,
     requests: u64,
 }
 
@@ -140,6 +141,27 @@ impl Device {
             let mut offset = (sector * SECTOR) as usize;
             let mut written = 0u32;
             let mut status = 0u8;
+            if kind == 11 {
+                // A discard's ranges: what they cover reads as zeros.
+                assert_eq!(sector, 0, "a discard's header names no sector");
+                for &(addr, len, writes) in &chain[1..chain.len() - 1] {
+                    let range = Device::read_mem(addr, len as usize);
+                    let first = u64::from_le_bytes(range[0..8].try_into().unwrap());
+                    let count = u32::from_le_bytes(range[8..12].try_into().unwrap());
+                    let flags = u32::from_le_bytes(range[12..16].try_into().unwrap());
+                    let (from, to) =
+                        ((first * SECTOR) as usize, ((first + u64::from(count)) * SECTOR) as usize);
+                    if writes || len != 16 || flags != 0 || to > s.disk.len() {
+                        status = 1;
+                        break;
+                    }
+                    s.disk[from..to].fill(0);
+                    s.discarded += u64::from(count);
+                }
+                chain.clear();
+                chain.push((0, 0, false));
+                chain.push((status_addr, 1, true));
+            }
             for &(addr, len, writes) in &chain[1..chain.len() - 1] {
                 let len = len as usize;
                 if offset + len > s.disk.len() {
@@ -161,7 +183,7 @@ impl Device {
             }
             if kind == 4 {
                 s.flushes += 1;
-            } else if kind != 0 && kind != 1 {
+            } else if kind != 0 && kind != 1 && kind != 11 {
                 status = 2;
             }
             fake_memory_write(status_addr, &[status]);
@@ -191,6 +213,8 @@ impl Registers for Device {
             (0x2008, 4) => 0,
             (0x200c, 4) => 8,
             (0x2014, 4) => 4096,
+            (0x2024, 4) => 32,
+            (0x2028, 4) => 1,
             _ => 0,
         }
     }
@@ -325,6 +349,36 @@ fn reads_and_writes_sectors_zero_copy() {
     let token = blk.submit(Op::Flush, 0, &[]).unwrap();
     assert_eq!(wait(&mut blk, token), Outcome::Done);
     assert_eq!(device.state.lock().unwrap().flushes, 1);
+}
+
+#[test]
+fn discards_when_the_device_does() {
+    let (_, mut blk) = setup(FEATURES);
+    assert_eq!(blk.info().discard_sectors, 0);
+    assert_eq!(blk.submit(Op::Discard(1), 0, &[]), Err(Error::BadRequest));
+
+    let (device, mut blk) = setup(FEATURES | feature::DISCARD);
+    assert_eq!(blk.info().discard_sectors, 32);
+    let token = blk.submit(Op::Discard(3), 5, &[]).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    {
+        let s = device.state.lock().unwrap();
+        assert_eq!(s.discarded, 3);
+        assert!(s.disk[5 * 512..8 * 512].iter().all(|&b| b == 0));
+        assert_eq!(s.disk[8 * 512], ((8 * 512) % 251) as u8);
+    }
+    let p = Dma::fake(4096).phys();
+    assert_eq!(blk.submit(Op::Discard(33), 0, &[]), Err(Error::BadRequest), "32 at most");
+    assert_eq!(blk.submit(Op::Discard(0), 0, &[]), Err(Error::BadRequest));
+    assert_eq!(blk.submit(Op::Discard(2), SECTORS - 1, &[]), Err(Error::BadRequest));
+    assert_eq!(blk.submit(Op::Discard(1), 0, &[(p, 512)]), Err(Error::BadRequest));
+    // The slot's status byte moved past the ranges: reads still end well.
+    let buffer = Dma::fake(4096);
+    let token = blk.submit(Op::Read, 0, &[(buffer.phys(), 512)]).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+
+    let (_, mut blk) = setup(FEATURES | feature::DISCARD | feature::RO);
+    assert_eq!(blk.submit(Op::Discard(1), 0, &[]), Err(Error::BadRequest));
 }
 
 #[test]

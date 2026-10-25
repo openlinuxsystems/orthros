@@ -8,7 +8,10 @@
 //!   [`Segment`]s of pages, which the device reaches by DMA: nothing is
 //!   copied on the way (spec 6.3). Requests block the calling thread until
 //!   the device is done; the driver below keeps its own queue (a virtqueue
-//!   for virtio-blk), so many threads have requests in flight at once.
+//!   for virtio-blk, a command list for AHCI), so many threads have
+//!   requests in flight at once. Besides reads, writes and flushes, a
+//!   device writes through its cache ([`BlockDevice::write_through`]) and
+//!   forgets sectors ([`BlockDevice::discard`]) as well as it can.
 //! - [`partition`] reads MBR and GPT partition tables, and [`Slice`] is a
 //!   partition as a block device of its own.
 //! - [`cache::BlockCache`] keeps a device's blocks in pages, for the
@@ -62,6 +65,8 @@ pub enum Error {
     OutOfRange,
     /// Out of memory for the request.
     NoMemory,
+    /// The device does not do this kind of request.
+    Unsupported,
 }
 
 impl fmt::Display for Error {
@@ -71,6 +76,7 @@ impl fmt::Display for Error {
             Error::ReadOnly => "the device is read-only",
             Error::OutOfRange => "the request is outside the device",
             Error::NoMemory => "out of memory",
+            Error::Unsupported => "the device does not do that",
         })
     }
 }
@@ -92,6 +98,11 @@ pub struct Info {
     pub read_only: bool,
     /// The most segments one request takes.
     pub max_segments: usize,
+    /// The most sectors it discards in one command, or 0 if it does not
+    /// discard; [`BlockDevice::discard`] takes any number and splits them.
+    pub discard_sectors: u64,
+    /// Whether it spins, so that seeks cost: a hard disk.
+    pub rotational: bool,
 }
 
 /// Part of a page the device reads from: `len` bytes from `offset`, both
@@ -132,6 +143,25 @@ pub trait BlockDevice: Send + Sync {
 
     /// Makes every write that returned durable.
     fn flush(&self) -> Result<(), Error>;
+
+    /// Writes `segments` as [`write`] does, and returns once they are
+    /// durable: a write with forced unit access, on a disk that has it.
+    /// It makes no other write durable. The default writes, then flushes.
+    ///
+    /// [`write`]: BlockDevice::write
+    fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        self.write(sector, segments)?;
+        self.flush()
+    }
+
+    /// Tells the device that the `count` sectors from `sector` hold
+    /// nothing worth keeping (ATA's TRIM, NVMe's deallocate): it may free
+    /// them, and what they read afterwards is the device's choice. Fails
+    /// with [`Error::Unsupported`] on a device that does not discard
+    /// ([`Info::discard_sectors`] is 0), which the default does.
+    fn discard(&self, _sector: u64, _count: u64) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 /// A block device, shared.
@@ -170,6 +200,15 @@ pub fn check(
     }
 }
 
+/// Checks a discard of `count` sectors from `sector` on a device of
+/// `sectors` sectors: at least one, all on the device.
+pub fn check_discard(sectors: u64, sector: u64, count: u64) -> Result<(), Error> {
+    match sector.checked_add(count) {
+        Some(end) if count > 0 && end <= sectors => Ok(()),
+        _ => Err(Error::OutOfRange),
+    }
+}
+
 #[cfg(kani)]
 mod proofs {
     use super::*;
@@ -193,6 +232,16 @@ mod proofs {
                 bytes += segment as u64;
             }
             assert_eq!(bytes / SECTOR, len);
+        }
+    }
+
+    /// A discard [`check_discard`] accepts covers sectors, all of them on
+    /// the device.
+    #[kani::proof]
+    fn accepted_discards_fit() {
+        let (sectors, sector, count): (u64, u64, u64) = kani::any();
+        if check_discard(sectors, sector, count).is_ok() {
+            assert!(count > 0 && sector < sectors && sectors - sector >= count);
         }
     }
 
@@ -243,6 +292,17 @@ impl BlockDevice for Slice {
 
     fn flush(&self) -> Result<(), Error> {
         self.device.flush()
+    }
+
+    fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        let lengths = segments.iter().map(|s| (s.offset, s.len));
+        check(self.sectors, usize::MAX, sector, lengths)?;
+        self.device.write_through(self.first + sector, segments)
+    }
+
+    fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
+        check_discard(self.sectors, sector, count)?;
+        self.device.discard(self.first + sector, count)
     }
 }
 

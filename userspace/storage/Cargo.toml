@@ -3,7 +3,7 @@
 
 [package]
 name = "storage"
-description = "A test program: it writes files to every FAT volume, reads them back after a reboot, and checks /proc, /sys and /dev"
+description = "A test program: it writes files to every FAT volume, reads them back after a reboot, checks /proc, /sys and /dev, and reads and writes disks raw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

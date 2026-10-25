@@ -5,16 +5,18 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Storage: files, disks and FAT
 
-This note describes Radix's storage as of Phase 7: the virtual file
-system and its capability-relative paths, directory and file objects,
-the page cache and the block cache, the block layer and the virtio disk
-driver, FAT, tmpfs and the generated trees, writeback and reclaim, and
-the hierarchy Spark builds. It ends with the semi-formal arguments that
-paths never leave their directory and that freed clusters are never
-written by their old owner, the lock order, and the known limits. The
-user-facing descriptions are radix-directory(2), radix-file(2),
-radix-files(7), radix-proc(5), radix-sysfs(5) and spark(8); the decisions
-behind the design are ADRs 0052 to 0059.
+This note describes Radix's storage as of Phase 7, with the disks of
+Phase 10: the virtual file system and its capability-relative paths,
+directory and file objects, the page cache and the block cache, the
+block layer, the disk queue and its virtio and AHCI drivers, raw access
+to block devices, FAT, tmpfs and the generated trees, writeback and
+reclaim, and the hierarchy Spark builds. It ends with the semi-formal
+arguments that paths never leave their directory and that freed
+clusters are never written by their old owner, the lock order, and the
+known limits. The user-facing descriptions are radix-directory(2),
+radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
+radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
+0052 to 0059, 0111 and 0112.
 
 ## Crates
 
@@ -24,6 +26,8 @@ kernel/lib/hw           radix-hw: device registers (Mmio), DMA memory (Dma),
                         PCI configuration space through ECAM (pci.rs)
 kernel/drivers/virtio   radix-virtio: the modern PCI transport, split
                         virtqueues, virtio-blk (compartment)
+kernel/drivers/ahci     radix-ahci: AHCI controllers and their SATA
+                        disks (compartment, Phase 10)
 kernel/fs/block         radix-block: block devices, MBR and GPT, the block
                         cache, the page index (pagemap), RAM disks for tests
                         (compartment)
@@ -32,10 +36,10 @@ kernel/fs/vfs           radix-vfs: nodes, filesystems, paths, the mount
                         boot archive (compartment)
 kernel/fs/fat           radix-fat: FAT12/16/32 with long names (compartment);
                         tla/Clusters.tla, the model of cluster reuse
-kernel/radix            fs/: the tree, disks, devfs, procfs, sysfs, the
-                        writeback thread; user/files.rs: the directory and
-                        file methods
-abi                     directory.ridl, file.ridl
+kernel/radix            fs/: the tree, disks and their queue, devfs,
+                        procfs, sysfs, the writeback thread; user/files.rs:
+                        the directory and file methods
+abi                     directory.ridl, file.ridl, block.ridl
 userspace/radix-rt      fs.rs: Dir and File for programs
 userspace/spark         Spark: the hierarchy and /volumes (since v1)
 userspace/storage       the `storage` boot test's program
@@ -195,25 +199,78 @@ sectors exactly, without touching their neighbours in the same page, and
 At boot, `fs::disk::init` walks every PCI segment the ACPI MCFG table
 describes (`radix_hw::pci::scan`: every bus from the segment's first,
 through PCI-to-PCI bridges, with each function's BARs sized), logs each
-function, and binds the virtio block devices:
+function, and binds the disks it has drivers for: virtio block devices
+(`vda`, `vdb` and on) and, since Phase 10, the SATA disks of AHCI
+controllers (`sda`, `sdb` and on). It then reads each disk's partition
+table and names each partition as Linux would (`vda1`, `sda1`), for
+`/dev` and `/sys/block`.
 
-1. it maps the BARs the virtio capabilities name, uncached, and turns on
+Binding a virtio block device:
+
+1. maps the BARs the virtio capabilities name, uncached, and turns on
    bus mastering;
-2. it sets the device up through the modern transport (ADR 0053):
-   reset, the features it uses, one split virtqueue in DMA memory;
-3. it asks the architecture for an interrupt vector and programs it as
-   the queue's MSI-X entry (ADR 0052); a device with no vector to spare
-   is polled by the threads that wait for it;
-4. it reads the disk's partition table and names the disk and each
-   partition as Linux would (`vda`, `vda1`), for `/dev` and `/sys/block`.
+2. sets the device up through the modern transport (ADR 0053): reset,
+   the features it uses (discard among them since Phase 10), one split
+   virtqueue in DMA memory;
+3. asks the architecture for an interrupt vector and programs it as the
+   queue's MSI-X entry (ADR 0052); a device with no vector to spare is
+   polled by the threads that wait for it.
 
-A request takes one of 64 slots, builds a descriptor chain (the header,
-up to 32 data segments, the status byte), adds it to the queue and rings
-the doorbell. The interrupt handler takes completions off the used ring
-and marks each slot done or failed, matched by the chain's head under the
-queue's lock (a head can be reused as soon as it is handed back), and
-wakes the waiting threads. The thread then frees its slot. Many threads
-can have requests in flight at once, up to the queue's size.
+Binding an AHCI controller (`radix-ahci`, ADR 0112) maps its registers
+(BAR 5), takes it from the firmware, resets it into AHCI mode, gives it
+one MSI, and resets every port's link at once. Each port with an ATA
+disk on it is identified (its size, sector sizes, queue depth, write
+cache, FUA and TRIM) and becomes a disk. A controller that cannot reach
+memory above 4 GiB is refused, and ATAPI devices and port multipliers
+are logged and left alone.
+
+### The queue
+
+Every disk's requests go through one queue (`fs/disk/queue.rs`, ADR
+0111), and a driver is a `Controller` below it. A request takes one of
+64 slots, as many as the I/O class and level of its thread allow (ADR
+0093), and the controller starts it: virtio as a descriptor chain (the
+header, up to 32 data segments, the status byte) matched to its slot by
+the chain's head, AHCI as a command in the port's command list, the
+slot's number its NCQ tag. The interrupt handler collects what finished
+and wakes the waiting threads, each of which frees its own slot. Many
+threads have requests in flight at once, up to the slots the controller
+has.
+
+A request the controller says goes alone (an ATA flush or TRIM, or any
+command to a disk without NCQ) waits for the disk to empty, and while
+it waits, requests of its rank and below that come after it wait behind
+it; more urgent ones still pass, so nothing urgent waits on a flush of
+idle work. A failed request ends in EIO. One the controller hands back
+to go again, because another command's error stopped it or a reset
+cleared it, goes again, five times at most.
+
+An AHCI port that an error stops turns its interrupts off and says so.
+The next thread to wake on the disk takes the controller out of the
+queue's lock, recovers it (ADR 0112: stop the engine, clear the error,
+read the NCQ error log or reset the link, start again), and puts it
+back, while the interrupt handler leaves the disk alone. A request
+unanswered for 30 seconds has its thread reset the port the same way;
+a disk that does not come back, or comes back as another disk, fails
+every request from then on.
+
+### Raw access
+
+A block device in `/dev` reads and writes raw (`radix_vfs::raw`):
+through pages of the kernel's, straight to the disk, with nothing cached
+between, as Linux's do when opened with `O_DIRECT`, but at any offset
+and length. Each request moves up to 16 pages. A write that covers part
+of a sector first reads the sector (the first and last of the request),
+under the node's lock, so that two such writes to one sector cannot lose
+each other's bytes. Reads end at the device's end; a write at or past it
+fails with ENOSPC, as on Linux. An error after some bytes moved ends the
+transfer short. `fsync` empties the disk's write cache.
+
+`ioctl` on a block device takes Linux's requests (radix-block(2)): the
+size in bytes and in sectors, the logical and physical sector sizes, the
+minimum and optimal I/O sizes, the alignment offset, whether it is
+read-only and whether it spins, whether discarded sectors read as zeros
+(never promised), and, with the write right, BLKDISCARD and BLKFLSBUF.
 
 ## FAT
 
@@ -319,6 +376,9 @@ From outermost to innermost:
 9. the block cache;
 10. the disk's queue (with interrupts off).
 
+A block device node's lock for raw writes of parts of sectors is taken
+with nothing else held, and its holder takes only the disk's queue.
+
 The mount table's lock is taken alone, around lookups and changes to the
 table, never while a filesystem works. The lock checker checks this
 order on every boot test (the `fuzz` test calls every directory and file
@@ -383,7 +443,9 @@ host, and reads everything back after a second boot.
 - A file's cache lock is held across its disk I/O, so one file has one
   request in flight; FAT holds one namespace lock for all directory work.
 - No read-ahead and no write clustering beyond one file's dirty pages in
-  order; no `O_DIRECT`.
+  order; no `O_DIRECT` for files (block devices are always raw).
+- Raw writes of parts of one sector through two different nodes (a disk
+  and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Disks are found once, at boot, and mounted by device name; there is no

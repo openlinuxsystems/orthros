@@ -10,9 +10,10 @@
 //! DMA memory, in a slot per descriptor number: a chain's head is unique
 //! among the chains in flight, so its slot is free. The data are the
 //! caller's buffers, by physical address: nothing is copied (spec 6.3,
-//! zero-copy I/O). The driver uses one queue, with its completions on
-//! MSI-X entry `vector`, and asks for no other feature than read-only
-//! disks, the block size, cache flushes and the segment limits.
+//! zero-copy I/O); a discard's one range lives in the slot too. The
+//! driver uses one queue, with its completions on MSI-X entry `vector`,
+//! and asks for no other feature than read-only disks, the block size,
+//! cache flushes, discards and the segment limits.
 
 use radix_hw::{Dma, device_barrier};
 
@@ -31,6 +32,8 @@ pub mod feature {
     pub const BLK_SIZE: u64 = 1 << 6;
     /// The device has a write cache that a flush request empties.
     pub const FLUSH: u64 = 1 << 9;
+    /// The device discards sectors (`max_discard_sectors`).
+    pub const DISCARD: u64 = 1 << 13;
 }
 
 /// The size of a sector, the unit of block addresses.
@@ -39,7 +42,10 @@ pub const SECTOR: u64 = 512;
 const TYPE_IN: u32 = 0;
 const TYPE_OUT: u32 = 1;
 const TYPE_FLUSH: u32 = 4;
+const TYPE_DISCARD: u32 = 11;
 const HEADER: usize = 16;
+/// A discard's range: its first sector, its length and flags (none).
+const RANGE: usize = 16;
 /// The most data buffers in one request this driver sends, whatever the
 /// device takes: the chain is built on the stack, and kernel stacks are
 /// small.
@@ -54,6 +60,8 @@ pub enum Op {
     Write,
     /// Make every completed write durable.
     Flush,
+    /// Discard this many sectors: the device may forget what they hold.
+    Discard(u32),
 }
 
 /// How a request ended, by its status byte.
@@ -83,6 +91,8 @@ pub struct Info {
     pub max_segments: u32,
     /// The most bytes in one data buffer (0 for no limit).
     pub max_segment_size: u32,
+    /// The most sectors one discard covers, or 0 if it does not discard.
+    pub discard_sectors: u32,
 }
 
 /// A virtio block device, set up and running.
@@ -113,8 +123,12 @@ impl Blk {
             transport.add_status(status::FAILED);
             return Err(Error::MissingFeature("virtio 1.0"));
         }
-        let wanted =
-            feature::SIZE_MAX | feature::SEG_MAX | feature::RO | feature::BLK_SIZE | feature::FLUSH;
+        let wanted = feature::SIZE_MAX
+            | feature::SEG_MAX
+            | feature::RO
+            | feature::BLK_SIZE
+            | feature::FLUSH
+            | feature::DISCARD;
         let features = common_feature::VERSION_1 | (offered & wanted);
         if let Err(err) = transport.set_driver_features(features) {
             transport.add_status(status::FAILED);
@@ -128,6 +142,12 @@ impl Blk {
             let seg_max = if features & feature::SEG_MAX != 0 { config.read32(12) } else { 0 };
             let block_size =
                 if features & feature::BLK_SIZE != 0 { config.read32(20) } else { 512 };
+            // A device that discards takes at least one range a request.
+            let discard_sectors = if features & feature::DISCARD != 0 && config.read32(40) > 0 {
+                config.read32(36)
+            } else {
+                0
+            };
             Info {
                 sectors: (high << 32) | low,
                 block_size: if block_size >= 512 && block_size.is_power_of_two() {
@@ -139,6 +159,7 @@ impl Blk {
                 flush: features & feature::FLUSH != 0,
                 max_segments: if seg_max == 0 { u32::MAX } else { seg_max },
                 max_segment_size: size_max,
+                discard_sectors,
             }
         });
         let queue = match Queue::new(&transport, 0, crate::queue::MAX_SIZE, vector, alloc) {
@@ -155,7 +176,7 @@ impl Blk {
             return Err(Error::NoQueue);
         }
         let size = usize::from(queue.size());
-        let Some(slots) = alloc((size * (HEADER + 1)).div_ceil(4096)) else {
+        let Some(slots) = alloc((size * (HEADER + RANGE + 1)).div_ceil(4096)) else {
             transport.reset();
             return Err(Error::NoMemory);
         };
@@ -182,13 +203,22 @@ impl Blk {
 
     /// Starts a request: `op` on the sectors from `sector`, with `data`
     /// buffers (physical address, length) that together cover whole
-    /// sectors, none for a flush. Returns its token, which
+    /// sectors, none for a flush or a discard. Returns its token, which
     /// [`Blk::complete`] gives back. The buffers must stay the request's
     /// alone until then.
     pub fn submit(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u16, Error> {
         let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
+        let fits =
+            |sectors: u64| sector.checked_add(sectors).is_some_and(|end| end <= self.info.sectors);
         let valid = match op {
             Op::Flush => data.is_empty() && self.info.flush,
+            Op::Discard(count) => {
+                data.is_empty()
+                    && count > 0
+                    && count <= self.info.discard_sectors
+                    && fits(u64::from(count))
+                    && !self.info.read_only
+            }
             Op::Read | Op::Write => {
                 !data.is_empty()
                     && bytes.is_multiple_of(SECTOR)
@@ -198,16 +228,15 @@ impl Blk {
                             && (self.info.max_segment_size == 0
                                 || len <= self.info.max_segment_size)
                     })
-                    && sector
-                        .checked_add(bytes / SECTOR)
-                        .is_some_and(|end| end <= self.info.sectors)
+                    && fits(bytes / SECTOR)
                     && !(op == Op::Write && self.info.read_only)
             }
         };
         if !valid {
             return Err(Error::BadRequest);
         }
-        if usize::from(self.queue.free()) < data.len() + 2 {
+        let buffers = if matches!(op, Op::Discard(_)) { 1 } else { data.len() };
+        if usize::from(self.queue.free()) < buffers + 2 {
             return Err(Error::Full);
         }
         let mut chain =
@@ -217,30 +246,50 @@ impl Blk {
         // in the header and clear the status before handing them over.
         let head = self.peek_head();
         let header = usize::from(head) * HEADER;
-        let status = size * HEADER + usize::from(head);
+        let range = size * HEADER + usize::from(head) * RANGE;
+        let status = self.status_at(head);
         let kind = match op {
             Op::Read => TYPE_IN,
             Op::Write => TYPE_OUT,
             Op::Flush => TYPE_FLUSH,
+            Op::Discard(_) => TYPE_DISCARD,
         };
         self.slots.write32(header, kind);
         self.slots.write32(header + 4, 0);
-        self.slots.write64(header + 8, if op == Op::Flush { 0 } else { sector });
+        // Only reads and writes say where in the header.
+        let at = if matches!(op, Op::Read | Op::Write) { sector } else { 0 };
+        self.slots.write64(header + 8, at);
         self.slots.write8(status, 0xff);
         chain[0] = Buffer {
             phys: self.slots.phys() + header as u64,
             len: HEADER as u32,
             device_writes: false,
         };
+        if let Op::Discard(count) = op {
+            self.slots.write64(range, sector);
+            self.slots.write32(range + 8, count);
+            self.slots.write32(range + 12, 0);
+            chain[1] = Buffer {
+                phys: self.slots.phys() + range as u64,
+                len: RANGE as u32,
+                device_writes: false,
+            };
+        }
         for (i, &(phys, len)) in data.iter().enumerate() {
             chain[1 + i] = Buffer { phys, len, device_writes: op == Op::Read };
         }
-        chain[1 + data.len()] =
+        chain[1 + buffers] =
             Buffer { phys: self.slots.phys() + status as u64, len: 1, device_writes: true };
-        let added = self.queue.add(&chain[..data.len() + 2])?;
+        let added = self.queue.add(&chain[..buffers + 2])?;
         debug_assert_eq!(added, head);
         self.queue.notify();
         Ok(added)
+    }
+
+    /// Where the status byte of the chain at `head` is in the slots: after
+    /// the headers and the discards' ranges.
+    fn status_at(&self, head: u16) -> usize {
+        usize::from(self.queue.size()) * (HEADER + RANGE) + usize::from(head)
     }
 
     /// The descriptor [`Queue::add`] will use as the next chain's head.
@@ -252,8 +301,7 @@ impl Blk {
     pub fn complete(&mut self) -> Option<(u16, Outcome)> {
         let (head, _) = self.queue.used()?;
         device_barrier();
-        let status = usize::from(self.queue.size()) * HEADER + usize::from(head);
-        let outcome = match self.slots.read8(status) {
+        let outcome = match self.slots.read8(self.status_at(head)) {
             0 => Outcome::Done,
             2 => Outcome::Unsupported,
             _ => Outcome::IoError,

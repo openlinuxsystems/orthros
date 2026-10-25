@@ -401,7 +401,12 @@ two threads passing a turn there and back through two semaphores, on
 one CPU and on two (`posix_futex_same_cpu`, `posix_futex_cross_cpu`),
 and two processes doing the same through semaphores in shared memory
 (`posix_futex_shared_same_cpu`, `posix_futex_shared_cross_cpu`, ADR
-0110).
+0110). Given `--disk`, it last reads and writes that disk 4 KiB, 64 KiB
+and 1 MiB at a time, one transfer after the other through its first 32
+MiB (`posix_disk_read_4k` to `posix_disk_write_mib`, ADR 0111). Both
+systems get the same virtio disk, a 64 MiB file on the host made afresh
+for each boot: `/dev/vda`, raw on Radix and opened with `O_DIRECT` on
+Linux, so that neither has a cache between the program and the disk.
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

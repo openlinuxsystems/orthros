@@ -8,7 +8,9 @@
 //!
 //! - `/sys/kernel/version`, `/sys/kernel/cmdline`, `/sys/kernel/cpus`;
 //! - `/sys/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
-//!   for every disk and partition;
+//!   for every disk and partition, and in its `queue` the sizes and flags
+//!   of radix-block(2)'s requests as Linux names them (`rotational`,
+//!   `logical_block_size`, `discard_max_bytes` and the rest);
 //! - `/sys/bus/pci/devices/<address>/vendor`, `device` and `class`, in
 //!   hexadecimal, for every PCI function the scan found.
 //!
@@ -101,6 +103,19 @@ impl Listing for Blocks {
         let info = device.info();
         dir.add("size", value(move |text| writeln!(text, "{}", info.sectors))?)?;
         dir.add("ro", value(move |text| writeln!(text, "{}", u8::from(info.read_only)))?)?;
+        let queue = dir.add_dir("queue", next_id())?;
+        let sector = radix_block::SECTOR;
+        for (name, number) in [
+            ("logical_block_size", sector),
+            ("physical_block_size", u64::from(info.block_size)),
+            ("minimum_io_size", u64::from(info.block_size)),
+            ("optimal_io_size", 0),
+            ("rotational", u64::from(info.rotational)),
+            ("discard_granularity", if info.discard_sectors > 0 { sector } else { 0 }),
+            ("discard_max_bytes", info.discard_sectors.saturating_mul(sector)),
+        ] {
+            queue.add(name, value(move |text| writeln!(text, "{number}"))?)?;
+        }
         Ok(dir)
     }
 }

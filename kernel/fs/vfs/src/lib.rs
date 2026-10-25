@@ -22,7 +22,8 @@
 //! filesystem syncs. tmpfs ([`tmpfs`]) is a page cache with nothing below
 //! it. [`synthetic`] makes the generated files of procfs, sysfs and devfs,
 //! and [`bootfs`] serves the boot archive. [`locks`] is what a file's
-//! advisory locks do (Phase 8).
+//! advisory locks do (Phase 8). [`raw`] reads and writes block devices
+//! with no cache between, for `/dev/sda` and its kind (Phase 10).
 //!
 //! The crate is a compartment: it has no `unsafe` code. It builds for the
 //! host (feature `host`), where its tests run.
@@ -42,6 +43,7 @@ pub mod cache;
 pub mod locks;
 pub mod mount;
 pub mod path;
+pub mod raw;
 pub mod synthetic;
 pub mod tmpfs;
 
@@ -161,6 +163,7 @@ impl From<radix_block::Error> for Error {
             radix_block::Error::Io | radix_block::Error::OutOfRange => Error::Io,
             radix_block::Error::ReadOnly => Error::ReadOnly,
             radix_block::Error::NoMemory => Error::NoMemory,
+            radix_block::Error::Unsupported => Error::NotSupported,
         }
     }
 }

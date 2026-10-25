@@ -1268,3 +1268,136 @@ mod lock_lists {
         }
     }
 }
+
+/// A disk in memory behind a block device node, filled with a pattern:
+/// byte `i` is `i % 251`.
+fn raw_disk(sectors: u64, max_segments: usize) -> (std::sync::Arc<RawDisk>, NodeRef) {
+    let ram = radix_block::ram::RamDisk::new(sectors, false);
+    let pattern: Vec<u8> = (0..sectors * 512).map(|i| (i % 251) as u8).collect();
+    ram.load(0, &pattern).unwrap();
+    let disk = std::sync::Arc::new(RawDisk { ram, max_segments });
+    let device: radix_block::DeviceRef = disk.clone();
+    (disk, crate::synthetic::BlockNode::make(7, device).unwrap())
+}
+
+/// A RAM disk that takes at most `max_segments` segments a request.
+struct RawDisk {
+    ram: radix_block::ram::RamDisk,
+    max_segments: usize,
+}
+
+impl radix_block::BlockDevice for RawDisk {
+    fn info(&self) -> radix_block::Info {
+        radix_block::Info { max_segments: self.max_segments, ..self.ram.info() }
+    }
+
+    fn read(
+        &self,
+        sector: u64,
+        segments: &mut [radix_block::SegmentMut<'_>],
+    ) -> core::result::Result<(), radix_block::Error> {
+        assert!(segments.len() <= self.max_segments);
+        self.ram.read(sector, segments)
+    }
+
+    fn write(
+        &self,
+        sector: u64,
+        segments: &[radix_block::Segment<'_>],
+    ) -> core::result::Result<(), radix_block::Error> {
+        assert!(segments.len() <= self.max_segments);
+        self.ram.write(sector, segments)
+    }
+
+    fn flush(&self) -> core::result::Result<(), radix_block::Error> {
+        self.ram.flush()
+    }
+}
+
+#[test]
+fn block_devices_read_raw_at_any_offset() {
+    let (_, node) = raw_disk(300, 3);
+    let expected =
+        |at: usize, len: usize| -> Vec<u8> { (at..at + len).map(|i| (i % 251) as u8).collect() };
+    for (at, len) in
+        [(0, 512), (1, 1), (511, 2), (1000, 70_000), (4096 * 3 - 7, 9000), (0, 300 * 512)]
+    {
+        let mut out = std::vec![0u8; len];
+        assert_eq!(node.read(at as u64, &mut SliceMut(&mut out)).unwrap(), len, "at {at}");
+        assert_eq!(out, expected(at, len), "at {at}, {len} bytes");
+    }
+    // Short at the end, nothing past it.
+    let mut out = [0u8; 100];
+    assert_eq!(node.read(300 * 512 - 10, &mut SliceMut(&mut out)).unwrap(), 10);
+    assert_eq!(&out[..10], &expected(300 * 512 - 10, 10)[..]);
+    assert_eq!(node.read(300 * 512, &mut SliceMut(&mut out)).unwrap(), 0);
+    assert_eq!(node.stat().size, 300 * 512);
+}
+
+#[test]
+fn block_devices_write_raw_and_keep_the_rest_of_partial_sectors() {
+    let (disk, node) = raw_disk(300, 2);
+    let mut model: Vec<u8> = (0..300 * 512).map(|i| (i % 251) as u8).collect();
+    for (at, len, byte) in
+        [(3, 5, 0xa1), (510, 4, 0xa2), (512, 512, 0xa3), (4000, 20_000, 0xa4), (8191, 1, 0xa5)]
+    {
+        let data = std::vec![byte; len];
+        assert_eq!(node.write(at as u64, &Slice(&data)).unwrap(), len);
+        model[at..at + len].fill(byte);
+    }
+    let mut back = std::vec![0u8; 300 * 512];
+    disk.ram.dump(0, &mut back);
+    assert!(back == model, "the disk is not what was written");
+    // Cut at the end; nothing at it or past it, nor at APPEND.
+    assert_eq!(node.write(300 * 512 - 3, &Slice(&[1; 10])).unwrap(), 3);
+    assert_eq!(node.write(300 * 512, &Slice(&[1])), Err(Error::NoSpace));
+    assert_eq!(node.write(APPEND, &Slice(&[1])), Err(Error::NoSpace));
+    let flushes = disk.ram.flushes();
+    node.sync().unwrap();
+    assert_eq!(disk.ram.flushes(), flushes + 1);
+}
+
+#[test]
+fn raw_errors_end_transfers_short() {
+    let (disk, node) = raw_disk(300, 1);
+    // The second request fails: one page came.
+    disk.ram.fail_after(1);
+    let mut out = std::vec![0u8; 3 * 4096];
+    assert_eq!(node.read(0, &mut SliceMut(&mut out)).unwrap(), 4096);
+    disk.ram.fail_after(0);
+    assert_eq!(node.read(0, &mut SliceMut(&mut out)), Err(Error::Io));
+    assert_eq!(node.write(0, &Slice(&out)), Err(Error::Io));
+    let ro = radix_block::ram::RamDisk::new(8, true);
+    let ro = crate::synthetic::BlockNode::make(8, std::sync::Arc::new(ro)).unwrap();
+    assert_eq!(ro.write(0, &Slice(&[0; 512])), Err(Error::ReadOnly));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Raw writes and reads of any offset and length, through requests of
+    /// any size, match a model of the disk.
+    #[test]
+    fn raw_transfers_match_a_model(
+        max_segments in 1usize..5,
+        ops in proptest::collection::vec((0u64..40 * 512, 1usize..20_000, any::<u8>(), any::<bool>()), 1..20),
+    ) {
+        let (disk, node) = raw_disk(40, max_segments);
+        let mut model: Vec<u8> = (0..40 * 512).map(|i| (i % 251) as u8).collect();
+        for (at, len, byte, write) in ops {
+            let end = (at as usize + len).min(model.len());
+            if write {
+                let data = std::vec![byte; len];
+                prop_assert_eq!(node.write(at, &Slice(&data)).unwrap(), end - at as usize);
+                model[at as usize..end].fill(byte);
+            } else {
+                let mut out = std::vec![0u8; len];
+                prop_assert_eq!(node.read(at, &mut SliceMut(&mut out)).unwrap(), end - at as usize);
+                prop_assert_eq!(&out[..end - at as usize], &model[at as usize..end]);
+            }
+        }
+        let mut back = std::vec![0u8; model.len()];
+        disk.ram.dump(0, &mut back);
+        prop_assert!(back == model);
+    }
+}

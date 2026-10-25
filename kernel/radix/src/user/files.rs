@@ -733,6 +733,14 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     fs::framebuffer::control(file, a.request, may_write)?;
                     0
                 }
+                Target::Node => {
+                    let Some(device) = file.at.node.block_device() else {
+                        return Err(error(Kernel::NotTerminal));
+                    };
+                    let may_write = found.cap.check(ObjectKind::File, Rights::WRITE).is_ok();
+                    fs::disk::control(&device, a.request, a.argument, may_write)?;
+                    0
+                }
                 _ => return Err(error(Kernel::NotTerminal)),
             };
             answer(label, file::ControlResults::WORDS, file::ControlResults { result }.encode())

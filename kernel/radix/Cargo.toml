@@ -17,6 +17,7 @@ bench = false
 
 [dependencies]
 radix-abi = { path = "../abi" }
+radix-ahci = { path = "../drivers/ahci" }
 radix-block = { path = "../fs/block" }
 radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }

@@ -1,0 +1,19 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+uname -o names the operating system Dukovo on Radix, as uname -s does
+(from the C library's uname), where platform-info would say "unknown".
+
+diff --git a/platform-info-2.1.0/src/lib_impl.rs b/platform-info-2.1.0/src/lib_impl.rs
+--- a/platform-info-2.1.0/src/lib_impl.rs
++++ b/platform-info-2.1.0/src/lib_impl.rs
+@@ -107,6 +107,8 @@
+     "Cygwin"
+ } else if cfg!(target_os = "wasi") {
+     "WASI"
++} else if cfg!(target_os = "radix") {
++    "Dukovo"
+ } else {
+     "unknown"
+ };
