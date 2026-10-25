@@ -30,7 +30,7 @@ use crate::cpu::{self, msr};
 use crate::interrupts::{VECTOR_APIC_ERROR, VECTOR_PIC_BASE, VECTOR_SPURIOUS};
 use crate::io::{io_delay, outb};
 use crate::paging::{self, Access, Cache};
-use crate::percpu;
+use crate::{kvm, percpu};
 
 /// Register offsets, as in the xAPIC memory layout. In x2APIC mode the MSR
 /// is `0x800 + offset / 16`.
@@ -143,43 +143,12 @@ pub fn end_of_interrupt() {
     write(reg::EOI, 0);
 }
 
-/// KVM's CPUID signature and the feature and MSR of paravirtual EOI.
-mod kvm {
-    pub const SIGNATURE: [u8; 12] = *b"KVMKVMKVM\0\0\0";
-    /// CPUID `base + 1`, EAX: `KVM_FEATURE_PV_EOI`.
-    pub const FEATURE_PV_EOI: u32 = 1 << 6;
-    pub const MSR_PV_EOI_EN: u32 = 0x4b56_4d04;
-}
-
-/// KVM's feature bits (CPUID `base + 1`, EAX), or 0 outside KVM. KVM's
-/// leaves start at 0x4000_0000, or at a multiple of 0x100 above it when
-/// another hypervisor's come first, so every base is tried, as Linux does.
-fn kvm_features() -> u32 {
-    static FEATURES: Once<u32> = Once::new();
-    *FEATURES.call_once(|| {
-        if !cpu::feature::hypervisor() {
-            return 0;
-        }
-        (0x4000_0000..0x4001_0000u32)
-            .step_by(0x100)
-            .find(|&base| {
-                let id = cpu::cpuid(base, 0);
-                let mut signature = [0u8; 12];
-                signature[..4].copy_from_slice(&id.ebx.to_le_bytes());
-                signature[4..8].copy_from_slice(&id.ecx.to_le_bytes());
-                signature[8..].copy_from_slice(&id.edx.to_le_bytes());
-                signature == kvm::SIGNATURE
-            })
-            .map_or(0, |base| cpu::cpuid(base + 1, 0).eax)
-    })
-}
-
 /// Whether the CPUs use paravirtual EOI.
 static PV_EOI: AtomicBool = AtomicBool::new(false);
 
 /// Turns on paravirtual EOI for this CPU if KVM offers it.
 fn enable_pv_eoi() {
-    if kvm_features() & kvm::FEATURE_PV_EOI == 0 {
+    if kvm::features() & kvm::FEATURE_PV_EOI == 0 {
         return;
     }
     let word = &percpu::current().pv_eoi;

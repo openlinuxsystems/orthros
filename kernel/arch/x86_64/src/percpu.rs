@@ -32,6 +32,7 @@ use radix_hal::{Fault, MAX_CPUS};
 use radix_sync::{Once, SpinLock, TakeOnce};
 
 use crate::cpu::{self, msr};
+use crate::kvm::StealTime;
 
 /// Frames of a stopped CPU's backtrace that the panic report shows.
 pub const STOPPED_FRAMES: usize = 12;
@@ -198,6 +199,8 @@ pub struct PerCpu {
     /// KVM's paravirtual end-of-interrupt word: the hypervisor sets bit 0
     /// when the interrupt it delivers needs no EOI write (`apic`).
     pub pv_eoi: AtomicU32,
+    /// KVM's steal-time record of this CPU (`kvm`).
+    pub steal_time: StealTime,
     descriptors: TakeOnce<Descriptors>,
 }
 
@@ -237,6 +240,7 @@ impl PerCpu {
             timer_writes: AtomicU64::new(0),
             ipis_sent: AtomicU64::new(0),
             pv_eoi: AtomicU32::new(0),
+            steal_time: StealTime::new(),
             descriptors: TakeOnce::new(Descriptors {
                 gdt: [0; 8],
                 tss: Tss {

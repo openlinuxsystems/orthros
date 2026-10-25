@@ -207,8 +207,14 @@ Removing or changing a mapping that other CPUs may have cached needs a TLB
 shootdown (`paging::shootdown`, `shootdown_on`). The initiating CPU takes
 the shootdown lock, publishes the range and a new request number, sets a
 pending bit for each target CPU, sends them the TLB IPI, flushes its own
-TLB and waits for the pending bits to clear; each target flushes the range
-(the whole TLB above 32 pages) and clears its bit. Two CPUs may start
+TLB while the IPIs travel and waits for the pending bits to clear; each
+target flushes the range (the whole TLB above 32 pages) and clears its
+bit. Under KVM with steal time and paravirtual TLB flush, a target the
+host has stopped gets no IPI: the initiator sets the flush bit of its
+steal-time record, and the hypervisor flushes its whole TLB before it
+runs it again. A target the host stops after the IPI was sent is handled
+the same way while the initiator waits (`kvm::flush_when_resumed`, ADR
+0105). Two CPUs may start
 shootdowns at once with interrupts disabled, so a CPU waiting for the lock,
 or for its targets, serves pending requests itself; the timer tick serves
 them too, in case an IPI was missed. A shootdown with no target CPU
