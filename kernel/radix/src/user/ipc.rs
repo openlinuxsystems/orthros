@@ -43,7 +43,7 @@ use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
 
 use super::{Fifo, Result, UserRef, UserThread, cap_error, error};
-use crate::caps::{self, Store};
+use crate::caps::{self, Locked};
 use crate::sched::{self, ThreadRef};
 
 /// An endpoint, shared.
@@ -199,7 +199,7 @@ pub fn send(
 /// whether it queued. With the store locked when the message carries
 /// capabilities.
 fn hand_over(
-    mut store: Option<&mut Store>,
+    mut store: Option<&mut Locked>,
     me: &ThreadRef,
     user: &UserRef,
     endpoint: &EndpointRef,
@@ -294,7 +294,7 @@ enum Taken {
 
 /// Takes the first sender's message, or queues the receiver.
 fn take(
-    mut store: Option<&mut Store>,
+    mut store: Option<&mut Locked>,
     me: &ThreadRef,
     user: &UserRef,
     endpoint: &EndpointRef,
@@ -516,7 +516,7 @@ fn cancel(me: &ThreadRef, user: &UserThread, endpoint: Option<&EndpointRef>) -> 
 /// Copies or moves a message's capabilities from the sender's space into
 /// the first empty slots of `to`'s receive window, and returns those
 /// slots. All or nothing.
-fn transfer(store: &mut Store, message: &Message, to: &UserThread) -> Result<[u64; 4]> {
+fn transfer(store: &mut Locked, message: &Message, to: &UserThread) -> Result<[u64; 4]> {
     let count = message.info.caps;
     debug_assert!(count <= MESSAGE_CAPS as usize);
     let (first, window) = to.window();
@@ -562,14 +562,14 @@ fn transfer(store: &mut Store, message: &Message, to: &UserThread) -> Result<[u6
 /// copy's deletion never releases its object, whose capability the sender
 /// still holds, so this never closes an object (it may run with an
 /// endpoint locked).
-fn undo(store: &mut Store, message: &Message, to: &UserThread, slots: &[u64]) {
+fn undo(store: &mut Locked, message: &Message, to: &UserThread, slots: &[u64]) {
     for (i, &slot) in slots.iter().enumerate() {
         let dest = SlotRef::new(to.cspace, slot as u32);
         if message.info.move_caps {
             let from = SlotRef::new(message.cspace, message.words[i] as u32);
             let _ = store.move_cap(dest, from);
         } else {
-            let _ = store.delete(dest, &mut caps::release);
+            let _ = store.delete(dest);
         }
     }
 }

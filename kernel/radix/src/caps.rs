@@ -4,7 +4,9 @@
 //! The kernel's capability store.
 //!
 //! One [`Capabilities`] store (`radix-cap`) holds every capability space,
-//! behind one lock. Its memory comes from the kernel heap. Memory objects
+//! behind one lock, which also guards the registry of the kernel objects
+//! the capabilities name (`user::objects`): the two change together
+//! ([`Locked`]). Its memory comes from the kernel heap. Memory objects
 //! take their pages from the frame allocator, owned by
 //! [`Owner::Memory`], and give them back when the store releases them.
 //!
@@ -29,30 +31,82 @@
 //! deleted or revoked.
 
 use core::fmt;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_cap::{
     CapError, Capabilities, Capability, MAX_DEPTH, MAX_SLOTS, ObjectId, ObjectKind, Progress,
-    Released, Rights, SlotRef,
+    Released, Rights, SlotRef, SpaceId,
 };
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc, Owner, PAGE_SHIFT};
 use radix_sync::Mutex;
 
 use crate::domains::{self, DomainError, DomainRef, Settings};
+use crate::user::objects::{self, Registry};
 
 /// The store's type in the kernel.
 pub type Store = Capabilities<Kmalloc>;
 
+/// What the store's lock guards: the store, and the registry of the
+/// objects it names, which changes only with it. It reads as the store;
+/// its own methods are the store's that may release objects, which then
+/// leave the registry ([`release`]).
+pub struct Locked {
+    pub store: Store,
+    pub registry: Registry,
+}
+
+impl Deref for Locked {
+    type Target = Store;
+
+    fn deref(&self) -> &Store {
+        &self.store
+    }
+}
+
+impl DerefMut for Locked {
+    fn deref_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+}
+
+impl Locked {
+    /// [`Store::delete`].
+    pub fn delete(&mut self, at: SlotRef) -> Result<(), CapError> {
+        let Locked { store, registry } = self;
+        store.delete(at, &mut |released| release(registry, released))
+    }
+
+    /// [`Store::destroy_space`].
+    pub fn destroy_space(&mut self, space: SpaceId) -> Result<(), CapError> {
+        let Locked { store, registry } = self;
+        store.destroy_space(space, &mut |released| release(registry, released))
+    }
+
+    /// [`Store::revoke`].
+    pub fn revoke(&mut self, at: SlotRef, budget: usize) -> Result<Progress, CapError> {
+        let Locked { store, registry } = self;
+        store.revoke(at, budget, &mut |released| release(registry, released))
+    }
+
+    /// [`Store::continue_revoke`].
+    pub fn continue_revoke(&mut self, at: SlotRef, budget: usize) -> Result<Progress, CapError> {
+        let Locked { store, registry } = self;
+        store.continue_revoke(at, budget, &mut |released| release(registry, released))
+    }
+}
+
 /// The store, once [`init`] has run.
-static STORE: Mutex<Option<Store>> = Mutex::new(None);
+static STORE: Mutex<Option<Locked>> = Mutex::new(None);
 
 /// Capabilities a revoke deletes before it lets go of the lock.
 pub const REVOKE_STEP: usize = 64;
 
 /// Sets up the store and reports it.
 pub fn init() {
-    *STORE.lock() = Some(Capabilities::new(HEAP.with(Flags::MAY_SLEEP)));
+    let store = Capabilities::new(HEAP.with(Flags::MAY_SLEEP));
+    *STORE.lock() = Some(Locked { store, registry: Registry::new() });
     info!(
         "Capabilities: ready; {} object kinds, {} rights, spaces of up to {MAX_SLOTS} slots, \
          derivations up to {MAX_DEPTH} deep",
@@ -65,7 +119,7 @@ pub fn init() {
 /// Processes that `f` released and that have no thread left to finish
 /// them are finished before the lock goes (`user::process`); files it
 /// released are dropped after (`fs::drop_deferred`).
-pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
+pub fn with<R>(f: impl FnOnce(&mut Locked) -> R) -> Result<R, CapError> {
     let mut store = STORE.lock();
     let result = match store.as_mut() {
         Some(store) => {
@@ -78,7 +132,7 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     // If `f` took away something a CPU has cached, every cache is stale
     // from now on: the version moves before the lock goes, so that whoever
     // sees the change through the store sees the new version too.
-    let stale = store.as_mut().is_some_and(Store::take_stale);
+    let stale = store.as_mut().is_some_and(|locked| locked.store.take_stale());
     // The mark is set and cleared only with the lock held, so a load and
     // a store do (a swap would be a locked instruction on every change).
     let marked = STALE.load(Ordering::Relaxed);
@@ -135,25 +189,36 @@ pub fn get(at: SlotRef) -> Result<Capability, CapError> {
 /// the lock is held.
 pub fn get_to_cache<R>(
     at: SlotRef,
-    also: impl FnOnce(&Capability) -> R,
+    also: impl FnOnce(&Capability, &mut Registry) -> R,
 ) -> Result<(Capability, R, u64), CapError> {
     let mut store = STORE.lock();
-    let cap = store.as_mut().ok_or(CapError::NoSuchSpace)?.get_to_cache(at)?;
-    let found = also(&cap);
+    let Locked { store, registry } = store.as_mut().ok_or(CapError::NoSuchSpace)?;
+    let cap = store.get_to_cache(at)?;
+    let found = also(&cap, registry);
     Ok((cap, found, VERSION.load(Ordering::Relaxed)))
 }
 
 /// Like [`with`], but gives up instead of waiting for the lock: for `kdb`,
 /// which may have stopped the CPU that holds it.
-pub fn try_with<R>(f: impl FnOnce(&Store) -> R) -> Option<R> {
+pub fn try_with<R>(f: impl FnOnce(&Locked) -> R) -> Option<R> {
     let store = STORE.try_lock()?;
     store.as_ref().map(f)
+}
+
+/// Runs `f` on the object registry, with the store's lock held, if the
+/// store is set up: to read it, as the registry changes only through
+/// [`with`].
+pub fn with_registry<R>(f: impl FnOnce(&Registry) -> R) -> Option<R> {
+    let store = STORE.lock();
+    store.as_ref().map(|locked| f(&locked.registry))
 }
 
 /// Writes what the store holds, by kind, for `kdb`. Gives up if another
 /// CPU holds the store's lock.
 pub fn write_census(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
-    let Some(census) = try_with(Store::census) else {
+    let Some((census, registered)) =
+        try_with(|locked| (locked.census(), objects::census(&locked.registry)))
+    else {
         line(format_args!("Capabilities: the store is not set up, or another CPU holds its lock"));
         return;
     };
@@ -168,11 +233,10 @@ pub fn write_census(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
         census.deepest,
         census.revoking
     ));
-    let registered = crate::user::objects::census();
     for kind in ObjectKind::ALL {
         let (caps, objects) = (census.caps[kind.index()], census.objects[kind.index()]);
         if caps > 0 || objects > 0 {
-            match registered.map(|counts| counts[kind.index()]).filter(|&n| n > 0) {
+            match Some(registered[kind.index()]).filter(|&n| n > 0) {
                 Some(n) => line(format_args!(
                     "  {:>13}: {caps:>6} capabilities, {objects:>6} objects, {n:>6} kernel objects",
                     kind.name()
@@ -186,16 +250,16 @@ pub fn write_census(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
     }
 }
 
-/// Gives back what the store released: kernel objects leave the registry
+/// Gives back what the store released: kernel objects leave `registry`
 /// and close (`user::objects`), memory objects' pages return to the frame
 /// allocator, and domains leave the domain table.
-pub fn release(released: Released) {
+fn release(registry: &mut Registry, released: Released) {
     if released.kind == ObjectKind::ResourceDomain {
         domains::released(released.id);
     }
     // Kernel objects close first: a frame is unmapped before its memory
     // can go back.
-    crate::user::objects::released(&released);
+    objects::released(registry, &released);
     let Some(memory) = released.memory else { return };
     let order = memory.pages.trailing_zeros();
     if let Err(err) = FRAMES.free(memory.base << PAGE_SHIFT, order, Owner::Memory) {
@@ -230,7 +294,7 @@ pub fn create_domain(
             Ok(domain) => Ok(domain),
             Err(err) => {
                 // The capability goes again; nothing was made.
-                let _ = store.delete(at, &mut |_| {});
+                let _ = store.store.delete(at, &mut |_| {});
                 Err(match err {
                     DomainError::NoMemory => CapError::NoMemory,
                     DomainError::InvalidArgument | DomainError::OverLimit => {
@@ -254,7 +318,7 @@ pub fn domain_at(at: SlotRef, needs: Rights) -> Result<DomainRef, CapError> {
 
 /// Deletes the capability in `at`.
 pub fn delete(at: SlotRef) -> Result<(), CapError> {
-    with(|store| store.delete(at, &mut release))?
+    with(|store| store.delete(at))?
 }
 
 /// Revokes everything derived from the capability in `at`, in steps of
@@ -266,11 +330,11 @@ pub fn revoke(at: SlotRef) -> Result<u32, CapError> {
     let mut steps = 0;
     loop {
         steps += 1;
-        let step = |store: &mut Store| {
+        let step = |store: &mut Locked| {
             if steps == 1 {
-                store.revoke(at, REVOKE_STEP, &mut release)
+                store.revoke(at, REVOKE_STEP)
             } else {
-                store.continue_revoke(at, REVOKE_STEP, &mut release)
+                store.continue_revoke(at, REVOKE_STEP)
             }
         };
         match with(step)?? {
@@ -281,6 +345,6 @@ pub fn revoke(at: SlotRef) -> Result<u32, CapError> {
 }
 
 /// Destroys a capability space and everything in it.
-pub fn destroy_space(space: radix_cap::SpaceId) -> Result<(), CapError> {
-    with(|store| store.destroy_space(space, &mut release))?
+pub fn destroy_space(space: SpaceId) -> Result<(), CapError> {
+    with(|store| store.destroy_space(space))?
 }

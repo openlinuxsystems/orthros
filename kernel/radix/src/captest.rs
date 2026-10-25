@@ -40,7 +40,7 @@ use radix_hal::{CpuLocal, MAX_CPUS, Smp, Timer};
 use radix_klog::{error, info};
 use radix_mm::{FRAMES, HEAP, Owner};
 
-use crate::caps::{self, Store};
+use crate::caps::{self, Locked};
 use crate::{Arch, work};
 
 /// What went wrong, and the error the store gave if that was the surprise.
@@ -75,7 +75,7 @@ fn ensure(condition: bool, what: &'static str) -> Check {
 }
 
 /// Runs `f` on the store with its lock held.
-fn op<R>(f: impl FnOnce(&mut Store) -> Result<R, CapError>) -> Result<R, CapError> {
+fn op<R>(f: impl FnOnce(&mut Locked) -> Result<R, CapError>) -> Result<R, CapError> {
     caps::with(f).and_then(|result| result)
 }
 
@@ -148,7 +148,7 @@ pub fn run() {
     info!(
         "selftest caps: forging, widening, badges, sealing, ranges, memory, revocation, random and concurrent operations"
     );
-    let census = |store: &mut Store| store.census();
+    let census = |store: &mut Locked| store.census();
     let frames = || FRAMES.owner_pages(Owner::Memory);
     HEAP.drain();
     let before = (caps::with(census).ok(), frames(), HEAP.stats());
@@ -614,7 +614,7 @@ fn revocation(tally: &mut Tally) -> Check {
     // A revoke in steps: in between, nothing below the top can be used to
     // derive, and the top cannot move.
     let top = at(spaces[0], 0);
-    let step = ok(op(|store| store.revoke(top, 20, &mut caps::release)), "a revoke was refused")?;
+    let step = ok(op(|store| store.revoke(top, 20)), "a revoke was refused")?;
     ensure(step == Progress::More, "a revoke of 250 capabilities finished in one step of 20")?;
     let n = &mut tally.widenings;
     for &(space, slot) in &placed[1..] {
