@@ -106,6 +106,12 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("notification_pingpong_same_cpu", 6_200), // 5,566
     ("channel_roundtrip_same_cpu", 5_100),     // 4,587
     ("ring_roundtrip_same_cpu", 9_400),        // 8,489
+    ("posix_fork_wait", 160_000),              // 138,300
+    ("posix_fork_exec_wait", 590_000),         // 531,676
+    ("posix_pipe_mib", 2_500_000),             // 2,188,725
+    ("posix_signal", 6_800),                   // 6,118
+    ("posix_poll", 1_300),                     // 1,092
+    ("posix_futex_same_cpu", 5_300),           // 4,787
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.
