@@ -51,6 +51,7 @@ use radix_vfs::{In, KArc, Kind, Node, NodeRef, Out, Stat, mem, next_id};
 use crate::Arch;
 use crate::sched::{self, wait};
 use crate::user::UserThread;
+use crate::user::posix::poll::Polled;
 use crate::user::posix::signal::{Restart, interrupted};
 use crate::user::posix::{self, poll};
 use crate::user::process::ProcessRef;
@@ -96,6 +97,8 @@ pub struct Tty {
     /// process group.
     session: AtomicU64,
     foreground: AtomicU64,
+    /// Its pollers, on either side.
+    polled: Polled,
 }
 
 /// A terminal's state.
@@ -138,10 +141,10 @@ impl Tty {
         core::ptr::from_ref::<Tty>(self) as usize
     }
 
-    /// Something changed: the waits look again, and so does `poll`.
+    /// Something changed: the waits look again, and so do its pollers.
     fn changed(&self) {
         wait::wake_all(self.key());
-        poll::changed();
+        self.polled.changed();
     }
 
     /// Updates the atomics the waits read, with the state locked.
@@ -723,6 +726,12 @@ impl Handle {
         &self.tty
     }
 
+    /// What its pollers count themselves in: the terminal's, for either
+    /// side.
+    pub fn polled(&self) -> &Polled {
+        &self.tty.polled
+    }
+
     /// Reads, as `user`'s thread.
     pub fn read(
         &self,
@@ -947,6 +956,7 @@ fn make() -> radix_vfs::Result<TtyRef> {
         opened: AtomicBool::new(false),
         session: AtomicU64::new(0),
         foreground: AtomicU64::new(0),
+        polled: Polled::new(),
     })?;
     list[number] = KArc::downgrade(&tty);
     drop(ptys);

@@ -245,14 +245,20 @@ in flight hold no socket, and no cycle of sockets can keep itself alive.
 eight entries), looks at each slot, and returns if one is ready or the
 poll does not wait (a `ppoll` with a signal mask takes the mask first,
 so that a signal the mask lets through interrupts it, as on Linux).
-Otherwise it counts itself as a poller, looks again, and waits for a
-change anywhere: everything a poll looks at (pipes, terminals,
-notifications) calls `changed` after it changes, which moves the global
-`GENERATION` and wakes every poller. A woken poller looks at all its
-entries again. This costs a barrier and a load per change while nobody
-polls, and wakes every poller on every change while some do: fine for a
-shell and its jobs, and the first thing to replace with per-object wait
-lists when a profile shows many pollers (see the limits).
+Otherwise it holds the objects its entries designate, as Linux's poll
+holds its files (a descriptor closed meanwhile does not change what it
+waits for), counts itself among each one's pollers, looks again, and
+waits for a change to any of them. Everything a poll looks at (pipes,
+socket listeners, terminals, the kernel log, the keyboard and
+notifications) keeps a count of its pollers (`Polled`) and calls
+`changed` on it after it changes, which, while the count is not 0, moves
+the global `GENERATION` and wakes every poller. A woken poller looks at
+all its objects again. A change to what nobody polls, such as the pipe
+between two programs that only read and write it, costs a barrier and a
+load; a change to anything polled wakes every poller: fine for a shell,
+its jobs and the system's services, and the next thing to replace with
+per-object wait lists when a profile shows many pollers (see the
+limits).
 
 ## Terminals
 
@@ -542,15 +548,18 @@ after the waiter is queued. Each argument below shows that the change a
 waiter needs either happens before it reads the word, or wakes it after
 it is queued.
 
-**No poll misses a change.** A poller increments `POLLERS`, then reads
-`GENERATION` and looks at its entries; `changed` makes its change, then
-reads `POLLERS`, and moves the generation and wakes if any poller is
-counted. Both sides have a sequentially consistent operation between
-their write and their read (the poller's increment, and `changed`'s
-barrier or the notification's read-modify-write). So either the poller's
-look sees the change, or `changed` sees the poller and moves the
-generation after the poller read it, and the poller's condition
-(generation moved) is true when it is queued or it is woken once queued.
+**No poll misses a change.** A poller increments the pollers count of
+each object it holds, then reads `GENERATION` and looks at them; a
+change is made, then `changed` reads the changed object's count, and
+moves the generation and wakes if any poller is counted. Both sides have
+a sequentially consistent operation between their write and their read
+(the poller's increment, and `changed`'s barrier or the notification's
+read-modify-write). So either the poller's look sees the change, or
+`changed` sees the poller and moves the generation after the poller read
+it, and the poller's condition (generation moved) is true when it is
+queued or it is woken once queued. The poller looks at the objects it
+counted itself in, not at its slots again, so no change it waits for is
+to an object it is not counted in.
 
 **No signal is missed by a thread about to wait.** A sender sets the
 pending bit and the target thread's `signalled` flag with the process's
@@ -642,7 +651,7 @@ above shows the kind of bug one would catch.
   cache maps its own pages.
 - `clock_gettime` is a capability call; there is no read-only clock page
   (vDSO). The instruction budgets will show when it matters.
-- `poll` wakes every poller on every change anywhere.
+- `poll` wakes every poller on a change to anything polled.
 - A directory descriptor's path is the one it was opened by, and one from
   before exec has none (ADR 0089); `getcwd` is the C library's string.
 - No named pipes (`mkfifo` fails with ENOSYS: no filesystem keeps them

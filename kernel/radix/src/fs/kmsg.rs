@@ -28,7 +28,7 @@ use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
 
 use super::FileObject;
 use crate::sched::{self, Options, Policy, wait};
-use crate::user::posix::poll;
+use crate::user::posix::poll::{self, Polled};
 use crate::user::posix::signal::{Restart, interrupted};
 
 /// The first record a new reader reads: none before the last clear.
@@ -38,6 +38,8 @@ static CLEARED: AtomicU64 = AtomicU64::new(0);
 static OPEN: AtomicU32 = AtomicU32::new(0);
 /// The next record's sequence number when the watcher last looked.
 static SEEN: AtomicU64 = AtomicU64::new(0);
+/// The pollers of `/dev/kmsg`.
+pub static POLLED: Polled = Polled::new();
 
 /// How long the watcher waits between looks: the timer's tick.
 const LOOK_NS: u64 = 10_000_000;
@@ -254,7 +256,7 @@ fn watch(_: usize) {
         let next = next_seq();
         if SEEN.swap(next, Ordering::AcqRel) != next {
             wait::wake_all(key());
-            poll::changed();
+            POLLED.changed();
         }
         sched::sleep_ns(LOOK_NS);
     }

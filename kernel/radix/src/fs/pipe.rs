@@ -48,7 +48,7 @@ use radix_vfs::{
 use super::{Description, FileObject, FileRef};
 use crate::sched::{self, wait};
 use crate::user::Fifo;
-use crate::user::posix::poll;
+use crate::user::posix::poll::{self, Polled};
 use crate::user::posix::signal::{Restart, interrupted};
 
 /// How many bytes a pipe holds, as on Linux.
@@ -119,6 +119,8 @@ pub struct Pipe {
     files: AtomicUsize,
     /// Its number, which both ends' nodes show.
     id: u64,
+    /// Its pollers.
+    polled: Polled,
 }
 
 impl Pipe {
@@ -138,6 +140,7 @@ impl Pipe {
             writers: AtomicU32::new(1),
             files: AtomicUsize::new(0),
             id: next_id(),
+            polled: Polled::new(),
         })
         .map_err(|_| Kernel::NoMemory.status(0))
     }
@@ -146,10 +149,15 @@ impl Pipe {
         core::ptr::from_ref::<Pipe>(self) as usize
     }
 
-    /// Something changed: the waits look again, and so does `poll`.
+    /// Something changed: the waits look again, and so do its pollers.
     fn changed(&self) {
         wait::wake_all(self.key());
-        poll::changed();
+        self.polled.changed();
+    }
+
+    /// What its pollers count themselves in.
+    pub fn polled(&self) -> &Polled {
+        &self.polled
     }
 
     /// The events `poll` finds on an end of it, as Linux's: a reading end

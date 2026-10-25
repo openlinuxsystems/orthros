@@ -19,6 +19,7 @@ use radix_abi::errors::Kernel;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
 
+use super::posix::poll::Polled;
 use super::ring::RingRef;
 use super::{Fifo, Result, error};
 use crate::sched::{self, wait};
@@ -32,6 +33,8 @@ pub struct Notification {
     closed: AtomicBool,
     /// Rings waiting for a signal, with the user data of their entries.
     rings: SpinLock<Fifo<(RingRef, u64)>>,
+    /// Its pollers.
+    polled: Polled,
 }
 
 impl Notification {
@@ -41,6 +44,7 @@ impl Notification {
             word: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             rings: SpinLock::new(Fifo::new()),
+            polled: Polled::new(),
         };
         Arc::try_new_in(notification, HEAP.with(Flags::MAY_SLEEP)).ok()
     }
@@ -58,7 +62,8 @@ impl Notification {
             match rings.pop_front() {
                 Some(ring) => Some(ring),
                 None => {
-                    // Sequentially consistent, for `poll` (changed_by_rmw).
+                    // Sequentially consistent, for its pollers
+                    // (changed_by_rmw).
                     self.word.fetch_or(bits, Ordering::SeqCst);
                     None
                 }
@@ -68,9 +73,14 @@ impl Notification {
             Some((ring, user_data)) => ring.finish(user_data, Ok([bits, 0])),
             None => {
                 wait::wake_all(self.key());
-                super::posix::poll::changed_by_rmw();
+                self.polled.changed_by_rmw();
             }
         }
+    }
+
+    /// What its pollers count themselves in.
+    pub fn polled(&self) -> &Polled {
+        &self.polled
     }
 
     /// Whether bits are set, and whether its last capability has gone,
@@ -146,6 +156,6 @@ impl Notification {
             ring.finish(user_data, Err(error(Kernel::Gone)));
         }
         wait::wake_all(self.key());
-        super::posix::poll::changed();
+        self.polled.changed();
     }
 }

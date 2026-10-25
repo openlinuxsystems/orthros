@@ -10,21 +10,25 @@
 //! ([`crate::fs::pipe::Pipe::events`], [`crate::fs::tty::Handle::events`]),
 //! a notification is readable while bits are set, other files and
 //! directories are always ready, and an empty slot is invalid. If none is
-//! ready, and the poll may wait, the thread waits for a change anywhere,
-//! looking again once it counts as a poller: whatever a poll looks at
-//! calls [`changed`] after it changes, which moves [`GENERATION`] and
-//! wakes the pollers. A waiting poller does not know which of its
-//! entries changed, so it looks at them all again; many pollers on a busy
-//! system wake for one another's changes (docs/design/posix.md lists that
-//! limit).
+//! ready, and the poll may wait, the thread holds the objects its entries
+//! designate, as Linux's `poll` holds its files (a slot closed meanwhile
+//! does not change what it waits for), counts itself among the pollers of
+//! each ([`Polled`]), and waits for a change to any of them: whatever a
+//! poll looks at calls [`Polled::changed`] after it changes, which, while
+//! anyone polls it, moves [`GENERATION`] and wakes the pollers. A woken
+//! poller does not know which of its objects changed, so it looks at them
+//! all again, and every poller wakes for a change to anything polled
+//! (docs/design/posix.md lists that limit); a change to what nobody polls,
+//! such as a pipe that is only read and written, wakes nobody.
 //!
 //! No wake-up is lost between a poller's look and its wait: a poller
-//! counts itself in [`POLLERS`] before it reads the generation and looks,
-//! and [`changed`] reads the count after the change, each with a full
-//! barrier between, so either the poller sees the change or [`changed`]
-//! sees the poller (and moves the generation it waits on). A notification,
-//! whose word changes by a read-modify-write that is already such a
-//! barrier, skips the extra one ([`changed_by_rmw`]).
+//! counts itself in each object's [`Polled`] before it reads the
+//! generation and looks, and [`Polled::changed`] reads the count after the
+//! change, each with a full barrier between, so either the poller sees the
+//! change or the change sees the poller (and moves the generation it waits
+//! on). A notification, whose word changes by a read-modify-write that is
+//! already such a barrier, skips the extra one
+//! ([`Polled::changed_by_rmw`]).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
@@ -39,7 +43,7 @@ use super::kmalloc;
 use super::signal::{self, Restart, interrupted};
 use crate::Arch;
 use crate::sched::{self, wait};
-use crate::user::objects::{self, Object};
+use crate::user::objects::{self, Found, Object};
 use crate::user::{Result, UserRef, error};
 
 /// There is data to read, or the end of a stream.
@@ -60,57 +64,127 @@ const ALWAYS: u16 = ERROR | HANG_UP | INVALID;
 /// open files allows.
 pub const ENTRIES_MAX: u32 = 4096;
 
-/// Moves whenever something a poll looks at changes, while anyone polls.
+/// Moves whenever something polled changes.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-/// How many threads are polling.
-static POLLERS: AtomicUsize = AtomicUsize::new(0);
 
 fn key() -> usize {
     &raw const GENERATION as usize
 }
 
-/// Something a poll may look at has changed: waiting pollers look again.
-/// Costs a barrier and a load while nobody polls.
-pub fn changed() {
-    fence(Ordering::SeqCst);
-    changed_by_rmw();
+/// What a poll may look at keeps one of these: how many threads poll it,
+/// which its changes wake.
+#[derive(Default)]
+pub struct Polled {
+    pollers: AtomicUsize,
 }
 
-/// As [`changed`], for a change made by a sequentially consistent
-/// read-modify-write that pollers read with sequentially consistent
-/// loads (a notification's word), which orders as the barrier would: only
-/// a load while nobody polls.
-pub fn changed_by_rmw() {
-    if POLLERS.load(Ordering::SeqCst) > 0 {
-        GENERATION.fetch_add(1, Ordering::SeqCst);
-        wait::wake_all(key());
+impl Polled {
+    /// Nobody polls it yet.
+    pub const fn new() -> Polled {
+        Polled { pollers: AtomicUsize::new(0) }
+    }
+
+    /// It has changed: the threads polling it look again. Costs a barrier
+    /// and a load while nobody polls it.
+    pub fn changed(&self) {
+        fence(Ordering::SeqCst);
+        self.changed_by_rmw();
+    }
+
+    /// As [`Polled::changed`], for a change made by a sequentially
+    /// consistent read-modify-write that pollers read with sequentially
+    /// consistent loads (a notification's word), which orders as the
+    /// barrier would: only a load while nobody polls it.
+    pub fn changed_by_rmw(&self) {
+        if self.pollers.load(Ordering::SeqCst) > 0 {
+            GENERATION.fetch_add(1, Ordering::SeqCst);
+            wait::wake_all(key());
+        }
     }
 }
 
-/// Counts the running thread among the pollers while it lives.
-struct Polling;
-
-impl Polling {
-    fn new() -> Polling {
-        POLLERS.fetch_add(1, Ordering::SeqCst);
-        Polling
+/// Calls `each` with what `object` keeps for its pollers: a pipe end's
+/// pipe, both pipes of a connected socket or a listening one's listener,
+/// a terminal, the kernel log or the keyboard, or a notification.
+fn polled_by(object: &Object, each: &mut dyn FnMut(&Polled)) {
+    match object {
+        Object::File(file) => {
+            if let Some(end) = file.pipe_end() {
+                each(end.pipe().polled());
+            } else if let Some(socket) = file.socket() {
+                socket.polled(each);
+            } else if let Some(handle) = file.tty_handle() {
+                each(handle.polled());
+            } else if file.is_kmsg() {
+                each(&crate::fs::kmsg::POLLED);
+            } else if file.is_keyboard() {
+                each(&crate::fs::keyboard::POLLED);
+            }
+        }
+        Object::Notification(notification) => each(notification.polled()),
+        // Always ready, or never.
+        _ => {}
     }
 }
 
-impl Drop for Polling {
+/// Counts the running thread among the pollers of `objects` while it
+/// lives.
+struct Polling<'a> {
+    objects: &'a [Option<Object>],
+}
+
+impl<'a> Polling<'a> {
+    fn new(objects: &'a [Option<Object>]) -> Polling<'a> {
+        for object in objects.iter().flatten() {
+            polled_by(object, &mut |polled| {
+                polled.pollers.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        Polling { objects }
+    }
+}
+
+impl Drop for Polling<'_> {
     fn drop(&mut self) {
-        POLLERS.fetch_sub(1, Ordering::SeqCst);
+        // The poll has looked for the last time, so no change needs to
+        // reach it: a count left high a while longer costs a wake-up.
+        for object in self.objects.iter().flatten() {
+            polled_by(object, &mut |polled| {
+                polled.pollers.fetch_sub(1, Ordering::Relaxed);
+            });
+        }
     }
+}
+
+/// An entry's descriptor, and the events it asks for.
+fn entry_of(entry: [u8; PollEntry::SIZE]) -> (i32, u16) {
+    let fd = i32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+    let events =
+        u16::from_le_bytes([entry[PollEntry::OFFSET_EVENTS], entry[PollEntry::OFFSET_EVENTS + 1]]);
+    (fd, events)
+}
+
+fn entries_of(entries: &[u8]) -> core::slice::Iter<'_, [u8; PollEntry::SIZE]> {
+    entries.as_chunks::<{ PollEntry::SIZE }>().0.iter()
 }
 
 /// What slot `slot` of `cspace` is ready for, among `events` and those
 /// always reported.
-fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
+fn slot_events(cspace: SpaceId, slot: u32, events: u16) -> u16 {
     let mut place = None;
-    let Ok(found) = objects::find(cspace, slot, |_| true, &mut place) else { return INVALID };
-    let found = match &found.object {
-        Some(Object::File(file)) => {
+    let found = match objects::find(cspace, slot, |_| true, &mut place) {
+        Ok(Found { object: Some(object), .. }) => events_of(object),
+        // An empty slot, nothing in the registry (a memory capability),
+        // or released since the capability was found.
+        _ => INVALID,
+    };
+    found & (events | ALWAYS)
+}
+
+/// What `object` is ready for.
+fn events_of(object: &Object) -> u16 {
+    match object {
+        Object::File(file) => {
             if let Some(end) = file.pipe_end() {
                 end.pipe().events(end.write)
             } else if let Some(socket) = file.socket() {
@@ -125,38 +199,41 @@ fn events_of(cspace: SpaceId, slot: u32, events: u16) -> u16 {
                 READABLE | WRITABLE
             }
         }
-        Some(Object::Directory(_)) => READABLE | WRITABLE,
-        Some(Object::Notification(notification)) => {
+        Object::Directory(_) => READABLE | WRITABLE,
+        Object::Notification(notification) => {
             let (set, closed) = notification.peek();
             (if set { READABLE } else { 0 }) | (if closed { HANG_UP } else { 0 })
         }
-        Some(_) => 0,
-        // Nothing in the registry (a memory capability), or released
-        // since the capability was found.
-        None => INVALID,
-    };
-    found & (events | ALWAYS)
+        _ => 0,
+    }
 }
 
-/// Looks at every entry, writing the events found in `found`; returns how
-/// many found any.
+/// Looks at every entry's slot, writing the events found in `found`;
+/// returns how many found any.
 fn look(cspace: SpaceId, base: u32, entries: &[u8], found: &mut [u16]) -> u32 {
     let mut ready = 0;
-    for (entry, found) in entries.as_chunks::<{ PollEntry::SIZE }>().0.iter().zip(found.iter_mut())
-    {
-        let fd = i32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
-        let events = u16::from_le_bytes([
-            entry[PollEntry::OFFSET_EVENTS],
-            entry[PollEntry::OFFSET_EVENTS + 1],
-        ]);
+    for (entry, found) in entries_of(entries).zip(found.iter_mut()) {
+        let (fd, events) = entry_of(*entry);
         *found = if fd < 0 {
             0
         } else {
             match base.checked_add(fd as u32) {
-                Some(slot) => events_of(cspace, slot, events),
+                Some(slot) => slot_events(cspace, slot, events),
                 None => INVALID,
             }
         };
+        ready += u32::from(*found != 0);
+    }
+    ready
+}
+
+/// As [`look`], at the objects `held` for the entries (none for one left
+/// out).
+fn look_held(held: &[Option<Object>], entries: &[u8], found: &mut [u16]) -> u32 {
+    let mut ready = 0;
+    for ((entry, object), found) in entries_of(entries).zip(held).zip(found.iter_mut()) {
+        let (_, events) = entry_of(*entry);
+        *found = object.as_ref().map_or(0, |object| events_of(object) & (events | ALWAYS));
         ready += u32::from(*found != 0);
     }
     ready
@@ -216,8 +293,8 @@ pub fn poll(user: &UserRef, a: PollArgs) -> Result<u32> {
 }
 
 /// Waits, as `a` says, until one of `entries` is ready, writing what
-/// each one is ready for in `found`; returns how many are, 0 if the time
-/// ran out.
+/// each one is ready for in `found` (all 0, from a first look); returns
+/// how many are, 0 if the time ran out.
 fn wait_ready(
     user: &UserRef,
     a: &PollArgs,
@@ -225,16 +302,49 @@ fn wait_ready(
     entries: &[u8],
     found: &mut [u16],
 ) -> Result<u32> {
+    let mut held_here: [Option<Object>; ON_STACK] = [const { None }; ON_STACK];
+    let mut held_heap: Vec<Option<Object>, Kmalloc> = Vec::new_in(kmalloc());
+    let held: &mut [Option<Object>] = if found.len() <= ON_STACK {
+        &mut held_here[..found.len()]
+    } else {
+        held_heap.try_reserve_exact(found.len()).map_err(|_| error(Kernel::NoMemory))?;
+        while held_heap.len() < found.len() {
+            // Room was reserved above.
+            let _ = held_heap.push_within_capacity(None);
+        }
+        &mut held_heap
+    };
+    let mut ready = 0;
+    for ((entry, held), found) in entries_of(entries).zip(held.iter_mut()).zip(found.iter_mut()) {
+        let (fd, _) = entry_of(*entry);
+        if fd < 0 {
+            continue;
+        }
+        let mut place = None;
+        let object = a
+            .base
+            .checked_add(fd as u32)
+            .and_then(|slot| objects::find(cspace, slot, |_| true, &mut place).ok()?.object.take());
+        if object.is_none() {
+            // Emptied since the first look.
+            *found = INVALID;
+            ready += 1;
+        }
+        *held = object;
+    }
+    if ready > 0 {
+        return Ok(ready);
+    }
     let masked = a.flags.contains(PollFlags::MASK);
     if masked {
         signal::begin_masked_wait(user, a.mask);
     }
     let deadline = (!a.flags.contains(PollFlags::FOREVER))
         .then(|| sched::now_ns().saturating_add(a.timeout_ns));
-    let polling = Polling::new();
+    let polling = Polling::new(held);
     let ready = loop {
         let seen = GENERATION.load(Ordering::SeqCst);
-        let ready = look(cspace, a.base, entries, found);
+        let ready = look_held(held, entries, found);
         if ready > 0 {
             break ready;
         }
@@ -247,7 +357,7 @@ fn wait_ready(
             None => wait::wait_until(key(), "poll", changed),
             Some(deadline) => {
                 if !wait::wait_until_or_timeout(key(), "poll", deadline, changed) {
-                    break look(cspace, a.base, entries, found);
+                    break look_held(held, entries, found);
                 }
             }
         }
