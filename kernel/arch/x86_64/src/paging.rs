@@ -30,8 +30,11 @@
 //! write-combining.
 //!
 //! Removing a mapping that other CPUs may have cached is a *TLB
-//! shootdown*: [`shootdown`] flushes the range locally, sends the others
-//! the TLB IPI and waits until each has flushed it too.
+//! shootdown*: [`shootdown`] sends the others the TLB IPI, flushes the
+//! range locally while the IPIs travel, and waits until each has flushed
+//! it too. Under KVM, a virtual CPU the host has stopped gets no IPI: the
+//! hypervisor flushes its TLB before it runs it again
+//! ([`kvm::flush_when_resumed`]).
 
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,7 +46,7 @@ use radix_sync::SpinLock;
 use crate::cpu::{self, msr};
 use crate::memory::{self, HUGE_PAGE, LARGE_PAGE, PAGE};
 use crate::percpu::{self, PerCpu};
-use crate::{apic, interrupts, smp, time};
+use crate::{apic, interrupts, kvm, smp, time};
 
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
@@ -694,7 +697,6 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     // way would wait for itself, and one moved off would leave its new
     // CPU's TLB unflushed.
     let _pinned = NoPreemption::new();
-    flush_local(range.clone());
     let me = percpu::current_index();
     // Two CPUs may shoot down at once: the one waiting for the lock keeps
     // answering the other's request.
@@ -714,11 +716,13 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
             && cpu.online.load(Ordering::Acquire)
             && !cpu.stopped.load(Ordering::Relaxed)
             && wanted(cpu)
+            && !kvm::flush_when_resumed(cpu)
         {
             targets[index / 64] |= 1 << (index % 64);
         }
     }
     if targets.iter().all(|&word| word == 0) {
+        flush_local(range);
         return;
     }
     // Only a request that is sent takes a number: a CPU that marked a
@@ -738,16 +742,40 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
             apic::send_fixed(cpu.apic_id.load(Ordering::Relaxed), interrupts::VECTOR_TLB);
         }
     }
+    // This CPU's own flush overlaps the IPIs' way to the others.
+    flush_local(range.clone());
     let started = time::now_ns();
-    while let Some(word) = SHOOTDOWN.pending.iter().position(|w| w.load(Ordering::Acquire) != 0) {
-        if time::now_ns().saturating_sub(started) > 2_000_000_000 {
-            let bits = SHOOTDOWN.pending[word].load(Ordering::Relaxed);
-            panic!(
-                "TLB shootdown: CPU {} did not flush {:#x}-{:#x} within 2 s",
-                word * 64 + bits.trailing_zeros() as usize,
-                range.start,
-                range.end
-            );
+    let words = cpus.div_ceil(64);
+    loop {
+        let mut waiting = false;
+        for (word, slot) in SHOOTDOWN.pending[..words].iter().enumerate() {
+            let mut bits = slot.load(Ordering::Acquire);
+            // A target the host stopped after the IPI was sent needs it no
+            // longer: the hypervisor flushes it before it runs again.
+            let mut left = bits;
+            while left != 0 {
+                let bit = left.isolate_lowest_one();
+                left &= !bit;
+                let index = word * 64 + bit.trailing_zeros() as usize;
+                if percpu::get(index).is_some_and(kvm::flush_when_resumed) {
+                    slot.fetch_and(!bit, Ordering::Relaxed);
+                    bits &= !bit;
+                }
+            }
+            if bits != 0 {
+                waiting = true;
+                if time::now_ns().saturating_sub(started) > 2_000_000_000 {
+                    panic!(
+                        "TLB shootdown: CPU {} did not flush {:#x}-{:#x} within 2 s",
+                        word * 64 + bits.trailing_zeros() as usize,
+                        range.start,
+                        range.end
+                    );
+                }
+            }
+        }
+        if !waiting {
+            break;
         }
         cpu::pause();
     }

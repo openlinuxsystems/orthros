@@ -39,6 +39,7 @@ mod i8042;
 mod interrupts;
 mod io;
 mod kaslr;
+mod kvm;
 mod memory;
 mod microcode;
 mod paging;
@@ -769,6 +770,7 @@ impl Platform for Arch {
             }
         }
         apic::init_cpu(madt, smp::acpi_uid(0));
+        kvm::init_cpu();
         if let Some(madt) = madt {
             apic::init_ioapics(madt);
         }
@@ -782,6 +784,12 @@ impl Platform for Arch {
             apic::id(),
             if apic::pv_eoi() { ", paravirtual EOI" } else { "" }
         );
+        if kvm::pv_tlb_flush() {
+            radix_klog::info!(
+                "KVM: steal time and paravirtual TLB flush (shootdowns send no IPI to a virtual \
+                 CPU the host has stopped)"
+            );
+        }
         apic::ioapics(|io| {
             radix_klog::info!(
                 "APIC: I/O APIC {} at {:#x}, version {:#x}, {} inputs from GSI {} (all masked)",

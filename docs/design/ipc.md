@@ -454,6 +454,9 @@ from every slot of the per-CPU table: until Phase 8 it looked at all
 A TLB shootdown is the same system calls as `tlb_local` plus an
 interrupt to the other CPU and its answer; under KVM most of that time
 is the host sending and delivering the interrupt, which Linux pays too.
+On a busy host the other virtual CPU may be stopped; both kernels then
+skip the interrupt and have the hypervisor flush it before it runs
+again (paravirtual TLB flush, ADR 0105).
 The receiving CPU ends the interrupt before it flushes, so the
 initiator's next request is not yet pending when the hypervisor decides
 whether to offer paravirtual EOI (ADR 0041).

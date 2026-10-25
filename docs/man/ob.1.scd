@@ -648,7 +648,10 @@ Sources are fetched once into _target/ports/_: with git by commit, and
 checked to be that commit; release archives from their *url* or, when
 that cannot be reached, from each of their *mirrors* in turn, the first
 copy whose SHA-256 is the one pinned; and crates from crates.io, checked
-against their SHA-256. A build uses nothing the recipe does not name. A
+against their SHA-256. An unpacked archive or crate is used again only
+while it holds the files, of the same sizes, that *ob* noted when it
+unpacked it, and a clone only while it has its commit; else the source
+is fetched again. A build uses nothing the recipe does not name. A
 source is copied into the build with its files' times, so make never
 remakes a release's generated files. Every port's license and notices go into the image's license
 manifest.

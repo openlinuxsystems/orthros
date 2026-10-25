@@ -1026,8 +1026,12 @@ fn rust_src(ctx: &Ctx) -> Result<(PathBuf, String)> {
 /// those directories. Returns where it is.
 pub fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -> Result<PathBuf> {
     let dir = ctx.target.join("ports/sources").join(format!("{name}-{}", &commit[..12]));
+    // The commit object too, which a plain `rev-parse HEAD` does not
+    // read: a clone that has lost its objects is fetched again.
     let head = |dir: &Path| -> Option<String> {
-        let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output();
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+        let out = cmd.output();
         out.ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -1083,11 +1087,17 @@ pub fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -
 fn fetch_archive(ctx: &Ctx, name: &str, source: &Source) -> Result<PathBuf> {
     let sources = ctx.target.join("ports/sources");
     let base = format!("{name}-{}", &source.sha256[..12]);
-    // Unpacked beside its final place, then moved there: a directory
-    // there is a whole archive.
+    // Unpacked beside its final place, then moved there, and the files
+    // it holds noted beside it: a tree that has lost some since, as a
+    // cache's cleanup cut short leaves one, is fetched again.
     let dir = sources.join(&base);
+    let files = sources.join(format!("{base}.files"));
     if dir.is_dir() {
-        return Ok(dir);
+        if std::fs::read_to_string(&files).ok() == Some(listing(&dir)?) {
+            return Ok(dir);
+        }
+        step(&format!("{} is not the tree ob unpacked; fetching it again", dir.display()));
+        std::fs::remove_dir_all(&dir).context(|| format!("removing {}", dir.display()))?;
     }
     process::create_dir(&sources)?;
     let file = sources.join(format!("{base}.download"));
@@ -1139,7 +1149,25 @@ fn fetch_archive(ctx: &Ctx, name: &str, source: &Source) -> Result<PathBuf> {
         std::fs::remove_dir_all(&partial).context(|| format!("removing {}", partial.display()))?;
     }
     let _ = std::fs::remove_file(&file);
+    write_file(&files, &listing(&dir)?)?;
     Ok(dir)
+}
+
+/// The files under `dir`, one line each with its size, in order: what
+/// ob notes beside a source tree it unpacks, to know the tree whole
+/// again before it builds from it.
+fn listing(dir: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    list_files(dir, &mut files)?;
+    files.sort();
+    let mut text = String::new();
+    for file in &files {
+        let size = std::fs::symlink_metadata(file)
+            .context(|| format!("reading {}", file.display()))?
+            .len();
+        let _ = writeln!(text, "{size} {}", file.strip_prefix(dir).unwrap_or(file).display());
+    }
+    Ok(text)
 }
 
 /// Fetches a crate from crates.io into `target/ports/sources/crates`,
@@ -1152,7 +1180,11 @@ fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
     let dir = crates.join(&name);
     let checksum = format!("{{\"files\":{{}},\"package\":\"{}\"}}", krate.sha256);
     let marker = dir.join(".cargo-checksum.json");
-    if std::fs::read_to_string(&marker).ok().as_deref() == Some(checksum.as_str()) {
+    // As with a release archive, the files unpacked are noted beside it.
+    let files = crates.join(format!("{name}.files"));
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(checksum.as_str())
+        && std::fs::read_to_string(&files).ok() == Some(listing(&dir)?)
+    {
         return Ok(dir);
     }
     let url = format!("https://static.crates.io/crates/{}/{name}.crate", krate.name);
@@ -1192,6 +1224,7 @@ fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
     std::fs::rename(&unpacked, &dir).context(|| format!("moving it to {}", dir.display()))?;
     std::fs::remove_dir_all(&partial).context(|| format!("removing {}", partial.display()))?;
     let _ = std::fs::remove_file(&file);
+    write_file(&files, &listing(&dir)?)?;
     Ok(dir)
 }
 
@@ -1481,5 +1514,24 @@ mod tests {
             Source { git: "https://x/y.git".into(), commit: "ab".into(), ..Source::default() };
         assert_eq!(git.download(), "git+https://x/y.git@ab");
         assert_eq!(git.release(), "ab");
+    }
+
+    #[test]
+    fn a_tree_that_lost_files_is_not_listed_as_whole() {
+        let dir = std::env::temp_dir().join(format!("ob-listing-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("CPP/Windows")).unwrap();
+        std::fs::write(dir.join("CPP/Windows/System.cpp"), "int x;\n").unwrap();
+        std::fs::write(dir.join("README"), "").unwrap();
+        std::os::unix::fs::symlink("README", dir.join("readme")).unwrap();
+        let whole = listing(&dir).unwrap();
+        assert_eq!(whole, "7 CPP/Windows/System.cpp\n0 README\n6 readme\n");
+        std::fs::write(dir.join("CPP/Windows/System.cpp"), "int\n").unwrap();
+        assert_ne!(listing(&dir).unwrap(), whole);
+        std::fs::write(dir.join("CPP/Windows/System.cpp"), "int y;\n").unwrap();
+        assert_eq!(listing(&dir).unwrap(), whole);
+        std::fs::remove_dir_all(dir.join("CPP")).unwrap();
+        let cut = listing(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(cut.unwrap(), "0 README\n6 readme\n");
     }
 }
