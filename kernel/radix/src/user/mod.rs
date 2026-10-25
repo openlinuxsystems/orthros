@@ -176,7 +176,6 @@ pub fn init() {
     Arch::set_user_page_handler(on_user_page);
     Arch::set_user_return_handler(on_return);
     Arch::describe_user_mode(&mut |args| info!("{args}"));
-    objects::init();
     // The ABI numbers object kinds as the store does.
     for kind in radix_cap::ObjectKind::ALL {
         let abi = radix_abi::capability::ObjectKind::from_raw(kind as u8);

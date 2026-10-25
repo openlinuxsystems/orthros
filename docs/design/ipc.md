@@ -148,11 +148,11 @@ is no method of the object's interface fails with `no_such_method`.
 
 Every capability lookup goes through the capability store of Phase 3 and
 the object registry (`user/objects.rs`), which maps the store's object
-names to the kernel objects behind them and is told when the store
-releases a name, so the object closes when its last capability goes: an
-endpoint fails its waiters with `gone`, a frame is unmapped from every
-address space. Phase 5 adds three object kinds to the store's twelve:
-`random`, `ring` and `kernel_log`.
+names to the kernel objects behind them, under the store's own lock
+(ADR 0108), and is told when the store releases a name, so the object
+closes when its last capability goes: an endpoint fails its waiters with
+`gone`, a frame is unmapped from every address space. Phase 5 adds three
+object kinds to the store's twelve: `random`, `ring` and `kernel_log`.
 
 ## Interface definitions: ridl and ridlc
 

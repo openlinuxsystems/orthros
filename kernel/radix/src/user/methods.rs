@@ -324,8 +324,7 @@ pub fn retype(
                 Err(err) => {
                     // All or nothing: the frames made so far go again.
                     for j in 0..count {
-                        let _ =
-                            store.delete(SlotRef::new(to.space, to.slot + j), &mut caps::release);
+                        let _ = store.delete(SlotRef::new(to.space, to.slot + j));
                     }
                     return Err(err);
                 }

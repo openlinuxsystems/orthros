@@ -50,7 +50,7 @@ pub use anon::{Anon, Fault, FileSource, Placement};
 use super::ring::RingRef;
 use super::{Result, error};
 use crate::Arch;
-use crate::caps::Store;
+use crate::caps::Locked;
 use crate::domains::DomainRef;
 
 /// An address space, shared.
@@ -534,7 +534,7 @@ pub fn cap_rights(rights: AbiRights) -> radix_cap::Rights {
 /// its extent's first page frame and pages. Called with the store locked,
 /// so the object is recorded before any capability to it can be used; it
 /// is zeroed later ([`FrameObject::zero`]), and returned for that.
-pub fn frame_made(store: &Store, id: ObjectId, base: u64, pages: u64) -> Result<FrameRef> {
+pub fn frame_made(store: &mut Locked, id: ObjectId, base: u64, pages: u64) -> Result<FrameRef> {
     let frame = FrameObject::new(base * PAGE_SIZE, pages).ok_or(error(Kernel::NoMemory))?;
     super::objects::insert(store, id, super::objects::Object::Frame(frame.clone()))
         .map_err(|_| error(Kernel::NoMemory))?;

@@ -547,21 +547,21 @@ fn install_space(process: &ProcessRef, space: &SpaceRef, empty_thread: bool) -> 
     }
     caps::with(|store| -> Result<()> {
         objects::reserve(store, 1).map_err(|_| error(Kernel::NoMemory))?;
-        store.delete(kept, &mut caps::release).map_err(cap_error)?;
+        store.delete(kept).map_err(cap_error)?;
         let id = store.create(kept, ObjectKind::AddressSpace).map_err(cap_error)?;
         objects::insert(store, id, Object::Space(space.clone()))
             .map_err(|_| error(Kernel::NoMemory))?;
         let at = SlotRef::new(cspace, startup::SLOT_SPACE);
-        let _ = store.delete(at, &mut caps::release);
+        let _ = store.delete(at);
         let how = Derivation { rights: ObjectKind::AddressSpace.rights(), ..Derivation::COPY };
         store.derive(kept, at, how).map_err(cap_error)?;
         let mut from = 0;
         while let Some(slot) = store.find_flagged(cspace, mask, from).map_err(cap_error)? {
-            let _ = store.delete(SlotRef::new(cspace, slot), &mut caps::release);
+            let _ = store.delete(SlotRef::new(cspace, slot));
             from = slot + 1;
         }
         if empty_thread {
-            let _ = store.delete(SlotRef::new(cspace, startup::SLOT_THREAD), &mut caps::release);
+            let _ = store.delete(SlotRef::new(cspace, startup::SLOT_THREAD));
         }
         Ok(())
     })

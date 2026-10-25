@@ -119,3 +119,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0105](0105-shootdowns-skip-stopped-virtual-cpus.md) | Under KVM, a TLB shootdown sends no interrupt to a virtual CPU the host has stopped | Accepted |
 | [0106](0106-posix-benchmarks-one-c-program.md) | The POSIX rows of `ob bench` are one C program, run on Radix and on Linux | Accepted |
 | [0107](0107-the-gate-is-parity-and-measures-again.md) | The performance gate is parity with Linux, and an operation over it is measured again on both systems | Accepted |
+| [0108](0108-the-registry-under-the-store-lock.md) | The object registry is guarded by the capability store's lock | Accepted |

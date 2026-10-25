@@ -78,7 +78,7 @@ use super::{
     Result, UserRef, UserThread, cap_error, default_window, error, set_ready, thread_main,
 };
 use crate::Arch;
-use crate::caps::{self, Store};
+use crate::caps::{self, Locked};
 use crate::domains::DomainRef;
 use crate::fs::trace::TraceRef;
 use crate::sched::{self, Name, Options, SpawnError, ThreadRef, wait};
@@ -256,13 +256,13 @@ pub fn create(
         let keep = match store.create_space(KEEP_SLOTS + 1) {
             Ok(keep) => keep,
             Err(err) => {
-                let _ = store.destroy_space(cspace, &mut caps::release);
+                let _ = store.destroy_space(cspace);
                 return Err(cap_error(err));
             }
         };
-        let undo = |store: &mut Store| {
-            let _ = store.destroy_space(cspace, &mut caps::release);
-            let _ = store.destroy_space(keep, &mut caps::release);
+        let undo = |store: &mut Locked| {
+            let _ = store.destroy_space(cspace);
+            let _ = store.destroy_space(keep);
         };
         let made = (|| {
             let id =
@@ -280,7 +280,7 @@ pub fn create(
             // Room was reserved above, so this cannot fail.
             if objects::insert_charged(store, id, Object::Process(process.clone()), charge).is_err()
             {
-                let _ = store.delete(at, &mut caps::release);
+                let _ = store.delete(at);
                 return Err(error(Kernel::NoMemory));
             }
             Ok(process)
@@ -843,7 +843,7 @@ impl ProcessObject {
     /// whoever asked. With `store`, the caller holds the store's lock
     /// (`finish_pending`). `last` is its last thread, ending, if that is
     /// the caller.
-    fn finish(&self, store: Option<&mut Store>, last: Option<&ThreadRef>) {
+    fn finish(&self, store: Option<&mut Locked>, last: Option<&ThreadRef>) {
         let locked = store.is_some();
         if self.has_record_locks() {
             crate::fs::locks::process_gone(self.number, None);
@@ -865,8 +865,8 @@ impl ProcessObject {
         drop(made);
         match store {
             Some(store) => {
-                let _ = store.destroy_space(self.cspace, &mut caps::release);
-                let _ = store.destroy_space(self.keep, &mut caps::release);
+                let _ = store.destroy_space(self.cspace);
+                let _ = store.destroy_space(self.keep);
             }
             None => {
                 let _ = caps::destroy_space(self.cspace);
@@ -934,7 +934,7 @@ fn push_pending(process: ProcessRef) {
 /// Finishes the processes the store released, with the store locked:
 /// `caps::with` calls it after every change. Finishing one may release
 /// more, which are finished too.
-pub fn finish_pending(store: &mut Store) {
+pub fn finish_pending(store: &mut Locked) {
     if !ANY_PENDING.load(Ordering::Acquire) {
         return;
     }
