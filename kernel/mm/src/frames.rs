@@ -28,20 +28,39 @@
 //! 4; `docs/design/scheduler.md`). Larger
 //! blocks fail instead: running out of contiguous memory is not running out
 //! of memory.
+//!
+//! Each CPU keeps a cache of free single frames from its node's first zone
+//! with memory, as Linux keeps per-CPU page lists. An order-0 allocation
+//! that may come from that zone takes the frame the CPU freed last, and
+//! freeing such a frame puts it back, without the zone's lock and without
+//! the buddy splits and merges, which cost some thousand instructions a
+//! frame. An empty cache takes [`CACHE_BATCH`] frames from above the zone's
+//! floors; one holding more than its limit (1/512 of the zone, between 64
+//! frames and 2 MiB) gives its oldest batch back. Cached frames count as
+//! free, and an allocation that finds nothing empties every CPU's cache
+//! into the zones before it tries again.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use radix_sync::{Once, SpinLock};
+use radix_sync::{Once, RawSpinLock, SpinLock};
 
 use crate::buddy::{Buddy, FreeError, MAX_ORDER, ORDERS, RegionError};
 use crate::context::{AllocError, Context, Flags, NodePolicy, ZoneLimit};
-use crate::page::{Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region};
-use crate::platform::{NoInterrupts, Platform};
+use crate::page::{NIL, Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region, State};
+use crate::platform::{MAX_CPUS, NoInterrupts, Platform};
 
 /// Most NUMA nodes.
 pub const MAX_NODES: usize = 8;
 /// Most regions of RAM across all zones.
 pub const MAX_REGIONS: usize = 64;
+/// Frames per section of physical memory, 2^15 (128 MiB, Linux's section
+/// size on x86_64): `Frames::entry` finds a frame's region through the
+/// section it is in.
+const SECTION_SHIFT: u32 = 15;
+/// Sections the map covers: the first 1 TiB of physical addresses. A
+/// frame above is found by a binary search.
+const SECTIONS: usize = 8192;
+const _: () = assert!(MAX_REGIONS < u8::MAX as usize, "a section names its region in a byte");
 /// First frame of the `Normal` zone: 4 GiB.
 const DMA32_END_PFN: u64 = 1 << (32 - PAGE_SHIFT);
 /// Zones per node.
@@ -52,6 +71,10 @@ pub const OOM_MAX_ORDER: u32 = 3;
 /// How many times one allocation asks the out-of-memory hook for memory
 /// before it fails.
 const OOM_ATTEMPTS: u32 = 4;
+/// Frames a CPU's cache takes from its zone, or gives back, at a time.
+pub const CACHE_BATCH: u32 = 32;
+/// Most frames a CPU's cache holds: 2 MiB.
+const CACHE_MOST: u32 = 512;
 
 /// What memory a zone holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +137,7 @@ pub struct ZoneStats {
     pub kind: ZoneKind,
     /// Frames it manages.
     pub managed: u64,
-    /// Frames free.
+    /// Frames free, those CPUs' caches hold included.
     pub free: u64,
     /// Frames kept for atomic allocations.
     pub reserve: u64,
@@ -130,6 +153,8 @@ struct Zone {
     reserve: AtomicU64,
     /// Frames kept for `Dma32` allocations (in `Dma32` zones only).
     protect: AtomicU64,
+    /// Free frames of the zone that CPUs' caches hold.
+    cached: AtomicU64,
 }
 
 impl Zone {
@@ -138,7 +163,44 @@ impl Zone {
             buddy: SpinLock::new(Buddy::new()),
             reserve: AtomicU64::new(0),
             protect: AtomicU64::new(0),
+            cached: AtomicU64::new(0),
         }
+    }
+}
+
+/// One CPU's cache of free frames, on a cache line of its own. Its lock is
+/// taken with interrupts masked, by its CPU but for the rare emptying of
+/// every cache, and only the zone's lock is taken inside it: a raw lock
+/// needs neither the preemption hooks nor a lock site, whose pointer would
+/// cost the KASLR table an entry per CPU.
+#[repr(align(64))]
+struct CpuFrames {
+    cache: RawSpinLock<Cached>,
+}
+
+impl CpuFrames {
+    const fn new() -> CpuFrames {
+        CpuFrames { cache: RawSpinLock::new(Cached::new()) }
+    }
+}
+
+/// Free frames of one zone, linked through their records' `next` and
+/// `prev` like a free list, the one freed last at the head. Their records
+/// say [`State::Cached`]: allocated, as far as the zone knows.
+struct Cached {
+    /// The zone, once the CPU has first used its cache; `None` in it if
+    /// the CPU's node has no memory.
+    zone: Option<Option<usize>>,
+    head: u32,
+    tail: u32,
+    len: u32,
+    /// Frames it holds before it gives a batch back.
+    limit: u32,
+}
+
+impl Cached {
+    const fn new() -> Cached {
+        Cached { zone: None, head: NIL, tail: NIL, len: 0, limit: 0 }
     }
 }
 
@@ -151,37 +213,34 @@ struct RegionEntry {
 struct RegionTable {
     entries: [Option<RegionEntry>; MAX_REGIONS],
     len: usize,
-    /// The entry the last search found, which the next lookup most likely
-    /// lands in too (the heap takes its slabs from one region at a time):
-    /// looked at before searching. Written only when it changes.
-    last: AtomicUsize,
+    /// The entry with the most frames, which most lookups land in: looked
+    /// at first.
+    largest: usize,
 }
 
 impl RegionTable {
     const fn new() -> RegionTable {
-        RegionTable { entries: [None; MAX_REGIONS], len: 0, last: AtomicUsize::new(0) }
+        RegionTable { entries: [None; MAX_REGIONS], len: 0, largest: 0 }
     }
 
     fn iter(&self) -> impl Iterator<Item = &RegionEntry> {
         self.entries[..self.len].iter().flatten()
     }
 
-    /// The entry containing frame `pfn`: the one the last search found,
-    /// or a binary search (the entries are sorted by base).
+    /// The entry containing frame `pfn`, from entry `first` on: the
+    /// entries are sorted by base, so the first that starts above `pfn`
+    /// ends the search.
     #[inline]
-    fn find(&self, pfn: u64) -> Option<&RegionEntry> {
-        match self.entries.get(self.last.load(Ordering::Relaxed)) {
-            Some(Some(entry)) if entry.region.contains(pfn) => Some(entry),
-            _ => self.search(pfn),
-        }
+    fn find_from(&self, first: usize, pfn: u64) -> Option<&RegionEntry> {
+        let entries = self.entries.get(first..self.len)?.iter().flatten();
+        entries.take_while(|e| e.region.base <= pfn).find(|e| e.region.contains(pfn))
     }
 
+    /// The entry containing frame `pfn`, by a binary search.
     fn search(&self, pfn: u64) -> Option<&RegionEntry> {
         let entries = &self.entries[..self.len];
         let index = entries.partition_point(|e| e.is_some_and(|e| e.region.end() <= pfn));
-        let found = entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))?;
-        self.last.store(index, Ordering::Relaxed);
-        Some(found)
+        entries.get(index)?.as_ref().filter(|e| e.region.contains(pfn))
     }
 }
 
@@ -191,6 +250,10 @@ pub struct Frames {
     platform: Once<&'static dyn Platform>,
     building: SpinLock<RegionTable>,
     regions: Once<RegionTable>,
+    /// For each section of physical memory, 1 + the index of the first
+    /// entry of `regions` with frames in it, or 0 for none: set before
+    /// `regions` is, and never changed after.
+    sections: [AtomicU8; SECTIONS],
     nodes: AtomicUsize,
     /// Nodes in fallback order, per node: nearest first.
     fallback: [[AtomicU8; MAX_NODES]; MAX_NODES],
@@ -202,6 +265,7 @@ pub struct Frames {
     oom_calls: AtomicU64,
     /// Whether any `Normal` zone has memory.
     has_normal: AtomicBool,
+    cpus: [CpuFrames; MAX_CPUS],
 }
 
 impl Frames {
@@ -214,6 +278,7 @@ impl Frames {
             platform: Once::new(),
             building: SpinLock::new(RegionTable::new()),
             regions: Once::new(),
+            sections: [const { AtomicU8::new(0) }; SECTIONS],
             nodes: AtomicUsize::new(1),
             fallback: [const { [const { AtomicU8::new(0) }; MAX_NODES] }; MAX_NODES],
             distance: [const { [const { AtomicU8::new(10) }; MAX_NODES] }; MAX_NODES],
@@ -223,6 +288,7 @@ impl Frames {
             oom: Once::new(),
             oom_calls: AtomicU64::new(0),
             has_normal: AtomicBool::new(false),
+            cpus: [const { CpuFrames::new() }; MAX_CPUS],
         }
     }
 
@@ -324,6 +390,20 @@ impl Frames {
         copy.entries = table.entries;
         copy.len = table.len;
         drop(table);
+        let frames = |index: usize| copy.entries[index].map_or(0, |e| e.region.pages.len());
+        copy.largest = (0..copy.len).max_by_key(|&index| frames(index)).unwrap_or(0);
+        // The lowest entry with frames in a section is written last.
+        for (index, entry) in copy.entries[..copy.len].iter().enumerate().rev() {
+            let Some(entry) = entry else { continue };
+            let first = usize::try_from(entry.region.base >> SECTION_SHIFT).unwrap_or(usize::MAX);
+            let last = usize::try_from((entry.region.end() - 1) >> SECTION_SHIFT);
+            let number = (index + 1) as u8;
+            for section in
+                self.sections.iter().take(last.map_or(SECTIONS, |last| last + 1)).skip(first)
+            {
+                section.store(number, Ordering::Relaxed);
+            }
+        }
         let normal = (0..MAX_NODES).any(|node| {
             self.zones[node * KINDS + ZoneKind::Normal.index()].buddy.lock().managed_pages() > 0
         });
@@ -404,12 +484,19 @@ impl Frames {
             NodePolicy::Prefer(node) | NodePolicy::Only(node) => usize::from(node),
         }
         .min(self.nodes() - 1);
-        // Reclaim once, then the out-of-memory hook up to OOM_ATTEMPTS
-        // times, each followed by another try: a hook that freed memory is
-        // never asked again before that memory has been tried.
-        let (mut reclaimed, mut oom_calls) = (false, 0);
+        // Empty the CPUs' caches once, reclaim once, then the out-of-memory
+        // hook up to OOM_ATTEMPTS times, each followed by another try: a
+        // hook that freed memory is never asked again before that memory
+        // has been tried.
+        let (mut drained, mut reclaimed, mut oom_calls) = (false, false, 0);
         loop {
-            if let Some(pfn) = self.try_zones(origin, order, flags, owner, tag) {
+            let cached = match platform {
+                Some(platform) if order == 0 && flags.zone == ZoneLimit::Any => {
+                    self.take_cached(platform, origin, owner, tag)
+                }
+                _ => None,
+            };
+            if let Some(pfn) = cached.or_else(|| self.try_zones(origin, order, flags, owner, tag)) {
                 self.owner_pages[owner as usize].fetch_add(1 << order, Ordering::Relaxed);
                 let phys = pfn << PAGE_SHIFT;
                 if let (true, Some(platform)) = (flags.zero, platform) {
@@ -422,6 +509,11 @@ impl Frames {
                     };
                 }
                 return Ok(phys);
+            }
+            if !drained && self.zones.iter().any(|z| z.cached.load(Ordering::Relaxed) > 0) {
+                drained = true;
+                self.drain_caches();
+                continue;
             }
             if flags.context != Context::MaySleep || !reclaim {
                 break;
@@ -484,6 +576,168 @@ impl Frames {
         None
     }
 
+    /// A frame from this CPU's cache, which takes a batch from its zone
+    /// first if it is empty, for an allocation from node `origin`.
+    fn take_cached(
+        &self,
+        platform: &dyn Platform,
+        origin: usize,
+        owner: Owner,
+        tag: u8,
+    ) -> Option<u64> {
+        let _irqs = NoInterrupts::new(Some(platform));
+        let mut cache = self.cpus.get(platform.current_cpu())?.cache.lock();
+        let zone = self.cache_zone(&mut cache, platform)?;
+        if zone / KINDS != origin {
+            return None;
+        }
+        if cache.len == 0 {
+            self.refill(&mut cache, zone);
+        }
+        let pfn = u64::from(cache.head);
+        let info = self.record(pfn).filter(|_| cache.head != NIL)?;
+        cache.head = info.next();
+        match self.record(u64::from(cache.head)).filter(|_| cache.head != NIL) {
+            Some(next) => next.set_prev(NIL),
+            None => cache.tail = NIL,
+        }
+        cache.len -= 1;
+        self.zones[zone].cached.fetch_sub(1, Ordering::Relaxed);
+        info.set(State::Allocated, 0, owner, tag);
+        Some(pfn)
+    }
+
+    /// The zone of a CPU's cache, chosen when the CPU first uses it: its
+    /// node's `Normal` zone, or its `Dma32` zone if that is all the node
+    /// has, as a local allocation tries first.
+    fn cache_zone(&self, cache: &mut Cached, platform: &dyn Platform) -> Option<usize> {
+        if let Some(zone) = cache.zone {
+            return zone;
+        }
+        let node = platform.cpu_node(platform.current_cpu()).min(self.nodes() - 1);
+        let zone = [ZoneKind::Normal, ZoneKind::Dma32]
+            .into_iter()
+            .map(|kind| node * KINDS + kind.index())
+            .find(|&zone| self.zones[zone].buddy.lock().managed_pages() > 0);
+        if let Some(zone) = zone {
+            let managed = self.zones[zone].buddy.lock().managed_pages();
+            let limit = (managed / 512).clamp(2 * u64::from(CACHE_BATCH), u64::from(CACHE_MOST));
+            cache.limit = limit as u32;
+        }
+        cache.zone = Some(zone);
+        zone
+    }
+
+    /// Takes up to [`CACHE_BATCH`] frames from `zone` into an empty cache,
+    /// none below the zone's floors.
+    fn refill(&self, cache: &mut Cached, zone: usize) {
+        let zone = &self.zones[zone];
+        let floor = zone.reserve.load(Ordering::Relaxed) + zone.protect.load(Ordering::Relaxed);
+        let mut buddy = zone.buddy.lock();
+        let room = buddy.free_pages().saturating_sub(floor).min(u64::from(CACHE_BATCH));
+        for _ in 0..room {
+            let Some(pfn) = buddy.alloc(0, Owner::PerCpu, 0) else { break };
+            let Some(info) = self.record(pfn) else { break };
+            info.set_state(State::Cached);
+            self.push(cache, pfn, info);
+            zone.cached.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Puts a cached frame at the head of a cache's list.
+    fn push(&self, cache: &mut Cached, pfn: u64, info: &PageInfo) {
+        info.set_prev(NIL);
+        info.set_next(cache.head);
+        match self.record(u64::from(cache.head)).filter(|_| cache.head != NIL) {
+            Some(head) => head.set_prev(pfn as u32),
+            None => cache.tail = pfn as u32,
+        }
+        cache.head = pfn as u32;
+        cache.len += 1;
+    }
+
+    /// Gives up to `count` frames from the tail of a cache, the ones freed
+    /// longest ago, back to its zone.
+    fn give_back(&self, cache: &mut Cached, count: u32) {
+        let Some(Some(zone)) = cache.zone else { return };
+        let zone = &self.zones[zone];
+        let mut buddy = zone.buddy.lock();
+        for _ in 0..count {
+            let pfn = u64::from(cache.tail);
+            let Some(info) = self.record(pfn).filter(|_| cache.tail != NIL) else { break };
+            cache.tail = info.prev();
+            match self.record(u64::from(cache.tail)).filter(|_| cache.tail != NIL) {
+                Some(tail) => tail.set_next(NIL),
+                None => cache.head = NIL,
+            }
+            cache.len -= 1;
+            zone.cached.fetch_sub(1, Ordering::Relaxed);
+            info.set(State::Allocated, 0, Owner::PerCpu, 0);
+            // Cannot fail: the frame was just marked allocated.
+            let _ = buddy.free(pfn, 0, Owner::PerCpu);
+        }
+    }
+
+    /// Puts the frame `pfn` of `zone`, which `owner` allocated alone, in
+    /// this CPU's cache if it caches that zone; false if it does not, or if
+    /// the frame is not such an allocated frame (which the zone then
+    /// reports).
+    fn free_cached(&self, platform: &dyn Platform, zone: usize, pfn: u64, owner: Owner) -> bool {
+        let _irqs = NoInterrupts::new(Some(platform));
+        let Some(cpu) = self.cpus.get(platform.current_cpu()) else { return false };
+        let mut cache = cpu.cache.lock();
+        if self.cache_zone(&mut cache, platform) != Some(zone) {
+            return false;
+        }
+        let Some(info) = self.record(pfn) else { return false };
+        if !info.cache(owner) {
+            return false;
+        }
+        self.push(&mut cache, pfn, info);
+        self.zones[zone].cached.fetch_add(1, Ordering::Relaxed);
+        if cache.len > cache.limit {
+            self.give_back(&mut cache, CACHE_BATCH);
+        }
+        true
+    }
+
+    /// Gives every frame the CPUs' caches hold back to the zones.
+    pub fn drain_caches(&self) {
+        for cpu in &self.cpus {
+            let _irqs = NoInterrupts::new(self.platform());
+            let mut cache = cpu.cache.lock();
+            let len = cache.len;
+            self.give_back(&mut cache, len);
+        }
+    }
+
+    /// The entry of the region containing frame `pfn`: the largest
+    /// region's, which holds most frames, or else one found through the
+    /// frame's section, as Linux finds a frame's record. Neither look
+    /// writes anything, so the CPUs share the lines they read.
+    #[inline]
+    fn entry(&self, pfn: u64) -> Option<&RegionEntry> {
+        let table = self.regions.get()?;
+        if let Some(Some(entry)) = table.entries.get(table.largest)
+            && entry.region.contains(pfn)
+        {
+            return Some(entry);
+        }
+        match self.sections.get(usize::try_from(pfn >> SECTION_SHIFT).ok()?) {
+            Some(first) => {
+                let first = usize::from(first.load(Ordering::Relaxed)).checked_sub(1)?;
+                table.find_from(first, pfn)
+            }
+            None => table.search(pfn),
+        }
+    }
+
+    /// The record of frame `pfn`.
+    #[inline]
+    fn record(&self, pfn: u64) -> Option<&'static PageInfo> {
+        self.entry(pfn)?.region.info(pfn)
+    }
+
     /// Frees the block of 2^`order` frames at physical address `phys`,
     /// which `owner` allocated.
     pub fn free(&self, phys: u64, order: u32, owner: Owner) -> Result<(), FreeError> {
@@ -491,8 +745,14 @@ impl Frames {
         if !phys.is_multiple_of(PAGE_SIZE as u64) {
             return Err(FreeError::Misaligned);
         }
-        let table = self.regions.get().ok_or(FreeError::NotManaged)?;
-        let entry = table.find(pfn).ok_or(FreeError::NotManaged)?;
+        let entry = self.entry(pfn).ok_or(FreeError::NotManaged)?;
+        if order == 0
+            && let Some(platform) = self.platform()
+            && self.free_cached(platform, entry.zone, pfn, owner)
+        {
+            self.owner_pages[owner as usize].fetch_sub(1, Ordering::Relaxed);
+            return Ok(());
+        }
         let _irqs = NoInterrupts::new(self.platform());
         self.zones[entry.zone].buddy.lock().free(pfn, order, owner)?;
         self.owner_pages[owner as usize].fetch_sub(1 << order, Ordering::Relaxed);
@@ -501,17 +761,20 @@ impl Frames {
 
     /// The record of the frame at physical address `phys`.
     pub fn info(&self, phys: u64) -> Option<&'static PageInfo> {
-        self.regions.get()?.find(phys >> PAGE_SHIFT)?.region.info(phys >> PAGE_SHIFT)
+        self.record(phys >> PAGE_SHIFT)
     }
 
     /// The node whose memory holds physical address `phys`.
     pub fn node_of(&self, phys: u64) -> Option<usize> {
-        Some(self.regions.get()?.find(phys >> PAGE_SHIFT)?.zone / KINDS)
+        Some(self.entry(phys >> PAGE_SHIFT)?.zone / KINDS)
     }
 
-    /// Free frames in all zones.
+    /// Free frames in all zones, those CPUs' caches hold included.
     pub fn free_pages(&self) -> u64 {
-        self.zones.iter().map(|zone| zone.buddy.lock().free_pages()).sum()
+        self.zones
+            .iter()
+            .map(|zone| zone.buddy.lock().free_pages() + zone.cached.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Frames all zones manage.
@@ -549,7 +812,7 @@ impl Frames {
                     node: index / KINDS,
                     kind: if index % KINDS == 0 { ZoneKind::Dma32 } else { ZoneKind::Normal },
                     managed: buddy.managed_pages(),
-                    free: buddy.free_pages(),
+                    free: buddy.free_pages() + zone.cached.load(Ordering::Relaxed),
                     reserve: zone.reserve.load(Ordering::Relaxed),
                     blocks,
                     span,
@@ -559,11 +822,38 @@ impl Frames {
         }
     }
 
-    /// Checks every zone's free lists ([`Buddy::check`]).
+    /// Checks every zone's free lists ([`Buddy::check`]) and every CPU's
+    /// cache: it holds as many frames as it counts, linked both ways, each
+    /// a cached frame of its zone.
     pub fn check(&self) -> Result<(), &'static str> {
         for zone in &self.zones {
             let _irqs = NoInterrupts::new(self.platform());
             zone.buddy.lock().check()?;
+        }
+        for cpu in &self.cpus {
+            let _irqs = NoInterrupts::new(self.platform());
+            let cache = cpu.cache.lock();
+            let (mut pfn, mut prev, mut len) = (cache.head, NIL, 0);
+            while pfn != NIL {
+                if len == cache.len {
+                    return Err("a CPU's cache holds more frames than it counts (a cycle?)");
+                }
+                let entry = self.entry(u64::from(pfn));
+                let info = self.record(u64::from(pfn)).ok_or("a CPU's cache names no frame")?;
+                if info.state() != State::Cached || info.order() != 0 {
+                    return Err("a frame in a CPU's cache is not a cached frame");
+                }
+                if info.prev() != prev {
+                    return Err("a CPU's cache's back link is wrong");
+                }
+                if entry.map(|e| e.zone) != cache.zone.flatten() {
+                    return Err("a CPU's cache holds a frame of another zone");
+                }
+                (prev, pfn, len) = (pfn, info.next(), len + 1);
+            }
+            if len != cache.len || cache.tail != prev {
+                return Err("a CPU's cache's count or tail is wrong");
+            }
         }
         Ok(())
     }
@@ -610,6 +900,28 @@ mod tests {
     }
 
     #[test]
+    fn frames_are_found_through_their_sections() {
+        // Three regions in the first section, the last of them reaching
+        // into the second, one above 4 GiB and one above the sections the
+        // map covers.
+        let above = (SECTIONS as u64) << SECTION_SHIFT;
+        let regions =
+            [(64u64, 32u64), (256, 4096), (32760, 16), (DMA32_END_PFN + 8, 64), (above + 8, 16)];
+        let frames = frames_with(&regions.map(|(base, pages)| (0, base, pages as usize)));
+        for (base, pages) in regions {
+            for pfn in [base, base + pages / 2, base + pages - 1] {
+                let entry = frames.entry(pfn).expect("a frame of a region");
+                assert_eq!(entry.region.base, base, "frame {pfn}");
+                let info = frames.info(pfn << PAGE_SHIFT).unwrap();
+                assert!(core::ptr::eq(info, &raw const entry.region.pages[(pfn - base) as usize]));
+            }
+            for pfn in [base - 1, base + pages] {
+                assert!(frames.entry(pfn).is_none(), "frame {pfn}");
+            }
+        }
+    }
+
+    #[test]
     fn prefers_the_local_node_and_falls_back() {
         // Node 0 below 4 GiB, node 1 above it.
         let frames = frames_with(&[(0, 256, 2048), (1, DMA32_END_PFN, 2048)]);
@@ -626,6 +938,69 @@ mod tests {
             frames.free(phys, 0, Owner::Kernel).unwrap();
         }
         assert_eq!(frames.owner_pages(Owner::Kernel), 0);
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn a_cpu_hands_out_the_frame_it_freed_last() {
+        let frames = frames_with(&[(0, 256, 2048)]);
+        let first = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        let second = frames.alloc(0, Flags::MAY_SLEEP, Owner::Anon).unwrap();
+        frames.free(first, 0, Owner::Kernel).unwrap();
+        assert_eq!(frames.free_pages(), 2047);
+        assert_eq!(frames.owner_pages(Owner::Kernel), 0);
+        assert_eq!(frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel), Ok(first));
+        // Frees the cache would take are checked as any other.
+        frames.free(first, 0, Owner::Kernel).unwrap();
+        assert_eq!(frames.free(first, 0, Owner::Kernel), Err(FreeError::AlreadyFree));
+        assert_eq!(
+            frames.free(second, 0, Owner::Kernel),
+            Err(FreeError::WrongOwner { owner: Owner::Anon })
+        );
+        frames.free(second, 0, Owner::Anon).unwrap();
+        frames.check().unwrap();
+        // Blocks of more than one frame skip it.
+        let block = frames.alloc(1, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        assert!(block != first && block != second);
+        frames.free(block, 1, Owner::Kernel).unwrap();
+        assert_eq!(frames.free_pages(), 2048);
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn caches_give_frames_back_past_their_limit_and_before_failing() {
+        use crate::tests::become_cpu;
+        let frames = frames_with(&[(0, 256, 2048)]);
+        let taken: Vec<u64> =
+            core::iter::from_fn(|| frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).ok()).collect();
+        assert_eq!(taken.len(), 2048 - 16);
+        // CPU 1 frees half of them: its cache keeps at most 64 (the least
+        // a cache may keep), the zone gets the rest back in batches.
+        let (by_cpu1, by_cpu0) = taken.split_at(1016);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                become_cpu(1);
+                for &phys in by_cpu1 {
+                    frames.free(phys, 0, Owner::Kernel).unwrap();
+                }
+            });
+        });
+        let cached = frames.zones[0].cached.load(Ordering::Relaxed);
+        assert!((1..=64).contains(&cached), "{cached} frames cached");
+        assert_eq!(frames.free_pages(), 16 + 1016);
+        frames.check().unwrap();
+        // CPU 0 gets every one of them: from the zone, then, when that has
+        // only its reserve left, from CPU 1's cache, which it empties.
+        let again =
+            core::iter::from_fn(|| frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).ok()).count();
+        assert_eq!(again, 1016);
+        assert_eq!(frames.zones[0].cached.load(Ordering::Relaxed), 0);
+        for &phys in by_cpu0 {
+            frames.free(phys, 0, Owner::Kernel).unwrap();
+        }
+        frames.drain_caches();
+        assert_eq!(frames.free_pages(), 16 + 1016);
+        assert_eq!(frames.zones[0].cached.load(Ordering::Relaxed), 0);
         frames.check().unwrap();
     }
 

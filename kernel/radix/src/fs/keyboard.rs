@@ -31,7 +31,7 @@ use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
 use super::FileObject;
 use crate::Arch;
 use crate::sched::{self, Options, Policy, ThreadRef, wait};
-use crate::user::posix::poll;
+use crate::user::posix::poll::{self, Polled};
 use crate::user::posix::signal::{Restart, interrupted};
 
 /// Events kept.
@@ -59,6 +59,8 @@ static DECODER: SpinLock<Set1> = SpinLock::new(Set1::new());
 static THREAD: Once<ThreadRef> = Once::new();
 /// The number of the next event when the thread last looked.
 static SEEN: AtomicU64 = AtomicU64::new(0);
+/// The pollers of `/dev/kbd`.
+pub static POLLED: Polled = Polled::new();
 /// The lights wanted, and the lights set (`u32::MAX` before any are).
 static LIGHTS: AtomicU32 = AtomicU32::new(0);
 static LIGHTS_SET: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -266,7 +268,7 @@ fn run(_: usize) {
         let next = next();
         if SEEN.swap(next, Ordering::AcqRel) != next {
             wait::wake_all(key());
-            poll::changed();
+            POLLED.changed();
         }
         let lights = LIGHTS.load(Ordering::Acquire);
         if STARTED.load(Ordering::Acquire) && LIGHTS_SET.load(Ordering::Acquire) != lights {

@@ -167,7 +167,13 @@ Real-time signals queue with their values, up to 1,024 per process
 (what *RLIMIT_SIGPENDING* says), and are taken lowest number first and
 in order within a number. *kill* may signal the caller, its descendants and the
 processes of its session; *kill(-1, ...)* signals all of those but the
-caller. Users come with Phase 13, and with them POSIX's rules.
+caller and process 1. Users come with Phase 13, and with them POSIX's rules.
+
+Spark, process 1, takes only the signals it has a handler for, as Linux's
+init does: the others, SIGKILL and SIGSTOP included, are dropped, and a
+write of Spark's to a pipe or socket nobody reads fails with EPIPE
+without ending it. A fault it has no handler for still ends it, and with
+it the system.
 
 # FILE DESCRIPTORS AND PATHS
 

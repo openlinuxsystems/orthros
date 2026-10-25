@@ -48,7 +48,7 @@ use super::pipe::{self, Files, Pipe};
 use super::{Description, FileObject, FileRef};
 use crate::sched::{self, wait};
 use crate::user::Fifo;
-use crate::user::posix::poll;
+use crate::user::posix::poll::{self, Polled};
 use crate::user::posix::signal::{Restart, interrupted};
 
 /// A socket's name: the path `bind_socket` was given, as the program gave
@@ -204,6 +204,8 @@ pub struct Listener {
     /// when it began to listen.
     name: Name,
     process: u64,
+    /// Its pollers.
+    polled: Polled,
 }
 
 impl Listener {
@@ -211,10 +213,10 @@ impl Listener {
         core::ptr::from_ref::<Listener>(self) as usize
     }
 
-    /// Something changed: the waits look again, and so does `poll`.
+    /// Something changed: the waits look again, and so do its pollers.
     fn changed(&self) {
         wait::wake_all(self.key());
-        poll::changed();
+        self.polled.changed();
     }
 
     /// Queues `end`, the listening side of a new connection, for
@@ -415,6 +417,18 @@ impl Socket {
             poll::WRITABLE | poll::HANG_UP
         }
     }
+
+    /// Calls `each` with what its pollers count themselves in, as
+    /// [`Socket::events`] looks: both pipes of its connection, or its
+    /// listener.
+    pub fn polled(&self, each: &mut dyn FnMut(&Polled)) {
+        if let Some(end) = self.end() {
+            each(end.rx.polled());
+            each(end.tx.polled());
+        } else if let Some(listener) = self.listener.get() {
+            each(&listener.polled);
+        }
+    }
 }
 
 impl Drop for Socket {
@@ -581,6 +595,7 @@ pub fn listen(socket: &Socket, backlog: u32, process: u64) -> Result<(), Status>
         closed: AtomicBool::new(false),
         name,
         process,
+        polled: Polled::new(),
     })
     .map_err(|_| Kernel::NoMemory.status(0))?;
     let mut state = socket.state.lock();

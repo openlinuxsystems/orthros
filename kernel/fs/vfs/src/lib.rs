@@ -329,10 +329,11 @@ pub trait Node: Send + Sync + Any {
         self.stat().kind
     }
 
-    /// The node a new handle to it uses: itself, or for a generated file a
-    /// snapshot of its contents taken now, which reads see unchanged.
-    fn open(&self, this: &NodeRef) -> Result<NodeRef> {
-        Ok(this.clone())
+    /// The node a new handle to it uses: `None` for itself (the caller
+    /// keeps the reference it has), or for a generated file a snapshot of
+    /// its contents taken now, which reads see unchanged.
+    fn open(&self) -> Result<Option<NodeRef>> {
+        Ok(None)
     }
 
     /// The entry `name` of a directory.

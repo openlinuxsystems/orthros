@@ -48,10 +48,11 @@
 //! A signal frame has Linux's layout on x86-64, so that a C library's
 //! `ucontext_t` and `siginfo_t` describe it (radix-signal(2)): at the
 //! handler's stack pointer the address it returns to, above it the
-//! `ucontext_t` (968 bytes, as glibc declares it, which musl's and mlibc's
-//! begin with), the `siginfo_t` (128 bytes) and, 64-byte aligned, the
-//! extended state as XSAVE (or FXSAVE) wrote it, which the context's
-//! `fpregs` points at. The 128-byte red zone below the interrupted stack
+//! `ucontext_t` as far as its signal mask (304 bytes: Linux's kernel
+//! declares the mask 8 bytes long, and glibc's, musl's and mlibc's longer
+//! types begin with those fields), the `siginfo_t` (128 bytes) and,
+//! 64-byte aligned, the extended state as XSAVE (or FXSAVE) wrote it, up
+//! to its last component in use, which the context's `fpregs` points at. The 128-byte red zone below the interrupted stack
 //! pointer is left alone.
 
 use core::fmt;
@@ -201,11 +202,14 @@ impl UserRegisters {
     }
 }
 
-/// The parts of a signal frame: its `ucontext_t` and `siginfo_t`, at the
-/// offsets glibc's x86-64 headers give them.
+/// The parts of a signal frame: its `ucontext_t` and `siginfo_t`, as
+/// Linux's x86-64 `rt_sigframe` lays them out, at the offsets glibc's
+/// headers give the fields.
 mod layout {
-    /// `ucontext_t`.
-    pub const CONTEXT: u64 = 968;
+    /// `ucontext_t` up to its 8-byte signal mask, as Linux writes it: the
+    /// rest of the C library's longer type (the mask's other 120 bytes, a
+    /// copy of the FPU state and shadow-stack words) is not written.
+    pub const CONTEXT: u64 = 304;
     /// `siginfo_t`, right after it.
     pub const INFO: u64 = 128;
     /// Both.
@@ -690,9 +694,10 @@ pub fn push_signal_frame(signal: &SignalFrame<'_>) -> bool {
     // its extended state stays as just saved, so a switch meanwhile writes
     // the same image again.
     let image = unsafe { core::slice::from_raw_parts(area as *const u8, size as usize) };
+    let used = fpu::used_size(image);
     if !copy_to_user(base, &signal.restorer.to_le_bytes())
         || !copy_to_user(context, &bytes)
-        || !copy_to_user(fpstate, image)
+        || !copy_to_user(fpstate, &image[..used])
     {
         return false;
     }
@@ -786,11 +791,17 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
             true
         } else {
             let image = core::slice::from_raw_parts_mut(area as *mut u8, size);
+            let head = fpu::head_size().min(size);
             // Interrupts are masked, so a page that is not there is not
             // made; each was touched above, so only one given back since
-            // fails the copy.
-            if copy_from_user(image, fpstate) {
-                fpu::sanitize(image);
+            // fails the copy. The head comes first, and is made safe:
+            // its header says how much follows.
+            let copied = copy_from_user(&mut image[..head], fpstate) && {
+                fpu::sanitize(&mut image[..head]);
+                let used = fpu::used_size(&image[..head]);
+                used <= head || copy_from_user(&mut image[head..used], fpstate + head as u64)
+            };
+            if copied {
                 fpu::restore(area);
                 true
             } else {

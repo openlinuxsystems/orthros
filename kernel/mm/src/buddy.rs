@@ -268,7 +268,7 @@ impl<'a> Buddy<'a> {
         let info = self.info(pfn).ok_or(FreeError::NotManaged)?;
         match info.state() {
             State::Allocated => {}
-            State::Free => return Err(FreeError::AlreadyFree),
+            State::Free | State::Cached => return Err(FreeError::AlreadyFree),
             State::Tail | State::Reserved => return Err(FreeError::NotABlock),
         }
         if info.order() != order {

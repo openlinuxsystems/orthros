@@ -431,7 +431,7 @@ impl Vfs {
             at.writable()?;
             at.node.set_size(0)?;
         }
-        let node = at.node.open(&at.node)?;
+        let node = at.node.open()?.unwrap_or(at.node);
         Ok(Location { mount: at.mount, node })
     }
 

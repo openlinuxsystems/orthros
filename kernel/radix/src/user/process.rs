@@ -72,7 +72,7 @@ use super::ipc::{self, Endpoint};
 use super::memory::{SpaceObject, SpaceRef};
 use super::methods::{Answer, answer};
 use super::notify::{Notification, NotificationRef};
-use super::objects::{self, Object};
+use super::objects::{self, Found, Object};
 use super::posix::{self, PosixState, ThreadSignals};
 use super::{
     Result, UserRef, UserThread, cap_error, default_window, error, set_ready, thread_main,
@@ -165,6 +165,9 @@ pub struct ProcessObject {
     /// Moves when a signal is sent to it or one of its threads, for
     /// `signal_wait`.
     pub signal_events: AtomicU64,
+    /// How many of its threads are in `signal_wait`: a signal sent while
+    /// none is wakes no one.
+    pub signal_waiters: AtomicU32,
     /// Whether a signal has stopped it: what its stopped threads wait on.
     pub stopped: AtomicBool,
     /// Whether it is a POSIX child: `exec` started it after `create`, so
@@ -335,6 +338,7 @@ fn allocate(
         child_events: AtomicU64::new(0),
         child_notify: SpinLock::new(None),
         signal_events: AtomicU64::new(0),
+        signal_waiters: AtomicU32::new(0),
         stopped: AtomicBool::new(false),
         posix_child: AtomicBool::new(false),
         record_locks: AtomicBool::new(false),
@@ -363,6 +367,13 @@ impl ProcessObject {
     /// Its number.
     pub fn number(&self) -> u64 {
         self.number
+    }
+
+    /// Whether the system cannot go on without it: Spark, whose end stops
+    /// the kernel. As Linux's init, it takes only the signals it has a
+    /// handler for (`posix::signal`).
+    pub fn is_vital(&self) -> bool {
+        self.on_exit.is_some()
     }
 
     /// Notes that it has taken a POSIX record lock.
@@ -406,10 +417,14 @@ impl ProcessObject {
         *self.name.lock() = name;
     }
 
-    /// Gives it `space` in place of its address space (`exec`).
+    /// Gives it `space` in place of its address space (`exec`), whose
+    /// memory goes at once: the thread that called `exec` still holds the
+    /// old space until it is reaped, but never runs in it again.
     pub fn set_space(&self, space: SpaceRef) {
         let old = self.space.lock().replace(space);
-        drop(old);
+        if let Some(old) = old {
+            old.empty();
+        }
     }
 
     /// It is a POSIX child: it no longer ends with its maker.
@@ -735,7 +750,7 @@ impl ProcessObject {
     /// finished now if none is left to.
     pub fn exit(&self, code: u64) {
         if self.end(code) {
-            self.finish(None);
+            self.finish(None, None);
         }
     }
 
@@ -804,15 +819,18 @@ impl ProcessObject {
         drop(gone);
         wait::wake_all(self.threads_key());
         if finish {
-            self.finish(None);
+            self.finish(None, Some(me));
+        } else {
+            sched::leave_domain(me);
         }
     }
 
     /// Finishes ending it: ends the processes made for it, empties both
     /// its capability spaces, lets go of its address space, and tells
     /// whoever asked. With `store`, the caller holds the store's lock
-    /// (`finish_pending`).
-    fn finish(&self, store: Option<&mut Store>) {
+    /// (`finish_pending`). `last` is its last thread, ending, if that is
+    /// the caller.
+    fn finish(&self, store: Option<&mut Store>, last: Option<&ThreadRef>) {
         let locked = store.is_some();
         if self.has_record_locks() {
             crate::fs::locks::process_gone(self.number, None);
@@ -842,10 +860,20 @@ impl ProcessObject {
                 let _ = caps::destroy_space(self.keep);
             }
         }
-        // Its threads' own references keep it alive while they finish
+        // Its memory goes now, before its parent hears of the end. Its
+        // threads' own references keep the empty space while they finish
         // leaving it.
         let space = self.space.lock().take();
-        drop(space);
+        if let Some(space) = space {
+            space.empty();
+        }
+        // Its last thread leaves its domain before anyone hears of the end,
+        // as on Linux a task leaves its cgroup after its memory has gone
+        // and before its parent is told: a supervisor that counts what is
+        // left in the domain then finds the thread gone.
+        if let Some(last) = last {
+            sched::leave_domain(last);
+        }
         let (code, notify) = {
             let mut state = self.state.lock();
             state.phase = ProcessState::Exited;
@@ -909,7 +937,7 @@ pub fn finish_pending(store: &mut Store) {
         };
         match next {
             Some(process) => {
-                process.finish(Some(store));
+                process.finish(Some(store), None);
                 push_finished(process);
             }
             None => return,
@@ -972,15 +1000,27 @@ pub fn install(at: SlotRef, kind: ObjectKind, object: Object) -> Result<()> {
     install_charged(at, kind, object, None)
 }
 
-/// The process interface.
-pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
+/// The process interface, on the process `found` in slot `slot`.
+pub fn method(
+    user: &UserRef,
+    slot: u32,
+    found: &Found,
+    label: u32,
+    args: &[u64; 8],
+) -> Result<Answer> {
     let needs = if label == process::INFO { Rights::READ } else { Rights::CONTROL };
-    let (_, target) = objects::process(user.cspace, slot, needs)?;
+    found.cap.check(ObjectKind::Process, needs).map_err(cap_error)?;
+    let target = match &found.object {
+        Some(Object::Process(target)) => target,
+        // Its own process, which the lookup did not take again.
+        None if found.held => &user.process,
+        _ => return Err(error(Kernel::Gone)),
+    };
     let at = |slot| SlotRef::new(user.cspace, slot);
     match label {
         process::CREATE => {
             let a = process::CreateArgs::decode(args)?;
-            create_for(&target, a.kind, a.size, at(a.to))?;
+            create_for(target, a.kind, a.size, at(a.to))?;
             answer(label, 0, [0; 8])
         }
         process::SET_NAME => {
@@ -1032,19 +1072,19 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
         }
         process::KEEP => {
             let a = process::KeepArgs::decode(args)?;
-            keep(&target, at(a.from))?;
+            keep(target, at(a.from))?;
             answer(label, 0, [0; 8])
         }
         process::START => {
             let a = process::StartArgs::decode(args)?;
             // A thread of the caller's own process starts with its mask.
-            let mask = if ProcessRef::ptr_eq(&target, &user.process) {
+            let mask = if ProcessRef::ptr_eq(target, &user.process) {
                 user.signals.lock().mask
             } else {
                 0
             };
             let thread = ProcessObject::start(
-                &target,
+                target,
                 Start::Fresh([a.entry, a.stack, a.argument]),
                 a.to,
                 None,
@@ -1057,7 +1097,7 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
         process::EXIT => {
             let a = process::ExitArgs::decode(args)?;
             target.exit(a.code);
-            if ProcessRef::ptr_eq(&target, &user.process) {
+            if ProcessRef::ptr_eq(target, &user.process) {
                 return Ok(Answer::Exit(a.code));
             }
             answer(label, 0, [0; 8])
@@ -1093,7 +1133,7 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
             drop(state);
             answer(label, process::InfoResults::WORDS, results.encode())
         }
-        _ if label >= process::FORK => posix::method(user, slot, &target, label, args),
+        _ if label >= process::FORK => posix::method(user, slot, target, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }

@@ -61,14 +61,21 @@ Memory comes up in four steps, because each needs the one before:
 `radix_mm::Frames` (`frames.rs`) keeps one buddy allocator per zone. Each
 NUMA node (at most 8) has two zones: `Dma32`, its RAM below 4 GiB, and
 `Normal`, the rest. A zone may hold up to 32 regions of RAM, each with its
-array of frame records.
+array of frame records. A frame's record is looked for first in the
+largest region, which holds most frames, then through the section of
+physical memory the frame is in (128 MiB, as Linux's sections on x86_64):
+a map of the first 1 TiB names the first region with frames in each
+section, which holds the frame as a rule. Either way a lookup costs a few
+loads and compares, not a search, and writes nothing, so CPUs looking up
+frames at once share the lines. Frames above 1 TiB are found by a binary
+search.
 
 `buddy.rs` hands out blocks of 2^order frames, order 0 to 10 (4 KiB to
 4 MiB), naturally aligned. The free lists are doubly linked through the
 frame records of the blocks' first frames, so the allocator never reads or
 writes the memory it manages. A frame record (`page.rs`) holds the frame's
-state (`Reserved`, `Free`, `Allocated` or `Tail`), the block's order, its
-owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area`,
+state (`Reserved`, `Free`, `Allocated`, `Tail` or `Cached`), the block's
+order, its owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area`,
 `PerCpu` or `Memory`, the last for the capability store's memory objects,
 used for accounting and for checking frees), a tag byte and two links; the slab
 layer reuses the links and an auxiliary word for its own bookkeeping. A free
@@ -94,6 +101,25 @@ that finds nothing calls the reclaim hook (`Heap::drain`, which empties
 every CPU's magazines and frees empty slabs) and tries once more. Failure
 is `AllocError`, never a panic.
 
+Each CPU keeps a cache of free single frames, as Linux keeps per-CPU page
+lists, from the first zone a local allocation tries: its node's `Normal`
+zone, or its `Dma32` zone if the node has no other. An order-0 allocation
+that may come from that zone takes the frame the CPU freed last, and
+freeing a frame of that zone puts it back, so neither takes the zone's
+lock nor splits or merges buddies (some thousand instructions a frame
+otherwise; a `fork` allocates about 26 frames and a `fork` and `exec` about
+120). The cache is a list linked through the frame records, like a free
+list, and its frames are `Cached`: allocated, as far as the zone knows, so
+no buddy merges with them. A free marks a frame cached with one atomic
+change of its record, which only an allocated frame of the right owner
+takes, so a double free is refused as before. An empty cache takes 32
+frames at a time from above the zone's floors, so the reserve stays with
+the zone; a cache holding more than its limit (1/512 of the zone, between
+64 frames and 2 MiB) gives back the 32 that went into it longest ago. Cached
+frames count as free, and an allocation that finds nothing empties every
+CPU's cache into the zones before it reclaims. `Frames::check` walks the
+caches as well as the free lists.
+
 ## Kernel heap
 
 `radix_mm::Heap` (`heap.rs`) serves requests up to 8 KiB from 32 size
@@ -113,12 +139,12 @@ have no headers. Free objects form a list through the objects: the first
 word holds a marker and the next free index, the second a poison pattern.
 Both are checked when the object is handed out, and a free checks that the
 address is the start of an object that is in use. A free finds its frame's
-region starting with the region the last lookup found, and the object's
-index by multiplying by the class's reciprocal (2^32 / size + 1, which
-is exact for every offset below 2^15, beyond the largest slab), so it
-divides by nothing (Phase 8, ADR 0077). Damage is reported to
-the corruption handler (the kernel panics with a `heap corruption:` message)
-and the object or slab is quarantined, never used again.
+region as any frame lookup does, and the object's index by multiplying
+by the class's reciprocal (2^32 / size + 1, which is exact for every
+offset below 2^15, beyond the largest slab), so it divides by nothing
+(Phase 8, ADR 0077). Damage is reported to the corruption handler (the
+kernel panics with a `heap corruption:` message) and the object or slab
+is quarantined, never used again.
 
 In front of each slab cache is a magazine layer (`magazine.rs`, after
 Bonwick and Adams). Each CPU has two magazines per class, *loaded* and
@@ -201,6 +227,20 @@ reads the generation, and flushes the space's identifier if the generation
 is newer than the one it last loaded. With these two orders, every CPU
 either gets the shootdown or sees the new generation.
 
+Most of a program's page tables is empty: its few regions sit far apart
+in 128 TiB. So that walks of a space (`edit`, `copy_into` for `fork`, the
+frees) never read the empty parts, each table's frame record keeps, in its
+two link words, a bit for each of the table's 64 lines of eight entries
+(a cache line each) that may hold an entry. Whoever fills an entry sets
+its line's bit under the space's lock (`paging::entry`, a new table's
+entry in its parent, a `fork` copy's entries); a walk that leaves a whole
+line empty clears its bit. A table made before the frame allocator ran
+has no record and counts as all lines in use. When its process ends, an
+address space's page tables are freed with its pages (`free_empty_tables`,
+which unlinks every table that maps nothing, flushes the CPUs running the
+space, and frees them), on the CPU the process ended on, as Linux frees
+them in `exit`.
+
 ### TLB shootdown
 
 Removing or changing a mapping that other CPUs may have cached needs a TLB
@@ -233,10 +273,10 @@ them and keeps every location that holds an absolute address into the
 higher-half image: 64-bit addresses (`R_X86_64_64`, and the global offset
 table) and 32-bit sign-extended ones (`R_X86_64_32S`); relative addresses
 move with their code. It writes their physical addresses, sorted, into the
-64 KiB `.krelocs` section the image reserves (format in `radix-relocs`),
+128 KiB `.krelocs` section the image reserves (format in `radix-relocs`),
 then removes the relocation sections with `llvm-objcopy`, because GRUB
 refuses to load an ELF file that has them. The Phase 2 kernel has about
-2,600 locations.
+2,600 locations, the Phase 9 kernel about 16,000 (some 64 KiB of table).
 
 At boot the trampoline, still running at the link address, calls
 `radix_kaslr_choose`, which reads the command line for `nokaslr` and picks

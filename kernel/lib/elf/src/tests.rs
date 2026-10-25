@@ -337,6 +337,44 @@ fn refuses_what_only_a_dynamic_linker_does() {
     assert_eq!(read(&pie(&[], &[(DT_RELAENT, 16)])), Err(ElfError::Malformed));
 }
 
+#[test]
+fn relocations_for_exec_take_what_loading_does() {
+    let entry = |kind: u32, symbol: u64, offset: u64, addend: u64| {
+        let mut entry = [0u8; 24];
+        entry[..8].copy_from_slice(&offset.to_le_bytes());
+        entry[8..16].copy_from_slice(&((symbol << 32) | u64::from(kind)).to_le_bytes());
+        entry[16..].copy_from_slice(&addend.to_le_bytes());
+        entry
+    };
+    let bias = 0x5555_0000_0000;
+    let bytes = good_pie();
+    let image = read(&bytes).unwrap();
+    let placed = image.place(bias, RANGE).unwrap();
+    let relocated =
+        |kind, symbol, offset, addend| placed.relocation(&entry(kind, symbol, offset, addend));
+    assert_eq!(
+        relocated(R_X86_64_RELATIVE, 0, 0x2800, 0x1000),
+        Ok(Some((bias + 0x2800, bias + 0x1000)))
+    );
+    assert_eq!(
+        relocated(R_X86_64_RELATIVE, 0, 0x3010, 0x3018),
+        Ok(Some((bias + 0x3010, bias + 0x3018)))
+    );
+    assert_eq!(relocated(R_X86_64_NONE, 0, 0x1000, 0), Ok(None));
+    // What `refuses_what_only_a_dynamic_linker_does` has loading refuse.
+    for (kind, symbol, offset) in [
+        (1, 0, 0x2800),
+        (R_X86_64_RELATIVE, 0, 0x1000),
+        (R_X86_64_RELATIVE, 0, 0x4ffc),
+        (R_X86_64_RELATIVE, 0, 0x9000),
+        (R_X86_64_RELATIVE, 1, 0x2800),
+    ] {
+        let refused = relocated(kind, symbol, offset, 0);
+        assert_eq!(refused, Err(ElfError::Relocation), "{kind} {symbol} {offset:#x}");
+    }
+    assert_eq!(placed.relocation(&[0; 16]), Err(ElfError::Malformed));
+}
+
 /// A dynamically linked program as `exec` sees one: its program headers
 /// in its first page, an interpreter's path, thread-local storage and a
 /// dynamic table, with only its first 0x400 bytes read.

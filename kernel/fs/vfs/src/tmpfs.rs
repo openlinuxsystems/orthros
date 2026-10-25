@@ -403,10 +403,10 @@ impl Node for TmpNode {
     }
 
     // A socket's name is connected through, never opened (ENXIO).
-    fn open(&self, this: &NodeRef) -> Result<NodeRef> {
+    fn open(&self) -> Result<Option<NodeRef>> {
         match self.body {
             Body::Socket { .. } => Err(Error::NoDevice),
-            _ => Ok(this.clone()),
+            _ => Ok(None),
         }
     }
 

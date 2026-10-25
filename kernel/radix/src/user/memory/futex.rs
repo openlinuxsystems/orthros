@@ -11,9 +11,15 @@
 //! so a `futex_wake` that comes after the word changed (it takes the same
 //! lock) always finds the waiter: no wake-up is lost between the check and
 //! the sleep. A woken waiter is taken off the list by its waker and told
-//! so through its own flag; one that stops waiting for another reason (a
-//! timeout, a signal) takes itself off, unless a waker did first, which
-//! then counts as its wake-up.
+//! so through its own flag, both with the list locked; the waker wakes
+//! its thread once the list is unlocked, so that the thread, which may
+//! run at once on the waker's CPU, does not find the list still locked.
+//! One that stops waiting for another reason (a timeout, a signal) takes
+//! itself off, unless a waker did first, which then counts as its
+//! wake-up. A waiter without a deadline sleeps on its own, outside the
+//! scheduler's wait table, as nothing but its waker, a signal or a stop
+//! wakes it ([`sched::wake`]). The TLA+ model `kernel/radix/tla/Futex.tla`
+//! checks that no wake-up is lost this way.
 //!
 //! Words of memory several processes share (`MAP_SHARED`) are named by
 //! each one's own space, so one process's wake does not reach another's
@@ -37,6 +43,10 @@ use crate::user::{Result, UserRef, error};
 /// How many lists waiters are spread over.
 const BUCKETS: usize = 64;
 
+/// How many waiters a wake takes off their list at a time, before it
+/// wakes them with the list unlocked.
+const WAKE_BATCH: usize = 8;
+
 /// A thread waiting on a word.
 struct Waiter {
     /// The address space, by address.
@@ -57,7 +67,8 @@ fn list(space: usize, address: u64) -> &'static Mutex<Option<Vec<Waiter, Kmalloc
     &LISTS[(hash >> 58) as usize % BUCKETS]
 }
 
-/// What a waiter waits on: its own flag.
+/// What a waiter with a deadline waits on in the scheduler's table: its
+/// own flag.
 fn key_of(user: &UserRef) -> usize {
     &raw const user.futex_woken as usize
 }
@@ -99,7 +110,11 @@ pub fn wait(
     let done = || user.futex_woken.load(Ordering::Acquire) || sched::interrupted();
     let in_time = match deadline_ns {
         None => {
-            wait::wait_until(key_of(user), "futex", done);
+            // A wake that comes before the thread sleeps makes the sleep
+            // return at once.
+            while !done() {
+                sched::block("futex");
+            }
             true
         }
         Some(deadline) => wait::wait_until_or_timeout(key_of(user), "futex", deadline, done),
@@ -133,20 +148,34 @@ pub fn wake(space: &SpaceObject, address: u64, count: u32) -> Result<u32> {
         return Err(Kernel::InvalidArgument.status(0));
     }
     let key = core::ptr::from_ref::<SpaceObject>(space) as usize;
+    let bucket = list(key, address);
     let mut woken = 0;
-    let mut waiters = list(key, address).lock();
-    let Some(waiters) = waiters.as_mut() else { return Ok(0) };
-    let mut index = 0;
-    while index < waiters.len() && woken < count {
-        let waiter = &waiters[index];
-        if waiter.space != key || waiter.address != address {
-            index += 1;
-            continue;
+    loop {
+        let mut batch: [Option<ThreadRef>; WAKE_BATCH] = [const { None }; WAKE_BATCH];
+        let mut taken = 0;
+        let more = {
+            let mut waiters = bucket.lock();
+            let Some(waiters) = waiters.as_mut() else { return Ok(0) };
+            let mut index = 0;
+            while index < waiters.len() && woken < count && taken < WAKE_BATCH {
+                let waiter = &waiters[index];
+                if waiter.space != key || waiter.address != address {
+                    index += 1;
+                    continue;
+                }
+                let waiter = waiters.remove(index);
+                waiter.user.futex_woken.store(true, Ordering::Release);
+                batch[taken] = Some(waiter.thread);
+                taken += 1;
+                woken += 1;
+            }
+            taken == WAKE_BATCH && woken < count
+        };
+        for thread in batch.iter().flatten() {
+            sched::wake(thread);
         }
-        let waiter = waiters.remove(index);
-        waiter.user.futex_woken.store(true, Ordering::Release);
-        wait::wake_all(key_of(&waiter.user));
-        woken += 1;
+        if !more {
+            return Ok(woken);
+        }
     }
-    Ok(woken)
 }

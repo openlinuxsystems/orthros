@@ -16,6 +16,12 @@
 //! loaded while a context that holds it runs. It also points this CPU's
 //! system call and interrupt stack at the incoming context's kernel stack.
 //!
+//! The area of a context that goes is kept, zeroed and still mapped, for
+//! the next new context of its size, up to [`SPARE_MOST`] of them, as Linux
+//! keeps a couple of stacks per CPU: mapping an area takes a frame a page
+//! and the mapping window's lock, and unmapping one flushes its pages from
+//! every CPU's TLB, which interrupts each of them.
+//!
 //! The switch saves the callee-saved registers on the outgoing stack,
 //! stores the stack pointer in the outgoing block, clears its `on_cpu`
 //! word, then waits until it can set the incoming block's `on_cpu` word
@@ -30,7 +36,7 @@
 use core::ops::Range;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use radix_sync::Once;
+use radix_sync::{Once, SpinLock};
 
 use crate::cpu::{self, msr};
 use crate::fpu;
@@ -50,6 +56,34 @@ const FULL_RETURN: usize = 24;
 const FULL_RCX: usize = 32;
 const FULL_R11: usize = 40;
 const AREA: usize = 64;
+
+/// Most areas of gone contexts kept for new ones.
+pub const SPARE_MOST: usize = 8;
+
+/// The kept areas: where each starts and its pages, or none.
+static SPARES: SpinLock<[Option<(usize, usize)>; SPARE_MOST]> = SpinLock::new([None; SPARE_MOST]);
+
+/// A kept area of `pages` pages, if there is one.
+fn take_spare(pages: usize) -> Option<usize> {
+    let mut spares = SPARES.lock();
+    let spare = spares.iter_mut().find(|spare| spare.is_some_and(|(_, p)| p == pages))?;
+    spare.take().map(|(area, _)| area)
+}
+
+/// Keeps the area of `pages` pages at `area`, which no context uses any
+/// more, zeroing it first; false if there is no room for it.
+fn keep_spare(area: usize, pages: usize) -> bool {
+    if SPARES.lock().iter().all(Option::is_some) {
+        return false;
+    }
+    // SAFETY: the area is mapped and writable (`map_area`), and its
+    // context, the only user, is being dropped and not on any CPU.
+    unsafe { core::ptr::write_bytes(area as *mut u8, 0, pages * PAGE as usize) };
+    let mut spares = SPARES.lock();
+    let Some(free) = spares.iter_mut().find(|spare| spare.is_none()) else { return false };
+    *free = Some((area, pages));
+    true
+}
 
 /// How a thread last came into the kernel from user mode, which says
 /// where on its kernel stack its user registers are.
@@ -237,12 +271,16 @@ impl Context {
     /// A context that runs `entry(arg)` on a new stack of `pages` pages.
     pub fn new(entry: fn(usize) -> !, arg: usize, pages: usize) -> Option<Context> {
         let pages = pages.max(1);
-        let area = paging::map_area(pages + 1).ok()?;
+        let area = match take_spare(pages + 1) {
+            Some(area) => area,
+            None => paging::map_area(pages + 1).ok()?,
+        };
         let stack = area..area + pages * PAGE as usize;
         let block = stack.end;
-        // SAFETY: the area was just mapped, zeroed and writable, and
-        // nothing else knows of it: the block is its last page, and the
-        // initial frame is the top 72 bytes of the stack below it.
+        // SAFETY: the area was just mapped (or kept, zeroed, by a context
+        // that went), zeroed and writable, and nothing else knows of it:
+        // the block is its last page, and the initial frame is the top 72
+        // bytes of the stack below it.
         unsafe {
             fpu::init_area(block + AREA);
             // The frame the switch pops: r15, r14 (block), r13 (argument),
@@ -381,6 +419,11 @@ impl Drop for Context {
             );
             return;
         }
-        paging::unmap_area(self.mapping.0, self.mapping.1);
+        let (area, pages) = self.mapping;
+        // A block alone is a CPU's first context (`adopt_current`).
+        if pages > 1 && keep_spare(area, pages) {
+            return;
+        }
+        paging::unmap_area(area, pages);
     }
 }

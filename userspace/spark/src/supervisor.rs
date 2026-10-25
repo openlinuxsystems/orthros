@@ -57,9 +57,11 @@ pub const SERVICES_DIR: &str = "system/etc/spark/services";
 const CONTROL_DIR: &str = "run/spark";
 const CONTROL: &str = "run/spark/control";
 
-/// The slots a POSIX program's capability space starts with: room for
-/// 960 file descriptors, and it can grow.
-pub const POSIX_SLOTS: u32 = 1024;
+/// The slots a POSIX program's capability space starts with: room for 64
+/// file descriptors, as Linux's first table of them has. The C library
+/// grows the space as more are opened, so a program pays for the room it
+/// uses, and a fork copies no more.
+pub const POSIX_SLOTS: u32 = 128;
 
 /// The environment a POSIX program starts with: text is UTF-8 (the
 /// C.UTF-8 locale, radix-posix(7)), and nano is the editor programs

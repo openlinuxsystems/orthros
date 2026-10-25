@@ -311,8 +311,11 @@ pub struct Found {
     /// The capability.
     pub cap: Capability,
     /// The object it designates, if the caller wanted it and the registry
-    /// holds it.
+    /// holds it, unless `held`.
     pub object: Option<Object>,
+    /// Whether the capability designates the process the caller said it
+    /// holds ([`find_holding`]), which `object` then leaves out.
+    pub held: bool,
 }
 
 /// The capability in slot `slot` of `cspace`, and the object it
@@ -338,6 +341,28 @@ pub fn find(
     wanted: impl Fn(ObjectKind) -> bool,
     place: &mut Option<Found>,
 ) -> Result<&mut Found> {
+    find_holding(cspace, slot, wanted, None, place)
+}
+
+/// As [`find`], for a caller that holds a reference to `process`: if this
+/// CPU's cache finds the capability designating it, the lookup takes no
+/// second reference (two atomic read-modify-writes on a line every
+/// thread of the process shares) but says it is the one held, in
+/// [`Found::held`]. A POSIX program's system calls are methods of its own
+/// process.
+///
+/// That is sound because the reference keeps the process's memory where it
+/// is: the cache's weak reference to the same address is to the same
+/// object, which the capability designated at the version the store has
+/// now.
+#[inline(always)]
+pub fn find_holding<'a>(
+    cspace: SpaceId,
+    slot: u32,
+    wanted: impl Fn(ObjectKind) -> bool,
+    process: Option<&ProcessRef>,
+    place: &'a mut Option<Found>,
+) -> Result<&'a mut Found> {
     let at = SlotRef::new(cspace, slot);
     let now = caps::version();
     let index = cache_index(at);
@@ -348,6 +373,12 @@ pub fn find(
             break 'cached;
         }
         let object = match &entry.object {
+            Some(Kept::Process(kept))
+                if process.is_some_and(|held| core::ptr::eq(kept.as_ptr(), Arc::as_ptr(held)))
+                    && wanted(entry.cap.kind()) =>
+            {
+                return Ok(place.insert(Found { cap: entry.cap, object: None, held: true }));
+            }
             Some(kept) if wanted(entry.cap.kind()) => match kept.upgrade() {
                 Some(object) => Some(object),
                 // Gone, so the version is about to move: ask the store.
@@ -355,7 +386,7 @@ pub fn find(
             },
             _ => None,
         };
-        return Ok(place.insert(Found { cap: entry.cap, object }));
+        return Ok(place.insert(Found { cap: entry.cap, object, held: false }));
     }
     let found = place.insert(fill(at, index)?);
     if !wanted(found.cap.kind()) {
@@ -376,7 +407,7 @@ fn fill(at: SlotRef, index: usize) -> Result<Found> {
     // be the last reference to an object's memory.
     let before = CACHE.with_own(|cache| cache[index].replace(kept));
     drop(before);
-    Ok(Found { cap, object })
+    Ok(Found { cap, object, held: false })
 }
 
 /// The capability in slot `slot` of `cspace`, if it may be used on a
@@ -460,13 +491,6 @@ typed_lookup!(
     Thread,
     Thread,
     ThreadRef
-);
-typed_lookup!(
-    /// The process a capability designates.
-    process,
-    Process,
-    Process,
-    ProcessRef
 );
 typed_lookup!(
     /// The file a capability designates.

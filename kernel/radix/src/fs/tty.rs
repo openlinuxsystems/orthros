@@ -51,6 +51,7 @@ use radix_vfs::{In, KArc, Kind, Node, NodeRef, Out, Stat, mem, next_id};
 use crate::Arch;
 use crate::sched::{self, wait};
 use crate::user::UserThread;
+use crate::user::posix::poll::Polled;
 use crate::user::posix::signal::{Restart, interrupted};
 use crate::user::posix::{self, poll};
 use crate::user::process::ProcessRef;
@@ -96,6 +97,8 @@ pub struct Tty {
     /// process group.
     session: AtomicU64,
     foreground: AtomicU64,
+    /// Its pollers, on either side.
+    polled: Polled,
 }
 
 /// A terminal's state.
@@ -138,10 +141,10 @@ impl Tty {
         core::ptr::from_ref::<Tty>(self) as usize
     }
 
-    /// Something changed: the waits look again, and so does `poll`.
+    /// Something changed: the waits look again, and so do its pollers.
     fn changed(&self) {
         wait::wake_all(self.key());
-        poll::changed();
+        self.polled.changed();
     }
 
     /// Updates the atomics the waits read, with the state locked.
@@ -723,6 +726,12 @@ impl Handle {
         &self.tty
     }
 
+    /// What its pollers count themselves in: the terminal's, for either
+    /// side.
+    pub fn polled(&self) -> &Polled {
+        &self.tty.polled
+    }
+
     /// Reads, as `user`'s thread.
     pub fn read(
         &self,
@@ -842,11 +851,11 @@ impl Node for Entry {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         if self.tty.state.lock().locked || self.tty.masters.load(Ordering::Acquire) == 0 {
             return Err(radix_vfs::Error::Io);
         }
-        open_side(&self.tty, false)
+        open_side(&self.tty, false).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -866,11 +875,11 @@ impl Node for Ptmx {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         let tty = make()?;
         // Without its master, nothing would ever take the terminal's
         // `/dev/pts/N` away, and its number with it.
-        open_side(&tty, true).inspect_err(|_| remove_entry(&tty))
+        open_side(&tty, true).inspect_err(|_| remove_entry(&tty)).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -890,11 +899,11 @@ impl Node for Current {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         let thread = sched::current().ok_or(radix_vfs::Error::NoDevice)?;
         let user = thread.user().ok_or(radix_vfs::Error::NoDevice)?;
         let tty = controlling(&user.process).ok_or(radix_vfs::Error::NoDevice)?;
-        open_side(&tty, false)
+        open_side(&tty, false).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -947,6 +956,7 @@ fn make() -> radix_vfs::Result<TtyRef> {
         opened: AtomicBool::new(false),
         session: AtomicU64::new(0),
         foreground: AtomicU64::new(0),
+        polled: Polled::new(),
     })?;
     list[number] = KArc::downgrade(&tty);
     drop(ptys);

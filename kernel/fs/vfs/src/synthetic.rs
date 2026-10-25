@@ -63,7 +63,7 @@ impl Node for Generated {
         }
     }
 
-    fn open(&self, _this: &NodeRef) -> Result<NodeRef> {
+    fn open(&self) -> Result<Option<NodeRef>> {
         let mut text = Text::new();
         let written = (self.generate)(&mut text);
         if text.failed() {
@@ -71,7 +71,7 @@ impl Node for Generated {
         }
         written.map_err(|_| Error::Io)?;
         let bytes = text.finish()?;
-        Ok(mem::arc(Snapshot { id: self.id, bytes, taken: crate::now() })?)
+        Ok(Some(mem::arc(Snapshot { id: self.id, bytes, taken: crate::now() })?))
     }
 
     fn read(&self, offset: u64, out: &mut dyn Out) -> Result<usize> {

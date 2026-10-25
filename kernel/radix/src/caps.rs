@@ -79,7 +79,13 @@ pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, CapError> {
     // from now on: the version moves before the lock goes, so that whoever
     // sees the change through the store sees the new version too.
     let stale = store.as_mut().is_some_and(Store::take_stale);
-    if stale | STALE.swap(false, Ordering::Relaxed) {
+    // The mark is set and cleared only with the lock held, so a load and
+    // a store do (a swap would be a locked instruction on every change).
+    let marked = STALE.load(Ordering::Relaxed);
+    if marked {
+        STALE.store(false, Ordering::Relaxed);
+    }
+    if stale | marked {
         VERSION.fetch_add(1, Ordering::Release);
     }
     drop(store);

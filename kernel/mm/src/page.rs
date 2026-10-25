@@ -11,9 +11,10 @@
 //! frame.
 //!
 //! The fields are atomics, but each record has one owner at a time: the
-//! zone's lock while the frame is free, and whoever allocated it after
-//! that. Relaxed loads and stores are plain moves on x86-64, and atomics let
-//! two locks share the array without `unsafe`.
+//! zone's lock while the frame is free, a CPU's cache while that holds it,
+//! and whoever allocated it after that. Relaxed loads and stores are plain
+//! moves on x86-64, and atomics let two locks share the array without
+//! `unsafe`.
 
 #![forbid(unsafe_code)]
 
@@ -40,6 +41,9 @@ pub enum State {
     Allocated = 2,
     /// Any later frame of a free or allocated block.
     Tail = 3,
+    /// A free frame that a CPU's cache holds: allocated, as far as its
+    /// zone knows ([`crate::Frames`]).
+    Cached = 4,
 }
 
 impl State {
@@ -48,6 +52,7 @@ impl State {
             1 => State::Free,
             2 => State::Allocated,
             3 => State::Tail,
+            4 => State::Cached,
             _ => State::Reserved,
         }
     }
@@ -121,7 +126,8 @@ impl Owner {
 /// `word` packs the state (bits 0-7), the block order (8-15), the owner
 /// (16-23) and an owner-defined byte (24-31: a slab's size class). `next`
 /// and `prev` link the frame into a free list, or a slab into its cache's
-/// list of partly used slabs; `aux` is owner-defined.
+/// list of partly used slabs, and hold a page table's lines in use
+/// ([`PageInfo::table_lines`]); `aux` is owner-defined.
 #[derive(Debug, Default)]
 #[repr(C)]
 pub struct PageInfo {
@@ -171,6 +177,19 @@ impl PageInfo {
         self.word.store(word, Relaxed);
     }
 
+    /// Marks the frame cached if it is a block of one frame allocated to
+    /// `owner`, and says whether it was. One atomic change: of two frees of
+    /// a frame at once, only one gets it.
+    pub(crate) fn cache(&self, owner: Owner) -> bool {
+        let word = self.word.load(Relaxed);
+        let allocated = State::Allocated as u32 | u32::from(owner as u8) << 16;
+        word & 0x00ff_ffff == allocated
+            && self
+                .word
+                .compare_exchange(word, (word & !0xff) | State::Cached as u32, Relaxed, Relaxed)
+                .is_ok()
+    }
+
     pub(crate) fn set_state(&self, state: State) {
         let word = self.word.load(Relaxed);
         self.word.store((word & !0xff) | state as u32, Relaxed);
@@ -190,6 +209,32 @@ impl PageInfo {
 
     pub(crate) fn set_prev(&self, pfn: u32) {
         self.prev.store(pfn, Relaxed);
+    }
+
+    /// For a frame allocated as a page table, which of its 64 lines of 8
+    /// entries may hold an entry, a bit each: the architecture's walks of
+    /// the table skip the others. `next` and `prev` hold it while the frame
+    /// is allocated; only whoever holds the table's lock takes lines out.
+    pub fn table_lines(&self) -> u64 {
+        u64::from(self.next.load(Relaxed)) | u64::from(self.prev.load(Relaxed)) << 32
+    }
+
+    /// Sets the lines [`PageInfo::table_lines`] gives.
+    pub fn set_table_lines(&self, lines: u64) {
+        self.next.store(lines as u32, Relaxed);
+        self.prev.store((lines >> 32) as u32, Relaxed);
+    }
+
+    /// Adds `lines` to those [`PageInfo::table_lines`] gives, atomically:
+    /// the kernel's own tables gain entries under more than one lock.
+    pub fn add_table_lines(&self, lines: u64) {
+        for (half, bits) in [(&self.next, lines as u32), (&self.prev, (lines >> 32) as u32)] {
+            // Most entries go to a line that holds some already, which
+            // needs no locked instruction.
+            if half.load(Relaxed) & bits != bits {
+                half.fetch_or(bits, Relaxed);
+            }
+        }
     }
 
     pub(crate) fn aux(&self) -> u32 {
@@ -270,6 +315,30 @@ mod tests {
         info.set_state(State::Tail);
         assert_eq!((info.state(), info.order(), info.owner()), (State::Tail, 9, Owner::Slab));
         assert_eq!(core::mem::size_of::<PageInfo>(), 16);
+    }
+
+    #[test]
+    fn only_a_single_allocated_frame_of_its_owner_is_cached() {
+        let info = PageInfo::new();
+        info.set(State::Allocated, 1, Owner::Anon, 0);
+        assert!(!info.cache(Owner::Anon), "a block of two frames");
+        info.set(State::Allocated, 0, Owner::Anon, 7);
+        assert!(!info.cache(Owner::Kernel), "another owner's frame");
+        assert!(info.cache(Owner::Anon));
+        assert_eq!((info.state(), info.owner(), info.tag()), (State::Cached, Owner::Anon, 7));
+        assert!(!info.cache(Owner::Anon), "a second free");
+    }
+
+    #[test]
+    fn a_page_tables_lines_fill_both_links() {
+        let info = PageInfo::new();
+        info.set_table_lines(1 << 3 | 1 << 40);
+        info.add_table_lines(1 << 63 | 1 << 3);
+        assert_eq!(info.table_lines(), 1 << 3 | 1 << 40 | 1 << 63);
+        info.add_table_lines(0);
+        assert_eq!(info.table_lines(), 1 << 3 | 1 << 40 | 1 << 63);
+        info.set_table_lines(0);
+        assert_eq!((info.table_lines(), info.next(), info.prev()), (0, 0, 0));
     }
 
     #[test]

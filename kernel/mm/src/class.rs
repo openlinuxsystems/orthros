@@ -27,12 +27,24 @@ pub const CLASSES: usize = 32;
 pub const MAX_SMALL: usize = 8192;
 /// Largest slab order.
 pub const MAX_SLAB_ORDER: u32 = 3;
+/// The alignment every class's objects have, at least.
+const MIN_ALIGN: usize = 16;
 
 /// The object size of each class, in bytes.
 pub const SIZES: [u16; CLASSES] = [
     16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
     1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
 ];
+
+// Every class's objects are aligned to [`MIN_ALIGN`] at least, which
+// `Class::for_layout` counts on.
+const _: () = {
+    let mut class = 0;
+    while class < CLASSES {
+        assert!((SIZES[class] as usize).is_multiple_of(MIN_ALIGN));
+        class += 1;
+    }
+};
 
 /// For each multiple of 16 bytes up to [`MAX_SMALL`], the smallest class
 /// that holds it.
@@ -106,6 +118,10 @@ impl Class {
             return None;
         }
         let mut class = usize::from(BY_SIZE[size.div_ceil(16)]);
+        // Every size is a multiple of 16, so most requests need no search.
+        if align <= MIN_ALIGN {
+            return Some(Class(class as u8));
+        }
         while class < CLASSES {
             if Class(class as u8).align() >= align {
                 return Some(Class(class as u8));

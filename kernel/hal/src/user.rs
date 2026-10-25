@@ -253,6 +253,11 @@ pub trait UserMode: crate::Threads {
         ) -> (PageEdit, Option<Option<UserAccess>>),
     ) -> Result<(), u64>;
 
+    /// Frees the page tables of `space` that map nothing: all of them
+    /// once every page is cleared. Their memory goes back from the CPU
+    /// that calls this, rather than from wherever the last handle goes.
+    fn free_page_tables(space: &Self::Space);
+
     /// Makes `context` run in `space` from its next switch on (it keeps a
     /// handle). A context's space is set once; returns `false`, changing
     /// nothing, if it has one already.

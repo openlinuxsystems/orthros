@@ -159,6 +159,7 @@ jobs:
             out/bench/report.md
             out/bench/results.json
             out/bench/boot-bench.log
+            out/bench/boot-posix-bench.log
             out/bench/boot-linux.log
           if-no-files-found: ignore
           retention-days: 90

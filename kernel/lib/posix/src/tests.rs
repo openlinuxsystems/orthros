@@ -390,6 +390,23 @@ fn groups_and_sessions_follow_posix() {
     tree.check().unwrap();
 }
 
+#[test]
+fn kill_of_every_process_leaves_init_out() {
+    let mut tree = T::new(Global);
+    tree.insert_root(1, 1).unwrap();
+    tree.insert_child(2, 1, 2).unwrap();
+    tree.insert_child(3, 1, 3).unwrap();
+    tree.new_session(3).unwrap();
+    let mut named = Vec::new();
+    tree.targets(2, 1, -1, &mut |m| named.push(m.pid));
+    assert_eq!(named, [3]);
+    // Process group 1 by its number: its members alone.
+    named.clear();
+    tree.targets(0, 1, 0, &mut |m| named.push(m.pid));
+    named.sort_unstable();
+    assert_eq!(named, [1, 2]);
+}
+
 /// An operation on the tree, with members picked by position.
 #[derive(Clone, Debug)]
 enum Op {

@@ -185,8 +185,11 @@ _/proc/stat_
 	to run; *disk_waiting*, the threads waiting for a disk;
 	*disk_reads*, *disk_read_sectors*, *disk_writes* and
 	*disk_written_sectors*, what the disks have done since boot, in
-	512-byte sectors; and *boot_time_ns*, when the kernel started, in
-	nanoseconds since 1970.
+	512-byte sectors; *timer_writes*, *ipis*, *halts* and *polls*, the
+	events that cost an exit to the host under a hypervisor (writes of
+	the timer hardware, interrupts sent to other CPUs, idle periods that
+	halted and idle periods a wake-up ended while the CPU polled); and
+	*boot_time_ns*, when the kernel started, in nanoseconds since 1970.
 
 _/proc/loadavg_
 	*load_1*, *load_5* and *load_15*: the load averages over 1, 5 and

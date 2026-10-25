@@ -576,6 +576,10 @@ impl UserMode for Arch {
         from.space().copy_into(to.space(), start, end, &mut decide)
     }
 
+    fn free_page_tables(space: &Self::Space) {
+        space.space().free_empty_tables();
+    }
+
     fn attach_space(context: &Self::Context, space: &Self::Space) -> bool {
         context.attach_space(space)
     }

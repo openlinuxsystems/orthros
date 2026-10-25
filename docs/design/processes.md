@@ -299,9 +299,12 @@ The claims, and why they hold:
    for good. Finishing needs the list empty.
 3. **A finished process holds nothing.** Both capability spaces are
    destroyed, which releases every capability it held and every object
-   whose last capability that was; its address space reference is
-   dropped; and every process made for it is ended. Its threads hold
-   the remaining references to the address space until each has left.
+   whose last capability that was; its address space is emptied, so
+   every page it mapped and every page table is let go before its parent
+   hears of the end, and its reference dropped; and every process made
+   for it is ended.
+   Its threads hold the remaining references to the empty address space
+   until each is reaped. `exec` empties the old space likewise.
 4. **Nothing is left behind.** Every process is reachable from its
    capabilities or from the process it was made for; when the last of
    those goes, it ends and is finished (claims 1 and 3), and when it is

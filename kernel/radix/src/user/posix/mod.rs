@@ -743,7 +743,10 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
     if sig > SIGNALS || pid == i64::MIN {
         return Err(Kernel::InvalidArgument.status(1));
     }
-    let mut targets: Vec<ProcessRef, Kmalloc> = Vec::new_in(kmalloc());
+    // The first target is kept here, the others in the heap: most kills
+    // name one process.
+    let mut first: Option<ProcessRef> = None;
+    let mut others: Vec<ProcessRef, Kmalloc> = Vec::new_in(kmalloc());
     let (count, allowed) = with_tree(|tree| -> Result<(usize, usize)> {
         join(tree, me)?;
         let tree = &*tree;
@@ -760,12 +763,16 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
             if matches!(member.life, radix_posix::tree::Life::Zombie { .. }) {
                 return;
             }
-            if targets.try_reserve(1).is_err() {
+            if first.is_none() {
+                first = Some(member.handle.clone());
+                return;
+            }
+            if others.try_reserve(1).is_err() {
                 failed = true;
                 return;
             }
             // Room was reserved above.
-            let _ = targets.push_within_capacity(member.handle.clone());
+            let _ = others.push_within_capacity(member.handle.clone());
         });
         if failed {
             return Err(error(Kernel::NoMemory));
@@ -782,7 +789,7 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
         return Ok(());
     }
     let mut full = false;
-    for target in &targets {
+    for target in first.iter().chain(&others) {
         full |= signal::send_process(target, sig, info) == signal::Sent::Full;
     }
     if full && info.code == radix_posix::signal::SI_QUEUE {

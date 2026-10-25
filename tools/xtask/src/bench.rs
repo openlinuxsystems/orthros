@@ -2,15 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! `ob bench`: the cost of system calls, IPC round trips, context
-//! switches, fresh pages, TLB shootdowns and memory bandwidth on Radix,
-//! with Linux as the baseline (docs/design/ipc.md, ADR 0035, ADR 0039).
+//! switches, fresh pages, TLB shootdowns, memory bandwidth, files and
+//! POSIX processes, pipes, signals and futexes on Radix, with Linux as the
+//! baseline (docs/design/ipc.md, ADR 0035, ADR 0039, ADR 0106).
 //!
 //! It boots a test image with `selftest=bench` on 2 CPUs, where the
 //! benchmark programs of `userspace/usertests` print one `BENCH` line per
-//! measurement. Then it measures the same operations with
-//! `tools/linux-bench` twice: as the init process of a Linux virtual
-//! machine set up exactly like Radix's (same QEMU machine, CPUs, memory
-//! and KVM), the baseline that counts, and on the host, for reference.
+//! measurement, and again with Spark running the POSIX benchmarks, a C
+//! program on the C library (`userspace/posix/bench.c`). Then it measures
+//! the same operations with `tools/linux-bench`, which runs the same C
+//! program built for Linux last, twice: as the init process of a Linux
+//! virtual machine set up exactly like Radix's (same QEMU machine, CPUs,
+//! memory and KVM), the baseline that counts, and on the host, for
+//! reference.
 //! Under KVM it measures Radix and the Linux virtual machine in turn
 //! [`RUNS`] times, and each operation counts its fastest run on each side
 //! (ADR 0046). The report goes to `out/bench/` as Markdown and JSON, and
@@ -36,6 +40,15 @@ use crate::{Args, Context, Ctx, Result, VERSION, kernel, userspace};
 
 /// The kernel command line of the benchmark boot.
 const CMDLINE: &str = "qemu-exit selftest=bench";
+
+/// The kernel command line of the POSIX benchmark boot: Spark runs the C
+/// program of [`POSIX_SOURCE`] from the boot archive, and nothing else.
+const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench";
+
+/// The POSIX benchmarks: one C program, which Radix's build makes for
+/// Radix (`userspace::build`, with the other C test programs) and
+/// [`posix_for_linux`] for Linux.
+const POSIX_SOURCE: &str = "userspace/posix/bench.c";
 
 /// The Linux virtual machine's command line: the serial console, no
 /// restart after a panic, so that QEMU exits, and none of the mitigations
@@ -93,6 +106,12 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("notification_pingpong_same_cpu", 6_200), // 5,566
     ("channel_roundtrip_same_cpu", 5_100),     // 4,587
     ("ring_roundtrip_same_cpu", 9_400),        // 8,489
+    ("posix_fork_wait", 160_000),              // 138,300
+    ("posix_fork_exec_wait", 590_000),         // 531,676
+    ("posix_pipe_mib", 2_500_000),             // 2,188,725
+    ("posix_signal", 6_800),                   // 6,118
+    ("posix_poll", 1_300),                     // 1,092
+    ("posix_futex_same_cpu", 5_300),           // 4,787
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.
@@ -119,6 +138,8 @@ const EVENTS: &[(&str, &str)] = &[
     ("ipis", "IPIs"),
     ("halts", "Halts"),
     ("polls", "Polls"),
+    ("idle_here_ns", "Idle on its CPU"),
+    ("busy_elsewhere_ns", "Busy elsewhere"),
 ];
 
 /// A row of the report: a Radix benchmark and the Linux one closest to it.
@@ -135,6 +156,11 @@ const fn row(
     how: &'static str,
 ) -> Row {
     Row { radix, what, linux: Some((linux, how)) }
+}
+
+/// A row of the POSIX benchmarks, which have the same name on both.
+const fn posix(name: &'static str, what: &'static str) -> Row {
+    Row { radix: name, what, linux: Some((name, "the same C program, on glibc")) }
 }
 
 /// The report's rows, in order.
@@ -264,6 +290,22 @@ const ROWS: &[Row] = &[
         "pipe_roundtrip_parallel",
         "pipe round trip, a pair of threads on each CPU",
     ),
+    posix("posix_fork_wait", "POSIX: process made and waited for (`fork`, `_exit`, `waitpid`)"),
+    posix("posix_fork_exec_wait", "POSIX: program run and waited for (`fork`, `execv`, `waitpid`)"),
+    posix(
+        "posix_pipe_mib",
+        "POSIX: pipe throughput, per MiB (64 KiB writes, two processes, one CPU)",
+    ),
+    posix("posix_signal", "POSIX: signal sent to itself and handled (`kill`, handler, return)"),
+    posix("posix_poll", "POSIX: `poll` on a pipe with data to read"),
+    posix(
+        "posix_futex_same_cpu",
+        "POSIX: futex wake and wait each way (semaphores), two threads, one CPU",
+    ),
+    posix(
+        "posix_futex_cross_cpu",
+        "POSIX: futex wake and wait each way (semaphores), two threads, two CPUs",
+    ),
 ];
 
 /// `ob bench`.
@@ -306,9 +348,10 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         );
     }
     let runs = if kvm { runs } else { 1 };
-    let vm_kernel = if linux {
+    let posix_linux = if linux { Some(posix_for_linux(ctx, &dir)?) } else { None };
+    let vm_kernel = if let Some(posix) = &posix_linux {
         match linux_kernel(given_kernel)? {
-            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir)?)),
+            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir, posix)?)),
             Some(_) => {
                 eprintln!(
                     "    No KVM: the Linux virtual machine would measure the emulator too, so \
@@ -345,8 +388,12 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         let (mut radix, counts) = radix_numbers(ctx, &dir, &image, Accel::of(kvm))?;
         per_switch(&mut radix, &counts);
         keep_best(&mut numbers.radix, radix);
+        step(&format!("Booting Radix with the POSIX benchmarks on 2 CPUs{of}"));
+        let (posix, posix_counts) = radix_posix_numbers(ctx, &dir, &image, Accel::of(kvm))?;
+        keep_best(&mut numbers.radix, posix);
         if numbers.counts.is_empty() {
             numbers.counts = counts;
+            numbers.counts.extend(posix_counts);
         }
         if let Some((kernel, initrd)) = &vm_kernel {
             step(&format!(
@@ -357,8 +404,8 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
             keep_best(&mut numbers.linux_vm, linux_vm_numbers(ctx, &dir, kernel, initrd)?);
         }
     }
-    if linux {
-        numbers.linux_host = linux_numbers(ctx)?;
+    if let Some(posix) = &posix_linux {
+        numbers.linux_host = linux_numbers(ctx, posix)?;
     }
 
     let report = report(ctx, &numbers, kvm);
@@ -407,6 +454,8 @@ fn count_instructions(
     step("Booting Radix with selftest=bench on 2 CPUs, counting instructions (minutes)");
     let (mut radix, counts) = radix_numbers(ctx, dir, image, Accel::Count)?;
     per_switch(&mut radix, &counts);
+    step("Booting Radix with the POSIX benchmarks on 2 CPUs, counting instructions (minutes)");
+    radix.extend(radix_posix_numbers(ctx, dir, image, Accel::Count)?.0);
     let report = budget_report(&radix);
     let markdown = dir.join("instructions.md");
     std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
@@ -569,9 +618,31 @@ fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
     Ok(std::fs::File::open(&own).is_ok().then_some(own))
 }
 
+/// Builds the POSIX benchmarks for Linux, static, with this machine's C
+/// library and the Clang that builds them for Radix (or else its C
+/// compiler), at the same optimisation, and returns the program.
+fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
+    step("Building the POSIX benchmarks for Linux as a static program");
+    let compiler = crate::ports::find_clang()
+        .map(|(clang, _)| clang)
+        .or_else(|| process::find_program("cc"))
+        .ok_or_else(|| {
+            crate::Error::new("no C compiler is installed, for the POSIX benchmarks on Linux")
+                .hint("run `./ob doctor`")
+        })?;
+    let program = dir.join("posix-bench");
+    let mut cmd = std::process::Command::new(compiler);
+    cmd.args(["-std=c11", "-D_GNU_SOURCE", "-O2", "-Wall", "-static", "-pthread", "-o"])
+        .arg(&program)
+        .arg(ctx.root.join(POSIX_SOURCE));
+    process::run(ctx, &mut cmd)?;
+    Ok(program)
+}
+
 /// Builds `linux-bench` as a static program and writes the initramfs
-/// that makes it the Linux virtual machine's init process.
-fn linux_init(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
+/// that makes it the Linux virtual machine's init process, with the
+/// POSIX benchmarks at `posix` beside it.
+fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
     let target = ctx.target.join("linux-guest");
     let mut cmd = process::cargo(ctx);
@@ -582,8 +653,9 @@ fn linux_init(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
     process::run(ctx, &mut cmd)?;
     let program = target.join("x86_64-unknown-linux-gnu/release/linux-bench");
     let init = std::fs::read(&program).context(|| format!("reading {}", program.display()))?;
+    let posix = std::fs::read(posix).context(|| format!("reading {}", posix.display()))?;
     let initrd = dir.join("linux-bench.cpio");
-    std::fs::write(&initrd, initramfs(&init))
+    std::fs::write(&initrd, initramfs(&init, &posix))
         .context(|| format!("writing {}", initrd.display()))?;
     Ok(initrd)
 }
@@ -633,12 +705,14 @@ fn linux_vm_numbers(
 }
 
 /// An initramfs (a cpio archive in the "newc" format Linux reads) that
-/// holds `init` and the console device it writes to.
-pub fn initramfs(init: &[u8]) -> Vec<u8> {
+/// holds `init`, the console device it writes to, and the POSIX
+/// benchmarks it runs, `posix`, at `/posix-bench`.
+pub fn initramfs(init: &[u8], posix: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     newc_entry(&mut out, 1, "dev", 0o040_755, (0, 0), &[]);
     newc_entry(&mut out, 2, "dev/console", 0o020_600, (5, 1), &[]);
     newc_entry(&mut out, 3, "init", 0o100_755, (0, 0), init);
+    newc_entry(&mut out, 4, "posix-bench", 0o100_755, (0, 0), posix);
     newc_entry(&mut out, 0, "TRAILER!!!", 0, (0, 0), &[]);
     out
 }
@@ -703,6 +777,14 @@ impl Accel {
     fn of(kvm: bool) -> Accel {
         if kvm { Accel::Kvm } else { Accel::Tcg }
     }
+
+    /// What QEMU is given for it, beyond the machine.
+    fn extra(self) -> Vec<String> {
+        match self {
+            Accel::Count => vec!["-icount".into(), ICOUNT.into()],
+            Accel::Kvm | Accel::Tcg => Vec::new(),
+        }
+    }
 }
 
 /// Boots the benchmark image and reads its `BENCH` and `BENCHCOUNT`
@@ -730,10 +812,7 @@ fn radix_numbers(
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: match accel {
-            Accel::Count => vec!["-icount".into(), ICOUNT.into()],
-            Accel::Kvm | Accel::Tcg => Vec::new(),
-        },
+        extra: accel.extra(),
         direct: None,
     };
     let mut vm = Vm::start(ctx, &machine, dir, "bench", TIMEOUT).map_err(crate::Error::new)?;
@@ -757,11 +836,58 @@ fn radix_numbers(
     Ok((parse(&log), parse_counts(&log)))
 }
 
-/// Builds and runs the Linux baseline on the host.
-fn linux_numbers(ctx: &Ctx) -> Result<Vec<Measurement>> {
+/// Boots the test image `base` with Spark running the POSIX benchmarks
+/// and reads their `BENCH` and `BENCHCOUNT` lines, which Spark copies from
+/// the program's terminal to the kernel log.
+fn radix_posix_numbers(
+    ctx: &Ctx,
+    dir: &Path,
+    base: &[u8],
+    accel: Accel,
+) -> Result<(Vec<Measurement>, Vec<Counts>)> {
+    let image = dir.join("posix-bench.img");
+    let bytes = test::with_cmdline(base, POSIX_CMDLINE).map_err(crate::Error::new)?;
+    std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
+    let machine = Machine {
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        ovmf: None,
+        image: image.clone(),
+        memory: VM_MEMORY.into(),
+        cpus: VM_CPUS,
+        kvm: accel == Accel::Kvm,
+        cpu_model: None,
+        serial: Serial::Pipe,
+        display: false,
+        reboot: false,
+        gdb: false,
+        qmp: None,
+        extra: accel.extra(),
+        direct: None,
+    };
+    let mut vm =
+        Vm::start(ctx, &machine, dir, "posix-bench", TIMEOUT).map_err(crate::Error::new)?;
+    let outcome = vm.expect("posix-bench: done");
+    let log = vm.log();
+    drop(vm);
+    let _ = std::fs::remove_file(&image);
+    if let Err(reason) = outcome {
+        show_trouble(&log);
+        crate::bail!(
+            "the POSIX benchmark boot failed: {reason}; serial log: {}",
+            ctx.display(&dir.join("boot-posix-bench.log"))
+        );
+    }
+    Ok((parse(&log), parse_counts(&log)))
+}
+
+/// Builds and runs the Linux baseline on the host, with the POSIX
+/// benchmarks at `posix`.
+fn linux_numbers(ctx: &Ctx, posix: &Path) -> Result<Vec<Measurement>> {
     step("Measuring the same operations on this machine's own Linux, for reference");
     let mut cmd = process::cargo(ctx);
-    cmd.args(["run", "--quiet", "--release", "-p", "linux-bench", "--"]);
+    cmd.args(["run", "--quiet", "--release", "-p", "linux-bench", "--", "--posix-bench"])
+        .arg(posix);
     let output = process::output(ctx, &mut cmd)?;
     Ok(parse(&String::from_utf8_lossy(&output.stdout)))
 }
@@ -933,6 +1059,9 @@ fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
         for (name, _) in EVENTS {
             let value = group.events.iter().find(|(event, _)| event == name).map(|(_, v)| *v);
             match value {
+                Some(value) if name.ends_with("_ns") => {
+                    let _ = write!(out, " {} |", show(value as f64 / group.rounds as f64));
+                }
                 Some(value) => {
                     let _ = write!(out, " {:.2} |", value as f64 / group.rounds as f64);
                 }
@@ -945,7 +1074,9 @@ fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
         out,
         "\nCounted over all CPUs while each benchmark ran{}, including starting and stopping \
          its programs, and divided by its rounds. A round trip on one CPU needs two switches; \
-         anything else is overhead.",
+         anything else is overhead. For the POSIX benchmarks, idle on its CPU is how long the \
+         CPU they run on sat idle, waiting, and busy elsewhere how long the other CPUs \
+         worked meanwhile.",
         if first_of_several { " in the first run" } else { "" }
     );
 }
@@ -1049,6 +1180,7 @@ mod tests {
         let programs = [
             include_str!("../../../userspace/usertests/src/bench.rs"),
             include_str!("../../../userspace/usertests/src/pairs.rs"),
+            include_str!("../../../userspace/posix/bench.c"),
         ];
         for row in ROWS {
             assert!(prints(&programs, row.radix), "{}", row.radix);
@@ -1057,7 +1189,10 @@ mod tests {
 
     #[test]
     fn linux_rows_name_what_linux_bench_prints() {
-        let program = [include_str!("../../linux-bench/src/main.rs")];
+        let program = [
+            include_str!("../../linux-bench/src/main.rs"),
+            include_str!("../../../userspace/posix/bench.c"),
+        ];
         for row in ROWS {
             let (name, _) = row.linux.expect("every row has a Linux equivalent");
             assert!(prints(&program, name), "{name}");
@@ -1068,7 +1203,12 @@ mod tests {
     /// whole, or as a name its place on the CPUs is added to.
     fn prints(programs: &[&str], name: &str) -> bool {
         let base = name.trim_end_matches("_same_cpu").trim_end_matches("_cross_cpu");
-        let forms = [format!("\"{base}\""), format!("name={base} "), format!("{base}_{{place}}")];
+        let forms = [
+            format!("\"{name}\""),
+            format!("\"{base}\""),
+            format!("name={base} "),
+            format!("{base}_{{place}}"),
+        ];
         programs.iter().any(|source| forms.iter().any(|form| source.contains(form.as_str())))
     }
 
@@ -1139,11 +1279,11 @@ mod tests {
 
     #[test]
     fn initramfs_is_newc() {
-        let archive = initramfs(b"\x7fELF");
+        let archive = initramfs(b"\x7fELF", b"\x7fELF");
         assert!(archive.starts_with(b"070701"));
         assert_eq!(archive.len() % 4, 0);
         let text = String::from_utf8_lossy(&archive);
-        for name in ["dev\0", "dev/console\0", "init\0", "TRAILER!!!\0"] {
+        for name in ["dev\0", "dev/console\0", "init\0", "posix-bench\0", "TRAILER!!!\0"] {
             assert!(text.contains(name), "{name}");
         }
         // Every header starts on a 4-byte boundary: the next magic number

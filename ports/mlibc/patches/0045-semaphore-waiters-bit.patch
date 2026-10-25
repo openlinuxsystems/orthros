@@ -1,0 +1,52 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+sem_post clears a semaphore's waiters bit when it wakes the waiters.
+The bit, set by a thread before it sleeps in sem_wait, stayed set for
+good once any thread had slept: every later sem_post made a futex wake
+system call though no one waited, and sem_trywait failed with EAGAIN
+whatever the count was, as it takes the bit to mean that the count is
+taken. sem_post now gives the new count without the bit and wakes every
+waiter if the bit was set, as it already woke them all; each one that
+then finds nothing to take sets the bit again before it sleeps. A
+thread that set the bit slept while the word held the value from before
+it did, which no longer matched, so its first wait returned at once and
+took a second system call; it now sleeps while the word holds the bit.
+Meant for upstream.
+
+--- a/options/posix/generic/semaphore.cpp
++++ b/options/posix/generic/semaphore.cpp
+@@ -40,7 +40,9 @@
+ 		if (!(state & semaphoreCountMask)) {
+ 			if (__atomic_compare_exchange_n(&sem->__mlibc_count, &state, semaphoreHasWaiters,
+ 						false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+-				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count, state, nullptr);
++				// Sleeps while the word holds what was just stored there.
++				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count,
++						semaphoreHasWaiters, nullptr);
+ 				if (e == 0 || e == EAGAIN) {
+ 					continue;
+ 				} else if (e == ECANCELED) {
+@@ -94,7 +96,8 @@
+ 					return -1;
+ 				}
+ 
+-				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count, state, &timeout);
++				int e = mlibc::thread_cancellable_futex_wait((int *)&sem->__mlibc_count,
++						semaphoreHasWaiters, &timeout);
+ 
+ 				if (e == 0 || e == EAGAIN) {
+ 					continue;
+@@ -130,7 +133,11 @@
+ 			return -1;
+ 		}
+ 
+-		auto new_state = (count + 1) | (state & semaphoreHasWaiters);
++		// The waiters, if any, are all woken below, so the bit goes: each
++		// that finds nothing to take sets it again before it sleeps. A
++		// post with no one asleep then makes no system call, and a count
++		// above zero never has the bit.
++		auto new_state = count + 1;
+ 
+ 		if (__atomic_compare_exchange_n(&sem->__mlibc_count, &state, new_state, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+ 			break;

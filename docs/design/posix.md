@@ -128,12 +128,25 @@ Sending (`send_process`, `send_thread`) does what the signal does at once
 (SIGCONT continues; SIGKILL, and a default action that ends the process,
 end it), makes it pending, picks a thread that does not block it, marks
 that thread `signalled` and wakes it, so a wait it is in ends as
-interrupted. On every return to user mode, `on_return` calls `deliver`,
+interrupted. Spark, whose end stops the kernel (`ProcessObject::is_vital`),
+takes only the signals it has a handler for, as Linux's init
+(`SIGNAL_UNKILLABLE`): the others, SIGKILL and SIGSTOP included, are
+dropped as they are sent, or as they are taken if they were sent while
+blocked. Before this, a reply Spark wrote to a `service` client that had
+just ended raised SIGPIPE and ended Spark, and the system with it. A
+fault Spark has no handler for still ends it. `kill(-1, ...)` leaves
+process 1 out, as Linux's does. On every return to user mode, `on_return` calls `deliver`,
 which takes the thread's signals one at a time: a stop stops the whole
 process (each thread waits in `deliver` until SIGCONT), and a handler gets
 Linux's x86-64 frame on the thread's stack or alternate stack: the
-restorer, a `ucontext_t`, the `siginfo_t`, and the XSAVE area, 64-byte
-aligned below the red zone (`UserMode::push_signal_frame`).
+restorer, a `ucontext_t` as far as its 8-byte signal mask (304 bytes,
+as Linux's kernel writes it; the C library's type goes on), the
+`siginfo_t`, and the XSAVE area, 64-byte aligned below the red zone
+(`UserMode::push_signal_frame`). Of the area, the frame gets the image up
+to the end of the last component its header names as in use, as Linux's
+XSAVE into the frame writes no more: a program that never used AVX-512
+has 832 bytes copied each way, not the whole 2.7 KiB, and
+`signal_return` reads back as much.
 `signal_return` restores every register from the context, so a handler
 may change them, and returns through the slow path, which restores all
 registers rather than SYSRET's subset.
@@ -241,14 +254,24 @@ in flight hold no socket, and no cycle of sockets can keep itself alive.
 
 ## poll
 
-`poll` copies the `pollfd` array in, looks at each slot, and if none is
-ready waits for a change anywhere: everything a poll looks at (pipes,
-terminals, notifications) calls `changed` after it changes, which moves
+`poll` copies the `pollfd` array in (onto the kernel stack, for up to
+eight entries), looks at each slot, and returns if one is ready or the
+poll does not wait (a `ppoll` with a signal mask takes the mask first,
+so that a signal the mask lets through interrupts it, as on Linux).
+Otherwise it holds the objects its entries designate, as Linux's poll
+holds its files (a descriptor closed meanwhile does not change what it
+waits for), counts itself among each one's pollers, looks again, and
+waits for a change to any of them. Everything a poll looks at (pipes,
+socket listeners, terminals, the kernel log, the keyboard and
+notifications) keeps a count of its pollers (`Polled`) and calls
+`changed` on it after it changes, which, while the count is not 0, moves
 the global `GENERATION` and wakes every poller. A woken poller looks at
-all its entries again. This costs a barrier and a load per change while
-nobody polls, and wakes every poller on every change while some do: fine
-for a shell and its jobs, and the first thing to replace with per-object
-wait lists when a profile shows many pollers (see the limits).
+all its objects again. A change to what nobody polls, such as the pipe
+between two programs that only read and write it, costs a barrier and a
+load; a change to anything polled wakes every poller: fine for a shell,
+its jobs and the system's services, and the next thing to replace with
+per-object wait lists when a profile shows many pollers (see the
+limits).
 
 ## Terminals
 
@@ -291,10 +314,16 @@ A futex word is named by its address space and address, hashed into one
 of 64 buckets, each a spin lock around a list of waiters in arrival
 order. `futex_wait` compares the word with the bucket locked and queues
 the waiter before letting go; `futex_wake` takes the same lock. A woken
-waiter is taken off the list by its waker and told through its own flag;
-one that leaves for another reason (a timeout, a signal) takes itself
-off unless a waker already did, which then counts as its wake-up, so a
-wake is never spent on a waiter that has gone.
+waiter is taken off the list by its waker and told through its own flag,
+with the lock held; the waker wakes the thread only once it has let the
+lock go, so that the thread, which may run at once on the waker's CPU,
+does not find the bucket still locked and sleep again on it. A waiter
+without a deadline sleeps outside the scheduler's wait table until its
+flag is set or it is interrupted: a wake that comes before it sleeps
+makes the sleep return at once. One that leaves for another reason (a
+timeout, a signal) takes itself off unless a waker already did, which
+then counts as its wake-up, so a wake is never spent on a waiter that has
+gone.
 
 ## Thread cancellation
 
@@ -532,15 +561,18 @@ after the waiter is queued. Each argument below shows that the change a
 waiter needs either happens before it reads the word, or wakes it after
 it is queued.
 
-**No poll misses a change.** A poller increments `POLLERS`, then reads
-`GENERATION` and looks at its entries; `changed` makes its change, then
-reads `POLLERS`, and moves the generation and wakes if any poller is
-counted. Both sides have a sequentially consistent operation between
-their write and their read (the poller's increment, and `changed`'s
-barrier or the notification's read-modify-write). So either the poller's
-look sees the change, or `changed` sees the poller and moves the
-generation after the poller read it, and the poller's condition
-(generation moved) is true when it is queued or it is woken once queued.
+**No poll misses a change.** A poller increments the pollers count of
+each object it holds, then reads `GENERATION` and looks at them; a
+change is made, then `changed` reads the changed object's count, and
+moves the generation and wakes if any poller is counted. Both sides have
+a sequentially consistent operation between their write and their read
+(the poller's increment, and `changed`'s barrier or the notification's
+read-modify-write). So either the poller's look sees the change, or
+`changed` sees the poller and moves the generation after the poller read
+it, and the poller's condition (generation moved) is true when it is
+queued or it is woken once queued. The poller looks at the objects it
+counted itself in, not at its slots again, so no change it waits for is
+to an object it is not counted in.
 
 **No signal is missed by a thread about to wait.** A sender sets the
 pending bit and the target thread's `signalled` flag with the process's
@@ -567,7 +599,11 @@ hung on that kernel within a few runs.
 waiter in one critical section of the bucket's lock; a waker changes the
 word and then takes that lock to wake. If the waker's change came before
 the comparison, the comparison fails and the waiter returns at once; if
-after, the waiter is on the list when the waker looks.
+after, the waiter is on the list when the waker looks, and the waker sets
+its flag before it wakes the thread. The waiter reads its flag before
+each sleep, and a wake that comes between that read and the sleep makes
+the sleep return at once (`sched::wake` notes it as pending), so the
+waiter either sees the flag or is woken after it sleeps.
 
 **No lock waits for a release that has happened.** A lock waiter reads
 `CHANGES` before it takes `TABLE`; every release and every change of a
@@ -610,9 +646,12 @@ place only once the count is one, which is after the writer stopped
 mapping it, so no page is writable in two spaces unless its region is
 shared.
 
-These arguments are not yet checked by a model; the timer race above
-shows the kind of bug one would catch, and TLA+ models of the poll, futex
-and timer protocols are candidates for the audit after Phase 9.
+TLC checks the futex argument with `kernel/radix/tla/Futex.tla`: no
+waiter sleeps through its wake, a wait ends as woken exactly when a waker
+took it off the list, and every wait ends, with a waiter that may be
+interrupted at any moment and wakers that take one waiter or several at a
+time. The other arguments are not yet checked by a model; the timer race
+above shows the kind of bug one would catch.
 
 ## Known limits
 
@@ -625,7 +664,7 @@ and timer protocols are candidates for the audit after Phase 9.
   cache maps its own pages.
 - `clock_gettime` is a capability call; there is no read-only clock page
   (vDSO). The instruction budgets will show when it matters.
-- `poll` wakes every poller on every change anywhere.
+- `poll` wakes every poller on a change to anything polled.
 - A directory descriptor's path is the one it was opened by, and one from
   before exec has none (ADR 0089); `getcwd` is the C library's string.
 - No named pipes (`mkfifo` fails with ENOSYS: no filesystem keeps them

@@ -268,6 +268,7 @@ impl FileObject {
     /// An object for `at`, with `description`'s flags, opened by a path
     /// from a directory: `from` holds where the directory was opened and
     /// the path. A mount's root has its own path, which the tree keeps.
+    #[allow(unsafe_code)]
     pub fn opened(
         at: Location,
         description: Description,
@@ -286,7 +287,15 @@ impl FileObject {
         };
         // The devices are the last kinds: one comparison for the others.
         let offset = if special >= Special::Kmsg { device_opened(special) } else { 0 };
-        let object = FileObject {
+        let heap = radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP);
+        // Made where it stays, and its `Opened` worked out there: an object
+        // is too big to move for free. Nothing else refers to it yet, so it
+        // needs no check that it is the only reference.
+        let mut object = alloc::sync::Arc::try_new_uninit_in(heap).ok()?;
+        // SAFETY: the allocation was just made; no other `Arc` or `Weak`
+        // to it exists.
+        let place = unsafe { alloc::sync::Arc::get_mut_unchecked(&mut object) };
+        let made = place.write(FileObject {
             at,
             offset: Mutex::new(offset),
             flags: AtomicU32::new(description.bits()),
@@ -294,14 +303,10 @@ impl FileObject {
             special,
             next: SpinLock::new(None),
             opened: Opened::NONE,
-        };
-        let heap = radix_mm::HEAP.with(radix_mm::Flags::MAY_SLEEP);
-        let mut object = alloc::sync::Arc::try_new_in(object, heap).ok()?;
-        // Worked out in place: an `Opened` is too big to move for free.
-        if let Some(object) = FileRef::get_mut(&mut object) {
-            object.opened.set(&object.at, from);
-        }
-        Some(object)
+        });
+        made.opened.set(&made.at, from);
+        // SAFETY: written just above.
+        Some(unsafe { object.assume_init() })
     }
 
     /// Its status flags.
