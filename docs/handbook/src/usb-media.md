@@ -36,7 +36,7 @@ Any USB stick works; writing the image **erases everything on it**.
 
    ```sh
    sudo umount /dev/sdX?* 2>/dev/null
-   sudo dd if=out/dukovo-0.0.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+   sudo dd if=out/dukovo-0.9.0-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
    ```
 
 `conv=fsync` makes `dd` wait until the data is on the stick, so it is safe
@@ -56,7 +56,7 @@ These tools write the same image and check the target is removable:
 1. Plug the stick in and switch the computer on.
 2. Open the one-time boot menu (F12 on Dell computers) and choose the USB
    stick. It may be listed twice, once for UEFI and once for legacy boot.
-3. GRUB shows a menu with one entry, "Dukovo 0.0.1 (Radix)", and boots it
+3. GRUB shows a menu with one entry, "Dukovo Server 0.9.0 (Radix)", and boots it
    after three seconds.
 
 The screen then shows the kernel's log, under UEFI and legacy BIOS boot

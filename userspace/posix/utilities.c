@@ -53,7 +53,7 @@ static void text(void) {
 	OUTPUT("", "1970\n", "/bin/date", "-u", "-d", "@0", "+%Y");
 	OUTPUT("", "Dukovo\n", "/bin/uname", "-s");
 	// The release is the kernel's version number, the second word of
-	// "Radix 0.0.1 (Dukovo Phase 9)", and the version the whole line.
+	// "Radix 0.9.0 (Dukovo Server 0.9.0)", and the version the whole line.
 	char line[64] = "", release[32] = "";
 	FILE *version = fopen("/sys/kernel/version", "r");
 	CHECK(version && fgets(line, sizeof(line), version));

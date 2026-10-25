@@ -420,7 +420,7 @@ int Sysdeps<Uname>::operator()(struct utsname *buf) {
 	strncpy(buf->sysname, "Dukovo", sizeof(buf->sysname) - 1);
 	if(sysdep<GetHostname>(buf->nodename, sizeof(buf->nodename)))
 		strncpy(buf->nodename, "dukovo", sizeof(buf->nodename) - 1);
-	// "Radix 0.0.1 (Dukovo Phase 9)": the second word is the release, as
+	// "Radix 0.9.0 (Dukovo Server 0.9.0)": the second word is the release, as
 	// Linux's is its version number, and the whole line the version.
 	char version[64];
 	if(!read_sys("/sys/kernel/version", version, sizeof(version)))

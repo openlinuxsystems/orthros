@@ -32,9 +32,10 @@ const QEMU_EXIT_PANIC: i32 = 35;
 const QEMU_EXIT_RESET: i32 = 0;
 /// QEMU's exit status when the guest powers the machine off.
 const QEMU_EXIT_POWER_OFF: i32 = 0;
-/// What the kernel's banner says after its version (`BANNER` in
-/// kernel/radix/src/main.rs).
-const PHASE: &str = "Dukovo Phase 9";
+/// The release's name, which the kernel's banner gives after its version
+/// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
+/// begins with (userspace/defaults/issue).
+const RELEASE: &str = "Dukovo Server";
 /// The first line of the kernel's panic report on the serial port
 /// (kernel/radix/src/panic.rs).
 const PANIC_BANNER: &str = "==================== RADIX KERNEL PANIC";
@@ -1557,7 +1558,7 @@ fn check_random(line: &str, hardware: bool, kvm: bool) -> Result<(), String> {
 /// The checks every normal boot passes, in the order the kernel logs them,
 /// up to the self-test (if any) that runs before "Boot complete.".
 fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    vm.expect(&format!("Radix {VERSION} ({PHASE})"))?;
+    vm.expect(&format!("Radix {VERSION} ({RELEASE} {VERSION})"))?;
     vm.expect(&format!("Firmware: {}", case.firmware))?;
     vm.expect("Memory: ")?;
     vm.expect(" MiB usable in ")?;
@@ -1682,7 +1683,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/bin/nukesh on tty1 as process ")?;
     vm.expect("consoled: 6 consoles; tty1 is shown")?;
-    vm.expect_screen(&[&format!("Dukovo {VERSION} (tty1)"), "# "])?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("echo $((6 * 7)) consoles\n")?;
     vm.expect_screen(&["# echo $((6 * 7)) consoles", "42 consoles"])?;
     vm.press(&["alt-f2"])?;
@@ -1702,7 +1703,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: starting consoled again in ")?;
     vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
     vm.expect("consoled: 6 consoles; tty1 is shown")?;
-    vm.expect_screen(&[&format!("Dukovo {VERSION} (tty1)"), "# "])?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: asked to power off the machine")?;
     vm.expect("spark: every service has stopped")?;
@@ -2165,7 +2166,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     for name in STORAGE_VOLUMES {
         vm.expect(&format!("storage: /sys/block/{name}/size: "))?;
     }
-    vm.expect(&format!("storage: /sys/kernel/version: Radix {VERSION} ({PHASE})"))?;
+    vm.expect(&format!("storage: /sys/kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
     vm.expect("storage: /sys/bus/pci/devices: ")?;
     vm.expect("storage: /proc lists ")?;
     vm.expect("1 spark (running)")?;

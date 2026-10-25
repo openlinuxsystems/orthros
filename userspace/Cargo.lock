@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "hello"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -12,29 +12,29 @@ dependencies = [
 
 [[package]]
 name = "libradix"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "radix-abi",
 ]
 
 [[package]]
 name = "radix-abi"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "ridlc",
 ]
 
 [[package]]
 name = "radix-bootfs"
-version = "0.0.1"
+version = "0.9.0"
 
 [[package]]
 name = "radix-elf"
-version = "0.0.1"
+version = "0.9.0"
 
 [[package]]
 name = "radix-rt"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "libradix",
  "radix-abi",
@@ -44,11 +44,11 @@ dependencies = [
 
 [[package]]
 name = "ridlc"
-version = "0.0.1"
+version = "0.9.0"
 
 [[package]]
 name = "spark"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "storage"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "usertests"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "libradix",
 ]

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-# GRUB configuration for the Dukovo @VERSION@ boot image.
+# GRUB configuration for the Dukovo Server @VERSION@ boot image.
 # `ob image` generates boot/grub/grub.cfg from image/grub/grub.cfg.in by
 # filling in the VERSION, TIMEOUT, CMDLINE and MODULES placeholders. See
 # dukovo-boot(7).
@@ -29,7 +29,7 @@ else
     insmod vbe
 fi
 
-menuentry "Dukovo @VERSION@ (Radix)" {
+menuentry "Dukovo Server @VERSION@ (Radix)" {
     multiboot2 /boot/radix @CMDLINE@
 @MODULES@    boot
 }
