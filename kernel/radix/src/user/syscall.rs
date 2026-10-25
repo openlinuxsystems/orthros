@@ -221,10 +221,12 @@ fn dispatch(me: &ThreadRef, user: &UserRef, number: u64, args: &mut [u64; 10]) -
                 return answered(args, methods::call_capability(user, a.cap, info, a.words));
             }
             // One look at this CPU's cache finds the capability and, for
-            // an endpoint, a file or a directory, its object, which the
-            // call borrows where the lookup put it.
+            // an endpoint, a file, a directory or another process, its
+            // object, which the call borrows where the lookup put it.
             let mut place = None;
-            let found = objects::find(cspace, a.cap, methods::takes_object, &mut place)?;
+            let process = Some(&user.process);
+            let found =
+                objects::find_holding(cspace, a.cap, methods::takes_object, process, &mut place)?;
             let cap = &found.cap;
             match cap.check(ObjectKind::Endpoint, Rights::SEND) {
                 Ok(()) => {

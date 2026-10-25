@@ -1003,8 +1003,11 @@ pub fn method(
 ) -> Result<Answer> {
     let needs = if label == process::INFO { Rights::READ } else { Rights::CONTROL };
     found.cap.check(ObjectKind::Process, needs).map_err(cap_error)?;
-    let Some(Object::Process(target)) = &found.object else {
-        return Err(error(Kernel::Gone));
+    let target = match &found.object {
+        Some(Object::Process(target)) => target,
+        // Its own process, which the lookup did not take again.
+        None if found.held => &user.process,
+        _ => return Err(error(Kernel::Gone)),
     };
     let at = |slot| SlotRef::new(user.cspace, slot);
     match label {
