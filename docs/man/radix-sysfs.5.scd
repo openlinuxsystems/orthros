@@ -27,8 +27,8 @@ devices and settings, and settings that can be changed.
 # FILES
 
 _/sys/kernel/version_
-	The kernel's name and version, and the phase of the roadmap it is
-	from: *Radix 0.0.1 (Dukovo Phase 9)*. The C library gives the
+	The kernel's name and version, and the Dukovo release it is part
+	of: *Radix 0.9.0 (Dukovo Server 0.9.0)*. The C library gives the
 	second word as the release, and the whole line as the version, in
 	uname(3)'s *struct utsname*.
 

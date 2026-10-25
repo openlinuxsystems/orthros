@@ -281,7 +281,7 @@ mod tests {
         let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit", &[]).unwrap();
         assert!(cfg.contains("set timeout=0"));
         assert!(cfg.contains("multiboot2 /boot/radix qemu-exit\n    boot\n"));
-        assert!(cfg.contains(&format!("Dukovo {VERSION} (Radix)")));
+        assert!(cfg.contains(&format!("Dukovo Server {VERSION} (Radix)")));
         assert!(cfg.contains("set gfxpayload=keep"));
         assert!(!cfg.contains("@VERSION@"));
         assert!(!cfg.contains("module2"));
