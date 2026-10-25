@@ -508,6 +508,18 @@ impl Thread {
         self.should_stop() || self.is_signalled()
     }
 
+    /// Gives its place among its domain's threads to a thread made to take
+    /// its place ([`super::Options::replacing`]): refused while the domain
+    /// is being stopped, as a join is; one that has left already lets the
+    /// new thread join instead. A stop that marks the domain meanwhile
+    /// stops the new thread all the same (`make_thread`).
+    pub(super) fn hand_over_domain(&self) -> bool {
+        if self.domain.is_stopping() {
+            return false;
+        }
+        !self.left.swap(true, Ordering::AcqRel) || self.domain.thread_joined()
+    }
+
     /// Stops counting it among its domain's threads: when it exits, so a
     /// domain's thread count falls although others still hold references.
     pub(super) fn leave_domain(&self) {

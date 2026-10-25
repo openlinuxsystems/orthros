@@ -207,7 +207,9 @@ _target/userspace/_).
 	capability core, scheduling policy and IPC arithmetic instead (see
 	*Verification* in _docs/design/memory.md_,
 	_docs/design/capabilities.md_, _docs/design/scheduler.md_ and
-	_docs/design/ipc.md_). Each takes
+	_docs/design/ipc.md_), and of the storage libraries' bounds: block
+	requests and partitions, paths, and FAT's table entries and long
+	names. Each takes
 	from seconds to several minutes, so plain *ob test* leaves them out,
 	and CI runs them in a job of their own. It needs the Kani release
 	that *ob doctor* names, installed with *cargo install --locked
@@ -217,11 +219,17 @@ _target/userspace/_).
 	capability store's derivation tree, retyping and revocation, in
 	_kernel/cap/tla/_, twice for the safety properties (once with more
 	capabilities, once with memory nested deeper) and once, on a smaller
-	model, for liveness; and how the scheduler blocks, wakes and switches
-	threads between CPUs, in _kernel/sched/tla/_, once for safety and
-	once for liveness; and how endpoints hand messages, calls and
-	replies between threads, in _kernel/ipc/tla/_, also once for each.
-	That takes about ten minutes on 4 CPUs, so
+	model, for liveness; how the scheduler blocks, wakes and switches
+	threads between CPUs, once for safety and once for liveness, and how
+	an idle CPU is woken, in _kernel/sched/tla/_; how endpoints hand
+	messages, calls and replies between threads, in _kernel/ipc/tla/_,
+	once for each; how the ends of a shared-memory channel wake each
+	other, in _userspace/libradix/tla/_; how a FAT volume's clusters
+	change hands while their data waits to be written back, in
+	_kernel/fs/fat/tla/_; and how futex waits (twice: wakers that wake
+	one each, and one that wakes several in batches), *poll*, the timer
+	thread and file locks wait without losing a wake-up, in
+	_kernel/radix/tla/_. That takes about twelve minutes on 4 CPUs, so
 	plain *ob test* leaves it out too, and CI runs it in a job of its
 	own. TLC needs Java 11 or later (the *default-jre-headless* package on
 	Debian, Ubuntu and Linux Mint). The first run downloads the pinned

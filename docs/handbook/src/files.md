@@ -5,10 +5,8 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Files, the directory hierarchy and /volumes
 
-This chapter describes files in Dukovo as of Phase 9 of the roadmap,
-while its shell, Nukesh, is being built; until it lands, files are used
-by programs and checked by the boot tests. The layout and the rules
-below are the ones the shell and every later program see. The full
+This chapter describes files in Dukovo as of Phase 9 of the roadmap: the
+layout and the rules that the shell and every program see. The full
 reference is radix-files(7); `/proc` and `/sys` are in radix-proc(5) and
 radix-sysfs(5).
 
@@ -54,9 +52,9 @@ what lies beneath them: a path that starts with `/`, or whose `..` climbs
 above the directory it started from, is refused. A symbolic link cannot
 lead out either: one whose target starts with `/` is followed from the
 directory the program started from, as if that were the root. Spark
-holds the root and decides what each program gets. When bundles arrive (Phase 13), this is
-how an application that asked for `documents: read-write` gets your
-documents folder and nothing else.
+holds the root and decides what each program gets. When bundles arrive
+(Phase 13), this is how an application that asked for
+`documents: read-write` gets your documents folder and nothing else.
 
 ## /volumes
 
@@ -71,7 +69,7 @@ Changes reach the disk within five seconds, or at once when a program
 asks for it, so a power cut loses at most the last five seconds of
 writes.
 
-Only virtual disks have a driver in Phase 7. On the Dell, `/volumes` stays
+Only virtual disks have a driver so far. On the Dell, `/volumes` stays
 empty: its SATA drives need the AHCI driver (Phase 10), and USB sticks
 need the USB drivers (Phase 11), which also bring mounting by label,
 `/volumes/<label>`, and safe eject.
@@ -93,7 +91,8 @@ Boot Dukovo with it as a virtio disk:
 ./ob run -- -drive file=disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
 ```
 
-The boot log shows the disk and the mount:
+The boot log shows the disk and the mount, and the shell on the screen
+finds the file there (`ls /volumes/vda`, `cat /volumes/vda/hello.txt`):
 
 ```text
 Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, MSI-X vector 0x50

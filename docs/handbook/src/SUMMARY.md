@@ -16,7 +16,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Using Dukovo
 
-- [Nukesh guide and scripting]()
+- [Nukesh guide and scripting](nukesh.md)
 - [Files, the directory hierarchy and /volumes](files.md)
 - [Bundles and permissions]()
 - [Users and administration]()

@@ -32,8 +32,9 @@ cd orthros
 `./ob setup` installs the nightly Rust toolchain pinned in
 `rust-toolchain.toml` through rustup, with the Rust sources the kernel
 build needs and the AArch64 target the lint step checks against, then runs
-`./ob doctor`, which checks every other tool. If rustup itself is missing, `ob` says so; install it from
-your distribution (`rustup` package) or from <https://rustup.rs>.
+`./ob doctor`, which checks every other tool. If rustup itself is
+missing, `ob` says so; install it from your distribution (`rustup`
+package) or from <https://rustup.rs>.
 
 When something is missing, `./ob doctor` prints the command that installs
 it for your distribution, for example on Ubuntu:
@@ -124,23 +125,25 @@ found and ends like this:
 [    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
 [    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    1.049978] Boot complete.
-[    1.073162] Init: the boot archive is 206 KiB with 9 entries; starting /system/bin/spark
-[    1.150677] Init: /system/bin/spark is process 1
+[    0.866770] Init: the boot archive is 91956 KiB with 1073 entries; starting /system/bin/spark
+[    1.583622] Init: /system/bin/spark is process 1
 ...
-[    1.392469] cpu1: spark[12]: spark: built the hierarchy of 10 directories and mounted 8 filesystems
-[    1.484750] cpu1: spark[12]: spark: started /system/tests/hello as process 2
-...
-[    1.594897] cpu1: spark[12]: spark: process 2 (/system/tests/hello) exited with code 0x0
-[    1.650016] cpu1: spark[12]: spark: reaped process 2; all of its memory came back
-[    1.676573] cpu1: spark[12]: spark: nothing more to do; waiting
+[    1.945004] cpu1: spark[1]: spark: built the hierarchy of 10 directories and mounted 8 filesystems
+[    1.994464] cpu1: spark[1]: spark: added 5 default settings to /system/etc
+[    2.025364] cpu1: spark[1]: spark: listening at /run/spark/control
+[    2.059082] cpu1: spark[1]: spark: 1 services in /system/etc/spark/services, 1 enabled
+[    2.162156] cpu1: spark[1]: spark: started consoled (/system/bin/consoled) as process 12
+[    2.207236] Framebuffer: a program took the screen; the log stays off it
 ```
 
 After `Boot complete.` the kernel starts Spark, the first program, which
 builds the directory hierarchy, mounts any FAT disks QEMU has at
-`/volumes` (see [Files, the directory hierarchy and /volumes](files.md)),
-runs a test program and waits. `dukovo-boot(7)` and `spark(8)` explain
-each step. Press
-**Ctrl-A** then **X** to quit QEMU. Useful variations:
+`/volumes` (see [Files, the directory hierarchy and /volumes](files.md))
+and starts the services. The first is `consoled`, which takes the
+screen from the kernel's log and shows a shell on it: the
+[Nukesh guide](nukesh.md) goes on from there. `dukovo-boot(7)` and
+`spark(8)` explain each step. Press **Ctrl-A** then **X** to quit QEMU,
+or type `poweroff` in the shell. Useful variations:
 
 | Command | Effect |
 | --- | --- |
@@ -164,13 +167,14 @@ what to do with it.
 ```
 
 This runs the unit tests on your machine, then the boot tests: QEMU boots
-a test image thirty times, each with a purpose. Four normal boots, under
+a test image thirty-three times, each with a purpose. Four normal boots, under
 UEFI and BIOS and from a USB stick and a CD-ROM, check the memory map, the
 CPU list and that all four CPUs take timer interrupts. Others check the
 boot log on the screen, the panic report after a deliberate page fault,
 the crash log across a restart, every `kdb` command, microcode loading,
-the memory manager, the scheduler, capabilities, IPC, Spark, disks and
-files, and the POSIX layer: the `posix` boot test runs C programs on the
+the memory manager, the scheduler, capabilities, IPC, Spark and its
+services, the consoles and the shell on them, disks and files, and the
+POSIX layer: the `posix` boot test runs C programs on the
 C library, mlibc's and Lua's own test suites, libc-test, a Rust
 program on the standard library and the ported utilities, `ls`, `sort`,
 `find`, `xargs` and the rest (radix-posix(7)). The tests read the screen by
@@ -200,8 +204,9 @@ UEFI and BIOS machines from a USB stick, a hard disk or a CD.
 
 `dukovo.toml` at the top of the repository holds the choices a builder
 makes: the build profile, the GRUB menu timeout, kernel flags, microcode
-to add to the image, and the virtual machine `./ob run` starts. Each key is described in
-`dukovo.toml(5)`. Command-line options override the file for one command.
+to add to the image, and the virtual machine `./ob run` starts. Each key
+is described in `dukovo.toml(5)`. Command-line options override the file
+for one command.
 
 ## Building in a container
 

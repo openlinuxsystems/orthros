@@ -43,8 +43,10 @@ cargo test --manifest-path kernel/Cargo.toml -p radix-acpi
 ```
 
 The memory manager, `radix-mm`, the capability core, `radix-cap`, the
-scheduling policy, `radix-sched`, and the arithmetic of IPC, `radix-ipc`,
-also have Kani proof harnesses (ADRs 0019, 0030 and 0032), which
+scheduling policy, `radix-sched`, the arithmetic of IPC, `radix-ipc`, and
+the storage libraries' bounds (requests and partitions in `radix-block`,
+paths in `radix-vfs`, table entries and long names in `radix-fat`) also
+have Kani proof harnesses (ADRs 0019, 0030 and 0032), which
 `./ob test kani` checks; they take about ten minutes and need the Kani
 release `./ob doctor` names:
 
@@ -56,12 +58,16 @@ cargo kani setup
 
 The capability core's derivation tree, retyping and revocation are also
 modelled in TLA+ (`kernel/cap/tla/`, ADR 0024), and so are how the
-scheduler blocks, wakes and switches threads between CPUs
-(`kernel/sched/tla/`, ADR 0030) and how endpoint calls, replies,
-cancellation and closing interact (`kernel/ipc/tla/`, ADR 0032).
-`./ob test tla` checks the three models with the TLC model checker in
-about ten minutes. It needs Java; `ob` downloads the pinned TLA+ tools
-itself:
+scheduler blocks, wakes and switches threads between CPUs and how an
+idle CPU is woken (`kernel/sched/tla/`, ADR 0030), how endpoint calls,
+replies, cancellation and closing interact (`kernel/ipc/tla/`,
+ADR 0032), how the two ends of a shared-memory channel wake each other
+(`userspace/libradix/tla/`), how a FAT volume's clusters change hands
+while their data waits to be written back (`kernel/fs/fat/tla/`), and
+how futex, `poll`, timer and file-lock waits are woken
+(`kernel/radix/tla/`). `./ob test tla` checks the models with the TLC
+model checker in about twelve minutes. It needs Java; `ob` downloads
+the pinned TLA+ tools itself:
 
 ```sh
 sudo apt install default-jre-headless
@@ -94,18 +100,22 @@ and `--case fuzz` run the test image;
 `fuzz` makes random system calls from seeds it logs, and
 `fuzz-seed=N` on the kernel command line repeats a run (ADR 0043).
 `./ob bench` measures system calls, IPC round trips, context switches,
-fresh pages, TLB shootdowns and memory copies on Radix and the closest
-operations of Linux in a virtual machine set up the same way, and writes
-a report to `out/bench/report.md` (ADR 0039). It needs KVM, and a Linux
+fresh pages, TLB shootdowns, file operations, memory copies and, with one
+C program on both systems, fork, exec, pipes, signals, `poll` and
+futexes (ADR 0106) on Radix and the closest operations of Linux in a
+virtual machine set up the same way, and writes a report to
+`out/bench/report.md` (ADR 0039). It needs KVM, and a Linux
 kernel it may read: on Debian, Ubuntu and Mint, copy your own once with
 `sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz` and run
 `./ob bench --linux-kernel .cache/vmlinuz`. It measures both systems
 three times in turn and keeps each operation's fastest run (ADR 0046).
 CI runs it with `--gate` on every pull request and merge, and fails if
-Radix is slower than Linux at any operation. `./ob bench --instructions` needs neither: it counts the
-instructions each operation takes under QEMU, and with `--gate` fails if
-one on one CPU goes over its budget in `tools/xtask/src/bench.rs`, as CI
-does (ADR 0045). A change that needs more raises the budget in the same
+Radix is slower than Linux at any operation, after measuring both again,
+up to six more times, while one is (ADR 0107).
+`./ob bench --instructions` needs neither: it counts the instructions
+each operation takes under QEMU, and with `--gate` fails if one on one
+CPU goes over its budget in `tools/xtask/src/bench.rs`, as CI does
+(ADR 0045). A change that needs more raises the budget in the same
 pull request and says why. How it all works is in `docs/design/ipc.md`
 and `radix-ipc(7)`.
 

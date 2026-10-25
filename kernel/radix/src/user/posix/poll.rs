@@ -28,7 +28,8 @@
 //! change or the change sees the poller (and moves the generation it waits
 //! on). A notification, whose word changes by a read-modify-write that is
 //! already such a barrier, skips the extra one
-//! ([`Polled::changed_by_rmw`]).
+//! ([`Polled::changed_by_rmw`]). The TLA+ model `kernel/radix/tla/Poll.tla`
+//! checks this.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};

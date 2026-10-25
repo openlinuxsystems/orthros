@@ -148,6 +148,8 @@ const EVENTS: &[(&str, &str)] = &[
     ("ipis", "IPIs"),
     ("halts", "Halts"),
     ("polls", "Polls"),
+    ("shootdown_wait_ns", "Waiting for TLB flushes"),
+    ("shootdowns_left", "Flushes left to the host"),
     ("idle_here_ns", "Idle on its CPU"),
     ("busy_elsewhere_ns", "Busy elsewhere"),
 ];
@@ -413,7 +415,11 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
                  Radix's{of}",
                 ctx.display(kernel)
             ));
-            keep_best(&mut numbers.linux_vm, linux_vm_numbers(ctx, &dir, kernel, initrd)?);
+            let (linux, linux_counts) = linux_vm_numbers(ctx, &dir, kernel, initrd)?;
+            keep_best(&mut numbers.linux_vm, linux);
+            if numbers.runs == 0 {
+                numbers.counts.extend(linux_counts);
+            }
         }
         numbers.runs += 1;
         Ok(())
@@ -595,7 +601,7 @@ struct Numbers {
     /// How many of those runs were more, for operations over the gate.
     more: u32,
     radix: Vec<Measurement>,
-    /// What the kernel did, in the first run.
+    /// What the kernel did, in the first run, and Linux's TLB interrupts.
     counts: Vec<Counts>,
     /// Linux in a virtual machine like Radix's: the baseline that counts.
     linux_vm: Vec<Measurement>,
@@ -715,14 +721,14 @@ fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path) -> Result<PathBuf> {
 }
 
 /// Boots `kernel` in a virtual machine set up like Radix's, with the
-/// `initrd` of [`linux_init`], and reads the `BENCH` lines of
-/// `linux-bench`.
+/// `initrd` of [`linux_init`], and reads the `BENCH` and `BENCHCOUNT`
+/// lines of `linux-bench`.
 fn linux_vm_numbers(
     ctx: &Ctx,
     dir: &Path,
     kernel: &Path,
     initrd: &Path,
-) -> Result<Vec<Measurement>> {
+) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let machine = Machine {
         firmware: Firmware::Bios,
         media: Media::Usb,
@@ -755,7 +761,7 @@ fn linux_vm_numbers(
             ctx.display(&dir.join("boot-linux.log"))
         );
     }
-    Ok(parse(&log))
+    Ok((parse(&log), parse_counts(&log)))
 }
 
 /// An initramfs (a cpio archive in the "newc" format Linux reads) that
@@ -1132,7 +1138,11 @@ fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
          its programs, and divided by its rounds. A round trip on one CPU needs two switches; \
          anything else is overhead. For the POSIX benchmarks, idle on its CPU is how long the \
          CPU they run on sat idle, waiting, and busy elsewhere how long the other CPUs \
-         worked meanwhile.",
+         worked meanwhile. Waiting for TLB flushes is how long a CPU that changed a mapping \
+         waited for the other CPUs to flush it, and flushes left to the host how many of \
+         them it neither interrupted nor waited for, because the host had stopped them and \
+         flushes for them when it runs them again. The tlb shootdown linux row is Linux's \
+         own count in its virtual machine: the TLB interrupts its other CPU took.",
         if first_of_several { " in the first run" } else { "" }
     );
 }
@@ -1223,6 +1233,35 @@ mod tests {
                 events: vec![("switches".into(), 200), ("ipis".into(), 0)],
             }]
         );
+    }
+
+    #[test]
+    fn events_name_what_the_kernel_and_linux_bench_print() {
+        let programs = [
+            include_str!("../../../kernel/radix/src/usertest.rs"),
+            include_str!("../../../userspace/posix/bench.c"),
+        ];
+        for (name, _) in EVENTS {
+            assert!(programs.iter().any(|source| source.contains(&format!("{name}="))), "{name}");
+        }
+        let linux = include_str!("../../linux-bench/src/main.rs");
+        assert!(linux.contains("BENCHCOUNT group=tlb_shootdown_linux rounds={rounds} ipis="));
+    }
+
+    #[test]
+    fn counts_show_per_round_and_leave_missing_events_empty() {
+        let counts = parse_counts(
+            "BENCHCOUNT group=tlb_shootdown rounds=100 switches=0 ipis=100 \
+             shootdown_wait_ns=500000 shootdowns_left=3\n\
+             BENCHCOUNT group=tlb_shootdown_linux rounds=100 ipis=100\n",
+        );
+        let mut out = String::new();
+        counts_table(&mut out, &counts, false);
+        assert!(
+            out.contains("| tlb shootdown | 0.00 | | 1.00 | | | 5000 ns | 0.03 | | |"),
+            "{out}"
+        );
+        assert!(out.contains("| tlb shootdown linux | | | 1.00 | | | | | | |"), "{out}");
     }
 
     #[test]

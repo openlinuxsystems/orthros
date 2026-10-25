@@ -251,6 +251,7 @@ fn build(at: SlotRef, process: &ProcessRef, program: &Program<'_>) -> Result<()>
         Start::Fresh(start),
         startup::SLOT_THREAD,
         program.cpu,
+        None,
         0,
         &mut |thread| {
             bytes[Startup::OFFSET_THREAD_ID..][..4]

@@ -62,8 +62,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest, InterruptController,
-    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, SignalFrame, Smp, SyscallRegs,
-    Threads, Timer, UserAccess, UserFault, UserMode,
+    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, Shootdowns, SignalFrame, Smp,
+    SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -464,6 +464,13 @@ impl PageTable for Arch {
 
     fn self_test_tlb(on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
         space::self_test(on_others)
+    }
+
+    fn shootdowns(cpu: usize) -> Shootdowns {
+        percpu::get(cpu).map_or(Shootdowns::default(), |c| Shootdowns {
+            wait_ns: c.shootdown_wait_ns.load(Ordering::Relaxed),
+            left: c.shootdowns_left.load(Ordering::Relaxed),
+        })
     }
 }
 

@@ -13,6 +13,8 @@
 //! counted at ticks; then it sends the signal of each timer that has
 //! expired. The processes with an armed timer are listed in [`ARMED`], by
 //! weak references, so a process that has gone drops out of the list.
+//! The TLA+ model `kernel/radix/tla/Timers.tla` checks that no set timer
+//! is left out of the list or slept through.
 //!
 //! An interval timer is set again by its interval at once (an expiry
 //! missed while the signal was pending counts once). A POSIX timer with

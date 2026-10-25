@@ -15,7 +15,7 @@ installer with the `rdisk` partitioner, USB and cloud images, and the
 ([ADR 0078](docs/adr/0078-server-first-release.md)). Every command and file
 format comes with a man page.
 
-Dukovo has finished **Phase 8** of its [roadmap](docs/roadmap.md):
+Dukovo has finished **Phase 9** of its [roadmap](docs/roadmap.md):
 
 - **Boot.** The Radix kernel boots through GRUB under UEFI and BIOS at a
   random address.
@@ -36,11 +36,17 @@ Dukovo has finished **Phase 8** of its [roadmap](docs/roadmap.md):
 - **POSIX.** A POSIX layer covers fork, exec, signals, pipes, terminals
   and job control. It runs on mlibc and a port of Rust's standard
   library, so C and Rust programs from elsewhere build for it.
-- **Speed.** CI checks every kernel operation it measures against Linux
-  in the same virtual machine, and fails if Radix is slower.
+- **Shell and tools.** It boots to the Nukesh shell on virtual terminals.
+  Nukesh runs bash scripts and serves as `/bin/sh`, with coreutils,
+  findutils, grep, sed, awk, less, tmux, nano, vi, the archivers and
+  Dukovo's own administration tools, each with its man page. Spark
+  supervises the services it starts.
+- **Speed.** CI checks every kernel and POSIX operation it measures
+  against Linux in the same virtual machine, and fails if Radix is slower
+  at any of them.
 
-Phase 9 brings the shell and the command-line tools. There is nothing to
-install yet.
+Phase 10 brings native storage: Btrfs, NVMe and AHCI disks, and swap.
+There is nothing to install yet.
 
 ## Quick start
 
@@ -105,18 +111,25 @@ rust-toolchain.toml pinned nightly Rust
 abi/                the system call interface, in ridl (see radix-ipc(7))
 kernel/             the Radix kernel workspace
   radix/            the architecture-independent kernel: consoles, panic, kdb,
-                    threads, user mode, system calls and IPC objects
+                    threads, user mode, system calls, IPC objects, files and
+                    the POSIX layer
   hal/              hardware abstraction layer traits, kernel command line
   arch/x86_64/      boot trampoline, CPU tables, paging, ACPI, APIC, SMP,
                     SYSCALL entry and user copies
   arch/aarch64/     HAL stubs that CI compiles, so x86 cannot leak into radix/
   mm/, cap/, sched/ the memory manager, capability core and scheduling policy
   ipc/              IPC arithmetic: info words, user ranges, ring accounting
+  fs/               the block layer, the VFS with tmpfs, and FAT
+  drivers/virtio/   the virtio block driver
   abi/              radix-abi, the Rust bindings generated from abi/
-  lib/              host-tested kernel libraries: acpi, bootinfo, elf, fbcon,
-                    kdb, klog, ksyms, lockdep, microcode, random, relocs, sync
+  lib/              host-tested kernel libraries: acpi, bootfs, bootinfo, elf,
+                    fbcon, hw, input, kdb, klog, ksyms, lockdep, microcode,
+                    posix, random, relocs, sync, tty
   targets/          the kernel's Rust target specification
-userspace/          the user programs: libradix and the usertests image
+userspace/          the user programs: libradix, radix-rt, Spark, the POSIX
+                    tests and the usertests image; programs/ holds Nukesh,
+                    consoled and the tools on Rust's standard library
+ports/              software from elsewhere at pinned commits, with patches
 image/grub/         GRUB menu template for every image
 docs/
   man/              man pages (scdoc sources)
@@ -130,8 +143,7 @@ tools/linux-bench/  the Linux baseline for ./ob bench
 tools/container/    the pinned build container
 ```
 
-Later phases add `libs/`, `ports/` and `tests/`, as described in the
-roadmap.
+Later phases add `libs/` and `tests/`, as described in the roadmap.
 
 ## Contributing
 

@@ -33,9 +33,18 @@
 //! (`userspace/posix/bench.c`, built with this machine's C compiler and C
 //! library), given with `--posix-bench`, or at `/posix-bench` as process 1.
 //!
+//! After the TLB shootdowns it prints how many TLB interrupts reached the
+//! other CPU (the `TLB` line of `/proc/interrupts`), as Radix prints its
+//! kernel's events:
+//!
+//! ```text
+//! BENCHCOUNT group=tlb_shootdown_linux rounds=<count> ipis=<count>
+//! ```
+//!
 //! `ob bench` runs it on the host, and also as the init process of a Linux
 //! virtual machine set up like the one Radix runs in: as process 1 it
-//! prints `linux-bench: done` at the end and powers the machine off.
+//! mounts `/proc`, prints `linux-bench: done` at the end and powers the
+//! machine off.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -64,6 +73,9 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+    if std::process::id() == 1 {
+        mount_proc();
     }
     let cpus = allowed_cpus();
     let Some(&first) = cpus.first() else {
@@ -334,12 +346,19 @@ fn tlb_shootdown(other: usize, rounds: u64) {
         }
     });
     ready.wait();
+    let interrupts = tlb_interrupts(other);
     let started = Instant::now();
     for _ in 0..rounds {
         protect(libc::PROT_NONE);
         protect(libc::PROT_READ | libc::PROT_WRITE);
     }
     print_line("tlb_shootdown", started, rounds);
+    if let (Some(before), Some(after)) = (interrupts, tlb_interrupts(other)) {
+        println!(
+            "BENCHCOUNT group=tlb_shootdown_linux rounds={rounds} ipis={}",
+            after.saturating_sub(before)
+        );
+    }
     stop.store(true, Ordering::Relaxed);
     spinner.join().expect("the spinning thread panicked");
     // SAFETY: mapped above, and no longer used.
@@ -433,6 +452,33 @@ fn report(name: &str, count: u64, mut body: impl FnMut()) {
         body();
     }
     print_line(name, started, count);
+}
+
+/// The TLB shootdown interrupts CPU `cpu` has taken: its column of the
+/// `TLB` line of `/proc/interrupts`, or `None` where there is none.
+fn tlb_interrupts(cpu: usize) -> Option<u64> {
+    tlb_column(&std::fs::read_to_string("/proc/interrupts").ok()?, cpu)
+}
+
+/// CPU `cpu`'s count on the `TLB` line of `/proc/interrupts`' `text`.
+fn tlb_column(text: &str, cpu: usize) -> Option<u64> {
+    let mut lines = text.lines();
+    let column = lines.next()?.split_whitespace().position(|name| name == format!("CPU{cpu}"))?;
+    let line = lines.find(|line| line.trim_start().starts_with("TLB:"))?;
+    line.split_whitespace().nth(1 + column)?.parse().ok()
+}
+
+/// Mounts `/proc`, which the virtual machine's init finds empty.
+fn mount_proc() {
+    let _ = std::fs::create_dir_all("/proc");
+    // SAFETY: the strings are NUL-terminated and live through the call;
+    // procfs takes no data.
+    let result = unsafe {
+        libc::mount(c"proc".as_ptr(), c"/proc".as_ptr(), c"proc".as_ptr(), 0, std::ptr::null())
+    };
+    if result != 0 {
+        eprintln!("linux-bench: cannot mount /proc: {}", std::io::Error::last_os_error());
+    }
 }
 
 fn print_line(name: &str, started: Instant, count: u64) {
@@ -663,4 +709,22 @@ fn pin(cpu: usize) {
     let result =
         unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &raw const set) };
     assert_eq!(result, 0, "cannot pin a thread to CPU {cpu}: {}", std::io::Error::last_os_error());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_cpus_tlb_interrupts() {
+        let text = "           CPU0       CPU2       CPU3\n\
+                    \x20 8:          0          0          0   IO-APIC    8-edge      rtc0\n\
+                    TLB:      78240      75740      76113   TLB shootdowns\n";
+        assert_eq!(tlb_column(text, 0), Some(78240));
+        assert_eq!(tlb_column(text, 2), Some(75740));
+        assert_eq!(tlb_column(text, 3), Some(76113));
+        // A CPU that is not online has no column.
+        assert_eq!(tlb_column(text, 1), None);
+        assert_eq!(tlb_column("           CPU0\n  8:  0  rtc0\n", 0), None);
+    }
 }

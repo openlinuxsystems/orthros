@@ -69,6 +69,9 @@ const USER_TEST_PAGE: u64 = 0x4000_0000;
 
 /// Above this many pages a shootdown flushes the whole TLB instead.
 const FLUSH_ALL_PAGES: u64 = 32;
+/// Pauses between a waiting shootdown's looks at the clock, for its time
+/// limit: a few milliseconds' worth.
+const WAIT_SPINS: u32 = 1 << 16;
 
 /// How a mapping is cached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -764,6 +767,7 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
         cpu::pause();
     };
     let mut targets = [0u64; MAX_CPUS / 64];
+    let mut left = 0;
     // Only the CPUs the firmware lists can be online: on a machine with a
     // few, looking at all MAX_CPUS slots made up most of an unmap's cost.
     let cpus = smp::count();
@@ -772,12 +776,17 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
             && cpu.online.load(Ordering::Acquire)
             && !cpu.stopped.load(Ordering::Relaxed)
             && wanted(cpu)
-            && !kvm::flush_when_resumed(cpu)
         {
-            targets[index / 64] |= 1 << (index % 64);
+            if kvm::flush_when_resumed(cpu) {
+                left += 1;
+            } else {
+                targets[index / 64] |= 1 << (index % 64);
+            }
         }
     }
+    let here = percpu::current();
     if targets.iter().all(|&word| word == 0) {
+        here.shootdowns_left.fetch_add(left, Ordering::Relaxed);
         flush_local(range);
         return;
     }
@@ -785,7 +794,7 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     // number as its own without sending it would take the next request
     // under that number for one it had already served, and never flush.
     let generation = SHOOTDOWN.generation.load(Ordering::Relaxed) + 1;
-    percpu::current().tlb_generation.store(generation, Ordering::Relaxed);
+    here.tlb_generation.store(generation, Ordering::Relaxed);
     SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
     SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
     // Release: a CPU that sees its bit sees this range (`serve_shootdown`).
@@ -802,39 +811,45 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     flush_local(range.clone());
     let started = time::now_ns();
     let words = cpus.div_ceil(64);
+    let mut spins = 0u32;
     loop {
-        let mut waiting = false;
+        let mut waiting = None;
         for (word, slot) in SHOOTDOWN.pending[..words].iter().enumerate() {
             let mut bits = slot.load(Ordering::Acquire);
             // A target the host stopped after the IPI was sent needs it no
             // longer: the hypervisor flushes it before it runs again.
-            let mut left = bits;
-            while left != 0 {
-                let bit = left.isolate_lowest_one();
-                left &= !bit;
+            let mut stopped = bits;
+            while stopped != 0 {
+                let bit = stopped.isolate_lowest_one();
+                stopped &= !bit;
                 let index = word * 64 + bit.trailing_zeros() as usize;
                 if percpu::get(index).is_some_and(kvm::flush_when_resumed) {
                     slot.fetch_and(!bit, Ordering::Relaxed);
                     bits &= !bit;
+                    left += 1;
                 }
             }
-            if bits != 0 {
-                waiting = true;
-                if time::now_ns().saturating_sub(started) > 2_000_000_000 {
-                    panic!(
-                        "TLB shootdown: CPU {} did not flush {:#x}-{:#x} within 2 s",
-                        word * 64 + bits.trailing_zeros() as usize,
-                        range.start,
-                        range.end
-                    );
-                }
+            if bits != 0 && waiting.is_none() {
+                waiting = Some(word * 64 + bits.trailing_zeros() as usize);
             }
         }
-        if !waiting {
-            break;
+        let Some(cpu) = waiting else { break };
+        // Only loads between the pauses, as in Linux's waits: a hypervisor
+        // takes a tight PAUSE loop for a spin (pause-loop exiting) and may
+        // run the CPU waited for first. The clock is read now and then.
+        spins = spins.wrapping_add(1);
+        if spins.is_multiple_of(WAIT_SPINS)
+            && time::now_ns().saturating_sub(started) > 2_000_000_000
+        {
+            panic!(
+                "TLB shootdown: CPU {cpu} did not flush {:#x}-{:#x} within 2 s",
+                range.start, range.end
+            );
         }
         cpu::pause();
     }
+    here.shootdown_wait_ns.fetch_add(time::now_ns().saturating_sub(started), Ordering::Relaxed);
+    here.shootdowns_left.fetch_add(left, Ordering::Relaxed);
     drop(guard);
 }
 

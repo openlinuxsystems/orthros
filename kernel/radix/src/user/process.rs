@@ -666,6 +666,7 @@ impl ProcessObject {
         start: Start,
         to: u32,
         cpu: Option<usize>,
+        replacing: Option<&ThreadRef>,
         mask: u64,
         prepare: &mut dyn FnMut(&ThreadRef) -> Result<()>,
     ) -> Result<ThreadRef> {
@@ -711,6 +712,9 @@ impl ProcessObject {
         }
         if !process.numbered.swap(true, Ordering::Relaxed) {
             options = options.number(process.number);
+        }
+        if let Some(old) = replacing {
+            options = options.replacing(old.clone());
         }
         let name = *process.name.lock();
         let thread =
@@ -1100,6 +1104,7 @@ pub fn method(
                 target,
                 Start::Fresh([a.entry, a.stack, a.argument]),
                 a.to,
+                None,
                 None,
                 mask,
                 &mut |_| Ok(()),

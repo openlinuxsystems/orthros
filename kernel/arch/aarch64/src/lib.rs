@@ -21,7 +21,8 @@ use core::sync::atomic::AtomicU32;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
     InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageEdit, PageTable, PciSegment,
-    Platform, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
+    Platform, Shootdowns, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
+    UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -437,6 +438,10 @@ impl PageTable for Arch {
 
     fn self_test_tlb(_on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
         Err("not available on aarch64")
+    }
+
+    fn shootdowns(_cpu: usize) -> Shootdowns {
+        Shootdowns::default()
     }
 }
 
