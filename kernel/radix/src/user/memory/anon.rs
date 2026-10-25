@@ -141,6 +141,19 @@ fn unshare(phys: u64) {
     }
 }
 
+/// As [`unshare`], for a page a space let go of that may be anonymous
+/// memory or not (a frame's, a ring's, which their objects keep): whether
+/// it was.
+fn unshare_if_anon(phys: u64) -> bool {
+    let Some(info) = FRAMES.info(phys).filter(|info| info.owner() == Owner::Anon) else {
+        return false;
+    };
+    if info.unshare() == 0 {
+        let _ = FRAMES.free(phys, 0, Owner::Anon);
+    }
+    true
+}
+
 impl SpaceObject {
     /// Charges `pages` more pages of anonymous memory to its domain.
     fn charge(&self, pages: u64) -> Result<()> {
@@ -165,6 +178,17 @@ impl SpaceObject {
         Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |phys| {
             unshare(phys);
             released += 1;
+        });
+        self.uncharge(released);
+    }
+
+    /// Unmaps everything from `start` to `end`, whatever region it is in,
+    /// in one walk of the page tables: how an ending space lets go of all
+    /// it maps. Pages of anonymous memory are given back and uncharged.
+    pub(super) fn release_all(&self, start: u64, end: u64) {
+        let mut released = 0;
+        Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |phys| {
+            released += u64::from(unshare_if_anon(phys));
         });
         self.uncharge(released);
     }
@@ -477,17 +501,15 @@ impl SpaceObject {
             // go of, so these are the pages the child gets.
             let total = self.anon_pages.load(Ordering::Relaxed);
             child.charge(total)?;
-            let mut given = 0u64;
             for region in regions.iter() {
-                let anon = match &region.backing {
-                    Backing::Anon(anon) => Some(anon),
+                match &region.backing {
+                    Backing::Anon(_) => {}
+                    // Room was reserved above.
                     Backing::Frame(frame) => {
-                        // Room was reserved above.
                         let _ = frames.push_within_capacity(frame.clone());
-                        None
                     }
                     Backing::Ring(_) => continue,
-                };
+                }
                 // In the child's list before its pages are, so that the
                 // child's end lets go of whatever it got.
                 let _ = copied.push_within_capacity(Region {
@@ -496,40 +518,50 @@ impl SpaceObject {
                     backing: region.backing.clone(),
                     offset: region.offset,
                 });
-                let shared = anon.is_some_and(|anon| anon.shared);
-                let mut last = None;
-                let result = Arch::copy_pages(
-                    &self.arch,
-                    &child.arch,
-                    region.start,
-                    region.end(),
-                    &mut |_, phys, access| {
-                        if anon.is_none() {
-                            return (PageEdit::Keep, Some(access));
-                        }
-                        if let Some(info) = FRAMES.info(phys) {
-                            info.share();
-                        }
-                        last = Some(phys);
-                        given += 1;
-                        match access {
-                            Some(UserAccess::ReadWrite) if !shared => (
-                                PageEdit::Set(Some(UserAccess::Read)),
-                                Some(Some(UserAccess::Read)),
-                            ),
-                            access => (PageEdit::Keep, Some(access)),
-                        }
-                    },
-                );
-                if result.is_err() {
-                    // The entry the walk stopped at was counted, not given.
-                    if let Some(phys) = last {
-                        unshare(phys);
-                        given -= 1;
+            }
+            // One walk over all of them, which finds each entry's region as
+            // it goes (both are in address order): a walk for each region
+            // went down the tables from the top again for every one.
+            let (mut at, mut given, mut last) = (0, 0u64, None);
+            let (start, end) = match (regions.first(), regions.last()) {
+                (Some(first), Some(last)) => (first.start, last.end()),
+                _ => (0, 0),
+            };
+            let result =
+                Arch::copy_pages(&self.arch, &child.arch, start, end, &mut |virt, phys, access| {
+                    // Only an entry of anonymous memory is counted.
+                    last = None;
+                    while regions.get(at).is_some_and(|region| region.end() <= virt) {
+                        at += 1;
                     }
-                    child.uncharge(total - given);
-                    return Err(error(Kernel::NoMemory));
+                    let region = regions.get(at).filter(|region| region.start <= virt);
+                    let anon = match region.map(|region| &region.backing) {
+                        Some(Backing::Anon(anon)) => anon,
+                        Some(Backing::Frame(_)) => return (PageEdit::Keep, Some(access)),
+                        // Rings are left out, as is whatever maps between
+                        // the regions.
+                        Some(Backing::Ring(_)) | None => return (PageEdit::Keep, None),
+                    };
+                    if let Some(info) = FRAMES.info(phys) {
+                        info.share();
+                    }
+                    last = Some(phys);
+                    given += 1;
+                    match access {
+                        Some(UserAccess::ReadWrite) if !anon.shared => {
+                            (PageEdit::Set(Some(UserAccess::Read)), Some(Some(UserAccess::Read)))
+                        }
+                        access => (PageEdit::Keep, Some(access)),
+                    }
+                });
+            if result.is_err() {
+                // The entry the walk stopped at was counted, not given.
+                if let Some(phys) = last {
+                    unshare(phys);
+                    given -= 1;
                 }
+                child.uncharge(total - given);
+                return Err(error(Kernel::NoMemory));
             }
             child.uncharge(total.saturating_sub(given));
         }

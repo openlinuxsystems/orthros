@@ -338,8 +338,8 @@ impl SpaceObject {
     pub fn empty(&self) {
         let regions = {
             let mut regions = self.regions.lock();
-            for region in regions.iter() {
-                self.clear_region(region);
+            if let (Some(first), Some(last)) = (regions.first(), regions.last()) {
+                self.release_all(first.start, last.end());
             }
             Arch::free_page_tables(&self.arch);
             core::mem::replace(&mut *regions, Vec::new_in(kmalloc()))
