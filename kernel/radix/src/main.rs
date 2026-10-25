@@ -42,6 +42,7 @@
 #![no_main]
 #![deny(unsafe_code)]
 #![feature(allocator_ext)]
+#![feature(get_mut_unchecked)]
 #![feature(vec_push_within_capacity)]
 
 extern crate alloc;

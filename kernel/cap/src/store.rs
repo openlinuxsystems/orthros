@@ -192,6 +192,15 @@ struct Link {
     slot: u32,
 }
 
+/// A slot's place among its relatives in the derivation tree.
+#[derive(Clone, Copy, Debug)]
+struct Links {
+    parent: Option<Link>,
+    child: Option<Link>,
+    prev: Option<Link>,
+    next: Option<Link>,
+}
+
 /// One slot: a capability and its place in the derivation tree.
 #[derive(Clone, Copy, Debug)]
 struct Slot {
@@ -228,6 +237,21 @@ impl Slot {
         flags: 0,
         cached: false,
     };
+
+    /// Makes it [`Slot::EMPTY`] in place, a field at a time: storing a
+    /// whole slot is a string move.
+    fn clear(&mut self) {
+        let Slot { cap, parent, child, prev, next, depth, revoking, flags, cached } = self;
+        *cap = None;
+        *parent = None;
+        *child = None;
+        *prev = None;
+        *next = None;
+        *depth = 0;
+        *revoking = false;
+        *flags = 0;
+        *cached = false;
+    }
 }
 
 struct Space<A: Allocator> {
@@ -1104,26 +1128,37 @@ impl<A: Allocator + Clone> Capabilities<A> {
     fn place(&mut self, link: Link, cap: Capability, parent: Option<Link>) {
         // Only an empty slot, which no cache can hold, takes a capability.
         debug_assert!(self.slot(link).cap.is_none(), "placing a capability in a full slot");
-        let mut slot = Slot { cap: Some(cap), ..Slot::EMPTY };
-        if let Some(parent) = parent {
-            let above = self.slot_mut(parent);
-            slot.parent = Some(parent);
-            slot.depth = above.depth + 1;
-            slot.next = above.child.replace(link);
-            if let Some(next) = slot.next {
-                self.slot_mut(next).prev = Some(link);
+        let (depth, next) = match parent {
+            Some(parent) => {
+                let above = self.slot_mut(parent);
+                (above.depth + 1, above.child.replace(link))
             }
+            None => (0, None),
+        };
+        if let Some(next) = next {
+            self.slot_mut(next).prev = Some(link);
         }
-        *self.slot_mut(link) = slot;
+        // Written where it stays, not made aside and moved in.
+        let slot = self.slot_mut(link);
+        slot.clear();
+        slot.cap = Some(cap);
+        slot.parent = parent;
+        slot.next = next;
+        slot.depth = depth;
     }
 
     /// Takes the capability out of `link`: its children move up to its
     /// parent, in its place among its siblings, and its object loses a
     /// capability.
     fn remove(&mut self, link: Link, released: &mut dyn FnMut(Released)) {
-        let node = *self.slot(link);
-        *self.slot_mut(link) = Slot::EMPTY;
-        self.stale |= node.cached;
+        // What the rest needs of the slot, without a copy of all of it.
+        let slot = self.slot_mut(link);
+        let held = slot.cap.as_ref().and_then(Capability::id);
+        let node =
+            Links { parent: slot.parent, child: slot.child, prev: slot.prev, next: slot.next };
+        let cached = slot.cached;
+        slot.clear();
+        self.stale |= cached;
         match (node.parent, node.child) {
             (Some(parent), Some(first)) => {
                 let mut last = first;
@@ -1165,8 +1200,8 @@ impl<A: Allocator + Clone> Capabilities<A> {
                 }
             }
         }
-        if let Some(cap) = node.cap {
-            self.release(&cap, released);
+        if let Some(id) = held {
+            self.release(id, released);
         }
     }
 
@@ -1178,10 +1213,9 @@ impl<A: Allocator + Clone> Capabilities<A> {
         }
     }
 
-    /// Drops a capability's hold on its object, and the object if that was
-    /// the last hold, and so on up the memory it was retyped from.
-    fn release(&mut self, cap: &Capability, released: &mut dyn FnMut(Released)) {
-        let Some(mut id) = cap.id() else { return };
+    /// Drops a capability's hold on the object `id`, and the object if
+    /// that was the last hold, and so on up the memory it was retyped from.
+    fn release(&mut self, mut id: ObjectId, released: &mut dyn FnMut(Released)) {
         let Some(entry) = self.entry_mut(id) else { return };
         entry.caps -= 1;
         loop {

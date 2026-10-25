@@ -851,11 +851,11 @@ impl Node for Entry {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         if self.tty.state.lock().locked || self.tty.masters.load(Ordering::Acquire) == 0 {
             return Err(radix_vfs::Error::Io);
         }
-        open_side(&self.tty, false)
+        open_side(&self.tty, false).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -875,11 +875,11 @@ impl Node for Ptmx {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         let tty = make()?;
         // Without its master, nothing would ever take the terminal's
         // `/dev/pts/N` away, and its number with it.
-        open_side(&tty, true).inspect_err(|_| remove_entry(&tty))
+        open_side(&tty, true).inspect_err(|_| remove_entry(&tty)).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -899,11 +899,11 @@ impl Node for Current {
         Kind::CharDevice
     }
 
-    fn open(&self, _this: &NodeRef) -> radix_vfs::Result<NodeRef> {
+    fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         let thread = sched::current().ok_or(radix_vfs::Error::NoDevice)?;
         let user = thread.user().ok_or(radix_vfs::Error::NoDevice)?;
         let tty = controlling(&user.process).ok_or(radix_vfs::Error::NoDevice)?;
-        open_side(&tty, false)
+        open_side(&tty, false).map(Some)
     }
 
     fn as_any(&self) -> &dyn Any {

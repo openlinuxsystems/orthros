@@ -49,17 +49,22 @@ use crate::{Arch, caps};
 pub const IO_MAX: u64 = 0x7fff_f000;
 
 /// A path copied in from a program: on the stack when it is short, on the
-/// heap when it is long.
+/// heap when it is long. A method copies it into a place of its own
+/// ([`Path::Empty`], then [`Path::copy`]), where it stays: returning a
+/// short one would move its 136 bytes twice, each a string move.
 enum Path {
+    /// No path yet, for [`Path::copy`] to fill: making one stores its tag
+    /// alone.
+    Empty,
     Short([u8; 128], usize),
     Long(alloc::vec::Vec<u8, radix_mm::Kmalloc>),
 }
 
 impl Path {
-    /// Copies the path in `buffer` from the caller. Inlined, so that the
-    /// path is copied in where the caller keeps it, not moved there after.
+    /// Copies the path in `buffer` from the caller into this one, and
+    /// gives it back.
     #[inline(always)]
-    fn copy(buffer: UserBuffer) -> Result<Path> {
+    fn copy(&mut self, buffer: UserBuffer) -> Result<&Path> {
         if buffer.len > PATH_MAX as u64 {
             return Err(fs::status(radix_vfs::Error::NameTooLong));
         }
@@ -67,29 +72,31 @@ impl Path {
             return Err(error(Kernel::BadAddress));
         }
         let len = buffer.len as usize;
-        let mut path = if len <= 128 {
-            Path::Short([0; 128], len)
-        } else {
+        if len > 128 {
             let mut bytes = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
             bytes.try_reserve_exact(len).map_err(|_| error(Kernel::NoMemory))?;
             while bytes.len() < len {
                 // Room was reserved above.
                 let _ = bytes.push_within_capacity(0);
             }
-            Path::Long(bytes)
-        };
-        let bytes = match &mut path {
+            *self = Path::Long(bytes);
+        } else {
+            *self = Path::Short([0; 128], len);
+        }
+        let bytes = match self {
+            Path::Empty => &mut [],
             Path::Short(bytes, len) => &mut bytes[..*len],
             Path::Long(bytes) => &mut bytes[..],
         };
         if !Arch::copy_from_user(bytes, buffer.address) {
             return Err(error(Kernel::BadAddress));
         }
-        Ok(path)
+        Ok(self)
     }
 
     fn bytes(&self) -> &[u8] {
         match self {
+            Path::Empty => &[],
             Path::Short(bytes, len) => &bytes[..*len],
             Path::Long(bytes) => &bytes[..],
         }
@@ -278,7 +285,8 @@ pub fn directory_method(
                     Err(err) => return Err(cap_error(err)),
                 }
             }
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let flags = VfsOpen {
                 create: a.flags.contains(OpenFlags::CREATE),
                 exclusive: a.flags.contains(OpenFlags::EXCLUSIVE),
@@ -323,14 +331,16 @@ pub fn directory_method(
         directory::MAKE_DIRECTORY => {
             let a = directory::MakeDirectoryArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             vfs()?.make_directory(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::REMOVE => {
             let a = directory::RemoveArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             vfs()?.remove(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -338,7 +348,8 @@ pub fn directory_method(
             let a = directory::RenameArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
             let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
-            let (from, to) = (Path::copy(a.from)?, Path::copy(a.to)?);
+            let (mut from, mut to) = (Path::Empty, Path::Empty);
+            let (from, to) = (from.copy(a.from)?, to.copy(a.to)?);
             vfs()?.rename(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -352,7 +363,8 @@ pub fn directory_method(
         directory::STAT => {
             let a = directory::StatArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let at = resolve(&dir.at, path.as_str()?, a.flags)?;
             let stat = at.node.stat();
             let results = directory::StatResults {
@@ -370,7 +382,8 @@ pub fn directory_method(
         directory::SET_TIMES => {
             let a = directory::SetTimesArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let at = resolve(&dir.at, path.as_str()?, a.flags)?;
             set_times(&at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
@@ -378,7 +391,8 @@ pub fn directory_method(
         directory::MAKE_LINK => {
             let a = directory::MakeLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
-            let (path, target) = (Path::copy(a.path)?, Path::copy(a.target)?);
+            let (mut path, mut target) = (Path::Empty, Path::Empty);
+            let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
             vfs()?.make_link(&dir.at, path.as_str()?, target.as_target()?).map_err(
                 |err| match err {
                     // FAT has no links: Linux says EPERM.
@@ -391,7 +405,8 @@ pub fn directory_method(
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
             let len = vfs()?.read_link(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
@@ -401,7 +416,8 @@ pub fn directory_method(
         directory::REAL_PATH => {
             let a = directory::RealPathArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
             let len = vfs()?.real_path(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
@@ -412,8 +428,10 @@ pub fn directory_method(
             let a = directory::MountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
             let read_only = a.flags.contains(MountFlags::READ_ONLY);
-            let path = Path::copy(a.path)?;
-            let kind = Path::copy(a.filesystem)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let mut kind = Path::Empty;
+            let kind = kind.copy(a.filesystem)?;
             let kind = kind.as_str()?;
             let source = if kind == "fat" {
                 let needs =
@@ -451,7 +469,8 @@ pub fn directory_method(
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             vfs()?.unmount(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -482,8 +501,10 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let (_, file) = objects::file(cspace, a.socket, Rights::WRITE)?;
             let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
-            let path = Path::copy(a.path)?;
-            let name = Path::copy(a.name)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let mut name = Path::Empty;
+            let name = name.copy(a.name)?;
             let name = socket::Name::of(name.bytes()).ok_or(Kernel::InvalidArgument.status(2))?;
             socket::bind(socket, vfs()?, &dir.at, path.as_str()?, name)?;
             answer(label, 0, [0; 8])
@@ -493,7 +514,8 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let (_, file) = objects::file(cspace, a.socket, Rights::WRITE)?;
             let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
-            let path = Path::copy(a.path)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
             let named = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
             let non_blocking = file.description().non_blocking;
             socket::connect(socket, &named.node, user.process.number(), non_blocking)?;
