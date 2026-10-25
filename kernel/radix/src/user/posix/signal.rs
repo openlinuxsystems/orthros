@@ -29,13 +29,13 @@ use core::sync::atomic::Ordering;
 use radix_abi::Status;
 use radix_abi::errors::File as FileError;
 use radix_abi::errors::Kernel;
-use radix_abi::process::{self, ProcessState};
+use radix_abi::process;
 use radix_abi::signal::{
     ActionFlags, MaskHow, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGNALS, SIGSEGV,
     SIGSTOP, SIGTRAP, SIGTTIN, SignalInfo, StackFlags,
 };
 use radix_abi::trace::TraceSignal;
-use radix_hal::{SignalFrame, SyscallRegs, UserFault, UserFaultKind, UserMode};
+use radix_hal::{CpuLocal, SignalFrame, SyscallRegs, UserFault, UserFaultKind, UserMode};
 use radix_klog::warn;
 use radix_posix::signal::{
     self as rules, Action, ActionError, Disposition, Info, UNBLOCKABLE, bit,
@@ -139,15 +139,20 @@ fn has_work(posix: &PosixState, signals: &ThreadSignals) -> bool {
 }
 
 /// Marks `thread` as having something to do on its way back, and wakes
-/// it.
+/// it. The running thread, signalling itself outside an interrupt, is not
+/// between a wait's look at `signalled` and its sleep, so its next wait
+/// sees the mark: it needs no wake, whose two locked instructions are
+/// most of a signal's cost to itself.
 fn kick(thread: &ThreadRef) {
     thread.set_signalled(true);
-    sched::wake(thread);
+    if thread.token() != sched::current_token() || Arch::interrupt_depth() != 0 {
+        sched::wake(thread);
+    }
 }
 
 /// Whether `process` is past taking signals.
 fn ending(process: &ProcessObject) -> bool {
-    !matches!(process.state().0, ProcessState::Created | ProcessState::Running)
+    process.is_ending()
 }
 
 /// Whether `signal`, whose action for `process` is `disposition`, passes
@@ -216,14 +221,28 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
         }
         let disposition = posix.actions.disposition(signal);
         let ignored = posix.actions.ignores(signal) || spared(process, disposition);
+        // The thread to take it: the running one if it is the process's
+        // and does not block it, as for a signal a program sends itself,
+        // which needs neither the thread list nor a reference; otherwise
+        // the first thread that does not block it.
+        let running = sched::running();
+        let me = running.as_deref().filter(|me| {
+            me.user().is_some_and(|user| {
+                ProcessRef::ptr_eq(&user.process, process)
+                    && user.signals.lock().mask & bit(signal) == 0
+            })
+        });
+        let mut other = None;
+        if me.is_none() {
+            process.for_each_thread(&mut |thread, user| {
+                if other.is_none() && user.signals.lock().mask & bit(signal) == 0 {
+                    other = Some(thread.clone());
+                }
+            });
+        }
+        let target = me.or(other.as_ref());
         // An ignored signal is dropped, unless every thread blocks it (its
         // action may change before it is taken).
-        let mut target = None;
-        process.for_each_thread(&mut |thread, user| {
-            if target.is_none() && user.signals.lock().mask & bit(signal) == 0 {
-                target = Some(thread.clone());
-            }
-        });
         if ignored && target.is_some() {
             return Sent::Dropped;
         }
@@ -237,7 +256,7 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
             if result == Sent::Queued
                 && let Some(thread) = target
             {
-                kick(&thread);
+                kick(thread);
             }
         }
     }
@@ -556,7 +575,9 @@ enum Step {
     /// End the process, killed by this signal.
     Kill(u32),
     /// Run a handler.
-    Handle { signal: u32, info: Info, action: Action },
+    Handle { signal: u32, info: Info, action: Action, handling: Handling },
+    /// Nothing: look for the next signal.
+    Next,
     /// Nothing: the signal was ignored. Only a traced process stops for
     /// it, to note it.
     Ignored(u32),
@@ -598,30 +619,42 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                         return;
                     }
                     Some((signal, info)) => {
-                        // A timer's signal: the timer is set again, with
-                        // its process's lock (and not the thread's) held.
-                        drop(signals);
-                        let info = timer::taken(process, &mut posix, signal, info);
-                        match posix.actions.disposition(signal) {
+                        let mut step = match posix.actions.disposition(signal) {
                             Disposition::Ignore if process.traced() => Step::Ignored(signal),
-                            Disposition::Ignore => continue,
+                            Disposition::Ignore => Step::Next,
                             // Queued while blocked; Spark takes only what
                             // it handles.
                             Disposition::Stop | Disposition::Terminate if process.is_vital() => {
-                                continue;
+                                Step::Next
                             }
                             Disposition::Stop => Step::Stop(signal),
                             Disposition::Terminate => Step::Kill(signal),
                             Disposition::Handle(action) => {
-                                posix.actions.handled(signal);
-                                Step::Handle { signal, info, action }
+                                // What its frame needs of the thread's
+                                // signals is taken under this one hold of
+                                // the locks. One handler at a time: the
+                                // next signal comes on the next way back,
+                                // inside this one's handler.
+                                let handling = Handling::take(&mut signals, signal, &action);
+                                me.set_signalled(has_work(&posix, &signals));
+                                Step::Handle { signal, info, action, handling }
                             }
+                        };
+                        // A timer's signal: the timer is set again, with
+                        // its process's lock (and not the thread's) held.
+                        drop(signals);
+                        let taken = timer::taken(process, &mut posix, signal, info);
+                        if let Step::Handle { info, .. } = &mut step {
+                            *info = taken;
+                            posix.actions.handled(signal);
                         }
+                        step
                     }
                 }
             }
         };
         match step {
+            Step::Next => {}
             Step::Park => {
                 wait::wait_until(stop_key(process), "stopped", || {
                     !process.stopped.load(Ordering::Acquire) || me.should_stop()
@@ -646,9 +679,9 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                 kill_process(process, signal);
                 exit_current(user.clone(), EXIT_STOPPED, Ending::Stop);
             }
-            Step::Handle { signal, info, action } => {
+            Step::Handle { signal, info, action, handling } => {
                 trace::signal(process, me.id(), signal, TraceSignal::Handled);
-                if !run_handler(user, signal, &info, &action) {
+                if !run_handler(signal, &info, &action, &handling) {
                     // No room for the frame: the process cannot go on.
                     warn!(
                         "User: thread {} ({}) has no stack for signal {signal}'s handler",
@@ -658,34 +691,51 @@ pub fn deliver(me: &ThreadRef, user: &UserRef) {
                     kill_process(process, SIGSEGV);
                     exit_current(user.clone(), EXIT_FAULT, Ending::Stop);
                 }
-                // One handler at a time: the next signal comes on the next
-                // way back, inside this one's handler.
-                let posix = process.posix.lock();
-                let signals = user.signals.lock();
-                me.set_signalled(has_work(&posix, &signals));
                 return;
             }
         }
     }
 }
 
-/// Makes the running thread run `action`'s handler for `signal`: restarts
-/// the system call it interrupted if the handler allows, writes the frame,
-/// and blocks the handler's mask. Returns `false` if the frame could not
-/// be written.
-fn run_handler(user: &UserThread, signal: u32, info: &Info, action: &Action) -> bool {
-    let (mask, restart, stack, trap) = {
-        let mut signals = user.signals.lock();
+/// What a handler's frame keeps of its thread's signals.
+#[derive(Clone, Copy)]
+struct Handling {
+    /// The mask the frame puts back.
+    mask: u64,
+    /// The alternate signal stack, as [`ThreadSignals::stack`].
+    stack: (u64, u64, u32),
+    /// What the fault that raised the signal left, as
+    /// [`ThreadSignals::trap`].
+    trap: Option<(u32, u64, u64, u64)>,
+}
+
+impl Handling {
+    /// The running thread, whose signals are `signals`, is to run
+    /// `action`'s handler for `signal`: takes what its frame needs, makes
+    /// the system call it interrupted run again if the handler allows,
+    /// and blocks the handler's mask.
+    fn take(signals: &mut ThreadSignals, signal: u32, action: &Action) -> Handling {
         let mask = signals.saved_mask.take().unwrap_or(signals.mask);
-        let restart = signals.restart.take();
+        if let Some((regs, Restart::Always)) = signals.restart.take()
+            && action.has(ActionFlags::RESTART)
+        {
+            Arch::restart_syscall(&regs);
+        }
         let trap = signals.trap.take().filter(|trap| trap.0 == signal);
-        (mask, restart, signals.stack, trap)
-    };
-    if let Some((regs, Restart::Always)) = restart
-        && action.has(ActionFlags::RESTART)
-    {
-        Arch::restart_syscall(&regs);
+        let mut blocked = mask | action.mask;
+        if !action.has(ActionFlags::NO_DEFER) {
+            blocked |= bit(signal);
+        }
+        signals.mask = blocked & !UNBLOCKABLE;
+        Handling { mask, stack: signals.stack, trap }
     }
+}
+
+/// Makes the running thread run `action`'s handler for `signal`, with the
+/// frame [`Handling::take`] prepared. Returns `false` if the frame could
+/// not be written.
+fn run_handler(signal: u32, info: &Info, action: &Action, handling: &Handling) -> bool {
+    let Handling { mask, stack, trap } = *handling;
     let (base, size, flags) = stack;
     let sp = Arch::user_stack_pointer();
     let enabled = flags & StackFlags::DISABLED.0 == 0 && size > 0;
@@ -704,16 +754,7 @@ fn run_handler(user: &UserThread, signal: u32, info: &Info, action: &Action) -> 
         altstack: (base, state, size),
         trap: trap.map(|(_, vector, code, address)| (vector, code, address)),
     };
-    if !Arch::push_signal_frame(&frame) {
-        return false;
-    }
-    let mut signals = user.signals.lock();
-    let mut blocked = mask | action.mask;
-    if !action.has(ActionFlags::NO_DEFER) {
-        blocked |= bit(signal);
-    }
-    signals.mask = blocked & !UNBLOCKABLE;
-    true
+    Arch::push_signal_frame(&frame)
 }
 
 /// The signal methods of radix-process(2), on the calling thread.

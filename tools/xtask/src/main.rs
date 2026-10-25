@@ -228,8 +228,9 @@ prints the report. Without KVM the Radix numbers measure QEMU's emulation
 and take minutes.
 
   --no-linux          Skip the Linux baseline
-  --gate              Fail if Radix takes more than 1.05 times as long as
-                      Linux in the same virtual machine at any operation
+  --gate              Fail if Radix takes longer than Linux in the same
+                      virtual machine at any operation, measuring both
+                      again (up to 6 more runs) while one is over
   --linux-kernel <file>
                       The Linux kernel to boot for the baseline
   --runs <n>          Measure Radix and Linux in turn this many times and

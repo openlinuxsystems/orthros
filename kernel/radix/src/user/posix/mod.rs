@@ -743,6 +743,18 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
     if sig > SIGNALS || pid == i64::MIN {
         return Err(Kernel::InvalidArgument.status(1));
     }
+    // A signal to the caller itself, as raise(3) and abort(3) send: it may
+    // always signal itself, and is no zombie while it runs, so the tree,
+    // whose lock every process shares, has nothing to add.
+    if pid > 0 && pid.unsigned_abs() == me.number() {
+        if sig != 0
+            && signal::send_process(me, sig, info) == signal::Sent::Full
+            && info.code == radix_posix::signal::SI_QUEUE
+        {
+            return Err(error(Kernel::WouldBlock));
+        }
+        return Ok(());
+    }
     // The first target is kept here, the others in the heap: most kills
     // name one process.
     let mut first: Option<ProcessRef> = None;

@@ -49,6 +49,23 @@ static DESCRIPTION: Once<TextBuf<96>> = Once::new();
 /// signal frame always holds.
 const HEAD: usize = 576;
 
+/// The initial state as an image as large as any save area, as
+/// [`init_area`] writes it: what [`load_initial`] restores, as Linux
+/// restores its `init_fpstate`. No thread saves into it, so an XSAVEOPT
+/// into a thread's area after a restore from it writes the whole state.
+#[repr(C, align(64))]
+struct Initial([u8; AREA_MAX]);
+
+static INITIAL: Initial = Initial({
+    let mut image = [0; AREA_MAX];
+    // FCW 0x37f and MXCSR 0x1f80; the XSAVE header at 512 is zero.
+    image[0] = 0x7f;
+    image[1] = 0x03;
+    image[24] = 0x80;
+    image[25] = 0x1f;
+    image
+});
+
 /// XCR0 bits: x87, SSE, AVX, and the three AVX-512 components.
 const X87: u64 = 1;
 const SSE: u64 = 1 << 1;
@@ -224,22 +241,12 @@ pub unsafe fn restore(area: usize) {
     }
 }
 
-/// Loads the initial state, as a new thread starts with, through the save
-/// area at `area`: what a signal handler starts with.
-///
-/// # Safety
-///
-/// As for [`save`]; interrupts must be masked, so that no context switch
-/// saves into the area meanwhile.
-pub unsafe fn load_initial(area: usize) {
-    // SAFETY: the caller guarantees the area, and that nothing else writes
-    // it before the restore; the legacy region and the XSAVE header (the
-    // first 576 bytes) are what `init_area` expects zeroed.
-    unsafe {
-        core::ptr::write_bytes(area as *mut u8, 0, 576);
-        init_area(area);
-        restore(area);
-    }
+/// Loads the initial state, as a new thread starts with: what a signal
+/// handler starts with.
+pub fn load_initial() {
+    // SAFETY: the image is valid, 64-byte aligned, and as large as any
+    // area, and nothing writes it.
+    unsafe { restore(INITIAL.0.as_ptr() as usize) };
 }
 
 /// The size of a save area's image: what [`save`] writes and [`restore`]

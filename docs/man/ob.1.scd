@@ -514,8 +514,10 @@ _target/userspace/_).
 
 	*--gate*
 		Fail if any operation was not measured on both systems, or Radix
-		takes more than 1.05 times as long as Linux in the virtual
-		machine: the performance gate of the plan.
+		takes longer than Linux in the virtual machine at any of them:
+		the performance gate of the plan. While an operation is over,
+		measure Radix and the Linux virtual machine in turn again, up to
+		six more times, each operation keeping its fastest run.
 
 	*--linux-kernel* _file_
 		The Linux kernel to boot. Without it, *ob* uses
