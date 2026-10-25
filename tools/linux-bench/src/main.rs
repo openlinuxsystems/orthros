@@ -5,7 +5,7 @@
 //! measures on Radix, as a baseline (docs/design/ipc.md).
 //!
 //! ```text
-//! linux-bench [--rounds <count>]
+//! linux-bench [--rounds <count>] [--posix-bench <program>]
 //! ```
 //!
 //! It prints one line per benchmark, in the format of the Radix benchmark
@@ -29,6 +29,10 @@
 //! beneath a directory, its status, and reading and writing its first
 //! page, which is in memory.
 //!
+//! Last it runs the POSIX benchmarks, the C program that Radix runs too
+//! (`userspace/posix/bench.c`, built with this machine's C compiler and C
+//! library), given with `--posix-bench`, or at `/posix-bench` as process 1.
+//!
 //! `ob bench` runs it on the host, and also as the init process of a Linux
 //! virtual machine set up like the one Radix runs in: as process 1 it
 //! prints `linux-bench: done` at the end and powers the machine off.
@@ -36,19 +40,27 @@
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
+/// Where the POSIX benchmarks are in the virtual machine's initramfs.
+const POSIX_BENCH: &str = "/posix-bench";
+
 fn main() {
     let mut rounds = 100_000u64;
+    let mut posix = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        match (arg.as_str(), args.next().and_then(|value| value.parse().ok())) {
-            ("--rounds", Some(count)) if count > 0 => rounds = count,
+        let value = args.next();
+        match (arg.as_str(), value) {
+            ("--rounds", Some(count)) if count.parse::<u64>().is_ok_and(|count| count > 0) => {
+                rounds = count.parse().unwrap_or(rounds);
+            }
+            ("--posix-bench", Some(program)) => posix = Some(PathBuf::from(program)),
             _ => {
-                eprintln!("usage: linux-bench [--rounds <count>]");
+                eprintln!("usage: linux-bench [--rounds <count>] [--posix-bench <program>]");
                 std::process::exit(2);
             }
         }
@@ -94,6 +106,10 @@ fn main() {
             parallel(name, other, count, body);
         }
         pipe_roundtrip_parallel(first, other, rounds);
+    }
+    let posix = posix.or_else(|| (std::process::id() == 1).then(|| PathBuf::from(POSIX_BENCH)));
+    if let Some(program) = posix {
+        posix_bench(&program, &cpus);
     }
 
     if std::process::id() == 1 {
@@ -606,6 +622,34 @@ fn allowed_cpus() -> Vec<usize> {
     assert_eq!(result, 0, "sched_getaffinity: {}", std::io::Error::last_os_error());
     // SAFETY: every index is below CPU_SETSIZE, so within the set.
     (0..libc::CPU_SETSIZE as usize).filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) }).collect()
+}
+
+/// Runs the POSIX benchmarks at `program`, which print their own lines,
+/// on every CPU this process may run on: it pins itself and its threads
+/// as it needs, as on Radix.
+fn posix_bench(program: &Path, cpus: &[usize]) {
+    allow(cpus);
+    std::io::stdout().flush().ok();
+    match std::process::Command::new(program).status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("linux-bench: {} failed: {status}", program.display()),
+        Err(err) => eprintln!("linux-bench: cannot run {}: {err}", program.display()),
+    }
+}
+
+/// Lets the calling thread run on each of `cpus` again.
+fn allow(cpus: &[usize]) {
+    // SAFETY: as in `allowed_cpus`.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    for &cpu in cpus {
+        // SAFETY: `cpu` came from `allowed_cpus`, so it is below CPU_SETSIZE.
+        unsafe { libc::CPU_SET(cpu, &mut set) };
+    }
+    // SAFETY: pid 0 is the calling thread, and `set` is a cpu_set_t of the
+    // size given.
+    let result =
+        unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &raw const set) };
+    assert_eq!(result, 0, "sched_setaffinity: {}", std::io::Error::last_os_error());
 }
 
 /// Pins the calling thread to `cpu`.

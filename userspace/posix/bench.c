@@ -1,0 +1,253 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// The POSIX benchmarks of `ob bench`: one C program, built for Radix on
+// mlibc (Spark runs it with --posix) and for Linux with the host's C
+// compiler and C library (linux-bench runs it), so both sides make the
+// same calls through their C libraries. Each benchmark prints a line in
+// the format of the others,
+//
+//     BENCH name=<name> ns=<nanoseconds per operation> iterations=<count>
+//
+// and the program prints "posix-bench: done" at the end. It pins itself
+// to the first CPU it may run on. With --exit it exits at once: the
+// program the exec benchmark runs.
+
+#include <errno.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static uint64_t now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static void report(const char *name, uint64_t started, uint64_t count) {
+	double ns = (double)(now_ns() - started) / (double)count;
+	printf("BENCH name=%s ns=%.2f iterations=%llu\n", name, ns, (unsigned long long)count);
+	fflush(stdout);
+}
+
+static void fail(const char *what) {
+	printf("posix-bench: %s failed: %s\n", what, strerror(errno));
+	fflush(stdout);
+	exit(1);
+}
+
+// The CPUs this process may run on, in order; returns how many.
+static int allowed_cpus(int *cpus, int most) {
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	if(sched_getaffinity(0, sizeof(set), &set) != 0)
+		fail("sched_getaffinity");
+	int count = 0;
+	for(int cpu = 0; cpu < CPU_SETSIZE && count < most; cpu++)
+		if(CPU_ISSET(cpu, &set))
+			cpus[count++] = cpu;
+	return count;
+}
+
+// Pins the calling thread to `cpu`.
+static void pin(int cpu) {
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	if(sched_setaffinity(0, sizeof(set), &set) != 0)
+		fail("sched_setaffinity");
+}
+
+// A child that exits at once, and the wait for it.
+static void fork_wait(uint64_t rounds) {
+	uint64_t started = now_ns();
+	for(uint64_t i = 0; i < rounds; i++) {
+		pid_t child = fork();
+		if(child < 0)
+			fail("fork");
+		if(child == 0)
+			_exit(0);
+		int status;
+		if(waitpid(child, &status, 0) != child || !WIFEXITED(status))
+			fail("waitpid");
+	}
+	report("posix_fork_wait", started, rounds);
+}
+
+// A child that runs this program with --exit, and the wait for it.
+static void fork_exec_wait(const char *self, uint64_t rounds) {
+	char *const argv[] = {(char *)self, "--exit", NULL};
+	uint64_t started = now_ns();
+	for(uint64_t i = 0; i < rounds; i++) {
+		pid_t child = fork();
+		if(child < 0)
+			fail("fork");
+		if(child == 0) {
+			execv(self, argv);
+			_exit(127);
+		}
+		int status;
+		if(waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+			fail("exec");
+	}
+	report("posix_fork_exec_wait", started, rounds);
+}
+
+// What a pipe carries per write, and in all.
+#define PIPE_CHUNK (64 * 1024)
+#define PIPE_TOTAL (256u * 1024 * 1024)
+
+// A child writes PIPE_TOTAL bytes into a pipe, PIPE_CHUNK at a time, and
+// this process reads them, both on this CPU: the time per MiB.
+static void pipe_throughput(void) {
+	static char buffer[PIPE_CHUNK];
+	int fds[2];
+	if(pipe(fds) != 0)
+		fail("pipe");
+	uint64_t started = now_ns();
+	pid_t child = fork();
+	if(child < 0)
+		fail("fork");
+	if(child == 0) {
+		close(fds[0]);
+		memset(buffer, 'x', sizeof(buffer));
+		for(size_t sent = 0; sent < PIPE_TOTAL; sent += PIPE_CHUNK)
+			for(size_t done = 0; done < PIPE_CHUNK;) {
+				ssize_t n = write(fds[1], buffer + done, PIPE_CHUNK - done);
+				if(n <= 0)
+					_exit(1);
+				done += (size_t)n;
+			}
+		_exit(0);
+	}
+	close(fds[1]);
+	size_t got = 0;
+	for(;;) {
+		ssize_t n = read(fds[0], buffer, sizeof(buffer));
+		if(n < 0)
+			fail("read");
+		if(n == 0)
+			break;
+		got += (size_t)n;
+	}
+	int status;
+	if(waitpid(child, &status, 0) != child || got != PIPE_TOTAL)
+		fail("the pipe's writer");
+	report("posix_pipe_mib", started, PIPE_TOTAL >> 20);
+	close(fds[0]);
+}
+
+static volatile sig_atomic_t caught;
+
+static void on_signal(int signal) {
+	(void)signal;
+	caught++;
+}
+
+// A signal this process sends itself, its handler and the return from
+// it.
+static void signal_delivery(uint64_t rounds) {
+	struct sigaction action;
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = on_signal;
+	sigemptyset(&action.sa_mask);
+	if(sigaction(SIGUSR1, &action, NULL) != 0)
+		fail("sigaction");
+	pid_t self = getpid();
+	caught = 0;
+	uint64_t started = now_ns();
+	for(uint64_t i = 0; i < rounds; i++)
+		kill(self, SIGUSR1);
+	report("posix_signal", started, rounds);
+	if((uint64_t)caught != rounds)
+		fail("signal delivery");
+}
+
+// poll on a pipe with data to read, which returns at once.
+static void poll_ready(uint64_t rounds) {
+	int fds[2];
+	if(pipe(fds) != 0 || write(fds[1], "x", 1) != 1)
+		fail("pipe");
+	struct pollfd entry = {.fd = fds[0], .events = POLLIN};
+	uint64_t started = now_ns();
+	for(uint64_t i = 0; i < rounds; i++)
+		if(poll(&entry, 1, 0) != 1)
+			fail("poll");
+	report("posix_poll", started, rounds);
+	close(fds[0]);
+	close(fds[1]);
+}
+
+// Two threads passing a turn there and back through two semaphores, as
+// futexes wake and wait in both C libraries.
+struct turns {
+	sem_t ask, answer;
+	uint64_t rounds;
+	int cpu;
+};
+
+static void *answerer(void *argument) {
+	struct turns *turns = argument;
+	pin(turns->cpu);
+	for(uint64_t i = 0; i < turns->rounds; i++) {
+		while(sem_wait(&turns->ask) != 0) {}
+		sem_post(&turns->answer);
+	}
+	return NULL;
+}
+
+static void futex_pingpong(const char *name, int other, uint64_t rounds) {
+	struct turns turns = {.rounds = rounds, .cpu = other};
+	if(sem_init(&turns.ask, 0, 0) != 0 || sem_init(&turns.answer, 0, 0) != 0)
+		fail("sem_init");
+	pthread_t thread;
+	if(pthread_create(&thread, NULL, answerer, &turns) != 0)
+		fail("pthread_create");
+	// One turn first, so that the other thread is pinned and waiting.
+	sem_post(&turns.ask);
+	while(sem_wait(&turns.answer) != 0) {}
+	uint64_t started = now_ns();
+	for(uint64_t i = 1; i < rounds; i++) {
+		sem_post(&turns.ask);
+		while(sem_wait(&turns.answer) != 0) {}
+	}
+	report(name, started, rounds - 1);
+	pthread_join(thread, NULL);
+	sem_destroy(&turns.ask);
+	sem_destroy(&turns.answer);
+}
+
+int main(int argc, char **argv) {
+	if(argc > 1 && !strcmp(argv[1], "--exit"))
+		return 0;
+	const char *self = argv[0];
+	if(!self || !strchr(self, '/')) {
+		printf("posix-bench: run me by my path, which the exec benchmark runs again\n");
+		return 2;
+	}
+	int cpus[2];
+	int count = allowed_cpus(cpus, 2);
+	if(count == 0)
+		fail("finding a CPU");
+	pin(cpus[0]);
+	fork_wait(2000);
+	fork_exec_wait(self, 500);
+	pipe_throughput();
+	signal_delivery(100000);
+	poll_ready(100000);
+	futex_pingpong("posix_futex_same_cpu", cpus[0], 50000);
+	if(count > 1)
+		futex_pingpong("posix_futex_cross_cpu", cpus[1], 50000);
+	printf("posix-bench: done\n");
+	fflush(stdout);
+	return 0;
+}

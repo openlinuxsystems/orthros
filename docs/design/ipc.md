@@ -385,6 +385,20 @@ vulnerabilities yet. The method follows lmbench's `lat_syscall`,
 | `ring_roundtrip_*`: `msg_ring` each way between two rings | a Unix socket round trip |
 | `syscall_null_parallel`, `cap_info_parallel`, `random_words_parallel`: the same on both CPUs at once | `getppid`, `fcntl` and `getrandom` on two threads |
 | `endpoint_call_parallel`: `endpoint_call_same_cpu` on both CPUs at once, each pair with its own endpoint | a pipe round trip, a pair of threads on each CPU at once |
+| `file_open_close`, `file_stat`, `file_read_4k`, `file_write_4k`: a file opened by name beneath a directory and closed, its status by name, and 4 KiB read from and written over its first page, on a tmpfs | `openat` and `close`, `fstatat`, `pread` and `pwrite` of 4 KiB, on a tmpfs |
+| `posix_*`: the POSIX benchmarks, a C program on mlibc (below) | the same C program on glibc |
+
+The POSIX benchmarks (ADR 0106) are one C program,
+`userspace/posix/bench.c`, which Spark runs on Radix in a second boot of
+the test image and `linux-bench` runs last on Linux, built from the same
+file with the same compiler. It times, with `clock_gettime`, `fork` and
+`waitpid` of a child that exits at once (`posix_fork_wait`); `fork`,
+`execv` of itself and `waitpid` (`posix_fork_exec_wait`); 256 MiB
+through a pipe in 64 KiB writes from a child, both on one CPU, per MiB
+(`posix_pipe_mib`); `kill` of itself with a handler for the signal
+(`posix_signal`); `poll` on a pipe with data to read (`posix_poll`); and
+two threads passing a turn there and back through two semaphores, on
+one CPU and on two (`posix_futex_same_cpu`, `posix_futex_cross_cpu`).
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

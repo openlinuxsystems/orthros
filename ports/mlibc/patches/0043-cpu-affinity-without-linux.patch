@@ -1,0 +1,174 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+GNU's CPU affinity calls on a system without the Linux option, which
+has them: sched_getaffinity and sched_setaffinity (through the
+GetAffinity and SetAffinity sysdeps), pthread_getaffinity_np and
+pthread_setaffinity_np (GetThreadaffinity and SetThreadaffinity) and
+the CPU_* macros of cpu_set_t, with the glibc option and _GNU_SOURCE,
+as on glibc. Without them a C program could not pin itself or its
+threads to CPUs. The CPU set functions are the Linux option's own.
+Meant for upstream.
+
+--- /dev/null
++++ b/options/glibc/generic/glibc-sched.cpp
+@@ -0,0 +1,20 @@
++#include <errno.h>
++#include <sched.h>
++
++#include <mlibc/all-sysdeps.hpp>
++
++int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
++	if(int e = mlibc::sysdep_or_enosys<GetAffinity>(pid, cpusetsize, mask); e) {
++		errno = e;
++		return -1;
++	}
++	return 0;
++}
++
++int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
++	if(int e = mlibc::sysdep_or_enosys<SetAffinity>(pid, cpusetsize, mask); e) {
++		errno = e;
++		return -1;
++	}
++	return 0;
++}
+--- /dev/null
++++ b/options/glibc/include/bits/glibc/glibc_sched.h
+@@ -0,0 +1,56 @@
++#ifndef _BITS_GLIBC_SCHED_H
++#define _BITS_GLIBC_SCHED_H
++
++/* GNU's CPU sets and affinity calls, for a system without the Linux
++ * option, which has them in bits/linux/linux_sched.h and cpu_set.h. */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <abi-bits/pid_t.h>
++#include <bits/cpu_set.h>
++#include <bits/size_t.h>
++
++#ifndef __MLIBC_ABI_ONLY
++
++int sched_setaffinity(pid_t __pid, size_t __cpusetsize, const cpu_set_t *__mask);
++int sched_getaffinity(pid_t __pid, size_t __cpusetsize, cpu_set_t *__mask);
++
++cpu_set_t *__mlibc_cpu_alloc(int __num_cpus);
++size_t __mlibc_cpu_alloc_size(int __num_cpus);
++
++void __mlibc_cpu_zero(const size_t __setsize, cpu_set_t *__set);
++void __mlibc_cpu_set(const int __cpu, const size_t __setsize, cpu_set_t *__set);
++void __mlibc_cpu_clear(const int __cpu, const size_t __setsize, cpu_set_t *__set);
++int __mlibc_cpu_isset(const int __cpu, const size_t __setsize, const cpu_set_t *__set);
++int __mlibc_cpu_count(const size_t __setsize, const cpu_set_t *__set);
++
++#define CPU_ALLOC_SIZE(n) __mlibc_cpu_alloc_size((n))
++#define CPU_ALLOC(n) __mlibc_cpu_alloc((n))
++#define CPU_FREE(set) free((set))
++
++#define CPU_ZERO_S(setsize, set) __mlibc_cpu_zero((setsize), (set))
++#define CPU_ZERO(set) CPU_ZERO_S(sizeof(cpu_set_t), set)
++
++#define CPU_SET_S(cpu, setsize, set) __mlibc_cpu_set((cpu), (setsize), (set))
++#define CPU_SET(cpu, set) CPU_SET_S(cpu, sizeof(cpu_set_t), set)
++
++#define CPU_CLR_S(cpu, setsize, set) __mlibc_cpu_clear((cpu), (setsize), (set))
++#define CPU_CLR(cpu, set) CPU_CLR_S(cpu, sizeof(cpu_set_t), set)
++
++#define CPU_ISSET_S(cpu, setsize, set) __mlibc_cpu_isset((cpu), (setsize), (set))
++#define CPU_ISSET(cpu, set) CPU_ISSET_S(cpu, sizeof(cpu_set_t), set)
++
++#define CPU_COUNT_S(setsize, set) __mlibc_cpu_count((setsize), (set))
++#define CPU_COUNT(set) CPU_COUNT_S(sizeof(cpu_set_t), set)
++
++#define CPU_SETSIZE __CPU_SETSIZE
++
++#endif /* !__MLIBC_ABI_ONLY */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _BITS_GLIBC_SCHED_H */
+--- a/options/glibc/meson.build
++++ b/options/glibc/meson.build
+@@ -25,6 +25,15 @@
+ 	'generic/stdlib.cpp'
+ )
+ 
++# GNU's CPU sets and affinity calls, which the Linux option has, for a
++# system without it.
++if not linux_option
++	libc_sources += files(
++		'generic/glibc-sched.cpp',
++		'../linux/generic/cpuset.cpp'
++	)
++endif
++
+ if not no_headers
+ 	install_headers(
+ 		'include/getopt.h',
+@@ -93,5 +102,11 @@
+ 		'include/bits/glibc/glibc_string.h',
+ 		subdir: 'bits/glibc'
+ 	)
++	if not linux_option
++		install_headers(
++			'include/bits/glibc/glibc_sched.h',
++			subdir: 'bits/glibc'
++		)
++	endif
+ endif
+ 
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -368,7 +368,9 @@
+ 	mlibc::infoLogger() << "pthread_getattr_np(): Implementation is incomplete!" << frg::endlog;
+ 	return 0;
+ }
++#endif // __MLIBC_LINUX_OPTION
+ 
++#if __MLIBC_LINUX_OPTION || __MLIBC_GLIBC_OPTION
+ int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *mask) {
+ 	return mlibc::sysdep_or_enosys<GetThreadaffinity>(reinterpret_cast<Tcb*>(thread)->tid, cpusetsize, mask);
+ }
+@@ -376,7 +378,7 @@
+ int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize, const cpu_set_t *mask) {
+ 	return mlibc::sysdep_or_enosys<SetThreadaffinity>(reinterpret_cast<Tcb*>(thread)->tid, cpusetsize, mask);
+ }
+-#endif // __MLIBC_LINUX_OPTION
++#endif // __MLIBC_LINUX_OPTION || __MLIBC_GLIBC_OPTION
+ 
+ #if __MLIBC_BSD_OPTION
+ int pthread_attr_get_np(pthread_t thread, pthread_attr_t *attr) {
+--- a/options/posix/include/pthread.h
++++ b/options/posix/include/pthread.h
+@@ -137,10 +137,12 @@
+ int pthread_attr_setsigmask_np(pthread_attr_t *__restrict __attr, const sigset_t *__restrict __sigmask);
+ 
+ int pthread_getattr_np(pthread_t __thrd, pthread_attr_t *__attr);
++#endif /* __MLIBC_LINUX_OPTION */
+ 
++#if __MLIBC_LINUX_OPTION || (__MLIBC_GLIBC_OPTION && defined(_GNU_SOURCE))
+ int pthread_getaffinity_np(pthread_t __thrd, size_t __cpusetsize, cpu_set_t *__cpuset);
+ int pthread_setaffinity_np(pthread_t __thrd, size_t __cpusetsize, const cpu_set_t *__cpuset);
+-#endif /* __MLIBC_LINUX_OPTION */
++#endif
+ 
+ /* pthread functions. */
+ int pthread_create(pthread_t *__restrict __thrd, const pthread_attr_t *__restrict __attr,
+--- a/options/posix/include/sched.h
++++ b/options/posix/include/sched.h
+@@ -22,6 +22,10 @@
+ #include <bits/linux/cpu_set.h>
+ #endif
+ 
++#if !__MLIBC_LINUX_OPTION && __MLIBC_GLIBC_OPTION && defined(_GNU_SOURCE)
++#include <bits/glibc/glibc_sched.h>
++#endif
++
+ #ifndef __MLIBC_ABI_ONLY
+ 
+ int sched_yield(void);

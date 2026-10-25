@@ -466,7 +466,8 @@ _target/userspace/_).
 
 *bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--summary* _file_] [*--debug* | *--release*]
 	Measure what system calls, IPC round trips, context switches, fresh
-	pages, TLB shootdowns and memory copies cost on Radix, next to Linux.
+	pages, TLB shootdowns, memory copies, files and POSIX calls cost on
+	Radix, next to Linux.
 	Build a test image and boot it in QEMU on 2 CPUs with
 	*selftest=bench*, where the benchmark programs of the test image time
 	the cheapest system calls (an unknown number, which only enters and
@@ -475,17 +476,25 @@ _target/userspace/_).
 	given back, a page unmapped while its address space runs on the other
 	CPU, a copy between two 32 MiB buffers, round trips between two
 	programs over an endpoint, a notification, a shared-memory channel and
-	a ring, with both on one CPU and on two, and three of the system calls
+	a ring, with both on one CPU and on two, three of the system calls
 	and endpoint round trips (a pair of programs on each CPU) on both CPUs
-	at once.
+	at once, and a file opened and closed, its status, and 4 KiB read
+	from and written to it, on a tmpfs. Then boot it again, with Spark
+	running the POSIX benchmarks, a C program on the C library
+	(_userspace/posix/bench.c_): *fork*(2) and *waitpid*(2), a program
+	run with *execv*(3), a pipe's throughput, a signal to itself,
+	*poll*(2), and futex round trips through semaphores between two
+	threads on one CPU and on two.
 
 	Then boot Linux in a virtual machine set up the same way, with
 	_tools/linux-bench_ built as a static program and run as its only
 	process, which times the closest Linux operations (*getppid*(2),
 	*sched_yield*(2), *fcntl*(2), *getrandom*(2), *mmap*(2) with a
 	first-touch fault, *mprotect*(2), the same copy, and round trips over
-	pipes, eventfds, futexes and Unix sockets, pinned the same way, and
-	pipe round trips with a pair of threads on each CPU at once). This
+	pipes, eventfds, futexes and Unix sockets, pinned the same way, pipe
+	round trips with a pair of threads on each CPU at once, the same file
+	calls on a tmpfs, and last the same POSIX benchmarks, built from the
+	same file with this machine's C library). This
 	Linux boots with *mitigations=off*, since Radix has no mitigations of
 	CPU vulnerabilities yet. Under KVM, Radix and this Linux are measured
 	three times in turn, and each operation counts its fastest run on
@@ -806,9 +815,10 @@ _out/test/_
 _out/bench/_
 	The benchmark report (_report.md_), its numbers (_results.json_),
 	the instruction counts of *--instructions* (_instructions.md_),
-	the serial logs of the benchmark boot and the Linux virtual machine
-	(_boot-bench.log_, _boot-linux.log_) and that machine's initramfs
-	(_linux-bench.cpio_), from *ob bench*.
+	the serial logs of the benchmark boots and the Linux virtual machine
+	(_boot-bench.log_, _boot-posix-bench.log_, _boot-linux.log_), the
+	POSIX benchmarks built for Linux (_posix-bench_) and that machine's
+	initramfs (_linux-bench.cpio_), from *ob bench*.
 
 # EXIT STATUS
 

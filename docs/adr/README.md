@@ -117,3 +117,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0103](0103-the-shell-corpus.md) | Nukesh is checked against POSIX's shell tests and real projects' scripts, run in a sandbox | Accepted |
 | [0104](0104-cancellation-points-as-musl-makes-them.md) | Thread cancellation points are system calls made as musl makes them, through a stub the signal handler can see | Accepted |
 | [0105](0105-shootdowns-skip-stopped-virtual-cpus.md) | Under KVM, a TLB shootdown sends no interrupt to a virtual CPU the host has stopped | Accepted |
+| [0106](0106-posix-benchmarks-one-c-program.md) | The POSIX rows of `ob bench` are one C program, run on Radix and on Linux | Accepted |

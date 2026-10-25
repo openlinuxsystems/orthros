@@ -3,8 +3,8 @@
 
 // Processes and signals on Radix (ADR 0061 to ADR 0063, ADR 0068): fork,
 // exec and wait, process groups and sessions, signal actions, masks and
-// stacks, timers and CPU times, all methods of the process's own
-// capability (radix-process(2)).
+// stacks, timers and CPU times, scheduling and CPU affinity, all methods
+// of the process's own capability (radix-process(2)).
 
 #include <bits/ensure.h>
 #include <errno.h>
@@ -491,6 +491,51 @@ int Sysdeps<SetSchedparam>::operator()(void *tcb, int policy, const struct sched
 	auto thread = static_cast<uint64_t>(reinterpret_cast<Tcb *>(tcb)->tid);
 	int priority = param->sched_priority;
 	return scheduling(thread, true, &policy, &priority);
+}
+
+namespace {
+
+// The CPUs thread `thread` (0: the calling one) may run on, into the CPU
+// set `mask` of `size` bytes: radix-process(2)'s `affinity`, whose bits
+// are a CPU set's (bit n % 8 of byte n / 8 for CPU n). The bytes past
+// the kernel's own are cleared, as glibc clears them.
+int get_affinity(uint64_t thread, size_t size, cpu_set_t *mask) {
+	struct radix_process_affinity_results r;
+	if(uint64_t status = radix_process_affinity(radix::SLOT_PROCESS, thread, mask, size, &r); status)
+		return radix::to_errno(status);
+	if(r.size < size)
+		memset(reinterpret_cast<char *>(mask) + r.size, 0, size - r.size);
+	return 0;
+}
+
+// Sets the CPUs thread `thread` (0: the calling one) may run on from the
+// CPU set `mask` of `size` bytes: radix-process(2)'s `set_affinity`.
+int set_affinity(uint64_t thread, size_t size, const cpu_set_t *mask) {
+	return radix::to_errno(radix_process_set_affinity(radix::SLOT_PROCESS, thread, mask, size));
+}
+
+} // namespace
+
+int Sysdeps<GetAffinity>::operator()(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	return get_affinity(thread, cpusetsize, mask);
+}
+
+int Sysdeps<SetAffinity>::operator()(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
+	uint64_t thread;
+	if(int e = thread_of(pid, &thread); e)
+		return e;
+	return set_affinity(thread, cpusetsize, mask);
+}
+
+int Sysdeps<GetThreadaffinity>::operator()(pid_t tid, size_t cpusetsize, cpu_set_t *mask) {
+	return get_affinity(static_cast<uint64_t>(tid), cpusetsize, mask);
+}
+
+int Sysdeps<SetThreadaffinity>::operator()(pid_t tid, size_t cpusetsize, const cpu_set_t *mask) {
+	return set_affinity(static_cast<uint64_t>(tid), cpusetsize, mask);
 }
 
 // The load averages, from /proc/loadavg's `load_N: whole.hundredths`

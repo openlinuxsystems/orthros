@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Scheduling and limits: nice levels as nice and setpriority set them,
-// the sched_ calls, resource limits as setrlimit sets them and fork and
-// exec keep them, the file descriptor and stack limits, and the file
-// mode mask.
+// the sched_ calls, the CPUs a thread may run on, resource limits as
+// setrlimit sets them and fork and exec keep them, the file descriptor
+// and stack limits, and the file mode mask.
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -133,6 +133,55 @@ static void policies(void) {
 	CHECK_ERROR(sched_getscheduler(99999), ESRCH);
 }
 
+static void *thread_cpus(void *argument) {
+	(void)argument;
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CHECK(pthread_getaffinity_np(pthread_self(), sizeof(set), &set) == 0);
+	return (void *)(intptr_t)CPU_COUNT(&set);
+}
+
+// The CPUs a thread may run on: every online one at first; one that
+// sched_setaffinity pins it to, which a new thread and a child start
+// with; pthread_setaffinity_np's, and the errors.
+static void affinity(void) {
+	cpu_set_t all, one, got;
+	CPU_ZERO(&all);
+	CHECK(sched_getaffinity(0, sizeof(all), &all) == 0);
+	int count = CPU_COUNT(&all);
+	CHECK(count >= 1 && count == sysconf(_SC_NPROCESSORS_ONLN));
+	int first = 0;
+	while(first < CPU_SETSIZE - 1 && !CPU_ISSET(first, &all))
+		first++;
+	CPU_ZERO(&one);
+	CPU_SET(first, &one);
+	CHECK(sched_setaffinity(0, sizeof(one), &one) == 0);
+	CPU_ZERO(&got);
+	CHECK(sched_getaffinity(getpid(), sizeof(got), &got) == 0);
+	CHECK(CPU_COUNT(&got) == 1 && CPU_ISSET(first, &got));
+	CHECK((intptr_t)in_thread(thread_cpus, NULL) == 1);
+	pid_t child = fork();
+	if(child == 0) {
+		cpu_set_t mine;
+		CPU_ZERO(&mine);
+		int pinned = sched_getaffinity(0, sizeof(mine), &mine) == 0 && CPU_COUNT(&mine) == 1
+				&& CPU_ISSET(first, &mine);
+		_exit(pinned ? 0 : 1);
+	}
+	int status;
+	CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(pthread_setaffinity_np(pthread_self(), sizeof(all), &all) == 0);
+	CPU_ZERO(&got);
+	CHECK(pthread_getaffinity_np(pthread_self(), sizeof(got), &got) == 0);
+	CHECK(CPU_COUNT(&got) == count);
+	cpu_set_t none;
+	CPU_ZERO(&none);
+	CHECK_ERROR(sched_setaffinity(0, sizeof(none), &none), EINVAL);
+	CHECK_ERROR(sched_getaffinity(0, 1, &got), EINVAL);
+	CHECK_ERROR(sched_getaffinity(99999, sizeof(got), &got), ESRCH);
+	CHECK(sched_setaffinity(0, sizeof(all), &all) == 0);
+}
+
 static void limits(void) {
 	struct rlimit limit;
 	CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
@@ -203,6 +252,7 @@ int main(int argc, char **argv) {
 	check_start("limits");
 	RUN(priorities);
 	RUN(policies);
+	RUN(affinity);
 	RUN(limits);
 	RUN(file_mask);
 	return check_end();
