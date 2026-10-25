@@ -198,7 +198,7 @@ fn map_program(
             base: segment.offset - page_offset,
             size: page_offset + segment.filesz,
         });
-        let anon = Anon { access: Some(access), shared: false, file: source };
+        let anon = Anon { access: Some(access), shared: None, file: source };
         let at = segment.first_page().wrapping_add(bias);
         space
             .map_anonymous(segment.pages(), anon, Placement::FixedNoReplace(at))
@@ -256,7 +256,7 @@ fn relocate(space: &SpaceObject, file: &File, program: &Program, bias: u64) -> R
 /// program moved by `bias`.
 #[inline(never)]
 fn map_startup(space: &SpaceObject, bias: u64) -> Result<()> {
-    let anon = Anon { access: Some(UserAccess::Read), shared: false, file: None };
+    let anon = Anon { access: Some(UserAccess::Read), shared: None, file: None };
     space
         .map_anonymous(1, anon, Placement::FixedNoReplace(startup::STARTUP_ADDRESS))
         .map_err(|_| not_executable(ElfError::OutOfRange))?;
@@ -512,7 +512,7 @@ fn build_stack(
     }
     let windows = startup::STACK_WINDOW / PAGE_SIZE - stack_bytes / PAGE_SIZE;
     let top = startup::STACK_TOP - radix_random::below(windows) * PAGE_SIZE;
-    let anon = Anon { access: Some(UserAccess::ReadWrite), shared: false, file: None };
+    let anon = Anon { access: Some(UserAccess::ReadWrite), shared: None, file: None };
     space
         .map_anonymous(stack_bytes / PAGE_SIZE, anon, Placement::FixedNoReplace(top - stack_bytes))
         .map_err(|_| error(Kernel::NoMemory))?;

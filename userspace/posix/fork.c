@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // fork and wait: the child is a copy whose writes the parent does not
-// see, and the parent waits for its children in every way waitpid has.
+// see, except in shared memory, which both see and whose futexes wake
+// across them, and the parent waits for its children in every way
+// waitpid has.
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
 #include <stdint.h>
 #include <sys/mman.h>
 
@@ -68,6 +73,129 @@ static void shares(void) {
 	CHECK_CHILD(pid);
 	CHECK(*shared == 2);
 	munmap((void *)shared, 4096);
+}
+
+// A page of shared memory first touched after the fork is the same page
+// on both sides, whichever side touches it first.
+static void shares_new_pages(void) {
+	volatile int *shared =
+			mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	CHECK(shared != MAP_FAILED);
+	if(shared == MAP_FAILED)
+		return;
+	int go[2];
+	CHECK(pipe(go) == 0);
+	// One child writes the second page and ends; another reads the third
+	// once the parent has written it.
+	pid_t writer = check_fork();
+	if(writer == 0) {
+		shared[1024] = 41;
+		check_exit_child();
+	}
+	pid_t reader = check_fork();
+	if(reader == 0) {
+		close(go[1]);
+		char byte;
+		CHECK(read(go[0], &byte, 1) == 1);
+		CHECK(shared[2048] == 42);
+		CHECK(shared[1024] == 41);
+		check_exit_child();
+	}
+	close(go[0]);
+	CHECK_CHILD(writer);
+	CHECK(shared[1024] == 41);
+	shared[2048] = 42;
+	CHECK(write(go[1], "x", 1) == 1);
+	close(go[1]);
+	CHECK_CHILD(reader);
+	CHECK(shared[0] == 0);
+	munmap((void *)shared, 3 * 4096);
+}
+
+// Two semaphores in shared memory (pshared), passed back and forth with
+// another process: each wake reaches a waiter in the other process.
+struct turns {
+	sem_t ask, answer;
+};
+
+static int turn(sem_t *sem) {
+	struct timespec until;
+	clock_gettime(CLOCK_REALTIME, &until);
+	until.tv_sec += 10;
+	int result;
+	while((result = sem_timedwait(sem, &until)) != 0 && errno == EINTR) {}
+	return result;
+}
+
+static void shared_semaphores(void) {
+	struct turns *turns =
+			mmap(NULL, sizeof(*turns), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	CHECK(turns != MAP_FAILED);
+	if(turns == MAP_FAILED)
+		return;
+	CHECK(sem_init(&turns->ask, 1, 0) == 0);
+	CHECK(sem_init(&turns->answer, 1, 0) == 0);
+	enum { ROUNDS = 200 };
+	pid_t pid = check_fork();
+	if(pid == 0) {
+		for(int i = 0; i < ROUNDS; i++) {
+			if(turn(&turns->ask) != 0) {
+				CHECK(!"the parent's post woke this process");
+				break;
+			}
+			sem_post(&turns->answer);
+		}
+		check_exit_child();
+	}
+	int answered = 0;
+	for(int i = 0; i < ROUNDS; i++) {
+		sem_post(&turns->ask);
+		if(turn(&turns->answer) != 0)
+			break;
+		answered++;
+	}
+	CHECK(answered == ROUNDS);
+	CHECK_CHILD(pid);
+	sem_destroy(&turns->ask);
+	sem_destroy(&turns->answer);
+	munmap(turns, sizeof(*turns));
+}
+
+// A mutex in shared memory (PTHREAD_PROCESS_SHARED) keeps two processes'
+// increments of a counter apart, sleeping and waking across them.
+struct counted {
+	pthread_mutex_t lock;
+	long count;
+};
+
+static void shared_mutex(void) {
+	struct counted *counted =
+			mmap(NULL, sizeof(*counted), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	CHECK(counted != MAP_FAILED);
+	if(counted == MAP_FAILED)
+		return;
+	pthread_mutexattr_t attr;
+	CHECK(pthread_mutexattr_init(&attr) == 0);
+	CHECK(pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED) == 0);
+	CHECK(pthread_mutex_init(&counted->lock, &attr) == 0);
+	pthread_mutexattr_destroy(&attr);
+	enum { EACH = 20000 };
+	pid_t pid = check_fork();
+	for(int i = 0; i < EACH; i++) {
+		pthread_mutex_lock(&counted->lock);
+		long seen = counted->count;
+		// Long enough inside for the other process to find it locked.
+		if(i % 64 == 0)
+			sched_yield();
+		counted->count = seen + 1;
+		pthread_mutex_unlock(&counted->lock);
+	}
+	if(pid == 0)
+		check_exit_child();
+	CHECK_CHILD(pid);
+	CHECK(counted->count == 2 * EACH);
+	pthread_mutex_destroy(&counted->lock);
+	munmap(counted, sizeof(*counted));
 }
 
 // Exit codes and wait statuses.
@@ -239,6 +367,9 @@ int main(void) {
 	check_start("fork");
 	RUN(copies);
 	RUN(shares);
+	RUN(shares_new_pages);
+	RUN(shared_semaphores);
+	RUN(shared_mutex);
 	RUN(statuses);
 	RUN(waits);
 	RUN(descriptors);

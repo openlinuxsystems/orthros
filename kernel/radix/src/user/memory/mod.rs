@@ -22,12 +22,17 @@
 //! Since Phase 8 a region can also be anonymous memory (`anon`): pages the
 //! kernel makes when a program first touches them, zeroed or filled from
 //! a file, charged to the space's resource domain, and shared after a
-//! fork until one side writes to them. `futex` keeps the threads that
-//! wait on words of an address space.
+//! fork until one side writes to them, or for good in a shared mapping,
+//! whose pages every space that maps it finds in one [`SharedPages`].
+//! `futex` keeps the threads that wait on words of memory: a word of a
+//! space's own memory by the space and its address, a word of memory
+//! spaces share by what they share and its place in it
+//! ([`SpaceObject::futex_key`]).
 //!
 //! Lock order: the capability store, then a frame's zeroing step, then its
-//! list of address spaces, then an address space's regions (then the
-//! architecture's page-table lock, then the frame allocator's).
+//! list of address spaces, then an address space's regions, then a shared
+//! mapping's pages (then the architecture's page-table lock, then the
+//! frame allocator's).
 
 mod anon;
 pub mod futex;
@@ -45,7 +50,7 @@ use radix_ipc::range::user_pages;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Mutex;
 
-pub use anon::{Anon, Fault, FileSource, Placement};
+pub use anon::{Anon, Fault, FileSource, Placement, SharedPages};
 
 use super::ring::RingRef;
 use super::{Result, error};
@@ -101,7 +106,7 @@ struct Region {
     /// How many pages.
     pages: u64,
     /// What they map, from page `offset` of it (for anonymous memory, of
-    /// the file it is filled from).
+    /// the file it is filled from, or of a shared mapping's pages).
     backing: Backing,
     offset: u64,
 }
@@ -149,6 +154,10 @@ pub struct SpaceObject {
     /// Where anonymous memory the kernel places goes: the highest free
     /// range below this, a random distance below ANONYMOUS_TOP.
     anon_top: u64,
+    /// Whether it has ever mapped memory another space may map too (a
+    /// frame, a ring or a shared mapping): until then a futex word is
+    /// named by the space alone, with no look at its regions.
+    may_share: AtomicBool,
 }
 
 /// Pages a step of zeroing a new frame clears: 256 KiB, a few tens of
@@ -184,6 +193,7 @@ impl SpaceObject {
             faults: AtomicU64::new(0),
             file_faults: AtomicU64::new(0),
             anon_top: anon::random_top(),
+            may_share: AtomicBool::new(false),
         };
         Arc::try_new_in(space, kmalloc()).ok()
     }
@@ -251,6 +261,7 @@ impl SpaceObject {
             }
         }
         insert(&mut regions, Region { start, pages, backing: backing.clone(), offset });
+        self.may_share.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -369,6 +380,50 @@ impl SpaceObject {
             None => (false, AbiRights(0)),
             Some((_, access)) => (true, rights_of(access)),
         }
+    }
+
+    /// What names the futex word at `address`: in memory only this space
+    /// maps, the space and the address; in a shared mapping, a frame or a
+    /// ring, which other spaces may map anywhere, what is mapped and the
+    /// word's place in it, held so that the name stays its own while a
+    /// thread waits on it. A space that never mapped such memory names
+    /// its words without looking at its regions.
+    #[inline]
+    pub fn futex_key(&self, address: u64) -> futex::Key {
+        // Acquire: a word of memory mapped by another thread is reached
+        // through an address that thread gave this one after its mapping
+        // was made, which set the flag.
+        if self.may_share.load(Ordering::Acquire) {
+            self.shared_futex_key(address)
+        } else {
+            self.own_futex_key(address)
+        }
+    }
+
+    fn own_futex_key(&self, address: u64) -> futex::Key {
+        futex::Key { owner: core::ptr::from_ref(self) as usize, offset: address, hold: None }
+    }
+
+    #[inline(never)]
+    fn shared_futex_key(&self, address: u64) -> futex::Key {
+        let page = address & !(PAGE_SIZE - 1);
+        let regions = self.regions.lock();
+        let Some(region) = regions.get(first_after(&regions, page)).filter(|r| r.start <= page)
+        else {
+            return self.own_futex_key(address);
+        };
+        let (owner, hold) = match &region.backing {
+            Backing::Anon(anon) => match &anon.shared {
+                Some(pages) => (Arc::as_ptr(pages) as usize, futex::Held::Pages(pages.clone())),
+                None => return self.own_futex_key(address),
+            },
+            Backing::Frame(frame) => {
+                (Arc::as_ptr(frame) as usize, futex::Held::Frame(frame.clone()))
+            }
+            Backing::Ring(ring) => (Arc::as_ptr(ring) as usize, futex::Held::Ring(ring.clone())),
+        };
+        let index = region.offset + (page - region.start) / PAGE_SIZE;
+        futex::Key { owner, offset: index * PAGE_SIZE + address % PAGE_SIZE, hold: Some(hold) }
     }
 }
 

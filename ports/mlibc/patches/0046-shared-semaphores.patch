@@ -1,0 +1,26 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+sem_init accepts a semaphore shared between processes (pshared). A
+semaphore is one futex word, and Radix names a word of memory several
+processes map by that memory, not by each process's address, so a post
+in one process wakes a waiter in another with no change to the rest of
+the code (radix-address-space(2)). mlibc refused them with ENOSYS on
+every system. Dukovo only: upstream would need to know which systems
+share futex words.
+
+--- a/options/posix/generic/semaphore.cpp
++++ b/options/posix/generic/semaphore.cpp
+@@ -10,12 +10,6 @@
+ static constexpr unsigned int semaphoreCountMask = static_cast<uint32_t>(1 << 31) - 1;
+ 
+ int sem_init(sem_t *sem, int pshared, unsigned int initial_count) {
+-	if (pshared) {
+-		mlibc::infoLogger() << "mlibc: shared semaphores are unsuppored" << frg::endlog;
+-		errno = ENOSYS;
+-		return -1;
+-	}
+-
+ 	if (initial_count > SEM_VALUE_MAX) {
+ 		errno = EINVAL;
+ 		return -1;

@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -296,6 +297,19 @@ static void *answerer(void *argument) {
 	return NULL;
 }
 
+// Passes the turns to the answerer and back, and reports all but the
+// first, which only finds the answerer pinned and waiting.
+static void pass_turns(const char *name, struct turns *turns) {
+	sem_post(&turns->ask);
+	while(sem_wait(&turns->answer) != 0) {}
+	struct mark started = start();
+	for(uint64_t i = 1; i < turns->rounds; i++) {
+		sem_post(&turns->ask);
+		while(sem_wait(&turns->answer) != 0) {}
+	}
+	report(name, started, turns->rounds - 1);
+}
+
 static void futex_pingpong(const char *name, int other, uint64_t rounds) {
 	struct turns turns = {.rounds = rounds, .cpu = other};
 	if(sem_init(&turns.ask, 0, 0) != 0 || sem_init(&turns.answer, 0, 0) != 0)
@@ -303,18 +317,38 @@ static void futex_pingpong(const char *name, int other, uint64_t rounds) {
 	pthread_t thread;
 	if(pthread_create(&thread, NULL, answerer, &turns) != 0)
 		fail("pthread_create");
-	// One turn first, so that the other thread is pinned and waiting.
-	sem_post(&turns.ask);
-	while(sem_wait(&turns.answer) != 0) {}
-	struct mark started = start();
-	for(uint64_t i = 1; i < rounds; i++) {
-		sem_post(&turns.ask);
-		while(sem_wait(&turns.answer) != 0) {}
-	}
-	report(name, started, rounds - 1);
+	pass_turns(name, &turns);
 	pthread_join(thread, NULL);
 	sem_destroy(&turns.ask);
 	sem_destroy(&turns.answer);
+}
+
+// The same between two processes, through semaphores shared between
+// processes in memory both map: the kernel names each futex word by
+// that memory, not by its address in one process.
+static void futex_processes(const char *name, int other, uint64_t rounds) {
+	struct turns *turns = mmap(NULL, sizeof(*turns), PROT_READ | PROT_WRITE,
+	                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if(turns == MAP_FAILED)
+		fail("mmap");
+	turns->rounds = rounds;
+	turns->cpu = other;
+	if(sem_init(&turns->ask, 1, 0) != 0 || sem_init(&turns->answer, 1, 0) != 0)
+		fail("sem_init");
+	pid_t child = fork();
+	if(child < 0)
+		fail("fork");
+	if(child == 0) {
+		answerer(turns);
+		_exit(0);
+	}
+	pass_turns(name, turns);
+	int status;
+	if(waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+		fail("waitpid");
+	sem_destroy(&turns->ask);
+	sem_destroy(&turns->answer);
+	munmap(turns, sizeof(*turns));
 }
 
 int main(int argc, char **argv) {
@@ -339,6 +373,9 @@ int main(int argc, char **argv) {
 	futex_pingpong("posix_futex_same_cpu", cpus[0], 50000);
 	if(count > 1)
 		futex_pingpong("posix_futex_cross_cpu", cpus[1], 50000);
+	futex_processes("posix_futex_shared_same_cpu", cpus[0], 50000);
+	if(count > 1)
+		futex_processes("posix_futex_shared_cross_cpu", cpus[1], 50000);
 	printf("posix-bench: done\n");
 	fflush(stdout);
 	return 0;

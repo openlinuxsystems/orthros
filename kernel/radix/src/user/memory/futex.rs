@@ -5,9 +5,13 @@
 //! words of an address space, what a C library's locks and condition
 //! variables sleep on.
 //!
-//! A word is named by its address space and its address. Its waiters are
-//! kept in one of [`BUCKETS`] lists, chosen by hashing the two, in the
-//! order they came. `futex_wait` checks the word with the bucket locked,
+//! A word is named by a [`Key`]: in memory only its address space maps, by
+//! the space and its address; in memory several spaces may map, each at
+//! its own address (a shared mapping, a frame, a ring), by what they map
+//! and the word's place in it, so that a wake in one process reaches the
+//! waiters of another (`SpaceObject::futex_key`). Its waiters are kept in
+//! one of [`BUCKETS`] lists, chosen by hashing the two, in the order they
+//! came. `futex_wait` checks the word with the bucket locked,
 //! so a `futex_wake` that comes after the word changed (it takes the same
 //! lock) always finds the waiter: no wake-up is lost between the check and
 //! the sleep. A woken waiter is taken off the list by its waker and told
@@ -21,10 +25,8 @@
 //! wakes it ([`sched::wake`]). The TLA+ model `kernel/radix/tla/Futex.tla`
 //! checks that no wake-up is lost this way.
 //!
-//! Words of memory several processes share (`MAP_SHARED`) are named by
-//! each one's own space, so one process's wake does not reach another's
-//! waiters on the same page: shared futexes are not supported yet
-//! (docs/design/posix.md lists it).
+//! A waiter on shared memory holds what it waits on, so that its key
+//! names nothing else while it waits, even if every space unmaps it.
 
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -34,7 +36,8 @@ use radix_hal::UserMode;
 use radix_mm::Kmalloc;
 use radix_sync::Mutex;
 
-use super::{SpaceObject, kmalloc};
+use super::anon::SharedRef;
+use super::{FrameRef, RingRef, SpaceObject, kmalloc};
 use crate::Arch;
 use crate::sched::{self, ThreadRef, wait};
 use crate::user::posix::signal::{Restart, interrupted};
@@ -47,11 +50,36 @@ const BUCKETS: usize = 64;
 /// wakes them with the list unlocked.
 const WAKE_BATCH: usize = 8;
 
+/// What names a word.
+pub struct Key {
+    /// What it is in, by address: its address space, or the memory spaces
+    /// share.
+    pub(super) owner: usize,
+    /// Its address in the space, or its place in the shared memory.
+    pub(super) offset: u64,
+    /// The shared memory, which a waiter holds.
+    pub(super) hold: Option<Held>,
+}
+
+/// Memory several spaces may map, held by a waiter on a word of it: a
+/// pointer each, so that a key stays small enough to move cheaply.
+#[expect(dead_code, reason = "held only to keep the memory alive")]
+pub enum Held {
+    /// A shared mapping's pages.
+    Pages(SharedRef),
+    /// A frame.
+    Frame(FrameRef),
+    /// A ring's pages.
+    Ring(RingRef),
+}
+
 /// A thread waiting on a word.
 struct Waiter {
-    /// The address space, by address.
-    space: usize,
-    address: u64,
+    owner: usize,
+    offset: u64,
+    /// Held while it waits ([`Key::hold`]).
+    #[expect(dead_code, reason = "held only to keep the memory alive")]
+    hold: Option<Held>,
     thread: ThreadRef,
     /// Its program side, whose flag the waker sets.
     user: UserRef,
@@ -61,9 +89,9 @@ struct Waiter {
 static LISTS: [Mutex<Option<Vec<Waiter, Kmalloc>>>; BUCKETS] =
     [const { Mutex::new(None) }; BUCKETS];
 
-/// The list for the word at `address` of the space at `space`.
-fn list(space: usize, address: u64) -> &'static Mutex<Option<Vec<Waiter, Kmalloc>>> {
-    let hash = (space as u64 ^ address.rotate_left(17)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+/// The list for the word `key` names.
+fn list(key: &Key) -> &'static Mutex<Option<Vec<Waiter, Kmalloc>>> {
+    let hash = (key.owner as u64 ^ key.offset.rotate_left(17)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     &LISTS[(hash >> 58) as usize % BUCKETS]
 }
 
@@ -87,8 +115,8 @@ pub fn wait(
         return Err(Kernel::InvalidArgument.status(0));
     }
     let me = sched::current().ok_or(error(Kernel::Gone))?;
-    let key = core::ptr::from_ref::<SpaceObject>(space) as usize;
-    let bucket = list(key, address);
+    let key = space.futex_key(address);
+    let bucket = list(&key);
     {
         let mut waiters = bucket.lock();
         // Read with the list locked: a waker changes the word before it
@@ -104,7 +132,13 @@ pub fn wait(
         waiters.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
         user.futex_woken.store(false, Ordering::Relaxed);
         // Room was reserved above.
-        let waiter = Waiter { space: key, address, thread: me.clone(), user: user.clone() };
+        let waiter = Waiter {
+            owner: key.owner,
+            offset: key.offset,
+            hold: key.hold,
+            thread: me.clone(),
+            user: user.clone(),
+        };
         let _ = waiters.push_within_capacity(waiter);
     }
     let done = || user.futex_woken.load(Ordering::Acquire) || sched::interrupted();
@@ -123,14 +157,16 @@ pub fn wait(
         return Ok(());
     }
     // Off the list, unless a waker took it off just now: then the wake-up
-    // is this wait's.
-    let mut waiters = bucket.lock();
-    let Some(waiters) = waiters.as_mut() else { return Ok(()) };
-    let before = waiters.len();
-    waiters.retain(|w| !ThreadRef::ptr_eq(&w.thread, &me));
-    if waiters.len() == before {
-        return Ok(());
-    }
+    // is this wait's. What it held goes with the list unlocked.
+    let mine = {
+        let mut waiters = bucket.lock();
+        let Some(waiters) = waiters.as_mut() else { return Ok(()) };
+        let Some(at) = waiters.iter().position(|w| ThreadRef::ptr_eq(&w.thread, &me)) else {
+            return Ok(());
+        };
+        waiters.remove(at)
+    };
+    drop(mine);
     if !in_time {
         return Err(error(Kernel::TimedOut));
     }
@@ -147,8 +183,8 @@ pub fn wake(space: &SpaceObject, address: u64, count: u32) -> Result<u32> {
     if !address.is_multiple_of(4) {
         return Err(Kernel::InvalidArgument.status(0));
     }
-    let key = core::ptr::from_ref::<SpaceObject>(space) as usize;
-    let bucket = list(key, address);
+    let key = space.futex_key(address);
+    let bucket = list(&key);
     let mut woken = 0;
     loop {
         let mut batch: [Option<ThreadRef>; WAKE_BATCH] = [const { None }; WAKE_BATCH];
@@ -159,12 +195,16 @@ pub fn wake(space: &SpaceObject, address: u64, count: u32) -> Result<u32> {
             let mut index = 0;
             while index < waiters.len() && woken < count && taken < WAKE_BATCH {
                 let waiter = &waiters[index];
-                if waiter.space != key || waiter.address != address {
+                if waiter.owner != key.owner || waiter.offset != key.offset {
                     index += 1;
                     continue;
                 }
                 let waiter = waiters.remove(index);
                 waiter.user.futex_woken.store(true, Ordering::Release);
+                // What the wait held goes here, with the list locked, and
+                // is never the last hold: a waiter on the same word holds
+                // the same memory as `key`, which is held until this
+                // returns, so no object is freed under the lock.
                 batch[taken] = Some(waiter.thread);
                 taken += 1;
                 woken += 1;
