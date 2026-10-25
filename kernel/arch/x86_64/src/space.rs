@@ -424,40 +424,74 @@ impl<'a> Walk<'a> {
     /// Walks the entries of the table at `phys`, of `level` (4 for the
     /// PML4), that cover the range; the table maps from `base`.
     fn table(&mut self, space: &AddressSpace, phys: u64, level: u32, base: u64) {
+        if level == 1 {
+            self.leaves(space, phys, base);
+            return;
+        }
         let span = 1u64 << (12 + 9 * (level - 1));
         let first = (self.start.max(base) - base) / span;
         let last = ((self.end - 1 - base) / span).min(511);
-        for index in first..=last {
+        let entries = paging::table(phys);
+        let mut index = first;
+        while index <= last {
             if self.failed.is_some() {
                 return;
             }
-            let virt = base + index * span;
-            let slot = &paging::table(phys)[index as usize];
-            let entry = slot.load(Ordering::Relaxed);
-            if level > 1 {
-                // Programs' pages are all 4 KiB ones.
-                if entry & PRESENT != 0 && entry & LARGE == 0 {
-                    self.table(space, entry & ADDRESS, level - 1, virt);
-                }
+            if let Some(next) = skip_empty(entries, index, last, PRESENT) {
+                index = next;
                 continue;
             }
+            let entry = entries[index as usize].load(Ordering::Relaxed);
+            // Programs' pages are all 4 KiB ones.
+            if entry & PRESENT != 0 && entry & LARGE == 0 {
+                self.table(space, entry & ADDRESS, level - 1, base + index * span);
+            }
+            index += 1;
+        }
+    }
+
+    /// Walks the entries of the page table at `phys`, which maps from
+    /// `base`, that cover the range: each one that holds a frame goes to
+    /// `decide`.
+    fn leaves(&mut self, space: &AddressSpace, phys: u64, base: u64) {
+        let first = (self.start.max(base) - base) / PAGE;
+        let last = ((self.end - 1 - base) / PAGE).min(511);
+        let entries = paging::table(phys);
+        // The copy's page table for the same 2 MiB, found (or made) when
+        // the first entry goes to it.
+        let mut target: Option<&'static [AtomicU64; 512]> = None;
+        let mut next = first;
+        while next <= last {
+            if let Some(after) = skip_empty(entries, next, last, PRESENT | HELD) {
+                next = after;
+                continue;
+            }
+            let index = next;
+            next += 1;
+            let slot = &entries[index as usize];
+            let entry = slot.load(Ordering::Relaxed);
             let present = entry & PRESENT != 0;
             if !present && entry & HELD == 0 {
                 continue;
             }
+            let virt = base + index * PAGE;
             let frame = entry & ADDRESS;
             let access = present.then(|| paging::access_of(entry));
             let (edit, copy) = (self.decide)(virt, frame, access);
             if let (Some(to), Some(access)) = (self.to, copy) {
                 // The target's lock is held (`copy_into`), and no CPU runs
                 // it, so its new entry needs no flush.
-                match paging::entry(to.pml4, virt, 1, true) {
-                    Ok(target) => target.store(leaf_entry(frame, access), Ordering::Relaxed),
-                    Err(_) => {
-                        self.failed = Some(virt);
-                        return;
-                    }
-                }
+                let table = match target {
+                    Some(table) => table,
+                    None => match paging::table_of(to.pml4, virt, 1, true) {
+                        Ok(table) => *target.insert(table),
+                        Err(_) => {
+                            self.failed = Some(virt);
+                            return;
+                        }
+                    },
+                };
+                table[index as usize].store(leaf_entry(frame, access), Ordering::Relaxed);
             }
             match edit {
                 Edit::Keep => {}
@@ -557,13 +591,35 @@ fn free_tables(phys: u64, level: u32, range: core::ops::Range<usize>) {
     if level == 1 {
         return;
     }
-    for index in range {
-        let entry = paging::table(phys)[index].load(Ordering::Relaxed);
-        if entry & PRESENT != 0 && entry & (1 << 7) == 0 {
-            free_tables(entry & ADDRESS, level - 1, 0..512);
-            memory::free_pages(entry & ADDRESS, 1, Owner::PageTable);
+    // A line of eight entries at a time: most are empty.
+    for line in paging::table(phys)[range].chunks(LINE as usize) {
+        if line.iter().fold(0, |any, entry| any | entry.load(Ordering::Relaxed)) & PRESENT == 0 {
+            continue;
+        }
+        for entry in line {
+            let entry = entry.load(Ordering::Relaxed);
+            if entry & PRESENT != 0 && entry & LARGE == 0 {
+                free_tables(entry & ADDRESS, level - 1, 0..512);
+                memory::free_pages(entry & ADDRESS, 1, Owner::PageTable);
+            }
         }
     }
+}
+
+/// Entries per cache line.
+const LINE: u64 = 8;
+
+/// Where a walk of `entries` at `index` goes on, if `index` starts a
+/// cache line, all of it at or before `last`, in which no entry has any
+/// of `bits`: most of a program's page tables is empty, and a line costs
+/// one test this way rather than eight.
+fn skip_empty(entries: &[AtomicU64; 512], index: u64, last: u64, bits: u64) -> Option<u64> {
+    if !index.is_multiple_of(LINE) || last - index < LINE - 1 {
+        return None;
+    }
+    let line = &entries[index as usize..(index + LINE) as usize];
+    let any = line.iter().fold(0, |any, entry| any | entry.load(Ordering::Relaxed));
+    (any & bits == 0).then_some(index + LINE)
 }
 
 /// What the other CPUs check during the `tlb` self-test.

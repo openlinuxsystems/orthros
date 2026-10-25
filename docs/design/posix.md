@@ -241,14 +241,18 @@ in flight hold no socket, and no cycle of sockets can keep itself alive.
 
 ## poll
 
-`poll` copies the `pollfd` array in, looks at each slot, and if none is
-ready waits for a change anywhere: everything a poll looks at (pipes,
-terminals, notifications) calls `changed` after it changes, which moves
-the global `GENERATION` and wakes every poller. A woken poller looks at
-all its entries again. This costs a barrier and a load per change while
-nobody polls, and wakes every poller on every change while some do: fine
-for a shell and its jobs, and the first thing to replace with per-object
-wait lists when a profile shows many pollers (see the limits).
+`poll` copies the `pollfd` array in (onto the kernel stack, for up to
+eight entries), looks at each slot, and returns if one is ready or the
+poll does not wait (a `ppoll` with a signal mask takes the mask first,
+so that a signal the mask lets through interrupts it, as on Linux).
+Otherwise it counts itself as a poller, looks again, and waits for a
+change anywhere: everything a poll looks at (pipes, terminals,
+notifications) calls `changed` after it changes, which moves the global
+`GENERATION` and wakes every poller. A woken poller looks at all its
+entries again. This costs a barrier and a load per change while nobody
+polls, and wakes every poller on every change while some do: fine for a
+shell and its jobs, and the first thing to replace with per-object wait
+lists when a profile shows many pollers (see the limits).
 
 ## Terminals
 
@@ -291,10 +295,16 @@ A futex word is named by its address space and address, hashed into one
 of 64 buckets, each a spin lock around a list of waiters in arrival
 order. `futex_wait` compares the word with the bucket locked and queues
 the waiter before letting go; `futex_wake` takes the same lock. A woken
-waiter is taken off the list by its waker and told through its own flag;
-one that leaves for another reason (a timeout, a signal) takes itself
-off unless a waker already did, which then counts as its wake-up, so a
-wake is never spent on a waiter that has gone.
+waiter is taken off the list by its waker and told through its own flag,
+with the lock held; the waker wakes the thread only once it has let the
+lock go, so that the thread, which may run at once on the waker's CPU,
+does not find the bucket still locked and sleep again on it. A waiter
+without a deadline sleeps outside the scheduler's wait table until its
+flag is set or it is interrupted: a wake that comes before it sleeps
+makes the sleep return at once. One that leaves for another reason (a
+timeout, a signal) takes itself off unless a waker already did, which
+then counts as its wake-up, so a wake is never spent on a waiter that has
+gone.
 
 ## Thread cancellation
 
@@ -567,7 +577,11 @@ hung on that kernel within a few runs.
 waiter in one critical section of the bucket's lock; a waker changes the
 word and then takes that lock to wake. If the waker's change came before
 the comparison, the comparison fails and the waiter returns at once; if
-after, the waiter is on the list when the waker looks.
+after, the waiter is on the list when the waker looks, and the waker sets
+its flag before it wakes the thread. The waiter reads its flag before
+each sleep, and a wake that comes between that read and the sleep makes
+the sleep return at once (`sched::wake` notes it as pending), so the
+waiter either sees the flag or is woken after it sleeps.
 
 **No lock waits for a release that has happened.** A lock waiter reads
 `CHANGES` before it takes `TABLE`; every release and every change of a
@@ -610,9 +624,12 @@ place only once the count is one, which is after the writer stopped
 mapping it, so no page is writable in two spaces unless its region is
 shared.
 
-These arguments are not yet checked by a model; the timer race above
-shows the kind of bug one would catch, and TLA+ models of the poll, futex
-and timer protocols are candidates for the audit after Phase 9.
+TLC checks the futex argument with `kernel/radix/tla/Futex.tla`: no
+waiter sleeps through its wake, a wait ends as woken exactly when a waker
+took it off the list, and every wait ends, with a waiter that may be
+interrupted at any moment and wakers that take one waiter or several at a
+time. The other arguments are not yet checked by a model; the timer race
+above shows the kind of bug one would catch.
 
 ## Known limits
 

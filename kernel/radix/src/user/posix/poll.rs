@@ -4,12 +4,14 @@
 //! `poll` (Phase 8, radix-process(2)): waits until one of many
 //! capabilities is ready, as POSIX's `poll` and `ppoll`.
 //!
-//! The entries are copied in, then each slot is looked at: a pipe's end
+//! The entries are copied in (onto the kernel stack, for up to
+//! [`ON_STACK`] of them), then each slot is looked at: a pipe's end
 //! or a terminal's side says what it is ready for
 //! ([`crate::fs::pipe::Pipe::events`], [`crate::fs::tty::Handle::events`]),
 //! a notification is readable while bits are set, other files and
 //! directories are always ready, and an empty slot is invalid. If none is
-//! ready the thread waits for a change anywhere: whatever a poll looks at
+//! ready, and the poll may wait, the thread waits for a change anywhere,
+//! looking again once it counts as a poller: whatever a poll looks at
 //! calls [`changed`] after it changes, which moves [`GENERATION`] and
 //! wakes the pollers. A waiting poller does not know which of its
 //! entries changed, so it looks at them all again; many pollers on a busy
@@ -160,42 +162,80 @@ fn look(cspace: SpaceId, base: u32, entries: &[u8], found: &mut [u16]) -> u32 {
     ready
 }
 
+/// The most entries a call keeps on its kernel stack; a call with more
+/// copies them into the heap.
+const ON_STACK: usize = 8;
+
 /// `poll`, for `user`'s thread.
 #[inline(never)]
 pub fn poll(user: &UserRef, a: PollArgs) -> Result<u32> {
     if a.count > ENTRIES_MAX {
         return Err(Kernel::InvalidArgument.status(1));
     }
-    let len = a.count as usize * PollEntry::SIZE;
+    let count = a.count as usize;
+    let len = count * PollEntry::SIZE;
     if !radix_ipc::range::user_bytes(a.entries, len as u64) {
         return Err(error(Kernel::BadAddress));
     }
-    let mut entries: Vec<u8, Kmalloc> = Vec::new_in(kmalloc());
-    let mut found: Vec<u16, Kmalloc> = Vec::new_in(kmalloc());
-    entries.try_reserve_exact(len).map_err(|_| error(Kernel::NoMemory))?;
-    found.try_reserve_exact(a.count as usize).map_err(|_| error(Kernel::NoMemory))?;
-    while entries.len() < len {
-        // Room was reserved above.
-        let _ = entries.push_within_capacity(0);
-    }
-    while found.len() < a.count as usize {
-        let _ = found.push_within_capacity(0);
-    }
-    if !Arch::copy_from_user(&mut entries, a.entries) {
+    let mut entries_here = [0u8; ON_STACK * PollEntry::SIZE];
+    let mut found_here = [0u16; ON_STACK];
+    let mut entries_heap: Vec<u8, Kmalloc>;
+    let mut found_heap: Vec<u16, Kmalloc> = Vec::new_in(kmalloc());
+    let (entries, found): (&mut [u8], &mut [u16]) = if count <= ON_STACK {
+        (&mut entries_here[..len], &mut found_here[..count])
+    } else {
+        let no_memory = |_| error(Kernel::NoMemory);
+        entries_heap = radix_mm::bytes::zeroed(len, kmalloc()).map_err(no_memory)?;
+        found_heap.try_reserve_exact(count).map_err(no_memory)?;
+        while found_heap.len() < count {
+            // Room was reserved above.
+            let _ = found_heap.push_within_capacity(0);
+        }
+        (&mut entries_heap, &mut found_heap)
+    };
+    if !Arch::copy_from_user(entries, a.entries) {
         return Err(error(Kernel::BadAddress));
     }
+    let cspace = user.process.cspace();
+    // A first look, without counting as a poller: what is ready, or a
+    // poll that does not wait, returns at once. One with a signal mask
+    // goes on to take it, so that a signal the mask lets through
+    // interrupts it, as on Linux.
+    let mut ready = look(cspace, a.base, entries, found);
+    let waits = a.flags.contains(PollFlags::FOREVER) || a.timeout_ns > 0;
+    if ready == 0 && (waits || a.flags.contains(PollFlags::MASK)) {
+        ready = wait_ready(user, &a, cspace, entries, found)?;
+    }
+    for (i, found) in found.iter().enumerate() {
+        let at = a.entries + (i * PollEntry::SIZE + PollEntry::OFFSET_FOUND) as u64;
+        if !Arch::copy_to_user(at, &found.to_le_bytes()) {
+            return Err(error(Kernel::BadAddress));
+        }
+    }
+    Ok(ready)
+}
+
+/// Waits, as `a` says, until one of `entries` is ready, writing what
+/// each one is ready for in `found`; returns how many are, 0 if the time
+/// ran out.
+fn wait_ready(
+    user: &UserRef,
+    a: &PollArgs,
+    cspace: SpaceId,
+    entries: &[u8],
+    found: &mut [u16],
+) -> Result<u32> {
     let masked = a.flags.contains(PollFlags::MASK);
     if masked {
         signal::begin_masked_wait(user, a.mask);
     }
-    let forever = a.flags.contains(PollFlags::FOREVER);
-    let deadline = (!forever).then(|| sched::now_ns().saturating_add(a.timeout_ns));
-    let cspace = user.process.cspace();
+    let deadline = (!a.flags.contains(PollFlags::FOREVER))
+        .then(|| sched::now_ns().saturating_add(a.timeout_ns));
     let polling = Polling::new();
     let ready = loop {
         let seen = GENERATION.load(Ordering::SeqCst);
-        let ready = look(cspace, a.base, &entries, &mut found);
-        if ready > 0 || (!forever && a.timeout_ns == 0) {
+        let ready = look(cspace, a.base, entries, found);
+        if ready > 0 {
             break ready;
         }
         if sched::interrupted() {
@@ -207,7 +247,7 @@ pub fn poll(user: &UserRef, a: PollArgs) -> Result<u32> {
             None => wait::wait_until(key(), "poll", changed),
             Some(deadline) => {
                 if !wait::wait_until_or_timeout(key(), "poll", deadline, changed) {
-                    break look(cspace, a.base, &entries, &mut found);
+                    break look(cspace, a.base, entries, found);
                 }
             }
         }
@@ -215,12 +255,6 @@ pub fn poll(user: &UserRef, a: PollArgs) -> Result<u32> {
     drop(polling);
     if masked {
         signal::end_masked_wait(user);
-    }
-    for (i, found) in found.iter().enumerate() {
-        let at = a.entries + (i * PollEntry::SIZE + PollEntry::OFFSET_FOUND) as u64;
-        if !Arch::copy_to_user(at, &found.to_le_bytes()) {
-            return Err(error(Kernel::BadAddress));
-        }
     }
     Ok(ready)
 }

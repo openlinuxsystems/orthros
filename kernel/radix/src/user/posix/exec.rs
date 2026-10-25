@@ -71,13 +71,7 @@ const HEAD: usize = 4096;
 
 /// A buffer of `len` zero bytes from the kernel's heap.
 pub(super) fn zeroed(len: usize) -> Result<Vec<u8, Kmalloc>> {
-    let mut bytes = Vec::new_in(kmalloc());
-    bytes.try_reserve_exact(len).map_err(|_| error(Kernel::NoMemory))?;
-    while bytes.len() < len {
-        // Room was reserved above.
-        let _ = bytes.push_within_capacity(0);
-    }
-    Ok(bytes)
+    radix_mm::bytes::zeroed(len, kmalloc()).map_err(|_| error(Kernel::NoMemory))
 }
 
 /// Copies `bytes` to the kernel's heap.
@@ -231,15 +225,27 @@ fn relocate(space: &SpaceObject, file: &File, program: &Program, bias: u64) -> R
     let entry_size = radix_elf::Placed::RELOCATION_SIZE;
     let mut chunk = zeroed(4096 / entry_size as usize * entry_size as usize)?;
     let per_chunk = chunk.len() as u64 / entry_size;
+    // The page the last word went to, and its frame: most pages take
+    // many words, and a look at the page tables for each costs more than
+    // the write.
+    let mut last: Option<(u64, u64)> = None;
     let mut done = 0;
     while done < count {
         let n = (count - done).min(per_chunk);
         let bytes = &mut chunk[..(n * entry_size) as usize];
         read_exact(&file.node, start + done * entry_size, bytes)?;
         for entry in bytes.chunks_exact(entry_size as usize) {
-            if let Ok(Some((address, value))) = placed.relocation(entry) {
+            let Ok(Some((address, value))) = placed.relocation(entry) else { continue };
+            let (page, offset) = (address & !(PAGE_SIZE - 1), address % PAGE_SIZE);
+            if offset > PAGE_SIZE - 8 {
                 space.write_new(address, &value.to_le_bytes())?;
+                continue;
             }
+            let phys = match last {
+                Some((at, phys)) if at == page => phys,
+                _ => last.insert((page, space.touch(page)?)).1,
+            };
+            Arch::write_frames(phys + offset, &value.to_le_bytes());
         }
         done += n;
     }

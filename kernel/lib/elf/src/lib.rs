@@ -344,18 +344,24 @@ impl Placed<'_> {
         Ok(())
     }
 
-    /// What the relocation `entry` (one entry of the table, 24 bytes)
-    /// writes: where among the loaded pages, and the word; `None` for
-    /// `R_X86_64_NONE`.
-    fn relocate(&self, entry: &[u8]) -> Result<Option<(u64, u64)>, ElfError> {
+    /// The relocation `entry` (one entry of the table, 24 bytes), as
+    /// linked: the address of the word it writes and its addend; `None`
+    /// for `R_X86_64_NONE`. Only `R_X86_64_RELATIVE` is applied.
+    fn relative(entry: &[u8]) -> Result<Option<(u64, u64)>, ElfError> {
         let r_offset = u64_at(entry, 0)?;
         let r_info = u64_at(entry, 8)?;
         let r_addend = u64_at(entry, 16)?;
         match (r_info & 0xffff_ffff) as u32 {
-            R_X86_64_NONE => return Ok(None),
-            R_X86_64_RELATIVE if r_info >> 32 == 0 => {}
-            _ => return Err(ElfError::Relocation),
+            R_X86_64_NONE => Ok(None),
+            R_X86_64_RELATIVE if r_info >> 32 == 0 => Ok(Some((r_offset, r_addend))),
+            _ => Err(ElfError::Relocation),
         }
+    }
+
+    /// What the relocation `entry` writes: where among the loaded pages,
+    /// and the word; `None` for `R_X86_64_NONE`.
+    fn relocate(&self, entry: &[u8]) -> Result<Option<(u64, u64)>, ElfError> {
+        let Some((r_offset, r_addend)) = Self::relative(entry)? else { return Ok(None) };
         // Only writable data is relocated: text relocations would need
         // code that is written to.
         let (segment, at) = self.locate(r_offset, 8).ok_or(ElfError::Relocation)?;
@@ -372,12 +378,12 @@ impl Placed<'_> {
         if entry.len() != RELA_SIZE as usize {
             return Err(ElfError::Malformed);
         }
-        self.relocate(entry)?;
-        let r_offset = u64_at(entry, 0)?;
-        let r_addend = u64_at(entry, 16)?;
-        let r_info = u64_at(entry, 8)?;
-        if r_info & 0xffff_ffff == u64::from(R_X86_64_NONE) {
-            return Ok(None);
+        let Some((r_offset, r_addend)) = Self::relative(entry)? else { return Ok(None) };
+        // As for `relocate`, without working out where the word is among
+        // the loaded pages: segments do not overlap, so the one that holds
+        // it is writable exactly when a writable one does.
+        if !self.image.segments().any(|s| s.access == Access::ReadWrite && s.holds(r_offset, 8)) {
+            return Err(ElfError::Relocation);
         }
         Ok(Some((r_offset.wrapping_add(self.bias), r_addend.wrapping_add(self.bias))))
     }

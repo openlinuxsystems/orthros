@@ -1,0 +1,144 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+frigg's slab_pool hands out the objects of a new slab as they are asked
+for. It linked every object of a slab into its free list when it made
+the slab, which wrote to every page of it: a program that allocated one
+small block of each of nine sizes held nine quarter-megabyte slabs, 576
+pages, in memory from its start, faulted in and zeroed one at a time,
+then shared with every child it forked and freed by every child that
+exited. A slab now keeps the address of its first object never handed
+out; a freed object is taken first, then the next fresh one, so a slab
+takes memory as glibc's heap does, as it is used. Meant for upstream,
+in frigg.
+
+--- a/subprojects/frigg/include/frg/slab.hpp
++++ b/subprojects/frigg/include/frg/slab.hpp
+@@ -286,7 +286,8 @@
+ 	struct slab_frame : frame {
+ 		slab_frame(uintptr_t address_, size_t length_, int index_)
+ 		: frame{frame_type::slab, address_, length_},
+-				index{index_}, num_reserved{0}, available{nullptr} { }
++				index{index_}, num_reserved{0}, available{nullptr},
++				fresh{address_} { }
+ 
+ 		slab_frame(const slab_frame &) = delete;
+ 
+@@ -294,7 +295,11 @@
+ 
+ 		const int index;
+ 		unsigned int num_reserved;
++		// Objects freed since they were handed out.
+ 		freelist *available;
++		// The first object never handed out; those from here to the end
++		// are untouched, so a new slab takes memory only as it is used.
++		uintptr_t fresh;
+ 		rbtree_hook partial_hook;
+ 	};
+ 
+@@ -336,6 +341,32 @@
+ 
+ 	slab_frame *_construct_slab(int index);
+ 
++	// Whether the slab has an object left: a freed one or a fresh one.
++	static bool has_room_(slab_frame *slb) {
++		size_t item_size = policy_traits::bucket_to_size(slb->index);
++		return slb->available || slb->address + slb->length - slb->fresh >= item_size;
++	}
++
++	// Takes an object out of a slab with room: a freed one first, which
++	// is likelier to be in the cache, else the next fresh one.
++	freelist *take_from_slab_(slab_frame *slb) {
++		freelist *object = slb->available;
++		if(object) {
++			FRG_ASSERT(slb->contains(object));
++			if(object->link && !slb->contains(object->link))
++				FRG_ASSERT(!"slab_pool corruption. Possible write to unallocated object");
++			slb->available = object->link;
++		}else{
++			FRG_ASSERT(has_room_(slb));
++			if constexpr (slab::has_poisoning_support<Policy>)
++				_plcy.unpoison(reinterpret_cast<void *>(slb->fresh), sizeof(freelist));
++			object = new (reinterpret_cast<void *>(slb->fresh)) freelist;
++			slb->fresh += policy_traits::bucket_to_size(slb->index);
++		}
++		slb->num_reserved++;
++		return object;
++	}
++
+ 	bool reallocate_in_slab_(slab_frame *slb, void *p, size_t new_size) {
+ 		size_t item_size = policy_traits::bucket_to_size(slb->index);
+ 		FRG_ASSERT(slb->contains(p));
+@@ -369,7 +400,7 @@
+ 		auto bkt = &_bkts[slb->index];
+ 		unique_lock<Mutex> bucket_guard(bkt->bucket_mutex);
+ 		{
+-			bool reinsert_into_bucket = !slb->available;
++			bool reinsert_into_bucket = !has_room_(slb);
+ 			FRG_ASSERT(slb->num_reserved);
+ 
+ 			FRG_ASSERT(!slb->available || slb->contains(slb->available));
+@@ -483,15 +514,9 @@
+ 		if(bkt->head_slb) {
+ 			auto slb = bkt->head_slb;
+ 
+-			object = slb->available;
+-			FRG_ASSERT(object);
+-			FRG_ASSERT(slb->contains(object));
+-			if(object->link && !slb->contains(object->link))
+-				FRG_ASSERT(!"slab_pool corruption. Possible write to unallocated object");
+-			slb->available = object->link;
+-			slb->num_reserved++;
++			object = take_from_slab_(slb);
+ 
+-			if(!slb->available) {
++			if(!has_room_(slb)) {
+ 				bkt->partial_tree.remove(slb);
+ 				bkt->head_slb = bkt->partial_tree.first();
+ 			}
+@@ -503,13 +528,7 @@
+ 			if(!slb)
+ 				return nullptr;
+ 
+-			object = slb->available;
+-			FRG_ASSERT(object);
+-			FRG_ASSERT(slb->contains(object));
+-			if(object->link && !slb->contains(object->link))
+-				FRG_ASSERT(!"slab_pool corruption. Possible write to unallocated object");
+-			slb->available = object->link;
+-			slb->num_reserved++;
++			object = take_from_slab_(slb);
+ 
+ 			unique_lock<Mutex> tree_guard(_tree_mutex);
+ #ifdef FRG_SLAB_TRACK_REGIONS
+@@ -521,7 +540,7 @@
+ 			// Finally, re-lock the bucket to attach the new slab.
+ 			bucket_guard.lock();
+ 
+-			FRG_ASSERT(slb->available);
++			FRG_ASSERT(has_room_(slb));
+ 			bkt->partial_tree.insert(slb);
+ 			if(!bkt->head_slb || slb->address < bkt->head_slb->address)
+ 				bkt->head_slb = slb;
+@@ -740,17 +759,10 @@
+ 	//if(logAllocations)
+ 	//	std::cout << "frb/slab: New area at " << area << std::endl;
+ 
+-	// Partition the slab into individual objects.
+-	freelist *first = nullptr;
+-	for(size_t off = 0; off < slb->length; off += item_size) {
+-		if constexpr (slab::has_poisoning_support<Policy>)
+-			_plcy.unpoison(reinterpret_cast<void *>(slb->address + off), sizeof(freelist));
+-		auto object = new (reinterpret_cast<void *>(slb->address + off)) freelist;
+-		object->link = first;
+-		first = object;
+-		//infoLogger() << "[slab] fill " << chunk << frg::endLog;
+-	}
+-	slb->available = first;
++	// The objects are handed out from `fresh` as they are asked for
++	// (take_from_slab_), not linked up here: that would touch every page
++	// of the slab, a quarter of a megabyte of memory per size of object
++	// that a program uses, which a fork then shares and an exit frees.
+ 
+ 	return slb;
+ }

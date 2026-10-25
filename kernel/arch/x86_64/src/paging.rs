@@ -181,6 +181,19 @@ pub(crate) fn entry(
     level: u32,
     user: bool,
 ) -> Result<&'static AtomicU64, MapError> {
+    let index = ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
+    Ok(&table_of(root, virt, level, user)?[index])
+}
+
+/// The table at `level` that holds the entry for `virt` under the PML4 at
+/// `root`, created as [`entry`] would: for a caller that goes on to the
+/// table's other entries.
+pub(crate) fn table_of(
+    root: u64,
+    virt: u64,
+    level: u32,
+    user: bool,
+) -> Result<&'static [AtomicU64; 512], MapError> {
     let mut table_phys = root;
     for current in ((level + 1)..=4).rev() {
         let index = ((virt >> (12 + 9 * (current - 1))) & 0x1ff) as usize;
@@ -197,8 +210,7 @@ pub(crate) fn entry(
         }
         table_phys = value & ADDRESS;
     }
-    let index = ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
-    Ok(&table(table_phys)[index])
+    Ok(table(table_phys))
 }
 
 /// The 4 KiB leaf entry for `virt` under `root`, if its tables exist.

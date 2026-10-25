@@ -643,6 +643,47 @@ fn the_boot_archive_as_a_filesystem() {
     assert_eq!(vfs.stat(&root, "system/etc/motd").err(), Some(Error::NotFound));
 }
 
+#[test]
+fn boot_archive_lookups_find_every_entry() {
+    let mut writer = radix_bootfs::write::Writer::new();
+    writer.directory("bin", 0o755, 1).unwrap();
+    let programs: Vec<String> = (0..300).map(|i| format!("p{i:03}")).collect();
+    for name in &programs {
+        writer.file(&format!("bin/{name}"), 0o755, 1, name.as_bytes()).unwrap();
+    }
+    // After everything in "bin", in the archive's order of names.
+    writer.directory("bin-extra", 0o755, 1).unwrap();
+    writer.file("bin-extra/x", 0o644, 1, b"x").unwrap();
+    writer.directory("etc", 0o755, 1).unwrap();
+    writer.directory("etc/a", 0o755, 1).unwrap();
+    writer.file("etc/a/b", 0o644, 1, b"b").unwrap();
+    writer.file("etc/c", 0o644, 1, b"c").unwrap();
+    let bytes: &'static [u8] = writer.finish().leak();
+    let vfs = Vfs::new(BootFs::new(bytes).unwrap(), "bootfs").unwrap();
+    let root = vfs.root();
+    for name in &programs {
+        let file = vfs.open(&root, &format!("bin/{name}"), OpenFlags::default()).unwrap();
+        assert_eq!(read_all(&file.node), name.as_bytes());
+    }
+    for missing in ["bin/p300", "bin/a", "bin/zzz", "bin-extra/y", "etc/a/c", "nothing"] {
+        assert_eq!(vfs.stat(&root, missing).err(), Some(Error::NotFound), "{missing}");
+    }
+    assert_eq!(vfs.stat(&root, "bin/p000/x").err(), Some(Error::NotDirectory));
+    let open = |path| read_all(&vfs.open(&root, path, OpenFlags::default()).unwrap().node);
+    assert_eq!(open("bin-extra/x"), b"x");
+    assert_eq!(open("etc/a/b"), b"b");
+    assert_eq!(open("etc/c"), b"c");
+    let listed = |path| names(&vfs, &vfs.resolve(&root, path).unwrap());
+    let in_root: Vec<String> = names(&vfs, &root).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(in_root, ["bin", "bin-extra", "etc"]);
+    let in_bin: Vec<String> = listed("bin").into_iter().map(|(name, _)| name).collect();
+    assert_eq!(in_bin, programs);
+    assert_eq!(
+        listed("etc"),
+        [(String::from("a"), Kind::Directory), (String::from("c"), Kind::File)]
+    );
+}
+
 /// A disk for one file: page-sized blocks in a map, with the cache's
 /// calls recorded.
 #[derive(Default)]

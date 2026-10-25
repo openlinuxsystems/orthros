@@ -462,13 +462,6 @@ typed_lookup!(
     ThreadRef
 );
 typed_lookup!(
-    /// The process a capability designates.
-    process,
-    Process,
-    Process,
-    ProcessRef
-);
-typed_lookup!(
     /// The file a capability designates.
     file,
     File,

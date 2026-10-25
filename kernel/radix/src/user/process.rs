@@ -72,7 +72,7 @@ use super::ipc::{self, Endpoint};
 use super::memory::{SpaceObject, SpaceRef};
 use super::methods::{Answer, answer};
 use super::notify::{Notification, NotificationRef};
-use super::objects::{self, Object};
+use super::objects::{self, Found, Object};
 use super::posix::{self, PosixState, ThreadSignals};
 use super::{
     Result, UserRef, UserThread, cap_error, default_window, error, set_ready, thread_main,
@@ -165,6 +165,9 @@ pub struct ProcessObject {
     /// Moves when a signal is sent to it or one of its threads, for
     /// `signal_wait`.
     pub signal_events: AtomicU64,
+    /// How many of its threads are in `signal_wait`: a signal sent while
+    /// none is wakes no one.
+    pub signal_waiters: AtomicU32,
     /// Whether a signal has stopped it: what its stopped threads wait on.
     pub stopped: AtomicBool,
     /// Whether it is a POSIX child: `exec` started it after `create`, so
@@ -335,6 +338,7 @@ fn allocate(
         child_events: AtomicU64::new(0),
         child_notify: SpinLock::new(None),
         signal_events: AtomicU64::new(0),
+        signal_waiters: AtomicU32::new(0),
         stopped: AtomicBool::new(false),
         posix_child: AtomicBool::new(false),
         record_locks: AtomicBool::new(false),
@@ -972,15 +976,24 @@ pub fn install(at: SlotRef, kind: ObjectKind, object: Object) -> Result<()> {
     install_charged(at, kind, object, None)
 }
 
-/// The process interface.
-pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
+/// The process interface, on the process `found` in slot `slot`.
+pub fn method(
+    user: &UserRef,
+    slot: u32,
+    found: &Found,
+    label: u32,
+    args: &[u64; 8],
+) -> Result<Answer> {
     let needs = if label == process::INFO { Rights::READ } else { Rights::CONTROL };
-    let (_, target) = objects::process(user.cspace, slot, needs)?;
+    found.cap.check(ObjectKind::Process, needs).map_err(cap_error)?;
+    let Some(Object::Process(target)) = &found.object else {
+        return Err(error(Kernel::Gone));
+    };
     let at = |slot| SlotRef::new(user.cspace, slot);
     match label {
         process::CREATE => {
             let a = process::CreateArgs::decode(args)?;
-            create_for(&target, a.kind, a.size, at(a.to))?;
+            create_for(target, a.kind, a.size, at(a.to))?;
             answer(label, 0, [0; 8])
         }
         process::SET_NAME => {
@@ -1032,19 +1045,19 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
         }
         process::KEEP => {
             let a = process::KeepArgs::decode(args)?;
-            keep(&target, at(a.from))?;
+            keep(target, at(a.from))?;
             answer(label, 0, [0; 8])
         }
         process::START => {
             let a = process::StartArgs::decode(args)?;
             // A thread of the caller's own process starts with its mask.
-            let mask = if ProcessRef::ptr_eq(&target, &user.process) {
+            let mask = if ProcessRef::ptr_eq(target, &user.process) {
                 user.signals.lock().mask
             } else {
                 0
             };
             let thread = ProcessObject::start(
-                &target,
+                target,
                 Start::Fresh([a.entry, a.stack, a.argument]),
                 a.to,
                 None,
@@ -1057,7 +1070,7 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
         process::EXIT => {
             let a = process::ExitArgs::decode(args)?;
             target.exit(a.code);
-            if ProcessRef::ptr_eq(&target, &user.process) {
+            if ProcessRef::ptr_eq(target, &user.process) {
                 return Ok(Answer::Exit(a.code));
             }
             answer(label, 0, [0; 8])
@@ -1093,7 +1106,7 @@ pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<
             drop(state);
             answer(label, process::InfoResults::WORDS, results.encode())
         }
-        _ if label >= process::FORK => posix::method(user, slot, &target, label, args),
+        _ if label >= process::FORK => posix::method(user, slot, target, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),
     }
 }

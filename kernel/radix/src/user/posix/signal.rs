@@ -230,10 +230,38 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
         return result;
     }
     if result == Sent::Queued {
-        process.signal_events.fetch_add(1, Ordering::AcqRel);
-        wait::wake_all(signal_key(process));
+        signal_sent(process);
     }
     result
+}
+
+/// A signal was queued for `process` or one of its threads: its threads
+/// in `signal_wait` look again. The count of them is read after the
+/// event moves, and a waiter counts itself before it reads the events,
+/// each in the single order of sequentially consistent operations, so
+/// either the sender sees the waiter or the waiter sees the signal.
+fn signal_sent(process: &ProcessObject) {
+    process.signal_events.fetch_add(1, Ordering::SeqCst);
+    if process.signal_waiters.load(Ordering::SeqCst) > 0 {
+        wait::wake_all(signal_key(process));
+    }
+}
+
+/// Counts the running thread among its process's threads in
+/// `signal_wait` while it lives.
+struct Waiting<'a>(&'a ProcessObject);
+
+impl<'a> Waiting<'a> {
+    fn new(process: &'a ProcessObject) -> Waiting<'a> {
+        process.signal_waiters.fetch_add(1, Ordering::SeqCst);
+        Waiting(process)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.signal_waiters.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Sends `signal` to `thread`, `user`'s, alone: a fault's, `signal_thread`'s
@@ -279,8 +307,7 @@ pub fn send_thread(thread: &ThreadRef, user: &UserThread, signal: u32, info: Inf
         return Sent::Queued;
     };
     if result == Sent::Queued {
-        process.signal_events.fetch_add(1, Ordering::AcqRel);
-        wait::wake_all(signal_key(process));
+        signal_sent(process);
     }
     result
 }
@@ -800,8 +827,9 @@ pub fn method(user: &UserRef, label: u32, args: &[u64; 8]) -> Result<Answer> {
             let a = process::SignalWaitArgs::decode(args)?;
             let set = a.set & !UNBLOCKABLE;
             let deadline = (!a.forever).then(|| sched::now_ns().saturating_add(a.timeout_ns));
+            let _waiting = Waiting::new(process);
             loop {
-                let seen = process.signal_events.load(Ordering::Acquire);
+                let seen = process.signal_events.load(Ordering::SeqCst);
                 let taken = {
                     let mut posix = process.posix.lock();
                     let mut signals = user.signals.lock();

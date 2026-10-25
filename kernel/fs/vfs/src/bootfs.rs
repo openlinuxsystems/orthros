@@ -6,7 +6,9 @@
 //! The archive (`radix-bootfs`) is checked whole before it is mounted;
 //! then a node is made for each of its entries, once, so that each file
 //! has one node (the mount table tells mount points by their node), and
-//! file reads copy straight from the archive's bytes.
+//! file reads copy straight from the archive's bytes. Each directory knows
+//! its entries, in the order of their names, as the archive has them, so
+//! a lookup is a binary search among them, not a look at every file.
 
 use alloc::sync::Weak;
 use core::any::Any;
@@ -22,6 +24,10 @@ use crate::{
 /// What the nodes of one archive share.
 struct Shared {
     nodes: radix_sync::Once<KVec<KArc<BootNode>>>,
+    /// The nodes' indices grouped by directory, each group in the order
+    /// of their names: a directory's entries are those in its
+    /// [`BootNode::entries`] range.
+    entries: KVec<u32>,
     size: u64,
 }
 
@@ -36,9 +42,10 @@ pub struct BootNode {
     shared: Weak<Shared, Alloc>,
     /// Its entry; none for the root.
     entry: Option<Entry<'static>>,
-    /// The index of its directory's node; none for the root and what is
-    /// in the root.
-    parent: Option<usize>,
+    /// Its name, the last of its path's; empty for the root.
+    name: &'static str,
+    /// Where its entries are in [`Shared::entries`], if it is a directory.
+    entries: core::ops::Range<u32>,
     id: u64,
 }
 
@@ -46,26 +53,70 @@ impl BootFs {
     /// Mounts the archive in `bytes`.
     pub fn new(bytes: &'static [u8]) -> Result<KArc<BootFs>> {
         let archive: Archive<'static> = radix_bootfs::open(bytes).map_err(|_| Error::Corrupt)?;
-        let shared = mem::arc(Shared { nodes: radix_sync::Once::new(), size: bytes.len() as u64 })?;
-        let mut nodes = mem::vec_with_capacity(archive.len())?;
-        let mut entries: KVec<Entry<'static>> = mem::vec_with_capacity(archive.len())?;
+        let count = archive.len();
+        let mut entries: KVec<Entry<'static>> = mem::vec_with_capacity(count)?;
         for entry in archive.entries() {
             // Room was made for every entry.
             let _ = entries.push_within_capacity(entry);
         }
+        // Each entry's directory, as a slot: 0 for the root, 1 + its index
+        // for an entry. The archive is in the order of its paths' names, a
+        // directory just before what it holds, so an entry's directory is
+        // the last entry one name shorter, if its path begins with that
+        // one's (an archive may leave a directory out: what it holds is
+        // then in the root, as when the archive was searched).
+        let mut parents: KVec<u32> = mem::vec_with_capacity(count)?;
+        let mut last = [None::<u32>; radix_bootfs::MAX_PATH / 2 + 1];
         for (i, entry) in entries.iter().enumerate() {
             let depth = entry.path().components().count();
-            // The archive is in order, a directory before what it holds,
-            // so the parent is an earlier entry one component shorter.
-            let parent = (0..i).rev().find(|&j| {
-                let p = entries[j].path();
-                p.components().count() + 1 == depth
-                    && p.components().zip(entry.path().components()).all(|(a, b)| a == b)
-            });
+            let parent =
+                depth.checked_sub(2).and_then(|up| last.get(up).copied().flatten()).filter(|&j| {
+                    let above = entries[j as usize].path();
+                    above.components().zip(entry.path().components()).all(|(a, b)| a == b)
+                });
+            if let Some(slot) = depth.checked_sub(1).and_then(|at| last.get_mut(at)) {
+                *slot = Some(i as u32);
+            }
+            let _ = parents.push_within_capacity(parent.map_or(0, |j| j + 1));
+        }
+        // Where each directory's group starts, counted, then filled in the
+        // archive's order, which is the order of the names within a group.
+        let mut starts: KVec<u32> = mem::vec_with_capacity(count + 2)?;
+        for _ in 0..count + 2 {
+            let _ = starts.push_within_capacity(0);
+        }
+        for &parent in &parents {
+            starts[parent as usize + 2] += 1;
+        }
+        for slot in 2..count + 2 {
+            starts[slot] += starts[slot - 1];
+        }
+        // `starts[slot + 1]` is where the group of `slot` starts; it moves
+        // along the group as the group is filled, ending where the group
+        // of `slot + 1` starts.
+        let mut grouped: KVec<u32> = mem::vec_with_capacity(count)?;
+        for _ in 0..count {
+            let _ = grouped.push_within_capacity(0);
+        }
+        for (i, &parent) in parents.iter().enumerate() {
+            let at = &mut starts[parent as usize + 1];
+            grouped[*at as usize] = i as u32;
+            *at += 1;
+        }
+        // So the group of `slot` is now from `starts[slot]` on.
+        let range = |slot: usize| starts[slot]..starts[slot + 1];
+        let shared = mem::arc(Shared {
+            nodes: radix_sync::Once::new(),
+            entries: grouped,
+            size: bytes.len() as u64,
+        })?;
+        let mut nodes = mem::vec_with_capacity(count)?;
+        for (i, entry) in entries.iter().enumerate() {
             let node = mem::arc(BootNode {
                 shared: KArc::downgrade(&shared),
                 entry: Some(*entry),
-                parent,
+                name: entry.path().file_name(),
+                entries: if entry.kind == EntryKind::Directory { range(i + 1) } else { 0..0 },
                 id: i as u64 + 2,
             })?;
             let _ = nodes.push_within_capacity(node);
@@ -74,7 +125,8 @@ impl BootFs {
         let root = mem::arc(BootNode {
             shared: KArc::downgrade(&shared),
             entry: None,
-            parent: None,
+            name: "",
+            entries: range(0),
             id: 1,
         })?;
         Ok(mem::arc(BootFs { shared, root })?)
@@ -124,29 +176,31 @@ impl BootNode {
         }
     }
 
-    /// The index of this node among the archive's, none for the root.
-    fn index(&self) -> Option<usize> {
-        self.entry.map(|_| self.id as usize - 2)
-    }
-
-    /// Calls `f` with each entry directly inside this directory.
-    fn children(&self, mut f: impl FnMut(&KArc<BootNode>) -> bool) -> Result<()> {
+    /// Calls `f` with the nodes of the archive and this directory's
+    /// entries among them, in the order of their names.
+    fn with_entries<R>(&self, f: impl FnOnce(&[KArc<BootNode>], &[u32]) -> R) -> Result<R> {
         if !self.is_dir() {
             return Err(Error::NotDirectory);
         }
         let shared = self.shared.upgrade().ok_or(Error::NotFound)?;
-        let Some(nodes) = shared.nodes.get() else { return Ok(()) };
-        let me = self.index();
-        for node in nodes.iter().filter(|node| node.parent == me) {
-            if !f(node) {
-                break;
+        let Some(nodes) = shared.nodes.get() else { return Ok(f(&[], &[])) };
+        let range = self.entries.start as usize..self.entries.end as usize;
+        Ok(f(nodes, shared.entries.get(range).unwrap_or(&[])))
+    }
+
+    /// Calls `f` with each entry directly inside this directory.
+    fn children(&self, mut f: impl FnMut(&KArc<BootNode>) -> bool) -> Result<()> {
+        self.with_entries(|nodes, entries| {
+            for node in entries.iter().filter_map(|&i| nodes.get(i as usize)) {
+                if !f(node) {
+                    break;
+                }
             }
-        }
-        Ok(())
+        })
     }
 
     fn name(&self) -> &'static str {
-        self.entry.map_or("", |e| e.path().file_name())
+        self.name
     }
 }
 
@@ -175,19 +229,13 @@ impl Node for BootNode {
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
-        let mut found = None;
-        self.children(|node| {
-            if node.name() == name {
-                found = Some(node.clone());
-                false
-            } else {
-                true
-            }
+        let found = self.with_entries(|nodes, entries| {
+            let name_of = |&i: &u32| nodes.get(i as usize).map_or("", |node| node.name);
+            let at = entries.binary_search_by(|i| name_of(i).cmp(name)).ok()?;
+            let node: NodeRef = nodes.get(*entries.get(at)? as usize)?.clone();
+            Some(node)
         })?;
-        match found {
-            Some(node) => Ok(node),
-            None => Err(Error::NotFound),
-        }
+        found.ok_or(Error::NotFound)
     }
 
     fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {

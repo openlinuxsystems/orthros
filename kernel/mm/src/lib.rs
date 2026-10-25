@@ -13,6 +13,7 @@
 //! - [`Ranges`], the allocator of the kernel's mapping window, where
 //!   stacks and device memory are mapped with guard gaps between them;
 //! - [`Pcids`], the allocator of address-space identifiers;
+//! - [`bytes`], byte vectors zeroed or filled with one string store;
 //! - the heap [stress test](stress) the kernel runs on every CPU.
 //!
 //! Every allocation takes [`Flags`] that say whether the caller may sleep,
@@ -27,7 +28,8 @@
 //! touch memory the allocators manage, each `unsafe` with its contract
 //! written down: the `raw` module, the frame allocator's zeroing of the
 //! blocks it hands out, the slab layer's free-object pattern, the heap's
-//! `free`, the [`Platform`] trait and the stress test.
+//! `free`, the [`Platform`] trait, the stress test and the lengths
+//! [`bytes`] sets.
 //! The crate builds for the host too, where its unit and property tests
 //! run, and for Kani, which proves the allocators' invariants
 //! (`docs/design/memory.md`).
@@ -37,8 +39,12 @@
 // `AllocatorClone`, which `Arc`s in the heap need to be cloned.
 #![cfg_attr(not(kani), feature(allocator_ext))]
 
+extern crate alloc;
+
 pub mod asid;
 pub mod buddy;
+#[cfg(not(kani))]
+pub mod bytes;
 pub mod class;
 pub mod context;
 pub mod frames;

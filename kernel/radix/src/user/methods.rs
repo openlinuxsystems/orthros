@@ -68,9 +68,12 @@ fn version(kind: ObjectKind) -> u32 {
 /// Whether the methods of a capability of `kind` take the object it
 /// designates from the lookup that found it ([`objects::find`]),
 /// rather than looking it up themselves: messages to an endpoint, and the
-/// file and directory methods.
+/// file, directory and process methods.
 pub fn takes_object(kind: ObjectKind) -> bool {
-    matches!(kind, ObjectKind::Endpoint | ObjectKind::File | ObjectKind::Directory)
+    matches!(
+        kind,
+        ObjectKind::Endpoint | ObjectKind::File | ObjectKind::Directory | ObjectKind::Process
+    )
 }
 
 /// The arguments of a method called with `info` and the data words
@@ -146,7 +149,7 @@ pub fn call(
         }
         (ObjectKind::AddressSpace, _) => address_space_method(user, slot, info.label, &args),
         (ObjectKind::Thread, _) => thread_method(me, user, slot, info.label, &args),
-        (ObjectKind::Process, _) => super::process::method(user, slot, info.label, &args),
+        (ObjectKind::Process, _) => super::process::method(user, slot, found, info.label, &args),
         (ObjectKind::ResourceDomain, _) => super::domain::method(user, slot, info.label, &args),
         (ObjectKind::Power, _) => super::power::method(user, cap, info.label, &args),
         (ObjectKind::Directory, _) => {

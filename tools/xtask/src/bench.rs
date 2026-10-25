@@ -381,7 +381,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         per_switch(&mut radix, &counts);
         keep_best(&mut numbers.radix, radix);
         step(&format!("Booting Radix with the POSIX benchmarks on 2 CPUs{of}"));
-        keep_best(&mut numbers.radix, radix_posix_numbers(ctx, &dir, &image, kvm)?);
+        keep_best(&mut numbers.radix, radix_posix_numbers(ctx, &dir, &image, Accel::of(kvm))?);
         if numbers.counts.is_empty() {
             numbers.counts = counts;
         }
@@ -444,6 +444,8 @@ fn count_instructions(
     step("Booting Radix with selftest=bench on 2 CPUs, counting instructions (minutes)");
     let (mut radix, counts) = radix_numbers(ctx, dir, image, Accel::Count)?;
     per_switch(&mut radix, &counts);
+    step("Booting Radix with the POSIX benchmarks on 2 CPUs, counting instructions (minutes)");
+    radix.extend(radix_posix_numbers(ctx, dir, image, Accel::Count)?);
     let report = budget_report(&radix);
     let markdown = dir.join("instructions.md");
     std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
@@ -765,6 +767,14 @@ impl Accel {
     fn of(kvm: bool) -> Accel {
         if kvm { Accel::Kvm } else { Accel::Tcg }
     }
+
+    /// What QEMU is given for it, beyond the machine.
+    fn extra(self) -> Vec<String> {
+        match self {
+            Accel::Count => vec!["-icount".into(), ICOUNT.into()],
+            Accel::Kvm | Accel::Tcg => Vec::new(),
+        }
+    }
 }
 
 /// Boots the benchmark image and reads its `BENCH` and `BENCHCOUNT`
@@ -792,10 +802,7 @@ fn radix_numbers(
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: match accel {
-            Accel::Count => vec!["-icount".into(), ICOUNT.into()],
-            Accel::Kvm | Accel::Tcg => Vec::new(),
-        },
+        extra: accel.extra(),
         direct: None,
     };
     let mut vm = Vm::start(ctx, &machine, dir, "bench", TIMEOUT).map_err(crate::Error::new)?;
@@ -822,7 +829,12 @@ fn radix_numbers(
 /// Boots the test image `base` with Spark running the POSIX benchmarks
 /// and reads their `BENCH` lines, which Spark copies from the program's
 /// terminal to the kernel log.
-fn radix_posix_numbers(ctx: &Ctx, dir: &Path, base: &[u8], kvm: bool) -> Result<Vec<Measurement>> {
+fn radix_posix_numbers(
+    ctx: &Ctx,
+    dir: &Path,
+    base: &[u8],
+    accel: Accel,
+) -> Result<Vec<Measurement>> {
     let image = dir.join("posix-bench.img");
     let bytes = test::with_cmdline(base, POSIX_CMDLINE).map_err(crate::Error::new)?;
     std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
@@ -833,14 +845,14 @@ fn radix_posix_numbers(ctx: &Ctx, dir: &Path, base: &[u8], kvm: bool) -> Result<
         image: image.clone(),
         memory: VM_MEMORY.into(),
         cpus: VM_CPUS,
-        kvm,
+        kvm: accel == Accel::Kvm,
         cpu_model: None,
         serial: Serial::Pipe,
         display: false,
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: Vec::new(),
+        extra: accel.extra(),
         direct: None,
     };
     let mut vm =
