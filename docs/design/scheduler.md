@@ -213,6 +213,9 @@ up: the clock's scale is rounded down, so scaling by the counter's rate
 would land early, by tens of microseconds a day after boot, and the
 timer would fire again and again until the clock caught up. Each CPU
 counts its timer writes, and `ob bench` reports them per operation.
+Under KVM a CPU that answers a TLB shootdown late also has its timer fire
+every 250 µs for a while, so that interrupts a host holds for a running
+virtual CPU are delivered sooner (ADR 0109); those firings are not ticks.
 
 ## Blocking and waking
 

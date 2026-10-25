@@ -690,6 +690,8 @@ struct Shootdown {
     generation: AtomicU64,
     start: AtomicU64,
     end: AtomicU64,
+    /// When the latest request was sent, in nanoseconds.
+    sent_ns: AtomicU64,
     /// CPUs that still have to flush, one bit each.
     pending: [AtomicU64; MAX_CPUS / 64],
 }
@@ -699,8 +701,14 @@ static SHOOTDOWN: Shootdown = Shootdown {
     generation: AtomicU64::new(0),
     start: AtomicU64::new(0),
     end: AtomicU64::new(0),
+    sent_ns: AtomicU64::new(0),
     pending: [const { AtomicU64::new(0) }; MAX_CPUS / 64],
 };
+
+/// An answer to a shootdown later than this after it was sent rings the
+/// answering CPU's doorbell (`time::ring_doorbell`). Answers take a few
+/// microseconds where the interrupt arrives at once.
+const LATE_NS: u64 = 50_000;
 
 /// Flushes `range` from this CPU's TLB: page by page, or all at once for
 /// more than [`FLUSH_ALL_PAGES`] pages. All at once, a range in the lower
@@ -797,6 +805,7 @@ pub(crate) fn shootdown_on(range: Range<u64>, wanted: impl Fn(&PerCpu) -> bool) 
     here.tlb_generation.store(generation, Ordering::Relaxed);
     SHOOTDOWN.start.store(range.start, Ordering::Relaxed);
     SHOOTDOWN.end.store(range.end, Ordering::Relaxed);
+    SHOOTDOWN.sent_ns.store(time::now_ns(), Ordering::Relaxed);
     // Release: a CPU that sees its bit sees this range (`serve_shootdown`).
     for (slot, &word) in SHOOTDOWN.pending.iter().zip(&targets) {
         slot.store(word, Ordering::Release);
@@ -872,8 +881,14 @@ pub fn serve_shootdown() {
     if pending.load(Ordering::Acquire) & bit != 0 {
         let start = SHOOTDOWN.start.load(Ordering::Relaxed);
         let end = SHOOTDOWN.end.load(Ordering::Relaxed);
+        let sent = SHOOTDOWN.sent_ns.load(Ordering::Relaxed);
         flush_local(start..end);
         pending.fetch_and(!bit, Ordering::Release);
+        // Late: the hypervisor may hold this CPU's interrupts while it runs,
+        // so it shortens the wait for the next requests (ADR 0109).
+        if time::now_ns().saturating_sub(sent) > LATE_NS {
+            time::ring_doorbell();
+        }
     }
 }
 

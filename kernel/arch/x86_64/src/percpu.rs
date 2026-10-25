@@ -192,6 +192,9 @@ pub struct PerCpu {
     /// When the timer is armed to fire, or `u64::MAX` when it is not (or
     /// has fired and its interrupt is not handled yet).
     pub armed_ns: AtomicU64,
+    /// Until when the timer also fires every `time::DOORBELL_NS`, since
+    /// this CPU answered a TLB shootdown late; 0 when it does not.
+    pub doorbell_until_ns: AtomicU64,
     /// Times the timer was written to arm it.
     pub timer_writes: AtomicU64,
     /// Interprocessor interrupts this CPU sent.
@@ -242,6 +245,7 @@ impl PerCpu {
             next_tick_ns: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(u64::MAX),
             armed_ns: AtomicU64::new(u64::MAX),
+            doorbell_until_ns: AtomicU64::new(0),
             timer_writes: AtomicU64::new(0),
             ipis_sent: AtomicU64::new(0),
             shootdown_wait_ns: AtomicU64::new(0),
