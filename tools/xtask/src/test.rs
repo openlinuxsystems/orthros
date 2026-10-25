@@ -35,6 +35,9 @@ const QEMU_EXIT_POWER_OFF: i32 = 0;
 /// What the kernel's banner says after its version (`BANNER` in
 /// kernel/radix/src/main.rs).
 const PHASE: &str = "Dukovo Phase 9";
+/// The first line of the kernel's panic report on the serial port
+/// (kernel/radix/src/panic.rs).
+const PANIC_BANNER: &str = "==================== RADIX KERNEL PANIC";
 
 /// Every library of the kernel workspace with host unit tests.
 pub const KERNEL_LIBRARIES: &[&str] = &[
@@ -939,10 +942,8 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
                 eprintln!("    FAIL  {:<15} {} ({secs:.1} s)", case.name, case.about);
                 eprintln!("          {reason}");
                 eprintln!("          serial log: {}", ctx.display(&log));
-                let text = std::fs::read_to_string(&log).unwrap_or_default();
-                for line in
-                    clean_log(&text).lines().rev().take(15).collect::<Vec<_>>().into_iter().rev()
-                {
+                let text = clean_log(&std::fs::read_to_string(&log).unwrap_or_default());
+                for line in failure_lines(&text) {
                     eprintln!("          | {line}");
                 }
             }
@@ -1466,6 +1467,25 @@ fn key_combo(c: char) -> Result<String, String> {
 }
 
 /// Removes carriage returns and terminal escape sequences from a serial log.
+/// The lines of a failed case's serial log worth printing: its last 15,
+/// or, when the kernel panicked, the whole panic report and the lines
+/// that led to it, so that a failure on CI says what panicked without
+/// the log, which only the job's artifacts keep.
+fn failure_lines(log: &str) -> Vec<&str> {
+    const TAIL: usize = 15;
+    const BEFORE: usize = 10;
+    const MOST: usize = 100;
+    let lines: Vec<&str> = log.lines().collect();
+    // The first report: the replay of one kept from the boot before has
+    // the log's prefix in front of each line.
+    let banner = lines.iter().position(|line| line.starts_with(PANIC_BANNER));
+    let from = match banner {
+        Some(banner) => banner.saturating_sub(BEFORE),
+        None => lines.len().saturating_sub(TAIL),
+    };
+    lines[from..lines.len().min(from + MOST)].to_vec()
+}
+
 pub fn clean_log(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -2353,6 +2373,29 @@ mod tests {
     #[test]
     fn strips_escapes() {
         assert_eq!(clean_log("\u{1b}[1;1HRadix\r\n\u{1b}[=3hok"), "Radix\nok");
+    }
+
+    #[test]
+    fn a_failure_shows_the_whole_panic_report() {
+        let numbered =
+            |count: usize| (0..count).map(|i| format!("line {i}\n")).collect::<Vec<_>>().concat();
+        // No panic: the last 15 lines.
+        let log = numbered(40);
+        let lines = failure_lines(&log);
+        assert_eq!((lines.len(), lines[0]), (15, "line 25"));
+        // A panic: from 10 lines before its report to the end.
+        let report =
+            format!("{PANIC_BANNER} ====================\nRadix panic on CPU 0\n{}", numbered(30));
+        let log = format!("{}{report}", numbered(40));
+        let lines = failure_lines(&log);
+        assert_eq!((lines.len(), lines[0]), (42, "line 30"));
+        assert!(lines[10].starts_with(PANIC_BANNER));
+        // The first report, not the replay of one kept from the boot
+        // before, and at most 100 lines.
+        let log = format!("{}[    0.000000]   | {report}{report}{}", numbered(3), numbered(200));
+        let lines = failure_lines(&log);
+        assert_eq!((lines.len(), lines[0]), (100, "line 20"));
+        assert!(lines[10].starts_with(PANIC_BANNER));
     }
 
     #[test]

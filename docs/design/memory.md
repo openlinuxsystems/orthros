@@ -67,8 +67,8 @@ array of frame records.
 4 MiB), naturally aligned. The free lists are doubly linked through the
 frame records of the blocks' first frames, so the allocator never reads or
 writes the memory it manages. A frame record (`page.rs`) holds the frame's
-state (`Reserved`, `Free`, `Allocated` or `Tail`), the block's order, its
-owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area`,
+state (`Reserved`, `Free`, `Allocated`, `Tail` or `Cached`), the block's
+order, its owner (an `Owner`: `Kernel`, `PageTable`, `Slab`, `Heap`, `Area`,
 `PerCpu` or `Memory`, the last for the capability store's memory objects,
 used for accounting and for checking frees), a tag byte and two links; the slab
 layer reuses the links and an auxiliary word for its own bookkeeping. A free
@@ -93,6 +93,25 @@ zone, at most 64 MiB, for devices that need it. A `MaySleep` allocation
 that finds nothing calls the reclaim hook (`Heap::drain`, which empties
 every CPU's magazines and frees empty slabs) and tries once more. Failure
 is `AllocError`, never a panic.
+
+Each CPU keeps a cache of free single frames, as Linux keeps per-CPU page
+lists, from the first zone a local allocation tries: its node's `Normal`
+zone, or its `Dma32` zone if the node has no other. An order-0 allocation
+that may come from that zone takes the frame the CPU freed last, and
+freeing a frame of that zone puts it back, so neither takes the zone's
+lock nor splits or merges buddies (some thousand instructions a frame
+otherwise; a `fork` allocates about 26 frames and a `fork` and `exec` about
+120). The cache is a list linked through the frame records, like a free
+list, and its frames are `Cached`: allocated, as far as the zone knows, so
+no buddy merges with them. A free marks a frame cached with one atomic
+change of its record, which only an allocated frame of the right owner
+takes, so a double free is refused as before. An empty cache takes 32
+frames at a time from above the zone's floors, so the reserve stays with
+the zone; a cache holding more than its limit (1/512 of the zone, between
+64 frames and 2 MiB) gives back the 32 that went into it longest ago. Cached
+frames count as free, and an allocation that finds nothing empties every
+CPU's cache into the zones before it reclaims. `Frames::check` walks the
+caches as well as the free lists.
 
 ## Kernel heap
 
@@ -233,10 +252,10 @@ them and keeps every location that holds an absolute address into the
 higher-half image: 64-bit addresses (`R_X86_64_64`, and the global offset
 table) and 32-bit sign-extended ones (`R_X86_64_32S`); relative addresses
 move with their code. It writes their physical addresses, sorted, into the
-64 KiB `.krelocs` section the image reserves (format in `radix-relocs`),
+128 KiB `.krelocs` section the image reserves (format in `radix-relocs`),
 then removes the relocation sections with `llvm-objcopy`, because GRUB
 refuses to load an ELF file that has them. The Phase 2 kernel has about
-2,600 locations.
+2,600 locations, the Phase 9 kernel about 16,000 (some 64 KiB of table).
 
 At boot the trampoline, still running at the link address, calls
 `radix_kaslr_choose`, which reads the command line for `nokaslr` and picks

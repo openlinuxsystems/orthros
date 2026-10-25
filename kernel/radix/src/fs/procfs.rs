@@ -523,6 +523,13 @@ fn stat(text: &mut Text) -> fmt::Result {
     writeln!(text, "disk_read_sectors: {}", count(&super::disk::READ_SECTORS))?;
     writeln!(text, "disk_writes: {}", count(&super::disk::WRITES))?;
     writeln!(text, "disk_written_sectors: {}", count(&super::disk::WRITTEN_SECTORS))?;
+    // What costs an exit to the host under a hypervisor, as `ob bench`
+    // counts it for its benchmarks.
+    let events = sched::counters();
+    writeln!(text, "timer_writes: {}", events.timer_writes)?;
+    writeln!(text, "ipis: {}", events.ipis)?;
+    writeln!(text, "halts: {}", events.halts)?;
+    writeln!(text, "polls: {}", events.polls)?;
     let now = <crate::Arch as radix_hal::Timer>::wall_clock_ns().unwrap_or(0);
     writeln!(text, "boot_time_ns: {}", now.saturating_sub(sched::now_ns()))
 }

@@ -410,10 +410,14 @@ impl ProcessObject {
         *self.name.lock() = name;
     }
 
-    /// Gives it `space` in place of its address space (`exec`).
+    /// Gives it `space` in place of its address space (`exec`), whose
+    /// memory goes at once: the thread that called `exec` still holds the
+    /// old space until it is reaped, but never runs in it again.
     pub fn set_space(&self, space: SpaceRef) {
         let old = self.space.lock().replace(space);
-        drop(old);
+        if let Some(old) = old {
+            old.empty();
+        }
     }
 
     /// It is a POSIX child: it no longer ends with its maker.
@@ -739,7 +743,7 @@ impl ProcessObject {
     /// finished now if none is left to.
     pub fn exit(&self, code: u64) {
         if self.end(code) {
-            self.finish(None);
+            self.finish(None, None);
         }
     }
 
@@ -808,15 +812,18 @@ impl ProcessObject {
         drop(gone);
         wait::wake_all(self.threads_key());
         if finish {
-            self.finish(None);
+            self.finish(None, Some(me));
+        } else {
+            sched::leave_domain(me);
         }
     }
 
     /// Finishes ending it: ends the processes made for it, empties both
     /// its capability spaces, lets go of its address space, and tells
     /// whoever asked. With `store`, the caller holds the store's lock
-    /// (`finish_pending`).
-    fn finish(&self, store: Option<&mut Store>) {
+    /// (`finish_pending`). `last` is its last thread, ending, if that is
+    /// the caller.
+    fn finish(&self, store: Option<&mut Store>, last: Option<&ThreadRef>) {
         let locked = store.is_some();
         if self.has_record_locks() {
             crate::fs::locks::process_gone(self.number, None);
@@ -846,10 +853,20 @@ impl ProcessObject {
                 let _ = caps::destroy_space(self.keep);
             }
         }
-        // Its threads' own references keep it alive while they finish
+        // Its memory goes now, before its parent hears of the end. Its
+        // threads' own references keep the empty space while they finish
         // leaving it.
         let space = self.space.lock().take();
-        drop(space);
+        if let Some(space) = space {
+            space.empty();
+        }
+        // Its last thread leaves its domain before anyone hears of the end,
+        // as on Linux a task leaves its cgroup after its memory has gone
+        // and before its parent is told: a supervisor that counts what is
+        // left in the domain then finds the thread gone.
+        if let Some(last) = last {
+            sched::leave_domain(last);
+        }
         let (code, notify) = {
             let mut state = self.state.lock();
             state.phase = ProcessState::Exited;
@@ -913,7 +930,7 @@ pub fn finish_pending(store: &mut Store) {
         };
         match next {
             Some(process) => {
-                process.finish(Some(store));
+                process.finish(Some(store), None);
                 push_finished(process);
             }
             None => return,

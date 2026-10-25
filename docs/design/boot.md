@@ -63,7 +63,7 @@ linking, `ob build` writes the symbol table into it in place (format in
 in the image moves. Only symbols within 4 GiB of the section are kept,
 which leaves out the boot code at 1 MiB.
 
-`.krelocs` is a 64 KiB read-only section of zeros that `ob build` fills
+`.krelocs` is a 128 KiB read-only section of zeros that `ob build` fills
 the same way with the kernel's relocation table: every location that
 holds an absolute address into the image, which the trampoline moves when
 it moves the kernel (KASLR, ADR 0018). The kernel is linked with

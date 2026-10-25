@@ -11,9 +11,10 @@
 //! frame.
 //!
 //! The fields are atomics, but each record has one owner at a time: the
-//! zone's lock while the frame is free, and whoever allocated it after
-//! that. Relaxed loads and stores are plain moves on x86-64, and atomics let
-//! two locks share the array without `unsafe`.
+//! zone's lock while the frame is free, a CPU's cache while that holds it,
+//! and whoever allocated it after that. Relaxed loads and stores are plain
+//! moves on x86-64, and atomics let two locks share the array without
+//! `unsafe`.
 
 #![forbid(unsafe_code)]
 
@@ -40,6 +41,9 @@ pub enum State {
     Allocated = 2,
     /// Any later frame of a free or allocated block.
     Tail = 3,
+    /// A free frame that a CPU's cache holds: allocated, as far as its
+    /// zone knows ([`crate::Frames`]).
+    Cached = 4,
 }
 
 impl State {
@@ -48,6 +52,7 @@ impl State {
             1 => State::Free,
             2 => State::Allocated,
             3 => State::Tail,
+            4 => State::Cached,
             _ => State::Reserved,
         }
     }
@@ -171,6 +176,19 @@ impl PageInfo {
         self.word.store(word, Relaxed);
     }
 
+    /// Marks the frame cached if it is a block of one frame allocated to
+    /// `owner`, and says whether it was. One atomic change: of two frees of
+    /// a frame at once, only one gets it.
+    pub(crate) fn cache(&self, owner: Owner) -> bool {
+        let word = self.word.load(Relaxed);
+        let allocated = State::Allocated as u32 | u32::from(owner as u8) << 16;
+        word & 0x00ff_ffff == allocated
+            && self
+                .word
+                .compare_exchange(word, (word & !0xff) | State::Cached as u32, Relaxed, Relaxed)
+                .is_ok()
+    }
+
     pub(crate) fn set_state(&self, state: State) {
         let word = self.word.load(Relaxed);
         self.word.store((word & !0xff) | state as u32, Relaxed);
@@ -270,6 +288,18 @@ mod tests {
         info.set_state(State::Tail);
         assert_eq!((info.state(), info.order(), info.owner()), (State::Tail, 9, Owner::Slab));
         assert_eq!(core::mem::size_of::<PageInfo>(), 16);
+    }
+
+    #[test]
+    fn only_a_single_allocated_frame_of_its_owner_is_cached() {
+        let info = PageInfo::new();
+        info.set(State::Allocated, 1, Owner::Anon, 0);
+        assert!(!info.cache(Owner::Anon), "a block of two frames");
+        info.set(State::Allocated, 0, Owner::Anon, 7);
+        assert!(!info.cache(Owner::Kernel), "another owner's frame");
+        assert!(info.cache(Owner::Anon));
+        assert_eq!((info.state(), info.owner(), info.tag()), (State::Cached, Owner::Anon, 7));
+        assert!(!info.cache(Owner::Anon), "a second free");
     }
 
     #[test]

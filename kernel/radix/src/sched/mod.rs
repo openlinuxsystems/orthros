@@ -124,6 +124,9 @@ struct CpuSched {
     halts: AtomicU64,
     /// Balancing attempts that found nothing to move, by level.
     balance_failures: [AtomicU32; 4],
+    /// Set by a switch away from a thread that has exited, for the thread
+    /// switched to, which tells the reaper (`after_switch`).
+    left_dead: AtomicBool,
 }
 
 impl CpuSched {
@@ -151,6 +154,7 @@ impl CpuSched {
             polls: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             balance_failures: [const { AtomicU32::new(0) }; 4],
+            left_dead: AtomicBool::new(false),
         }
     }
 
@@ -167,8 +171,8 @@ static TOPOLOGY: Once<Topology> = Once::new();
 static REGISTRY: SpinLock<Option<Vec<ThreadRef, Kmalloc>>> = SpinLock::new(None);
 /// Exited threads waiting for the reaper.
 static ZOMBIES: SpinLock<Option<Vec<ThreadRef, Kmalloc>>> = SpinLock::new(None);
-static ZOMBIE_COUNT: AtomicUsize = AtomicUsize::new(0);
-/// What the reaper waits on.
+/// What the reaper waits on: how many switches away from exited threads
+/// are done.
 static REAPER: AtomicU64 = AtomicU64::new(0);
 /// Threads every list has room for.
 static ROOM: AtomicUsize = AtomicUsize::new(0);
@@ -1021,6 +1025,12 @@ pub fn set_affinity(thread: &ThreadRef, cpus: CpuSet) -> Result<(), SpawnError> 
     }
 }
 
+/// Stops counting `thread`, which is ending, among its domain's threads,
+/// if it is still counted; [`exit`] does it otherwise.
+pub fn leave_domain(thread: &ThreadRef) {
+    thread.leave_domain();
+}
+
 /// Ends the running thread. Its stack is freed by the reaper once the CPU
 /// has switched away from it.
 pub fn exit() -> ! {
@@ -1041,10 +1051,10 @@ pub fn exit() -> ! {
         if let Some(zombies) = zombies.as_mut() {
             let _ = zombies.push_within_capacity(me.clone());
         }
-        ZOMBIE_COUNT.fetch_add(1, Ordering::Release);
     }
     drop(me);
-    wait::wake_all(reaper_key());
+    // The thread the switch goes to tells the reaper, once this one's
+    // context is saved.
     reschedule(Switch::Exit);
     unreachable!("a thread ran after it exited");
 }
@@ -1195,6 +1205,7 @@ fn reschedule(why: Switch) {
         (Switch::Exit, Some(state)) => {
             state.run = Run::Dead;
             rq.dequeue(&me);
+            slot.left_dead.store(true, Ordering::Relaxed);
         }
         (Switch::Yield, _) => rq.yield_current(),
         _ => {
@@ -1267,6 +1278,15 @@ fn switch(prev: *const Thread, next: *const Thread) {
 
 /// What a thread does when a switch brings it back, or first starts it.
 fn after_switch() {
+    let slot = CPUS.this();
+    if slot.left_dead.load(Ordering::Relaxed) {
+        slot.left_dead.store(false, Ordering::Relaxed);
+        // The thread this CPU switched away from has exited, and the switch
+        // has saved its context: the reaper may free it now, rather than
+        // look again later.
+        REAPER.fetch_add(1, Ordering::Release);
+        wait::wake_all(reaper_key());
+    }
     if !hooks::lockdep_enabled() {
         return;
     }
@@ -1527,34 +1547,41 @@ fn reaper_key() -> usize {
     &raw const REAPER as usize
 }
 
-/// Frees exited threads once their CPUs have switched away from them.
+/// Frees exited threads once their CPUs have switched away from them:
+/// each such switch bumps `REAPER` and wakes it.
 fn reaper_main(_: usize) {
+    let mut seen = 0;
     loop {
-        wait::wait_until(reaper_key(), "reap", || ZOMBIE_COUNT.load(Ordering::Acquire) > 0);
+        wait::wait_until(reaper_key(), "reap", || REAPER.load(Ordering::Acquire) != seen);
+        seen = REAPER.load(Ordering::Acquire);
         loop {
+            // Whether a thread off its CPU had its lock held, so that it
+            // could not be told dead or alive.
+            let mut busy = false;
             let ready = {
                 let mut zombies = ZOMBIES.lock_irq();
                 let Some(list) = zombies.as_mut() else { break };
                 let found = list.iter().position(|t| {
-                    t.state.try_lock().is_some_and(|s| s.run == Run::Dead)
-                        && !<Arch as Threads>::is_running(&t.context)
+                    if <Arch as Threads>::is_running(&t.context) {
+                        return false;
+                    }
+                    let state = t.state.try_lock();
+                    busy |= state.is_none();
+                    state.is_some_and(|s| s.run == Run::Dead)
                 });
                 found.map(|index| list.swap_remove(index))
             };
             match ready {
                 Some(thread) => reap(thread),
+                // Its switch has bumped `REAPER` already: look again soon.
+                None if busy => sleep_ns(1_000_000),
                 None => break,
             }
-        }
-        if ZOMBIE_COUNT.load(Ordering::Acquire) > 0 {
-            // One is still being switched away from.
-            sleep_ns(1_000_000);
         }
     }
 }
 
 fn reap(thread: ThreadRef) {
-    ZOMBIE_COUNT.fetch_sub(1, Ordering::AcqRel);
     let registered = {
         let mut registry = REGISTRY.lock_irq();
         registry.as_mut().and_then(|list| {

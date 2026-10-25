@@ -381,9 +381,11 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         per_switch(&mut radix, &counts);
         keep_best(&mut numbers.radix, radix);
         step(&format!("Booting Radix with the POSIX benchmarks on 2 CPUs{of}"));
-        keep_best(&mut numbers.radix, radix_posix_numbers(ctx, &dir, &image, Accel::of(kvm))?);
+        let (posix, posix_counts) = radix_posix_numbers(ctx, &dir, &image, Accel::of(kvm))?;
+        keep_best(&mut numbers.radix, posix);
         if numbers.counts.is_empty() {
             numbers.counts = counts;
+            numbers.counts.extend(posix_counts);
         }
         if let Some((kernel, initrd)) = &vm_kernel {
             step(&format!(
@@ -445,7 +447,7 @@ fn count_instructions(
     let (mut radix, counts) = radix_numbers(ctx, dir, image, Accel::Count)?;
     per_switch(&mut radix, &counts);
     step("Booting Radix with the POSIX benchmarks on 2 CPUs, counting instructions (minutes)");
-    radix.extend(radix_posix_numbers(ctx, dir, image, Accel::Count)?);
+    radix.extend(radix_posix_numbers(ctx, dir, image, Accel::Count)?.0);
     let report = budget_report(&radix);
     let markdown = dir.join("instructions.md");
     std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
@@ -827,14 +829,14 @@ fn radix_numbers(
 }
 
 /// Boots the test image `base` with Spark running the POSIX benchmarks
-/// and reads their `BENCH` lines, which Spark copies from the program's
-/// terminal to the kernel log.
+/// and reads their `BENCH` and `BENCHCOUNT` lines, which Spark copies from
+/// the program's terminal to the kernel log.
 fn radix_posix_numbers(
     ctx: &Ctx,
     dir: &Path,
     base: &[u8],
     accel: Accel,
-) -> Result<Vec<Measurement>> {
+) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let image = dir.join("posix-bench.img");
     let bytes = test::with_cmdline(base, POSIX_CMDLINE).map_err(crate::Error::new)?;
     std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
@@ -868,7 +870,7 @@ fn radix_posix_numbers(
             ctx.display(&dir.join("boot-posix-bench.log"))
         );
     }
-    Ok(parse(&log))
+    Ok((parse(&log), parse_counts(&log)))
 }
 
 /// Builds and runs the Linux baseline on the host, with the POSIX

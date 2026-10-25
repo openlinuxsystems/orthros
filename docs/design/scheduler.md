@@ -160,7 +160,10 @@ the run queue's reference, which would cost a lock and two atomic counts
 per switch. A thread
 that exits is put on the reaper's list before its last switch, and the
 reaper frees its stack only once its `on_cpu` word is clear, that is once
-the switch away from it has saved it.
+the switch away from it has saved it. The thread its CPU switches to
+wakes the reaper then, so the reaper never looks too early and waits;
+it looks again after a millisecond only if a dead thread's lock was held
+while it looked.
 
 **Preemption.** Spin locks and RCU read sections raise the CPU's
 preemption count; nothing else holds off preemption. `need_resched` is

@@ -33,9 +33,69 @@ static uint64_t now_ns(void) {
 	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
-static void report(const char *name, uint64_t started, uint64_t count) {
-	double ns = (double)(now_ns() - started) / (double)count;
+// The kernel events `ob bench` counts per operation, which Radix's
+// /proc/stat lists one a line ("ipis: 12"); Linux's has none of them.
+static const char *const event_names[] = {"switches", "timer_writes", "ipis", "halts", "polls"};
+#define EVENTS (sizeof(event_names) / sizeof(event_names[0]))
+
+// Reads the events into `events`; false if /proc/stat lacks any.
+static int read_events(uint64_t *events) {
+	FILE *file = fopen("/proc/stat", "r");
+	if(!file)
+		return 0;
+	char line[256];
+	unsigned found = 0;
+	while(fgets(line, sizeof(line), file))
+		for(size_t i = 0; i < EVENTS; i++) {
+			size_t length = strlen(event_names[i]);
+			if(!strncmp(line, event_names[i], length) && line[length] == ':') {
+				events[i] = strtoull(line + length + 1, NULL, 10);
+				found |= 1u << i;
+			}
+		}
+	fclose(file);
+	return found == (1u << EVENTS) - 1;
+}
+
+// When a benchmark started, and the kernel's events then.
+struct mark {
+	uint64_t ns;
+	uint64_t events[EVENTS];
+	int counted;
+};
+
+// On Radix, Spark copies what the program prints to the kernel log,
+// which draws it on the console: a pause before each benchmark lets the
+// drawing of what the ones before it printed end before it starts, so
+// that its instruction count leaves that drawing out.
+static void settle(void) {
+	fflush(stdout);
+	struct timespec pause = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000};
+	while(nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+}
+
+static struct mark start(void) {
+	settle();
+	struct mark mark;
+	mark.counted = read_events(mark.events);
+	mark.ns = now_ns();
+	return mark;
+}
+
+// Prints the time per operation since `started`, and on Radix the
+// kernel's events since then as a BENCHCOUNT line, which ob bench divides
+// by the rounds.
+static void report(const char *name, struct mark started, uint64_t count) {
+	double ns = (double)(now_ns() - started.ns) / (double)count;
 	printf("BENCH name=%s ns=%.2f iterations=%llu\n", name, ns, (unsigned long long)count);
+	uint64_t events[EVENTS];
+	if(started.counted && read_events(events)) {
+		printf("BENCHCOUNT group=%s rounds=%llu", name, (unsigned long long)count);
+		for(size_t i = 0; i < EVENTS; i++)
+			printf(" %s=%llu", event_names[i],
+			       (unsigned long long)(events[i] - started.events[i]));
+		printf("\n");
+	}
 	fflush(stdout);
 }
 
@@ -69,7 +129,7 @@ static void pin(int cpu) {
 
 // A child that exits at once, and the wait for it.
 static void fork_wait(uint64_t rounds) {
-	uint64_t started = now_ns();
+	struct mark started = start();
 	for(uint64_t i = 0; i < rounds; i++) {
 		pid_t child = fork();
 		if(child < 0)
@@ -86,7 +146,7 @@ static void fork_wait(uint64_t rounds) {
 // A child that runs this program with --exit, and the wait for it.
 static void fork_exec_wait(const char *self, uint64_t rounds) {
 	char *const argv[] = {(char *)self, "--exit", NULL};
-	uint64_t started = now_ns();
+	struct mark started = start();
 	for(uint64_t i = 0; i < rounds; i++) {
 		pid_t child = fork();
 		if(child < 0)
@@ -113,7 +173,7 @@ static void pipe_throughput(void) {
 	int fds[2];
 	if(pipe(fds) != 0)
 		fail("pipe");
-	uint64_t started = now_ns();
+	struct mark started = start();
 	pid_t child = fork();
 	if(child < 0)
 		fail("fork");
@@ -164,7 +224,7 @@ static void signal_delivery(uint64_t rounds) {
 		fail("sigaction");
 	pid_t self = getpid();
 	caught = 0;
-	uint64_t started = now_ns();
+	struct mark started = start();
 	for(uint64_t i = 0; i < rounds; i++)
 		kill(self, SIGUSR1);
 	report("posix_signal", started, rounds);
@@ -178,7 +238,7 @@ static void poll_ready(uint64_t rounds) {
 	if(pipe(fds) != 0 || write(fds[1], "x", 1) != 1)
 		fail("pipe");
 	struct pollfd entry = {.fd = fds[0], .events = POLLIN};
-	uint64_t started = now_ns();
+	struct mark started = start();
 	for(uint64_t i = 0; i < rounds; i++)
 		if(poll(&entry, 1, 0) != 1)
 			fail("poll");
@@ -215,7 +275,7 @@ static void futex_pingpong(const char *name, int other, uint64_t rounds) {
 	// One turn first, so that the other thread is pinned and waiting.
 	sem_post(&turns.ask);
 	while(sem_wait(&turns.answer) != 0) {}
-	uint64_t started = now_ns();
+	struct mark started = start();
 	for(uint64_t i = 1; i < rounds; i++) {
 		sem_post(&turns.ask);
 		while(sem_wait(&turns.answer) != 0) {}

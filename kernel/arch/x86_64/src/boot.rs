@@ -253,12 +253,13 @@ __ksyms_end:
 
     /* ---- Room for the KASLR relocation table (radix-relocs) ----
      * Written by `ob build` like the symbol table; the trampoline leaves
-     * the kernel where it was linked while this is zeros. */
+     * the kernel where it was linked while this is zeros. The audit's
+     * kernel needs some 64 KiB. */
     .section .krelocs, "a", @progbits
     .balign 16
     .global __krelocs_start
 __krelocs_start:
-    .skip 64 * 1024
+    .skip 128 * 1024
     .global __krelocs_end
 __krelocs_end:
 
