@@ -702,10 +702,9 @@ pub fn push_signal_frame(signal: &SignalFrame<'_>) -> bool {
         return false;
     }
 
+    // The handler starts with the initial extended state, as Linux's do.
+    fpu::load_initial();
     cpu::disable_interrupts();
-    // SAFETY: as above, with interrupts masked: the handler starts with
-    // the initial extended state, as Linux's do.
-    unsafe { fpu::load_initial(area) };
     // Its registers and RCX and R11 are in the frame now.
     let _ = thread::take_full_return();
     let entry =
@@ -787,7 +786,7 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
     // gets the thread's live state back.
     let restored = unsafe {
         if fpstate == 0 {
-            fpu::load_initial(area);
+            fpu::load_initial();
             true
         } else {
             let image = core::slice::from_raw_parts_mut(area as *mut u8, size);

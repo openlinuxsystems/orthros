@@ -418,8 +418,11 @@ host delivers on both systems alike, so the ratio compares the kernels.
 Under KVM, `ob bench` boots Radix and the Linux virtual machine three
 times in turn and keeps each row's fastest run on each side (ADR 0046):
 the host only ever adds time, and rarely to the same row in every run.
-`ob bench --gate` fails if a row is missing or Radix takes more than
-1.05 times as long as Linux in the virtual machine; CI's `bench` job runs
+`ob bench --gate` fails if a row is missing or Radix takes longer than
+Linux in the virtual machine (ADR 0107); while a row is over, it boots
+both systems in turn again, up to six more times, each side keeping its
+fastest run, so the noise of a run is set aside and a real difference
+stays. CI's `bench` job runs
 it on every pull request and every merge to main and shows the report in
 the job's summary, with the numbers as an artifact (`results.json`).
 Without KVM nothing is comparable: the Linux virtual machine does not

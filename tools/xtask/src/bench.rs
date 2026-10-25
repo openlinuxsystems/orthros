@@ -20,7 +20,9 @@
 //! (ADR 0046). The report goes to `out/bench/` as Markdown and JSON, and
 //! CI appends the Markdown to its job summary. With `--gate`, `ob bench`
 //! fails if Radix is slower than Linux in the virtual machine at any
-//! operation (beyond [`GATE_RATIO`]): the performance gate of the plan.
+//! operation ([`GATE_RATIO`], parity): the performance gate of the plan.
+//! While an operation is over it, both systems are measured again, up to
+//! [`MORE_RUNS`] more times (ADR 0107).
 //!
 //! With `--instructions` it boots Radix under QEMU's instruction counting
 //! instead, where every instruction takes one nanosecond of the guest's
@@ -61,9 +63,10 @@ const VM_MEMORY: &str = "1G";
 const VM_CPUS: u32 = 2;
 
 /// The most time Radix may take for an operation, as a share of what
-/// Linux takes in the same virtual machine, before `--gate` fails: parity,
-/// plus the run-to-run noise of a shared CI runner.
-pub const GATE_RATIO: f64 = 1.05;
+/// Linux takes in the same virtual machine, before `--gate` fails: parity
+/// (ADR 0107). The noise of a shared CI runner is met with more runs
+/// ([`MORE_RUNS`]), never with room above parity.
+pub const GATE_RATIO: f64 = 1.00;
 
 /// How many times `ob bench` measures Radix and Linux in turn under KVM,
 /// unless `--runs` says otherwise. Each operation counts its fastest run
@@ -72,6 +75,13 @@ pub const GATE_RATIO: f64 = 1.05;
 /// ever makes a run slower, and rarely hits the same operation every
 /// time, while what the kernel costs is there in every run.
 const RUNS: u32 = 3;
+
+/// How many more times, at most, `ob bench --gate` measures Radix and
+/// Linux in turn while an operation is over the gate after the first
+/// runs. Each run can only lower each side's fastest time: a run the host
+/// slowed is set aside on whichever side it fell, while what the kernel
+/// costs is in every run, so a real difference stays (ADR 0107).
+pub const MORE_RUNS: u32 = 6;
 
 /// How long the benchmark boot may take: minutes under KVM, about three
 /// without it.
@@ -109,7 +119,7 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_fork_wait", 160_000),              // 138,300
     ("posix_fork_exec_wait", 590_000),         // 531,676
     ("posix_pipe_mib", 2_500_000),             // 2,188,725
-    ("posix_signal", 6_800),                   // 6,118
+    ("posix_signal", 5_900),                   // 5,300
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
 ];
@@ -373,14 +383,16 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         None
     };
     let mut numbers = Numbers {
-        runs,
+        runs: 0,
+        more: 0,
         radix: Vec::new(),
         counts: Vec::new(),
         linux_vm: Vec::new(),
         linux_host: Vec::new(),
     };
-    for run in 1..=runs {
-        let of = if runs > 1 { format!(", run {run} of {runs}") } else { String::new() };
+    // One run: Radix, then Linux in the virtual machine; each operation
+    // keeps its fastest so far on each side.
+    let measure = |numbers: &mut Numbers, of: &str| -> Result<()> {
         step(&format!(
             "Booting Radix with selftest=bench on 2 CPUs ({}{of})",
             if kvm { "KVM" } else { "no KVM, which takes minutes" }
@@ -403,6 +415,28 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
             ));
             keep_best(&mut numbers.linux_vm, linux_vm_numbers(ctx, &dir, kernel, initrd)?);
         }
+        numbers.runs += 1;
+        Ok(())
+    };
+    for run in 1..=runs {
+        let of = if runs > 1 { format!(", run {run} of {runs}") } else { String::new() };
+        measure(&mut numbers, &of)?;
+    }
+    if gate && kvm && !numbers.linux_vm.is_empty() {
+        while numbers.more < MORE_RUNS {
+            let over = over_gate(&numbers);
+            if over.is_empty() {
+                break;
+            }
+            numbers.more += 1;
+            step(&format!(
+                "Over the gate after {} runs: {}. Measuring both again",
+                numbers.runs,
+                over.join("; ")
+            ));
+            let of = format!(", run {} of at most {}", numbers.runs + 1, runs + MORE_RUNS);
+            measure(&mut numbers, &of)?;
+        }
     }
     if let Some(posix) = &posix_linux {
         numbers.linux_host = linux_numbers(ctx, posix)?;
@@ -421,10 +455,10 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     step(&format!("Benchmark report in {} and {}", ctx.display(&markdown), ctx.display(&json)));
     if gate {
         check_gate(&numbers)?;
-        step(&format!(
-            "Performance gate passed: Radix is within {GATE_RATIO} times Linux in the same \
-             virtual machine at every operation"
-        ));
+        step(
+            "Performance gate passed: Radix is as fast as Linux in the same virtual machine, \
+             or faster, at every operation",
+        );
     }
     Ok(())
 }
@@ -558,6 +592,8 @@ fn per_switch(radix: &mut [Measurement], counts: &[Counts]) {
 struct Numbers {
     /// How many times Radix and the Linux virtual machine were measured.
     runs: u32,
+    /// How many of those runs were more, for operations over the gate.
+    more: u32,
     radix: Vec<Measurement>,
     /// What the kernel did, in the first run.
     counts: Vec<Counts>,
@@ -576,8 +612,32 @@ fn ratio(numbers: &Numbers, row: &Row) -> Option<f64> {
     (theirs > 0.0).then(|| ours / theirs)
 }
 
-/// Fails unless every row has both numbers and Radix's is within
-/// [`GATE_RATIO`] of Linux's.
+/// The rows over the gate, each with its ratio (or that it is missing).
+fn over_gate(numbers: &Numbers) -> Vec<String> {
+    let mut over = Vec::new();
+    for row in ROWS.iter().filter(|row| row.linux.is_some()) {
+        match ratio(numbers, row) {
+            Some(ratio) if ratio <= GATE_RATIO => {}
+            Some(ratio) => over.push(format!("{} ({} times Linux)", row.what, shown(ratio))),
+            None => over.push(format!("{} (not measured)", row.what)),
+        }
+    }
+    over
+}
+
+/// A ratio to two decimals, or to three where two would hide that it is
+/// over the gate (1.004 is not 1.00).
+fn shown(ratio: f64) -> String {
+    let two = format!("{ratio:.2}");
+    if ratio > GATE_RATIO && two.parse::<f64>().is_ok_and(|r| r <= GATE_RATIO) {
+        format!("{ratio:.3}")
+    } else {
+        two
+    }
+}
+
+/// Fails unless every row has both numbers and Radix's is at most
+/// [`GATE_RATIO`] times Linux's.
 fn check_gate(numbers: &Numbers) -> Result<()> {
     if numbers.linux_vm.is_empty() {
         crate::bail!(
@@ -585,19 +645,13 @@ fn check_gate(numbers: &Numbers) -> Result<()> {
              and that did not run"
         );
     }
-    let mut failed = Vec::new();
-    for row in ROWS.iter().filter(|row| row.linux.is_some()) {
-        match ratio(numbers, row) {
-            Some(ratio) if ratio <= GATE_RATIO => {}
-            Some(ratio) => failed.push(format!("{} ({ratio:.2} times Linux)", row.what)),
-            None => failed.push(format!("{} (not measured)", row.what)),
-        }
-    }
-    if !failed.is_empty() {
+    let over = over_gate(numbers);
+    if !over.is_empty() {
         crate::bail!(
             "the performance gate failed: Radix is slower than Linux in the same virtual machine \
-             (beyond {GATE_RATIO} times) at {}",
-            failed.join("; ")
+             after {} runs at {}",
+            numbers.runs,
+            over.join("; ")
         );
     }
     Ok(())
@@ -982,8 +1036,7 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
     } else {
         format!(
             "Linux (VM) is Linux in a virtual machine set up the same way, the baseline Radix \
-             must match: the goal is a ratio of at most 1.00 (lower is better), and the gate \
-             fails beyond {GATE_RATIO}, room for the noise of a shared runner"
+             must match: the gate fails at any ratio over {GATE_RATIO:.2} (lower is better)"
         )
     };
     let _ = writeln!(
@@ -995,13 +1048,16 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
         if kvm { "under KVM" } else { "without KVM (emulated, so not comparable)" },
         host_cpu(),
         host_kernel(),
-        if numbers.runs > 1 {
-            format!(
-                ", in the fastest of {} runs (Radix and Linux (VM) measured in turn)",
-                numbers.runs
-            )
-        } else {
-            String::new()
+        match (numbers.runs, numbers.more) {
+            (0 | 1, _) => String::new(),
+            (runs, 0) => {
+                format!(", in the fastest of {runs} runs (Radix and Linux (VM) measured in turn)")
+            }
+            (runs, more) => format!(
+                ", in the fastest of {runs} runs (Radix and Linux (VM) measured in turn; {more} \
+                 of them because an operation was over the gate after the first {})",
+                runs - more
+            ),
         },
     );
     let _ = writeln!(
@@ -1020,8 +1076,8 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
             None => (String::new(), String::new(), "none"),
         };
         let ratio = match ratio(numbers, row) {
-            Some(ratio) if ratio > GATE_RATIO => format!("**{ratio:.2}**"),
-            Some(ratio) => format!("{ratio:.2}"),
+            Some(ratio) if ratio > GATE_RATIO => format!("**{}**", shown(ratio)),
+            Some(ratio) => shown(ratio),
             None => String::new(),
         };
         let _ = writeln!(out, "| {} | {ours} | {vm} | {ratio} | {host} | {how} |", row.what);
@@ -1032,7 +1088,7 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
          on Linux), pinned to one CPU or to two. Under a hypervisor, a wake-up on another \
          CPU is an interrupt the host delivers, so two-CPU numbers in a virtual machine \
          carry the host's cost on top; Linux (VM) pays it too. A ratio in bold is over the \
-         gate's {GATE_RATIO}. docs/design/ipc.md describes each measurement."
+         gate's {GATE_RATIO:.2}. docs/design/ipc.md describes each measurement."
     );
     if !numbers.counts.is_empty() {
         counts_table(&mut out, &numbers.counts, numbers.runs > 1);
@@ -1120,8 +1176,9 @@ fn results_json(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
     let _ = writeln!(out, "  \"kvm\": {kvm},");
     let _ = writeln!(out, "  \"host_cpu\": {},", json_string(&host_cpu()));
     let _ = writeln!(out, "  \"host_kernel\": {},", json_string(&host_kernel()));
-    let _ = writeln!(out, "  \"gate_ratio\": {GATE_RATIO},");
+    let _ = writeln!(out, "  \"gate_ratio\": {GATE_RATIO:.2},");
     let _ = writeln!(out, "  \"runs\": {},", numbers.runs);
+    let _ = writeln!(out, "  \"more_runs\": {},", numbers.more);
     out.push_str("  \"radix\": ");
     json_list(&mut out, &numbers.radix);
     out.push_str(",\n  \"linux_vm\": ");
@@ -1219,6 +1276,7 @@ mod tests {
     fn numbers(radix_ns: f64, linux_ns: f64) -> Numbers {
         let mut numbers = Numbers {
             runs: 1,
+            more: 0,
             radix: Vec::new(),
             counts: Vec::new(),
             linux_vm: Vec::new(),
@@ -1234,14 +1292,27 @@ mod tests {
     #[test]
     fn gate_passes_at_parity_and_fails_beyond_it() {
         assert!(check_gate(&numbers(100.0, 100.0)).is_ok());
-        assert!(check_gate(&numbers(104.0, 100.0)).is_ok());
-        assert!(check_gate(&numbers(120.0, 100.0)).is_err());
+        assert!(check_gate(&numbers(99.0, 100.0)).is_ok());
+        assert!(check_gate(&numbers(100.1, 100.0)).is_err());
+        assert!(check_gate(&numbers(104.0, 100.0)).is_err());
+        assert_eq!(
+            over_gate(&numbers(100.1, 100.0)).len(),
+            ROWS.iter().filter(|r| r.linux.is_some()).count()
+        );
         let mut missing = numbers(90.0, 100.0);
         missing.radix.pop();
         assert!(check_gate(&missing).is_err());
         let mut no_vm = numbers(90.0, 100.0);
         no_vm.linux_vm.clear();
         assert!(check_gate(&no_vm).is_err());
+    }
+
+    #[test]
+    fn a_ratio_over_the_gate_never_shows_as_parity() {
+        assert_eq!(shown(0.934), "0.93");
+        assert_eq!(shown(1.0), "1.00");
+        assert_eq!(shown(1.004), "1.004");
+        assert_eq!(shown(1.006), "1.01");
     }
 
     #[test]

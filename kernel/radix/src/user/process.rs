@@ -126,6 +126,9 @@ pub struct ProcessObject {
     /// What objects it makes are charged to, and its threads run in.
     account: AccountRef,
     state: SpinLock<State>,
+    /// Set, with the state locked, once its phase has left created and
+    /// running: what a signal's sender looks at without the lock.
+    ending: AtomicBool,
     /// Called once it has exited: Spark's end stops the kernel.
     on_exit: Option<fn(&ProcessObject, u64)>,
     /// The next process waiting to be finished, while it waits.
@@ -321,6 +324,7 @@ fn allocate(
             notify: None,
             finishing: false,
         }),
+        ending: AtomicBool::new(false),
         on_exit,
         pending: SpinLock::new(None),
         made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
@@ -628,6 +632,12 @@ impl ProcessObject {
         self.space.lock().clone()
     }
 
+    /// Whether it has begun to end (or has ended), read without a lock: as
+    /// [`ProcessObject::state`] says, as of a moment ago.
+    pub fn is_ending(&self) -> bool {
+        self.ending.load(Ordering::Acquire)
+    }
+
     /// Where it is in its life, and its exit code once it has exited.
     pub fn state(&self) -> (ProcessState, Option<u64>) {
         let state = self.state.lock();
@@ -761,6 +771,7 @@ impl ProcessObject {
         let mut state = self.state.lock();
         if matches!(state.phase, ProcessState::Created | ProcessState::Running) {
             state.phase = ProcessState::Ending;
+            self.ending.store(true, Ordering::Release);
             state.code = code;
             for thread in &state.threads {
                 thread.request_stop();
@@ -805,6 +816,7 @@ impl ProcessObject {
             self.exited_switches[1].fetch_add(involuntary, Ordering::Relaxed);
             if running && how == Ending::Fault {
                 state.phase = ProcessState::Ending;
+                self.ending.store(true, Ordering::Release);
                 state.code = EXIT_FAULT;
                 for thread in &state.threads {
                     thread.request_stop();
@@ -812,6 +824,7 @@ impl ProcessObject {
                 }
             } else if running && state.threads.is_empty() {
                 state.phase = ProcessState::Ending;
+                self.ending.store(true, Ordering::Release);
                 state.code = status;
             }
             (Self::take_finish(&mut state), gone)
