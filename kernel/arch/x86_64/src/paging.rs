@@ -699,14 +699,25 @@ static SHOOTDOWN: Shootdown = Shootdown {
     pending: [const { AtomicU64::new(0) }; MAX_CPUS / 64],
 };
 
-/// Flushes `range` from this CPU's TLB.
+/// Flushes `range` from this CPU's TLB: page by page, or all at once for
+/// more than [`FLUSH_ALL_PAGES`] pages. All at once, a range in the lower
+/// half goes with the rest of the running space's entries, by reloading
+/// CR3, as Linux flushes a program's TLB: the kernel's global entries stay,
+/// and a space this CPU ran under another PCID is flushed when it next runs
+/// here, its TLB generation having moved. Only a range of the kernel's
+/// half takes the global entries too, by toggling CR4.PGE, which a
+/// hypervisor may trap (KVM on AMD traps every write to CR4): toggled for
+/// each `fork` and exit, it cost a program's end two exits to the host and
+/// every kernel mapping in the TLB.
 pub(crate) fn flush_local(range: Range<u64>) {
-    if (range.end - range.start) / PAGE > FLUSH_ALL_PAGES {
-        cpu::flush_tlb_all();
-    } else {
+    if (range.end - range.start) / PAGE <= FLUSH_ALL_PAGES {
         for page in range.step_by(PAGE as usize) {
             cpu::invlpg(page as usize);
         }
+    } else if range.end <= crate::space::USER_END {
+        cpu::flush_tlb();
+    } else {
+        cpu::flush_tlb_all();
     }
 }
 
