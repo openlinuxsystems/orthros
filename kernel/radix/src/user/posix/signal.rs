@@ -195,9 +195,11 @@ pub fn send_process(process: &ProcessRef, signal: u32, info: Info) -> Sent {
     let result;
     {
         let mut posix = process.posix.lock();
-        posix.pending.discard(on.discard);
-        process.for_each_thread(&mut |_, user| user.signals.lock().pending.discard(on.discard));
-        timer::discarded(process, &mut posix, on.discard);
+        if on.discard != 0 {
+            posix.pending.discard(on.discard);
+            process.for_each_thread(&mut |_, user| user.signals.lock().pending.discard(on.discard));
+            timer::discarded(process, &mut posix, on.discard);
+        }
         let disposition = posix.actions.disposition(signal);
         let ignored = posix.actions.ignores(signal);
         // An ignored signal is dropped, unless every thread blocks it (its
