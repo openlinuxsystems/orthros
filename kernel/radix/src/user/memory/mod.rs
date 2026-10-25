@@ -327,19 +327,21 @@ impl SpaceObject {
         }
     }
 
-    /// Takes away everything mapped in it, once its process has let go of
-    /// it (by ending, or by running a new program in another space): its
-    /// memory is free when the process ends, as Linux frees a process's,
-    /// not when the last of its threads is reaped. Its parent, told of the
-    /// end, then writes its own pages without copying those the two shared
-    /// since `fork`. Whoever still holds a capability to it holds an empty
-    /// space.
+    /// Takes away everything mapped in it, and its page tables, once its
+    /// process has let go of it (by ending, or by running a new program in
+    /// another space): its memory is free when the process ends, as Linux
+    /// frees a process's, not when the last of its threads is reaped, and
+    /// it goes back to the CPU the process ended on. Its parent, told of
+    /// the end, then writes its own pages without copying those the two
+    /// shared since `fork`. Whoever still holds a capability to it holds an
+    /// empty space.
     pub fn empty(&self) {
         let regions = {
             let mut regions = self.regions.lock();
             for region in regions.iter() {
                 self.clear_region(region);
             }
+            Arch::free_page_tables(&self.arch);
             core::mem::replace(&mut *regions, Vec::new_in(kmalloc()))
         };
         // What the regions held goes with the lock let go.

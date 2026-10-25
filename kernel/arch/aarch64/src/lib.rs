@@ -289,6 +289,8 @@ impl UserMode for Arch {
         Ok(())
     }
 
+    fn free_page_tables(_: &Space) {}
+
     fn attach_space(_: &Context, _: &Space) -> bool {
         false
     }

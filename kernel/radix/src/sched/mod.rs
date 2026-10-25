@@ -174,6 +174,8 @@ static ZOMBIES: SpinLock<Option<Vec<ThreadRef, Kmalloc>>> = SpinLock::new(None);
 /// What the reaper waits on: how many switches away from exited threads
 /// are done.
 static REAPER: AtomicU64 = AtomicU64::new(0);
+/// The reaper, once it runs.
+static REAPER_THREAD: Once<ThreadRef> = Once::new();
 /// Threads every list has room for.
 static ROOM: AtomicUsize = AtomicUsize::new(0);
 /// Held while the lists grow.
@@ -424,8 +426,11 @@ pub fn run_cpu(cpu: usize) -> ! {
 /// are up.
 pub fn start_threads() {
     let made = spawn("reaper", reaper_main, 0, Options::new().policy(Policy::Fair { nice: -5 }));
-    if let Err(err) = made {
-        panic!("Scheduler: could not start the reaper: {err}");
+    match made {
+        Ok(reaper) => {
+            let _ = REAPER_THREAD.set(reaper);
+        }
+        Err(err) => panic!("Scheduler: could not start the reaper: {err}"),
     }
     let nodes = FRAMES.nodes();
     info!(
@@ -793,6 +798,13 @@ pub fn wake(thread: &ThreadRef) -> bool {
 /// waker blocks, instead of on another CPU that would have to be
 /// interrupted (the IPC fast path, `docs/design/ipc.md`).
 pub fn wake_sync(thread: &ThreadRef) -> bool {
+    wake_here(thread)
+}
+
+/// Wakes `thread` on this CPU if it may run here (and is not real-time),
+/// rather than on the CPU that suits it best: for [`wake_sync`], and for
+/// the reaper, which frees a thread on the CPU it ended on.
+fn wake_here(thread: &ThreadRef) -> bool {
     thread.wake_pending.store(true, Ordering::SeqCst);
     let mut state = thread.state.lock_irq();
     if !matches!(state.run, Run::Blocked(_)) {
@@ -1283,9 +1295,18 @@ fn after_switch() {
         slot.left_dead.store(false, Ordering::Relaxed);
         // The thread this CPU switched away from has exited, and the switch
         // has saved its context: the reaper may free it now, rather than
-        // look again later.
+        // look again later. It does so on this CPU, as Linux frees a task
+        // on the CPU it ended on: waking it on another, idle, CPU would
+        // interrupt that CPU for every thread that ends, an exit to the
+        // host each way in a virtual machine.
         REAPER.fetch_add(1, Ordering::Release);
-        wait::wake_all(reaper_key());
+        match REAPER_THREAD.get() {
+            // A reaper that is still queued (`wait_until`) takes itself out.
+            Some(reaper) => {
+                wake_here(reaper);
+            }
+            None => wait::wake_all(reaper_key()),
+        }
     }
     if !hooks::lockdep_enabled() {
         return;
@@ -1499,7 +1520,14 @@ fn idle_loop(cpu: usize) -> ! {
             slot.polling.store(mwait, Ordering::SeqCst);
             if !slot.need_resched.load(Ordering::SeqCst) {
                 slot.halts.fetch_add(1, Ordering::Relaxed);
+                // Preemption off, as in `poll`: the interrupt that ends the
+                // halt leaves the switch to this loop, which ends the idle
+                // period first. A switch on the interrupt's way out would
+                // leave the period open while other threads ran, counting
+                // their time as idle until this CPU next went idle.
+                Arch::preempt_disable();
                 Arch::idle_until(&slot.wake);
+                Arch::preempt_enable();
             }
             slot.polling.store(false, Ordering::SeqCst);
         }

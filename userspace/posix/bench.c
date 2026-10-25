@@ -38,29 +38,54 @@ static uint64_t now_ns(void) {
 static const char *const event_names[] = {"switches", "timer_writes", "ipis", "halts", "polls"};
 #define EVENTS (sizeof(event_names) / sizeof(event_names[0]))
 
-// Reads the events into `events`; false if /proc/stat lacks any.
-static int read_events(uint64_t *events) {
+// The CPU the benchmarks run on (`main` pins them to it).
+static int home_cpu;
+
+// What the kernel says at a moment: its events, and how long the
+// benchmarks' CPU and the others had been idle (Radix's per-CPU lines,
+// "cpu1: user_ns=... idle_ns=..."), and how many others there are.
+struct kernel_state {
+	uint64_t events[EVENTS];
+	uint64_t idle_here, idle_elsewhere;
+	unsigned others;
+};
+
+// Reads the kernel's state; false if /proc/stat lacks an event.
+static int read_events(struct kernel_state *state) {
+	memset(state, 0, sizeof(*state));
 	FILE *file = fopen("/proc/stat", "r");
 	if(!file)
 		return 0;
 	char line[256];
 	unsigned found = 0;
-	while(fgets(line, sizeof(line), file))
+	while(fgets(line, sizeof(line), file)) {
 		for(size_t i = 0; i < EVENTS; i++) {
 			size_t length = strlen(event_names[i]);
 			if(!strncmp(line, event_names[i], length) && line[length] == ':') {
-				events[i] = strtoull(line + length + 1, NULL, 10);
+				state->events[i] = strtoull(line + length + 1, NULL, 10);
 				found |= 1u << i;
 			}
 		}
+		int cpu;
+		const char *idle = strstr(line, " idle_ns=");
+		if(sscanf(line, "cpu%d:", &cpu) == 1 && idle) {
+			uint64_t ns = strtoull(idle + strlen(" idle_ns="), NULL, 10);
+			if(cpu == home_cpu) {
+				state->idle_here = ns;
+			} else {
+				state->idle_elsewhere += ns;
+				state->others++;
+			}
+		}
+	}
 	fclose(file);
 	return found == (1u << EVENTS) - 1;
 }
 
-// When a benchmark started, and the kernel's events then.
+// When a benchmark started, and the kernel's state then.
 struct mark {
 	uint64_t ns;
-	uint64_t events[EVENTS];
+	struct kernel_state kernel;
 	int counted;
 };
 
@@ -77,24 +102,30 @@ static void settle(void) {
 static struct mark start(void) {
 	settle();
 	struct mark mark;
-	mark.counted = read_events(mark.events);
+	mark.counted = read_events(&mark.kernel);
 	mark.ns = now_ns();
 	return mark;
 }
 
 // Prints the time per operation since `started`, and on Radix the
 // kernel's events since then as a BENCHCOUNT line, which ob bench divides
-// by the rounds.
+// by the rounds, with how long the benchmarks' CPU sat idle and how long
+// the other CPUs worked meanwhile.
 static void report(const char *name, struct mark started, uint64_t count) {
-	double ns = (double)(now_ns() - started.ns) / (double)count;
+	uint64_t elapsed = now_ns() - started.ns;
+	double ns = (double)elapsed / (double)count;
 	printf("BENCH name=%s ns=%.2f iterations=%llu\n", name, ns, (unsigned long long)count);
-	uint64_t events[EVENTS];
-	if(started.counted && read_events(events)) {
+	struct kernel_state now;
+	if(started.counted && read_events(&now)) {
 		printf("BENCHCOUNT group=%s rounds=%llu", name, (unsigned long long)count);
 		for(size_t i = 0; i < EVENTS; i++)
 			printf(" %s=%llu", event_names[i],
-			       (unsigned long long)(events[i] - started.events[i]));
-		printf("\n");
+			       (unsigned long long)(now.events[i] - started.kernel.events[i]));
+		uint64_t idle_elsewhere = now.idle_elsewhere - started.kernel.idle_elsewhere;
+		uint64_t elsewhere = (uint64_t)now.others * elapsed;
+		printf(" idle_here_ns=%llu busy_elsewhere_ns=%llu\n",
+		       (unsigned long long)(now.idle_here - started.kernel.idle_here),
+		       (unsigned long long)(elsewhere > idle_elsewhere ? elsewhere - idle_elsewhere : 0));
 	}
 	fflush(stdout);
 }
@@ -298,7 +329,8 @@ int main(int argc, char **argv) {
 	int count = allowed_cpus(cpus, 2);
 	if(count == 0)
 		fail("finding a CPU");
-	pin(cpus[0]);
+	home_cpu = cpus[0];
+	pin(home_cpu);
 	fork_wait(2000);
 	fork_exec_wait(self, 500);
 	pipe_throughput();

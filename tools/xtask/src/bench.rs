@@ -132,6 +132,8 @@ const EVENTS: &[(&str, &str)] = &[
     ("ipis", "IPIs"),
     ("halts", "Halts"),
     ("polls", "Polls"),
+    ("idle_here_ns", "Idle on its CPU"),
+    ("busy_elsewhere_ns", "Busy elsewhere"),
 ];
 
 /// A row of the report: a Radix benchmark and the Linux one closest to it.
@@ -1051,6 +1053,9 @@ fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
         for (name, _) in EVENTS {
             let value = group.events.iter().find(|(event, _)| event == name).map(|(_, v)| *v);
             match value {
+                Some(value) if name.ends_with("_ns") => {
+                    let _ = write!(out, " {} |", show(value as f64 / group.rounds as f64));
+                }
                 Some(value) => {
                     let _ = write!(out, " {:.2} |", value as f64 / group.rounds as f64);
                 }
@@ -1063,7 +1068,9 @@ fn counts_table(out: &mut String, counts: &[Counts], first_of_several: bool) {
         out,
         "\nCounted over all CPUs while each benchmark ran{}, including starting and stopping \
          its programs, and divided by its rounds. A round trip on one CPU needs two switches; \
-         anything else is overhead.",
+         anything else is overhead. For the POSIX benchmarks, idle on its CPU is how long the \
+         CPU they run on sat idle, waiting, and busy elsewhere how long the other CPUs \
+         worked meanwhile.",
         if first_of_several { " in the first run" } else { "" }
     );
 }

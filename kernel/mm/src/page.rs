@@ -126,7 +126,8 @@ impl Owner {
 /// `word` packs the state (bits 0-7), the block order (8-15), the owner
 /// (16-23) and an owner-defined byte (24-31: a slab's size class). `next`
 /// and `prev` link the frame into a free list, or a slab into its cache's
-/// list of partly used slabs; `aux` is owner-defined.
+/// list of partly used slabs, and hold a page table's lines in use
+/// ([`PageInfo::table_lines`]); `aux` is owner-defined.
 #[derive(Debug, Default)]
 #[repr(C)]
 pub struct PageInfo {
@@ -208,6 +209,32 @@ impl PageInfo {
 
     pub(crate) fn set_prev(&self, pfn: u32) {
         self.prev.store(pfn, Relaxed);
+    }
+
+    /// For a frame allocated as a page table, which of its 64 lines of 8
+    /// entries may hold an entry, a bit each: the architecture's walks of
+    /// the table skip the others. `next` and `prev` hold it while the frame
+    /// is allocated; only whoever holds the table's lock takes lines out.
+    pub fn table_lines(&self) -> u64 {
+        u64::from(self.next.load(Relaxed)) | u64::from(self.prev.load(Relaxed)) << 32
+    }
+
+    /// Sets the lines [`PageInfo::table_lines`] gives.
+    pub fn set_table_lines(&self, lines: u64) {
+        self.next.store(lines as u32, Relaxed);
+        self.prev.store((lines >> 32) as u32, Relaxed);
+    }
+
+    /// Adds `lines` to those [`PageInfo::table_lines`] gives, atomically:
+    /// the kernel's own tables gain entries under more than one lock.
+    pub fn add_table_lines(&self, lines: u64) {
+        for (half, bits) in [(&self.next, lines as u32), (&self.prev, (lines >> 32) as u32)] {
+            // Most entries go to a line that holds some already, which
+            // needs no locked instruction.
+            if half.load(Relaxed) & bits != bits {
+                half.fetch_or(bits, Relaxed);
+            }
+        }
     }
 
     pub(crate) fn aux(&self) -> u32 {
@@ -300,6 +327,18 @@ mod tests {
         assert!(info.cache(Owner::Anon));
         assert_eq!((info.state(), info.owner(), info.tag()), (State::Cached, Owner::Anon, 7));
         assert!(!info.cache(Owner::Anon), "a second free");
+    }
+
+    #[test]
+    fn a_page_tables_lines_fill_both_links() {
+        let info = PageInfo::new();
+        info.set_table_lines(1 << 3 | 1 << 40);
+        info.add_table_lines(1 << 63 | 1 << 3);
+        assert_eq!(info.table_lines(), 1 << 3 | 1 << 40 | 1 << 63);
+        info.add_table_lines(0);
+        assert_eq!(info.table_lines(), 1 << 3 | 1 << 40 | 1 << 63);
+        info.set_table_lines(0);
+        assert_eq!((info.table_lines(), info.next(), info.prev()), (0, 0, 0));
     }
 
     #[test]

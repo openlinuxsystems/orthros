@@ -65,7 +65,7 @@ pub use buddy::{FreeError, MAX_ORDER};
 pub use context::{AllocError, Context, Flags, NodePolicy, ZoneLimit};
 pub use frames::{Frames, MAX_NODES, OOM_MAX_ORDER, SetupError, ZoneKind, ZoneStats};
 pub use heap::{ClassStats, ExplicitOnly, Heap, HeapStats, Kmalloc};
-pub use page::{Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region};
+pub use page::{Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region, State};
 pub use platform::{MAX_CPUS, Platform};
 pub use slab::Corruption;
 pub use vrange::{RangeError, Ranges};

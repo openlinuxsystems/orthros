@@ -40,7 +40,7 @@ use core::ops::Range;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_hal::MAX_CPUS;
-use radix_mm::{AllocError, Owner, Ranges};
+use radix_mm::{AllocError, FRAMES, Owner, PageInfo, Ranges};
 use radix_sync::SpinLock;
 
 use crate::cpu::{self, msr};
@@ -164,17 +164,47 @@ pub(crate) fn table(phys: u64) -> &'static [AtomicU64; 512] {
     unsafe { &*(memory::phys_to_virt(phys) as *const [AtomicU64; 512]) }
 }
 
-/// A zeroed page for a page table. A PML4 must be below 4 GiB (the AP
-/// trampoline loads CR3 in 32-bit mode), as must every table before the
-/// kernel's tables are live.
+/// A zeroed page for a page table, with none of its lines in use
+/// ([`lines`]). A PML4 must be below 4 GiB (the AP trampoline loads CR3 in
+/// 32-bit mode), as must every table before the kernel's tables are live.
 pub(crate) fn new_table(pml4: bool) -> Result<u64, MapError> {
     let low = pml4 || !SWITCHED.load(Ordering::Relaxed);
-    memory::alloc_pages(1, low, Owner::PageTable).ok_or(MapError::NoMemory)
+    let phys = memory::alloc_pages(1, low, Owner::PageTable).ok_or(MapError::NoMemory)?;
+    if let Some(record) = table_record(phys) {
+        record.set_table_lines(0);
+    }
+    Ok(phys)
+}
+
+/// Entries in a line of a page table: one cache line's worth.
+pub(crate) const LINE: usize = 8;
+
+/// The frame allocator's record of the page table at `phys`, which keeps
+/// its lines in use. Tables made before the allocator ran have none.
+pub(crate) fn table_record(phys: u64) -> Option<&'static PageInfo> {
+    FRAMES.info(phys).filter(|record| {
+        record.state() == radix_mm::State::Allocated && record.owner() == Owner::PageTable
+    })
+}
+
+/// The lines of the page table at `phys` that may hold an entry, a bit
+/// for each [`LINE`] entries; the others are empty. Every line of a table
+/// without a record. A walk of the table needs its space's lock, which
+/// whoever fills an entry holds.
+pub(crate) fn lines(phys: u64) -> (u64, Option<&'static PageInfo>) {
+    let record = table_record(phys);
+    (record.map_or(u64::MAX, PageInfo::table_lines), record)
+}
+
+/// The bit of [`lines`] for the entry at `index`.
+pub(crate) const fn line_bit(index: usize) -> u64 {
+    1 << (index / LINE)
 }
 
 /// The entry for `virt` in the table at `level` (4 = PML4, 3 = PDPT,
 /// 2 = page directory, 1 = page table) under the PML4 at `root`, creating
-/// tables on the way down (reachable from user mode if `user`).
+/// tables on the way down (reachable from user mode if `user`), for the
+/// caller to fill: its line counts as in use ([`lines`]).
 pub(crate) fn entry(
     root: u64,
     virt: u64,
@@ -182,18 +212,18 @@ pub(crate) fn entry(
     user: bool,
 ) -> Result<&'static AtomicU64, MapError> {
     let index = ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize;
-    Ok(&table_of(root, virt, level, user)?[index])
+    let phys = table_of(root, virt, level, user)?;
+    if let Some(record) = table_record(phys) {
+        record.add_table_lines(line_bit(index));
+    }
+    Ok(&table(phys)[index])
 }
 
-/// The table at `level` that holds the entry for `virt` under the PML4 at
-/// `root`, created as [`entry`] would: for a caller that goes on to the
-/// table's other entries.
-pub(crate) fn table_of(
-    root: u64,
-    virt: u64,
-    level: u32,
-    user: bool,
-) -> Result<&'static [AtomicU64; 512], MapError> {
+/// The physical address of the table at `level` that holds the entry for
+/// `virt` under the PML4 at `root`, created as [`entry`] would: for a
+/// caller that goes on to the table's other entries, and notes the lines
+/// it fills.
+pub(crate) fn table_of(root: u64, virt: u64, level: u32, user: bool) -> Result<u64, MapError> {
     let mut table_phys = root;
     for current in ((level + 1)..=4).rev() {
         let index = ((virt >> (12 + 9 * (current - 1))) & 0x1ff) as usize;
@@ -202,6 +232,9 @@ pub(crate) fn table_of(
         if value & PRESENT == 0 {
             value = new_table(false)? | PRESENT | WRITABLE | if user { USER } else { 0 };
             slot.store(value, Ordering::Relaxed);
+            if let Some(record) = table_record(table_phys) {
+                record.add_table_lines(line_bit(index));
+            }
         } else if value & LARGE != 0 {
             return Err(MapError::LargePage);
         } else if user && value & USER == 0 {
@@ -210,7 +243,7 @@ pub(crate) fn table_of(
         }
         table_phys = value & ADDRESS;
     }
-    Ok(table(table_phys))
+    Ok(table_phys)
 }
 
 /// The 4 KiB leaf entry for `virt` under `root`, if its tables exist.

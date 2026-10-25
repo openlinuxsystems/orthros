@@ -220,6 +220,20 @@ reads the generation, and flushes the space's identifier if the generation
 is newer than the one it last loaded. With these two orders, every CPU
 either gets the shootdown or sees the new generation.
 
+Most of a program's page tables is empty: its few regions sit far apart
+in 128 TiB. So that walks of a space (`edit`, `copy_into` for `fork`, the
+frees) never read the empty parts, each table's frame record keeps, in its
+two link words, a bit for each of the table's 64 lines of eight entries
+(a cache line each) that may hold an entry. Whoever fills an entry sets
+its line's bit under the space's lock (`paging::entry`, a new table's
+entry in its parent, a `fork` copy's entries); a walk that leaves a whole
+line empty clears its bit. A table made before the frame allocator ran
+has no record and counts as all lines in use. When its process ends, an
+address space's page tables are freed with its pages (`free_empty_tables`,
+which unlinks every table that maps nothing, flushes the CPUs running the
+space, and frees them), on the CPU the process ended on, as Linux frees
+them in `exit`.
+
 ### TLB shootdown
 
 Removing or changing a mapping that other CPUs may have cached needs a TLB

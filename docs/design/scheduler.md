@@ -161,9 +161,12 @@ per switch. A thread
 that exits is put on the reaper's list before its last switch, and the
 reaper frees its stack only once its `on_cpu` word is clear, that is once
 the switch away from it has saved it. The thread its CPU switches to
-wakes the reaper then, so the reaper never looks too early and waits;
-it looks again after a millisecond only if a dead thread's lock was held
-while it looked.
+wakes the reaper then, so the reaper never looks too early and waits,
+and wakes it on that CPU, as Linux frees a task on the CPU it ended on:
+waking it where it last ran, an idle CPU as often as not, cost an
+interrupt and a halt for every thread that ended, each an exit to the
+host in a virtual machine. The reaper looks again after a millisecond
+only if a dead thread's lock was held while it looked.
 
 **Preemption.** Spin locks and RCU read sections raise the CPU's
 preemption count; nothing else holds off preemption. `need_resched` is
@@ -185,6 +188,11 @@ the flag instead of sending an IPI. How long it polls adapts as Linux's
 cpuidle-haltpoll governor does (`radix_sched::haltpoll`): the limit
 starts at 0, doubles (from 50 µs, up to 200 µs) when an idle period
 outlasted it but ended within 200 µs, and halves when one lasted longer.
+A halt runs with preemption off too, so that the interrupt that ends it
+leaves the switch to the idle loop, which ends the idle period first: a
+switch on the interrupt's way out left the period open while other
+threads ran, which counted their time as idle, in `/proc/stat` and in
+what the limit learnt.
 The waker sets `need_resched` before it reads `polling`; the poller
 clears `polling` before it reads `need_resched` again; both are
 sequentially consistent, so one of them sees the other. The TLA+ model
