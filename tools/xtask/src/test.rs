@@ -2017,8 +2017,8 @@ fn fuzz(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
-/// Spark's line or hello's that starts with `start`: the rest of it, once
-/// the line has ended.
+/// A program's line that starts with `start`: the rest of it, once the
+/// line has ended.
 fn program_line(vm: &mut Vm, start: &str) -> Result<String, String> {
     vm.expect(start)?;
     let from = vm.cursor;
@@ -2128,15 +2128,17 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// The end of the storage program: no failed checks, and exit code 0.
+/// Its verdict is read once its whole line has arrived: the serial port
+/// may have brought only the start of it when that is first seen.
 fn storage_end(vm: &mut Vm, mode: &str) -> Result<(), String> {
-    vm.expect(&format!("storage: {mode}: "))?;
+    let verdict = program_line(vm, &format!("storage: {mode}: "))?;
     let log = vm.log();
     let failed: Vec<&str> = log.lines().filter(|line| line.contains("storage: FAILED: ")).collect();
     if !failed.is_empty() {
         return Err(format!("the storage program failed: {}", failed.join("; ")));
     }
-    if !log.contains(&format!("storage: {mode}: every check passed")) {
-        return Err(format!("the storage program did not pass every check of `{mode}`"));
+    if verdict != "every check passed" {
+        return Err(format!("the storage program did not pass every check of `{mode}`: {verdict}"));
     }
     vm.expect("(/system/tests/storage) exited with code 0x0")?;
     vm.expect("spark: nothing more to do; waiting")
