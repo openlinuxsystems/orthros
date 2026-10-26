@@ -167,7 +167,7 @@ USB when the machine is set up.
 | --- | --- | --- |
 | Processor | AMD Ryzen AI Max+ 395 (Zen 5, 16 cores, 32 threads) | SMP from Phase 1; AMD-Vi and machine checks in Phase 11 |
 | Memory | 128 GB LPDDR5x-8000, shared with the GPU | Frame allocator and kernel heap from Phase 2 |
-| Storage | Two M.2 NVMe PCIe 4.0 slots | NVMe driver and Btrfs RAID1 across both, Phase 10 |
+| Storage | Two M.2 NVMe PCIe 4.0 slots | NVMe driver, with a queue and an interrupt for each of up to 16 CPUs, Phase 10; Btrfs RAID1 across both, Phase 10 |
 | Wired network | Realtek RTL8126 5 GbE | Phase 12 |
 | Platform | AMD FCH, SMU sensors, Framework embedded controller (open source) | Fans, LEDs, sensors and the watchdog, Phase 11 |
 | USB | Two USB4 Type-C, two USB-A 3.2 Gen 2 | xHCI in Phase 11; USB4 tunneling after 1.0 |

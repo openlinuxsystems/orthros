@@ -85,8 +85,9 @@ holds the root and decides what each program gets. When bundles arrive
 
 At boot the kernel finds each disk and reads its partition table, MBR or
 GPT. Disks and partitions get the names Linux gives them: `vda`, `vdb` for
-virtual disks, `sda`, `sdb` for SATA disks, `vda1` for the first partition
-of `vda`. Spark then mounts
+virtual disks, `sda`, `sdb` for SATA disks, `nvme0n1`, `nvme1n1` for NVMe
+drives, `vda1` for the first partition of `vda` and `nvme0n1p1` for the
+first of `nvme0n1`. Spark then mounts
 the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
 disk with no partition table, at `/volumes/<name>`, read-write. Anything
 that is not FAT is left alone.
@@ -95,10 +96,16 @@ Changes reach the disk within five seconds, or at once when a program
 asks for it, so a power cut loses at most the last five seconds of
 writes.
 
-Virtual disks and SATA disks have drivers so far: on the Dell, its SSD
-and hard disk are `sda` and `sdb`. USB sticks need the USB drivers (Phase
-11), which also bring mounting by label, `/volumes/<label>`, and safe
-eject. NVMe disks come later in Phase 10.
+Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
+SSD and hard disk are `sda` and `sdb`; on the Framework Desktop, its two
+NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks need the USB drivers
+(Phase 11), which also bring mounting by label, `/volumes/<label>`, and
+safe eject.
+
+When the machine is turned off or restarted, every disk's cache is
+written out first, and each NVMe drive is told to shut down, as Linux
+does, so that it does not count an unsafe shutdown. A read or write a
+disk fails shows in the kernel's log (dmesg(1)), with what the disk said.
 
 Disk tools read and write the devices themselves, such as `/devices/sda`, at
 any offset, with nothing cached between, and ask their size, sector size
@@ -121,6 +128,12 @@ Boot Dukovo with it as a virtio disk:
 
 ```sh
 ./ob run -- -drive file=disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+or as an NVMe drive, `/volumes/nvme0n1`:
+
+```sh
+./ob run -- -drive file=disk.img,if=none,id=d0,format=raw -device nvme,serial=test,drive=d0
 ```
 
 The boot log shows the disk and the mount, and the shell on the screen

@@ -207,9 +207,13 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   storage          four FAT disks: what is written reads back after a reboot
                    and on the host
   storage-sata     the same on four SATA disks of an AHCI controller
-  disk-raw         raw reads, writes and discards of a virtio and a SATA disk,
-                   and Linux's block requests; the host checks every byte
-  disk-errors      QEMU fails SATA reads and writes: retried, then EIO
+  storage-nvme     the same on four NVMe namespaces of two controllers,
+                   with a queue for each of 4 CPUs
+  disk-raw         raw reads, writes and discards of a virtio, a SATA and an
+                   NVMe disk, and Linux's block requests; the host checks
+                   every byte
+  disk-errors      QEMU fails SATA and NVMe reads and writes: retried, then
+                   EIO
   posix            C programs on mlibc, a Rust std one and the ported
                    utilities: fork, exec, signals, pipes, terminals, files,
                    threads

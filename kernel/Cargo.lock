@@ -118,6 +118,7 @@ dependencies = [
  "radix-ksyms",
  "radix-lockdep",
  "radix-mm",
+ "radix-nvme",
  "radix-posix",
  "radix-random",
  "radix-sched",
@@ -280,6 +281,13 @@ version = "0.9.0"
 dependencies = [
  "proptest",
  "radix-sync",
+]
+
+[[package]]
+name = "radix-nvme"
+version = "0.9.0"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]

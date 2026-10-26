@@ -4,23 +4,29 @@
 //! The queue a disk's requests go through, whatever drives the disk.
 //!
 //! A request blocks its thread until the device is done; many threads have
-//! requests in flight at once, up to what the device holds. A request
-//! takes one of [`SLOTS`] slots, whose state is set when the driver hands
-//! the request back ([`Disk::collect`], in the interrupt handler, or in the
-//! waiting threads of a device with no interrupt); the thread then frees
-//! the slot. A [`Controller`] is the driver underneath: it numbers what it
-//! has in flight its own way (descriptor chains, command slots) and says
-//! which slot each finished request was.
+//! requests in flight at once, up to what the device holds. A disk has one
+//! *lane* or several, each a part of its driver with its own lock: an
+//! NVMe namespace one for each CPU (a submission and completion queue
+//! pair, whose interrupt comes to that CPU), an AHCI port or a virtio disk
+//! one. A thread's requests go to its CPU's lane, so that threads on
+//! different CPUs neither wait for each other's lock nor are woken from
+//! another CPU. A request takes one of the lane's [`SLOTS`] slots, whose
+//! state is set when the driver hands the request back ([`Disk::collect`],
+//! in the lane's interrupt handler, or in the waiting threads of a device
+//! with no interrupt); the thread then frees the slot. A [`Controller`] is
+//! the driver's part in a lane: it numbers what it has in flight its own
+//! way (descriptor chains, command slots) and says which slot each
+//! finished request was.
 //!
 //! Requests take room by their processes' I/O class and level
 //! (radix-process(2)'s `io_priority`, ionice(1)): one takes room only
-//! while no more urgent one waits for it, the real-time class before
-//! best effort, and level 0 before 7 in each; the idle class takes room
-//! only while the disk has nothing else to do. A request the device takes
-//! only with nothing else in flight (an AHCI disk's flush or TRIM) holds
-//! back those of its rank and below that come after it, so that the
-//! device empties for it. Once in flight, every request is the device's
-//! alike.
+//! while no more urgent one waits for it, in any lane, the real-time
+//! class before best effort, and level 0 before 7 in each; the idle class
+//! takes room only while the disk has nothing else to do. A request the
+//! device takes only with nothing else in flight (an AHCI disk's flush or
+//! TRIM) holds back those of its rank and below that come after it, so
+//! that the device empties for it. Once in flight, every request is the
+//! device's alike.
 //!
 //! A raw transfer ([`BlockDevice::read_frames`], into memory a program
 //! lends) goes in requests of as many segments as the device takes, not
@@ -31,22 +37,30 @@
 //! has another right behind it ([`Controller::submit`]'s `more`), which
 //! lets QEMU's virtio disk merge them into one read or write of its file.
 //!
-//! A request the device fails ends in an I/O error. One it hands back to
+//! A request the device fails ends in an I/O error, which the log tells
+//! of, with what the controller said of it, for at most
+//! [`FAILURES_LOGGED`] requests of a disk in each 5 s. One it hands back to
 //! go again (another request's error stopped it, or the link was reset)
 //! goes again, up to [`TRIES`] times in all. A controller an error stopped
 //! is restarted by one of the threads waiting for it: that thread takes
-//! the controller out of the queue's lock, so that it can sleep while the
-//! controller recovers, and puts it back; the interrupt handler leaves the
-//! disk alone meanwhile. A request unanswered for [`TIMEOUT_NS`] has the
-//! controller reset the same way, if it can be (an AHCI port resets its
-//! link); a virtio device cannot, and its requests wait on.
+//! every lane's part out of its lock, so that it can sleep while the
+//! controller recovers, and puts them back; the interrupt handlers leave
+//! the disk alone meanwhile. A request unanswered for [`TIMEOUT_NS`] has
+//! the controller reset the same way, if it can be (an AHCI port resets
+//! its link, an NVMe controller is disabled and enabled again); a virtio
+//! device cannot, and its requests wait on.
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::process::{IO_LEVELS, IoClass};
 use radix_block::{BlockDevice, Error, Info, Segment, SegmentMut};
-use radix_hal::Timer;
-use radix_klog::warn;
+use radix_hal::{CpuLocal, Timer};
+use radix_klog::{TextBuf, warn};
+use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
 
 use super::{Name, READ_SECTORS, READS, WRITES, WRITTEN_SECTORS};
@@ -54,7 +68,7 @@ use crate::Arch;
 use crate::sched::{self, wait};
 use crate::user::posix::priority;
 
-/// Requests in flight or waiting to be collected, per disk.
+/// Requests in flight or waiting to be collected, per lane.
 pub const SLOTS: usize = 64;
 /// The most requests one raw transfer has in flight at once.
 pub const PARTS: usize = 16;
@@ -68,6 +82,11 @@ pub const TRIES: u32 = 5;
 /// How long a request may go unanswered before the controller is reset:
 /// the time Linux gives SCSI and ATA disks.
 pub const TIMEOUT_NS: u64 = 30_000_000_000;
+/// How many of a disk's failed requests the log tells of in each
+/// [`FAILURE_WINDOW_NS`]: Linux's limit on its own messages, so that a
+/// dying disk does not drown the log.
+pub const FAILURES_LOGGED: u32 = 10;
+const FAILURE_WINDOW_NS: u64 = 5_000_000_000;
 
 const FREE: u8 = 0;
 /// Taken by a request that is not in flight: between its tries.
@@ -100,6 +119,20 @@ pub enum Op {
     Discard(u64),
 }
 
+/// A request: what it does, to which of the disk's volumes, and the
+/// buffers (physical address, length) it reads into or writes from.
+#[derive(Clone, Copy, Debug)]
+pub struct Request<'a> {
+    /// What it does.
+    pub op: Op,
+    /// Which volume: an NVMe namespace's ID; 0 on a disk with one.
+    pub target: u32,
+    /// Its first sector.
+    pub sector: u64,
+    /// Its buffers.
+    pub data: &'a [(u64, u32)],
+}
+
 /// How a request ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -111,10 +144,10 @@ pub enum Outcome {
     Retry,
 }
 
-/// What the queue needs of a disk's driver. Every method but
-/// [`Controller::recover`] and [`Controller::reset`] runs with the
-/// queue's lock held and interrupts off, and must not wait.
-pub trait Controller: Send {
+/// What the queue needs of a disk's driver, in each of its lanes. Every
+/// method but [`Controller::recover`] and [`Controller::reset`] runs
+/// with the lane's lock held and interrupts off, and must not wait.
+pub trait Controller: Send + Sized {
     /// Whether `op` with `segments` buffers finds room now.
     fn room(&self, op: Op, segments: usize) -> bool;
 
@@ -123,19 +156,10 @@ pub trait Controller: Send {
         false
     }
 
-    /// Starts a request, `op` on the sectors from `sector` with the
-    /// `data` buffers (physical address, length), as the queue's `slot`.
-    /// With `more`, another request follows at once: the controller may
-    /// wait to tell the device until one comes without it, or until
-    /// [`Controller::kick`].
-    fn submit(
-        &mut self,
-        slot: u8,
-        op: Op,
-        sector: u64,
-        data: &[(u64, u32)],
-        more: bool,
-    ) -> Result<(), Error>;
+    /// Starts `request` as the lane's `slot`. With `more`, another
+    /// request follows at once: the controller may wait to tell the
+    /// device until one comes without it, or until [`Controller::kick`].
+    fn submit(&mut self, slot: u8, request: &Request<'_>, more: bool) -> Result<(), Error>;
 
     /// Tells the device of the requests [`Controller::submit`] held back.
     fn kick(&mut self) {}
@@ -143,21 +167,28 @@ pub trait Controller: Send {
     /// The next finished request: its slot and how it ended.
     fn complete(&mut self) -> Option<(u8, Outcome)>;
 
+    /// What the device said of the request in `slot`, which failed or
+    /// was handed back, for the log: an NVMe status.
+    fn why(&self, _slot: u8) -> Option<&'static str> {
+        None
+    }
+
     /// Whether an error stopped the controller, which then takes nothing
     /// until [`Controller::recover`] has run.
     fn stopped(&self) -> bool {
         false
     }
 
-    /// Restarts a stopped controller; what was in flight comes out of
-    /// [`Controller::complete`] afterwards. It may sleep: it runs without
-    /// the queue's lock.
-    fn recover(&mut self) {}
-
-    /// Resets the controller after a request went unanswered too long;
+    /// Restarts a stopped controller, given every lane's part in order;
     /// what was in flight comes out of [`Controller::complete`]
-    /// afterwards. False if it cannot be reset. It may sleep.
-    fn reset(&mut self) -> bool {
+    /// afterwards. It may sleep: it runs without the lanes' locks.
+    fn recover(_lanes: &mut [Part<Self>]) {}
+
+    /// Resets the controller after a request went unanswered too long,
+    /// given every lane's part in order; what was in flight comes out of
+    /// [`Controller::complete`] afterwards. False if it cannot be reset.
+    /// It may sleep.
+    fn reset(_lanes: &mut [Part<Self>]) -> bool {
         false
     }
 }
@@ -206,16 +237,36 @@ pub fn delay(us: u32) {
     }
 }
 
-/// A disk: the device's driver, and the requests waiting for it.
-pub struct Disk<C> {
-    /// The driver: `None` while a thread recovers or resets it.
-    queue: SpinLock<Option<C>>,
+/// A lane's part of a driver, on the heap: it is moved out of its lane
+/// while the controller recovers, and some are large.
+pub type Part<C> = Box<C, Kmalloc>;
+
+/// Puts `controller` on the heap as a lane's part; `None` when memory
+/// runs out.
+pub fn part<C>(controller: C) -> Option<Part<C>> {
+    Box::try_new_in(controller, HEAP.with(Flags::MAY_SLEEP)).ok()
+}
+
+/// One lane of a disk: a part of its driver with its own lock, request
+/// slots and waiting threads.
+struct Lane<C> {
+    /// The driver's part: `None` while a thread recovers or resets it.
+    queue: SpinLock<Option<Part<C>>>,
     /// Each request slot's state.
     requests: [AtomicU8; SLOTS],
     /// Moves on every completion and every slot freed: what threads
     /// waiting for room wait on.
     events: AtomicU64,
-    /// How many requests wait for room, by rank.
+}
+
+/// A disk: the device's driver, in one lane or one for each CPU, and the
+/// requests waiting for it.
+pub struct Disk<C> {
+    lanes: Vec<Lane<C>, Kmalloc>,
+    /// Room for every lane's part while a thread recovers or resets the
+    /// controller, with no lock held: taken out, then put back.
+    spare: SpinLock<Vec<Part<C>, Kmalloc>>,
+    /// How many requests wait for room, by rank, in every lane.
     waiting: [AtomicU32; RANKS],
     /// How many of them the device takes only alone, and wait for it to
     /// empty, by rank.
@@ -224,6 +275,9 @@ pub struct Disk<C> {
     attention: AtomicBool,
     /// A thread has the controller out to recover or reset it.
     recovering: AtomicBool,
+    /// When the log's present window of failures began, and how many it
+    /// told of since ([`FAILURES_LOGGED`]).
+    failures: SpinLock<(u64, u32)>,
     info: Info,
     /// The most segments a request of a raw transfer takes: the
     /// controller's own limit, not [`MAX_SEGMENTS`].
@@ -239,52 +293,84 @@ pub struct Disk<C> {
 }
 
 impl<C: Controller> Disk<C> {
-    /// The disk `name` that `controller` drives: what it is, whether it
-    /// has a write cache and writes through it, and whether its
-    /// completions raise an interrupt that calls [`Disk::collect`].
+    /// The disk `name` that `lanes` drive, one lane each (on the heap,
+    /// [`part`]): what it is,
+    /// whether it has a write cache and writes through it, and whether
+    /// its completions raise an interrupt that calls [`Disk::collect`].
+    /// `None` when memory runs out.
     pub fn new(
-        controller: C,
+        lanes: impl ExactSizeIterator<Item = Part<C>>,
         info: Info,
         write_cache: bool,
         fua: bool,
         interrupt: bool,
         name: Name,
-    ) -> Disk<C> {
-        Disk {
-            queue: SpinLock::new(Some(controller)),
-            requests: [const { AtomicU8::new(FREE) }; SLOTS],
-            events: AtomicU64::new(0),
+    ) -> Option<Disk<C>> {
+        let count = lanes.len().max(1);
+        let mut built = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        built.try_reserve_exact(count).ok()?;
+        for controller in lanes {
+            let lane = Lane {
+                queue: SpinLock::new(Some(controller)),
+                requests: [const { AtomicU8::new(FREE) }; SLOTS],
+                events: AtomicU64::new(0),
+            };
+            built.push_within_capacity(lane).ok()?;
+        }
+        if built.is_empty() {
+            return None;
+        }
+        let mut spare = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        spare.try_reserve_exact(count).ok()?;
+        Some(Disk {
+            lanes: built,
+            spare: SpinLock::new(spare),
             waiting: [const { AtomicU32::new(0) }; RANKS],
             lone: [const { AtomicU32::new(0) }; RANKS],
             attention: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
+            failures: SpinLock::new((0, 0)),
             info: Info { max_segments: info.max_segments.min(MAX_SEGMENTS), ..info },
             raw_segments: info.max_segments.max(1),
             write_cache,
             fua,
             interrupt,
             name,
+        })
+    }
+
+    /// The lane of the CPU this runs on.
+    fn here(&self) -> usize {
+        <Arch as CpuLocal>::current_cpu() % self.lanes.len()
+    }
+
+    fn key(&self, lane: usize) -> usize {
+        core::ptr::from_ref::<Lane<C>>(&self.lanes[lane]) as usize
+    }
+
+    /// Wakes every thread waiting in `lane`, for room or for its request.
+    fn wake(&self, lane: usize) {
+        self.lanes[lane].events.fetch_add(1, Ordering::Release);
+        wait::wake_all(self.key(lane));
+    }
+
+    /// Wakes the threads waiting in every lane.
+    fn wake_every_lane(&self) {
+        for lane in 0..self.lanes.len() {
+            self.wake(lane);
         }
     }
 
-    fn key(&self) -> usize {
-        core::ptr::from_ref::<Disk<C>>(self) as usize
-    }
-
-    /// Wakes every thread waiting for room or for its request.
-    fn wake(&self) {
-        self.events.fetch_add(1, Ordering::Release);
-        wait::wake_all(self.key());
-    }
-
-    /// Takes the requests the driver has handed back, notes an error that
-    /// stopped it, and wakes the threads waiting. Runs in the interrupt
-    /// handler, and in waiting threads when the device has no interrupt;
-    /// leaves a controller being recovered alone.
-    pub fn collect(&self) {
+    /// Takes the requests the driver has handed back in `lane`, notes an
+    /// error that stopped it, and wakes the threads waiting there. Runs
+    /// in the lane's interrupt handler, and in waiting threads when the
+    /// device has no interrupt; leaves a controller being recovered alone.
+    pub fn collect(&self, lane: usize) {
+        let Some(this) = self.lanes.get(lane) else { return };
         let mut any = false;
+        let mut stopped = false;
         {
-            let mut queue = self.queue.lock_irq();
+            let mut queue = this.queue.lock_irq();
             let Some(controller) = queue.as_mut() else { return };
             while let Some((slot, outcome)) = controller.complete() {
                 let state = match outcome {
@@ -292,59 +378,81 @@ impl<C: Controller> Disk<C> {
                     Outcome::Failed => FAILED,
                     Outcome::Retry => RETRY,
                 };
-                if let Some(request) = self.requests.get(usize::from(slot)) {
+                if let Some(request) = this.requests.get(usize::from(slot)) {
                     request.store(state, Ordering::Release);
                 }
                 any = true;
             }
             if controller.stopped() && !self.attention.load(Ordering::Relaxed) {
                 self.attention.store(true, Ordering::Release);
-                any = true;
+                stopped = true;
             }
         }
-        if any {
-            self.wake();
+        if stopped {
+            // A thread in any lane may be the one to recover it.
+            self.wake_every_lane();
+        } else if any {
+            self.wake(lane);
         }
     }
 
     /// Recovers a controller an error stopped or, with `reset`, resets
-    /// one that left a request unanswered: with the controller out of the
-    /// lock, so that it may sleep. Another thread at it already does it
-    /// for both.
+    /// one that left a request unanswered: with every lane's part out of
+    /// its lock, so that it may sleep. Another thread at it already does
+    /// it for both.
     fn attend(&self, reset: bool) {
         if self.recovering.swap(true, Ordering::AcqRel) {
             return;
         }
         self.attention.store(false, Ordering::Release);
-        let taken = self.queue.lock_irq().take();
-        if let Some(mut controller) = taken {
-            if controller.stopped() {
-                controller.recover();
-            } else if reset && !controller.reset() {
+        let mut taken = core::mem::replace(
+            &mut *self.spare.lock_irq(),
+            Vec::new_in(HEAP.with(Flags::MAY_SLEEP)),
+        );
+        for lane in &self.lanes {
+            if let Some(controller) = lane.queue.lock_irq().take() {
+                // Room for every lane was reserved when the disk was made.
+                let _ = taken.push_within_capacity(controller);
+            }
+        }
+        if taken.len() == self.lanes.len() {
+            if taken.iter().any(|part| part.stopped()) {
+                C::recover(&mut taken);
+            } else if reset && !C::reset(&mut taken) {
                 warn!("Disk: {}: a request has gone unanswered for 30 s", self.name);
             }
-            *self.queue.lock_irq() = Some(controller);
         }
+        // Back where they were taken from, the last first: each lane's own
+        // part.
+        for lane in self.lanes.iter().rev() {
+            let mut queue = lane.queue.lock_irq();
+            if queue.is_none() {
+                *queue = taken.pop();
+            }
+        }
+        *self.spare.lock_irq() = taken;
         self.recovering.store(false, Ordering::Release);
-        self.collect();
+        for lane in 0..self.lanes.len() {
+            self.collect(lane);
+        }
         // Those waiting for room find it again, whatever was collected.
-        self.wake();
+        self.wake_every_lane();
     }
 
-    /// Waits until `condition` holds, an error needs a thread to recover
-    /// the controller, or the clock passes `deadline_ns`: asleep until an
-    /// interrupt, or polling the device without one. Returns whether
-    /// `condition` holds.
-    fn wait(&self, deadline_ns: u64, condition: impl Fn() -> bool) -> bool {
+    /// Waits in `lane` until `condition` holds, an error needs a thread
+    /// to recover the controller, or the clock passes `deadline_ns`:
+    /// asleep until an interrupt, or polling the device without one.
+    /// Returns whether `condition` holds.
+    fn wait(&self, lane: usize, deadline_ns: u64, condition: impl Fn() -> bool) -> bool {
         // Counted in the load averages while it waits, as on Linux.
         sched::DISK_WAITERS.fetch_add(1, Ordering::Relaxed);
         let _counted = Counted;
         let woken = || condition() || self.attention.load(Ordering::Acquire);
         if self.interrupt {
-            wait::wait_until_or_timeout(self.key(), "disk", deadline_ns, woken);
+            wait::wait_until_or_timeout(self.key(lane), "disk", deadline_ns, woken);
         } else {
             while !woken() && sched::now_ns() < deadline_ns {
-                self.collect();
+                self.collect(lane);
                 if !woken() {
                     sched::yield_now();
                 }
@@ -355,8 +463,8 @@ impl<C: Controller> Disk<C> {
 
     /// Whether a request of rank `rank` may take room now: no more urgent
     /// one waits for it, and for the idle class, no other request waits or
-    /// is in flight, as Linux's idle class is served only when the disk
-    /// is otherwise idle.
+    /// is in flight in any lane, as Linux's idle class is served only when
+    /// the disk is otherwise idle.
     fn may_go(&self, rank: usize) -> bool {
         let others = |range: core::ops::Range<usize>| {
             self.waiting[range].iter().any(|count| count.load(Ordering::Acquire) > 0)
@@ -364,7 +472,11 @@ impl<C: Controller> Disk<C> {
         if rank < IDLE {
             return !others(0..rank);
         }
-        !others(0..IDLE) && self.requests.iter().all(|r| r.load(Ordering::Acquire) == FREE)
+        !others(0..IDLE)
+            && self
+                .lanes
+                .iter()
+                .all(|lane| lane.requests.iter().all(|r| r.load(Ordering::Acquire) == FREE))
     }
 
     /// Whether a request that goes out alone, of rank `rank` or more
@@ -374,42 +486,42 @@ impl<C: Controller> Disk<C> {
         self.lone[..=rank].iter().any(|count| count.load(Ordering::Acquire) > 0)
     }
 
-    /// Takes room for a request and starts it, in slot `held` (a request
-    /// that goes again) or a free one; returns the slot. With `more`,
-    /// another request follows at once ([`Controller::submit`]).
+    /// Takes room for `request` in `lane` and starts it, in slot `held`
+    /// (a request that goes again) or a free one; returns the slot. With
+    /// `more`, another request follows at once ([`Controller::submit`]).
     fn issue(
         &self,
+        lane: usize,
         rank: usize,
         held: Option<usize>,
-        op: Op,
-        sector: u64,
-        data: &[(u64, u32)],
+        request: &Request<'_>,
         more: bool,
     ) -> Result<usize, Error> {
+        let this = &self.lanes[lane];
         self.waiting[rank].fetch_add(1, Ordering::AcqRel);
         let waiting = Waiting(&self.waiting[rank]);
         let mut lone = None;
         let slot = loop {
-            let seen = self.events.load(Ordering::Acquire);
+            let seen = this.events.load(Ordering::Acquire);
             if self.attention.load(Ordering::Acquire) {
                 self.attend(false);
                 continue;
             }
             if self.may_go(rank) && (lone.is_some() || !self.held_back(rank)) {
-                let mut queue = self.queue.lock_irq();
+                let mut queue = this.queue.lock_irq();
                 if let Some(controller) = queue.as_mut()
                     && !controller.stopped()
                 {
                     let free = held.or_else(|| {
-                        self.requests.iter().position(|r| r.load(Ordering::Acquire) == FREE)
+                        this.requests.iter().position(|r| r.load(Ordering::Acquire) == FREE)
                     });
                     if let Some(slot) = free {
-                        if controller.room(op, data.len()) {
-                            controller.submit(slot as u8, op, sector, data, more)?;
-                            self.requests[slot].store(PENDING, Ordering::Release);
+                        if controller.room(request.op, request.data.len()) {
+                            controller.submit(slot as u8, request, more)?;
+                            this.requests[slot].store(PENDING, Ordering::Release);
                             break slot;
                         }
-                        if lone.is_none() && controller.alone(op) {
+                        if lone.is_none() && controller.alone(request.op) {
                             self.lone[rank].fetch_add(1, Ordering::AcqRel);
                             lone = Some(Waiting(&self.lone[rank]));
                         }
@@ -420,26 +532,27 @@ impl<C: Controller> Disk<C> {
             // controller is being recovered: wait for a completion, or a
             // slot freed, once the device knows of what was held back
             // for it.
-            self.kick();
-            self.wait(u64::MAX, || self.events.load(Ordering::Acquire) != seen);
+            self.kick(lane);
+            self.wait(lane, u64::MAX, || this.events.load(Ordering::Acquire) != seen);
         };
         drop(lone);
         drop(waiting);
         if self.waiting.iter().any(|count| count.load(Ordering::Acquire) > 0) {
-            // Less urgent requests waited for this one: there may be room
-            // for them too.
-            self.wake();
+            // Less urgent requests waited for this one, in any lane:
+            // there may be room for them too.
+            self.wake_every_lane();
         }
         Ok(slot)
     }
 
-    /// Waits for the request in `slot` to be handed back: recovers the
-    /// controller if an error stops it meanwhile, and resets it if the
-    /// request goes unanswered too long.
-    fn finish(&self, slot: usize) {
+    /// Waits for the request in `slot` of `lane` to be handed back:
+    /// recovers the controller if an error stops it meanwhile, and resets
+    /// it if the request goes unanswered too long.
+    fn finish(&self, lane: usize, slot: usize) {
+        let request = &self.lanes[lane].requests[slot];
         let mut deadline = sched::now_ns().saturating_add(TIMEOUT_NS);
         loop {
-            if self.wait(deadline, || self.requests[slot].load(Ordering::Acquire) != PENDING) {
+            if self.wait(lane, deadline, || request.load(Ordering::Acquire) != PENDING) {
                 return;
             }
             if self.attention.load(Ordering::Acquire) {
@@ -451,44 +564,46 @@ impl<C: Controller> Disk<C> {
         }
     }
 
-    /// Tells the device of the requests held back for it.
-    fn kick(&self) {
-        if let Some(controller) = self.queue.lock_irq().as_mut() {
+    /// Tells the device of the requests held back for it in `lane`.
+    fn kick(&self, lane: usize) {
+        if let Some(controller) = self.lanes[lane].queue.lock_irq().as_mut() {
             controller.kick();
         }
     }
 
-    /// Frees `slot`, and wakes those waiting for one.
-    fn free(&self, slot: usize) {
-        self.requests[slot].store(FREE, Ordering::Release);
-        self.wake();
+    /// Frees `slot` of `lane`, and wakes those waiting there for one.
+    fn free(&self, lane: usize, slot: usize) {
+        self.lanes[lane].requests[slot].store(FREE, Ordering::Release);
+        self.wake(lane);
     }
 
-    /// Carries out one request and waits for it, again as long as the
-    /// device hands it back to go again, up to [`TRIES`] times.
-    fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
-        let rank = running_rank();
-        let slot = self.issue(rank, None, op, sector, data, false)?;
-        self.settle(rank, slot, op, sector, data)
+    /// Carries out `request` in this CPU's lane and waits for it, again
+    /// as long as the device hands it back to go again, up to [`TRIES`]
+    /// times.
+    fn request(&self, request: &Request<'_>) -> Result<(), Error> {
+        let (lane, rank) = (self.here(), running_rank());
+        let slot = self.issue(lane, rank, None, request, false)?;
+        self.settle(lane, rank, slot, request)
     }
 
     /// Carries out a transfer of any number of buffers as requests of as
     /// many as the device takes, up to [`PARTS`] of them in flight at
-    /// once, and waits for every one: each goes again as [`Disk::request`]
-    /// has it. Returns only once the device is done with every buffer,
-    /// whatever failed.
-    fn request_all(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
-        let rank = running_rank();
+    /// once in this CPU's lane, and waits for every one: each goes again
+    /// as [`Disk::request`] has it. Returns only once the device is done
+    /// with every buffer, whatever failed.
+    fn request_all(&self, request: &Request<'_>) -> Result<(), Error> {
+        let (lane, rank) = (self.here(), running_rank());
         let most = self.raw_segments;
         let mut result = Ok(());
-        let mut at = sector;
-        for window in data.chunks(most * PARTS) {
+        let mut at = request.sector;
+        for window in request.data.chunks(most * PARTS) {
             // Each part's slot, buffers and first sector.
             let mut parts = [(0usize, 0usize, 0u64); PARTS];
             let mut issued = 0;
             for (i, part) in window.chunks(most).enumerate() {
                 let more = (i + 1) * most < window.len();
-                match self.issue(rank, None, op, at, part, more) {
+                let part = Request { sector: at, data: part, ..*request };
+                match self.issue(lane, rank, None, &part, more) {
                     Ok(slot) => parts[i] = (slot, i * most, at),
                     Err(err) => {
                         result = Err(err);
@@ -496,12 +611,13 @@ impl<C: Controller> Disk<C> {
                     }
                 }
                 issued += 1;
-                at += sectors(part);
+                at += sectors(part.data);
             }
-            self.kick();
+            self.kick(lane);
             for &(slot, first, start) in &parts[..issued] {
-                let part = &window[first..(first + most).min(window.len())];
-                let settled = self.settle(rank, slot, op, start, part);
+                let data = &window[first..(first + most).min(window.len())];
+                let part = Request { sector: start, data, ..*request };
+                let settled = self.settle(lane, rank, slot, &part);
                 if result.is_ok() {
                     result = settled;
                 }
@@ -511,42 +627,43 @@ impl<C: Controller> Disk<C> {
         Ok(())
     }
 
-    /// Waits for the request in `slot` to end, sending it again while the
-    /// device hands it back to go again, up to [`TRIES`] times in all;
-    /// frees the slot.
+    /// Waits for `request`, in `slot` of `lane`, to end, sending it again
+    /// while the device hands it back to go again, up to [`TRIES`] times
+    /// in all; frees the slot.
     fn settle(
         &self,
+        lane: usize,
         rank: usize,
         mut slot: usize,
-        op: Op,
-        sector: u64,
-        data: &[(u64, u32)],
+        request: &Request<'_>,
     ) -> Result<(), Error> {
+        let requests = &self.lanes[lane].requests;
         let mut tries = 1;
         loop {
-            self.finish(slot);
-            match self.requests[slot].load(Ordering::Acquire) {
+            self.finish(lane, slot);
+            match requests[slot].load(Ordering::Acquire) {
                 DONE => break,
                 RETRY if tries < TRIES => {
                     tries += 1;
-                    self.requests[slot].store(HELD, Ordering::Release);
-                    slot = match self.issue(rank, Some(slot), op, sector, data, false) {
+                    requests[slot].store(HELD, Ordering::Release);
+                    slot = match self.issue(lane, rank, Some(slot), request, false) {
                         Ok(slot) => slot,
                         Err(err) => {
-                            self.free(slot);
+                            self.free(lane, slot);
                             return Err(err);
                         }
                     };
                 }
                 _ => {
-                    self.free(slot);
+                    self.failed(lane, slot, request, tries);
+                    self.free(lane, slot);
                     return Err(Error::Io);
                 }
             }
         }
-        self.free(slot);
-        let sectors = sectors(data);
-        let (count, moved) = match op {
+        self.free(lane, slot);
+        let sectors = sectors(request.data);
+        let (count, moved) = match request.op {
             Op::Read => (&READS, &READ_SECTORS),
             Op::Write | Op::WriteThrough => (&WRITES, &WRITTEN_SECTORS),
             _ => return Ok(()),
@@ -554,6 +671,75 @@ impl<C: Controller> Disk<C> {
         count.fetch_add(1, Ordering::Relaxed);
         moved.fetch_add(sectors, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Tells the log of `request`, in `slot` of `lane`, which failed
+    /// after `tries` tries, unless it has told of [`FAILURES_LOGGED`]
+    /// already in this window.
+    fn failed(&self, lane: usize, slot: usize, request: &Request<'_>, tries: u32) {
+        let now = sched::now_ns();
+        {
+            let mut window = self.failures.lock();
+            if now.saturating_sub(window.0) >= FAILURE_WINDOW_NS {
+                *window = (now, 0);
+            }
+            if window.1 >= FAILURES_LOGGED {
+                return;
+            }
+            window.1 += 1;
+        }
+        let why = self.lanes[lane]
+            .queue
+            .lock_irq()
+            .as_ref()
+            .and_then(|controller| controller.why(slot as u8));
+        let mut volume = Name::new();
+        let _ = write!(volume, "{}", self.name);
+        if request.target != 0 {
+            let _ = write!(volume, "n{}", request.target);
+        }
+        let mut what = TextBuf::<64>::new();
+        let _ = match request.op {
+            Op::Read | Op::Write | Op::WriteThrough | Op::Discard(_) => {
+                let (op, count) = match request.op {
+                    Op::Read => ("read", sectors(request.data)),
+                    Op::Discard(count) => ("discard", count),
+                    _ => ("write", sectors(request.data)),
+                };
+                write!(what, "a {op} of {count} sectors from sector {}", request.sector)
+            }
+            Op::Flush => what.write_str("a flush"),
+        };
+        let mut after = TextBuf::<16>::new();
+        if tries > 1 {
+            let _ = write!(after, " after {tries} tries");
+        }
+        warn!("Disk: {volume}: {what} failed{after}: {}", why.unwrap_or("an I/O error"));
+    }
+}
+
+/// What a disk serves as a block device: the whole of it, or one of its
+/// namespaces, all through the disk's lanes.
+pub struct Volume<C> {
+    disk: Arc<Disk<C>, Kmalloc>,
+    /// Its ID in the requests.
+    target: u32,
+    info: Info,
+}
+
+impl<C: Controller> Volume<C> {
+    /// The block device for volume `target` of `disk`: its whole for a
+    /// disk with one (target 0), or one of an NVMe controller's
+    /// namespaces, which `info` says what it is. Its requests take as many
+    /// segments as the disk's do.
+    pub fn new(disk: Arc<Disk<C>, Kmalloc>, target: u32, info: Info) -> Self {
+        let info = Info { max_segments: disk.info.max_segments, ..info };
+        Volume { disk, target, info }
+    }
+
+    /// Carries out `op` from `sector` with `data`, as [`Disk::request`].
+    fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
+        self.disk.request(&Request { op, target: self.target, sector, data })
     }
 
     /// Writes `segments` from `sector`, as `op`.
@@ -572,7 +758,7 @@ impl<C: Controller> Disk<C> {
     }
 }
 
-impl<C: Controller> BlockDevice for Disk<C> {
+impl<C: Controller> BlockDevice for Volume<C> {
     fn info(&self) -> Info {
         self.info
     }
@@ -597,7 +783,7 @@ impl<C: Controller> BlockDevice for Disk<C> {
     }
 
     fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
-        if self.fua {
+        if self.disk.fua {
             return self.write_as(Op::WriteThrough, sector, segments);
         }
         self.write_as(Op::Write, sector, segments)?;
@@ -606,7 +792,8 @@ impl<C: Controller> BlockDevice for Disk<C> {
 
     fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
         radix_block::check_frames(self.info.sectors, sector, frames)?;
-        self.request_all(Op::Read, sector, frames)?;
+        let request = Request { op: Op::Read, target: self.target, sector, data: frames };
+        self.disk.request_all(&request)?;
         radix_hw::device_barrier();
         Ok(())
     }
@@ -617,11 +804,12 @@ impl<C: Controller> BlockDevice for Disk<C> {
         }
         radix_block::check_frames(self.info.sectors, sector, frames)?;
         radix_hw::device_barrier();
-        self.request_all(Op::Write, sector, frames)
+        let request = Request { op: Op::Write, target: self.target, sector, data: frames };
+        self.disk.request_all(&request)
     }
 
     fn flush(&self) -> Result<(), Error> {
-        if !self.write_cache {
+        if !self.disk.write_cache {
             // Without a write cache, a write that returned is durable.
             return Ok(());
         }

@@ -207,6 +207,14 @@ impl Devices for Arch {
         None
     }
 
+    fn allocate_interrupt_at(
+        _cpu: usize,
+        _handler: fn(usize),
+        _arg: usize,
+    ) -> Option<(u32, MsiMessage)> {
+        None
+    }
+
     fn free_interrupt(_vector: u32) {}
 
     fn interrupt_count(_vector: u32) -> u64 {

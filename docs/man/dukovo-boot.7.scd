@@ -131,9 +131,10 @@ _/system/resources/licenses/_
   filesystems every five seconds (see *radix-files*(7)).
 . The kernel walks PCI through the windows of the ACPI MCFG table, logs
   every function it finds on a *PCI:* line, with its vendor and device
-  IDs and class, and sets up each virtio block device: a *Disk:* line
-  names it (_vda_, _vdb_, ...) and its size, and the next lines its
-  partition table and partitions. The functions are listed in
+  IDs and class, and sets up each disk: a *Disk:* line names it (_vda_
+  for a virtio block device, _sda_ for a SATA disk, _nvme0n1_ for an NVMe
+  namespace, ...) and its size, and the next lines its partition table
+  and partitions. The functions are listed in
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test

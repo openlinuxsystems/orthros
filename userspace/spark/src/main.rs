@@ -444,9 +444,13 @@ fn mount_disks(root: &Dir) {
                 return;
             }
         };
+    // A partition has its disk's name and its number, after a `p` when
+    // the disk's name ends in a digit: `sda1`, but `nvme0n1p1`.
     let partitioned = |disk: &str| {
+        let digit = disk.bytes().last().is_some_and(|b| b.is_ascii_digit());
         devices.iter().any(|name| {
             name.strip_prefix(disk)
+                .and_then(|n| if digit { n.strip_prefix('p') } else { Some(n) })
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
     };

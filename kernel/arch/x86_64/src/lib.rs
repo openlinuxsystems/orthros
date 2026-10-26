@@ -352,7 +352,15 @@ impl Devices for Arch {
     }
 
     fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hal::MsiMessage)> {
-        devices::allocate(handler, arg)
+        devices::allocate(0, handler, arg)
+    }
+
+    fn allocate_interrupt_at(
+        cpu: usize,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<(u32, radix_hal::MsiMessage)> {
+        devices::allocate(cpu, handler, arg)
     }
 
     fn free_interrupt(vector: u32) {

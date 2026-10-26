@@ -408,10 +408,13 @@ and two processes doing the same through semaphores in shared memory
 (`posix_futex_shared_same_cpu`, `posix_futex_shared_cross_cpu`, ADR
 0110). Given `--disk`, it last reads and writes that disk 4 KiB, 64 KiB
 and 1 MiB at a time, one transfer after the other through its first 32
-MiB (`posix_disk_read_4k` to `posix_disk_write_mib`, ADR 0111). Both
-systems get the same virtio disk, a 64 MiB file on the host made afresh
-for each boot: `vda` (`/devices/vda`), raw on Radix, and `/dev/vda`,
-opened with `O_DIRECT`, on Linux, so that neither has a cache between the program and the disk.
+MiB (`posix_disk_read_4k` to `posix_disk_write_mib`, ADR 0111), and
+given `--nvme`, an NVMe disk the same way (`posix_nvme_read_4k` to
+`posix_nvme_write_mib`, ADR 0115). Both systems get the same virtio disk
+and NVMe disk, each a 64 MiB file on the host made afresh for each boot:
+`vda` and `nvme0n1` (`/devices/vda`, `/devices/nvme0n1`), raw on Radix,
+and `/dev/vda` and `/dev/nvme0n1`, opened with `O_DIRECT`, on Linux, so
+that neither has a cache between the program and the disk.
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

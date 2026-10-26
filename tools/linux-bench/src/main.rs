@@ -32,8 +32,8 @@
 //! Last it runs the POSIX benchmarks, the C program that Radix runs too
 //! (`userspace/posix/bench.c`, built with this machine's C compiler and C
 //! library), given with `--posix-bench`, or at `/posix-bench` as process 1,
-//! where it also gives them the virtual machine's disk, `/dev/vda`, for
-//! their disk benchmarks.
+//! where it also gives them the virtual machine's disks, `/dev/vda` and
+//! `/dev/nvme0n1`, for their disk benchmarks.
 //!
 //! After the TLB shootdowns it prints how many TLB interrupts reached the
 //! other CPU (the `TLB` line of `/proc/interrupts`), as Radix prints its
@@ -59,8 +59,10 @@ use std::time::Instant;
 /// Where the POSIX benchmarks are in the virtual machine's initramfs.
 const POSIX_BENCH: &str = "/posix-bench";
 
-/// The virtual machine's disk, for the POSIX benchmarks' disk benchmarks.
+/// The virtual machine's disks, for the POSIX benchmarks' disk benchmarks:
+/// a virtio disk and an NVMe one.
 const DISK: &str = "/dev/vda";
+const NVME: &str = "/dev/nvme0n1";
 
 fn main() {
     let mut rounds = 100_000u64;
@@ -127,11 +129,22 @@ fn main() {
     }
     let posix = posix.or_else(|| (std::process::id() == 1).then(|| PathBuf::from(POSIX_BENCH)));
     if let Some(program) = posix {
-        let disk = (std::process::id() == 1).then_some(Path::new(DISK));
-        if disk.is_some_and(|disk| !disk.exists()) {
-            eprintln!("linux-bench: the virtual machine has no {DISK}, for the disk benchmarks");
-        }
-        posix_bench(&program, &cpus, disk);
+        let mut disks: Vec<(&str, &Path)> = if std::process::id() == 1 {
+            vec![("--disk", Path::new(DISK)), ("--nvme", Path::new(NVME))]
+        } else {
+            Vec::new()
+        };
+        disks.retain(|(_, disk)| {
+            let there = disk.exists();
+            if !there {
+                eprintln!(
+                    "linux-bench: the virtual machine has no {}, for the disk benchmarks",
+                    disk.display()
+                );
+            }
+            there
+        });
+        posix_bench(&program, &cpus, &disks);
     }
 
     if std::process::id() == 1 {
@@ -688,12 +701,12 @@ fn allowed_cpus() -> Vec<usize> {
 /// Runs the POSIX benchmarks at `program`, which print their own lines,
 /// on every CPU this process may run on: it pins itself and its threads
 /// as it needs, as on Radix.
-fn posix_bench(program: &Path, cpus: &[usize], disk: Option<&Path>) {
+fn posix_bench(program: &Path, cpus: &[usize], disks: &[(&str, &Path)]) {
     allow(cpus);
     std::io::stdout().flush().ok();
     let mut command = std::process::Command::new(program);
-    if let Some(disk) = disk {
-        command.arg("--disk").arg(disk);
+    for (option, disk) in disks {
+        command.arg(option).arg(disk);
     }
     match command.status() {
         Ok(status) if status.success() => {}

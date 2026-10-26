@@ -320,6 +320,15 @@ pub trait Devices {
     /// `None` when no vector is free.
     fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hw::MsiMessage)>;
 
+    /// As [`Devices::allocate_interrupt`], with the interrupts sent to CPU
+    /// `cpu` rather than the boot CPU: for a device with a queue for each
+    /// CPU. A CPU the message cannot name gets the boot CPU's.
+    fn allocate_interrupt_at(
+        cpu: usize,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<(u32, radix_hw::MsiMessage)>;
+
     /// Frees a vector from [`Devices::allocate_interrupt`]; the device
     /// must no longer send its message.
     fn free_interrupt(vector: u32);

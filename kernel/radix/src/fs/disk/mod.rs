@@ -5,12 +5,16 @@
 //!
 //! [`init`] walks every PCI segment the firmware describes (`radix_hw::pci`),
 //! logs each function it finds, and binds the disks' controllers: virtio
-//! block devices ([`virtio`], named `vda`, `vdb` and on) and AHCI
-//! controllers ([`ahci`], whose disks are named `sda`, `sdb` and on). A
-//! disk's partitions are named after it (`vda1`, `sda2`), read from its MBR
-//! or GPT (`radix_block::partition`); every one appears in `/devices` and
+//! block devices ([`virtio`], named `vda`, `vdb` and on), AHCI controllers
+//! ([`ahci`], whose disks are named `sda`, `sdb` and on) and NVMe
+//! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on). A
+//! disk's partitions are named after it (`vda1`, `sda2`, and with a `p`
+//! after a name that ends in a digit, `nvme0n1p1`), read from its MBR or
+//! GPT (`radix_block::partition`); every one appears in `/devices` and
 //! `/kernel/block`. Requests to every disk go through the same queue
-//! ([`queue`]), whatever drives it.
+//! ([`queue`]), whatever drives it. Before the machine is powered off,
+//! [`shutdown`] empties every disk's write cache and shuts the NVMe
+//! controllers down.
 
 use alloc::sync::Arc;
 use core::fmt::Write;
@@ -30,6 +34,7 @@ use radix_virtio::device_type;
 use crate::Arch;
 
 mod ahci;
+mod nvme;
 mod queue;
 mod virtio;
 
@@ -93,6 +98,7 @@ pub fn init() {
     let mut functions = 0;
     let mut disks = 0;
     let mut sata = 0;
+    let mut controllers = 0;
     for segment in segments.iter().flatten() {
         let PciSegment { base, segment: number, first_bus, last_bus } = *segment;
         let mut map_bus = |bus: u8| {
@@ -107,23 +113,26 @@ pub fn init() {
                     Ok(()) => disks += 1,
                     Err(why) => warn!("Disk: could not set up a virtio block device: {why}"),
                 }
-            } else if function.class() == radix_ahci::PCI_CLASS
-                && let Err(why) = ahci::bind(&function, &mut sata)
-            {
-                warn!(
-                    "Disk: could not set up the AHCI controller at {}: {why}",
-                    function.address()
-                );
+            } else if function.class() == radix_ahci::PCI_CLASS {
+                if let Err(why) = ahci::bind(&function, &mut sata) {
+                    warn!(
+                        "Disk: could not set up the AHCI controller at {}: {why}",
+                        function.address()
+                    );
+                }
+            } else if function.class() == radix_nvme::PCI_CLASS {
+                nvme::bind(&function, &mut controllers);
             }
         });
     }
     let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
     info!(
-        "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}",
+        "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}, {controllers} NVMe {}",
         plural(functions, "function", "functions"),
         plural(count, "segment", "segments"),
         plural(disks, "disk", "disks"),
-        plural(sata, "disk", "disks")
+        plural(sata, "disk", "disks"),
+        plural(controllers, "controller", "controllers")
     );
 }
 
@@ -213,7 +222,8 @@ fn partitions(name: &Name, device: &DeviceRef) {
         };
         let Ok(slice) = radix_vfs::mem::arc(slice) else { continue };
         let mut part_name = Name::new();
-        let _ = write!(part_name, "{name}{}", part.number);
+        let digit = name.as_str().ends_with(|c: char| c.is_ascii_digit());
+        let _ = write!(part_name, "{name}{}{}", if digit { "p" } else { "" }, part.number);
         let mut kind = TextBuf::<48>::new();
         match part.kind {
             partition::Kind::Mbr(byte) => {
@@ -279,6 +289,19 @@ fn register(name: &Name, device: DeviceRef) {
         let _ = disks.push_within_capacity((name.clone(), device.clone()));
     }
     super::devfs::add_block(name.as_str(), device);
+}
+
+/// Readies every disk for the power to go: empties each one's write
+/// cache, and tells each NVMe controller to shut down. Runs once the
+/// filesystems have written back what they hold, before the machine is
+/// powered off, restarted or halted; requests after it may fail.
+pub fn shutdown() {
+    for_each(|name, device| {
+        if let Err(err) = device.flush() {
+            warn!("Disk: {name}: its write cache could not be emptied: {err}");
+        }
+    });
+    nvme::shutdown();
 }
 
 /// The name a disk or partition was registered under.

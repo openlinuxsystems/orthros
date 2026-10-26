@@ -23,7 +23,7 @@ use radix_sync::Once;
 use radix_virtio::blk::{self, Blk};
 use radix_virtio::{NO_VECTOR, Transport};
 
-use super::queue::{Controller, Disk, Op, Outcome};
+use super::queue::{Controller, Disk, Op, Outcome, Request, Volume};
 use super::{Name, Size, partitions, register};
 use crate::Arch;
 
@@ -47,14 +47,8 @@ impl Controller for Virtio {
         self.blk.room(segments.max(1)) > 0
     }
 
-    fn submit(
-        &mut self,
-        slot: u8,
-        op: Op,
-        sector: u64,
-        data: &[(u64, u32)],
-        more: bool,
-    ) -> Result<(), Error> {
+    fn submit(&mut self, slot: u8, request: &Request<'_>, more: bool) -> Result<(), Error> {
+        let Request { op, sector, data, .. } = *request;
         let op = match op {
             Op::Read => blk::Op::Read,
             // Never asked for: the disk does not say it writes through.
@@ -108,7 +102,7 @@ static DISKS: [Once<Arc<Disk<Virtio>, Kmalloc>>; MAX_DISKS] = [const { Once::new
 
 fn on_interrupt(index: usize) {
     if let Some(disk) = DISKS.get(index).and_then(Once::get) {
-        disk.collect();
+        disk.collect(0);
     }
 }
 
@@ -170,7 +164,9 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         // Linux's default for a disk that does not say.
         rotational: true,
     };
-    let disk = Disk::new(controller, info, found.flush, false, interrupt.is_some(), name.clone());
+    let lanes = core::iter::once(super::queue::part(controller).ok_or("out of memory")?);
+    let disk = Disk::new(lanes, info, found.flush, false, interrupt.is_some(), name.clone())
+        .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = DISKS[index].set(disk.clone());
     let size = Size(info.sectors * radix_block::SECTOR);
@@ -187,7 +183,9 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         if found.flush { ", write cache" } else { "" },
         if info.discard_sectors > 0 { ", discards" } else { "" },
     );
-    let device: DeviceRef = disk;
+    let volume = Volume::new(disk, 0, info);
+    let device: DeviceRef =
+        Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     register(&name, device.clone());
     partitions(&name, &device);
     Ok(())

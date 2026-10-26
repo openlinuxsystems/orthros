@@ -126,3 +126,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0112](0112-ahci-from-the-specification.md) | SATA disks through AHCI, written from Intel's specification, in a crate without unsafe code | Accepted |
 | [0113](0113-plain-names-for-the-root-folders.md) | The root's folders have plain names, and Unix's names are hidden links to them | Accepted |
 | [0114](0114-plain-names-inside-system.md) | The folders inside /system have plain names, and Unix's names are hidden links to them | Accepted |
+| [0115](0115-nvme-from-the-specification.md) | NVMe disks, written from the specification, with a queue for each CPU | Accepted |
