@@ -13,7 +13,9 @@
 //! another CPU. A request takes one of the lane's [`SLOTS`] slots, whose
 //! state is set when the driver hands the request back ([`Disk::collect`],
 //! in the lane's interrupt handler, or in the waiting threads of a device
-//! with no interrupt); the thread then frees the slot. A [`Controller`] is
+//! with no interrupt); the thread then frees the slot. A thread waits on
+//! its slot alone, so a completion wakes only the thread whose request it
+//! ends. A [`Controller`] is
 //! the driver's part in a lane: it numbers what it has in flight its own
 //! way (descriptor chains, command slots) and says which slot each
 //! finished request was.
@@ -36,6 +38,8 @@
 //! together: a controller may hold back the doorbell of a request that
 //! has another right behind it ([`Controller::submit`]'s `more`), which
 //! lets QEMU's virtio disk merge them into one read or write of its file.
+//! Its thread waits for the last request first: requests tend to end in
+//! order, so the earlier ones' completions wake no one.
 //!
 //! A request the device fails ends in an I/O error, which the log tells
 //! of, with what the controller said of it, for at most
@@ -255,7 +259,8 @@ struct Lane<C> {
     /// Each request slot's state.
     requests: [AtomicU8; SLOTS],
     /// Moves on every completion and every slot freed: what threads
-    /// waiting for room wait on.
+    /// waiting for room wait on (the lane's key). A thread waiting for its
+    /// request waits on its slot's key instead ([`Disk::slot_key`]).
     events: AtomicU64,
 }
 
@@ -348,16 +353,28 @@ impl<C: Controller> Disk<C> {
         core::ptr::from_ref::<Lane<C>>(&self.lanes[lane]) as usize
     }
 
-    /// Wakes every thread waiting in `lane`, for room or for its request.
+    /// What the thread waiting for the request in `slot` of `lane` waits
+    /// on: the slot's state, which no other key shares.
+    fn slot_key(&self, lane: usize, slot: usize) -> usize {
+        core::ptr::from_ref::<AtomicU8>(&self.lanes[lane].requests[slot]) as usize
+    }
+
+    /// Wakes every thread waiting for room in `lane`.
     fn wake(&self, lane: usize) {
         self.lanes[lane].events.fetch_add(1, Ordering::Release);
         wait::wake_all(self.key(lane));
     }
 
-    /// Wakes the threads waiting in every lane.
+    /// Wakes the threads waiting in every lane, for room or for their
+    /// requests.
     fn wake_every_lane(&self) {
-        for lane in 0..self.lanes.len() {
+        for (lane, this) in self.lanes.iter().enumerate() {
             self.wake(lane);
+            for (slot, request) in this.requests.iter().enumerate() {
+                if request.load(Ordering::Acquire) != FREE {
+                    wait::wake_all(self.slot_key(lane, slot));
+                }
+            }
         }
     }
 
@@ -367,7 +384,7 @@ impl<C: Controller> Disk<C> {
     /// device has no interrupt; leaves a controller being recovered alone.
     pub fn collect(&self, lane: usize) {
         let Some(this) = self.lanes.get(lane) else { return };
-        let mut any = false;
+        let mut ended = 0u64;
         let mut stopped = false;
         {
             let mut queue = this.queue.lock_irq();
@@ -380,8 +397,8 @@ impl<C: Controller> Disk<C> {
                 };
                 if let Some(request) = this.requests.get(usize::from(slot)) {
                     request.store(state, Ordering::Release);
+                    ended |= 1 << slot;
                 }
-                any = true;
             }
             if controller.stopped() && !self.attention.load(Ordering::Relaxed) {
                 self.attention.store(true, Ordering::Release);
@@ -391,7 +408,14 @@ impl<C: Controller> Disk<C> {
         if stopped {
             // A thread in any lane may be the one to recover it.
             self.wake_every_lane();
-        } else if any {
+        } else if ended != 0 {
+            let mut left = ended;
+            while left != 0 {
+                let slot = left.trailing_zeros() as usize;
+                left &= left - 1;
+                wait::wake_all(self.slot_key(lane, slot));
+            }
+            // The device has room again.
             self.wake(lane);
         }
     }
@@ -441,15 +465,21 @@ impl<C: Controller> Disk<C> {
 
     /// Waits in `lane` until `condition` holds, an error needs a thread
     /// to recover the controller, or the clock passes `deadline_ns`:
-    /// asleep until an interrupt, or polling the device without one.
-    /// Returns whether `condition` holds.
-    fn wait(&self, lane: usize, deadline_ns: u64, condition: impl Fn() -> bool) -> bool {
+    /// asleep on `key` until an interrupt, or polling the device without
+    /// one. Returns whether `condition` holds.
+    fn wait(
+        &self,
+        lane: usize,
+        key: usize,
+        deadline_ns: u64,
+        condition: impl Fn() -> bool,
+    ) -> bool {
         // Counted in the load averages while it waits, as on Linux.
         sched::DISK_WAITERS.fetch_add(1, Ordering::Relaxed);
         let _counted = Counted;
         let woken = || condition() || self.attention.load(Ordering::Acquire);
         if self.interrupt {
-            wait::wait_until_or_timeout(self.key(lane), "disk", deadline_ns, woken);
+            wait::wait_until_or_timeout(key, "disk", deadline_ns, woken);
         } else {
             while !woken() && sched::now_ns() < deadline_ns {
                 self.collect(lane);
@@ -533,7 +563,8 @@ impl<C: Controller> Disk<C> {
             // slot freed, once the device knows of what was held back
             // for it.
             self.kick(lane);
-            self.wait(lane, u64::MAX, || this.events.load(Ordering::Acquire) != seen);
+            let room = || this.events.load(Ordering::Acquire) != seen;
+            self.wait(lane, self.key(lane), u64::MAX, room);
         };
         drop(lone);
         drop(waiting);
@@ -550,9 +581,10 @@ impl<C: Controller> Disk<C> {
     /// it if the request goes unanswered too long.
     fn finish(&self, lane: usize, slot: usize) {
         let request = &self.lanes[lane].requests[slot];
+        let key = self.slot_key(lane, slot);
         let mut deadline = sched::now_ns().saturating_add(TIMEOUT_NS);
         loop {
-            if self.wait(lane, deadline, || request.load(Ordering::Acquire) != PENDING) {
+            if self.wait(lane, key, deadline, || request.load(Ordering::Acquire) != PENDING) {
                 return;
             }
             if self.attention.load(Ordering::Acquire) {
@@ -614,7 +646,8 @@ impl<C: Controller> Disk<C> {
                 at += sectors(part.data);
             }
             self.kick(lane);
-            for &(slot, first, start) in &parts[..issued] {
+            // The last first: the others have likely ended by then.
+            for &(slot, first, start) in parts[..issued].iter().rev() {
                 let data = &window[first..(first + most).min(window.len())];
                 let part = Request { sector: start, data, ..*request };
                 let settled = self.settle(lane, rank, slot, &part);

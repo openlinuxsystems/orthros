@@ -188,6 +188,12 @@ the flag instead of sending an IPI. How long it polls adapts as Linux's
 cpuidle-haltpoll governor does (`radix_sched::haltpoll`): the limit
 starts at 0, doubles (from 50 µs, up to 200 µs) when an idle period
 outlasted it but ended within 200 µs, and halves when one lasted longer.
+Unlike Linux's governor it learns only from wake-ups that other CPUs
+send (ADR 0116): a waker on another CPU marks the CPU it wakes
+(`called`), and a period that the CPU's own interrupt ended, a device's
+or the timer's, halves the limit, since that interrupt comes whether the
+CPU polls or halts, and the hypervisor delivers it to a halted CPU
+sooner. So a CPU whose threads wait only for disks halts at once.
 A halt runs with preemption off too, so that the interrupt that ends it
 leaves the switch to the idle loop, which ends the idle period first: a
 switch on the interrupt's way out left the period open while other

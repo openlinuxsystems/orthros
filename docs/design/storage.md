@@ -263,7 +263,8 @@ device asked to be told, and the device interrupts only for the first
 completion after the driver has read every one before it, so that a
 batch of completions raises one interrupt, as Linux's driver has it.
 The interrupt handler collects what finished
-and wakes the waiting threads, each of which frees its own slot. Many
+and wakes the thread waiting on each finished slot (each thread waits
+on its own), which frees it. Many
 threads have requests in flight at once, up to the slots the controller
 has.
 
@@ -329,7 +330,9 @@ each is settled, retried or failed, before the call returns, even after
 another failed, since the device may still be reaching the memory. The
 device hears of them together: virtio-blk rings its doorbell once, after
 the last, which lets QEMU merge requests for adjacent sectors into one
-read or write of its file.
+read or write of its file. The thread waits for the last request first,
+so the earlier ones' completions, which usually come before it, wake no
+one (ADR 0116).
 
 `ioctl` on a block device takes Linux's requests (radix-block(2)): the
 size in bytes and in sectors, the logical and physical sector sizes, the

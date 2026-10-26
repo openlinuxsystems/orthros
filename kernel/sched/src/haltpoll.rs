@@ -14,12 +14,20 @@
 //! (its documentation is `Documentation/virt/guest-halt-polling.rst`):
 //!
 //! - the limit starts at 0, so a CPU that is idle for long never polls;
-//! - an idle period that outlasted the limit but ended within
-//!   [`MAX_POLL_NS`] means polling longer would have caught the wake-up,
-//!   so the limit doubles (to at least [`GROW_START_NS`], at most
+//! - an idle period that another CPU's wake-up ended after the limit but
+//!   within [`MAX_POLL_NS`] means polling longer would have caught it, so
+//!   the limit doubles (to at least [`GROW_START_NS`], at most
 //!   [`MAX_POLL_NS`]);
 //! - an idle period longer than [`MAX_POLL_NS`] means polling only wasted
 //!   time, so the limit halves.
+//!
+//! Unlike Linux's governor, it learns only from wake-ups that other CPUs
+//! send. One that comes from this CPU's own interrupt, a disk's or the
+//! timer's, needs that interrupt whether the CPU polls or halts, and the
+//! hypervisor delivers it sooner to a halted CPU, which it watches, than
+//! to a running one, which it must first stop. So an idle period such an
+//! interrupt ended halves the limit too, and a CPU that waits only for
+//! its devices halts at once, as Linux's do (ADR 0116).
 //!
 //! A CPU with MWAIT waits on the word in hardware and needs none of this.
 
@@ -48,9 +56,9 @@ impl HaltPoll {
     }
 
     /// Learns from an idle period that lasted `idle_ns`, polling and halted
-    /// together.
-    pub fn record(&mut self, idle_ns: u64) {
-        if idle_ns > MAX_POLL_NS {
+    /// together, and that a wake-up from another CPU ended if `called`.
+    pub fn record(&mut self, idle_ns: u64, called: bool) {
+        if idle_ns > MAX_POLL_NS || !called {
             self.limit_ns /= 2;
         } else if idle_ns > self.limit_ns {
             self.limit_ns = (self.limit_ns * 2).clamp(GROW_START_NS, MAX_POLL_NS);
@@ -67,22 +75,22 @@ mod tests {
         let mut poll = HaltPoll::new();
         assert_eq!(poll.limit_ns(), 0);
         // Woken soon after halting: poll next time.
-        poll.record(10_000);
+        poll.record(10_000, true);
         assert_eq!(poll.limit_ns(), GROW_START_NS);
         // Caught while polling: nothing to learn.
-        poll.record(GROW_START_NS - 1);
+        poll.record(GROW_START_NS - 1, true);
         assert_eq!(poll.limit_ns(), GROW_START_NS);
         // Woken after the limit, within the maximum: double it.
-        poll.record(GROW_START_NS + 1);
+        poll.record(GROW_START_NS + 1, true);
         assert_eq!(poll.limit_ns(), 2 * GROW_START_NS);
-        poll.record(MAX_POLL_NS);
+        poll.record(MAX_POLL_NS, true);
         assert_eq!(poll.limit_ns(), MAX_POLL_NS);
-        poll.record(MAX_POLL_NS);
+        poll.record(MAX_POLL_NS, true);
         assert_eq!(poll.limit_ns(), MAX_POLL_NS);
         // Idle for long: polling was wasted, so halve it.
-        poll.record(MAX_POLL_NS + 1);
+        poll.record(MAX_POLL_NS + 1, true);
         assert_eq!(poll.limit_ns(), MAX_POLL_NS / 2);
-        poll.record(u64::MAX);
+        poll.record(u64::MAX, true);
         assert_eq!(poll.limit_ns(), MAX_POLL_NS / 4);
     }
 
@@ -96,10 +104,11 @@ mod tests {
             seed ^= seed << 17;
             let before = poll.limit_ns();
             let idle = seed % (3 * MAX_POLL_NS);
-            poll.record(idle);
+            let called = seed & (1 << 40) != 0;
+            poll.record(idle, called);
             let after = poll.limit_ns();
             assert!(after <= MAX_POLL_NS);
-            if idle > MAX_POLL_NS {
+            if idle > MAX_POLL_NS || !called {
                 assert_eq!(after, before / 2);
             } else if idle > before {
                 assert!(after > before || after == MAX_POLL_NS);
@@ -113,12 +122,34 @@ mod tests {
     fn a_cpu_idle_for_long_stops_polling() {
         let mut poll = HaltPoll::new();
         for _ in 0..3 {
-            poll.record(MAX_POLL_NS);
+            poll.record(MAX_POLL_NS, true);
         }
         assert_eq!(poll.limit_ns(), MAX_POLL_NS);
         for _ in 0..20 {
-            poll.record(10_000_000);
+            poll.record(10_000_000, true);
         }
         assert_eq!(poll.limit_ns(), 0);
+    }
+
+    #[test]
+    fn a_cpu_its_own_interrupts_wake_stops_polling() {
+        let mut poll = HaltPoll::new();
+        for _ in 0..3 {
+            poll.record(MAX_POLL_NS, true);
+        }
+        assert_eq!(poll.limit_ns(), MAX_POLL_NS);
+        // A disk's interrupt ends each wait, soon after it began: polling
+        // would not have spared it, so the CPU learns to halt.
+        poll.record(30_000, false);
+        assert_eq!(poll.limit_ns(), MAX_POLL_NS / 2);
+        for _ in 0..20 {
+            poll.record(30_000, false);
+        }
+        assert_eq!(poll.limit_ns(), 0);
+        // Halting, it stays at 0; another CPU's wake-up starts it again.
+        poll.record(10_000, false);
+        assert_eq!(poll.limit_ns(), 0);
+        poll.record(10_000, true);
+        assert_eq!(poll.limit_ns(), GROW_START_NS);
     }
 }
