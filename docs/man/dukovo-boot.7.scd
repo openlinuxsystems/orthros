@@ -131,9 +131,10 @@ _/system/resources/licenses/_
   filesystems every five seconds (see *radix-files*(7)).
 . The kernel walks PCI through the windows of the ACPI MCFG table, logs
   every function it finds on a *PCI:* line, with its vendor and device
-  IDs and class, and sets up each virtio block device: a *Disk:* line
-  names it (_vda_, _vdb_, ...) and its size, and the next lines its
-  partition table and partitions. The functions are listed in
+  IDs and class, and sets up each disk: a *Disk:* line names it (_vda_
+  for a virtio block device, _sda_ for a SATA disk, _nvme0n1_ for an NVMe
+  namespace, ...) and its size, and the next lines its partition table
+  and partitions. The functions are listed in
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
@@ -154,7 +155,7 @@ seconds since the kernel started; messages before timer calibration show
 
 ```
 [    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
-[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
 [    0.445393] Capabilities: ready; 18 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)

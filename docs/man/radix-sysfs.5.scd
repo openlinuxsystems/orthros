@@ -64,8 +64,9 @@ _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
 	discards; *0* and *0* if not.
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
-	virtio disks, _sda_, _sdb_ for SATA disks, _vda1_ for the first
-	partition of _vda_. Linux puts a
+	virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_ for the first
+	namespace of the first NVMe controller, _vda1_ for the first
+	partition of _vda_ and _nvme0n1p1_ for the first of _nvme0n1_. Linux puts a
 	partition's directory inside its disk's (_/sys/block/vda/vda1_) and
 	lists both in _/sys/class/block_; Radix lists both here.
 
@@ -77,7 +78,7 @@ _/kernel/bus/pci/devices/_*address*_/vendor_, _device_
 _/kernel/bus/pci/devices/_*address*_/class_
 	Its class code, the base class, subclass and programming interface,
 	in hexadecimal with six digits: *0x010000* for a SCSI-like storage
-	controller, *0x010601* for an AHCI one.
+	controller, *0x010601* for an AHCI one, *0x010802* for an NVMe one.
 
 	A function's address is its PCI segment, bus, device and function,
 	as Linux writes it: _0000:00:03.0_. Every function the kernel's scan

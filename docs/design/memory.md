@@ -120,6 +120,18 @@ frames count as free, and an allocation that finds nothing empties every
 CPU's cache into the zones before it reclaims. `Frames::check` walks the
 caches as well as the free lists.
 
+Memory filled in order takes its frames from a run instead
+(`Frames::alloc_sequential`, ADR 0118): each CPU takes a block of 32
+contiguous frames (128 KiB) from its zone in one go and hands them out
+lowest first, so that a buffer a program writes from its start to its end
+lies in long stretches of physical memory, as Linux's mostly does, rather
+than in whatever frames were freed last. An anonymous page fault asks for
+it when it makes a zeroed page of a region of at least 128 KiB whose page
+before it is already there; any other takes the frame freed last, still
+warm in the caches. A run's frames not
+yet handed out are `Cached` too, and go back with the cache; a zone with
+no free block that large gives any frame.
+
 ## Kernel heap
 
 `radix_mm::Heap` (`heap.rs`) serves requests up to 8 KiB from 32 size

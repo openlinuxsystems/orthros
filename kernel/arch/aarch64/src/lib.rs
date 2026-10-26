@@ -207,6 +207,14 @@ impl Devices for Arch {
         None
     }
 
+    fn allocate_interrupt_at(
+        _cpu: usize,
+        _handler: fn(usize),
+        _arg: usize,
+    ) -> Option<(u32, MsiMessage)> {
+        None
+    }
+
     fn free_interrupt(_vector: u32) {}
 
     fn interrupt_count(_vector: u32) -> u64 {
@@ -270,6 +278,8 @@ impl UserMode for Arch {
     ) -> Result<(), MapPageError> {
         Err(MapPageError::NoMemory)
     }
+
+    fn frames(_: &Space, _: u64, _: u64, _: bool, _: &mut dyn FnMut(u64) -> bool) {}
 
     fn edit_pages(
         _: &Space,

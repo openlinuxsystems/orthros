@@ -64,8 +64,13 @@ overflow faults on the guard. Each CPU starts with an idle thread made
 from its start-up stack; the boot code becomes the thread `kmain`.
 
 **Eager extended state.** Every switch saves the outgoing thread's x87,
-SSE, AVX and AVX-512 registers (those the CPU has; XCR0) with XSAVEOPT,
-or XSAVE, or FXSAVE without XSAVE, and restores the incoming thread's.
+SSE, AVX and AVX-512 registers and protection keys (those the CPU has;
+XCR0) with XSAVEOPT, or XSAVE, or FXSAVE without XSAVE, and restores the
+incoming thread's. AMX is enabled too but held off with XFD, so its tile
+data is never saved (saves and restores do not ask for it) and its
+instructions fault: XCR0 then matches what
+a hypervisor's host enables, as a Linux guest's does, and KVM need not
+switch it at every exit (ADR 0120).
 Lazy switching would trap a thread's first use after a switch instead,
 which leaked one thread's registers to another through speculative
 execution (CVE-2018-3665) and costs a trap per switch for any thread that
@@ -188,6 +193,12 @@ the flag instead of sending an IPI. How long it polls adapts as Linux's
 cpuidle-haltpoll governor does (`radix_sched::haltpoll`): the limit
 starts at 0, doubles (from 50 µs, up to 200 µs) when an idle period
 outlasted it but ended within 200 µs, and halves when one lasted longer.
+Unlike Linux's governor it learns only from wake-ups that other CPUs
+send (ADR 0116): a waker on another CPU marks the CPU it wakes
+(`called`), and a period that the CPU's own interrupt ended, a device's
+or the timer's, halves the limit, since that interrupt comes whether the
+CPU polls or halts, and the hypervisor delivers it to a halted CPU
+sooner. So a CPU whose threads wait only for disks halts at once.
 A halt runs with preemption off too, so that the interrupt that ends it
 leaves the switch to the idle loop, which ends the idle period first: a
 switch on the interrupt's way out left the period open while other

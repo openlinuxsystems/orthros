@@ -46,11 +46,12 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
-/// with the benchmarks' disk ([`disk_args`]).
-const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /devices/vda";
+/// with the benchmarks' disks ([`disk_args`]).
+const POSIX_CMDLINE: &str =
+    "-- --posix /system/tests/posix/bench --disk /devices/vda --nvme /devices/nvme0n1";
 
-/// The size of the disk both systems' POSIX benchmarks read and write: the
-/// 32 MiB they go through, with room.
+/// The size of each disk both systems' POSIX benchmarks read and write:
+/// the 32 MiB they go through, with room.
 const DISK_BYTES: usize = 64 << 20;
 
 /// The POSIX benchmarks: one C program, which Radix's build makes for
@@ -346,6 +347,12 @@ const ROWS: &[Row] = &[
     disk("posix_disk_write_64k", "Disk: 64 KiB written raw to a virtio disk"),
     disk("posix_disk_read_mib", "Disk: 1 MiB read raw from a virtio disk"),
     disk("posix_disk_write_mib", "Disk: 1 MiB written raw to a virtio disk"),
+    disk("posix_nvme_read_4k", "Disk: 4 KiB read raw from an NVMe disk (`pread`)"),
+    disk("posix_nvme_write_4k", "Disk: 4 KiB written raw to an NVMe disk (`pwrite`)"),
+    disk("posix_nvme_read_64k", "Disk: 64 KiB read raw from an NVMe disk"),
+    disk("posix_nvme_write_64k", "Disk: 64 KiB written raw to an NVMe disk"),
+    disk("posix_nvme_read_mib", "Disk: 1 MiB read raw from an NVMe disk"),
+    disk("posix_nvme_write_mib", "Disk: 1 MiB written raw to an NVMe disk"),
 ];
 
 /// `ob bench`.
@@ -971,21 +978,29 @@ fn radix_posix_numbers(
     Ok((parse(&log), parse_counts(&log)))
 }
 
-/// Makes the benchmarks' disk afresh in `dir`, filled with bytes rather
+/// Makes the benchmarks' disks afresh in `dir`, filled with bytes rather
 /// than holes, which the host would read faster, and returns QEMU's
-/// arguments for it: a virtio block device, `vda` on both systems
-/// (`/devices/vda` on Radix, `/dev/vda` on Linux).
-/// Each boot gets the same disk.
+/// arguments for them: a virtio block device, `vda` on both systems
+/// (`/devices/vda` on Radix, `/dev/vda` on Linux), and an NVMe
+/// controller with one namespace, `nvme0n1`. Each boot gets the same
+/// disks.
 fn disk_args(dir: &Path) -> Result<Vec<String>> {
-    let disk = dir.join("bench-disk.img");
-    std::fs::write(&disk, vec![0x5a; DISK_BYTES])
-        .context(|| format!("writing {}", disk.display()))?;
-    Ok(vec![
-        "-drive".into(),
-        format!("file={},if=none,id=bench,format=raw", qemu::option_value(&disk)),
-        "-device".into(),
-        "virtio-blk-pci,drive=bench".into(),
-    ])
+    let mut args = Vec::new();
+    for (name, device) in [
+        ("bench-disk", "virtio-blk-pci,drive=bench-disk"),
+        ("bench-nvme", "nvme,serial=bench,drive=bench-nvme"),
+    ] {
+        let disk = dir.join(format!("{name}.img"));
+        std::fs::write(&disk, vec![0x5a; DISK_BYTES])
+            .context(|| format!("writing {}", disk.display()))?;
+        args.extend([
+            "-drive".into(),
+            format!("file={},if=none,id={name},format=raw", qemu::option_value(&disk)),
+            "-device".into(),
+            device.into(),
+        ]);
+    }
+    Ok(args)
 }
 
 /// Builds and runs the Linux baseline on the host, with the POSIX

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0037. The timer is written only to fire earlier, and idle virtual CPUs poll before they halt
 
-- Status: Accepted
+- Status: Accepted; polling learns only from wake-ups that other CPUs send since [0116](0116-idle-polling-learns-from-other-cpus.md)
 - Date: 2026-10-21
 
 ## Context

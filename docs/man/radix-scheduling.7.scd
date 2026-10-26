@@ -29,7 +29,8 @@ correct, is in _docs/design/scheduler.md_.
 
 A thread has a name of up to 23 bytes, a stack of 16 KiB with an
 unmapped guard page below it, a save area for its extended processor
-state (x87, SSE, AVX and, where the CPU has it, AVX-512), a scheduling
+state (x87, SSE, AVX and, where the CPU has them, AVX-512 and protection
+keys; AMX is held off, so its instructions fail), a scheduling
 policy, the set of CPUs it may run on, and a resource domain. It is
 *ready*, *blocked* (with the reason it waits), or *dead* once it has
 exited; the *reaper* thread frees a dead thread's stack.
@@ -233,7 +234,10 @@ virtual machine without MWAIT it first polls for a wake-up, for as long
 as its recent idle periods suggest (up to 200 µs, adapting as Linux's
 cpuidle-haltpoll does), because halting and the interrupt that ends a
 halt each leave the guest. A CPU that wakes another one that is polling
-or in MWAIT writes a word instead of sending an interrupt.
+or in MWAIT writes a word instead of sending an interrupt. It learns
+only from wake-ups that other CPUs send: one that its own interrupt
+brings, a disk's or the timer's, comes whether it polls or halts, so a
+CPU whose threads wait only for disks halts at once.
 
 # DIAGNOSTICS
 

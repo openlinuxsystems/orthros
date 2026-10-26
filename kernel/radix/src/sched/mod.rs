@@ -93,6 +93,10 @@ struct CpuSched {
     /// Whether the idle thread watches `need_resched` or `wake` without
     /// needing an interrupt: polling, or waiting in MWAIT.
     polling: AtomicBool,
+    /// Set by a waker on another CPU, before `need_resched`: the idle loop
+    /// clears it when it goes idle, and so learns which wake-ups polling
+    /// can catch (`radix_sched::haltpoll`).
+    called: AtomicBool,
     /// The token of the running thread.
     current: AtomicUsize,
     /// The published load: queued threads, and the running real-time
@@ -138,6 +142,7 @@ impl CpuSched {
             need_resched: AtomicBool::new(false),
             wake: AtomicU32::new(0),
             polling: AtomicBool::new(false),
+            called: AtomicBool::new(false),
             current: AtomicUsize::new(0),
             running: AtomicU32::new(0),
             rt_prio: AtomicU8::new(0),
@@ -931,12 +936,14 @@ impl Loads for LiveLoads {
 /// Asks CPU `cpu` to look for a more urgent thread.
 fn kick(cpu: usize) {
     let slot = CPUS.get(cpu);
-    slot.need_resched.store(true, Ordering::SeqCst);
     if cpu == Arch::current_cpu() {
         // The switch happens when this CPU lets go of its last spin lock or
         // leaves the interrupt it is in.
+        slot.need_resched.store(true, Ordering::SeqCst);
         return;
     }
+    slot.called.store(true, Ordering::Relaxed);
+    slot.need_resched.store(true, Ordering::SeqCst);
     if slot.polling.load(Ordering::SeqCst) {
         slot.wake.store(1, Ordering::Release);
     } else {
@@ -1527,6 +1534,8 @@ fn idle_loop(cpu: usize) -> ! {
         if slot.running.load(Ordering::Relaxed) == 0 {
             balance::idle(cpu, Arch::now_ns());
         }
+        // Before the check: a wake-up from another CPU after it is noted.
+        slot.called.store(false, Ordering::Relaxed);
         if slot.need_resched.load(Ordering::SeqCst) || slot.running.load(Ordering::Relaxed) > 0 {
             reschedule(Switch::Preempt);
             continue;
@@ -1562,7 +1571,7 @@ fn idle_loop(cpu: usize) -> ! {
         slot.idle_since.store(0, Ordering::Relaxed);
         slot.idle_seq.fetch_add(1, Ordering::Release);
         if poll_first {
-            haltpoll.record(idle);
+            haltpoll.record(idle, slot.called.load(Ordering::Relaxed));
         }
     }
 }

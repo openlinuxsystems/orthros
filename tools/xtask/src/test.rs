@@ -62,6 +62,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-ksyms",
     "radix-microcode",
     "radix-mm",
+    "radix-nvme",
     "radix-posix",
     "radix-random",
     "radix-relocs",
@@ -145,6 +146,38 @@ enum Bus {
     /// A port of an AHCI controller of the case's own, the q35 chipset's
     /// (`ich9-ahci`): `sda`, `sdb` and on.
     Sata,
+    /// A namespace of NVMe controller `n` of the case's own, numbered as
+    /// they come: `nvme<n>n1`, `nvme<n>n2` and on.
+    Nvme(u8),
+}
+
+impl Disk {
+    /// Whether the kernel takes it for solid state: an NVMe disk, or a
+    /// SATA one with QEMU's rotation rate of 1.
+    fn solid(&self) -> bool {
+        matches!(self.bus, Bus::Nvme(_)) || self.device.contains("rotation_rate=1")
+    }
+}
+
+/// The name of partition `number` of disk `disk`: after a `p` when the
+/// disk's name ends in a digit, as Linux has it (`sda1`, `nvme0n1p1`).
+fn partition_name(disk: &str, number: u32) -> String {
+    let p = if disk.ends_with(|c: char| c.is_ascii_digit()) { "p" } else { "" };
+    format!("{disk}{p}{number}")
+}
+
+/// The NVMe controllers a case's disks are on, in order.
+fn nvme_controllers(disks: &[Disk]) -> Vec<u8> {
+    let mut controllers: Vec<u8> = disks
+        .iter()
+        .filter_map(|disk| match disk.bus {
+            Bus::Nvme(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    controllers.sort_unstable();
+    controllers.dedup();
+    controllers
 }
 
 /// A case's second boot: its command line, what the host does to the
@@ -165,15 +198,21 @@ pub struct DiskImage {
 }
 
 /// The names the kernel gives a case's disks: `vda`, `vdb` and on for
-/// virtio ones, `sda`, `sdb` and on for SATA ones, each in their order.
+/// virtio ones, `sda`, `sdb` and on for SATA ones, each in their order,
+/// and `nvme<n>n1` and on for each NVMe controller's namespaces.
 fn disk_names(disks: &[Disk]) -> Vec<String> {
     let (mut virtio, mut sata) = (b'a', b'a');
+    let mut namespaces = [0u32; 256];
     disks
         .iter()
         .map(|disk| {
             let (prefix, letter) = match disk.bus {
                 Bus::Virtio => ("vd", &mut virtio),
                 Bus::Sata => ("sd", &mut sata),
+                Bus::Nvme(n) => {
+                    namespaces[usize::from(n)] += 1;
+                    return format!("nvme{n}n{}", namespaces[usize::from(n)]);
+                }
             };
             *letter += 1;
             format!("{prefix}{}", char::from(*letter - 1))
@@ -188,7 +227,7 @@ fn volume_names(disks: &[Disk]) -> Vec<String> {
         .into_iter()
         .zip(disks)
         .filter(|(_, disk)| disk.fat != 0)
-        .map(|(name, disk)| if disk.partitioned { name + "1" } else { name })
+        .map(|(name, disk)| if disk.partitioned { partition_name(&name, 1) } else { name })
         .collect()
 }
 
@@ -230,6 +269,15 @@ const SATA_DISKS: &[Disk] = &[
     Disk { device: ",rotation_rate=1", ..fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Sata) },
 ];
 
+/// The same disks as NVMe namespaces, two on each of two controllers:
+/// `nvme0n1`, `nvme0n2`, `nvme1n1` and `nvme1n2p1`.
+const NVME_DISKS: &[Disk] = &[
+    fat_disk(1440, 12, "RADIX12", false, Bus::Nvme(0)),
+    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Nvme(0)),
+    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Nvme(1)),
+    fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Nvme(1)),
+];
+
 /// The size of the raw disks of the `disk-raw` and `disk-errors` tests.
 const RAW_KIB: u64 = 8 * 1024;
 
@@ -247,10 +295,12 @@ const fn raw_disk(bus: Bus, check: fn(&DiskImage) -> Result<(), String>) -> Disk
     }
 }
 
-/// The `disk-raw` test's disks: one virtio, one solid state SATA disk.
+/// The `disk-raw` test's disks: one virtio, one solid state SATA disk and
+/// an NVMe namespace.
 const RAW_DISKS: &[Disk] = &[
     raw_disk(Bus::Virtio, raw_check),
     Disk { device: ",rotation_rate=1", ..raw_disk(Bus::Sata, raw_check) },
+    raw_disk(Bus::Nvme(0), raw_check),
 ];
 
 /// What the `disk-raw` test's program writes to each disk: at these
@@ -262,18 +312,20 @@ const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 
-/// The `disk-errors` test's disk, and the errors QEMU gives its reads and
-/// writes: a read of sector 6000 fails once, one of sector 10000 every
-/// time, and so does a write of sector 12000. The program (userspace/
-/// storage) reads and writes those sectors.
-const ERROR_DISKS: &[Disk] = &[Disk {
-    errors: Some(
-        "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
-         [inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"10000\"\n\n\
-         [inject-error]\nevent = \"write_aio\"\nerrno = \"5\"\nsector = \"12000\"\n",
-    ),
-    ..raw_disk(Bus::Sata, raw_unchanged)
-}];
+/// The `disk-errors` test's disks, a SATA disk and an NVMe namespace,
+/// and the errors QEMU gives their reads and writes ([`ERROR_RULES`]):
+/// a read of sector 6000 fails once, one of sector 10000 every time, and
+/// so does a write of sector 12000. The program (userspace/storage) reads
+/// and writes those sectors.
+const ERROR_DISKS: &[Disk] = &[
+    Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Sata, raw_unchanged) },
+    Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Nvme(0), raw_unchanged) },
+];
+
+/// QEMU's blkdebug rules for [`ERROR_DISKS`].
+const ERROR_RULES: &str = "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
+     [inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"10000\"\n\n\
+     [inject-error]\nevent = \"write_aio\"\nerrno = \"5\"\nsector = \"12000\"\n";
 
 /// What the storage test's program writes (userspace/storage), as the
 /// host reads it back with mtools.
@@ -819,11 +871,31 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
-        name: "disk-raw",
-        about: "Raw reads, writes and discards of a virtio and a SATA disk, and Linux's block requests; the host checks every byte",
+        name: "storage-nvme",
+        about: "The storage test on four NVMe namespaces of two controllers, each with a queue and an interrupt for each of four CPUs",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- /system/tests/storage raw vda sda",
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: NVME_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
+        name: "disk-raw",
+        about: "Raw reads, writes and discards of a virtio, a SATA and an NVMe disk, and Linux's block requests; the host checks every byte",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage raw vda sda nvme0n1",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -836,10 +908,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "disk-errors",
-        about: "QEMU fails reads and writes of a SATA disk: one that fails once goes again, one that always fails ends in EIO",
+        about: "QEMU fails reads and writes of a SATA and an NVMe disk: one that fails once goes again, one that always fails ends in EIO",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- /system/tests/storage errors sda",
+        cmdline: "lockdep -- /system/tests/storage errors sda nvme0n1",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -971,6 +1043,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-vfs",
     "radix-fat",
     "radix-ahci",
+    "radix-nvme",
 ];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
@@ -1142,6 +1215,12 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
+    // Each controller before its namespaces, in order, so that the
+    // kernel finds them in that order.
+    for n in nvme_controllers(case.disks) {
+        extra.extend(["-device".into(), format!("nvme,id=nvme{n},serial=dukovo-test-{n}")]);
+    }
+    let mut namespaces = [0u32; 256];
     let mut port = 0;
     for (i, (disk, image)) in case.disks.iter().zip(&disks).enumerate() {
         let mut file = qemu::option_value(&image.path);
@@ -1158,6 +1237,11 @@ fn run_case(
             Bus::Sata => {
                 port += 1;
                 format!("ide-hd,drive=disk{i},bus=sata.{}{}", port - 1, disk.device)
+            }
+            Bus::Nvme(n) => {
+                namespaces[usize::from(n)] += 1;
+                let nsid = namespaces[usize::from(n)];
+                format!("nvme-ns,drive=disk{i},bus=nvme{n},nsid={nsid}{}", disk.device)
             }
         });
     }
@@ -2351,6 +2435,25 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
             .find_map(|line| line.find(start).map(|at| &line[at..]))
             .ok_or_else(|| format!("the kernel never said \"{start}...\""))
     };
+    let lanes = case.cpus.clamp(1, 16);
+    for n in nvme_controllers(case.disks) {
+        let line = line_of(&format!("Disk: nvme{n} is an NVMe 1.4 controller at "))?;
+        // QEMU's controller takes shadow doorbells and scatter gather
+        // lists.
+        let queues = if lanes == 1 {
+            ", 1 I/O queue of 63 commands, one MSI-X vector, shadow doorbells, scatter gather \
+             lists"
+                .to_string()
+        } else {
+            format!(
+                ", {lanes} I/O queues of 63 commands, an MSI-X vector for each of {lanes} CPUs, \
+                 shadow doorbells, scatter gather lists"
+            )
+        };
+        if !line.contains(": QEMU NVMe Ctrl, firmware ") || !line.ends_with(&queues) {
+            return Err(format!("the kernel described nvme{n} as \"{line}\""));
+        }
+    }
     let mut port = 0;
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let size = disk_size(disk.kib);
@@ -2369,29 +2472,35 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                     "512 bytes a block, NCQ depth 32, write cache, TRIM",
                 )
             }
+            Bus::Nvme(_) => (
+                line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
+                "512 bytes a block, write cache, deallocates",
+            ),
         };
-        let solid = disk.device.contains("rotation_rate=1");
-        if !line.contains(want) || line.ends_with(", solid state") != solid {
+        // Only a SATA disk's line says whether it is solid state.
+        let says_solid = disk.bus == Bus::Sata && disk.solid();
+        if !line.contains(want) || line.ends_with(", solid state") != says_solid {
             return Err(format!("the kernel described {name} as \"{line}\""));
         }
         if disk.partitioned {
             line_of(&format!("Disk: {name} has an MBR with 1 partition"))?;
             line_of(&format!(
-                "Disk: {name}1: {} from sector {PARTITION_START}, type 0x0c",
+                "Disk: {}: {} from sector {PARTITION_START}, type 0x0c",
+                partition_name(&name, 1),
                 disk_size(disk.kib - PARTITION_START / 2)
             ))?;
         } else {
             line_of(&format!("Disk: {name} has no partition table; it is used whole"))?;
         }
     }
-    let virtio = case.disks.iter().filter(|disk| disk.bus == Bus::Virtio).count();
-    let disks = |count: usize, kind: &str| {
-        format!("{count} {kind} disk{}", if count == 1 { "" } else { "s" })
-    };
+    let on = |bus: Bus| case.disks.iter().filter(|disk| disk.bus == bus).count();
+    let plural =
+        |count: usize, what: &str| format!("{count} {what}{}", if count == 1 { "" } else { "s" });
     line_of(&format!(
-        "; {}, {}",
-        disks(virtio, "virtio"),
-        disks(case.disks.len() - virtio, "SATA")
+        "; {}, {}, {}",
+        plural(on(Bus::Virtio), "virtio disk"),
+        plural(on(Bus::Sata), "SATA disk"),
+        plural(nvme_controllers(case.disks).len(), "NVMe controller")
     ))?;
     Ok(())
 }
@@ -2540,7 +2649,7 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
-        let rotational = u8::from(!disk.device.contains("rotation_rate=1"));
+        let rotational = u8::from(!disk.solid());
         vm.expect(&format!(
             "storage: /devices/{name}: {} bytes, {} sectors of 512 bytes, physical blocks of 512, \
              minimum and optimal I/O 512 and 0, alignment 0, read-only 0, rotational \
@@ -2561,18 +2670,23 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s
-/// errors, each retried by the kernel after recovering the port.
+/// errors, each tried again by the kernel, up to five times: the SATA
+/// disk's after recovering the port, which QEMU's AHCI disk stops for an
+/// aborted command, and the NVMe disk's at once, which QEMU's controller
+/// fails as a media error without Do Not Retry.
 fn disk_errors(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     vm.expect("spark: started /system/tests/storage as process ")?;
-    for line in [
-        "storage: /devices/sda: a read of sector 6000, which fails once, reads what it holds",
-        "storage: /devices/sda: a read of sector 10000, which always fails, fails with io",
-        "storage: /devices/sda: a read up to sector 10000 ends short, after 65536 bytes",
-        "storage: /devices/sda: a write of sector 12000, which always fails, fails with io",
-        "storage: /devices/sda: reads and writes elsewhere work after the errors",
-    ] {
-        vm.expect(line)?;
+    for name in disk_names(case.disks) {
+        for line in [
+            "a read of sector 6000, which fails once, reads what it holds",
+            "a read of sector 10000, which always fails, fails with io",
+            "a read up to sector 10000 ends short, after 65536 bytes",
+            "a write of sector 12000, which always fails, fails with io",
+            "reads and writes elsewhere work after the errors",
+        ] {
+            vm.expect(&format!("storage: /devices/{name}: {line}"))?;
+        }
     }
     storage_end(vm, "errors")?;
     // The first read failed once and then worked; each of the others
@@ -2584,6 +2698,31 @@ fn disk_errors(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     if !log.contains("; it runs again (16 errors since boot)") || log.contains("the disk is gone") {
         return Err("the kernel did not recover sda's port every time".into());
+    }
+    // Each disk's failed requests are logged, with what the NVMe
+    // controller said.
+    for (name, read, write) in [
+        ("sda", "an I/O error", "an I/O error"),
+        ("nvme0n1", "unrecovered read error", "write fault"),
+    ] {
+        for line in [
+            format!(
+                "Disk: {name}: a read of 8 sectors from sector 10000 failed after 5 tries: {read}"
+            ),
+            format!(
+                "Disk: {name}: a read of 128 sectors from sector 10000 failed after 5 tries: {read}"
+            ),
+            format!(
+                "Disk: {name}: a write of 8 sectors from sector 12000 failed after 5 tries: {write}"
+            ),
+        ] {
+            if !log.contains(&line) {
+                return Err(format!("the kernel never said \"{line}\""));
+            }
+        }
+        if log.matches(&format!("Disk: {name}: a ")).count() != 3 {
+            return Err(format!("the kernel logged other failures of {name}"));
+        }
     }
     Ok(())
 }

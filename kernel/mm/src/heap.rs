@@ -271,6 +271,7 @@ impl Heap {
                 Owner::Slab,
                 class.index() as u8,
                 reclaim && flags.context == Context::MaySleep,
+                false,
             )?;
             let pfn = phys >> PAGE_SHIFT;
             // SAFETY: the frames were just allocated for this slab.
@@ -473,7 +474,7 @@ impl Heap {
         }
         let node = platform.cpu_node(cpu).min(u8::MAX.into()) as u8;
         let flags = BOOKKEEPING.prefer_node(node);
-        let phys = self.frames.alloc_inner(0, flags, Owner::PerCpu, 0, false).ok()?;
+        let phys = self.frames.alloc_inner(0, flags, Owner::PerCpu, 0, false, false).ok()?;
         let addr = platform.direct_map() + phys as usize;
         let empty = CpuCache { classes: SpinLock::new([const { Loaded::new() }; CLASSES]) };
         // SAFETY: the frame was just allocated for this cache, is mapped by

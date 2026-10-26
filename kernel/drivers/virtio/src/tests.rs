@@ -87,6 +87,8 @@ struct State {
     requests: u64,
     /// Requests whose chain was in a table of its own.
     indirect: u64,
+    /// How many data buffers each request had.
+    chains: Vec<usize>,
     /// Doorbells rung, and interrupts the device would raise.
     doorbells: u64,
     interrupts: u64,
@@ -203,6 +205,7 @@ impl Device {
                 status = 2;
             }
             fake_memory_write(status_addr, &[status]);
+            s.chains.push(chain.len() - 2);
             let slot = s.device + 4 + 8 * (u64::from(s.used_idx) % size);
             fake_memory_write(slot, &u32::from(head).to_le_bytes());
             fake_memory_write(slot + 4, &(written + 1).to_le_bytes());
@@ -237,7 +240,8 @@ impl Registers for Device {
             (0x1e, 2) => 0,
             (0x2000, 4) => SECTORS & 0xffff_ffff,
             (0x2004, 4) => SECTORS >> 32,
-            (0x2008, 4) => 0,
+            // size_max, if offered.
+            (0x2008, 4) => 2048,
             (0x200c, 4) => 8,
             (0x2014, 4) => 4096,
             (0x2024, 4) => 32,
@@ -624,24 +628,72 @@ fn requests_go_in_tables_of_their_own() {
 }
 
 #[test]
-fn a_table_takes_up_to_126_buffers() {
+fn a_table_takes_up_to_254_buffers() {
     // Without seg_max the device takes any number: a table's worth, or
     // what fits in the ring several times without tables.
     let (device, mut blk) = setup(FEATURES & !feature::SEG_MAX);
-    assert_eq!(blk.info().max_segments, 126);
-    // Half sectors, so that 126 of them fit on the disk.
-    let buffer = Dma::fake(126 * 256);
-    let parts: Vec<(u64, u32)> = (0..126).map(|k| (buffer.phys() + 256 * k, 256)).collect();
-    let token = blk.submit(Op::Read, 1, &parts).unwrap();
+    assert_eq!(blk.info().max_segments, 254);
+    // Two half sectors and quarter sectors, so that 254 of them fill the
+    // disk, each with a gap after it so that none shares a descriptor.
+    let len = SECTORS * SECTOR;
+    let buffer = Dma::fake(2 * len as usize);
+    let mut at = buffer.phys();
+    let parts: Vec<(u64, u32)> = (0..254)
+        .map(|k| {
+            let part = (at, if k < 2 { 256 } else { 128 });
+            at += 2 * u64::from(part.1);
+            part
+        })
+        .collect();
+    let token = blk.submit(Op::Read, 0, &parts).unwrap();
     assert_eq!(wait(&mut blk, token), Outcome::Done);
-    let mut got = std::vec![0u8; 126 * 256];
-    buffer.read(0, &mut got);
-    assert_eq!(got, disk_bytes(SECTOR, 126 * 256));
-    assert_eq!(device.state.lock().unwrap().indirect, 1);
-    let more = [(buffer.phys(), 512u32); 127];
+    let mut got = Vec::new();
+    for &(phys, part) in &parts {
+        let mut bytes = std::vec![0u8; part as usize];
+        buffer.read((phys - buffer.phys()) as usize, &mut bytes);
+        got.extend(bytes);
+    }
+    assert_eq!(got, disk_bytes(0, len));
+    let s = device.state.lock().unwrap();
+    assert_eq!((s.indirect, &s.chains[..]), (1, &[254][..]));
+    drop(s);
+    let more = [(buffer.phys(), 512u32); 255];
     assert_eq!(blk.submit(Op::Read, 0, &more), Err(Error::BadRequest));
     let (_, blk) = setup(FEATURES & !(feature::SEG_MAX | common_feature::INDIRECT_DESC));
     assert_eq!(blk.info().max_segments, 30);
+}
+
+#[test]
+fn buffers_that_follow_each_other_share_a_descriptor() {
+    let (device, mut blk) = setup(FEATURES);
+    let buffer = Dma::fake(8192);
+    let p = buffer.phys();
+    // Eight pieces of one buffer, in order, are one descriptor; two runs
+    // apart in memory are two.
+    let parts: Vec<(u64, u32)> = (0..8).map(|k| (p + 512 * k, 512)).collect();
+    let token = blk.submit(Op::Read, 0, &parts).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let apart = [(p, 1024), (p + 1024, 1024), (p + 4096, 512), (p + 4608, 512)];
+    let token = blk.submit(Op::Read, 8, &apart).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let mut got = [0u8; 3072];
+    buffer.read(0, &mut got[..2048]);
+    buffer.read(4096, &mut got[2048..]);
+    assert_eq!(&got[..], &disk_bytes(8 * SECTOR, 3072)[..]);
+    // Nine that follow each other are one buffer, within seg_max's eight.
+    let nine: Vec<(u64, u32)> = (0..9).map(|k| (p + 512 * k, 512)).collect();
+    let token = blk.submit(Op::Write, 16, &nine).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    assert_eq!(device.state.lock().unwrap().chains, [1, 2, 1]);
+    // A device's size_max bounds a descriptor: 2048 bytes here.
+    let (device, mut blk) = setup(FEATURES | feature::SIZE_MAX);
+    assert_eq!(blk.info().max_segment_size, 2048);
+    let token = blk.submit(Op::Read, 0, &parts).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let mut got = [0u8; 4096];
+    buffer.read(0, &mut got);
+    assert_eq!(&got[..], &disk_bytes(0, 4096)[..]);
+    assert_eq!(device.state.lock().unwrap().chains, [2]);
 }
 
 #[test]

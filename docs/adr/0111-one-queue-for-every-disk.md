@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0111. Every disk's requests go through one queue, and block devices are read and written raw
 
-- Status: Accepted
+- Status: Accepted; an NVMe disk has a lane for each CPU, and failed requests are logged, since [0115](0115-nvme-from-the-specification.md); a transfer of several requests waits for its last first since [0116](0116-idle-polling-learns-from-other-cpus.md); a virtio request takes up to 254 pages since [0117](0117-nvme-shadow-doorbells.md)
 - Date: 2026-10-25
 
 ## Context

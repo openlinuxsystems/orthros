@@ -251,6 +251,12 @@ pub(crate) fn table_of(root: u64, virt: u64, level: u32, user: bool) -> Result<u
 
 /// The 4 KiB leaf entry for `virt` under `root`, if its tables exist.
 pub(crate) fn leaf(root: u64, virt: u64) -> Option<&'static AtomicU64> {
+    Some(&leaf_table(root, virt)?[((virt >> 12) & 0x1ff) as usize])
+}
+
+/// The table of 4 KiB leaf entries that holds `virt`'s under `root`, if
+/// it exists.
+pub(crate) fn leaf_table(root: u64, virt: u64) -> Option<&'static [AtomicU64; 512]> {
     let mut table_phys = root;
     for level in (1..4).rev() {
         let index = ((virt >> (12 + 9 * level)) & 0x1ff) as usize;
@@ -260,7 +266,7 @@ pub(crate) fn leaf(root: u64, virt: u64) -> Option<&'static AtomicU64> {
         }
         table_phys = slot & ADDRESS;
     }
-    Some(&table(table_phys)[((virt >> 12) & 0x1ff) as usize])
+    Some(table(table_phys))
 }
 
 fn leaf_flags(state: &State, access: Access, cache: Cache) -> u64 {

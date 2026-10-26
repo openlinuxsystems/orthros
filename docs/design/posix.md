@@ -151,11 +151,12 @@ Linux's x86-64 frame on the thread's stack or alternate stack: the
 restorer, a `ucontext_t` as far as its 8-byte signal mask (304 bytes,
 as Linux's kernel writes it; the C library's type goes on), the
 `siginfo_t`, and the XSAVE area, 64-byte aligned below the red zone
-(`UserMode::push_signal_frame`). Of the area, the frame gets the image up
-to the end of the last component its header names as in use, as Linux's
-XSAVE into the frame writes no more: a program that never used AVX-512
-has 832 bytes copied each way, not the whole 2.7 KiB, and
-`signal_return` reads back as much.
+(`UserMode::push_signal_frame`). Of the area, the frame gets the image's
+head and each component its header names as in use, as Linux's XSAVE
+into the frame writes no others: a program that never used AVX-512 has
+832 bytes copied each way, not the whole 2.7 KiB (and 8 more for
+protection keys, past AVX-512's place, where the CPU counts them in
+use), and `signal_return` reads back as much.
 `signal_return` restores every register from the context, so a handler
 may change them, and returns through the slow path, which restores all
 registers rather than SYSRET's subset.
@@ -286,6 +287,16 @@ load; a change to anything polled wakes every poller: fine for a shell,
 its jobs and the system's services, and the next thing to replace with
 per-object wait lists when a profile shows many pollers (see the
 limits).
+
+What an entry found is written back only where it differs from what
+the entry held when it was copied in. A program polls the same array
+again and again, and most entries find what they found the last time,
+ready or idle; such a poll writes nothing, so it needs no second copy,
+and a page of the array still shared after a `fork` stays shared. A
+second thread that rewrites `revents` while the poll runs races with it
+on any system. One difference from Linux follows: a poll of an array in
+read-only memory that changes nothing succeeds, where Linux's fails
+with `EFAULT`.
 
 ## Terminals
 

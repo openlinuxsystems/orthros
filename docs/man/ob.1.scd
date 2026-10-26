@@ -437,27 +437,37 @@ _target/userspace/_).
 		the last of them solid state. The kernel must name them _sda_ to
 		_sdd_ and find their queue depth, write cache and TRIM.
 
+	*storage-nvme*
+		The *storage* test with the same four disks as NVMe namespaces,
+		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on
+		4 CPUs. The kernel must name them _nvme0n1_, _nvme0n2_, _nvme1n1_
+		and _nvme1n2_, the partition _nvme1n2p1_, and give each
+		controller 4 I/O queues with an MSI-X vector for each CPU.
+
 	*disk-raw*
-		Boot 2 CPUs under UEFI with two 8 MiB disks of known bytes, a
-		virtio disk and a solid state SATA disk, and no filesystem.
-		_/system/tests/storage raw vda sda_ asks each disk Linux's block
+		Boot 2 CPUs under UEFI with three 8 MiB disks of known bytes, a
+		virtio disk, a solid state SATA disk and an NVMe namespace, and no
+		filesystem. _/system/tests/storage raw vda sda nvme0n1_ asks each
+		disk Linux's block
 		requests (*radix-block*(2)) and checks them against _/kernel/block_,
 		reads at odd offsets and across the end, writes at odd offsets,
 		parts of sectors and across the end, reads every write back,
 		discards a megabyte, flushes, and checks what is refused: a
 		discard of part of a sector or past the end, a terminal request,
 		and a discard or a write without the write right. On the host,
-		every byte of both disks must be what the writes left, with the
+		every byte of every disk must be what the writes left, with the
 		discarded range zeroed (QEMU punches holes for discards).
 
 	*disk-errors*
-		Boot 2 CPUs under UEFI with one 8 MiB SATA disk through QEMU's
-		*blkdebug* driver, which fails a read of sector 6000 once, and
-		every read of sector 10000 and write of sector 12000.
-		_/system/tests/storage errors sda_ reads the first, which must
-		come back on its retry, and the others, which must end in EIO
-		after five tries each, with a read that reaches the failing
-		sector ending short; then reads and writes elsewhere must work.
+		Boot 2 CPUs under UEFI with an 8 MiB SATA disk and an 8 MiB NVMe
+		namespace through QEMU's *blkdebug* driver, which fails a read
+		of sector 6000 once, and every read of sector 10000 and write of
+		sector 12000. _/system/tests/storage errors sda nvme0n1_ reads the
+		first, which must come back on its retry, and the others, which
+		must end in EIO after five tries each, with a read that reaches
+		the failing sector ending short; then reads and writes elsewhere
+		must work. The kernel must log each failed request, with the
+		NVMe status for the namespace's.
 		The kernel must log each recovery of the port, 16 in all, and
 		the disk must hold on the host what it held before.
 

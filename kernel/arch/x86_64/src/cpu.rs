@@ -255,6 +255,8 @@ pub mod msr {
     pub const GS_BASE: u32 = 0xc000_0101;
     pub const KERNEL_GS_BASE: u32 = 0xc000_0102;
     pub const TSC_DEADLINE: u32 = 0x6e0;
+    pub const XFD: u32 = 0x1c4;
+    pub const XFD_ERR: u32 = 0x1c5;
 }
 
 /// Reads a model-specific register.

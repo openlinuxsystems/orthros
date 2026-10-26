@@ -13,8 +13,8 @@
 // to the first CPU it may run on. With --exit it exits at once: the
 // program the exec benchmark runs. With --disk <device> it also reads
 // and writes that disk, with nothing cached between (the disk
-// benchmarks); `ob bench` gives both systems the same virtio disk, a
-// file on the host.
+// benchmarks), and with --nvme <device> that NVMe disk; `ob bench` gives
+// both systems the same virtio disk and NVMe disk, files on the host.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -392,8 +392,22 @@ static void disk_transfers(int fd, const char *name, int writing, size_t size, u
 
 // The disk benchmarks on the disk at `path`, opened as Linux's disk
 // tools open one to bypass the page cache (Radix's block devices are
-// always raw, and its C library takes O_DIRECT and ignores it).
-static void disk(const char *path) {
+// always raw, and its C library takes O_DIRECT and ignores it): a
+// virtio disk's rows, or with `nvme` an NVMe disk's.
+static void disk(const char *path, int nvme) {
+	static const struct {
+		const char *names[2];
+		int writing;
+		size_t size;
+		uint64_t rounds;
+	} runs[] = {
+		{{"posix_disk_read_4k", "posix_nvme_read_4k"}, 0, 4096, 20000},
+		{{"posix_disk_write_4k", "posix_nvme_write_4k"}, 1, 4096, 20000},
+		{{"posix_disk_read_64k", "posix_nvme_read_64k"}, 0, 64 * 1024, 5000},
+		{{"posix_disk_write_64k", "posix_nvme_write_64k"}, 1, 64 * 1024, 5000},
+		{{"posix_disk_read_mib", "posix_nvme_read_mib"}, 0, 1 << 20, 500},
+		{{"posix_disk_write_mib", "posix_nvme_write_mib"}, 1, 1 << 20, 500},
+	};
 	int fd = open(path, O_RDWR | O_DIRECT);
 	if(fd < 0)
 		fail(path);
@@ -403,21 +417,21 @@ static void disk(const char *path) {
 		       DISK_SPAN);
 		exit(1);
 	}
-	disk_transfers(fd, "posix_disk_read_4k", 0, 4096, 20000);
-	disk_transfers(fd, "posix_disk_write_4k", 1, 4096, 20000);
-	disk_transfers(fd, "posix_disk_read_64k", 0, 64 * 1024, 5000);
-	disk_transfers(fd, "posix_disk_write_64k", 1, 64 * 1024, 5000);
-	disk_transfers(fd, "posix_disk_read_mib", 0, 1 << 20, 500);
-	disk_transfers(fd, "posix_disk_write_mib", 1, 1 << 20, 500);
+	for(size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++)
+		disk_transfers(fd, runs[i].names[nvme], runs[i].writing, runs[i].size, runs[i].rounds);
 	close(fd);
 }
 
 int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "--exit"))
 		return 0;
-	const char *disk_path = NULL;
-	if(argc > 2 && !strcmp(argv[1], "--disk"))
-		disk_path = argv[2];
+	const char *disk_path = NULL, *nvme_path = NULL;
+	for(int i = 1; i + 1 < argc; i += 2) {
+		if(!strcmp(argv[i], "--disk"))
+			disk_path = argv[i + 1];
+		else if(!strcmp(argv[i], "--nvme"))
+			nvme_path = argv[i + 1];
+	}
 	const char *self = argv[0];
 	if(!self || !strchr(self, '/')) {
 		printf("posix-bench: run me by my path, which the exec benchmark runs again\n");
@@ -441,7 +455,9 @@ int main(int argc, char **argv) {
 	if(count > 1)
 		futex_processes("posix_futex_shared_cross_cpu", cpus[1], 50000);
 	if(disk_path)
-		disk(disk_path);
+		disk(disk_path, 0);
+	if(nvme_path)
+		disk(nvme_path, 1);
 	printf("posix-bench: done\n");
 	fflush(stdout);
 	return 0;

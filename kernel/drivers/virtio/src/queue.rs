@@ -244,10 +244,15 @@ impl Queue {
     }
 
     /// Hands the device a chain of `count` buffers, `buffer(0)` first, in
-    /// order: those it reads first, then those it writes. Returns the
-    /// chain's head, which [`Queue::used`] gives back with it. Call
-    /// [`Queue::notify`] after adding.
-    pub fn add(&mut self, count: usize, buffer: impl Fn(usize) -> Buffer) -> Result<u16, Error> {
+    /// order (each asked for once, in that order): those it reads first,
+    /// then those it writes. Returns the chain's head, which
+    /// [`Queue::used`] gives back with it. Call [`Queue::notify`] after
+    /// adding.
+    pub fn add(
+        &mut self,
+        count: usize,
+        mut buffer: impl FnMut(usize) -> Buffer,
+    ) -> Result<u16, Error> {
         if count == 0 || count > usize::from(self.size) {
             return Err(Error::BadRequest);
         }
@@ -271,10 +276,11 @@ impl Queue {
                 if !last {
                     flags |= FLAG_NEXT;
                 }
+                let next = if last { 0 } else { i as u64 + 1 };
+                // The length, flags and next place in one little-endian
+                // word, as the descriptor lays them out.
                 tables.write64(at, phys);
-                tables.write32(at + 8, len);
-                tables.write16(at + 12, flags);
-                tables.write16(at + 14, if last { 0 } else { i as u16 + 1 });
+                tables.write64(at + 8, u64::from(len) | u64::from(flags) << 32 | next << 48);
             }
             let at = Self::desc(head);
             self.memory.write64(at, tables.phys() + table as u64);

@@ -481,7 +481,22 @@ impl SpaceObject {
     ) -> core::result::Result<u64, Fault> {
         self.charge(1).map_err(|_| Fault::NoMemory)?;
         let flags = Flags { zero: anon.file.is_none(), ..Flags::MAY_SLEEP };
-        let Ok(phys) = FRAMES.alloc(0, flags, Owner::Anon) else {
+        // A zeroed page of a region of more than a run, whose page before
+        // is there, is likely one of many a buffer has touched in order:
+        // it takes the next frame of this CPU's run of contiguous ones, so
+        // that the buffer lies in long stretches of memory, which devices
+        // and hypervisors move faster. Smaller regions, which a program's
+        // start fills, keep taking the frames freed last.
+        let in_order = anon.file.is_none()
+            && region.pages >= u64::from(radix_mm::RUN_FRAMES)
+            && page > region.start
+            && Arch::query_entry(&self.arch, page - PAGE_SIZE).is_some();
+        let frame = if in_order {
+            FRAMES.alloc_sequential(flags, Owner::Anon)
+        } else {
+            FRAMES.alloc(0, flags, Owner::Anon)
+        };
+        let Ok(phys) = frame else {
             self.uncharge(1);
             return Err(Fault::NoMemory);
         };
@@ -679,31 +694,30 @@ impl SpaceObject {
         // With the regions locked no page of this space is made or let go
         // of, nor does a fork start.
         let _regions = self.regions.lock();
+        // One walk of the page tables pins them in order; it stops at a
+        // page that is not there (or is read-only for a `write`), or that
+        // cannot be pinned.
         let mut at = address;
-        while at < end {
-            let page = at & !(PAGE_SIZE - 1);
-            let pins = match Arch::query_entry(&self.arch, page) {
-                Some((phys, Some(access))) if !write || access == UserAccess::ReadWrite => {
-                    match FRAMES.info(phys) {
-                        Some(info) if info.owner() == Owner::Anon && info.pin() => Ok(phys),
-                        _ => Err(Pins::Refused),
-                    }
+        let mut refused = false;
+        Arch::frames(&self.arch, address, end, write, &mut |phys| {
+            match FRAMES.info(phys) {
+                Some(info) if info.owner() == Owner::Anon && info.pin() => {}
+                _ => {
+                    refused = true;
+                    return false;
                 }
-                _ => Err(Pins::NotReady),
-            };
-            let phys = match pins {
-                Ok(phys) => phys,
-                Err(pins) => {
-                    for &(phys, _) in frames.iter() {
-                        unpin(phys & !(PAGE_SIZE - 1));
-                    }
-                    frames.clear();
-                    return pins;
-                }
-            };
-            let n = (page + PAGE_SIZE).min(end) - at;
+            }
+            let n = ((at & !(PAGE_SIZE - 1)) + PAGE_SIZE).min(end) - at;
             let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
             at += n;
+            at < end
+        });
+        if at < end {
+            for &(phys, _) in frames.iter() {
+                unpin(phys & !(PAGE_SIZE - 1));
+            }
+            frames.clear();
+            return if refused { Pins::Refused } else { Pins::NotReady };
         }
         self.lending.fetch_add(1, Ordering::AcqRel);
         Pins::All

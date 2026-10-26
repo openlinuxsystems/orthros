@@ -27,7 +27,7 @@ use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Once;
 
-use super::queue::{self, Controller, Disk, Op, Outcome};
+use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
 use super::{Name, Size, partitions, register};
 use crate::Arch;
 
@@ -56,7 +56,7 @@ fn on_interrupt(index: usize) {
         let port = left.trailing_zeros() as usize;
         left &= left - 1;
         if let Some(disk) = host.disks[port].get() {
-            disk.collect();
+            disk.collect(0);
         }
     }
     host.hba.acknowledge(pending);
@@ -90,14 +90,8 @@ impl Controller for SataPort {
         self.port.alone(port_op(op))
     }
 
-    fn submit(
-        &mut self,
-        slot: u8,
-        op: Op,
-        sector: u64,
-        data: &[(u64, u32)],
-        _more: bool,
-    ) -> Result<(), Error> {
+    fn submit(&mut self, slot: u8, request: &Request<'_>, _more: bool) -> Result<(), Error> {
+        let Request { op, sector, data, .. } = *request;
         let tag = self.port.submit(port_op(op), sector, data).map_err(|err| match err {
             radix_ahci::Error::BadRequest => Error::OutOfRange,
             _ => Error::Io,
@@ -120,7 +114,26 @@ impl Controller for SataPort {
         self.port.stopped()
     }
 
-    fn recover(&mut self) {
+    fn recover(lanes: &mut [Part<SataPort>]) {
+        for lane in lanes {
+            lane.recover_port();
+        }
+    }
+
+    fn reset(lanes: &mut [Part<SataPort>]) -> bool {
+        for lane in lanes {
+            lane.reset_link();
+        }
+        true
+    }
+}
+
+impl SataPort {
+    /// Restarts the port after an error stopped it.
+    fn recover_port(&mut self) {
+        if !self.port.stopped() {
+            return;
+        }
         let status = self.port.stop_status().unwrap_or(0);
         self.port.recover(&mut queue::delay);
         let errors = self.port.errors().0;
@@ -140,7 +153,8 @@ impl Controller for SataPort {
         }
     }
 
-    fn reset(&mut self) -> bool {
+    /// Resets the port's link after a request went unanswered too long.
+    fn reset_link(&mut self) {
         self.port.reset(&mut queue::delay);
         if self.port.dead() {
             warn!(
@@ -155,7 +169,6 @@ impl Controller for SataPort {
                 self.name
             );
         }
-        true
     }
 }
 
@@ -255,7 +268,16 @@ fn add(
         rotational: found.rotational.unwrap_or(true),
     };
     let controller = SataPort { port, owner: [0; PORTS], name: name.clone() };
-    let disk = Disk::new(controller, info, found.write_cache, found.fua, interrupt, name.clone());
+    let controller = queue::part(controller).ok_or("out of memory")?;
+    let disk = Disk::new(
+        core::iter::once(controller),
+        info,
+        found.write_cache,
+        found.fua,
+        interrupt,
+        name.clone(),
+    )
+    .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = host.disks[number].set(disk.clone());
     *next += 1;
@@ -274,7 +296,9 @@ fn add(
         if info.discard_sectors > 0 { ", TRIM" } else { "" },
         if info.rotational { "" } else { ", solid state" },
     );
-    let device: DeviceRef = disk;
+    let volume = Volume::new(disk, 0, info);
+    let device: DeviceRef =
+        Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     register(&name, device.clone());
     partitions(&name, &device);
     Ok(())

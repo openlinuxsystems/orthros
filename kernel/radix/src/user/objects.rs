@@ -401,6 +401,32 @@ pub fn find_holding<'a>(
     Ok(found)
 }
 
+/// The object the capability in slot `slot` of `cspace` designates, if
+/// the registry holds one: [`find`] for a caller that wants only the
+/// object, which leaves the capability where it is rather than copy it.
+#[inline(always)]
+pub fn find_object(cspace: SpaceId, slot: u32) -> Option<Object> {
+    let at = SlotRef::new(cspace, slot);
+    let now = caps::version();
+    let index = cache_index(at);
+    'cached: {
+        let Some(cache) = CACHE.own() else { break 'cached };
+        let Some(entry) = &cache[index] else { break 'cached };
+        if entry.at != at || entry.version != now {
+            break 'cached;
+        }
+        return match &entry.object {
+            Some(kept) => match kept.upgrade() {
+                Some(object) => Some(object),
+                // Gone, so the version is about to move: ask the store.
+                None => break 'cached,
+            },
+            None => None,
+        };
+    }
+    fill(at, index).ok()?.object
+}
+
 /// [`find`] when this CPU's cache cannot answer: kept apart, so that a
 /// hit needs neither its registers nor its stack.
 #[cold]

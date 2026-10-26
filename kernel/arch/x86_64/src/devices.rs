@@ -6,9 +6,12 @@
 //!
 //! Vectors [`FIRST`] to [`LAST`] are for devices. [`allocate`] hands one
 //! out with the function it calls; a device raises it by writing the
-//! [`MsiMessage`] it returns: the local APIC's address with the boot CPU's
-//! APIC ID as destination, and the vector, edge-triggered with fixed
-//! delivery (Intel SDM volume 3, "Message Signalled Interrupts"). The
+//! [`MsiMessage`] it returns: the local APIC's address with the APIC ID of
+//! the CPU it is for as destination (the boot CPU's for most devices),
+//! and the vector, edge-triggered with fixed delivery (Intel SDM volume 3,
+//! "Message Signalled Interrupts"). The message has eight bits for the
+//! destination, so a CPU whose APIC ID is above 255 gets the boot CPU's
+//! interrupts instead: naming it would need interrupt remapping. The
 //! dispatcher calls the function, then ends the interrupt. A handler is
 //! read with acquire ordering after its argument was stored, so a vector
 //! whose message a device already knows never runs a half-registered
@@ -36,8 +39,8 @@ static COUNTS: [AtomicU64; COUNT] = [const { AtomicU64::new(0) }; COUNT];
 /// Which device vectors are taken.
 static TAKEN: SpinLock<[bool; COUNT]> = SpinLock::new([false; COUNT]);
 
-/// Takes a free vector for `handler(arg)`.
-pub fn allocate(handler: fn(usize), arg: usize) -> Option<(u32, MsiMessage)> {
+/// Takes a free vector for `handler(arg)`, sent to CPU `cpu`.
+pub fn allocate(cpu: usize, handler: fn(usize), arg: usize) -> Option<(u32, MsiMessage)> {
     let index = {
         let mut taken = TAKEN.lock_irq();
         let index = taken.iter().position(|taken| !taken)?;
@@ -47,7 +50,11 @@ pub fn allocate(handler: fn(usize), arg: usize) -> Option<(u32, MsiMessage)> {
     ARGS[index].store(arg, Ordering::Relaxed);
     HANDLERS[index].store(handler as usize, Ordering::Release);
     let vector = u32::from(FIRST) + index as u32;
-    let destination = u64::from(smp::info(0).map_or(0, |cpu| cpu.hardware_id) & 0xff);
+    let destination = smp::info(cpu)
+        .filter(|found| found.online && found.hardware_id <= 0xff)
+        .or_else(|| smp::info(0))
+        .map_or(0, |found| found.hardware_id & 0xff);
+    let destination = u64::from(destination);
     let message = MsiMessage { address: 0xfee0_0000 | (destination << 12), data: vector };
     Some((vector, message))
 }

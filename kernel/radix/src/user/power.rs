@@ -53,6 +53,7 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
     {
         warn!("Power: a filesystem could not write back its changes: {err}");
     }
+    crate::fs::disk::shutdown();
     // The screen is the log's again, whatever program held it, so the last
     // lines show.
     console::give_back();

@@ -126,3 +126,9 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0112](0112-ahci-from-the-specification.md) | SATA disks through AHCI, written from Intel's specification, in a crate without unsafe code | Accepted |
 | [0113](0113-plain-names-for-the-root-folders.md) | The root's folders have plain names, and Unix's names are hidden links to them | Accepted |
 | [0114](0114-plain-names-inside-system.md) | The folders inside /system have plain names, and Unix's names are hidden links to them | Accepted |
+| [0115](0115-nvme-from-the-specification.md) | NVMe disks, written from the specification, with a queue for each CPU | Accepted |
+| [0116](0116-idle-polling-learns-from-other-cpus.md) | Idle polling learns only from wake-ups that other CPUs send | Accepted |
+| [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted |
+| [0118](0118-frames-in-order-for-memory-written-in-order.md) | Memory written in order gets frames in order, and virtio merges buffers that follow each other | Accepted |
+| [0119](0119-nvme-scatter-gather-lists-for-long-runs.md) | NVMe data in long runs of memory go as scatter gather lists | Accepted |
+| [0120](0120-extended-state-matches-the-host.md) | Extended state enables what the host's does, with AMX held off | Accepted |

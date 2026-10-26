@@ -409,8 +409,9 @@ fn check_sys(root: &Dir, volumes: &[String]) {
         }
         Err(err) => fail(&format!("/kernel/version: {err}")),
     }
-    // Every `vd` disk is a virtio block device, PCI vendor 0x1af4, and
-    // every `sd` disk is on an AHCI controller, class 0x010601.
+    // Every `vd` disk is a virtio block device, PCI vendor 0x1af4, every
+    // `sd` disk is on an AHCI controller, class 0x010601, and every
+    // `nvme` one on an NVMe controller, class 0x010802.
     match root.open_dir("kernel/bus/pci/devices", Rights::READ).and_then(|dir| dir.entries()) {
         Ok(functions) => {
             let count = |file: &str, value: &[u8]| {
@@ -423,14 +424,20 @@ fn check_sys(root: &Dir, volumes: &[String]) {
                     .count()
             };
             let (virtio, ahci) = (count("vendor", b"0x1af4\n"), count("class", b"0x010601\n"));
+            let nvme = count("class", b"0x010802\n");
             let on = |prefix: &str| volumes.iter().filter(|name| name.starts_with(prefix)).count();
-            check(virtio >= on("vd") && (ahci > 0 || on("sd") == 0), || {
-                format!(
-                    "/kernel/bus/pci/devices lists {virtio} virtio functions and {ahci} AHCI ones"
-                )
-            });
+            check(
+                virtio >= on("vd") && (ahci > 0 || on("sd") == 0) && (nvme > 0 || on("nvme") == 0),
+                || {
+                    format!(
+                        "/kernel/bus/pci/devices lists {virtio} virtio functions, {ahci} AHCI \
+                         ones and {nvme} NVMe ones"
+                    )
+                },
+            );
             println!(
-                "storage: /kernel/bus/pci/devices: {} functions, {virtio} of them virtio, {ahci} AHCI",
+                "storage: /kernel/bus/pci/devices: {} functions, {virtio} of them virtio, {ahci} \
+                 AHCI, {nvme} NVMe",
                 functions.len()
             );
         }

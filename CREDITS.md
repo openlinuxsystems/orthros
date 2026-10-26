@@ -215,6 +215,11 @@ We implement these from their published descriptions. No code is copied.
   which `radix-ahci` drives SATA disks: native command queuing, TRIM, the
   NCQ Command Error log and error recovery
   ([ADR 0112](docs/adr/0112-ahci-from-the-specification.md)).
+- The NVM Express Base Specification, revision 2.0, and the NVM Command
+  Set Specification, revision 1.0 (NVM Express, Inc.), from which
+  `radix-nvme` drives NVMe controllers: queue pairs, PRP lists, Identify,
+  Dataset Management, controller reset and shutdown
+  ([ADR 0115](docs/adr/0115-nvme-from-the-specification.md)).
 - The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
   BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
   devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).

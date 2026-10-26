@@ -765,10 +765,10 @@ pub fn push_signal_frame(signal: &SignalFrame<'_>) -> bool {
     // its extended state stays as just saved, so a switch meanwhile writes
     // the same image again.
     let image = unsafe { core::slice::from_raw_parts(area as *const u8, size as usize) };
-    let used = fpu::used_size(image);
     if !copy_to_user(base, &signal.restorer.to_le_bytes())
         || !copy_to_user(context, &bytes)
-        || !copy_to_user(fpstate, &image[..used])
+        || !fpu::used_parts(image)
+            .all(|part| copy_to_user(fpstate + part.start as u64, &image[part]))
     {
         return false;
     }
@@ -865,11 +865,14 @@ pub fn pop_signal_frame(context: u64, regs: &mut SyscallRegs) -> Option<u64> {
             // Interrupts are masked, so a page that is not there is not
             // made; each was touched above, so only one given back since
             // fails the copy. The head comes first, and is made safe:
-            // its header says how much follows.
+            // its header says which parts follow.
             let copied = copy_from_user(&mut image[..head], fpstate) && {
                 fpu::sanitize(&mut image[..head]);
-                let used = fpu::used_size(&image[..head]);
-                used <= head || copy_from_user(&mut image[head..used], fpstate + head as u64)
+                fpu::used_parts(&image[..head]).all(|part| {
+                    let from = part.start.max(head);
+                    from >= part.end
+                        || copy_from_user(&mut image[from..part.end], fpstate + from as u64)
+                })
             };
             if copied {
                 fpu::restore(area);
@@ -918,6 +921,13 @@ pub fn exception(vector: u8, frame: &TrapFrame) {
         0 => UserFaultKind::Divide,
         3 => UserFaultKind::Breakpoint,
         6 => UserFaultKind::InvalidOpcode,
+        // Only an AMX instruction, which XFD holds off, raises #NM: it is
+        // an invalid instruction, as it was with AMX off in XCR0 and as it
+        // is in Linux for a program that has not asked for AMX.
+        7 => {
+            fpu::end_held_fault();
+            UserFaultKind::InvalidOpcode
+        }
         13 => UserFaultKind::Protection,
         14 => UserFaultKind::Page {
             address: cpu::cr2(),

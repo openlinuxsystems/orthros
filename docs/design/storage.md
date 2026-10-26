@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 This note describes Radix's storage as of Phase 7, with the disks of
 Phase 10: the virtual file system and its capability-relative paths,
 directory and file objects, the page cache and the block cache, the
-block layer, the disk queue and its virtio and AHCI drivers, raw access
+block layer, the disk queue and its virtio, AHCI and NVMe drivers, raw access
 to block devices, FAT, tmpfs and the generated trees, writeback and
 reclaim, and the hierarchy Spark builds. It ends with the semi-formal
 arguments that paths never leave their directory and that freed
@@ -16,7 +16,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111 and 0112.
+0052 to 0059, 0111, 0112, 0115 and 0117.
 
 ## Crates
 
@@ -28,6 +28,8 @@ kernel/drivers/virtio   radix-virtio: the modern PCI transport, split
                         virtqueues, virtio-blk (compartment)
 kernel/drivers/ahci     radix-ahci: AHCI controllers and their SATA
                         disks (compartment, Phase 10)
+kernel/drivers/nvme     radix-nvme: NVMe controllers, their queue pairs
+                        and namespaces (compartment, Phase 10)
 kernel/fs/block         radix-block: block devices, MBR and GPT, the block
                         cache, the page index (pagemap), RAM disks for tests
                         (compartment)
@@ -201,9 +203,11 @@ describes (`radix_hw::pci::scan`: every bus from the segment's first,
 through PCI-to-PCI bridges, with each function's BARs sized), logs each
 function, and binds the disks it has drivers for: virtio block devices
 (`vda`, `vdb` and on) and, since Phase 10, the SATA disks of AHCI
-controllers (`sda`, `sdb` and on). It then reads each disk's partition
-table and names each partition as Linux would (`vda1`, `sda1`), for
-`/devices` and `/kernel/block`.
+controllers (`sda`, `sdb` and on) and the namespaces of NVMe controllers
+(`nvme0n1`, `nvme0n2`, `nvme1n1` and on). It then reads each disk's
+partition table and names each partition as Linux would (`vda1`, `sda1`,
+and `nvme0n1p1` after a name that ends in a digit), for `/devices` and
+`/kernel/block`.
 
 Binding a virtio block device:
 
@@ -224,24 +228,50 @@ cache, FUA and TRIM) and becomes a disk. A controller that cannot reach
 memory above 4 GiB is refused, and ATAPI devices and port multipliers
 are logged and left alone.
 
+Binding an NVMe controller (`radix-nvme`, ADR 0115) maps its registers
+(BAR 0), disables it, gives it an admin queue of 32 entries, enables it
+with 4 KiB pages and the NVM command set, and asks what it is (Identify)
+and for as many I/O queues as there are CPUs, at most 16. Each queue
+pair, a *lane* of the queue below, has 64 entries and an MSI-X vector
+aimed at its CPU (`allocate_interrupt_at`); the admin queue is polled.
+A controller that takes shadow doorbells (Doorbell Buffer Config, OACS
+bit 8), as QEMU's does, is given two pages for them before its queues
+are made, and again after a reset (ADR 0117): a lane then writes each
+doorbell to memory, and its register only when the controller's event
+index asks.
+Each active namespace with 512-byte blocks and no metadata becomes a
+disk, its requests naming it; its physical block is the size it is best
+written in, but no more than what is whole after a power failure. At
+power off, after the filesystems are written back, every disk's cache is
+flushed and each NVMe controller is shut down normally (CC.SHN).
+
 ### The queue
 
 Every disk's requests go through one queue (`fs/disk/queue.rs`, ADR
-0111), and a driver is a `Controller` below it. A request takes one of
-64 slots, as many as the I/O class and level of its thread allow (ADR
+0111), and a driver is a `Controller` below it, in one *lane* or more:
+each lane has its own lock, slots and waiting threads, and a thread's
+requests go to its CPU's lane. An NVMe controller has a lane for each
+CPU, shared by its namespaces (ADR 0115); an AHCI port and a virtio disk
+have one. A request takes one of a lane's 64 slots, as many as the I/O
+class and level of its thread allow, counted across the lanes (ADR
 0093), and the controller starts it: virtio as a descriptor chain (the
 header, the data segments, the status byte) matched to its slot by the
 chain's head, AHCI as a command in the port's command list, the slot's
-number its NCQ tag. When the device takes indirect descriptors, as
+number its NCQ tag, NVMe as a command in the lane's submission queue,
+the slot's number its command ID, its data in a PRP list of the slot's
+own (up to 128 pages, or fewer when the controller says), or, when the
+controller takes them and the data lie in runs of memory averaging 32
+KiB or more, in a scatter gather list of those runs (ADR 0119). When the device takes indirect descriptors, as
 QEMU's and most do, each virtio chain goes in a table of its own, one of
 64 the driver keeps, and takes one entry of the ring; a request then
-has up to 126 data segments, and 30 without them. With event indexes
+has up to 254 data segments, and 30 without them. With event indexes
 (`VIRTIO_F_EVENT_IDX`) the driver rings the doorbell only when the
 device asked to be told, and the device interrupts only for the first
 completion after the driver has read every one before it, so that a
 batch of completions raises one interrupt, as Linux's driver has it.
 The interrupt handler collects what finished
-and wakes the waiting threads, each of which frees its own slot. Many
+and wakes the thread waiting on each finished slot (each thread waits
+on its own), which frees it. Many
 threads have requests in flight at once, up to the slots the controller
 has.
 
@@ -249,9 +279,11 @@ A request the controller says goes alone (an ATA flush or TRIM, or any
 command to a disk without NCQ) waits for the disk to empty, and while
 it waits, requests of its rank and below that come after it wait behind
 it; more urgent ones still pass, so nothing urgent waits on a flush of
-idle work. A failed request ends in EIO. One the controller hands back
-to go again, because another command's error stopped it or a reset
-cleared it, goes again, five times at most.
+idle work. A failed request ends in EIO, and the log says which it was
+and what the controller said of it (an NVMe status), at most 10 of a
+disk's in 5 seconds. One the controller hands back to go again, because
+another command's error stopped it, a reset cleared it, or its NVMe
+status does not say Do Not Retry, goes again, five times at most.
 
 An AHCI port that an error stops turns its interrupts off and says so.
 The next thread to wake on the disk takes the controller out of the
@@ -260,7 +292,9 @@ read the NCQ error log or reset the link, start again), and puts it
 back, while the interrupt handler leaves the disk alone. A request
 unanswered for 30 seconds has its thread reset the port the same way;
 a disk that does not come back, or comes back as another disk, fails
-every request from then on.
+every request from then on. An NVMe controller is reset the same way:
+disabled, enabled again and its queue pairs made again, every request
+in flight sent again; one that does not come back fails its requests.
 
 ### Raw access
 
@@ -295,14 +329,17 @@ bytes moved ends the transfer short. `fsync` empties the disk's write
 cache.
 
 A raw transfer's requests take as many parts of pages as the device
-does, not the 16 the page cache's take: 126 on a virtio disk, so a
-mebibyte is three requests, and 32 on an AHCI disk. A transfer of more
+does, not the 16 the page cache's take: 254 on a virtio disk, so a
+mebibyte is two requests, as in Linux, 32 on an AHCI disk, and 128 on
+most NVMe disks. A transfer of more
 goes as several (`Disk::request_all`), up to 16 in flight at once, and
 each is settled, retried or failed, before the call returns, even after
 another failed, since the device may still be reaching the memory. The
 device hears of them together: virtio-blk rings its doorbell once, after
 the last, which lets QEMU merge requests for adjacent sectors into one
-read or write of its file.
+read or write of its file. The thread waits for the last request first,
+so the earlier ones' completions, which usually come before it, wake no
+one (ADR 0116).
 
 `ioctl` on a block device takes Linux's requests (radix-block(2)): the
 size in bytes and in sectors, the logical and physical sector sizes, the
@@ -417,10 +454,13 @@ From outermost to innermost:
 7. a FAT node's `meta` (one at a time);
 8. a FAT volume's `space`;
 9. the block cache;
-10. the disk's queue (with interrupts off).
+10. a lane of the disk's queue (with interrupts off), one at a time.
 
 A block device node's lock for raw writes of parts of sectors is taken
-with nothing else held, and its holder takes only the disk's queue. A
+with nothing else held, and its holder takes only the disk's queue. An
+NVMe controller's own lock is taken by its setup, its shutdown and its
+reset, with no lane's lock held (a reset has every lane's part out of
+its lock); the disk's count of logged failures is taken alone. A
 raw transfer lends a program's pages under its address space's regions
 lock, with nothing else held, and lets go of the lock before the disk
 works; a fork holds it while it waits for such transfers to end.

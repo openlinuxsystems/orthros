@@ -153,7 +153,7 @@ pub fn start(byte: fn(u8)) -> Option<&'static str> {
     // Scanning on. A keyboard that does not answer may still send keys.
     let answered = write(DATA, ENABLE_SCANNING) && read_waiting() == Some(ACK);
     BYTE.call_once(|| byte);
-    let Some((vector, _)) = devices::allocate(interrupt, 0) else {
+    let Some((vector, _)) = devices::allocate(0, interrupt, 0) else {
         radix_klog::warn!("Keyboard: no interrupt vector is free");
         return None;
     };

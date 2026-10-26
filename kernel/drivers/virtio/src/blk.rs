@@ -16,8 +16,8 @@
 //! indexes, read-only disks, the block size, cache flushes, discards and
 //! the segment limits. With indirect descriptors a request takes one
 //! entry of the ring and up to [`TABLE_SEGMENTS`] data buffers, in a
-//! table of its own, as Linux's requests do: a mebibyte of pages is three
-//! requests. Without them a request is at most [`RING_SEGMENTS`] buffers,
+//! table of its own, as Linux's requests do: a mebibyte of pages is two
+//! requests, as in Linux. Without them a request is at most [`RING_SEGMENTS`] buffers,
 //! so that several fit in the ring at once.
 
 use radix_hw::{Dma, device_barrier};
@@ -52,12 +52,19 @@ const HEADER: usize = 16;
 /// A discard's range: its first sector, its length and flags (none).
 const RANGE: usize = 16;
 /// The most data buffers in a request in a table of its own, whatever
-/// the device takes: with its header and status, 128 descriptors, a table
-/// of 2 KiB.
-pub const TABLE_SEGMENTS: u32 = 126;
+/// the device takes: with its header and status, 256 descriptors, a table
+/// of 4 KiB. QEMU's devices take as many (`seg_max`, their queue's size
+/// less two).
+pub const TABLE_SEGMENTS: u32 = 254;
 /// The most data buffers in a request in the ring, without indirect
 /// descriptors: eight of them fill a ring of 256.
 pub const RING_SEGMENTS: u32 = 30;
+
+/// Whether a buffer at `phys` of `len` bytes goes on from one that ends
+/// at `end` and holds `sum` bytes, in one descriptor of at most `most`.
+fn follows(end: u64, sum: u32, phys: u64, len: u32, most: u32) -> bool {
+    phys == end && sum.checked_add(len).is_some_and(|total| total <= most)
+}
 
 /// What a request does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,7 +244,27 @@ impl Blk {
     /// request held back meanwhile, so that the device takes them
     /// together.
     pub fn submit_held(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u16, Error> {
-        let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
+        // Every buffer's length is checked as it is summed, and buffers
+        // that follow each other in memory are counted as the one
+        // descriptor they share, up to the device's longest segment, as
+        // Linux merges them.
+        let most =
+            if self.info.max_segment_size == 0 { u32::MAX } else { self.info.max_segment_size };
+        let (mut bytes, mut sizes_ok, mut pieces) = (0u64, true, 0usize);
+        let mut run: Option<(u64, u32)> = None;
+        for &(phys, len) in data {
+            bytes += u64::from(len);
+            sizes_ok &= len > 0 && len <= most;
+            run = match run {
+                Some((end, sum)) if follows(end, sum, phys, len, most) => {
+                    Some((phys + u64::from(len), sum + len))
+                }
+                _ => {
+                    pieces += 1;
+                    Some((phys + u64::from(len), len))
+                }
+            };
+        }
         let fits =
             |sectors: u64| sector.checked_add(sectors).is_some_and(|end| end <= self.info.sectors);
         let valid = match op {
@@ -252,12 +279,8 @@ impl Blk {
             Op::Read | Op::Write => {
                 !data.is_empty()
                     && bytes.is_multiple_of(SECTOR)
-                    && data.len() <= self.info.max_segments as usize
-                    && data.iter().all(|&(_, len)| {
-                        len > 0
-                            && (self.info.max_segment_size == 0
-                                || len <= self.info.max_segment_size)
-                    })
+                    && pieces <= self.info.max_segments as usize
+                    && sizes_ok
                     && fits(bytes / SECTOR)
                     && !(op == Op::Write && self.info.read_only)
             }
@@ -265,7 +288,7 @@ impl Blk {
         if !valid {
             return Err(Error::BadRequest);
         }
-        let buffers = if matches!(op, Op::Discard(_)) { 1 } else { data.len() };
+        let buffers = if matches!(op, Op::Discard(_)) { 1 } else { pieces };
         if self.queue.room(buffers + 2) == 0 {
             return Err(Error::Full);
         }
@@ -294,7 +317,9 @@ impl Blk {
             self.slots.write32(range + 12, 0);
         }
         let slots = self.slots.phys();
-        // The header, the data (or a discard's range), the status byte.
+        // The header, the data (or a discard's range), the status byte;
+        // the data's buffers merged as they were counted.
+        let mut next = 0;
         let chain = |i: usize| match i {
             0 => Buffer { phys: slots + header as u64, len: HEADER as u32, device_writes: false },
             i if i == buffers + 1 => {
@@ -303,8 +328,15 @@ impl Blk {
             _ if matches!(op, Op::Discard(_)) => {
                 Buffer { phys: slots + range as u64, len: RANGE as u32, device_writes: false }
             }
-            i => {
-                let (phys, len) = data[i - 1];
+            _ => {
+                let (phys, mut len) = data[next];
+                next += 1;
+                while let Some(&(more, more_len)) = data.get(next)
+                    && follows(phys + u64::from(len), len, more, more_len, most)
+                {
+                    len += more_len;
+                    next += 1;
+                }
                 Buffer { phys, len, device_writes: op == Op::Read }
             }
         };

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0093. Threads have Linux's CPU affinity, and processes Linux's I/O classes
 
-- Status: Accepted
+- Status: Accepted; an NVMe disk has a queue for each CPU since [0115](0115-nvme-from-the-specification.md)
 - Date: 2026-10-23
 
 ## Context

@@ -352,7 +352,15 @@ impl Devices for Arch {
     }
 
     fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hal::MsiMessage)> {
-        devices::allocate(handler, arg)
+        devices::allocate(0, handler, arg)
+    }
+
+    fn allocate_interrupt_at(
+        cpu: usize,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<(u32, radix_hal::MsiMessage)> {
+        devices::allocate(cpu, handler, arg)
     }
 
     fn free_interrupt(vector: u32) {
@@ -518,6 +526,16 @@ impl UserMode for Arch {
             return None;
         }
         space.space().entry(virt).map(|(phys, access)| (phys, access.map(space::user_access)))
+    }
+
+    fn frames(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        write: bool,
+        each: &mut dyn FnMut(u64) -> bool,
+    ) {
+        space.space().frames(start, end.min(user::USER_TOP), write, each);
     }
 
     fn set_entry(

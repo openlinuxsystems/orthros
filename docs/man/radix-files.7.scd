@@ -213,7 +213,11 @@ _/users_ and _/shared_ are empty directories of the root's tmpfs.
 
 At boot the kernel finds each disk, reads its partition table (MBR or
 GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
-virtio disks, _sda_, _sdb_ for SATA disks, _vda1_ for a partition. Each
+virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_, _nvme0n2_ for the
+namespaces of the first NVMe controller and _nvme1n1_ for the second's,
+_vda1_ for a partition, and _nvme0n1p1_ after a name that ends in a digit.
+When the machine is powered off or restarted, every disk's write cache is
+emptied and each NVMe controller is shut down. Each
 appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts past
 the disk's end is skipped, an MBR one that reaches past it is cut to end
 there, and an extended partition shows only its first two sectors. Spark
@@ -252,8 +256,18 @@ Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block,
 Disk: vda has no partition table; it is used whole
 Disk: AHCI 1.0 controller at 0000:00:1f.2: 6 ports, 32 command slots, NCQ, MSI vector 0x54
 Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a block, NCQ depth 32, write cache, TRIM
+Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells, scatter gather lists
+Disk: nvme0n1 is an NVMe namespace of 64 MiB: QEMU NVMe Ctrl, 512 bytes a block, write cache, deallocates
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 ```
+
+*Disk:* _name_*: a read of* _n_ *sectors from sector* _s_ *failed after* _t_ *tries:* _why_
+	A request failed for good, and the program that made it got *io*
+	(EIO). It names the request (*a read*, *a write*, *a discard* or
+	*a flush*), how many times it went to the disk when more than once,
+	and what the disk said: for NVMe, its status (*unrecovered read
+	error*, *write fault*, ...), otherwise *an I/O error*. At most 10
+	such lines are logged for each disk in 5 seconds.
 
 *Disk:* _name_*: an error stopped its port (status* _bits_*); it runs again (*_n_* errors since boot)*
 	A SATA disk reported an error, or the link to it failed, and the
@@ -263,6 +277,12 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 *Disk:* _name_*: a request went unanswered for 30 s; the link was reset, and what was in flight goes again*
 	A SATA disk stopped answering, and its link was reset.
+
+*Disk:* _name_*: a request went unanswered for 30 s; the controller was reset, and what was in flight goes again*
+	An NVMe controller stopped answering, or said it failed, and was
+	disabled and enabled again, its queues made again. When it does
+	not come back, the line ends instead in *its disks are gone, and
+	their requests fail*.
 
 	When the disk does not come back, or another one is there after
 	the reset, the line ends instead in *the disk is gone, and its
@@ -275,10 +295,10 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 # LIMITS
 
-- virtio block devices and SATA disks on AHCI controllers have drivers;
-  NVMe comes later in Phase 10, USB storage in Phase 11. Port
-  multipliers, optical drives and disks with 4096-byte logical sectors
-  are not supported.
+- virtio block devices, SATA disks on AHCI controllers and NVMe
+  namespaces have drivers; USB storage comes in Phase 11. Port
+  multipliers, optical drives, disks with 4096-byte logical sectors and
+  NVMe namespaces with metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
 - There is no name cache, no read-ahead and no hot plug yet.
