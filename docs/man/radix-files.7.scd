@@ -256,7 +256,7 @@ Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block,
 Disk: vda has no partition table; it is used whole
 Disk: AHCI 1.0 controller at 0000:00:1f.2: 6 ports, 32 command slots, NCQ, MSI vector 0x54
 Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a block, NCQ depth 32, write cache, TRIM
-Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells
+Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells, scatter gather lists
 Disk: nvme0n1 is an NVMe namespace of 64 MiB: QEMU NVMe Ctrl, 512 bytes a block, write cache, deallocates
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 ```

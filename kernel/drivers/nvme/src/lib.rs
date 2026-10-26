@@ -571,7 +571,8 @@ impl Nvme {
         }
         let doorbells = self.doorbells(id).ok_or(Error::Registers)?;
         let memory = alloc(MEMORY_PAGES).ok_or(Error::NoMemory)?;
-        let mut lane = Lane::new(memory, doorbells, id, vector, self.identity.max_pages);
+        let mut lane =
+            Lane::new(memory, doorbells, id, vector, self.identity.max_pages, self.identity.sgls);
         self.remake(&mut lane, delay)?;
         Ok(lane)
     }

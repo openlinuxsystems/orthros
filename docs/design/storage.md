@@ -259,7 +259,9 @@ header, the data segments, the status byte) matched to its slot by the
 chain's head, AHCI as a command in the port's command list, the slot's
 number its NCQ tag, NVMe as a command in the lane's submission queue,
 the slot's number its command ID, its data in a PRP list of the slot's
-own (up to 128 pages, or fewer when the controller says). When the device takes indirect descriptors, as
+own (up to 128 pages, or fewer when the controller says), or, when the
+controller takes them and the data lie in runs of memory averaging 32
+KiB or more, in a scatter gather list of those runs (ADR 0119). When the device takes indirect descriptors, as
 QEMU's and most do, each virtio chain goes in a table of its own, one of
 64 the driver keeps, and takes one entry of the ring; a request then
 has up to 254 data segments, and 30 without them. With event indexes

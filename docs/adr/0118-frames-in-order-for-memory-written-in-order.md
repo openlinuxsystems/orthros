@@ -80,6 +80,6 @@ for each.
   longer take them, so a cache passes its limit and gives a batch back to
   its zone more often: a buddy merge for each frame it gives back.
 - NVMe takes one PRP entry per page whatever the frames are; scatter
-  gather lists could take whole runs later.
+  gather lists take whole runs (ADR 0119).
 - A CPU may hold up to 32 frames of its run beyond its cache, until the
   caches are emptied.

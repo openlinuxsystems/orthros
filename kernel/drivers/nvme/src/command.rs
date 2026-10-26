@@ -3,7 +3,8 @@
 
 //! Commands and their completions (NVM Express Base Specification 2.0,
 //! sections 4.2 and 4.6), what a completion's status says, and the lists
-//! of pages a command's data are in (PRP lists, 4.1.1).
+//! a command's data are in: of pages (PRP lists, 4.1.1), or of runs of
+//! memory (scatter gather lists, 4.1.2).
 
 /// The size of a submission queue entry, a command.
 pub const COMMAND_SIZE: usize = 64;
@@ -14,6 +15,20 @@ pub const COMPLETION_SIZE: usize = 16;
 pub const PAGE: u64 = 4096;
 /// The most entries one command's PRP list holds: a kibibyte of them.
 pub const LIST_ENTRIES: usize = 128;
+/// The most descriptors one command's scatter gather list holds, in the
+/// same kibibyte.
+pub const SGL_ENTRIES: usize = LIST_ENTRIES * 8 / 16;
+/// The average length of the runs of memory a command's data are in from
+/// which they go as a scatter gather list rather than PRPs, as Linux's
+/// `sgl_threshold` has it: shorter runs take no fewer entries.
+pub const SGL_FROM: u64 = 32 * 1024;
+/// SGL descriptor types (4.1.2.1), in the high half of a descriptor's
+/// last byte, whose low half (0, an address) is the same for both.
+const DATA_BLOCK: u64 = 0x0;
+const LAST_SEGMENT: u64 = 0x3;
+/// Command dword 0's PSDT field (bits 15:14) for data in a scatter gather
+/// list (and metadata, which no command here has, in one buffer).
+const PSDT_SGL: u32 = 1 << 14;
 
 /// Admin command opcodes (5).
 pub mod admin {
@@ -77,9 +92,14 @@ pub struct Command {
     pub id: u16,
     /// The namespace it is for (NSID), 0 for none.
     pub namespace: u32,
-    /// The first data pointer: the first page of the data, at an offset.
+    /// Whether the data pointer is a scatter gather list's first
+    /// descriptor ([`sgl`]) rather than PRPs.
+    pub sgl: bool,
+    /// The first data pointer: the first page of the data, at an offset;
+    /// or a descriptor's address.
     pub prp1: u64,
-    /// The second: the second page, or the PRP list of the others.
+    /// The second: the second page, or the PRP list of the others; or a
+    /// descriptor's length and type.
     pub prp2: u64,
     /// Command dwords 10 to 15.
     pub dwords: [u32; 6],
@@ -89,7 +109,8 @@ impl Command {
     /// The 64 bytes the controller reads.
     pub fn bytes(&self) -> [u8; COMMAND_SIZE] {
         let mut out = [0u8; COMMAND_SIZE];
-        let dword0 = u32::from(self.opcode) | (u32::from(self.id) << 16);
+        let psdt = if self.sgl { PSDT_SGL } else { 0 };
+        let dword0 = u32::from(self.opcode) | psdt | (u32::from(self.id) << 16);
         out[0..4].copy_from_slice(&dword0.to_le_bytes());
         out[4..8].copy_from_slice(&self.namespace.to_le_bytes());
         out[24..32].copy_from_slice(&self.prp1.to_le_bytes());
@@ -336,6 +357,67 @@ pub fn prps(data: &[(u64, u32)], list_phys: u64) -> Result<(u64, u64), Gap> {
     Ok((first, prp2))
 }
 
+/// The runs of memory the buffers in `data` make: each buffer merged with
+/// those that follow it in memory, (address, length).
+fn runs(data: &[(u64, u32)]) -> impl Iterator<Item = (u64, u64)> + '_ {
+    let mut rest = data;
+    core::iter::from_fn(move || {
+        let (&(start, len), more) = rest.split_first()?;
+        let mut end = start.wrapping_add(u64::from(len));
+        rest = more;
+        while let Some((&(phys, len), more)) = rest.split_first()
+            && phys == end
+        {
+            end = end.wrapping_add(u64::from(len));
+            rest = more;
+        }
+        Some((start, end.wrapping_sub(start)))
+    })
+}
+
+/// The data pointer of a command whose data are in `data` (physical
+/// address, length) as a scatter gather list, for a controller that takes
+/// them: a data block descriptor for each run of memory the buffers make,
+/// which `put` writes (the descriptor's place and its two words) to the
+/// list at `list_phys` if there is more than one. Returns the two words of
+/// the descriptor the command holds: the one data block, or the last
+/// segment descriptor of the list. `None`, for PRPs, if a buffer is empty
+/// or not dword aligned, or the runs are more than [`SGL_ENTRIES`] or
+/// shorter than [`SGL_FROM`] on average, as Linux decides.
+pub fn sgl(
+    data: &[(u64, u32)],
+    list_phys: u64,
+    mut put: impl FnMut(usize, u64, u64),
+) -> Option<(u64, u64)> {
+    let fits = |&(phys, len): &(u64, u32)| {
+        len > 0
+            && phys.is_multiple_of(4)
+            && len.is_multiple_of(4)
+            && phys.checked_add(len.into()).is_some()
+    };
+    let bytes = data
+        .iter()
+        .try_fold(0u64, |sum, buffer| fits(buffer).then(|| sum + u64::from(buffer.1)))?;
+    let (count, longest) =
+        runs(data).fold((0usize, 0), |(count, longest), (_, len)| (count + 1, longest.max(len)));
+    if count == 0
+        || count > SGL_ENTRIES
+        || longest > u64::from(u32::MAX)
+        || bytes.div_ceil(count as u64) < SGL_FROM
+    {
+        return None;
+    }
+    let descriptor = |len: u64, kind: u64| len | kind << 60;
+    if count == 1 {
+        let (start, len) = runs(data).next()?;
+        return Some((start, descriptor(len, DATA_BLOCK)));
+    }
+    for (i, (start, len)) in runs(data).enumerate() {
+        put(i, start, descriptor(len, DATA_BLOCK));
+    }
+    Some((list_phys, descriptor(16 * count as u64, LAST_SEGMENT)))
+}
+
 #[cfg(kani)]
 mod proofs {
     use super::*;
@@ -365,6 +447,50 @@ mod proofs {
             for &(phys, len) in &data[..count - 1] {
                 assert_eq!(phys % PAGE + u64::from(len), PAGE);
             }
+        }
+    }
+
+    /// What [`sgl`] makes covers the buffers' bytes, in order: one data
+    /// block of them all, or a last segment descriptor of a list of data
+    /// blocks, each of whole buffers that follow each other in memory.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn sgls_describe_the_buffers() {
+        let data: [(u64, u32); 3] = kani::any();
+        let count: usize = kani::any_where(|&c: &usize| c <= 3);
+        let list_phys: u64 = kani::any();
+        let mut list = [(0u64, 0u64); 3];
+        let mut puts = 0;
+        let found = sgl(&data[..count], list_phys, |i, address, rest| {
+            assert!(i == puts && i < 3);
+            list[i] = (address, rest);
+            puts += 1;
+        });
+        if let Some((first, second)) = found {
+            let single = [(first, second)];
+            let blocks = if puts == 0 {
+                &single[..]
+            } else {
+                assert_eq!(first, list_phys);
+                assert_eq!(second, 16 * puts as u64 | LAST_SEGMENT << 60);
+                &list[..puts]
+            };
+            let (mut at, mut sum) = (0, 0u64);
+            for &(address, rest) in blocks {
+                assert_eq!(rest >> 32, DATA_BLOCK);
+                let len = rest & 0xffff_ffff;
+                let mut covered = 0u64;
+                while covered < len {
+                    assert!(at < count);
+                    assert_eq!(data[at].0, address.wrapping_add(covered));
+                    covered += u64::from(data[at].1);
+                    at += 1;
+                }
+                assert_eq!(covered, len);
+                sum += len;
+            }
+            assert_eq!(at, count);
+            assert_eq!(sum, data[..count].iter().map(|&(_, len)| u64::from(len)).sum::<u64>());
         }
     }
 

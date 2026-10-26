@@ -130,3 +130,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0116](0116-idle-polling-learns-from-other-cpus.md) | Idle polling learns only from wake-ups that other CPUs send | Accepted |
 | [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted |
 | [0118](0118-frames-in-order-for-memory-written-in-order.md) | Memory written in order gets frames in order, and virtio merges buffers that follow each other | Accepted |
+| [0119](0119-nvme-scatter-gather-lists-for-long-runs.md) | NVMe data in long runs of memory go as scatter gather lists | Accepted |

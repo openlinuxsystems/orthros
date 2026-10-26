@@ -93,6 +93,10 @@ struct State {
     /// event indexes it was given.
     offers_shadow: bool,
     shadow: Option<(u64, u64)>,
+    /// Whether it takes scatter gather lists, and how many data blocks
+    /// each I/O command that came with one had.
+    offers_sgl: bool,
+    sgl_blocks: Vec<usize>,
     /// Each I/O completion queue's head, as the controller last heard of
     /// it: from its register or its shadow doorbell.
     heads: HashMap<u16, u16>,
@@ -151,6 +155,32 @@ fn data_pages(prp1: u64, prp2: u64, bytes: u64) -> Vec<(u64, u64)> {
         entry += 8;
     }
     pages
+}
+
+/// The runs of memory an I/O command's `len` bytes of data are in: from
+/// its PRPs, or from its scatter gather list, whose data blocks' count
+/// goes in `sgl_blocks`.
+fn data_of(command: &[u8; COMMAND_SIZE], len: u64, sgl_blocks: &mut Vec<usize>) -> Vec<(u64, u64)> {
+    let (first, second) = (qword(command, 24), qword(command, 32));
+    if command[1] >> 6 == 0 {
+        return data_pages(first, second, len);
+    }
+    assert_eq!(command[1] >> 6, 1, "PSDT: data in an SGL, no metadata");
+    let blocks: Vec<(u64, u64)> = match command[39] {
+        0x00 => std::vec![(first, second & 0xffff_ffff)],
+        0x30 => (0..(second & 0xffff_ffff) / 16)
+            .map(|i| {
+                let mut descriptor = [0u8; 16];
+                fake_memory(first + 16 * i, &mut descriptor);
+                assert_eq!(descriptor[15], 0x00, "a data block in the list");
+                (qword(&descriptor, 0), u64::from(dword(&descriptor, 8)))
+            })
+            .collect(),
+        other => panic!("SGL descriptor {other:#x}"),
+    };
+    assert_eq!(blocks.iter().map(|&(_, len)| len).sum::<u64>(), len, "the SGL's length");
+    sgl_blocks.push(blocks.len());
+    blocks
 }
 
 impl State {
@@ -243,6 +273,7 @@ impl State {
                         data[516..520].copy_from_slice(&8u32.to_le_bytes());
                         data[520..522].copy_from_slice(&(1u16 << 2).to_le_bytes());
                         data[525] = u8::from(self.write_cache);
+                        data[536] = u8::from(self.offers_sgl);
                         0
                     }
                     cns::ACTIVE_NAMESPACES => {
@@ -331,10 +362,11 @@ impl State {
         self.complete(0, head, id, status, result);
     }
 
-    fn io(&mut self, sq: u16, bytes: &[u8; COMMAND_SIZE]) {
+    fn io(&mut self, sq: u16, command: &[u8; COMMAND_SIZE]) {
+        let bytes = command;
         let (opcode, id) = (bytes[0], u16::from_le_bytes([bytes[2], bytes[3]]));
         let namespace = dword(bytes, 4);
-        let (prp1, prp2) = (qword(bytes, 24), qword(bytes, 32));
+        let prp1 = qword(bytes, 24);
         let (cdw10, cdw11, cdw12) = (dword(bytes, 40), dword(bytes, 44), dword(bytes, 48));
         self.commands.push((sq, opcode, namespace, [cdw10, cdw11, cdw12]));
         let queue = self.sqs[&sq];
@@ -354,7 +386,7 @@ impl State {
                     bytes.extend(space.written.get(&b).cloned().unwrap_or_else(|| pattern(b)));
                 }
                 let mut at = 0;
-                for (phys, len) in data_pages(prp1, prp2, bytes.len() as u64) {
+                for (phys, len) in data_of(command, bytes.len() as u64, &mut self.sgl_blocks) {
                     fake_memory_write(phys, &bytes[at..at + len as usize]);
                     at += len as usize;
                 }
@@ -364,7 +396,7 @@ impl State {
             (nvm::WRITE, Some(space)) => {
                 let mut bytes = std::vec![0u8; blocks as usize * 512];
                 let mut at = 0;
-                for (phys, len) in data_pages(prp1, prp2, bytes.len() as u64) {
+                for (phys, len) in data_of(command, bytes.len() as u64, &mut self.sgl_blocks) {
                     fake_memory(phys, &mut bytes[at..at + len as usize]);
                     at += len as usize;
                 }
@@ -675,6 +707,53 @@ fn reads_and_writes_through_prp_lists() {
     }
     let state = sim.state();
     assert!(state.interrupts.iter().all(|&vector| vector == 1));
+}
+
+#[test]
+fn long_runs_of_memory_go_in_scatter_gather_lists() {
+    let (sim, mut nvme) = setup_with(|state| state.offers_sgl = true);
+    assert!(nvme.identity().sgls);
+    nvme.request_queues(1, &mut |_| {}).unwrap();
+    let mut queue = lane(&mut nvme, 1);
+    // 32 pages: in one run, one data block; in two runs, a list of two;
+    // in eight runs of 16 KiB, too short for a list, PRPs.
+    let base = pages(64);
+    let page = |i: u64| (base + i * PAGE, PAGE as u32);
+    let one: Vec<(u64, u32)> = (0..32).map(page).collect();
+    let two: Vec<(u64, u32)> = (0..16).chain(32..48).map(page).collect();
+    let eight: Vec<(u64, u32)> = (0..64).filter(|i| i % 8 < 4).map(page).collect();
+    for (slot, data) in [(0u8, &one), (1, &two), (2, &eight)] {
+        let block = 256 * u64::from(slot);
+        let text: Vec<u8> = (0..32 * PAGE).map(|i| (i * 3 + u64::from(slot)) as u8).collect();
+        for (i, &(phys, len)) in data.iter().enumerate() {
+            fake_memory_write(phys, &text[i * PAGE as usize..i * PAGE as usize + len as usize]);
+        }
+        queue.submit(slot, Op::Write, 1, block, data, true).unwrap();
+        assert_eq!(next(&mut queue), (slot, Outcome::Done));
+        for &(phys, len) in data {
+            fake_memory_write(phys, &std::vec![0u8; len as usize]);
+        }
+        queue.submit(slot, Op::Read, 1, block, data, true).unwrap();
+        assert_eq!(next(&mut queue), (slot, Outcome::Done));
+        let back: Vec<u8> =
+            data.iter().flat_map(|&(phys, len)| read_host(phys, len as usize)).collect();
+        assert_eq!(back, text);
+    }
+    assert_eq!(sim.state().sgl_blocks, [1, 1, 2, 2]);
+    // Buffers PRPs cannot describe are refused as by any controller: off
+    // a multiple of four bytes, or across a page.
+    let odd = [(base + 2, 4094), (base + PAGE, 4096)];
+    assert_eq!(queue.submit(0, Op::Read, 1, 0, &odd, true), Err(Error::BadRequest));
+    let across = [(base, 2 * PAGE as u32)];
+    assert_eq!(queue.submit(0, Op::Read, 1, 0, &across, true), Err(Error::BadRequest));
+    // A controller without them gets PRPs whatever the runs.
+    let (sim, mut nvme) = setup();
+    assert!(!nvme.identity().sgls);
+    nvme.request_queues(1, &mut |_| {}).unwrap();
+    let mut lane = lane(&mut nvme, 1);
+    lane.submit(0, Op::Read, 1, 0, &one, true).unwrap();
+    assert_eq!(next(&mut lane), (0, Outcome::Done));
+    assert!(sim.state().sgl_blocks.is_empty());
 }
 
 #[test]

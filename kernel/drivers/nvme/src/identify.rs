@@ -42,6 +42,10 @@ pub struct Controller {
     /// Whether it takes shadow doorbells (Doorbell Buffer Config, OACS
     /// bit 8), as controllers that hypervisors emulate may.
     pub shadow_doorbells: bool,
+    /// Whether it takes NVM commands' data in scatter gather lists (SGLS
+    /// bits 1:0): with data blocks of any length (01b), or of whole
+    /// dwords at dword addresses (10b), as the driver's always are.
+    pub sgls: bool,
     /// How many blocks a write may cover and still be whole after a
     /// power failure (AWUPF), for a namespace that does not say.
     pub atomic_blocks: u32,
@@ -101,6 +105,7 @@ impl Controller {
         write_cache: false,
         deallocate: false,
         shadow_doorbells: false,
+        sgls: false,
         atomic_blocks: 1,
         shutdown_us: 0,
         version: 0,
@@ -130,6 +135,7 @@ pub fn controller(data: &[u8; HEAD]) -> Controller {
         write_cache: data[525] & 1 != 0,
         deallocate: u16_at(data, 520) & (1 << 2) != 0,
         shadow_doorbells: u16_at(data, 256) & (1 << 8) != 0,
+        sgls: matches!(u32_at(data, 536) & 3, 1 | 2),
         atomic_blocks: u32::from(u16_at(data, 528)) + 1,
         shutdown_us: u32_at(data, 88),
         version: u32_at(data, 80),

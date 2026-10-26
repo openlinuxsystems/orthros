@@ -265,7 +265,7 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
     if let Some(msix) = msix.filter(|_| interrupt) {
         msix.unmask_all(function);
     }
-    let mut how = TextBuf::<64>::new();
+    let mut how = TextBuf::<96>::new();
     let _ = match count {
         0 => how.write_str("polled"),
         1 => how.write_str("one MSI-X vector"),
@@ -273,6 +273,9 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
     };
     if shadowed {
         let _ = how.write_str(", shadow doorbells");
+    }
+    if identity.sgls {
+        let _ = how.write_str(", scatter gather lists");
     }
     info!(
         "Disk: {name} is an NVMe {major}.{minor} controller at {}: {}, firmware {}, {granted} \

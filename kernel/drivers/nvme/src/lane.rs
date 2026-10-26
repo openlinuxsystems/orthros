@@ -61,6 +61,8 @@ pub struct Lane {
     vector: Option<u16>,
     /// The most pages one command's data take.
     max_pages: usize,
+    /// Whether the controller takes scatter gather lists.
+    sgls: bool,
     tail: u16,
     head: u16,
     phase: bool,
@@ -100,6 +102,7 @@ impl Lane {
         id: u16,
         vector: Option<u16>,
         max_pages: usize,
+        sgls: bool,
     ) -> Lane {
         Lane {
             memory,
@@ -109,6 +112,7 @@ impl Lane {
             id,
             vector,
             max_pages,
+            sgls,
             tail: 0,
             head: 0,
             phase: true,
@@ -210,17 +214,37 @@ impl Lane {
                 {
                     return Err(Error::BadRequest);
                 }
-                let (prp1, prp2) = command::prps(data, list_phys).map_err(|_| Error::BadRequest)?;
-                if data.len() > 2 {
-                    for (i, &(phys, _)) in data[1..].iter().enumerate() {
-                        self.memory.write64(list_at + 8 * i, phys);
-                    }
-                }
+                // Every controller takes the same buffers, those PRPs can
+                // describe, which keeps them within the transfer limit;
+                // long runs of them go as a scatter gather list to those
+                // that take one.
+                let prps = command::prps(data, list_phys).map_err(|_| Error::BadRequest)?;
                 let write = op != Op::Read;
                 let fua = op == Op::WriteThrough;
                 let mut command = Command::transfer(write, fua, namespace, block, blocks as u32);
-                command.prp1 = prp1;
-                command.prp2 = prp2;
+                let memory = &self.memory;
+                let sgl = if self.sgls {
+                    command::sgl(data, list_phys, |i, address, rest| {
+                        memory.write64(list_at + 16 * i, address);
+                        memory.write64(list_at + 16 * i + 8, rest);
+                    })
+                } else {
+                    None
+                };
+                (command.prp1, command.prp2) = match sgl {
+                    Some(pointer) => {
+                        command.sgl = true;
+                        pointer
+                    }
+                    None => {
+                        if data.len() > 2 {
+                            for (i, &(phys, _)) in data[1..].iter().enumerate() {
+                                memory.write64(list_at + 8 * i, phys);
+                            }
+                        }
+                        prps
+                    }
+                };
                 command
             }
             Op::Flush => {

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0115. NVMe disks, written from the specification, with a queue for each CPU
 
-- Status: Accepted; a controller that takes shadow doorbells is given them since [0117](0117-nvme-shadow-doorbells.md)
+- Status: Accepted; a controller that takes shadow doorbells is given them since [0117](0117-nvme-shadow-doorbells.md), and data in long runs of memory go as scatter gather lists since [0119](0119-nvme-scatter-gather-lists-for-long-runs.md)
 - Date: 2026-10-26
 
 ## Context
