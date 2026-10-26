@@ -72,15 +72,20 @@ Linux's `ioctl` requests.
   lendings under way, since it makes a private page read-only on both
   sides and the next write copies it; with the device still writing the
   original, the parent's copy would miss the rest of the read.
-- A transfer of more parts of pages than the device takes in one
-  request goes as several, up to 16 in flight at once, each settled
-  before the call returns even after another fails, since the device
-  may still reach the memory. virtio-blk puts each request's chain in a
-  table of its own (indirect descriptors), so that a request takes one
-  entry of the ring rather than one for each buffer and all 16 fit, and
-  rings its doorbell once for them all; QEMU then merges requests for
-  adjacent sectors into one read or write of its file, as it does
-  Linux's.
+- A raw transfer's requests take as many parts of pages as the device
+  does: 126 on a virtio disk, 32 on an AHCI disk, rather than the 16
+  that the page cache's requests take. A transfer of more goes as
+  several, up to 16 in flight at once, each settled before the call
+  returns even after another fails, since the device may still reach
+  the memory. virtio-blk puts each request's chain in a table of its
+  own (indirect descriptors), so that a request takes one entry of the
+  ring rather than one for each buffer, and rings its doorbell once for
+  them all; QEMU then merges requests for adjacent sectors into one read
+  or write of its file, as it does Linux's. With event indexes the
+  device interrupts once for a batch of completions rather than once
+  for each, and the driver rings only when the device asks: under a
+  hypervisor each interrupt and doorbell is a trip out of the virtual
+  machine.
 - `ioctl` on a block device takes Linux's requests for its size
   (BLKGETSIZE64, BLKGETSIZE), sector and block sizes (BLKSSZGET,
   BLKPBSZGET, BLKIOMIN, BLKIOOPT, BLKALIGNOFF), read-only and rotational

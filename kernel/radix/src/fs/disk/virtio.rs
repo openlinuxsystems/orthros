@@ -142,7 +142,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     });
     let entry = if interrupt.is_some() { 0 } else { NO_VECTOR };
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(pages, false);
-    let Ok(blk) = Blk::new(transport, entry, &mut alloc) else {
+    let Ok(blk) = Blk::new(transport, entry, super::queue::SLOTS, &mut alloc) else {
         if let Some(vector) = interrupt {
             <Arch as Devices>::free_interrupt(vector);
         }

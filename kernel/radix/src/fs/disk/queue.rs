@@ -22,9 +22,11 @@
 //! device empties for it. Once in flight, every request is the device's
 //! alike.
 //!
-//! A transfer of more segments than the device takes in one
-//! ([`BlockDevice::read_frames`], into memory a program lends) goes as
-//! several requests, all in flight at once, and the device hears of them
+//! A raw transfer ([`BlockDevice::read_frames`], into memory a program
+//! lends) goes in requests of as many segments as the device takes, not
+//! the [`MAX_SEGMENTS`] of the page cache's: a virtio disk's take 126
+//! pages, an AHCI disk's 32. A transfer of more goes as several requests,
+//! all in flight at once, and the device hears of them
 //! together: a controller may hold back the doorbell of a request that
 //! has another right behind it ([`Controller::submit`]'s `more`), which
 //! lets QEMU's virtio disk merge them into one read or write of its file.
@@ -54,11 +56,11 @@ use crate::user::posix::priority;
 
 /// Requests in flight or waiting to be collected, per disk.
 pub const SLOTS: usize = 64;
-/// The most requests one transfer has in flight at once: a mebibyte of
-/// pages, in requests of [`MAX_SEGMENTS`].
+/// The most requests one raw transfer has in flight at once.
 pub const PARTS: usize = 16;
-/// The most segments one request takes: a page cache's requests take one
-/// page each, so this is plenty.
+/// The most segments one request of the page cache or a filesystem
+/// takes: theirs take one page each, so this is plenty. A raw transfer's
+/// requests take as many as the device does.
 pub const MAX_SEGMENTS: usize = 16;
 /// How many times a request goes to the device before it fails, when the
 /// device keeps handing it back to go again.
@@ -223,6 +225,9 @@ pub struct Disk<C> {
     /// A thread has the controller out to recover or reset it.
     recovering: AtomicBool,
     info: Info,
+    /// The most segments a request of a raw transfer takes: the
+    /// controller's own limit, not [`MAX_SEGMENTS`].
+    raw_segments: usize,
     /// Whether it has a write cache for flushes to empty.
     write_cache: bool,
     /// Whether it writes through its cache itself ([`Op::WriteThrough`]).
@@ -254,6 +259,7 @@ impl<C: Controller> Disk<C> {
             attention: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
             info: Info { max_segments: info.max_segments.min(MAX_SEGMENTS), ..info },
+            raw_segments: info.max_segments.max(1),
             write_cache,
             fua,
             interrupt,
@@ -473,7 +479,7 @@ impl<C: Controller> Disk<C> {
     /// whatever failed.
     fn request_all(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
         let rank = running_rank();
-        let most = self.info.max_segments.max(1);
+        let most = self.raw_segments;
         let mut result = Ok(());
         let mut at = sector;
         for window in data.chunks(most * PARTS) {

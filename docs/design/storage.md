@@ -230,12 +230,17 @@ Every disk's requests go through one queue (`fs/disk/queue.rs`, ADR
 0111), and a driver is a `Controller` below it. A request takes one of
 64 slots, as many as the I/O class and level of its thread allow (ADR
 0093), and the controller starts it: virtio as a descriptor chain (the
-header, up to 30 data segments, the status byte) matched to its slot by
-the chain's head, in a table of its own when the device takes indirect
-descriptors, as QEMU's and most do, so that each request takes one entry
-of the ring and the 16 requests of a mebibyte go at one doorbell; AHCI as
-a command in the port's command list, the
-slot's number its NCQ tag. The interrupt handler collects what finished
+header, the data segments, the status byte) matched to its slot by the
+chain's head, AHCI as a command in the port's command list, the slot's
+number its NCQ tag. When the device takes indirect descriptors, as
+QEMU's and most do, each virtio chain goes in a table of its own, one of
+64 the driver keeps, and takes one entry of the ring; a request then
+has up to 126 data segments, and 30 without them. With event indexes
+(`VIRTIO_F_EVENT_IDX`) the driver rings the doorbell only when the
+device asked to be told, and the device interrupts only for the first
+completion after the driver has read every one before it, so that a
+batch of completions raises one interrupt, as Linux's driver has it.
+The interrupt handler collects what finished
 and wakes the waiting threads, each of which frees its own slot. Many
 threads have requests in flight at once, up to the slots the controller
 has.
@@ -289,7 +294,9 @@ write at or past it fails with ENOSPC, as on Linux. An error after some
 bytes moved ends the transfer short. `fsync` empties the disk's write
 cache.
 
-A transfer of more parts of pages than the device takes in one request
+A raw transfer's requests take as many parts of pages as the device
+does, not the 16 the page cache's take: 126 on a virtio disk, so a
+mebibyte is three requests, and 32 on an AHCI disk. A transfer of more
 goes as several (`Disk::request_all`), up to 16 in flight at once, and
 each is settled, retried or failed, before the call returns, even after
 another failed, since the device may still be reaching the memory. The

@@ -87,6 +87,9 @@ struct State {
     requests: u64,
     /// Requests whose chain was in a table of its own.
     indirect: u64,
+    /// Doorbells rung, and interrupts the device would raise.
+    doorbells: u64,
+    interrupts: u64,
 }
 
 /// The device's BAR: the common configuration, the device configuration
@@ -206,7 +209,18 @@ impl Device {
             s.used_idx = s.used_idx.wrapping_add(1);
             fake_memory_write(s.device + 2, &s.used_idx.to_le_bytes());
             s.requests += 1;
+            // An interrupt, as QEMU decides: with event indexes, only if
+            // this entry is the one the driver asked about.
+            let wanted = if s.driver_features & common_feature::EVENT_IDX != 0 {
+                let event = Device::u16_at(s.driver + 4 + 2 * size);
+                s.used_idx.wrapping_sub(event).wrapping_sub(1) < 1
+            } else {
+                Device::u16_at(s.driver) & 1 == 0
+            };
+            s.interrupts += u64::from(wanted);
         }
+        // Done with the ring: told of what comes next, with event indexes.
+        fake_memory_write(s.device + 4 + 8 * size, &s.last_avail.to_le_bytes());
     }
 }
 
@@ -263,6 +277,7 @@ impl Registers for Device {
             0x30 => s.device = value,
             0x3000 => {
                 assert!(s.enabled && s.status & status::DRIVER_OK != 0, "notified before ready");
+                s.doorbells += 1;
                 Device::serve(&mut s);
             }
             _ => {}
@@ -272,10 +287,14 @@ impl Registers for Device {
 
 const FEATURES: u64 = common_feature::VERSION_1
     | common_feature::INDIRECT_DESC
+    | common_feature::EVENT_IDX
     | feature::SEG_MAX
     | feature::BLK_SIZE
     | feature::FLUSH
-    | (1 << 29);
+    | (1 << 34);
+
+/// The most requests the tests have in flight, a table each.
+const REQUESTS: usize = 64;
 
 fn function(subsystem: u16, device_id: u16) -> Function {
     let config = Mmio::fake(config_space(subsystem, device_id), pci::CONFIG_SIZE);
@@ -292,7 +311,7 @@ fn setup(features: u64) -> (Arc<Device>, Blk) {
     let regs = device.clone();
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(regs.clone(), BAR_SIZE))).unwrap();
-    let blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    let blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
     (device, blk)
 }
 
@@ -323,10 +342,11 @@ fn sets_up_with_the_features_it_wants() {
         s.driver_features,
         common_feature::VERSION_1
             | common_feature::INDIRECT_DESC
+            | common_feature::EVENT_IDX
             | feature::SEG_MAX
             | feature::BLK_SIZE
             | feature::FLUSH,
-        "not event indexes (bit 29), which it does not use"
+        "not packed rings (bit 34), which it does not use"
     );
     assert_eq!(
         s.status,
@@ -358,7 +378,10 @@ fn refuses_legacy_devices() {
     let f = function(2, 0x1042);
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(device.clone(), BAR_SIZE))).unwrap();
-    assert_eq!(Blk::new(transport, 0, &mut alloc).err(), Some(Error::MissingFeature("virtio 1.0")));
+    assert_eq!(
+        Blk::new(transport, 0, REQUESTS, &mut alloc).err(),
+        Some(Error::MissingFeature("virtio 1.0"))
+    );
     assert_eq!(device.state.lock().unwrap().status & status::FAILED, status::FAILED);
 }
 
@@ -460,7 +483,7 @@ fn many_requests_wrap_the_indexes() {
         }
     }
     assert_eq!(device.state.lock().unwrap().requests, 70_000);
-    assert_eq!(blk.room(1), 256);
+    assert_eq!(blk.room(1), REQUESTS);
 }
 
 #[test]
@@ -471,7 +494,7 @@ fn the_queue_fills_and_empties() {
     let f = function(2, 0x1042);
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
-    let mut blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    let mut blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
     let buffer = Dma::fake(4096);
     let mut tokens = Vec::new();
     loop {
@@ -481,14 +504,14 @@ fn the_queue_fills_and_empties() {
             Err(err) => panic!("{err}"),
         }
     }
-    assert_eq!(tokens.len(), 256, "one entry of the ring each");
+    assert_eq!(tokens.len(), REQUESTS, "a table each");
     assert!(blk.complete().is_none());
     Device::serve(&mut paused.0.state.lock().unwrap());
     for token in tokens {
         assert_eq!(wait(&mut blk, token), Outcome::Done);
     }
     assert!(blk.complete().is_none());
-    assert_eq!(blk.room(1), 256);
+    assert_eq!(blk.room(1), REQUESTS);
 }
 
 /// A device whose doorbell does nothing until the test serves it.
@@ -500,7 +523,9 @@ impl Registers for Paused {
     }
 
     fn write(&self, offset: usize, size: usize, value: u64) {
-        if offset != 0x3000 {
+        if offset == 0x3000 {
+            self.0.state.lock().unwrap().doorbells += 1;
+        } else {
             self.0.write(offset, size, value);
         }
     }
@@ -527,7 +552,7 @@ fn used_entries_naming_no_request_are_skipped() {
     let f = function(2, 0x1042);
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
-    let mut blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    let mut blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
     let buffer = Dma::fake(4096);
     let first = blk.submit(Op::Read, 0, &[(buffer.phys(), 512)]).unwrap();
     let second = blk.submit(Op::Read, 1, &[(buffer.phys(), 512)]).unwrap();
@@ -550,29 +575,34 @@ fn disk_bytes(from: u64, len: u64) -> Vec<u8> {
 #[test]
 fn requests_go_in_tables_of_their_own() {
     // 64 reads of eight buffers each, at one doorbell: in the ring they
-    // would take ten descriptors each, and 25 at most would fit.
+    // would take ten descriptors each, and 25 at most would fit. Their
+    // completions raise one interrupt.
     let (device, mut blk) = setup(FEATURES);
-    assert_eq!(blk.room(8), 256);
+    assert_eq!(blk.room(8), REQUESTS);
     let buffers: Vec<Dma> = (0..64).map(|_| Dma::fake(4096)).collect();
     let mut tokens = Vec::new();
     for (i, buffer) in buffers.iter().enumerate() {
         let parts: Vec<(u64, u32)> = (0..8).map(|k| (buffer.phys() + 512 * k, 512)).collect();
         tokens.push(blk.submit_held(Op::Read, (i as u64 * 8) % SECTORS, &parts).unwrap());
     }
-    assert_eq!(blk.room(8), 256 - 64);
+    assert_eq!(blk.room(8), 0, "every table is taken");
+    assert_eq!(blk.submit(Op::Read, 0, &[(buffers[0].phys(), 512)]), Err(Error::Full));
     blk.notify();
     for token in tokens {
         assert_eq!(wait(&mut blk, token), Outcome::Done);
     }
+    // As the interrupt handler does: on until there is none, which asks
+    // for an interrupt at the next.
+    assert_eq!(blk.complete(), None);
     for (i, buffer) in buffers.iter().enumerate() {
         let mut got = [0u8; 4096];
         buffer.read(0, &mut got);
         assert_eq!(&got[..], &disk_bytes(((i as u64 * 8) % SECTORS) * SECTOR, 4096)[..]);
     }
     let s = device.state.lock().unwrap();
-    assert_eq!((s.requests, s.indirect), (64, 64));
+    assert_eq!((s.requests, s.indirect, s.doorbells, s.interrupts), (64, 64, 1, 1));
     drop(s);
-    assert_eq!(blk.room(8), 256);
+    assert_eq!(blk.room(8), REQUESTS);
 
     // A write from tables too, and a flush, whose table has no buffer.
     let buffer = &buffers[0];
@@ -585,6 +615,87 @@ fn requests_go_in_tables_of_their_own() {
     let s = device.state.lock().unwrap();
     assert!(s.disk[40 * 512..48 * 512].iter().all(|&b| b == 3));
     assert_eq!((s.indirect, s.flushes), (66, 1));
+    assert_eq!((s.doorbells, s.interrupts), (3, 2), "none for the flush: not asked for yet");
+    drop(s);
+    assert_eq!(blk.complete(), None);
+    let token = blk.submit(Op::Flush, 0, &[]).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    assert_eq!(device.state.lock().unwrap().interrupts, 3);
+}
+
+#[test]
+fn a_table_takes_up_to_126_buffers() {
+    // Without seg_max the device takes any number: a table's worth, or
+    // what fits in the ring several times without tables.
+    let (device, mut blk) = setup(FEATURES & !feature::SEG_MAX);
+    assert_eq!(blk.info().max_segments, 126);
+    // Half sectors, so that 126 of them fit on the disk.
+    let buffer = Dma::fake(126 * 256);
+    let parts: Vec<(u64, u32)> = (0..126).map(|k| (buffer.phys() + 256 * k, 256)).collect();
+    let token = blk.submit(Op::Read, 1, &parts).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let mut got = std::vec![0u8; 126 * 256];
+    buffer.read(0, &mut got);
+    assert_eq!(got, disk_bytes(SECTOR, 126 * 256));
+    assert_eq!(device.state.lock().unwrap().indirect, 1);
+    let more = [(buffer.phys(), 512u32); 127];
+    assert_eq!(blk.submit(Op::Read, 0, &more), Err(Error::BadRequest));
+    let (_, blk) = setup(FEATURES & !(feature::SEG_MAX | common_feature::INDIRECT_DESC));
+    assert_eq!(blk.info().max_segments, 30);
+}
+
+#[test]
+fn doorbells_ring_only_when_the_device_asks() {
+    let buffer = Dma::fake(4096);
+    let read = |blk: &mut Blk, sector| blk.submit(Op::Read, sector, &[(buffer.phys(), 512)]);
+    let ring = |device: &Device| device.state.lock().unwrap().doorbells;
+    // Without event indexes: not while the device says it needs none, as
+    // it does while it works through the ring and looks again after.
+    let paused = Arc::new(Paused(Device::new(FEATURES & !common_feature::EVENT_IDX)));
+    let f = function(2, 0x1042);
+    let transport =
+        Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
+    let mut blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
+    let used_flags = paused.0.state.lock().unwrap().device;
+    read(&mut blk, 0).unwrap();
+    assert_eq!(ring(&paused.0), 1);
+    fake_memory_write(used_flags, &1u16.to_le_bytes());
+    read(&mut blk, 1).unwrap();
+    assert_eq!(ring(&paused.0), 1, "the device needs no doorbell");
+    fake_memory_write(used_flags, &0u16.to_le_bytes());
+    read(&mut blk, 2).unwrap();
+    blk.notify();
+    assert_eq!(ring(&paused.0), 2, "none for nothing new");
+    Device::serve(&mut paused.0.state.lock().unwrap());
+    assert_eq!(paused.0.state.lock().unwrap().interrupts, 3, "one for each, without them");
+    for _ in 0..3 {
+        assert_eq!(blk.complete().map(|(_, outcome)| outcome), Some(Outcome::Done));
+    }
+
+    // With them: only for buffers past the index the device asked about.
+    let paused = Arc::new(Paused(Device::new(FEATURES)));
+    let transport =
+        Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
+    let mut blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
+    let avail_event = {
+        let s = paused.0.state.lock().unwrap();
+        s.device + 4 + 8 * u64::from(s.queue_size)
+    };
+    read(&mut blk, 0).unwrap();
+    assert_eq!(ring(&paused.0), 1);
+    read(&mut blk, 1).unwrap();
+    assert_eq!(ring(&paused.0), 1, "the device will look past the first");
+    fake_memory_write(avail_event, &2u16.to_le_bytes());
+    read(&mut blk, 2).unwrap();
+    assert_eq!(ring(&paused.0), 2, "the device asked about the third");
+    Device::serve(&mut paused.0.state.lock().unwrap());
+    for _ in 0..3 {
+        assert_eq!(blk.complete().map(|(_, outcome)| outcome), Some(Outcome::Done));
+    }
+    assert_eq!(blk.complete(), None);
+    let s = paused.0.state.lock().unwrap();
+    assert_eq!(s.interrupts, 1);
+    assert_eq!(Device::u16_at(s.driver + 4 + 2 * u64::from(s.queue_size)), 3, "asked after all");
 }
 
 #[test]
@@ -609,7 +720,7 @@ fn a_flood_of_bad_entries_is_read_a_queue_at_a_time() {
     let f = function(2, 0x1042);
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
-    let mut blk = Blk::new(transport, 0, &mut alloc).unwrap();
+    let mut blk = Blk::new(transport, 0, REQUESTS, &mut alloc).unwrap();
     for _ in 0..300 {
         used_entry(&paused.0, 7);
     }

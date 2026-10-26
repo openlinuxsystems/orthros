@@ -131,6 +131,9 @@ pub mod feature {
     /// The device takes chains of buffers in tables of their own
     /// (indirect descriptors).
     pub const INDIRECT_DESC: u64 = 1 << 28;
+    /// Each side says up to where in the other's ring it has looked, so
+    /// that doorbells and interrupts come only for what is past it.
+    pub const EVENT_IDX: u64 = 1 << 29;
     /// The device follows virtio 1.0 or later.
     pub const VERSION_1: u64 = 1 << 32;
 }

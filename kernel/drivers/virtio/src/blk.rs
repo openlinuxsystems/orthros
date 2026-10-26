@@ -12,11 +12,13 @@
 //! caller's buffers, by physical address: nothing is copied (spec 6.3,
 //! zero-copy I/O); a discard's one range lives in the slot too. The
 //! driver uses one queue, with its completions on MSI-X entry `vector`,
-//! and asks for no other feature than indirect descriptors, read-only
-//! disks, the block size, cache flushes, discards and the segment limits.
-//! With indirect descriptors each request takes one entry of the queue,
-//! as Linux's requests do, so that the 16 requests of a mebibyte go to
-//! the device at once.
+//! and asks for no other feature than indirect descriptors, event
+//! indexes, read-only disks, the block size, cache flushes, discards and
+//! the segment limits. With indirect descriptors a request takes one
+//! entry of the ring and up to [`TABLE_SEGMENTS`] data buffers, in a
+//! table of its own, as Linux's requests do: a mebibyte of pages is three
+//! requests. Without them a request is at most [`RING_SEGMENTS`] buffers,
+//! so that several fit in the ring at once.
 
 use radix_hw::{Dma, device_barrier};
 
@@ -49,11 +51,13 @@ const TYPE_DISCARD: u32 = 11;
 const HEADER: usize = 16;
 /// A discard's range: its first sector, its length and flags (none).
 const RANGE: usize = 16;
-/// The most data buffers in one request this driver sends, whatever the
-/// device takes: the chain is built on the stack, and kernel stacks are
-/// small. With its header and status a request is then 32 descriptors,
-/// and its indirect table 512 bytes, eight to a page.
-pub const MAX_SEGMENTS: u32 = 30;
+/// The most data buffers in a request in a table of its own, whatever
+/// the device takes: with its header and status, 128 descriptors, a table
+/// of 2 KiB.
+pub const TABLE_SEGMENTS: u32 = 126;
+/// The most data buffers in a request in the ring, without indirect
+/// descriptors: eight of them fill a ring of 256.
+pub const RING_SEGMENTS: u32 = 30;
 
 /// What a request does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +95,7 @@ pub struct Info {
     /// Whether it has a write cache to flush.
     pub flush: bool,
     /// The most data buffers in one request: the device's limit, but at
-    /// most [`MAX_SEGMENTS`].
+    /// most [`TABLE_SEGMENTS`] or [`RING_SEGMENTS`].
     pub max_segments: u32,
     /// The most bytes in one data buffer (0 for no limit).
     pub max_segment_size: u32,
@@ -110,11 +114,15 @@ pub struct Blk {
 impl Blk {
     /// Sets the device up: resets it, agrees on features, reads its
     /// configuration, sets up queue 0 with completions on MSI-X entry
-    /// `vector`, and tells it the driver is ready. `alloc` gives zeroed
-    /// DMA memory, in pages.
+    /// `vector`, and tells it the driver is ready. `requests` is the most
+    /// requests the caller has in flight at once, at most
+    /// [`MAX_TABLES`](crate::queue::MAX_TABLES): with indirect descriptors
+    /// the queue keeps a table for each. `alloc` gives zeroed DMA memory,
+    /// in pages.
     pub fn new(
         transport: Transport,
         vector: u16,
+        requests: usize,
         alloc: &mut dyn FnMut(usize) -> Option<Dma>,
     ) -> Result<Blk, Error> {
         if !transport.reset() {
@@ -133,8 +141,8 @@ impl Blk {
             | feature::BLK_SIZE
             | feature::FLUSH
             | feature::DISCARD;
-        let features =
-            common_feature::VERSION_1 | (offered & (wanted | common_feature::INDIRECT_DESC));
+        let features = common_feature::VERSION_1
+            | (offered & (wanted | common_feature::INDIRECT_DESC | common_feature::EVENT_IDX));
         if let Err(err) = transport.set_driver_features(features) {
             transport.add_status(status::FAILED);
             return Err(err);
@@ -168,9 +176,9 @@ impl Blk {
             }
         });
         // A table holds a request's header, its buffers and its status.
-        let tables =
-            (features & common_feature::INDIRECT_DESC != 0).then_some(MAX_SEGMENTS as u16 + 2);
-        let queue = match Queue::new(&transport, 0, crate::queue::MAX_SIZE, vector, tables, alloc) {
+        let tables = (requests, TABLE_SEGMENTS as u16 + 2);
+        let size = crate::queue::MAX_SIZE;
+        let queue = match Queue::new(&transport, 0, size, vector, features, tables, alloc) {
             Ok(queue) => queue,
             Err(err) => {
                 transport.add_status(status::FAILED);
@@ -188,7 +196,11 @@ impl Blk {
             transport.reset();
             return Err(Error::NoMemory);
         };
-        let max_segments = info.max_segments.min(u32::from(queue.size()) - 2).min(MAX_SEGMENTS);
+        let most = match queue.table_len() {
+            0 => RING_SEGMENTS,
+            len => u32::from(len) - 2,
+        };
+        let max_segments = info.max_segments.min(u32::from(queue.size()) - 2).min(most);
         let info = Info { max_segments, ..info };
         transport.add_status(status::DRIVER_OK);
         Ok(Blk { transport, queue, slots, info })
@@ -257,8 +269,6 @@ impl Blk {
         if self.queue.room(buffers + 2) == 0 {
             return Err(Error::Full);
         }
-        let mut chain =
-            [Buffer { phys: 0, len: 0, device_writes: false }; MAX_SEGMENTS as usize + 2];
         let size = usize::from(self.queue.size());
         // The head is the next free descriptor, whose slot is free: fill
         // in the header and clear the status before handing them over.
@@ -278,34 +288,34 @@ impl Blk {
         let at = if matches!(op, Op::Read | Op::Write) { sector } else { 0 };
         self.slots.write64(header + 8, at);
         self.slots.write8(status, 0xff);
-        chain[0] = Buffer {
-            phys: self.slots.phys() + header as u64,
-            len: HEADER as u32,
-            device_writes: false,
-        };
         if let Op::Discard(count) = op {
             self.slots.write64(range, sector);
             self.slots.write32(range + 8, count);
             self.slots.write32(range + 12, 0);
-            chain[1] = Buffer {
-                phys: self.slots.phys() + range as u64,
-                len: RANGE as u32,
-                device_writes: false,
-            };
         }
-        for (i, &(phys, len)) in data.iter().enumerate() {
-            chain[1 + i] = Buffer { phys, len, device_writes: op == Op::Read };
-        }
-        chain[1 + buffers] =
-            Buffer { phys: self.slots.phys() + status as u64, len: 1, device_writes: true };
-        let added = self.queue.add(&chain[..buffers + 2])?;
+        let slots = self.slots.phys();
+        // The header, the data (or a discard's range), the status byte.
+        let chain = |i: usize| match i {
+            0 => Buffer { phys: slots + header as u64, len: HEADER as u32, device_writes: false },
+            i if i == buffers + 1 => {
+                Buffer { phys: slots + status as u64, len: 1, device_writes: true }
+            }
+            _ if matches!(op, Op::Discard(_)) => {
+                Buffer { phys: slots + range as u64, len: RANGE as u32, device_writes: false }
+            }
+            i => {
+                let (phys, len) = data[i - 1];
+                Buffer { phys, len, device_writes: op == Op::Read }
+            }
+        };
+        let added = self.queue.add(buffers + 2, chain)?;
         debug_assert_eq!(added, head);
         Ok(added)
     }
 
     /// Rings the device's doorbell for the requests added since it last
-    /// rang.
-    pub fn notify(&self) {
+    /// rang, unless the device said it will look at them anyway.
+    pub fn notify(&mut self) {
         self.queue.notify();
     }
 
