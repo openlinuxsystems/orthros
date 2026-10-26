@@ -17,7 +17,7 @@ reboot, poweroff, halt - restart, power off or halt the machine
 
 # DESCRIPTION
 
-Each asks Spark, over its control socket _/run/spark/control_
+Each asks Spark, over its control socket _/system/live/spark/control_
 (*spark*(8)), to stop the system now: Spark stops the services, the most
 recently started group first, giving each group 5 seconds to end after
 SIGTERM before it stops them, and then restarts the machine, powers it
@@ -59,7 +59,7 @@ On the virtual consoles (*consoled*(8)), Ctrl+Alt+Del runs *reboot*.
 
 # FILES
 
-_/run/spark/control_
+_/system/live/spark/control_
 	Spark's control socket.
 
 # SEE ALSO

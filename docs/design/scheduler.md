@@ -191,7 +191,7 @@ outlasted it but ended within 200 µs, and halves when one lasted longer.
 A halt runs with preemption off too, so that the interrupt that ends it
 leaves the switch to the idle loop, which ends the idle period first: a
 switch on the interrupt's way out left the period open while other
-threads ran, which counted their time as idle, in `/proc/stat` and in
+threads ran, which counted their time as idle, in `/processes/stat` and in
 what the limit learnt.
 The waker sets `need_resched` before it reads `polling`; the poller
 clears `polling` before it reads `need_resched` again; both are

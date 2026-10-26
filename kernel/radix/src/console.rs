@@ -3,7 +3,7 @@
 
 //! The framebuffer console: the kernel log on the screen, and the screen
 //! the panic report takes over. Since Phase 9 a program may take the screen
-//! to draw on through `/dev/fb0` (`fs::framebuffer`): the log stays off it
+//! to draw on through `/devices/fb0` (`fs::framebuffer`): the log stays off it
 //! until the program gives it back.
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +23,7 @@ static STORAGE: TakeOnce<[u32; STORAGE_CELLS]> = TakeOnce::new([0; STORAGE_CELLS
 static SCREEN: SpinLock<Option<Console>> = SpinLock::new(None);
 /// Set by the panic path, which draws its report itself.
 static TAKEN_OVER: AtomicBool = AtomicBool::new(false);
-/// Set while a program holds the screen (`/dev/fb0`).
+/// Set while a program holds the screen (`/devices/fb0`).
 static HANDED_OVER: AtomicBool = AtomicBool::new(false);
 
 /// The kernel log's framebuffer console.
@@ -119,7 +119,7 @@ pub fn screen() -> Option<(usize, usize, usize, PixelFormat)> {
     Some((fb.width, fb.height, fb.pitch, fb.format))
 }
 
-/// Gives the screen to a program (`/dev/fb0`): the log stops drawing on
+/// Gives the screen to a program (`/devices/fb0`): the log stops drawing on
 /// it.
 pub fn hand_over() {
     HANDED_OVER.store(true, Ordering::Relaxed);

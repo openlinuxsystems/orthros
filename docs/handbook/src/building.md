@@ -128,10 +128,10 @@ found and ends like this:
 [    0.866770] Init: the boot archive is 91956 KiB with 1073 entries; starting /system/bin/spark
 [    1.583622] Init: /system/bin/spark is process 1
 ...
-[    1.945004] cpu1: spark[1]: spark: built the hierarchy of 10 directories and mounted 8 filesystems
-[    1.994464] cpu1: spark[1]: spark: added 5 default settings to /system/etc
-[    2.025364] cpu1: spark[1]: spark: listening at /run/spark/control
-[    2.059082] cpu1: spark[1]: spark: 1 services in /system/etc/spark/services, 1 enabled
+[    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 8 filesystems
+[    1.994464] cpu1: spark[1]: spark: added 5 default settings to /system/settings
+[    2.025364] cpu1: spark[1]: spark: listening at /system/live/spark/control
+[    2.059082] cpu1: spark[1]: spark: 1 services in /system/settings/spark/services, 1 enabled
 [    2.162156] cpu1: spark[1]: spark: started consoled (/system/bin/consoled) as process 12
 [    2.207236] Framebuffer: a program took the screen; the log stays off it
 ```

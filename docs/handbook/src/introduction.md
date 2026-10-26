@@ -53,7 +53,7 @@ handbook describes **Phase 9**.
 - **Processes.** Each program runs in a process of its own. Spark starts
   them from a boot archive (see `radix-processes(7)` and `spark(8)`).
 - **Files.** Files are reached through directory capabilities: tmpfs,
-  FAT on virtual disks, `/proc` and `/sys` (see `radix-files(7)` and the
+  FAT on virtual disks, `/processes` and `/kernel` (see `radix-files(7)` and the
   Files chapter).
 - **POSIX.** Programs written for Unix run on a POSIX layer with fork,
   exec, signals, pipes, terminals and job control (see `radix-posix(7)`),

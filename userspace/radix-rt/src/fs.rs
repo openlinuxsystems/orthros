@@ -405,7 +405,7 @@ impl File {
             at += read;
         }
         // It may have grown since, or not know its size (a generated file
-        // of /proc says 0): read on in pieces until the end.
+        // of /processes says 0): read on in pieces until the end.
         let mut piece = [0u8; 512];
         loop {
             let read = self.read_at(at as u64, &mut piece)?;

@@ -521,9 +521,9 @@ extern "C" fn on_signal(_: libc::c_int) {
 /// Traces process `pid` into a new file descriptor.
 fn attach(pid: u64, flags: TraceFlags) -> Result<File, Status> {
     loop {
-        // The lowest free descriptor: the one /dev/null would get.
+        // The lowest free descriptor: the one /devices/null would get.
         // SAFETY: opening and closing a descriptor of our own.
-        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        let fd = unsafe { libc::open(c"/devices/null".as_ptr(), libc::O_RDONLY) };
         if fd < 0 {
             return Err(radix_abi::errors::Kernel::NoRoom.status(0));
         }

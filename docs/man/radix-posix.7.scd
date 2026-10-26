@@ -214,13 +214,14 @@ where Linux lets the file's owner, and so does Rust's *File::set_times*;
 the filetime crate, which the core utilities use, sets a path's times by
 its path.
 
-_/dev/fd/_*N* names descriptor _N_, and _/dev/stdin_, _/dev/stdout_ and
-_/dev/stderr_ name 0, 1 and 2, for *open*, *stat* and *access* and
-their *at* forms; the shell passes pipes by these names. The C library
+_/devices/fd/_*N* names descriptor _N_, and _/devices/stdin_,
+_/devices/stdout_ and _/devices/stderr_ name 0, 1 and 2, as do the same
+names in _/dev_, for *open*, *stat* and *access* and their *at* forms;
+the shell passes pipes by these names. The C library
 gives them: opening one copies the descriptor, as *dup* does, as on the
 BSDs, so the copy shares its offset, never has more access than it
 (EACCES), and *O_TRUNC* does nothing. A descriptor not open has no name
-(ENOENT). _/dev/fd_ itself cannot be listed.
+(ENOENT). _/devices/fd_ itself cannot be listed.
 
 *statvfs* and *fstatvfs* say the filesystem's block size and blocks,
 and how many files and directories it can hold: a tmpfs one for every
@@ -284,9 +285,9 @@ families fail with EAFNOSUPPORT until networking comes in Phase 12.
 
 # TERMINALS
 
-Opening _/dev/ptmx_ makes a pseudo-terminal and gives the opener its
+Opening _/devices/ptmx_ makes a pseudo-terminal and gives the opener its
 master side; *grantpt*, *unlockpt* and *ptsname* give the terminal side,
-_/dev/pts/N_, which lasts until the master goes and hangs it up. Between
+_/devices/pts/N_, which lasts until the master goes and hangs it up. Between
 the two is POSIX's general terminal interface as Linux's N_TTY line
 discipline behaves: canonical lines with their editing characters, echo,
 the signal characters (^C SIGINT, ^\\ SIGQUIT, ^Z SIGTSTP), *IXON* flow
@@ -308,7 +309,7 @@ A terminal may be the controlling terminal of one session: the first one
 its leader opens without *O_NOCTTY* while it has none, or one it asks for
 with *TIOCSCTTY*. A background process of the session that reads it gets
 SIGTTIN, and one that writes it with *TOSTOP* set, or changes its
-settings, SIGTTOU, as job control needs. _/dev/tty_ opens the caller's
+settings, SIGTTOU, as job control needs. _/devices/tty_ opens the caller's
 controlling terminal. When the session leader ends, or the master goes,
 the foreground group gets SIGHUP and SIGCONT.
 
@@ -496,9 +497,9 @@ tests are:
 	vmstat and df; renice, ionice and taskset, set on children and
 	inherited through *exec*; lsof on a file it holds; rtrace on a
 	command, its children and a running process; dmesg and
-	_/dev/kmsg_; xxd, hexdump, hd, column and tree against what the
+	_/devices/kmsg_; xxd, hexdump, hd, column and tree against what the
 	Linux tools write; script, watch and pidstat; shutdown and service
-	through Spark; and the _/proc_ files they read (*radix-proc*(5)).
+	through Spark; and the _/processes_ files they read (*radix-proc*(5)).
 
 *commands*
 	Every program in _/system/bin_ was run by *utilities* or *admin*,

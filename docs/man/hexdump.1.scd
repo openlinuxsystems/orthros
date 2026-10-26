@@ -121,7 +121,7 @@ it would have printed.
 
 The first 64 bytes of a disk:
 
-	hd -n 64 /dev/vda
+	hd -n 64 /devices/vda
 
 Bytes in decimal, eight a line, with the offset:
 

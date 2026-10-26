@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/dev/fb0` (Phase 9, radix-framebuffer(2)): the screen, for consoled(8)
+//! `/devices/fb0` (Phase 9, radix-framebuffer(2)): the screen, for consoled(8)
 //! to draw its virtual terminals on.
 //!
 //! The pixels belong to the kernel's framebuffer console (`console`),
@@ -32,7 +32,7 @@ const STEP: usize = 16 * 1024;
 /// The description holding the screen, by its address, or 0.
 static HOLDER: AtomicUsize = AtomicUsize::new(0);
 
-/// The node of `/dev/fb0`, numbered as its id.
+/// The node of `/devices/fb0`, numbered as its id.
 pub struct Framebuffer(pub u64);
 
 impl Node for Framebuffer {
@@ -68,7 +68,7 @@ impl Node for Framebuffer {
     }
 }
 
-/// Whether `node` is `/dev/fb0`.
+/// Whether `node` is `/devices/fb0`.
 pub fn is_framebuffer(node: &NodeRef) -> bool {
     radix_vfs::downcast::<Framebuffer>(&**node).is_some()
 }

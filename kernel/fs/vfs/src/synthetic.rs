@@ -11,7 +11,7 @@
 //!   devfs); [`ListedDir`] is one whose entries a [`Listing`] works out
 //!   each time (procfs's one directory per process).
 //! - [`Null`], [`Zero`] and [`Random`] are the character devices of
-//!   `/dev`, and [`BlockNode`] a block device, which `mount` takes.
+//!   `/devices`, and [`BlockNode`] a block device, which `mount` takes.
 //! - [`SyntheticFs`] makes a tree of them a read-only filesystem.
 //!
 //! Text formats follow radix-proc(5): one `key: value` per line, so that
@@ -299,7 +299,7 @@ fn device_stat(id: u64, kind: Kind, size: u64) -> Stat {
     Stat { kind, size, allocated: 0, id, created: 0, modified: 0, accessed: 0 }
 }
 
-/// `/dev/null`: reads nothing, swallows writes.
+/// `/devices/null`: reads nothing, swallows writes.
 pub struct Null(pub u64);
 
 impl Node for Null {
@@ -324,7 +324,7 @@ impl Node for Null {
     }
 }
 
-/// `/dev/zero`: reads zeros, swallows writes.
+/// `/devices/zero`: reads zeros, swallows writes.
 pub struct Zero(pub u64);
 
 impl Node for Zero {
@@ -351,7 +351,7 @@ impl Node for Zero {
     }
 }
 
-/// `/dev/random` and `/dev/urandom`: the kernel's random number
+/// `/devices/random` and `/devices/urandom`: the kernel's random number
 /// generator, through the function the kernel gives.
 pub struct Random {
     /// Its number.
@@ -391,7 +391,7 @@ impl Node for Random {
     }
 }
 
-/// A block device in `/dev`: what `mount` takes, read and written raw
+/// A block device in `/devices`: what `mount` takes, read and written raw
 /// ([`crate::raw`]).
 pub struct BlockNode {
     id: u64,

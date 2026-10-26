@@ -411,6 +411,10 @@ are grateful.
   their code.
 - FreeBSD's fdescfs: opening `/dev/fd/N` copies the descriptor, as
   `dup` does ([ADR 0084](docs/adr/0084-dev-fd-in-the-c-library.md)).
+- [GNOME Files](https://apps.gnome.org/Nautilus/) and
+  [Nemo](https://github.com/linuxmint/nemo): a directory's `.hidden`
+  file, whose names a listing leaves out, which keeps the root's Unix
+  names out of `ls /` ([ADR 0113](docs/adr/0113-plain-names-for-the-root-folders.md)).
 
 The roadmap names more projects whose ideas later phases will follow, such as
 macOS, Windows, Ubuntu, GNOME, Hyprland and TMOG. They are added here when

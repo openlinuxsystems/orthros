@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! lsof(8): what each process holds, from `/proc/<n>/files`: its open
+//! lsof(8): what each process holds, from `/processes/<n>/files`: its open
 //! files and directories, with the paths they were opened by, and every
 //! other capability in its capability space, with its rights. lsof's
 //! common options select by process, command, file and descriptor.
@@ -202,7 +202,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     }
     let searching =
         !s.files.is_empty() || !s.dirs.is_empty() || !s.pids.is_empty() || !s.commands.is_empty();
-    let processes = proc::processes().map_err(|e| util::failed(&"/proc", e))?;
+    let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let user = util::user_name(0);
     let mut table = vec![
         [

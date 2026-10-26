@@ -202,7 +202,7 @@ impl Console {
     }
 
     /// The framebuffer's pixels, for a program that draws on the screen
-    /// itself (consoled, through `/dev/fb0`).
+    /// itself (consoled, through `/devices/fb0`).
     pub fn pixels_mut(&mut self) -> &mut [u8] {
         self.fb.memory
     }

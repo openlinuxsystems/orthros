@@ -658,7 +658,7 @@ interface process = 0x000a version 7 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
                 not_permitted];
     /// Notes the caller's working directory, an absolute path that the C
-    /// library keeps (radix-posix(7)), so that /proc shows it
+    /// library keeps (radix-posix(7)), so that /processes shows it
     /// (radix-proc(5)). `exec` notes the one its block names.
     method set_directory = 52 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,

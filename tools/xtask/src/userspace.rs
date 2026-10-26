@@ -52,7 +52,8 @@ pub const ARCHIVE: &[(&str, &str)] = &[
 
 /// Empty directories of the boot archive: mount points under `/system`
 /// for what Spark mounts there (spark(8)).
-pub const ARCHIVE_DIRS: &[&str] = &["system/boot", "system/etc", "system/var"];
+pub const ARCHIVE_DIRS: &[&str] =
+    &["system/boot", "system/live", "system/settings", "system/state"];
 
 /// The programs on Rust's standard library that the boot archive holds:
 /// each one's path in it, and its package in userspace/programs.
@@ -116,7 +117,7 @@ pub const SHELL_CASES_DIR: &str = "system/tests/shell";
 
 /// The system's own default settings (ADR 0090), and where in the boot
 /// archive they go: among the ports' defaults, which Spark copies into
-/// `/system/etc` (spark(8)).
+/// `/system/settings` (spark(8)).
 pub const DEFAULTS: &str = "userspace/defaults";
 pub const DEFAULTS_DIR: &str = "system/lib/defaults/etc";
 
@@ -556,7 +557,7 @@ mod tests {
         }
         std::fs::write(dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
         std::fs::set_permissions(dir.join("hosts"), Permissions::from_mode(0o644)).unwrap();
-        files.push(("system/etc/hosts".to_string(), dir.join("hosts")));
+        files.push(("system/settings/hosts".to_string(), dir.join("hosts")));
         std::os::unix::fs::symlink("spark", dir.join("init")).unwrap();
         files.push(("system/bin/init".to_string(), dir.join("init")));
         let bytes = write_archive(&files, Some("1700000000".into())).unwrap();
@@ -571,18 +572,19 @@ mod tests {
                 "system/bin/init",
                 "system/bin/spark",
                 "system/boot",
-                "system/etc",
-                "system/etc/hosts",
+                "system/live",
+                "system/settings",
+                "system/settings/hosts",
+                "system/state",
                 "system/tests",
                 "system/tests/hello",
-                "system/tests/storage",
-                "system/var"
+                "system/tests/storage"
             ]
         );
         let spark = archive.find("/system/bin/spark").unwrap();
         assert_eq!(spark.data, b"the spark program");
         assert_eq!((spark.mode, spark.mtime), (0o755, 1_700_000_000));
-        assert_eq!(archive.find("/system/etc/hosts").unwrap().mode, 0o644);
+        assert_eq!(archive.find("/system/settings/hosts").unwrap().mode, 0o644);
         let init = archive.find("/system/bin/init").unwrap();
         assert_eq!((init.kind, init.data), (radix_bootfs::Kind::Symlink, &b"spark"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");

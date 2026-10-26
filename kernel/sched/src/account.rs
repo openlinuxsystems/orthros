@@ -111,7 +111,7 @@ impl LoadAverage {
     }
 
     /// Each average in hundredths, rounded to the nearest, as Linux's
-    /// `/proc/loadavg` prints them.
+    /// `/processes/loadavg` prints them.
     pub fn hundredths(&self) -> [u64; 3] {
         self.averages.map(|average| {
             let rounded = average.saturating_add(FIXED_1 / 200);

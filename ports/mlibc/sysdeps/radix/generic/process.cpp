@@ -156,7 +156,7 @@ int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *cons
 }
 
 int Sysdeps<Fexecve>::operator()(int fd, char *const argv[], char *const envp[]) {
-	char execfn[32] = "/dev/fd/";
+	char execfn[32] = "/devices/fd/";
 	char digits[12];
 	int n = 0;
 	for(unsigned value = static_cast<unsigned>(fd); n == 0 || value; value /= 10)
@@ -538,11 +538,11 @@ int Sysdeps<SetThreadaffinity>::operator()(pid_t tid, size_t cpusetsize, const c
 	return set_affinity(static_cast<uint64_t>(tid), cpusetsize, mask);
 }
 
-// The load averages, from /proc/loadavg's `load_N: whole.hundredths`
+// The load averages, from /processes/loadavg's `load_N: whole.hundredths`
 // lines (radix-proc(5)).
 int Sysdeps<GetLoadavg>::operator()(double *samples) {
 	int fd;
-	if(int e = sysdep<Open>("/proc/loadavg", O_RDONLY | O_CLOEXEC, 0, &fd); e)
+	if(int e = sysdep<Open>("/processes/loadavg", O_RDONLY | O_CLOEXEC, 0, &fd); e)
 		return e;
 	char text[256];
 	ssize_t length = 0;

@@ -68,7 +68,7 @@ The spec (v1.4) is buildable as written once eleven gaps are settled. Each row b
 | --- | --- | --- | --- |
 | 1 | 1.2 vs 7.x | 1.2 says "kernel only", yet sections 7.1 to 7.16 specify a full userspace | Treat the spec as the Dukovo system spec; Radix is the kernel inside it |
 | 2 | 16.2 | Two steps are numbered 7, and Spark (step 7) must mount filesystems before the VFS exists (the other step 7) | Phase 6 builds a minimal VFS with a read-only boot archive before Spark; the full VFS follows in Phase 7 |
-| 3 | 7.1 vs 7.6 | `/system` is immutable and replaced on update, but `/system/etc` and `/system/var` must persist and be writable | `/system` is a read-only Btrfs subvolume per update slot; `/system/etc` and `/system/var` are separate writable subvolumes mounted over it. Updates ship defaults in `/system/lib/defaults/etc` and add new files without overwriting edited ones |
+| 3 | 7.1 vs 7.6 | `/system` is immutable and replaced on update, but `/system/settings` and `/system/state` must persist and be writable | `/system` is a read-only Btrfs subvolume per update slot; `/system/settings` and `/system/state` are separate writable subvolumes mounted over it. Updates ship defaults in `/system/lib/defaults/etc` and add new files without overwriting edited ones |
 | 4 | 2.1 vs 7.8 | Network stacks are to be compartmentalized, yet the kernel stack must remain the default path | The network stack runs in the kernel as a compartment: a `#![forbid(unsafe_code)]` crate with its own capability set, restartable on panic |
 | 5 | 7.2 | `chmod` and `chown` must exist but there are no UID/GID permission bits | Files carry an owner principal and a small rights template as metadata. `chown` needs an admin capability; `chmod` edits the template that governs capabilities derived for other principals. Detailed in `radix-fs-rights(7)` |
 | 6 | 7.2, 7.3 | Job control and supervision need POSIX-style signals, which the spec never names | Signals are a kernel notification object. Sending one requires a process capability with the `signal` right; mlibc maps POSIX signal APIs onto it |
@@ -160,7 +160,7 @@ The same driver crates also build as userspace driver processes against the `rad
 | Boot | GRUB 2, built from pinned source | GPL-3.0 |
 | App runtime (post-1.0, Phase 22) | Wasmtime running WebAssembly components (WASI 0.2, Component Model), compiled ahead of time with Cranelift when a bundle is installed | Rust, Bytecode Alliance; Apache-2.0 WITH LLVM-exception |
 
-nano is an addition to the spec's utility list: a console-first system needs an editor for its configuration files. Windows-style (CUA) shortcuts are the system default everywhere: Ctrl+C, X and V for copy, cut and paste, Ctrl+Z and Y for undo and redo, Ctrl+S save, Ctrl+F find, Ctrl+A select all. nano ships with its modern bindings (nano 8 or later) switched on in the system nanorc. In terminals, Ctrl+C copies when text is selected and otherwise interrupts, as in Windows Terminal; Ctrl+Z keeps its job-control meaning at the Nukesh prompt. The default editor is chosen through EDITOR and VISUAL (system default in /system/etc, per-user override) behind a neutral editor command. POSIX requires vi, and server admins expect it, so nvi (BSD-3-Clause) ships as `vi`; Vim and micro come from the catalog.
+nano is an addition to the spec's utility list: a console-first system needs an editor for its configuration files. Windows-style (CUA) shortcuts are the system default everywhere: Ctrl+C, X and V for copy, cut and paste, Ctrl+Z and Y for undo and redo, Ctrl+S save, Ctrl+F find, Ctrl+A select all. nano ships with its modern bindings (nano 8 or later) switched on in the system nanorc. In terminals, Ctrl+C copies when text is selected and otherwise interrupts, as in Windows Terminal; Ctrl+Z keeps its job-control meaning at the Nukesh prompt. The default editor is chosen through EDITOR and VISUAL (system default in /system/settings, per-user override) behind a neutral editor command. POSIX requires vi, and server admins expect it, so nvi (BSD-3-Clause) ships as `vi`; Vim and micro come from the catalog.
 
 ### Administration command set
 
@@ -405,7 +405,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 ### Phase 13: Users, bundles, service bundles and logging (L)
 
-- **13a Logging (S):** `logd` and `logtrim` writing JSON lines under `/system/var/log`; audit log of security events; `notifyd` with console delivery. Privacy promise, stated in the handbook and the installer: Dukovo has no telemetry, and nothing leaves the machine unless the user starts it. Update checks are the only automatic network calls and can be turned off; crash reports are kept locally and shared only by hand.
+- **13a Logging (S):** `logd` and `logtrim` writing JSON lines under `/system/state/log`; audit log of security events; `notifyd` with console delivery. Privacy promise, stated in the handbook and the installer: Dukovo has no telemetry, and nothing leaves the machine unless the user starts it. Update checks are the only automatic network calls and can be turned off; crash reports are kept locally and shared only by hand.
 - **13b Users and login (M):** `authd` with Argon2id password hashes, `login` on every console, the `user` tool, home directory skeleton, per-user and admin capability sets. An elevate command re-asks the password through authd and runs one command with the admin set; every use goes to the audit log. authd slows down repeated failed logins per account and per source. No password rules are forced: as on Linux, a short, simple or empty password is allowed after a plain warning and a confirmation, with no complexity rules, no forced expiry and no required online account. Secure defaults such as login rate limiting and key-only SSH stay defaults the owner can change. Dukovo is a users-first system: it warns and confirms, and the user decides. The user rows of the administration command set (passwd, id, last, the `sudo` front end and the rest). Done when only the admin can read logs.
 - **13c SSH (M):** sshd, a Rust SSH server built on the russh crate (Apache-2.0), managed by Spark. Logins go through authd with Ed25519 public keys by default and passwords optional (SSH accepts only keys unless the user enables passwords); each session gets the user's capability set; SFTP and port forwarding are gated by capabilities. Host keys are generated on first boot; the ssh and sftp clients from the same crate ship too, with ssh(1), sftp(1), sshd(8) and sshd\_config(5) man pages. sshd is off until the installer or the user enables it. This makes the headless system usable remotely. Done when the user logs in to the Dell over SSH from another machine with a key.
 - **13d Bundles (M):** bundle runtime: manifest JSON schema and validation, keyboard-only permission prompt, grant storage, launch with exactly the granted capabilities and a filesystem view built from them. Bundle signing with Ed25519 (minisign-compatible) over a hashed file list; `bundle` CLI (`install`, `list`, `info`, `grant`, `revoke`, `run`, `remove`, `sign`, `verify`).
@@ -423,7 +423,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 
 ### Phase 15: Atomic updates and snapshots (M)
 
-- **15a A/B updates and recovery (M):** `sysupdate`: signed update images, A/B system subvolumes, GRUB boot counting through `grubenv` on the EFI partition, a `boot-complete` health check in Spark, automatic rollback. A Recovery boot entry starts the previous slot into a root console with networking off, and offers a system reset that keeps /users and /data. Done when a deliberately broken update rolls back on its own.
+- **15a A/B updates and recovery (M):** `sysupdate`: signed update images, A/B system subvolumes, GRUB boot counting through `grubenv` on the EFI partition, a `boot-complete` health check in Spark, automatic rollback. A Recovery boot entry starts the previous slot into a root console with networking off, and offers a system reset that keeps /users and /shared. Done when a deliberately broken update rolls back on its own.
 - **15b Snapshots and backups (M):** `snap`: create, list, restore and delete snapshots of `/system`, `/users` or any subvolume; optional inclusion of `/volumes` targets. A backup tool sends Btrfs snapshots incrementally to a USB disk or to another machine over SSH, on a schedule, encrypted with rage (Rust, MIT/Apache); after Phase 23 it can use the system key store. snap applies a retention policy (default 7 daily and 4 weekly snapshots) and prunes old snapshots and update slots automatically.
 - **15c Update delivery (M):** system update delivery on the update server and TUF-style (The Update Framework) signed metadata from Phase 13, which block rollback, freeze and malicious-mirror attacks; stable, beta and nightly channels chosen with sysupdate channel; binary delta updates between consecutive images so routine updates stay small. The optional firmware package updates through the same signed path.
 - **15d Unified updater and server policy (M):** one updated service and one update command check, download and apply system images, firmware, catalog apps and sideloaded apps with their own feeds, together. The user is always in charge: Dukovo never installs an update or restarts the machine on its own. The default is to check and notify only; the user can choose to download in the background, auto-update apps, or turn checks off entirely, and can skip or pin any version. A system update is staged into the spare A/B slot and takes effect at whatever reboot the user chooses, with no update screens at shutdown or boot; reminders can be snoozed or silenced, and security fixes are highlighted but never forced. One history; respects metered connections; shows which security advisories each update fixes. sysupdate and bundle update remain as the lower-level tools. Servers: optional unattended security updates on a schedule the admin picks, off by default, with an automatic reboot only if the admin turns that on as well; the A/B slots and rollback make this safe. An LTS channel next to stable, beta and nightly.
@@ -455,7 +455,7 @@ One USB image boots on UEFI and legacy BIOS machines, offers a live console, and
 
 The system image is the same signed format that `sysupdate` uses, so installation and updates share one code path and one verification step.
 
-The GRUB menu offers: **Install Dukovo**, **Try Dukovo (live console)**, **Install with serial console**, **Install with speech**, and **Boot from first disk**. The live system mounts tmpfs over `/system/etc`, `/system/var`, `/users` and `/tmp`, starts the installer on the first virtual terminal and a rescue Nukesh on the second.
+The GRUB menu offers: **Install Dukovo**, **Try Dukovo (live console)**, **Install with serial console**, **Install with speech**, and **Boot from first disk**. The live system mounts tmpfs over `/system/settings`, `/system/state`, `/users` and `/tmp`, starts the installer on the first virtual terminal and a rescue Nukesh on the second.
 
 ### Installer (`dukovo-install`)
 
@@ -470,7 +470,7 @@ A text interface built with ratatui. It works entirely from the keyboard and ove
 7. Administrator account (spec 7.7), plus optional ordinary users.
 8. Summary, eject prompt, reboot.
 
-The install log goes to `/tmp/install.log` and is copied to `/system/var/log/install.log` on the new system. An answer file (`install.json`, on the EFI partition or passed with `--answers`) runs the same steps unattended, which is how CI tests every install.
+The install log goes to `/tmp/install.log` and is copied to `/system/state/log/install.log` on the new system. An answer file (`install.json`, on the EFI partition or passed with `--answers`) runs the same steps unattended, which is how CI tests every install.
 
 ### Guided disk layout
 
@@ -487,24 +487,24 @@ Btrfs subvolumes on the root partition:
 | --- | --- | --- |
 | `@root` | `/` | Only mount-point directories |
 | `@system.a`, `@system.b` | `/system` | Read-only; one active slot, one for the next update |
-| `@etc` | `/system/etc` | Writable, survives updates |
-| `@var` | `/system/var` | Writable; logs, caches, package and grant state |
+| `@settings` | `/system/settings` | Writable, survives updates |
+| `@state` | `/system/state` | Writable; logs, caches, package and grant state |
 | `@applications` | `/applications` | System-wide bundles |
 | `@users` | `/users` | Home directories |
-| `@data` | `/data` | Shared data |
+| `@shared` | `/shared` | Files shared between users and services |
 | `@snapshots` | not mounted | Managed by `snap` |
 
-`/tmp` and `/run` are tmpfs; `/dev`, `/proc` and `/sys` are virtual; `/volumes` holds removable media. The EFI partition is mounted at `/system/boot`.
+`/tmp` and `/system/live` (live service state: sockets, locks, process IDs and each user's runtime folder) are tmpfs; `/devices` (device files), `/processes` (processes, mounts and memory as text) and `/kernel` (the kernel's view of the hardware and its settings, one value per file) are virtual; `/volumes` holds removable media. The EFI partition is mounted at `/system/boot`. The names say what each folder holds (ADR 0113): the Unix names `/dev`, `/proc`, `/sys` and `/run` stay as links, like `/bin`, `/usr`, `/etc` and `/var`, so ported software finds its paths; the file manager hides them, and so does `ls /` unless asked; the C library reports the new names, and the Linux compatibility layer (release 1.3) shows the Linux layout inside its own view.
 
 ### `rdisk` partitioner
 
 `rdisk` is an fdisk-style tool for GPT and MBR disks, written in Rust and documented in `rdisk(8)`.
 
 - **Interactive mode** keeps fdisk's single-letter commands so the habit carries over: `p` print, `n` new, `d` delete, `t` type, `l` list types, `g` new GPT, `o` new MBR, `c` name, `u` units, `v` verify, `w` write, `q` quit, `m` help.
-- **Script mode** (`rdisk --script layout.json /dev/disk0`) applies a layout file; the installer and `./ob image` both use it.
+- **Script mode** (`rdisk --script layout.json /devices/disk0`) applies a layout file; the installer and `./ob image` both use it.
 - GPT primary and backup headers with CRC32 checks and repair, protective MBR, 1 MiB alignment, partition names, readable type aliases (`efi`, `bios-boot`, `swap`, `dukovo-root`, `linux`, `windows-data`).
 - Nothing is written before `w`; `--dry-run` prints the result; mounted disks are refused.
-- Disks appear as `/dev/disk0`, partitions as `/dev/disk0p1`, with `/dev/disk/by-label/` and `/dev/disk/by-uuid/` links.
+- Disks appear as `/devices/disk0`, partitions as `/devices/disk0p1`, with `/devices/disk/by-label/` and `/devices/disk/by-uuid/` links.
 - Builds for Linux too, so `./ob image` uses the same code that runs on target machines.
 
 ### Formatting and boot tools
@@ -516,7 +516,7 @@ Btrfs subvolumes on the root partition:
 | `mkfs-fat`, `fsck-fat` | FAT12/16/32 for EFI partitions and USB sticks |  |
 | `mkfs-exfat` | exFAT for large USB media |  |
 | `mkswap`, `swapon`, `swapoff` | Swap setup | Standard swap format |
-| `mkfs` | Front end: `mkfs -t btrfs /dev/disk0p4` |  |
+| `mkfs` | Front end: `mkfs -t btrfs /devices/disk0p4` |  |
 | `rgrub-setup` | Installs GRUB: EFI binary to the EFI partition; for BIOS writes `boot.img` and `core.img` and patches their sector pointers as `grub-bios-setup` does | GRUB images prebuilt by `./ob` from pinned source with only the modules needed (gpt, msdos, fat, btrfs, multiboot2, loadenv, search, gfxterm, serial) |
 
 ### Writing the stick
@@ -588,7 +588,7 @@ Lumen is the first 1.x release (moved out of 1.0 on 2026-10-23). It is a complet
 - **Notifications:** Lumen subscribes to `notifyd` and shows plain-text notifications with position, timeout and do-not-disturb settings.
 - **Laptop and session basics:** a lock screen (on demand, on lid close and after idle), battery and brightness indicators with the brightness keys, a shutdown and restart shortcut, and the Inter, JetBrains Mono and Noto fonts rendered through cosmic-text and swash.
 - **Accessibility:** a Lumen accessibility protocol exposes window titles, focus changes and basic roles to the built-in screen reader; high-contrast and large-title-bar themes; everything usable from the keyboard. Accessibility from day one: a built-in Rust screen reader speaks the text console, the installer and Lumen through eSpeak NG (GPL-3, run as a separate program), and BRLTTY (LGPL-2.1, a separate program) drives USB braille displays. Speech can be turned on from the boot menu, so a blind user can install Dukovo without help. Basic audio playback (Intel HDA, including the Framework Desktop's Realtek ALC623 codec, USB Audio Class and virtio-snd) is in 1.0 to carry speech in the console and installer; the full audio stack stays in Phase 27. Also in 1.0: text scaling, larger cursors, reduced motion, sticky and slow keys, and a visible focus indicator everywhere.
-- **Configuration:** `/system/etc/lumen.json` for system defaults and `~/.config/lumen.json` per user, both documented in `lumen.json(5)`.
+- **Configuration:** `/system/settings/lumen.json` for system defaults and `~/.config/lumen.json` per user, both documented in `lumen.json(5)`.
 - **Starting it:** `lumen` from Nukesh, or enable `lumen.service` in Spark to start it after login. Leaving Lumen out of `dukovo.toml` builds a console-only image (spec 7.4, 16.6), which is the 1.0 default.
 - **Phase 17 work items:** the display layer with modes, framebuffers and page flips for GOP and virtio-gpu; `inputd` event devices behind capabilities; the Dell's touchpad, most likely HID over I2C, which needs Intel LPSS I2C, Intel GPIO and I2C-HID drivers (a USB mouse works until then); the renderer behind a trait so a Vulkan renderer can replace pixman once GPU drivers exist (Phase 24); fonts Inter, JetBrains Mono and Noto (all OFL) through cosmic-text and swash; the lock screen; lid close locking and turning the screen off; ACPI backlight and the battery level; `terminal.bundle` as the supported terminal, with tabs, scrollback and Windows-style copy and paste; and VirtualBox as a guest. The full UI/UX design session with the maintainer comes before the visual work.
 - **Test client:** `terminal.bundle`, a small Rust terminal emulator (alacritty\_terminal for the VT parser, cosmic-text and swash for text in the Lumen fonts) that proves input, rendering, decorations and permissions end to end.
@@ -751,7 +751,7 @@ Neither machine has a serial port, so three tools are folded into the phases abo
 - The latest USB image is smoke-booted on the Dell at the end of Phases 1, 2, 6 and 9, then at the end of every later phase. Results go in the handbook's Supported hardware chapter (`docs/handbook/src/hardware.md`), the first entry of the supported-hardware list.
 - In 1.0 the laptop gets the power button, a clean power-off, battery and AC status, and CPU frequency scaling. The lid lock and brightness keys arrive with Lumen in Phase 17, and suspend with Phase 27.
 
-Decided: Dukovo installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 1 TB hard drive untouched; it can be formatted later with rdisk and used under /data or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
+Decided: Dukovo installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 1 TB hard drive untouched; it can be formatted later with rdisk and used under /shared or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
 
 ### Framework Desktop
 
@@ -815,7 +815,7 @@ Dukovo 1.0 ships when every item below passes, automated in QEMU where possible 
 
 - [ ] DHCP over wired Ethernet, DNS resolution, `curl https://` and time synchronization all work.
 - [ ] A bundle without network permission cannot open a socket.
-- [ ] Logs are written as text or JSON lines under `/system/var/log` and readable only with the log capability.
+- [ ] Logs are written as text or JSON lines under `/system/state/log` and readable only with the log capability.
 - [ ] Swap is active and the system survives memory pressure. A user logs in over SSH with a key, and the session has only that user's capabilities.
 - [ ] KASLR offsets differ across boots, and every process can draw from getrandom.
 - [ ] sshd is off on a fresh install; the packet filter denies inbound connections by default, and enabling sshd opens only port 22. Repeated failed logins are slowed down, SSH accepts only keys by default, and ssh hostname.local reaches the machine.
@@ -833,7 +833,7 @@ Dukovo 1.0 ships when every item below passes, automated in QEMU where possible 
 - [ ] Tampered or older update and catalog metadata are refused.
 - [ ] A delta update from the release candidate installs.
 - [ ] Nothing installs and the machine never restarts without the user's action; update checks can be turned off.
-- [ ] The Recovery boot entry starts the previous slot, and the reset keeps /users and /data.
+- [ ] The Recovery boot entry starts the previous slot, and the reset keeps /users and /shared.
 - [ ] A backup to a USB disk is restored onto a fresh install. Snapshot retention prunes old snapshots, and deleting files works on a full disk.
 
 **Server platform and web console**
@@ -1029,7 +1029,7 @@ Twenty-two are decided and three remain open. The repository also records each o
 | Native filesystem | Decided: Btrfs, our own Rust implementation | Fallback: OpenZFS port as a userspace filesystem server. Rejected: reusing Linux's GPL Btrfs code, a purpose-built filesystem |
 | Linking of system programs | Decided: Static | Dynamic with mlibc's loader |
 | Default install image | Decided (2026-10-23): the server image, with the console, the web console and the 1.0 services; Lumen joins the default image in 1.1 | A full image with Lumen in 1.0 (the earlier plan); a console-only image without the web console |
-| Install target on the Dell | Decided: the 128 GB SSD, erasing Windows; the 1 TB hard disk is kept for /data | Keep Windows and dual boot |
+| Install target on the Dell | Decided: the 128 GB SSD, erasing Windows; the 1 TB hard disk is kept for /shared | Keep Windows and dual boot |
 | Closed firmware (microcode, Wi-Fi) | Decided: a separate optional package, kept outside /system | Include it in the base system, or leave it out entirely |
 | Unified app runtime | Decided: WebAssembly components (WASI) on Wasmtime, post-1.0 Phase 22 | Port .NET (CoreCLR) as the primary runtime |
 | UI toolkit and desktop look | Decided: our own UI kit on Iced; Lumen draws title bars; GTK and Qt only inside third-party bundles; optional personality shell in Phase 26 | Port GTK and Qt into /system; a fully from-scratch toolkit; Slint |

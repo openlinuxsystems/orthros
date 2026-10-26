@@ -20,13 +20,13 @@ the Linux console's colours, keys and escape sequences, running a login
 shell on a pseudo-terminal of its own (*radix-posix*(7)).
 
 The Radix kernel shows its log on the screen while the machine starts.
-When consoled takes the screen (_/dev/fb0_, *radix-framebuffer*(2)) the
+When consoled takes the screen (_/devices/fb0_, *radix-framebuffer*(2)) the
 kernel stops drawing on it, and when consoled ends the screen is the
 log's again; *dmesg*(1) shows the kernel's messages meanwhile. The keys
-come from _/dev/kbd_ (*radix-input*(2)), the PS/2 keyboard's events.
+come from _/devices/kbd_ (*radix-input*(2)), the PS/2 keyboard's events.
 
 Spark starts consoled at boot as the *consoled* service
-(_/system/etc/spark/services/consoled.service_, *spark*(8)), first and
+(_/system/settings/spark/services/consoled.service_, *spark*(8)), first and
 stopped last, and starts it again if it fails. Without a screen, as on
 a machine with only a serial console, consoled logs *no screen for
 consoles* and exits with 0, and stays stopped.
@@ -35,10 +35,10 @@ consoles* and exits with 0, and stays stopped.
 
 tty1's session starts with consoled; each other console's starts the
 first time it is shown. A session is root's login shell, from
-_/system/etc/passwd_ (*nukesh*(1) by default), started as *-nukesh*
+_/system/settings/passwd_ (*nukesh*(1) by default), started as *-nukesh*
 with *HOME*, *SHELL*, *USER*, *LOGNAME* and *TERM=linux* set and the
 screen's size on its terminal. Before it, the console shows
-_/system/etc/issue_, in which *\\s* is the system's name, *\\r* its
+_/system/settings/issue_, in which *\\s* is the system's name, *\\r* its
 release, *\\l* the console's name, *\\n* the host's name, *\\v* the
 kernel's version and *\\m* the machine:
 
@@ -105,17 +105,17 @@ vte crate's, from the Alacritty project.
 
 # FILES
 
-_/dev/fb0_
+_/devices/fb0_
 	The screen.
 
-_/dev/kbd_
+_/devices/kbd_
 	The keyboard's events.
 
-_/system/etc/issue_
+_/system/settings/issue_
 	What each console shows before its session. Its default is in
 	_/system/lib/defaults/etc/issue_.
 
-_/system/etc/spark/services/consoled.service_
+_/system/settings/spark/services/consoled.service_
 	The service.
 
 # SEE ALSO

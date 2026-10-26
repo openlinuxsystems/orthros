@@ -62,7 +62,7 @@ static void sessions(void) {
 		CHECK(session == getpid());
 		CHECK(getsid(0) == getpid() && getpgrp() == getpid());
 		// A new session has no controlling terminal.
-		CHECK_ERROR(open("/dev/tty", O_RDWR), ENXIO);
+		CHECK_ERROR(open("/devices/tty", O_RDWR), ENXIO);
 		CHECK_ERROR(tcgetpgrp(STDIN_FILENO), ENOTTY);
 		// Its leader cannot start another.
 		CHECK_ERROR(setsid(), EPERM);

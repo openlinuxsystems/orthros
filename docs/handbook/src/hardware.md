@@ -26,7 +26,7 @@ parts list for its service tag.
 | Memory | 8 GB DDR4-2400, one module | Managed by the frame allocator and kernel heap from Phase 2 (one NUMA node) |
 | Graphics | Intel UHD Graphics 620 | Firmware framebuffer console from Phase 1; no native GPU driver in 1.0 |
 | SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; Dukovo installs here |
-| Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/data` |
+| Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/shared` |
 | USB | Intel xHCI | Phase 11 |
 | Keyboard | Built-in, PS/2 (i8042) | Phase 9 |
 | Touchpad | Likely I2C-HID (Intel Serial IO) | Phase 11, to be confirmed |

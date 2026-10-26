@@ -15,9 +15,9 @@ service - start, stop and look at the services
 
 # DESCRIPTION
 
-service asks Spark, over its control socket _/run/spark/control_
+service asks Spark, over its control socket _/system/live/spark/control_
 (*spark*(8)), about the services it supervises: the programs that
-_/system/etc/spark/services_ describes, a file each.
+_/system/settings/spark/services_ describes, a file each.
 
 *start* starts a service that is stopped or disabled, *stop* stops one
 and keeps it stopped until it is started again or the system restarts,
@@ -50,10 +50,10 @@ for a command it does not know.
 
 # FILES
 
-_/system/etc/spark/services/_*name*_.service_
+_/system/settings/spark/services/_*name*_.service_
 	The services.
 
-_/run/spark/control_
+_/system/live/spark/control_
 	Spark's control socket.
 
 # SEE ALSO

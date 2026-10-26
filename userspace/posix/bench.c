@@ -39,7 +39,8 @@ static uint64_t now_ns(void) {
 }
 
 // The kernel events `ob bench` counts per operation, which Radix's
-// /proc/stat lists one a line ("ipis: 12"); Linux's has none of them.
+// /processes/stat lists one a line ("ipis: 12"); Linux's /proc/stat has
+// none of them.
 static const char *const event_names[] = {"switches", "timer_writes", "ipis", "halts", "polls"};
 #define EVENTS (sizeof(event_names) / sizeof(event_names[0]))
 
@@ -55,10 +56,17 @@ struct kernel_state {
 	unsigned others;
 };
 
-// Reads the kernel's state; false if /proc/stat lacks an event.
+// Where the kernel's counts are, on each system.
+#ifdef __radix__
+#define KERNEL_STAT "/processes/stat"
+#else
+#define KERNEL_STAT "/proc/stat"
+#endif
+
+// Reads the kernel's state; false if KERNEL_STAT lacks an event.
 static int read_events(struct kernel_state *state) {
 	memset(state, 0, sizeof(*state));
-	FILE *file = fopen("/proc/stat", "r");
+	FILE *file = fopen(KERNEL_STAT, "r");
 	if(!file)
 		return 0;
 	char line[256];

@@ -8,11 +8,11 @@
 //! - `storage write` writes a set of files to every volume (short and long
 //!   names, a file of many clusters, a directory of many entries, a
 //!   rename, a removal, appends and a cut), syncs, and checks `/tmp`,
-//!   `/dev`, `/proc` and `/sys`;
+//!   `/devices`, `/processes` and `/kernel`;
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
-//!   (with mtools, from `ob test`), then checks `/proc` again;
-//! - `storage raw <disk>...` reads and writes each disk in `/dev` raw at
+//!   (with mtools, from `ob test`), then checks `/processes` again;
+//! - `storage raw <disk>...` reads and writes each disk in `/devices` raw at
 //!   odd offsets, discards part of it, flushes it, and asks it Linux's
 //!   block requests (the `disk-raw` boot test, [`disk::raw`]);
 //! - `storage errors <disk>` reads and writes the sectors QEMU fails on
@@ -102,7 +102,7 @@ fn main(_: &Startup) -> u64 {
         "raw" | "errors" => {
             let disks: Vec<&str> = args().skip(2).collect();
             if disks.is_empty() {
-                fail(&format!("`{mode}` takes the names of disks in /dev"));
+                fail(&format!("`{mode}` takes the names of disks in /devices"));
             }
             for name in disks {
                 if mode == "raw" { disk::raw(&root, name) } else { disk::errors(&root, name) }
@@ -352,72 +352,72 @@ fn check_tmp(root: &Dir) {
     println!("storage: /tmp: a 10000-byte file written, read back and removed");
 }
 
-/// Reads `/dev/zero` and `/dev/random`, and writes `/dev/null`.
+/// Reads `/devices/zero` and `/devices/random`, and writes `/devices/null`.
 fn check_dev(root: &Dir) {
     let mut bytes = [0xffu8; 64];
-    match root.open_read("dev/zero").and_then(|zero| zero.read_at(0, &mut bytes)) {
+    match root.open_read("devices/zero").and_then(|zero| zero.read_at(0, &mut bytes)) {
         Ok(n) => check(n == 64 && bytes.iter().all(|&b| b == 0), || {
-            String::from("/dev/zero is not zeros")
+            String::from("/devices/zero is not zeros")
         }),
-        Err(err) => fail(&format!("/dev/zero: {err}")),
+        Err(err) => fail(&format!("/devices/zero: {err}")),
     }
     let mut random = [0u8; 64];
-    match root.open_read("dev/random").and_then(|dev| dev.read_at(0, &mut random)) {
+    match root.open_read("devices/random").and_then(|dev| dev.read_at(0, &mut random)) {
         Ok(n) => check(n == 64 && random.iter().any(|&b| b != 0), || {
-            String::from("/dev/random gave zeros")
+            String::from("/devices/random gave zeros")
         }),
-        Err(err) => fail(&format!("/dev/random: {err}")),
+        Err(err) => fail(&format!("/devices/random: {err}")),
     }
     let written = root
-        .open("dev/null", OpenFlags::NONE, Rights::WRITE)
+        .open("devices/null", OpenFlags::NONE, Rights::WRITE)
         .and_then(|null| null.write_at(0, &random));
     match written {
-        Ok(n) => check(n == 64, || format!("/dev/null took {n} of 64 bytes")),
-        Err(err) => fail(&format!("/dev/null: {err}")),
+        Ok(n) => check(n == 64, || format!("/devices/null took {n} of 64 bytes")),
+        Err(err) => fail(&format!("/devices/null: {err}")),
     }
-    match root.open_dir("dev", Rights::READ).and_then(|dev| dev.entries()) {
+    match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
         Ok(entries) => {
             let disks = entries.iter().filter(|entry| entry.kind == FileKind::BlockDevice).count();
             println!(
-                "storage: /dev: {} entries, {disks} of them disks; zero, random and null work",
+                "storage: /devices: {} entries, {disks} of them disks; zero, random and null work",
                 entries.len()
             );
         }
-        Err(err) => fail(&format!("/dev: {err}")),
+        Err(err) => fail(&format!("/devices: {err}")),
     }
 }
 
-/// Reads the size of each volume's disk in `/sys/block`, and the kernel's
+/// Reads the size of each volume's disk in `/kernel/block`, and the kernel's
 /// version.
 fn check_sys(root: &Dir, volumes: &[String]) {
     for name in volumes {
-        match root.read_file(&format!("sys/block/{name}/size")) {
+        match root.read_file(&format!("kernel/block/{name}/size")) {
             Ok(text) => {
                 let text = String::from_utf8_lossy(&text);
                 let sectors: Option<u64> = text.trim_end().parse().ok();
                 check(sectors.is_some_and(|s| s > 0), || {
-                    format!("/sys/block/{name}/size says `{text}`")
+                    format!("/kernel/block/{name}/size says `{text}`")
                 });
-                println!("storage: /sys/block/{name}/size: {} sectors", text.trim_end());
+                println!("storage: /kernel/block/{name}/size: {} sectors", text.trim_end());
             }
-            Err(err) => fail(&format!("/sys/block/{name}/size: {err}")),
+            Err(err) => fail(&format!("/kernel/block/{name}/size: {err}")),
         }
     }
-    match root.read_file("sys/kernel/version") {
+    match root.read_file("kernel/version") {
         Ok(text) => {
-            println!("storage: /sys/kernel/version: {}", String::from_utf8_lossy(&text).trim_end());
+            println!("storage: /kernel/version: {}", String::from_utf8_lossy(&text).trim_end());
         }
-        Err(err) => fail(&format!("/sys/kernel/version: {err}")),
+        Err(err) => fail(&format!("/kernel/version: {err}")),
     }
     // Every `vd` disk is a virtio block device, PCI vendor 0x1af4, and
     // every `sd` disk is on an AHCI controller, class 0x010601.
-    match root.open_dir("sys/bus/pci/devices", Rights::READ).and_then(|dir| dir.entries()) {
+    match root.open_dir("kernel/bus/pci/devices", Rights::READ).and_then(|dir| dir.entries()) {
         Ok(functions) => {
             let count = |file: &str, value: &[u8]| {
                 functions
                     .iter()
                     .filter(|function| {
-                        root.read_file(&format!("sys/bus/pci/devices/{}/{file}", function.name))
+                        root.read_file(&format!("kernel/bus/pci/devices/{}/{file}", function.name))
                             .is_ok_and(|text| text == value)
                     })
                     .count()
@@ -425,32 +425,34 @@ fn check_sys(root: &Dir, volumes: &[String]) {
             let (virtio, ahci) = (count("vendor", b"0x1af4\n"), count("class", b"0x010601\n"));
             let on = |prefix: &str| volumes.iter().filter(|name| name.starts_with(prefix)).count();
             check(virtio >= on("vd") && (ahci > 0 || on("sd") == 0), || {
-                format!("/sys/bus/pci/devices lists {virtio} virtio functions and {ahci} AHCI ones")
+                format!(
+                    "/kernel/bus/pci/devices lists {virtio} virtio functions and {ahci} AHCI ones"
+                )
             });
             println!(
-                "storage: /sys/bus/pci/devices: {} functions, {virtio} of them virtio, {ahci} AHCI",
+                "storage: /kernel/bus/pci/devices: {} functions, {virtio} of them virtio, {ahci} AHCI",
                 functions.len()
             );
         }
-        Err(err) => fail(&format!("/sys/bus/pci/devices: {err}")),
+        Err(err) => fail(&format!("/kernel/bus/pci/devices: {err}")),
     }
 }
 
-/// Lists the processes in `/proc`, which must include this one and
-/// Spark, and counts the mounts in `/proc/mounts`.
+/// Lists the processes in `/processes`, which must include this one and
+/// Spark, and counts the mounts in `/processes/mounts`.
 fn check_proc(root: &Dir, me: u64) {
-    let entries = match root.open_dir("proc", Rights::READ).and_then(|proc| proc.entries()) {
+    let entries = match root.open_dir("processes", Rights::READ).and_then(|proc| proc.entries()) {
         Ok(entries) => entries,
-        Err(err) => return fail(&format!("/proc: {err}")),
+        Err(err) => return fail(&format!("/processes: {err}")),
     };
     let mut listed = String::new();
     let mut numbers = Vec::new();
     for entry in entries.iter().filter(|entry| entry.kind == FileKind::Directory) {
         let Ok(number) = entry.name.parse::<u64>() else { continue };
-        let status = match root.read_file(&format!("proc/{number}/status")) {
+        let status = match root.read_file(&format!("processes/{number}/status")) {
             Ok(status) => String::from_utf8_lossy(&status).into_owned(),
             Err(err) => {
-                fail(&format!("/proc/{number}/status: {err}"));
+                fail(&format!("/processes/{number}/status: {err}"));
                 continue;
             }
         };
@@ -465,26 +467,26 @@ fn check_proc(root: &Dir, me: u64) {
         ));
         numbers.push(number);
     }
-    check(numbers.contains(&1), || String::from("/proc does not list Spark, process 1"));
-    check(numbers.contains(&me), || format!("/proc does not list this process, {me}"));
-    println!("storage: /proc lists {} processes: {listed}", numbers.len());
-    match root.read_file("proc/mounts") {
+    check(numbers.contains(&1), || String::from("/processes does not list Spark, process 1"));
+    check(numbers.contains(&me), || format!("/processes does not list this process, {me}"));
+    println!("storage: /processes lists {} processes: {listed}", numbers.len());
+    match root.read_file("processes/mounts") {
         Ok(text) => {
             let text = String::from_utf8_lossy(&text);
             let fat = text.lines().filter(|line| line.contains(" fat ")).count();
             println!(
-                "storage: /proc/mounts lists {} mounts, {fat} of them FAT",
+                "storage: /processes/mounts lists {} mounts, {fat} of them FAT",
                 text.lines().count()
             );
         }
-        Err(err) => fail(&format!("/proc/mounts: {err}")),
+        Err(err) => fail(&format!("/processes/mounts: {err}")),
     }
     let number = |text: &str, key: &str| {
         text.lines()
             .find_map(|line| line.strip_prefix(key))
             .and_then(|value| value.trim().trim_end_matches(" KiB").parse::<u64>().ok())
     };
-    match (root.read_file("proc/meminfo"), root.read_file("proc/uptime")) {
+    match (root.read_file("processes/meminfo"), root.read_file("processes/uptime")) {
         (Ok(memory), Ok(uptime)) => {
             let (memory, uptime) =
                 (String::from_utf8_lossy(&memory), String::from_utf8_lossy(&uptime));
@@ -493,16 +495,16 @@ fn check_proc(root: &Dir, me: u64) {
             let cache = number(&memory, "page_cache:");
             let up = number(&uptime, "uptime_ns:").unwrap_or(0);
             check(total > free && free > 0 && cache.is_some() && up > 0, || {
-                format!("/proc/meminfo or /proc/uptime is wrong: `{memory}` `{uptime}`")
+                format!("/processes/meminfo or /processes/uptime is wrong: `{memory}` `{uptime}`")
             });
             println!(
-                "storage: /proc/meminfo: {total} KiB in all, {free} KiB free, {} KiB of page \
-                 cache; /proc/uptime: {} ms",
+                "storage: /processes/meminfo: {total} KiB in all, {free} KiB free, {} KiB of page \
+                 cache; /processes/uptime: {} ms",
                 cache.unwrap_or(0),
                 up / 1_000_000
             );
         }
-        (Err(err), _) => fail(&format!("/proc/meminfo: {err}")),
-        (_, Err(err)) => fail(&format!("/proc/uptime: {err}")),
+        (Err(err), _) => fail(&format!("/processes/meminfo: {err}")),
+        (_, Err(err)) => fail(&format!("/processes/uptime: {err}")),
     }
 }

@@ -301,7 +301,7 @@ fn grep(args: &mut Args, kill: bool) -> Result<i32, Fail> {
     }
     let own = proc::own_number();
     let mut found: Vec<Process> = proc::processes()
-        .map_err(|e| util::fail_with(3, format!("/proc: {e}")))?
+        .map_err(|e| util::fail_with(3, format!("{}: {e}", proc::PROC)))?
         .into_iter()
         .filter(|p| m.matches(p, own))
         .collect();

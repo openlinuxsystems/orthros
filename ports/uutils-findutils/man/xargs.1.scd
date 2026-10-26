@@ -112,9 +112,9 @@ spaces and all:
 
 	find . -name '\*.c' -print0 | xargs -0 wc -l
 
-Copy each file a list names into _/data/backup_:
+Copy each file a list names into _/shared/backup_:
 
-	xargs -I {} cp {} /data/backup < list.txt
+	xargs -I {} cp {} /shared/backup < list.txt
 
 # SEE ALSO
 

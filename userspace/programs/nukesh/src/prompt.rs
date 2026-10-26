@@ -160,7 +160,7 @@ fn short_pwd(shell: &Shell, base: bool) -> String {
     tilde
 }
 
-/// The terminal's name without `/dev/`, for `\l`.
+/// The terminal's name without its directory, for `\l`.
 fn tty_name() -> String {
     // SAFETY: ttyname returns a static string or null.
     let name = unsafe { libc::ttyname(0) };

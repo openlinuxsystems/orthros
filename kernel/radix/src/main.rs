@@ -103,7 +103,7 @@ pub struct Settings {
 static SETTINGS: Once<Settings> = Once::new();
 
 /// The kernel's name and version, and the Dukovo release it is part of:
-/// the first line of the boot log and `/sys/kernel/version`
+/// the first line of the boot log and `/kernel/version`
 /// (radix-sysfs(5)), whose second word the C library gives as the
 /// release (uname(1)).
 pub const BANNER: &str = concat!(

@@ -264,7 +264,7 @@ pub(super) const FAIR: u8 = 1;
 /// On a real-time queue.
 pub(super) const REAL_TIME: u8 = 2;
 
-/// Counters for the debugger, the self-tests and `/proc`.
+/// Counters for the debugger, the self-tests and `/processes`.
 #[derive(Default)]
 pub(super) struct Stats {
     pub(super) runtime_ns: AtomicU64,

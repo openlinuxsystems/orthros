@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Raw reads and writes of a block device, as `/dev/sda` and its kind
+//! Raw reads and writes of a block device, as `/devices/sda` and its kind
 //! take them: straight to the device, through pages of the kernel's.
 //!
 //! Nothing is cached, as with FreeBSD's disks, or Linux's opened with

@@ -181,7 +181,10 @@ Tab completes command names, file names, variables after *$*, user
 names after *~* and the like, and what *complete* says for a command's
 arguments: words, functions (with *COMP_WORDS*, *COMP_CWORD*,
 *COMP_LINE*, *COMP_POINT* and *COMPREPLY*), commands, patterns and
-filters, as bash's *complete*, *compgen* and *compopt* do.
+filters, as bash's *complete*, *compgen* and *compopt* do. A file name
+that a directory's _.hidden_ file lists, as the root's lists the links
+with Unix's names (*radix-files*(7)), completes only once it is typed
+whole, so _/de_ completes to _/devices/_.
 
 A program that *complete* says nothing for completes from its completion
 file, if it has one, which every program in _/system/bin_ does: a word

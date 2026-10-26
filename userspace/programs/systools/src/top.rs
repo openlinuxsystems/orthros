@@ -78,7 +78,7 @@ struct Row {
 #[derive(Default)]
 struct Before {
     cpu: HashMap<u64, u64>,
-    /// `/proc/stat` at the frame before this one, and at this one.
+    /// `/processes/stat` at the frame before this one, and at this one.
     stat_before: Option<Stat>,
     stat: Option<Stat>,
     at_ns: u64,
@@ -303,7 +303,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 /// keeps what the next frame needs.
 fn sample(s: &Settings, before: &mut Before) -> Result<Vec<Row>, Fail> {
     let now = util::monotonic_ns();
-    let processes = proc::processes().map_err(|e| util::failed(&"/proc", e))?;
+    let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let span = now.saturating_sub(before.at_ns).max(1) as f64;
     let mut rows = Vec::new();
     let mut cpu = HashMap::new();

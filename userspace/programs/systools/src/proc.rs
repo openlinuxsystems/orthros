@@ -1,16 +1,17 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Reading the kernel's `/proc` (radix-proc(5)): its `key: value` files,
-//! and the `key=value` lines of a process's `threads` and `files`.
+//! Reading the kernel's `/processes` (radix-proc(5)), Linux's `/proc`: its
+//! `key: value` files, and the `key=value` lines of a process's `threads`
+//! and `files`.
 
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
 
-/// Where the kernel's `/proc` is.
-pub const PROC: &str = "/proc";
+/// Where the kernel's `/processes` is.
+pub const PROC: &str = "/processes";
 
 /// A process, as its `status` describes it.
 #[derive(Clone, Debug, Default)]
@@ -90,7 +91,7 @@ fn pairs(text: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
     })
 }
 
-/// A value with `/proc`'s escapes undone: a backslash and three octal
+/// A value with `/processes`' escapes undone: a backslash and three octal
 /// digits stand for a byte (`\040` a space), as on Linux.
 pub fn unescape(value: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.len());
@@ -332,7 +333,7 @@ pub struct CpuTimes {
     pub switches: u64,
 }
 
-/// `/proc/stat`.
+/// `/processes/stat`.
 #[derive(Clone, Debug, Default)]
 pub struct Stat {
     /// Each online CPU's times, by number.
@@ -351,7 +352,7 @@ pub struct Stat {
     pub boot_time_ns: u64,
 }
 
-/// Parses `/proc/stat`.
+/// Parses `/processes/stat`.
 pub fn parse_stat(text: &[u8]) -> Stat {
     let mut stat = Stat::default();
     for (key, value) in pairs(text) {
@@ -389,12 +390,12 @@ pub fn parse_stat(text: &[u8]) -> Stat {
     stat
 }
 
-/// `/proc/stat`, now.
+/// `/processes/stat`, now.
 pub fn stat() -> io::Result<Stat> {
     Ok(parse_stat(&fs::read(format!("{PROC}/stat"))?))
 }
 
-/// `/proc/meminfo`: memory in KiB, by key (`total`, `free`,
+/// `/processes/meminfo`: memory in KiB, by key (`total`, `free`,
 /// `page_cache` and the other owners).
 pub fn meminfo() -> io::Result<Vec<(String, u64)>> {
     let text = fs::read(format!("{PROC}/meminfo"))?;
@@ -453,7 +454,7 @@ pub fn uptime_ns() -> u64 {
     pairs(&text).find(|(key, _)| *key == b"uptime_ns").map_or(0, |(_, value)| number(value))
 }
 
-/// A mount, as `/proc/mounts` lists it.
+/// A mount, as `/processes/mounts` lists it.
 #[derive(Clone, Debug)]
 pub struct Mount {
     pub source: String,

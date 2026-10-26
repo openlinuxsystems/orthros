@@ -14,11 +14,11 @@
 //! library's `struct termios` for Linux, and the flags and `c_cc`
 //! indices are Linux's.
 //!
-//! Opening `/dev/ptmx` makes a pseudo-terminal: the file it opens is the
-//! master, and the terminal itself appears as `/dev/pts/N`, where N is
+//! Opening `/devices/ptmx` makes a pseudo-terminal: the file it opens is the
+//! master, and the terminal itself appears as `/devices/pts/N`, where N is
 //! what GET_PTY_NUMBER says. Opening a terminal (other than with
 //! no_terminal) makes it the controlling terminal of a session leader that
-//! has none; `/dev/tty` opens the caller's controlling terminal. A
+//! has none; `/devices/tty` opens the caller's controlling terminal. A
 //! process of a background process group that reads its controlling
 //! terminal gets SIGTTIN, and with TOSTOP one that writes gets SIGTTOU,
 //! so that a shell's jobs share the terminal (radix-process(2)).
@@ -64,7 +64,7 @@ const GET_SESSION: u32 = 0x5429;
 /// its master, and (unlike Linux, for `ttyname`) on the terminal too.
 const GET_PTY_NUMBER: u32 = 0x80045430;
 /// On a master: locks (non-zero 32-bit number at `buffer`) or unlocks
-/// `/dev/pts/N`; it starts unlocked.
+/// `/devices/pts/N`; it starts unlocked.
 const SET_PTY_LOCK: u32 = 0x40045431;
 
 /// The number of `c_cc` entries.

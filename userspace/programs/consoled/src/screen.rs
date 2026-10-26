@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The screen: _/dev/fb0_ (radix-framebuffer(2)), taken from the kernel's
+//! The screen: _/devices/fb0_ (radix-framebuffer(2)), taken from the kernel's
 //! log, and the console drawn on it.
 //!
 //! The grid is centred on the screen in the Spleen font the kernel's log
@@ -135,7 +135,7 @@ pub fn layout(format: &Format, font: &Font<'_>) -> (usize, usize, (usize, usize)
 }
 
 impl Screen {
-    /// Opens _/dev/fb0_ and takes the screen from the kernel's log.
+    /// Opens _/devices/fb0_ and takes the screen from the kernel's log.
     pub fn open(path: &str) -> io::Result<Screen> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let fd = file.as_raw_fd();

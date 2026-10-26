@@ -44,7 +44,7 @@ static void run_script(const char *shell, const char *script) {
 	CHECK(pipe(out) == 0);
 	pid_t pid = check_fork();
 	if(pid == 0) {
-		int null = open("/dev/null", O_RDWR);
+		int null = open("/devices/null", O_RDWR);
 		dup2(null, STDIN_FILENO);
 		dup2(out[1], STDOUT_FILENO);
 		dup2(null, STDERR_FILENO);
@@ -341,8 +341,15 @@ static void editor(void) {
 	// And an option, from the program's completion file (ADR 0102).
 	send(s, "grep --ignore-c\t");
 	EXPECT(s, "--ignore-case");
-	send(s, " x /dev/null; echo option-$?\r");
+	send(s, " x /devices/null; echo option-$?\r");
 	EXPECT(s, "option-1");
+	// And a folder, but not a link the root's .hidden lists (ADR 0113):
+	// /de is /devices, as /dev is left out.
+	send(s, "cd /de\t");
+	EXPECT(s, "/devices/");
+	send(s, "\recho ${PWD}-$((4+4))\r");
+	EXPECT(s, "/devices-8");
+	send(s, "cd /\r");
 	// The up arrow brings the last command back.
 	send(s, "echo $((3+4))up\r");
 	EXPECT(s, "7up");

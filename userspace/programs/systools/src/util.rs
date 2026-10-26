@@ -203,6 +203,17 @@ pub fn is_terminal(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+/// Where the devices are (ADR 0113): the terminals' names are beneath
+/// it, as `/devices/pts/0`.
+pub const DEVICES: &str = "/devices";
+
+/// A terminal's path as the tools show it, beneath the devices: `pts/0`
+/// for `/devices/pts/0`, or for `/dev/pts/0`, through the link that has
+/// Linux's name.
+pub fn terminal_name(path: &str) -> &str {
+    path.strip_prefix("/devices/").or_else(|| path.strip_prefix("/dev/")).unwrap_or(path)
+}
+
 /// Whether the locale's characters are UTF-8, as the first of
 /// `LC_ALL`, `LC_CTYPE` and `LANG` that is set says (`C.UTF-8`,
 /// `en_US.utf8`); with none, the C locale is ASCII.

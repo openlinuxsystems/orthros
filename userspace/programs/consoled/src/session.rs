@@ -26,7 +26,7 @@ pub struct Shell {
     pub path: String,
     /// The environment it gets, as `NAME=value`.
     pub env: Vec<String>,
-    /// The text shown before it starts: /system/etc/issue's.
+    /// The text shown before it starts: /system/settings/issue's.
     pub issue: String,
 }
 
@@ -241,7 +241,7 @@ fn set_flags(fd: RawFd) {
     }
 }
 
-/// /system/etc/issue's text for console `number`, with agetty(8)'s
+/// /system/settings/issue's text for console `number`, with agetty(8)'s
 /// escapes: `\l` the terminal's name, `\n` the host's name, `\s` the
 /// system's, `\r` its release, `\v` its version, `\m` the machine, `\\` a
 /// backslash.

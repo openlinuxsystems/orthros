@@ -14,7 +14,7 @@ pidstat - report what processes use
 # DESCRIPTION
 
 pidstat reports, a line a process, what each one uses, as sysstat's
-pidstat does and in its layout, from _/proc_ (*radix-proc*(5)). Without
+pidstat does and in its layout, from _/processes_ (*radix-proc*(5)). Without
 an _interval_ (or with 0) it reports each one's use since it started,
 where sysstat's pidstat reports the use since the machine started. With
 one it reports the use in each _interval_ seconds, _count_ times or

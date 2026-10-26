@@ -7,7 +7,7 @@
 // disks, priorities, CPU affinity and I/O classes, held files, traces,
 // the kernel log, the dump and layout tools, script, watch and pidstat,
 // and shutdown and service through Spark. With them, what the kernel
-// tells them: /proc (radix-proc(5)), /dev/kmsg, getloadavg, and the
+// tells them: /processes (radix-proc(5)), /devices/kmsg, getloadavg, and the
 // priorities a child inherits.
 
 #include <fcntl.h>
@@ -56,7 +56,7 @@ static pid_t start_sleeper(void) {
 	}
 	CHECK(pid > 0);
 	char path[64], text[4096];
-	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	snprintf(path, sizeof(path), "/processes/%d/status", pid);
 	long long deadline = check_now_ns() + 5000000000LL;
 	while(!strstr(read_file(path, text, sizeof(text)), "\nname: sleep\n") &&
 			check_now_ns() < deadline)
@@ -79,7 +79,7 @@ static const char *text_of(long number, char *buffer) {
 
 // The foreground process group of this process's terminal.
 static pid_t foreground(void) {
-	int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC);
+	int tty = open("/devices/tty", O_RDONLY | O_CLOEXEC);
 	CHECK(tty >= 0);
 	pid_t group = tcgetpgrp(tty);
 	close(tty);
@@ -87,11 +87,11 @@ static pid_t foreground(void) {
 	return group;
 }
 
-// What /proc says of processes: this one's status, arguments and
+// What /processes says of processes: this one's status, arguments and
 // threads, and the system's CPUs and load.
 static void proc(void) {
 	char path[64], text[4096], line[64];
-	snprintf(path, sizeof(path), "/proc/%d/status", getpid());
+	snprintf(path, sizeof(path), "/processes/%d/status", getpid());
 	read_file(path, text, sizeof(text));
 	snprintf(line, sizeof(line), "\nparent: %d\n", getppid());
 	CHECK(strstr(text, line) != NULL);
@@ -103,19 +103,19 @@ static void proc(void) {
 	CHECK(strstr(text, "\nio_class: none\n") != NULL);
 	CHECK(strstr(text, "\ntraced: no\n") != NULL);
 	CHECK(strstr(text, "\nuser_ns: ") != NULL);
-	snprintf(path, sizeof(path), "/proc/%d/cmdline", getpid());
+	snprintf(path, sizeof(path), "/processes/%d/cmdline", getpid());
 	int fd = open(path, O_RDONLY | O_CLOEXEC);
 	CHECK(fd >= 0);
 	ssize_t got = read(fd, text, sizeof(text));
 	close(fd);
 	static const char ARGS[] = "/system/tests/posix/admin";
 	CHECK(got == sizeof(ARGS) && !memcmp(text, ARGS, sizeof(ARGS)));
-	snprintf(path, sizeof(path), "/proc/%d/threads", getpid());
+	snprintf(path, sizeof(path), "/processes/%d/threads", getpid());
 	read_file(path, text, sizeof(text));
 	CHECK(strstr(text, "name=") != NULL && strchr(text, '\n') == text + strlen(text) - 1);
-	read_file("/proc/stat", text, sizeof(text));
+	read_file("/processes/stat", text, sizeof(text));
 	CHECK(strstr(text, "\ncpus: 4\n") != NULL);
-	read_file("/proc/loadavg", text, sizeof(text));
+	read_file("/processes/loadavg", text, sizeof(text));
 	CHECK(!strncmp(text, "load_1: ", 8));
 	double loads[3] = {-1, -1, -1};
 	CHECK(getloadavg(loads, 3) == 3);
@@ -241,7 +241,7 @@ static void priorities(void) {
 	STATUS(0, "/bin/ionice", "-c", "idle", "-p", number);
 	OUTPUT("", "idle\n", "/bin/ionice", "-p", number);
 	char path[64], text[4096];
-	snprintf(path, sizeof(path), "/proc/%d/status", sleeper);
+	snprintf(path, sizeof(path), "/processes/%d/status", sleeper);
 	CHECK(strstr(read_file(path, text, sizeof(text)), "\nio_class: idle\n") != NULL);
 	end_sleeper(sleeper);
 	OUTPUT("", "best-effort: prio 3\n", "/bin/ionice", "-c", "2", "-n", "3", "/bin/ionice");
@@ -306,7 +306,7 @@ static void tracing(void) {
 			DIR "/held");
 	read_file(DIR "/trace", text, sizeof(text));
 	CHECK(strstr(text, "directory.open(") != NULL && strstr(text, "file.read(") == NULL);
-	STATUS(1, "/bin/rtrace", "-o", "/dev/null", "/bin/false");
+	STATUS(1, "/bin/rtrace", "-o", "/devices/null", "/bin/false");
 	STATUS(0, "/bin/rtrace", "-c", "-o", DIR "/count", "/bin/true");
 	CHECK(strstr(read_file(DIR "/count", text, sizeof(text)), "% time") != NULL);
 	STATUS(0, "/bin/rtrace", "-f", "-o", DIR "/forks", "/bin/sh", "-c", "/bin/true; /bin/true");
@@ -347,7 +347,7 @@ static void tracing(void) {
 	CHECK(equals && (equals - start == 39 || equals[-1] != ' '));
 	pid_t tracer = fork();
 	if(!tracer) {
-		execl("/bin/rtrace", "rtrace", "-o", "/dev/null", "/bin/sh", "-c", "kill -TERM $$",
+		execl("/bin/rtrace", "rtrace", "-o", "/devices/null", "/bin/sh", "-c", "kill -TERM $$",
 				(char *)NULL);
 		_exit(127);
 	}
@@ -355,11 +355,11 @@ static void tracing(void) {
 			WTERMSIG(status) == SIGTERM);
 }
 
-// dmesg and /dev/kmsg: a line written to the log, the records as they
+// dmesg and /devices/kmsg: a line written to the log, the records as they
 // are read, and the log cleared. The log keeps the latest 512 records,
 // so the boot's own may be gone by now.
 static void kernel_log(void) {
-	int fd = open("/dev/kmsg", O_RDWR | O_CLOEXEC);
+	int fd = open("/devices/kmsg", O_RDWR | O_CLOEXEC);
 	CHECK(fd >= 0);
 	static const char LINE[] = "<4>admin: a line for dmesg\n";
 	CHECK(write(fd, LINE, sizeof(LINE) - 1) == sizeof(LINE) - 1);

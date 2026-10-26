@@ -4,10 +4,10 @@
 //! consoled(8): Dukovo's virtual consoles (ADR 0100).
 //!
 //! The kernel draws its log on the screen until consoled takes the screen
-//! (_/dev/fb0_, radix-framebuffer(2)). Then consoled draws six consoles on
+//! (_/devices/fb0_, radix-framebuffer(2)). Then consoled draws six consoles on
 //! it, one at a time, each a terminal for TERM=linux (`term`) with a login
 //! shell on a pseudo-terminal (`session`), and turns the keys read from
-//! _/dev/kbd_ (radix-input(2)) into what the terminal sends (`keys`).
+//! _/devices/kbd_ (radix-input(2)) into what the terminal sends (`keys`).
 //! Alt+F1 to Alt+F6 show a console, starting its session the first time;
 //! Shift+Page Up looks back; Scroll Lock holds the shown console's output;
 //! Ctrl+Alt+Delete runs reboot(8). When consoled ends, the screen is the
@@ -38,9 +38,9 @@ const USAGE: &str = "usage: consoled [--consoles N] [--shell PATH]";
 const CONSOLES_MAX: usize = 12;
 
 /// Where the text shown before each session comes from.
-const ISSUE: &str = "/system/etc/issue";
+const ISSUE: &str = "/system/settings/issue";
 
-/// What is shown when /system/etc/issue is missing.
+/// What is shown when /system/settings/issue is missing.
 const DEFAULT_ISSUE: &str = "\\s \\r (\\l)\n\n";
 
 /// What Ctrl+Alt+Delete runs.
@@ -325,12 +325,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let screen = match Screen::open("/dev/fb0") {
+    let screen = match Screen::open("/devices/fb0") {
         Ok(screen) => screen,
         Err(err) => {
             // No screen to draw on, as with a serial console only: nothing
             // to do, and nothing to start again.
-            eprintln!("consoled: no screen for consoles (/dev/fb0: {err})");
+            eprintln!("consoled: no screen for consoles (/devices/fb0: {err})");
             return ExitCode::SUCCESS;
         }
     };
@@ -339,8 +339,8 @@ fn main() -> ExitCode {
         .read(true)
         .write(true)
         .custom_flags(libc::O_CLOEXEC)
-        .open("/dev/kbd")
-        .map_err(|err| eprintln!("consoled: no keyboard (/dev/kbd: {err})"))
+        .open("/devices/kbd")
+        .map_err(|err| eprintln!("consoled: no keyboard (/devices/kbd: {err})"))
         .ok();
     let (root_shell, home) = root_account();
     let path = options.shell.unwrap_or(root_shell);

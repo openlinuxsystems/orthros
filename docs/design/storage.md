@@ -66,7 +66,7 @@ full it is.
 The mount table (`radix_vfs::mount::Vfs`) joins filesystems into one
 tree. A mount records its filesystem, its root node, the mount and node it
 covers, whether it is read-only, its path from the root (for
-`/proc/mounts`) and where it was mounted from. A place in the tree is a
+`/processes/mounts`) and where it was mounted from. A place in the tree is a
 `Location`: a mount and a node of it.
 
 ### Paths
@@ -169,7 +169,7 @@ works: a file has one request in flight at a time.
 Copies between the caller's memory and a page are the only copies: the
 disk reads and writes the page itself by DMA, so data moves once between
 a program and the disk. Pages come from the frame allocator, owned by
-`PageCache`, so `/proc/meminfo` counts them.
+`PageCache`, so `/processes/meminfo` counts them.
 
 ## The block layer and the block cache
 
@@ -203,7 +203,7 @@ function, and binds the disks it has drivers for: virtio block devices
 (`vda`, `vdb` and on) and, since Phase 10, the SATA disks of AHCI
 controllers (`sda`, `sdb` and on). It then reads each disk's partition
 table and names each partition as Linux would (`vda1`, `sda1`), for
-`/dev` and `/sys/block`.
+`/devices` and `/kernel/block`.
 
 Binding a virtio block device:
 
@@ -264,7 +264,7 @@ every request from then on.
 
 ### Raw access
 
-A block device in `/dev` reads and writes raw (`radix_vfs::raw`):
+A block device in `/devices` reads and writes raw (`radix_vfs::raw`):
 straight to the disk, with nothing cached between, as Linux's do when
 opened with `O_DIRECT`, but at any offset and length.
 
@@ -360,11 +360,13 @@ opened, so that a reader sees one snapshot. They are read-only.
 
 - `devfs`: `null`, `zero`, `random`, `urandom`, and a block device node per
   disk and partition, read and written through the block layer.
-- `procfs` (radix-proc(5)): `/proc/<n>/status` for every process the
-  kernel holds, `/proc/mounts`, `/proc/meminfo` and `/proc/uptime`.
-- `sysfs` (radix-sysfs(5)): `/sys/kernel/{version,cmdline,cpus}`,
-  `/sys/block/<name>/{size,ro}` and
-  `/sys/bus/pci/devices/<address>/{vendor,device,class}`, as on Linux.
+- `procfs` (radix-proc(5)): `/processes/<n>/status` for every process
+  the kernel holds, `/processes/mounts`, `/processes/meminfo` and
+  `/processes/uptime`.
+- `sysfs` (radix-sysfs(5)): `/kernel/{version,cmdline,cpus}`,
+  `/kernel/block/<name>/{size,ro}` and
+  `/kernel/bus/pci/devices/<address>/{vendor,device,class}`, as Linux's
+  `/sys` has them.
 - `bootfs`: the boot archive's `system` directory, read-only, one node per
   file over the archive's bytes.
 
@@ -383,14 +385,17 @@ never inside an allocation.
 
 The kernel makes only the root, an empty tmpfs, and gives it to Spark in
 `SLOT_ROOT`. Spark (spark(8), since v1) makes `/system`, `/applications`,
-`/users`, `/data`, `/tmp`, `/run`, `/dev`, `/proc`, `/sys` and
+`/users`, `/shared`, `/tmp`, `/devices`, `/processes`, `/kernel` and
 `/volumes`; mounts the boot archive read-only on `/system`, tmpfs on
-`/system/etc`, `/system/var`, `/tmp` and `/run`, and the `dev`, `proc`
-and `sys` trees; and mounts the FAT filesystem of each disk or partition
-in `/dev` at `/volumes/<name>`, read-only when the device is. A disk
-with a partition table is not mounted whole. It then starts the program
-its arguments name with the root, read and write, or since Phase 9 the
-services.
+`/system/settings`, `/system/state`, `/system/live` and `/tmp`, and the
+`dev`, `proc` and `sys` trees on `/devices`, `/processes` and `/kernel`;
+makes the links with Unix's names (`/dev`, `/proc`, `/sys`, `/run`,
+`/etc`, `/var`, `/bin`, `/sbin`, `/usr`) and the `.hidden` file that
+keeps them out of listings (ADR 0113); and mounts the FAT filesystem of
+each disk or partition in `/devices` at `/volumes/<name>`, read-only
+when the device is. A disk with a partition table is not mounted whole.
+It then starts the program its arguments name with the root, read and
+write, or since Phase 9 the services.
 
 ## Lock order
 

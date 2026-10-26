@@ -15,7 +15,7 @@ shutdown - stop the system, now or later
 
 # DESCRIPTION
 
-shutdown asks Spark, over its control socket _/run/spark/control_
+shutdown asks Spark, over its control socket _/system/live/spark/control_
 (*spark*(8)), to stop the system at _time_: Spark stops the services,
 the most recently started group first, and then powers the machine
 off, restarts it or halts it. The Radix kernel writes back every
@@ -73,7 +73,7 @@ Restart at once:
 
 # FILES
 
-_/run/spark/control_
+_/system/live/spark/control_
 	Spark's control socket.
 
 # SEE ALSO

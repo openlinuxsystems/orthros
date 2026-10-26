@@ -7,8 +7,8 @@
 //! log services (Phase 6), report what they do: `debug_log` writes a line
 //! to it, prefixed with the thread's name.
 //!
-//! Programs read the log through _/dev/kmsg_ (radix-files(7)), as on
-//! Linux: each read of it returns one record, the oldest the reader has
+//! Programs read the log through _/devices/kmsg_ (radix-files(7)), as
+//! Linux's read _/dev/kmsg_: each read of it returns one record, the oldest the reader has
 //! not read, as a line of text `priority,sequence,microseconds,-;text`.
 //! The priority is the record's syslog(3) level (3 for errors, 4 for
 //! warnings, 6 for information, 7 for debugging), of the kernel's
@@ -28,7 +28,7 @@ module kernel_log;
 /// The most bytes of one line `debug_log` keeps.
 const WRITE_MAX: u64 = 256;
 
-/// radix-file(2)'s `control` request on _/dev/kmsg_ that clears the log
+/// radix-file(2)'s `control` request on _/devices/kmsg_ that clears the log
 /// (as `dmesg -C` does): readers that open it or seek to its start
 /// later skip the records it holds. Needs the write right.
 const CLEAR: u32 = 0x4b4d0001;

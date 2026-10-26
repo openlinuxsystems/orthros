@@ -402,7 +402,7 @@ pub fn exec(
 type Script = (Vec<u8, Kmalloc>, Option<Vec<u8, Kmalloc>>);
 
 /// Has `target` keep the arguments its new program starts with, as
-/// [`build_stack`] lays them out, for `/proc/<n>/cmdline`: for a script,
+/// [`build_stack`] lays them out, for `/processes/<n>/cmdline`: for a script,
 /// its interpreter, the `#!` line's argument and the script's path in
 /// place of the first of the block's; each ends with a NUL.
 fn keep_args(

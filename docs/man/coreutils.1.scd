@@ -25,6 +25,12 @@ _/system/bin/coreutils_ by its name, and coreutils runs the utility its
 name says; *coreutils* _utility_ runs one by name. Each utility has its
 own manual page.
 
+On Dukovo, *ls*(1) also leaves out of a directory's listing the names
+its _.hidden_ file lists, one a line, unless *-a* or *-A* is given: the
+root's lists the links with Unix's names, such as _/dev_ and _/etc_
+(*radix-files*(7)), so that *ls /* shows the folders by their plain
+names.
+
 # OPTIONS
 
 *--list*

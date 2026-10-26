@@ -29,7 +29,7 @@ _delay_ in seconds, a line follows every _delay_ seconds of what
 happened since the line before, _count_ lines in all or until
 interrupted.
 
-It reads _/proc/stat_ and _/proc/meminfo_ (*radix-proc*(5)). Radix has
+It reads _/processes/stat_ and _/processes/meminfo_ (*radix-proc*(5)). Radix has
 no swap yet and does not count interrupts or the time spent waiting for
 disks or stolen, so *swpd*, *si*, *so*, *in*, *wa*, *st* and *gu* are 0.
 

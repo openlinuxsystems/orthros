@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/sys`: the kernel's devices and settings, one value per file.
+//! `/kernel`: the kernel's view of the hardware and its settings, one
+//! value per file. `/sys`, Linux's name for it, is a link to it.
 //!
 //! The layout follows Linux's where both have a thing, so that ported
 //! tools find it where they look (lspci reads `/sys/bus/pci/devices`):
 //!
-//! - `/sys/kernel/version`, `/sys/kernel/cmdline`, `/sys/kernel/cpus`;
-//! - `/sys/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
+//! - `/kernel/version`, `/kernel/cmdline`, `/kernel/cpus`;
+//! - `/kernel/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
 //!   for every disk and partition, and in its `queue` the sizes and flags
 //!   of radix-block(2)'s requests as Linux names them (`rotational`,
 //!   `logical_block_size`, `discard_max_bytes` and the rest);
-//! - `/sys/bus/pci/devices/<address>/vendor`, `device` and `class`, in
+//! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
 //!   hexadecimal, for every PCI function the scan found.
 //!
 //! Every file ends with a newline. The tree is read-only.
@@ -29,7 +30,7 @@ use super::disk;
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
 
-/// Records the kernel's command line, for `/sys/kernel/cmdline`.
+/// Records the kernel's command line, for `/kernel/cmdline`.
 pub fn set_command_line(line: &'static str) {
     let _ = COMMAND_LINE.set(line);
 }
@@ -41,10 +42,9 @@ pub fn make() -> Result<FsRef> {
         return SyntheticFs::make(FsKind::Sys, root);
     }
     let root = FixedDir::new(next_id())?;
-    let kernel = root.add_dir("kernel", next_id())?;
-    kernel.add("version", Generated::from_fn(next_id(), version)?)?;
-    kernel.add("cmdline", Generated::from_fn(next_id(), cmdline)?)?;
-    kernel.add("cpus", Generated::from_fn(next_id(), cpus)?)?;
+    root.add("version", Generated::from_fn(next_id(), version)?)?;
+    root.add("cmdline", Generated::from_fn(next_id(), cmdline)?)?;
+    root.add("cpus", Generated::from_fn(next_id(), cpus)?)?;
     let block: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(Blocks)?;
     root.add("block", ListedDir::make(next_id(), block)?)?;
     let bus = root.add_dir("bus", next_id())?;
@@ -78,7 +78,7 @@ fn value(generate: impl Fn(&mut Text) -> fmt::Result + Send + Sync + 'static) ->
     Generated::make(next_id(), generate)
 }
 
-/// `/sys/block`: a directory per disk and partition.
+/// `/kernel/block`: a directory per disk and partition.
 struct Blocks;
 
 impl Listing for Blocks {
@@ -120,7 +120,7 @@ impl Listing for Blocks {
     }
 }
 
-/// `/sys/bus/pci/devices`: a directory per PCI function.
+/// `/kernel/bus/pci/devices`: a directory per PCI function.
 struct PciDevices;
 
 fn address_of(function: &disk::PciFunction) -> TextBuf<16> {

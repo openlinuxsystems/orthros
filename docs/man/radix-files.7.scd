@@ -101,7 +101,7 @@ program and the disk.
 When memory runs low, the writeback thread drops clean cached pages, and
 the out-of-memory policy (*radix-scheduling*(7)) asks it to before it
 stops anything. Cached pages are counted as *page_cache* in
-_/proc/meminfo_.
+_/processes/meminfo_.
 
 A file removed while it is open lives on, unnamed, until its last
 capability goes, then its space is freed.
@@ -153,45 +153,56 @@ removed.
 # THE DIRECTORY HIERARCHY
 
 The kernel makes only an empty root. Spark (*spark*(8)) builds the tree
-on it at every boot:
+on it at every boot. Each folder is named for what it holds:
 
 [[ *Path*
 :< *What it is*
 |  _/system_
 :< the boot archive, read-only: programs and the system's own files
-|  _/system/etc_, _/system/var_
-:< tmpfs for now; settings, which start from the defaults in
-   _/system/lib/defaults/etc_ (*spark*(8)), and the system's changing data,
-   with _/system/var/tmp_ for temporary files that are to outlive a restart
+|  _/system/settings_
+:< the system's settings, a tmpfs for now, which starts from the
+   defaults in _/system/lib/defaults/etc_ (*spark*(8))
+|  _/system/state_
+:< the system's changing data, a tmpfs for now, with
+   _/system/state/tmp_ for temporary files that are to outlive a restart
+|  _/system/live_
+:< a tmpfs: the state of running services, such as Spark's control
+   socket
 |  _/applications_
 :< applications (bundles come in Phase 13)
 |  _/users_
 :< the users' homes
-|  _/data_
-:< data shared between users
-|  _/tmp_, _/run_
-:< tmpfs: temporary files, and the state of running services
-|  _/dev_
+|  _/shared_
+:< files that users and services share
+|  _/tmp_
+:< a tmpfs: temporary files
+|  _/devices_
 :< the devices
-|  _/proc_
+|  _/processes_
 :< the processes (*radix-proc*(5))
-|  _/sys_
-:< the kernel's devices and settings (*radix-sysfs*(5))
+|  _/kernel_
+:< the kernel's view of the hardware and its settings (*radix-sysfs*(5))
 |  _/volumes_
 :< disks, USB sticks and SD cards, one directory each
-|  _/bin_, _/sbin_, _/usr_, _/etc_, _/var_
-:< symbolic links to _system/bin_, _system/bin_, _system_, _system/etc_
-   and _system/var_, for Unix programs and scripts
+
+Unix's names for these are symbolic links in the root, for Unix programs,
+scripts and people: _/bin_ and _/sbin_ lead to _system/bin_, _/usr_ to
+_system_, _/etc_ to _system/settings_, _/var_ to _system/state_, _/run_
+to _system/live_, _/dev_ to _devices_, _/proc_ to _processes_ and _/sys_
+to _kernel_; _/system/state/run_ leads to _../live_, so that _/var/run_
+is _/run_. The root's _.hidden_ file lists them, one name a line, and
+*ls*(1) and the shell's completion leave the names it lists out, unless
+asked for every name (*ls -a*), as the file manager will.
 
 Until the root filesystem is on a disk (Btrfs, Phase 10), _/applications_,
-_/users_ and _/data_ are empty directories of the root's tmpfs.
+_/users_ and _/shared_ are empty directories of the root's tmpfs.
 
 # VOLUMES
 
 At boot the kernel finds each disk, reads its partition table (MBR or
 GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
 virtio disks, _sda_, _sdb_ for SATA disks, _vda1_ for a partition. Each
-appears in _/dev_ and _/sys/block_. As on Linux, an entry that starts past
+appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts past
 the disk's end is skipped, an MBR one that reaches past it is cut to end
 there, and an extended partition shows only its first two sectors. Spark
 mounts the FAT filesystem of each partition, or of each disk with no
@@ -200,7 +211,7 @@ device is. A device with no FAT filesystem is left alone. Disks are found
 once, at boot. Removable media, mounted by label at _/volumes/_*label*
 with safe eject, come with *volumed* in Phase 11.
 
-A disk or partition in _/dev_ is read and written raw, at any offset and
+A disk or partition in _/devices_ is read and written raw, at any offset and
 length, with nothing cached between, as Linux's are when opened with
 *O_DIRECT*; *fsync*(2) empties the disk's write cache, and *ioctl*(2)
 takes Linux's requests for its size, sector size and discards

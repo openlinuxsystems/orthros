@@ -1716,7 +1716,7 @@ impl Shell {
     }
 
     /// `<(...)` and `>(...)`: a child reading or writing a pipe, and the
-    /// pipe's name in `/dev/fd`.
+    /// pipe's name in `/dev/fd`, which Dukovo calls `/devices/fd`.
     pub fn process_subst(&mut self, output: bool, program: &Program) -> Result<String, Flow> {
         let (read, write) = match sys::pipe() {
             Ok(fds) => fds,
@@ -1758,7 +1758,8 @@ impl Shell {
             return Err(self.fatal("cannot make a descriptor for process substitution", 1));
         }
         self.procsub_fds.push(fd);
-        Ok(format!("/dev/fd/{fd}"))
+        let dir = if cfg!(target_os = "radix") { "/devices/fd" } else { "/dev/fd" };
+        Ok(format!("{dir}/{fd}"))
     }
 
     fn has_procsubs(&self) -> bool {

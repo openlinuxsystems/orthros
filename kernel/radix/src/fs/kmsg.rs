@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/dev/kmsg` (Phase 9, radix-kernel-log(2)): the kernel log's records,
+//! `/devices/kmsg` (Phase 9, radix-kernel-log(2)): the kernel log's records,
 //! one per read, as Linux's `/dev/kmsg` gives them, for dmesg(1).
 //!
 //! A description of it keeps where its reader is in the log in its
@@ -33,18 +33,18 @@ use crate::user::posix::signal::{Restart, interrupted};
 
 /// The first record a new reader reads: none before the last clear.
 static CLEARED: AtomicU64 = AtomicU64::new(0);
-/// How many descriptions of `/dev/kmsg` are open: while none is, the
+/// How many descriptions of `/devices/kmsg` are open: while none is, the
 /// watcher does not look.
 static OPEN: AtomicU32 = AtomicU32::new(0);
 /// The next record's sequence number when the watcher last looked.
 static SEEN: AtomicU64 = AtomicU64::new(0);
-/// The pollers of `/dev/kmsg`.
+/// The pollers of `/devices/kmsg`.
 pub static POLLED: Polled = Polled::new();
 
 /// How long the watcher waits between looks: the timer's tick.
 const LOOK_NS: u64 = 10_000_000;
 
-/// The node of `/dev/kmsg`, numbered as its id.
+/// The node of `/devices/kmsg`, numbered as its id.
 pub struct Kmsg(pub u64);
 
 impl Node for Kmsg {
@@ -79,7 +79,7 @@ impl Node for Kmsg {
     }
 }
 
-/// Whether `node` is `/dev/kmsg`.
+/// Whether `node` is `/devices/kmsg`.
 pub fn is_kmsg(node: &NodeRef) -> bool {
     radix_vfs::downcast::<Kmsg>(&**node).is_some()
 }
@@ -243,7 +243,7 @@ pub fn start() {
     if let Err(err) =
         sched::spawn("kmsg", watch, 0, Options::new().policy(Policy::Fair { nice: 0 }))
     {
-        error!("Kernel log: could not start the thread that wakes /dev/kmsg's readers: {err}");
+        error!("Kernel log: could not start the thread that wakes /devices/kmsg's readers: {err}");
     }
 }
 

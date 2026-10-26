@@ -47,7 +47,7 @@ static void own(void) {
 	CHECK(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
 	char name[64];
 	CHECK(ttyname_r(STDIN_FILENO, name, sizeof(name)) == 0);
-	CHECK(!strncmp(name, "/dev/pts/", 9));
+	CHECK(!strncmp(name, "/devices/pts/", 13));
 	int fds[2];
 	CHECK(pipe(fds) == 0);
 	CHECK(!isatty(fds[0]) && errno == ENOTTY);
@@ -56,7 +56,7 @@ static void own(void) {
 	close(fds[0]);
 	close(fds[1]);
 	// It is the controlling terminal, and the test is in the foreground.
-	int tty = open("/dev/tty", O_RDWR);
+	int tty = open("/devices/tty", O_RDWR);
 	CHECK(tty >= 0 && isatty(tty));
 	close(tty);
 	CHECK(tcgetpgrp(STDIN_FILENO) == getpgrp());
@@ -256,7 +256,7 @@ static void sizes(void) {
 	char name[32];
 	CHECK(ptsname_r(master, name, sizeof(name)) == 0);
 	char expected[32];
-	snprintf(expected, sizeof(expected), "/dev/pts/%d", number);
+	snprintf(expected, sizeof(expected), "/devices/pts/%d", number);
 	CHECK(!strcmp(name, expected));
 	CHECK(ttyname_r(terminal, name, sizeof(name)) == 0 && !strcmp(name, expected));
 	CHECK(ttyname_r(terminal, name, 4) == ERANGE);
@@ -360,7 +360,7 @@ static void hangups(void) {
 	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGHUP);
 	char buffer[8];
 	CHECK(read(terminal, buffer, sizeof(buffer)) == 0);
-	CHECK_ERROR(open("/dev/pts/1000", O_RDWR | O_NOCTTY), ENOENT);
+	CHECK_ERROR(open("/devices/pts/1000", O_RDWR | O_NOCTTY), ENOENT);
 	close(ready[0]);
 	close(ready[1]);
 	close(terminal);

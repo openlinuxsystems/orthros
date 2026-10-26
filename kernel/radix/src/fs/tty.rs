@@ -7,9 +7,9 @@
 //! A pseudo-terminal ([`Tty`]) is a line discipline (`radix_tty::Ldisc`)
 //! between two sides. What is written to the master is typed: edited into
 //! lines, echoed, and turned into signals for the foreground process
-//! group. What programs write to the terminal (`/dev/pts/N`) goes through
-//! output processing to the master's reads. Opening `/dev/ptmx` makes one
-//! ([`Ptmx`]) and gives the opener its master; `/dev/pts/N` appears until
+//! group. What programs write to the terminal (`/devices/pts/N`) goes through
+//! output processing to the master's reads. Opening `/devices/ptmx` makes one
+//! ([`Ptmx`]) and gives the opener its master; `/devices/pts/N` appears until
 //! the master goes, which hangs the terminal up.
 //!
 //! Each open of either side is a node of its own ([`Handle`]), so the
@@ -24,7 +24,7 @@
 //! had when it looked (`PosixState::terminal`), which forks inherit. A
 //! process of the session in a background process group that reads from
 //! it gets SIGTTIN, and one that writes to it with TOSTOP, or changes its
-//! settings, SIGTTOU, as `radix-posix(7)` describes; `/dev/tty` opens the
+//! settings, SIGTTOU, as `radix-posix(7)` describes; `/devices/tty` opens the
 //! caller's controlling terminal. When the session leader ends, or the
 //! master goes, the foreground process group gets SIGHUP (and SIGCONT)
 //! and the terminal belongs to no session.
@@ -74,9 +74,9 @@ const MAX_PTYS: usize = 256;
 
 /// A pseudo-terminal.
 pub struct Tty {
-    /// N, of `/dev/pts/N`.
+    /// N, of `/devices/pts/N`.
     number: u32,
-    /// The node number `/dev/pts/N` shows.
+    /// The node number `/devices/pts/N` shows.
     id: u64,
     state: Mutex<State>,
     /// Whether `poll` finds the terminal side readable, how many bytes a
@@ -106,14 +106,14 @@ struct State {
     ldisc: Ldisc<Vec<u8, Kmalloc>>,
     output: Ring<Vec<u8, Kmalloc>>,
     window: [u16; 4],
-    /// `/dev/pts/N` may not be opened (SET_PTY_LOCK).
+    /// `/devices/pts/N` may not be opened (SET_PTY_LOCK).
     locked: bool,
 }
 
 /// The pseudo-terminals, by number, made when first needed.
 static PTYS: Mutex<Option<Vec<Weak<Tty, Kmalloc>, Kmalloc>>> = Mutex::new(None);
 
-/// `/dev/pts`.
+/// `/devices/pts`.
 static PTS: Once<KArc<FixedDir>> = Once::new();
 
 fn heap() -> Kmalloc {
@@ -161,7 +161,7 @@ impl Tty {
         self.opened.load(Ordering::Acquire) && self.slaves.load(Ordering::Acquire) == 0
     }
 
-    /// N, of its `/dev/pts/N`.
+    /// N, of its `/devices/pts/N`.
     pub fn number(&self) -> u32 {
         self.number
     }
@@ -837,7 +837,7 @@ fn open_side(tty: &TtyRef, master: bool) -> radix_vfs::Result<NodeRef> {
     Ok(handle)
 }
 
-/// `/dev/pts/N`: the terminal side of pseudo-terminal N.
+/// `/devices/pts/N`: the terminal side of pseudo-terminal N.
 struct Entry {
     tty: TtyRef,
 }
@@ -863,7 +863,7 @@ impl Node for Entry {
     }
 }
 
-/// `/dev/ptmx`: opening it makes a pseudo-terminal.
+/// `/devices/ptmx`: opening it makes a pseudo-terminal.
 pub struct Ptmx(pub u64);
 
 impl Node for Ptmx {
@@ -878,7 +878,7 @@ impl Node for Ptmx {
     fn open(&self) -> radix_vfs::Result<Option<NodeRef>> {
         let tty = make()?;
         // Without its master, nothing would ever take the terminal's
-        // `/dev/pts/N` away, and its number with it.
+        // `/devices/pts/N` away, and its number with it.
         open_side(&tty, true).inspect_err(|_| remove_entry(&tty)).map(Some)
     }
 
@@ -887,7 +887,7 @@ impl Node for Ptmx {
     }
 }
 
-/// `/dev/tty`: opening it opens the caller's controlling terminal.
+/// `/devices/tty`: opening it opens the caller's controlling terminal.
 pub struct Current(pub u64);
 
 impl Node for Current {
@@ -919,7 +919,7 @@ pub fn controlling(process: &ProcessRef) -> Option<TtyRef> {
 }
 
 /// Makes a pseudo-terminal, with the lowest free number, and its
-/// `/dev/pts/N`.
+/// `/devices/pts/N`.
 fn make() -> radix_vfs::Result<TtyRef> {
     let pts = PTS.get().ok_or(radix_vfs::Error::NotFound)?;
     let input = buffer(INPUT).ok_or(radix_vfs::Error::NoMemory)?;
@@ -967,7 +967,7 @@ fn make() -> radix_vfs::Result<TtyRef> {
     Ok(tty)
 }
 
-/// Takes `tty`'s `/dev/pts/N` away.
+/// Takes `tty`'s `/devices/pts/N` away.
 fn remove_entry(tty: &Tty) {
     if let Some(pts) = PTS.get() {
         let mut name = radix_klog::TextBuf::<12>::new();
@@ -976,8 +976,8 @@ fn remove_entry(tty: &Tty) {
     }
 }
 
-/// Makes `/dev/pts` in the device tree `root`, with `/dev/ptmx` and
-/// `/dev/tty`.
+/// Makes `/devices/pts` in the device tree `root`, with `/devices/ptmx` and
+/// `/devices/tty`.
 pub fn init(root: &FixedDir) -> radix_vfs::Result<()> {
     let pts = root.add_dir("pts", next_id())?;
     let _ = PTS.set(pts);
