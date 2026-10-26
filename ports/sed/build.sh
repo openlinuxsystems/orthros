@@ -18,6 +18,6 @@ make -j"$JOBS" >make.log 2>&1 || {
 make install DESTDIR="$SYSROOT" >/dev/null
 
 : >"$PORT_INFO/image"
-$STRIP "$SYSROOT/system/bin/sed"
-echo "system/bin/sed" >>"$PORT_INFO/image"
-echo "system/share/man/man1/sed.1" >>"$PORT_INFO/image"
+$STRIP "$SYSROOT/system/commands/sed"
+echo "system/commands/sed" >>"$PORT_INFO/image"
+echo "system/resources/man/man1/sed.1" >>"$PORT_INFO/image"

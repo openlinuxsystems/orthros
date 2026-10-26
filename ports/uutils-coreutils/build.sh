@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Builds uutils' core utilities for Radix as one program,
-# /system/bin/coreutils, with Cargo for Radix ($CARGO_RADIX, ob(1),
+# /system/commands/coreutils, with Cargo for Radix ($CARGO_RADIX, ob(1),
 # PORTS), a symbolic link to it by each utility's name, which it runs as,
 # and their manual pages with uutils' own generator, built for the host.
 # Lists the crates the program links for the license manifest.
@@ -26,11 +26,11 @@ features=$(printf '%s\n' $utilities | grep -vx '\[' | paste -sd, -)
 cd "$PORT_SRC"
 "$CARGO_RADIX" build --release --no-default-features --features "$features" \
 	--bin coreutils --target-dir "$PORT_BUILD/radix" --jobs "$JOBS"
-mkdir -p "$SYSROOT/system/bin"
-$STRIP -o "$SYSROOT/system/bin/coreutils" "$PORT_BUILD/radix/x86_64-unknown-radix/release/coreutils"
+mkdir -p "$SYSROOT/system/commands"
+$STRIP -o "$SYSROOT/system/commands/coreutils" "$PORT_BUILD/radix/x86_64-unknown-radix/release/coreutils"
 for utility in $utilities; do
-	ln -sfn coreutils "$SYSROOT/system/bin/$utility"
-	echo "system/bin/$utility"
+	ln -sfn coreutils "$SYSROOT/system/commands/$utility"
+	echo "system/commands/$utility"
 done >"$PORT_INFO/image"
 
 # A manual page for each utility, from its own argument definitions.
@@ -39,13 +39,13 @@ cargo build --release --no-default-features --features "uudoc,$features" --bin u
 	--target-dir "$PORT_BUILD/host" --jobs "$JOBS"
 # The generator dates each page today; the commit's date makes the same
 # pages each build.
-man="$SYSROOT/system/share/man/man1"
+man="$SYSROOT/system/resources/man/man1"
 date=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%d)
 mkdir -p "$man"
 for utility in $utilities; do
 	"$PORT_BUILD/host/release/uudoc" manpage "$utility" |
 		sed "1,/^\.TH /s/^\(\.TH [^ ]* 1\) \"[0-9-]*\"/\1 \"$date\"/" >"$man/$utility.1"
-	echo "system/share/man/man1/$utility.1"
+	echo "system/resources/man/man1/$utility.1"
 done >>"$PORT_INFO/image"
 
 # What the program links, for the license manifest (ADR 0021): not the

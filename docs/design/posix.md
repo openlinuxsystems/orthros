@@ -446,10 +446,10 @@ and why:
 | 0006 | `strftime` and `wcsftime` from musl 1.2.5 |
 | 0007 | Time conversions from musl 1.2.5's calendar code |
 | 0008 | Random temporary-file names from `getentropy` |
-| 0009 | Locales in `/system/lib/locale`, named as asked, `MB_CUR_MAX` |
+| 0009 | Locales in `/system/libraries/locale`, named as asked, `MB_CUR_MAX` |
 | 0010 | `getpriority`'s failure value |
 | 0011 | `preadv` and `pwritev` |
-| 0012 | `/system/bin` as the default program path, and `confstr`'s failure |
+| 0012 | `/system/commands` as the default program path, and `confstr`'s failure |
 | 0013 | `lrand48`, `nrand48` and `lcong48` from musl 1.2.5 |
 | 0014 | Every resource limit's name, whatever the feature macros |
 | 0015 | `strtol`'s bases, `memmem` and `wcsstr` with an empty needle, `wctob` |
@@ -480,6 +480,12 @@ and why:
 | 0040 | A new thread's signal mask |
 | 0041 | Cancellation points as POSIX has them, made as musl makes them |
 | 0042 | `sigwait`'s error number, and no EINTR |
+| 0043 | GNU's CPU affinity calls without the Linux option |
+| 0044 | A slab's objects handed out as they are asked for |
+| 0045 | A semaphore's waiters bit cleared when it wakes them |
+| 0046 | Semaphores shared between processes |
+| 0047 | The root's folders by their plain names in `paths.h` and `ctermid` |
+| 0048 | `/system/commands` and `/system/resources/man` in `paths.h` |
 
 Patches 0013 to 0022 fix what libc-test found (below); each says which
 of its tests it answers. One of mlibc's own tests changes with patch
@@ -512,7 +518,7 @@ sysroot's headers, Linux's macros undefined and `__radix__` and
 `__dukovo__` defined. When it links, it adds the start files, the C
 library and the builtins around the caller's arguments, in one of three
 modes: static (`-static-pie`, the default), `-dynamic` (a PIE whose
-interpreter is `/system/lib/ld.so`) and `-shared`. The C library goes in
+interpreter is `/system/libraries/ld.so`) and `-shared`. The C library goes in
 with `-Bstatic` or `-Bdynamic` stated, since rustc ends its arguments
 with `-Bdynamic`.
 
@@ -541,7 +547,7 @@ every function the module declares. It found that mlibc aligns
 ## Dynamic linking
 
 `ld.so` searches the needing object's run path (with `$ORIGIN`), then
-`LD_LIBRARY_PATH`, then `/system/lib`. The `dynamic` test builds a
+`LD_LIBRARY_PATH`, then `/system/libraries`. The `dynamic` test builds a
 bundle's shape: a program, a private library in `lib/` beside it found
 through `$ORIGIN/lib`, with a constructor, data and thread-local storage,
 and a plugin opened with `dlopen` whose thread-local storage each thread
@@ -552,7 +558,7 @@ Phase 13.
 
 The `locales` port compiles C.UTF-8 from glibc 2.42's locale sources
 with the host's `localedef` (ADR 0073). mlibc reads glibc's compiled
-format; it looks in `LOCPATH`, then `/system/lib/locale`.
+format; it looks in `LOCPATH`, then `/system/libraries/locale`.
 
 ## Lock order
 

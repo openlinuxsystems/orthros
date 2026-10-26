@@ -61,7 +61,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     if names.is_empty() {
         return Err(util::fail(String::new()));
     }
-    let path = std::env::var_os("PATH").unwrap_or_else(|| "/system/bin".into());
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/system/commands".into());
     let mut out = io::stdout().lock();
     let mut code = 0;
     for name in &names {

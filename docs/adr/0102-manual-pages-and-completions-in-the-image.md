@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0102. Every program in /system/bin has its manual page, indexed, and the shell completes its options from that page
 
-- Status: Accepted
+- Status: Accepted; the pages and completions are in `/system/resources` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-24
 
 ## Context

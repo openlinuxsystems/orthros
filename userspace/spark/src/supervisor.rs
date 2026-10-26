@@ -67,7 +67,7 @@ pub const POSIX_SLOTS: u32 = 128;
 /// C.UTF-8 locale, radix-posix(7)), and nano is the editor programs
 /// open a file in for its user (ADR 0090).
 pub const POSIX_ENV: [&str; 5] =
-    ["PATH=/system/bin", "HOME=/", "TERM=dumb", "LANG=C.UTF-8", "EDITOR=nano"];
+    ["PATH=/system/commands", "HOME=/", "TERM=dumb", "LANG=C.UTF-8", "EDITOR=nano"];
 
 const MS: u64 = 1_000_000;
 const SECOND: u64 = 1_000 * MS;

@@ -6,7 +6,7 @@
 //! `ob image` lists every component that ends up in the image, checks each
 //! license against the allow-list of the component's area, and writes an
 //! SPDX 2.3 document, the license texts and each component's own notice
-//! files to `/system/share/licenses`. See
+//! files to `/system/resources/licenses`. See
 //! docs/adr/0021-license-manifest-in-every-image.md.
 
 use std::collections::BTreeSet;
@@ -19,7 +19,7 @@ use crate::process::{self, step};
 use crate::{Context, Ctx, Error, Result, VERSION, kernel, userspace};
 
 /// Where the manifest and notices go, relative to the image root.
-pub const DIR: &str = "system/share/licenses";
+pub const DIR: &str = "system/resources/licenses";
 
 /// File name of the SPDX document, in [`DIR`] and next to the image.
 pub const MANIFEST: &str = "dukovo.spdx";
@@ -1361,7 +1361,7 @@ mod tests {
              SPDXRef-Package-compiler-builtins-0.1.160\n"
         ));
         assert!(
-            text.contains("Notices: /system/share/licenses/notices/compiler_builtins-0.1.160.")
+            text.contains("Notices: /system/resources/licenses/notices/compiler_builtins-0.1.160.")
         );
         assert!(text.contains("Created: 1970-01-01T00:00:00Z\n"));
     }

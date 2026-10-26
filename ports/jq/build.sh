@@ -19,8 +19,8 @@ make -j"$JOBS" >make.log 2>&1 || {
 	exit 1
 }
 make install DESTDIR="$SYSROOT" >/dev/null
-rm -f "$SYSROOT/system/lib/libjq.la" "$SYSROOT/system/lib/libonig.la"
+rm -f "$SYSROOT/system/libraries/libjq.la" "$SYSROOT/system/libraries/libonig.la"
 
-$STRIP "$SYSROOT/system/bin/jq"
-echo system/bin/jq >"$PORT_INFO/image"
-echo system/share/man/man1/jq.1 >>"$PORT_INFO/image"
+$STRIP "$SYSROOT/system/commands/jq"
+echo system/commands/jq >"$PORT_INFO/image"
+echo system/resources/man/man1/jq.1 >>"$PORT_INFO/image"

@@ -11,6 +11,7 @@ set -eu
 
 cd "$PORT_SRC"
 HOSTCC=cc HOSTCFLAGS=-O2 PREFIX=/system DESTDIR="$SYSROOT" \
+	BINDIR=/system/commands DATAROOTDIR=/system/resources \
 	./configure.sh -O 2 -N -G -T -i >"$PORT_BUILD/configure.log" 2>&1 || {
 	tail -n 40 "$PORT_BUILD/configure.log" >&2
 	exit 1
@@ -23,7 +24,7 @@ make install >/dev/null
 
 : >"$PORT_INFO/image"
 for program in bc dc; do
-	[ -L "$SYSROOT/system/bin/$program" ] || $STRIP "$SYSROOT/system/bin/$program"
-	echo "system/bin/$program" >>"$PORT_INFO/image"
-	echo "system/share/man/man1/$program.1" >>"$PORT_INFO/image"
+	[ -L "$SYSROOT/system/commands/$program" ] || $STRIP "$SYSROOT/system/commands/$program"
+	echo "system/commands/$program" >>"$PORT_INFO/image"
+	echo "system/resources/man/man1/$program.1" >>"$PORT_INFO/image"
 done

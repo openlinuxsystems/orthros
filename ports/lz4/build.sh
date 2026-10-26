@@ -12,6 +12,8 @@ set -eu
 
 cd "$PORT_SRC"
 make="make -j$JOBS CC=$CC AR=$AR CFLAGS=-O3 PREFIX=/system DESTDIR=$SYSROOT BUILD_SHARED=no"
+# Into the folders Dukovo names (radix-files(7)).
+make="$make bindir=/system/commands libdir=/system/libraries mandir=/system/resources/man"
 {
 	$make -C lib liblz4.a liblz4.pc
 	$make -C programs HAVE_PTHREAD=1 lz4
@@ -22,8 +24,8 @@ make="make -j$JOBS CC=$CC AR=$AR CFLAGS=-O3 PREFIX=/system DESTDIR=$SYSROOT BUIL
 $make -C lib install >/dev/null
 $make -C programs HAVE_PTHREAD=1 install >/dev/null
 
-$STRIP "$SYSROOT/system/bin/lz4"
+$STRIP "$SYSROOT/system/commands/lz4"
 for name in lz4 lz4c lz4cat unlz4; do
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >"$PORT_INFO/image"

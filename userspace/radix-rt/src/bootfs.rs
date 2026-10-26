@@ -3,7 +3,7 @@
 
 //! The boot archive's files, read-only, for Spark: the kernel maps the
 //! archive into Spark's address space and says where in its start-up page
-//! (radix-startup(2)). Paths are absolute, such as `/system/bin/spark`.
+//! (radix-startup(2)). Paths are absolute, such as `/system/commands/spark`.
 
 use core::fmt;
 

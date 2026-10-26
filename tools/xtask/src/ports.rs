@@ -591,7 +591,7 @@ impl Toolchain {
     /// of its own, as the C library's are, for the linker to drop). It
     /// links a static position-independent program, as system programs
     /// are; with `-dynamic`, which it takes away, a program that the
-    /// dynamic linker starts (`/system/lib/ld.so`), and with `-shared` a
+    /// dynamic linker starts (`/system/libraries/ld.so`), and with `-shared` a
     /// shared library, both on the shared C library, for bundles that ship
     /// libraries of their own (ADR 0071). Linux's target, rather than
     /// none, makes Clang link with LLD itself (for no OS it hands linking
@@ -604,7 +604,7 @@ impl Toolchain {
     /// 0090). `-nostdinc++` leaves out the headers and `-nostdlib++` or
     /// `-nodefaultlibs` the libraries, as libc++'s own build asks.
     fn compiler_script(&self, sysroot: &Path, cxx: bool) -> String {
-        let lib = sysroot.join("system/lib");
+        let lib = sysroot.join("system/libraries");
         let (what, clang) =
             if cxx { ("C++ compiler", self.clangxx()) } else { ("C compiler", self.clang.clone()) };
         // What only C++ adds: the arguments that leave out libc++, its
@@ -662,7 +662,7 @@ if [ -n "$link" ]; then
 	case $mode in
 	static) start='{lib}/Scrt1.o' libc=-Bstatic; set -- -static-pie "$@" ;;
 	dynamic) start='{lib}/Scrt1.o' libc=-Bdynamic
-		set -- -pie -Wl,--dynamic-linker=/system/lib/ld.so -Wl,--as-needed "$@" ;;
+		set -- -pie -Wl,--dynamic-linker=/system/libraries/ld.so -Wl,--as-needed "$@" ;;
 	shared) start= libc=-Bdynamic; set -- -Wl,--as-needed "$@" ;;
 	esac
 	[ -n "$cxxlib" ] && cxx='{libraries}' || cxx=
@@ -1352,7 +1352,7 @@ fn build(ctx: &Ctx, toolchain: &Toolchain, port: &Port) -> Result<()> {
         .env_remove("CPPFLAGS")
         .env_remove("LDFLAGS")
         .env_remove("PKG_CONFIG_PATH")
-        .env("PKG_CONFIG_LIBDIR", sysroot.join("system/lib/pkgconfig"))
+        .env("PKG_CONFIG_LIBDIR", sysroot.join("system/libraries/pkgconfig"))
         .env("PKG_CONFIG_SYSROOT_DIR", &sysroot)
         .env("SOURCE_DATE_EPOCH", crate::image::source_date_epoch(ctx).unwrap_or("0".into()));
     process::run(ctx, &mut cmd)
@@ -1444,7 +1444,7 @@ mod tests {
             license = "MIT"
             homepage = "https://www.lua.org"
             depends = ["mlibc"]
-            image = ["system/bin/lua"]
+            image = ["system/commands/lua"]
             [source]
             git = "https://github.com/lua/lua.git"
             commit = "0123456789012345678901234567890123456789"
@@ -1471,7 +1471,7 @@ mod tests {
             summary = "x"
             license = "MIT"
             homepage = "https://x"
-            image = ["system/bin/x", "system/share/x/"]
+            image = ["system/commands/x", "system/resources/x/"]
             [source]
             git = "https://x/x.git"
             commit = "0123456789012345678901234567890123456789"
@@ -1479,8 +1479,8 @@ mod tests {
         let recipe: Recipe = toml::from_str(text).unwrap();
         assert_eq!(outside_path(&recipe), None);
         for (from, to) in [
-            ("\"system/bin/x\"", "\"/etc/x\""),
-            ("\"system/bin/x\"", "\"system/../../x\""),
+            ("\"system/commands/x\"", "\"/etc/x\""),
+            ("\"system/commands/x\"", "\"system/../../x\""),
             ("image = [", "notices = [\"../COPYING\"]\nimage = ["),
             (
                 "[source]",

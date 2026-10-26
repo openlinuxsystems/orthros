@@ -28,7 +28,7 @@ grep -q VI_VERSION version.h
 # config.h as CMakeLists.txt would write it for Radix.
 sed -e 's/^#cmakedefine \(USE_WIDECHAR\|HAVE_NCURSES_H\|HAVE_PTY_H\|HAVE_TERM_H\)$/#define \1/' \
 	-e 's/^#cmakedefine \(.*\)$/\/* #undef \1 *\//' "$src/files/config.h.in" >config.h
-sed -e 's|@vi_cv_path_msgcat@|/system/share/vi/catalog/|' \
+sed -e 's|@vi_cv_path_msgcat@|/system/resources/vi/catalog/|' \
 	-e 's|@vi_cv_path_preserve@|/var/tmp/vi.recover/|' "$src/files/pathnames.h.in" >pathnames.h
 
 flags="$CFLAGS -std=gnu17 -D_GNU_SOURCE -D_XOPEN_SOURCE_EXTENDED -D__REGEX_PRIVATE \
@@ -54,8 +54,8 @@ make -j"$JOBS" vi >make.log 2>&1 || {
 	exit 1
 }
 
-bin="$SYSROOT/system/bin"
-man="$SYSROOT/system/share/man/man1"
+bin="$SYSROOT/system/commands"
+man="$SYSROOT/system/resources/man/man1"
 mkdir -p "$bin" "$man"
 cp vi "$bin/vi"
 $STRIP "$bin/vi"
@@ -65,6 +65,6 @@ for name in ex view; do
 	ln -sfn vi.1 "$man/$name.1"
 done
 for name in vi ex view; do
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >"$PORT_INFO/image"

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0071. mlibc's dynamic linker is /system/lib/ld.so, for bundles; system programs stay static
 
-- Status: Accepted
+- Status: Accepted; the dynamic linker is `/system/libraries/ld.so` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-22
 
 ## Context

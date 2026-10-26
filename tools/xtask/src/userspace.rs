@@ -45,7 +45,7 @@ pub const BOOTFS_WORD: &str = "bootfs";
 /// What the boot archive holds: each program's path in it, and its
 /// package.
 pub const ARCHIVE: &[(&str, &str)] = &[
-    ("system/bin/spark", "spark"),
+    ("system/commands/spark", "spark"),
     ("system/tests/hello", "hello"),
     ("system/tests/storage", "storage"),
 ];
@@ -55,12 +55,22 @@ pub const ARCHIVE: &[(&str, &str)] = &[
 pub const ARCHIVE_DIRS: &[&str] =
     &["system/boot", "system/live", "system/settings", "system/state"];
 
+/// Symbolic links of the boot archive: Unix's names for folders of
+/// `/system`, each leading to the folder that holds what it stands for
+/// (ADR 0114), so that `/usr/bin` and `/usr/lib` still lead somewhere.
+pub const ARCHIVE_LINKS: &[(&str, &str)] =
+    &[("system/bin", "commands"), ("system/lib", "libraries"), ("system/share", "resources")];
+
+/// The `.hidden` file of `/system`: the names of its links, which
+/// listings leave out (ADR 0113).
+pub const ARCHIVE_HIDDEN: (&str, &str) = ("system/.hidden", "bin\nlib\nshare\n");
+
 /// The programs on Rust's standard library that the boot archive holds:
 /// each one's path in it, and its package in userspace/programs.
 pub const STD_ARCHIVE: &[(&str, &str)] = &[
-    ("system/bin/consoled", "consoled"),
-    ("system/bin/nukesh", "nukesh"),
-    ("system/bin/systools", "systools"),
+    ("system/commands/consoled", "consoled"),
+    ("system/commands/nukesh", "nukesh"),
+    ("system/commands/systools", "systools"),
     ("system/tests/posix/std-test", "std-test"),
 ];
 
@@ -70,44 +80,44 @@ pub const STD_ARCHIVE: &[(&str, &str)] = &[
 /// (nukesh(1), ADR 0103); the native tools are one program, which each
 /// tool's name runs (ADR 0096).
 pub const STD_LINKS: &[(&str, &str)] = &[
-    ("system/bin/bash", "nukesh"),
-    ("system/bin/sh", "nukesh"),
-    ("system/bin/rnukesh", "nukesh"),
-    ("system/bin/chgrp", "systools"),
-    ("system/bin/chmod", "systools"),
-    ("system/bin/chown", "systools"),
-    ("system/bin/column", "systools"),
-    ("system/bin/df", "systools"),
-    ("system/bin/dmesg", "systools"),
-    ("system/bin/free", "systools"),
-    ("system/bin/hd", "systools"),
-    ("system/bin/halt", "systools"),
-    ("system/bin/hexdump", "systools"),
-    ("system/bin/ionice", "systools"),
-    ("system/bin/kill", "systools"),
-    ("system/bin/lsof", "systools"),
-    ("system/bin/pgrep", "systools"),
-    ("system/bin/pidstat", "systools"),
-    ("system/bin/pkill", "systools"),
-    ("system/bin/poweroff", "systools"),
-    ("system/bin/ps", "systools"),
-    ("system/bin/reboot", "systools"),
-    ("system/bin/renice", "systools"),
-    ("system/bin/rtrace", "systools"),
-    ("system/bin/script", "systools"),
-    ("system/bin/service", "systools"),
-    ("system/bin/shutdown", "systools"),
-    ("system/bin/taskset", "systools"),
-    ("system/bin/top", "systools"),
-    ("system/bin/tree", "systools"),
-    ("system/bin/uptime", "systools"),
-    ("system/bin/users", "systools"),
-    ("system/bin/vmstat", "systools"),
-    ("system/bin/w", "systools"),
-    ("system/bin/watch", "systools"),
-    ("system/bin/which", "systools"),
-    ("system/bin/who", "systools"),
-    ("system/bin/xxd", "systools"),
+    ("system/commands/bash", "nukesh"),
+    ("system/commands/sh", "nukesh"),
+    ("system/commands/rnukesh", "nukesh"),
+    ("system/commands/chgrp", "systools"),
+    ("system/commands/chmod", "systools"),
+    ("system/commands/chown", "systools"),
+    ("system/commands/column", "systools"),
+    ("system/commands/df", "systools"),
+    ("system/commands/dmesg", "systools"),
+    ("system/commands/free", "systools"),
+    ("system/commands/hd", "systools"),
+    ("system/commands/halt", "systools"),
+    ("system/commands/hexdump", "systools"),
+    ("system/commands/ionice", "systools"),
+    ("system/commands/kill", "systools"),
+    ("system/commands/lsof", "systools"),
+    ("system/commands/pgrep", "systools"),
+    ("system/commands/pidstat", "systools"),
+    ("system/commands/pkill", "systools"),
+    ("system/commands/poweroff", "systools"),
+    ("system/commands/ps", "systools"),
+    ("system/commands/reboot", "systools"),
+    ("system/commands/renice", "systools"),
+    ("system/commands/rtrace", "systools"),
+    ("system/commands/script", "systools"),
+    ("system/commands/service", "systools"),
+    ("system/commands/shutdown", "systools"),
+    ("system/commands/taskset", "systools"),
+    ("system/commands/top", "systools"),
+    ("system/commands/tree", "systools"),
+    ("system/commands/uptime", "systools"),
+    ("system/commands/users", "systools"),
+    ("system/commands/vmstat", "systools"),
+    ("system/commands/w", "systools"),
+    ("system/commands/watch", "systools"),
+    ("system/commands/which", "systools"),
+    ("system/commands/who", "systools"),
+    ("system/commands/xxd", "systools"),
 ];
 
 /// The shell's test scripts, with their expected output, and where in
@@ -119,7 +129,7 @@ pub const SHELL_CASES_DIR: &str = "system/tests/shell";
 /// archive they go: among the ports' defaults, which Spark copies into
 /// `/system/settings` (spark(8)).
 pub const DEFAULTS: &str = "userspace/defaults";
-pub const DEFAULTS_DIR: &str = "system/lib/defaults/etc";
+pub const DEFAULTS_DIR: &str = "system/resources/default-settings";
 
 /// The service files of the boot tests that Spark is pointed at with
 /// `--service-dir` (spark(8)), and where in the boot archive they go.
@@ -483,36 +493,67 @@ fn build_dynamic(ctx: &Ctx, toolchain: &ports::Toolchain) -> Result<Vec<(String,
     Ok(files)
 }
 
+/// What a path of the boot archive is.
+enum Entry<'a> {
+    Directory,
+    /// A file, or a symbolic link, on the host.
+    File(&'a Path),
+    /// A symbolic link with this target.
+    Link(&'a str),
+    /// A file with this text.
+    Text(&'a str),
+}
+
 /// The boot archive: `files`, each a path in the archive and the file
 /// it holds (a symbolic link stays one, with its target), the
-/// directories above them and those of [`ARCHIVE_DIRS`], owned by root
-/// and dated `epoch` (the commit's time), so the same programs make the
-/// same bytes. A file is 0755 if its source may be run by anyone (a
-/// program or a script), and 0644 otherwise (settings, manual pages, a
-/// test's expected output), as Linux installs them.
+/// directories above them, those of [`ARCHIVE_DIRS`], the links of
+/// [`ARCHIVE_LINKS`] and [`ARCHIVE_HIDDEN`], owned by root and dated
+/// `epoch` (the commit's time), so the same programs make the same
+/// bytes. A file is 0755 if its source may be run by anyone (a program
+/// or a script), and 0644 otherwise (settings, manual pages, a test's
+/// expected output), as Linux installs them. No file may be under one of
+/// the links: it belongs in the folder the link leads to.
 fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<Vec<u8>> {
     let mtime = epoch.and_then(|epoch| epoch.parse().ok()).unwrap_or(0);
-    let mut entries: Vec<(String, Option<&Path>)> = Vec::new();
+    let mut entries: Vec<(String, Entry<'_>)> = Vec::new();
     for dir in ARCHIVE_DIRS {
-        entries.push((dir.to_string(), None));
+        entries.push((dir.to_string(), Entry::Directory));
     }
+    let mut leaves: Vec<(String, Entry<'_>)> = Vec::new();
+    for (link, target) in ARCHIVE_LINKS {
+        leaves.push((link.to_string(), Entry::Link(target)));
+    }
+    leaves.push((ARCHIVE_HIDDEN.0.to_string(), Entry::Text(ARCHIVE_HIDDEN.1)));
     for (path, file) in files {
-        // Each directory above the file, once.
+        if let Some((link, _)) = ARCHIVE_LINKS
+            .iter()
+            .find(|(link, _)| path.strip_prefix(link).is_some_and(|rest| rest.starts_with('/')))
+        {
+            return Err(crate::Error::new(format!(
+                "the boot archive: {path} is under the link /{link}"
+            )));
+        }
+        leaves.push((path.clone(), Entry::File(file)));
+    }
+    for (path, entry) in leaves {
+        // Each directory above it, once.
         for (end, _) in path.match_indices('/') {
             let dir = &path[..end];
             if !entries.iter().any(|(seen, _)| seen == dir) {
-                entries.push((dir.to_string(), None));
+                entries.push((dir.to_string(), Entry::Directory));
             }
         }
-        entries.push((path.clone(), Some(file)));
+        entries.push((path, entry));
     }
     // A directory before what is in it, as the archive's reader wants.
     entries.sort_by(|a, b| a.0.split('/').cmp(b.0.split('/')));
     let mut writer = radix_bootfs::write::Writer::new();
-    for (path, file) in &entries {
-        let written = match file {
-            None => writer.directory(path, 0o755, mtime),
-            Some(file) if file.is_symlink() => {
+    for (path, entry) in &entries {
+        let written = match entry {
+            Entry::Directory => writer.directory(path, 0o755, mtime),
+            Entry::Link(target) => writer.symlink(path, target, mtime),
+            Entry::Text(text) => writer.file(path, 0o644, mtime, text.as_bytes()),
+            Entry::File(file) if file.is_symlink() => {
                 let target =
                     std::fs::read_link(file).context(|| format!("reading {}", file.display()))?;
                 let target = target.to_str().ok_or_else(|| {
@@ -520,7 +561,7 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
                 })?;
                 writer.symlink(path, target, mtime)
             }
-            Some(file) => {
+            Entry::File(file) => {
                 let data = std::fs::read(file).context(|| format!("reading {}", file.display()))?;
                 let mode = if is_executable(file)? { 0o755 } else { 0o644 };
                 writer.file(path, mode, mtime, &data)
@@ -559,7 +600,7 @@ mod tests {
         std::fs::set_permissions(dir.join("hosts"), Permissions::from_mode(0o644)).unwrap();
         files.push(("system/settings/hosts".to_string(), dir.join("hosts")));
         std::os::unix::fs::symlink("spark", dir.join("init")).unwrap();
-        files.push(("system/bin/init".to_string(), dir.join("init")));
+        files.push(("system/commands/init".to_string(), dir.join("init")));
         let bytes = write_archive(&files, Some("1700000000".into())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let archive = radix_bootfs::open(&bytes).unwrap();
@@ -568,25 +609,35 @@ mod tests {
             paths,
             [
                 "system",
+                "system/.hidden",
                 "system/bin",
-                "system/bin/init",
-                "system/bin/spark",
                 "system/boot",
+                "system/commands",
+                "system/commands/init",
+                "system/commands/spark",
+                "system/lib",
                 "system/live",
                 "system/settings",
                 "system/settings/hosts",
+                "system/share",
                 "system/state",
                 "system/tests",
                 "system/tests/hello",
                 "system/tests/storage"
             ]
         );
-        let spark = archive.find("/system/bin/spark").unwrap();
+        let spark = archive.find("/system/commands/spark").unwrap();
         assert_eq!(spark.data, b"the spark program");
         assert_eq!((spark.mode, spark.mtime), (0o755, 1_700_000_000));
         assert_eq!(archive.find("/system/settings/hosts").unwrap().mode, 0o644);
-        let init = archive.find("/system/bin/init").unwrap();
+        let init = archive.find("/system/commands/init").unwrap();
         assert_eq!((init.kind, init.data), (radix_bootfs::Kind::Symlink, &b"spark"[..]));
+        let bin = archive.find("/system/bin").unwrap();
+        assert_eq!((bin.kind, bin.data), (radix_bootfs::Kind::Symlink, &b"commands"[..]));
+        let hidden = archive.find("/system/.hidden").unwrap();
+        assert_eq!((hidden.mode, hidden.data), (0o644, &b"bin\nlib\nshare\n"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");
+        let under_a_link = [("system/bin/ls".to_string(), dir.join("ls"))];
+        assert!(write_archive(&under_a_link, None).is_err(), "a file under /system/bin");
     }
 }

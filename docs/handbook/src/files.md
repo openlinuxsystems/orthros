@@ -18,6 +18,9 @@ is named for what it holds:
 | Path | What it holds |
 | --- | --- |
 | `/system` | The operating system: programs and the system's own files, read-only |
+| `/system/commands` | The programs, where the shell finds commands |
+| `/system/libraries` | The libraries, the dynamic linker and the locales |
+| `/system/resources` | What else the programs read: manual pages, terminal descriptions, the licenses, the default settings |
 | `/system/settings` | The system's settings (in memory for now) |
 | `/system/state` | The system's changing data: logs, caches (in memory for now) |
 | `/system/live` | The state of running services: sockets, locks, process IDs, in memory |
@@ -39,8 +42,9 @@ that holds what it stands for:
 
 | Unix name | Leads to |
 | --- | --- |
-| `/bin`, `/sbin` | `/system/bin` |
+| `/bin`, `/sbin` | `/system/commands` |
 | `/usr` | `/system` |
+| `/system/bin`, `/system/lib`, `/system/share` | `/system/commands`, `/system/libraries`, `/system/resources` |
 | `/etc` | `/system/settings` |
 | `/var` | `/system/state` (and `/var/run` to `/system/live`) |
 | `/run` | `/system/live` |
@@ -50,13 +54,15 @@ that holds what it stands for:
 
 Everything is still kept in one place, so `/etc/nanorc` and
 `/system/settings/nanorc` are the same file. The links are hidden: the
-root's `.hidden` file lists them, and `ls /` and the shell's Tab
-completion leave them out, as the file manager will. `ls -a /` shows
-them, and Tab completes one once its whole name is typed.
+root's `.hidden` file lists them (and `/system/.hidden` those in
+`/system`), and `ls /` and the shell's Tab completion leave them out,
+as the file manager will. `ls -a /` shows them, and Tab completes one
+once its whole name is typed.
 
-The system ships its default settings in `/system/lib/defaults/etc`,
-and Spark copies each one that `/system/settings` lacks into it at boot,
-so `/system/settings/nanorc` is there to edit. A setting already in
+The system ships its default settings in
+`/system/resources/default-settings`, and Spark copies each one that
+`/system/settings` lacks into it at boot, so `/system/settings/nanorc`
+is there to edit. A setting already in
 `/system/settings` is never replaced. While `/system/settings` is in
 memory, each boot starts it afresh from the defaults.
 

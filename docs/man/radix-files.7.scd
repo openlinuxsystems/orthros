@@ -159,9 +159,16 @@ on it at every boot. Each folder is named for what it holds:
 :< *What it is*
 |  _/system_
 :< the boot archive, read-only: programs and the system's own files
+|  _/system/commands_
+:< the programs, where the shell's *PATH* leads
+|  _/system/libraries_
+:< the libraries, the dynamic linker _ld.so_ and the locales
+|  _/system/resources_
+:< everything else the programs read: manual pages, terminal
+   descriptions, completions, the licenses, and the default settings
 |  _/system/settings_
 :< the system's settings, a tmpfs for now, which starts from the
-   defaults in _/system/lib/defaults/etc_ (*spark*(8))
+   defaults in _/system/resources/default-settings_ (*spark*(8))
 |  _/system/state_
 :< the system's changing data, a tmpfs for now, with
    _/system/state/tmp_ for temporary files that are to outlive a restart
@@ -185,14 +192,19 @@ on it at every boot. Each folder is named for what it holds:
 |  _/volumes_
 :< disks, USB sticks and SD cards, one directory each
 
-Unix's names for these are symbolic links in the root, for Unix programs,
-scripts and people: _/bin_ and _/sbin_ lead to _system/bin_, _/usr_ to
-_system_, _/etc_ to _system/settings_, _/var_ to _system/state_, _/run_
-to _system/live_, _/dev_ to _devices_, _/proc_ to _processes_ and _/sys_
-to _kernel_; _/system/state/run_ leads to _../live_, so that _/var/run_
-is _/run_. The root's _.hidden_ file lists them, one name a line, and
+Unix's names for these are symbolic links in the root, for Unix
+programs, scripts and people: _/bin_ and _/sbin_ lead to
+_system/commands_, _/usr_ to _system_, _/etc_ to _system/settings_,
+_/var_ to _system/state_, _/run_ to _system/live_, _/dev_ to _devices_,
+_/proc_ to _processes_ and _/sys_ to _kernel_; _/system/state/run_
+leads to _../live_, so that _/var/run_ is _/run_. The root's _.hidden_ file lists them, one name a line, and
 *ls*(1) and the shell's completion leave the names it lists out, unless
 asked for every name (*ls -a*), as the file manager will.
+
+The boot archive has the same for _/system_: _bin_ leads to _commands_,
+_lib_ to _libraries_ and _share_ to _resources_, so _/usr/bin/env_,
+_/usr/lib/ld.so_ and _/usr/share/man_ are there too, and
+_/system/.hidden_ lists them.
 
 Until the root filesystem is on a disk (Btrfs, Phase 10), _/applications_,
 _/users_ and _/shared_ are empty directories of the root's tmpfs.

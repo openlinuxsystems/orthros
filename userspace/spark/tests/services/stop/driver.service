@@ -5,7 +5,7 @@
 # service(8), shows what Spark says of the services, and powers off.
 
 description = Drives the spark-stop boot test
-program = /system/bin/nukesh
+program = /system/commands/nukesh
 arguments = -c "sleep 1; service stubborn restart; sleep 7; service stubborn stop; sleep 7; service --status-all; service leaver status; poweroff"
 order = 90
 restart = never

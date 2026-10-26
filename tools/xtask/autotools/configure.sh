@@ -16,6 +16,10 @@
 # running a program for Radix (config.site, beside this script's
 # directory). CONFIG_SHELL keeps configure from choosing the host's bash
 # for the scripts a package installs, which Radix runs with /bin/sh.
+# A package installs into the folders Dukovo names (radix-files(7)):
+# programs in commands, libraries in libraries, its other files in
+# resources, settings in settings and changing data in state, under
+# the prefix.
 set -eu
 
 src=$1
@@ -48,5 +52,9 @@ fi
 CONFIG_SITE=$toolchain/autotools/config.site
 CONFIG_SHELL=/bin/sh
 export CONFIG_SITE CONFIG_SHELL
-exec /bin/sh "$src/configure" --build="$build" --host=x86_64-radix --prefix="${PREFIX:-/system}" \
+prefix=${PREFIX:-/system}
+exec /bin/sh "$src/configure" --build="$build" --host=x86_64-radix --prefix="$prefix" \
+	--bindir="$prefix/commands" --sbindir="$prefix/commands" --libdir="$prefix/libraries" \
+	--libexecdir="$prefix/libraries" --datarootdir="$prefix/resources" \
+	--sysconfdir="$prefix/settings" --localstatedir="$prefix/state" \
 	CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" CFLAGS="$CFLAGS" "$@"

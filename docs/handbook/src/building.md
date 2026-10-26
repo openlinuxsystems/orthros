@@ -125,14 +125,14 @@ found and ends like this:
 [    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
 [    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    1.049978] Boot complete.
-[    0.866770] Init: the boot archive is 91956 KiB with 1073 entries; starting /system/bin/spark
-[    1.583622] Init: /system/bin/spark is process 1
+[    0.866770] Init: the boot archive is 91956 KiB with 1073 entries; starting /system/commands/spark
+[    1.583622] Init: /system/commands/spark is process 1
 ...
 [    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 8 filesystems
 [    1.994464] cpu1: spark[1]: spark: added 5 default settings to /system/settings
 [    2.025364] cpu1: spark[1]: spark: listening at /system/live/spark/control
 [    2.059082] cpu1: spark[1]: spark: 1 services in /system/settings/spark/services, 1 enabled
-[    2.162156] cpu1: spark[1]: spark: started consoled (/system/bin/consoled) as process 12
+[    2.162156] cpu1: spark[1]: spark: started consoled (/system/commands/consoled) as process 12
 [    2.207236] Framebuffer: a program took the screen; the log stays off it
 ```
 

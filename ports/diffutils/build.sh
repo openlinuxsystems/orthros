@@ -20,7 +20,7 @@ make install SUBDIRS="lib src doc man" DESTDIR="$SYSROOT" >/dev/null
 
 : >"$PORT_INFO/image"
 for program in diff cmp diff3 sdiff; do
-	$STRIP "$SYSROOT/system/bin/$program"
-	echo "system/bin/$program" >>"$PORT_INFO/image"
-	echo "system/share/man/man1/$program.1" >>"$PORT_INFO/image"
+	$STRIP "$SYSROOT/system/commands/$program"
+	echo "system/commands/$program" >>"$PORT_INFO/image"
+	echo "system/resources/man/man1/$program.1" >>"$PORT_INFO/image"
 done

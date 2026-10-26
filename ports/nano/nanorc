@@ -38,4 +38,4 @@ bind ^Z undo main
 bind ^Y redo main
 
 ## Syntax highlighting for the file types nano knows.
-include "/system/share/nano/*.nanorc"
+include "/system/resources/nano/*.nanorc"

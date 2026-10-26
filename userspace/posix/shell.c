@@ -25,7 +25,7 @@
 #define CASES "/system/tests/shell"
 #endif
 #ifndef NUKESH
-#define NUKESH "/system/bin/nukesh"
+#define NUKESH "/system/commands/nukesh"
 #endif
 #ifndef SH
 #define SH "/bin/sh"

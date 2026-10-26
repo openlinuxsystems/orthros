@@ -17,10 +17,10 @@ make -j"$JOBS" CC="$CC" AR="$AR" RANLIB="$RANLIB" CFLAGS="$CFLAGS -D_FILE_OFFSET
 	exit 1
 }
 
-bin="$SYSROOT/system/bin"
-man="$SYSROOT/system/share/man/man1"
-mkdir -p "$bin" "$man" "$SYSROOT/system/lib" "$SYSROOT/system/include"
-cp libbz2.a "$SYSROOT/system/lib/"
+bin="$SYSROOT/system/commands"
+man="$SYSROOT/system/resources/man/man1"
+mkdir -p "$bin" "$man" "$SYSROOT/system/libraries" "$SYSROOT/system/include"
+cp libbz2.a "$SYSROOT/system/libraries/"
 cp bzlib.h "$SYSROOT/system/include/"
 for program in bzip2 bzip2recover; do
 	cp "$program" "$bin/"
@@ -44,6 +44,6 @@ for name in bzip2 bunzip2:bzip2 bzcat:bzip2 bzip2recover:bzip2 bzgrep bzegrep:bz
 		[ "$link" = bzip2recover ] || ln -sfn "$target" "$bin/$link"
 		ln -sfn "$target.1" "$man/$link.1"
 	fi
-	echo "system/bin/$link"
-	echo "system/share/man/man1/$link.1"
+	echo "system/commands/$link"
+	echo "system/resources/man/man1/$link.1"
 done >>"$PORT_INFO/image"

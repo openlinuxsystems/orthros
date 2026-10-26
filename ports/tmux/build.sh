@@ -21,5 +21,5 @@ make -j"$JOBS" >make.log 2>&1 || {
 }
 make install DESTDIR="$SYSROOT" >/dev/null
 
-$STRIP "$SYSROOT/system/bin/tmux"
-printf '%s\n' system/bin/tmux system/share/man/man1/tmux.1 >"$PORT_INFO/image"
+$STRIP "$SYSROOT/system/commands/tmux"
+printf '%s\n' system/commands/tmux system/resources/man/man1/tmux.1 >"$PORT_INFO/image"

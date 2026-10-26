@@ -11,11 +11,11 @@ set -eu
 cd "$PORT_SRC"
 "$CARGO_RADIX" build --release --bin find --bin xargs --target-dir "$PORT_BUILD/radix" \
 	--jobs "$JOBS"
-mkdir -p "$SYSROOT/system/bin" "$SYSROOT/system/share/man/man1"
+mkdir -p "$SYSROOT/system/commands" "$SYSROOT/system/resources/man/man1"
 for program in find xargs; do
-	$STRIP -o "$SYSROOT/system/bin/$program" \
+	$STRIP -o "$SYSROOT/system/commands/$program" \
 		"$PORT_BUILD/radix/x86_64-unknown-radix/release/$program"
-	scdoc <"$PORT_DIR/man/$program.1.scd" >"$SYSROOT/system/share/man/man1/$program.1"
+	scdoc <"$PORT_DIR/man/$program.1.scd" >"$SYSROOT/system/resources/man/man1/$program.1"
 done
 
 # What the programs link, for the license manifest (ADR 0021): not the

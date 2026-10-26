@@ -1,9 +1,9 @@
 SPDX-FileCopyrightText: 2026 The Dukovo contributors
 SPDX-License-Identifier: Apache-2.0 OR MIT
 
-Programs are in /system/bin on Dukovo, which has no /bin or /usr:
-execvp and its kin search /system/bin when PATH is not set, and
-confstr(_CS_PATH) names it. confstr fails with EINVAL for a name it does
+Programs are in /system/commands on Dukovo (/bin and /usr/bin are
+links to it): execvp and its kin search /system/commands when PATH is
+not set, and confstr(_CS_PATH) names it. confstr fails with EINVAL for a name it does
 not know, as POSIX says, instead of ending the program.
 
 diff -ruN a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
@@ -14,8 +14,8 @@ diff -ruN a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
  	const char *str = "";
  	if (name == _CS_PATH) {
 -		str = "/bin:/usr/bin";
-+		// Dukovo's programs are in /system/bin; there is no /bin or /usr.
-+		str = "/system/bin";
++		// Dukovo's programs are in /system/commands; /bin leads there.
++		str = "/system/commands";
  	} else if(name == _CS_GNU_LIBPTHREAD_VERSION) {
  		// We are not glibc, so we can return 0 here.
  		return 0;
@@ -37,7 +37,7 @@ diff -ruN a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
  		dirs = pv;
  	}else{
 -		dirs = "/bin:/usr/bin";
-+		dirs = "/system/bin";
++		dirs = "/system/commands";
  	}
  
  	size_t p = 0;

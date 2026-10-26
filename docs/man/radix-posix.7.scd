@@ -44,7 +44,7 @@ _out/toolchain_:
 	*\_\_dukovo\_\_* defined and Linux's own macros taken away) against
 	the C library's headers only, and links a static
 	position-independent program by default. *-dynamic* links a program
-	whose interpreter is _/system/lib/ld.so_, on the shared C library;
+	whose interpreter is _/system/libraries/ld.so_, on the shared C library;
 	*-shared* links a shared library.
 
 _out/toolchain/meson/radix.ini_
@@ -92,7 +92,7 @@ The auxiliary vector has Linux's entries (*AT_PHDR*, *AT_ENTRY*,
 *AT_RADIX_STARTUP* (0x52440002), the start-up page's address.
 
 Spark gives every POSIX program it starts the environment
-*PATH=/system/bin*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8* and
+*PATH=/system/commands*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8* and
 *EDITOR=nano*, the root with the read and write rights, and a new
 pseudo-terminal as descriptors 0, 1 and 2, whose output it copies to the
 kernel log.
@@ -420,17 +420,17 @@ are not there, as they are not POSIX's. There is no program break:
 Programs start in the C locale, as POSIX says. *setlocale(LC_ALL, "")*
 with Spark's *LANG=C.UTF-8* gives the C.UTF-8 locale: UTF-8 characters
 with Unicode 16's classes and case mappings, compiled from glibc's locale
-data into _/system/lib/locale/C.utf8_. Asking for any other locale fails
+data into _/system/libraries/locale/C.utf8_. Asking for any other locale fails
 until Phase 12 brings named locales and time zones; until then local
 time is UTC.
 
 # DYNAMIC LINKING
 
-mlibc's dynamic linker is _/system/lib/ld.so_ and the shared C library
-_/system/lib/libc.so_. A dynamically linked program's libraries are
+mlibc's dynamic linker is _/system/libraries/ld.so_ and the shared C library
+_/system/libraries/libc.so_. A dynamically linked program's libraries are
 looked for in the run path of the object that needs them, where
 *$ORIGIN* is that object's directory, then in *LD_LIBRARY_PATH* and
-_/system/lib_. *dlopen*, *dlsym*, *dlclose*, constructors, and
+_/system/libraries_. *dlopen*, *dlsym*, *dlclose*, constructors, and
 thread-local storage in libraries opened later, all work. System
 programs never use it; bundles (Phase 13) may.
 
@@ -502,7 +502,7 @@ tests are:
 	through Spark; and the _/processes_ files they read (*radix-proc*(5)).
 
 *commands*
-	Every program in _/system/bin_ was run by *utilities* or *admin*,
+	Every program in _/system/commands_ was run by *utilities* or *admin*,
 	which note each program they run in _/tmp/posix-commands_; Spark
 	and consoled, which other boot tests run, are the exceptions. A
 	new program fails this test until a test runs it.

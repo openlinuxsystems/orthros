@@ -7,7 +7,7 @@
 //! Dukovo's own pages (docs/man) join the ports'. makewhatis(8) indexes
 //! them all, so that man(1), apropos(1) and whatis(1) find a page by any
 //! name its NAME section gives, as *man poweroff* finds reboot(8). Every
-//! program in `/system/bin` must have a page, by its file's name or by
+//! program in `/system/commands` must have a page, by its file's name or by
 //! one of those names, or the build fails. And from each program's page
 //! come the options the shell completes for it: the build reads the
 //! page as mandoc(1) shows it, takes each option a list of them names,
@@ -24,11 +24,11 @@ use crate::process::{self, step};
 use crate::{Context, Ctx, Error, Result, docs};
 
 /// Where the manual pages go in the boot archive.
-pub const MAN_DIR: &str = "system/share/man";
+pub const MAN_DIR: &str = "system/resources/man";
 /// Where the shell's completion files go in the boot archive.
-pub const COMPLETIONS_DIR: &str = "system/share/nukesh/completions";
+pub const COMPLETIONS_DIR: &str = "system/resources/nukesh/completions";
 /// The programs' directory in the boot archive.
-const BIN_DIR: &str = "system/bin";
+const BIN_DIR: &str = "system/commands";
 
 /// The first two numbers of a mandoc.db(5) file: its magic number, and
 /// the version of the format, which the image's mandoc (1.14.6) reads.

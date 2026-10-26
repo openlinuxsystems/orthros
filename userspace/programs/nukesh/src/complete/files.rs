@@ -13,7 +13,7 @@ use super::{Candidate, action_words, files};
 use crate::shell::Shell;
 
 /// Where the system's completion files are.
-const SYSTEM_DIR: &str = "/system/share/nukesh/completions";
+const SYSTEM_DIR: &str = "/system/resources/nukesh/completions";
 
 /// One option of a completion file.
 #[derive(Debug, Default, PartialEq, Eq)]

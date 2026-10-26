@@ -835,7 +835,7 @@ fn signatures_disagree(toolchain: &Toolchain, work: &Path, module: &Module) -> R
 /// The functions the module declares that none of the C library's
 /// archives defines.
 fn missing_functions(ctx: &Ctx, toolchain: &Toolchain, module: &Module) -> Result<Vec<String>> {
-    let lib = ctx.out.join("sysroot/system/lib");
+    let lib = ctx.out.join("sysroot/system/libraries");
     let mut archives: Vec<_> = std::fs::read_dir(&lib)
         .map_err(|err| Error::new(format!("reading {}: {err}", lib.display())))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))

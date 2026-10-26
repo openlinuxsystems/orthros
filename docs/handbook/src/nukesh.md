@@ -44,7 +44,7 @@ finished, such as an open quote or an `if` without its `fi`, goes on to
 the next line.
 
 Tab completes command names, file names and variables. Every program
-in `/system/bin` has a completion file, made from its manual page, so
+in `/system/commands` has a completion file, made from its manual page, so
 `grep --` and Tab shows a menu of `grep`'s options with what each does,
 and the word after an option that takes a file, a directory or a user
 completes as one.
@@ -55,7 +55,7 @@ manage them. Ctrl+C drops the line being typed.
 
 ## Finding your way
 
-Programs are in `/system/bin`, which `/bin` and `/sbin` lead to; `ls
+Programs are in `/system/commands`, which `/bin` and `/sbin` lead to; `ls
 /bin` lists them. Each has a manual page:
 
 ```sh

@@ -11,7 +11,7 @@
 // the terminal tools, typed at on a pseudo-terminal; tmux, its server and
 // a client attached at a pseudo-terminal; and the shell by each of its
 // names. The `commands` test then checks that every program in
-// /system/bin was run.
+// /system/commands was run.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -192,7 +192,7 @@ static void identity(void) {
 	OUTPUT("", "/tmp\n", "/bin/sh", "-c", "cd /tmp && /bin/pwd");
 	OUTPUT("", "3\n", "/bin/nice", "-n", "3", "/bin/nice");
 	OUTPUT("", "hi\n", "/bin/nohup", "/bin/echo", "hi");
-	OUTPUT("", "hi\n", "/system/bin/coreutils", "echo", "hi");
+	OUTPUT("", "hi\n", "/system/commands/coreutils", "echo", "hi");
 }
 
 // Files: making, linking, copying, moving, listing and removing them.
@@ -217,7 +217,7 @@ static void files(void) {
 	STATUS(2, "/bin/ls", "/tmp/utilities");
 	// Spark's links into /system, and what ls and realpath make of them.
 	OUTPUT("", "system\n", "/bin/readlink", "/usr");
-	OUTPUT("", "/system/bin\n", "/bin/realpath", "/usr/bin");
+	OUTPUT("", "/system/commands\n", "/bin/realpath", "/usr/bin");
 	// The root's Unix names are links its .hidden lists (ADR 0113): ls
 	// leaves them out unless asked for every name.
 	OUTPUT("", "applications\ndevices\nkernel\nprocesses\nshared\nsystem\ntmp\nusers\nvolumes\n",
@@ -226,8 +226,12 @@ static void files(void) {
 			   "sbin\nshared\nsys\nsystem\ntmp\nusers\nusr\nvar\nvolumes\n",
 			"/bin/ls", "-A", "/");
 	OUTPUT("", "/dev\n", "/bin/ls", "-d", "/dev");
-	CONTAINS("-> system/bin", "/bin/ls", "-ld", "/bin");
-	CONTAINS("coreutils\n", "/bin/ls", "/system/bin");
+	// So are those of /system (ADR 0114).
+	OUTPUT("", "boot\ncommands\nlibraries\nlive\nresources\nsettings\nstate\ntests\n", "/bin/ls",
+			"/system");
+	OUTPUT("", "/system/libraries\n", "/bin/realpath", "/usr/lib");
+	CONTAINS("-> system/commands", "/bin/ls", "-ld", "/bin");
+	CONTAINS("coreutils\n", "/bin/ls", "/system/commands");
 }
 
 // find and xargs.
@@ -339,7 +343,7 @@ static void others(void) {
 	STATUS(0, "/bin/tput", "-T", "tmux-256color", "colors");
 	CONTAINS("cols#80,", "/bin/infocmp", "-1", "vt100");
 	STATUS(3, "/bin/tput", "-T", "no-such-terminal", "cols");
-	OUTPUT("", "/system/share/man/man1/grep.1\n", "/bin/man", "-w", "grep");
+	OUTPUT("", "/system/resources/man/man1/grep.1\n", "/bin/man", "-w", "grep");
 	// The pages are longer than what this collects, so a script reads
 	// their start, where their NAME section is.
 	CONTAINS("print lines that match patterns", "/bin/sh", "-c", "man grep | head -n 8");
@@ -534,9 +538,9 @@ static void describing(void) {
 	OUTPUT("", "ASCII text\n", "/bin/file", "-b", "/tmp/describe/t");
 	// Inside the compressed file.
 	CONTAINS("ASCII text (XZ compressed data", "/bin/file", "-bz", "/tmp/describe/t.xz");
-	CONTAINS("ELF 64-bit LSB pie executable, x86-64", "/bin/file", "-b", "/system/bin/jq");
+	CONTAINS("ELF 64-bit LSB pie executable, x86-64", "/bin/file", "-b", "/system/commands/jq");
 	CONTAINS("directory", "/bin/file", "/tmp/describe");
-	CONTAINS("symbolic link to system/bin", "/bin/file", "/bin");
+	CONTAINS("symbolic link to system/commands", "/bin/file", "/bin");
 	STATUS(0, "/bin/rm", "-r", "/tmp/describe");
 
 	OUTPUT("{\"a\":1,\"b\":[1,2]}", "1\n", "/bin/jq", ".a");
@@ -769,7 +773,7 @@ static void shells(void) {
 	OUTPUT("", "5.2.0(1)-release\n", "/bin/bash", "-c", "echo $BASH_VERSION");
 	OUTPUT("", "yes\n", "/bin/bash", "-c", "[[ abc == a* ]] && echo yes");
 	OUTPUT("", "unset\n", "/bin/sh", "-c", "echo ${BASH_VERSION-unset}");
-	OUTPUT("", "yes\n", "/system/bin/nukesh", "-c", "[ -n \"$NUKESH_VERSION\" ] && echo yes");
+	OUTPUT("", "yes\n", "/system/commands/nukesh", "-c", "[ -n \"$NUKESH_VERSION\" ] && echo yes");
 	OUTPUT("", "hi\n", "/bin/rnukesh", "-c", "echo hi");
 	STATUS(1, "/bin/rnukesh", "-c", "cd /");
 }
@@ -808,11 +812,11 @@ static void multiplexing(void) {
 	STATUS(0, "/bin/tmux", "kill-server");
 }
 
-// Every program in /system/bin has its manual page, which man finds by
+// Every program in /system/commands has its manual page, which man finds by
 // the program's name, and its completion file for the shell; ob checks
 // both when it builds the system (ADR 0102).
 static void manuals(void) {
-	DIR *bin = opendir("/system/bin");
+	DIR *bin = opendir("/system/commands");
 	CHECK(bin != NULL);
 	int programs = 0;
 	struct dirent *entry;
@@ -822,10 +826,10 @@ static void manuals(void) {
 		const char *const argv[] = {"/bin/man", "-w", entry->d_name, NULL};
 		int status = run_program(argv, "", 0);
 		char completions[128];
-		snprintf(completions, sizeof(completions), "/system/share/nukesh/completions/%s",
+		snprintf(completions, sizeof(completions), "/system/resources/nukesh/completions/%s",
 				entry->d_name);
 		struct stat st;
-		if(status != 0 || !strstr(output, "/share/man/man") || stat(completions, &st) != 0) {
+		if(status != 0 || !strstr(output, "/resources/man/man") || stat(completions, &st) != 0) {
 			char what[192];
 			snprintf(what, sizeof(what), "man -w %s exited with %d and wrote \"%.100s\"",
 					entry->d_name, status, output);
@@ -837,13 +841,13 @@ static void manuals(void) {
 	CHECK(programs > 200);
 	// A page is found by each name its NAME section gives, through the
 	// index makewhatis made, which whatis and apropos read too.
-	CONTAINS("/share/man/man8/reboot.8", "/bin/man", "-w", "poweroff");
+	CONTAINS("/resources/man/man8/reboot.8", "/bin/man", "-w", "poweroff");
 	CONTAINS("poweroff(8) - restart, power off or halt the machine", "/bin/whatis", "poweroff");
 	CONTAINS("nukesh", "/bin/apropos", "shell");
 	CONTAINS("the 7-Zip archiver", "/bin/sh", "-c", "man 7z | head -n 8");
 	CONTAINS("Dukovo's shell", "/bin/sh", "-c", "man sh | head -n 8");
 	// The options of a program's completion file come from its page.
-	CONTAINS("option\t-i --ignore-case\t", "/bin/cat", "/system/share/nukesh/completions/grep");
+	CONTAINS("option\t-i --ignore-case\t", "/bin/cat", "/system/resources/nukesh/completions/grep");
 }
 
 int main(void) {

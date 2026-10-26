@@ -137,7 +137,7 @@ fn compile(ctx: &Ctx, page: &Page, output: &Path) -> Result<()> {
 const HOST_PAGES: &[&str] = &["ob.1", "dukovo.toml.5"];
 
 /// Compiles Dukovo's own manual pages, and those generated from
-/// `abi/*.ridl`, into `out/sysroot/system/share/man` for the image, but
+/// `abi/*.ridl`, into `out/sysroot/system/resources/man` for the image, but
 /// not the build host's ([`HOST_PAGES`]), and returns each one's place in
 /// the boot archive and file.
 pub fn image_pages(ctx: &Ctx) -> Result<Vec<(String, PathBuf)>> {

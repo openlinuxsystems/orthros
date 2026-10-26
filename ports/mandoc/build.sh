@@ -16,11 +16,12 @@ cat >configure.local <<EOT
 OSNAME="Dukovo"
 OSENUM=MANDOC_OS_OTHER
 PREFIX=/system
-BINDIR=/system/bin
-SBINDIR=/system/bin
-MANDIR=/system/share/man
-MANPATH_BASE=/system/share/man
-MANPATH_DEFAULT=/system/share/man
+BINDIR=/system/commands
+SBINDIR=/system/commands
+BIN_FROM_SBIN=.
+MANDIR=/system/resources/man
+MANPATH_BASE=/system/resources/man
+MANPATH_DEFAULT=/system/resources/man
 UTF8_LOCALE=C.UTF-8
 BINM_PAGER=less
 LN="ln -sf"
@@ -81,14 +82,14 @@ make -j"$JOBS" >"$PORT_BUILD/make.log" 2>&1 || {
 	exit 1
 }
 make base-install DESTDIR="$SYSROOT" >/dev/null
-$STRIP "$SYSROOT/system/bin/mandoc" "$SYSROOT/system/bin/demandoc" "$SYSROOT/system/bin/soelim"
+$STRIP "$SYSROOT/system/commands/mandoc" "$SYSROOT/system/commands/demandoc" "$SYSROOT/system/commands/soelim"
 
 : >"$PORT_INFO/image"
 for program in mandoc man apropos whatis makewhatis demandoc soelim; do
-	echo "system/bin/$program" >>"$PORT_INFO/image"
+	echo "system/commands/$program" >>"$PORT_INFO/image"
 done
 for page in man1/mandoc.1 man1/demandoc.1 man1/soelim.1 man1/man.1 man1/apropos.1 \
 	man1/whatis.1 man5/man.conf.5 man5/mandoc.db.5 man7/man.7 man7/mdoc.7 \
 	man7/roff.7 man7/eqn.7 man7/tbl.7 man7/mandoc_char.7 man8/makewhatis.8; do
-	echo "system/share/man/$page" >>"$PORT_INFO/image"
+	echo "system/resources/man/$page" >>"$PORT_INFO/image"
 done

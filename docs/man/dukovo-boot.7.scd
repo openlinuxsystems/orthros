@@ -41,7 +41,7 @@ _/boot/firmware/intel-ucode.bin_
 	*image.microcode* (see *dukovo.toml*(5)) or *ob image --microcode*.
 	See *MICROCODE* below.
 
-_/system/share/licenses/_
+_/system/resources/licenses/_
 	The license manifest. _dukovo.spdx_ lists every component of the
 	image (the kernel's crates, the Rust standard library crates compiled
 	into it, GRUB, and the microcode if any) with its SPDX license, in
@@ -140,7 +140,7 @@ _/system/share/licenses/_
   named by *selftest* if any, and prints *Boot complete.*
 . Unless a self-test ran, the kernel starts the first program: it checks
   the boot archive, finds the program *init* names in it
-  (_/system/bin/spark_ by default) and starts it in a process of its
+  (_/system/commands/spark_ by default) and starts it in a process of its
   own, with the words after *--* on the command line as its arguments.
   The *Init:* lines name the program and its process. That program,
   Spark, starts every other one, and the kernel stops if it ends; see
@@ -179,8 +179,8 @@ seconds since the kernel started; messages before timer calibration show
 [    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
 [    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    1.049978] Boot complete.
-[    1.073162] Init: the boot archive is 206 KiB with 9 entries; starting /system/bin/spark
-[    1.150677] Init: /system/bin/spark is process 1
+[    1.073162] Init: the boot archive is 206 KiB with 9 entries; starting /system/commands/spark
+[    1.150677] Init: /system/commands/spark is process 1
 ```
 
 ## Address space
@@ -381,7 +381,7 @@ them to *init*, and the kernel does not read them.
 
 *init*=_path_
 	Start the program at _path_ in the boot archive as the first
-	program, instead of _/system/bin/spark_. See *spark*(8).
+	program, instead of _/system/commands/spark_. See *spark*(8).
 
 *--* _arguments_...
 	Pass _arguments_ to the first program, after its path; at most 32

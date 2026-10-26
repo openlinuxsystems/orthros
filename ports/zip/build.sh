@@ -19,13 +19,13 @@ make -f unix/Makefile -j"$JOBS" zips CC="$CC" BIND="$CC" CPP="$CC -E" \
 	exit 1
 }
 
-bin="$SYSROOT/system/bin"
-man="$SYSROOT/system/share/man/man1"
+bin="$SYSROOT/system/commands"
+man="$SYSROOT/system/resources/man/man1"
 mkdir -p "$bin" "$man"
 for program in zip zipcloak zipnote zipsplit; do
 	cp "$program" "$bin/"
 	$STRIP "$bin/$program"
 	cp "man/$program.1" "$man/"
-	echo "system/bin/$program"
-	echo "system/share/man/man1/$program.1"
+	echo "system/commands/$program"
+	echo "system/resources/man/man1/$program.1"
 done >"$PORT_INFO/image"

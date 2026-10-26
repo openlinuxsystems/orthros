@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0021. Every image carries a checked license manifest
 
-- Status: Accepted
+- Status: Accepted; the licenses are in `/system/resources/licenses` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-20
 
 ## Context

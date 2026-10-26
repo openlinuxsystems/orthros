@@ -89,9 +89,9 @@ _target/userspace/_).
 	_out/sysroot/boot/bootfs_ (see *spark*(8)). Dukovo's own manual
 	pages from _docs/man/_ go there too, but not this one or
 	*dukovo.toml*(5), and *makewhatis*(8) indexes every page. The build
-	fails if a program in _/system/bin_ has no page; from each program's
+	fails if a program in _/system/commands_ has no page; from each program's
 	page it writes the program's completion file for *nukesh*(1) into
-	_/system/share/nukesh/completions/_.
+	_/system/resources/nukesh/completions/_.
 
 	*--debug*
 		Build without optimisation.
@@ -134,7 +134,7 @@ _target/userspace/_).
 	_kernel/deny.toml_, which allows permissive licenses only; GRUB, a
 	separate program, may be GPL-3.0-or-later. It then writes an SPDX 2.3
 	document, the text of every license it names, and each component's
-	own notice files to _/system/share/licenses/_ in the image, and a copy
+	own notice files to _/system/resources/licenses/_ in the image, and a copy
 	of the document next to the image.
 
 	*--iso*
@@ -719,7 +719,7 @@ is Linux's x86-64 one (see *radix-posix*(7)), with *\_\_radix\_\_* and
 *\_\_dukovo\_\_* defined and Linux's own macros not, against the
 sysroot's headers only. It links a static position-independent program,
 as every program in _/system_ is. With *-dynamic* it links a program
-that the dynamic linker, _/system/lib/ld.so_, starts on the shared C
+that the dynamic linker, _/system/libraries/ld.so_, starts on the shared C
 library, and with *-shared* a shared library, as a bundle that ships
 libraries of its own needs (ADR 0071). *x86_64-radix-c++* is the same
 for C++, on LLVM's libc++, libc++abi and libunwind, which the

@@ -23,7 +23,7 @@ its system calls, which Radix does not have: Dukovo has its own, written
 in Rust for Radix, with the Linux tools' names, options and output, so
 that what people type and what scripts read stay the same.
 
-Each command is a link to _/system/bin/systools_ by its name, and
+Each command is a link to _/system/commands/systools_ by its name, and
 systools runs the tool its name says. *systools* _tool_ runs a tool by
 name, and *systools --list* lists them.
 

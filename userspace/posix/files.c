@@ -462,10 +462,10 @@ static void links(void) {
 	// Spark's links to /system, for Unix programs and scripts.
 	CHECK(lstat("/bin", &st) == 0 && S_ISLNK(st.st_mode));
 	CHECK(readlink("/usr", target, sizeof(target)) == 6 && !memcmp(target, "system", 6));
-	CHECK(realpath("/usr/share/../bin", real) && !strcmp(real, "/system/bin"));
+	CHECK(realpath("/usr/share/../bin", real) && !strcmp(real, "/system/commands"));
 	CHECK(stat("/etc", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK(stat("/var", &st) == 0 && S_ISDIR(st.st_mode));
-	CHECK(realpath("/sbin/.", real) && !strcmp(real, "/system/bin"));
+	CHECK(realpath("/sbin/.", real) && !strcmp(real, "/system/commands"));
 }
 
 // Whether descriptor `fd` is the directory `path`.
@@ -589,21 +589,25 @@ static void mapped(void) {
 	CHECK(!close(fd) && !unlink("/tmp/mapped"));
 }
 
-// The root's folders by their plain names and by Unix's (ADR 0113): each
-// Unix name is a link to the folder that holds what it held, and the
-// root's .hidden lists them, so that ls leaves them out.
+// The folders by their plain names and by Unix's (ADRs 0113 and 0114):
+// each Unix name is a link to the folder that holds what it held, and
+// the .hidden of the root and of /system list them, so that ls leaves
+// them out.
 static void folder_names(void) {
 	static const char *const links[][2] = {
-		{"/bin", "system/bin"},
+		{"/bin", "system/commands"},
 		{"/dev", "devices"},
 		{"/etc", "system/settings"},
 		{"/proc", "processes"},
 		{"/run", "system/live"},
-		{"/sbin", "system/bin"},
+		{"/sbin", "system/commands"},
 		{"/sys", "kernel"},
 		{"/usr", "system"},
 		{"/var", "system/state"},
 		{"/var/run", "../live"},
+		{"/system/bin", "commands"},
+		{"/system/lib", "libraries"},
+		{"/system/share", "resources"},
 	};
 	char target[64], real[PATH_MAX];
 	for(size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
@@ -613,6 +617,8 @@ static void folder_names(void) {
 	CHECK(realpath("/dev/null", real) && !strcmp(real, "/devices/null"));
 	CHECK(realpath("/var/run", real) && !strcmp(real, "/system/live"));
 	CHECK(realpath("/etc/nanorc", real) && !strcmp(real, "/system/settings/nanorc"));
+	CHECK(realpath("/usr/lib/ld.so", real) && !strcmp(real, "/system/libraries/ld.so"));
+	CHECK(realpath("/usr/share/man", real) && !strcmp(real, "/system/resources/man"));
 	struct stat st, want;
 	CHECK(stat("/dev/null", &st) == 0 && stat("/devices/null", &want) == 0);
 	CHECK(st.st_ino == want.st_ino && st.st_dev == want.st_dev);
@@ -622,6 +628,11 @@ static void folder_names(void) {
 	CHECK(fd >= 0 && read(fd, hidden, sizeof(hidden) - 1) > 0);
 	close(fd);
 	CHECK(!strcmp(hidden, "bin\ndev\netc\nproc\nrun\nsbin\nsys\nusr\nvar\n"));
+	memset(hidden, 0, sizeof(hidden));
+	fd = open("/system/.hidden", O_RDONLY);
+	CHECK(fd >= 0 && read(fd, hidden, sizeof(hidden) - 1) > 0);
+	close(fd);
+	CHECK(!strcmp(hidden, "bin\nlib\nshare\n"));
 	// The working directory is where the link led.
 	CHECK(chdir("/dev") == 0 && in_dir("/devices"));
 	CHECK(chdir("/") == 0);

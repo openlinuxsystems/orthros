@@ -287,7 +287,7 @@ static void files(void) {
 	STATUS(1, "/bin/chown", "nosuchuser", DIR "/held");
 	STATUS(0, "/bin/chgrp", "root", DIR "/held");
 
-	OUTPUT("", "/system/bin/ps\n", "/bin/which", "ps");
+	OUTPUT("", "/system/commands/ps\n", "/bin/which", "ps");
 	STATUS(1, "/bin/which", "nosuchcommand");
 }
 
@@ -534,10 +534,10 @@ static void power(void) {
 
 // The program behind the links.
 static void links(void) {
-	CONTAINS("\nxxd\n", "/system/bin/systools", "--list");
-	OUTPUT("", "spark\n", "/system/bin/systools", "ps", "-o", "comm=", "-p", "1");
+	CONTAINS("\nxxd\n", "/system/commands/systools", "--list");
+	OUTPUT("", "spark\n", "/system/commands/systools", "ps", "-o", "comm=", "-p", "1");
 	struct stat st;
-	CHECK(lstat("/system/bin/ps", &st) == 0 && S_ISLNK(st.st_mode));
+	CHECK(lstat("/system/commands/ps", &st) == 0 && S_ISLNK(st.st_mode));
 	STATUS(0, "/bin/rm", "-r", DIR);
 }
 

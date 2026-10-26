@@ -4,7 +4,7 @@
 // Running programs as a script does, for the tests of the utilities and
 // the administration tools: each with text on its standard input, and
 // what it writes and its exit status checked. Each program of
-// /system/bin that runs is noted, for the `commands` test.
+// /system/commands that runs is noted, for the `commands` test.
 
 #ifndef POSIX_PROGRAMS_H
 #define POSIX_PROGRAMS_H
@@ -17,10 +17,10 @@
 static char output[16384];
 
 // Notes the program that `len` bytes of `word` name, as `name`,
-// `/bin/name` or `/system/bin/name`, if /system/bin has it; returns
+// `/bin/name` or `/system/commands/name`, if /system/commands has it; returns
 // whether it does.
 static int note_command(const char *word, size_t len) {
-	static const char *const DIRS[] = {"/bin/", "/system/bin/"};
+	static const char *const DIRS[] = {"/bin/", "/system/commands/"};
 	for(size_t i = 0; i < 2; i++) {
 		size_t n = strlen(DIRS[i]);
 		if(len > n && !strncmp(word, DIRS[i], n)) {
@@ -32,7 +32,7 @@ static int note_command(const char *word, size_t len) {
 	if(!len || len > 64 || memchr(word, '/', len))
 		return 0;
 	char path[96], line[72];
-	snprintf(path, sizeof(path), "/system/bin/%.*s", (int)len, word);
+	snprintf(path, sizeof(path), "/system/commands/%.*s", (int)len, word);
 	if(access(path, X_OK) != 0)
 		return 0;
 	int fd = open(COMMANDS_RUN, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
@@ -109,7 +109,7 @@ static void note_script(const char *script) {
 // it is given with `-c`.
 static void note_commands(const char *const argv[]) {
 	for(size_t i = 0; argv[i]; i++) {
-		if(i == 0 || !strncmp(argv[i], "/bin/", 5) || !strncmp(argv[i], "/system/bin/", 12))
+		if(i == 0 || !strncmp(argv[i], "/bin/", 5) || !strncmp(argv[i], "/system/commands/", 17))
 			note_command(argv[i], strlen(argv[i]));
 		else if(!strcmp(argv[i - 1], "-c"))
 			note_script(argv[i]);

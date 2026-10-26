@@ -39,31 +39,31 @@ quiet x86_64-radix-configure "$PORT_SRC" CPPFLAGS=-D_GNU_SOURCE --with-build-cc=
 	--without-cxx --without-cxx-binding --without-tests \
 	--enable-widec --disable-lib-suffixes --enable-overwrite \
 	--enable-ext-colors --enable-ext-mouse --enable-sigwinch \
-	--with-default-terminfo-dir=/system/share/terminfo \
-	--with-terminfo-dirs=/system/share/terminfo \
+	--with-default-terminfo-dir=/system/resources/terminfo \
+	--with-terminfo-dirs=/system/resources/terminfo \
 	--disable-db-install --disable-stripping \
-	--enable-pc-files --with-pkg-config-libdir=/system/lib/pkgconfig \
+	--enable-pc-files --with-pkg-config-libdir=/system/libraries/pkgconfig \
 	--with-manpage-format=normal --without-manpage-renames
 quiet make -j"$JOBS"
 quiet make install DESTDIR="$SYSROOT"
 for name in ncursesw curses tinfo; do
-	ln -sf libncurses.a "$SYSROOT/system/lib/lib$name.a"
+	ln -sf libncurses.a "$SYSROOT/system/libraries/lib$name.a"
 done
-ln -sf ncurses.pc "$SYSROOT/system/lib/pkgconfig/ncursesw.pc"
+ln -sf ncurses.pc "$SYSROOT/system/libraries/pkgconfig/ncursesw.pc"
 
 # The programs without their symbols, and their manual pages: ncurses
 # names those of tic and infocmp, which it counts as administration
 # programs, tic.1m and infocmp.1m. reset is tset under another name.
 : >"$PORT_INFO/image"
 for program in clear infocmp reset tic tput tset; do
-	[ -L "$SYSROOT/system/bin/$program" ] || $STRIP "$SYSROOT/system/bin/$program"
-	echo "system/bin/$program" >>"$PORT_INFO/image"
-	for page in "$SYSROOT/system/share/man/man1/$program".1*; do
-		echo "system/share/man/man1/${page##*/}" >>"$PORT_INFO/image"
+	[ -L "$SYSROOT/system/commands/$program" ] || $STRIP "$SYSROOT/system/commands/$program"
+	echo "system/commands/$program" >>"$PORT_INFO/image"
+	for page in "$SYSROOT/system/resources/man/man1/$program".1*; do
+		echo "system/resources/man/man1/${page##*/}" >>"$PORT_INFO/image"
 	done
 done
 for page in man5/terminfo.5 man5/term.5 man5/user_caps.5 man7/term.7; do
-	echo "system/share/man/$page" >>"$PORT_INFO/image"
+	echo "system/resources/man/$page" >>"$PORT_INFO/image"
 done
 
 # The terminals Dukovo is used from: its own console and serial line,
@@ -74,7 +74,7 @@ terminals="ansi dumb linux linux-16color vt52 vt100 vt102 vt220 sun cons25
 	alacritty contour cygwin foot gnome gnome-256color iterm2 kitty konsole
 	konsole-256color mintty ms-terminal putty putty-256color rxvt st-256color
 	vte vte-256color wezterm"
-terminfo="$SYSROOT/system/share/terminfo"
+terminfo="$SYSROOT/system/resources/terminfo"
 rm -rf "$terminfo"
 mkdir -p "$terminfo"
 # shellcheck disable=SC2086 # one word per terminal

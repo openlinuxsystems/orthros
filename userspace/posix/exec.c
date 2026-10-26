@@ -46,7 +46,7 @@ static void arguments(void) {
 		_exit(126);
 	}
 	CHECK_CHILD(pid);
-	// Without PATH it searches /system/bin, which confstr names: there
+	// Without PATH it searches /system/commands, which confstr names: there
 	// is no exec-helper there.
 	pid = check_fork();
 	if(pid == 0) {
@@ -56,8 +56,8 @@ static void arguments(void) {
 	}
 	CHECK_CHILD(pid);
 	char path[32];
-	CHECK(confstr(_CS_PATH, path, sizeof(path)) == sizeof("/system/bin"));
-	CHECK(!strcmp(path, "/system/bin"));
+	CHECK(confstr(_CS_PATH, path, sizeof(path)) == sizeof("/system/commands"));
+	CHECK(!strcmp(path, "/system/commands"));
 	errno = 0;
 	CHECK(confstr(-1, path, sizeof(path)) == 0 && errno == EINVAL);
 	// The exit code comes back through wait.

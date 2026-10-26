@@ -216,7 +216,7 @@ default for `mmap` on x86-64, and 24 to the stack.
 
 `ob build` writes `/boot/bootfs`, a POSIX ustar file holding the
 programs of `ARCHIVE` in `tools/xtask/src/userspace.rs` under their
-directories (`system/bin/spark`, `system/tests/hello`), owned by root,
+directories (`system/commands/spark`, `system/tests/hello`), owned by root,
 mode 0755 and dated from the commit. GRUB loads it as a module with the
 word `bootfs`. `radix_bootfs::open` checks it in one pass before anything
 uses it (ADR 0049), in the kernel before Spark starts and again in Spark
@@ -229,7 +229,7 @@ After "Boot complete.", if no self-test was asked for and the boot loader
 loaded a `bootfs` module (`user/init.rs`):
 
 1. The kernel checks the archive and finds `init=PATH` in it,
-   `/system/bin/spark` by default.
+   `/system/commands/spark` by default.
 2. It makes a kernel capability space, which is never destroyed:
    Spark's original process capability goes in slot 0, a 4 MiB memory
    object in slot 1, and the boot archive's memory objects and frames,

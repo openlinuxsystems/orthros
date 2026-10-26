@@ -11,10 +11,10 @@ license = "MIT"
 homepage = "https://github.com/uutils/findutils"
 depends = ["rust-crates"]
 image = [
-    "system/bin/find",
-    "system/bin/xargs",
-    "system/share/man/man1/find.1",
-    "system/share/man/man1/xargs.1",
+    "system/commands/find",
+    "system/commands/xargs",
+    "system/resources/man/man1/find.1",
+    "system/resources/man/man1/xargs.1",
 ]
 
 [source]
