@@ -679,44 +679,30 @@ impl SpaceObject {
         // With the regions locked no page of this space is made or let go
         // of, nor does a fork start.
         let _regions = self.regions.lock();
-        // One walk of the page tables visits the pages that hold frames, in
-        // order: a page it passes over is not there. The first page that
-        // fails decides what the walk did, and the rest are left alone.
-        let first = address & !(PAGE_SIZE - 1);
-        let mut next = first;
-        let mut pins = Pins::All;
-        let mut pin = |page: u64, phys: u64, access: Option<UserAccess>| {
-            if pins != Pins::All {
-                return PageEdit::Keep;
-            }
-            pins = match access {
-                _ if page != next => Pins::NotReady,
-                Some(access) if !write || access == UserAccess::ReadWrite => {
-                    match FRAMES.info(phys) {
-                        Some(info) if info.owner() == Owner::Anon && info.pin() => Pins::All,
-                        _ => Pins::Refused,
-                    }
+        // One walk of the page tables pins them in order; it stops at a
+        // page that is not there (or is read-only for a `write`), or that
+        // cannot be pinned.
+        let mut at = address;
+        let mut refused = false;
+        Arch::frames(&self.arch, address, end, write, &mut |phys| {
+            match FRAMES.info(phys) {
+                Some(info) if info.owner() == Owner::Anon && info.pin() => {}
+                _ => {
+                    refused = true;
+                    return false;
                 }
-                _ => Pins::NotReady,
-            };
-            if pins == Pins::All {
-                let at = page.max(address);
-                let n = (page + PAGE_SIZE).min(end) - at;
-                let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
-                next = page + PAGE_SIZE;
             }
-            PageEdit::Keep
-        };
-        Arch::edit_pages(&self.arch, first, end, &mut pin, &mut |_| {});
-        if pins == Pins::All && next < end {
-            pins = Pins::NotReady;
-        }
-        if pins != Pins::All {
+            let n = ((at & !(PAGE_SIZE - 1)) + PAGE_SIZE).min(end) - at;
+            let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
+            at += n;
+            at < end
+        });
+        if at < end {
             for &(phys, _) in frames.iter() {
                 unpin(phys & !(PAGE_SIZE - 1));
             }
             frames.clear();
-            return pins;
+            return if refused { Pins::Refused } else { Pins::NotReady };
         }
         self.lending.fetch_add(1, Ordering::AcqRel);
         Pins::All

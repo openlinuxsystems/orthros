@@ -528,6 +528,16 @@ impl UserMode for Arch {
         space.space().entry(virt).map(|(phys, access)| (phys, access.map(space::user_access)))
     }
 
+    fn frames(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        write: bool,
+        each: &mut dyn FnMut(u64) -> bool,
+    ) {
+        space.space().frames(start, end.min(user::USER_TOP), write, each);
+    }
+
     fn set_entry(
         space: &Self::Space,
         virt: u64,

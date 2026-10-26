@@ -238,7 +238,12 @@ impl Blk {
     /// request held back meanwhile, so that the device takes them
     /// together.
     pub fn submit_held(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u16, Error> {
-        let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
+        // Every buffer's length is checked as it is summed.
+        let most =
+            if self.info.max_segment_size == 0 { u32::MAX } else { self.info.max_segment_size };
+        let (bytes, sizes_ok) = data.iter().fold((0u64, true), |(bytes, ok), &(_, len)| {
+            (bytes + u64::from(len), ok && len > 0 && len <= most)
+        });
         let fits =
             |sectors: u64| sector.checked_add(sectors).is_some_and(|end| end <= self.info.sectors);
         let valid = match op {
@@ -254,11 +259,7 @@ impl Blk {
                 !data.is_empty()
                     && bytes.is_multiple_of(SECTOR)
                     && data.len() <= self.info.max_segments as usize
-                    && data.iter().all(|&(_, len)| {
-                        len > 0
-                            && (self.info.max_segment_size == 0
-                                || len <= self.info.max_segment_size)
-                    })
+                    && sizes_ok
                     && fits(bytes / SECTOR)
                     && !(op == Op::Write && self.info.read_only)
             }

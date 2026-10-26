@@ -210,6 +210,19 @@ pub trait UserMode: crate::Threads {
     /// for one that keeps its frame but gives no access.
     fn query_entry(space: &Self::Space, virt: u64) -> Option<(u64, Option<UserAccess>)>;
 
+    /// Calls `each` with the frame of every page from `start` to `end`, in
+    /// order, while the page is mapped (writable too if `write`) and `each`
+    /// returns `true`: one walk of the page tables, held locked meanwhile,
+    /// so `each` must not sleep. A page that keeps its frame without
+    /// access stops it, as one not there does.
+    fn frames(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        write: bool,
+        each: &mut dyn FnMut(u64) -> bool,
+    );
+
     /// Points the page at `virt` at the frame at `phys` with `access`
     /// (`None`: keeping the frame without access), replacing whatever was
     /// there. `upgrade` says only access to the same frame is added, which

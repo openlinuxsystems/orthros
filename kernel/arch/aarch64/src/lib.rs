@@ -279,6 +279,8 @@ impl UserMode for Arch {
         Err(MapPageError::NoMemory)
     }
 
+    fn frames(_: &Space, _: u64, _: u64, _: bool, _: &mut dyn FnMut(u64) -> bool) {}
+
     fn edit_pages(
         _: &Space,
         _: u64,

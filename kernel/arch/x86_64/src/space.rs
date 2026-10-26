@@ -180,6 +180,29 @@ impl AddressSpace {
         }
     }
 
+    /// Calls `each` with the frame of every page from `start` to `end`,
+    /// in order, while the page is mapped (writable too if `write`) and
+    /// `each` returns `true`: one walk of the tables, with their lock held.
+    pub fn frames(&self, start: u64, end: u64, write: bool, each: &mut dyn FnMut(u64) -> bool) {
+        let _guard = self.lock.lock();
+        let mut virt = start & !(PAGE - 1);
+        while virt < end.min(USER_END) {
+            let Some(entries) = paging::leaf_table(self.pml4, virt) else { return };
+            let first = ((virt / PAGE) % 512) as usize;
+            let count = (end.min(USER_END) - virt).div_ceil(PAGE).min(512 - first as u64);
+            for slot in &entries[first..first + count as usize] {
+                let entry = slot.load(Ordering::Relaxed);
+                if entry & PRESENT == 0
+                    || (write && paging::access_of(entry) != Access::ReadWrite)
+                    || !each(entry & ADDRESS)
+                {
+                    return;
+                }
+            }
+            virt += count * PAGE;
+        }
+    }
+
     /// Points the entry for `virt` at `phys` with `access`, or holds the
     /// frame without access for `None`, replacing whatever was there. A
     /// CPU that cached the old entry is shot down, unless `upgrade` says
