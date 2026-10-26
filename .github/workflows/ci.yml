@@ -386,6 +386,15 @@ jobs:
           ./ob bench --gate --linux-kernel "$RUNNER_TEMP/vmlinuz" \
             --summary "$GITHUB_STEP_SUMMARY"
 
+      # TEMPORARY (PR #49): each system's CPU time per disk transfer, from
+      # the last run.
+      - name: CPU time per disk transfer
+        if: always()
+        run: |
+          for log in out/bench/boot-posix-bench.log out/bench/boot-linux.log; do
+            echo "== $log"; grep -a -o 'BENCHCPU .*' "$log" || true
+          done
+
       - name: Upload the benchmark numbers
         if: always()
         uses: actions/upload-artifact@v4

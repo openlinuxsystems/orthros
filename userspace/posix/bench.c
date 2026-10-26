@@ -380,13 +380,20 @@ static void disk_transfers(int fd, const char *name, int writing, size_t size, u
 	memset(buffer, 0x5a, size);
 	off_t at = 0;
 	struct mark started = start();
+	// TEMPORARY (PR #49): the thread's own CPU time per transfer.
+	struct timespec cpu0, cpu1;
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu0);
 	for(uint64_t i = 0; i < rounds; i++) {
 		ssize_t done = writing ? pwrite(fd, buffer, size, at) : pread(fd, buffer, size, at);
 		if(done != (ssize_t)size)
 			fail(writing ? "a disk write" : "a disk read");
 		at = (at + (off_t)size) % DISK_SPAN;
 	}
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu1);
 	report(name, started, rounds);
+	double cpu = (double)(cpu1.tv_sec - cpu0.tv_sec) * 1e9 + (double)(cpu1.tv_nsec - cpu0.tv_nsec);
+	printf("BENCHCPU name=%s ns=%.2f\n", name, cpu / (double)rounds);
+	fflush(stdout);
 	free(buffer);
 }
 
