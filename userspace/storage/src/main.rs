@@ -11,7 +11,12 @@
 //!   `/dev`, `/proc` and `/sys`;
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
-//!   (with mtools, from `ob test`), then checks `/proc` again.
+//!   (with mtools, from `ob test`), then checks `/proc` again;
+//! - `storage raw <disk>...` reads and writes each disk in `/dev` raw at
+//!   odd offsets, discards part of it, flushes it, and asks it Linux's
+//!   block requests (the `disk-raw` boot test, [`disk::raw`]);
+//! - `storage errors <disk>` reads and writes the sectors QEMU fails on
+//!   it (the `disk-errors` boot test, [`disk::errors`]).
 //!
 //! It prints a line per step, `storage: FAILED: ...` for each check that
 //! fails, and exits with 0 only if none did.
@@ -21,6 +26,8 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+
+mod disk;
 
 use alloc::format;
 use alloc::string::String;
@@ -88,10 +95,19 @@ fn main(_: &Startup) -> u64 {
             return 1;
         }
     };
-    if volumes.is_empty() {
+    if volumes.is_empty() && matches!(mode, "write" | "check") {
         fail("no volumes are mounted under /volumes");
     }
     match mode {
+        "raw" | "errors" => {
+            let disks: Vec<&str> = args().skip(2).collect();
+            if disks.is_empty() {
+                fail(&format!("`{mode}` takes the names of disks in /dev"));
+            }
+            for name in disks {
+                if mode == "raw" { disk::raw(&root, name) } else { disk::errors(&root, name) }
+            }
+        }
         "write" => {
             for name in &volumes {
                 write_volume(&root, name);
@@ -106,7 +122,7 @@ fn main(_: &Startup) -> u64 {
             }
         }
         _ => {
-            println!("storage: FAILED: say `write` or `check`, not `{mode}`");
+            println!("storage: FAILED: say `write`, `check`, `raw` or `errors`, not `{mode}`");
             return 1;
         }
     }
@@ -393,21 +409,26 @@ fn check_sys(root: &Dir, volumes: &[String]) {
         }
         Err(err) => fail(&format!("/sys/kernel/version: {err}")),
     }
-    // Every disk is a virtio block device, PCI vendor 0x1af4.
+    // Every `vd` disk is a virtio block device, PCI vendor 0x1af4, and
+    // every `sd` disk is on an AHCI controller, class 0x010601.
     match root.open_dir("sys/bus/pci/devices", Rights::READ).and_then(|dir| dir.entries()) {
         Ok(functions) => {
-            let virtio = functions
-                .iter()
-                .filter(|function| {
-                    root.read_file(&format!("sys/bus/pci/devices/{}/vendor", function.name))
-                        .is_ok_and(|vendor| vendor == b"0x1af4\n")
-                })
-                .count();
-            check(virtio >= volumes.len(), || {
-                format!("/sys/bus/pci/devices lists {virtio} virtio functions")
+            let count = |file: &str, value: &[u8]| {
+                functions
+                    .iter()
+                    .filter(|function| {
+                        root.read_file(&format!("sys/bus/pci/devices/{}/{file}", function.name))
+                            .is_ok_and(|text| text == value)
+                    })
+                    .count()
+            };
+            let (virtio, ahci) = (count("vendor", b"0x1af4\n"), count("class", b"0x010601\n"));
+            let on = |prefix: &str| volumes.iter().filter(|name| name.starts_with(prefix)).count();
+            check(virtio >= on("vd") && (ahci > 0 || on("sd") == 0), || {
+                format!("/sys/bus/pci/devices lists {virtio} virtio functions and {ahci} AHCI ones")
             });
             println!(
-                "storage: /sys/bus/pci/devices: {} functions, {virtio} of them virtio",
+                "storage: /sys/bus/pci/devices: {} functions, {virtio} of them virtio, {ahci} AHCI",
                 functions.len()
             );
         }

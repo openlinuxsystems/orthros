@@ -31,7 +31,9 @@
 //!
 //! Last it runs the POSIX benchmarks, the C program that Radix runs too
 //! (`userspace/posix/bench.c`, built with this machine's C compiler and C
-//! library), given with `--posix-bench`, or at `/posix-bench` as process 1.
+//! library), given with `--posix-bench`, or at `/posix-bench` as process 1,
+//! where it also gives them the virtual machine's disk, `/dev/vda`, for
+//! their disk benchmarks.
 //!
 //! After the TLB shootdowns it prints how many TLB interrupts reached the
 //! other CPU (the `TLB` line of `/proc/interrupts`), as Radix prints its
@@ -43,8 +45,8 @@
 //!
 //! `ob bench` runs it on the host, and also as the init process of a Linux
 //! virtual machine set up like the one Radix runs in: as process 1 it
-//! mounts `/proc`, prints `linux-bench: done` at the end and powers the
-//! machine off.
+//! mounts `/proc` and `/dev`, prints `linux-bench: done` at the end and
+//! powers the machine off.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -56,6 +58,9 @@ use std::time::Instant;
 
 /// Where the POSIX benchmarks are in the virtual machine's initramfs.
 const POSIX_BENCH: &str = "/posix-bench";
+
+/// The virtual machine's disk, for the POSIX benchmarks' disk benchmarks.
+const DISK: &str = "/dev/vda";
 
 fn main() {
     let mut rounds = 100_000u64;
@@ -75,7 +80,8 @@ fn main() {
         }
     }
     if std::process::id() == 1 {
-        mount_proc();
+        mount("proc", "/proc");
+        mount("devtmpfs", "/dev");
     }
     let cpus = allowed_cpus();
     let Some(&first) = cpus.first() else {
@@ -121,7 +127,11 @@ fn main() {
     }
     let posix = posix.or_else(|| (std::process::id() == 1).then(|| PathBuf::from(POSIX_BENCH)));
     if let Some(program) = posix {
-        posix_bench(&program, &cpus);
+        let disk = (std::process::id() == 1).then_some(Path::new(DISK));
+        if disk.is_some_and(|disk| !disk.exists()) {
+            eprintln!("linux-bench: the virtual machine has no {DISK}, for the disk benchmarks");
+        }
+        posix_bench(&program, &cpus, disk);
     }
 
     if std::process::id() == 1 {
@@ -468,16 +478,21 @@ fn tlb_column(text: &str, cpu: usize) -> Option<u64> {
     line.split_whitespace().nth(1 + column)?.parse().ok()
 }
 
-/// Mounts `/proc`, which the virtual machine's init finds empty.
-fn mount_proc() {
-    let _ = std::fs::create_dir_all("/proc");
+/// Mounts a filesystem of kind `kind` on `at`, which the virtual
+/// machine's init finds empty: `/proc`, and `/dev` as the kernel's
+/// devtmpfs, where its disk is.
+fn mount(kind: &str, at: &str) {
+    let _ = std::fs::create_dir_all(at);
+    let (Ok(kind_c), Ok(at_c)) = (std::ffi::CString::new(kind), std::ffi::CString::new(at)) else {
+        return;
+    };
     // SAFETY: the strings are NUL-terminated and live through the call;
-    // procfs takes no data.
+    // procfs and devtmpfs take no data.
     let result = unsafe {
-        libc::mount(c"proc".as_ptr(), c"/proc".as_ptr(), c"proc".as_ptr(), 0, std::ptr::null())
+        libc::mount(kind_c.as_ptr(), at_c.as_ptr(), kind_c.as_ptr(), 0, std::ptr::null())
     };
     if result != 0 {
-        eprintln!("linux-bench: cannot mount /proc: {}", std::io::Error::last_os_error());
+        eprintln!("linux-bench: cannot mount {at}: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -673,10 +688,14 @@ fn allowed_cpus() -> Vec<usize> {
 /// Runs the POSIX benchmarks at `program`, which print their own lines,
 /// on every CPU this process may run on: it pins itself and its threads
 /// as it needs, as on Radix.
-fn posix_bench(program: &Path, cpus: &[usize]) {
+fn posix_bench(program: &Path, cpus: &[usize], disk: Option<&Path>) {
     allow(cpus);
     std::io::stdout().flush().ok();
-    match std::process::Command::new(program).status() {
+    let mut command = std::process::Command::new(program);
+    if let Some(disk) = disk {
+        command.arg("--disk").arg(disk);
+    }
+    match command.status() {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!("linux-bench: {} failed: {status}", program.display()),
         Err(err) => eprintln!("linux-bench: cannot run {}: {err}", program.display()),

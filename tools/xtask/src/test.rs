@@ -44,6 +44,7 @@ const PANIC_BANNER: &str = "==================== RADIX KERNEL PANIC";
 pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-abi",
     "radix-acpi",
+    "radix-ahci",
     "radix-bootfs",
     "radix-block",
     "radix-bootinfo",
@@ -102,8 +103,8 @@ pub struct Case {
     /// More QEMU arguments.
     qemu: &'static [&'static str],
     script: Script,
-    /// Disks to attach as virtio block devices (`vda`, `vdb`, ...), made
-    /// afresh for each run and checked with `fsck.fat` after each boot.
+    /// Disks to attach, made afresh for each run and checked after each
+    /// boot.
     disks: &'static [Disk],
     /// A second boot from the same disks, once the first has passed.
     second: Option<SecondBoot>,
@@ -113,31 +114,82 @@ pub struct Case {
 /// the reason.
 type Script = fn(&mut Vm, &Case) -> Result<(), String>;
 
-/// A disk of a boot test, holding a FAT filesystem `mkfs.fat` makes.
+/// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, or raw
+/// bytes.
 pub struct Disk {
     /// Its size in KiB.
     kib: u64,
-    /// 12, 16 or 32.
+    /// 12, 16 or 32; or 0 for no filesystem, the disk holding
+    /// [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The filesystem's label.
     label: &'static str,
     /// Whether the filesystem is in an MBR partition from 1 MiB on, rather
     /// than the whole disk.
     partitioned: bool,
+    bus: Bus,
+    /// More of QEMU's properties of the disk's device, each after a comma.
+    device: &'static str,
+    /// Errors for QEMU's blkdebug driver to inject, as its configuration
+    /// file.
+    errors: Option<&'static str>,
+    /// What the host checks after each boot: [`fsck`] for a FAT disk.
+    check: fn(&DiskImage) -> Result<(), String>,
+}
+
+/// Where a test disk is attached.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bus {
+    /// A virtio block device: `vda`, `vdb` and on.
+    Virtio,
+    /// A port of an AHCI controller of the case's own, the q35 chipset's
+    /// (`ich9-ahci`): `sda`, `sdb` and on.
+    Sata,
 }
 
 /// A case's second boot: its command line, what the host does to the
 /// disks first, and its script.
 pub struct SecondBoot {
     cmdline: &'static str,
-    before: fn(&[DiskImage]) -> Result<(), String>,
+    before: fn(&Case, &[DiskImage]) -> Result<(), String>,
     script: Script,
 }
 
-/// A disk made for a run: its file, and where its filesystem starts.
+/// A disk made for a run: its file, where its filesystem starts, its
+/// size, and what checks it.
 pub struct DiskImage {
     path: PathBuf,
     offset: u64,
+    bytes: u64,
+    check: fn(&DiskImage) -> Result<(), String>,
+}
+
+/// The names the kernel gives a case's disks: `vda`, `vdb` and on for
+/// virtio ones, `sda`, `sdb` and on for SATA ones, each in their order.
+fn disk_names(disks: &[Disk]) -> Vec<String> {
+    let (mut virtio, mut sata) = (b'a', b'a');
+    disks
+        .iter()
+        .map(|disk| {
+            let (prefix, letter) = match disk.bus {
+                Bus::Virtio => ("vd", &mut virtio),
+                Bus::Sata => ("sd", &mut sata),
+            };
+            *letter += 1;
+            format!("{prefix}{}", char::from(*letter - 1))
+        })
+        .collect()
+}
+
+/// The volumes Spark mounts from a case's FAT disks: each disk, or its
+/// partition.
+fn volume_names(disks: &[Disk]) -> Vec<String> {
+    disk_names(disks)
+        .into_iter()
+        .zip(disks)
+        .filter(|(_, disk)| disk.fat != 0)
+        .map(|(name, disk)| if disk.partitioned { name + "1" } else { name })
+        .collect()
 }
 
 /// Two NUMA nodes of 512 MiB and two CPUs each, 21 apart (with `-m 1G`).
@@ -154,16 +206,74 @@ const TWO_NODES: &[&str] = &[
     "dist,src=0,dst=1,val=21",
 ];
 
+/// A FAT test disk on `bus`.
+const fn fat_disk(kib: u64, fat: u8, label: &'static str, partitioned: bool, bus: Bus) -> Disk {
+    Disk { kib, fat, label, partitioned, bus, device: "", errors: None, check: fsck }
+}
+
 /// The storage test's disks: FAT12, FAT16 and FAT32 on whole disks, and
-/// FAT32 in an MBR partition. Spark mounts them at the volumes of
-/// [`STORAGE_VOLUMES`].
+/// FAT32 in an MBR partition, as virtio disks. Spark mounts them at
+/// `/volumes/vda`, `vdb`, `vdc` and `vdd1`.
 const STORAGE_DISKS: &[Disk] = &[
-    Disk { kib: 1440, fat: 12, label: "RADIX12", partitioned: false },
-    Disk { kib: 32 * 1024, fat: 16, label: "RADIX16", partitioned: false },
-    Disk { kib: 64 * 1024, fat: 32, label: "RADIX32", partitioned: false },
-    Disk { kib: 48 * 1024, fat: 32, label: "RADIXPART", partitioned: true },
+    fat_disk(1440, 12, "RADIX12", false, Bus::Virtio),
+    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Virtio),
+    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Virtio),
+    fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Virtio),
 ];
-const STORAGE_VOLUMES: [&str; 4] = ["vda", "vdb", "vdc", "vdd1"];
+
+/// The same disks on SATA, the last one solid state (QEMU's rotation rate
+/// of 1).
+const SATA_DISKS: &[Disk] = &[
+    fat_disk(1440, 12, "RADIX12", false, Bus::Sata),
+    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Sata),
+    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Sata),
+    Disk { device: ",rotation_rate=1", ..fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Sata) },
+];
+
+/// The size of the raw disks of the `disk-raw` and `disk-errors` tests.
+const RAW_KIB: u64 = 8 * 1024;
+
+/// A raw test disk on `bus`, which the host checks with `check`.
+const fn raw_disk(bus: Bus, check: fn(&DiskImage) -> Result<(), String>) -> Disk {
+    Disk {
+        kib: RAW_KIB,
+        fat: 0,
+        label: "",
+        partitioned: false,
+        bus,
+        device: "",
+        errors: None,
+        check,
+    }
+}
+
+/// The `disk-raw` test's disks: one virtio, one solid state SATA disk.
+const RAW_DISKS: &[Disk] = &[
+    raw_disk(Bus::Virtio, raw_check),
+    Disk { device: ",rotation_rate=1", ..raw_disk(Bus::Sata, raw_check) },
+];
+
+/// What the `disk-raw` test's program writes to each disk: at these
+/// offsets, these many bytes, each the complement of the one there
+/// before; and one write of 20 bytes 10 before the end, of which 10 fit.
+/// Then it discards [`RAW_DISCARD`] (offset and length), which QEMU
+/// zeroes. The program (userspace/storage) has the same lists.
+const RAW_WRITES: &[(u64, u64)] =
+    &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
+const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
+
+/// The `disk-errors` test's disk, and the errors QEMU gives its reads and
+/// writes: a read of sector 6000 fails once, one of sector 10000 every
+/// time, and so does a write of sector 12000. The program (userspace/
+/// storage) reads and writes those sectors.
+const ERROR_DISKS: &[Disk] = &[Disk {
+    errors: Some(
+        "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
+         [inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"10000\"\n\n\
+         [inject-error]\nevent = \"write_aio\"\nerrno = \"5\"\nsector = \"12000\"\n",
+    ),
+    ..raw_disk(Bus::Sata, raw_unchanged)
+}];
 
 /// What the storage test's program writes (userspace/storage), as the
 /// host reads it back with mtools.
@@ -689,6 +799,58 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "storage-sata",
+        about: "The storage test on four SATA disks of an AHCI controller, one of them solid state",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: SATA_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
+        name: "disk-raw",
+        about: "Raw reads, writes and discards of a virtio and a SATA disk, and Linux's block requests; the host checks every byte",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage raw vda sda",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_raw,
+        disks: RAW_DISKS,
+        second: None,
+    },
+    Case {
+        name: "disk-errors",
+        about: "QEMU fails reads and writes of a SATA disk: one that fails once goes again, one that always fails ends in EIO",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage errors sda",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_errors,
+        disks: ERROR_DISKS,
+        second: None,
+    },
+    Case {
         name: "posix",
         about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
@@ -800,8 +962,16 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
 }
 
 /// The kernel libraries with Kani proof harnesses (ADR 0019).
-pub const PROVED_LIBRARIES: &[&str] =
-    &["radix-mm", "radix-cap", "radix-sched", "radix-ipc", "radix-block", "radix-vfs", "radix-fat"];
+pub const PROVED_LIBRARIES: &[&str] = &[
+    "radix-mm",
+    "radix-cap",
+    "radix-sched",
+    "radix-ipc",
+    "radix-block",
+    "radix-vfs",
+    "radix-fat",
+    "radix-ahci",
+];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
 /// so plain `ob test` leaves them to this suite (and to their CI job).
@@ -969,12 +1139,27 @@ fn run_case(
     let qmp = dir.join(format!("{}.qmp", case.name));
     let disks = make_disks(dir, case)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
-    for (i, disk) in disks.iter().enumerate() {
+    if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
+        extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
+    }
+    let mut port = 0;
+    for (i, (disk, image)) in case.disks.iter().zip(&disks).enumerate() {
+        let mut file = qemu::option_value(&image.path);
+        if disk.errors.is_some() {
+            let rules = image.path.with_extension("blkdebug");
+            file = format!("blkdebug:{}:{file}", qemu::option_value(&rules));
+        }
+        // Discards reach the disk's file as holes, which read as zeros.
         extra.push("-drive".into());
-        extra
-            .push(format!("file={},if=none,id=disk{i},format=raw", qemu::option_value(&disk.path)));
+        extra.push(format!("file={file},if=none,id=disk{i},format=raw,discard=unmap"));
         extra.push("-device".into());
-        extra.push(format!("virtio-blk-pci,drive=disk{i}"));
+        extra.push(match disk.bus {
+            Bus::Virtio => format!("virtio-blk-pci,drive=disk{i}{}", disk.device),
+            Bus::Sata => {
+                port += 1;
+                format!("ide-hd,drive=disk{i},bus=sata.{}{}", port - 1, disk.device)
+            }
+        });
     }
     let ovmf = match case.firmware {
         Firmware::Uefi => Some(
@@ -1007,12 +1192,12 @@ fn run_case(
         let result = script(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));
         vm.stop();
         result?;
-        disks.iter().try_for_each(fsck)
+        disks.iter().try_for_each(|disk| (disk.check)(disk))
     };
     let mut result = boot(case.name, case.cmdline, case.script);
     if let (Ok(()), Some(second)) = (&result, &case.second) {
         let name = format!("{}-reboot", case.name);
-        result = (second.before)(&disks)
+        result = (second.before)(case, &disks)
             .and_then(|()| boot(&name, second.cmdline, second.script))
             .map_err(|err| {
                 let log = dir.join(format!("boot-{name}.log"));
@@ -1023,6 +1208,7 @@ fn run_case(
     if result.is_ok() {
         for disk in &disks {
             let _ = std::fs::remove_file(&disk.path);
+            let _ = std::fs::remove_file(disk.path.with_extension("blkdebug"));
         }
     }
     result
@@ -1031,32 +1217,92 @@ fn run_case(
 /// The first sector of a partitioned test disk's filesystem: 1 MiB in.
 const PARTITION_START: u64 = 2048;
 
-/// Makes the case's disks afresh in `dir`, with `mkfs.fat`.
+/// Makes the case's disks afresh in `dir`: with `mkfs.fat`, or filled
+/// with [`storage_big_byte`]'s bytes; and the configuration files of
+/// their errors.
 fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
     let mut made = Vec::new();
     for (i, disk) in case.disks.iter().enumerate() {
         let path = dir.join(format!("{}-disk{i}.img", case.name));
         let _ = std::fs::remove_file(&path);
+        let image = DiskImage { path, offset: 0, bytes: disk.kib * 1024, check: disk.check };
+        if let Some(rules) = disk.errors {
+            let at = image.path.with_extension("blkdebug");
+            std::fs::write(&at, rules).map_err(|err| format!("writing {}: {err}", at.display()))?;
+        }
+        if disk.fat == 0 {
+            std::fs::write(&image.path, raw_bytes(image.bytes))
+                .map_err(|err| format!("writing {}: {err}", image.path.display()))?;
+            made.push(image);
+            continue;
+        }
+        let path = &image.path;
         let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
         // A fixed volume ID, so that runs match.
         mkfs.args(["-F", &disk.fat.to_string(), "-n", disk.label, "-i", "4f525448"]);
         let offset = if disk.partitioned {
-            let file = std::fs::File::create(&path)
+            let file = std::fs::File::create(path)
                 .map_err(|err| format!("making {}: {err}", path.display()))?;
             file.set_len(disk.kib * 1024)
                 .map_err(|err| format!("sizing {}: {err}", path.display()))?;
-            write_mbr(&path, disk.kib * 2)?;
+            write_mbr(path, disk.kib * 2)?;
             mkfs.args(["--offset", &PARTITION_START.to_string()]);
-            mkfs.arg(&path).arg((disk.kib - PARTITION_START / 2).to_string());
+            mkfs.arg(path).arg((disk.kib - PARTITION_START / 2).to_string());
             PARTITION_START * 512
         } else {
-            mkfs.arg("-C").arg(&path).arg(disk.kib.to_string());
+            mkfs.arg("-C").arg(path).arg(disk.kib.to_string());
             0
         };
         host_tool(&mut mkfs)?;
-        made.push(DiskImage { path, offset });
+        made.push(DiskImage { offset, ..image });
     }
     Ok(made)
+}
+
+/// What a raw test disk holds before the test: [`storage_big_byte`]'s
+/// bytes.
+fn raw_bytes(bytes: u64) -> Vec<u8> {
+    (0..bytes as usize).map(storage_big_byte).collect()
+}
+
+/// Checks that a raw disk holds what it held before the boot.
+fn raw_unchanged(disk: &DiskImage) -> Result<(), String> {
+    raw_same(disk, &raw_bytes(disk.bytes))
+}
+
+/// Checks a disk of the `disk-raw` test: what [`RAW_WRITES`] wrote, the
+/// write at the end, zeros where [`RAW_DISCARD`] discarded, and the bytes
+/// it held before everywhere else.
+fn raw_check(disk: &DiskImage) -> Result<(), String> {
+    let mut want = raw_bytes(disk.bytes);
+    let end = (disk.bytes - 10, 10);
+    for &(offset, len) in RAW_WRITES.iter().chain([&end]) {
+        for byte in &mut want[offset as usize..(offset + len) as usize] {
+            *byte = !*byte;
+        }
+    }
+    let (offset, len) = RAW_DISCARD;
+    want[offset as usize..(offset + len) as usize].fill(0);
+    raw_same(disk, &want)
+}
+
+/// Checks that a raw disk holds `want`, naming the first byte that
+/// differs.
+fn raw_same(disk: &DiskImage, want: &[u8]) -> Result<(), String> {
+    let got = std::fs::read(&disk.path)
+        .map_err(|err| format!("reading {}: {err}", disk.path.display()))?;
+    match got.iter().zip(want).position(|(a, b)| a != b) {
+        Some(at) => Err(format!(
+            "{}: byte {at} is {:#04x}, not {:#04x}",
+            disk.path.display(),
+            got[at],
+            want[at]
+        )),
+        None if got.len() != want.len() => {
+            Err(format!("{} is {} bytes, not {}", disk.path.display(), got.len(), want.len()))
+        }
+        None => Ok(()),
+    }
 }
 
 /// Writes an MBR with one FAT32 (LBA) partition from [`PARTITION_START`]
@@ -2093,35 +2339,70 @@ fn posix(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: nothing more to do; waiting")
 }
 
-/// The kernel's and Spark's lines for the storage test's disks, up to
-/// the start of the program.
-fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
+/// The kernel's lines for a case's disks, up to the end of the boot.
+/// The disks are found while the other CPUs start, so their lines come
+/// among those `boot_report` checks: looked for anywhere before here.
+fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    // The disks are found while the other CPUs start, so their lines come
-    // among those `boot_report` checks: looked for anywhere before here.
     let log = vm.log();
-    let logged = |line: &str| {
-        if log.contains(line) { Ok(()) } else { Err(format!("the kernel never said \"{line}\"")) }
+    let line_of = |start: &str| {
+        log.lines()
+            .find_map(|line| line.find(start).map(|at| &line[at..]))
+            .ok_or_else(|| format!("the kernel never said \"{start}...\""))
     };
-    for (i, disk) in STORAGE_DISKS.iter().enumerate() {
-        let name = STORAGE_VOLUMES[i].trim_end_matches(char::is_numeric);
+    let mut port = 0;
+    for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let size = disk_size(disk.kib);
-        logged(&format!("Disk: {name} is a virtio block device of {size} at "))?;
+        let (line, want) = match disk.bus {
+            Bus::Virtio => (
+                line_of(&format!("Disk: {name} is a virtio block device of {size} at "))?,
+                ", 512 bytes a block, write cache, discards, MSI-X vector ",
+            ),
+            Bus::Sata => {
+                port += 1;
+                (
+                    line_of(&format!(
+                        "Disk: {name} is a SATA disk of {size} on AHCI port {}: QEMU HARDDISK, ",
+                        port - 1
+                    ))?,
+                    "512 bytes a block, NCQ depth 32, write cache, TRIM",
+                )
+            }
+        };
+        let solid = disk.device.contains("rotation_rate=1");
+        if !line.contains(want) || line.ends_with(", solid state") != solid {
+            return Err(format!("the kernel described {name} as \"{line}\""));
+        }
         if disk.partitioned {
-            logged(&format!("Disk: {name} has an MBR with 1 partition"))?;
-            logged(&format!(
+            line_of(&format!("Disk: {name} has an MBR with 1 partition"))?;
+            line_of(&format!(
                 "Disk: {name}1: {} from sector {PARTITION_START}, type 0x0c",
                 disk_size(disk.kib - PARTITION_START / 2)
             ))?;
         } else {
-            logged(&format!("Disk: {name} has no partition table; it is used whole"))?;
+            line_of(&format!("Disk: {name} has no partition table; it is used whole"))?;
         }
     }
-    logged(&format!("; {} virtio disks", STORAGE_DISKS.len()))?;
+    let virtio = case.disks.iter().filter(|disk| disk.bus == Bus::Virtio).count();
+    let disks = |count: usize, kind: &str| {
+        format!("{count} {kind} disk{}", if count == 1 { "" } else { "s" })
+    };
+    line_of(&format!(
+        "; {}, {}",
+        disks(virtio, "virtio"),
+        disks(case.disks.len() - virtio, "SATA")
+    ))?;
+    Ok(())
+}
+
+/// The kernel's and Spark's lines for the storage test's disks, up to
+/// the start of the program.
+fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
     vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
-    for (i, name) in STORAGE_VOLUMES.iter().enumerate() {
-        let label = STORAGE_DISKS[i].label;
+    for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
+        let label = disk.label;
         vm.expect(&format!("Files: mounted fat from {name} on /volumes/{name}, labelled {label}"))?;
         vm.expect(&format!("spark: mounted the FAT filesystem of {name} at /volumes/{name}"))?;
     }
@@ -2156,14 +2437,15 @@ fn disk_size(kib: u64) -> String {
 /// The first boot: the program writes its files to every volume.
 fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_boot(vm, case)?;
-    for name in STORAGE_VOLUMES {
+    let volumes = volume_names(case.disks);
+    for name in &volumes {
         vm.expect(&format!("storage: /volumes/{name}: fat, "))?;
         vm.expect(&format!("storage: /volumes/{name}: wrote "))?;
     }
     vm.expect("storage: /tmp: a 10000-byte file written, read back and removed")?;
     vm.expect("storage: /dev: ")?;
     vm.expect(" of them disks; zero, random and null work")?;
-    for name in STORAGE_VOLUMES {
+    for name in &volumes {
         vm.expect(&format!("storage: /sys/block/{name}/size: "))?;
     }
     vm.expect(&format!("storage: /sys/kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
@@ -2180,12 +2462,12 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// and writes a file of its own to each disk, from beside the disks in
 /// out/test (not the shared temporary directory, where another user could
 /// put a link in its place).
-fn storage_host(disks: &[DiskImage]) -> Result<(), String> {
+fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
     let Some(first) = disks.first() else { return Err("the case has no disks".into()) };
     let source = first.path.with_file_name("storage-from-host.txt");
     std::fs::write(&source, STORAGE_FROM_HOST)
         .map_err(|err| format!("writing {}: {err}", source.display()))?;
-    let result = disks.iter().zip(STORAGE_VOLUMES).try_for_each(|(disk, name)| {
+    let result = disks.iter().zip(volume_names(case.disks)).try_for_each(|(disk, name)| {
         let image = mtools_image(disk);
         let mtype =
             |path: &str| host_tool(std::process::Command::new("mtype").args(["-i", &image, path]));
@@ -2233,7 +2515,8 @@ fn storage_host(disks: &[DiskImage]) -> Result<(), String> {
     result
 }
 
-/// The byte at `offset` of the program's `big.bin`.
+/// The byte at `offset` of the program's `big.bin`, and of a raw test
+/// disk before its test.
 fn storage_big_byte(offset: usize) -> u8 {
     (offset as u32).wrapping_mul(2_654_435_761).wrapping_add((offset / 4096) as u32).to_le_bytes()
         [3]
@@ -2242,12 +2525,65 @@ fn storage_big_byte(offset: usize) -> u8 {
 /// The second boot: the program reads every file back.
 fn storage_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_boot(vm, case)?;
-    for name in STORAGE_VOLUMES {
+    for name in volume_names(case.disks) {
         vm.expect(&format!("storage: /volumes/{name}: "))?;
         vm.expect(" files read back after the reboot, every byte as written")?;
     }
     vm.expect("storage: /proc lists ")?;
     storage_end(vm, "check")
+}
+
+/// The `disk-raw` test: the program reads, writes and discards each disk
+/// raw, and asks it Linux's block requests; the host then checks its
+/// bytes ([`raw_check`]).
+fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    vm.expect("spark: started /system/tests/storage as process ")?;
+    for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
+        let rotational = u8::from(!disk.device.contains("rotation_rate=1"));
+        vm.expect(&format!(
+            "storage: /dev/{name}: {} bytes, {} sectors of 512 bytes, physical blocks of 512, \
+             minimum and optimal I/O 512 and 0, alignment 0, read-only 0, rotational \
+             {rotational}, discarded sectors read as zeros 0",
+            disk.kib * 1024,
+            disk.kib * 2
+        ))?;
+        vm.expect(&format!("storage: /dev/{name}: raw reads at odd offsets read what it holds"))?;
+        vm.expect(&format!("storage: /dev/{name}: raw writes at odd offsets read back"))?;
+        vm.expect(&format!(
+            "storage: /dev/{name}: raw transfers straight between the disk and anonymous memory"
+        ))?;
+        vm.expect(&format!("storage: /dev/{name}: discards, flushes and refusals work"))?;
+    }
+    storage_end(vm, "raw")
+}
+
+/// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s
+/// errors, each retried by the kernel after recovering the port.
+fn disk_errors(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    vm.expect("spark: started /system/tests/storage as process ")?;
+    for line in [
+        "storage: /dev/sda: a read of sector 6000, which fails once, reads what it holds",
+        "storage: /dev/sda: a read of sector 10000, which always fails, fails with io",
+        "storage: /dev/sda: a read up to sector 10000 ends short, after 65536 bytes",
+        "storage: /dev/sda: a write of sector 12000, which always fails, fails with io",
+        "storage: /dev/sda: reads and writes elsewhere work after the errors",
+    ] {
+        vm.expect(line)?;
+    }
+    storage_end(vm, "errors")?;
+    // The first read failed once and then worked; each of the others
+    // went five times.
+    let log = vm.log();
+    let errors = log.matches("Disk: sda: an error stopped its port (status ").count();
+    if errors != 1 + 5 * 3 {
+        return Err(format!("the kernel recovered sda's port {errors} times, not 16"));
+    }
+    if !log.contains("; it runs again (16 errors since boot)") || log.contains("the disk is gone") {
+        return Err("the kernel did not recover sda's port every time".into());
+    }
+    Ok(())
 }
 
 fn rcu(vm: &mut Vm, case: &Case) -> Result<(), String> {

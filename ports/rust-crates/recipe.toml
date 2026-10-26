@@ -64,6 +64,12 @@ sha256 = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 license = "MIT"
 
 [[crate]]
+name = "platform-info"
+version = "2.1.0"
+sha256 = "9368d62437c8cbb7c31ee37fd8c08a7d390e09a3ff75698a674953f46705ffcb"
+license = "MIT"
+
+[[crate]]
 name = "rustix"
 version = "1.1.5"
 sha256 = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"

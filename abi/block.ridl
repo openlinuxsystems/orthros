@@ -1,0 +1,57 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Disks and their partitions (Phase 10, ADR 0111): the block devices of
+//! _/dev_ (radix-files(7)), such as `vda`, `sda` and `sda1`.
+//!
+//! A block device is read and written raw: at any offset and length,
+//! straight to the disk with nothing cached between, as Linux's are when
+//! opened with O_DIRECT. A write that covers part of a sector reads the
+//! rest of it first. Reads end at the device's end, and writes at or past
+//! it fail with no_space. radix-file(2)'s `sync` empties the disk's write
+//! cache.
+//!
+//! radix-file(2)'s `control` takes Linux's requests for block devices,
+//! below, with their argument as the address of the value they write or
+//! read; `buffer` and `size` are not used. A request with another number
+//! fails with not_terminal, and one whose address is not mapped with
+//! bad_address.
+
+module block;
+
+/// The device's size in bytes, written as a u64 (Linux's BLKGETSIZE64).
+const GET_SIZE_BYTES: u32 = 0x80081272;
+/// Its size in 512-byte sectors, written as a u64 (BLKGETSIZE).
+const GET_SIZE_SECTORS: u32 = 0x1260;
+/// Its logical sector size, written as a u32: 512 (BLKSSZGET).
+const GET_SECTOR_SIZE: u32 = 0x1268;
+/// Its physical block size, the smallest unit it writes without reading
+/// first, written as a u32 (BLKPBSZGET).
+const GET_PHYSICAL_BLOCK_SIZE: u32 = 0x127b;
+/// The smallest write it prefers, written as a u32: its physical block
+/// size (BLKIOMIN).
+const GET_MINIMUM_IO: u32 = 0x1278;
+/// The size of write it does best, written as a u32: 0, as it does not
+/// say (BLKIOOPT).
+const GET_OPTIMAL_IO: u32 = 0x1279;
+/// How far its first sector is from the start of a physical block,
+/// written as a u32: 0 (BLKALIGNOFF).
+const GET_ALIGNMENT_OFFSET: u32 = 0x127a;
+/// Whether it refuses writes, written as a u32: 1 if it does (BLKROGET).
+const GET_READ_ONLY: u32 = 0x125e;
+/// Whether it spins, written as a u16: 1 for a hard disk, or a disk that
+/// does not say (BLKROTATIONAL).
+const GET_ROTATIONAL: u32 = 0x127e;
+/// Whether discarded sectors read as zeros, written as a u32: 0, since a
+/// disk need not promise it (BLKDISCARDZEROES).
+const GET_DISCARD_ZEROES: u32 = 0x127c;
+/// Discards a range, read as two u64s: its first byte and its length,
+/// both multiples of 512 and on the device. The device may forget what
+/// the range holds (TRIM). Needs the write right; fails with
+/// invalid_argument for a range that is not whole sectors on the device,
+/// read_only on a device that refuses writes, and not_supported on one
+/// that does not discard (BLKDISCARD).
+const DISCARD: u32 = 0x1277;
+/// Empties the disk's write cache, as radix-file(2)'s `sync` does
+/// (BLKFLSBUF). Needs the write right.
+const FLUSH: u32 = 0x1261;

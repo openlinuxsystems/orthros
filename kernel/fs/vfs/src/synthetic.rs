@@ -391,16 +391,19 @@ impl Node for Random {
     }
 }
 
-/// A block device in `/dev`.
+/// A block device in `/dev`: what `mount` takes, read and written raw
+/// ([`crate::raw`]).
 pub struct BlockNode {
     id: u64,
     device: radix_block::DeviceRef,
+    /// Held by writes of parts of sectors.
+    partial: Mutex<()>,
 }
 
 impl BlockNode {
     /// The node numbered `id` of `device`.
     pub fn make(id: u64, device: radix_block::DeviceRef) -> Result<NodeRef> {
-        Ok(mem::arc(BlockNode { id, device })?)
+        Ok(mem::arc(BlockNode { id, device, partial: Mutex::new(()) })?)
     }
 }
 
@@ -414,14 +417,18 @@ impl Node for BlockNode {
         Kind::BlockDevice
     }
 
-    fn read(&self, _offset: u64, _out: &mut dyn Out) -> Result<usize> {
-        // Raw access comes with the disk tools of Phase 10; until then a
-        // block device is only something to mount.
-        Err(Error::NotSupported)
+    fn read(&self, offset: u64, out: &mut dyn Out) -> Result<usize> {
+        crate::raw::read(&*self.device, offset, out)
     }
 
-    fn write(&self, _offset: u64, _data: &dyn In) -> Result<usize> {
-        Err(Error::NotSupported)
+    fn write(&self, offset: u64, data: &dyn In) -> Result<usize> {
+        crate::raw::write(&*self.device, &self.partial, offset, data)
+    }
+
+    /// Raw writes have reached the device already: what is left is its
+    /// own cache.
+    fn sync(&self) -> Result<()> {
+        Ok(self.device.flush()?)
     }
 
     fn block_device(&self) -> Option<radix_block::DeviceRef> {

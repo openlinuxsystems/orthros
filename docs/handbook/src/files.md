@@ -60,7 +60,8 @@ holds the root and decides what each program gets. When bundles arrive
 
 At boot the kernel finds each disk and reads its partition table, MBR or
 GPT. Disks and partitions get the names Linux gives them: `vda`, `vdb` for
-virtual disks, `vda1` for the first partition of `vda`. Spark then mounts
+virtual disks, `sda`, `sdb` for SATA disks, `vda1` for the first partition
+of `vda`. Spark then mounts
 the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
 disk with no partition table, at `/volumes/<name>`, read-write. Anything
 that is not FAT is left alone.
@@ -69,10 +70,16 @@ Changes reach the disk within five seconds, or at once when a program
 asks for it, so a power cut loses at most the last five seconds of
 writes.
 
-Only virtual disks have a driver so far. On the Dell, `/volumes` stays
-empty: its SATA drives need the AHCI driver (Phase 10), and USB sticks
-need the USB drivers (Phase 11), which also bring mounting by label,
-`/volumes/<label>`, and safe eject.
+Virtual disks and SATA disks have drivers so far: on the Dell, its SSD
+and hard disk are `sda` and `sdb`. USB sticks need the USB drivers (Phase
+11), which also bring mounting by label, `/volumes/<label>`, and safe
+eject. NVMe disks come later in Phase 10.
+
+Disk tools read and write the devices themselves, such as `/dev/sda`, at
+any offset, with nothing cached between, and ask their size, sector size
+and the rest with Linux's `ioctl` requests (radix-block(2)). A device
+written by mistake loses what was on it, as on any system, so write to
+one only with a tool made for it.
 
 ## Trying it in QEMU
 
@@ -95,7 +102,7 @@ The boot log shows the disk and the mount, and the shell on the screen
 finds the file there (`ls /volumes/vda`, `cat /volumes/vda/hello.txt`):
 
 ```text
-Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, MSI-X vector 0x50
+Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, discards, MSI-X vector 0x50
 Disk: vda has no partition table; it is used whole
 Files: mounted fat from vda on /volumes/vda, labelled MYDISK
 spark: mounted the FAT filesystem of vda at /volumes/vda

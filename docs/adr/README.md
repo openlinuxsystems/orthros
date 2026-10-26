@@ -122,3 +122,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0108](0108-the-registry-under-the-store-lock.md) | The object registry is guarded by the capability store's lock | Accepted |
 | [0109](0109-a-doorbell-for-late-shootdown-answers.md) | Under KVM, a CPU that answers a TLB shootdown late gets a faster timer while it runs | Accepted |
 | [0110](0110-shared-mappings-keep-their-pages.md) | A shared mapping keeps its pages in one place, which also names the futex words in it | Accepted |
+| [0111](0111-one-queue-for-every-disk.md) | Every disk's requests go through one queue, and block devices are read and written raw | Accepted |
+| [0112](0112-ahci-from-the-specification.md) | SATA disks through AHCI, written from Intel's specification, in a crate without unsafe code | Accepted |

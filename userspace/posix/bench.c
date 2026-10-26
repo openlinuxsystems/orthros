@@ -11,9 +11,13 @@
 //
 // and the program prints "posix-bench: done" at the end. It pins itself
 // to the first CPU it may run on. With --exit it exits at once: the
-// program the exec benchmark runs.
+// program the exec benchmark runs. With --disk <device> it also reads
+// and writes that disk, with nothing cached between (the disk
+// benchmarks); `ob bench` gives both systems the same virtio disk, a
+// file on the host.
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -351,9 +355,61 @@ static void futex_processes(const char *name, int other, uint64_t rounds) {
 	munmap(turns, sizeof(*turns));
 }
 
+// How much of the disk the disk benchmarks go through, a transfer after
+// the other, before they start again at its beginning: more than the
+// largest transfer many times over, and less than the host's cache.
+#define DISK_SPAN (32u << 20)
+
+// Transfers of `size` bytes, reads or with `writing` writes, one after
+// the other through the first DISK_SPAN bytes of the disk in `fd`.
+static void disk_transfers(int fd, const char *name, int writing, size_t size, uint64_t rounds) {
+	void *buffer;
+	// Linux's O_DIRECT moves data straight between the disk and the
+	// program's memory, which must be aligned for it; so does Radix for
+	// any transfer on a sector's boundary, and copies the rest.
+	if(posix_memalign(&buffer, 4096, size) != 0)
+		fail("posix_memalign");
+	memset(buffer, 0x5a, size);
+	off_t at = 0;
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++) {
+		ssize_t done = writing ? pwrite(fd, buffer, size, at) : pread(fd, buffer, size, at);
+		if(done != (ssize_t)size)
+			fail(writing ? "a disk write" : "a disk read");
+		at = (at + (off_t)size) % DISK_SPAN;
+	}
+	report(name, started, rounds);
+	free(buffer);
+}
+
+// The disk benchmarks on the disk at `path`, opened as Linux's disk
+// tools open one to bypass the page cache (Radix's block devices are
+// always raw, and its C library takes O_DIRECT and ignores it).
+static void disk(const char *path) {
+	int fd = open(path, O_RDWR | O_DIRECT);
+	if(fd < 0)
+		fail(path);
+	off_t size = lseek(fd, 0, SEEK_END);
+	if(size < (off_t)DISK_SPAN) {
+		printf("posix-bench: %s holds %lld bytes, fewer than %u\n", path, (long long)size,
+		       DISK_SPAN);
+		exit(1);
+	}
+	disk_transfers(fd, "posix_disk_read_4k", 0, 4096, 20000);
+	disk_transfers(fd, "posix_disk_write_4k", 1, 4096, 20000);
+	disk_transfers(fd, "posix_disk_read_64k", 0, 64 * 1024, 5000);
+	disk_transfers(fd, "posix_disk_write_64k", 1, 64 * 1024, 5000);
+	disk_transfers(fd, "posix_disk_read_mib", 0, 1 << 20, 500);
+	disk_transfers(fd, "posix_disk_write_mib", 1, 1 << 20, 500);
+	close(fd);
+}
+
 int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "--exit"))
 		return 0;
+	const char *disk_path = NULL;
+	if(argc > 2 && !strcmp(argv[1], "--disk"))
+		disk_path = argv[2];
 	const char *self = argv[0];
 	if(!self || !strchr(self, '/')) {
 		printf("posix-bench: run me by my path, which the exec benchmark runs again\n");
@@ -376,6 +432,8 @@ int main(int argc, char **argv) {
 	futex_processes("posix_futex_shared_same_cpu", cpus[0], 50000);
 	if(count > 1)
 		futex_processes("posix_futex_shared_cross_cpu", cpus[1], 50000);
+	if(disk_path)
+		disk(disk_path);
 	printf("posix-bench: done\n");
 	fflush(stdout);
 	return 0;

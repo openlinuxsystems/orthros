@@ -190,14 +190,27 @@ _/users_ and _/data_ are empty directories of the root's tmpfs.
 
 At boot the kernel finds each disk, reads its partition table (MBR or
 GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
-virtio disks, _vda1_ for a partition. Each appears in _/dev_ and
-_/sys/block_. As on Linux, an entry that starts past the disk's end is
-skipped, an MBR one that reaches past it is cut to end there, and an
-extended partition shows only its first two sectors. Spark mounts the FAT filesystem of each partition, or of
-each disk with no partition table, at _/volumes/_*name*, read-write, or
-read-only when the device is. A device with no FAT filesystem is left
-alone. Disks are found once, at boot. Removable media, mounted by label
-at _/volumes/_*label* with safe eject, come with *volumed* in Phase 11.
+virtio disks, _sda_, _sdb_ for SATA disks, _vda1_ for a partition. Each
+appears in _/dev_ and _/sys/block_. As on Linux, an entry that starts past
+the disk's end is skipped, an MBR one that reaches past it is cut to end
+there, and an extended partition shows only its first two sectors. Spark
+mounts the FAT filesystem of each partition, or of each disk with no
+partition table, at _/volumes/_*name*, read-write, or read-only when the
+device is. A device with no FAT filesystem is left alone. Disks are found
+once, at boot. Removable media, mounted by label at _/volumes/_*label*
+with safe eject, come with *volumed* in Phase 11.
+
+A disk or partition in _/dev_ is read and written raw, at any offset and
+length, with nothing cached between, as Linux's are when opened with
+*O_DIRECT*; *fsync*(2) empties the disk's write cache, and *ioctl*(2)
+takes Linux's requests for its size, sector size and discards
+(*radix-block*(2)). The whole sectors of a transfer that starts on a
+sector's boundary, into or out of memory on a sector's boundary (an
+aligned *posix_memalign*(3) or *mmap*(2) buffer), go straight between
+the disk and the program's memory; the rest is copied. A write that
+covers part of a sector reads the rest of the sector first. Writing to
+a disk that holds a mounted filesystem damages the filesystem, as on
+every system.
 
 # DIAGNOSTICS
 
@@ -212,10 +225,26 @@ errno it maps to.
 The kernel logs each disk, partition and mount:
 
 ```
-Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, MSI-X vector 0x50
+Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block, write cache, discards, MSI-X vector 0x50
 Disk: vda has no partition table; it is used whole
+Disk: AHCI 1.0 controller at 0000:00:1f.2: 6 ports, 32 command slots, NCQ, MSI vector 0x54
+Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a block, NCQ depth 32, write cache, TRIM
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 ```
+
+*Disk:* _name_*: an error stopped its port (status* _bits_*); it runs again (*_n_* errors since boot)*
+	A SATA disk reported an error, or the link to it failed, and the
+	port was restarted. The commands in flight go again, five times at
+	most, and the one the disk names as failed ends in *io* (EIO). The
+	status bits are the port's interrupt status (AHCI's PxIS).
+
+*Disk:* _name_*: a request went unanswered for 30 s; the link was reset, and what was in flight goes again*
+	A SATA disk stopped answering, and its link was reset.
+
+	When the disk does not come back, or another one is there after
+	the reset, the line ends instead in *the disk is gone, and its
+	requests fail*: every request to it fails from then on, until the
+	next boot.
 
 *Files: writing back to a disk failed:* _error_*; changes stay in memory*
 	A sync by the writeback thread failed; the dirty pages stay in
@@ -223,14 +252,17 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 # LIMITS
 
-- Only virtio block devices have a driver: AHCI and NVMe come in Phase
-  10, USB storage in Phase 11.
+- virtio block devices and SATA disks on AHCI controllers have drivers;
+  NVMe comes later in Phase 10, USB storage in Phase 11. Port
+  multipliers, optical drives and disks with 4096-byte logical sectors
+  are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
 - There is no name cache, no read-ahead and no hot plug yet.
 
 # SEE ALSO
 
-*radix-directory*(2), *radix-file*(2), *radix-ring*(2), *radix-errors*(2),
+*radix-directory*(2), *radix-file*(2), *radix-block*(2), *radix-ring*(2),
+*radix-errors*(2),
 *radix-proc*(5), *radix-sysfs*(5), *radix-capabilities*(7),
 *radix-processes*(7), *spark*(8)

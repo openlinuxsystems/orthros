@@ -55,6 +55,7 @@ use radix_sync::Mutex;
 use super::{Backing, Region, SpaceObject, SpaceRef, first_after, insert, overlaps};
 use crate::Arch;
 use crate::domains::DomainRef;
+use crate::sched::wait;
 use crate::user::{Result, error};
 
 /// The most the place of anonymous memory moves below ANONYMOUS_TOP, at
@@ -248,6 +249,28 @@ fn unshare(phys: u64) {
     {
         let _ = FRAMES.free(phys, 0, Owner::Anon);
     }
+}
+
+/// Lets go of a pin on a page of anonymous memory lent to a device, as
+/// [`unshare`] lets go of a space's hold on it.
+fn unpin(phys: u64) {
+    if let Some(info) = FRAMES.info(phys)
+        && info.unpin() == 0
+    {
+        let _ = FRAMES.free(phys, 0, Owner::Anon);
+    }
+}
+
+/// What [`SpaceObject::pin_pages`] did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pins {
+    /// Pinned every page.
+    All,
+    /// A page is not there yet, or is read-only for a write into it: one a
+    /// fault makes.
+    NotReady,
+    /// A page is not anonymous memory, or has as many pins as it holds.
+    Refused,
 }
 
 /// As [`unshare`], for a page a space let go of that may be anonymous
@@ -598,6 +621,99 @@ impl SpaceObject {
         true
     }
 
+    /// Lends the pages of `len` bytes from `address` to a device that
+    /// reads them, or writes them if `write`: makes them as faults would,
+    /// pins them ([`radix_mm::PageInfo::pin`]) and calls `with` with them
+    /// (a physical address and length for each part of a page, in order),
+    /// then lets go of them. A page the program unmaps meanwhile stays
+    /// until then. A fork waits for every lending under way: it would make
+    /// a page read-only in both spaces, and the first write to it would
+    /// copy it, part-way through what the device writes. `None`, without
+    /// calling `with`, if a page cannot be made or is not anonymous memory
+    /// (a frame's, a ring's): the caller copies instead.
+    pub fn lend<R>(
+        &self,
+        address: u64,
+        len: usize,
+        write: bool,
+        with: impl FnOnce(&[(u64, u32)]) -> R,
+    ) -> Option<R> {
+        let end = address.checked_add(len as u64)?;
+        if len == 0 {
+            return None;
+        }
+        let pages = (end - (address & !(PAGE_SIZE - 1))).div_ceil(PAGE_SIZE) as usize;
+        let mut frames = Vec::new_in(super::kmalloc());
+        frames.try_reserve_exact(pages).ok()?;
+        // Pages the program has touched are pinned in one walk of the page
+        // tables; if one is not there yet, they are made as faults would
+        // make them, with the regions unlocked, and pinned once more.
+        match self.pin_pages(address, end, write, &mut frames) {
+            Pins::All => {}
+            Pins::NotReady
+                if self.fault_in(address, len, write)
+                    && self.pin_pages(address, end, write, &mut frames) == Pins::All => {}
+            _ => return None,
+        }
+        let result = with(&frames);
+        for &(phys, _) in &frames {
+            unpin(phys & !(PAGE_SIZE - 1));
+        }
+        if self.lending.fetch_sub(1, Ordering::AcqRel) == 1 {
+            wait::wake_all(self.lending_key());
+        }
+        Some(result)
+    }
+
+    /// Pins the pages of the bytes from `address` to `end`, as they are,
+    /// into `frames`, and counts a lending, for [`SpaceObject::lend`]. A
+    /// page that is not there, or is read-only for a `write`, or is not
+    /// anonymous memory pins nothing.
+    fn pin_pages(
+        &self,
+        address: u64,
+        end: u64,
+        write: bool,
+        frames: &mut Vec<(u64, u32), Kmalloc>,
+    ) -> Pins {
+        // With the regions locked no page of this space is made or let go
+        // of, nor does a fork start.
+        let _regions = self.regions.lock();
+        let mut at = address;
+        while at < end {
+            let page = at & !(PAGE_SIZE - 1);
+            let pins = match Arch::query_entry(&self.arch, page) {
+                Some((phys, Some(access))) if !write || access == UserAccess::ReadWrite => {
+                    match FRAMES.info(phys) {
+                        Some(info) if info.owner() == Owner::Anon && info.pin() => Ok(phys),
+                        _ => Err(Pins::Refused),
+                    }
+                }
+                _ => Err(Pins::NotReady),
+            };
+            let phys = match pins {
+                Ok(phys) => phys,
+                Err(pins) => {
+                    for &(phys, _) in frames.iter() {
+                        unpin(phys & !(PAGE_SIZE - 1));
+                    }
+                    frames.clear();
+                    return pins;
+                }
+            };
+            let n = (page + PAGE_SIZE).min(end) - at;
+            let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
+            at += n;
+        }
+        self.lending.fetch_add(1, Ordering::AcqRel);
+        Pins::All
+    }
+
+    /// What a fork waits on for lendings to finish.
+    fn lending_key(&self) -> usize {
+        core::ptr::from_ref(&self.lending) as usize
+    }
+
     /// Makes sure the page at `address` of anonymous memory is there, as
     /// the program would find it, and returns its frame: for writing a new
     /// program's stack and relocations before any thread runs in the
@@ -640,6 +756,11 @@ impl SpaceObject {
         let mut frames = alloc::vec::Vec::new_in(super::kmalloc());
         {
             let regions = self.regions.lock();
+            // No lending starts with the regions locked; those under way
+            // finish without them.
+            wait::wait_until(self.lending_key(), "fork", || {
+                self.lending.load(Ordering::Acquire) == 0
+            });
             let mut copied = child.regions.lock_nested(1);
             copied.try_reserve(regions.len()).map_err(|_| error(Kernel::NoMemory))?;
             frames.try_reserve(regions.len()).map_err(|_| error(Kernel::NoMemory))?;

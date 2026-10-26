@@ -134,6 +134,114 @@ fn ram_disk_and_slices() {
     assert_eq!(ro.write(0, &seg), Err(Error::ReadOnly));
 }
 
+#[test]
+fn discards_and_writes_through() {
+    let (disk, device) = shared(RamDisk::new(64, false));
+    disk.load(0, &std::vec![0xaa; 64 * 512]).unwrap();
+    assert_eq!(crate::check_discard(64, 0, 64), Ok(()));
+    assert_eq!(crate::check_discard(64, 0, 0), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 60, 5), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, u64::MAX, 2), Err(Error::OutOfRange));
+    // Through a partition: sectors 8 to 23 of the disk. Its sectors 3 to
+    // 12 (disk 11 to 20) go: part of the disk's second page, the third
+    // whole, and part of the fourth.
+    let slice = Slice::new(device.clone(), 8, 16).unwrap();
+    assert_eq!(slice.discard(3, 14), Err(Error::OutOfRange));
+    slice.discard(3, 10).unwrap();
+    assert_eq!(disk.discarded(), 10);
+    let mut raw = std::vec![0u8; 64 * 512];
+    disk.dump(0, &mut raw);
+    for (sector, bytes) in raw.chunks(512).enumerate() {
+        let gone = (11..21).contains(&sector);
+        assert!(bytes.iter().all(|&b| b == if gone { 0 } else { 0xaa }), "sector {sector}");
+    }
+    let flushes = disk.flushes();
+    let mut page = CachePage::new().unwrap();
+    page.bytes_mut()[..512].fill(0x5a);
+    slice.write_through(0, &[crate::Segment { page: &page, offset: 0, len: 512 }]).unwrap();
+    assert_eq!(disk.flushes(), flushes + 1);
+    disk.dump(8 * 512, &mut raw[..512]);
+    assert!(raw[..512].iter().all(|&b| b == 0x5a));
+    let ro = RamDisk::new(8, true);
+    assert_eq!(ro.discard(0, 8), Err(Error::ReadOnly));
+}
+
+/// A disk of 64 sectors that only notes the lent memory it is asked to
+/// move.
+#[derive(Default)]
+struct Lending {
+    asked: std::sync::Mutex<Vec<Asked>>,
+}
+
+/// Whether [`Lending`] was asked to write, the sector, the frames.
+type Asked = (bool, u64, Vec<(u64, u32)>);
+
+impl BlockDevice for Lending {
+    fn info(&self) -> crate::Info {
+        crate::Info {
+            sectors: 64,
+            block_size: 512,
+            read_only: false,
+            max_segments: 16,
+            discard_sectors: 0,
+            rotational: false,
+        }
+    }
+
+    fn read(&self, _: u64, _: &mut [SegmentMut<'_>]) -> Result<(), Error> {
+        Err(Error::Io)
+    }
+
+    fn write(&self, _: u64, _: &[crate::Segment<'_>]) -> Result<(), Error> {
+        Err(Error::Io)
+    }
+
+    fn flush(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        self.asked.lock().unwrap().push((false, sector, frames.to_vec()));
+        Ok(())
+    }
+
+    fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        self.asked.lock().unwrap().push((true, sector, frames.to_vec()));
+        Ok(())
+    }
+}
+
+#[test]
+fn lent_memory_goes_through_partitions() {
+    let disk = Arc::new(Lending::default());
+    let device: DeviceRef = disk.clone();
+    // Sectors 8 to 23 of the disk.
+    let slice = Slice::new(device, 8, 16).unwrap();
+    let frames = [(0x1_0e00, 512), (0x2_0000, 4096)];
+    slice.read_frames(2, &frames).unwrap();
+    slice.write_frames(7, &frames[1..]).unwrap();
+    assert_eq!(
+        *disk.asked.lock().unwrap(),
+        [(false, 10, frames.to_vec()), (true, 15, frames[1..].to_vec())]
+    );
+    // Past the partition's end, parts of sectors, a frame across a page's
+    // end, none, or more than a mebibyte's worth: refused before the disk
+    // sees them.
+    assert_eq!(slice.read_frames(8, &[(0x2_0000, 4096), (0x3_0000, 512)]), Err(Error::OutOfRange));
+    assert_eq!(slice.read_frames(0, &[(0x2_0000, 100)]), Err(Error::OutOfRange));
+    assert_eq!(slice.read_frames(0, &[(0x2_0100, 512)]), Err(Error::OutOfRange));
+    assert_eq!(slice.write_frames(0, &[(0x2_0e00, 1024)]), Err(Error::OutOfRange));
+    assert_eq!(slice.write_frames(0, &[]), Err(Error::OutOfRange));
+    let many = std::vec![(0x2_0000, 512); crate::MAX_FRAMES + 1];
+    assert_eq!(crate::check_frames(1 << 20, 0, &many), Err(Error::OutOfRange));
+    assert_eq!(crate::check_frames(1 << 20, 0, &many[1..]), Ok(crate::MAX_FRAMES as u64));
+    assert_eq!(disk.asked.lock().unwrap().len(), 2);
+    // A device that cannot reach lent memory says so, and the caller
+    // copies.
+    let (_, ram) = shared(RamDisk::new(8, false));
+    assert_eq!(ram.read_frames(0, &frames[..1]), Err(Error::Unsupported));
+}
+
 /// An MBR with `entries` (status, type, first, sectors).
 fn mbr(entries: &[(u8, u8, u32, u32)]) -> [u8; 512] {
     let mut s = [0u8; 512];

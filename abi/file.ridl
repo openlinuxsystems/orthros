@@ -158,11 +158,13 @@ interface file = 0x000c version 4 {
     /// A device's own request, as Linux's `ioctl`: `request` with its
     /// `argument`, and `size` bytes at `buffer` it reads or writes.
     /// Terminals take the termios, window size, process group and
-    /// controlling terminal requests radix-terminal(2) lists; other files
-    /// fail with not_terminal.
+    /// controlling terminal requests radix-terminal(2) lists, and block
+    /// devices the size, sector and discard requests radix-block(2) lists;
+    /// other files fail with not_terminal.
     method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
-                not_terminal, not_permitted, interrupted, io];
+                not_terminal, not_permitted, interrupted, io, read_only, not_supported,
+                no_memory];
     /// Takes, changes or lets go of (`kind` none) a lock of `owner`'s on
     /// the `length` bytes from `start` (0: all those past it, however the
     /// file grows); a description lock always covers the whole file. A

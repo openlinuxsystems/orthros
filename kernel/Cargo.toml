@@ -15,6 +15,7 @@ members = [
     "arch/x86_64",
     "arch/aarch64",
     "cap",
+    "drivers/ahci",
     "drivers/virtio",
     "fs/block",
     "fs/fat",

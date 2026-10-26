@@ -52,6 +52,7 @@ static void text(void) {
 	OUTPUT("", "/a/b\n", "/bin/dirname", "/a/b/c.txt");
 	OUTPUT("", "1970\n", "/bin/date", "-u", "-d", "@0", "+%Y");
 	OUTPUT("", "Dukovo\n", "/bin/uname", "-s");
+	OUTPUT("", "Dukovo\n", "/bin/uname", "-o");
 	// The release is the kernel's version number, the second word of
 	// "Radix 0.9.0 (Dukovo Server 0.9.0)", and the version the whole line.
 	char line[64] = "", release[32] = "";

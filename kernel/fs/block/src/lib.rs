@@ -8,7 +8,10 @@
 //!   [`Segment`]s of pages, which the device reaches by DMA: nothing is
 //!   copied on the way (spec 6.3). Requests block the calling thread until
 //!   the device is done; the driver below keeps its own queue (a virtqueue
-//!   for virtio-blk), so many threads have requests in flight at once.
+//!   for virtio-blk, a command list for AHCI), so many threads have
+//!   requests in flight at once. Besides reads, writes and flushes, a
+//!   device writes through its cache ([`BlockDevice::write_through`]) and
+//!   forgets sectors ([`BlockDevice::discard`]) as well as it can.
 //! - [`partition`] reads MBR and GPT partition tables, and [`Slice`] is a
 //!   partition as a block device of its own.
 //! - [`cache::BlockCache`] keeps a device's blocks in pages, for the
@@ -50,6 +53,10 @@ pub const SECTOR: u64 = 512;
 /// Sectors in a page.
 pub const SECTORS_PER_PAGE: u64 = PAGE_SIZE as u64 / SECTOR;
 
+/// The most frames one [`BlockDevice::read_frames`] or
+/// [`BlockDevice::write_frames`] takes: a mebibyte of whole pages.
+pub const MAX_FRAMES: usize = 256;
+
 /// What can go wrong with a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -62,6 +69,8 @@ pub enum Error {
     OutOfRange,
     /// Out of memory for the request.
     NoMemory,
+    /// The device does not do this kind of request.
+    Unsupported,
 }
 
 impl fmt::Display for Error {
@@ -71,6 +80,7 @@ impl fmt::Display for Error {
             Error::ReadOnly => "the device is read-only",
             Error::OutOfRange => "the request is outside the device",
             Error::NoMemory => "out of memory",
+            Error::Unsupported => "the device does not do that",
         })
     }
 }
@@ -92,6 +102,11 @@ pub struct Info {
     pub read_only: bool,
     /// The most segments one request takes.
     pub max_segments: usize,
+    /// The most sectors it discards in one command, or 0 if it does not
+    /// discard; [`BlockDevice::discard`] takes any number and splits them.
+    pub discard_sectors: u64,
+    /// Whether it spins, so that seeks cost: a hard disk.
+    pub rotational: bool,
 }
 
 /// Part of a page the device reads from: `len` bytes from `offset`, both
@@ -132,6 +147,48 @@ pub trait BlockDevice: Send + Sync {
 
     /// Makes every write that returned durable.
     fn flush(&self) -> Result<(), Error>;
+
+    /// Writes `segments` as [`write`] does, and returns once they are
+    /// durable: a write with forced unit access, on a disk that has it.
+    /// It makes no other write durable. The default writes, then flushes.
+    ///
+    /// [`write`]: BlockDevice::write
+    fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        self.write(sector, segments)?;
+        self.flush()
+    }
+
+    /// Reads the sectors from `sector` straight into `frames` (physical
+    /// address, length), in order, as [`read`] does into pages: memory
+    /// that its owner, a program, lends for the request, at most
+    /// [`MAX_FRAMES`] parts of pages, each a multiple of [`SECTOR`] long
+    /// and starting at one. They stay in place, and their owner's, until
+    /// it returns, so it returns only once the device is done with every
+    /// one of them, even when the request fails. Fails with
+    /// [`Error::Unsupported`] on a device that cannot, which the default
+    /// does; the caller then reads through pages of its own.
+    ///
+    /// [`read`]: BlockDevice::read
+    fn read_frames(&self, _sector: u64, _frames: &[(u64, u32)]) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Writes `frames` to the sectors from `sector`, as [`write`] does,
+    /// from memory lent as [`BlockDevice::read_frames`] has it.
+    ///
+    /// [`write`]: BlockDevice::write
+    fn write_frames(&self, _sector: u64, _frames: &[(u64, u32)]) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Tells the device that the `count` sectors from `sector` hold
+    /// nothing worth keeping (ATA's TRIM, NVMe's deallocate): it may free
+    /// them, and what they read afterwards is the device's choice. Fails
+    /// with [`Error::Unsupported`] on a device that does not discard
+    /// ([`Info::discard_sectors`] is 0), which the default does.
+    fn discard(&self, _sector: u64, _count: u64) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 /// A block device, shared.
@@ -170,6 +227,25 @@ pub fn check(
     }
 }
 
+/// Checks a request to or from lent memory ([`BlockDevice::read_frames`]),
+/// as [`check`] does pages: each frame (physical address, length) whole
+/// sectors inside its page, and no more than [`MAX_FRAMES`] of them.
+/// Returns the request's length in sectors.
+pub fn check_frames(sectors: u64, sector: u64, frames: &[(u64, u32)]) -> Result<u64, Error> {
+    let lengths =
+        frames.iter().map(|&(phys, len)| ((phys % PAGE_SIZE as u64) as usize, len as usize));
+    check(sectors, MAX_FRAMES, sector, lengths)
+}
+
+/// Checks a discard of `count` sectors from `sector` on a device of
+/// `sectors` sectors: at least one, all on the device.
+pub fn check_discard(sectors: u64, sector: u64, count: u64) -> Result<(), Error> {
+    match sector.checked_add(count) {
+        Some(end) if count > 0 && end <= sectors => Ok(()),
+        _ => Err(Error::OutOfRange),
+    }
+}
+
 #[cfg(kani)]
 mod proofs {
     use super::*;
@@ -193,6 +269,16 @@ mod proofs {
                 bytes += segment as u64;
             }
             assert_eq!(bytes / SECTOR, len);
+        }
+    }
+
+    /// A discard [`check_discard`] accepts covers sectors, all of them on
+    /// the device.
+    #[kani::proof]
+    fn accepted_discards_fit() {
+        let (sectors, sector, count): (u64, u64, u64) = kani::any();
+        if check_discard(sectors, sector, count).is_ok() {
+            assert!(count > 0 && sector < sectors && sectors - sector >= count);
         }
     }
 
@@ -243,6 +329,27 @@ impl BlockDevice for Slice {
 
     fn flush(&self) -> Result<(), Error> {
         self.device.flush()
+    }
+
+    fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        let lengths = segments.iter().map(|s| (s.offset, s.len));
+        check(self.sectors, usize::MAX, sector, lengths)?;
+        self.device.write_through(self.first + sector, segments)
+    }
+
+    fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        check_frames(self.sectors, sector, frames)?;
+        self.device.read_frames(self.first + sector, frames)
+    }
+
+    fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        check_frames(self.sectors, sector, frames)?;
+        self.device.write_frames(self.first + sector, frames)
+    }
+
+    fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
+        check_discard(self.sectors, sector, count)?;
+        self.device.discard(self.first + sector, count)
     }
 }
 

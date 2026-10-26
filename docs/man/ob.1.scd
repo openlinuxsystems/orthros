@@ -431,6 +431,36 @@ _target/userspace/_).
 		lists the running processes. dosfstools and mtools must be
 		installed (*ob doctor* says how).
 
+	*storage-sata*
+		The *storage* test with the same four disks on SATA, the ports
+		of an AHCI controller added to the machine (QEMU's *ich9-ahci*),
+		the last of them solid state. The kernel must name them _sda_ to
+		_sdd_ and find their queue depth, write cache and TRIM.
+
+	*disk-raw*
+		Boot 2 CPUs under UEFI with two 8 MiB disks of known bytes, a
+		virtio disk and a solid state SATA disk, and no filesystem.
+		_/system/tests/storage raw vda sda_ asks each disk Linux's block
+		requests (*radix-block*(2)) and checks them against _/sys/block_,
+		reads at odd offsets and across the end, writes at odd offsets,
+		parts of sectors and across the end, reads every write back,
+		discards a megabyte, flushes, and checks what is refused: a
+		discard of part of a sector or past the end, a terminal request,
+		and a discard or a write without the write right. On the host,
+		every byte of both disks must be what the writes left, with the
+		discarded range zeroed (QEMU punches holes for discards).
+
+	*disk-errors*
+		Boot 2 CPUs under UEFI with one 8 MiB SATA disk through QEMU's
+		*blkdebug* driver, which fails a read of sector 6000 once, and
+		every read of sector 10000 and write of sector 12000.
+		_/system/tests/storage errors sda_ reads the first, which must
+		come back on its retry, and the others, which must end in EIO
+		after five tries each, with a read that reaches the failing
+		sector ending short; then reads and writes elsewhere must work.
+		The kernel must log each recovery of the port, 16 in all, and
+		the disk must hold on the host what it held before.
+
 	*posix*
 		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark
 		starts _/system/tests/posix/run_ on a pseudo-terminal (see
@@ -491,9 +521,10 @@ _target/userspace/_).
 	running the POSIX benchmarks, a C program on the C library
 	(_userspace/posix/bench.c_): *fork*(2) and *waitpid*(2), a program
 	run with *execv*(3), a pipe's throughput, a signal to itself,
-	*poll*(2), and futex round trips through semaphores between two
+	*poll*(2), futex round trips through semaphores between two
 	threads, and between two processes in shared memory, on one CPU and
-	on two.
+	on two, and reads and writes of 4 KiB, 64 KiB and 1 MiB of a virtio
+	disk, _/dev/vda_, a file on this machine.
 
 	Then boot Linux in a virtual machine set up the same way, with
 	_tools/linux-bench_ built as a static program and run as its only
@@ -503,7 +534,8 @@ _target/userspace/_).
 	pipes, eventfds, futexes and Unix sockets, pinned the same way, pipe
 	round trips with a pair of threads on each CPU at once, the same file
 	calls on a tmpfs, and last the same POSIX benchmarks, built from the
-	same file with this machine's C library). This
+	same file with this machine's C library, with the same disk opened
+	with *O_DIRECT*). This
 	Linux boots with *mitigations=off*, since Radix has no mitigations of
 	CPU vulnerabilities yet. Under KVM, Radix and this Linux are measured
 	three times in turn, and each operation counts its fastest run on
@@ -828,8 +860,9 @@ _out/bench/_
 	the instruction counts of *--instructions* (_instructions.md_),
 	the serial logs of the benchmark boots and the Linux virtual machine
 	(_boot-bench.log_, _boot-posix-bench.log_, _boot-linux.log_), the
-	POSIX benchmarks built for Linux (_posix-bench_) and that machine's
-	initramfs (_linux-bench.cpio_), from *ob bench*.
+	POSIX benchmarks built for Linux (_posix-bench_), that machine's
+	initramfs (_linux-bench.cpio_) and the disk both benchmark
+	(_bench-disk.img_), from *ob bench*.
 
 # EXIT STATUS
 

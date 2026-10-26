@@ -3,8 +3,9 @@
 
 //! `ob bench`: the cost of system calls, IPC round trips, context
 //! switches, fresh pages, TLB shootdowns, memory bandwidth, files and
-//! POSIX processes, pipes, signals and futexes on Radix, with Linux as the
-//! baseline (docs/design/ipc.md, ADR 0035, ADR 0039, ADR 0106).
+//! POSIX processes, pipes, signals, futexes and raw disk transfers on
+//! Radix, with Linux as the baseline (docs/design/ipc.md, ADR 0035, ADR
+//! 0039, ADR 0106, ADR 0111).
 //!
 //! It boots a test image with `selftest=bench` on 2 CPUs, where the
 //! benchmark programs of `userspace/usertests` print one `BENCH` line per
@@ -44,8 +45,13 @@ use crate::{Args, Context, Ctx, Result, VERSION, kernel, userspace};
 const CMDLINE: &str = "qemu-exit selftest=bench";
 
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
-/// program of [`POSIX_SOURCE`] from the boot archive, and nothing else.
-const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench";
+/// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
+/// with the benchmarks' disk ([`disk_args`]).
+const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /dev/vda";
+
+/// The size of the disk both systems' POSIX benchmarks read and write: the
+/// 32 MiB they go through, with room.
+const DISK_BYTES: usize = 64 << 20;
 
 /// The POSIX benchmarks: one C program, which Radix's build makes for
 /// Radix (`userspace::build`, with the other C test programs) and
@@ -97,7 +103,8 @@ const ICOUNT: &str = "shift=0,align=off";
 /// when the budget was set, plus a tenth, rounded up to two significant
 /// figures (the count it was set from is in the comment). Operations on
 /// two CPUs depend on how QEMU interleaves the CPUs, and its clock runs on
-/// while one waits, so they have no budget. A change that makes an
+/// while one waits, so they have no budget; nor do the disk transfers,
+/// which wait for the disk. A change that makes an
 /// operation longer raises its budget in the same pull request, and says
 /// why.
 pub const BUDGETS: &[(&str, u64)] = &[
@@ -174,6 +181,12 @@ const fn row(
 /// A row of the POSIX benchmarks, which have the same name on both.
 const fn posix(name: &'static str, what: &'static str) -> Row {
     Row { radix: name, what, linux: Some((name, "the same C program, on glibc")) }
+}
+
+/// A row of the POSIX benchmarks' disk transfers: on Linux, of the same
+/// disk opened with `O_DIRECT`.
+const fn disk(name: &'static str, what: &'static str) -> Row {
+    Row { radix: name, what, linux: Some((name, "the same C program, on glibc, `O_DIRECT`")) }
 }
 
 /// The report's rows, in order.
@@ -327,6 +340,12 @@ const ROWS: &[Row] = &[
         "posix_futex_shared_cross_cpu",
         "POSIX: futex wake and wait each way (semaphores in shared memory), two processes, two CPUs",
     ),
+    disk("posix_disk_read_4k", "Disk: 4 KiB read raw from a virtio disk (`pread`)"),
+    disk("posix_disk_write_4k", "Disk: 4 KiB written raw to a virtio disk (`pwrite`)"),
+    disk("posix_disk_read_64k", "Disk: 64 KiB read raw from a virtio disk"),
+    disk("posix_disk_write_64k", "Disk: 64 KiB written raw to a virtio disk"),
+    disk("posix_disk_read_mib", "Disk: 1 MiB read raw from a virtio disk"),
+    disk("posix_disk_write_mib", "Disk: 1 MiB written raw to a virtio disk"),
 ];
 
 /// `ob bench`.
@@ -752,7 +771,7 @@ fn linux_vm_numbers(
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: Vec::new(),
+        extra: disk_args(dir)?,
         direct: Some(DirectBoot {
             kernel: kernel.to_path_buf(),
             initrd: initrd.to_path_buf(),
@@ -917,6 +936,8 @@ fn radix_posix_numbers(
     let image = dir.join("posix-bench.img");
     let bytes = test::with_cmdline(base, POSIX_CMDLINE).map_err(crate::Error::new)?;
     std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
+    let mut extra = accel.extra();
+    extra.extend(disk_args(dir)?);
     let machine = Machine {
         firmware: Firmware::Bios,
         media: Media::Usb,
@@ -931,7 +952,7 @@ fn radix_posix_numbers(
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: accel.extra(),
+        extra,
         direct: None,
     };
     let mut vm =
@@ -948,6 +969,22 @@ fn radix_posix_numbers(
         );
     }
     Ok((parse(&log), parse_counts(&log)))
+}
+
+/// Makes the benchmarks' disk afresh in `dir`, filled with bytes rather
+/// than holes, which the host would read faster, and returns QEMU's
+/// arguments for it: a virtio block device, `/dev/vda` on both systems.
+/// Each boot gets the same disk.
+fn disk_args(dir: &Path) -> Result<Vec<String>> {
+    let disk = dir.join("bench-disk.img");
+    std::fs::write(&disk, vec![0x5a; DISK_BYTES])
+        .context(|| format!("writing {}", disk.display()))?;
+    Ok(vec![
+        "-drive".into(),
+        format!("file={},if=none,id=bench,format=raw", qemu::option_value(&disk)),
+        "-device".into(),
+        "virtio-blk-pci,drive=bench".into(),
+    ])
 }
 
 /// Builds and runs the Linux baseline on the host, with the POSIX

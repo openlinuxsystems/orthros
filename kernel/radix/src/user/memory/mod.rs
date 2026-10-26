@@ -24,6 +24,9 @@
 //! a file, charged to the space's resource domain, and shared after a
 //! fork until one side writes to them, or for good in a shared mapping,
 //! whose pages every space that maps it finds in one [`SharedPages`].
+//! A device can reach a program's anonymous memory in place, for a read
+//! or write of a disk the program asked for ([`SpaceObject::lend`]): the
+//! pages are pinned while it does, and a fork waits for it to finish.
 //! `futex` keeps the threads that wait on words of memory: a word of a
 //! space's own memory by the space and its address, a word of memory
 //! spaces share by what they share and its place in it
@@ -158,6 +161,9 @@ pub struct SpaceObject {
     /// frame, a ring or a shared mapping): until then a futex word is
     /// named by the space alone, with no look at its regions.
     may_share: AtomicBool,
+    /// How many lendings of its memory to devices are under way
+    /// ([`SpaceObject::lend`]), which a fork waits for.
+    lending: AtomicU64,
 }
 
 /// Pages a step of zeroing a new frame clears: 256 KiB, a few tens of
@@ -194,6 +200,7 @@ impl SpaceObject {
             file_faults: AtomicU64::new(0),
             anon_top: anon::random_top(),
             may_share: AtomicBool::new(false),
+            lending: AtomicU64::new(0),
         };
         Arc::try_new_in(space, kmalloc()).ok()
     }
