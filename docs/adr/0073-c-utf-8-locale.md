@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0073. Programs start in C.UTF-8, compiled from glibc's locale data; named locales wait for Phase 12
 
-- Status: Accepted
+- Status: Accepted; the locales are in `/system/libraries/locale` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-22
 
 ## Context

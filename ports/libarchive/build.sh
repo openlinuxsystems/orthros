@@ -34,23 +34,23 @@ make -j"$JOBS" >make.log 2>&1 || {
 	exit 1
 }
 make install DESTDIR="$SYSROOT" >/dev/null
-rm -f "$SYSROOT/system/lib/libarchive.la"
+rm -f "$SYSROOT/system/libraries/libarchive.la"
 
-bin="$SYSROOT/system/bin"
-man="$SYSROOT/system/share/man"
+bin="$SYSROOT/system/commands"
+man="$SYSROOT/system/resources/man"
 : >"$PORT_INFO/image"
 for program in bsdtar bsdcpio bsdcat bsdunzip; do
 	$STRIP "$bin/$program"
-	echo "system/bin/$program"
-	echo "system/share/man/man1/$program.1"
+	echo "system/commands/$program"
+	echo "system/resources/man/man1/$program.1"
 done >>"$PORT_INFO/image"
 # bsdcat keeps its name: cat is the core utilities'.
 for name in tar cpio unzip; do
 	ln -sfn "bsd$name" "$bin/$name"
 	ln -sfn "bsd$name.1" "$man/man1/$name.1"
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >>"$PORT_INFO/image"
 for page in cpio libarchive-formats mtree tar; do
-	echo "system/share/man/man5/$page.5"
+	echo "system/resources/man/man5/$page.5"
 done >>"$PORT_INFO/image"

@@ -1,0 +1,47 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Dukovo's programs are in /system/commands and its manual pages in
+/system/resources/man (ADR 0114): paths.h gives those names for the
+search path, the shell, vi, sendmail and man, as patch 0047 gives the
+new names of the root's folders. /bin, /usr/bin and /usr/share lead to
+the same folders, so programs that use the Unix names still work.
+Dukovo only.
+
+diff -ruN a/options/glibc/include/paths.h b/options/glibc/include/paths.h
+--- a/options/glibc/include/paths.h
++++ b/options/glibc/include/paths.h
+@@ -4,27 +4,27 @@
+ #ifndef _PATHS_H
+ #define _PATHS_H
+ 
+-#define	_PATH_DEFPATH "/usr/local/bin:/bin:/usr/bin"
+-#define	_PATH_STDPATH "/bin:/usr/bin:/sbin:/usr/sbin"
++#define	_PATH_DEFPATH "/system/commands"
++#define	_PATH_STDPATH "/system/commands"
+ 
+-#define	_PATH_BSHELL	"/bin/sh"
++#define	_PATH_BSHELL	"/system/commands/sh"
+ #define	_PATH_CONSOLE	"/devices/console"
+ #define	_PATH_DEVNULL	"/devices/null"
+ #define _PATH_GSHADOW	"/system/settings/gshadow"
+ #define	_PATH_KLOG	"/proc/kmsg"
+ #define	_PATH_LASTLOG	"/system/state/log/lastlog"
+ #define	_PATH_MAILDIR	"/system/state/mail"
+-#define	_PATH_MAN	"/usr/share/man"
++#define	_PATH_MAN	"/system/resources/man"
+ #define	_PATH_MNTTAB	"/system/settings/fstab"
+ #define	_PATH_MOUNTED	"/etc/mtab"
+ #define	_PATH_NOLOGIN	"/system/settings/nologin"
+ #define _PATH_PRESERVE	"/system/state/lib"
+-#define	_PATH_SENDMAIL	"/usr/sbin/sendmail"
++#define	_PATH_SENDMAIL	"/system/commands/sendmail"
+ #define	_PATH_SHADOW	"/system/settings/shadow"
+ #define	_PATH_SHELLS	"/system/settings/shells"
+ #define	_PATH_TTY	"/devices/tty"
+ #define _PATH_UTMP	"/system/live/utmp"
+-#define	_PATH_VI	"/usr/bin/vi"
++#define	_PATH_VI	"/system/commands/vi"
+ #define _PATH_WTMP	"/system/state/log/wtmp"
+ 
+ #define	_PATH_DEV	"/devices/"

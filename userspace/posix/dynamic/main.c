@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Dynamic linking, as a bundle uses it (ADR 0071): a program that the
-// dynamic linker (/system/lib/ld.so) starts on the shared C library and a
+// dynamic linker (/system/libraries/ld.so) starts on the shared C library and a
 // private library it finds next to it (lib/libgreet.so, through its run
 // path, $ORIGIN/lib), with that library's constructor, data and
 // thread-local storage; a library opened with dlopen, and its symbols

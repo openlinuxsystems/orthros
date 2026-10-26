@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0090. Editors, a C++ runtime, and the settings the system starts with
 
-- Status: Accepted
+- Status: Accepted; the default settings are in `/system/resources/default-settings` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-23
 
 ## Context

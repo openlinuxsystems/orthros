@@ -4,9 +4,10 @@
 
 # Builds LLVM's C++ runtime for Radix (ob(1), PORTS; ADR 0090) with
 # CMake, as LLVM's runtimes build does on its own, and installs it into
-# the sysroot: libc++, libc++abi and libunwind as static libraries, as
-# every program in /system is static, with libc++abi on libunwind and
-# all three on compiler-rt's builtins rather than GCC's. Threads are
+# the sysroot's /system/libraries: libc++, libc++abi and libunwind as
+# static libraries, as every program in /system is static, with
+# libc++abi on libunwind and all three on compiler-rt's builtins rather
+# than GCC's. Threads are
 # POSIX threads. The time zone database of std::chrono is left out until
 # the system has tzdata (Phase 12). CMake is told that the C++ compiler
 # works: it would check by linking a program, which x86_64-radix-c++
@@ -20,6 +21,10 @@ cmake -G Ninja -S "$PORT_SRC/runtimes" -B . -Wno-dev \
 	-DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INSTALL_PREFIX="$PREFIX" \
+	-DLIBUNWIND_INSTALL_LIBRARY_DIR=libraries \
+	-DLIBCXXABI_INSTALL_LIBRARY_DIR=libraries \
+	-DLIBCXX_INSTALL_LIBRARY_DIR=libraries \
+	-DLIBCXX_INSTALL_MODULES_DIR=resources/libc++/v1 \
 	-DCMAKE_CXX_COMPILER_WORKS=ON \
 	-DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
 	-DLLVM_INCLUDE_TESTS=OFF \

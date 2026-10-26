@@ -44,7 +44,7 @@ const ISSUE: &str = "/system/settings/issue";
 const DEFAULT_ISSUE: &str = "\\s \\r (\\l)\n\n";
 
 /// What Ctrl+Alt+Delete runs.
-const REBOOT: &str = "/system/bin/reboot";
+const REBOOT: &str = "/system/commands/reboot";
 
 /// The write end of the pipe the SIGCHLD handler wakes the loop with.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
@@ -97,11 +97,12 @@ fn root_account() -> (String, String) {
             .then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
     };
     if entry.is_null() {
-        return ("/system/bin/sh".into(), "/".into());
+        return ("/system/commands/sh".into(), "/".into());
     }
     // SAFETY: not null, as checked.
     let entry = unsafe { &*entry };
-    let shell = text(entry.pw_shell).filter(|s| !s.is_empty()).unwrap_or("/system/bin/sh".into());
+    let shell =
+        text(entry.pw_shell).filter(|s| !s.is_empty()).unwrap_or("/system/commands/sh".into());
     let home = text(entry.pw_dir).filter(|s| !s.is_empty()).unwrap_or("/".into());
     (shell, home)
 }

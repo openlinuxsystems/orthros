@@ -26,6 +26,6 @@ done
 rm -f libdb1.a
 $AR rcs libdb1.a ./*.o
 
-mkdir -p "$SYSROOT/system/include/db1" "$SYSROOT/system/lib"
+mkdir -p "$SYSROOT/system/include/db1" "$SYSROOT/system/libraries"
 cp "$PORT_SRC/db.h" "$SYSROOT/system/include/db1/"
-cp libdb1.a "$SYSROOT/system/lib/"
+cp libdb1.a "$SYSROOT/system/libraries/"

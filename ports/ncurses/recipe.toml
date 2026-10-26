@@ -12,7 +12,7 @@ summary = "the terminal library, the terminfo database and its tools"
 license = "X11-distribute-modifications-variant"
 homepage = "https://invisible-island.net/ncurses/"
 depends = ["mlibc"]
-image = ["system/share/terminfo/"]
+image = ["system/resources/terminfo/"]
 
 [source]
 git = "https://github.com/ThomasDickey/ncurses-snapshots.git"

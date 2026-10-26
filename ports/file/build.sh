@@ -44,9 +44,10 @@ make -j"$JOBS" FILE_COMPILE="$PORT_BUILD/host/src/file" >make.log 2>&1 || {
 	exit 1
 }
 make install DESTDIR="$SYSROOT" >/dev/null
-rm -f "$SYSROOT/system/lib/libmagic.la"
+rm -f "$SYSROOT/system/libraries/libmagic.la"
 
-$STRIP "$SYSROOT/system/bin/file"
-for path in bin/file share/misc/magic.mgc share/man/man1/file.1 share/man/man5/magic.5; do
+$STRIP "$SYSROOT/system/commands/file"
+for path in commands/file resources/misc/magic.mgc resources/man/man1/file.1 \
+	resources/man/man5/magic.5; do
 	echo "system/$path"
 done >"$PORT_INFO/image"

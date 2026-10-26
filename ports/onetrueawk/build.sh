@@ -13,7 +13,7 @@ make -j"$JOBS" CC="$CC" HOSTCC=cc CFLAGS="$CFLAGS" YACC="bison -d" >make.log 2>&
 	tail -n 60 make.log >&2
 	exit 1
 }
-mkdir -p "$SYSROOT/system/bin" "$SYSROOT/system/share/man/man1"
-$STRIP -o "$SYSROOT/system/bin/awk" a.out
-cp awk.1 "$SYSROOT/system/share/man/man1/awk.1"
-printf '%s\n' system/bin/awk system/share/man/man1/awk.1 >"$PORT_INFO/image"
+mkdir -p "$SYSROOT/system/commands" "$SYSROOT/system/resources/man/man1"
+$STRIP -o "$SYSROOT/system/commands/awk" a.out
+cp awk.1 "$SYSROOT/system/resources/man/man1/awk.1"
+printf '%s\n' system/commands/awk system/resources/man/man1/awk.1 >"$PORT_INFO/image"

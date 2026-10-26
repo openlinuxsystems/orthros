@@ -9,6 +9,7 @@
 set -eu
 
 cd "$PORT_BUILD"
-CHOST="$HOST" "$PORT_SRC/configure" --prefix=/system --static >configure.log
+CHOST="$HOST" "$PORT_SRC/configure" --prefix=/system --libdir=/system/libraries \
+	--mandir=/system/resources/man --static >configure.log
 make -j"$JOBS" libz.a >make.log
 make install DESTDIR="$SYSROOT" >/dev/null

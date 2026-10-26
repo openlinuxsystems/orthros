@@ -13,6 +13,8 @@ set -eu
 
 cd "$PORT_SRC"
 make="make -j$JOBS CC=$CC AR=$AR CFLAGS=-O3 PREFIX=/system DESTDIR=$SYSROOT"
+# Into the folders Dukovo names (radix-files(7)).
+make="$make bindir=/system/commands libdir=/system/libraries mandir=/system/resources/man"
 features="HAVE_PTHREAD=1 HAVE_ZLIB=1 HAVE_LZMA=1 HAVE_LZ4=1"
 {
 	$make -C lib libzstd.a-mt
@@ -27,9 +29,9 @@ $make -C lib install-static install-includes install-pc >/dev/null
 $make -C programs $features install >/dev/null
 
 # zstdmt, zstd -T0, is told of in zstd's page as well.
-ln -sfn zstd.1 "$SYSROOT/system/share/man/man1/zstdmt.1"
-$STRIP "$SYSROOT/system/bin/zstd"
+ln -sfn zstd.1 "$SYSROOT/system/resources/man/man1/zstdmt.1"
+$STRIP "$SYSROOT/system/commands/zstd"
 for name in zstd zstdcat unzstd zstdmt zstdgrep zstdless; do
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >"$PORT_INFO/image"

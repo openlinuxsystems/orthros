@@ -20,13 +20,13 @@ make -j"$JOBS" SUBDIRS="lib doc" >make.log 2>&1 || {
 make install SUBDIRS="lib doc" DESTDIR="$SYSROOT" >/dev/null
 
 # The names with no page of their own are told of in another's.
-man="$SYSROOT/system/share/man/man1"
+man="$SYSROOT/system/resources/man/man1"
 ln -sfn gunzip.1 "$man/uncompress.1"
 ln -sfn zgrep.1 "$man/zegrep.1"
 ln -sfn zgrep.1 "$man/zfgrep.1"
-$STRIP "$SYSROOT/system/bin/gzip"
+$STRIP "$SYSROOT/system/commands/gzip"
 for name in gzip gunzip uncompress zcat gzexe zcmp zdiff zegrep zfgrep zforce zgrep zless \
 	zmore znew; do
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >"$PORT_INFO/image"

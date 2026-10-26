@@ -11,7 +11,7 @@ use crate::shell::{Res, Shell};
 use crate::{show, sys, trap};
 
 /// `command -p`'s `PATH`: where the standard programs are.
-pub const DEFAULT_PATH: &str = "/system/bin:/bin:/usr/bin";
+pub const DEFAULT_PATH: &str = "/system/commands:/bin:/usr/bin";
 
 /// The reserved words.
 pub const KEYWORDS: &[&str] = &[

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0050. The kernel starts one program, Spark, from the boot archive, gives it the archive and a pool of memory, and stops if it ends
 
-- Status: Accepted
+- Status: Accepted; Spark is `/system/commands/spark` since [0114](0114-plain-names-inside-system.md)
 - Date: 2026-10-21
 
 ## Context

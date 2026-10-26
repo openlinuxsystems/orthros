@@ -20,11 +20,11 @@ make -j"$JOBS" SUBDIRS="lib doc src" >make.log 2>&1 || {
 make install SUBDIRS="lib doc src" DESTDIR="$SYSROOT" >/dev/null
 
 : >"$PORT_INFO/image"
-$STRIP "$SYSROOT/system/bin/grep"
+$STRIP "$SYSROOT/system/commands/grep"
 for name in egrep fgrep; do
-	echo ".so man1/grep.1" >"$SYSROOT/system/share/man/man1/$name.1"
+	echo ".so man1/grep.1" >"$SYSROOT/system/resources/man/man1/$name.1"
 done
-for file in bin/grep bin/egrep bin/fgrep share/man/man1/grep.1 share/man/man1/egrep.1 \
-	share/man/man1/fgrep.1; do
+for file in commands/grep commands/egrep commands/fgrep resources/man/man1/grep.1 \
+	resources/man/man1/egrep.1 resources/man/man1/fgrep.1; do
 	echo "system/$file" >>"$PORT_INFO/image"
 done

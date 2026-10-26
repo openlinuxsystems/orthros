@@ -19,13 +19,13 @@ make -j"$JOBS" -f ../../cmpl_clang.mak CC="$CC" CXX="$CXX" O="$PORT_BUILD" \
 	exit 1
 }
 
-bin="$SYSROOT/system/bin"
-man="$SYSROOT/system/share/man/man1"
+bin="$SYSROOT/system/commands"
+man="$SYSROOT/system/resources/man/man1"
 mkdir -p "$bin" "$man"
 cp "$PORT_BUILD/7zz" "$bin/7zz"
 $STRIP "$bin/7zz"
 ln -sfn 7zz "$bin/7z"
 echo ".so man1/7zz.1" >"$man/7z.1"
-for file in bin/7zz bin/7z share/man/man1/7z.1; do
+for file in commands/7zz commands/7z resources/man/man1/7z.1; do
 	echo "system/$file"
 done >"$PORT_INFO/image"

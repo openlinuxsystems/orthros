@@ -5,6 +5,6 @@
 # its domain 5 s after `service stubborn restart` or `stop`.
 
 description = Ignores SIGTERM
-program = /system/bin/nukesh
+program = /system/commands/nukesh
 arguments = -c "trap '' TERM; echo up; while :; do sleep 1; done"
 restart = always

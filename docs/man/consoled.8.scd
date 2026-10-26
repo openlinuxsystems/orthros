@@ -113,7 +113,7 @@ _/devices/kbd_
 
 _/system/settings/issue_
 	What each console shows before its session. Its default is in
-	_/system/lib/defaults/etc/issue_.
+	_/system/resources/default-settings/issue_.
 
 _/system/settings/spark/services/consoled.service_
 	The service.

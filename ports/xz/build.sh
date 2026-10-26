@@ -22,11 +22,11 @@ make -j"$JOBS" >make.log 2>&1 || {
 }
 make install DESTDIR="$SYSROOT" >/dev/null
 # libtool's notes on the library name its place without the sysroot.
-rm -f "$SYSROOT/system/lib/liblzma.la"
+rm -f "$SYSROOT/system/libraries/liblzma.la"
 
-$STRIP "$SYSROOT/system/bin/xz" "$SYSROOT/system/bin/lzmainfo"
+$STRIP "$SYSROOT/system/commands/xz" "$SYSROOT/system/commands/lzmainfo"
 for name in xz unxz xzcat lzma unlzma lzcat lzmainfo xzdiff xzcmp lzdiff lzcmp xzgrep xzegrep \
 	xzfgrep lzgrep lzegrep lzfgrep xzless lzless xzmore lzmore; do
-	echo "system/bin/$name"
-	echo "system/share/man/man1/$name.1"
+	echo "system/commands/$name"
+	echo "system/resources/man/man1/$name.1"
 done >"$PORT_INFO/image"

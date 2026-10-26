@@ -6,9 +6,9 @@
 //! Each `NAME.service` file in `/system/settings/spark/services`
 //! describes one service, as lines of `key = value`; `#` starts a
 //! comment. The system's own come from
-//! `/system/lib/defaults/etc/spark/services`, which Spark copies in when
-//! they are missing, so an administrator turns one off with `enabled = no`
-//! rather than by removing it.
+//! `/system/resources/default-settings/spark/services`, which Spark copies
+//! in when they are missing, so an administrator turns one off with
+//! `enabled = no` rather than by removing it.
 
 use alloc::format;
 use alloc::string::{String, ToString};

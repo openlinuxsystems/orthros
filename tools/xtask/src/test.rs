@@ -1925,15 +1925,15 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
     vm.expect("spark: 1 services in /system/settings/spark/services, 1 enabled")?;
-    vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
-    vm.expect("consoled: started /system/bin/nukesh on tty1 as process ")?;
+    vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
     vm.expect("consoled: 6 consoles; tty1 is shown")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("echo $((6 * 7)) consoles\n")?;
     vm.expect_screen(&["# echo $((6 * 7)) consoles", "42 consoles"])?;
     vm.press(&["alt-f2"])?;
-    vm.expect("consoled: started /system/bin/nukesh on tty2 as process ")?;
+    vm.expect("consoled: started /system/commands/nukesh on tty2 as process ")?;
     vm.expect_screen(&["(tty2)"])?;
     vm.type_text("service --status-all; service consoled status\n")?;
     vm.expect_screen(&[
@@ -1947,7 +1947,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: consoled (process ")?;
     vm.expect(" was ended by signal 15")?;
     vm.expect("spark: starting consoled again in ")?;
-    vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: 6 consoles; tty1 is shown")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("poweroff\n")?;
@@ -2290,7 +2290,7 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
     vm.expect("Init: the boot archive is ")?;
-    vm.expect("Init: /system/bin/spark is process ")?;
+    vm.expect("Init: /system/commands/spark is process ")?;
     let rest = program_line(vm, "spark: Spark v2 is process ")?;
     let spark = image_bias(&rest, "Spark")?;
     vm.expect("spark: boot archive of ")?;
@@ -2636,15 +2636,15 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn spark_stop(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("spark: 3 services in /system/tests/services/stop, 3 enabled")?;
-    vm.expect("spark: started leaver (/system/bin/nukesh) as process ")?;
-    vm.expect("spark: started stubborn (/system/bin/nukesh) as process ")?;
-    vm.expect("spark: started driver (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: started leaver (/system/commands/nukesh) as process ")?;
+    vm.expect("spark: started stubborn (/system/commands/nukesh) as process ")?;
+    vm.expect("spark: started driver (/system/commands/nukesh) as process ")?;
     vm.expect("spark: asked to restart stubborn")?;
     vm.expect("spark: stubborn did not end in 5 s; stopping its domain")?;
     vm.expect("spark: stubborn (process ")?;
     vm.expect(" was ended by signal 9")?;
     vm.expect("spark: starting stubborn again in 0.1 s")?;
-    vm.expect("spark: started stubborn (/system/bin/nukesh) as process ")?;
+    vm.expect("spark: started stubborn (/system/commands/nukesh) as process ")?;
     vm.expect("spark: asked to stop stubborn")?;
     vm.expect("spark: stubborn did not end in 5 s; stopping its domain")?;
     vm.expect(" was ended by signal 9")?;

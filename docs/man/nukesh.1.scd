@@ -187,7 +187,7 @@ with Unix's names (*radix-files*(7)), completes only once it is typed
 whole, so _/de_ completes to _/devices/_.
 
 A program that *complete* says nothing for completes from its completion
-file, if it has one, which every program in _/system/bin_ does: a word
+file, if it has one, which every program in _/system/commands_ does: a word
 that starts with *-* completes to the program's options, shown with what
 each does, and the word after an option completes as that option's
 argument, a file, a directory, a user and the like; *--name=* and an
@@ -201,7 +201,7 @@ A program's completion file is the file of its name in the first of the
 directories of *NUKESH_COMPLETION_PATH* that has one or, without that
 variable, in _$XDG_DATA_HOME/nukesh/completions_ (by default
 _~/.local/share/nukesh/completions_), so that a user's own come first,
-then in _/system/share/nukesh/completions_. The system's are written from
+then in _/system/resources/nukesh/completions_. The system's are written from
 each program's manual page when the system is built. A shell reads each
 file once.
 
@@ -340,15 +340,15 @@ wrongly; 126 for a file that cannot be run, 127 for one not found;
 
 # FILES
 
-_/system/bin/nukesh_, and its links _/system/bin/sh_, _/system/bin/bash_
-and _/system/bin/rnukesh_ (_/bin_ is _/system/bin_).
+_/system/commands/nukesh_, and its links _/system/commands/sh_, _/system/commands/bash_
+and _/system/commands/rnukesh_ (_/bin_ leads to _/system/commands_).
 
 _/etc/profile_, _/etc/nukeshrc_, _~/.nukesh_profile_, _~/.nukesh_login_,
 _~/.profile_, _~/.nukeshrc_, _~/.nukesh_logout_: the start-up files.
 
 _~/.nukesh_history_: the history.
 
-_/system/share/nukesh/completions_ and
+_/system/resources/nukesh/completions_ and
 _~/.local/share/nukesh/completions_: completion files.
 
 # STANDARDS

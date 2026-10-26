@@ -24,7 +24,7 @@ is named by its number or its name, with or without *SIG*, in any case:
 *-9*, *-KILL*, *-s kill* and *-s SIGKILL* are the same.
 
 Nukesh has its own *kill* built in, which also takes jobs (*%1*);
-_/system/bin/kill_ is this one.
+_/system/commands/kill_ is this one.
 
 # OPTIONS
 

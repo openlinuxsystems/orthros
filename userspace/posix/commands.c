@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// Every program in /system/bin was run by the tests before this one, the
+// Every program in /system/commands was run by the tests before this one, the
 // utilities' and the administration tools': each of them notes the
 // programs it runs in /tmp/posix-commands (programs.h), and this reads
 // what they noted. A few run in other boot tests instead, each for the
@@ -62,7 +62,7 @@ static void every_program(void) {
 	close(fd);
 	CHECK(len < sizeof(noted) - 1);
 
-	DIR *bin = opendir("/system/bin");
+	DIR *bin = opendir("/system/commands");
 	CHECK(bin != NULL);
 	if(!bin)
 		return;
@@ -84,10 +84,10 @@ static void every_program(void) {
 	// Each exception is a program there.
 	for(size_t i = 0; i < ELSEWHERE_COUNT; i++) {
 		char path[64];
-		snprintf(path, sizeof(path), "/system/bin/%s", ELSEWHERE[i][0]);
+		snprintf(path, sizeof(path), "/system/commands/%s", ELSEWHERE[i][0]);
 		CHECK(access(path, X_OK) == 0);
 	}
-	printf("commands: %d programs in /system/bin, %d of them run in other boot tests\n",
+	printf("commands: %d programs in /system/commands, %d of them run in other boot tests\n",
 			programs, (int)ELSEWHERE_COUNT);
 }
 

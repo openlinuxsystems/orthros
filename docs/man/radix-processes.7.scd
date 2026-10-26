@@ -118,7 +118,7 @@ program how far its image moved, for debuggers and crash reports.
 The programs the system starts with come in the boot archive, a POSIX
 ustar file that *ob build* writes to _/boot/bootfs_ and GRUB loads as a
 module with the word *bootfs* (see *dukovo-boot*(7)). It holds
-_/system/bin/spark_ and the programs Spark starts, owned by root, mode
+_/system/commands/spark_ and the programs Spark starts, owned by root, mode
 0755, dated from the commit, so the same programs make the same bytes.
 List it with *tar tvf out/sysroot/boot/bootfs*.
 
@@ -133,7 +133,7 @@ layer comes in Phase 7.
 # THE FIRST PROGRAM
 
 At the end of boot, unless a self-test runs, the kernel starts the
-program *init=* names in the boot archive, _/system/bin/spark_ by default,
+program *init=* names in the boot archive, _/system/commands/spark_ by default,
 with the words after a lone *--* on the command line as its arguments.
 It is the only program the kernel starts, and the kernel stops if it
 ends. See *spark*(8).
@@ -153,7 +153,7 @@ that failed and the kernel's error:
 
 ```
 User: spark cannot run: a segment is writable and executable, or not readable, or the stack executable
-Init: could not start /system/bin/spark: 0x10008
+Init: could not start /system/commands/spark: 0x10008
 ```
 
 radix-rt's *spawn* returns the same reasons to its caller, which Spark

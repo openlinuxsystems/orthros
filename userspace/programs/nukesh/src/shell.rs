@@ -453,7 +453,7 @@ impl Shell {
         let ps4 = if self.opts.posix { "+ " } else { "+ ${BASH_SOURCE:-$0}:${LINENO}: " };
         set_default(self, "PS4", ps4.into());
         set_default(self, "OPTIND", "1".into());
-        set_default(self, "PATH", "/system/bin:/bin:/usr/bin".into());
+        set_default(self, "PATH", "/system/commands:/bin:/usr/bin".into());
         let readonly = |shell: &mut Shell, name: &str, value: String| {
             let var = shell.vars.entry(name);
             var.value = Some(Value::Str(value));

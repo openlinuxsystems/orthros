@@ -90,4 +90,4 @@ disks hold the tree (Phase 10), every change costs a migration.
 - `getcwd` after `cd /dev` says `/devices`: the C library keeps the
   working directory with its links followed (ADR 0081).
 - The folders inside `/system` (`bin`, `lib`, `share`) are renamed
-  separately, with the program paths that go with them.
+  separately, with the program paths that go with them (ADR 0114).

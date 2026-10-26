@@ -21,7 +21,7 @@ coreutils is the uutils project's core utilities, written in Rust,
 built for Radix as one program: *ls*(1), *cp*(1), *cat*(1), *sort*(1),
 *date*(1), *test*(1) and the rest of the utilities POSIX names and GNU's
 core utilities have, with GNU's options. Each is a link to
-_/system/bin/coreutils_ by its name, and coreutils runs the utility its
+_/system/commands/coreutils_ by its name, and coreutils runs the utility its
 name says; *coreutils* _utility_ runs one by name. Each utility has its
 own manual page.
 
@@ -48,7 +48,7 @@ The utility's, or 1 when there is no utility by that name.
 
 # FILES
 
-_/system/bin/coreutils_, and a link by each utility's name.
+_/system/commands/coreutils_, and a link by each utility's name.
 
 # SEE ALSO
 

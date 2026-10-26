@@ -83,7 +83,7 @@ pub const FLAGS: &[Flag] = &[
     Flag {
         name: "init",
         value: Some("path"),
-        summary: "the first program, from the boot archive (/system/bin/spark if not given); \
+        summary: "the first program, from the boot archive (/system/commands/spark if not given); \
                   the words after a lone -- are its arguments",
     },
     Flag {

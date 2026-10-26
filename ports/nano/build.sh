@@ -11,7 +11,7 @@ set -eu
 
 cd "$PORT_BUILD"
 x86_64-radix-configure "$PORT_SRC" --disable-nls --enable-utf8 --disable-libmagic \
-	--sysconfdir=/system/settings >configure.log 2>&1 || {
+	>configure.log 2>&1 || {
 	tail -n 40 configure.log >&2
 	exit 1
 }
@@ -21,16 +21,16 @@ make -j"$JOBS" >make.log 2>&1 || {
 }
 make install DESTDIR="$SYSROOT" >/dev/null
 
-defaults="$SYSROOT/system/lib/defaults/etc"
+defaults="$SYSROOT/system/resources/default-settings"
 mkdir -p "$defaults"
 cp "$PORT_DIR/nanorc" "$defaults/nanorc"
 
 : >"$PORT_INFO/image"
-$STRIP "$SYSROOT/system/bin/nano"
-for file in bin/nano bin/rnano share/man/man1/nano.1 share/man/man1/rnano.1 \
-	share/man/man5/nanorc.5 lib/defaults/etc/nanorc; do
+$STRIP "$SYSROOT/system/commands/nano"
+for file in commands/nano commands/rnano resources/man/man1/nano.1 resources/man/man1/rnano.1 \
+	resources/man/man5/nanorc.5 resources/default-settings/nanorc; do
 	echo "system/$file" >>"$PORT_INFO/image"
 done
-for syntax in "$SYSROOT"/system/share/nano/*.nanorc; do
-	echo "system/share/nano/${syntax##*/}" >>"$PORT_INFO/image"
+for syntax in "$SYSROOT"/system/resources/nano/*.nanorc; do
+	echo "system/resources/nano/${syntax##*/}" >>"$PORT_INFO/image"
 done

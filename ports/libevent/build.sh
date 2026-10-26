@@ -21,6 +21,6 @@ make -j"$JOBS" >make.log 2>&1 || {
 make install DESTDIR="$SYSROOT" >/dev/null
 # libtool's notes on the libraries name their place without the sysroot,
 # and event_rpcgen.py needs a Python Radix does not have yet.
-rm -f "$SYSROOT"/system/lib/libevent*.la "$SYSROOT/system/bin/event_rpcgen.py"
+rm -f "$SYSROOT"/system/libraries/libevent*.la "$SYSROOT/system/commands/event_rpcgen.py"
 
 : >"$PORT_INFO/image"

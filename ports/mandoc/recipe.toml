@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # mandoc (ADR 0086): man, which shows the manual pages in
-# /system/share/man, and the formatter behind it. The release archive
+# /system/resources/man, and the formatter behind it. The release archive
 # comes from mandoc's home, or else from Ubuntu's source pool, which
 # keeps it unchanged under Debian's old name for mandoc, mdocml.
 name = "mandoc"

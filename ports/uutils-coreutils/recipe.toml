@@ -14,7 +14,7 @@ summary = "the core utilities, rewritten in Rust"
 license = "MIT"
 homepage = "https://github.com/uutils/coreutils"
 depends = ["rust-crates"]
-image = ["system/bin/coreutils"]
+image = ["system/commands/coreutils"]
 
 [source]
 git = "https://github.com/uutils/coreutils.git"

@@ -3,10 +3,10 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 Locales as Dukovo keeps them:
   - compiled locales, and glibc's locale archive, are looked for in
-    /system/lib/locale, where Dukovo keeps the system's files (there is
-    no /usr), after the directories of LOCPATH; /usr/share/i18n/locales
-    is left out: it holds glibc's locale sources, which mlibc does not
-    read;
+    /system/libraries/locale, where Dukovo keeps the system's libraries
+    (/usr/lib leads there), after the directories of LOCPATH;
+    /usr/share/i18n/locales is left out: it holds glibc's locale
+    sources, which mlibc does not read;
   - setlocale and newlocale name a locale as they were asked, as glibc
     does ("C.UTF-8" stays "C.UTF-8"), not by the directory it was found
     in ("C.utf8");
@@ -64,7 +64,7 @@ diff -ruN a/options/internal/generic/locale.cpp b/options/internal/generic/local
  		}
 -		locpaths.push_back(frg::string<MemoryAllocator>{"/usr/lib/locale", getAllocator()});
 -		locpaths.push_back(frg::string<MemoryAllocator>{"/usr/share/i18n/locales", getAllocator()});
-+		locpaths.push_back(frg::string<MemoryAllocator>{"/system/lib/locale", getAllocator()});
++		locpaths.push_back(frg::string<MemoryAllocator>{"/system/libraries/locale", getAllocator()});
  	}
  
  	if (!cachedLocpath.empty())
@@ -73,11 +73,11 @@ diff -ruN a/options/internal/generic/locale.cpp b/options/internal/generic/local
  
  	struct stat info;
 -	if (mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, "/usr/lib/locale/locale-archive", 0, &info))
-+	if (mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, "/system/lib/locale/locale-archive", 0, &info))
++	if (mlibc::sysdep_or_enosys<Stat>(mlibc::fsfd_target::path, -1, "/system/libraries/locale/locale-archive", 0, &info))
  		return;
  
 -	auto window = smarter::allocate_shared<file_window>(getAllocator(), "/usr/lib/locale/locale-archive");
-+	auto window = smarter::allocate_shared<file_window>(getAllocator(), "/system/lib/locale/locale-archive");
++	auto window = smarter::allocate_shared<file_window>(getAllocator(), "/system/libraries/locale/locale-archive");
  	if (window->size() < sizeof(LocaleArchive::Header))
  		return;
  

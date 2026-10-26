@@ -17,8 +17,10 @@
 //!    `/tmp`, and the device, process and kernel trees; makes
 //!    `/system/state/tmp`; makes the Unix names (`/bin`, `/etc`, `/dev`,
 //!    `/proc` and the rest) links to them, hidden from listings by the
-//!    root's `.hidden`; then copies each default setting in
-//!    `/system/lib/defaults/etc` that `/system/settings` lacks into it;
+//!    root's `.hidden` (the boot archive has `/system`'s own, ADR 0114);
+//!    then copies each default setting in
+//!    `/system/resources/default-settings` that `/system/settings` lacks
+//!    into it;
 //! 2. mounts the FAT filesystem of each disk in `/devices` that holds one
 //!    (each partition, or the whole disk if it has none) at
 //!    `/volumes/<name>`;
@@ -92,15 +94,16 @@ const HIERARCHY: [&str; 9] = [
 
 /// Symbolic links from the names Unix programs and scripts look for to
 /// where Dukovo keeps those things: `/bin/sh`, `#!/usr/bin/env`,
-/// `/etc/hosts`, `/dev/null`, `/proc/mounts`, `/var/run` (ADRs 0081 and
-/// 0113).
+/// `/etc/hosts`, `/dev/null`, `/proc/mounts`, `/var/run` (ADRs 0081,
+/// 0113 and 0114). `/usr/bin` and `/usr/lib` are `/system`'s links to
+/// `commands` and `libraries`, which the boot archive holds.
 const LINKS: [(&str, &str); 10] = [
-    ("bin", "system/bin"),
+    ("bin", "system/commands"),
     ("dev", "devices"),
     ("etc", "system/settings"),
     ("proc", "processes"),
     ("run", "system/live"),
-    ("sbin", "system/bin"),
+    ("sbin", "system/commands"),
     ("sys", "kernel"),
     ("usr", "system"),
     ("var", "system/state"),
@@ -370,7 +373,7 @@ fn build(root: &Dir) -> bool {
 /// way for updates to add settings without replacing edited ones
 /// (spark(8)). `/system/settings` is a tmpfs until Btrfs, so each boot
 /// starts it with all of them.
-const DEFAULTS: &str = "system/lib/defaults/etc";
+const DEFAULTS: &str = "system/resources/default-settings";
 const SETTINGS: &str = "system/settings";
 
 /// How deep the defaults' directories may nest.

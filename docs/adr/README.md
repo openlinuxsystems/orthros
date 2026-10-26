@@ -32,7 +32,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0018](0018-kaslr-with-a-post-link-relocation-table.md) | KASLR moves the kernel at boot using a relocation table written after linking | Accepted |
 | [0019](0019-verifying-the-memory-manager.md) | The memory manager is verified with Kani proofs and proptest properties | Accepted |
 | [0020](0020-zones-nodes-and-address-space-layout.md) | Physical memory is managed in per-node DMA32 and Normal zones with per-frame records | Accepted |
-| [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted |
+| [0021](0021-license-manifest-in-every-image.md) | Every image carries a checked license manifest | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0022](0022-kernel-random-number-generator.md) | The kernel's random numbers come from ChaCha20 seeded through BLAKE2s from every source | Accepted |
 | [0023](0023-capability-model.md) | Capabilities carry copy and transfer rights, seal with endpoints, and revoke in marked steps | Accepted |
 | [0024](0024-tla-plus-tools.md) | The TLA+ models are checked with TLC from the pinned TLA+ tools 1.7.4 | Accepted |
@@ -61,7 +61,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0047](0047-processes.md) | A process is a capability-named object that its maker builds, that ends with its threads or its maker, and that is reaped by deleting its last capability | Accepted |
 | [0048](0048-static-pie-programs-and-user-aslr.md) | Programs are static position-independent executables, placed at random addresses by whoever loads them | Accepted |
 | [0049](0049-boot-archive.md) | The programs a machine starts with come in a ustar boot archive that GRUB loads as a module, checked whole before use | Accepted |
-| [0050](0050-spark-is-started-by-the-kernel-from-the-boot-archive.md) | The kernel starts one program, Spark, from the boot archive, gives it the archive and a pool of memory, and stops if it ends | Accepted |
+| [0050](0050-spark-is-started-by-the-kernel-from-the-boot-archive.md) | The kernel starts one program, Spark, from the boot archive, gives it the archive and a pool of memory, and stops if it ends | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0051](0051-radix-rt-runtime.md) | radix-rt is the Rust runtime of native programs: a heap, arguments, the boot archive and spawning, on top of libradix | Accepted |
 | [0052](0052-message-signalled-interrupts-only.md) | Device interrupts are message-signalled only, and PCI is reached through ECAM | Accepted |
 | [0053](0053-modern-virtio-only.md) | Virtio devices are driven through the modern PCI transport only, with split virtqueues | Accepted |
@@ -82,9 +82,9 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0068](0068-mlibc-is-the-c-library.md) | mlibc is the C library, with Radix's own system layer and Linux's ABI numbers | Accepted |
 | [0069](0069-clang-toolchain-and-ports.md) | Software from elsewhere is built by ports: pinned sources, patches and a script, with the host's Clang wrapped for Radix | Accepted |
 | [0070](0070-rust-standard-library-port.md) | Rust's standard library is ported to a radix target on mlibc, built from the toolchain's rust-src | Accepted |
-| [0071](0071-dynamic-linker-for-bundles.md) | mlibc's dynamic linker is /system/lib/ld.so, for bundles; system programs stay static | Accepted |
+| [0071](0071-dynamic-linker-for-bundles.md) | mlibc's dynamic linker is /system/lib/ld.so, for bundles; system programs stay static | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0072](0072-exact-numbers-and-times-in-the-c-library.md) | The C library writes and reads numbers and times as glibc does, with musl's code where mlibc's was wrong | Accepted |
-| [0073](0073-c-utf-8-locale.md) | Programs start in C.UTF-8, compiled from glibc's locale data; named locales wait for Phase 12 | Accepted |
+| [0073](0073-c-utf-8-locale.md) | Programs start in C.UTF-8, compiled from glibc's locale data; named locales wait for Phase 12 | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0074](0074-posix-scheduling-and-resource-limits.md) | Nice levels, POSIX scheduling and resource limits follow Linux's rules for a process without privileges | Accepted |
 | [0075](0075-advisory-file-locks.md) | Advisory file locks are kept by the kernel in one table: BSD's, POSIX's and Linux's open file description locks | Accepted |
 | [0076](0076-file-times-and-device-numbers.md) | Programs set a file's times; reading never changes them, and each mount has a device number | Accepted |
@@ -92,7 +92,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0078](0078-server-first-release.md) | Dukovo 1.0 is a server release, and Lumen moves to 1.1 | Accepted |
 | [0079](0079-framework-desktop-second-reference-machine.md) | The Framework Desktop is the second reference machine | Accepted |
 | [0080](0080-crates-patched-for-radix.md) | Programs in Rust from elsewhere build with crates.io crates patched for Radix | Accepted |
-| [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) |
+| [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) and [0114](0114-plain-names-inside-system.md) |
 | [0082](0082-copies-under-the-page-cache-never-wait-for-a-page.md) | Copies under a file's page cache lock never wait for a page | Accepted |
 | [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted; changed by [0103](0103-the-shell-corpus.md) |
 | [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) |
@@ -101,7 +101,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0087](0087-gpl-programs-among-the-ports.md) | GPL programs may be ports in /system, each a program of its own | Accepted |
 | [0088](0088-archives-and-compressors.md) | libarchive is tar, cpio and unzip; each compressor is its own project's | Accepted |
 | [0089](0089-directory-descriptor-paths.md) | The C library notes the path of each directory descriptor, for `..` beneath it and fchdir | Accepted |
-| [0090](0090-editors-cxx-and-default-settings.md) | Editors, a C++ runtime, and the settings the system starts with | Accepted |
+| [0090](0090-editors-cxx-and-default-settings.md) | Editors, a C++ runtime, and the settings the system starts with | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0091](0091-named-sockets-and-passed-descriptors.md) | Named sockets connect through the tree, and descriptors ride on their bytes | Accepted |
 | [0092](0092-cpu-time-split-and-load-averages.md) | CPU time is split by the timer's samples, and the load averages are Linux's | Accepted |
 | [0093](0093-cpu-affinity-and-io-classes.md) | Threads have Linux's CPU affinity, and processes Linux's I/O classes | Accepted |
@@ -113,7 +113,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0099](0099-power-capability-and-ordered-shutdown.md) | Turning the machine off is a capability only Spark holds, and Spark stops the services first | Accepted |
 | [0100](0100-consoled-virtual-consoles-in-a-program.md) | consoled draws the virtual consoles as a program, a terminal for TERM=linux built on the vte crate | Accepted |
 | [0101](0101-spark-supervises-services.md) | Spark supervises services from simple key-value files, in a domain each, and answers a control socket | Accepted |
-| [0102](0102-manual-pages-and-completions-in-the-image.md) | Every program in /system/bin has its manual page, indexed, and the shell completes its options from that page | Accepted |
+| [0102](0102-manual-pages-and-completions-in-the-image.md) | Every program in /system/bin has its manual page, indexed, and the shell completes its options from that page | Accepted; changed by [0114](0114-plain-names-inside-system.md) |
 | [0103](0103-the-shell-corpus.md) | Nukesh is checked against POSIX's shell tests and real projects' scripts, run in a sandbox | Accepted |
 | [0104](0104-cancellation-points-as-musl-makes-them.md) | Thread cancellation points are system calls made as musl makes them, through a stub the signal handler can see | Accepted |
 | [0105](0105-shootdowns-skip-stopped-virtual-cpus.md) | Under KVM, a TLB shootdown sends no interrupt to a virtual CPU the host has stopped | Accepted |
@@ -125,3 +125,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0111](0111-one-queue-for-every-disk.md) | Every disk's requests go through one queue, and block devices are read and written raw | Accepted |
 | [0112](0112-ahci-from-the-specification.md) | SATA disks through AHCI, written from Intel's specification, in a crate without unsafe code | Accepted |
 | [0113](0113-plain-names-for-the-root-folders.md) | The root's folders have plain names, and Unix's names are hidden links to them | Accepted |
+| [0114](0114-plain-names-inside-system.md) | The folders inside /system have plain names, and Unix's names are hidden links to them | Accepted |

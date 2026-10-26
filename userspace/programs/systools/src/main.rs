@@ -5,7 +5,7 @@
 //! administrator expects from Linux whose Linux versions read Linux's
 //! `/proc`, utmp or system calls, written for Radix, with their names and
 //! common options, as one program. A link by each tool's name runs it
-//! (`/system/bin/ps` is a link to `systools`), and so does
+//! (`/system/commands/ps` is a link to `systools`), and so does
 //! `systools <tool> [argument...]`.
 //!
 //! The process tools read the kernel's `/processes` (radix-proc(5)); `lsof`

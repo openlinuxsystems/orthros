@@ -6,8 +6,8 @@
 //! The boot loader loads the boot archive as a module, `bootfs`: a ustar
 //! file (`radix-bootfs`) with the programs the system starts with. The
 //! kernel checks it whole, finds the first program in it (`init=PATH`,
-//! `/system/bin/spark` by default) and starts it in a process of its own
-//! (`loader`), with the archive mapped read-only for it, the root of the
+//! `/system/commands/spark` by default) and starts it in a process of its
+//! own (`loader`), with the archive mapped read-only for it, the root of the
 //! file tree in `SLOT_ROOT` (`crate::fs`), from `SLOT_FIRST_EXTRA` on a
 //! memory object for the programs it starts, a capability to `services`,
 //! the resource domain below the root that its services run in, and the
@@ -37,7 +37,7 @@ use crate::{caps, domains};
 pub const MODULE_WORD: &str = "bootfs";
 
 /// The first program, unless `init=` names another.
-pub const DEFAULT_INIT: &str = "/system/bin/spark";
+pub const DEFAULT_INIT: &str = "/system/commands/spark";
 
 /// Spark's own memory object, and the one for the programs it starts:
 /// 2^order pages each, the largest the kernel makes.
