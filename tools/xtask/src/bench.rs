@@ -47,7 +47,7 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
 /// with the benchmarks' disk ([`disk_args`]).
-const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /dev/vda";
+const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /devices/vda";
 
 /// The size of the disk both systems' POSIX benchmarks read and write: the
 /// 32 MiB they go through, with room.
@@ -973,7 +973,8 @@ fn radix_posix_numbers(
 
 /// Makes the benchmarks' disk afresh in `dir`, filled with bytes rather
 /// than holes, which the host would read faster, and returns QEMU's
-/// arguments for it: a virtio block device, `/dev/vda` on both systems.
+/// arguments for it: a virtio block device, `vda` on both systems
+/// (`/devices/vda` on Radix, `/dev/vda` on Linux).
 /// Each boot gets the same disk.
 fn disk_args(dir: &Path) -> Result<Vec<String>> {
     let disk = dir.join("bench-disk.img");

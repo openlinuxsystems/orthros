@@ -1442,7 +1442,7 @@ pub fn load_average() -> LoadAverage {
     *LOAD.lock_irq()
 }
 
-/// What CPU `cpu` has done since it came online, for `/proc/stat`.
+/// What CPU `cpu` has done since it came online, for `/processes/stat`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CpuTimes {
     /// Nanoseconds running threads in user mode, and in the kernel.

@@ -410,8 +410,8 @@ and two processes doing the same through semaphores in shared memory
 and 1 MiB at a time, one transfer after the other through its first 32
 MiB (`posix_disk_read_4k` to `posix_disk_write_mib`, ADR 0111). Both
 systems get the same virtio disk, a 64 MiB file on the host made afresh
-for each boot: `/dev/vda`, raw on Radix and opened with `O_DIRECT` on
-Linux, so that neither has a cache between the program and the disk.
+for each boot: `vda` (`/devices/vda`), raw on Radix, and `/dev/vda`,
+opened with `O_DIRECT`, on Linux, so that neither has a cache between the program and the disk.
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

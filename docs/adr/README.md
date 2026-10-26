@@ -92,10 +92,10 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0078](0078-server-first-release.md) | Dukovo 1.0 is a server release, and Lumen moves to 1.1 | Accepted |
 | [0079](0079-framework-desktop-second-reference-machine.md) | The Framework Desktop is the second reference machine | Accepted |
 | [0080](0080-crates-patched-for-radix.md) | Programs in Rust from elsewhere build with crates.io crates patched for Radix | Accepted |
-| [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted |
+| [0081](0081-symbolic-links.md) | Symbolic links are resolved by the kernel, beneath the directory a path starts from | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) |
 | [0082](0082-copies-under-the-page-cache-never-wait-for-a-page.md) | Copies under a file's page cache lock never wait for a page | Accepted |
 | [0083](0083-nukesh-the-shell.md) | Nukesh is the shell and /bin/sh, written in Rust and checked against bash | Accepted; changed by [0103](0103-the-shell-corpus.md) |
-| [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted |
+| [0084](0084-dev-fd-in-the-c-library.md) | The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) |
 | [0085](0085-socket-pairs.md) | Socket pairs are two pipes, one each way | Accepted |
 | [0086](0086-release-archives-and-autoconf-ports.md) | Ports come from release archives or git, and autoconf packages build through one wrapper | Accepted |
 | [0087](0087-gpl-programs-among-the-ports.md) | GPL programs may be ports in /system, each a program of its own | Accepted |
@@ -105,7 +105,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0091](0091-named-sockets-and-passed-descriptors.md) | Named sockets connect through the tree, and descriptors ride on their bytes | Accepted |
 | [0092](0092-cpu-time-split-and-load-averages.md) | CPU time is split by the timer's samples, and the load averages are Linux's | Accepted |
 | [0093](0093-cpu-affinity-and-io-classes.md) | Threads have Linux's CPU affinity, and processes Linux's I/O classes | Accepted |
-| [0094](0094-proc-for-the-native-tools-kmsg-and-opened-paths.md) | /proc tells the native tools what they show, /dev/kmsg gives the log, and files keep the path they were opened by | Accepted |
+| [0094](0094-proc-for-the-native-tools-kmsg-and-opened-paths.md) | /proc tells the native tools what they show, /dev/kmsg gives the log, and files keep the path they were opened by | Accepted; changed by [0113](0113-plain-names-for-the-root-folders.md) |
 | [0095](0095-tracing-through-a-pipe-the-kernel-writes.md) | A trace is a pipe the kernel writes a record to for each call | Accepted |
 | [0096](0096-native-administration-tools-as-one-program.md) | The native administration tools are one Rust program, written for Radix with Linux's names and options | Accepted |
 | [0097](0097-keyboard-events-and-the-framebuffer-for-programs.md) | The kernel hands programs key events through /dev/kbd and the screen through /dev/fb0 | Accepted |
@@ -124,3 +124,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0110](0110-shared-mappings-keep-their-pages.md) | A shared mapping keeps its pages in one place, which also names the futex words in it | Accepted |
 | [0111](0111-one-queue-for-every-disk.md) | Every disk's requests go through one queue, and block devices are read and written raw | Accepted |
 | [0112](0112-ahci-from-the-specification.md) | SATA disks through AHCI, written from Intel's specification, in a crate without unsafe code | Accepted |
+| [0113](0113-plain-names-for-the-root-folders.md) | The root's folders have plain names, and Unix's names are hidden links to them | Accepted |

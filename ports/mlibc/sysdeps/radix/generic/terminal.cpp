@@ -75,7 +75,7 @@ int pty_number(int fd, uint32_t *number) {
 	return control(fd, RADIX_TERMINAL_GET_PTY_NUMBER, 0, number, sizeof(*number));
 }
 
-// Writes "/dev/pts/N" for `number` to `buf`, which holds `size` bytes.
+// Writes "/devices/pts/N" for `number` to `buf`, which holds `size` bytes.
 int pts_path(uint32_t number, char *buf, size_t size) {
 	char digits[10];
 	int n = 0;
@@ -83,7 +83,7 @@ int pts_path(uint32_t number, char *buf, size_t size) {
 		digits[n++] = static_cast<char>('0' + number % 10);
 		number /= 10;
 	} while(number);
-	const char prefix[] = "/dev/pts/";
+	const char prefix[] = "/devices/pts/";
 	size_t len = sizeof(prefix) - 1;
 	if(size < len + n + 1)
 		return ERANGE;
@@ -206,7 +206,7 @@ int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *re
 }
 
 int Sysdeps<Ttyname>::operator()(int fd, char *buf, size_t size) {
-	// Every terminal is a pseudo-terminal, /dev/pts/N.
+	// Every terminal is a pseudo-terminal, /devices/pts/N.
 	uint32_t number;
 	if(int e = pty_number(fd, &number); e)
 		return e;

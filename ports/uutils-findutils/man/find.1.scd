@@ -249,9 +249,9 @@ could not be read, say), as GNU find does.
 
 # EXAMPLES
 
-Files under _/system/var/log_ changed in the last day:
+Files under _/system/state/log_ changed in the last day:
 
-	find /system/var/log -type f -mtime 0
+	find /system/state/log -type f -mtime 0
 
 Remove the build output of every project, but nothing below it:
 

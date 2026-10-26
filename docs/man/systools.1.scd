@@ -30,7 +30,7 @@ name, and *systools --list* lists them.
 The tools that show processes read *radix-proc*(5); *lsof*(8) lists the
 capabilities each process holds; *rtrace*(1) reads a trace of a
 process's system calls (*radix-trace*(2)); *dmesg*(1) reads the kernel's
-log through _/dev/kmsg_ (*radix-files*(7)); *shutdown*(8), *reboot*(8),
+log through _/devices/kmsg_ (*radix-files*(7)); *shutdown*(8), *reboot*(8),
 *poweroff*(8), *halt*(8) and *service*(8) ask Spark over its control
 socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
 every process is root's, so the user columns all say root and the

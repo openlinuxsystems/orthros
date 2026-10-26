@@ -34,7 +34,7 @@ reaps it and checks that all of the program's memory came back, or runs
 it as a POSIX program (see *POSIX PROGRAMS*); it starts the services too
 only when *--services* comes first. *--service-dir* _directory_ starts
 the services that _directory_ describes instead of
-_/system/etc/spark/services_, with or without a program: the *spark-oom*
+_/system/settings/spark/services_, with or without a program: the *spark-oom*
 boot test points it at _/system/tests/services_.
 
 # STARTING
@@ -72,32 +72,36 @@ Init: /system/bin/spark is process 1
 # WHAT SPARK v2 DOES
 
 . It checks the boot archive whole.
-. It makes the root's ten directories, _/system_, _/applications_,
-  _/users_, _/data_, _/tmp_, _/run_, _/dev_, _/proc_, _/sys_ and
+. It makes the root's nine directories, _/system_, _/applications_,
+  _/users_, _/shared_, _/tmp_, _/devices_, _/processes_, _/kernel_ and
   _/volumes_ (see *radix-files*(7) for what each is for).
 . It mounts, in this order, the boot archive read-only on _/system_;
-  tmpfs on _/system/etc_, _/system/var_, _/tmp_ and _/run_; and the
-  *dev*, *proc* and *sys* trees on _/dev_, _/proc_ and _/sys_
-  (*radix-proc*(5), *radix-sysfs*(5)); then it makes _/system/var/tmp_,
-  for temporary files that are to outlive a restart. If any of this
-  fails, it starts nothing.
-. It makes the root's symbolic links for Unix programs: _/bin_ and
-  _/sbin_ to _system/bin_, _/usr_ to _system_, _/etc_ to _system/etc_
-  and _/var_ to _system/var_.
+  tmpfs on _/system/settings_, _/system/state_, _/system/live_ and
+  _/tmp_; and the *dev*, *proc* and *sys* trees on _/devices_,
+  _/processes_ and _/kernel_ (*radix-proc*(5), *radix-sysfs*(5)); then
+  it makes _/system/state/tmp_, for temporary files that are to outlive
+  a restart. If any of this fails, it starts nothing.
+. It makes the symbolic links with Unix's names, for Unix programs,
+  scripts and people: _/bin_ and _/sbin_ to _system/bin_, _/usr_ to
+  _system_, _/etc_ to _system/settings_, _/var_ to _system/state_, _/run_
+  to _system/live_, _/dev_ to _devices_, _/proc_ to _processes_, _/sys_
+  to _kernel_, and _/system/state/run_ to _../live_. It writes the names
+  of those in the root to _/.hidden_, and _run_ to _/system/state/.hidden_,
+  so that listings leave them out (*radix-files*(7)).
 . It copies each default setting in _/system/lib/defaults/etc_ that
-  _/system/etc_ lacks into it, with the directories it is in: the
+  _/system/settings_ lacks into it, with the directories it is in: the
   defaults the system ships, such as nano's _nanorc_ and the service
-  files, which an administrator edits in _/system/etc_. A file already
-  there is never replaced, so an update can add settings without
-  undoing edits; until _/system/etc_ is kept on a disk, each boot starts
-  it with all of them.
-. It looks for disks in _/dev_ and mounts the FAT filesystem of each
+  files, which an administrator edits in _/system/settings_. A file
+  already there is never replaced, so an update can add settings without
+  undoing edits; until _/system/settings_ is kept on a disk, each boot
+  starts it with all of them.
+. It looks for disks in _/devices_ and mounts the FAT filesystem of each
   partition, or of each disk with no partition table, at
   _/volumes/_*name*: read-write, or read-only when the device is. A
   device that holds no FAT filesystem is left alone.
-. It listens at _/run/spark/control_.
+. It listens at _/system/live/spark/control_.
 . With no program on the command line, as on a normal boot, it starts
-  the services that _/system/etc/spark/services_ enables, the lowest
+  the services that _/system/settings/spark/services_ enables, the lowest
   *order* first.
 . With a program, it reads it from _/system_ and passes it the arguments
   after it. It starts the program in a process made for Spark, with 2
@@ -115,10 +119,10 @@ Its lines in the kernel log start with *spark:*, after the kernel's
 ```
 spark: Spark v2 is process 1, moved by 0x10ae4974a000
 spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
-spark: built the hierarchy of 10 directories and mounted 8 filesystems
-spark: added 4 default settings to /system/etc
-spark: listening at /run/spark/control
-spark: 1 services in /system/etc/spark/services, 1 enabled
+spark: built the hierarchy of 9 directories and mounted 8 filesystems
+spark: added 4 default settings to /system/settings
+spark: listening at /system/live/spark/control
+spark: 1 services in /system/settings/spark/services, 1 enabled
 spark: started consoled (/system/bin/consoled) as process 12
 ```
 
@@ -134,7 +138,7 @@ spark: nothing more to do; waiting
 # SERVICES
 
 A service is a program Spark starts at boot and keeps running. Each is
-described by a file _/system/etc/spark/services/_*name*_.service_, whose
+described by a file _/system/settings/spark/services/_*name*_.service_, whose
 _name_, of 1 to 23 bytes, is the service's and its domain's. The
 system's own come from _/system/lib/defaults/etc/spark/services_; to
 turn one off, set *enabled = no* in its file rather than removing it,
@@ -196,7 +200,7 @@ memory = none
 
 Spark starts each service as a POSIX program (*radix-posix*(7)) in a
 domain of its own below *services*, which it makes the first time and
-keeps for the restarts, with _/dev/null_ as its standard input, a pipe as
+keeps for the restarts, with _/devices/null_ as its standard input, a pipe as
 its standard output and error, _/_ as its working directory, and the
 environment *PATH=/system/bin*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8*
 and *EDITOR=nano* with the file's *environment* over it. It copies what
@@ -226,7 +230,7 @@ spark: started consoled (/system/bin/consoled) as process 31
 
 # CONTROL SOCKET
 
-Spark listens at the Unix socket _/run/spark/control_. A request is one
+Spark listens at the Unix socket _/system/live/spark/control_. A request is one
 line; Spark answers it with text and closes the connection. An answer
 that starts with *ok:* or a status table is a success, one that starts
 with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
@@ -283,7 +287,7 @@ A machine the kernel cannot power off, with no ACPI, is halted instead.
 With *--posix* as its first argument, Spark runs the program after it as
 a POSIX program (*radix-posix*(7)): it makes a process for it, gives it
 the root directory, the random source and the kernel log, and a new
-pseudo-terminal from _/dev/ptmx_ as descriptors 0, 1 and 2, then starts
+pseudo-terminal from _/devices/ptmx_ as descriptors 0, 1 and 2, then starts
 it with *exec* as its own child, with the environment *PATH=/system/bin*,
 *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8* and *EDITOR=nano* and _/_ as its
 working directory. It copies what the program writes to the terminal to the
@@ -363,11 +367,11 @@ _/boot/bootfs_
 _/system/bin/spark_
 	Spark, in the boot archive.
 
-_/system/etc/spark/services/_*name*_.service_
+_/system/settings/spark/services/_*name*_.service_
 	The services (see *SERVICES*); the system's own come from
 	_/system/lib/defaults/etc/spark/services_.
 
-_/run/spark/control_
+_/system/live/spark/control_
 	The control socket (see *CONTROL SOCKET*).
 
 _/system/tests/hello_
@@ -416,7 +420,7 @@ _name_ *holds no FAT filesystem; left alone*
 	sector or tables are damaged.
 
 *spark: cannot make a pseudo-terminal:* _reason_, *spark: could not start* _path_*:* _reason_
-	Running a POSIX program failed before it started: _/dev/ptmx_ could
+	Running a POSIX program failed before it started: _/devices/ptmx_ could
 	not be opened, or the process, its descriptors or *exec* failed.
 
 *spark: process* _n_ *(*_path_*) was ended by signal* _signal_

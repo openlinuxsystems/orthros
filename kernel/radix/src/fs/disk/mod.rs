@@ -8,8 +8,8 @@
 //! block devices ([`virtio`], named `vda`, `vdb` and on) and AHCI
 //! controllers ([`ahci`], whose disks are named `sda`, `sdb` and on). A
 //! disk's partitions are named after it (`vda1`, `sda2`), read from its MBR
-//! or GPT (`radix_block::partition`); every one appears in `/dev` and
-//! `/sys/block`. Requests to every disk go through the same queue
+//! or GPT (`radix_block::partition`); every one appears in `/devices` and
+//! `/kernel/block`. Requests to every disk go through the same queue
 //! ([`queue`]), whatever drives it.
 
 use alloc::sync::Arc;
@@ -36,7 +36,7 @@ mod virtio;
 /// A disk's name: `vda`, `vda1`.
 pub type Name = TextBuf<16>;
 
-/// What every disk has done since boot, for `/proc/stat` and vmstat(8):
+/// What every disk has done since boot, for `/processes/stat` and vmstat(8):
 /// the reads and writes finished, and the 512-byte sectors they moved.
 pub static READS: AtomicU64 = AtomicU64::new(0);
 pub static READ_SECTORS: AtomicU64 = AtomicU64::new(0);
@@ -44,7 +44,7 @@ pub static WRITES: AtomicU64 = AtomicU64::new(0);
 pub static WRITTEN_SECTORS: AtomicU64 = AtomicU64::new(0);
 
 /// What the PCI scan found: where each function is, its vendor and
-/// device IDs, and its class code, for `/sys/bus/pci`.
+/// device IDs, and its class code, for `/kernel/bus/pci`.
 #[derive(Clone, Copy, Debug)]
 pub struct PciFunction {
     /// Where it is.
@@ -266,7 +266,7 @@ impl core::fmt::Display for Size {
     }
 }
 
-/// Adds a disk or partition under `name`, to `/dev` and `/sys/block`.
+/// Adds a disk or partition under `name`, to `/devices` and `/kernel/block`.
 fn register(name: &Name, device: DeviceRef) {
     {
         let mut disks = DISKS.lock();

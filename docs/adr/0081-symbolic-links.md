@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0081. Symbolic links are resolved by the kernel, beneath the directory a path starts from
 
-- Status: Accepted
+- Status: Accepted; the targets of `/etc` and `/var` are changed by [0113](0113-plain-names-for-the-root-folders.md)
 - Date: 2026-10-23
 
 ## Context

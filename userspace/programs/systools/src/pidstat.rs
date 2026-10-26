@@ -132,7 +132,7 @@ impl Report {
     }
 }
 
-/// sysstat's name for a scheduling policy that /proc names.
+/// sysstat's name for a scheduling policy that /processes names.
 fn policy_name(policy: &str) -> &'static str {
     match policy {
         "fifo" => "FIFO",

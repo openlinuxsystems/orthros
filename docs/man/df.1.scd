@@ -15,12 +15,12 @@ df - the space of each mounted filesystem
 
 df shows, for each mounted filesystem, as GNU df does, what it was
 mounted from, its size, the space used and available, the share used
-and where it is mounted, from _/proc/mounts_ (*radix-proc*(5)) and
+and where it is mounted, from _/processes/mounts_ (*radix-proc*(5)) and
 *statvfs*(3). Sizes are in blocks of 1 KiB unless an option says
 otherwise. Given files, it shows the filesystems they are on.
 
 Without *-a* it leaves out the filesystems that hold no files of their
-own: _/proc_, _/sys_ and _/dev_.
+own: _/processes_, _/kernel_ and _/devices_.
 
 # OPTIONS
 

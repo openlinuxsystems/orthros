@@ -165,7 +165,7 @@ argument follows it with no space between them; the braces, as in
 
 Put a directory, with everything in it, in a new 7z archive:
 
-	7zz a backup.7z /data/projects
+	7zz a backup.7z /shared/projects
 
 The same, at the best compression, with a password asked for and the
 names hidden:

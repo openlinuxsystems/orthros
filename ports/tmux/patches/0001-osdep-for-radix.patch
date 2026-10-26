@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 Adds Radix to the systems tmux knows, with its own osdep file: tmux
 finds the program running in a pane, which it names the window after,
-in the name line of /proc/<number>/status, as it finds it in
+in the name line of /processes/<number>/status, as it finds it in
 /proc/<number>/cmdline on Linux. And when cross-compiling for Radix,
 configure takes the C library's reallocarray as working, as it is:
 configure cannot run its test program then, and would build tmux's
@@ -82,7 +82,7 @@ have.
 +
 +/*
 + * Radix, the kernel of Dukovo, shows each process's program as the name
-+ * line of /proc/<number>/status. It keeps no working directory for a
++ * line of /processes/<number>/status. It keeps no working directory for a
 + * process: that is the C library's.
 + */
 +
@@ -97,7 +97,7 @@ have.
 +	if ((pgrp = tcgetpgrp(fd)) == -1)
 +		return (NULL);
 +
-+	xasprintf(&path, "/proc/%lld/status", (long long) pgrp);
++	xasprintf(&path, "/processes/%lld/status", (long long) pgrp);
 +	f = fopen(path, "r");
 +	free(path);
 +	if (f == NULL)

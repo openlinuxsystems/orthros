@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! dmesg(1): the kernel log, read from `/dev/kmsg` a record at a time
+//! dmesg(1): the kernel log, read from `/devices/kmsg` a record at a time
 //! (radix-kernel-log(2)), as util-linux's dmesg prints it: each record's
 //! time since boot and text, filtered by level, followed (`-w`), or
 //! cleared (`-C`). Every record has facility 0, the kernel's.
@@ -20,7 +20,7 @@ use crate::sys::{self, SYS};
 use crate::util::{self, Fail, fail, usage};
 
 /// Where the log is read.
-const KMSG: &str = "/dev/kmsg";
+const KMSG: &str = "/devices/kmsg";
 
 /// syslog(3)'s levels, by number.
 const LEVELS: [&str; 8] = ["emerg", "alert", "crit", "err", "warn", "notice", "info", "debug"];
@@ -32,7 +32,7 @@ struct Line {
     text: String,
 }
 
-/// Parses `/dev/kmsg`'s `PRIORITY,SEQUENCE,MICROSECONDS,-;TEXT`.
+/// Parses `/devices/kmsg`'s `PRIORITY,SEQUENCE,MICROSECONDS,-;TEXT`.
 fn parse(record: &[u8]) -> Option<Line> {
     let text = String::from_utf8_lossy(record);
     let (head, body) = text.split_once(';')?;

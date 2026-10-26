@@ -3,7 +3,7 @@
 
 //! Keyboards (Phase 9, ADR 0097): the keys pressed on them, as events.
 //!
-//! _/dev/kbd_ (radix-files(7)) is every keyboard of the machine as one:
+//! _/devices/kbd_ (radix-files(7)) is every keyboard of the machine as one:
 //! since Phase 9 the built-in PS/2 one behind the i8042 controller, which
 //! is QEMU's default keyboard and how laptops such as the reference Dell
 //! connect theirs, and from Phase 11 USB keyboards too. A read returns
@@ -25,7 +25,7 @@
 
 module input;
 
-/// How many events _/dev/kbd_ keeps for readers that fall behind.
+/// How many events _/devices/kbd_ keeps for readers that fall behind.
 const EVENTS_KEPT: u32 = 512;
 
 /// The key went up.
@@ -35,7 +35,7 @@ const PRESSED: u16 = 1;
 /// The key is held down, and the keyboard repeats it.
 const REPEATED: u16 = 2;
 
-/// radix-file(2)'s `control` request on _/dev/kbd_ that lights the
+/// radix-file(2)'s `control` request on _/devices/kbd_ that lights the
 /// keyboard's lock lights: `argument` holds LED_* bits, and the lights
 /// whose bits are clear go out. Needs the write right.
 const SET_LEDS: u32 = 0x4b420001;

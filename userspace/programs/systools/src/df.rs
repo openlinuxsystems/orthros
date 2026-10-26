@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! df(1): the space of each mounted filesystem, from `/proc/mounts` and
+//! df(1): the space of each mounted filesystem, from `/processes/mounts` and
 //! statvfs(3), with GNU df's options.
 
 use std::ffi::{CString, OsStr, OsString};
@@ -105,7 +105,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             other => return Err(args.unknown(&other)),
         }
     }
-    let mounts = proc::mounts().map_err(|e| util::failed(&"/proc/mounts", e))?;
+    let mounts = proc::mounts().map_err(|e| util::failed(&"/processes/mounts", e))?;
     // Each file given names the mount it is on: the longest mount path it
     // starts with.
     let mut chosen: Vec<Mount> = Vec::new();

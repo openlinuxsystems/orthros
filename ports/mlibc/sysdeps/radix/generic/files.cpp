@@ -353,36 +353,44 @@ int dup_from(int fd, int min_fd, bool close_on_exec, int *newfd) {
 	return 0;
 }
 
-// The descriptor a name in /dev/fd stands for (ADR 0084): /dev/fd/N for
-// descriptor N, and /dev/stdin, /dev/stdout and /dev/stderr for 0, 1 and
-// 2, as on Linux and the BSDs, where scripts and the shell's process
-// substitution (`diff <(a) <(b)`) find them. No filesystem holds a
+// The descriptor a name in /devices/fd stands for (ADR 0084): fd/N for
+// descriptor N, and stdin, stdout and stderr for 0, 1 and 2, as Linux and
+// the BSDs have them in /dev, where scripts and the shell's process
+// substitution (`diff <(a) <(b)`) find them. /dev is a link to /devices
+// (ADR 0113), and the names are the same in both. No filesystem holds a
 // process's descriptors, so the C library gives these names itself.
 // Returns -1 for any other path.
 int named_fd(const radix::Path &path) {
 	if(path.dir != radix::SLOT_ROOT)
 		return -1;
-	// The first `n` bytes of the path are `word`. (The dynamic linker,
-	// which has this code too, has no strncmp.)
-	auto starts = [&](const char *word, size_t n) {
-		if(path.len < n)
+	// The bytes of the path from `at` on start with `word`. (The dynamic
+	// linker, which has this code too, has no strncmp.)
+	auto starts = [&](size_t at, const char *word) {
+		size_t n = strlen(word);
+		if(path.len < at + n)
 			return false;
 		for(size_t i = 0; i < n; i++) {
-			if(path.text[i] != word[i])
+			if(path.text[at + i] != word[i])
 				return false;
 		}
 		return true;
 	};
-	static const char *const STANDARD[] = {"dev/stdin", "dev/stdout", "dev/stderr"};
+	size_t at;
+	if(starts(0, "devices/"))
+		at = 8;
+	else if(starts(0, "dev/"))
+		at = 4;
+	else
+		return -1;
+	static const char *const STANDARD[] = {"stdin", "stdout", "stderr"};
 	for(int i = 0; i < 3; i++) {
-		size_t n = strlen(STANDARD[i]);
-		if(path.len == n && starts(STANDARD[i], n))
+		if(path.len == at + strlen(STANDARD[i]) && starts(at, STANDARD[i]))
 			return i;
 	}
-	if(path.len <= 7 || !starts("dev/fd/", 7))
+	if(path.len <= at + 3 || !starts(at, "fd/"))
 		return -1;
 	// Only the number as it is written: no sign, and no leading zero.
-	const char *digits = path.text + 7;
+	const char *digits = path.text + at + 3;
 	if(digits[0] == '0' && digits[1])
 		return -1;
 	int fd = 0;
@@ -396,7 +404,7 @@ int named_fd(const radix::Path &path) {
 	return fd;
 }
 
-// What the descriptor `from`, which a name in /dev/fd stands for, is:
+// What the descriptor `from`, which a name in /devices/fd stands for, is:
 // ENOENT if it is not open, as there is then no such name.
 int stat_named(int from, struct stat *st) {
 	uint64_t rights;
@@ -405,7 +413,7 @@ int stat_named(int from, struct stat *st) {
 	return stat_fd(from, st);
 }
 
-// Opens descriptor `from` by its name in /dev/fd, with openat's `flags`:
+// Opens descriptor `from` by its name in /devices/fd, with openat's `flags`:
 // a copy of it, as dup makes, which shares its open file description and
 // offset, as on the BSDs (Linux opens a file anew, at its start). As
 // there, it has no more access than `from` has, and O_TRUNC does nothing.
@@ -1065,7 +1073,7 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 		return e;
 	if(int e = radix::set_cwd(absolute); e)
 		return e;
-	// The kernel shows it in /proc (radix-proc(5)); a failure there is
+	// The kernel shows it in /processes (radix-proc(5)); a failure there is
 	// no failure of chdir.
 	const char *dir = radix::cwd();
 	radix_process_set_directory(radix::SLOT_PROCESS, dir, strlen(dir));

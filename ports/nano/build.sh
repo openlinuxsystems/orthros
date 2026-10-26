@@ -5,13 +5,13 @@
 # Builds nano for Radix (ob(1), PORTS), on ncurses' wide-character
 # library and without translations, and installs it, rnano (its
 # restricted mode), their manual pages, the syntax files and the system
-# nanorc. The nanorc goes among the defaults Spark puts in /system/etc at
-# boot (spark(8)), as nano reads it from there.
+# nanorc. The nanorc goes among the defaults Spark puts in
+# /system/settings at boot (spark(8)), as nano reads it from there.
 set -eu
 
 cd "$PORT_BUILD"
 x86_64-radix-configure "$PORT_SRC" --disable-nls --enable-utf8 --disable-libmagic \
-	--sysconfdir=/system/etc >configure.log 2>&1 || {
+	--sysconfdir=/system/settings >configure.log 2>&1 || {
 	tail -n 40 configure.log >&2
 	exit 1
 }

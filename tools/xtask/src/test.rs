@@ -1923,8 +1923,8 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
-    vm.expect("spark: listening at /run/spark/control")?;
-    vm.expect("spark: 1 services in /system/etc/spark/services, 1 enabled")?;
+    vm.expect("spark: listening at /system/live/spark/control")?;
+    vm.expect("spark: 1 services in /system/settings/spark/services, 1 enabled")?;
     vm.expect("spark: started consoled (/system/bin/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/bin/nukesh on tty1 as process ")?;
@@ -2296,7 +2296,7 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: boot archive of ")?;
     vm.expect(" KiB with ")?;
     vm.expect(" files at 0x")?;
-    vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
     let args = program_line(vm, "hello: process ")?;
     if args != format!("{number}, arguments: /system/tests/hello one two") {
@@ -2400,7 +2400,7 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: built the hierarchy of 10 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
         let label = disk.label;
         vm.expect(&format!("Files: mounted fat from {name} on /volumes/{name}, labelled {label}"))?;
@@ -2443,18 +2443,18 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: /volumes/{name}: wrote "))?;
     }
     vm.expect("storage: /tmp: a 10000-byte file written, read back and removed")?;
-    vm.expect("storage: /dev: ")?;
+    vm.expect("storage: /devices: ")?;
     vm.expect(" of them disks; zero, random and null work")?;
     for name in &volumes {
-        vm.expect(&format!("storage: /sys/block/{name}/size: "))?;
+        vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
     }
-    vm.expect(&format!("storage: /sys/kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
-    vm.expect("storage: /sys/bus/pci/devices: ")?;
-    vm.expect("storage: /proc lists ")?;
+    vm.expect(&format!("storage: /kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
+    vm.expect("storage: /kernel/bus/pci/devices: ")?;
+    vm.expect("storage: /processes lists ")?;
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
-    vm.expect("storage: /proc/mounts lists 13 mounts, 4 of them FAT")?;
-    vm.expect("storage: /proc/meminfo: ")?;
+    vm.expect("storage: /processes/mounts lists 13 mounts, 4 of them FAT")?;
+    vm.expect("storage: /processes/meminfo: ")?;
     storage_end(vm, "write")
 }
 
@@ -2529,7 +2529,7 @@ fn storage_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: /volumes/{name}: "))?;
         vm.expect(" files read back after the reboot, every byte as written")?;
     }
-    vm.expect("storage: /proc lists ")?;
+    vm.expect("storage: /processes lists ")?;
     storage_end(vm, "check")
 }
 
@@ -2542,18 +2542,20 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let rotational = u8::from(!disk.device.contains("rotation_rate=1"));
         vm.expect(&format!(
-            "storage: /dev/{name}: {} bytes, {} sectors of 512 bytes, physical blocks of 512, \
+            "storage: /devices/{name}: {} bytes, {} sectors of 512 bytes, physical blocks of 512, \
              minimum and optimal I/O 512 and 0, alignment 0, read-only 0, rotational \
              {rotational}, discarded sectors read as zeros 0",
             disk.kib * 1024,
             disk.kib * 2
         ))?;
-        vm.expect(&format!("storage: /dev/{name}: raw reads at odd offsets read what it holds"))?;
-        vm.expect(&format!("storage: /dev/{name}: raw writes at odd offsets read back"))?;
         vm.expect(&format!(
-            "storage: /dev/{name}: raw transfers straight between the disk and anonymous memory"
+            "storage: /devices/{name}: raw reads at odd offsets read what it holds"
         ))?;
-        vm.expect(&format!("storage: /dev/{name}: discards, flushes and refusals work"))?;
+        vm.expect(&format!("storage: /devices/{name}: raw writes at odd offsets read back"))?;
+        vm.expect(&format!(
+            "storage: /devices/{name}: raw transfers straight between the disk and anonymous memory"
+        ))?;
+        vm.expect(&format!("storage: /devices/{name}: discards, flushes and refusals work"))?;
     }
     storage_end(vm, "raw")
 }
@@ -2564,11 +2566,11 @@ fn disk_errors(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     for line in [
-        "storage: /dev/sda: a read of sector 6000, which fails once, reads what it holds",
-        "storage: /dev/sda: a read of sector 10000, which always fails, fails with io",
-        "storage: /dev/sda: a read up to sector 10000 ends short, after 65536 bytes",
-        "storage: /dev/sda: a write of sector 12000, which always fails, fails with io",
-        "storage: /dev/sda: reads and writes elsewhere work after the errors",
+        "storage: /devices/sda: a read of sector 6000, which fails once, reads what it holds",
+        "storage: /devices/sda: a read of sector 10000, which always fails, fails with io",
+        "storage: /devices/sda: a read up to sector 10000 ends short, after 65536 bytes",
+        "storage: /devices/sda: a write of sector 12000, which always fails, fails with io",
+        "storage: /devices/sda: reads and writes elsewhere work after the errors",
     ] {
         vm.expect(line)?;
     }

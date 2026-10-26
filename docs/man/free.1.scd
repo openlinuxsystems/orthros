@@ -14,7 +14,7 @@ free - memory in use and free
 # DESCRIPTION
 
 free shows the memory the kernel manages, as Linux's free (procps-ng)
-does, from _/proc/meminfo_ (*radix-proc*(5)): its *total*, how much is
+does, from _/processes/meminfo_ (*radix-proc*(5)): its *total*, how much is
 *used* by programs and the kernel, how much is *free*, *shared* (always
 0), *buff/cache* (the page cache: files' data held in memory) and
 *available*: what programs could have, free memory with the page cache,

@@ -98,7 +98,7 @@ signals.
 #!/bin/bash
 set -euo pipefail
 declare -A size
-for f in /system/etc/*; do
+for f in /system/settings/*; do
     [[ -f $f ]] && size[$f]=$(wc -c < "$f")
 done
 for f in "${!size[@]}"; do

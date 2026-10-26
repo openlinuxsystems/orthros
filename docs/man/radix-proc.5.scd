@@ -5,11 +5,13 @@ radix-proc(5) "Dukovo" "Dukovo Manual"
 
 # NAME
 
-radix-proc - the processes and what the kernel holds, as text in /proc
+radix-proc - the processes and what the kernel holds, as text in
+/processes
 
 # DESCRIPTION
 
-A *proc* filesystem, which Spark mounts at _/proc_ (*spark*(8)), shows
+A *proc* filesystem, which Spark mounts at _/processes_ (*spark*(8)),
+with _/proc_, Linux's name for it, a link to it (*radix-files*(7)), shows
 the processes the kernel holds and some of its state as plain text. It
 is read-only. Every file is written when it is opened, so a program that
 reads it in pieces sees one snapshot; a file opened again shows the state
@@ -30,13 +32,13 @@ so that it cannot end its line early.
 Linux keeps its own _/proc_ formats, which programs read: Dukovo's own
 tools read these instead (*ps*(1), *top*(1), *free*(1), *lsof*(8) and the
 others of *systools*(1)), and the C library's *getloadavg*(3) reads
-_/proc/loadavg_ for programs ported from Linux.
+_/processes/loadavg_ for programs ported from Linux.
 
-This page describes _/proc_ as of Phase 9 of the roadmap.
+This page describes _/processes_ as of Phase 10 of the roadmap.
 
 # FILES
 
-_/proc/_*n*_/status_
+_/processes/_*n*_/status_
 	One directory per process the kernel holds, named by its number:
 	those still running, and those that ended but whose last capability
 	has not been deleted yet (see *radix-processes*(7)). Its keys:
@@ -130,12 +132,12 @@ _/proc/_*n*_/status_
 		has its parent's. Left out for a process that never said,
 		such as Spark.
 
-_/proc/_*n*_/cmdline_
+_/processes/_*n*_/cmdline_
 	The arguments its program started with, each followed by a NUL, as
 	on Linux. Empty for a process that was not started from a program
 	file with arguments.
 
-_/proc/_*n*_/threads_
+_/processes/_*n*_/threads_
 	A line per thread, of the fields *number*, *run* (*running*,
 	*sleeping*, *disk*, *new* or *dead*), *cpu* (the CPU it last ran
 	on), *user_ns*, *system_ns*, *voluntary_switches*,
@@ -143,7 +145,7 @@ _/proc/_*n*_/threads_
 	*waits* (what it is blocked on, with _\__ for spaces) if it is
 	blocked, and *name* last.
 
-_/proc/_*n*_/files_
+_/processes/_*n*_/files_
 	A line per capability the process holds, by slot: *fd*=_n_ for a
 	slot of the file descriptors (slot 64 + _n_, *radix-posix*(7)), else
 	*slot*=_n_. For a file or directory the fields that follow are
@@ -158,7 +160,7 @@ _/proc/_*n*_/files_
 	*rights*. Rights are names joined by *+*, as *radix-capabilities*(7)
 	lists them, or *none*.
 
-_/proc/mounts_
+_/processes/mounts_
 	One line per mount, in the order they were made, of four fields
 	separated by spaces, and a fifth when the filesystem has a label:
 	where it was mounted from (a device name such as _vda1_, or the
@@ -168,7 +170,7 @@ _/proc/mounts_
 	a space, tab, newline or backslash in a field is written *\\040*,
 	*\\011*, *\\012* or *\\134*.
 
-_/proc/meminfo_
+_/processes/meminfo_
 	Memory in KiB, each value followed by *KiB*: *total*, the memory the
 	kernel manages; *free*; and what each owner holds: *kernel*,
 	*page_tables*, *heap_slabs*, *large_heap_blocks*, *mapped_areas*,
@@ -176,7 +178,7 @@ _/proc/meminfo_
 	is the files' data in memory (*radix-files*(7)), which the kernel
 	gives back when memory runs low.
 
-_/proc/stat_
+_/processes/stat_
 	A line per online CPU, *cpu*_n_*:* then the fields *user_ns*,
 	*system_ns* and *idle_ns* (the time it spent running programs, in
 	the kernel, and idle) and *switches* (the threads it switched
@@ -191,13 +193,13 @@ _/proc/stat_
 	halted and idle periods a wake-up ended while the CPU polled); and
 	*boot_time_ns*, when the kernel started, in nanoseconds since 1970.
 
-_/proc/loadavg_
+_/processes/loadavg_
 	*load_1*, *load_5* and *load_15*: the load averages over 1, 5 and
 	15 minutes, with two decimals, as Linux computes them: the threads
 	running, ready to run or waiting for a disk, sampled every five
 	seconds.
 
-_/proc/uptime_
+_/processes/uptime_
 	*uptime_ns*: nanoseconds since the kernel started.
 
 # EXAMPLES
@@ -244,8 +246,8 @@ Its files:
 ```
 slot=1 kind=thread rights=read+control+copy+transfer
 slot=4 kind=random rights=read+copy+transfer
-fd=0 kind=char access=rw id=30 size=0 fs=dev mount=7 rights=read+write+copy+transfer offset=0 path=/dev/pts/0
-fd=3 kind=file access=r id=1201 size=5120 fs=bootfs mount=2 rights=read+copy+transfer offset=4096 path=/system/etc/profile
+fd=0 kind=char access=rw id=30 size=0 fs=dev mount=7 rights=read+write+copy+transfer offset=0 path=/devices/pts/0
+fd=3 kind=file access=r id=1201 size=5120 fs=tmpfs mount=3 rights=read+copy+transfer offset=4096 path=/system/settings/profile
 ```
 
 The mounts after Spark has built the hierarchy on a machine with one
@@ -254,13 +256,13 @@ disk:
 ```
 tmpfs / tmpfs rw
 bootfs /system bootfs ro
-tmpfs /system/etc tmpfs rw
-tmpfs /system/var tmpfs rw
+tmpfs /system/settings tmpfs rw
+tmpfs /system/state tmpfs rw
+tmpfs /system/live tmpfs rw
 tmpfs /tmp tmpfs rw
-tmpfs /run tmpfs rw
-dev /dev dev rw
-proc /proc proc ro
-sys /sys sys ro
+dev /devices dev rw
+proc /processes proc ro
+sys /kernel sys ro
 vda /volumes/vda fat rw label=RADIX16
 ```
 

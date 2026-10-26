@@ -56,7 +56,7 @@ static void text(void) {
 	// The release is the kernel's version number, the second word of
 	// "Radix 0.9.0 (Dukovo Server 0.9.0)", and the version the whole line.
 	char line[64] = "", release[32] = "";
-	FILE *version = fopen("/sys/kernel/version", "r");
+	FILE *version = fopen("/kernel/version", "r");
 	CHECK(version && fgets(line, sizeof(line), version));
 	fclose(version);
 	CHECK(sscanf(line, "Radix %31s", release) == 1);
@@ -132,7 +132,7 @@ static void formatting(void) {
 static void file_tools(void) {
 	STATUS(0, "/bin/mkdir", "-p", "/tmp/file-tools/listed");
 	OUTPUT("abc", "abc", "/bin/dd", "status=none");
-	OUTPUT("", "8\n", "/bin/sh", "-c", "dd if=/dev/zero bs=4 count=2 status=none | wc -c");
+	OUTPUT("", "8\n", "/bin/sh", "-c", "dd if=/devices/zero bs=4 count=2 status=none | wc -c");
 	STATUS(0, "/bin/truncate", "-s", "10", "/tmp/file-tools/t");
 	OUTPUT("", "10\n", "/bin/stat", "-c", "%s", "/tmp/file-tools/t");
 	STATUS(0, "/bin/install", "-m", "644", "-D", "/tmp/file-tools/t", "/tmp/file-tools/i/t");
@@ -218,6 +218,14 @@ static void files(void) {
 	// Spark's links into /system, and what ls and realpath make of them.
 	OUTPUT("", "system\n", "/bin/readlink", "/usr");
 	OUTPUT("", "/system/bin\n", "/bin/realpath", "/usr/bin");
+	// The root's Unix names are links its .hidden lists (ADR 0113): ls
+	// leaves them out unless asked for every name.
+	OUTPUT("", "applications\ndevices\nkernel\nprocesses\nshared\nsystem\ntmp\nusers\nvolumes\n",
+			"/bin/ls", "/");
+	OUTPUT("", ".hidden\napplications\nbin\ndev\ndevices\netc\nkernel\nproc\nprocesses\nrun\n"
+			   "sbin\nshared\nsys\nsystem\ntmp\nusers\nusr\nvar\nvolumes\n",
+			"/bin/ls", "-A", "/");
+	OUTPUT("", "/dev\n", "/bin/ls", "-d", "/dev");
 	CONTAINS("-> system/bin", "/bin/ls", "-ld", "/bin");
 	CONTAINS("coreutils\n", "/bin/ls", "/system/bin");
 }
@@ -236,7 +244,7 @@ static void finding(void) {
 	OUTPUT("", "c\n", "/bin/find", "/tmp/find", "-name", "c", "-printf", "%f\\n");
 	OUTPUT("", "/tmp/find/c\n", "/bin/find", "/tmp/find", "-name", "c", "-exec", "/bin/echo",
 			"{}", ";");
-	OUTPUT("", "/proc\n", "/bin/find", "/proc", "-maxdepth", "0", "-fstype", "proc");
+	OUTPUT("", "/processes\n", "/bin/find", "/processes", "-maxdepth", "0", "-fstype", "proc");
 	OUTPUT("", "/tmp\n", "/bin/find", "/tmp", "-maxdepth", "0", "-fstype", "tmpfs");
 	STATUS(0, "/bin/find", "/tmp/find", "-name", "*.txt", "-delete");
 	OUTPUT("", "", "/bin/find", "/tmp/find", "-name", "*.txt");
@@ -735,7 +743,7 @@ static void editing(void) {
 // zipcloak, which asks for its password there.
 static void terminals(void) {
 	TYPE_AT("24 80", "", "/bin/stty", "size");
-	TYPE_AT("/dev/pts/", "", "/bin/tty");
+	TYPE_AT("/devices/pts/", "", "/bin/tty");
 	STATUS(1, "/bin/tty");
 	TYPE_AT("xterm", "", "/bin/tset", "-q");
 	// xterm's full reset, and its clearing of the screen.

@@ -423,11 +423,11 @@ _target/userspace/_).
 		builds the directory hierarchy and mounts each volume at
 		_/volumes/<name>_; _/system/tests/storage write_ writes files of
 		many sizes, a long-named one and directories to each, checks
-		_/tmp_, _/dev_, _/sys_ and _/proc_, and syncs. On the host,
+		_/tmp_, _/devices_, _/kernel_ and _/processes_, and syncs. On the host,
 		*fsck.fat -n* checks every volume and mtools reads every file
 		back; the host then writes a file to one. A second boot from the
 		same disks runs _/system/tests/storage check_, which reads
-		everything back, the host's file too, and checks that _/proc_
+		everything back, the host's file too, and checks that _/processes_
 		lists the running processes. dosfstools and mtools must be
 		installed (*ob doctor* says how).
 
@@ -441,7 +441,7 @@ _target/userspace/_).
 		Boot 2 CPUs under UEFI with two 8 MiB disks of known bytes, a
 		virtio disk and a solid state SATA disk, and no filesystem.
 		_/system/tests/storage raw vda sda_ asks each disk Linux's block
-		requests (*radix-block*(2)) and checks them against _/sys/block_,
+		requests (*radix-block*(2)) and checks them against _/kernel/block_,
 		reads at odd offsets and across the end, writes at odd offsets,
 		parts of sectors and across the end, reads every write back,
 		discards a megabyte, flushes, and checks what is refused: a
@@ -524,7 +524,7 @@ _target/userspace/_).
 	*poll*(2), futex round trips through semaphores between two
 	threads, and between two processes in shared memory, on one CPU and
 	on two, and reads and writes of 4 KiB, 64 KiB and 1 MiB of a virtio
-	disk, _/dev/vda_, a file on this machine.
+	disk, _vda_ on both systems, a file on this machine.
 
 	Then boot Linux in a virtual machine set up the same way, with
 	_tools/linux-bench_ built as a static program and run as its only

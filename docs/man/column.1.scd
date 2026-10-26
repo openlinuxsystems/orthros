@@ -105,7 +105,7 @@ taken and change nothing.
 
 # EXAMPLES
 
-	column -t -s : /proc/1/status
+	column -t -s : /processes/1/status
 	column -t -s : -N USER,PASSWORD,UID,GID,NAME,HOME,SHELL -H PASSWORD /etc/passwd
 	printf '1 0 root\\n2 1 child\\n' | column -t -N ID,PARENT,NAME -r NAME -i ID -p PARENT
 

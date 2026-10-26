@@ -156,7 +156,7 @@ pub struct ProcessObject {
     /// class in bits 8 to 15, the level in bits 0 to 7.
     io_priority: AtomicU32,
     /// The arguments its program started with, each ending with a NUL, up
-    /// to ARGS_KEPT bytes (`/proc/<n>/cmdline`); none before `exec`.
+    /// to ARGS_KEPT bytes (`/processes/<n>/cmdline`); none before `exec`.
     args: SpinLock<Option<Vec<u8, Kmalloc>>>,
     /// Its POSIX side (Phase 8).
     pub posix: SpinLock<PosixState>,
@@ -198,7 +198,7 @@ struct State {
 }
 
 /// The most bytes of a program's arguments a process keeps for
-/// `/proc/<n>/cmdline`: a page, as Linux shows (from the program's memory)
+/// `/processes/<n>/cmdline`: a page, as Linux shows (from the program's memory)
 /// up to a page of them to other processes.
 pub const ARGS_KEPT: usize = 4096;
 
@@ -548,7 +548,7 @@ impl ProcessObject {
     }
 
     /// Writes the arguments its program started with to `out`, each
-    /// ending with a NUL, as `/proc/<n>/cmdline` shows them.
+    /// ending with a NUL, as `/processes/<n>/cmdline` shows them.
     pub fn write_args(&self, out: &mut dyn FnMut(&[u8])) {
         if let Some(args) = self.args.lock().as_ref() {
             out(args);
@@ -589,7 +589,7 @@ impl ProcessObject {
         Ok(got)
     }
 
-    /// Writes its status as `/proc/<number>/status` shows it
+    /// Writes its status as `/processes/<number>/status` shows it
     /// (radix-proc(5)): `key: value` lines.
     pub fn describe(&self, out: &mut dyn core::fmt::Write) -> core::fmt::Result {
         let name = *self.name.lock();

@@ -22,7 +22,7 @@ the memory and swap in MiB. Below them is a line per process: PID,
 USER, PR, NI, VIRT, RES, SHR, S, %CPU, %MEM, TIME+ and COMMAND.
 
 %CPU is of one CPU, over the time since the frame before, so a process
-that keeps two CPUs busy shows 200. It reads _/proc_
+that keeps two CPUs busy shows 200. It reads _/processes_
 (*radix-proc*(5)). Radix has no swap yet, and SHR is always 0.
 
 In batch mode (*-b*) top writes frame after frame to its standard

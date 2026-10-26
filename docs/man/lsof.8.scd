@@ -14,7 +14,7 @@ lsof - list what processes hold open
 # DESCRIPTION
 
 lsof lists, a line each, what every process holds, from each one's
-_/proc/<n>/files_ (*radix-proc*(5)), with lsof's columns: COMMAND, PID,
+_/processes/<n>/files_ (*radix-proc*(5)), with lsof's columns: COMMAND, PID,
 USER, FD, TYPE, DEVICE, SIZE/OFF, NODE and NAME. Each process's
 working directory comes first, as *cwd*.
 

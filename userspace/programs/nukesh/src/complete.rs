@@ -579,7 +579,7 @@ fn hostnames() -> Vec<String> {
 /// Spark's services, as `service` takes them: the names of their files.
 fn services() -> Vec<String> {
     let mut names = Vec::new();
-    for dir in ["/system/etc/spark/services", "/etc/spark/services"] {
+    for dir in ["/system/settings/spark/services", "/etc/spark/services"] {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let name = text::from_os(&entry.file_name());
@@ -664,6 +664,7 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
         None => (".".to_string(), expanded.clone(), String::new()),
     };
     let Ok(entries) = std::fs::read_dir(text::to_os(&dir)) else { return Vec::new() };
+    let hidden = hidden_names(&dir);
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = text::from_os(&entry.file_name());
@@ -671,6 +672,9 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
             continue;
         }
         if name.starts_with('.') && !base.starts_with('.') && !shell.shopt("dotglob") {
+            continue;
+        }
+        if name != base && hidden.contains(&name) {
             continue;
         }
         let full = format!("{}/{name}", dir.trim_end_matches('/'));
@@ -682,6 +686,18 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// The names `dir/.hidden` lists, one a line, which ls(1) and the file
+/// manager leave out, as GNOME Files does: on Dukovo, the Unix names of
+/// the root's folders, links to the plainly named ones (ADR 0113). They
+/// complete only once the word is the whole name.
+fn hidden_names(dir: &str) -> Vec<String> {
+    let path = format!("{}/.hidden", dir.trim_end_matches('/'));
+    std::fs::read(text::to_os(&path)).map_or_else(
+        |_| Vec::new(),
+        |bytes| text::decode(&bytes).lines().filter(|l| !l.is_empty()).map(String::from).collect(),
+    )
 }
 
 // The completion the line editor asks for.

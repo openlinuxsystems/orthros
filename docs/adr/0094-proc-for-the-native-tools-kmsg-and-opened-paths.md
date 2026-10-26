@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0094. /proc tells the native tools what they show, /dev/kmsg gives the log, and files keep the path they were opened by
 
-- Status: Accepted
+- Status: Accepted; `/proc` and `/dev` are `/processes` and `/devices` since [0113](0113-plain-names-for-the-root-folders.md)
 - Date: 2026-10-23
 
 ## Context

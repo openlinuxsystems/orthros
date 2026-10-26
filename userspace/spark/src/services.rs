@@ -3,11 +3,12 @@
 
 //! Service files (spark(8)): what Spark starts at boot and keeps running.
 //!
-//! Each `NAME.service` file in `/system/etc/spark/services` describes one
-//! service, as lines of `key = value`; `#` starts a comment. The system's
-//! own come from `/system/lib/defaults/etc/spark/services`, which Spark
-//! copies in when they are missing, so an administrator turns one off with
-//! `enabled = no` rather than by removing it.
+//! Each `NAME.service` file in `/system/settings/spark/services`
+//! describes one service, as lines of `key = value`; `#` starts a
+//! comment. The system's own come from
+//! `/system/lib/defaults/etc/spark/services`, which Spark copies in when
+//! they are missing, so an administrator turns one off with `enabled = no`
+//! rather than by removing it.
 
 use alloc::format;
 use alloc::string::{String, ToString};

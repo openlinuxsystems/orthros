@@ -4,7 +4,7 @@
 //! The screen (Phase 9, ADR 0097): the framebuffer the firmware set up,
 //! for consoled(8) to draw its virtual terminals on.
 //!
-//! _/dev/fb0_ (radix-files(7)) is the pixels of the screen the boot loader
+//! _/devices/fb0_ (radix-files(7)) is the pixels of the screen the boot loader
 //! left in graphics mode, row after row, `pitch` bytes apart, each pixel
 //! `bytes_per_pixel` bytes with its colours where FramebufferInfo says.
 //! The kernel draws its log there until a program takes the screen with

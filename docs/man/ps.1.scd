@@ -14,7 +14,7 @@ ps - a snapshot of the processes
 # DESCRIPTION
 
 ps lists processes, one a line, with the columns asked for, as Linux's
-ps (procps-ng) does, from _/proc_ (*radix-proc*(5)). It takes procps's
+ps (procps-ng) does, from _/processes_ (*radix-proc*(5)). It takes procps's
 three kinds of options: UNIX options, which start with a dash (*-ef*);
 BSD options, letters without a dash (*aux*); and GNU long options
 (*--sort*).

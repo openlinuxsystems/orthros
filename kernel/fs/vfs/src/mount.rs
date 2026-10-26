@@ -47,7 +47,7 @@ pub struct Mount {
     on: Option<(MountRef, NodeRef)>,
     /// Whether it was mounted read-only.
     read_only: bool,
-    /// Where it is in the tree, from the root, for `/proc/mounts`.
+    /// Where it is in the tree, from the root, for `/processes/mounts`.
     path: KVec<u8>,
     /// Whether it is in no tree ([`Mount::detached`]).
     detached: bool,

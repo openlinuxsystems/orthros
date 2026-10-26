@@ -36,7 +36,7 @@ kernel/radix/src/user/memory/futex.rs   futex_wait and futex_wake
 kernel/radix/src/user/posix/            the tree, signals, fork, exec,
                         timers, poll, priority and limits, as radix-process(2)
 kernel/radix/src/fs/pipe.rs   pipes, on the detached pipefs
-kernel/radix/src/fs/tty.rs    pseudo-terminals, /dev/ptmx, /dev/pts, /dev/tty
+kernel/radix/src/fs/tty.rs    pseudo-terminals, /devices/ptmx, /devices/pts, /devices/tty
 kernel/radix/src/fs/locks.rs  the table of file locks, and lock waits
 ports/                  the ports: mlibc (with sysdeps/radix, patches and
                         musl/), mlibc-tests, freestnd-cxx-hdrs, locales,
@@ -223,8 +223,9 @@ kernel from the root by that path, and `fchdir` changes to it. A
 descriptor from before exec has none, so `..` above it still fails
 with EXDEV and `fchdir` with ENOSYS.
 
-`/dev/fd/N`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are the C
-library's (ADR 0084): `open`, `stat` and `access` match the resolved
+`/devices/fd/N`, `/devices/stdin`, `/devices/stdout` and
+`/devices/stderr`, and the same names in `/dev`, are the C library's
+(ADRs 0084 and 0113): `open`, `stat` and `access` match the resolved
 path and work on the descriptor, as `dup` and `fstat` do, since no
 filesystem differs from one process to the next.
 
@@ -300,7 +301,7 @@ A terminal remembers the session it controls and its foreground group;
 each process remembers the terminal its session had when it looked
 (`PosixState::terminal`), which forks inherit. Job control checks are
 made with the terminal's state, then the tree, locked in that order, and
-signals are sent with neither held. `/dev/tty` opens the caller's
+signals are sent with neither held. `/devices/tty` opens the caller's
 controlling terminal through that remembered handle.
 
 ## Clocks and timers

@@ -15,8 +15,8 @@
 //!   (`mount` in radix-directory(2)) and lays out the spec 7.1 hierarchy;
 //! - `disk` finds virtio block devices on PCI and drives them, one MSI-X
 //!   interrupt each, and names them and their partitions (`vda`, `vda1`);
-//! - `devfs`, `procfs` and `sysfs` make the generated trees of `/dev`,
-//!   `/proc` and `/sys`, and `kmsg` is `/dev/kmsg`, the kernel log;
+//! - `devfs`, `procfs` and `sysfs` make the generated trees of `/devices`,
+//!   `/processes` and `/kernel`, and `kmsg` is `/devices/kmsg`, the kernel log;
 //! - `writeback` is the thread that writes dirty filesystems to their
 //!   disks every five seconds, and drops clean cached pages when memory
 //!   runs short (the out-of-memory policy asks it first);
@@ -110,11 +110,11 @@ enum Special {
     Socket,
     /// A side of a terminal.
     Tty,
-    /// `/dev/kmsg`.
+    /// `/devices/kmsg`.
     Kmsg,
-    /// `/dev/kbd`.
+    /// `/devices/kbd`.
     Keyboard,
-    /// `/dev/fb0`.
+    /// `/devices/fb0`.
     Framebuffer,
 }
 
@@ -122,7 +122,7 @@ enum Special {
 pub const OPENED_MAX: usize = 104;
 
 /// Where a file object was opened, as an absolute path, for
-/// `/proc/<n>/files` and lsof(1): the path its open was given, beneath the
+/// `/processes/<n>/files` and lsof(1): the path its open was given, beneath the
 /// path of the directory it was opened from, with `.` and `..` worked out
 /// by name. Symbolic links on the way are not followed: it is the path
 /// the program named. It is kept in the object itself, so that an open
@@ -344,17 +344,17 @@ impl FileObject {
         if self.special == Special::Tty { tty::handle_of(&self.at.node) } else { None }
     }
 
-    /// Whether it is of `/dev/kmsg`.
+    /// Whether it is of `/devices/kmsg`.
     pub fn is_kmsg(&self) -> bool {
         self.special == Special::Kmsg
     }
 
-    /// Whether it is of `/dev/kbd`.
+    /// Whether it is of `/devices/kbd`.
     pub fn is_keyboard(&self) -> bool {
         self.special == Special::Keyboard
     }
 
-    /// Whether it is of `/dev/fb0`.
+    /// Whether it is of `/devices/fb0`.
     pub fn is_framebuffer(&self) -> bool {
         self.special == Special::Framebuffer
     }
@@ -502,7 +502,7 @@ fn fs_ref<T: FileSystem + 'static>(fs: radix_vfs::KArc<T>) -> radix_vfs::Result<
 }
 
 /// What a filesystem made for `mount` is: the filesystem, and what it was
-/// mounted from, for `/proc/mounts`.
+/// mounted from, for `/processes/mounts`.
 pub struct Made {
     /// The filesystem.
     pub fs: FsRef,

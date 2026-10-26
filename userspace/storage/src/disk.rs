@@ -79,13 +79,13 @@ fn named(status: Status) -> String {
     format!("{}", Error::Status(status))
 }
 
-/// Opens `/dev/<name>` for reading and writing.
+/// Opens `/devices/<name>` for reading and writing.
 fn open(root: &Dir, name: &str) -> Option<File> {
     let rw = Rights::READ.union(Rights::WRITE);
-    match root.open(&format!("dev/{name}"), OpenFlags::NONE, rw) {
+    match root.open(&format!("devices/{name}"), OpenFlags::NONE, rw) {
         Ok(disk) => Some(disk),
         Err(err) => {
-            fail(&format!("/dev/{name}: {err}"));
+            fail(&format!("/devices/{name}: {err}"));
             None
         }
     }
@@ -101,7 +101,7 @@ fn as_held(offset: u64, bytes: &[u8], written: &[(u64, u64)]) -> bool {
     })
 }
 
-/// The `raw` mode on `/dev/<name>`: Linux's block requests, raw reads and
+/// The `raw` mode on `/devices/<name>`: Linux's block requests, raw reads and
 /// writes at odd offsets, discards, flushes, and what is refused.
 pub fn raw(root: &Dir, name: &str) {
     let Some(disk) = open(root, name) else { return };
@@ -132,17 +132,19 @@ pub fn raw(root: &Dir, name: &str) {
         zeroes,
     ] = match asked {
         Ok(values) => values,
-        Err(status) => return fail(&format!("/dev/{name}: a block request: {}", named(status))),
+        Err(status) => {
+            return fail(&format!("/devices/{name}: a block request: {}", named(status)));
+        }
     };
     println!(
-        "storage: /dev/{name}: {size} bytes, {sectors} sectors of {sector} bytes, physical \
+        "storage: /devices/{name}: {size} bytes, {sectors} sectors of {sector} bytes, physical \
          blocks of {physical}, minimum and optimal I/O {minimum} and {optimal}, alignment \
          {alignment}, read-only {read_only}, rotational {rotational}, discarded sectors read as \
          zeros {zeroes}"
     );
-    check(sectors * 512 == size, || format!("/dev/{name}: {sectors} sectors, {size} bytes"));
+    check(sectors * 512 == size, || format!("/devices/{name}: {sectors} sectors, {size} bytes"));
     let sys = |file: &str| {
-        root.read_file(&format!("sys/block/{name}/{file}"))
+        root.read_file(&format!("kernel/block/{name}/{file}"))
             .ok()
             .and_then(|text| String::from_utf8_lossy(&text).trim_end().parse::<u64>().ok())
     };
@@ -153,10 +155,10 @@ pub fn raw(root: &Dir, name: &str) {
         ("queue/rotational", Some(rotational)),
         ("queue/discard_granularity", Some(512)),
     ] {
-        check(sys(file) == want, || format!("/sys/block/{name}/{file} is {:?}", sys(file)));
+        check(sys(file) == want, || format!("/kernel/block/{name}/{file} is {:?}", sys(file)));
     }
     let most = sys("queue/discard_max_bytes").unwrap_or(0);
-    check(most >= 512, || format!("/sys/block/{name}/queue/discard_max_bytes is {most}"));
+    check(most >= 512, || format!("/kernel/block/{name}/queue/discard_max_bytes is {most}"));
 
     for &(from, len) in RAW_READS {
         let offset = if from < 0 { size - from.unsigned_abs() } else { from as u64 };
@@ -164,12 +166,12 @@ pub fn raw(root: &Dir, name: &str) {
         let want = (len as u64).min(size.saturating_sub(offset)) as usize;
         match disk.read_at(offset, &mut buffer) {
             Ok(got) => check(got == want && as_held(offset, &buffer[..got], &[]), || {
-                format!("/dev/{name}: a read of {len} bytes at {offset} gave {got}, or others")
+                format!("/devices/{name}: a read of {len} bytes at {offset} gave {got}, or others")
             }),
-            Err(err) => fail(&format!("/dev/{name}: a read of {len} bytes at {offset}: {err}")),
+            Err(err) => fail(&format!("/devices/{name}: a read of {len} bytes at {offset}: {err}")),
         }
     }
-    println!("storage: /dev/{name}: raw reads at odd offsets read what it holds");
+    println!("storage: /devices/{name}: raw reads at odd offsets read what it holds");
 
     let mut written = Vec::new();
     for &(offset, len) in RAW_WRITES.iter().chain(&[(size - 10, 20)]) {
@@ -177,9 +179,11 @@ pub fn raw(root: &Dir, name: &str) {
         let fits = len.min(size - offset);
         match disk.write_at(offset, &data) {
             Ok(done) => check(done as u64 == fits, || {
-                format!("/dev/{name}: a write of {len} bytes at {offset} wrote {done}")
+                format!("/devices/{name}: a write of {len} bytes at {offset} wrote {done}")
             }),
-            Err(err) => fail(&format!("/dev/{name}: a write of {len} bytes at {offset}: {err}")),
+            Err(err) => {
+                fail(&format!("/devices/{name}: a write of {len} bytes at {offset}: {err}"));
+            }
         }
         written.push((offset, fits));
         // What it wrote, and a sector and more each side, read back.
@@ -187,50 +191,50 @@ pub fn raw(root: &Dir, name: &str) {
         let mut buffer = vec![0u8; (offset + fits + 600).min(size).saturating_sub(from) as usize];
         match disk.read_at(from, &mut buffer) {
             Ok(got) => check(got == buffer.len() && as_held(from, &buffer, &written), || {
-                format!("/dev/{name}: what was written at {offset} reads back otherwise")
+                format!("/devices/{name}: what was written at {offset} reads back otherwise")
             }),
-            Err(err) => fail(&format!("/dev/{name}: a read at {from}: {err}")),
+            Err(err) => fail(&format!("/devices/{name}: a read at {from}: {err}")),
         }
     }
     match disk.write_at(size, b"x") {
         Err(err) if err.is(FileError::NoSpace) => {}
-        other => fail(&format!("/dev/{name}: a write at the end: {other:?}, not no_space")),
+        other => fail(&format!("/devices/{name}: a write at the end: {other:?}, not no_space")),
     }
-    println!("storage: /dev/{name}: raw writes at odd offsets read back");
+    println!("storage: /devices/{name}: raw writes at odd offsets read back");
     lent(&disk, name);
 
     for (offset, len) in [(513, 512), (512, 100), (size - 512, 1024)] {
         match discard(&disk, offset, len) {
             Err(status) if is(status, Kernel::InvalidArgument) => {}
-            other => fail(&format!("/dev/{name}: a discard of {len} at {offset}: {other:?}")),
+            other => fail(&format!("/devices/{name}: a discard of {len} at {offset}: {other:?}")),
         }
     }
     match control(&disk, 0x5401, &mut [0u8; 60]) {
         Err(status) if is(status, Kernel::NotTerminal) => {}
-        other => fail(&format!("/dev/{name}: TCGETS: {other:?}, not not_terminal")),
+        other => fail(&format!("/devices/{name}: TCGETS: {other:?}, not not_terminal")),
     }
-    match root.open(&format!("dev/{name}"), OpenFlags::NONE, Rights::READ) {
+    match root.open(&format!("devices/{name}"), OpenFlags::NONE, Rights::READ) {
         Ok(reader) => {
             match discard(&reader, 0, 512) {
                 Err(status) if is(status, Kernel::MissingRights) => {}
-                other => fail(&format!("/dev/{name}: a discard without writing: {other:?}")),
+                other => fail(&format!("/devices/{name}: a discard without writing: {other:?}")),
             }
             match reader.write_at(0, &[0; 512]) {
                 Err(Error::Status(status)) if is(status, Kernel::MissingRights) => {}
-                other => fail(&format!("/dev/{name}: a write without writing: {other:?}")),
+                other => fail(&format!("/devices/{name}: a write without writing: {other:?}")),
             }
         }
-        Err(err) => fail(&format!("/dev/{name}, to read: {err}")),
+        Err(err) => fail(&format!("/devices/{name}, to read: {err}")),
     }
     let (offset, len) = RAW_DISCARD;
     let discarded = discard(&disk, offset, len).map_err(named);
-    check(discarded.is_ok(), || format!("/dev/{name}: a discard: {discarded:?}"));
-    check(discard(&disk, 0, 0).is_ok(), || format!("/dev/{name}: an empty discard failed"));
+    check(discarded.is_ok(), || format!("/devices/{name}: a discard: {discarded:?}"));
+    check(discard(&disk, 0, 0).is_ok(), || format!("/devices/{name}: an empty discard failed"));
     let synced = disk.sync();
-    check(synced.is_ok(), || format!("/dev/{name}: fsync: {synced:?}"));
+    check(synced.is_ok(), || format!("/devices/{name}: fsync: {synced:?}"));
     let flushed = control(&disk, block::FLUSH, &mut []).map_err(named);
-    check(flushed.is_ok(), || format!("/dev/{name}: BLKFLSBUF: {flushed:?}"));
-    println!("storage: /dev/{name}: discards, flushes and refusals work");
+    check(flushed.is_ok(), || format!("/devices/{name}: BLKFLSBUF: {flushed:?}"));
+    println!("storage: /devices/{name}: discards, flushes and refusals work");
 }
 
 /// Raw transfers between `disk` and anonymous memory, the memory C
@@ -245,7 +249,7 @@ fn lent(disk: &File, name: &str) {
     const LEN: usize = (2 << 20) + 4096 + 512;
     const LAST: usize = LEN.next_multiple_of(4096);
     let Some(memory) = radix_rt::vm::anonymous(LAST + 4096) else {
-        return fail(&format!("/dev/{name}: no anonymous memory to lend"));
+        return fail(&format!("/devices/{name}: no anonymous memory to lend"));
     };
     for (start, at, len) in [
         (0, LENT_AT, LEN),
@@ -258,10 +262,10 @@ fn lent(disk: &File, name: &str) {
         match disk.read_at(at, buffer) {
             Ok(got) => check(got == len && as_held(at, buffer, &[]), || {
                 format!(
-                    "/dev/{name}: a read of {len} bytes at {at} into anonymous memory at {start}"
+                    "/devices/{name}: a read of {len} bytes at {at} into anonymous memory at {start}"
                 )
             }),
-            Err(err) => fail(&format!("/dev/{name}: a read of {len} bytes at {at}: {err}")),
+            Err(err) => fail(&format!("/devices/{name}: a read of {len} bytes at {at}: {err}")),
         }
     }
     // Read back through the heap, which is copied, 64 KiB at a time.
@@ -275,7 +279,7 @@ fn lent(disk: &File, name: &str) {
             let wrote = disk.write_at(at, buffer);
             check(wrote.as_ref().is_ok_and(|&n| n == len), || {
                 format!(
-                    "/dev/{name}: a write of {len} bytes at {at} from anonymous memory: {wrote:?}"
+                    "/devices/{name}: a write of {len} bytes at {at} from anonymous memory: {wrote:?}"
                 )
             });
             for from in (at..at + len as u64).step_by(back.len()) {
@@ -283,7 +287,7 @@ fn lent(disk: &File, name: &str) {
                 let read = disk.read_at(from, &mut back[..n]);
                 check(read.is_ok() && as_held(from, &back[..n], written), || {
                     format!(
-                        "/dev/{name}: what was written at {at} from anonymous memory reads back \
+                        "/devices/{name}: what was written at {at} from anonymous memory reads back \
                          otherwise at {from}"
                     )
                 });
@@ -294,26 +298,28 @@ fn lent(disk: &File, name: &str) {
     let last = &mut memory[LAST..];
     let address = last.as_ptr() as u64;
     let protected = address_space::protect(&SYS, SLOT_SPACE, address, 4096, Rights::READ);
-    check(protected.is_ok(), || format!("/dev/{name}: making memory read-only: {protected:?}"));
+    check(protected.is_ok(), || format!("/devices/{name}: making memory read-only: {protected:?}"));
     let wrote = disk.write_at(LENT_AT, last);
     check(wrote.as_ref().is_ok_and(|&n| n == 4096), || {
-        format!("/dev/{name}: a write from read-only memory: {wrote:?}")
+        format!("/devices/{name}: a write from read-only memory: {wrote:?}")
     });
     match disk.read_at(LENT_AT, last) {
         Err(Error::Status(status)) if is(status, Kernel::BadAddress) => {}
-        other => fail(&format!("/dev/{name}: a read into read-only memory: {other:?}")),
+        other => fail(&format!("/devices/{name}: a read into read-only memory: {other:?}")),
     }
     let zeros = disk.read_at(LENT_AT, &mut back[..4096]);
     check(zeros.is_ok() && back[..4096].iter().all(|&byte| byte == 0), || {
-        format!("/dev/{name}: what was written from read-only memory reads back otherwise")
+        format!("/devices/{name}: what was written from read-only memory reads back otherwise")
     });
     let held: Vec<u8> = (0..4096).map(|at| big_byte(LENT_AT as usize + at)).collect();
     let restored = disk.write_at(LENT_AT, &held);
-    check(restored.is_ok(), || format!("/dev/{name}: a write at {LENT_AT}: {restored:?}"));
-    println!("storage: /dev/{name}: raw transfers straight between the disk and anonymous memory");
+    check(restored.is_ok(), || format!("/devices/{name}: a write at {LENT_AT}: {restored:?}"));
+    println!(
+        "storage: /devices/{name}: raw transfers straight between the disk and anonymous memory"
+    );
 }
 
-/// The `errors` mode on `/dev/<name>`: reads and writes of the sectors
+/// The `errors` mode on `/devices/<name>`: reads and writes of the sectors
 /// QEMU fails, then of others.
 pub fn errors(root: &Dir, name: &str) {
     let Some(disk) = open(root, name) else { return };
@@ -321,34 +327,34 @@ pub fn errors(root: &Dir, name: &str) {
     let at = FAILS_ONCE * 512;
     match disk.read_at(at, &mut buffer) {
         Ok(4096) if as_held(at, &buffer, &[]) => println!(
-            "storage: /dev/{name}: a read of sector {FAILS_ONCE}, which fails once, reads what it \
+            "storage: /devices/{name}: a read of sector {FAILS_ONCE}, which fails once, reads what it \
              holds"
         ),
-        other => fail(&format!("/dev/{name}: the read that fails once: {other:?}")),
+        other => fail(&format!("/devices/{name}: the read that fails once: {other:?}")),
     }
     match disk.read_at(FAILS_READING * 512, &mut buffer) {
         Err(err) if err.is(FileError::Io) => println!(
-            "storage: /dev/{name}: a read of sector {FAILS_READING}, which always fails, fails \
+            "storage: /devices/{name}: a read of sector {FAILS_READING}, which always fails, fails \
              with io"
         ),
-        other => fail(&format!("/dev/{name}: the read that always fails: {other:?}")),
+        other => fail(&format!("/devices/{name}: the read that always fails: {other:?}")),
     }
     // Two requests: the first works, the second fails.
     let mut both = vec![0u8; 128 * 1024];
     let at = (FAILS_READING - 128) * 512;
     match disk.read_at(at, &mut both) {
         Ok(65536) if as_held(at, &both[..65536], &[]) => println!(
-            "storage: /dev/{name}: a read up to sector {FAILS_READING} ends short, after 65536 \
+            "storage: /devices/{name}: a read up to sector {FAILS_READING} ends short, after 65536 \
              bytes"
         ),
-        other => fail(&format!("/dev/{name}: the read up to the failing sector: {other:?}")),
+        other => fail(&format!("/devices/{name}: the read up to the failing sector: {other:?}")),
     }
     match disk.write_at(FAILS_WRITING * 512, &[0; 4096]) {
         Err(err) if err.is(FileError::Io) => println!(
-            "storage: /dev/{name}: a write of sector {FAILS_WRITING}, which always fails, fails \
+            "storage: /devices/{name}: a write of sector {FAILS_WRITING}, which always fails, fails \
              with io"
         ),
-        other => fail(&format!("/dev/{name}: the write that always fails: {other:?}")),
+        other => fail(&format!("/devices/{name}: the write that always fails: {other:?}")),
     }
     // A write of what a sector holds already leaves the disk as the host
     // checks it.
@@ -357,8 +363,8 @@ pub fn errors(root: &Dir, name: &str) {
     let wrote = disk.write_at(at, &same);
     let read = disk.read_at(2000 * 512, &mut buffer);
     if wrote == Ok(4096) && read == Ok(4096) && as_held(2000 * 512, &buffer, &[]) {
-        println!("storage: /dev/{name}: reads and writes elsewhere work after the errors");
+        println!("storage: /devices/{name}: reads and writes elsewhere work after the errors");
     } else {
-        fail(&format!("/dev/{name}: after the errors, a write: {wrote:?}; a read: {read:?}"));
+        fail(&format!("/devices/{name}: after the errors, a write: {wrote:?}; a read: {read:?}"));
     }
 }

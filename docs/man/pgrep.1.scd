@@ -89,7 +89,7 @@ pkill only:
 # EXIT STATUS
 
 0 if a process was selected (for pkill, and sent the signal), 1 if none
-was, 2 for a mistake in the command line, 3 if _/proc_ could not be
+was, 2 for a mistake in the command line, 3 if _/processes_ could not be
 read.
 
 # EXAMPLES

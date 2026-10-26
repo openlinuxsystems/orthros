@@ -17,7 +17,7 @@ uptime prints a line, as Linux's uptime (procps-ng) does: the time, how
 long the system has been up, the users logged in (as *who*(1) counts
 them) and the load averages over the last 1, 5 and 15 minutes (the
 threads running, ready to run or waiting for a disk, as
-_/proc/loadavg_ gives them, *radix-proc*(5)).
+_/processes/loadavg_ gives them, *radix-proc*(5)).
 
 # OPTIONS
 

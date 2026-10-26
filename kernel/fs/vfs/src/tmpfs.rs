@@ -12,7 +12,7 @@
 //! program has it open lives until the program lets go, as on Linux.
 //!
 //! The root filesystem of every Radix system is a tmpfs (spec 7.1), as
-//! are `/system/etc` and `/system/var` on top of the read-only boot
+//! are `/system/settings` and `/system/state` on top of the read-only boot
 //! archive until Phase 10 brings Btrfs.
 
 use alloc::sync::Weak;

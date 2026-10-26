@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! shutdown(8), reboot(8), poweroff(8), halt(8) and service(8): requests
-//! to Spark over its control socket, `/run/spark/control` (spark(8)).
+//! to Spark over its control socket, `/system/live/spark/control`
+//! (spark(8)).
 //!
 //! Spark stops the services in order and then turns the machine off,
 //! restarts it or halts it; with `--force` it skips the services. The
@@ -16,7 +17,7 @@ use crate::args::{Arg, Args};
 use crate::util::{self, Fail, fail, fail_with, usage};
 
 /// Spark's control socket.
-pub const CONTROL: &str = "/run/spark/control";
+pub const CONTROL: &str = "/system/live/spark/control";
 
 /// Sends Spark `request` and returns its answer.
 pub fn request(request: &str) -> Result<String, Fail> {

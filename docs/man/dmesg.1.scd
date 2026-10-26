@@ -17,7 +17,7 @@ dmesg - print or clear the kernel log
 
 dmesg prints the kernel log, as util-linux's dmesg does, a record a
 line: the time since boot the record was made, in seconds, and its
-text. It reads the records from _/dev/kmsg_ (*radix-kernel-log*(2)),
+text. It reads the records from _/devices/kmsg_ (*radix-kernel-log*(2)),
 the oldest kept first. The kernel keeps the newest records in a ring;
 older ones are gone.
 
@@ -45,7 +45,7 @@ name. Every record is of the kernel's facility.
 
 *-C*, *--clear*
 	Clear the log without printing it: later readers start after the
-	records it holds. It needs leave to write to _/dev/kmsg_.
+	records it holds. It needs leave to write to _/devices/kmsg_.
 
 *-t*, *--notime*
 	No times.

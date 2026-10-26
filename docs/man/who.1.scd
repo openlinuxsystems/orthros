@@ -20,7 +20,7 @@ the session began, as GNU who does. users prints the users of the
 sessions on one line.
 
 Radix keeps no utmp file. A session is a session leader with a
-controlling terminal, as _/proc_ shows it (*radix-proc*(5)), which began
+controlling terminal, as _/processes_ shows it (*radix-proc*(5)), which began
 when its leader started: a login shell on a terminal. Every session is
 root's until users come.
 

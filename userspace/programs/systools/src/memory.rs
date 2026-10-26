@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! free(1) and vmstat(8), from `/proc/meminfo` and `/proc/stat`. Radix has
+//! free(1) and vmstat(8), from `/processes/meminfo` and `/processes/stat`. Radix has
 //! no swap until Phase 10 and counts no interrupts per CPU, so those
 //! columns are 0; the page cache is free(1)'s buff/cache, which the kernel
 //! can drop for programs, so it counts as available.
@@ -118,7 +118,7 @@ pub fn free(args: &mut Args) -> Result<i32, Fail> {
             out.flush()?;
             thread::sleep(Duration::from_secs_f64(every.unwrap_or(1.0)));
         }
-        let m = proc::memory().map_err(|e| util::failed(&"/proc/meminfo", e))?;
+        let m = proc::memory().map_err(|e| util::failed(&"/processes/meminfo", e))?;
         let w = 11;
         if wide {
             writeln!(
@@ -206,8 +206,8 @@ struct Sample {
 
 fn sample() -> Result<Sample, Fail> {
     Ok(Sample {
-        stat: proc::stat().map_err(|e| util::failed(&"/proc/stat", e))?,
-        memory: proc::memory().map_err(|e| util::failed(&"/proc/meminfo", e))?,
+        stat: proc::stat().map_err(|e| util::failed(&"/processes/stat", e))?,
+        memory: proc::memory().map_err(|e| util::failed(&"/processes/meminfo", e))?,
         at_ns: util::monotonic_ns(),
     })
 }

@@ -614,8 +614,8 @@ fn the_boot_archive_as_a_filesystem() {
     writer.directory("system/bin", 0o755, 1).unwrap();
     writer.symlink("system/bin/sh", "spark", 1).unwrap();
     writer.file("system/bin/spark", 0o755, 2, b"\x7fELF spark").unwrap();
-    writer.directory("system/etc", 0o755, 1).unwrap();
-    writer.file("system/etc/motd", 0o644, 3, b"hello\n").unwrap();
+    writer.directory("system/settings", 0o755, 1).unwrap();
+    writer.file("system/settings/motd", 0o644, 3, b"hello\n").unwrap();
     let bytes: &'static [u8] = writer.finish().leak();
     let fs = BootFs::new(bytes).unwrap();
     let vfs = Vfs::new(fs, "bootfs").unwrap();
@@ -626,7 +626,7 @@ fn the_boot_archive_as_a_filesystem() {
     let system = vfs.resolve(&root, "system").unwrap();
     assert_eq!(
         names(&vfs, &system),
-        [(String::from("bin"), Kind::Directory), (String::from("etc"), Kind::Directory)]
+        [(String::from("bin"), Kind::Directory), (String::from("settings"), Kind::Directory)]
     );
     let bin = vfs.resolve(&root, "system/bin").unwrap();
     assert_eq!(names(&vfs, &bin)[0], (String::from("sh"), Kind::Symlink));
@@ -639,9 +639,9 @@ fn the_boot_archive_as_a_filesystem() {
     assert_eq!(vfs.open(&root, "system/new", create()).err(), Some(Error::ReadOnly));
     assert_eq!(spark.node.write(0, &Slice(b"x")), Err(Error::ReadOnly));
     // Each file is one node, so a tmpfs mounts over a directory of it.
-    vfs.mount(&root, "system/etc", tmpfs(1 << 20), "tmpfs", false).unwrap();
-    write(&vfs, &root, "system/etc/hostname", b"dukovo").unwrap();
-    assert_eq!(vfs.stat(&root, "system/etc/motd").err(), Some(Error::NotFound));
+    vfs.mount(&root, "system/settings", tmpfs(1 << 20), "tmpfs", false).unwrap();
+    write(&vfs, &root, "system/settings/hostname", b"dukovo").unwrap();
+    assert_eq!(vfs.stat(&root, "system/settings/motd").err(), Some(Error::NotFound));
 }
 
 #[test]

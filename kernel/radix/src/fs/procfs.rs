@@ -1,31 +1,31 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/proc`: the processes, and what the kernel holds, as plain text.
+//! `/processes`: the processes, and what the kernel holds, as plain text.
 //!
 //! Every file is text of `key: value` lines (radix-proc(5)), written when
 //! it is opened, so a program reading it in pieces sees one snapshot:
 //!
-//! - `/proc/<number>/status`: a process's number, name, state, threads,
+//! - `/processes/<number>/status`: a process's number, name, state, threads,
 //!   domain and the kernel memory charged for it, for every process the
 //!   kernel holds (those still running, and those ended but not reaped);
 //!   since Phase 9 also its place in the tree, its CPU time, scheduling,
 //!   memory, page faults, I/O and working directory, what ps(1) and
 //!   top(1) show;
-//! - `/proc/<number>/cmdline`: the arguments its program started with,
+//! - `/processes/<number>/cmdline`: the arguments its program started with,
 //!   each ending with a NUL, as on Linux;
-//! - `/proc/<number>/threads`: a line per thread, of `key=value` fields;
-//! - `/proc/<number>/files`: a line per capability it holds, of
+//! - `/processes/<number>/threads`: a line per thread, of `key=value` fields;
+//! - `/processes/<number>/files`: a line per capability it holds, of
 //!   `key=value` fields, with a file's or directory's path last: what
 //!   lsof(1) lists;
-//! - `/proc/mounts`: one line per mount, `source /path kind rw|ro`, with
+//! - `/processes/mounts`: one line per mount, `source /path kind rw|ro`, with
 //!   the filesystem's label if it has one; a space, tab, newline or
 //!   backslash in a field is written as Linux writes it, `\040` and so on;
-//! - `/proc/meminfo`: memory in KiB, in all, free, and by owner;
-//! - `/proc/stat`: what each CPU has done, the threads ready to run and
+//! - `/processes/meminfo`: memory in KiB, in all, free, and by owner;
+//! - `/processes/stat`: what each CPU has done, the threads ready to run and
 //!   waiting for a disk, and what the disks have read and written;
-//! - `/proc/loadavg`: the load averages;
-//! - `/proc/uptime`: nanoseconds since boot.
+//! - `/processes/loadavg`: the load averages;
+//! - `/processes/uptime`: nanoseconds since boot.
 //!
 //! A newline or a backslash in a name or a path is written the same way,
 //! so that it cannot end its line early.
@@ -51,7 +51,7 @@ use crate::user::process::ProcessRef;
 /// would end the line early, and a backslash begins an escape.
 pub const LINE_SPECIAL: &[u8] = b"\n\\";
 
-/// The bytes a field of `/proc/mounts` escapes, as on Linux.
+/// The bytes a field of `/processes/mounts` escapes, as on Linux.
 const FIELD_SPECIAL: &[u8] = b" \t\n\\";
 
 /// Writes `bytes`, with each of those in `special` as `/proc` on Linux
@@ -82,7 +82,7 @@ pub fn write_escaped_str(out: &mut dyn Write, text: &str, special: &[u8]) -> fmt
     out.write_str(&text[start..])
 }
 
-/// The files of `/proc` besides the processes' directories.
+/// The files of `/processes` besides the processes' directories.
 const FILES: [&str; 5] = ["loadavg", "meminfo", "mounts", "stat", "uptime"];
 
 /// The files of a process's directory.
@@ -185,7 +185,7 @@ impl Listing for ProcessDir {
 }
 
 /// The process numbered `number`: one the registry holds, or a zombie,
-/// which `/proc` shows as Linux's does until its parent waits for it.
+/// which `/processes` shows as Linux's does until its parent waits for it.
 fn process_by_number(number: u64) -> Option<ProcessRef> {
     objects::process_by_number(number).or_else(|| posix::zombie(number))
 }
@@ -221,7 +221,7 @@ fn policy_name(user: &UserRef) -> (&'static str, u8, i8) {
     (scheduling.policy.name(), scheduling.priority, scheduling.nice)
 }
 
-/// `/proc/<number>/status`.
+/// `/processes/<number>/status`.
 fn status(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     process.describe(text)?;
     let number = process.number();
@@ -305,7 +305,7 @@ fn status(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     Ok(())
 }
 
-/// `/proc/<number>/cmdline`.
+/// `/processes/<number>/cmdline`.
 fn cmdline(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     let mut result = Ok(());
     process.write_args(&mut |bytes| {
@@ -316,7 +316,7 @@ fn cmdline(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     result
 }
 
-/// `/proc/<number>/threads`.
+/// `/processes/<number>/threads`.
 fn threads(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     for (thread, user) in threads_of(process) {
         let (user_ns, system_ns) = thread.cpu_times();
@@ -369,7 +369,7 @@ fn held_caps(process: &ProcessRef) -> Vec<(u32, Capability), Kmalloc> {
     caps
 }
 
-/// The name of an object's kind in `/proc/<number>/files`, as one word.
+/// The name of an object's kind in `/processes/<number>/files`, as one word.
 fn object_name(kind: ObjectKind) -> &'static str {
     match kind {
         ObjectKind::AddressSpace => "address_space",
@@ -382,7 +382,7 @@ fn object_name(kind: ObjectKind) -> &'static str {
     }
 }
 
-/// The name of a node's kind in `/proc/<number>/files`.
+/// The name of a node's kind in `/processes/<number>/files`.
 fn kind_name(kind: Kind) -> &'static str {
     match kind {
         Kind::File => "file",
@@ -395,7 +395,7 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// `/proc/<number>/files`.
+/// `/processes/<number>/files`.
 fn files(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     let fd_base = radix_abi::startup::SLOT_FD_BASE;
     for (slot, cap) in held_caps(process) {
@@ -445,7 +445,7 @@ fn files(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     Ok(())
 }
 
-/// `/proc/mounts`.
+/// `/processes/mounts`.
 fn mounts(text: &mut Text) -> fmt::Result {
     let Some(vfs) = super::vfs() else { return Ok(()) };
     let mut result = Ok(());
@@ -471,7 +471,7 @@ fn mounts(text: &mut Text) -> fmt::Result {
     result
 }
 
-/// `/proc/meminfo`.
+/// `/processes/meminfo`.
 fn meminfo(text: &mut Text) -> fmt::Result {
     let kib = |pages: u64| pages * PAGE_SIZE as u64 / 1024;
     writeln!(text, "total: {} KiB", kib(FRAMES.managed_pages()))?;
@@ -486,7 +486,7 @@ fn meminfo(text: &mut Text) -> fmt::Result {
     Ok(())
 }
 
-/// `/proc/stat`: each online CPU's times, as `cpuN: key=value` lines, and
+/// `/processes/stat`: each online CPU's times, as `cpuN: key=value` lines, and
 /// their sums.
 fn stat(text: &mut Text) -> fmt::Result {
     let mut sum = sched::CpuTimes::default();
@@ -534,7 +534,7 @@ fn stat(text: &mut Text) -> fmt::Result {
     writeln!(text, "boot_time_ns: {}", now.saturating_sub(sched::now_ns()))
 }
 
-/// `/proc/loadavg`: the averages, with two decimals as Linux prints them.
+/// `/processes/loadavg`: the averages, with two decimals as Linux prints them.
 fn loadavg(text: &mut Text) -> fmt::Result {
     let averages = sched::load_average().hundredths();
     for (minutes, hundredths) in [1, 5, 15].iter().zip(averages) {
@@ -543,7 +543,7 @@ fn loadavg(text: &mut Text) -> fmt::Result {
     Ok(())
 }
 
-/// `/proc/uptime`.
+/// `/processes/uptime`.
 fn uptime(text: &mut Text) -> fmt::Result {
     writeln!(text, "uptime_ns: {}", crate::sched::now_ns())
 }

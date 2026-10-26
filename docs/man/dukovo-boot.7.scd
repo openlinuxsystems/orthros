@@ -134,7 +134,7 @@ _/system/share/licenses/_
   IDs and class, and sets up each virtio block device: a *Disk:* line
   names it (_vda_, _vdb_, ...) and its size, and the next lines its
   partition table and partitions. The functions are listed in
-  _/sys/bus/pci/devices_ (*radix-sysfs*(5)).
+  _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## The system's settings for nano (nanorc(5)), which each user's
-## ~/.nanorc may change. Spark puts this file in /system/etc at boot
-## when it is not there (spark(8)); edit that copy.
+## ~/.nanorc may change. Spark puts this file in /system/settings at
+## boot when it is not there (spark(8)); edit that copy, which is also
+## /etc/nanorc.
 
 ## The key bindings most programs use, as the system has them everywhere
 ## (Ctrl+S saves, Ctrl+Q quits, Ctrl+C, X and V copy, cut and paste,

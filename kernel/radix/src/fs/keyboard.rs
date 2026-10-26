@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/dev/kbd` (Phase 9, radix-input(2)): the keys of the machine's
+//! `/devices/kbd` (Phase 9, radix-input(2)): the keys of the machine's
 //! keyboards, as events, for consoled(8).
 //!
 //! The keyboard's interrupt hands each byte it sends to [`byte`], which
 //! decodes it (`radix_input::Set1`) and puts the key event into the ring
-//! [`RING`], numbered from boot. A description of `/dev/kbd` keeps in its
+//! [`RING`], numbered from boot. A description of `/devices/kbd` keeps in its
 //! offset one more than the number of the next event it reads, starting
 //! with the first after it was opened, so that nobody reads keys typed
 //! before. The interrupt cannot wake the readers itself (waking takes the
@@ -59,7 +59,7 @@ static DECODER: SpinLock<Set1> = SpinLock::new(Set1::new());
 static THREAD: Once<ThreadRef> = Once::new();
 /// The number of the next event when the thread last looked.
 static SEEN: AtomicU64 = AtomicU64::new(0);
-/// The pollers of `/dev/kbd`.
+/// The pollers of `/devices/kbd`.
 pub static POLLED: Polled = Polled::new();
 /// The lights wanted, and the lights set (`u32::MAX` before any are).
 static LIGHTS: AtomicU32 = AtomicU32::new(0);
@@ -71,7 +71,7 @@ static ANSWER: AtomicU32 = AtomicU32::new(0);
 /// The keyboard is ready to be sent commands.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// The node of `/dev/kbd`, numbered as its id.
+/// The node of `/devices/kbd`, numbered as its id.
 pub struct Keyboard(pub u64);
 
 impl Node for Keyboard {
@@ -106,7 +106,7 @@ impl Node for Keyboard {
     }
 }
 
-/// Whether `node` is `/dev/kbd`.
+/// Whether `node` is `/devices/kbd`.
 pub fn is_keyboard(node: &NodeRef) -> bool {
     radix_vfs::downcast::<Keyboard>(&**node).is_some()
 }
@@ -216,13 +216,13 @@ pub fn start() {
             let _ = THREAD.set(thread);
         }
         Err(err) => {
-            error!("Keyboard: could not start the thread that wakes /dev/kbd's readers: {err}");
+            error!("Keyboard: could not start the thread that wakes /devices/kbd's readers: {err}");
             return;
         }
     }
     match Arch::start_keyboard(byte) {
         Some(name) => {
-            info!("Keyboard: {name} reads into /dev/kbd");
+            info!("Keyboard: {name} reads into /devices/kbd");
             STARTED.store(true, Ordering::Release);
             if let Some(thread) = THREAD.get() {
                 sched::wake(thread);

@@ -1131,11 +1131,11 @@ enum Target<'a> {
     Socket(&'a socket::Socket),
     /// A side of a terminal.
     Tty(&'a tty::Handle),
-    /// `/dev/kmsg`.
+    /// `/devices/kmsg`.
     Kmsg,
-    /// `/dev/kbd`.
+    /// `/devices/kbd`.
     Keyboard,
-    /// `/dev/fb0`.
+    /// `/devices/fb0`.
     Framebuffer,
     /// A file of the tree, through its node.
     Node,

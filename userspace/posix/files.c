@@ -5,9 +5,10 @@
 // seeking, descriptions that share an offset, stdio, directories and
 // their descriptors, temporary files, renaming and removing, times,
 // symbolic links, `..` beneath directory descriptors and fchdir, reading
-// into and writing from memory not made yet, and descriptors by their
-// names in /dev/fd, on the tmpfs at /tmp and the read-only /system; and
-// what each refuses, with Linux's errors.
+// into and writing from memory not made yet, the root's folders by their
+// names and by Unix's, and descriptors by their names in /devices/fd, on
+// the tmpfs at /tmp and the read-only /system; and what each refuses,
+// with Linux's errors.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -98,7 +99,7 @@ static void descriptions(void) {
 // redirection, far more often than capabilities may be derived from one
 // another: it still copies, and a child still gets it.
 static void saved_and_restored(void) {
-	int fd = open("/dev/null", O_RDONLY);
+	int fd = open("/devices/null", O_RDONLY);
 	CHECK(fd >= 0);
 	for(int i = 0; i < 1000; i++) {
 		int saved = fcntl(fd, F_DUPFD_CLOEXEC, 10);
@@ -228,7 +229,7 @@ static void times(void) {
 	// Directories have times too, and devices none.
 	CHECK(utimensat(AT_FDCWD, "/tmp", set, 0) == 0);
 	CHECK(stat("/tmp", &st) == 0 && st.st_mtim.tv_sec == 2);
-	CHECK_ERROR(utimensat(AT_FDCWD, "/dev/null", NULL, 0), EPERM);
+	CHECK_ERROR(utimensat(AT_FDCWD, "/devices/null", NULL, 0), EPERM);
 	CHECK(unlink("/tmp/files-times") == 0);
 }
 
@@ -360,7 +361,7 @@ static void temporary_files(void) {
 // Symbolic links (ADR 0081): made and read, followed by the calls that
 // take a path but not by those that work on a link itself, `..` after
 // one taken from where it led, links that lead nowhere or round in a
-// loop, and the links to /system that Spark makes.
+// loop, and the links into /system that Spark makes.
 static void links(void) {
 	CHECK(mkdir("/tmp/links", 0755) == 0);
 	CHECK(mkdir("/tmp/links/a", 0755) == 0);
@@ -588,14 +589,61 @@ static void mapped(void) {
 	CHECK(!close(fd) && !unlink("/tmp/mapped"));
 }
 
-// Descriptors by their names in /dev/fd, and /dev/stdin, /dev/stdout and
-// /dev/stderr: opening one copies the descriptor, as dup does, so the
-// copy shares its offset, and never with more access than it has.
+// The root's folders by their plain names and by Unix's (ADR 0113): each
+// Unix name is a link to the folder that holds what it held, and the
+// root's .hidden lists them, so that ls leaves them out.
+static void folder_names(void) {
+	static const char *const links[][2] = {
+		{"/bin", "system/bin"},
+		{"/dev", "devices"},
+		{"/etc", "system/settings"},
+		{"/proc", "processes"},
+		{"/run", "system/live"},
+		{"/sbin", "system/bin"},
+		{"/sys", "kernel"},
+		{"/usr", "system"},
+		{"/var", "system/state"},
+		{"/var/run", "../live"},
+	};
+	char target[64], real[PATH_MAX];
+	for(size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+		ssize_t n = readlink(links[i][0], target, sizeof(target));
+		CHECK(n == (ssize_t)strlen(links[i][1]) && !memcmp(target, links[i][1], n));
+	}
+	CHECK(realpath("/dev/null", real) && !strcmp(real, "/devices/null"));
+	CHECK(realpath("/var/run", real) && !strcmp(real, "/system/live"));
+	CHECK(realpath("/etc/nanorc", real) && !strcmp(real, "/system/settings/nanorc"));
+	struct stat st, want;
+	CHECK(stat("/dev/null", &st) == 0 && stat("/devices/null", &want) == 0);
+	CHECK(st.st_ino == want.st_ino && st.st_dev == want.st_dev);
+	CHECK(access("/proc/mounts", R_OK) == 0 && access("/sys/version", R_OK) == 0);
+	char hidden[128] = {0};
+	int fd = open("/.hidden", O_RDONLY);
+	CHECK(fd >= 0 && read(fd, hidden, sizeof(hidden) - 1) > 0);
+	close(fd);
+	CHECK(!strcmp(hidden, "bin\ndev\netc\nproc\nrun\nsbin\nsys\nusr\nvar\n"));
+	// The working directory is where the link led.
+	CHECK(chdir("/dev") == 0 && in_dir("/devices"));
+	CHECK(chdir("/") == 0);
+	// Descriptors by Unix's names for them.
+	int fds[2];
+	CHECK(pipe(fds) == 0);
+	snprintf(target, sizeof(target), "/dev/fd/%d", fds[0]);
+	CHECK(stat(target, &st) == 0 && S_ISFIFO(st.st_mode));
+	CHECK(stat("/dev/stdin", &st) == 0);
+	close(fds[0]);
+	close(fds[1]);
+}
+
+// Descriptors by their names in /devices/fd, and /devices/stdin,
+// /devices/stdout and /devices/stderr: opening one copies the descriptor,
+// as dup does, so the copy shares its offset, and never with more access
+// than it has.
 static void named_descriptors(void) {
 	int fds[2];
 	CHECK(pipe(fds) == 0);
 	char name[32];
-	snprintf(name, sizeof(name), "/dev/fd/%d", fds[0]);
+	snprintf(name, sizeof(name), "/devices/fd/%d", fds[0]);
 	struct stat st;
 	CHECK(stat(name, &st) == 0 && S_ISFIFO(st.st_mode));
 	CHECK(access(name, R_OK) == 0);
@@ -609,8 +657,8 @@ static void named_descriptors(void) {
 	CHECK(read(reader, buffer, sizeof(buffer)) == 5 && !memcmp(buffer, "piped", 5));
 	close(reader);
 	// What a shell's process substitution does: a child reads the pipe
-	// by its name, as `cat /dev/fd/N` would.
-	snprintf(name, sizeof(name), "/dev/fd/%d", fds[1]);
+	// by its name, as `cat /devices/fd/N` would.
+	snprintf(name, sizeof(name), "/devices/fd/%d", fds[1]);
 	FILE *out = fopen(name, "w");
 	CHECK(out != NULL);
 	if(out) {
@@ -624,7 +672,7 @@ static void named_descriptors(void) {
 	int fd = open("/tmp/named", O_RDWR | O_CREAT | O_TRUNC, 0644);
 	CHECK(fd >= 0 && write(fd, "0123456789", 10) == 10);
 	CHECK(lseek(fd, 4, SEEK_SET) == 4);
-	snprintf(name, sizeof(name), "/dev/fd/%d", fd);
+	snprintf(name, sizeof(name), "/devices/fd/%d", fd);
 	// O_TRUNC does nothing, as on the BSDs.
 	int copy = open(name, O_RDWR | O_TRUNC);
 	CHECK(copy >= 0);
@@ -633,27 +681,27 @@ static void named_descriptors(void) {
 	CHECK_ERROR(open(name, O_RDONLY | O_CREAT | O_EXCL, 0644), EEXIST);
 	CHECK_ERROR(open(name, O_RDONLY | O_DIRECTORY), ENOTDIR);
 	close(copy);
-	// The standard ones, and relative to /dev.
+	// The standard ones, and relative to /devices.
 	int saved = dup(0);
 	CHECK(saved >= 0 && dup2(fd, 0) == 0);
 	CHECK(lseek(0, 0, SEEK_SET) == 0);
-	int in = open("/dev/stdin", O_RDONLY);
+	int in = open("/devices/stdin", O_RDONLY);
 	CHECK(in >= 0 && read(in, buffer, 2) == 2 && !memcmp(buffer, "01", 2));
 	close(in);
 	CHECK(dup2(saved, 0) == 0);
 	close(saved);
-	CHECK(chdir("/dev") == 0);
+	CHECK(chdir("/devices") == 0);
 	snprintf(name, sizeof(name), "fd/%d", fd);
 	CHECK(stat(name, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 10);
 	CHECK(chdir("/") == 0);
-	CHECK(stat("/dev/stdout", &st) == 0 && stat("/dev/stderr", &st) == 0);
+	CHECK(stat("/devices/stdout", &st) == 0 && stat("/devices/stderr", &st) == 0);
 	// A descriptor that is not open has no name; nor have others there.
 	close(fd);
-	snprintf(name, sizeof(name), "/dev/fd/%d", fd);
+	snprintf(name, sizeof(name), "/devices/fd/%d", fd);
 	CHECK_ERROR(open(name, O_RDONLY), ENOENT);
-	CHECK_ERROR(stat("/dev/fd/999", &st), ENOENT);
-	CHECK_ERROR(stat("/dev/fd/01", &st), ENOENT);
-	CHECK_ERROR(stat("/dev/fd/x", &st), ENOENT);
+	CHECK_ERROR(stat("/devices/fd/999", &st), ENOENT);
+	CHECK_ERROR(stat("/devices/fd/01", &st), ENOENT);
+	CHECK_ERROR(stat("/devices/fd/x", &st), ENOENT);
 	CHECK(unlink("/tmp/named") == 0);
 }
 
@@ -730,6 +778,7 @@ int main(void) {
 	RUN(links);
 	RUN(climbing);
 	RUN(mapped);
+	RUN(folder_names);
 	RUN(named_descriptors);
 	RUN(refusals);
 	return check_end();

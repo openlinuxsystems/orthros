@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `/dev`: the devices.
+//! `/devices`: the devices.
 //!
 //! One tree of device nodes, which every `dev` mount shows: `null`,
 //! `zero`, `random` and `urandom` (both the kernel's generator, which
@@ -46,7 +46,7 @@ pub fn init() {
         Ok(root) => {
             let _ = ROOT.set(root);
         }
-        Err(err) => error!("Files: could not make /dev: {err}"),
+        Err(err) => error!("Files: could not make /devices: {err}"),
     }
 }
 
@@ -54,7 +54,7 @@ pub fn init() {
 pub fn add_block(name: &str, device: DeviceRef) {
     let Some(root) = ROOT.get() else { return };
     if let Err(err) = BlockNode::make(next_id(), device).and_then(|node| root.add(name, node)) {
-        warn!("Files: could not add /dev/{name}: {err}");
+        warn!("Files: could not add /devices/{name}: {err}");
     }
 }
 

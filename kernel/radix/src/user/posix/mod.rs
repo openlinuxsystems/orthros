@@ -141,7 +141,7 @@ pub struct PosixState {
     /// Its file mode creation mask (`umask`).
     pub file_mask: u32,
     /// Its working directory as the C library last noted it (`exec`,
-    /// `set_directory`): an absolute path, for `/proc`. Shared, so that
+    /// `set_directory`): an absolute path, for `/processes`. Shared, so that
     /// `fork` copies it under the lock without taking memory.
     pub directory: Option<Directory>,
 }
@@ -245,7 +245,7 @@ pub fn ids_of(process: &ProcessRef) -> Result<(u64, u64, u64)> {
     })
 }
 
-/// Where process `pid` is in the tree, for `/proc`: its parent, process
+/// Where process `pid` is in the tree, for `/processes`: its parent, process
 /// group and session, and whether it has ended unreaped (a zombie); none
 /// if it is not in the tree.
 pub fn tree_place(pid: u64) -> Option<(u64, u64, u64, bool)> {
@@ -257,7 +257,7 @@ pub fn tree_place(pid: u64) -> Option<(u64, u64, u64, bool)> {
 }
 
 /// The process numbered `pid` if it has ended and its parent has not
-/// waited for it (a zombie), for `/proc`: the registry holds a process
+/// waited for it (a zombie), for `/processes`: the registry holds a process
 /// only while a capability names it, which a zombie's seldom does.
 pub fn zombie(pid: u64) -> Option<ProcessRef> {
     with_tree(|tree| {

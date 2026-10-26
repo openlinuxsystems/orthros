@@ -557,7 +557,7 @@ pub fn released(registry: &mut Registry, released: &Released) {
     drop(charge);
 }
 
-/// The numbers of the processes the registry holds, for `/proc`.
+/// The numbers of the processes the registry holds, for `/processes`.
 pub fn process_numbers() -> Vec<u64, Kmalloc> {
     let mut numbers = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
     caps::with_registry(|registry| {

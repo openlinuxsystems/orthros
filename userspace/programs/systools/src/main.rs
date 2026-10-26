@@ -8,10 +8,10 @@
 //! (`/system/bin/ps` is a link to `systools`), and so does
 //! `systools <tool> [argument...]`.
 //!
-//! The process tools read the kernel's `/proc` (radix-proc(5)); `lsof`
+//! The process tools read the kernel's `/processes` (radix-proc(5)); `lsof`
 //! lists the capabilities each process holds; `rtrace` reads a trace of
 //! a process's system calls (radix-trace(2)), and `dmesg` the kernel log
-//! through `/dev/kmsg`. Every process is root's until users come
+//! through `/devices/kmsg`. Every process is root's until users come
 //! (Phase 13), so the user columns all say root.
 
 mod args;

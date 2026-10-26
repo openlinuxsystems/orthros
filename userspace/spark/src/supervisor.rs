@@ -7,7 +7,7 @@
 //! the domain the kernel gave Spark (radix-resource-domain(2)), with the
 //! CPU weight, memory limit and out-of-memory class its file gives
 //! (`services`). Its standard output and error are a pipe whose lines
-//! Spark copies to the kernel log, its input is _/dev/null_. When it ends
+//! Spark copies to the kernel log, its input is _/devices/null_. When it ends
 //! Spark starts it again as its file says, waiting 0.1 s after a quick
 //! end, then twice as long after each one in a row, up to 30 s; a service
 //! the out-of-memory policy stopped ends as if killed, and is started
@@ -23,7 +23,7 @@
 //! Spark hears of its children's ends from a notification the kernel
 //! signals (radix-process(2)'s `notify_children`), and waits in `poll`
 //! for it, the services' output, the program it was asked to run, and the
-//! control socket, `/run/spark/control`: shutdown(8), reboot(8),
+//! control socket, `/system/live/spark/control`: shutdown(8), reboot(8),
 //! poweroff(8), halt(8) and service(8) send a request there, one line, and
 //! read the answer. Shutting down stops the services the highest `order`
 //! first, each group with SIGTERM and then, after STOP_WAIT, by stopping
@@ -51,11 +51,11 @@ use radix_rt::{SYS, println, slots};
 use crate::services::{self, Restart, Spec};
 
 /// Where the service files are.
-pub const SERVICES_DIR: &str = "system/etc/spark/services";
+pub const SERVICES_DIR: &str = "system/settings/spark/services";
 
 /// The control socket, and the directory it is in.
-const CONTROL_DIR: &str = "run/spark";
-const CONTROL: &str = "run/spark/control";
+const CONTROL_DIR: &str = "system/live/spark";
+const CONTROL: &str = "system/live/spark/control";
 
 /// The slots a POSIX program's capability space starts with: room for 64
 /// file descriptors, as Linux's first table of them has. The C library
@@ -447,8 +447,8 @@ impl Supervisor {
             .map_err(|err| format!("{}: {err}", spec.program))?;
         let null = self
             .root
-            .open("dev/null", OpenFlags::NONE, Rights::READ.union(Rights::WRITE))
-            .map_err(|err| format!("/dev/null: {err}"))?;
+            .open("devices/null", OpenFlags::NONE, Rights::READ.union(Rights::WRITE))
+            .map_err(|err| format!("/devices/null: {err}"))?;
         let (read, write) = (slots::take().ok_or("no free slot")?, slots::take());
         let Some(write) = write else {
             slots::give_back(read);
@@ -484,7 +484,7 @@ impl Supervisor {
             return Err(format!("cannot make its process: {:#x}", status.0));
         }
         // The root, the random source and the log as Spark has them, with
-        // the copy right that `fork` needs; /dev/null as its input and the
+        // the copy right that `fork` needs; /devices/null as its input and the
         // pipe as its output and errors.
         let shares = [
             (root, SLOT_ROOT),

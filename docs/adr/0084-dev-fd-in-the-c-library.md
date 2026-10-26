@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0084. The C library gives /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr
 
-- Status: Accepted
+- Status: Accepted; the names are also beneath `/devices` since [0113](0113-plain-names-for-the-root-folders.md)
 - Date: 2026-10-23
 
 ## Context

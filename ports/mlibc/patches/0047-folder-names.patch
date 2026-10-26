@@ -1,0 +1,76 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Dukovo's folders have plain names (ADR 0113): devices are in /devices,
+settings in /system/settings, the system's changing data in
+/system/state and the running services' in /system/live. /dev, /etc,
+/var and /run are links to them, so programs that open the Unix names
+still work. paths.h and ctermid give the new names, so that what
+programs print and compare names the folders as Dukovo does: a program
+that takes _PATH_DEV off the front of ttyname's /devices/pts/0 gets
+pts/0. The paths of programs, the shell and the manual pages move with
+the folders inside /system, separately. Dukovo only.
+
+diff -ruN a/options/glibc/include/paths.h b/options/glibc/include/paths.h
+--- a/options/glibc/include/paths.h
++++ b/options/glibc/include/paths.h
+@@ -8,30 +8,30 @@
+ #define	_PATH_STDPATH "/bin:/usr/bin:/sbin:/usr/sbin"
+ 
+ #define	_PATH_BSHELL	"/bin/sh"
+-#define	_PATH_CONSOLE	"/dev/console"
+-#define	_PATH_DEVNULL	"/dev/null"
+-#define _PATH_GSHADOW	"/etc/gshadow"
++#define	_PATH_CONSOLE	"/devices/console"
++#define	_PATH_DEVNULL	"/devices/null"
++#define _PATH_GSHADOW	"/system/settings/gshadow"
+ #define	_PATH_KLOG	"/proc/kmsg"
+-#define	_PATH_LASTLOG	"/var/log/lastlog"
+-#define	_PATH_MAILDIR	"/var/mail"
++#define	_PATH_LASTLOG	"/system/state/log/lastlog"
++#define	_PATH_MAILDIR	"/system/state/mail"
+ #define	_PATH_MAN	"/usr/share/man"
+-#define	_PATH_MNTTAB	"/etc/fstab"
++#define	_PATH_MNTTAB	"/system/settings/fstab"
+ #define	_PATH_MOUNTED	"/etc/mtab"
+-#define	_PATH_NOLOGIN	"/etc/nologin"
+-#define _PATH_PRESERVE	"/var/lib"
++#define	_PATH_NOLOGIN	"/system/settings/nologin"
++#define _PATH_PRESERVE	"/system/state/lib"
+ #define	_PATH_SENDMAIL	"/usr/sbin/sendmail"
+-#define	_PATH_SHADOW	"/etc/shadow"
+-#define	_PATH_SHELLS	"/etc/shells"
+-#define	_PATH_TTY	"/dev/tty"
+-#define _PATH_UTMP	"/var/run/utmp"
++#define	_PATH_SHADOW	"/system/settings/shadow"
++#define	_PATH_SHELLS	"/system/settings/shells"
++#define	_PATH_TTY	"/devices/tty"
++#define _PATH_UTMP	"/system/live/utmp"
+ #define	_PATH_VI	"/usr/bin/vi"
+-#define _PATH_WTMP	"/var/log/wtmp"
++#define _PATH_WTMP	"/system/state/log/wtmp"
+ 
+-#define	_PATH_DEV	"/dev/"
++#define	_PATH_DEV	"/devices/"
+ #define	_PATH_TMP	"/tmp/"
+-#define	_PATH_VARDB	"/var/lib/misc/"
+-#define	_PATH_VARRUN	"/var/run/"
+-#define	_PATH_VARTMP	"/var/tmp/"
++#define	_PATH_VARDB	"/system/state/lib/misc/"
++#define	_PATH_VARRUN	"/system/live/"
++#define	_PATH_VARTMP	"/system/state/tmp/"
+ 
+ #ifdef _GNU_SOURCE
+ #define _PATH_UTMPX _PATH_UTMP
+diff -ruN a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -1569,7 +1569,7 @@
+ }
+ 
+ char *ctermid(char *s) {
+-	return s ? strcpy(s, "/dev/tty") : const_cast<char *>("/dev/tty");
++	return s ? strcpy(s, "/devices/tty") : const_cast<char *>("/devices/tty");
+ }
+ 
+ int setresuid(uid_t ruid, uid_t euid, uid_t suid) {

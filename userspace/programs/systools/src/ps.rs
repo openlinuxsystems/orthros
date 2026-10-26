@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! ps(1): a snapshot of the processes, from `/proc`, with the options of
+//! ps(1): a snapshot of the processes, from `/processes`, with the options of
 //! procps-ng's ps, Linux's: the UNIX options (`-ef`, `-o`), the BSD ones
 //! without a dash (`aux`) and the GNU long ones (`--sort`, `--forest`).
 
@@ -674,7 +674,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     }
     let own = own_terminal();
     let processes: Vec<Process> = proc::processes()
-        .map_err(|e| util::failed(&"/proc", e))?
+        .map_err(|e| util::failed(&proc::PROC, e))?
         .into_iter()
         .filter(|p| o.select.selects(p, own.as_deref()))
         .collect();
@@ -775,7 +775,7 @@ fn own_terminal() -> Option<String> {
         if !name.is_null() {
             // SAFETY: a non-null result is a C string.
             let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
-            return Some(name.strip_prefix("/dev/").unwrap_or(&name).to_string());
+            return Some(util::terminal_name(&name).to_string());
         }
     }
     None

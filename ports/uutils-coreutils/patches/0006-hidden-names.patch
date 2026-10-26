@@ -1,0 +1,62 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+On Radix, `ls` leaves out of a directory's listing the names its
+`.hidden` file lists, one a line, as GNOME Files and Nemo do, unless -a
+or -A asks for every name. Dukovo's root holds the Unix names of its
+folders (/bin, /dev, /etc, /proc and the rest) as links to the plainly
+named ones, and its `.hidden` lists them, so that `ls /` shows only
+folders a reader can make sense of (ADR 0113). Dukovo only.
+
+--- a/src/uu/ls/src/ls.rs
++++ b/src/uu/ls/src/ls.rs
+@@ -1303,6 +1303,16 @@
+         ));
+     }
+ 
++    // Dukovo leaves out the names the directory's `.hidden` lists, as
++    // GNOME Files does: the Unix names of its folders, links to the plain
++    // ones (ADR 0113). -a and -A show them.
++    #[cfg(target_os = "radix")]
++    let hidden = if config.files == Files::Normal {
++        hidden_names(path_data.path())
++    } else {
++        FxHashSet::default()
++    };
++
+     for raw_entry in read_dir.by_ref() {
+         let dir_entry = match raw_entry {
+             Ok(path) => path,
+@@ -1313,6 +1323,11 @@
+             }
+         };
+ 
++        #[cfg(target_os = "radix")]
++        if hidden.contains(&dir_entry.file_name()) {
++            continue;
++        }
++
+         if should_display(&dir_entry, config) {
+             entries.push(PathData::new(
+                 dir_entry.path().into(),
+@@ -1331,6 +1346,19 @@
+     Ok(())
+ }
+ 
++/// The names `dir/.hidden` lists, one a line, as GNOME Files reads them.
++#[cfg(target_os = "radix")]
++fn hidden_names(dir: &Path) -> FxHashSet<OsString> {
++    use std::os::unix::ffi::OsStrExt;
++    let Ok(text) = fs::read(dir.join(".hidden")) else {
++        return FxHashSet::default();
++    };
++    text.split(|&b| b == b'\n')
++        .filter(|line| !line.is_empty())
++        .map(|line| OsStr::from_bytes(line).to_os_string())
++        .collect()
++}
++
+ fn write_directory_entries<O: LsOutput>(
+     entries: &[PathData],
+     config: &Config,

@@ -5,8 +5,9 @@ SPDX-License-Identifier: MIT
 The core utilities on Radix, which has Linux's system interface through
 mlibc: uucore's signal list, realtime signals and broken-pipe check are
 Linux's; file systems are described with statvfs, as on Redox, since
-mlibc has no statfs, and listed from /proc/mounts, which Radix writes as
-mtab lines; and setgroups and the audit-less id are Linux's.
+mlibc has no statfs, and listed from /processes/mounts (Linux's
+/proc/mounts), which Radix writes as mtab lines; and setgroups and the
+audit-less id are Linux's.
 
 diff --git a/src/uu/chroot/src/chroot.rs b/src/uu/chroot/src/chroot.rs
 index 23e696b..78fdf69 100644
@@ -63,9 +64,9 @@ index 0ede0f2..8c9f923 100644
  
  #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
  const LINUX_MTAB: &str = "/etc/mtab";
-+// Radix lists its mounts in /proc/mounts, one mtab line each.
++// Radix lists its mounts in /processes/mounts, one mtab line each.
 +#[cfg(target_os = "radix")]
-+const LINUX_MTAB: &str = "/proc/mounts";
++const LINUX_MTAB: &str = "/processes/mounts";
  #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
  const LINUX_MOUNTINFO: &str = "/proc/self/mountinfo";
  #[cfg(all(unix, not(any(target_os = "aix", target_os = "redox"))))]

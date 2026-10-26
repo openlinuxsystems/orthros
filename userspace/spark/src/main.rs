@@ -9,19 +9,22 @@
 //! it starts, a capability to the `services` resource domain and the
 //! power capability. Spark v2:
 //!
-//! 1. builds the directory hierarchy on the root (the plan's spec 7.1):
-//!    `/system`, `/applications`, `/users`, `/data`, `/tmp`, `/run`,
-//!    `/dev`, `/proc`, `/sys` and `/volumes`; and mounts the boot archive
-//!    read-only on `/system`, tmpfs on `/system/etc`, `/system/var`,
-//!    `/tmp` and `/run`, and the `dev`, `proc` and `sys` trees; makes
-//!    `/system/var/tmp`; then copies each default setting in
-//!    `/system/lib/defaults/etc` that `/system/etc` lacks into it;
-//! 2. mounts the FAT filesystem of each disk in `/dev` that holds one
+//! 1. builds the directory hierarchy on the root (the plan's spec 7.1,
+//!    with plain names, ADR 0113): `/system`, `/applications`, `/users`,
+//!    `/shared`, `/tmp`, `/devices`, `/processes`, `/kernel` and
+//!    `/volumes`; and mounts the boot archive read-only on `/system`,
+//!    tmpfs on `/system/settings`, `/system/state`, `/system/live` and
+//!    `/tmp`, and the device, process and kernel trees; makes
+//!    `/system/state/tmp`; makes the Unix names (`/bin`, `/etc`, `/dev`,
+//!    `/proc` and the rest) links to them, hidden from listings by the
+//!    root's `.hidden`; then copies each default setting in
+//!    `/system/lib/defaults/etc` that `/system/settings` lacks into it;
+//! 2. mounts the FAT filesystem of each disk in `/devices` that holds one
 //!    (each partition, or the whole disk if it has none) at
 //!    `/volumes/<name>`;
-//! 3. listens for requests at `/run/spark/control` and, with no
+//! 3. listens for requests at `/system/live/spark/control` and, with no
 //!    arguments (a normal boot), starts the services
-//!    `/system/etc/spark/services` describes (`supervisor`);
+//!    `/system/settings/spark/services` describes (`supervisor`);
 //! 4. with arguments, as the boot tests boot it, starts one program
 //!    from `/system`, the one they name, with the arguments after it, and
 //!    starts no services unless `--services` comes first, or
@@ -73,38 +76,64 @@ const PROGRAM_MEMORY_ORDER: u32 = 9;
 const ARGS_MAX: usize = 16;
 
 /// The directories of the root, every one a mount point or a place for
-/// one (the plan's spec 7.1).
-const HIERARCHY: [&str; 10] =
-    ["system", "applications", "users", "data", "tmp", "run", "dev", "proc", "sys", "volumes"];
-
-/// Symbolic links in the root to where Dukovo keeps what Unix programs
-/// look for at the usual places: `/bin/sh`, `#!/usr/bin/env`,
-/// `/etc/hosts`, `/usr/share/man` (ADR 0081).
-const LINKS: [(&str, &str); 5] = [
-    ("bin", "system/bin"),
-    ("etc", "system/etc"),
-    ("sbin", "system/bin"),
-    ("usr", "system"),
-    ("var", "system/var"),
+/// one (the plan's spec 7.1), named so that they need no explaining
+/// (ADR 0113).
+const HIERARCHY: [&str; 9] = [
+    "system",
+    "applications",
+    "users",
+    "shared",
+    "tmp",
+    "devices",
+    "processes",
+    "kernel",
+    "volumes",
 ];
 
-/// What is mounted where, in this order. `/system/etc`, `/system/var` and
-/// `/system/boot` are directories of the boot archive's, for this.
+/// Symbolic links from the names Unix programs and scripts look for to
+/// where Dukovo keeps those things: `/bin/sh`, `#!/usr/bin/env`,
+/// `/etc/hosts`, `/dev/null`, `/proc/mounts`, `/var/run` (ADRs 0081 and
+/// 0113).
+const LINKS: [(&str, &str); 10] = [
+    ("bin", "system/bin"),
+    ("dev", "devices"),
+    ("etc", "system/settings"),
+    ("proc", "processes"),
+    ("run", "system/live"),
+    ("sbin", "system/bin"),
+    ("sys", "kernel"),
+    ("usr", "system"),
+    ("var", "system/state"),
+    ("system/state/run", "../live"),
+];
+
+/// What is mounted where, in this order. `/system/settings`,
+/// `/system/state`, `/system/live` and `/system/boot` are directories of
+/// the boot archive's, for this.
 const MOUNTS: [(&str, FilesystemKind, MountFlags); 8] = [
     ("system", FilesystemKind::Bootfs, MountFlags::READ_ONLY),
-    ("system/etc", FilesystemKind::Tmpfs, MountFlags::NONE),
-    ("system/var", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("system/settings", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("system/state", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("system/live", FilesystemKind::Tmpfs, MountFlags::NONE),
     ("tmp", FilesystemKind::Tmpfs, MountFlags::NONE),
-    ("run", FilesystemKind::Tmpfs, MountFlags::NONE),
-    ("dev", FilesystemKind::Dev, MountFlags::NONE),
-    ("proc", FilesystemKind::Proc, MountFlags::NONE),
-    ("sys", FilesystemKind::Sys, MountFlags::NONE),
+    ("devices", FilesystemKind::Dev, MountFlags::NONE),
+    ("processes", FilesystemKind::Proc, MountFlags::NONE),
+    ("kernel", FilesystemKind::Sys, MountFlags::NONE),
 ];
 
 /// Directories of the mounted tmpfs that Unix programs expect there:
 /// `/var/tmp`, for temporary files that are to outlive a restart, such
-/// as vi's recovery files, once `/system/var` is on a disk.
-const MOUNTED_DIRS: [&str; 1] = ["system/var/tmp"];
+/// as vi's recovery files, once `/system/state` is on a disk.
+const MOUNTED_DIRS: [&str; 1] = ["system/state/tmp"];
+
+/// The directories with links in them, and the `.hidden` file each gets:
+/// the links' names, one a line, which ls(1) and the shell's completion
+/// leave out unless asked for everything, as the file manager will and
+/// as GNOME Files and Nemo leave out what a `.hidden` names (ADR 0113).
+const HIDDEN: [(&str, &str); 2] = [
+    (".hidden", "bin\ndev\netc\nproc\nrun\nsbin\nsys\nusr\nvar\n"),
+    ("system/state/.hidden", "run\n"),
+];
 
 fn main(start: &Startup) -> u64 {
     let number = process::info(&SYS, SLOT_PROCESS).map_or(0, |info| info.number);
@@ -280,7 +309,7 @@ fn run_posix(root: &Dir, path: &str, args: &[&str]) -> Result<Program, String> {
 /// not become Spark's controlling terminal).
 fn open_pty(root: &Dir) -> Result<(File, File), String> {
     let rw = Rights::READ.union(Rights::WRITE);
-    let master = root.open("dev/ptmx", OpenFlags::NONE, rw).map_err(|err| format!("{err}"))?;
+    let master = root.open("devices/ptmx", OpenFlags::NONE, rw).map_err(|err| format!("{err}"))?;
     let mut number = [0u8; 4];
     let request = |request, buffer: &mut [u8; 4]| {
         let address = buffer.as_mut_ptr() as u64;
@@ -289,7 +318,7 @@ fn open_pty(root: &Dir) -> Result<(File, File), String> {
     };
     request(terminal::GET_PTY_NUMBER, &mut number)?;
     request(terminal::SET_PTY_LOCK, &mut [0; 4])?;
-    let path = format!("dev/pts/{}", u32::from_le_bytes(number));
+    let path = format!("devices/pts/{}", u32::from_le_bytes(number));
     let terminal =
         root.open(&path, OpenFlags::NO_TERMINAL, rw).map_err(|err| format!("/{path}: {err}"))?;
     Ok((master, terminal))
@@ -322,6 +351,12 @@ fn build(root: &Dir) -> bool {
             return false;
         }
     }
+    for (path, names) in HIDDEN {
+        if let Err(err) = root.write_file(path, names.as_bytes()) {
+            println!("spark: cannot write /{path}: {err}");
+            return false;
+        }
+    }
     println!(
         "spark: built the hierarchy of {} directories and mounted {} filesystems",
         HIERARCHY.len(),
@@ -333,15 +368,15 @@ fn build(root: &Dir) -> bool {
 /// Where the system keeps its default settings, and where the settings
 /// are, which start with each default that is not there yet: the plan's
 /// way for updates to add settings without replacing edited ones
-/// (spark(8)). `/system/etc` is a tmpfs until Btrfs, so each boot starts
-/// it with all of them.
+/// (spark(8)). `/system/settings` is a tmpfs until Btrfs, so each boot
+/// starts it with all of them.
 const DEFAULTS: &str = "system/lib/defaults/etc";
-const SETTINGS: &str = "system/etc";
+const SETTINGS: &str = "system/settings";
 
 /// How deep the defaults' directories may nest.
 const DEFAULTS_DEPTH: usize = 8;
 
-/// Copies each default setting into `/system/etc` that is not there.
+/// Copies each default setting into `/system/settings` that is not there.
 fn seed_settings(root: &Dir) {
     let Ok(defaults) = root.open_dir(DEFAULTS, Rights::READ) else {
         return;
@@ -395,14 +430,14 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
 /// no partitions, at `/volumes/<name>`.
 fn mount_disks(root: &Dir) {
     let devices: Vec<String> =
-        match root.open_dir("dev", Rights::READ).and_then(|dev| dev.entries()) {
+        match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
             Ok(entries) => entries
                 .into_iter()
                 .filter(|entry| entry.kind == FileKind::BlockDevice)
                 .map(|entry| entry.name)
                 .collect(),
             Err(err) => {
-                println!("spark: cannot list /dev: {err}");
+                println!("spark: cannot list /devices: {err}");
                 return;
             }
         };
@@ -417,19 +452,19 @@ fn mount_disks(root: &Dir) {
     }
 }
 
-/// Mounts the FAT filesystem on `/dev/<name>` at `/volumes/<name>`,
+/// Mounts the FAT filesystem on `/devices/<name>` at `/volumes/<name>`,
 /// read-only if the disk is.
 fn mount_disk(root: &Dir, name: &str) {
     let rw = Rights::READ.union(Rights::WRITE);
-    let (device, flags) = match root.open(&alloc::format!("dev/{name}"), OpenFlags::NONE, rw) {
+    let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
         Ok(device) => (device, MountFlags::NONE),
         Err(err) if err.is(FileError::ReadOnly) => {
-            match root.open(&alloc::format!("dev/{name}"), OpenFlags::NONE, Rights::READ) {
+            match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, Rights::READ) {
                 Ok(device) => (device, MountFlags::READ_ONLY),
-                Err(err) => return println!("spark: cannot open /dev/{name}: {err}"),
+                Err(err) => return println!("spark: cannot open /devices/{name}: {err}"),
             }
         }
-        Err(err) => return println!("spark: cannot open /dev/{name}: {err}"),
+        Err(err) => return println!("spark: cannot open /devices/{name}: {err}"),
     };
     let at = alloc::format!("volumes/{name}");
     if let Err(err) = root.make_dir(&at) {

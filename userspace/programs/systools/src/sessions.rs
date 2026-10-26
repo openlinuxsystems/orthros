@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! who(1), w(1), users(1) and uptime(1). Radix keeps no utmp: a session
-//! is a session leader with a controlling terminal, as `/proc` shows it,
+//! is a session leader with a controlling terminal, as `/processes` shows it,
 //! logged in when its leader started.
 
 use std::ffi::CStr;
@@ -44,7 +44,7 @@ fn login_seconds(session: &Session, boot: i64) -> i64 {
 
 /// How long since the terminal was last used, in seconds, if known.
 fn idle_seconds(terminal: &str) -> Option<u64> {
-    let meta = std::fs::metadata(format!("/dev/{terminal}")).ok()?;
+    let meta = std::fs::metadata(format!("{}/{terminal}", util::DEVICES)).ok()?;
     let last = meta.atime().max(meta.mtime());
     if last <= 0 {
         return None;
@@ -62,7 +62,7 @@ fn own_terminal() -> Option<String> {
     }
     // SAFETY: a non-null result is a C string.
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
-    Some(name.strip_prefix("/dev/").unwrap_or(&name).to_string())
+    Some(util::terminal_name(&name).to_string())
 }
 
 /// uptime(1)'s line: the time, how long the system has been up, the
@@ -128,7 +128,7 @@ pub fn users(args: &mut Args) -> Result<i32, Fail> {
     if let Some(arg) = args.next()? {
         return Err(args.unknown(&arg));
     }
-    let processes = proc::processes().map_err(|e| util::failed(&"/proc", e))?;
+    let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let names: Vec<String> = sessions(&processes).iter().map(|_| util::user_name(0)).collect();
     println!("{}", names.join(" "));
     Ok(0)
@@ -177,7 +177,7 @@ pub fn who(args: &mut Args) -> Result<i32, Fail> {
     if operands.len() == 2 {
         only_mine = true;
     }
-    let processes = proc::processes().map_err(|e| util::failed(&"/proc", e))?;
+    let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let mut list = sessions(&processes);
     if only_mine {
         let mine = own_terminal();
@@ -277,7 +277,7 @@ pub fn w(args: &mut Args) -> Result<i32, Fail> {
             other => return Err(args.unknown(&other)),
         }
     }
-    let processes = proc::processes().map_err(|e| util::failed(&"/proc", e))?;
+    let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let mut list = sessions(&processes);
     let user = util::user_name(0);
     if user_filter.as_ref().is_some_and(|u| *u != user && u != "0") {

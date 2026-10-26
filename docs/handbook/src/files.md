@@ -5,44 +5,63 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Files, the directory hierarchy and /volumes
 
-This chapter describes files in Dukovo as of Phase 9 of the roadmap: the
-layout and the rules that the shell and every program see. The full
-reference is radix-files(7); `/proc` and `/sys` are in radix-proc(5) and
-radix-sysfs(5).
+This chapter describes files in Dukovo as of Phase 10 of the roadmap:
+the layout and the rules that the shell and every program see. The full
+reference is radix-files(7); `/processes` and `/kernel` are in
+radix-proc(5) and radix-sysfs(5).
 
 ## The directory hierarchy
 
-Every boot, Spark, the first program, builds the same tree:
+Every boot, Spark, the first program, builds the same tree. Each folder
+is named for what it holds:
 
 | Path | What it holds |
 | --- | --- |
 | `/system` | The operating system: programs and the system's own files, read-only |
-| `/system/etc`, `/system/var` | The system's settings and changing data (in memory for now) |
+| `/system/settings` | The system's settings (in memory for now) |
+| `/system/state` | The system's changing data: logs, caches (in memory for now) |
+| `/system/live` | The state of running services: sockets, locks, process IDs, in memory |
 | `/applications` | Applications |
 | `/users` | Each user's home |
-| `/data` | Data shared between users |
+| `/shared` | Files that users and services share |
 | `/tmp` | Temporary files, in memory, gone at the next boot |
-| `/run` | The state of running services, in memory |
-| `/dev` | Devices: `null`, `zero`, `random`, `urandom`, one per disk and partition, and the terminals (`ptmx`, `tty`, `pts/`) |
-| `/proc` | The processes, the mounts, memory and uptime, as text |
-| `/sys` | The kernel's devices and settings, one value per file |
+| `/devices` | Devices: `null`, `zero`, `random`, `urandom`, one per disk and partition, and the terminals (`ptmx`, `tty`, `pts/`) |
+| `/processes` | The processes, the mounts, memory and uptime, as text |
+| `/kernel` | The kernel's view of the hardware and its settings, one value per file |
 | `/volumes` | Disks, USB sticks and SD cards, one directory each |
 
-Unix programs and scripts look for `/bin/sh`, `/bin/bash`,
-`/usr/bin/env`, `/etc` and `/var/log`, so the root also has five
-symbolic links into `/system`:
-`/bin` and `/sbin` lead to `/system/bin`, `/usr` to `/system`, `/etc` to
-`/system/etc` and `/var` to `/system/var`. Everything is still kept in
-one place, `/system`.
+## The Unix names
+
+Unix programs and scripts look for `/bin/sh`, `/usr/bin/env`,
+`/dev/null`, `/proc`, `/etc` and `/var/log`, and so do people who know
+Unix. Each of those names is a symbolic link in the root to the folder
+that holds what it stands for:
+
+| Unix name | Leads to |
+| --- | --- |
+| `/bin`, `/sbin` | `/system/bin` |
+| `/usr` | `/system` |
+| `/etc` | `/system/settings` |
+| `/var` | `/system/state` (and `/var/run` to `/system/live`) |
+| `/run` | `/system/live` |
+| `/dev` | `/devices` |
+| `/proc` | `/processes` |
+| `/sys` | `/kernel` |
+
+Everything is still kept in one place, so `/etc/nanorc` and
+`/system/settings/nanorc` are the same file. The links are hidden: the
+root's `.hidden` file lists them, and `ls /` and the shell's Tab
+completion leave them out, as the file manager will. `ls -a /` shows
+them, and Tab completes one once its whole name is typed.
 
 The system ships its default settings in `/system/lib/defaults/etc`,
-and Spark copies each one that `/system/etc` lacks into it at boot, so
-`/etc/nanorc` is there to edit. A setting already in `/system/etc` is
-never replaced. While `/system/etc` is in memory, each boot starts it
-afresh from the defaults.
+and Spark copies each one that `/system/settings` lacks into it at boot,
+so `/system/settings/nanorc` is there to edit. A setting already in
+`/system/settings` is never replaced. While `/system/settings` is in
+memory, each boot starts it afresh from the defaults.
 
 Until the root filesystem lives on a disk (Btrfs, Phase 10),
-`/applications`, `/users` and `/data` are empty and in memory.
+`/applications`, `/users` and `/shared` are empty and in memory.
 
 ## Programs see only what they are given
 
@@ -75,7 +94,7 @@ and hard disk are `sda` and `sdb`. USB sticks need the USB drivers (Phase
 11), which also bring mounting by label, `/volumes/<label>`, and safe
 eject. NVMe disks come later in Phase 10.
 
-Disk tools read and write the devices themselves, such as `/dev/sda`, at
+Disk tools read and write the devices themselves, such as `/devices/sda`, at
 any offset, with nothing cached between, and ask their size, sector size
 and the rest with Linux's `ioctl` requests (radix-block(2)). A device
 written by mistake loses what was on it, as on any system, so write to

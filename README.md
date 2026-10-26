@@ -32,7 +32,7 @@ Dukovo has finished **Phase 9** of its [roadmap](docs/roadmap.md):
 - **Processes.** Programs run in processes of their own, which Spark
   starts from a boot archive.
 - **Files.** Files live behind directory capabilities: tmpfs, FAT on
-  virtio disks, `/proc` and `/sys`.
+  virtio disks, `/processes` and `/kernel`.
 - **POSIX.** A POSIX layer covers fork, exec, signals, pipes, terminals
   and job control. It runs on mlibc and a port of Rust's standard
   library, so C and Rust programs from elsewhere build for it.

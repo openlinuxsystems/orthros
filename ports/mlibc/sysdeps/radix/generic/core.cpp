@@ -371,7 +371,7 @@ int Sysdeps<GetEntropy>::operator()(void *buffer, size_t length) {
 #ifndef MLIBC_BUILDING_RTLD
 namespace {
 
-// Reads the first line of a file of /sys into `out` (`size` bytes, with
+// Reads the first line of a file of /kernel into `out` (`size` bytes, with
 // its NUL), without the newline. Returns whether it could.
 bool read_sys(const char *path, char *out, size_t size) {
 	int fd;
@@ -388,12 +388,12 @@ bool read_sys(const char *path, char *out, size_t size) {
 	return true;
 }
 
-// The number of KiB on the line of /proc/meminfo that starts with `key`
+// The number of KiB on the line of /processes/meminfo that starts with `key`
 // (as "free:"), or -1 if none does.
 long memory_kib(const char *key) {
 	char text[1024];
 	int fd;
-	if(sysdep<Open>("/proc/meminfo", O_RDONLY | O_CLOEXEC, 0, &fd))
+	if(sysdep<Open>("/processes/meminfo", O_RDONLY | O_CLOEXEC, 0, &fd))
 		return -1;
 	ssize_t got = 0;
 	int e = sysdep<Read>(fd, text, sizeof(text) - 1, &got);
@@ -423,7 +423,7 @@ int Sysdeps<Uname>::operator()(struct utsname *buf) {
 	// "Radix 0.9.0 (Dukovo Server 0.9.0)": the second word is the release, as
 	// Linux's is its version number, and the whole line the version.
 	char version[64];
-	if(!read_sys("/sys/kernel/version", version, sizeof(version)))
+	if(!read_sys("/kernel/version", version, sizeof(version)))
 		strcpy(version, "Radix unknown");
 	strncpy(buf->version, version, sizeof(buf->version) - 1);
 	const char *release = strchr(version, ' ');
@@ -464,7 +464,7 @@ int Sysdeps<Sysconf>::operator()(int num, long *ret) {
 	case _SC_NPROCESSORS_ONLN: {
 		char cpus[32];
 		*ret = 1;
-		if(read_sys("/sys/kernel/cpus", cpus, sizeof(cpus))) {
+		if(read_sys("/kernel/cpus", cpus, sizeof(cpus))) {
 			long n = strtol(cpus, nullptr, 10);
 			if(n > 0)
 				*ret = n;

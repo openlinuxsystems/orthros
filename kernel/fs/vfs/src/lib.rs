@@ -23,7 +23,7 @@
 //! it. [`synthetic`] makes the generated files of procfs, sysfs and devfs,
 //! and [`bootfs`] serves the boot archive. [`locks`] is what a file's
 //! advisory locks do (Phase 8). [`raw`] reads and writes block devices
-//! with no cache between, for `/dev/sda` and its kind (Phase 10).
+//! with no cache between, for `/devices/sda` and its kind (Phase 10).
 //!
 //! The crate is a compartment: it has no `unsafe` code. It builds for the
 //! host (feature `host`), where its tests run.
@@ -509,11 +509,11 @@ pub enum FsKind {
     Tmpfs,
     /// FAT12, FAT16 or FAT32 on a disk.
     Fat,
-    /// The processes (`/proc`).
+    /// The processes (`/processes`).
     Proc,
-    /// The kernel's devices and settings (`/sys`).
+    /// The kernel's devices and settings (`/kernel`).
     Sys,
-    /// The devices (`/dev`).
+    /// The devices (`/devices`).
     Dev,
     /// The boot archive (`/system`), read-only.
     Boot,

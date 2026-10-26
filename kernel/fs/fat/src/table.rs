@@ -63,7 +63,7 @@ impl Width {
         value >= self.mask() - 7
     }
 
-    /// The name, as `/proc/mounts` shows it.
+    /// The name, as `/processes/mounts` shows it.
     pub fn name(self) -> &'static str {
         match self {
             Width::Fat12 => "FAT12",

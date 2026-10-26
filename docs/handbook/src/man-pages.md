@@ -15,8 +15,8 @@ for section 2, which `ridlc` generates from the interface definitions in
 | --- | --- |
 | `ob(1)` | The build tool: every command and option |
 | `dukovo.toml(5)` | The build configuration file |
-| `radix-proc(5)` | `/proc`: the processes, the mounts, memory and uptime as text |
-| `radix-sysfs(5)` | `/sys`: the kernel's devices and settings, one value per file, in Linux's layout |
+| `radix-proc(5)` | `/processes`: the processes, the mounts, memory and uptime as text |
+| `radix-sysfs(5)` | `/kernel`: the kernel's view of the hardware and its settings, one value per file, in Linux's layout |
 | `dukovo-boot(7)` | How Dukovo boots, its consoles, the kernel command line and microcode |
 | `radix-debug(7)` | Panic reports, the crash log, the kernel debugger, the lock checker, GDB and trace points |
 | `radix-capabilities(7)` | Capabilities: object kinds, rights, badges, sealing, delegation and revocation |
