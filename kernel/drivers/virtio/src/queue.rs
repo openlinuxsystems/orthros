@@ -244,10 +244,15 @@ impl Queue {
     }
 
     /// Hands the device a chain of `count` buffers, `buffer(0)` first, in
-    /// order: those it reads first, then those it writes. Returns the
-    /// chain's head, which [`Queue::used`] gives back with it. Call
-    /// [`Queue::notify`] after adding.
-    pub fn add(&mut self, count: usize, buffer: impl Fn(usize) -> Buffer) -> Result<u16, Error> {
+    /// order (each asked for once, in that order): those it reads first,
+    /// then those it writes. Returns the chain's head, which
+    /// [`Queue::used`] gives back with it. Call [`Queue::notify`] after
+    /// adding.
+    pub fn add(
+        &mut self,
+        count: usize,
+        mut buffer: impl FnMut(usize) -> Buffer,
+    ) -> Result<u16, Error> {
         if count == 0 || count > usize::from(self.size) {
             return Err(Error::BadRequest);
         }

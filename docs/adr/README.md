@@ -129,3 +129,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0115](0115-nvme-from-the-specification.md) | NVMe disks, written from the specification, with a queue for each CPU | Accepted |
 | [0116](0116-idle-polling-learns-from-other-cpus.md) | Idle polling learns only from wake-ups that other CPUs send | Accepted |
 | [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted |
+| [0118](0118-frames-in-order-for-memory-written-in-order.md) | Memory written in order gets frames in order, and virtio merges buffers that follow each other | Accepted |

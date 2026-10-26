@@ -39,6 +39,16 @@
 //! frames and 2 MiB) gives its oldest batch back. Cached frames count as
 //! free, and an allocation that finds nothing empties every CPU's cache
 //! into the zones before it tries again.
+//!
+//! Memory filled in order, as a program first writes a buffer from its
+//! start to its end, takes its frames from a run instead
+//! ([`Frames::alloc_sequential`]): a block of [`RUN_FRAMES`] contiguous
+//! frames each CPU takes from its zone at once and hands out from the
+//! lowest up, so that the buffer lies in long stretches of physical
+//! memory, as Linux's mostly does, rather than in whatever frames were
+//! freed last. A device takes such a buffer in fewer, longer pieces, and a
+//! hypervisor copies it faster. The frames of a run not yet handed out
+//! count as cached.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -75,6 +85,10 @@ const OOM_ATTEMPTS: u32 = 4;
 pub const CACHE_BATCH: u32 = 32;
 /// Most frames a CPU's cache holds: 2 MiB.
 const CACHE_MOST: u32 = 512;
+/// The order of the blocks a CPU's run takes from its zone.
+const RUN_ORDER: u32 = 5;
+/// Frames in a run: 128 KiB.
+pub const RUN_FRAMES: u32 = 1 << RUN_ORDER;
 
 /// What memory a zone holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,11 +210,15 @@ struct Cached {
     len: u32,
     /// Frames it holds before it gives a batch back.
     limit: u32,
+    /// The frames from `run` to `run_end` of the block it hands out in
+    /// order ([`Frames::alloc_sequential`]), cached too.
+    run: u32,
+    run_end: u32,
 }
 
 impl Cached {
     const fn new() -> Cached {
-        Cached { zone: None, head: NIL, tail: NIL, len: 0, limit: 0 }
+        Cached { zone: None, head: NIL, tail: NIL, len: 0, limit: 0, run: 0, run_end: 0 }
     }
 }
 
@@ -457,13 +475,23 @@ impl Frames {
         owner: Owner,
         tag: u8,
     ) -> Result<u64, AllocError> {
-        self.alloc_inner(order, flags, owner, tag, true)
+        self.alloc_inner(order, flags, owner, tag, true, false)
+    }
+
+    /// Like an order-0 [`Frames::alloc`], for memory filled in order: the
+    /// next frame of this CPU's run, a block of [`RUN_FRAMES`] contiguous
+    /// frames it takes from its zone when it has handed out the last, so
+    /// that frames allocated one after another this way follow each other
+    /// in memory. Any frame does if no such block is free.
+    pub fn alloc_sequential(&self, flags: Flags, owner: Owner) -> Result<u64, AllocError> {
+        self.alloc_inner(0, flags, owner, 0, true, true)
     }
 
     /// The allocation itself. Without `reclaim`, a `MaySleep` allocation
     /// keeps out of the reserves but does not run the reclaim hook: the
     /// heap allocates its own bookkeeping this way, so reclaim never runs
-    /// inside the heap.
+    /// inside the heap. With `sequential`, a single frame comes from the
+    /// CPU's run if it can.
     pub(crate) fn alloc_inner(
         &self,
         order: u32,
@@ -471,6 +499,7 @@ impl Frames {
         owner: Owner,
         tag: u8,
         reclaim: bool,
+        sequential: bool,
     ) -> Result<u64, AllocError> {
         if order > MAX_ORDER || self.regions.get().is_none() {
             return Err(AllocError);
@@ -491,9 +520,10 @@ impl Frames {
         let (mut drained, mut reclaimed, mut oom_calls) = (false, false, 0);
         loop {
             let cached = match platform {
-                Some(platform) if order == 0 && flags.zone == ZoneLimit::Any => {
-                    self.take_cached(platform, origin, owner, tag)
-                }
+                Some(platform) if order == 0 && flags.zone == ZoneLimit::Any => sequential
+                    .then(|| self.take_run(platform, origin, owner, tag))
+                    .flatten()
+                    .or_else(|| self.take_cached(platform, origin, owner, tag)),
                 _ => None,
             };
             if let Some(pfn) = cached.or_else(|| self.try_zones(origin, order, flags, owner, tag)) {
@@ -607,6 +637,51 @@ impl Frames {
         Some(pfn)
     }
 
+    /// The next frame of this CPU's run, which takes a free block of
+    /// [`RUN_ORDER`] from its zone first if it is used up, for an
+    /// allocation from node `origin`; `None` if no such block is free
+    /// above the zone's floors.
+    fn take_run(
+        &self,
+        platform: &dyn Platform,
+        origin: usize,
+        owner: Owner,
+        tag: u8,
+    ) -> Option<u64> {
+        let _irqs = NoInterrupts::new(Some(platform));
+        let mut cache = self.cpus.get(platform.current_cpu())?.cache.lock();
+        let zone = self.cache_zone(&mut cache, platform)?;
+        if zone / KINDS != origin {
+            return None;
+        }
+        if cache.run == cache.run_end {
+            let block = {
+                let zone = &self.zones[zone];
+                let floor =
+                    zone.reserve.load(Ordering::Relaxed) + zone.protect.load(Ordering::Relaxed);
+                let mut buddy = zone.buddy.lock();
+                if buddy.free_pages() < floor + u64::from(RUN_FRAMES) {
+                    return None;
+                }
+                buddy.alloc(RUN_ORDER, Owner::PerCpu, 0)?
+            };
+            // The block's frames become single cached frames.
+            for pfn in block..block + u64::from(RUN_FRAMES) {
+                if let Some(info) = self.record(pfn) {
+                    info.set(State::Cached, 0, Owner::PerCpu, 0);
+                }
+            }
+            (cache.run, cache.run_end) = (block as u32, (block + u64::from(RUN_FRAMES)) as u32);
+            self.zones[zone].cached.fetch_add(u64::from(RUN_FRAMES), Ordering::Relaxed);
+        }
+        let pfn = u64::from(cache.run);
+        let info = self.record(pfn)?;
+        cache.run += 1;
+        self.zones[zone].cached.fetch_sub(1, Ordering::Relaxed);
+        info.set(State::Allocated, 0, owner, tag);
+        Some(pfn)
+    }
+
     /// The zone of a CPU's cache, chosen when the CPU first uses it: its
     /// node's `Normal` zone, or its `Dma32` zone if that is all the node
     /// has, as a local allocation tries first.
@@ -701,13 +776,25 @@ impl Frames {
         true
     }
 
-    /// Gives every frame the CPUs' caches hold back to the zones.
+    /// Gives every frame the CPUs' caches hold back to the zones, their
+    /// runs' too.
     pub fn drain_caches(&self) {
         for cpu in &self.cpus {
             let _irqs = NoInterrupts::new(self.platform());
             let mut cache = cpu.cache.lock();
             let len = cache.len;
             self.give_back(&mut cache, len);
+            let Some(Some(zone)) = cache.zone else { continue };
+            let zone = &self.zones[zone];
+            let mut buddy = zone.buddy.lock();
+            for pfn in u64::from(cache.run)..u64::from(cache.run_end) {
+                let Some(info) = self.record(pfn) else { continue };
+                info.set(State::Allocated, 0, Owner::PerCpu, 0);
+                // Cannot fail: the frame was just marked allocated.
+                let _ = buddy.free(pfn, 0, Owner::PerCpu);
+                zone.cached.fetch_sub(1, Ordering::Relaxed);
+            }
+            cache.run = cache.run_end;
         }
     }
 
@@ -824,7 +911,7 @@ impl Frames {
 
     /// Checks every zone's free lists ([`Buddy::check`]) and every CPU's
     /// cache: it holds as many frames as it counts, linked both ways, each
-    /// a cached frame of its zone.
+    /// a cached frame of its zone, as is each frame left in its run.
     pub fn check(&self) -> Result<(), &'static str> {
         for zone in &self.zones {
             let _irqs = NoInterrupts::new(self.platform());
@@ -853,6 +940,19 @@ impl Frames {
             }
             if len != cache.len || cache.tail != prev {
                 return Err("a CPU's cache's count or tail is wrong");
+            }
+            if cache.run > cache.run_end || cache.run_end - cache.run > RUN_FRAMES {
+                return Err("a CPU's run is out of bounds");
+            }
+            for pfn in u64::from(cache.run)..u64::from(cache.run_end) {
+                let entry = self.entry(pfn);
+                let info = self.record(pfn).ok_or("a CPU's run names no frame")?;
+                if info.state() != State::Cached || info.order() != 0 {
+                    return Err("a frame of a CPU's run is not a cached frame");
+                }
+                if entry.map(|e| e.zone) != cache.zone.flatten() {
+                    return Err("a CPU's run holds a frame of another zone");
+                }
             }
         }
         Ok(())
@@ -963,6 +1063,52 @@ mod tests {
         let block = frames.alloc(1, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
         assert!(block != first && block != second);
         frames.free(block, 1, Owner::Kernel).unwrap();
+        assert_eq!(frames.free_pages(), 2048);
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn frames_allocated_in_order_follow_each_other() {
+        let frames = frames_with(&[(0, 256, 2048)]);
+        // Frames freed in a jumble fill the cache, which ordinary
+        // allocations take from first.
+        let jumble: Vec<u64> =
+            (0..64).map(|_| frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).unwrap()).collect();
+        for &phys in jumble.iter().step_by(2).chain(jumble.iter().skip(1).step_by(2)) {
+            frames.free(phys, 0, Owner::Kernel).unwrap();
+        }
+        let run = RUN_FRAMES as usize;
+        let taken: Vec<u64> = (0..2 * run + run / 2)
+            .map(|_| frames.alloc_sequential(Flags::MAY_SLEEP, Owner::Anon).unwrap())
+            .collect();
+        for block in taken.chunks(run) {
+            assert!(
+                block.windows(2).all(|pair| pair[1] == pair[0] + PAGE_SIZE as u64),
+                "{block:x?}"
+            );
+        }
+        assert!(taken.iter().all(|phys| !jumble.contains(phys)));
+        assert_eq!(frames.owner_pages(Owner::Anon), taken.len() as u64);
+        assert_eq!(frames.free_pages(), 2048 - taken.len() as u64);
+        frames.check().unwrap();
+        // The rest of the last run goes back with the cache.
+        for &phys in &taken {
+            frames.free(phys, 0, Owner::Anon).unwrap();
+        }
+        frames.drain_caches();
+        assert_eq!(frames.free_pages(), 2048);
+        assert_eq!(frames.zones[0].cached.load(Ordering::Relaxed), 0);
+        frames.check().unwrap();
+        // Without a free block for a run, any frame does: every one above
+        // the reserve is still handed out.
+        let all =
+            core::iter::from_fn(|| frames.alloc_sequential(Flags::MAY_SLEEP, Owner::Anon).ok())
+                .collect::<Vec<_>>();
+        assert_eq!(all.len(), 2048 - 16);
+        for phys in all {
+            frames.free(phys, 0, Owner::Anon).unwrap();
+        }
+        frames.drain_caches();
         assert_eq!(frames.free_pages(), 2048);
         frames.check().unwrap();
     }

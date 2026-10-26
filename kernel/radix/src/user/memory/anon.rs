@@ -481,7 +481,22 @@ impl SpaceObject {
     ) -> core::result::Result<u64, Fault> {
         self.charge(1).map_err(|_| Fault::NoMemory)?;
         let flags = Flags { zero: anon.file.is_none(), ..Flags::MAY_SLEEP };
-        let Ok(phys) = FRAMES.alloc(0, flags, Owner::Anon) else {
+        // A zeroed page of a region of more than a run, whose page before
+        // is there, is likely one of many a buffer has touched in order:
+        // it takes the next frame of this CPU's run of contiguous ones, so
+        // that the buffer lies in long stretches of memory, which devices
+        // and hypervisors move faster. Smaller regions, which a program's
+        // start fills, keep taking the frames freed last.
+        let in_order = anon.file.is_none()
+            && region.pages >= u64::from(radix_mm::RUN_FRAMES)
+            && page > region.start
+            && Arch::query_entry(&self.arch, page - PAGE_SIZE).is_some();
+        let frame = if in_order {
+            FRAMES.alloc_sequential(flags, Owner::Anon)
+        } else {
+            FRAMES.alloc(0, flags, Owner::Anon)
+        };
+        let Ok(phys) = frame else {
             self.uncharge(1);
             return Err(Fault::NoMemory);
         };
