@@ -560,6 +560,24 @@ static void mapped(void) {
 	CHECK(fresh != MAP_FAILED);
 	CHECK(pread(fd, fresh, 2 * SIZE, 0) == 2 * SIZE);
 	CHECK(!memcmp(fresh, pattern, SIZE) && !memcmp(fresh + SIZE, pattern, SIZE));
+	// Copies into memory a little past the file's page within a page, and
+	// from memory into the file a little past it, go from the end, and
+	// make the pages as they go: memory none of whose pages are there yet,
+	// 1, 16 and 511 bytes past, and 512, where the copies go forward.
+	static const char none[SIZE];
+	static const int ahead[] = {1, 16, 511, 512};
+	for(size_t i = 0; i < sizeof(ahead) / sizeof(ahead[0]); i++) {
+		int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+		char *into = mmap(NULL, SIZE + 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
+		char *blank = mmap(NULL, SIZE, PROT_READ | PROT_WRITE, flags, -1, 0);
+		CHECK(into != MAP_FAILED && blank != MAP_FAILED);
+		char *at = into + ahead[i];
+		CHECK(pread(fd, at, SIZE, 0) == SIZE && !memcmp(at, pattern, SIZE));
+		CHECK(pwrite(fd, blank, SIZE, ahead[i]) == SIZE);
+		CHECK(pread(fd, at, SIZE, ahead[i]) == SIZE && !memcmp(at, none, SIZE));
+		CHECK(pwrite(fd, fresh, 2 * SIZE, 0) == 2 * SIZE);
+		CHECK(!munmap(into, SIZE + 4096) && !munmap(blank, SIZE));
+	}
 	// New memory reads as zeros, and writes them.
 	char *zeros = mmap(NULL, SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	CHECK(zeros != MAP_FAILED);

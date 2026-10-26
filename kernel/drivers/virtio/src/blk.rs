@@ -12,8 +12,11 @@
 //! caller's buffers, by physical address: nothing is copied (spec 6.3,
 //! zero-copy I/O); a discard's one range lives in the slot too. The
 //! driver uses one queue, with its completions on MSI-X entry `vector`,
-//! and asks for no other feature than read-only disks, the block size,
-//! cache flushes, discards and the segment limits.
+//! and asks for no other feature than indirect descriptors, read-only
+//! disks, the block size, cache flushes, discards and the segment limits.
+//! With indirect descriptors each request takes one entry of the queue,
+//! as Linux's requests do, so that the 16 requests of a mebibyte go to
+//! the device at once.
 
 use radix_hw::{Dma, device_barrier};
 
@@ -48,8 +51,9 @@ const HEADER: usize = 16;
 const RANGE: usize = 16;
 /// The most data buffers in one request this driver sends, whatever the
 /// device takes: the chain is built on the stack, and kernel stacks are
-/// small.
-pub const MAX_SEGMENTS: u32 = 32;
+/// small. With its header and status a request is then 32 descriptors,
+/// and its indirect table 512 bytes, eight to a page.
+pub const MAX_SEGMENTS: u32 = 30;
 
 /// What a request does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +133,8 @@ impl Blk {
             | feature::BLK_SIZE
             | feature::FLUSH
             | feature::DISCARD;
-        let features = common_feature::VERSION_1 | (offered & wanted);
+        let features =
+            common_feature::VERSION_1 | (offered & (wanted | common_feature::INDIRECT_DESC));
         if let Err(err) = transport.set_driver_features(features) {
             transport.add_status(status::FAILED);
             return Err(err);
@@ -162,7 +167,10 @@ impl Blk {
                 discard_sectors,
             }
         });
-        let queue = match Queue::new(&transport, 0, crate::queue::MAX_SIZE, vector, alloc) {
+        // A table holds a request's header, its buffers and its status.
+        let tables =
+            (features & common_feature::INDIRECT_DESC != 0).then_some(MAX_SEGMENTS as u16 + 2);
+        let queue = match Queue::new(&transport, 0, crate::queue::MAX_SIZE, vector, tables, alloc) {
             Ok(queue) => queue,
             Err(err) => {
                 transport.add_status(status::FAILED);
@@ -198,7 +206,7 @@ impl Blk {
 
     /// How many more requests of `segments` data buffers fit in the queue.
     pub fn room(&self, segments: usize) -> usize {
-        usize::from(self.queue.free()) / (segments + 2)
+        self.queue.room(segments + 2)
     }
 
     /// Starts a request: `op` on the sectors from `sector`, with `data`
@@ -246,7 +254,7 @@ impl Blk {
             return Err(Error::BadRequest);
         }
         let buffers = if matches!(op, Op::Discard(_)) { 1 } else { data.len() };
-        if usize::from(self.queue.free()) < buffers + 2 {
+        if self.queue.room(buffers + 2) == 0 {
             return Err(Error::Full);
         }
         let mut chain =

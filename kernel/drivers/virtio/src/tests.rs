@@ -85,6 +85,8 @@ struct State {
     flushes: u32,
     discarded: u64,
     requests: u64,
+    /// Requests whose chain was in a table of its own.
+    indirect: u64,
 }
 
 /// The device's BAR: the common configuration, the device configuration
@@ -121,13 +123,24 @@ impl Device {
             let head = Device::u16_at(s.driver + 4 + 2 * (u64::from(s.last_avail) % size));
             s.last_avail = s.last_avail.wrapping_add(1);
             let mut chain = Vec::new();
-            let mut desc = head;
+            let (mut table, mut entries, mut desc) = (s.desc, size, head);
             loop {
-                let d = Device::read_mem(s.desc + 16 * u64::from(desc), 16);
+                assert!(u64::from(desc) < entries, "descriptor {desc} is past its table");
+                let d = Device::read_mem(table + 16 * u64::from(desc), 16);
                 let addr = u64::from_le_bytes(d[0..8].try_into().unwrap());
                 let len = u32::from_le_bytes(d[8..12].try_into().unwrap());
                 let flags = u16::from_le_bytes(d[12..14].try_into().unwrap());
                 let next = u16::from_le_bytes(d[14..16].try_into().unwrap());
+                if flags & 4 != 0 {
+                    // The chain is in a table of its own (2.7.5.3), which
+                    // holds no further tables.
+                    assert!(s.driver_features & common_feature::INDIRECT_DESC != 0);
+                    assert!(table == s.desc && flags & 1 == 0, "a table in a table or a chain");
+                    assert!(len > 0 && len % 16 == 0 && u64::from(len / 16) <= size);
+                    (table, entries, desc) = (addr, u64::from(len / 16), 0);
+                    s.indirect += 1;
+                    continue;
+                }
                 chain.push((addr, len, flags & 2 != 0));
                 if flags & 1 == 0 {
                     break;
@@ -257,8 +270,12 @@ impl Registers for Device {
     }
 }
 
-const FEATURES: u64 =
-    common_feature::VERSION_1 | feature::SEG_MAX | feature::BLK_SIZE | feature::FLUSH | (1 << 28);
+const FEATURES: u64 = common_feature::VERSION_1
+    | common_feature::INDIRECT_DESC
+    | feature::SEG_MAX
+    | feature::BLK_SIZE
+    | feature::FLUSH
+    | (1 << 29);
 
 fn function(subsystem: u16, device_id: u16) -> Function {
     let config = Mmio::fake(config_space(subsystem, device_id), pci::CONFIG_SIZE);
@@ -304,7 +321,12 @@ fn sets_up_with_the_features_it_wants() {
     let s = device.state.lock().unwrap();
     assert_eq!(
         s.driver_features,
-        common_feature::VERSION_1 | feature::SEG_MAX | feature::BLK_SIZE | feature::FLUSH
+        common_feature::VERSION_1
+            | common_feature::INDIRECT_DESC
+            | feature::SEG_MAX
+            | feature::BLK_SIZE
+            | feature::FLUSH,
+        "not event indexes (bit 29), which it does not use"
     );
     assert_eq!(
         s.status,
@@ -438,7 +460,7 @@ fn many_requests_wrap_the_indexes() {
         }
     }
     assert_eq!(device.state.lock().unwrap().requests, 70_000);
-    assert_eq!(blk.room(1), 256 / 3);
+    assert_eq!(blk.room(1), 256);
 }
 
 #[test]
@@ -459,14 +481,14 @@ fn the_queue_fills_and_empties() {
             Err(err) => panic!("{err}"),
         }
     }
-    assert_eq!(tokens.len(), 256 / 3);
+    assert_eq!(tokens.len(), 256, "one entry of the ring each");
     assert!(blk.complete().is_none());
     Device::serve(&mut paused.0.state.lock().unwrap());
     for token in tokens {
         assert_eq!(wait(&mut blk, token), Outcome::Done);
     }
     assert!(blk.complete().is_none());
-    assert_eq!(blk.room(1), 256 / 3);
+    assert_eq!(blk.room(1), 256);
 }
 
 /// A device whose doorbell does nothing until the test serves it.
@@ -499,8 +521,9 @@ fn used_entry(device: &Device, head: u32) {
 fn used_entries_naming_no_request_are_skipped() {
     // A descriptor out of range, one inside a chain but not its head, and
     // a chain given back twice: the driver frees nothing it did not hand
-    // over, and goes on with the requests it did.
-    let paused = Arc::new(Paused(Device::new(FEATURES)));
+    // over, and goes on with the requests it did. The chains are in the
+    // ring, so that they have descriptors other than their heads.
+    let paused = Arc::new(Paused(Device::new(FEATURES & !common_feature::INDIRECT_DESC)));
     let f = function(2, 0x1042);
     let transport =
         Transport::find(&f, &mut |_, _| Some(Mmio::fake(paused.clone(), BAR_SIZE))).unwrap();
@@ -517,6 +540,67 @@ fn used_entries_naming_no_request_are_skipped() {
     assert!(blk.complete().is_none());
     assert_eq!(blk.bad_entries(), 3);
     assert_eq!(blk.room(1), 256 / 3);
+}
+
+/// Bytes `from..from + len` of the simulated disk as it starts.
+fn disk_bytes(from: u64, len: u64) -> Vec<u8> {
+    (from..from + len).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn requests_go_in_tables_of_their_own() {
+    // 64 reads of eight buffers each, at one doorbell: in the ring they
+    // would take ten descriptors each, and 25 at most would fit.
+    let (device, mut blk) = setup(FEATURES);
+    assert_eq!(blk.room(8), 256);
+    let buffers: Vec<Dma> = (0..64).map(|_| Dma::fake(4096)).collect();
+    let mut tokens = Vec::new();
+    for (i, buffer) in buffers.iter().enumerate() {
+        let parts: Vec<(u64, u32)> = (0..8).map(|k| (buffer.phys() + 512 * k, 512)).collect();
+        tokens.push(blk.submit_held(Op::Read, (i as u64 * 8) % SECTORS, &parts).unwrap());
+    }
+    assert_eq!(blk.room(8), 256 - 64);
+    blk.notify();
+    for token in tokens {
+        assert_eq!(wait(&mut blk, token), Outcome::Done);
+    }
+    for (i, buffer) in buffers.iter().enumerate() {
+        let mut got = [0u8; 4096];
+        buffer.read(0, &mut got);
+        assert_eq!(&got[..], &disk_bytes(((i as u64 * 8) % SECTORS) * SECTOR, 4096)[..]);
+    }
+    let s = device.state.lock().unwrap();
+    assert_eq!((s.requests, s.indirect), (64, 64));
+    drop(s);
+    assert_eq!(blk.room(8), 256);
+
+    // A write from tables too, and a flush, whose table has no buffer.
+    let buffer = &buffers[0];
+    buffer.write(0, &[3u8; 4096]);
+    let parts: Vec<(u64, u32)> = (0..8).map(|k| (buffer.phys() + 512 * k, 512)).collect();
+    let token = blk.submit(Op::Write, 40, &parts).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let token = blk.submit(Op::Flush, 0, &[]).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let s = device.state.lock().unwrap();
+    assert!(s.disk[40 * 512..48 * 512].iter().all(|&b| b == 3));
+    assert_eq!((s.indirect, s.flushes), (66, 1));
+}
+
+#[test]
+fn chains_go_in_the_ring_without_indirect_descriptors() {
+    let (device, mut blk) = setup(FEATURES & !common_feature::INDIRECT_DESC);
+    assert_eq!(device.state.lock().unwrap().driver_features & common_feature::INDIRECT_DESC, 0);
+    assert_eq!(blk.room(8), 256 / 10);
+    let buffer = Dma::fake(4096);
+    let parts: Vec<(u64, u32)> = (0..8).map(|k| (buffer.phys() + 512 * k, 512)).collect();
+    let token = blk.submit(Op::Read, 8, &parts).unwrap();
+    assert_eq!(wait(&mut blk, token), Outcome::Done);
+    let mut got = [0u8; 4096];
+    buffer.read(0, &mut got);
+    assert_eq!(&got[..], &disk_bytes(8 * SECTOR, 4096)[..]);
+    let s = device.state.lock().unwrap();
+    assert_eq!((s.requests, s.indirect), (1, 0));
 }
 
 #[test]

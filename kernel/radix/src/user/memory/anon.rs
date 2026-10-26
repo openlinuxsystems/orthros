@@ -261,6 +261,18 @@ fn unpin(phys: u64) {
     }
 }
 
+/// What [`SpaceObject::pin_pages`] did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pins {
+    /// Pinned every page.
+    All,
+    /// A page is not there yet, or is read-only for a write into it: one a
+    /// fault makes.
+    NotReady,
+    /// A page is not anonymous memory, or has as many pins as it holds.
+    Refused,
+}
+
 /// As [`unshare`], for a page a space let go of that may be anonymous
 /// memory or not (a frame's, a ring's, which their objects keep): whether
 /// it was.
@@ -627,43 +639,21 @@ impl SpaceObject {
         with: impl FnOnce(&[(u64, u32)]) -> R,
     ) -> Option<R> {
         let end = address.checked_add(len as u64)?;
-        if len == 0 || !self.fault_in(address, len, write) {
+        if len == 0 {
             return None;
         }
         let pages = (end - (address & !(PAGE_SIZE - 1))).div_ceil(PAGE_SIZE) as usize;
         let mut frames = Vec::new_in(super::kmalloc());
         frames.try_reserve_exact(pages).ok()?;
-        {
-            // With the regions locked no page of this space is made or let
-            // go of, nor does a fork start.
-            let _regions = self.regions.lock();
-            let mut at = address;
-            while at < end {
-                let page = at & !(PAGE_SIZE - 1);
-                let pinned = match Arch::query_entry(&self.arch, page) {
-                    Some((phys, Some(access)))
-                        if (!write || access == UserAccess::ReadWrite)
-                            && FRAMES
-                                .info(phys)
-                                .is_some_and(|info| info.owner() == Owner::Anon && info.pin()) =>
-                    {
-                        Some(phys)
-                    }
-                    _ => None,
-                };
-                let Some(phys) = pinned else {
-                    // Taken away again since it was made, or not anonymous
-                    // memory.
-                    for &(phys, _) in &frames {
-                        unpin(phys & !(PAGE_SIZE - 1));
-                    }
-                    return None;
-                };
-                let n = (page + PAGE_SIZE).min(end) - at;
-                let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
-                at += n;
-            }
-            self.lending.fetch_add(1, Ordering::AcqRel);
+        // Pages the program has touched are pinned in one walk of the page
+        // tables; if one is not there yet, they are made as faults would
+        // make them, with the regions unlocked, and pinned once more.
+        match self.pin_pages(address, end, write, &mut frames) {
+            Pins::All => {}
+            Pins::NotReady
+                if self.fault_in(address, len, write)
+                    && self.pin_pages(address, end, write, &mut frames) == Pins::All => {}
+            _ => return None,
         }
         let result = with(&frames);
         for &(phys, _) in &frames {
@@ -673,6 +663,50 @@ impl SpaceObject {
             wait::wake_all(self.lending_key());
         }
         Some(result)
+    }
+
+    /// Pins the pages of the bytes from `address` to `end`, as they are,
+    /// into `frames`, and counts a lending, for [`SpaceObject::lend`]. A
+    /// page that is not there, or is read-only for a `write`, or is not
+    /// anonymous memory pins nothing.
+    fn pin_pages(
+        &self,
+        address: u64,
+        end: u64,
+        write: bool,
+        frames: &mut Vec<(u64, u32), Kmalloc>,
+    ) -> Pins {
+        // With the regions locked no page of this space is made or let go
+        // of, nor does a fork start.
+        let _regions = self.regions.lock();
+        let mut at = address;
+        while at < end {
+            let page = at & !(PAGE_SIZE - 1);
+            let pins = match Arch::query_entry(&self.arch, page) {
+                Some((phys, Some(access))) if !write || access == UserAccess::ReadWrite => {
+                    match FRAMES.info(phys) {
+                        Some(info) if info.owner() == Owner::Anon && info.pin() => Ok(phys),
+                        _ => Err(Pins::Refused),
+                    }
+                }
+                _ => Err(Pins::NotReady),
+            };
+            let phys = match pins {
+                Ok(phys) => phys,
+                Err(pins) => {
+                    for &(phys, _) in frames.iter() {
+                        unpin(phys & !(PAGE_SIZE - 1));
+                    }
+                    frames.clear();
+                    return pins;
+                }
+            };
+            let n = (page + PAGE_SIZE).min(end) - at;
+            let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
+            at += n;
+        }
+        self.lending.fetch_add(1, Ordering::AcqRel);
+        Pins::All
     }
 
     /// What a fork waits on for lendings to finish.

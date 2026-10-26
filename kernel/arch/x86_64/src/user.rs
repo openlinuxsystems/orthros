@@ -38,8 +38,10 @@
 //!
 //! The kernel reads and writes user memory only through
 //! [`copy_from_user`] and [`copy_to_user`], which check that the range is
-//! in the user half and lift SMAP for the one `rep movsb` that copies. A
-//! fault on that instruction does not stop the kernel. If the copy may
+//! in the user half and lift SMAP for the one `rep movsb` that copies, or
+//! for a loop that copies from the end when the destination is a little
+//! ahead of the source within a page ([`BACKWARD_WINDOW`]). A fault on a
+//! copying instruction does not stop the kernel. If the copy may
 //! sleep (interrupts were on, preemption allowed), the user page handler
 //! gets the chance to make the page first, and the copy goes on where it
 //! stopped; otherwise, or if it could not, the fault handler moves the
@@ -371,6 +373,17 @@ radix_user_copy:
     je 2f
     stac
 2:
+    // Backward when the destination is 1 to BACKWARD_WINDOW - 1 bytes
+    // ahead of the source, modulo 4 KiB, and the copy is long.
+    cmp rcx, {backward_min}
+    jb 4f
+    mov eax, edi
+    sub eax, esi
+    and eax, 4095
+    dec eax
+    cmp eax, {backward_window} - 2
+    jbe 5f
+4:
     .global radix_user_copy_insn
 radix_user_copy_insn:
     rep movsb
@@ -382,6 +395,45 @@ radix_user_copy_done:
 3:
     mov rax, rcx
     ret
+    // From the end: single bytes until a multiple of 8 is left, then 32
+    // bytes at a time, then 8. RCX is always what is left to copy, at
+    // the start, so that every load and store here may fault and go
+    // again, as `rep movsb` does.
+5:
+    .global radix_user_copy_back
+radix_user_copy_back:
+    test cl, 7
+    jz 6f
+    movzx eax, byte ptr [rsi + rcx - 1]
+    mov byte ptr [rdi + rcx - 1], al
+    dec rcx
+    jmp 5b
+6:
+    cmp rcx, 32
+    jb 8f
+7:
+    mov rax, qword ptr [rsi + rcx - 8]
+    mov rdx, qword ptr [rsi + rcx - 16]
+    mov r8, qword ptr [rsi + rcx - 24]
+    mov r9, qword ptr [rsi + rcx - 32]
+    mov qword ptr [rdi + rcx - 8], rax
+    mov qword ptr [rdi + rcx - 16], rdx
+    mov qword ptr [rdi + rcx - 24], r8
+    mov qword ptr [rdi + rcx - 32], r9
+    sub rcx, 32
+    cmp rcx, 32
+    jae 7b
+8:
+    test rcx, rcx
+    jz 9f
+    mov rax, qword ptr [rsi + rcx - 8]
+    mov qword ptr [rdi + rcx - 8], rax
+    sub rcx, 8
+    jmp 8b
+9:
+    .global radix_user_copy_back_end
+radix_user_copy_back_end:
+    jmp radix_user_copy_done
     "#,
     scratch = const SCRATCH_OFFSET,
     kernel_rsp = const KERNEL_RSP_OFFSET,
@@ -391,7 +443,24 @@ radix_user_copy_done:
     user_cs = const USER_CS,
     initial_flags = const FLAG_INTERRUPT | FLAG_RESERVED,
     smap = sym paging::SMAP,
+    backward_min = const BACKWARD_MIN,
+    backward_window = const BACKWARD_WINDOW,
 );
+
+/// Copies of at least this many bytes go backward when the destination
+/// is a little ahead of the source within a page ([`BACKWARD_WINDOW`]).
+const BACKWARD_MIN: usize = 512;
+
+/// How far ahead of the source, modulo 4 KiB, the destination of a long
+/// copy may be for the copy to go backward, from the end, rather than
+/// with `rep movsb`. AMD's Zen 3 and later take a load of `rep movsb`
+/// for one that may depend on a store just before it whose address has
+/// the same low 12 bits (4K aliasing), and then wait for the store: when
+/// the destination is just ahead of the source, every load does, and the
+/// copy runs many times slower (glibc's bug 30994, and why its `memmove`
+/// copies backward in the same case). A copy from the end never loads
+/// from where it just stored. The window is glibc's for 32-byte vectors.
+const BACKWARD_WINDOW: usize = 512;
 
 unsafe extern "C" {
     /// The SYSCALL entry; see the assembly above.
@@ -406,6 +475,8 @@ unsafe extern "C" {
     fn radix_user_copy(dst: *mut u8, src: *const u8, len: usize) -> usize;
     static radix_user_copy_insn: u8;
     static radix_user_copy_done: u8;
+    static radix_user_copy_back: u8;
+    static radix_user_copy_back_end: u8;
 }
 
 static SYSCALL_HANDLER: Once<fn(&mut SyscallRegs)> = Once::new();
@@ -861,14 +932,16 @@ pub fn exception(vector: u8, frame: &TrapFrame) {
     fault(UserFault { kind, pc: frame.rip, sp: frame.rsp, code: frame.error });
 }
 
-/// Where a fault in kernel mode at `rip` resumes, if it is the copy
-/// instruction of a user copy: for a page fault on a user address (`page`:
-/// the address and whether it was a write) that the copy may sleep for,
-/// the copy instruction again once the user page handler has made the
-/// page; otherwise the copy's end, so that it reports what was left.
+/// Where a fault in kernel mode at `rip` resumes, if it is a copy
+/// instruction of a user copy (`rep movsb`, or a load or store of the
+/// backward copy): for a page fault on a user address (`page`: the address
+/// and whether it was a write) that the copy may sleep for, the same
+/// instruction again once the user page handler has made the page;
+/// otherwise the copy's end, so that it reports what was left.
 pub fn fixup(rip: u64, page: Option<(u64, bool)>, may_sleep: bool) -> Option<u64> {
     let insn = &raw const radix_user_copy_insn as u64;
-    if rip != insn {
+    let back = &raw const radix_user_copy_back as u64..&raw const radix_user_copy_back_end as u64;
+    if rip != insn && !back.contains(&rip) {
         return None;
     }
     if let Some((address, write)) = page {
@@ -880,7 +953,7 @@ pub fn fixup(rip: u64, page: Option<(u64, bool)>, may_sleep: bool) -> Option<u64
             let made = handler(address, write);
             cpu::disable_interrupts();
             if made {
-                return Some(insn);
+                return Some(rip);
             }
         }
     }

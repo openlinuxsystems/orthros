@@ -98,13 +98,18 @@ is a breakpoint and not a protection fault.
 **User copies.** The kernel reads and writes user memory only through
 `copy_from_user` and `copy_to_user`. Each checks that the range lies in
 the user half (`radix_ipc::range`, proved with Kani), lifts SMAP with
-`stac` for one `rep movsb` and puts it back with `clac`. A page fault on
-that instruction does not panic: the fault handler moves the instruction
-pointer to the end of the copy (`fixup`) and the copy reports failure,
-which becomes `bad_address`. Memory the kernel shares with a program for
-a longer time, such as a ring's pages, is allocated by the kernel, kept
-mapped in its own half and read and written there with volatile accesses
-(`Shared`), never through the program's mapping.
+`stac` for one `rep movsb` and puts it back with `clac`. A copy of 512
+bytes or more whose destination is 1 to 511 bytes ahead of its source,
+modulo 4 KiB, goes from the end in 8-byte moves instead: AMD's Zen 3 and
+later run `rep movsb` many times slower there, each load waiting on a
+store just before it with the same low 12 bits of address (4K aliasing),
+and glibc's `memmove` copies backward in the same case. A page fault on
+a copying instruction does not panic: the fault handler moves the
+instruction pointer to the end of the copy (`fixup`) and the copy
+reports failure, which becomes `bad_address`. Memory the kernel shares
+with a program for a longer time, such as a ring's pages, is allocated by
+the kernel, kept mapped in its own half and read and written there with
+volatile accesses (`Shared`), never through the program's mapping.
 
 **Status words.** Every system call returns a status in `rax`: 0 for
 success, otherwise `(detail << 32) | (domain << 16) | code`. Domain 1 is

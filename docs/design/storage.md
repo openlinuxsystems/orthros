@@ -230,8 +230,11 @@ Every disk's requests go through one queue (`fs/disk/queue.rs`, ADR
 0111), and a driver is a `Controller` below it. A request takes one of
 64 slots, as many as the I/O class and level of its thread allow (ADR
 0093), and the controller starts it: virtio as a descriptor chain (the
-header, up to 32 data segments, the status byte) matched to its slot by
-the chain's head, AHCI as a command in the port's command list, the
+header, up to 30 data segments, the status byte) matched to its slot by
+the chain's head, in a table of its own when the device takes indirect
+descriptors, as QEMU's and most do, so that each request takes one entry
+of the ring and the 16 requests of a mebibyte go at one doorbell; AHCI as
+a command in the port's command list, the
 slot's number its NCQ tag. The interrupt handler collects what finished
 and wakes the waiting threads, each of which frees its own slot. Many
 threads have requests in flight at once, up to the slots the controller

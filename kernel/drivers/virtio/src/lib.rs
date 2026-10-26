@@ -128,6 +128,9 @@ pub mod status {
 
 /// Feature bits every device type shares.
 pub mod feature {
+    /// The device takes chains of buffers in tables of their own
+    /// (indirect descriptors).
+    pub const INDIRECT_DESC: u64 = 1 << 28;
     /// The device follows virtio 1.0 or later.
     pub const VERSION_1: u64 = 1 << 32;
 }

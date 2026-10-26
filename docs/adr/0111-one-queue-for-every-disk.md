@@ -75,9 +75,12 @@ Linux's `ioctl` requests.
 - A transfer of more parts of pages than the device takes in one
   request goes as several, up to 16 in flight at once, each settled
   before the call returns even after another fails, since the device
-  may still reach the memory. virtio-blk rings its doorbell once for
-  them all, so QEMU merges requests for adjacent sectors into one read
-  or write of its file.
+  may still reach the memory. virtio-blk puts each request's chain in a
+  table of its own (indirect descriptors), so that a request takes one
+  entry of the ring rather than one for each buffer and all 16 fit, and
+  rings its doorbell once for them all; QEMU then merges requests for
+  adjacent sectors into one read or write of its file, as it does
+  Linux's.
 - `ioctl` on a block device takes Linux's requests for its size
   (BLKGETSIZE64, BLKGETSIZE), sector and block sizes (BLKSSZGET,
   BLKPBSZGET, BLKIOMIN, BLKIOOPT, BLKALIGNOFF), read-only and rotational
@@ -93,7 +96,6 @@ Four alternatives were set aside:
 - Pins counted as sharers. The page then looks shared to the program's
   next write fault, which copies it, and the device writes a page the
   program no longer maps.
-
 - A kernel thread per controller for error handling, as Linux's SCSI
   layer has. Every request in flight has a thread waiting for it, so
   one of them is always there to do the work, and no thread sleeps
