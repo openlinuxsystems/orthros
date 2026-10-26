@@ -29,6 +29,7 @@
 
 use core::arch::asm;
 use core::fmt::Write;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_klog::TextBuf;
@@ -50,8 +51,10 @@ static XCR0: AtomicU64 = AtomicU64::new(0);
 static SIZE: AtomicU32 = AtomicU32::new(512);
 /// The components XCR0 enables that XFD holds off: tile data, with AMX.
 static HELD: AtomicU64 = AtomicU64::new(0);
-/// Where each component beyond SSE that XCR0 enables (2 to 18) ends in an
-/// image, from CPUID leaf 0xD; 0 for one not enabled or held off.
+/// Where each component beyond SSE that XCR0 enables (2 to 18) starts and
+/// ends in an image, from CPUID leaf 0xD; 0 for one not enabled or held
+/// off.
+static STARTS: [AtomicU32; 19] = [const { AtomicU32::new(0) }; 19];
 static ENDS: [AtomicU32; 19] = [const { AtomicU32::new(0) }; 19];
 static DESCRIPTION: Once<TextBuf<128>> = Once::new();
 
@@ -127,10 +130,11 @@ pub fn init_boot_cpu() {
         // leaf 0 would count the tile data, which XFD keeps out.
         let xcr0 = XCR0.load(Ordering::Relaxed) & !HELD.load(Ordering::Relaxed);
         let mut size = HEAD as u32;
-        for (component, end) in ENDS.iter().enumerate().skip(2) {
+        for (component, (start, end)) in STARTS.iter().zip(&ENDS).enumerate().skip(2) {
             if xcr0 & (1 << component) != 0 {
                 // EBX is the component's offset, EAX its size.
                 let leaf = cpu::cpuid(0xd, component as u32);
+                start.store(leaf.ebx, Ordering::Relaxed);
                 end.store(leaf.ebx + leaf.eax, Ordering::Relaxed);
                 size = size.max(leaf.ebx + leaf.eax);
             }
@@ -315,28 +319,62 @@ pub fn head_size() -> usize {
     if MODE.load(Ordering::Relaxed) >= XSAVE { HEAD } else { image_size() }
 }
 
-/// How much of an image a signal frame holds, from its head: up to the
-/// end of the last component the header names as not in its initial
-/// state, since XRSTOR reads no other (components lie in the order of
-/// their numbers), or the head alone if none is. Linux's XSAVE into the
-/// frame writes no more: for a program that never used AVX-512, 832 bytes
-/// instead of the 2.7 KiB area.
-pub fn used_size(head: &[u8]) -> usize {
+/// The parts of an image a signal frame holds, as ranges of it in order,
+/// from its head: the head, then each component the header names as not
+/// in its initial state, since XRSTOR reads no other; parts that meet are
+/// one. Linux's XSAVE into the frame writes no others: for a program that
+/// never used AVX-512, 832 bytes of the 2.7 KiB image, and protection keys'
+/// 8 bytes past AVX-512's place, where the CPU counts them in use, do not
+/// bring the bytes between along. With FXSAVE, the whole image.
+pub fn used_parts(head: &[u8]) -> Parts {
     let size = image_size();
     let bv = match head.get(512..520) {
         Some(bv) if MODE.load(Ordering::Relaxed) >= XSAVE => {
             u64::from_le_bytes(bv.try_into().unwrap())
         }
-        _ => return size,
+        _ => return Parts { next: 0..size, rest: 0 },
     };
-    let beyond = bv & XCR0.load(Ordering::Relaxed) & !(HELD.load(Ordering::Relaxed) | X87 | SSE);
-    let end = match beyond.checked_ilog2() {
-        Some(last) => {
-            ENDS.get(last as usize).map_or(size, |end| end.load(Ordering::Relaxed) as usize)
+    let rest = bv & XCR0.load(Ordering::Relaxed) & !(HELD.load(Ordering::Relaxed) | X87 | SSE);
+    Parts { next: 0..HEAD.min(size), rest }
+}
+
+/// The parts [`used_parts`] gives.
+pub struct Parts {
+    /// The next part; empty once every part is given.
+    next: Range<usize>,
+    /// The components not yet given, one bit each.
+    rest: u64,
+}
+
+impl Iterator for Parts {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Range<usize>> {
+        if self.next.is_empty() {
+            return None;
         }
-        None => HEAD,
-    };
-    end.min(size).max(HEAD.min(size))
+        let size = image_size();
+        let mut part = core::mem::replace(&mut self.next, 0..0);
+        while self.rest != 0 {
+            let component = self.rest.trailing_zeros() as usize;
+            self.rest &= self.rest - 1;
+            let place = |table: &[AtomicU32]| {
+                table.get(component).map_or(0, |at| at.load(Ordering::Relaxed) as usize).min(size)
+            };
+            let (start, end) = (place(&STARTS), place(&ENDS));
+            if start >= end {
+                continue;
+            }
+            // Components lie in the order of their numbers.
+            if start <= part.end {
+                part.end = part.end.max(end);
+            } else {
+                self.next = start..end;
+                break;
+            }
+        }
+        Some(part)
+    }
 }
 
 /// Makes an image that came from user memory (a signal frame's) safe to

@@ -151,11 +151,12 @@ Linux's x86-64 frame on the thread's stack or alternate stack: the
 restorer, a `ucontext_t` as far as its 8-byte signal mask (304 bytes,
 as Linux's kernel writes it; the C library's type goes on), the
 `siginfo_t`, and the XSAVE area, 64-byte aligned below the red zone
-(`UserMode::push_signal_frame`). Of the area, the frame gets the image up
-to the end of the last component its header names as in use, as Linux's
-XSAVE into the frame writes no more: a program that never used AVX-512
-has 832 bytes copied each way, not the whole 2.7 KiB, and
-`signal_return` reads back as much.
+(`UserMode::push_signal_frame`). Of the area, the frame gets the image's
+head and each component its header names as in use, as Linux's XSAVE
+into the frame writes no others: a program that never used AVX-512 has
+832 bytes copied each way, not the whole 2.7 KiB (and 8 more for
+protection keys, past AVX-512's place, where the CPU counts them in
+use), and `signal_return` reads back as much.
 `signal_return` restores every register from the context, so a handler
 may change them, and returns through the slow path, which restores all
 registers rather than SYSRET's subset.
