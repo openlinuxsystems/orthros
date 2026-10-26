@@ -47,7 +47,13 @@ exits.
   invalid instruction (SIGILL), as it did with AMX off and as a Linux
   program does that has not asked for AMX. Held off, the tile data is
   never saved, so an image ends with the tile configuration: 2,816
-  bytes on a CPU with AVX-512 and AMX, against 2,688 before.
+  bytes on a CPU with AVX-512 and AMX, against 2,688 before. Saves and
+  restores leave tile data out of the components they ask for (EDX:EAX),
+  as Linux's do for a program without AMX. Asked for, it made every boot
+  on an Intel Xeon 8573C fault at the first XRSTOR, on the last byte of
+  the tile data's place past the area: the CPU checks that it could
+  reach each component asked for, though the header said the tile data
+  was in its initial state.
 - AMX's components are never loaded from a signal frame's image, which
   is the program's memory: they are always initial, and an invalid tile
   configuration would make XRSTOR fault in the kernel.

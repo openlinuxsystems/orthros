@@ -19,7 +19,12 @@
 //! restore. Nothing uses protection keys yet (CR4.PKE stays off), and AMX
 //! is held off: extended feature disable (XFD) makes each AMX instruction
 //! fault, as in Linux until a program asks for AMX, so its 8 KiB of tile
-//! data is never saved and the save area stays small. Both are on
+//! data is never saved and the save area stays small. Saves and restores
+//! leave it out of the components they ask for, as Linux's do: a CPU may
+//! check that it could reach every component asked for, even one it does
+//! not touch (an Intel Xeon 8573C faulted at an XRSTOR on the last byte of
+//! the tile data's place, past the area, though the header said the tile
+//! data was in its initial state). Both are on
 //! because a hypervisor runs with its own XCR0: when a guest's differs,
 //! KVM changes XCR0 with XSETBV at every entry to the guest and every exit
 //! from it, and nested under another hypervisor on Intel CPUs each XSETBV
@@ -51,6 +56,9 @@ static XCR0: AtomicU64 = AtomicU64::new(0);
 static SIZE: AtomicU32 = AtomicU32::new(512);
 /// The components XCR0 enables that XFD holds off: tile data, with AMX.
 static HELD: AtomicU64 = AtomicU64::new(0);
+/// The components saves and restores ask for (EDX:EAX): those XCR0
+/// enables, but for those held off.
+static ASKED: AtomicU64 = AtomicU64::new(0);
 /// Where each component beyond SSE that XCR0 enables (2 to 18) starts and
 /// ends in an image, from CPUID leaf 0xD; 0 for one not enabled or held
 /// off.
@@ -122,6 +130,7 @@ pub fn init_boot_cpu() {
             HELD.store(TILE_DATA, Ordering::Relaxed);
         }
         XCR0.store(wanted | X87, Ordering::Relaxed);
+        ASKED.store((wanted | X87) & !HELD.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     MODE.store(mode, Ordering::Relaxed);
     init_cpu();
@@ -258,17 +267,18 @@ pub unsafe fn init_area(area: usize) {
 /// `area` must be a save area set up by [`init_area`] that only the
 /// running thread uses.
 pub unsafe fn save(area: usize) {
+    let (low, high) = asked();
     match MODE.load(Ordering::Relaxed) {
         // SAFETY: the caller guarantees the area: 64-byte aligned and large
-        // enough for what XCR0 enables (`SIZE`); EDX:EAX all ones saves
-        // every enabled component.
+        // enough for the components asked for (`SIZE`), every enabled one
+        // but those held off.
         XSAVEOPT => unsafe {
-            asm!("xsaveopt64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
+            asm!("xsaveopt64 [{}]", in(reg) area, in("eax") low, in("edx") high,
                  options(nostack, preserves_flags));
         },
         // SAFETY: as above.
         XSAVE => unsafe {
-            asm!("xsave64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
+            asm!("xsave64 [{}]", in(reg) area, in("eax") low, in("edx") high,
                  options(nostack, preserves_flags));
         },
         // SAFETY: as above, for the 512-byte legacy area.
@@ -284,11 +294,13 @@ pub unsafe fn save(area: usize) {
 /// As for [`save`]; the area must hold state saved by [`save`] or written
 /// by [`init_area`].
 pub unsafe fn restore(area: usize) {
+    let (low, high) = asked();
     match MODE.load(Ordering::Relaxed) {
         // SAFETY: the caller guarantees the area holds a valid image (its
-        // reserved header bytes are zero, MXCSR has no reserved bits set).
+        // reserved header bytes are zero, MXCSR has no reserved bits set),
+        // as large as the components asked for.
         XSAVE | XSAVEOPT => unsafe {
-            asm!("xrstor64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX,
+            asm!("xrstor64 [{}]", in(reg) area, in("eax") low, in("edx") high,
                  options(nostack, preserves_flags, readonly));
         },
         // SAFETY: as above.
@@ -297,6 +309,12 @@ pub unsafe fn restore(area: usize) {
         },
         _ => {}
     }
+}
+
+/// The components saves and restores ask for, as EAX and EDX.
+fn asked() -> (u32, u32) {
+    let asked = ASKED.load(Ordering::Relaxed);
+    (asked as u32, (asked >> 32) as u32)
 }
 
 /// Loads the initial state, as a new thread starts with: what a signal

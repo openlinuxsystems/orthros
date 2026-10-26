@@ -67,7 +67,8 @@ from its start-up stack; the boot code becomes the thread `kmain`.
 SSE, AVX and AVX-512 registers and protection keys (those the CPU has;
 XCR0) with XSAVEOPT, or XSAVE, or FXSAVE without XSAVE, and restores the
 incoming thread's. AMX is enabled too but held off with XFD, so its tile
-data is never saved and its instructions fault: XCR0 then matches what
+data is never saved (saves and restores do not ask for it) and its
+instructions fault: XCR0 then matches what
 a hypervisor's host enables, as a Linux guest's does, and KVM need not
 switch it at every exit (ADR 0120).
 Lazy switching would trap a thread's first use after a switch instead,
