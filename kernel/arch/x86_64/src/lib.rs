@@ -507,6 +507,24 @@ impl UserMode for Arch {
         space.space().map_new(virt, phys, space::access(access))
     }
 
+    fn map_pages(
+        space: &Self::Space,
+        virt: u64,
+        phys: u64,
+        pages: u64,
+        access: UserAccess,
+    ) -> Result<(), MapPageError> {
+        assert!(
+            virt >= user::USER_START && pages <= user::USER_TOP.saturating_sub(virt) / memory::PAGE,
+            "{pages} pages at {virt:#x} go outside the user half"
+        );
+        space.space().map_run(virt, phys, pages, space::access(access))
+    }
+
+    fn split_pages(space: &Self::Space, at: u64) -> Result<(), MapPageError> {
+        space.space().split(at)
+    }
+
     fn unmap_page(space: &Self::Space, virt: u64) -> Option<u64> {
         if virt >= user::USER_TOP {
             return None;

@@ -548,7 +548,21 @@ impl SpaceObject {
         else {
             return Fault::Refused;
         };
-        let Backing::Anon(anon) = &region.backing else { return Fault::Refused };
+        let Backing::Anon(anon) = &region.backing else {
+            // A frame's or ring's page is mapped from the start, so it
+            // faults for want of access, or while a large page of it was
+            // split (`cut`, which holds the lock taken above): then it is
+            // mapped again by now, and the access is tried again.
+            return match Arch::query_page(&self.arch, page) {
+                Some((_, now))
+                    if (!write || now == UserAccess::ReadWrite)
+                        && (!execute || now == UserAccess::ReadExecute) =>
+                {
+                    Fault::Resolved
+                }
+                _ => Fault::Refused,
+            };
+        };
         let Some(access) = anon.access else { return Fault::Refused };
         if (write && access != UserAccess::ReadWrite)
             || (execute && access != UserAccess::ReadExecute)

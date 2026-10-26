@@ -233,7 +233,8 @@ pub(crate) fn table_of(root: u64, virt: u64, level: u32, user: bool) -> Result<u
         let slot = &table(table_phys)[index];
         let mut value = slot.load(Ordering::Relaxed);
         if value & PRESENT == 0 {
-            value = new_table(false)? | PRESENT | WRITABLE | if user { USER } else { 0 };
+            let phys = new_table(false)?;
+            value = if user { user_table(phys) } else { phys | PRESENT | WRITABLE };
             slot.store(value, Ordering::Relaxed);
             if let Some(record) = table_record(table_phys) {
                 record.add_table_lines(line_bit(index));
@@ -288,6 +289,12 @@ pub(crate) fn user_flags(access: Access) -> u64 {
         Access::ReadOnly => PRESENT | USER | nx,
         Access::ReadWrite => PRESENT | USER | WRITABLE | nx,
     }
+}
+
+/// The entry that links in the page table at `phys` for user mode, as
+/// [`table_of`] links the tables it makes.
+pub(crate) fn user_table(phys: u64) -> u64 {
+    phys | PRESENT | WRITABLE | USER
 }
 
 /// The access rights a user page-table entry grants.

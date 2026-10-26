@@ -257,6 +257,14 @@ impl UserMode for Arch {
         Err(MapPageError::NoMemory)
     }
 
+    fn map_pages(_: &Space, _: u64, _: u64, _: u64, _: UserAccess) -> Result<(), MapPageError> {
+        Err(MapPageError::NoMemory)
+    }
+
+    fn split_pages(_: &Space, _: u64) -> Result<(), MapPageError> {
+        Ok(())
+    }
+
     fn unmap_page(_: &Space, _: u64) -> Option<u64> {
         None
     }

@@ -14,8 +14,8 @@ use libradix::abi::notification::WaitFlags;
 use libradix::abi::process::{self, ProcessState};
 use libradix::abi::ring::Opcode;
 use libradix::abi::startup::{
-    self, SLOT_LOG, SLOT_MEMORY, SLOT_PROCESS, SLOT_RANDOM, SLOT_SPACE, SLOT_THREAD,
-    STARTUP_VERSION,
+    self, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_MEMORY, SLOT_PROCESS, SLOT_RANDOM, SLOT_SPACE,
+    SLOT_THREAD, STARTUP_VERSION,
 };
 use libradix::abi::{Status, address_space, memory, random, ring, syscalls, thread};
 use libradix::ring::Ring;
@@ -40,6 +40,7 @@ const GRANDCHILD: u32 = 77;
 const GRANDCHILD_VIEW: u32 = 78;
 const STACK: u32 = 79;
 const WAITER_DONE: u32 = 80;
+const LARGE: u32 = 81;
 
 /// Free addresses for its mappings.
 const MAP_AT: u64 = 0x2000_0000;
@@ -93,7 +94,8 @@ fn start_page() {
     check!(start.role == 1, "role {}", start.role);
     check!(start.tsc_hz > 0, "the time-stamp counter's frequency is unknown");
     check!(start.memory_bytes > 0, "no memory left: {}", start.memory_bytes);
-    check!(start.extra == 0, "{} extra capabilities", start.extra);
+    // The memory object of `large_frames`.
+    check!(start.extra == 1, "{} extra capabilities", start.extra);
     if let Some(info) = ok!(memory::info(&SYS, SLOT_MEMORY), "memory info") {
         let free = (info.pages - info.used) * 4096;
         check!(free == start.memory_bytes, "{free} bytes free, not {}", start.memory_bytes);
@@ -381,6 +383,62 @@ fn memory() {
         "querying the kernel's half"
     );
     reused_memory();
+    large_frames();
+}
+
+/// A frame of 1024 pages, from the memory object the kernel passes, mapped
+/// whole at a 2 MiB boundary, as two large pages (ADR 0121): its pages
+/// read and write as any do, and pages unmapped from the middle of one or
+/// across the two (which splits them) go alone, the others staying.
+fn large_frames() {
+    const PAGES: u64 = 1024;
+    let page = |n: u64| MAP_AT + n * 4096;
+    let word = |n: u64| page(n) as *mut u64;
+    let mapped = |n: u64| address_space::query(&SYS, SLOT_SPACE, page(n)).map(|q| q.mapped);
+    if startup().extra == 0 {
+        return;
+    }
+    let made = memory::retype(&SYS, SLOT_FIRST_EXTRA, ObjectKind::Frame, 10, LARGE, 1);
+    if ok!(made, "retype a frame of 1024 pages").is_none()
+        || ok!(syscalls::map(&SYS, SLOT_SPACE, LARGE, MAP_AT, RW, 0, PAGES), "map it").is_none()
+    {
+        return;
+    }
+    for n in 0..PAGES {
+        // SAFETY: the frame is mapped read-write at MAP_AT, PAGES pages
+        // long, and pages leave it below only once their words are read.
+        unsafe { word(n).write_volatile(0x1a29_0000 + n) };
+    }
+    let mut wrong = 0;
+    for n in 0..PAGES {
+        // SAFETY: as above.
+        wrong += u64::from(unsafe { word(n).read_volatile() } != 0x1a29_0000 + n);
+    }
+    check!(wrong == 0, "{wrong} pages of a large frame read back wrong");
+    // A page from the middle of the first large page, then four across both.
+    ok!(syscalls::unmap(&SYS, SLOT_SPACE, page(300), 1), "unmap a page of a large page");
+    ok!(syscalls::unmap(&SYS, SLOT_SPACE, page(510), 4), "unmap pages across two large pages");
+    let after = [(299, true), (300, false), (301, true), (509, true), (510, false), (513, false)];
+    for (n, expect) in after.into_iter().chain([(514, true), (1023, true)]) {
+        check!(mapped(n) == Ok(expect), "page {n} of a split large page: {:?}", mapped(n));
+    }
+    for n in [0, 299, 301, 509, 514, 1023] {
+        // SAFETY: page n is still mapped, as checked above.
+        let held = unsafe { word(n).read_volatile() };
+        check!(held == 0x1a29_0000 + n, "page {n} of a split large page holds {held:#x}");
+    }
+    // The page unmapped maps again, to the same frame.
+    if ok!(syscalls::map(&SYS, SLOT_SPACE, LARGE, page(300), RW, 300, 1), "map a page again")
+        .is_some()
+    {
+        // SAFETY: page 300 was just mapped again.
+        let held = unsafe { word(300).read_volatile() };
+        check!(held == 0x1a29_0000 + 300, "a page mapped again holds {held:#x}");
+    }
+    ok!(syscalls::unmap(&SYS, SLOT_SPACE, page(0), 510), "unmap the first part");
+    ok!(syscalls::unmap(&SYS, SLOT_SPACE, page(514), PAGES - 514), "unmap the rest");
+    check!(mapped(0) == Ok(false) && mapped(700) == Ok(false), "a large frame stayed mapped");
+    ok!(capability::delete(&SYS, LARGE), "delete the large frame");
 }
 
 /// Memory that goes back to its memory object and is retyped again comes

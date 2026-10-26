@@ -20,9 +20,18 @@
 //! before it reads which CPUs run the space, so every CPU either gets the
 //! IPI or sees the new generation. PCIDs come from [`radix_mm::Pcids`].
 //!
+//! Pages are 4 KiB ones, but for a run of frames that follow one another
+//! ([`AddressSpace::map_run`]: a frame object's, mapped whole), which a
+//! page directory's entry maps 2 MiB at a time wherever the virtual and
+//! physical addresses both allow (ADR 0121): a copy over such memory then
+//! needs one TLB entry for 512 pages, and under a hypervisor saves the
+//! walks of two sets of tables at every miss. A large page changes only as
+//! a whole: whatever changes part of one splits it first
+//! ([`AddressSpace::split`]).
+//!
 //! User programs run in these spaces (Phase 5's `UserSpace` handles); the
 //! `tlb` self-test also checks the shootdowns and PCID switches on every
-//! CPU.
+//! CPU, and large pages.
 
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
@@ -47,6 +56,12 @@ const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 const HELD: u64 = 1 << 9;
 /// A large page (in a page-directory or page-directory-pointer entry).
 const LARGE: u64 = 1 << 7;
+/// What a page directory's entry for a large page maps.
+const LARGE_PAGE: u64 = 512 * PAGE;
+/// The frame of a large page's entry. Its bit 12 is the PAT bit, which
+/// user pages leave clear, as they leave the PAT, PCD and PWT bits of every
+/// entry: all user memory is write-back.
+const LARGE_ADDRESS: u64 = ADDRESS & !(LARGE_PAGE - 1);
 
 /// The most cleared entries [`AddressSpace::edit`] keeps before it flushes
 /// the TLB and hands their frames back.
@@ -157,7 +172,15 @@ impl AddressSpace {
     pub fn map_new(&self, virt: u64, phys: u64, access: Access) -> Result<(), MapPageError> {
         assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
         let _guard = self.lock.lock();
-        let slot = paging::entry(self.pml4, virt, 1, true).map_err(|_| MapPageError::NoMemory)?;
+        self.map_locked(virt, phys, access)
+    }
+
+    /// [`AddressSpace::map_new`], with the lock held.
+    fn map_locked(&self, virt: u64, phys: u64, access: Access) -> Result<(), MapPageError> {
+        let slot = paging::entry(self.pml4, virt, 1, true).map_err(|err| match err {
+            MapError::LargePage => MapPageError::AlreadyMapped,
+            MapError::NoMemory => MapPageError::NoMemory,
+        })?;
         if slot.load(Ordering::Relaxed) & PRESENT != 0 {
             return Err(MapPageError::AlreadyMapped);
         }
@@ -166,11 +189,118 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Maps the `pages` pages from `virt` (in the lower half) to the frames
+    /// from `phys` on, which follow one another, for user mode, unless one
+    /// of them is mapped already: all of them, or none. Each 2 MiB that
+    /// starts at a large page's boundary in both, where no page table is
+    /// yet, goes in one entry of the page directory.
+    pub fn map_run(
+        &self,
+        virt: u64,
+        phys: u64,
+        pages: u64,
+        access: Access,
+    ) -> Result<(), MapPageError> {
+        assert!(
+            virt.is_multiple_of(PAGE)
+                && phys.is_multiple_of(PAGE)
+                && pages <= USER_END.saturating_sub(virt) / PAGE,
+            "{pages} pages at {virt:#x} are not user pages"
+        );
+        let end = virt + pages * PAGE;
+        let guard = self.lock.lock();
+        let mut at = virt;
+        let mut failed = None;
+        while at < end {
+            let frame = phys + (at - virt);
+            let large = at.is_multiple_of(LARGE_PAGE)
+                && frame.is_multiple_of(LARGE_PAGE)
+                && end - at >= LARGE_PAGE;
+            let mapped = if large { self.map_large(at, frame, access) } else { Ok(false) };
+            let step = match mapped {
+                Ok(true) => Ok(LARGE_PAGE),
+                Ok(false) => self.map_locked(at, frame, access).map(|()| PAGE),
+                Err(err) => Err(err),
+            };
+            match step {
+                Ok(step) => at += step,
+                Err(err) => {
+                    failed = Some(err);
+                    break;
+                }
+            }
+        }
+        drop(guard);
+        let Some(err) = failed else { return Ok(()) };
+        // A CPU running the space may have reached the pages mapped so far,
+        // so they go as any others do.
+        self.edit(virt, at, &mut |_, _, _| Edit::Clear, &mut |_| {});
+        Err(err)
+    }
+
+    /// Maps the large page at `virt` to the frames from `phys` on, unless
+    /// a page table that maps something is there (`false`), with the lock
+    /// held.
+    fn map_large(&self, virt: u64, phys: u64, access: Access) -> Result<bool, MapPageError> {
+        let slot = paging::entry(self.pml4, virt, 2, true).map_err(|_| MapPageError::NoMemory)?;
+        match slot.load(Ordering::Relaxed) {
+            // Not present before, so no CPU has it cached: no flush.
+            0 => {}
+            entry if entry & LARGE != 0 => return Err(MapPageError::AlreadyMapped),
+            entry if is_empty(entry & ADDRESS) => {
+                // A page table left empty by an unmap goes once no CPU's
+                // paging-structure caches can hold it, as the frees of
+                // `free_empty_tables` do.
+                slot.store(0, Ordering::Relaxed);
+                self.flush_range(virt..virt + LARGE_PAGE);
+                memory::free_pages(entry & ADDRESS, 1, Owner::PageTable);
+            }
+            _ => return Ok(false),
+        }
+        slot.store(large_entry(phys, access), Ordering::Relaxed);
+        Ok(true)
+    }
+
+    /// Makes sure no large page maps pages on both sides of `at`, so that
+    /// those on either side can change alone: one there becomes a page
+    /// table of the same pages. On the way, the large page is unmapped and
+    /// shot down before the table takes its place, as Linux splits one: a
+    /// CPU must never cache a page's translation as a large page and a
+    /// 4 KiB one at once, which some take for a machine check (Intel's
+    /// erratum of a page-size change, AMD's erratum 383). A program that
+    /// touches it meanwhile faults, and finds it mapped again once the
+    /// split is done, under the lock of its regions its fault waits for.
+    pub fn split(&self, at: u64) -> Result<(), MapPageError> {
+        if at.is_multiple_of(LARGE_PAGE) || at >= USER_END {
+            return Ok(());
+        }
+        let _guard = self.lock.lock();
+        let Some((entries, 2)) = mapping(self.pml4, at) else { return Ok(()) };
+        let slot = &entries[index(at, 2)];
+        let entry = slot.load(Ordering::Relaxed);
+        if entry & PRESENT == 0 {
+            return Ok(());
+        }
+        let table = paging::new_table(false).map_err(|_| MapPageError::NoMemory)?;
+        let (frame, flags) = (entry & LARGE_ADDRESS, entry & !(ADDRESS | LARGE));
+        for (page, leaf) in (0..).zip(paging::table(table)) {
+            leaf.store((frame + page * PAGE) | flags, Ordering::Relaxed);
+        }
+        if let Some(record) = paging::table_record(table) {
+            record.set_table_lines(u64::MAX);
+        }
+        let base = at & !(LARGE_PAGE - 1);
+        slot.store(0, Ordering::Relaxed);
+        self.flush_range(base..base + LARGE_PAGE);
+        slot.store(paging::user_table(table), Ordering::Relaxed);
+        Ok(())
+    }
+
     /// The frame the entry for `virt` holds, and the access it gives
     /// (`None` for an entry that holds its frame without giving access).
     pub fn entry(&self, virt: u64) -> Option<(u64, Option<Access>)> {
         let _guard = self.lock.lock();
-        let entry = paging::leaf(self.pml4, virt)?.load(Ordering::Relaxed);
+        let entry = page_entry(self.pml4, virt)?;
         if entry & PRESENT != 0 {
             Some((entry & ADDRESS, Some(paging::access_of(entry))))
         } else if entry & HELD != 0 {
@@ -185,18 +315,28 @@ impl AddressSpace {
     /// `each` returns `true`: one walk of the tables, with their lock held.
     pub fn frames(&self, start: u64, end: u64, write: bool, each: &mut dyn FnMut(u64) -> bool) {
         let _guard = self.lock.lock();
+        let end = end.min(USER_END);
         let mut virt = start & !(PAGE - 1);
-        while virt < end.min(USER_END) {
-            let Some(entries) = paging::leaf_table(self.pml4, virt) else { return };
+        while virt < end {
+            let Some((entries, level)) = mapping(self.pml4, virt) else { return };
             let first = ((virt / PAGE) % 512) as usize;
-            let count = (end.min(USER_END) - virt).div_ceil(PAGE).min(512 - first as u64);
-            for slot in &entries[first..first + count as usize] {
-                let entry = slot.load(Ordering::Relaxed);
-                if entry & PRESENT == 0
-                    || (write && paging::access_of(entry) != Access::ReadWrite)
-                    || !each(entry & ADDRESS)
-                {
+            let count = (end - virt).div_ceil(PAGE).min(512 - first as u64);
+            let usable = |entry: u64| {
+                entry & PRESENT != 0 && (!write || paging::access_of(entry) == Access::ReadWrite)
+            };
+            if level == 2 {
+                // A large page's frames, from `virt` on.
+                let entry = entries[index(virt, 2)].load(Ordering::Relaxed);
+                let frame = (entry & LARGE_ADDRESS) + first as u64 * PAGE;
+                if !usable(entry) || !(0..count).all(|page| each(frame + page * PAGE)) {
                     return;
+                }
+            } else {
+                for slot in &entries[first..first + count as usize] {
+                    let entry = slot.load(Ordering::Relaxed);
+                    if !usable(entry) || !each(entry & ADDRESS) {
+                        return;
+                    }
                 }
             }
             virt += count * PAGE;
@@ -238,7 +378,10 @@ impl AddressSpace {
     /// changed; `released` gets each cleared entry's frame after the
     /// flush, when no CPU can reach it any more. Both run with the
     /// space's page-table lock held, so they must not sleep; `decide` may
-    /// map pages into another space.
+    /// map pages into another space. A large page goes to `decide` once,
+    /// as its first page, and what it says goes for the whole of it (which
+    /// is never held without access); `released` gets each of its frames.
+    /// The range must not cut through one ([`AddressSpace::split`]).
     pub fn edit(
         &self,
         start: u64,
@@ -288,7 +431,7 @@ impl AddressSpace {
     /// The frame `virt` maps and how, if it is mapped.
     pub fn query(&self, virt: u64) -> Option<(u64, Access)> {
         let _guard = self.lock.lock();
-        let entry = paging::leaf(self.pml4, virt)?.load(Ordering::Relaxed);
+        let entry = page_entry(self.pml4, virt)?;
         if entry & PRESENT == 0 {
             return None;
         }
@@ -296,7 +439,9 @@ impl AddressSpace {
     }
 
     /// Removes the mapping of `virt` from every CPU and returns the frame
-    /// it mapped, which the caller may then free.
+    /// it mapped, which the caller may then free. A page of a large page
+    /// is not unmapped alone: [`AddressSpace::edit`] takes the large page,
+    /// once [`AddressSpace::split`] has made sure of its edges.
     pub fn unmap(&self, virt: u64) -> Option<u64> {
         let guard = self.lock.lock();
         let slot = paging::leaf(self.pml4, virt)?;
@@ -312,9 +457,13 @@ impl AddressSpace {
     }
 
     fn flush(&self, virt: u64) {
+        self.flush_range(virt..virt + PAGE);
+    }
+
+    fn flush_range(&self, range: Range<u64>) {
         self.tlb_generation.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
-        paging::shootdown_on(virt..virt + PAGE, |cpu| self.is_active(cpu.index()));
+        paging::shootdown_on(range, |cpu| self.is_active(cpu.index()));
     }
 
     /// Switches this CPU to the space.
@@ -437,6 +586,56 @@ fn leaf_entry(frame: u64, access: Option<Access>) -> u64 {
     }
 }
 
+/// The entry of a large page that maps the frames from `frame` on.
+fn large_entry(frame: u64, access: Access) -> u64 {
+    frame | paging::user_flags(access) | LARGE
+}
+
+/// Whether the page table at `phys` holds no entry, read in its lines in
+/// use.
+fn is_empty(phys: u64) -> bool {
+    let entries = paging::table(phys);
+    in_use(paging::lines(phys).0, 0, 511)
+        .all(|line| entries[line].iter().all(|entry| entry.load(Ordering::Relaxed) == 0))
+}
+
+/// The index of `virt`'s entry in its table at `level`.
+fn index(virt: u64, level: u32) -> usize {
+    ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize
+}
+
+/// The table under the PML4 at `root` whose entry maps `virt`, and its
+/// level: a page table (1), or a page directory whose entry is a large
+/// page's (2). `None` where the tables stop before either.
+fn mapping(root: u64, virt: u64) -> Option<(&'static [AtomicU64; 512], u32)> {
+    let mut table = root;
+    for level in (2..=4).rev() {
+        let entries = paging::table(table);
+        let entry = entries[index(virt, level)].load(Ordering::Relaxed);
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        if entry & LARGE != 0 {
+            return (level == 2).then_some((entries, 2));
+        }
+        table = entry & ADDRESS;
+    }
+    Some((paging::table(table), 1))
+}
+
+/// The entry for the page at `virt` as a page table holds it: a large
+/// page's for the page within it, with bit 7 (PAT in a page table's
+/// entry) clear.
+fn page_entry(root: u64, virt: u64) -> Option<u64> {
+    let (entries, level) = mapping(root, virt)?;
+    let entry = entries[index(virt, level)].load(Ordering::Relaxed);
+    if level == 1 {
+        return Some(entry);
+    }
+    let frame = (entry & LARGE_ADDRESS) + (virt & (LARGE_PAGE - 1) & !(PAGE - 1));
+    Some(frame | (entry & !(ADDRESS | LARGE)))
+}
+
 impl<'a> Walk<'a> {
     fn new(
         start: u64,
@@ -483,9 +682,55 @@ impl<'a> Walk<'a> {
                     return;
                 }
                 let entry = entries[index].load(Ordering::Relaxed);
-                // Programs' pages are all 4 KiB ones.
+                let at = base + index as u64 * span;
+                // Programs' large pages are all 2 MiB ones.
                 if entry & PRESENT != 0 && entry & LARGE == 0 {
-                    self.table(space, entry & ADDRESS, level - 1, base + index as u64 * span);
+                    self.table(space, entry & ADDRESS, level - 1, at);
+                } else if entry & PRESENT != 0 && level == 2 {
+                    self.large(space, &entries[index], entry, at);
+                }
+            }
+        }
+    }
+
+    /// Does what `decide` says with the large page whose entry, `entry`,
+    /// is at `slot` and maps from `base`; the range covers it whole.
+    fn large(&mut self, space: &AddressSpace, slot: &AtomicU64, entry: u64, base: u64) {
+        assert!(
+            self.start <= base && base + LARGE_PAGE <= self.end,
+            "a walk from {:#x} to {:#x} cuts through the large page at {base:#x}",
+            self.start,
+            self.end
+        );
+        let frame = entry & LARGE_ADDRESS;
+        let held = || panic!("the large page at {base:#x} would be held without access");
+        let (edit, copy) = (self.decide)(base, frame, Some(paging::access_of(entry)));
+        if let (Some(to), Some(access)) = (self.to, copy) {
+            let access = access.unwrap_or_else(held);
+            // As for a page table's entries: the target's lock is held,
+            // and no CPU runs it.
+            match paging::entry(to.pml4, base, 2, true) {
+                Ok(target) => target.store(large_entry(frame, access), Ordering::Relaxed),
+                Err(_) => {
+                    self.failed = Some(base);
+                    return;
+                }
+            }
+        }
+        match edit {
+            Edit::Keep => {}
+            Edit::Set(access) => {
+                let new = large_entry(frame, access.unwrap_or_else(held));
+                slot.store(new, Ordering::Relaxed);
+                self.changed |= new != entry;
+            }
+            Edit::Clear => {
+                slot.store(0, Ordering::Relaxed);
+                self.changed = true;
+                // Its 512 frames are handed back at once, after a flush.
+                self.flush(space, base + LARGE_PAGE);
+                for page in 0..LARGE_PAGE / PAGE {
+                    (self.released)(frame + page * PAGE);
                 }
             }
         }
@@ -819,6 +1064,153 @@ fn check_spaces() {
     }
 }
 
+/// Reads `TEST.address` in the first test space (run on every CPU).
+fn check_large_page() {
+    let were_enabled = cpu::disable_interrupts();
+    let space = TEST.spaces[0].load(Ordering::Acquire) as *const AddressSpace;
+    // SAFETY: as in `check_spaces`.
+    let space: &'static AddressSpace = unsafe { &*space };
+    space.switch_to();
+    if read_user(TEST.address.load(Ordering::Relaxed)) != TEST.expect.load(Ordering::Relaxed) {
+        TEST.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    AddressSpace::switch_to_kernel();
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
+}
+
+/// Where the large-page part of the self-test maps its pages, and what
+/// the first word of each holds, with the page's index.
+const LARGE_TEST: u64 = 0x20_0000_0000;
+const LARGE_PATTERN: u64 = 0x5a5a_0000_1a00_0000;
+
+/// The large-page part of the `tlb` self-test, with `b` a frame holding
+/// `pattern`: a run of 512 frames mapped by one large page, read, looked
+/// up, copied into another space, split, changed and unmapped.
+fn large_pages(on_others: &dyn Fn(fn()), b: u64, pattern: u64) -> Result<(), &'static str> {
+    // A power of two of pages comes aligned to its size.
+    let run = memory::alloc_pages(512, false, Owner::Kernel).ok_or("out of memory")?;
+    for page in 0..512 {
+        // SAFETY: the run was just allocated and is RAM in the direct map.
+        unsafe {
+            let word = memory::phys_to_virt(run + page * PAGE) as *mut u64;
+            core::ptr::write_volatile(word, LARGE_PATTERN + page);
+        }
+    }
+    let spaces = [AddressSpace::new(), AddressSpace::new()];
+    let result = match &spaces {
+        [Ok(space), Ok(copy)] => large_pages_in(on_others, space, copy, run, (b, pattern)),
+        _ => Err("out of memory"),
+    };
+    for space in spaces.into_iter().flatten() {
+        let end = LARGE_TEST + 2 * LARGE_PAGE;
+        space.edit(LARGE_TEST, end, &mut |_, _, _| Edit::Clear, &mut |_| {});
+        // SAFETY: every CPU switched back to the kernel's tables in
+        // `check_large_page`, and nothing keeps the references.
+        unsafe { space.destroy() };
+    }
+    memory::free_pages(run, 512, Owner::Kernel);
+    result
+}
+
+fn large_pages_in(
+    on_others: &dyn Fn(fn()),
+    space: &'static AddressSpace,
+    copy: &'static AddressSpace,
+    run: u64,
+    (b, pattern): (u64, u64),
+) -> Result<(), &'static str> {
+    let page = |n: u64| LARGE_TEST + n * PAGE;
+    let read_everywhere = |at: u64, expect: u64| {
+        TEST.spaces[0].store(core::ptr::from_ref(space) as u64, Ordering::Relaxed);
+        TEST.address.store(at, Ordering::Relaxed);
+        TEST.expect.store(expect, Ordering::Release);
+        check_large_page();
+        on_others(check_large_page);
+        TEST.failures.swap(0, Ordering::Relaxed) == 0
+    };
+    let check = |ok: bool, what: &'static str| if ok { Ok(()) } else { Err(what) };
+    let mut cleared = |_: u64, _: u64, _: Option<Access>| Edit::Clear;
+
+    // A page table an unmap left empty gives way to a large page.
+    space.map_new(page(517), b, Access::ReadOnly).map_err(|_| "out of memory")?;
+    space.edit(page(517), page(518), &mut cleared, &mut |_| {});
+    space.map_run(page(512), run, 512, Access::ReadOnly).map_err(|_| "out of memory")?;
+    check(
+        matches!(mapping(space.pml4, page(517)), Some((_, 2))),
+        "an empty page table kept a large page out",
+    )?;
+    space.edit(page(512), page(1024), &mut cleared, &mut |_| {});
+
+    space.map_run(page(0), run, 512, Access::ReadOnly).map_err(|_| "out of memory")?;
+    check(
+        matches!(mapping(space.pml4, page(5)), Some((_, 2))),
+        "a run of 512 frames got no large page",
+    )?;
+    check(
+        space.query(page(5) + 8) == Some((run + 5 * PAGE, Access::ReadOnly))
+            && space.entry(page(511)) == Some((run + 511 * PAGE, Some(Access::ReadOnly))),
+        "a page of a large page looked up wrong",
+    )?;
+    check(
+        space.map_new(page(7), b, Access::ReadOnly) == Err(MapPageError::AlreadyMapped)
+            && space.map_run(page(0), run, 512, Access::ReadOnly)
+                == Err(MapPageError::AlreadyMapped),
+        "a page of a large page was mapped again",
+    )?;
+    let (mut next, mut seen) = (run + 510 * PAGE, 0);
+    space.frames(page(510), page(513), false, &mut |frame| {
+        seen += u64::from(frame == next);
+        next += PAGE;
+        true
+    });
+    check(seen == 2 && next == run + 512 * PAGE, "a large page's frames came wrong")?;
+    space.frames(page(0), page(1), true, &mut |_| {
+        seen = 0;
+        true
+    });
+    check(seen == 2, "a read-only large page's frames came for writing")?;
+    check(
+        read_everywhere(page(300), LARGE_PATTERN + 300),
+        "a CPU read the wrong frame through a large page",
+    )?;
+
+    // A fork's copy gets the large page, asked about once.
+    let mut asked = 0;
+    let copied = space.copy_into(copy, page(0), page(512), &mut |_, _, access| {
+        asked += 1;
+        (Edit::Keep, Some(access))
+    });
+    check(
+        copied.is_ok()
+            && asked == 1
+            && matches!(mapping(copy.pml4, page(3)), Some((_, 2)))
+            && copy.query(page(3)) == Some((run + 3 * PAGE, Access::ReadOnly)),
+        "a copied large page came wrong",
+    )?;
+
+    // Split, its pages stay; a page changed is read changed everywhere.
+    space.split(page(100)).map_err(|_| "out of memory")?;
+    check(
+        matches!(mapping(space.pml4, page(5)), Some((_, 1)))
+            && space.query(page(5)) == Some((run + 5 * PAGE, Access::ReadOnly))
+            && space.query(page(511)) == Some((run + 511 * PAGE, Access::ReadOnly)),
+        "a split large page's pages came wrong",
+    )?;
+    space.set(page(300), b, Some(Access::ReadOnly), false).map_err(|_| "out of memory")?;
+    check(read_everywhere(page(300), pattern), "a CPU read a split large page's old page")?;
+    check(
+        read_everywhere(page(301), LARGE_PATTERN + 301),
+        "a CPU read the wrong page of a split large page",
+    )?;
+
+    // Unmapped whole: every frame comes back once.
+    let mut released = 0;
+    copy.edit(page(0), page(512), &mut cleared, &mut |_| released += 1);
+    check(released == 512 && copy.query(page(3)).is_none(), "an unmapped large page stayed")
+}
+
 /// Fills a fresh frame with `pattern`.
 fn pattern_frame(pattern: u64) -> Result<u64, &'static str> {
     let phys = memory::alloc_pages(1, false, Owner::Kernel).ok_or("out of memory")?;
@@ -887,6 +1279,7 @@ pub fn self_test(on_others: &dyn Fn(fn())) -> Result<(), &'static str> {
         // `check_spaces`, and nothing keeps the references.
         unsafe { space.destroy() };
     }
+    let result = result.and_then(|()| large_pages(on_others, b, B));
     memory::free_pages(a, 1, Owner::Kernel);
     memory::free_pages(b, 1, Owner::Kernel);
     result

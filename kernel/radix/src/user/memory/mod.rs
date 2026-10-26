@@ -48,7 +48,7 @@ use radix_abi::address_space::PAGE_SIZE;
 use radix_abi::capability::Rights as AbiRights;
 use radix_abi::errors::Kernel;
 use radix_cap::ObjectId;
-use radix_hal::{MapPageError, UserAccess, UserMode};
+use radix_hal::{MapPageError, PageEdit, UserAccess, UserMode};
 use radix_ipc::range::user_pages;
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Mutex;
@@ -254,17 +254,27 @@ impl SpaceObject {
             return Err(error(Kernel::AlreadyMapped));
         }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
-        for page in 0..pages {
-            let virt = start + page * PAGE_SIZE;
-            let phys = backing.phys(offset + page).ok_or(error(Kernel::InvalidArgument))?;
-            if let Err(err) = Arch::map_page(&self.arch, virt, phys, access) {
-                for done in 0..page {
-                    Arch::unmap_page(&self.arch, start + done * PAGE_SIZE);
+        let failed = |err| {
+            error(match err {
+                MapPageError::AlreadyMapped => Kernel::AlreadyMapped,
+                MapPageError::NoMemory => Kernel::NoMemory,
+            })
+        };
+        if let Backing::Frame(frame) = backing {
+            // A frame's pages follow one another, so they may go in large
+            // pages (ADR 0121).
+            let phys = frame.phys + offset * PAGE_SIZE;
+            Arch::map_pages(&self.arch, start, phys, pages, access).map_err(failed)?;
+        } else {
+            for page in 0..pages {
+                let virt = start + page * PAGE_SIZE;
+                let phys = backing.phys(offset + page).ok_or(error(Kernel::InvalidArgument))?;
+                if let Err(err) = Arch::map_page(&self.arch, virt, phys, access) {
+                    for done in 0..page {
+                        Arch::unmap_page(&self.arch, start + done * PAGE_SIZE);
+                    }
+                    return Err(failed(err));
                 }
-                return Err(error(match err {
-                    MapPageError::AlreadyMapped => Kernel::AlreadyMapped,
-                    MapPageError::NoMemory => Kernel::NoMemory,
-                }));
             }
         }
         insert(&mut regions, Region { start, pages, backing: backing.clone(), offset });
@@ -321,6 +331,10 @@ impl SpaceObject {
     fn cut(&self, regions: &mut Vec<Region, Kmalloc>, start: u64, end: u64) -> Result<()> {
         Self::split_at(regions, start)?;
         Self::split_at(regions, end)?;
+        // Nor does a large page of a frame's lie across either end.
+        for at in [start, end] {
+            Arch::split_pages(&self.arch, at).map_err(|_| error(Kernel::NoMemory))?;
+        }
         // After the splits, the regions the range meets lie wholly inside.
         let first = first_after(regions, start);
         let last = first + regions[first..].partition_point(|r| r.start < end);
@@ -332,17 +346,20 @@ impl SpaceObject {
         Ok(())
     }
 
-    /// Takes away a region's pages: a frame's or ring's are unmapped one by
-    /// one, anonymous memory's given back.
+    /// Takes away a region's pages: a frame's or ring's are unmapped,
+    /// anonymous memory's given back.
     fn clear_region(&self, region: &Region) {
         match region.backing {
             Backing::Anon(_) => self.release_range(region.start, region.end()),
-            Backing::Frame(_) | Backing::Ring(_) => {
-                for page in 0..region.pages {
-                    Arch::unmap_page(&self.arch, region.start + page * PAGE_SIZE);
-                }
-            }
+            Backing::Frame(_) | Backing::Ring(_) => self.unmap_range(region.start, region.end()),
         }
+    }
+
+    /// Unmaps a frame's or ring's pages from `start` to `end`, in one walk
+    /// of the page tables, large pages and all: their frames are not the
+    /// space's to give back.
+    fn unmap_range(&self, start: u64, end: u64) {
+        Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |_| {});
     }
 
     /// Takes away everything mapped in it, and its page tables, once its
@@ -373,9 +390,7 @@ impl SpaceObject {
             if !region.backing.same(backing) {
                 return true;
             }
-            for page in 0..region.pages {
-                Arch::unmap_page(&self.arch, region.start + page * PAGE_SIZE);
-            }
+            self.unmap_range(region.start, region.end());
             false
         });
     }

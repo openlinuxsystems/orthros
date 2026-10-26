@@ -199,6 +199,26 @@ pub trait UserMode: crate::Threads {
         access: UserAccess,
     ) -> Result<(), MapPageError>;
 
+    /// Maps the `pages` pages from `virt` (page-aligned, below
+    /// [`UserMode::USER_TOP`]) to the frames that follow one another from
+    /// `phys` on, with `access`, unless one of them is mapped already: all
+    /// of them, or none. Where both addresses allow, one large page may
+    /// map many of them, which then change only as a whole: whatever
+    /// changes part of one calls [`UserMode::split_pages`] first, and
+    /// [`UserMode::unmap_page`] leaves it be.
+    fn map_pages(
+        space: &Self::Space,
+        virt: u64,
+        phys: u64,
+        pages: u64,
+        access: UserAccess,
+    ) -> Result<(), MapPageError>;
+
+    /// Makes sure no large page ([`UserMode::map_pages`]) maps pages on
+    /// both sides of `at` (page-aligned), so that a range that starts or
+    /// ends there can change alone.
+    fn split_pages(space: &Self::Space, at: u64) -> Result<(), MapPageError>;
+
     /// Removes the mapping of the page at `virt` from every CPU's view and
     /// returns the frame it mapped.
     fn unmap_page(space: &Self::Space, virt: u64) -> Option<u64>;
@@ -239,7 +259,10 @@ pub trait UserMode: crate::Threads {
     /// order, and does what `decide` says, given its address, frame and
     /// access; `released` gets the frame of every page cleared once no
     /// CPU can reach it. Both run with the space's page tables locked,
-    /// and must not sleep.
+    /// and must not sleep. A large page ([`UserMode::map_pages`]) goes to
+    /// `decide` once, as its first page, and what it says goes for all of
+    /// it, which is never held without access; the range must not cut
+    /// through one.
     fn edit_pages(
         space: &Self::Space,
         start: u64,

@@ -253,6 +253,19 @@ which unlinks every table that maps nothing, flushes the CPUs running the
 space, and frees them), on the CPU the process ended on, as Linux frees
 them in `exit`.
 
+A frame's pages follow one another in physical memory, from a boundary
+of the frame's size, so a frame mapped into a space goes in as one run
+(`map_run`): each 2 MiB of it at a 2 MiB boundary in both addresses,
+where no page table is yet, is one large page, an entry of the page
+directory (ADR 0121). A copy over such memory needs a TLB entry for 512
+pages. Anonymous memory and rings keep 4 KiB pages. A large page changes
+only as a whole: an unmap that cuts through one splits it into a page
+table of the same pages first (`split`), unmapping it and shooting it
+down before the table takes its place, so no CPU caches a page as both
+sizes at once. A program that touches it meanwhile faults, waits for the
+regions' lock that the split holds, and finds it mapped again. Walks ask
+about a large page once, as its first page.
+
 ### TLB shootdown
 
 Removing or changing a mapping that other CPUs may have cached needs a TLB
