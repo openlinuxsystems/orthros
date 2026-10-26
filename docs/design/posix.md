@@ -287,6 +287,16 @@ its jobs and the system's services, and the next thing to replace with
 per-object wait lists when a profile shows many pollers (see the
 limits).
 
+What an entry found is written back only where it differs from what
+the entry held when it was copied in. A program polls the same array
+again and again, and most entries find what they found the last time,
+ready or idle; such a poll writes nothing, so it needs no second copy,
+and a page of the array still shared after a `fork` stays shared. A
+second thread that rewrites `revents` while the poll runs races with it
+on any system. One difference from Linux follows: a poll of an array in
+read-only memory that changes nothing succeeds, where Linux's fails
+with `EFAULT`.
+
 ## Terminals
 
 A pseudo-terminal is an `Ldisc` and two rings behind the terminal's lock,

@@ -44,7 +44,7 @@ use super::kmalloc;
 use super::signal::{self, Restart, interrupted};
 use crate::Arch;
 use crate::sched::{self, wait};
-use crate::user::objects::{self, Found, Object};
+use crate::user::objects::{self, Object};
 use crate::user::{Result, UserRef, error};
 
 /// There is data to read, or the end of a stream.
@@ -165,6 +165,11 @@ fn entry_of(entry: [u8; PollEntry::SIZE]) -> (i32, u16) {
     (fd, events)
 }
 
+/// The events an entry held found when it was copied in.
+fn found_of(entry: [u8; PollEntry::SIZE]) -> u16 {
+    u16::from_le_bytes([entry[PollEntry::OFFSET_FOUND], entry[PollEntry::OFFSET_FOUND + 1]])
+}
+
 fn entries_of(entries: &[u8]) -> core::slice::Iter<'_, [u8; PollEntry::SIZE]> {
     entries.as_chunks::<{ PollEntry::SIZE }>().0.iter()
 }
@@ -172,12 +177,11 @@ fn entries_of(entries: &[u8]) -> core::slice::Iter<'_, [u8; PollEntry::SIZE]> {
 /// What slot `slot` of `cspace` is ready for, among `events` and those
 /// always reported.
 fn slot_events(cspace: SpaceId, slot: u32, events: u16) -> u16 {
-    let mut place = None;
-    let found = match objects::find(cspace, slot, |_| true, &mut place) {
-        Ok(Found { object: Some(object), .. }) => events_of(object),
+    let found = match objects::find_object(cspace, slot) {
+        Some(object) => events_of(&object),
         // An empty slot, nothing in the registry (a memory capability),
         // or released since the capability was found.
-        _ => INVALID,
+        None => INVALID,
     };
     found & (events | ALWAYS)
 }
@@ -284,7 +288,14 @@ pub fn poll(user: &UserRef, a: PollArgs) -> Result<u32> {
     if ready == 0 && (waits || a.flags.contains(PollFlags::MASK)) {
         ready = wait_ready(user, &a, cspace, entries, found)?;
     }
-    for (i, found) in found.iter().enumerate() {
+    // An array polled again mostly holds what it found last time, as an
+    // entry left as ready or as idle as it was: only events that differ
+    // from what an entry held are written, and nothing at all, not even
+    // to a page shared until written, when none do.
+    for (i, (entry, found)) in entries_of(entries).zip(found.iter()).enumerate() {
+        if found_of(*entry) == *found {
+            continue;
+        }
         let at = a.entries + (i * PollEntry::SIZE + PollEntry::OFFSET_FOUND) as u64;
         if !Arch::copy_to_user(at, &found.to_le_bytes()) {
             return Err(error(Kernel::BadAddress));
@@ -321,11 +332,8 @@ fn wait_ready(
         if fd < 0 {
             continue;
         }
-        let mut place = None;
-        let object = a
-            .base
-            .checked_add(fd as u32)
-            .and_then(|slot| objects::find(cspace, slot, |_| true, &mut place).ok()?.object.take());
+        let object =
+            a.base.checked_add(fd as u32).and_then(|slot| objects::find_object(cspace, slot));
         if object.is_none() {
             // Emptied since the first look.
             *found = INVALID;
