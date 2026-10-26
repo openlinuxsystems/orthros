@@ -155,7 +155,7 @@ seconds since the kernel started; messages before timer calibration show
 
 ```
 [    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
-[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX; 832-byte areas
+[    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
 [    0.445393] Capabilities: ready; 18 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)

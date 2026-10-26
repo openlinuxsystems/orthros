@@ -64,8 +64,12 @@ overflow faults on the guard. Each CPU starts with an idle thread made
 from its start-up stack; the boot code becomes the thread `kmain`.
 
 **Eager extended state.** Every switch saves the outgoing thread's x87,
-SSE, AVX and AVX-512 registers (those the CPU has; XCR0) with XSAVEOPT,
-or XSAVE, or FXSAVE without XSAVE, and restores the incoming thread's.
+SSE, AVX and AVX-512 registers and protection keys (those the CPU has;
+XCR0) with XSAVEOPT, or XSAVE, or FXSAVE without XSAVE, and restores the
+incoming thread's. AMX is enabled too but held off with XFD, so its tile
+data is never saved and its instructions fault: XCR0 then matches what
+a hypervisor's host enables, as a Linux guest's does, and KVM need not
+switch it at every exit (ADR 0120).
 Lazy switching would trap a thread's first use after a switch instead,
 which leaked one thread's registers to another through speculative
 execution (CVE-2018-3665) and costs a trap per switch for any thread that

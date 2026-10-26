@@ -29,7 +29,8 @@ correct, is in _docs/design/scheduler.md_.
 
 A thread has a name of up to 23 bytes, a stack of 16 KiB with an
 unmapped guard page below it, a save area for its extended processor
-state (x87, SSE, AVX and, where the CPU has it, AVX-512), a scheduling
+state (x87, SSE, AVX and, where the CPU has them, AVX-512 and protection
+keys; AMX is held off, so its instructions fail), a scheduling
 policy, the set of CPUs it may run on, and a resource domain. It is
 *ready*, *blocked* (with the reason it waits), or *dead* once it has
 exited; the *reaper* thread frees a dead thread's stack.

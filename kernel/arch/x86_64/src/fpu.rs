@@ -13,11 +13,19 @@
 //! to another through speculative execution (CVE-2018-3665), and costs a
 //! trap per switch on any thread that computes.
 //!
-//! With XSAVE the kernel enables x87, SSE, AVX and AVX-512 where the CPU
-//! has them (XCR0) and saves with XSAVEOPT where it can, which skips
-//! registers unchanged since the last restore. MPX, protection keys and AMX
-//! are left off: nothing uses them yet, and AMX's 8 KiB of tile state would
-//! not fit the save area. Without XSAVE, FXSAVE saves x87 and SSE.
+//! With XSAVE the kernel enables in XCR0 each of x87, SSE, AVX, AVX-512,
+//! protection keys (PKRU) and AMX that the CPU has, and saves with
+//! XSAVEOPT where it can, which skips registers unchanged since the last
+//! restore. Nothing uses protection keys yet (CR4.PKE stays off), and AMX
+//! is held off: extended feature disable (XFD) makes each AMX instruction
+//! fault, as in Linux until a program asks for AMX, so its 8 KiB of tile
+//! data is never saved and the save area stays small. Both are on
+//! because a hypervisor runs with its own XCR0: when a guest's differs,
+//! KVM changes XCR0 with XSETBV at every entry to the guest and every exit
+//! from it, and nested under another hypervisor on Intel CPUs each XSETBV
+//! leaves for that hypervisor too (ADR 0120). Linux guests enable what
+//! their host does, so their XCR0 matches it, and so does Radix's. MPX
+//! stays off, as Linux leaves it. Without XSAVE, FXSAVE saves x87 and SSE.
 
 use core::arch::asm;
 use core::fmt::Write;
@@ -26,7 +34,7 @@ use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use radix_klog::TextBuf;
 use radix_sync::Once;
 
-use crate::cpu;
+use crate::cpu::{self, msr};
 
 /// Room for a save area in a context block.
 pub const AREA_MAX: usize = 4096 - 64;
@@ -40,10 +48,12 @@ const XSAVEOPT: u8 = 3;
 static MODE: AtomicU8 = AtomicU8::new(NONE);
 static XCR0: AtomicU64 = AtomicU64::new(0);
 static SIZE: AtomicU32 = AtomicU32::new(512);
-/// Where each component beyond SSE that XCR0 enables (2 to 7) ends in an
-/// image, from CPUID leaf 0xD; 0 for one not enabled.
-static ENDS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
-static DESCRIPTION: Once<TextBuf<96>> = Once::new();
+/// The components XCR0 enables that XFD holds off: tile data, with AMX.
+static HELD: AtomicU64 = AtomicU64::new(0);
+/// Where each component beyond SSE that XCR0 enables (2 to 18) ends in an
+/// image, from CPUID leaf 0xD; 0 for one not enabled or held off.
+static ENDS: [AtomicU32; 19] = [const { AtomicU32::new(0) }; 19];
+static DESCRIPTION: Once<TextBuf<128>> = Once::new();
 
 /// The legacy region and the XSAVE header: the head of an image, which a
 /// signal frame always holds.
@@ -66,11 +76,15 @@ static INITIAL: Initial = Initial({
     image
 });
 
-/// XCR0 bits: x87, SSE, AVX, and the three AVX-512 components.
+/// XCR0 bits: x87, SSE, AVX, the three AVX-512 components, protection
+/// keys, and AMX's tile configuration and tile data.
 const X87: u64 = 1;
 const SSE: u64 = 1 << 1;
 const AVX: u64 = 1 << 2;
 const AVX512: u64 = 0b111 << 5;
+const PKRU: u64 = 1 << 9;
+const TILE_DATA: u64 = 1 << 18;
+const AMX: u64 = 1 << 17 | TILE_DATA;
 
 /// Chooses how to save extended state, on the boot CPU, then sets this
 /// CPU up.
@@ -87,37 +101,49 @@ pub fn init_boot_cpu() {
     if mode >= XSAVE {
         let leaf = cpu::cpuid(0xd, 0);
         let supported = u64::from(leaf.eax) | (u64::from(leaf.edx) << 32);
-        let mut wanted = supported & (X87 | SSE | AVX | AVX512);
+        let mut wanted = supported & (X87 | SSE | AVX | AVX512 | PKRU | AMX);
         if wanted & AVX512 != AVX512 || wanted & AVX == 0 {
             wanted &= !AVX512;
         }
         if wanted & SSE == 0 {
             wanted &= !AVX;
         }
+        // AMX only with XFD (CPUID 0xD.1 EAX bit 4) able to hold its tile
+        // data off (that component's ECX bit 2), which keeps the data out
+        // of every image: 8 KiB would not fit the save area.
+        let xfd = cpu::cpuid(0xd, 1).eax & (1 << 4) != 0 && cpu::cpuid(0xd, 18).ecx & (1 << 2) != 0;
+        if wanted & AMX != AMX || !xfd {
+            wanted &= !AMX;
+        }
+        if wanted & AMX != 0 {
+            HELD.store(TILE_DATA, Ordering::Relaxed);
+        }
         XCR0.store(wanted | X87, Ordering::Relaxed);
     }
     MODE.store(mode, Ordering::Relaxed);
     init_cpu();
     if mode >= XSAVE {
-        // With XCR0 set, EBX is the size of an area for what it enables.
-        let size = cpu::cpuid(0xd, 0).ebx;
+        // An image ends where the last component it can hold does; CPUID
+        // leaf 0 would count the tile data, which XFD keeps out.
+        let xcr0 = XCR0.load(Ordering::Relaxed) & !HELD.load(Ordering::Relaxed);
+        let mut size = HEAD as u32;
+        for (component, end) in ENDS.iter().enumerate().skip(2) {
+            if xcr0 & (1 << component) != 0 {
+                // EBX is the component's offset, EAX its size.
+                let leaf = cpu::cpuid(0xd, component as u32);
+                end.store(leaf.ebx + leaf.eax, Ordering::Relaxed);
+                size = size.max(leaf.ebx + leaf.eax);
+            }
+        }
         if size as usize > AREA_MAX {
             // Cannot happen with the components above; fall back to the
             // legacy area rather than overrun the block.
             MODE.store(FXSAVE, Ordering::Relaxed);
         } else {
             SIZE.store(size, Ordering::Relaxed);
-            let xcr0 = XCR0.load(Ordering::Relaxed);
-            for (component, end) in ENDS.iter().enumerate().skip(2) {
-                if xcr0 & (1 << component) != 0 {
-                    // EBX is the component's offset, EAX its size.
-                    let leaf = cpu::cpuid(0xd, component as u32);
-                    end.store(leaf.ebx + leaf.eax, Ordering::Relaxed);
-                }
-            }
         }
     }
-    let mut text = TextBuf::<96>::new();
+    let mut text = TextBuf::<128>::new();
     let xcr0 = XCR0.load(Ordering::Relaxed);
     let _ = match MODE.load(Ordering::Relaxed) {
         NONE => write!(text, "not saved (no FXSAVE)"),
@@ -133,6 +159,12 @@ pub fn init_boot_cpu() {
             }
             if mode >= XSAVE && xcr0 & AVX512 != 0 {
                 let _ = write!(text, ", AVX-512");
+            }
+            if mode >= XSAVE && xcr0 & PKRU != 0 {
+                let _ = write!(text, ", PKRU");
+            }
+            if mode >= XSAVE && xcr0 & AMX != 0 {
+                let _ = write!(text, ", AMX held off");
             }
             write!(text, "; {}-byte areas", SIZE.load(Ordering::Relaxed))
         }
@@ -163,11 +195,33 @@ pub fn init_cpu() {
     unsafe { cpu::write_cr4(cr4) };
     if mode >= XSAVE {
         // SAFETY: OSXSAVE is now set, and XCR0 holds only components CPUID
-        // reported, with x87 on and AVX only with SSE.
+        // reported, with x87 on, AVX only with SSE, and AVX-512's three
+        // and AMX's two each all or none.
         unsafe { cpu::xsetbv(0, XCR0.load(Ordering::Relaxed)) };
+        let held = HELD.load(Ordering::Relaxed);
+        if held != 0 {
+            // SAFETY: CPUID reported XFD for the held component (checked
+            // on the boot CPU), so both MSRs exist and take its bit. Held
+            // off, it is never saved or loaded, and its instructions fault
+            // with #NM, which records it in XFD_ERR, cleared here.
+            unsafe {
+                cpu::wrmsr(msr::XFD, held);
+                cpu::wrmsr(msr::XFD_ERR, 0);
+            }
+        }
     }
     // SAFETY: FNINIT resets the x87 FPU to its initial state.
     unsafe { asm!("fninit", options(nomem, nostack)) };
+}
+
+/// Ends a device-not-available fault (#NM) from user mode, which only an
+/// instruction of a component XFD holds off raises here (CR0.TS and EM
+/// stay clear): clears XFD_ERR, which the CPU leaves naming the component.
+pub fn end_held_fault() {
+    if HELD.load(Ordering::Relaxed) != 0 {
+        // SAFETY: XFD is in use (`init_cpu`), so the MSR exists.
+        unsafe { cpu::wrmsr(msr::XFD_ERR, 0) };
+    }
 }
 
 /// How extended state is saved, for the boot report.
@@ -275,7 +329,7 @@ pub fn used_size(head: &[u8]) -> usize {
         }
         _ => return size,
     };
-    let beyond = bv & XCR0.load(Ordering::Relaxed) & !(X87 | SSE);
+    let beyond = bv & XCR0.load(Ordering::Relaxed) & !(HELD.load(Ordering::Relaxed) | X87 | SSE);
     let end = match beyond.checked_ilog2() {
         Some(last) => {
             ENDS.get(last as usize).map_or(size, |end| end.load(Ordering::Relaxed) as usize)
@@ -289,6 +343,8 @@ pub fn used_size(head: &[u8]) -> usize {
 /// load: MXCSR without reserved bits and, for XSAVE, a header naming only
 /// the components this kernel enables in the standard format, with its
 /// reserved bytes zero. Loading anything else would fault in the kernel.
+/// AMX's components are never loaded from one: held off, they are always
+/// initial, and a tile configuration XRSTOR found invalid would fault.
 pub fn sanitize(image: &mut [u8]) {
     if image.len() < 512 {
         return;
@@ -305,7 +361,7 @@ pub fn sanitize(image: &mut [u8]) {
     image[24..28].copy_from_slice(&mxcsr.to_le_bytes());
     if MODE.load(Ordering::Relaxed) >= XSAVE && image.len() >= 576 {
         let bv = u64::from_le_bytes(image[512..520].try_into().unwrap());
-        let bv = bv & XCR0.load(Ordering::Relaxed);
+        let bv = bv & XCR0.load(Ordering::Relaxed) & !AMX;
         image[512..520].copy_from_slice(&bv.to_le_bytes());
         image[520..576].fill(0);
     }

@@ -918,6 +918,13 @@ pub fn exception(vector: u8, frame: &TrapFrame) {
         0 => UserFaultKind::Divide,
         3 => UserFaultKind::Breakpoint,
         6 => UserFaultKind::InvalidOpcode,
+        // Only an AMX instruction, which XFD holds off, raises #NM: it is
+        // an invalid instruction, as it was with AMX off in XCR0 and as it
+        // is in Linux for a program that has not asked for AMX.
+        7 => {
+            fpu::end_held_fault();
+            UserFaultKind::InvalidOpcode
+        }
         13 => UserFaultKind::Protection,
         14 => UserFaultKind::Page {
             address: cpu::cr2(),
