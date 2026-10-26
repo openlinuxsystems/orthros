@@ -22,6 +22,10 @@
 //!   Access for writes through the cache), flushes and deallocations, up
 //!   to 63 in flight, their data in PRP lists ([`command::prps`]).
 //! - [`command`] builds the commands and reads their completions.
+//! - [`Shadow`] holds the shadow doorbells of a controller that takes
+//!   them, as ones that hypervisors emulate may: a lane writes its
+//!   doorbell registers, each an exit from the virtual machine, only when
+//!   the controller asks.
 //!
 //! The crate is a compartment: it has no `unsafe` code, and reaches the
 //! controller only through the [`Mmio`] windows and [`Dma`] memory that
@@ -38,6 +42,7 @@
 pub mod command;
 pub mod identify;
 mod lane;
+mod shadow;
 
 #[cfg(test)]
 mod tests;
@@ -47,6 +52,7 @@ use core::fmt;
 use command::{COMMAND_SIZE, COMPLETION_SIZE, Command, Completion, Status, cns};
 pub use lane::{DEPTH, ENTRIES, Lane, MEMORY_PAGES, SLOTS};
 use radix_hw::{Dma, Mmio, device_barrier};
+pub use shadow::Shadow;
 
 /// The PCI class, subclass and programming interface of an NVMe
 /// controller: mass storage, non-volatile memory, NVM Express.
@@ -239,6 +245,8 @@ pub struct Nvme {
     deallocate_blocks: u32,
     /// The I/O queue pairs the controller granted.
     granted: u16,
+    /// The shadow doorbells it was given, if it takes them.
+    shadow: Option<&'static Shadow>,
 }
 
 impl fmt::Debug for Nvme {
@@ -296,6 +304,7 @@ impl Nvme {
             identity: identify::Controller::UNKNOWN,
             deallocate_blocks: u32::MAX,
             granted: 0,
+            shadow: None,
         };
         nvme.enable(delay)?;
         let buffer = nvme.admin.phys() + BUFFER as u64;
@@ -464,6 +473,40 @@ impl Nvme {
         Ok(self.granted)
     }
 
+    /// Gives the controller `shadow` doorbells, once it has granted I/O
+    /// queues ([`Nvme::request_queues`]) and before its lanes are made: the
+    /// lanes write their doorbell registers only when it asks. Fails if it
+    /// does not take them ([`identify::Controller::shadow_doorbells`]), or
+    /// has more queues than the shadow holds, or refuses them, and then
+    /// its lanes write their registers every time.
+    pub fn use_shadow(
+        &mut self,
+        shadow: &'static Shadow,
+        delay: &mut dyn FnMut(u32),
+    ) -> Result<(), Error> {
+        self.shadow = None;
+        // Each queue pair's two doorbells, the admin queue's first.
+        let room = 2 * (usize::from(self.granted) + 1) * self.stride();
+        if !self.identity.shadow_doorbells || self.granted == 0 || room > Shadow::ROOM {
+            return Err(Error::Unsupported);
+        }
+        self.give_shadow(shadow, delay)?;
+        self.shadow = Some(shadow);
+        Ok(())
+    }
+
+    /// Sends Doorbell Buffer Config, with `shadow` zeroed.
+    fn give_shadow(&mut self, shadow: &Shadow, delay: &mut dyn FnMut(u32)) -> Result<(), Error> {
+        shadow.clear();
+        let (doorbells, events) = shadow.addresses();
+        self.command(Command::doorbell_buffer(doorbells, events), delay).map(|_| ())
+    }
+
+    /// Whether its lanes use shadow doorbells.
+    pub fn shadowed(&self) -> bool {
+        self.shadow.is_some()
+    }
+
     /// Calls `found` with each active namespace and what it is, or why the
     /// driver cannot take it, up to the first [`MAX_NAMESPACES`]. A
     /// controller before version 1.1, which does not list its active
@@ -528,16 +571,22 @@ impl Nvme {
         }
         let doorbells = self.doorbells(id).ok_or(Error::Registers)?;
         let memory = alloc(MEMORY_PAGES).ok_or(Error::NoMemory)?;
-        let lane = Lane::new(memory, doorbells, id, vector, self.identity.max_pages);
-        self.remake(&lane, delay)?;
+        let mut lane = Lane::new(memory, doorbells, id, vector, self.identity.max_pages);
+        self.remake(&mut lane, delay)?;
         Ok(lane)
     }
 
     /// Creates `lane`'s queues on the controller: when the lane is made,
-    /// and again after [`Nvme::restart`].
-    pub fn remake(&mut self, lane: &Lane, delay: &mut dyn FnMut(u32)) -> Result<(), Error> {
+    /// and again after [`Nvme::restart`]. The lane writes its doorbells to
+    /// the shadow doorbells the controller has now, if any.
+    pub fn remake(&mut self, lane: &mut Lane, delay: &mut dyn FnMut(u32)) -> Result<(), Error> {
         let (sq, cq) = lane.queues();
         let id = lane.id();
+        // Where the lane's doorbells are in the shadow, as in the
+        // registers; `use_shadow` checked that they fit.
+        let stride = self.stride();
+        let at = 2 * usize::from(id) * stride;
+        lane.use_shadow(self.shadow.map(|shadow| (shadow, at, at + stride)));
         self.command(Command::create_cq(id, ENTRIES, cq, lane.vector()), delay)?;
         if let Err(err) = self.command(Command::create_sq(id, ENTRIES, sq), delay) {
             let _ = self.command(Command::delete(id, true), delay);
@@ -551,12 +600,21 @@ impl Nvme {
     /// Each lane is to be restarted first ([`Lane::restart`], so that every
     /// request in flight goes again), and made again after
     /// ([`Nvme::remake`]); if the controller does not come back, each is
-    /// to be killed ([`Lane::kill`]), and its requests fail.
+    /// to be killed ([`Lane::kill`]), and its requests fail. The
+    /// controller forgets its shadow doorbells too, and is given them
+    /// again; if it refuses them now, its lanes write their registers.
     pub fn restart(&mut self, delay: &mut dyn FnMut(u32)) -> Result<(), Error> {
         self.enable(delay)?;
         let wanted = self.granted;
         if self.request_queues(wanted, delay)? < wanted {
             return Err(Error::Unsupported);
+        }
+        if let Some(shadow) = self.shadow.take() {
+            match self.give_shadow(shadow, delay) {
+                Ok(()) => self.shadow = Some(shadow),
+                Err(Error::Command(_)) => {}
+                Err(err) => return Err(err),
+            }
         }
         Ok(())
     }

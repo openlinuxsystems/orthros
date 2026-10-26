@@ -32,7 +32,7 @@
 //!
 //! A raw transfer ([`BlockDevice::read_frames`], into memory a program
 //! lends) goes in requests of as many segments as the device takes, not
-//! the [`MAX_SEGMENTS`] of the page cache's: a virtio disk's take 126
+//! the [`MAX_SEGMENTS`] of the page cache's: a virtio disk's take 254
 //! pages, an AHCI disk's 32. A transfer of more goes as several requests,
 //! all in flight at once, and the device hears of them
 //! together: a controller may hold back the doorbell of a request that

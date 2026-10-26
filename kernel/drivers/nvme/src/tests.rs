@@ -4,7 +4,8 @@
 //! The driver against a simulated NVMe controller: its registers, its
 //! admin commands, and namespaces that carry out the commands in its I/O
 //! queues, at once or when a test says, failing with the status a test
-//! sets on blocks it marks.
+//! sets on blocks it marks. It may take shadow doorbells, and then keeps
+//! their event indexes as QEMU's controller does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,8 @@ use radix_hw::{Dma, Mmio, Registers, fake_memory, fake_memory_write};
 
 use crate::command::{self, COMMAND_SIZE, PAGE, Status, admin, cns, nvm};
 use crate::identify::{self, Unusable};
-use crate::{DEPTH, Error, Lane, MEMORY_PAGES, Nvme, Op, Outcome};
+use crate::shadow::passes;
+use crate::{DEPTH, Error, Lane, MEMORY_PAGES, Nvme, Op, Outcome, Shadow};
 
 /// Its registers' length: the controller's, and doorbells for 17 queues.
 const REGS: usize = 0x1000 + 17 * 8;
@@ -87,6 +89,13 @@ struct State {
     /// How many times it was enabled.
     enables: u32,
     shutdowns: u32,
+    /// Whether it takes shadow doorbells, and the shadow doorbells and
+    /// event indexes it was given.
+    offers_shadow: bool,
+    shadow: Option<(u64, u64)>,
+    /// Each I/O completion queue's head, as the controller last heard of
+    /// it: from its register or its shadow doorbell.
+    heads: HashMap<u16, u16>,
 }
 
 /// The simulated controller.
@@ -107,6 +116,16 @@ fn dword(bytes: &[u8], at: usize) -> u32 {
 
 fn qword(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+fn read_word(phys: u64) -> u16 {
+    let mut word = [0u8; 4];
+    fake_memory(phys, &mut word);
+    u32::from_le_bytes(word) as u16
+}
+
+fn write_word(phys: u64, value: u16) {
+    fake_memory_write(phys, &u32::from(value).to_le_bytes());
 }
 
 /// The pages a command's data are in, each (address, length), for
@@ -135,9 +154,25 @@ fn data_pages(prp1: u64, prp2: u64, bytes: u64) -> Vec<(u64, u64)> {
 }
 
 impl State {
+    /// The shadow doorbell and event index of doorbell `index` (2*y* for
+    /// submission queue *y*, one more for its completion queue), if it
+    /// has them: an I/O queue's, once the controller was given them.
+    fn shadow_of(&self, index: u16) -> Option<(u64, u64)> {
+        let (doorbells, events) = self.shadow?;
+        let at = 4 * u64::from(index);
+        (index >= 2).then_some((doorbells + at, events + at))
+    }
+
     /// Writes a completion of `id` with `status` and `result` to
     /// completion queue `cq`, and signals its interrupt.
     fn complete(&mut self, cq: u16, sq_head: u16, id: u16, status: u16, result: u32) {
+        // As QEMU does: the event index is the head it last heard of, and
+        // then it reads the shadow doorbell.
+        if let Some((doorbell, event)) = self.shadow_of(2 * cq + 1) {
+            let head = self.heads.get(&cq).copied().unwrap_or(0);
+            write_word(event, head);
+            self.heads.insert(cq, read_word(doorbell));
+        }
         let queue = self.cqs.get_mut(&cq).unwrap();
         let mut entry = [0u8; 16];
         entry[0..4].copy_from_slice(&result.to_le_bytes());
@@ -156,11 +191,19 @@ impl State {
     }
 
     /// Carries out the commands written to submission queue `sq` up to
-    /// `tail`.
-    fn run(&mut self, sq: u16, tail: u16) {
+    /// `tail`, or up to its shadow doorbell as it reads now: then it asks
+    /// to hear of the next command by register.
+    fn run(&mut self, sq: u16, mut tail: u16) {
+        let shadow = self.shadow_of(2 * sq);
         loop {
+            if let Some((doorbell, _)) = shadow {
+                tail = read_word(doorbell);
+            }
             let Some(queue) = self.sqs.get_mut(&sq) else { return };
             if queue.at == tail {
+                if let Some((_, event)) = shadow {
+                    write_word(event, tail);
+                }
                 return;
             }
             let bytes = read_command(queue.base, queue.at);
@@ -195,6 +238,8 @@ impl State {
                         data[77] = self.mdts;
                         data[80..84].copy_from_slice(&self.version.to_le_bytes());
                         data[88..92].copy_from_slice(&2_000_000u32.to_le_bytes());
+                        let oacs = if self.offers_shadow { 1u16 << 8 } else { 0 };
+                        data[256..258].copy_from_slice(&oacs.to_le_bytes());
                         data[516..520].copy_from_slice(&8u32.to_le_bytes());
                         data[520..522].copy_from_slice(&(1u16 << 2).to_le_bytes());
                         data[525] = u8::from(self.write_cache);
@@ -252,8 +297,14 @@ impl State {
                 } else {
                     let queue = Queue { base: prp1, entries, at: 0, phase: true, other: vector };
                     self.cqs.insert(id, queue);
+                    self.heads.insert(id, 0);
                     0
                 }
+            }
+            // The pages need not be aligned here: fake memory is not.
+            admin::DOORBELL_BUFFER_CONFIG if self.offers_shadow => {
+                self.shadow = Some((prp1, qword(bytes, 32)));
+                0
             }
             admin::CREATE_SQ => {
                 let id = cdw10 as u16;
@@ -352,6 +403,31 @@ impl Sim {
         }
     }
 
+    /// Looks at each I/O submission queue for commands, as a controller
+    /// with shadow doorbells does from time to time.
+    fn look(&self) {
+        let mut state = self.state();
+        let mut queues: Vec<(u16, u16)> =
+            state.sqs.iter().map(|(&id, q)| (id, q.at)).filter(|&(id, _)| id != 0).collect();
+        queues.sort_unstable();
+        for (sq, at) in queues {
+            state.run(sq, at);
+        }
+    }
+
+    /// The shadow doorbell and event index of doorbell `index`: as the
+    /// driver wrote the one and the controller the other.
+    fn shadow_word(&self, index: u16) -> (u16, u16) {
+        let (doorbell, event) = self.state().shadow_of(index).expect("shadow doorbells");
+        (read_word(doorbell), read_word(event))
+    }
+
+    /// Sets the event index of doorbell `index`, as the controller does.
+    fn ask(&self, index: u16, event: u16) {
+        let (_, at) = self.state().shadow_of(index).expect("shadow doorbells");
+        write_word(at, event);
+    }
+
     /// Answers held command `index` with `status`, out of turn.
     fn answer(&self, index: usize, status: u16) {
         let mut state = self.state();
@@ -405,6 +481,8 @@ impl Registers for Sim {
                     state.sqs.clear();
                     state.cqs.clear();
                     state.held.clear();
+                    state.shadow = None;
+                    state.heads.clear();
                     state.csts &= !1;
                 }
                 if value32 & (3 << 14) == 1 << 14 {
@@ -424,6 +502,8 @@ impl Registers for Sim {
                 state.doorbells.push((queue, tail));
                 if tail {
                     state.run(queue, value32 as u16);
+                } else if queue != 0 {
+                    state.heads.insert(queue, value32 as u16);
                 }
             }
             _ => {}
@@ -438,6 +518,11 @@ fn space(id: u32, blocks: u64) -> Space {
 /// A simulated controller with namespaces 1 (a mebibyte) and 2 (64 KiB)
 /// and the driver set up on it.
 fn setup() -> (Arc<Sim>, Nvme) {
+    setup_with(|_| {})
+}
+
+/// As [`setup`], with the controller changed by `change` first.
+fn setup_with(change: impl FnOnce(&mut State)) -> (Arc<Sim>, Nvme) {
     let sim = Arc::new(Sim::default());
     {
         let mut state = sim.state();
@@ -447,6 +532,7 @@ fn setup() -> (Arc<Sim>, Nvme) {
         state.write_cache = true;
         state.spaces.push(space(1, 2048));
         state.spaces.push(space(2, 128));
+        change(&mut state);
     }
     let regs = Mmio::fake(sim.clone(), REGS);
     let nvme = Nvme::new(regs, &mut alloc, &mut |_| {}).unwrap();
@@ -742,7 +828,7 @@ fn a_reset_makes_the_queues_again_and_sends_what_was_in_flight_again() {
         lane.restart();
     }
     nvme.restart(&mut |_| {}).unwrap();
-    for lane in &lanes {
+    for lane in &mut lanes {
         nvme.remake(lane, &mut |_| {}).unwrap();
     }
     assert_eq!(sim.state().enables, 2);
@@ -825,4 +911,127 @@ fn a_block_is_what_is_best_written_and_whole_after_a_power_failure() {
     // A namespace that does not say what is best is written in blocks.
     data[24] = 0;
     assert_eq!(identify::namespace(&data, 16).map(|n| n.block_size), Ok(512));
+}
+
+/// Shadow doorbells for a controller: never given back.
+fn shadow() -> &'static Shadow {
+    Box::leak(Box::new(Shadow::new(Dma::fake(Shadow::PAGES * 4096)).unwrap()))
+}
+
+/// The doorbell registers of queue pair 1 written: each a tail's or not.
+fn rung(sim: &Sim) -> Vec<bool> {
+    sim.state().doorbells.iter().filter(|&&(queue, _)| queue == 1).map(|&(_, tail)| tail).collect()
+}
+
+#[test]
+fn gives_shadow_doorbells_to_a_controller_that_takes_them() {
+    let (sim, mut nvme) = setup();
+    nvme.request_queues(2, &mut |_| {}).unwrap();
+    assert!(!nvme.identity().shadow_doorbells);
+    assert_eq!(nvme.use_shadow(shadow(), &mut |_| {}), Err(Error::Unsupported));
+    assert!(!nvme.shadowed());
+    assert!(sim.state().commands.iter().all(|c| c.1 != admin::DOORBELL_BUFFER_CONFIG));
+
+    let (sim, mut nvme) = setup_with(|state| state.offers_shadow = true);
+    assert!(nvme.identity().shadow_doorbells);
+    // Only once it has granted queues, which the shadow must hold.
+    let given = shadow();
+    assert_eq!(nvme.use_shadow(given, &mut |_| {}), Err(Error::Unsupported));
+    nvme.request_queues(2, &mut |_| {}).unwrap();
+    nvme.use_shadow(given, &mut |_| {}).unwrap();
+    assert!(nvme.shadowed());
+    assert_eq!(sim.state().shadow, Some(given.addresses()));
+}
+
+#[test]
+fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
+    let (sim, mut nvme) = setup_with(|state| state.offers_shadow = true);
+    nvme.request_queues(1, &mut |_| {}).unwrap();
+    nvme.use_shadow(shadow(), &mut |_| {}).unwrap();
+    let mut lane = lane(&mut nvme, 1);
+    let page = pages(1);
+    // An idle controller asks to hear of the next command, and of the
+    // head moving past the completion it writes.
+    lane.submit(0, Op::Read, 1, 3, &[(page, 512)], true).unwrap();
+    assert_eq!(next(&mut lane), (0, Outcome::Done));
+    assert_eq!(read_host(page, 512), pattern(3));
+    assert_eq!(rung(&sim), [true, false]);
+    assert_eq!(sim.shadow_word(2), (1, 1));
+    assert_eq!(sim.shadow_word(3).0, 1);
+    // One that asks to hear of entry 10 only finds the next command in
+    // memory when it looks.
+    sim.ask(2, 10);
+    lane.submit(1, Op::Read, 1, 4, &[(page, 512)], true).unwrap();
+    assert_eq!(rung(&sim), [true, false]);
+    assert_eq!(sim.shadow_word(2).0, 2);
+    assert!(lane.complete().is_none());
+    sim.look();
+    assert_eq!(next(&mut lane), (1, Outcome::Done));
+    assert_eq!(read_host(page, 512), pattern(4));
+    assert_eq!(rung(&sim), [true, false, false]);
+    // A head it does not ask for stays in memory.
+    lane.submit(2, Op::Read, 1, 5, &[(page, 512)], true).unwrap();
+    sim.ask(3, 40);
+    assert_eq!(next(&mut lane), (2, Outcome::Done));
+    assert_eq!(rung(&sim), [true, false, false, true]);
+    assert_eq!(sim.shadow_word(3).0, 3);
+    // As QEMU's does, it asks next for the head it last heard of, which
+    // the driver has passed: the heads stay in memory from then on.
+    for slot in 3..8 {
+        lane.submit(slot, Op::Read, 1, u64::from(slot), &[(page, 512)], true).unwrap();
+        assert_eq!(next(&mut lane), (slot, Outcome::Done));
+        assert_eq!(read_host(page, 512), pattern(u64::from(slot)));
+    }
+    assert_eq!(rung(&sim).iter().filter(|&&tail| !tail).count(), 2);
+    assert_eq!(sim.shadow_word(3).0, 8);
+}
+
+#[test]
+fn a_reset_gives_the_shadow_doorbells_again_or_goes_without() {
+    let (sim, mut nvme) = setup_with(|state| state.offers_shadow = true);
+    nvme.request_queues(1, &mut |_| {}).unwrap();
+    let given = shadow();
+    nvme.use_shadow(given, &mut |_| {}).unwrap();
+    let mut lane = lane(&mut nvme, 1);
+    let page = pages(1);
+    sim.state().hold = true;
+    lane.submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
+    lane.restart();
+    nvme.restart(&mut |_| {}).unwrap();
+    // Given again, and zeroed: the queues start empty.
+    assert!(nvme.shadowed());
+    assert_eq!(sim.state().shadow, Some(given.addresses()));
+    assert_eq!((sim.shadow_word(2), sim.shadow_word(3)), ((0, 0), (0, 0)));
+    nvme.remake(&mut lane, &mut |_| {}).unwrap();
+    assert_eq!(next(&mut lane), (4, Outcome::Retry));
+    sim.state().hold = false;
+    lane.submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
+    assert_eq!(next(&mut lane), (4, Outcome::Done));
+    assert_eq!(read_host(page, 512), pattern(9));
+    assert_eq!(sim.shadow_word(2).0, 1);
+    // A controller that refuses them after a reset: its lanes write their
+    // registers every time.
+    lane.restart();
+    sim.state().offers_shadow = false;
+    nvme.restart(&mut |_| {}).unwrap();
+    assert!(!nvme.shadowed());
+    assert_eq!(sim.state().shadow, None);
+    nvme.remake(&mut lane, &mut |_| {}).unwrap();
+    let before = rung(&sim).len();
+    lane.submit(5, Op::Read, 1, 10, &[(page, 512)], true).unwrap();
+    assert_eq!(next(&mut lane), (5, Outcome::Done));
+    assert_eq!(rung(&sim)[before..], [true, false]);
+    let configs =
+        sim.state().commands.iter().filter(|c| c.1 == admin::DOORBELL_BUFFER_CONFIG).count();
+    assert_eq!(configs, 3);
+}
+
+#[test]
+fn a_doorbell_passes_the_entries_from_where_it_was_to_before_where_it_is() {
+    assert!(passes(0, 1, 0));
+    assert!(!passes(0, 1, 1));
+    assert!(!passes(3, 3, 3));
+    // Round the end of the queue.
+    assert!(passes(62, 1, 62) && passes(62, 1, 63) && passes(62, 1, 0));
+    assert!(!passes(62, 1, 1) && !passes(62, 1, 30) && !passes(62, 1, 61));
 }

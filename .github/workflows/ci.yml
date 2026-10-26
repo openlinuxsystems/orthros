@@ -281,7 +281,7 @@ jobs:
               if len(ops) < 3:
                   print(f'  {label}: {len(ops)} ops')
                   return
-              period, sqbh, cmdgap, work, last_done, cbirq, irqcq, guest, irqs, dbs = ([] for _ in range(10))
+              period, sqbh, cmdgap, work, last_done, cbirq, irqcq, guest, irqs, dbs, cqdbs = ([] for _ in range(11))
               for a, b in zip(ops, ops[1:]):
                   d0 = a['db'][0]
                   period.append(b['db'][0] - d0)
@@ -296,12 +296,13 @@ jobs:
                           irqcq.append(a['cqdb'][-1] - a['irq'][-1])
                           guest.append(b['db'][0] - a['cqdb'][-1])
                   irqs.append(len(a['irq']))
+                  cqdbs.append(len(a['cqdb']))
                   dbs.append(1 + len([t for t in a['db_after'] if t < b['db'][0]]))
               print(f'  {label}: {len(ops)} ops, period {mean(period)} us; doorbell->1st cmd {mean(sqbh)}; '
                     f'1st->last cmd {mean(cmdgap)}; worker (submit->complete) {mean(work)}; '
                     f'doorbell->last complete {mean(last_done)}; last cb->last irq {mean(cbirq)}; '
                     f'last irq->cq doorbell {mean(irqcq)}; cq doorbell->next sq doorbell {mean(guest)}; '
-                    f'irqs/op {mean(irqs)}; sq doorbells/op {mean(dbs)}')
+                    f'irqs/op {mean(irqs)}; sq doorbells/op {mean(dbs)}; cq doorbells/op {mean(cqdbs)}')
 
 
           def virtio_report(label, ops):

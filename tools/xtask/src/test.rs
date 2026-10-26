@@ -2438,10 +2438,14 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let lanes = case.cpus.clamp(1, 16);
     for n in nvme_controllers(case.disks) {
         let line = line_of(&format!("Disk: nvme{n} is an NVMe 1.4 controller at "))?;
+        // QEMU's controller takes shadow doorbells.
         let queues = if lanes == 1 {
-            ", 1 I/O queue of 63 commands, one MSI-X vector".to_string()
+            ", 1 I/O queue of 63 commands, one MSI-X vector, shadow doorbells".to_string()
         } else {
-            format!(", {lanes} I/O queues of 63 commands, an MSI-X vector for each of {lanes} CPUs")
+            format!(
+                ", {lanes} I/O queues of 63 commands, an MSI-X vector for each of {lanes} CPUs, \
+                 shadow doorbells"
+            )
         };
         if !line.contains(": QEMU NVMe Ctrl, firmware ") || !line.ends_with(&queues) {
             return Err(format!("the kernel described nvme{n} as \"{line}\""));

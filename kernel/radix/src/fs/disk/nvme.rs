@@ -11,10 +11,12 @@
 //! namespaces share, each a volume of it. Lane *k*'s completions raise an
 //! MSI-X interrupt aimed at CPU *k*, whose handler collects that lane; a
 //! controller without MSI-X vectors to spare is polled by the threads
-//! waiting for it. A request that goes unanswered has the controller
-//! reset and its queues made again ([`Controller::reset`]), and before the
-//! machine is powered off each controller is told to shut down
-//! ([`shutdown`]).
+//! waiting for it. A controller that takes shadow doorbells, as ones that
+//! hypervisors emulate may, is given them: its lanes write a doorbell
+//! register, an exit from the virtual machine, only when it asks. A
+//! request that goes unanswered has the controller reset and its queues
+//! made again ([`Controller::reset`]), and before the machine is powered
+//! off each controller is told to shut down ([`shutdown`]).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -26,7 +28,7 @@ use radix_hw::pci::{Bar, Function, MsiX};
 use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_nvme::identify::{self, Unusable};
-use radix_nvme::{Lane, Nvme};
+use radix_nvme::{Lane, Nvme, Shadow};
 use radix_sync::{Mutex, Once};
 
 use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
@@ -52,6 +54,10 @@ struct Host {
 
 /// The controllers, for their interrupt handlers: set once each.
 static HOSTS: [Once<Arc<Host, Kmalloc>>; MAX_HOSTS] = [const { Once::new() }; MAX_HOSTS];
+
+/// Each controller's shadow doorbells, if it takes them: kept even if its
+/// setup fails, for the next controller with its number.
+static SHADOWS: [Once<Shadow>; MAX_HOSTS] = [const { Once::new() }; MAX_HOSTS];
 
 /// Lane `arg % MAX_LANES` of controller `arg / MAX_LANES` has news.
 fn on_interrupt(arg: usize) {
@@ -116,9 +122,9 @@ impl Controller for NvmeLane {
             lane.lane.restart();
         }
         let delay = &mut queue::delay;
-        let result = nvme
-            .restart(delay)
-            .and_then(|()| lanes.iter().try_for_each(|lane| nvme.remake(&lane.lane, delay)));
+        let result = nvme.restart(delay).and_then(|()| {
+            lanes.iter_mut().try_for_each(|lane| nvme.remake(&mut lane.lane, delay))
+        });
         match result {
             Ok(()) => warn!(
                 "Disk: {}: a request went unanswered for 30 s; the controller was reset, and \
@@ -201,6 +207,21 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
         wanted = wanted.min(usize::from(msix.entries()).saturating_sub(1).max(1));
     }
     let granted = usize::from(nvme.request_queues(wanted as u16, delay)?);
+    if nvme.identity().shadow_doorbells {
+        let shadow = match SHADOWS[index].get() {
+            Some(shadow) => Some(shadow),
+            None => alloc(Shadow::PAGES)
+                .and_then(Shadow::new)
+                .and_then(|shadow| SHADOWS[index].set(shadow).ok()),
+        };
+        let given =
+            shadow.ok_or(radix_nvme::Error::NoMemory).and_then(|s| nvme.use_shadow(s, delay));
+        if let Err(err) = given {
+            warn!(
+                "Disk: nvme{index}: no shadow doorbells ({err}); every doorbell is a register write"
+            );
+        }
+    }
     let vectors = Vectors::give(function, msix, index, granted);
     let interrupt = vectors.count > 0;
     let mut name = Name::new();
@@ -213,6 +234,7 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
         let _ = lanes.push_within_capacity(made);
     }
     let identity = *nvme.identity();
+    let shadowed = nvme.shadowed();
     let (major, minor, _) = nvme.version();
     let deallocate = if identity.deallocate { u64::from(nvme.deallocate_blocks()) } else { 0 };
     let host = Host { nvme: Mutex::new(nvme), disk: Once::new(), name: name.clone() };
@@ -243,12 +265,15 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
     if let Some(msix) = msix.filter(|_| interrupt) {
         msix.unmask_all(function);
     }
-    let mut how = TextBuf::<40>::new();
+    let mut how = TextBuf::<64>::new();
     let _ = match count {
         0 => how.write_str("polled"),
         1 => how.write_str("one MSI-X vector"),
         n => write!(how, "an MSI-X vector for each of {n} CPUs"),
     };
+    if shadowed {
+        let _ = how.write_str(", shadow doorbells");
+    }
     info!(
         "Disk: {name} is an NVMe {major}.{minor} controller at {}: {}, firmware {}, {granted} \
          I/O {} of {} commands, {how}",

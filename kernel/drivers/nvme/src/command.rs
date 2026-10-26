@@ -29,6 +29,8 @@ pub mod admin {
     pub const IDENTIFY: u8 = 0x06;
     /// Set Features.
     pub const SET_FEATURES: u8 = 0x09;
+    /// Doorbell Buffer Config: shadow doorbells.
+    pub const DOORBELL_BUFFER_CONFIG: u8 = 0x7c;
 }
 
 /// NVM command set opcodes (NVM Command Set Specification 1.0, 3).
@@ -142,6 +144,17 @@ impl Command {
         dwords[0] = u32::from(queue);
         let opcode = if completion { admin::DELETE_CQ } else { admin::DELETE_SQ };
         Command { opcode, dwords, ..Command::default() }
+    }
+
+    /// Doorbell Buffer Config: shadow doorbells in the page at
+    /// `doorbells`, and event indexes in the page at `events`.
+    pub fn doorbell_buffer(doorbells: u64, events: u64) -> Command {
+        Command {
+            opcode: admin::DOORBELL_BUFFER_CONFIG,
+            prp1: doorbells,
+            prp2: events,
+            ..Command::default()
+        }
     }
 
     /// Read or Write of `blocks` blocks (1 to 65,536) from `block` of

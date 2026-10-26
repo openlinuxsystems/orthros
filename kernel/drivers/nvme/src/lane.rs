@@ -17,11 +17,14 @@
 //! doorbell past it; the controller writes a completion at the
 //! completion queue's head, with the phase tag that tells a new entry
 //! from the last pass's, and the driver moves the head doorbell past the
-//! entries it has read.
+//! entries it has read. With shadow doorbells ([`Shadow`]), a doorbell
+//! moves in memory, and its register is written only when the controller
+//! asks.
 
 use radix_hw::{Dma, Mmio, device_barrier};
 
 use crate::command::{self, COMMAND_SIZE, COMPLETION_SIZE, Command, Completion, LIST_ENTRIES};
+use crate::shadow::Shadow;
 use crate::{Error, Op, Outcome};
 
 /// Entries in each queue of a lane.
@@ -49,6 +52,9 @@ pub struct Lane {
     /// of its completion queue.
     sq_doorbell: Mmio,
     cq_doorbell: Mmio,
+    /// The controller's shadow doorbells, if it takes them, and where the
+    /// lane's two are in them.
+    shadow: Option<(&'static Shadow, usize, usize)>,
     /// Its queues' ID.
     id: u16,
     /// Its MSI-X entry, if its completions interrupt.
@@ -99,6 +105,7 @@ impl Lane {
             memory,
             sq_doorbell: doorbells.0,
             cq_doorbell: doorbells.1,
+            shadow: None,
             id,
             vector,
             max_pages,
@@ -125,6 +132,13 @@ impl Lane {
     /// Its MSI-X entry, if its completions interrupt.
     pub fn vector(&self) -> Option<u16> {
         self.vector
+    }
+
+    /// Has the lane's doorbells written to `shadow`, at these offsets, or
+    /// to their registers alone: as the controller was set up when its
+    /// queues were made.
+    pub(crate) fn use_shadow(&mut self, shadow: Option<(&'static Shadow, usize, usize)>) {
+        self.shadow = shadow;
     }
 
     /// The physical addresses of its submission and completion queues.
@@ -242,7 +256,13 @@ impl Lane {
     pub fn ring(&mut self) {
         if self.unrung && !self.dead {
             device_barrier();
-            self.sq_doorbell.write32(0, u32::from(self.tail));
+            let register = match self.shadow {
+                Some((shadow, at, _)) => shadow.update(at, self.tail),
+                None => true,
+            };
+            if register {
+                self.sq_doorbell.write32(0, u32::from(self.tail));
+            }
             self.unrung = false;
         }
     }
@@ -309,7 +329,13 @@ impl Lane {
             }
         }
         if moved {
-            self.cq_doorbell.write32(0, u32::from(self.head));
+            let register = match self.shadow {
+                Some((shadow, _, at)) => shadow.update(at, self.head),
+                None => true,
+            };
+            if register {
+                self.cq_doorbell.write32(0, u32::from(self.head));
+            }
         }
     }
 

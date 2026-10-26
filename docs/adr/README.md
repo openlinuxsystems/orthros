@@ -128,3 +128,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0114](0114-plain-names-inside-system.md) | The folders inside /system have plain names, and Unix's names are hidden links to them | Accepted |
 | [0115](0115-nvme-from-the-specification.md) | NVMe disks, written from the specification, with a queue for each CPU | Accepted |
 | [0116](0116-idle-polling-learns-from-other-cpus.md) | Idle polling learns only from wake-ups that other CPUs send | Accepted |
+| [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted |

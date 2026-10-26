@@ -624,21 +624,30 @@ fn requests_go_in_tables_of_their_own() {
 }
 
 #[test]
-fn a_table_takes_up_to_126_buffers() {
+fn a_table_takes_up_to_254_buffers() {
     // Without seg_max the device takes any number: a table's worth, or
     // what fits in the ring several times without tables.
     let (device, mut blk) = setup(FEATURES & !feature::SEG_MAX);
-    assert_eq!(blk.info().max_segments, 126);
-    // Half sectors, so that 126 of them fit on the disk.
-    let buffer = Dma::fake(126 * 256);
-    let parts: Vec<(u64, u32)> = (0..126).map(|k| (buffer.phys() + 256 * k, 256)).collect();
-    let token = blk.submit(Op::Read, 1, &parts).unwrap();
+    assert_eq!(blk.info().max_segments, 254);
+    // Two half sectors and quarter sectors, so that 254 of them fill the
+    // disk.
+    let len = SECTORS * SECTOR;
+    let buffer = Dma::fake(len as usize);
+    let mut at = buffer.phys();
+    let parts: Vec<(u64, u32)> = (0..254)
+        .map(|k| {
+            let part = (at, if k < 2 { 256 } else { 128 });
+            at += u64::from(part.1);
+            part
+        })
+        .collect();
+    let token = blk.submit(Op::Read, 0, &parts).unwrap();
     assert_eq!(wait(&mut blk, token), Outcome::Done);
-    let mut got = std::vec![0u8; 126 * 256];
+    let mut got = std::vec![0u8; len as usize];
     buffer.read(0, &mut got);
-    assert_eq!(got, disk_bytes(SECTOR, 126 * 256));
+    assert_eq!(got, disk_bytes(0, len));
     assert_eq!(device.state.lock().unwrap().indirect, 1);
-    let more = [(buffer.phys(), 512u32); 127];
+    let more = [(buffer.phys(), 512u32); 255];
     assert_eq!(blk.submit(Op::Read, 0, &more), Err(Error::BadRequest));
     let (_, blk) = setup(FEATURES & !(feature::SEG_MAX | common_feature::INDIRECT_DESC));
     assert_eq!(blk.info().max_segments, 30);

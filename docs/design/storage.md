@@ -16,7 +16,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112 and 0115.
+0052 to 0059, 0111, 0112, 0115 and 0117.
 
 ## Crates
 
@@ -234,6 +234,11 @@ with 4 KiB pages and the NVM command set, and asks what it is (Identify)
 and for as many I/O queues as there are CPUs, at most 16. Each queue
 pair, a *lane* of the queue below, has 64 entries and an MSI-X vector
 aimed at its CPU (`allocate_interrupt_at`); the admin queue is polled.
+A controller that takes shadow doorbells (Doorbell Buffer Config, OACS
+bit 8), as QEMU's does, is given two pages for them before its queues
+are made, and again after a reset (ADR 0117): a lane then writes each
+doorbell to memory, and its register only when the controller's event
+index asks.
 Each active namespace with 512-byte blocks and no metadata becomes a
 disk, its requests naming it; its physical block is the size it is best
 written in, but no more than what is whole after a power failure. At
@@ -257,7 +262,7 @@ the slot's number its command ID, its data in a PRP list of the slot's
 own (up to 128 pages, or fewer when the controller says). When the device takes indirect descriptors, as
 QEMU's and most do, each virtio chain goes in a table of its own, one of
 64 the driver keeps, and takes one entry of the ring; a request then
-has up to 126 data segments, and 30 without them. With event indexes
+has up to 254 data segments, and 30 without them. With event indexes
 (`VIRTIO_F_EVENT_IDX`) the driver rings the doorbell only when the
 device asked to be told, and the device interrupts only for the first
 completion after the driver has read every one before it, so that a
@@ -322,9 +327,9 @@ bytes moved ends the transfer short. `fsync` empties the disk's write
 cache.
 
 A raw transfer's requests take as many parts of pages as the device
-does, not the 16 the page cache's take: 126 on a virtio disk, so a
-mebibyte is three requests, 32 on an AHCI disk, and 128 on most NVMe
-disks. A transfer of more
+does, not the 16 the page cache's take: 254 on a virtio disk, so a
+mebibyte is two requests, as in Linux, 32 on an AHCI disk, and 128 on
+most NVMe disks. A transfer of more
 goes as several (`Disk::request_all`), up to 16 in flight at once, and
 each is settled, retried or failed, before the call returns, even after
 another failed, since the device may still be reaching the memory. The

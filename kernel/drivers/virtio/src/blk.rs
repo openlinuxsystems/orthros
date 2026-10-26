@@ -16,8 +16,8 @@
 //! indexes, read-only disks, the block size, cache flushes, discards and
 //! the segment limits. With indirect descriptors a request takes one
 //! entry of the ring and up to [`TABLE_SEGMENTS`] data buffers, in a
-//! table of its own, as Linux's requests do: a mebibyte of pages is three
-//! requests. Without them a request is at most [`RING_SEGMENTS`] buffers,
+//! table of its own, as Linux's requests do: a mebibyte of pages is two
+//! requests, as in Linux. Without them a request is at most [`RING_SEGMENTS`] buffers,
 //! so that several fit in the ring at once.
 
 use radix_hw::{Dma, device_barrier};
@@ -52,9 +52,10 @@ const HEADER: usize = 16;
 /// A discard's range: its first sector, its length and flags (none).
 const RANGE: usize = 16;
 /// The most data buffers in a request in a table of its own, whatever
-/// the device takes: with its header and status, 128 descriptors, a table
-/// of 2 KiB.
-pub const TABLE_SEGMENTS: u32 = 126;
+/// the device takes: with its header and status, 256 descriptors, a table
+/// of 4 KiB. QEMU's devices take as many (`seg_max`, their queue's size
+/// less two).
+pub const TABLE_SEGMENTS: u32 = 254;
 /// The most data buffers in a request in the ring, without indirect
 /// descriptors: eight of them fill a ring of 256.
 pub const RING_SEGMENTS: u32 = 30;

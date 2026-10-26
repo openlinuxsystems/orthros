@@ -39,6 +39,9 @@ pub struct Controller {
     pub write_cache: bool,
     /// Whether it deallocates blocks (Dataset Management).
     pub deallocate: bool,
+    /// Whether it takes shadow doorbells (Doorbell Buffer Config, OACS
+    /// bit 8), as controllers that hypervisors emulate may.
+    pub shadow_doorbells: bool,
     /// How many blocks a write may cover and still be whole after a
     /// power failure (AWUPF), for a namespace that does not say.
     pub atomic_blocks: u32,
@@ -97,6 +100,7 @@ impl Controller {
         namespaces: 0,
         write_cache: false,
         deallocate: false,
+        shadow_doorbells: false,
         atomic_blocks: 1,
         shutdown_us: 0,
         version: 0,
@@ -125,6 +129,7 @@ pub fn controller(data: &[u8; HEAD]) -> Controller {
         namespaces: u32_at(data, 516),
         write_cache: data[525] & 1 != 0,
         deallocate: u16_at(data, 520) & (1 << 2) != 0,
+        shadow_doorbells: u16_at(data, 256) & (1 << 8) != 0,
         atomic_blocks: u32::from(u16_at(data, 528)) + 1,
         shutdown_us: u32_at(data, 88),
         version: u32_at(data, 80),
