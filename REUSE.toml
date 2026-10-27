@@ -60,3 +60,10 @@ SPDX-License-Identifier = "Apache-2.0 OR MIT"
 path = ["userspace/defaults/group", "userspace/defaults/issue", "userspace/defaults/passwd"]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# Zstandard frames of generated data, made by the zstd program, which the
+# Btrfs decoder's tests read (kernel/fs/btrfs/src/tests/compressed.rs).
+[[annotations]]
+path = "kernel/fs/btrfs/src/tests/zstd/*.zst"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

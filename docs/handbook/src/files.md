@@ -92,8 +92,8 @@ the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
 disk with no partition table, at `/volumes/<name>`, read-write, or its
 Btrfs filesystem, read-only for now: Dukovo reads Btrfs disks Linux made,
 with their subvolumes, and checks every block and every sector of data
-against its checksum, but writes them only from Phase 10c. Compressed
-files on Btrfs read from Phase 10b.3. Anything else is left alone.
+against its checksum, and reads files compressed with zlib, LZO or zstd,
+but writes them only from Phase 10c. Anything else is left alone.
 
 Changes reach the disk within five seconds, or at once when a program
 asks for it, so a power cut loses at most the last five seconds of

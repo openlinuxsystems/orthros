@@ -18,6 +18,10 @@
 //! - [`volume::Volume`]: an opened device, its chunks and its trees.
 //! - [`inode`], [`dir`] and [`extent`]: the items a subvolume's tree
 //!   keeps for its files, directories and data.
+//! - [`inflate`], [`lzo`] and [`zstd`]: the three compressions of data,
+//!   decoded from their specifications (RFC 1950 and 1951, the LZO1X
+//!   format Linux documents, RFC 8878), and [`unpack`], which uncompresses
+//!   extents with them.
 //! - [`fs::BtrfsFs`] and [`node::BtrfsNode`]: a mounted filesystem, read
 //!   through the VFS.
 //!
@@ -38,12 +42,16 @@ pub mod dir;
 pub mod extent;
 pub mod format;
 pub mod fs;
+pub mod inflate;
 pub mod inode;
+pub mod lzo;
 pub mod node;
 mod sha256;
 pub mod superblock;
 pub mod tree;
+pub mod unpack;
 pub mod volume;
+pub mod zstd;
 
 #[cfg(test)]
 mod tests;
@@ -56,10 +64,15 @@ use radix_vfs::mem::{self, KVec, NoMemory};
 /// `len` zero bytes on the heap (the kernel's `alloc` has no `resize`,
 /// which cannot fail).
 pub(crate) fn zeroed(len: usize) -> Result<KVec<u8>, NoMemory> {
+    filled(len, 0)
+}
+
+/// `len` copies of `value` on the heap.
+pub(crate) fn filled<T: Copy>(len: usize, value: T) -> Result<KVec<T>, NoMemory> {
     let mut v = mem::vec_with_capacity(len)?;
     for _ in 0..len {
         // Room was made above.
-        let _ = v.push_within_capacity(0);
+        let _ = v.push_within_capacity(value);
     }
     Ok(v)
 }

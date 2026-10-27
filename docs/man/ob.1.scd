@@ -530,11 +530,12 @@ _target/userspace/_).
 	*btrfs*
 		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
 		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB
-		sectors with BLAKE2b, nodes of 4 KiB and metadata once, and a
-		virtio disk as it makes one by default (CRC-32C, nodes of 16 KiB,
-		metadata twice). The files are of sizes around the inline and
-		sector limits, sparse, deep and wide, with links of both kinds, a
-		FIFO, a name that is not ASCII and a subvolume; the host changes
+		sectors with BLAKE2b, nodes of 4 KiB, metadata once and data
+		compressed with zstd, and a virtio disk as it makes one by default
+		(CRC-32C, nodes of 16 KiB, metadata twice) but for data compressed
+		with zlib. The files are of sizes around the inline and sector
+		limits, sparse, deep and wide, with text that compresses, links of
+		both kinds, a FIFO, a name that is not ASCII and a subvolume; the host changes
 		a byte of one file's second sector on each disk. Spark must mount
 		both read-only, and _/system/tests/storage list_ must list every
 		file, directory and link as the host made it, with each file's

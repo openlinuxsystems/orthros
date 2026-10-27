@@ -65,6 +65,24 @@ pub trait Backing {
         Ok(())
     }
 
+    /// Reads page `index` as [`Backing::read_page`] does. A backing that
+    /// reads more of the file on the way (Btrfs uncompresses a whole
+    /// extent to read a page of it) offers those pages to `more`, by
+    /// index, with their bytes; the cache keeps each one it lacks, so that
+    /// the work is not done again for them, as Linux adds a compressed
+    /// extent's other pages to its cache. `more` returns false once it
+    /// takes no more.
+    fn read_pages(
+        &self,
+        index: u64,
+        page: &mut Page,
+        len: usize,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<()> {
+        let _ = more;
+        self.read_page(index, page, len)
+    }
+
     /// Writes the first `len` bytes of page `index` to the disk.
     fn write_page(&self, _index: u64, _page: &Page, _len: usize) -> Result<()> {
         Ok(())
@@ -447,12 +465,28 @@ fn load<'s>(
         let mut page = CachePage::new()?;
         let len = page_len(index, state.size);
         if backing.persistent() && fill && len > 0 {
-            backing.read_page(index, &mut page, len)?;
+            let (pages, size) = (&mut state.pages, state.size);
+            let mut more = |at, bytes: &[u8]| keep(pages, size, index, at, bytes);
+            backing.read_pages(index, &mut page, len, &mut more)?;
             radix_hw::device_wrote(page.bytes_mut());
         }
         state.pages.insert(index, Slot { page, dirty: false }).map_err(|_| Error::NoMemory)?;
     }
     Ok(state.pages.get_mut(index))
+}
+
+/// Keeps page `at` of a file of `size` bytes, which a backing read along
+/// with page `index`, unless the cache holds it already or it is past the
+/// end; returns whether the cache takes more.
+fn keep(pages: &mut PageMap<Slot>, size: u64, index: u64, at: u64, bytes: &[u8]) -> bool {
+    let len = page_len(at, size);
+    if at == index || len == 0 || pages.get(at).is_some() {
+        return true;
+    }
+    let Ok(mut page) = CachePage::new() else { return false };
+    let n = len.min(bytes.len());
+    page.bytes_mut()[..n].copy_from_slice(&bytes[..n]);
+    pages.insert(at, Slot { page, dirty: false }).is_ok()
 }
 
 /// Zeroes `len` bytes of `out` from `at`, without waiting for a page, as

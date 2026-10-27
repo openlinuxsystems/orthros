@@ -17,7 +17,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115, 0117, 0125 and 0127.
+0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127 and 0128.
 
 ## Crates
 
@@ -394,8 +394,8 @@ Howard Hinnant's civil-date algorithms.
 ## Btrfs
 
 `radix-btrfs` reads Btrfs from its published format documentation (ADRs
-0125 and 0127): Phase 10b.1 has its trees, 10b.2 its files and its mount,
-read-only until 10c writes it.
+0125, 0127 and 0128): Phase 10b.1 has its trees, 10b.2 its files and its
+mount, 10b.3 its compressed extents, read-only until 10c writes it.
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -436,8 +436,19 @@ read-only until 10c writes it.
   zeros, an inline one from its item, and one on the disk straight into
   the page, whose checksum must then match, or the next copy is read;
   when none matches, or the sector has no checksum and the file is not
-  `NODATASUM`, the read fails with `Io`, as Linux's does. Compressed
-  extents fail with `NotSupported` until 10b.3.
+  `NODATASUM`, the read fails with `Io`, as Linux's does. A compressed
+  extent is read whole, each sector checked so, uncompressed, and the
+  page copied out; its other pages are offered to the page cache
+  (`Backing::read_pages`), which keeps those it lacks, so an extent is
+  uncompressed once, as on Linux.
+- `inflate` (zlib, RFC 1950 and 1951), `zstd` (RFC 8878, with its XXH64
+  checksum) and `lzo` (LZO1X in Btrfs's segments) are the crate's own
+  decoders, written from the formats' descriptions (ADR 0128): safe,
+  bounds-checked, with every table allocated once, so data that does not
+  decode fails with `Io`. `unpack::Workspace` holds an extent's
+  compressed bytes, its data and the decoders' tables, about 400 KiB, one
+  per filesystem, made at its first compressed read and dropped by its
+  shrinker.
 
 ## tmpfs and the generated trees
 
@@ -597,7 +608,9 @@ host, and reads everything back after a second boot.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Btrfs is read-only (10c writes it), on one device (10e), with 4 KiB
-  sectors, and without compressed files (10b.3). Its `statfs` sizes are
+  sectors. Its compressed reads take one workspace in turn, where Linux
+  keeps one per CPU at most, and are not yet measured against Linux's
+  (10c adds the rows). Its `statfs` sizes are
   the superblock's, without Linux's view of the profiles and unallocated
   space.
   Its tree blocks are read through the sector cache, a page at a time,
