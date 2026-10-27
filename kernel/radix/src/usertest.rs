@@ -216,7 +216,9 @@ pub fn user() {
     let mut outcome = Outcome::new("user");
     let before = census();
     if let Some(group) = group(&mut outcome, "probe", |group| {
-        start(group, Spec { name: "probe", role: role::PROBE, argument: 0, cpu: 0, extra: &[] })
+        // A memory object of 4 MiB, for a frame mapped with large pages.
+        let extra = [(group.memory(10).map_err(|_| ())?, ALL, 0)];
+        start(group, Spec { name: "probe", role: role::PROBE, argument: 0, cpu: 0, extra: &extra })
     }) {
         outcome.check("probe", &group, 0);
     }
