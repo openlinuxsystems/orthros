@@ -30,6 +30,17 @@ const MAGIC: u32 = 0xFD2F_B528;
 /// The most a block holds, compressed or not.
 pub const MAX_BLOCK: usize = 128 * 1024;
 
+/// The literals buffer: a block's literals, with room for copies of 16
+/// bytes to run past the last.
+const LITERALS: usize = MAX_BLOCK + 16;
+
+/// The states of the largest FSE code of sequences (accuracy log 9).
+const STATES: usize = 1 << 9;
+
+/// The sequences decoded at a time, before their copies are made: apart,
+/// each loop keeps what it needs in registers.
+const BATCH: usize = 128;
+
 /// The most bits a Huffman code of literals has.
 const HUFFMAN_MAX_BITS: u32 = 11;
 
@@ -155,12 +166,32 @@ impl Forward<'_> {
     }
 }
 
-/// A stream read backwards, from its end: Huffman and FSE data. `left`
-/// is the bits not yet read; reading past the start reads zeros and
-/// takes it below zero.
+/// A stream read backwards, from its end: Huffman and FSE data. Its
+/// bits are read from a window of the 8 bytes before `end`, from the
+/// top; reading past the start reads zeros and takes [`Backward::left`]
+/// below zero.
 struct Backward<'a> {
     data: &'a [u8],
-    left: isize,
+    /// The 8 bytes before `end`, little-endian, zero before the start.
+    bits: u64,
+    /// How many of `bits`, from the top, are read.
+    used: u32,
+    end: usize,
+}
+
+/// The 8 bytes of `data` before `end`, little-endian, zero before its
+/// start.
+fn window(data: &[u8], end: usize) -> u64 {
+    match end.checked_sub(8).and_then(|start| data.get(start..end)) {
+        Some(bytes) => u64_at(bytes, 0),
+        None => {
+            let mut word = 0;
+            for (i, &b) in data.iter().take(end).enumerate() {
+                word |= u64::from(b) << (8 * (i + 8 - end));
+            }
+            word
+        }
+    }
 }
 
 impl<'a> Backward<'a> {
@@ -170,45 +201,66 @@ impl<'a> Backward<'a> {
         if last == 0 {
             return Err(Stop::Bad);
         }
-        let left = data.len() * 8 - last.leading_zeros() as usize - 1;
-        Ok(Backward { data, left: left as isize })
+        let end = data.len();
+        Ok(Backward { data, bits: window(data, end), used: last.leading_zeros() + 1, end })
     }
 
-    /// Eight bytes from `at`, zero past the end.
-    fn word(&self, at: usize) -> u64 {
-        match self.data.get(at..at + 8) {
-            Some(bytes) => u64_at(bytes, 0),
-            None => {
-                let mut word = 0;
-                for (i, &b) in self.data.iter().skip(at).take(8).enumerate() {
-                    word |= u64::from(b) << (8 * i);
-                }
-                word
-            }
+    /// The bits not yet read; below zero once reads pass the start.
+    fn left(&self) -> isize {
+        (self.end * 8) as isize - self.used as isize
+    }
+
+    /// Moves the window back over the whole bytes read, as far as the
+    /// start.
+    #[inline(always)]
+    fn refill(&mut self) {
+        let back = (self.used >> 3) as usize;
+        if back + 8 <= self.end {
+            // Most refills: whole bytes back, far from the start.
+            self.end -= back;
+            self.used &= 7;
+            self.bits = u64_at(self.data, self.end - 8);
+            return;
         }
+        let back = back.min(self.end);
+        self.end -= back;
+        self.used -= (back as u32) << 3;
+        self.bits = match self.data.get(self.end.wrapping_sub(8)..self.end) {
+            Some(bytes) => u64_at(bytes, 0),
+            None => window(self.data, self.end),
+        };
     }
 
     /// The next `n` bits (up to 56): the first read is the highest.
-    fn peek(&self, n: u32) -> u64 {
-        if n == 0 || self.left <= 0 {
-            return 0;
+    #[inline(always)]
+    fn peek(&mut self, n: u32) -> u64 {
+        if self.used + n > 64 {
+            self.refill();
         }
-        let low = self.left - n as isize;
-        if low >= 0 {
-            let low = low as usize;
-            (self.word(low / 8) >> (low % 8)) & ((1 << n) - 1)
-        } else {
-            (self.word(0) & ((1 << self.left) - 1)) << -low
-        }
+        // In two shifts, so that `n` may be 0.
+        (self.bits.wrapping_shl(self.used) >> 1) >> (63 - n)
     }
 
+    #[inline(always)]
     fn skip(&mut self, n: u32) {
-        self.left -= n as isize;
+        self.used += n;
     }
 
+    #[inline(always)]
     fn read(&mut self, n: u32) -> u64 {
         let value = self.peek(n);
         self.skip(n);
+        value
+    }
+
+    /// The next `n` bits, read without moving the window: its caller
+    /// refills it often enough that they are in it. Past the start, and
+    /// in a stream too short for its reads, they are no more than `n`
+    /// bits of nonsense, which [`Backward::left`] finds at the end.
+    #[inline(always)]
+    fn take(&mut self, n: u32) -> u64 {
+        let value = (self.bits.wrapping_shl(self.used) >> 1) >> (63 - n);
+        self.used += n;
         value
     }
 }
@@ -229,6 +281,7 @@ fn symbol(entry: u32) -> usize {
 }
 
 /// The state after `state` of `table`, read from `stream`.
+#[inline(always)]
 fn next_state(table: &[u32], state: usize, stream: &mut Backward<'_>) -> usize {
     let entry = table[state];
     (entry >> 16) as usize + stream.read((entry >> 8) & 0xff) as usize
@@ -236,12 +289,36 @@ fn next_state(table: &[u32], state: usize, stream: &mut Backward<'_>) -> usize {
 
 impl Fse {
     fn new() -> core::result::Result<Fse, NoMemory> {
-        Ok(Fse { table: crate::filled(1 << 9, 0)?, log: 0, ready: false })
+        Ok(Fse { table: crate::filled(STATES, 0)?, log: 0, ready: false })
     }
 
-    /// Sets the code for a block's sequences from its mode and the bytes
-    /// after it; returns how many it used.
-    fn prepare(&mut self, mode: u8, data: &[u8], kind: Kind) -> Step<usize> {
+    /// Fills `seq` from the table of a code of `kind`: each state as
+    /// sequences read it, the next state's base and bits and its value's
+    /// extra bits and base (`base | bits << 16 | extra << 24 | value << 32`).
+    fn spell(&self, kind: Kind, seq: &mut [u64]) -> Step<()> {
+        let states = self.table.get(..1 << self.log).ok_or(Stop::Bad)?;
+        for (seq, &entry) in seq.iter_mut().zip(states) {
+            let sym = symbol(entry);
+            let (extra, value) = match kind {
+                Kind::Literals => (LL_BITS.get(sym).copied(), LL_BASE.get(sym).copied()),
+                Kind::Matches => (ML_BITS.get(sym).copied(), ML_BASE.get(sym).copied()),
+                Kind::Offsets => {
+                    (u8::try_from(sym).ok().filter(|&s| s < 32), 1u32.checked_shl(sym as u32))
+                }
+            };
+            let (Some(extra), Some(value)) = (extra, value) else { return Err(Stop::Bad) };
+            *seq = u64::from(entry >> 16)
+                | u64::from((entry >> 8) & 0xff) << 16
+                | u64::from(extra) << 24
+                | u64::from(value) << 32;
+        }
+        Ok(())
+    }
+
+    /// Sets the code for a block's sequences, and `seq` from it (as
+    /// [`Fse::spell`] fills it), from its mode and the bytes after it;
+    /// returns how many it used.
+    fn prepare(&mut self, mode: u8, data: &[u8], kind: Kind, seq: &mut [u64]) -> Step<usize> {
         let (max_symbol, max_log) = kind.limits();
         let used = match mode {
             0 => {
@@ -272,9 +349,10 @@ impl Fse {
                 if !self.ready {
                     return Err(Stop::Bad);
                 }
-                0
+                return Ok(0);
             }
         };
+        self.spell(kind, seq)?;
         self.ready = true;
         Ok(used)
     }
@@ -391,7 +469,7 @@ fn build(shares: &[i16], log: u32, table: &mut [u32]) -> Step<()> {
 
 /// What decoding frames needs, kept between them.
 pub struct Zstd {
-    /// A block's literals, decoded.
+    /// A block's literals, decoded, and room after them.
     literals: KVec<u8>,
     /// The Huffman code of literals: for each value of its next bits, the
     /// symbol and its code's length (`symbol | length << 8`).
@@ -401,6 +479,12 @@ pub struct Zstd {
     ll: Fse,
     of: Fse,
     ml: Fse,
+    /// The three codes of sequences' states, as [`Fse::spell`] gives
+    /// them: literals' lengths, offsets and matches' lengths.
+    seqs: KVec<u64>,
+    /// Sequences decoded and not yet copied: each its literals' length,
+    /// its match's length and its offset.
+    batch: KVec<[usize; 3]>,
 }
 
 /// The output buffer, and how much of it is made.
@@ -409,11 +493,39 @@ struct Output<'o> {
     made: usize,
 }
 
+/// Copies `src` to the start of `dst`, the short copies most sequences
+/// make in words rather than through `memcpy`, whose start costs more
+/// than they do.
+#[inline(always)]
+fn copy_short(dst: &mut [u8], src: &[u8]) {
+    let n = src.len();
+    let dst = &mut dst[..n];
+    if n > 64 {
+        dst.copy_from_slice(src);
+    } else if n >= 8 {
+        // Words, the last one ending where the copy does.
+        let mut at = 0;
+        while at + 8 < n {
+            dst[at..at + 8].copy_from_slice(&src[at..at + 8]);
+            at += 8;
+        }
+        dst[n - 8..].copy_from_slice(&src[n - 8..]);
+    } else if n >= 4 {
+        dst[..4].copy_from_slice(&src[..4]);
+        dst[n - 4..].copy_from_slice(&src[n - 4..]);
+    } else {
+        for (d, &s) in dst.iter_mut().zip(src) {
+            *d = s;
+        }
+    }
+}
+
 impl Output<'_> {
+    #[inline(always)]
     fn put(&mut self, bytes: &[u8]) -> Step<()> {
         let room = self.buf.len() - self.made;
         let n = bytes.len().min(room);
-        self.buf[self.made..self.made + n].copy_from_slice(&bytes[..n]);
+        copy_short(&mut self.buf[self.made..], &bytes[..n]);
         self.made += n;
         if n < bytes.len() { Err(Stop::Full) } else { Ok(()) }
     }
@@ -426,19 +538,70 @@ impl Output<'_> {
         if n < len { Err(Stop::Full) } else { Ok(()) }
     }
 
+    /// Copies the `len` bytes at `at` of `from`, 16 at a time when both
+    /// buffers have 16 bytes past the copy for the last to run into.
+    #[inline(always)]
+    fn put_from(&mut self, from: &[u8], at: usize, len: usize) -> Step<()> {
+        let to = self.made;
+        if to + len + 16 <= self.buf.len() && at + len + 16 <= from.len() {
+            let mut done = 0;
+            loop {
+                self.buf[to + done..to + done + 16]
+                    .copy_from_slice(&from[at + done..at + done + 16]);
+                done += 16;
+                if done >= len {
+                    break;
+                }
+            }
+            self.made += len;
+            return Ok(());
+        }
+        self.put(from.get(at..at + len).ok_or(Stop::Bad)?)
+    }
+
     /// Copies `len` bytes from `offset` back, overlapping as they may.
+    #[inline(always)]
     fn copy(&mut self, offset: usize, len: usize) -> Step<()> {
         if offset == 0 || offset > self.made {
             return Err(Stop::Bad);
         }
         let room = self.buf.len() - self.made;
-        let n = len.min(room);
         let from = self.made - offset;
+        if offset >= 16 && len + 16 <= room {
+            // 16 bytes at a time, each of bytes made before it, the last
+            // running past the end.
+            let to = self.made;
+            let mut done = 0;
+            loop {
+                let (made, rest) = self.buf.split_at_mut(to + done);
+                rest[..16].copy_from_slice(&made[from + done..from + done + 16]);
+                done += 16;
+                if done >= len {
+                    break;
+                }
+            }
+            self.made += len;
+            return Ok(());
+        }
+        let n = len.min(room);
         if offset >= n {
-            self.buf.copy_within(from..from + n, self.made);
+            let (made, rest) = self.buf.split_at_mut(self.made);
+            copy_short(rest, &made[from..from + n]);
+        } else if offset >= 8 {
+            // Overlapping: words, each of bytes made before it.
+            let to = self.made;
+            let mut at = 0;
+            while at + 8 <= n {
+                let word = u64_at(&self.buf[from + at..from + at + 8], 0);
+                self.buf[to + at..to + at + 8].copy_from_slice(&word.to_le_bytes());
+                at += 8;
+            }
+            for at in at..n {
+                self.buf[to + at] = self.buf[from + at];
+            }
         } else {
-            for i in 0..n {
-                self.buf[self.made + i] = self.buf[from + i];
+            for at in 0..n {
+                self.buf[self.made + at] = self.buf[from + at];
             }
         }
         self.made += n;
@@ -450,12 +613,14 @@ impl Zstd {
     /// Tables and buffers for decoding, on the heap.
     pub fn new() -> core::result::Result<Zstd, NoMemory> {
         Ok(Zstd {
-            literals: crate::filled(MAX_BLOCK, 0)?,
+            literals: crate::filled(LITERALS, 0)?,
             huffman: crate::filled(1 << HUFFMAN_MAX_BITS, 0)?,
             huffman_bits: 0,
             ll: Fse::new()?,
             of: Fse::new()?,
             ml: Fse::new()?,
+            seqs: crate::filled(3 * STATES, 0)?,
+            batch: crate::filled(BATCH, [0; 3])?,
         })
     }
 
@@ -543,21 +708,24 @@ impl Zstd {
 
     /// Decodes the compressed block `data` into `o`.
     fn block(&mut self, data: &[u8], o: &mut Output<'_>, repeats: &mut [usize; 3]) -> Step<()> {
-        let Zstd { literals, huffman, huffman_bits, ll, of, ml } = self;
-        let (lits, rest) = read_literals(data, literals, huffman, huffman_bits)?;
+        let Zstd { literals, huffman, huffman_bits, ll, of, ml, seqs, batch } = self;
+        let (lits_len, rest) = read_literals(data, literals, huffman, huffman_bits)?;
+        let lits = <&[u8; LITERALS]>::try_from(&literals[..]).map_err(|_| Stop::Bad)?;
         let codes = [(ll, Kind::Literals), (of, Kind::Offsets), (ml, Kind::Matches)];
-        sequences(rest, lits, codes, o, repeats)
+        let batch = <&mut [[usize; 3]; BATCH]>::try_from(&mut batch[..]).map_err(|_| Stop::Bad)?;
+        let seqs = <&mut [u64; 3 * STATES]>::try_from(&mut seqs[..]).map_err(|_| Stop::Bad)?;
+        sequences(rest, (lits, lits_len), (codes, seqs), batch, o, repeats)
     }
 }
 
-/// Reads a block's literals section; returns its literals and the bytes
-/// after it.
+/// Reads a block's literals section into the start of `buf`; returns how
+/// many there are and the bytes after it.
 fn read_literals<'d>(
     data: &'d [u8],
-    buf: &'d mut KVec<u8>,
+    buf: &mut KVec<u8>,
     huffman: &mut KVec<u16>,
     huffman_bits: &mut u32,
-) -> Step<(&'d [u8], &'d [u8])> {
+) -> Step<(usize, &'d [u8])> {
     let first = *data.first().ok_or(Stop::Bad)?;
     let format = (first >> 2) & 3;
     match first & 3 {
@@ -567,14 +735,15 @@ fn read_literals<'d>(
                 1 => ((le(data, 0, 2)? >> 4) as usize, 2),
                 _ => ((le(data, 0, 3)? >> 4) as usize, 3),
             };
+            let lits = buf.get_mut(..size).filter(|_| size <= MAX_BLOCK).ok_or(Stop::Bad)?;
             if kind == 0 {
-                Ok((get(data, header, size)?, &data[header + size..]))
+                // Copied, so that sequences find room after them as after
+                // the others.
+                lits.copy_from_slice(get(data, header, size)?);
+                Ok((size, &data[header + size..]))
             } else {
-                let byte = *data.get(header).ok_or(Stop::Bad)?;
-                let lits = buf.get_mut(..size).ok_or(Stop::Bad)?;
-                lits.fill(byte);
-                let buf: &'d KVec<u8> = buf;
-                Ok((&buf[..size], &data[header + 1..]))
+                lits.fill(*data.get(header).ok_or(Stop::Bad)?);
+                Ok((size, &data[header + 1..]))
             }
         }
         kind => {
@@ -603,10 +772,10 @@ fn read_literals<'d>(
             } else {
                 body
             };
-            let lits = buf.get_mut(..regenerated).ok_or(Stop::Bad)?;
+            let lits =
+                buf.get_mut(..regenerated).filter(|_| regenerated <= MAX_BLOCK).ok_or(Stop::Bad)?;
             huffman_literals(streams_data, streams, lits, huffman, *huffman_bits)?;
-            let buf: &'d KVec<u8> = buf;
-            Ok((&buf[..regenerated], &data[header + compressed..]))
+            Ok((regenerated, &data[header + compressed..]))
         }
     }
 }
@@ -694,7 +863,7 @@ fn fse_weights(data: &[u8], weights: &mut [u8; 256]) -> Step<usize> {
             *weights.get_mut(count).ok_or(Stop::Bad)? = symbol(table[states[turn]]) as u8;
             count += 1;
             states[turn] = next_state(&table, states[turn], &mut stream);
-            if stream.left < 0 {
+            if stream.left() < 0 {
                 let other = states[1 - turn];
                 *weights.get_mut(count).ok_or(Stop::Bad)? = symbol(table[other]) as u8;
                 count += 1;
@@ -724,40 +893,81 @@ fn huffman_literals(
     let sizes = [0, 2, 4].map(|at| usize::from(u16_at(data, at)));
     let last = (data.len() - 6).checked_sub(sizes.iter().sum()).ok_or(Stop::Bad)?;
     let quarter = out.len().div_ceil(4);
-    let mut at = 6;
-    for (i, size) in sizes.into_iter().chain([last]).enumerate() {
-        let from = (i * quarter).min(out.len());
-        let to = if i == 3 { out.len() } else { (from + quarter).min(out.len()) };
-        huffman_stream(get(data, at, size)?, &mut out[from..to], table, bits)?;
-        at += size;
+    if 3 * quarter > out.len() {
+        return Err(Stop::Bad);
+    }
+    let [a, b, c] = sizes;
+    let mut s0 = Backward::new(get(data, 6, a)?)?;
+    let mut s1 = Backward::new(get(data, 6 + a, b)?)?;
+    let mut s2 = Backward::new(get(data, 6 + a + b, c)?)?;
+    let mut s3 = Backward::new(get(data, 6 + a + b + c, last)?)?;
+    let (o0, rest) = out.split_at_mut(quarter);
+    let (o1, rest) = rest.split_at_mut(quarter);
+    let (o2, o3) = rest.split_at_mut(quarter);
+    let table = huffman_table(table)?;
+    // The four in turn, as far as the last goes, for the processor to
+    // decode them at once; then the rest of the first three.
+    let both = o3.len();
+    for at in 0..both {
+        o0[at] = huffman_symbol(&mut s0, table, bits);
+        o1[at] = huffman_symbol(&mut s1, table, bits);
+        o2[at] = huffman_symbol(&mut s2, table, bits);
+        o3[at] = huffman_symbol(&mut s3, table, bits);
+    }
+    for (stream, out) in [(&mut s0, o0), (&mut s1, o1), (&mut s2, o2)] {
+        for byte in &mut out[both..] {
+            *byte = huffman_symbol(stream, table, bits);
+        }
+    }
+    if [s0, s1, s2, s3].iter().any(|s| s.left() != 0) {
+        return Err(Stop::Bad);
     }
     Ok(())
+}
+
+/// The Huffman table, as long as its longest code takes.
+fn huffman_table(table: &[u16]) -> Step<&[u16; 1 << HUFFMAN_MAX_BITS]> {
+    table.get(..1 << HUFFMAN_MAX_BITS).and_then(|t| t.try_into().ok()).ok_or(Stop::Bad)
+}
+
+/// The next symbol of a Huffman stream whose longest code takes `bits`.
+#[inline(always)]
+fn huffman_symbol(
+    stream: &mut Backward<'_>,
+    table: &[u16; 1 << HUFFMAN_MAX_BITS],
+    bits: u32,
+) -> u8 {
+    let entry = table[stream.peek(bits) as usize & ((1 << HUFFMAN_MAX_BITS) - 1)];
+    stream.skip(u32::from(entry >> 8));
+    entry as u8
 }
 
 /// Decodes `out.len()` literals from one Huffman stream, which they must
 /// use up.
 fn huffman_stream(data: &[u8], out: &mut [u8], table: &[u16], bits: u32) -> Step<()> {
     let mut stream = Backward::new(data)?;
+    let table = huffman_table(table)?;
     for byte in out.iter_mut() {
-        let entry = table[stream.peek(bits) as usize];
-        *byte = entry as u8;
-        stream.skip(u32::from(entry >> 8));
+        *byte = huffman_symbol(&mut stream, table, bits);
     }
-    if stream.left != 0 {
+    if stream.left() != 0 {
         return Err(Stop::Bad);
     }
     Ok(())
 }
 
 /// Decodes a block's sequences section `data` and runs its sequences,
-/// with the literals `lits`, into `o`.
+/// with the literals `lits` (and any bytes after them in their buffer),
+/// into `o`.
 fn sequences(
     data: &[u8],
-    lits: &[u8],
-    codes: [(&mut Fse, Kind); 3],
+    lits: (&[u8; LITERALS], usize),
+    codes: ([(&mut Fse, Kind); 3], &mut [u64; 3 * STATES]),
+    batch: &mut [[usize; 3]; BATCH],
     o: &mut Output<'_>,
     repeats: &mut [usize; 3],
 ) -> Step<()> {
+    let (lits, lits_len) = lits;
     let first = *data.first().ok_or(Stop::Bad)?;
     let (count, mut at) = match first {
         0..=127 => (usize::from(first), 1),
@@ -769,67 +979,167 @@ fn sequences(
         if data.len() != at {
             return Err(Stop::Bad);
         }
-        return o.put(lits);
+        return o.put(&lits[..lits_len]);
     }
     let modes = *data.get(at).ok_or(Stop::Bad)?;
     at += 1;
     if modes & 3 != 0 {
         return Err(Stop::Bad);
     }
-    let [(ll, ll_kind), (of, of_kind), (ml, ml_kind)] = codes;
-    at += ll.prepare(modes >> 6, &data[at..], ll_kind)?;
-    at += of.prepare((modes >> 4) & 3, &data[at..], of_kind)?;
-    at += ml.prepare((modes >> 2) & 3, &data[at..], ml_kind)?;
+    let ([(ll, ll_kind), (of, of_kind), (ml, ml_kind)], tables) = codes;
+    let (ll_seq, rest) = tables.split_at_mut(STATES);
+    let (of_seq, ml_seq) = rest.split_at_mut(STATES);
+    at += ll.prepare(modes >> 6, &data[at..], ll_kind, ll_seq)?;
+    at += of.prepare((modes >> 4) & 3, &data[at..], of_kind, of_seq)?;
+    at += ml.prepare((modes >> 2) & 3, &data[at..], ml_kind, ml_seq)?;
+    let tables: &[u64; 3 * STATES] = tables;
     let mut stream = Backward::new(&data[at..])?;
-    let (ll_table, of_table, ml_table) = (&ll.table[..], &of.table[..], &ml.table[..]);
-    let mut ll_state = stream.read(ll.log) as usize;
-    let mut of_state = stream.read(of.log) as usize;
-    let mut ml_state = stream.read(ml.log) as usize;
+    // States are below the size of their tables, which is at most
+    // `STATES`; masked, they need no other check.
+    let ll_state = stream.read(ll.log) as usize;
+    let of_state = stream.read(of.log) as usize;
+    let ml_state = stream.read(ml.log) as usize;
+    let mut states = [ll_state, of_state, ml_state];
     let mut lit = 0;
-    for i in 0..count {
-        let of_code = symbol(of_table[of_state]) as u32;
-        let ml_code = symbol(ml_table[ml_state]);
-        let ll_code = symbol(ll_table[ll_state]);
-        let value = (1usize << of_code) + stream.read(of_code) as usize;
-        let ml_len = (ML_BASE[ml_code] + stream.read(u32::from(ML_BITS[ml_code])) as u32) as usize;
-        let ll_len = (LL_BASE[ll_code] + stream.read(u32::from(LL_BITS[ll_code])) as u32) as usize;
+    let mut left = count;
+    while left != 0 {
+        let n = left.min(BATCH);
+        left -= n;
+        let batch = &mut batch[..n];
+        decode(&mut stream, tables, &mut states, repeats, batch, left != 0);
+        lit = execute(batch, (lits, lits_len), lit, o)?;
+    }
+    if stream.left() != 0 {
+        return Err(Stop::Bad);
+    }
+    o.put(&lits[lit..lits_len])
+}
+
+/// Decodes `batch.len()` sequences from `stream` into `batch`, each its
+/// literals' length, its match's length and its offset, with the codes'
+/// `tables` from `states` on; the last moves the states on only when
+/// `more` follow it.
+#[inline(never)]
+fn decode(
+    stream: &mut Backward<'_>,
+    tables: &[u64; 3 * STATES],
+    states: &mut [usize; 3],
+    repeats: &mut [usize; 3],
+    batch: &mut [[usize; 3]],
+    more: bool,
+) {
+    let [mut ll_state, mut of_state, mut ml_state] = *states;
+    let [mut r0, mut r1, mut r2] = *repeats;
+    let mut entries = (0, 0, 0);
+    for slot in batch {
+        // States are below the size of their tables, which is at most
+        // `STATES`; masked, they need no other check.
+        let (l, f, m) = (
+            tables[ll_state % STATES],
+            tables[STATES + of_state % STATES],
+            tables[2 * STATES + ml_state % STATES],
+        );
+        entries = (l, f, m);
+        // Up to 31 bits for the offset, 16 each for the lengths and 26
+        // for the states: the window is refilled where they could run
+        // past its 64, which they seldom do.
+        stream.refill();
+        let value = (f >> 32) as usize + stream.take(extra(f)) as usize;
+        if stream.used > 32 {
+            stream.refill();
+        }
+        let ml_len = (m >> 32) as usize + stream.take(extra(m)) as usize;
+        let ll_len = (l >> 32) as usize + stream.take(extra(l)) as usize;
         let offset = if value > 3 {
-            let offset = value - 3;
-            *repeats = [offset, repeats[0], repeats[1]];
-            offset
+            (r0, r1, r2) = (value - 3, r0, r1);
+            r0
         } else {
             // The last three offsets: with no literals, the next one, and
             // the last less one byte after the third.
             match value - 1 + usize::from(ll_len == 0) {
-                0 => repeats[0],
+                0 => r0,
                 1 => {
-                    repeats.swap(0, 1);
-                    repeats[0]
+                    (r0, r1) = (r1, r0);
+                    r0
                 }
                 2 => {
-                    *repeats = [repeats[2], repeats[0], repeats[1]];
-                    repeats[0]
+                    (r0, r1, r2) = (r2, r0, r1);
+                    r0
                 }
                 _ => {
-                    let offset = repeats[0] - 1;
-                    *repeats = [offset, repeats[0], repeats[1]];
-                    offset
+                    (r0, r1, r2) = (r0.wrapping_sub(1), r0, r1);
+                    r0
                 }
             }
         };
-        o.put(get(lits, lit, ll_len)?)?;
-        lit += ll_len;
-        o.copy(offset, ml_len)?;
-        if i + 1 < count {
-            ll_state = next_state(ll_table, ll_state, &mut stream);
-            ml_state = next_state(ml_table, ml_state, &mut stream);
-            of_state = next_state(of_table, of_state, &mut stream);
+        if stream.used > 38 {
+            stream.refill();
         }
+        ll_state = state(l) + stream.take(state_bits(l)) as usize;
+        ml_state = state(m) + stream.take(state_bits(m)) as usize;
+        of_state = state(f) + stream.take(state_bits(f)) as usize;
+        *slot = [ll_len, ml_len, offset];
     }
-    if stream.left != 0 {
-        return Err(Stop::Bad);
+    if !more {
+        // The last sequence has no next states: their bits are not read.
+        let (l, f, m) = entries;
+        stream.used -= state_bits(l) + state_bits(m) + state_bits(f);
     }
-    o.put(&lits[lit..])
+    *states = [ll_state, of_state, ml_state];
+    *repeats = [r0, r1, r2];
+}
+
+/// Makes the copies of the sequences of `batch` into `o`, their literals
+/// from `lit` on of `lits`; returns where the next literals start.
+#[inline(never)]
+fn execute(
+    batch: &[[usize; 3]],
+    lits: (&[u8; LITERALS], usize),
+    lit: usize,
+    o: &mut Output<'_>,
+) -> Step<usize> {
+    let (lits, lits_len) = lits;
+    let (mut lit, mut made) = (lit, o.made);
+    for &[ll_len, ml_len, offset] in batch {
+        let (lit_end, to) = (lit + ll_len, made + ll_len);
+        if (ll_len | ml_len) < 16
+            && lit_end <= lits_len
+            && to + 32 <= o.buf.len()
+            && (16..=to).contains(&offset)
+        {
+            // Most sequences: their literals and their match are a copy of
+            // 16 bytes each, which may run past them.
+            o.buf[made..made + 16].copy_from_slice(&lits[lit..lit + 16]);
+            let (before, after) = o.buf.split_at_mut(to);
+            after[..16].copy_from_slice(&before[to - offset..to - offset + 16]);
+            made = to + ml_len;
+        } else {
+            if lit_end > lits_len {
+                return Err(Stop::Bad);
+            }
+            o.made = made;
+            o.put_from(lits, lit, ll_len)?;
+            o.copy(offset, ml_len)?;
+            made = o.made;
+        }
+        lit = lit_end;
+    }
+    o.made = made;
+    Ok(lit)
+}
+
+/// The parts of a [`Fse::seq`] entry: the next state's base, its bits,
+/// and the value's extra bits.
+fn state(entry: u64) -> usize {
+    (entry & 0xffff) as usize
+}
+
+fn state_bits(entry: u64) -> u32 {
+    ((entry >> 16) & 0xff) as u32
+}
+
+fn extra(entry: u64) -> u32 {
+    ((entry >> 24) & 0xff) as u32
 }
 
 const P1: u64 = 0x9E37_79B1_85EB_CA87;

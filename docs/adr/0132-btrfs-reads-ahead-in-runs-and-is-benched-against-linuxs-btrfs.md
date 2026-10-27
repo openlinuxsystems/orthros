@@ -30,11 +30,19 @@ Radix writes that Linux has in the same form.
   as many as one read of its own gives and says how many. By default it
   reads one, so FAT and the other backings are as before.
 - **Read-ahead in the page cache**: a read that misses a page reads up
-  to its own last page, and when it goes on from a cached page or starts
-  the file, `READ_AHEAD` (32) pages more, at most `READ_RUN` (256, 1 MiB)
-  in all, never past the end of the file nor over a cached page. A read
-  elsewhere in a file reads only its own pages. Short of memory, a run is
-  shorter.
+  to its own last page, and more when it starts the file (three times
+  what it asks for) or goes on from cached pages (as many as are cached
+  right before it), `READ_AHEAD` (32) pages at least, at most `READ_RUN`
+  (256, 1 MiB) in all, never past the end of the file nor over a cached
+  page. A sequential reader's runs so double up to 1 MiB, as Linux's
+  window grows, with nothing kept per file: the pages behind the read
+  say how far it has come. A read elsewhere in a file reads only its own
+  pages. Short of memory, a run is shorter.
+- **Runs of the page cache in one go**: a request of the page cache or
+  a filesystem takes up to 256 pages (`radix_block::MAX_FRAMES`), not
+  16: up to 16 go as one request with their buffers listed on the stack,
+  as before, and more as a raw transfer goes, in requests of as many as
+  the device takes, all in flight at once (ADR 0111).
 - **Btrfs runs**: the pages of one uncompressed extent from the missing
   one on, as many as the run has, are one request to the disk, from the
   first copy; their checksums are checked in one walk of the checksum
@@ -56,6 +64,15 @@ Radix writes that Linux has in the same form.
   workspace in one request and checked in one walk, then uncompressed;
   the run takes the extent's pages from the missing one on, and the page
   cache the extent's others, as before.
+- **zstd at speed**: the decoder (ADR 0128) decodes a block's sequences
+  128 at a time into lengths and offsets, then makes their copies, so
+  that each loop keeps its values in registers; the three codes' states
+  are one table, their indexes masked to its size rather than checked;
+  most sequences' literals and match are each one copy of 16 bytes,
+  which may run past them into room the buffers keep for it (raw
+  literals are copied into the literals buffer for that); Huffman
+  literals come from four streams at once. Everything stays safe Rust:
+  the Btrfs compartment has no `unsafe`.
 - **Benchmarks** (docs/design/ipc.md): a third disk, a virtio disk of 192
   MiB that `ob bench` makes afresh with `mkfs.btrfs --compress zstd`,
   holds 32 files of 1 MiB of noise, which `mkfs.btrfs` stores plain, and
@@ -72,10 +89,10 @@ Radix writes that Linux has in the same form.
 
 Rejected:
 
-- **Linux's read-ahead window**, which grows from the first read and
-  shrinks on misses: a fixed window, kept only for sequential reads,
-  does what the benchmark and a program reading a file through need with
-  no state per file.
+- **Linux's read-ahead state**, a window kept per open file that grows
+  and shrinks, read in the background as the reader nears its end: the
+  pages already cached behind a read size its run as well for a reader
+  going through a file, with no state per file.
 - **Several extents per run**: a run ends at its extent's end, so a file
   of 128 KiB compressed extents takes a request each. Requests for
   neighbouring extents could be merged later; the gate decides.
@@ -96,4 +113,7 @@ Rejected:
   instruction against the bit-at-a-time definition at every length
   around a pass's three runs, and Btrfs's tests check the tables against
   it.
+- The zstd decoder went from 226 to 666 MB/s on a test host's text of
+  the benchmark's kind, where the reference `zstd` tool (C, with its
+  assembly and BMI2) decodes 814 MB/s.
 - The three Btrfs rows are gated at 1.00, as every row is.

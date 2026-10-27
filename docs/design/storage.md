@@ -159,9 +159,11 @@ dirty.
   through the file's `Backing` first. Bytes past the end read as nothing;
   a page never written reads as zeros.
 - A missing page is read with the pages after it, up to the read's last,
-  and when the read goes on from a cached page or starts the file,
-  `READ_AHEAD` (32) more, at most `READ_RUN` (256) in all, stopping at a
-  cached page and at the end (ADR 0132). The backing fills as many of
+  and more when the read starts the file (three times what it asks for)
+  or goes on from cached pages (as many as are cached right before it),
+  `READ_AHEAD` (32) at least, at most `READ_RUN` (256) in all, stopping
+  at a cached page and at the end (ADR 0132): a sequential reader's runs
+  grow to 1 MiB, with nothing kept per file. The backing fills as many of
   them as one read of its own gives (`Backing::read_run`; one, unless
   the filesystem does better), and the cache keeps those.
 - A write copies into the pages and marks them dirty, growing the file
@@ -688,8 +690,9 @@ host, and reads everything back after a second boot.
   first things to measure as the trees grow.
 - A file's cache lock is held across its disk I/O, so one file has one
   request in flight; FAT holds one namespace lock for all directory work.
-- Read-ahead is a fixed window, for Btrfs only (FAT reads a page per
-  request), and no write clustering beyond one file's dirty pages in
+- Read-ahead is for Btrfs only (FAT reads a page per request), runs
+  wait for their reads (nothing reads ahead in the background), and no
+  write clustering beyond one file's dirty pages in
   order; no `O_DIRECT` for files (block devices are always raw).
 - Raw writes of parts of one sector through two different nodes (a disk
   and its partition) are not kept apart.

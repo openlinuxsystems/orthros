@@ -50,9 +50,9 @@ const PAGE: u64 = PAGE_SIZE as u64;
 /// The most pages [`FileCache::sync`] hands its backing in one write.
 pub const WRITE_RUN: usize = 32;
 
-/// The pages a read that misses asks its backing for beyond those it
-/// copies, when it goes on from where the cached pages end (or starts at
-/// the file's start): 128 KiB, Linux's default `read_ahead_kb`.
+/// The fewest pages a read that misses asks its backing for beyond those
+/// it copies, when it goes on from where the cached pages end or starts
+/// at the file's start: 128 KiB, Linux's default `read_ahead_kb`.
 pub const READ_AHEAD: usize = 32;
 
 /// The most pages one read that misses asks its backing for: 1 MiB.
@@ -576,11 +576,12 @@ fn load<'s>(
 
 /// Page `index`, which is not in memory, read from the backing for a read
 /// that copies up to page `last`, with the pages after it that one read
-/// of the backing gives: up to `last`, and [`READ_AHEAD`] more when the
-/// read goes on from cached pages or starts the file, up to [`READ_RUN`]
-/// in all and no more than the backing reads at once, and none that is in
-/// memory or past the end. Without a disk, or with one read a page at a
-/// time, [`load`]'s.
+/// of the backing gives: up to `last`, and more when the read starts the
+/// file (three times what it asks for) or goes on from cached pages (as
+/// many as are cached right before it), [`READ_AHEAD`] at least, up to
+/// [`READ_RUN`] in all and no more than the backing reads at once, and
+/// none that is in memory or past the end. Without a disk, or with one
+/// read a page at a time, [`load`]'s.
 fn load_run<'s>(
     state: &'s mut State,
     index: u64,
@@ -591,10 +592,19 @@ fn load_run<'s>(
     if !backing.persistent() || most <= 1 || state.size <= index * PAGE {
         return load(state, index, backing, false, true);
     }
-    let on = index == 0 || state.pages.get(index - 1).is_some();
-    let ahead = if on { READ_AHEAD as u64 } else { 0 };
+    // A read from the start reads ahead three times what it asks for, and
+    // one that goes on from cached pages as many as it goes on from: the
+    // window doubles while a reader keeps on.
+    let wanted = last + 1 - index;
+    let behind =
+        (1..=most.min(index)).take_while(|&n| state.pages.get(index - n).is_some()).count();
+    let ahead = match (index, behind) {
+        (0, _) => (3 * wanted).max(READ_AHEAD as u64),
+        (_, 0) => 0,
+        (_, behind) => (behind as u64).max(READ_AHEAD as u64),
+    };
     let end_page = state.size.div_ceil(PAGE);
-    let end = (last + 1 + ahead).min(index + most).min(end_page);
+    let end = (last + 1).saturating_add(ahead).min(index + most).min(end_page);
     // Short of memory, a shorter run.
     let mut pages =
         mem::vec_with_capacity((end - index) as usize).or_else(|_| mem::vec_with_capacity(1))?;

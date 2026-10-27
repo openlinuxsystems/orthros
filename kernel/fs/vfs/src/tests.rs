@@ -844,12 +844,15 @@ fn reads_go_to_the_disk_in_runs_and_read_ahead_when_sequential() {
     let size = 1200 * 4096 - 100;
     let cache = FileCache::new(size, 0);
     let piece = 128 << 10;
-    // The start of the file: the read's 32 pages and as many again.
-    assert_eq!(read_runs(&cache, &disk, 0, piece), [(0, 32 + READ_AHEAD)]);
+    // The start of the file: the read's 32 pages and three times as many.
+    assert_eq!(read_runs(&cache, &disk, 0, piece), [(0, 4 * 32)]);
     // Cached already.
     assert_eq!(read_runs(&cache, &disk, piece as u64, piece), []);
-    // On from cached pages: read ahead again.
-    assert_eq!(read_runs(&cache, &disk, 2 * piece as u64, piece), [(64, 32 + READ_AHEAD)]);
+    // On from 128 cached pages: the read's 32 and 128 more.
+    assert_eq!(read_runs(&cache, &disk, 4 * piece as u64, piece), [(128, 32 + 128)]);
+    // A small read at the start reads READ_AHEAD more.
+    let small = FileCache::new(size, 0);
+    assert_eq!(read_runs(&small, &disk, 0, 100), [(0, 1 + READ_AHEAD)]);
     // Elsewhere, no read ahead: the page read alone.
     assert_eq!(read_runs(&cache, &disk, 300 * 4096 + 7, 10), [(300, 1)]);
     // A run stops at a cached page, and goes on after it with read ahead.
