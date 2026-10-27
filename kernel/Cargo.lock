@@ -191,6 +191,15 @@ name = "radix-bootinfo"
 version = "0.10.0"
 
 [[package]]
+name = "radix-btrfs"
+version = "0.10.0"
+dependencies = [
+ "radix-block",
+ "radix-sync",
+ "radix-vfs",
+]
+
+[[package]]
 name = "radix-cap"
 version = "0.10.0"
 dependencies = [

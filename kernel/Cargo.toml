@@ -19,6 +19,7 @@ members = [
     "drivers/nvme",
     "drivers/virtio",
     "fs/block",
+    "fs/btrfs",
     "fs/fat",
     "fs/vfs",
     "ipc",

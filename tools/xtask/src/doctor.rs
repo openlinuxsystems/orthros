@@ -297,6 +297,21 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "btrfs-progs",
+            purpose: "makes the Btrfs filesystems Radix's Btrfs tests read",
+            // In /usr/sbin too.
+            found: |_| {
+                ["/usr/sbin/mkfs.btrfs", "/sbin/mkfs.btrfs"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkfs.btrfs"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: all("btrfs-progs"),
+            fallback: None,
+        },
+        Requirement {
             name: "Clang",
             purpose: "compiles the C library and the ports (version 20 or later)",
             found: |_| ports::find_clang().map(|(_, version)| version),
