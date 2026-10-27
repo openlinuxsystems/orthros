@@ -6,6 +6,8 @@
 
 use radix_block::DeviceRef;
 use radix_block::cache::BlockCache;
+use radix_sync::Mutex;
+use radix_vfs::mem::KVec;
 use radix_vfs::{Error, Result};
 
 use crate::chunk::{Chunk, ChunkMap, Place};
@@ -25,6 +27,17 @@ pub struct Volume {
     device_bytes: u64,
     chunks: ChunkMap,
     blocks: Blocks,
+    current: Mutex<Current>,
+}
+
+/// What changes as transactions commit: the roots of the two trees the
+/// superblock names, as the running transaction has them, and the
+/// superblock last written.
+struct Current {
+    root: Root,
+    chunk: Root,
+    /// The superblock on the disk, as read or last written.
+    superblock: KVec<u8>,
 }
 
 impl Volume {
@@ -58,7 +71,16 @@ impl Volume {
         }
         let chunks = ChunkMap::bootstrap(sb.sys_chunks(), sb.sectorsize)?;
         let blocks = Blocks::new(sb.nodesize);
-        let mut volume = Volume { sb, cache, device_bytes, chunks, blocks };
+        let current = Mutex::new(Current {
+            root: Root { bytenr: sb.root, level: sb.root_level, generation: sb.generation },
+            chunk: Root {
+                bytenr: sb.chunk_root,
+                level: sb.chunk_root_level,
+                generation: sb.chunk_root_generation,
+            },
+            superblock: bytes,
+        });
+        let mut volume = Volume { sb, cache, device_bytes, chunks, blocks, current };
         volume.read_chunk_tree()?;
         Ok(volume)
     }
@@ -133,16 +155,37 @@ impl Volume {
 
     /// The chunk tree's root block.
     pub fn chunk_root(&self) -> Root {
-        Root {
-            bytenr: self.sb.chunk_root,
-            level: self.sb.chunk_root_level,
-            generation: self.sb.chunk_root_generation,
-        }
+        self.current.lock().chunk
     }
 
     /// The root tree's root block.
     pub fn root_tree(&self) -> Root {
-        Root { bytenr: self.sb.root, level: self.sb.root_level, generation: self.sb.generation }
+        self.current.lock().root
+    }
+
+    /// Moves the chunk tree's root, in the running transaction.
+    pub(crate) fn set_chunk_root(&self, root: Root) {
+        self.current.lock().chunk = root;
+    }
+
+    /// Moves the root tree's root, in the running transaction.
+    pub(crate) fn set_root_tree(&self, root: Root) {
+        self.current.lock().root = root;
+    }
+
+    /// A copy of the superblock last written, or read.
+    pub(crate) fn superblock_bytes(&self) -> Result<KVec<u8>> {
+        Ok(radix_vfs::mem::copy(&self.current.lock().superblock)?)
+    }
+
+    /// Records the superblock a commit wrote.
+    pub(crate) fn set_superblock_bytes(&self, bytes: KVec<u8>) {
+        self.current.lock().superblock = bytes;
+    }
+
+    /// The device, through its cache of sectors: writes go there.
+    pub(crate) fn cache(&self) -> &BlockCache {
+        &self.cache
     }
 
     /// The root block of tree `id` (a [`tree`] number, or a subvolume's),

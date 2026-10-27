@@ -140,3 +140,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0126](0126-no-age-or-identity-verification.md) | Dukovo never verifies anyone's age or identity | Accepted |
 | [0127](0127-btrfs-files-are-read-through-the-page-cache.md) | Btrfs files are read through the page cache and checked as Linux checks them | Accepted |
 | [0128](0128-btrfs-compressed-extents-have-their-own-decoders.md) | Btrfs's compressed extents are read by decoders of its own, written from the formats' specifications | Accepted |
+| [0129](0129-btrfs-commits-copy-on-write-and-flush-before-the-superblock.md) | Btrfs writes by copying on write, and a commit flushes its blocks before its superblock | Accepted |

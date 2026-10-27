@@ -3,7 +3,7 @@
 
 [package]
 name = "radix-btrfs"
-description = "Btrfs for Radix: its trees, checksums, files, subvolumes and compressed extents, read-only"
+description = "Btrfs for Radix: its trees, checksums, files, subvolumes and compressed extents, and transactions that write its trees by copying on write"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

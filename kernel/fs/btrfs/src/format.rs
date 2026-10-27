@@ -155,8 +155,24 @@ pub mod item {
     pub const EXTENT_ITEM: u8 = 168;
     /// An allocated tree block and who refers to it.
     pub const METADATA_ITEM: u8 = 169;
+    /// A tree block's reference from the tree that owns it, inline in its
+    /// extent item or an item of its own.
+    pub const TREE_BLOCK_REF: u8 = 176;
+    /// A data extent's reference from a file, inline or an item.
+    pub const EXTENT_DATA_REF: u8 = 178;
+    /// A tree block's reference from the block above it (snapshots).
+    pub const SHARED_BLOCK_REF: u8 = 182;
+    /// A data extent's reference from the leaf that holds it (snapshots).
+    pub const SHARED_DATA_REF: u8 = 184;
     /// A chunk's use: how many of its bytes are allocated.
     pub const BLOCK_GROUP_ITEM: u8 = 192;
+    /// A block group's entry in the free-space tree: how its free space
+    /// is kept.
+    pub const FREE_SPACE_INFO: u8 = 198;
+    /// A free range of a block group.
+    pub const FREE_SPACE_EXTENT: u8 = 199;
+    /// A bitmap of a block group's free sectors.
+    pub const FREE_SPACE_BITMAP: u8 = 200;
     /// A range of a device that a chunk lies on.
     pub const DEV_EXTENT: u8 = 204;
     /// A device.

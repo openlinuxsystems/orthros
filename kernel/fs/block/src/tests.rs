@@ -542,6 +542,36 @@ fn block_cache_reads_writes_and_syncs() {
 }
 
 #[test]
+fn writes_through_and_out_reach_the_disk_alone() {
+    let (disk, device) = shared(RamDisk::new(20, false));
+    let cache = BlockCache::new(device);
+    cache.write(0, &[1u8; 512]).unwrap();
+    let flushes = disk.flushes();
+    // A write through reaches the disk at once (a RAM disk has no forced
+    // unit access, so it writes and flushes); the sector written before
+    // stays in the cache, dirty.
+    cache.write_through(4096, &[2u8; 1024]).unwrap();
+    cache.write_out(8192, &[3u8; 512]).unwrap();
+    let mut raw = [0u8; 512];
+    disk.dump(4096 + 512, &mut raw);
+    assert_eq!(raw, [2u8; 512]);
+    disk.dump(8192, &mut raw);
+    assert_eq!(raw, [3u8; 512]);
+    disk.dump(0, &mut raw);
+    assert_eq!(raw, [0u8; 512]);
+    assert_eq!(disk.flushes(), flushes + 1);
+    assert!(cache.is_dirty());
+    // The cache keeps what it wrote.
+    let mut out = [0u8; 512];
+    cache.read(4096, &mut out).unwrap();
+    assert_eq!(out, [2u8; 512]);
+    cache.sync().unwrap();
+    disk.dump(0, &mut raw);
+    assert_eq!(raw, [1u8; 512]);
+    assert!(!cache.is_dirty());
+}
+
+#[test]
 fn discarded_sectors_never_reach_the_disk() {
     let (disk, device) = shared(RamDisk::new(16, false));
     let cache = BlockCache::new(device);

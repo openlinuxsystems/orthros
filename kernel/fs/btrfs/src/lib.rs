@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Btrfs (Phase 10b): Dukovo's own filesystem, read first.
+//! Btrfs (Phase 10b and 10c): Dukovo's own filesystem.
 //!
 //! Btrfs keeps everything in copy-on-write B-trees, checksums every block
 //! of metadata and data, and spreads them over its devices in chunks.
@@ -24,6 +24,9 @@
 //!   extents with them.
 //! - [`fs::BtrfsFs`] and [`node::BtrfsNode`]: a mounted filesystem, read
 //!   through the VFS.
+//! - [`cow::Writer`]: changing the trees by copying on write, in
+//!   transactions that [`space`] gives room and `commit` makes durable
+//!   (ADR 0129).
 //!
 //! The crate is a compartment: it has no `unsafe` code, and builds for the
 //! host (feature `host`).
@@ -37,8 +40,11 @@ extern crate alloc;
 
 mod blake2b;
 pub mod chunk;
+mod commit;
+pub mod cow;
 pub mod csum;
 pub mod dir;
+mod edit;
 pub mod extent;
 pub mod format;
 pub mod fs;
@@ -47,6 +53,7 @@ pub mod inode;
 pub mod lzo;
 pub mod node;
 mod sha256;
+pub mod space;
 pub mod superblock;
 pub mod tree;
 pub mod unpack;
