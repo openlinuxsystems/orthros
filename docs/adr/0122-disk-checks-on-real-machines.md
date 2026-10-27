@@ -10,9 +10,12 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 ## Context
 
-Phase 10a is done when the Dell Inspiron 15 5570 (an AHCI controller with
-an SSD and a hard disk) and the Framework Desktop (two NVMe drives) read
-and write raw disks. QEMU's disks cannot show what real ones do: a write
+Phase 10's disk work is checked on the Dell Inspiron 15 5570 (an AHCI
+controller with an SSD and a hard disk). The Framework Desktop (two NVMe
+drives) serves other work until Dukovo runs containers (Phase 20), so
+its drives are checked from then; until then NVMe disks, and disks of
+4 KiB sectors, which neither machine has, are checked in QEMU only.
+QEMU's disks cannot show what real ones do: a write
 cache that loses what a flush did not reach, a drive that numbers its
 namespaces or reports its sizes in its own way, firmware that is slow at
 some transfer sizes. The boot tests cover the drivers' logic; a real
@@ -21,8 +24,8 @@ machine has to cover the rest.
 Three things make this harder than a boot test. The project lead runs
 each check by hand, booting a USB stick, with no serial port to read a
 log from and no network driver yet (Phase 12) to send one. The disks
-may be erased, but only the ones the lead names: the Framework's second
-NVMe drive holds data and must never be written. And disk names cannot
+may be erased, but only the ones the lead names: one of the Framework's
+NVMe drives holds data and must never be written. And disk names cannot
 say which disk is which, since both Dukovo and Linux name disks in the
 order their controllers are found, which can differ between the two
 systems and between boots.
@@ -80,7 +83,7 @@ in the virtual machine, Linux's on the host on the disk's file.
 - Linux's side is linked against the live system's C library, not built
   static, so the image carries none of the GNU C Library's code; it
   needs a live system with glibc 2.34 or later (2021 and on).
-- The disk under test loses what it held, as the lead agreed for the
-  Dell's disks and one of the Framework's drives (Phase 10 prep, question
-  3); the other Framework drive is written only in 10e, when the lead
-  says so.
+- The disk under test loses what it held, as the lead agreed for both
+  of the Dell's disks (Phase 10 prep, question 2) and, once the Framework
+  runs Dukovo, one of its drives; the other is written only when the
+  lead says so.
