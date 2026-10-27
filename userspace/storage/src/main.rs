@@ -418,9 +418,30 @@ fn check_sys(root: &Dir, volumes: &[String]) {
                     format!("partition {name} has a queue in /kernel/block")
                 });
             }
-            (Err(_), Err(_)) => check(read("queue/rotational").is_ok(), || {
-                format!("disk {name} has no queue in /kernel/block")
-            }),
+            (Err(_), Err(_)) => {
+                check(read("queue/rotational").is_ok(), || {
+                    format!("disk {name} has no queue in /kernel/block")
+                });
+                // A SATA or NVMe disk says what it is; a virtio one cannot.
+                if name.starts_with("sd") || name.starts_with("nvme") {
+                    let text = |file: &str| {
+                        read(file)
+                            .map(|text| String::from(String::from_utf8_lossy(&text).trim_end()))
+                    };
+                    match (text("device/model"), text("device/serial"), text("device/firmware_rev"))
+                    {
+                        (Ok(model), Ok(serial), Ok(firmware))
+                            if !model.is_empty() && !serial.is_empty() =>
+                        {
+                            println!(
+                                "storage: /kernel/block/{name}/device: {model}, serial {serial}, \
+                                 firmware {firmware}"
+                            );
+                        }
+                        other => fail(&format!("/kernel/block/{name}/device gives {other:?}")),
+                    }
+                }
+            }
             _ => fail(&format!("/kernel/block/{name} has only one of `partition` and `start`")),
         }
     }

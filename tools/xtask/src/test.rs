@@ -2698,6 +2698,14 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(" of them disks; zero, random and null work")?;
     for (name, disk) in volumes.iter().zip(case.disks.iter().filter(|disk| disk.fat != 0)) {
         vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
+        let model = match disk.bus {
+            Bus::Sata => "QEMU HARDDISK",
+            Bus::Nvme(_) => "QEMU NVMe Ctrl",
+            Bus::Virtio => "",
+        };
+        if disk.table == Table::None && !model.is_empty() {
+            vm.expect(&format!("storage: /kernel/block/{name}/device: {model}, serial "))?;
+        }
         if disk.table != Table::None {
             vm.expect(&format!(
                 "storage: /kernel/block/{name}: partition 1 from sector {PARTITION_START}"

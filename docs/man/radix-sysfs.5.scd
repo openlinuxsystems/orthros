@@ -53,6 +53,14 @@ _/kernel/block/_*name*_/partition_, _start_
 	partition has these instead of a _queue_ directory, as on Linux,
 	whose tools read the queue of the partition's disk.
 
+_/kernel/block/_*name*_/device/model_, _serial_, _firmware_rev_
+	For a SATA or NVMe disk: its model, serial number and firmware
+	revision, as it gives them, without the padding. Linux has these for
+	an NVMe disk; for a SATA disk it cuts the model to 16 characters and
+	keeps the serial number elsewhere. A tool that must write to one
+	particular disk should find it by its serial number, since disk names
+	follow the order the controllers are found in.
+
 _/kernel/block/_*name*_/queue/logical_block_size_, _physical_block_size_
 	The sizes in bytes of the device's sectors, *512*, and of the
 	blocks it writes without reading first (*radix-block*(2)).

@@ -13,7 +13,8 @@
 //!   disk's table (`partition`) and its first sector (`start`); and for a
 //!   disk, in its `queue`, the sizes and flags of radix-block(2)'s
 //!   requests as Linux names them (`rotational`, `logical_block_size`,
-//!   `discard_max_bytes` and the rest);
+//!   `discard_max_bytes` and the rest), and in its `device` the `model`,
+//!   `serial` and `firmware_rev` it gives, for SATA and NVMe disks;
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
 //!   hexadecimal, for every PCI function the scan found.
 //!
@@ -86,21 +87,21 @@ struct Blocks;
 impl Listing for Blocks {
     fn list(&self, f: &mut dyn FnMut(&str, Kind) -> bool) {
         let mut more = true;
-        disk::for_each(|name, _, _| {
+        disk::for_each(|entry| {
             if more {
-                more = f(name, Kind::Directory);
+                more = f(entry.name.as_str(), Kind::Directory);
             }
         });
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
-        let mut found: Option<(DeviceRef, Option<disk::Place>)> = None;
-        disk::for_each(|n, device, place| {
-            if n == name {
-                found = Some((device.clone(), place));
+        let mut found: Option<(DeviceRef, Option<disk::Place>, Option<disk::Ident>)> = None;
+        disk::for_each(|entry| {
+            if entry.name.as_str() == name {
+                found = Some((entry.device.clone(), entry.place, entry.ident));
             }
         });
-        let (device, place) = found.ok_or(Error::NotFound)?;
+        let (device, place, ident) = found.ok_or(Error::NotFound)?;
         let dir = FixedDir::new(next_id())?;
         let info = device.info();
         dir.add("size", value(move |text| writeln!(text, "{}", info.sectors))?)?;
@@ -111,6 +112,14 @@ impl Listing for Blocks {
             dir.add("partition", value(move |text| writeln!(text, "{}", place.number))?)?;
             dir.add("start", value(move |text| writeln!(text, "{}", place.first))?)?;
             return Ok(dir);
+        }
+        // What the disk says it is, where Linux has an NVMe controller's.
+        if let Some(ident) = ident {
+            let device = dir.add_dir("device", next_id())?;
+            device.add("model", value(move |text| writeln!(text, "{}", ident.model()))?)?;
+            device.add("serial", value(move |text| writeln!(text, "{}", ident.serial()))?)?;
+            let firmware = value(move |text| writeln!(text, "{}", ident.firmware()))?;
+            device.add("firmware_rev", firmware)?;
         }
         let queue = dir.add_dir("queue", next_id())?;
         let sector = radix_block::SECTOR;

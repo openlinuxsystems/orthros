@@ -24,7 +24,7 @@ use radix_virtio::blk::{self, Blk};
 use radix_virtio::{NO_VECTOR, Transport};
 
 use super::queue::{Controller, Disk, Op, Outcome, Request, Volume};
-use super::{Name, Size, partitions, register};
+use super::{Entry, Name, Size, partitions, register};
 use crate::Arch;
 
 /// The most virtio disks.
@@ -186,7 +186,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     let volume = Volume::new(disk, 0, info);
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
-    register(&name, device.clone(), None);
+    register(Entry { name: name.clone(), device: device.clone(), place: None, ident: None });
     partitions(&name, &device);
     Ok(())
 }

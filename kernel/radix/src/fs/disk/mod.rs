@@ -87,9 +87,54 @@ pub struct Place {
     pub first: u64,
 }
 
-/// Every disk and partition, by name, with where each partition is.
-type Disks = alloc::vec::Vec<(Name, DeviceRef, Option<Place>), Kmalloc>;
-static DISKS: Mutex<Option<Disks>> = Mutex::new(None);
+/// What a disk says it is, as its controller identifies it: text padded
+/// with spaces or NULs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ident {
+    /// Its model.
+    pub model: [u8; 40],
+    /// Its serial number.
+    pub serial: [u8; 20],
+    /// Its firmware's revision.
+    pub firmware: [u8; 8],
+}
+
+impl Ident {
+    /// Its model, without the padding.
+    pub fn model(&self) -> &str {
+        unpadded(&self.model)
+    }
+
+    /// Its serial number, without the padding.
+    pub fn serial(&self) -> &str {
+        unpadded(&self.serial)
+    }
+
+    /// Its firmware's revision, without the padding.
+    pub fn firmware(&self) -> &str {
+        unpadded(&self.firmware)
+    }
+}
+
+/// Text a disk gave, without the spaces and NULs around it; empty if it
+/// is not UTF-8.
+fn unpadded(text: &[u8]) -> &str {
+    core::str::from_utf8(text).unwrap_or("").trim_matches(|c: char| c == ' ' || c == '\0')
+}
+
+/// A disk or partition the kernel has.
+pub struct Entry {
+    /// Its name, as in `/devices`.
+    pub name: Name,
+    pub device: DeviceRef,
+    /// For a partition, where it is on its disk.
+    pub place: Option<Place>,
+    /// For a disk that says, what it is.
+    pub ident: Option<Ident>,
+}
+
+/// Every disk and partition, in the order they were found.
+static DISKS: Mutex<Option<alloc::vec::Vec<Entry, Kmalloc>>> = Mutex::new(None);
 
 /// Finds and sets up the disks.
 pub fn init() {
@@ -268,7 +313,8 @@ fn partitions(name: &Name, device: &DeviceRef) {
             }
         );
         let device: DeviceRef = slice;
-        register(&part_name, device, Some(Place { number: part.number, first: part.first }));
+        let place = Place { number: part.number, first: part.first };
+        register(Entry { name: part_name, device, place: Some(place), ident: None });
     }
 }
 
@@ -293,7 +339,8 @@ impl core::fmt::Display for Size {
 }
 
 /// Adds a disk or partition under `name`, to `/devices` and `/kernel/block`.
-fn register(name: &Name, device: DeviceRef, place: Option<Place>) {
+fn register(entry: Entry) {
+    let (name, device) = (entry.name.clone(), entry.device.clone());
     {
         let mut disks = DISKS.lock();
         let disks =
@@ -302,7 +349,7 @@ fn register(name: &Name, device: DeviceRef, place: Option<Place>) {
             warn!("Disk: out of memory registering {name}");
             return;
         }
-        let _ = disks.push_within_capacity((name.clone(), device.clone(), place));
+        let _ = disks.push_within_capacity(entry);
     }
     super::devfs::add_block(name.as_str(), device);
 }
@@ -312,9 +359,9 @@ fn register(name: &Name, device: DeviceRef, place: Option<Place>) {
 /// filesystems have written back what they hold, before the machine is
 /// powered off, restarted or halted; requests after it may fail.
 pub fn shutdown() {
-    for_each(|name, device, _| {
-        if let Err(err) = device.flush() {
-            warn!("Disk: {name}: its write cache could not be emptied: {err}");
+    for_each(|entry| {
+        if let Err(err) = entry.device.flush() {
+            warn!("Disk: {}: its write cache could not be emptied: {err}", entry.name);
         }
     });
     nvme::shutdown();
@@ -323,14 +370,14 @@ pub fn shutdown() {
 /// The name a disk or partition was registered under.
 pub fn name_of(device: &DeviceRef) -> Option<Name> {
     let disks = DISKS.lock();
-    disks.as_ref()?.iter().find(|(_, d, _)| Arc::ptr_eq(d, device)).map(|(name, ..)| name.clone())
+    disks.as_ref()?.iter().find(|e| Arc::ptr_eq(&e.device, device)).map(|e| e.name.clone())
 }
 
 /// Calls `f` with each disk and partition, in the order they were found.
-pub fn for_each(mut f: impl FnMut(&str, &DeviceRef, Option<Place>)) {
+pub fn for_each(mut f: impl FnMut(&Entry)) {
     let disks = DISKS.lock();
-    for (name, device, place) in disks.iter().flatten() {
-        f(name.as_str(), device, *place);
+    for entry in disks.iter().flatten() {
+        f(entry);
     }
 }
 

@@ -32,7 +32,7 @@ use radix_nvme::{Lane, Nvme, Shadow};
 use radix_sync::{Mutex, Once};
 
 use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
-use super::{Name, Size, partitions, register};
+use super::{Entry, Ident, Name, Size, partitions, register};
 use crate::Arch;
 
 /// The most NVMe controllers.
@@ -402,7 +402,9 @@ fn add(
         if info.discard_sectors > 0 { ", deallocates" } else { "" },
     );
     let device: DeviceRef = volume;
-    register(&name, device.clone(), None);
+    let ident =
+        Ident { model: identity.model, serial: identity.serial, firmware: identity.firmware };
+    register(Entry { name: name.clone(), device: device.clone(), place: None, ident: Some(ident) });
     partitions(&name, &device);
 }
 

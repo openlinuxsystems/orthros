@@ -28,7 +28,7 @@ use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Once;
 
 use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
-use super::{Name, Size, partitions, register};
+use super::{Entry, Ident, Name, Size, partitions, register};
 use crate::Arch;
 
 /// The most AHCI controllers.
@@ -299,7 +299,9 @@ fn add(
     let volume = Volume::new(disk, 0, info);
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
-    register(&name, device.clone(), None);
+    let ident =
+        identity.map(|id| Ident { model: id.model, serial: id.serial, firmware: id.firmware });
+    register(Entry { name: name.clone(), device: device.clone(), place: None, ident });
     partitions(&name, &device);
     Ok(())
 }
