@@ -181,10 +181,11 @@ impl Space {
     }
 
     /// Takes `size` bytes, aligned to `align`, from a block group that
-    /// holds `want` (a [`kind`] of data, metadata or system).
+    /// holds `want` (a [`kind`] of data, metadata or system): a group of
+    /// both data and metadata (`mkfs.btrfs --mixed`) holds either.
     pub(crate) fn take(&mut self, want: u64, size: u64, align: u64) -> Result<u64> {
         for group in &mut self.groups {
-            if group.flags & TYPE != want {
+            if group.flags & TYPE & want == 0 {
                 continue;
             }
             let found = group.free.iter().find_map(|&(s, e)| {

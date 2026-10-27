@@ -47,6 +47,9 @@ use crate::{APPEND, Error, In, Out, Result};
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
+/// The most pages [`FileCache::sync`] hands its backing in one write.
+pub const WRITE_RUN: usize = 32;
+
 /// The most of a program's memory made at once when a copy finds a page
 /// missing: the pages it will copy next, so a large read into new memory
 /// lets go of the lock once for each 64 KiB rather than for each page.
@@ -85,6 +88,19 @@ pub trait Backing {
 
     /// Writes the first `len` bytes of page `index` to the disk.
     fn write_page(&self, _index: u64, _page: &Page, _len: usize) -> Result<()> {
+        Ok(())
+    }
+
+    /// Writes `pages`, the file's pages from `index` on, to the disk: all
+    /// of each but the last, and the first `len` bytes of that. A backing
+    /// that places each write anew (Btrfs, which copies on write) puts
+    /// them in one extent; by default each is a [`Backing::write_page`].
+    fn write_pages(&self, index: u64, pages: &[&Page], len: usize) -> Result<()> {
+        let last = pages.len().saturating_sub(1);
+        for (i, page) in pages.iter().enumerate() {
+            let n = if i == last { len } else { PAGE_SIZE };
+            self.write_page(index + i as u64, page, n)?;
+        }
         Ok(())
     }
 
@@ -176,6 +192,11 @@ impl FileCache {
     pub fn status(&self) -> (u64, u64, usize) {
         let state = self.state.lock();
         (state.size, state.modified, state.pages.len())
+    }
+
+    /// How many pages wait to be written back.
+    pub fn dirty_pages(&self) -> usize {
+        self.state.lock().dirty
     }
 
     /// Whether some pages wait to be written back.
@@ -393,7 +414,9 @@ impl FileCache {
         Ok(())
     }
 
-    /// Writes every dirty page back. Pages whose write failed stay dirty.
+    /// Writes every dirty page back, in runs of up to [`WRITE_RUN`] pages
+    /// next to each other in the file. Pages whose write failed stay
+    /// dirty.
     pub fn sync(&self, backing: &dyn Backing) -> Result<()> {
         if !backing.persistent() {
             return Ok(());
@@ -403,17 +426,31 @@ impl FileCache {
         let mut failed = None;
         let mut index = 0;
         while *dirty > 0
-            && let Some((found, _)) = pages.next(index)
+            && let Some((found, first)) = pages.next(index)
         {
-            index = found + 1;
-            let Some(slot) = pages.get_mut(found) else { break };
-            if !slot.dirty {
+            if !first.dirty {
+                index = found + 1;
                 continue;
             }
-            match backing.write_page(found, &slot.page, page_len(found, *size)) {
+            let mut run = [&*first.page; WRITE_RUN];
+            let mut n = 1;
+            while n < WRITE_RUN
+                && let Some(slot) = pages.get(found + n as u64)
+                && slot.dirty
+            {
+                run[n] = &*slot.page;
+                n += 1;
+            }
+            let last = found + n as u64 - 1;
+            index = last + 1;
+            match backing.write_pages(found, &run[..n], page_len(last, *size)) {
                 Ok(()) => {
-                    slot.dirty = false;
-                    *dirty -= 1;
+                    for at in found..=last {
+                        if let Some(slot) = pages.get_mut(at) {
+                            slot.dirty = false;
+                        }
+                    }
+                    *dirty -= n;
                 }
                 Err(err) => failed = Some(err),
             }

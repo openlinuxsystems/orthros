@@ -141,3 +141,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0127](0127-btrfs-files-are-read-through-the-page-cache.md) | Btrfs files are read through the page cache and checked as Linux checks them | Accepted |
 | [0128](0128-btrfs-compressed-extents-have-their-own-decoders.md) | Btrfs's compressed extents are read by decoders of its own, written from the formats' specifications | Accepted |
 | [0129](0129-btrfs-commits-copy-on-write-and-flush-before-the-superblock.md) | Btrfs writes by copying on write, and a commit flushes its blocks before its superblock | Accepted |
+| [0130](0130-btrfs-files-change-under-one-transaction-lock-and-data-is-copied-at-write-back.md) | Btrfs files change under one transaction lock, and their data is copied on write at write-back | Accepted |

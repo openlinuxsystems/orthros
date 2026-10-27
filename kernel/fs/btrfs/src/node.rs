@@ -10,36 +10,70 @@
 //! reads it straight from the disk into the page, checking it against the
 //! checksum tree and reading the next copy when it does not match, as
 //! Linux does.
+//!
+//! On a writable mount (ADR 0130) a change goes through the running
+//! transaction ([`crate::files`]). A file's data waits in its page cache
+//! until the next sync, when each run of pages next to each other goes to
+//! a new extent; its inode item follows its size and times then.
 
+use alloc::sync::Weak;
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use radix_block::mem::CachePage;
 use radix_block::{PAGE_SIZE, Page, SegmentMut};
+use radix_sync::{Mutex, Once};
 use radix_vfs::cache::{Backing, FileCache};
-use radix_vfs::mem::KArc;
-use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat};
+use radix_vfs::mem::{self, Alloc, KArc, KVec};
+use radix_vfs::path::check_name;
+use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat, now};
 
 use crate::dir::Entries;
 use crate::extent::{self, Compression, Extent, Regular};
+use crate::files::{Files, at, file_type, put_time, put_u32, put_u64};
 use crate::format::{Key, item, name_hash, tree};
-use crate::fs::Inner;
-use crate::inode::Inode;
+use crate::fs::{Inner, Txn};
+use crate::inode::{self, Inode};
 use crate::tree::{Cursor, Root};
 use crate::unpack;
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
+/// The modes of the nodes a writable mount makes: their type and
+/// permissions, as Linux makes them with the usual umask.
+mod mode {
+    pub const FILE: u32 = 0o100_644;
+    pub const DIR: u32 = 0o040_755;
+    pub const LINK: u32 = 0o120_777;
+}
+
+/// The longest link Btrfs keeps: inline, in less than a sector.
+const LINK_MAX: usize = PAGE_SIZE - 1;
+
+/// How many entries a listing on a writable mount reads at a time: it lets
+/// go of the transaction to hand them over.
+const LIST_BATCH: usize = 64;
+
 /// A node of a mounted Btrfs filesystem.
 pub struct BtrfsNode {
     pub(crate) fs: KArc<Inner>,
-    /// Its subvolume: the number of its tree, and the tree's root.
+    /// Its subvolume: the number of its tree, and the tree's root on a
+    /// read-only mount.
     pub(crate) subvol: u64,
     pub(crate) tree: Root,
     /// Its inode number in the subvolume.
     pub(crate) ino: u64,
-    inode: Inode,
+    /// Its inode item, as the running transaction has it.
+    inode: Mutex<Inode>,
     kind: Kind,
     /// A file's page cache.
     cache: Option<FileCache>,
+    /// Whether it has no names left: its items go when it does.
+    removed: AtomicBool,
+    /// Whether the filesystem keeps it for the next sync.
+    pinned: AtomicBool,
+    /// Itself, to be kept.
+    me: Once<Weak<BtrfsNode, Alloc>>,
 }
 
 /// A number for the inode `ino` of subvolume `subvol`, unique among the
@@ -52,10 +86,12 @@ pub fn id_of(subvol: u64, ino: u64) -> u64 {
 
 impl BtrfsNode {
     /// The node of inode `ino` of subvolume `subvol`, whose tree is
-    /// `tree`, read from its inode item.
+    /// `tree`, read from its inode item. On a writable mount the tree is
+    /// read as the running transaction has it, and the caller holds it.
     pub(crate) fn load(fs: KArc<Inner>, subvol: u64, tree: Root, ino: u64) -> Result<BtrfsNode> {
         let key = Key::new(ino, item::INODE_ITEM, 0);
-        let cursor = Cursor::seek(&fs.volume, &tree, &key)?;
+        let now = if fs.writable() { fs.volume.tree(subvol)?.ok_or(Error::Corrupt)? } else { tree };
+        let cursor = Cursor::seek(&fs.volume, &now, &key)?;
         let inode = match cursor.get() {
             Some((found, data)) if found == key => Inode::read(data)?,
             _ => return Err(Error::Corrupt),
@@ -63,16 +99,108 @@ impl BtrfsNode {
         drop(cursor);
         let kind = inode.kind()?;
         let cache = (kind == Kind::File).then(|| FileCache::new(inode.size, inode.mtime));
-        Ok(BtrfsNode { fs, subvol, tree, ino, inode, kind, cache })
+        Ok(BtrfsNode {
+            fs,
+            subvol,
+            tree,
+            ino,
+            inode: Mutex::new(inode),
+            kind,
+            cache,
+            removed: AtomicBool::new(false),
+            pinned: AtomicBool::new(false),
+            me: Once::new(),
+        })
+    }
+
+    /// Notes where it lives, once it is on the heap.
+    pub(crate) fn placed(node: &KArc<BtrfsNode>) {
+        let _ = node.me.set(KArc::downgrade(node));
     }
 
     fn is_dir(&self) -> Result<()> {
         if self.kind == Kind::Directory { Ok(()) } else { Err(Error::NotDirectory) }
     }
 
-    /// The inode item.
-    pub fn inode(&self) -> &Inode {
-        &self.inode
+    /// The inode item, as the running transaction has it.
+    pub fn inode(&self) -> Inode {
+        *self.inode.lock()
+    }
+
+    /// Its subvolume's tree, as the running transaction has it; the caller
+    /// holds the transaction on a writable mount.
+    fn tree(&self) -> Result<Root> {
+        if self.fs.writable() {
+            self.fs.volume.tree(self.subvol)?.ok_or(Error::Corrupt)
+        } else {
+            Ok(self.tree)
+        }
+    }
+
+    fn removed(&self) -> bool {
+        self.removed.load(Ordering::Acquire)
+    }
+
+    /// Reads its inode item again, after a change.
+    fn reload(&self, files: &Files<'_>) -> Result<()> {
+        let key = Key::new(self.ino, item::INODE_ITEM, 0);
+        let data = files.get(self.subvol, &key)?.ok_or(Error::Corrupt)?;
+        *self.inode.lock() = Inode::read(&data)?;
+        Ok(())
+    }
+
+    /// Keeps it until the next sync; false if there was no memory to.
+    pub(crate) fn pin(&self) -> bool {
+        if self.pinned.swap(true, Ordering::AcqRel) {
+            return true;
+        }
+        let pinned =
+            self.me.get().and_then(Weak::upgrade).is_some_and(|me| self.fs.pin(me).is_ok());
+        if !pinned {
+            self.pinned.store(false, Ordering::Release);
+        }
+        pinned
+    }
+
+    /// The filesystem no longer keeps it for the next sync.
+    pub(crate) fn unpinned(&self) {
+        self.pinned.store(false, Ordering::Release);
+    }
+
+    /// Notes that its data or size changed in memory: the next sync writes
+    /// it, or it is written now if there is no memory to keep it.
+    fn changed(&self) -> Result<()> {
+        if self.pin() { Ok(()) } else { self.flush() }
+    }
+
+    /// How many of its pages wait to be written.
+    pub(crate) fn dirty_pages(&self) -> usize {
+        self.cache.as_ref().map_or(0, FileCache::dirty_pages)
+    }
+
+    /// Writes its data, then its size and times to its inode item.
+    pub(crate) fn flush(&self) -> Result<()> {
+        let Some(cache) = &self.cache else { return Ok(()) };
+        if self.removed() || !self.fs.writable() {
+            return Ok(());
+        }
+        cache.sync(&FileBacking(self))?;
+        let (size, modified, _) = cache.status();
+        let inode = self.inode();
+        if inode.size == size && inode.mtime == modified {
+            return Ok(());
+        }
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            files.whole(|f| {
+                f.change_inode(self.ino, |d| {
+                    put_u64(d, at::SIZE, size);
+                    put_time(d, at::MTIME, modified);
+                    put_time(d, at::CTIME, modified.max(inode.ctime));
+                })
+            })?;
+            self.reload(&files)
+        })
     }
 
     /// What the entry `location` of this directory names: an inode here,
@@ -92,9 +220,42 @@ impl BtrfsNode {
         Ok(node)
     }
 
+    /// What the entry `name` of this directory names. The caller holds the
+    /// transaction on a writable mount.
+    fn entry(&self, name: &str) -> Result<Option<Key>> {
+        let volume = &self.fs.volume;
+        let key = Key::new(self.ino, item::DIR_ITEM, name_hash(name.as_bytes()));
+        let cursor = Cursor::seek(volume, &self.tree()?, &key)?;
+        let Some((found, data)) = cursor.get() else { return Ok(None) };
+        if found != key {
+            return Ok(None);
+        }
+        // Names whose hashes are the same share the item.
+        for entry in Entries::of(data) {
+            let entry = entry?;
+            if entry.name == name.as_bytes() {
+                return Ok(Some(entry.location));
+            }
+        }
+        Ok(None)
+    }
+
     /// Reads the file's page `index`, `len` bytes of it, into `page`;
     /// offers `more` the extent's other pages when it uncompresses one.
     fn read_page(
+        &self,
+        index: u64,
+        page: &mut Page,
+        len: usize,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<()> {
+        let _reading = self.fs.reading();
+        self.read_page_in(index, page, len, more)
+    }
+
+    /// [`BtrfsNode::read_page`], with the transaction held on a writable
+    /// mount.
+    fn read_page_in(
         &self,
         index: u64,
         page: &mut Page,
@@ -106,7 +267,7 @@ impl BtrfsNode {
         let key = Key::new(self.ino, item::EXTENT_DATA, pos);
         // The extent that starts at `pos` or before it; when it ends
         // before `pos`, or there is none, the page is in a hole.
-        let cursor = Cursor::seek_last(volume, &self.tree, &key)?;
+        let cursor = Cursor::seek_last(volume, &self.tree()?, &key)?;
         let found = match &cursor {
             Some(cursor) => match cursor.get() {
                 Some((at, data)) if at.is(self.ino, item::EXTENT_DATA) => {
@@ -228,10 +389,10 @@ impl BtrfsNode {
     /// from the first copy whose checksum matches.
     fn read_data(&self, logical: u64, page: &mut Page) -> Result<()> {
         let volume = &self.fs.volume;
-        let sum = if self.inode.has_sums() {
-            let csums = self.fs.csums.as_ref().ok_or(Error::Io)?;
+        let sum = if self.inode().has_sums() {
+            let csums = self.fs.csums()?.ok_or(Error::Io)?;
             // Data without its checksum fails, as on Linux.
-            Some(extent::data_sum(volume, csums, logical)?.ok_or(Error::Io)?)
+            Some(extent::data_sum(volume, &csums, logical)?.ok_or(Error::Io)?)
         } else {
             None
         };
@@ -265,7 +426,205 @@ impl BtrfsNode {
     }
 }
 
-/// A file's page cache backing: its extents, read-only.
+/// The writes of a writable mount.
+impl BtrfsNode {
+    /// Rewrites the file's inline extent, if it has one, as a regular one
+    /// of one page: a file whose data changes past its start keeps no
+    /// inline extent, as on Linux.
+    fn convert_inline(&self, files: &mut Files<'_>) -> Result<()> {
+        if !files.has_inline(self.ino)? {
+            return Ok(());
+        }
+        let mut page = CachePage::new()?;
+        let len = usize::try_from(self.inode().size).map_or(PAGE_SIZE, |size| size.min(PAGE_SIZE));
+        self.read_page_in(0, &mut page, len, &mut |_, _| false)?;
+        let sums = self.inode().has_sums();
+        files.write_data(self.ino, 0, &[&*page], sums, 0)
+    }
+
+    /// Writes `pages`, the file's pages from `index` on (`len` bytes of
+    /// the last one in the file), to new extents.
+    fn write_run(&self, index: u64, pages: &[&Page], len: usize) -> Result<()> {
+        let pos = index * PAGE;
+        let end = pos + (pages.len() as u64 - 1) * PAGE + len as u64;
+        let sums = self.inode().has_sums();
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            if pos != 0 {
+                self.convert_inline(&mut files)?;
+            }
+            write_split(&mut files, self.ino, pos, pages, sums, end)?;
+            self.reload(&files)
+        })
+    }
+
+    /// Drops the file's extents from byte `from` to `to` (whole pages): it
+    /// grows over them, and they read as zeros.
+    fn zero(&self, from: u64, to: u64) -> Result<()> {
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            self.convert_inline(&mut files)?;
+            files.whole(|f| {
+                let lost = f.drop_extents(self.ino, from, to)?;
+                f.change_inode(self.ino, |d| {
+                    put_u64(
+                        d,
+                        at::NBYTES,
+                        crate::format::u64_at(d, at::NBYTES).saturating_sub(lost),
+                    );
+                })
+            })?;
+            self.reload(&files)
+        })
+    }
+
+    /// Cuts the file to `size` bytes: its extents past the sector holding
+    /// its end go.
+    fn truncate(&self, size: u64) -> Result<()> {
+        let sector = u64::from(self.fs.volume.superblock().sectorsize);
+        let time = now();
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            if size > 0 {
+                self.convert_inline(&mut files)?;
+            }
+            files.whole(|f| {
+                let lost = f.drop_extents(self.ino, size.next_multiple_of(sector), u64::MAX)?;
+                f.change_inode(self.ino, |d| {
+                    put_u64(d, at::SIZE, size);
+                    put_u64(
+                        d,
+                        at::NBYTES,
+                        crate::format::u64_at(d, at::NBYTES).saturating_sub(lost),
+                    );
+                    put_time(d, at::MTIME, time);
+                    put_time(d, at::CTIME, time);
+                })
+            })?;
+            self.reload(&files)
+        })
+    }
+
+    /// Makes `name` in this directory: a new inode of `kind` with `mode`,
+    /// and for a link, `target` inline.
+    fn make(&self, name: &str, mode: u32, kind: Kind, target: Option<&[u8]>) -> Result<NodeRef> {
+        self.is_dir()?;
+        check_name(name)?;
+        let time = now();
+        let parent = self.inode();
+        // A file made in a directory that copies in place does too, and
+        // keeps no checksums, as `chattr +C` has Linux do.
+        let flags = if kind == Kind::File {
+            parent.flags & (inode::flags::NODATACOW | inode::flags::NODATASUM)
+        } else {
+            0
+        };
+        let node = self.fs.change(|txn: &mut Txn| {
+            if self.removed() {
+                return Err(Error::NotFound);
+            }
+            if self.entry(name)?.is_some() {
+                return Err(Error::Exists);
+            }
+            let ino = txn.take_ino(&self.fs.volume, self.subvol)?;
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            let index = files.next_index(self.ino)?;
+            let size = target.map_or(0, |t| t.len() as u64);
+            files.whole(|f| {
+                f.make_inode(ino, mode, flags, size, size, time)?;
+                if let Some(target) = target {
+                    f.inline_extent(ino, target)?;
+                }
+                f.add_entry(self.ino, name.as_bytes(), ino, file_type(kind), index, time)
+            })?;
+            self.reload(&files)?;
+            Inner::node_for(&self.fs, self.subvol, self.tree, ino)
+        })?;
+        Ok(node)
+    }
+
+    /// Takes away the name the inode `ino` (`old`) has in directory `dir`
+    /// as part of a change, and the inode with it once it has none; the
+    /// inode stays while `live` is a node of it, as an orphan. Returns
+    /// whether the inode has no names left.
+    fn unname(
+        files: &mut Files<'_>,
+        dir: u64,
+        name: &[u8],
+        ino: u64,
+        old: &Inode,
+        live: bool,
+        time: u64,
+    ) -> Result<bool> {
+        files.remove_entry(dir, name, ino, time)?;
+        // A directory has one name, as Btrfs counts them.
+        let nlink = if old.kind()? == Kind::Directory { 0 } else { old.nlink.saturating_sub(1) };
+        files.change_inode(ino, |d| {
+            put_u32(d, at::NLINK, nlink);
+            put_time(d, at::CTIME, time);
+        })?;
+        if nlink == 0 {
+            if live {
+                files.add_orphan(ino)?;
+            } else {
+                files.free_inode(ino)?;
+            }
+        }
+        Ok(nlink == 0)
+    }
+
+    /// What `name` in this directory names, checked as a change needs it:
+    /// an inode of this subvolume with its name in its reference, and its
+    /// inode item. The caller holds the transaction.
+    fn named(&self, files: &Files<'_>, name: &str) -> Result<(u64, Inode)> {
+        let location = self.entry(name)?.ok_or(Error::NotFound)?;
+        // A subvolume's entry goes with the subvolume (10c.2).
+        if location.kind != item::INODE_ITEM {
+            return Err(Error::NotSupported);
+        }
+        let ino = location.objectid;
+        let key = Key::new(ino, item::INODE_ITEM, 0);
+        let inode = Inode::read(&files.get(self.subvol, &key)?.ok_or(Error::Corrupt)?)?;
+        // A name kept in an extended reference (thousands of hard links in
+        // one directory, from Linux) is not changed yet.
+        files.index_of(ino, self.ino, name.as_bytes())?.ok_or(Error::NotSupported)?;
+        Ok((ino, inode))
+    }
+
+    /// After a change to inode `ino`: its node in use reads its item again,
+    /// and is marked removed if it has no names left.
+    fn after(&self, files: &Files<'_>, ino: u64, gone: bool) -> Result<()> {
+        let Some(node) = self.fs.live(self.subvol, ino) else { return Ok(()) };
+        if gone {
+            node.removed.store(true, Ordering::Release);
+            return Ok(());
+        }
+        node.reload(files)
+    }
+}
+
+/// Writes `pages` with [`Files::write_data`], in halves when there is no
+/// one free range that holds them all.
+fn write_split(
+    files: &mut Files<'_>,
+    ino: u64,
+    pos: u64,
+    pages: &[&Page],
+    sums: bool,
+    end: u64,
+) -> Result<()> {
+    match files.write_data(ino, pos, pages, sums, end) {
+        Err(Error::NoSpace) if pages.len() > 1 => {
+            let half = pages.len() / 2;
+            let mid = pos + half as u64 * PAGE;
+            write_split(files, ino, pos, &pages[..half], sums, end.min(mid))?;
+            write_split(files, ino, mid, &pages[half..], sums, end)
+        }
+        result => result,
+    }
+}
+
+/// A file's page cache backing: its extents.
 struct FileBacking<'a>(&'a BtrfsNode);
 
 impl Backing for FileBacking<'_> {
@@ -287,12 +646,26 @@ impl Backing for FileBacking<'_> {
         self.0.read_page(index, page, len, more)
     }
 
-    fn reserve(&self, _size: u64) -> Result<()> {
-        Err(Error::ReadOnly)
+    fn write_page(&self, index: u64, page: &Page, len: usize) -> Result<()> {
+        self.0.write_run(index, &[page], len)
     }
 
-    fn truncate(&self, _size: u64) -> Result<()> {
-        Err(Error::ReadOnly)
+    fn write_pages(&self, index: u64, pages: &[&Page], len: usize) -> Result<()> {
+        self.0.write_run(index, pages, len)
+    }
+
+    /// Space is taken when the data is written, at the next sync (10c.1c
+    /// reserves it first).
+    fn reserve(&self, _size: u64) -> Result<()> {
+        if self.0.fs.writable() { Ok(()) } else { Err(Error::ReadOnly) }
+    }
+
+    fn zero(&self, from: u64, to: u64) -> Result<()> {
+        self.0.zero(from, to)
+    }
+
+    fn truncate(&self, size: u64) -> Result<()> {
+        self.0.truncate(size)
     }
 }
 
@@ -300,14 +673,24 @@ impl Node for BtrfsNode {
     fn stat(&self) -> Stat {
         // Whole sectors, as Linux counts them.
         let sector = u64::from(self.fs.volume.superblock().sectorsize);
+        let inode = self.inode();
+        // A file's size and time are its page cache's, which may be ahead
+        // of its inode item.
+        let (size, modified) = match &self.cache {
+            Some(cache) => {
+                let (size, modified, _) = cache.status();
+                (size, modified)
+            }
+            None => (inode.size, inode.mtime),
+        };
         Stat {
             kind: self.kind,
-            size: self.inode.size,
-            allocated: self.inode.nbytes.next_multiple_of(sector),
+            size,
+            allocated: inode.nbytes.next_multiple_of(sector),
             id: id_of(self.subvol, self.ino),
-            created: self.inode.otime,
-            modified: self.inode.mtime,
-            accessed: self.inode.atime,
+            created: inode.otime,
+            modified,
+            accessed: inode.atime,
         }
     }
 
@@ -317,33 +700,280 @@ impl Node for BtrfsNode {
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
         self.is_dir()?;
-        let volume = &self.fs.volume;
-        let key = Key::new(self.ino, item::DIR_ITEM, name_hash(name.as_bytes()));
-        let location = {
-            let cursor = Cursor::seek(volume, &self.tree, &key)?;
-            let Some((found, data)) = cursor.get() else { return Err(Error::NotFound) };
-            if found != key {
-                return Err(Error::NotFound);
-            }
-            // Names whose hashes are the same share the item.
-            let mut location = None;
-            for entry in Entries::of(data) {
-                let entry = entry?;
-                if entry.name == name.as_bytes() {
-                    location = Some(entry.location);
-                    break;
-                }
-            }
-            location.ok_or(Error::NotFound)?
-        };
+        let _reading = self.fs.reading();
+        let location = self.entry(name)?.ok_or(Error::NotFound)?;
         self.open_entry(&location)
     }
 
     fn list(&self, cursor: u64, f: ListFn<'_>) -> Result<()> {
         self.is_dir()?;
+        if !self.fs.writable() {
+            return self.list_from(cursor, &mut |next, name, kind| f(next, name, kind));
+        }
+        // A batch at a time, each handed over with the transaction let go:
+        // the caller copies names to a program's memory, which may fault.
+        let mut cursor = cursor;
+        loop {
+            let mut names: KVec<u8> = mem::vec();
+            let mut entries: KVec<(u64, usize, usize, Kind)> = mem::vec();
+            let mut failed = None;
+            {
+                let _reading = self.fs.reading();
+                self.list_from(cursor, &mut |next, name, kind| {
+                    let start = names.len();
+                    let kept = mem::extend(&mut names, name.as_bytes()).is_ok()
+                        && mem::push(&mut entries, (next, start, name.len(), kind)).is_ok();
+                    if !kept {
+                        failed = Some(Error::NoMemory);
+                    }
+                    kept && entries.len() < LIST_BATCH
+                })?;
+            }
+            if let Some(err) = failed {
+                return Err(err);
+            }
+            for &(next, start, len, kind) in &entries {
+                let name =
+                    core::str::from_utf8(&names[start..start + len]).map_err(|_| Error::Corrupt)?;
+                if !f(next, name, kind) {
+                    return Ok(());
+                }
+                cursor = next;
+            }
+            if entries.len() < LIST_BATCH {
+                return Ok(());
+            }
+        }
+    }
+
+    fn read(&self, offset: u64, out: &mut dyn Out) -> Result<usize> {
+        match &self.cache {
+            Some(cache) => cache.read(offset, out, &FileBacking(self)),
+            None if self.kind == Kind::Directory => Err(Error::IsDirectory),
+            None => Err(Error::NotSupported),
+        }
+    }
+
+    fn write(&self, offset: u64, data: &dyn In) -> Result<usize> {
+        let cache = match (&self.cache, self.kind) {
+            (_, Kind::Directory) => return Err(Error::IsDirectory),
+            (Some(cache), _) if self.fs.writable() => cache,
+            (Some(_), _) => return Err(Error::ReadOnly),
+            (None, _) => {
+                return Err(if self.fs.writable() { Error::NotSupported } else { Error::ReadOnly });
+            }
+        };
+        let wrote = cache.write(offset, data, &FileBacking(self))?;
+        if wrote > 0 {
+            self.changed()?;
+        }
+        Ok(wrote)
+    }
+
+    fn set_size(&self, size: u64) -> Result<()> {
+        let cache = match (&self.cache, self.kind) {
+            (_, Kind::Directory) => return Err(Error::IsDirectory),
+            (Some(cache), _) if self.fs.writable() => cache,
+            (Some(_), _) => return Err(Error::ReadOnly),
+            (None, _) => {
+                return Err(if self.fs.writable() { Error::NotSupported } else { Error::ReadOnly });
+            }
+        };
+        cache.set_size(size, &FileBacking(self))?;
+        self.changed()
+    }
+
+    fn set_times(&self, accessed: Option<u64>, modified: Option<u64>) -> Result<()> {
+        let time = now();
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            files.whole(|f| {
+                f.change_inode(self.ino, |d| {
+                    if let Some(accessed) = accessed {
+                        put_time(d, at::ATIME, accessed);
+                    }
+                    if let Some(modified) = modified {
+                        put_time(d, at::MTIME, modified);
+                    }
+                    put_time(d, at::CTIME, time);
+                })
+            })?;
+            self.reload(&files)
+        })?;
+        // The page cache keeps the time its data changed, which the next
+        // flush writes: it takes the new one.
+        if let (Some(cache), Some(modified)) = (&self.cache, modified) {
+            cache.set_modified(modified);
+        }
+        Ok(())
+    }
+
+    fn sync(&self) -> Result<()> {
+        if !self.fs.writable() {
+            return Ok(());
+        }
+        // Until the log tree (10c.2), a file is durable with a commit.
+        self.flush()?;
+        self.fs.commit()
+    }
+
+    fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
+        self.is_dir()?;
+        if !self.fs.writable() {
+            return Err(Error::ReadOnly);
+        }
+        let mode = match kind {
+            Kind::File => mode::FILE,
+            Kind::Directory => mode::DIR,
+            // Devices, pipes and sockets are made in 10c.3.
+            _ => return Err(Error::NotSupported),
+        };
+        self.make(name, mode, kind, None)
+    }
+
+    fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
+        self.is_dir()?;
+        if !self.fs.writable() {
+            return Err(Error::ReadOnly);
+        }
+        if target.is_empty() {
+            return Err(Error::NotFound);
+        }
+        if target.len() > LINK_MAX {
+            return Err(Error::NameTooLong);
+        }
+        self.make(name, mode::LINK, Kind::Symlink, Some(target.as_bytes()))
+    }
+
+    fn make_socket(&self, _name: &str, _binding: SocketBinding) -> Result<NodeRef> {
+        self.is_dir()?;
+        if self.fs.writable() { Err(Error::NotSupported) } else { Err(Error::ReadOnly) }
+    }
+
+    fn remove(&self, name: &str) -> Result<()> {
+        self.is_dir()?;
+        check_name(name)?;
+        let time = now();
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            let (ino, old) = self.named(&files, name)?;
+            if old.kind()? == Kind::Directory && !files.is_empty_dir(ino)? {
+                return Err(Error::NotEmpty);
+            }
+            let live = self.fs.live(self.subvol, ino);
+            let gone = files.whole(|f| {
+                BtrfsNode::unname(f, self.ino, name.as_bytes(), ino, &old, live.is_some(), time)
+            })?;
+            self.reload(&files)?;
+            self.after(&files, ino, gone)
+        })
+    }
+
+    fn rename(&self, from: &str, to_dir: &dyn Node, to: &str) -> Result<()> {
+        self.is_dir()?;
+        check_name(from)?;
+        check_name(to)?;
+        let target = radix_vfs::downcast::<BtrfsNode>(to_dir).ok_or(Error::CrossMount)?;
+        // Linux moves nothing between subvolumes either.
+        if !KArc::ptr_eq(&target.fs, &self.fs) || target.subvol != self.subvol {
+            return Err(Error::CrossMount);
+        }
+        target.is_dir()?;
+        let time = now();
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            let (moving, inode) = self.named(&files, from)?;
+            if target.removed() {
+                return Err(Error::NotFound);
+            }
+            if target.ino == self.ino && from == to {
+                return Ok(());
+            }
+            let is_dir = inode.kind()? == Kind::Directory;
+            // A directory cannot move under itself.
+            if is_dir {
+                let mut at = Some(target.ino);
+                while let Some(dir) = at {
+                    if dir == moving {
+                        return Err(Error::BadName);
+                    }
+                    at = files.parent_of(dir)?;
+                }
+            }
+            let replaced = match target.entry(to)? {
+                Some(_) => {
+                    let (ino, old) = target.named(&files, to)?;
+                    if ino == moving {
+                        // Two names of one file: nothing moves, as POSIX says.
+                        return Ok(());
+                    }
+                    match (is_dir, old.kind()? == Kind::Directory) {
+                        (true, true) if !files.is_empty_dir(ino)? => return Err(Error::NotEmpty),
+                        (true, false) => return Err(Error::NotDirectory),
+                        (false, true) => return Err(Error::IsDirectory),
+                        _ => {}
+                    }
+                    Some((ino, old, self.fs.live(self.subvol, ino)))
+                }
+                None => None,
+            };
+            let index = files.next_index(target.ino)?;
+            let ft = file_type(inode.kind()?);
+            let gone = files.whole(|f| {
+                let mut gone = false;
+                if let Some((ino, old, live)) = &replaced {
+                    gone = BtrfsNode::unname(
+                        f,
+                        target.ino,
+                        to.as_bytes(),
+                        *ino,
+                        old,
+                        live.is_some(),
+                        time,
+                    )?;
+                }
+                f.remove_entry(self.ino, from.as_bytes(), moving, time)?;
+                f.add_entry(target.ino, to.as_bytes(), moving, ft, index, time)?;
+                f.change_inode(moving, |d| put_time(d, at::CTIME, time))?;
+                Ok(gone)
+            })?;
+            self.reload(&files)?;
+            target.reload(&files)?;
+            self.after(&files, moving, false)?;
+            if let Some((ino, _, _)) = replaced {
+                self.after(&files, ino, gone)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
+        if self.kind != Kind::Symlink {
+            return Err(Error::NotLink);
+        }
+        // Copied out first: `out` may be a program's memory, which may
+        // fault, and the transaction is let go before it is touched.
+        let path = {
+            let _reading = self.fs.reading();
+            self.link_path()?
+        };
+        let n = path.len().min(out.len());
+        out.put(0, &path[..n])?;
+        Ok(path.len())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl BtrfsNode {
+    /// Lists the directory from `cursor`, as [`Node::list`] does; the
+    /// caller holds the transaction on a writable mount.
+    fn list_from(&self, cursor: u64, f: &mut dyn FnMut(u64, &str, Kind) -> bool) -> Result<()> {
         let volume = &self.fs.volume;
         let mut at =
-            Cursor::seek(volume, &self.tree, &Key::new(self.ino, item::DIR_INDEX, cursor))?;
+            Cursor::seek(volume, &self.tree()?, &Key::new(self.ino, item::DIR_INDEX, cursor))?;
         while let Some((key, data)) = at.get() {
             if !key.is(self.ino, item::DIR_INDEX) {
                 break;
@@ -365,64 +995,12 @@ impl Node for BtrfsNode {
         Ok(())
     }
 
-    fn read(&self, offset: u64, out: &mut dyn Out) -> Result<usize> {
-        match &self.cache {
-            Some(cache) => cache.read(offset, out, &FileBacking(self)),
-            None if self.kind == Kind::Directory => Err(Error::IsDirectory),
-            None => Err(Error::NotSupported),
-        }
-    }
-
-    fn write(&self, _offset: u64, _data: &dyn In) -> Result<usize> {
-        match self.kind {
-            Kind::Directory => Err(Error::IsDirectory),
-            _ => Err(Error::ReadOnly),
-        }
-    }
-
-    fn set_size(&self, _size: u64) -> Result<()> {
-        match self.kind {
-            Kind::Directory => Err(Error::IsDirectory),
-            _ => Err(Error::ReadOnly),
-        }
-    }
-
-    fn set_times(&self, _accessed: Option<u64>, _modified: Option<u64>) -> Result<()> {
-        Err(Error::ReadOnly)
-    }
-
-    fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {
-        self.is_dir()?;
-        Err(Error::ReadOnly)
-    }
-
-    fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
-        self.is_dir()?;
-        Err(Error::ReadOnly)
-    }
-
-    fn make_socket(&self, _name: &str, _binding: SocketBinding) -> Result<NodeRef> {
-        self.is_dir()?;
-        Err(Error::ReadOnly)
-    }
-
-    fn remove(&self, _name: &str) -> Result<()> {
-        self.is_dir()?;
-        Err(Error::ReadOnly)
-    }
-
-    fn rename(&self, _from: &str, _to_dir: &dyn Node, _to: &str) -> Result<()> {
-        self.is_dir()?;
-        Err(Error::ReadOnly)
-    }
-
-    fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
-        if self.kind != Kind::Symlink {
-            return Err(Error::NotLink);
-        }
+    /// A link's path; the caller holds the transaction on a writable
+    /// mount.
+    fn link_path(&self) -> Result<KVec<u8>> {
         let volume = &self.fs.volume;
         let key = Key::new(self.ino, item::EXTENT_DATA, 0);
-        let cursor = Cursor::seek(volume, &self.tree, &key)?;
+        let cursor = Cursor::seek(volume, &self.tree()?, &key)?;
         let Some((found, data)) = cursor.get() else { return Err(Error::Corrupt) };
         if found != key {
             return Err(Error::Corrupt);
@@ -434,25 +1012,30 @@ impl Node for BtrfsNode {
         else {
             return Err(Error::Corrupt);
         };
-        let len = usize::try_from(self.inode.size).map_or(data.len(), |size| size.min(data.len()));
-        let n = len.min(out.len());
-        out.put(0, &data[..n])?;
-        Ok(len)
+        let len =
+            usize::try_from(self.inode().size).map_or(data.len(), |size| size.min(data.len()));
+        Ok(mem::copy(&data[..len])?)
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+impl Drop for BtrfsNode {
+    /// A node of an inode with no names left was all that kept its items:
+    /// they go at the next sync.
+    fn drop(&mut self) {
+        if *self.removed.get_mut() {
+            self.fs.reaped(self.subvol, self.ino);
+        }
     }
 }
 
 impl BtrfsNode {
-    /// Drops up to `max` pages of its cache; returns how many.
     /// How many pages the file's cache holds.
     #[cfg(test)]
     pub(crate) fn cached_pages(&self) -> usize {
         self.cache.as_ref().map_or(0, FileCache::pages)
     }
 
+    /// Drops up to `max` pages of its cache; returns how many.
     pub(crate) fn shrink(&self, max: usize) -> usize {
         match &self.cache {
             Some(cache) => cache.shrink(max, &FileBacking(self)),

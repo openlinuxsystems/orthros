@@ -9,32 +9,87 @@
 //! (5) unless `btrfs subvolume set-default` changed it. The subvolumes
 //! inside it are directories of the mount, as on Linux.
 //!
-//! Btrfs is read-only until Phase 10c, which writes it.
+//! A writable mount (ADR 0130) keeps the running transaction, and changes
+//! files through it ([`crate::files`]); a commit makes them durable at the
+//! next sync, every [`COMMIT_NS`], or sooner when the pages waiting to be
+//! written pass [`DIRTY_PAGES_MAX`]. A node whose data or inode waits for
+//! the sync is kept until then; a file removed while open keeps its items
+//! until its last node goes, with an orphan item that cleans it up at the
+//! next writable mount if the power goes first.
 //!
 //! # Locks
 //!
-//! `nodes` (the node table) is held only to find or add a node, never
-//! while reading the disk: a node is read first, and when another was
-//! added for the same inode meanwhile, that one is used and the new one
-//! dropped, which only frees memory. A file's page cache is taken before
-//! the workspace of compressed reads, which is taken before the volume's
-//! block cache, which is taken before the disk's. Shrinking only tries
+//! A file's page cache is taken first. On a writable mount the
+//! transaction's lock comes next, held by every change and also by every
+//! read of the trees, since a change edits the transaction's blocks in
+//! place; it is never held while a program's memory is copied, which may
+//! fault and read a file. Then come a node's inode, the node table and
+//! the list of nodes to remove, then the workspace of compressed reads,
+//! the volume's block cache and the disk's. `nodes` is held only to find
+//! or add a node, never while reading the disk: a node is read first, and
+//! when another was added for the same inode meanwhile, that one is used
+//! and the new one dropped, which only frees memory. Shrinking only tries
 //! the workspace's lock, as a reader that holds it may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use radix_block::{DeviceRef, PAGE_SIZE};
-use radix_sync::Mutex;
+use radix_sync::{Mutex, MutexGuard};
 use radix_vfs::mem::{self, Alloc, KArc, KBox, KVec};
 use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
 
+use crate::cow::Writer;
 use crate::dir::Entries;
-use crate::format::{Key, item, name_hash, tree};
+use crate::files::Files;
+use crate::format::{Key, item, name_hash, tree, u64_at};
 use crate::node::BtrfsNode;
+use crate::superblock::incompat;
 use crate::tree::{Cursor, Root};
 use crate::unpack::Workspace;
 use crate::volume::Volume;
+
+/// How long a change waits in memory, at most, before a commit makes it
+/// durable: Linux's default `commit=30`.
+pub const COMMIT_NS: u64 = 30_000_000_000;
+
+/// How many pages may wait to be written before the writeback thread
+/// commits early: 64 MiB.
+pub const DIRTY_PAGES_MAX: usize = 16_384;
+
+/// The running transaction of a writable mount, and what changing files
+/// keeps beside it.
+pub(crate) struct Txn {
+    pub(crate) writer: Writer,
+    /// The next inode number of each subvolume written so far.
+    next_ino: KVec<(u64, u64)>,
+}
+
+impl Txn {
+    /// Subvolume `subvol`, to change.
+    pub(crate) fn files<'a>(&'a mut self, volume: &'a Volume, subvol: u64) -> Files<'a> {
+        Files { w: &mut self.writer, volume, subvol }
+    }
+
+    /// A number for a new inode of subvolume `subvol`.
+    pub(crate) fn take_ino(&mut self, volume: &Volume, subvol: u64) -> Result<u64> {
+        let at = match self.next_ino.iter().position(|e| e.0 == subvol) {
+            Some(at) => at,
+            None => {
+                let next = self.files(volume, subvol).next_ino()?;
+                mem::push(&mut self.next_ino, (subvol, next))?;
+                self.next_ino.len() - 1
+            }
+        };
+        let ino = self.next_ino[at].1;
+        if ino >= crate::files::object::LAST_FREE {
+            return Err(Error::NoSpace);
+        }
+        self.next_ino[at].1 += 1;
+        Ok(ino)
+    }
+}
 
 /// An entry of the node table: a node's subvolume and inode number, and
 /// the node while it is in use.
@@ -43,12 +98,21 @@ type Entry = ((u64, u64), Weak<BtrfsNode, Alloc>);
 /// What a filesystem's nodes share.
 pub(crate) struct Inner {
     pub(crate) volume: Volume,
-    /// The checksum tree's root, if it has one.
-    pub(crate) csums: Option<Root>,
+    /// The checksum tree's root, if it has one, on a read-only mount.
+    csums: Option<Root>,
     /// The nodes in use, by subvolume and inode number, sorted.
     nodes: Mutex<KVec<Entry>>,
     /// What reading compressed extents uses, once one is read.
     workspace: Mutex<Option<KBox<Workspace>>>,
+    /// The running transaction, on a writable mount.
+    tx: Option<Mutex<Txn>>,
+    /// The nodes whose data or inode waits for the next sync.
+    dirty: Mutex<KVec<KArc<BtrfsNode>>>,
+    /// Inodes removed while open and since closed, by subvolume and
+    /// number: their items go at the next sync.
+    reap: Mutex<KVec<(u64, u64)>>,
+    /// When the oldest change the disk lacks was made, or 0 if none.
+    since: AtomicU64,
 }
 
 /// A mounted Btrfs filesystem.
@@ -66,8 +130,24 @@ impl BtrfsFs {
     /// `mkfs.btrfs` makes on x86-64), or a disk whose blocks are larger
     /// than the sectors.
     pub fn mount(device: DeviceRef) -> Result<KArc<BtrfsFs>> {
+        BtrfsFs::mount_with(device, false)
+    }
+
+    /// Mounts the Btrfs filesystem on `device` to read and write, at its
+    /// default subvolume, and cleans up the files a crash left removed
+    /// but not yet freed.
+    ///
+    /// Fails as [`BtrfsFs::mount`] and [`Writer::new`] do, and with
+    /// [`Error::NotSupported`] for a filesystem without `no-holes`, which
+    /// every `mkfs.btrfs` since 5.15 makes: one that names its holes
+    /// is not written yet.
+    pub fn mount_writable(device: DeviceRef) -> Result<KArc<BtrfsFs>> {
+        BtrfsFs::mount_with(device, true)
+    }
+
+    fn mount_with(device: DeviceRef, writable: bool) -> Result<KArc<BtrfsFs>> {
         let logical_block = device.info().logical_block;
-        let inner = Inner::open(device)?;
+        let inner = Inner::open(device, writable)?;
         let volume = &inner.volume;
         let sectorsize = volume.superblock().sectorsize;
         if sectorsize as usize != PAGE_SIZE || logical_block > sectorsize {
@@ -78,6 +158,9 @@ impl BtrfsFs {
         let root = Inner::node_for(&inner, subvol, top, dir)?;
         if root.kind() != Kind::Directory {
             return Err(Error::Corrupt);
+        }
+        if writable {
+            inner.clean_orphans()?;
         }
         Ok(mem::arc(BtrfsFs { inner, root })?)
     }
@@ -111,17 +194,180 @@ impl Inner {
     /// Opens the volume on `device`, on the heap: a volume is too large
     /// for [`BtrfsFs::mount`]'s stack frame to hold as well.
     #[inline(never)]
-    fn open(device: DeviceRef) -> Result<KArc<Inner>> {
-        Inner::of(Volume::open(device)?)
+    fn open(device: DeviceRef, writable: bool) -> Result<KArc<Inner>> {
+        Inner::of(Volume::open(device)?, writable)
     }
 
     /// What the nodes of `volume` share, on the heap, in a frame of its
     /// own.
     #[inline(never)]
-    fn of(volume: Volume) -> Result<KArc<Inner>> {
+    fn of(volume: Volume, writable: bool) -> Result<KArc<Inner>> {
         let csums = volume.tree(tree::CSUM)?;
-        let nodes = Mutex::new(mem::vec());
-        Ok(mem::arc(Inner { volume, csums, nodes, workspace: Mutex::new(None) })?)
+        let tx = if writable {
+            if !volume.superblock().has(incompat::NO_HOLES) {
+                return Err(Error::NotSupported);
+            }
+            let writer = Writer::new(&volume)?;
+            Some(Mutex::new(Txn { writer, next_ino: mem::vec() }))
+        } else {
+            None
+        };
+        Ok(mem::arc(Inner {
+            volume,
+            csums,
+            nodes: Mutex::new(mem::vec()),
+            workspace: Mutex::new(None),
+            tx,
+            dirty: Mutex::new(mem::vec()),
+            reap: Mutex::new(mem::vec()),
+            since: AtomicU64::new(0),
+        })?)
+    }
+
+    /// Whether the mount writes.
+    pub(crate) fn writable(&self) -> bool {
+        self.tx.is_some()
+    }
+
+    /// Holds the transaction, on a writable mount, while the trees are
+    /// read: a change edits its blocks in place.
+    pub(crate) fn reading(&self) -> Option<MutexGuard<'_, Txn>> {
+        self.tx.as_ref().map(Mutex::lock)
+    }
+
+    /// Runs the change `f` in the running transaction; fails with
+    /// [`Error::ReadOnly`] on a read-only mount.
+    pub(crate) fn change<R>(&self, f: impl FnOnce(&mut Txn) -> Result<R>) -> Result<R> {
+        let tx = self.tx.as_ref().ok_or(Error::ReadOnly)?;
+        let mut txn = tx.lock();
+        self.touch();
+        f(&mut txn)
+    }
+
+    /// Notes that the disk lacks a change made now.
+    fn touch(&self) {
+        let now = radix_vfs::now().max(1);
+        let _ = self.since.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// The checksum tree's root, as the running transaction has it.
+    pub(crate) fn csums(&self) -> Result<Option<Root>> {
+        if self.writable() { self.volume.tree(tree::CSUM) } else { Ok(self.csums) }
+    }
+
+    /// Keeps `node` until the next sync: its data or inode waits for it.
+    pub(crate) fn pin(&self, node: KArc<BtrfsNode>) -> core::result::Result<(), KArc<BtrfsNode>> {
+        self.touch();
+        let mut dirty = self.dirty.lock();
+        if dirty.try_reserve(1).is_err() {
+            return Err(node);
+        }
+        let _ = dirty.push_within_capacity(node);
+        Ok(())
+    }
+
+    /// Notes that the last node of inode `ino` of subvolume `subvol`, which
+    /// has no names left, went: its items go at the next sync. Without
+    /// the memory to note it, its orphan item has them go at the next
+    /// writable mount.
+    pub(crate) fn reaped(&self, subvol: u64, ino: u64) {
+        let mut reap = self.reap.lock();
+        if reap.try_reserve(1).is_ok() {
+            let _ = reap.push_within_capacity((subvol, ino));
+        }
+    }
+
+    /// The node of inode `ino` of subvolume `subvol`, if one is in use.
+    pub(crate) fn live(&self, subvol: u64, ino: u64) -> Option<KArc<BtrfsNode>> {
+        let nodes = self.nodes.lock();
+        let i = nodes.binary_search_by_key(&(subvol, ino), |(k, _)| *k).ok()?;
+        nodes[i].1.upgrade()
+    }
+
+    /// Frees the files a crash left removed but open: those with orphan
+    /// items, in every subvolume.
+    fn clean_orphans(&self) -> Result<()> {
+        self.change(|txn| {
+            let volume = &self.volume;
+            let mut key = Key::first(tree::FS, item::ROOT_ITEM);
+            loop {
+                let subvol = {
+                    let cursor = Cursor::seek(volume, &volume.root_tree(), &key)?;
+                    match cursor.key() {
+                        Some(found) if found.objectid < crate::files::object::LAST_FREE => found,
+                        _ => break,
+                    }
+                };
+                key = Key::first(subvol.objectid + 1, item::ROOT_ITEM);
+                if subvol.kind != item::ROOT_ITEM
+                    || (subvol.objectid != tree::FS && subvol.objectid < tree::FIRST_FREE)
+                {
+                    continue;
+                }
+                let mut files = txn.files(volume, subvol.objectid);
+                loop {
+                    let orphans = files.orphans(64)?;
+                    if orphans.is_empty() {
+                        break;
+                    }
+                    for ino in orphans {
+                        files.whole(|f| f.free_inode(ino))?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        // Nothing may have changed.
+        if let Some(tx) = &self.tx
+            && !tx.lock().writer.is_dirty()
+        {
+            self.since.store(0, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Writes every node's data and inode, frees the files removed and
+    /// closed, and commits.
+    pub(crate) fn sync(&self) -> Result<()> {
+        let Some(tx) = &self.tx else { return Ok(()) };
+        let pinned = core::mem::replace(&mut *self.dirty.lock(), mem::vec());
+        let mut failed = None;
+        for node in &pinned {
+            node.unpinned();
+            if let Err(err) = node.flush() {
+                failed.get_or_insert(err);
+                // It stays dirty, to be tried again.
+                node.pin();
+            }
+        }
+        // Nodes go here, with no lock held: a removed one is reaped.
+        drop(pinned);
+        let reap = core::mem::replace(&mut *self.reap.lock(), mem::vec());
+        {
+            let mut txn = tx.lock();
+            for &(subvol, ino) in &reap {
+                txn.files(&self.volume, subvol).whole(|f| f.free_inode(ino))?;
+            }
+            self.commit_locked(&mut txn)?;
+        }
+        match failed {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Commits the running transaction.
+    pub(crate) fn commit(&self) -> Result<()> {
+        let Some(tx) = &self.tx else { return Ok(()) };
+        self.commit_locked(&mut tx.lock())
+    }
+
+    fn commit_locked(&self, txn: &mut Txn) -> Result<()> {
+        txn.writer.commit(&self.volume)?;
+        // What waits for the next sync keeps the commit due.
+        let waiting = !self.dirty.lock().is_empty() || !self.reap.lock().is_empty();
+        self.since.store(if waiting { radix_vfs::now().max(1) } else { 0 }, Ordering::Release);
+        Ok(())
     }
 
     /// Runs `f` with the workspace of compressed reads, made if need be.
@@ -162,6 +408,7 @@ impl Inner {
             }
         }
         let node = mem::arc(BtrfsNode::load(this.clone(), subvol, tree, ino)?)?;
+        BtrfsNode::placed(&node);
         let mut nodes = this.nodes.lock();
         let weak = KArc::downgrade(&node);
         match nodes.binary_search_by_key(&key, |(k, _)| *k) {
@@ -212,22 +459,50 @@ impl FileSystem for BtrfsFs {
         self.root.clone()
     }
 
-    /// Its size and what is used of it, as the superblock keeps them;
-    /// Linux also takes the profiles and unallocated space into account,
-    /// which Phase 10e's `btrfs filesystem usage` shows.
+    /// Its size and what is used of it, as the superblock keeps them and
+    /// the running transaction changes them; Linux also takes the
+    /// profiles and unallocated space into account, which Phase 10e's
+    /// `btrfs filesystem usage` shows.
     fn info(&self) -> FsInfo {
-        let sb = self.inner.volume.superblock();
+        let volume = &self.inner.volume;
+        let sb = volume.superblock();
         let sector = u64::from(sb.sectorsize);
+        let used = match &self.inner.tx {
+            Some(tx) => {
+                let delta = tx.lock().writer.bytes_used;
+                let last = volume.superblock_bytes().map_or(sb.bytes_used, |b| u64_at(&b, 0x78));
+                last.saturating_add_signed(delta)
+            }
+            None => sb.bytes_used,
+        };
         FsInfo {
             block_size: sb.sectorsize,
             blocks: sb.total_bytes / sector,
-            free: sb.total_bytes.saturating_sub(sb.bytes_used) / sector,
+            free: sb.total_bytes.saturating_sub(used) / sector,
             ..FsInfo::default()
         }
     }
 
     fn read_only(&self) -> bool {
-        true
+        !self.inner.writable()
+    }
+
+    fn sync(&self) -> Result<()> {
+        self.inner.sync()
+    }
+
+    /// Whether a commit is due: the oldest change the disk lacks is
+    /// [`COMMIT_NS`] old, or more than [`DIRTY_PAGES_MAX`] pages wait.
+    fn is_dirty(&self) -> bool {
+        let since = self.inner.since.load(Ordering::Acquire);
+        if since == 0 {
+            return false;
+        }
+        if radix_vfs::now().saturating_sub(since) >= COMMIT_NS {
+            return true;
+        }
+        let dirty = self.inner.dirty.lock();
+        dirty.iter().map(|node| node.dirty_pages()).sum::<usize>() > DIRTY_PAGES_MAX
     }
 
     fn label(&self, out: &mut dyn fmt::Write) -> fmt::Result {
@@ -254,7 +529,8 @@ impl FileSystem for BtrfsFs {
         dropped
     }
 
-    /// A node holds only memory: nothing is written when it goes.
+    /// A node holds only memory: nothing is written when it goes, and a
+    /// removed one's items go at the next sync.
     fn light_drops(&self) -> bool {
         true
     }

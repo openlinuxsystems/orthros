@@ -1,0 +1,849 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Changing a subvolume's files, in the running transaction (ADR 0130):
+//! inode items, directory entries, file extents, the extent items and
+//! checksums of their data, and orphans.
+//!
+//! Each change here is several items in several trees, which only
+//! together say what Linux's `btrfs check` expects. A name in a directory
+//! is a `DIR_ITEM`, a `DIR_INDEX` and the inode's `INODE_REF`, and the
+//! directory's size counts it twice. A file's extent is its `EXTENT_DATA`
+//! item, the extent's item in the extent tree with a reference back to
+//! the file, and its data's checksums, and the inode's `nbytes` counts
+//! it. The caller checks what it can before a change starts, and runs it
+//! in [`Files::whole`]: any failure once it has begun leaves the writer
+//! refusing every change, so no half-made change is ever committed.
+
+use radix_block::{PAGE_SIZE, Page, SECTOR, Segment};
+use radix_vfs::mem::{self, KVec};
+use radix_vfs::{Error, Kind, Result};
+
+use crate::cow::Writer;
+use crate::csum::crc32c_update;
+use crate::format::{Key, item, name_hash, tree, u16_at, u32_at, u64_at};
+use crate::tree::{Block, Cursor, ITEM_SIZE};
+use crate::volume::Volume;
+
+const PAGE: u64 = PAGE_SIZE as u64;
+
+/// Object IDs of a subvolume's tree that are not inodes.
+pub(crate) mod object {
+    /// Past the highest inode number.
+    pub const LAST_FREE: u64 = (-256i64) as u64;
+    /// The orphans: inodes removed while open, whose items go once they
+    /// close, or at the next writable mount after a crash.
+    pub const ORPHAN: u64 = (-5i64) as u64;
+}
+
+/// The item type of an orphan, keyed by its inode number.
+pub(crate) const ORPHAN_ITEM: u8 = 48;
+
+/// What a data extent's item says it is.
+const EXTENT_FLAG_DATA: u64 = 1 << 0;
+
+/// An inline reference to a tree that owns a data extent, for simple
+/// quotas (refused by the writer, skipped here).
+const EXTENT_OWNER_REF: u8 = 172;
+
+/// The size of a directory entry before its name.
+const DIR_HEADER: usize = 30;
+/// The size of an inode reference before its name.
+const REF_HEADER: usize = 10;
+/// The size of an extent item before its inline references.
+const EXTENT_HEADER: usize = 24;
+/// The size of a file's reference to a data extent: its tree, inode,
+/// offset and count.
+const DATA_REF: usize = 28;
+/// The size of a regular file extent item.
+const FILE_EXTENT: usize = 53;
+/// The size of an inline file extent item before its data.
+const INLINE_HEADER: usize = 21;
+
+/// Where an inode item's fields are.
+pub(crate) mod at {
+    pub const GENERATION: usize = 0;
+    pub const TRANSID: usize = 8;
+    pub const SIZE: usize = 16;
+    pub const NBYTES: usize = 24;
+    pub const NLINK: usize = 40;
+    pub const MODE: usize = 52;
+    pub const FLAGS: usize = 64;
+    pub const SEQUENCE: usize = 72;
+    pub const ATIME: usize = 112;
+    pub const CTIME: usize = 124;
+    pub const MTIME: usize = 136;
+    pub const OTIME: usize = 148;
+}
+
+/// The kinds of file extent item.
+mod extent_type {
+    pub const INLINE: u8 = 0;
+    pub const REGULAR: u8 = 1;
+}
+
+/// The most sectors one request writes, so its segments fit on the stack.
+const MAX_SEGMENTS: usize = 16;
+
+pub(crate) fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
+    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Writes `ns`, nanoseconds since 1970, as a `btrfs_timespec` at `at`.
+pub(crate) fn put_time(bytes: &mut [u8], at: usize, ns: u64) {
+    put_u64(bytes, at, ns / 1_000_000_000);
+    put_u32(bytes, at + 8, (ns % 1_000_000_000) as u32);
+}
+
+/// The type byte a directory entry gives `kind`: Linux's `BTRFS_FT_*`.
+pub(crate) fn file_type(kind: Kind) -> u8 {
+    match kind {
+        Kind::File => 1,
+        Kind::Directory => 2,
+        Kind::CharDevice => 3,
+        Kind::BlockDevice => 4,
+        Kind::Pipe => 5,
+        Kind::Socket => 6,
+        Kind::Symlink => 7,
+    }
+}
+
+/// The key of a data extent's reference from a file, when it is an item
+/// of its own: Linux's `hash_extent_data_ref`.
+fn data_ref_hash(root: u64, ino: u64, offset: u64) -> u64 {
+    let high = crc32c_update(!0, &root.to_le_bytes());
+    let low = crc32c_update(crc32c_update(!0, &ino.to_le_bytes()), &offset.to_le_bytes());
+    (u64::from(high) << 31) ^ u64::from(low)
+}
+
+/// Where the entry named `name` is in the `DIR_ITEM` `data`: its start
+/// and length.
+fn dir_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>> {
+    let mut at = 0;
+    while at < data.len() {
+        let b = &data[at..];
+        let len = DIR_HEADER + usize::from(u16_at(b, 27)) + usize::from(u16_at(b, 25));
+        if b.len() < len {
+            return Err(Error::Corrupt);
+        }
+        if &b[DIR_HEADER..DIR_HEADER + usize::from(u16_at(b, 27))] == name {
+            return Ok(Some((at, len)));
+        }
+        at += len;
+    }
+    Ok(None)
+}
+
+/// Where the reference named `name` is in the `INODE_REF` `data`: its
+/// start, its length, and its directory index.
+fn ref_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize, u64)>> {
+    let mut at = 0;
+    while at < data.len() {
+        let b = &data[at..];
+        let len = REF_HEADER + usize::from(u16_at(b, 8));
+        if b.len() < len {
+            return Err(Error::Corrupt);
+        }
+        if &b[REF_HEADER..len] == name {
+            return Ok(Some((at, len, u64_at(b, 0))));
+        }
+        at += len;
+    }
+    Ok(None)
+}
+
+/// Where the file `ino` of tree `root`'s reference with `offset` is
+/// among the inline references of the data extent item `data`.
+fn inline_ref(data: &[u8], root: u64, ino: u64, offset: u64) -> Result<Option<usize>> {
+    let mut at = EXTENT_HEADER;
+    while at < data.len() {
+        let size = match data[at] {
+            item::EXTENT_DATA_REF => 1 + DATA_REF,
+            item::SHARED_DATA_REF => 1 + 12,
+            item::TREE_BLOCK_REF | item::SHARED_BLOCK_REF | EXTENT_OWNER_REF => 1 + 8,
+            _ => return Err(Error::Corrupt),
+        };
+        if at + size > data.len() {
+            return Err(Error::Corrupt);
+        }
+        if data[at] == item::EXTENT_DATA_REF
+            && u64_at(data, at + 1) == root
+            && u64_at(data, at + 9) == ino
+            && u64_at(data, at + 17) == offset
+        {
+            return Ok(Some(at));
+        }
+        at += size;
+    }
+    Ok(None)
+}
+
+/// A file extent item's fields.
+#[derive(Clone, Copy)]
+struct FileExtent {
+    kind: u8,
+    disk_bytenr: u64,
+    disk_num_bytes: u64,
+    offset: u64,
+    /// The file's bytes it covers.
+    len: u64,
+}
+
+impl FileExtent {
+    fn read(data: &[u8]) -> Result<FileExtent> {
+        if data.len() < 21 {
+            return Err(Error::Corrupt);
+        }
+        let kind = data[20];
+        if kind == extent_type::INLINE {
+            let len = u64_at(data, 8);
+            return Ok(FileExtent { kind, disk_bytenr: 0, disk_num_bytes: 0, offset: 0, len });
+        }
+        if data.len() != FILE_EXTENT || kind > 2 {
+            return Err(Error::Corrupt);
+        }
+        Ok(FileExtent {
+            kind,
+            disk_bytenr: u64_at(data, 21),
+            disk_num_bytes: u64_at(data, 29),
+            offset: u64_at(data, 37),
+            len: u64_at(data, 45),
+        })
+    }
+}
+
+/// A subvolume, changed in the running transaction.
+pub(crate) struct Files<'a> {
+    pub(crate) w: &'a mut Writer,
+    pub(crate) volume: &'a Volume,
+    /// The subvolume: the number of its tree.
+    pub(crate) subvol: u64,
+}
+
+impl Files<'_> {
+    /// Runs the change `f`, which checked what it could first: if it
+    /// fails, it is half made, and the writer refuses every later change
+    /// and commit.
+    pub(crate) fn whole<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        let result = f(self);
+        if result.is_err() {
+            self.w.break_off();
+        }
+        result
+    }
+
+    /// A copy of item `key` of tree `tree`.
+    pub(crate) fn get(&self, tree: u64, key: &Key) -> Result<Option<KVec<u8>>> {
+        crate::tree::find(self.volume, &Writer::tree_root(self.volume, tree)?, key)
+    }
+
+    /// The first item of tree `tree` at `key` or after it, copied.
+    pub(crate) fn next(&self, tree: u64, key: &Key) -> Result<Option<(Key, KVec<u8>)>> {
+        let root = Writer::tree_root(self.volume, tree)?;
+        let cursor = Cursor::seek(self.volume, &root, key)?;
+        match cursor.get() {
+            Some((found, data)) => Ok(Some((found, mem::copy(data)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// The last item of tree `tree` at `key` or before it, copied.
+    fn prev(&self, tree: u64, key: &Key) -> Result<Option<(Key, KVec<u8>)>> {
+        let root = Writer::tree_root(self.volume, tree)?;
+        let Some(cursor) = Cursor::seek_last(self.volume, &root, key)? else { return Ok(None) };
+        match cursor.get() {
+            Some((found, data)) => Ok(Some((found, mem::copy(data)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// One more than the highest inode number of the subvolume.
+    pub(crate) fn next_ino(&self) -> Result<u64> {
+        let last = self.prev(self.subvol, &Key::new(object::LAST_FREE, 0, 0))?;
+        let highest = last.map_or(tree::FIRST_FREE, |(key, _)| key.objectid);
+        Ok(highest.max(tree::FIRST_FREE) + 1)
+    }
+
+    /// The index the next entry of directory `dir` gets: one past its
+    /// last, and 2 for its first, as Linux numbers them.
+    pub(crate) fn next_index(&self, dir: u64) -> Result<u64> {
+        Ok(match self.prev(self.subvol, &Key::last(dir, item::DIR_INDEX))? {
+            Some((key, _)) if key.is(dir, item::DIR_INDEX) => key.offset + 1,
+            _ => 2,
+        })
+    }
+
+    /// Whether directory `dir` has no entries.
+    pub(crate) fn is_empty_dir(&self, dir: u64) -> Result<bool> {
+        Ok(match self.next(self.subvol, &Key::first(dir, item::DIR_ITEM))? {
+            Some((key, _)) => {
+                key.objectid != dir || (key.kind != item::DIR_ITEM && key.kind != item::DIR_INDEX)
+            }
+            None => true,
+        })
+    }
+
+    /// The directory holding inode `ino`, by its first reference, and
+    /// that reference's name; `None` for a subvolume's top directory.
+    pub(crate) fn parent_of(&self, ino: u64) -> Result<Option<u64>> {
+        match self.next(self.subvol, &Key::first(ino, item::INODE_REF))? {
+            Some((key, _)) if key.is(ino, item::INODE_REF) && key.offset != ino => {
+                Ok(Some(key.offset))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The directory index of the name `name` that inode `ino` has in
+    /// directory `dir`, from its reference.
+    pub(crate) fn index_of(&self, ino: u64, dir: u64, name: &[u8]) -> Result<Option<u64>> {
+        let Some(refs) = self.get(self.subvol, &Key::new(ino, item::INODE_REF, dir))? else {
+            return Ok(None);
+        };
+        Ok(ref_entry(&refs, name)?.map(|(_, _, index)| index))
+    }
+
+    /// Makes inode `ino` with one name: `mode` (its type and permissions),
+    /// `flags`, `size` bytes and `nbytes` of extents, made `now`.
+    pub(crate) fn make_inode(
+        &mut self,
+        ino: u64,
+        mode: u32,
+        flags: u64,
+        size: u64,
+        nbytes: u64,
+        now: u64,
+    ) -> Result<()> {
+        let generation = self.w.generation;
+        let key = Key::new(ino, item::INODE_ITEM, 0);
+        self.w.insert_with(self.volume, self.subvol, &key, crate::inode::SIZE, |d| {
+            d.fill(0);
+            put_u64(d, at::GENERATION, generation);
+            put_u64(d, at::TRANSID, generation);
+            put_u64(d, at::SIZE, size);
+            put_u64(d, at::NBYTES, nbytes);
+            put_u32(d, at::NLINK, 1);
+            put_u32(d, at::MODE, mode);
+            put_u64(d, at::FLAGS, flags);
+            for time in [at::ATIME, at::CTIME, at::MTIME, at::OTIME] {
+                put_time(d, time, now);
+            }
+        })
+    }
+
+    /// Makes file `ino`'s one extent: `data` inline, uncompressed, as a
+    /// link's path is kept.
+    pub(crate) fn inline_extent(&mut self, ino: u64, data: &[u8]) -> Result<()> {
+        let generation = self.w.generation;
+        let key = Key::new(ino, item::EXTENT_DATA, 0);
+        self.w.insert_with(self.volume, self.subvol, &key, INLINE_HEADER + data.len(), |d| {
+            d.fill(0);
+            put_u64(d, 0, generation);
+            put_u64(d, 8, data.len() as u64);
+            d[20] = extent_type::INLINE;
+            d[INLINE_HEADER..].copy_from_slice(data);
+        })
+    }
+
+    /// Changes inode `ino`'s item with `f`, noting the transaction did.
+    pub(crate) fn change_inode<R>(
+        &mut self,
+        ino: u64,
+        f: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R> {
+        let generation = self.w.generation;
+        let key = Key::new(ino, item::INODE_ITEM, 0);
+        self.w.update(self.volume, self.subvol, &key, |d| {
+            put_u64(d, at::TRANSID, generation);
+            let sequence = u64_at(d, at::SEQUENCE);
+            put_u64(d, at::SEQUENCE, sequence.wrapping_add(1));
+            f(d)
+        })
+    }
+
+    /// Adds `bytes` to the end of item `key` of tree `tree`, made if it is
+    /// missing.
+    fn append(&mut self, tree: u64, key: &Key, bytes: &[u8]) -> Result<()> {
+        match self.get(tree, key)? {
+            None => self.w.insert(self.volume, tree, key, bytes),
+            Some(old) => {
+                let n = old.len();
+                self.w.resize(self.volume, tree, key, n + bytes.len())?;
+                self.w.update(self.volume, tree, key, |d| d[n..].copy_from_slice(bytes))
+            }
+        }
+    }
+
+    /// Cuts `len` bytes from `start` out of item `key` of tree `tree`,
+    /// `old` long; deletes it when nothing is left.
+    fn cut(&mut self, tree: u64, key: &Key, old: usize, start: usize, len: usize) -> Result<()> {
+        if old == len {
+            return self.w.delete(self.volume, tree, key);
+        }
+        self.w.update(self.volume, tree, key, |d| d.copy_within(start + len.., start))?;
+        self.w.resize(self.volume, tree, key, old - len)
+    }
+
+    /// Names inode `ino`, of type byte `ft`, `name` in directory `dir`, at
+    /// index `index`: the directory's two entries and the inode's
+    /// reference, and the directory's size and times.
+    pub(crate) fn add_entry(
+        &mut self,
+        dir: u64,
+        name: &[u8],
+        ino: u64,
+        ft: u8,
+        index: u64,
+        now: u64,
+    ) -> Result<()> {
+        let mut entry = crate::zeroed(DIR_HEADER + name.len())?;
+        let location = Key::new(ino, item::INODE_ITEM, 0);
+        put_u64(&mut entry, 0, location.objectid);
+        entry[8] = location.kind;
+        put_u64(&mut entry, 9, location.offset);
+        put_u64(&mut entry, 17, self.w.generation);
+        put_u16(&mut entry, 27, name.len() as u16);
+        entry[29] = ft;
+        entry[DIR_HEADER..].copy_from_slice(name);
+        self.append(self.subvol, &Key::new(dir, item::DIR_ITEM, name_hash(name)), &entry)?;
+        self.w.insert(self.volume, self.subvol, &Key::new(dir, item::DIR_INDEX, index), &entry)?;
+        let mut reference = crate::zeroed(REF_HEADER + name.len())?;
+        put_u64(&mut reference, 0, index);
+        put_u16(&mut reference, 8, name.len() as u16);
+        reference[REF_HEADER..].copy_from_slice(name);
+        self.append(self.subvol, &Key::new(ino, item::INODE_REF, dir), &reference)?;
+        self.change_inode(dir, |d| {
+            put_u64(d, at::SIZE, u64_at(d, at::SIZE) + 2 * name.len() as u64);
+            put_time(d, at::MTIME, now);
+            put_time(d, at::CTIME, now);
+        })
+    }
+
+    /// Takes the name `name` of inode `ino` out of directory `dir`: the
+    /// directory's two entries and the inode's reference, and the
+    /// directory's size and times.
+    pub(crate) fn remove_entry(&mut self, dir: u64, name: &[u8], ino: u64, now: u64) -> Result<()> {
+        let key = Key::new(dir, item::DIR_ITEM, name_hash(name));
+        let entries = self.get(self.subvol, &key)?.ok_or(Error::Corrupt)?;
+        let (start, len) = dir_entry(&entries, name)?.ok_or(Error::Corrupt)?;
+        self.cut(self.subvol, &key, entries.len(), start, len)?;
+        let ref_key = Key::new(ino, item::INODE_REF, dir);
+        let refs = self.get(self.subvol, &ref_key)?.ok_or(Error::Corrupt)?;
+        let (start, len, index) = ref_entry(&refs, name)?.ok_or(Error::Corrupt)?;
+        self.cut(self.subvol, &ref_key, refs.len(), start, len)?;
+        self.w.delete(self.volume, self.subvol, &Key::new(dir, item::DIR_INDEX, index))?;
+        self.change_inode(dir, |d| {
+            put_u64(d, at::SIZE, u64_at(d, at::SIZE).saturating_sub(2 * name.len() as u64));
+            put_time(d, at::MTIME, now);
+            put_time(d, at::CTIME, now);
+        })
+    }
+
+    /// Notes that inode `ino`, which has no names left, is still open: it
+    /// goes once it closes, or at the next writable mount.
+    pub(crate) fn add_orphan(&mut self, ino: u64) -> Result<()> {
+        let key = Key::new(object::ORPHAN, ORPHAN_ITEM, ino);
+        self.w.insert(self.volume, self.subvol, &key, &[])
+    }
+
+    /// The orphans of the subvolume, at most `max` of them.
+    pub(crate) fn orphans(&self, max: usize) -> Result<KVec<u64>> {
+        let mut out = mem::vec();
+        let mut key = Key::first(object::ORPHAN, ORPHAN_ITEM);
+        while out.len() < max
+            && let Some((found, _)) = self.next(self.subvol, &key)?
+            && found.is(object::ORPHAN, ORPHAN_ITEM)
+        {
+            mem::push(&mut out, found.offset)?;
+            key = Key::new(object::ORPHAN, ORPHAN_ITEM, found.offset.saturating_add(1));
+            if found.offset == u64::MAX {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes inode `ino`: every item it has, its extents, and its
+    /// orphan item.
+    pub(crate) fn free_inode(&mut self, ino: u64) -> Result<()> {
+        self.drop_extents(ino, 0, u64::MAX)?;
+        while let Some((key, _)) = self.next(self.subvol, &Key::new(ino, 0, 0))?
+            && key.objectid == ino
+        {
+            self.w.delete(self.volume, self.subvol, &key)?;
+        }
+        match self.w.delete(self.volume, self.subvol, &Key::new(object::ORPHAN, ORPHAN_ITEM, ino)) {
+            Ok(()) | Err(Error::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The extent of file `ino` that holds byte `pos`, or the first after
+    /// it.
+    fn extent_at(&self, ino: u64, pos: u64) -> Result<Option<(Key, KVec<u8>)>> {
+        let key = Key::new(ino, item::EXTENT_DATA, pos);
+        if let Some((found, data)) = self.prev(self.subvol, &key)?
+            && found.is(ino, item::EXTENT_DATA)
+            && found.offset.saturating_add(FileExtent::read(&data)?.len) > pos
+        {
+            return Ok(Some((found, data)));
+        }
+        Ok(self.next(self.subvol, &key)?.filter(|(found, _)| found.is(ino, item::EXTENT_DATA)))
+    }
+
+    /// Whether file `ino` keeps its bytes inline, in its one extent item.
+    pub(crate) fn has_inline(&self, ino: u64) -> Result<bool> {
+        let key = Key::new(ino, item::EXTENT_DATA, 0);
+        Ok(match self.get(self.subvol, &key)? {
+            Some(data) => FileExtent::read(&data)?.kind == extent_type::INLINE,
+            None => false,
+        })
+    }
+
+    /// Drops file `ino`'s bytes from `start` to `end` (whole sectors, or
+    /// to `u64::MAX`), leaving a hole: extents that cross either end are
+    /// cut, and those wholly inside go, with their data once no file
+    /// names it. An inline extent only goes whole, from the start.
+    /// Returns how many bytes the inode's `nbytes` loses.
+    pub(crate) fn drop_extents(&mut self, ino: u64, start: u64, end: u64) -> Result<u64> {
+        let mut lost = 0;
+        let mut pos = start;
+        while pos < end
+            && let Some((key, data)) = self.extent_at(ino, pos)?
+            && key.offset < end
+        {
+            let extent = FileExtent::read(&data)?;
+            let (a, b) = (key.offset, key.offset.checked_add(extent.len).ok_or(Error::Corrupt)?);
+            if b <= pos {
+                return Err(Error::Corrupt);
+            }
+            if extent.kind == extent_type::INLINE {
+                if a != 0 || start != 0 {
+                    return Err(Error::NotSupported);
+                }
+                self.w.delete(self.volume, self.subvol, &key)?;
+                lost += extent.len;
+                pos = b;
+                continue;
+            }
+            // Holes take no space; preallocated extents do.
+            let counts = extent.disk_bytenr != 0;
+            // What the extent's reference back to the file says: where the
+            // extent would start in the file, which no cut changes.
+            let ref_offset = a.wrapping_sub(extent.offset);
+            if a < start {
+                // The front stays.
+                let keep = start - a;
+                self.w.update(self.volume, self.subvol, &key, |d| put_u64(d, 45, keep))?;
+                if b > end {
+                    // And the back too: a second item names the extent.
+                    let mut back = mem::copy(&data)?;
+                    put_u64(&mut back, 37, extent.offset + (end - a));
+                    put_u64(&mut back, 45, b - end);
+                    let at = Key::new(ino, item::EXTENT_DATA, end);
+                    self.w.insert(self.volume, self.subvol, &at, &back)?;
+                    if counts {
+                        self.add_data_ref(
+                            extent.disk_bytenr,
+                            extent.disk_num_bytes,
+                            ino,
+                            ref_offset,
+                        )?;
+                        lost += end - start;
+                    }
+                    break;
+                }
+                if counts {
+                    lost += b - start;
+                }
+            } else if b > end {
+                // The back stays: its item moves to `end`.
+                self.w.delete(self.volume, self.subvol, &key)?;
+                let mut back = mem::copy(&data)?;
+                put_u64(&mut back, 37, extent.offset + (end - a));
+                put_u64(&mut back, 45, b - end);
+                self.w.insert(
+                    self.volume,
+                    self.subvol,
+                    &Key::new(ino, item::EXTENT_DATA, end),
+                    &back,
+                )?;
+                if counts {
+                    lost += end - a;
+                }
+                break;
+            } else {
+                self.w.delete(self.volume, self.subvol, &key)?;
+                if counts {
+                    lost += extent.len;
+                    self.drop_data_ref(extent.disk_bytenr, extent.disk_num_bytes, ino, ref_offset)?;
+                }
+            }
+            pos = b;
+        }
+        Ok(lost)
+    }
+
+    /// Writes `pages`, file `ino`'s bytes from `pos` on, to a new extent,
+    /// with their checksums unless `sums` is false, and points the file at
+    /// it. The file's inode gets the extent's bytes and grows to `size` if
+    /// it is smaller. Nothing changes if writing the data fails.
+    pub(crate) fn write_data(
+        &mut self,
+        ino: u64,
+        pos: u64,
+        pages: &[&Page],
+        sums: bool,
+        size: u64,
+    ) -> Result<()> {
+        let len = pages.len() as u64 * PAGE;
+        let sb = self.volume.superblock();
+        let csum = sb.csum_type;
+        let mut checksums = mem::vec();
+        if sums {
+            let size = csum.size();
+            checksums = crate::zeroed(pages.len() * size)?;
+            for (page, out) in pages.iter().zip(checksums.chunks_exact_mut(size)) {
+                out.copy_from_slice(&csum.sum(page.bytes())[..size]);
+            }
+        }
+        let bytenr = self.w.alloc_data(self.volume, len)?;
+        if let Err(e) = write_pages(self.volume, bytenr, pages) {
+            self.w.free_data(bytenr, len, true)?;
+            return Err(e);
+        }
+        let generation = self.w.generation;
+        self.whole(|f| {
+            let lost = f.drop_extents(ino, pos, pos + len)?;
+            let key = Key::new(ino, item::EXTENT_DATA, pos);
+            f.w.insert_with(f.volume, f.subvol, &key, FILE_EXTENT, |d| {
+                d.fill(0);
+                put_u64(d, 0, generation);
+                put_u64(d, 8, len);
+                d[20] = extent_type::REGULAR;
+                put_u64(d, 21, bytenr);
+                put_u64(d, 29, len);
+                put_u64(d, 45, len);
+            })?;
+            f.new_data_extent(bytenr, len, ino, pos)?;
+            if sums {
+                f.add_sums(bytenr, &checksums)?;
+            }
+            f.change_inode(ino, |d| {
+                let nbytes = u64_at(d, at::NBYTES).saturating_sub(lost) + len;
+                put_u64(d, at::NBYTES, nbytes);
+                if u64_at(d, at::SIZE) < size {
+                    put_u64(d, at::SIZE, size);
+                }
+            })
+        })
+    }
+
+    /// Makes the item of the data extent `[bytenr, bytenr + len)`, which
+    /// file `ino` names from byte `pos` on.
+    fn new_data_extent(&mut self, bytenr: u64, len: u64, ino: u64, pos: u64) -> Result<()> {
+        let (generation, root) = (self.w.generation, self.subvol);
+        let key = Key::new(bytenr, item::EXTENT_ITEM, len);
+        self.w.insert_with(self.volume, tree::EXTENT, &key, EXTENT_HEADER + 1 + DATA_REF, |d| {
+            put_u64(d, 0, 1);
+            put_u64(d, 8, generation);
+            put_u64(d, 16, EXTENT_FLAG_DATA);
+            d[24] = item::EXTENT_DATA_REF;
+            put_u64(d, 25, root);
+            put_u64(d, 33, ino);
+            put_u64(d, 41, pos);
+            put_u32(d, 49, 1);
+        })
+    }
+
+    /// The key of file `ino`'s reference to the data extent at `bytenr`
+    /// with `offset`, when it is an item of its own, and its count.
+    fn keyed_ref(&self, bytenr: u64, ino: u64, offset: u64) -> Result<Option<(Key, u32)>> {
+        let mut key =
+            Key::new(bytenr, item::EXTENT_DATA_REF, data_ref_hash(self.subvol, ino, offset));
+        // Hashes alike go to the next key free, as Linux places them.
+        while let Some((found, data)) = self.next(tree::EXTENT, &key)?
+            && found.is(bytenr, item::EXTENT_DATA_REF)
+        {
+            if u64_at(&data, 0) == self.subvol
+                && u64_at(&data, 8) == ino
+                && u64_at(&data, 16) == offset
+            {
+                return Ok(Some((found, u32_at(&data, 24))));
+            }
+            key = Key::new(bytenr, item::EXTENT_DATA_REF, found.offset.wrapping_add(1));
+            if found.offset == u64::MAX {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    /// Adds one to file `ino`'s count of names for the data extent
+    /// `[bytenr, bytenr + len)` with `offset`: a cut made it two items.
+    fn add_data_ref(&mut self, bytenr: u64, len: u64, ino: u64, offset: u64) -> Result<()> {
+        let key = Key::new(bytenr, item::EXTENT_ITEM, len);
+        let data = self.get(tree::EXTENT, &key)?.ok_or(Error::Corrupt)?;
+        let inline = inline_ref(&data, self.subvol, ino, offset)?;
+        let keyed = match inline {
+            Some(_) => None,
+            None => Some(self.keyed_ref(bytenr, ino, offset)?.ok_or(Error::Corrupt)?),
+        };
+        self.w.update(self.volume, tree::EXTENT, &key, |d| {
+            put_u64(d, 0, u64_at(d, 0) + 1);
+            if let Some(at) = inline {
+                put_u32(d, at + 25, u32_at(d, at + 25) + 1);
+            }
+        })?;
+        if let Some((rkey, count)) = keyed {
+            self.w.update(self.volume, tree::EXTENT, &rkey, |d| put_u32(d, 24, count + 1))?;
+        }
+        Ok(())
+    }
+
+    /// Takes one from file `ino`'s count of names for the data extent
+    /// `[bytenr, bytenr + len)` with `offset`, and frees the extent and
+    /// its checksums once no name is left.
+    fn drop_data_ref(&mut self, bytenr: u64, len: u64, ino: u64, offset: u64) -> Result<()> {
+        let key = Key::new(bytenr, item::EXTENT_ITEM, len);
+        let data = self.get(tree::EXTENT, &key)?.ok_or(Error::Corrupt)?;
+        let refs = u64_at(&data, 0);
+        match inline_ref(&data, self.subvol, ino, offset)? {
+            Some(at) => {
+                let count = u32_at(&data, at + 25);
+                if refs > 1 && count > 1 {
+                    self.w.update(self.volume, tree::EXTENT, &key, |d| {
+                        put_u64(d, 0, refs - 1);
+                        put_u32(d, at + 25, count - 1);
+                    })?;
+                } else if refs > 1 {
+                    self.w.update(self.volume, tree::EXTENT, &key, |d| put_u64(d, 0, refs - 1))?;
+                    self.cut(tree::EXTENT, &key, data.len(), at, 1 + DATA_REF)?;
+                }
+            }
+            None => {
+                let (rkey, count) = self.keyed_ref(bytenr, ino, offset)?.ok_or(Error::Corrupt)?;
+                if count > 1 {
+                    self.w
+                        .update(self.volume, tree::EXTENT, &rkey, |d| put_u32(d, 24, count - 1))?;
+                } else {
+                    self.w.delete(self.volume, tree::EXTENT, &rkey)?;
+                }
+                if refs > 1 {
+                    self.w.update(self.volume, tree::EXTENT, &key, |d| put_u64(d, 0, refs - 1))?;
+                }
+            }
+        }
+        if refs <= 1 {
+            self.w.delete(self.volume, tree::EXTENT, &key)?;
+            self.delete_sums(bytenr, len)?;
+            // An extent this transaction wrote is named by no tree on the disk.
+            let made = u64_at(&data, 8) == self.w.generation;
+            self.w.free_data(bytenr, len, made)?;
+        }
+        Ok(())
+    }
+
+    /// The key of the checksum item from logical address `at`.
+    fn sum_key(at: u64) -> Key {
+        Key::new(tree::EXTENT_CSUM, item::EXTENT_CSUM, at)
+    }
+
+    /// Adds `sums`, the checksums of the data sectors from `bytenr` on, to
+    /// the checksum tree, in items no larger than Linux makes them.
+    fn add_sums(&mut self, bytenr: u64, sums: &[u8]) -> Result<()> {
+        let sb = self.volume.superblock();
+        let size = sb.csum_type.size();
+        let sector = u64::from(sb.sectorsize);
+        let per_item = (Block::max_item(sb.nodesize) - ITEM_SIZE) / size - 1;
+        for (n, chunk) in sums.chunks(per_item * size).enumerate() {
+            let at = bytenr + (n * per_item) as u64 * sector;
+            self.w.insert(self.volume, tree::CSUM, &Self::sum_key(at), chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the checksums of the data sectors in `[bytenr, bytenr +
+    /// len)`, cutting the items that cross either end.
+    fn delete_sums(&mut self, bytenr: u64, len: u64) -> Result<()> {
+        let sb = self.volume.superblock();
+        let size = sb.csum_type.size() as u64;
+        let sector = u64::from(sb.sectorsize);
+        let end = bytenr + len;
+        let mut pos = bytenr;
+        while pos < end {
+            let covers = |(found, data): &(Key, KVec<u8>)| {
+                found.is(tree::EXTENT_CSUM, item::EXTENT_CSUM)
+                    && found.offset + data.len() as u64 / size * sector > pos
+            };
+            let found = match self.prev(tree::CSUM, &Self::sum_key(pos))?.filter(covers) {
+                Some(found) => Some(found),
+                None => self
+                    .next(tree::CSUM, &Self::sum_key(pos))?
+                    .filter(|(k, _)| k.is(tree::EXTENT_CSUM, item::EXTENT_CSUM)),
+            };
+            let Some((key, data)) = found else { break };
+            let (a, b) = (key.offset, key.offset + data.len() as u64 / size * sector);
+            if a >= end {
+                break;
+            }
+            let front = (bytenr.saturating_sub(a) / sector * size) as usize;
+            if b > end {
+                let from = ((end - a) / sector * size) as usize;
+                if front == 0 {
+                    self.w.delete(self.volume, tree::CSUM, &key)?;
+                } else {
+                    self.w.resize(self.volume, tree::CSUM, &key, front)?;
+                }
+                self.w.insert(self.volume, tree::CSUM, &Self::sum_key(end), &data[from..])?;
+                break;
+            }
+            if front == 0 {
+                self.w.delete(self.volume, tree::CSUM, &key)?;
+            } else {
+                self.w.resize(self.volume, tree::CSUM, &key, front)?;
+            }
+            pos = b;
+        }
+        Ok(())
+    }
+}
+
+/// Writes `pages` to the data at logical address `bytenr`, on every copy.
+fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
+    let device = volume.device();
+    let max = device.info().max_segments.clamp(1, MAX_SEGMENTS);
+    let mut done = 0;
+    while done < pages.len() {
+        let logical = bytenr + done as u64 * PAGE;
+        let place = volume.place(logical)?;
+        let n = usize::try_from(place.len / PAGE)
+            .unwrap_or(usize::MAX)
+            .min(pages.len() - done)
+            .min(max);
+        if n == 0 {
+            return Err(Error::Corrupt);
+        }
+        let segments: [Segment<'_>; MAX_SEGMENTS] = core::array::from_fn(|i| Segment {
+            page: pages[done + i.min(n - 1)],
+            offset: 0,
+            len: PAGE_SIZE,
+        });
+        for &physical in place.copies() {
+            if physical.checked_add(n as u64 * PAGE).is_none_or(|e| e > volume.device_bytes()) {
+                return Err(Error::Corrupt);
+            }
+            device.write(physical / SECTOR, &segments[..n])?;
+        }
+        done += n;
+    }
+    Ok(())
+}

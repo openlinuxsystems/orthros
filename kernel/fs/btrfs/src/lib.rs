@@ -46,6 +46,7 @@ pub mod csum;
 pub mod dir;
 mod edit;
 pub mod extent;
+mod files;
 pub mod format;
 pub mod fs;
 pub mod inflate;
