@@ -16,7 +16,7 @@ use std::vec::Vec;
 use radix_block::DeviceRef;
 use radix_block::ram::RamDisk;
 use radix_vfs::Error;
-use radix_vfs::mem::{self, KArc};
+use radix_vfs::mem::{self, KArc, KBox};
 
 use crate::Volume;
 use crate::chunk::kind;
@@ -105,12 +105,12 @@ fn disk_of(block: u32, image: &[u8]) -> KArc<RamDisk> {
 
 /// The filesystem in `image`, opened on a disk of logical blocks of
 /// `block` bytes.
-fn open_in(block: u32, image: &[u8]) -> Result<Volume, Error> {
+fn open_in(block: u32, image: &[u8]) -> Result<KBox<Volume>, Error> {
     let device: DeviceRef = disk_of(block, image);
     Volume::open(device)
 }
 
-fn open(image: &[u8]) -> Result<Volume, Error> {
+fn open(image: &[u8]) -> Result<KBox<Volume>, Error> {
     open_in(512, image)
 }
 
@@ -351,15 +351,17 @@ fn reads_the_profiles_one_device_has() {
         let image = mkfs(args, &dir);
         let volume = open(&image).unwrap();
         assert_eq!(listing(&volume).unwrap(), names_of(10), "{args:?}");
-        let chunks = volume.chunks().chunks();
-        assert!(chunks.iter().any(|c| c.kind & kind::SYSTEM != 0));
-        let dup = args.contains(&"dup");
-        assert!(
-            chunks.iter().filter(|c| c.kind & kind::METADATA != 0).all(|c| {
-                (c.kind & kind::DUP != 0) == dup && c.stripes.len() == if dup { 2 } else { 1 }
-            }),
-            "{args:?}"
-        );
+        volume.with_chunks(|map| {
+            let chunks = map.chunks();
+            assert!(chunks.iter().any(|c| c.kind & kind::SYSTEM != 0));
+            let dup = args.contains(&"dup");
+            assert!(
+                chunks.iter().filter(|c| c.kind & kind::METADATA != 0).all(|c| {
+                    (c.kind & kind::DUP != 0) == dup && c.stripes.len() == if dup { 2 } else { 1 }
+                }),
+                "{args:?}"
+            );
+        });
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

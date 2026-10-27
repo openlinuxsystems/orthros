@@ -512,8 +512,9 @@ pub struct Made {
 
 /// Makes a filesystem of the kind named `kind` for `mount`: `fat` and
 /// `btrfs` on the block device `source` stands for, the others from
-/// nothing. Btrfs mounts read-only whatever `read_only` says, until Phase
-/// 10c writes it, as Linux mounts a disk that refuses writes.
+/// nothing; `read_only` mounts a disk's filesystem so. A Btrfs that Radix
+/// cannot write yet fails a writable mount with `NotSupported` (ADR
+/// 0130), and mounts read-only.
 pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs::Result<Made> {
     use core::fmt::Write;
     let mut name = radix_klog::TextBuf::<32>::new();
@@ -523,23 +524,18 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
             fs_ref(tmpfs(max)?)?
         }
-        "fat" => {
+        "fat" | "btrfs" => {
             let node = source.ok_or(Error::NotBlockDevice)?;
             let device = node.block_device().ok_or(Error::NotBlockDevice)?;
             let _ = match disk::name_of(&device) {
                 Some(disk) => name.write_str(disk.as_str()),
-                None => name.write_str("fat"),
+                None => name.write_str(kind),
             };
-            fs_ref(radix_fat::FatFs::mount(device, read_only)?)?
-        }
-        "btrfs" => {
-            let node = source.ok_or(Error::NotBlockDevice)?;
-            let device = node.block_device().ok_or(Error::NotBlockDevice)?;
-            let _ = match disk::name_of(&device) {
-                Some(disk) => name.write_str(disk.as_str()),
-                None => name.write_str("btrfs"),
-            };
-            fs_ref(radix_btrfs::BtrfsFs::mount(device)?)?
+            if kind == "fat" {
+                mount_fat(device, read_only)?
+            } else {
+                mount_btrfs(device, read_only)?
+            }
         }
         "proc" => procfs::make()?,
         "sys" => sysfs::make()?,
@@ -551,6 +547,24 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
         let _ = name.write_str(fs.kind().name());
     }
     Ok(Made { fs, source: name })
+}
+
+/// Mounts the FAT filesystem on `device`. A function of its own, as each
+/// filesystem's mount is, so that a mount system call's stack holds only
+/// the frames of the one it makes.
+#[inline(never)]
+fn mount_fat(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+    fs_ref(radix_fat::FatFs::mount(device, read_only)?)
+}
+
+/// Mounts the Btrfs filesystem on `device` ([`mount_fat`]).
+#[inline(never)]
+fn mount_btrfs(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+    if read_only {
+        fs_ref(radix_btrfs::BtrfsFs::mount(device)?)
+    } else {
+        fs_ref(radix_btrfs::BtrfsFs::mount_writable(device)?)
+    }
 }
 
 /// The boot archive's `system` directory as a filesystem, for `/system`:

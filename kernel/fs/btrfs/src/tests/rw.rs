@@ -15,14 +15,14 @@ use std::string::{String, ToString};
 use std::vec;
 use std::vec::Vec;
 
-use radix_block::DeviceRef;
 use radix_block::ram::RamDisk;
+use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
 use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use super::files::{contents, mount, noise};
 use super::write::{
-    CrashDisk, Op, SIZE, assert_checks, btrfs_check, image_of, mkfs_empty, writable,
+    CrashDisk, Op, SIZE, assert_checks, btrfs_check, image_of, mkfs_empty, mkfs_sized, writable,
 };
 use super::{XorShift, scratch, tool};
 use crate::files::{ORPHAN_ITEM, object};
@@ -139,8 +139,8 @@ fn put_model(model: &mut Model, path: &str, offset: u64, data: &[u8]) {
 /// Syncs `fs` on `disk`, checks it with `btrfs check`, and checks a
 /// read-only mount of it reads `model`.
 fn synced(fs: &BtrfsFs, disk: &RamDisk, model: &Model, what: &str) {
-    fs.sync().unwrap();
-    let image = image_of(disk, SIZE as usize);
+    fs.sync().unwrap_or_else(|e| panic!("{what}: sync: {e:?}"));
+    let image = image_of(disk, (disk.info().sectors * radix_block::SECTOR) as usize);
     let (whole, text) = btrfs_check(&image);
     assert!(whole, "{what}: btrfs check failed:\n{text}");
     let ro = mount(&image).unwrap();
@@ -156,6 +156,7 @@ fn files_written_read_back_and_pass_btrfs_check() {
     let disk = writable(&mkfs_empty(&[]));
     let fs = mount_rw(&disk);
     assert!(!fs.read_only());
+    let free = fs.info().free;
     let root = fs.root();
     let mut model = Model::new();
     root.create("docs", Kind::Directory).unwrap();
@@ -187,9 +188,11 @@ fn files_written_read_back_and_pass_btrfs_check() {
     assert_eq!(root.create("pipe", Kind::Pipe).map(|_| ()), Err(Error::NotSupported));
     assert_eq!(root.create("", Kind::File).map(|_| ()), Err(Error::BadName));
     assert_eq!(snapshot(&root), model, "before the sync");
-    let free = fs.info().free;
+    // The pages written take their room as they change, as on Linux.
+    let dirty = fs.info().free;
+    assert!(dirty < free - 1_400_000 / 4096, "the data takes space");
     synced(&fs, &disk, &model, "made");
-    assert!(fs.info().free < free, "the data takes space");
+    assert_eq!(fs.info().free, dirty, "and keeps it once written");
     // Each file's bytes are counted as Linux counts them.
     let file = at(&root, "/docs/deeper/size-4097").unwrap();
     assert_eq!(file.stat().allocated, 8192);
@@ -547,4 +550,129 @@ fn random_changes_match_a_model() {
         }
         assert_eq!(snapshot(&root), model);
     }
+}
+
+/// Fills a filesystem of `size` bytes from `mkfs.btrfs args` with
+/// `megs` MiB of files, past its first data chunk; removes half of them;
+/// and fills their room again through a new mount.
+fn fill(args: &[&str], size: u64, megs: u64) {
+    let disk = writable(&mkfs_sized(size, args));
+    let chunks = |disk: &KArc<RamDisk>| {
+        let device: DeviceRef = disk.clone();
+        crate::Volume::open(device).unwrap().with_chunks(|map| map.chunks().len())
+    };
+    let before = chunks(&disk);
+    let mut model = Model::new();
+    {
+        let fs = mount_rw(&disk);
+        let root = fs.root();
+        for n in 0..megs / 4 {
+            let file = root.create(&format!("f{n}"), Kind::File).unwrap();
+            let data = noise(n, 4 << 20);
+            put(&file, 0, &data);
+            model.insert(format!("/f{n}"), Thing::File(data));
+        }
+        synced(&fs, &disk, &model, "filled");
+        for n in (0..megs / 4).step_by(2) {
+            root.remove(&format!("f{n}")).unwrap();
+            model.remove(&format!("/f{n}"));
+        }
+        synced(&fs, &disk, &model, "half removed");
+    }
+    assert!(chunks(&disk) > before, "no chunk was made");
+    // A new mount finds the chunks, and fills the room the files left.
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    for n in 100..100 + megs / 8 {
+        let file = root.create(&format!("f{n}"), Kind::File).unwrap();
+        let data = noise(n, 4 << 20);
+        put(&file, 0, &data);
+        model.insert(format!("/f{n}"), Thing::File(data));
+    }
+    synced(&fs, &disk, &model, "refilled");
+}
+
+#[test]
+fn files_past_the_first_data_chunk_go_to_new_ones() {
+    // mkfs makes a data chunk of 8 MiB; new ones are 16 MiB.
+    fill(&[], SIZE, 28);
+}
+
+#[test]
+fn mixed_chunks_hold_the_tree_blocks_of_the_files_past_the_first() {
+    fill(&["--mixed"], SIZE, 32);
+}
+
+#[test]
+fn files_past_the_first_dup_data_chunk_go_to_new_dup_ones() {
+    // mkfs makes a data chunk of 64 MiB, kept twice.
+    fill(&["-d", "dup"], 256 << 20, 72);
+}
+
+/// Writes 1 MiB files to a filesystem, numbered from `first`, until a
+/// write says it is full; returns how many were written whole.
+fn fill_up(root: &NodeRef, model: &mut Model, first: usize) -> usize {
+    for n in first.. {
+        let name = format!("full-{n}");
+        let file = match root.create(&name, Kind::File) {
+            Ok(file) => file,
+            Err(Error::NoSpace) => return n - first,
+            Err(e) => panic!("create {name}: {e:?}"),
+        };
+        let data = noise(n as u64 + 1000, 1 << 20);
+        let path = format!("/{name}");
+        match file.write(0, &Slice(&data)) {
+            Ok(len) if len == data.len() => {
+                model.insert(path, Thing::File(data));
+            }
+            // The write stops where the room did; what it wrote stays.
+            Ok(len) => {
+                model.insert(path, Thing::File(data[..len].to_vec()));
+                return n - first;
+            }
+            Err(Error::NoSpace) => {
+                model.insert(path, Thing::File(Vec::new()));
+                return n - first;
+            }
+            Err(e) => panic!("write {name}: {e:?}"),
+        }
+    }
+    unreachable!()
+}
+
+/// Fills a filesystem from `mkfs.btrfs args` until a write says it is
+/// full, then empties half of it and fills it again.
+fn full(args: &[&str]) {
+    let disk = writable(&mkfs_empty(args));
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    let mut model = Model::new();
+    let written = fill_up(&root, &mut model, 0);
+    // Most of the device holds data: 39 MiB of it is free, past
+    // mkfs's chunks.
+    assert!(written >= 30, "{args:?}: {written} MiB");
+    // What the writes took, write-back has room for.
+    synced(&fs, &disk, &model, &format!("{args:?} full"));
+    // Nothing is left but, on a mixed filesystem, what metadata keeps.
+    let free = fs.info().free * 4096;
+    assert!(free < 4 << 20, "{args:?}: {free} bytes free");
+    // Removing files works on a full filesystem, and makes room.
+    for n in 0..written / 2 {
+        root.remove(&format!("full-{n}")).unwrap();
+        model.remove(&format!("/full-{n}"));
+    }
+    synced(&fs, &disk, &model, &format!("{args:?} emptied"));
+    let again = fill_up(&root, &mut model, 1000);
+    assert!(again >= written / 2 - 2, "{args:?}: {again} MiB after {written}");
+    synced(&fs, &disk, &model, &format!("{args:?} full again"));
+}
+
+#[test]
+fn a_full_filesystem_fails_the_write_not_the_sync_and_empties() {
+    full(&[]);
+}
+
+#[test]
+fn a_full_mixed_filesystem_keeps_room_for_its_metadata() {
+    full(&["--mixed"]);
 }

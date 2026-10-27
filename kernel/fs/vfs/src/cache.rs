@@ -107,6 +107,19 @@ pub trait Backing {
     /// Makes room for the file to be `size` bytes, before it grows.
     fn reserve(&self, size: u64) -> Result<()>;
 
+    /// Makes room on the disk for `pages` clean pages about to change, as
+    /// a filesystem that writes every change to a new place (Btrfs) must;
+    /// by default there is nothing to do. Fails with [`Error::NoSpace`]
+    /// when there is none, so that the write fails as on Linux, not the
+    /// write-back after it.
+    fn reserve_pages(&self, _pages: usize) -> Result<()> {
+        Ok(())
+    }
+
+    /// Gives back the room [`Backing::reserve_pages`] made for `pages`
+    /// pages, which were written back or dropped.
+    fn release_pages(&self, _pages: usize) {}
+
     /// Sets the file's bytes from `from` to `to` (both multiples of the
     /// page size) to zero on the disk.
     fn zero(&self, _from: u64, _to: u64) -> Result<()> {
@@ -331,6 +344,15 @@ impl FileCache {
                     break;
                 }
             };
+            // Room on the disk comes before the page changes.
+            let reserved = !slot.dirty;
+            if reserved && let Err(err) = backing.reserve_pages(1) {
+                if made {
+                    drop(state.pages.remove(index));
+                }
+                stopped = Some(Err(err));
+                break;
+            }
             let bytes = &mut slot.page.bytes_mut()[within..within + n];
             let copied = data.get_now(from + done, bytes);
             if !matches!(copied, Ok(true)) {
@@ -338,6 +360,7 @@ impl FileCache {
                     // A page made to be written whole holds none of the
                     // file's bytes: it goes, and the file keeps its own.
                     drop(state.pages.remove(index));
+                    backing.release_pages(1);
                 } else {
                     // Some of the bytes may have been copied: those in
                     // the file go to the disk with the page, and those
@@ -346,6 +369,8 @@ impl FileCache {
                     bytes[inside..].fill(0);
                     if inside > 0 && !core::mem::replace(&mut slot.dirty, true) {
                         state.dirty += 1;
+                    } else if reserved && !slot.dirty {
+                        backing.release_pages(1);
                     }
                 }
                 stopped = Some(copied.map(|_| Copied::Missing(len - done)));
@@ -401,6 +426,7 @@ impl FileCache {
                 drop,
             );
             state.dirty -= lost_dirty;
+            backing.release_pages(lost_dirty);
             let within = (size % PAGE) as usize;
             if within != 0
                 && let Some(slot) = state.pages.get_mut(size / PAGE)
@@ -451,6 +477,7 @@ impl FileCache {
                         }
                     }
                     *dirty -= n;
+                    backing.release_pages(n);
                 }
                 Err(err) => failed = Some(err),
             }
@@ -556,8 +583,11 @@ fn zero_gap(state: &mut State, from: u64, to: u64, backing: &dyn Backing) -> Res
         let index = from / PAGE;
         let within = (from % PAGE) as usize;
         if let Some(slot) = load(state, index, backing, true, true)? {
+            // Those bytes are past the end, so zeroing them changes no
+            // byte of the file even if there is no room to write it.
             slot.page.bytes_mut()[within..].fill(0);
             if !slot.dirty {
+                backing.reserve_pages(1)?;
                 slot.dirty = true;
                 state.dirty += 1;
             }

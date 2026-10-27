@@ -15,7 +15,7 @@ use std::vec::Vec;
 use radix_block::DeviceRef;
 use radix_block::ram::RamDisk;
 use radix_vfs::Error;
-use radix_vfs::mem::{self, KArc};
+use radix_vfs::mem::{self, KArc, KBox};
 
 use super::{XorShift, listing, scratch, tool};
 use crate::Volume;
@@ -30,9 +30,14 @@ pub(super) const SIZE: u64 = 128 << 20;
 
 /// An empty filesystem from `mkfs.btrfs args`, `SIZE` bytes.
 pub(super) fn mkfs_empty(args: &[&str]) -> Vec<u8> {
+    mkfs_sized(SIZE, args)
+}
+
+/// An empty filesystem from `mkfs.btrfs args`, `size` bytes.
+pub(super) fn mkfs_sized(size: u64, args: &[&str]) -> Vec<u8> {
     let path = scratch("empty");
     let file = std::fs::File::create(&path).unwrap();
-    file.set_len(SIZE).unwrap();
+    file.set_len(size).unwrap();
     let out = Command::new(tool("mkfs.btrfs"))
         .args(["-q", "-f"])
         .args(args)
@@ -190,7 +195,7 @@ impl Files {
     }
 }
 
-fn open(disk: &KArc<RamDisk>) -> Volume {
+fn open(disk: &KArc<RamDisk>) -> KBox<Volume> {
     let device: DeviceRef = disk.clone();
     Volume::open(device).unwrap()
 }
@@ -613,4 +618,66 @@ fn a_power_cut_anywhere_leaves_the_last_durable_commit_whole() {
             ops.len()
         );
     }
+}
+
+#[test]
+fn new_chunks_of_each_kind_are_recorded_as_linux_records_them() {
+    use crate::chunk::kind;
+    for args in [&[][..], &["--mixed"]] {
+        // Room for a chunk of each kind, each a tenth of the device.
+        let image = mkfs_sized(256 << 20, args);
+        let disk = writable(&image);
+        let mut files = Files::new();
+        let before;
+        {
+            let volume = open(&disk);
+            before = volume.with_chunks(|map| map.chunks().len());
+            let mut w = Writer::new(&volume).unwrap();
+            for want in [kind::SYSTEM, kind::METADATA, kind::DATA] {
+                w.new_chunk(&volume, want, 0).unwrap();
+            }
+            // The new chunks' blocks read back before the commit.
+            for n in 0..300 {
+                files.create(&mut w, &volume, &format!("file-{n}")).unwrap();
+            }
+            w.commit(&volume).unwrap();
+            // And the next commit leaves them as they are.
+            files.create(&mut w, &volume, "second").unwrap();
+            w.commit(&volume).unwrap();
+        }
+        let written = image_of(&disk, image.len());
+        assert_checks(&written);
+        let volume = open(&disk);
+        assert_eq!(names(&volume), files.names, "{args:?}");
+        let (count, system) = volume.with_chunks(|map| {
+            let system = map.chunks().iter().filter(|c| c.kind & kind::SYSTEM != 0).count();
+            (map.chunks().len(), system)
+        });
+        assert_eq!(count, before + 3, "{args:?}");
+        assert_eq!(system, 2, "{args:?}: the system chunk array has the new one");
+        // A writer of the remounted filesystem finds them, and grows on.
+        let mut w = Writer::new(&volume).unwrap();
+        w.new_chunk(&volume, kind::DATA, 0).unwrap();
+        files.create(&mut w, &volume, "third").unwrap();
+        w.commit(&volume).unwrap();
+        assert_checks(&image_of(&disk, image.len()));
+    }
+}
+
+#[test]
+fn a_device_with_no_room_for_a_chunk_makes_none() {
+    use crate::chunk::kind;
+    let image = mkfs_empty(&[]);
+    let disk = writable(&image);
+    let volume = open(&disk);
+    let mut w = Writer::new(&volume).unwrap();
+    // The device has 39 MiB free: two data chunks of 16 MiB, then one of
+    // what is left, then none.
+    for _ in 0..3 {
+        w.new_chunk(&volume, kind::DATA, 0).unwrap();
+    }
+    assert_eq!(w.new_chunk(&volume, kind::DATA, 0), Err(Error::NoSpace));
+    assert_eq!(w.new_chunk(&volume, kind::METADATA, 0), Err(Error::NoSpace));
+    w.commit(&volume).unwrap();
+    assert_checks(&image_of(&disk, image.len()));
 }

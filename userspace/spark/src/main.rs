@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 use libradix::abi::capability::{self, ObjectKind, Rights};
 use libradix::abi::directory::{FileKind, FilesystemKind, MountFlags, OpenFlags};
 use libradix::abi::errors::File as FileError;
+use libradix::abi::errors::Kernel as KernelError;
 use libradix::abi::notification::WaitFlags;
 use libradix::abi::startup::{
     SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT, Startup,
@@ -465,11 +466,12 @@ fn mount_disks(root: &Dir) {
     }
 }
 
-/// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
-/// read-only if the disk is, or else Btrfs, read-only until Phase 10c
-/// writes it. FAT is tried first: `mkfs.btrfs` clears where FAT keeps its
-/// boot sector, but `mkfs.fat` can leave an older Btrfs superblock behind,
-/// so the FAT one is the newer.
+/// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT
+/// or Btrfs, read-only if the disk is. A Btrfs that the disk or Radix
+/// cannot write (yet) mounts read-only, as Linux's `mount` does with a
+/// disk that refuses writes. FAT is tried first: `mkfs.btrfs` clears where
+/// FAT keeps its boot sector, but `mkfs.fat` can leave an older Btrfs
+/// superblock behind, so the FAT one is the newer.
 fn mount_disk(root: &Dir, name: &str) {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
@@ -488,8 +490,22 @@ fn mount_disk(root: &Dir, name: &str) {
     }
     let mounted = match root.mount(&at, FilesystemKind::Fat, Some(&device), flags) {
         Err(err) if err.is(FileError::UnknownFilesystem) => {
-            let flags = MountFlags::READ_ONLY;
-            root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags).map(|()| ("Btrfs", flags))
+            match root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags) {
+                // A disk that refuses writes fails with read_only, and what
+                // Radix does not write yet is an argument it does not take,
+                // as on Linux (EROFS, EINVAL).
+                Err(radix_rt::fs::Error::Status(status))
+                    if !flags.contains(MountFlags::READ_ONLY)
+                        && (FileError::from_status(status) == Some(FileError::ReadOnly)
+                            || KernelError::from_status(status)
+                                == Some(KernelError::InvalidArgument)) =>
+                {
+                    let flags = MountFlags::READ_ONLY;
+                    root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags)
+                        .map(|()| ("Btrfs", flags))
+                }
+                done => done.map(|()| ("Btrfs", flags)),
+            }
         }
         done => done.map(|()| ("FAT", flags)),
     };

@@ -49,6 +49,7 @@ pub mod extent;
 mod files;
 pub mod format;
 pub mod fs;
+mod grow;
 pub mod inflate;
 pub mod inode;
 pub mod lzo;

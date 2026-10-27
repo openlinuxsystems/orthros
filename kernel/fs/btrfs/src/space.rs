@@ -17,7 +17,7 @@
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
-use crate::chunk::kind;
+use crate::chunk::{MAX_COPIES, kind};
 use crate::format::{Key, item, tree, u32_at, u64_at};
 use crate::superblock::compat_ro;
 use crate::tree::{Cursor, Root};
@@ -110,6 +110,10 @@ pub(crate) struct Group {
     used_delta: i64,
     /// Where the last range taken ended: the next is looked for after it.
     hint: u64,
+    /// The bytes of `free`.
+    free_bytes: u64,
+    /// The bytes freed that may be taken once the commit is durable.
+    pinned: u64,
 }
 
 /// Every block group's space.
@@ -136,26 +140,7 @@ impl Space {
         } else {
             tree::EXTENT
         };
-        let mut space = Space { groups: mem::vec(), group_tree };
-        let groups = volume.tree(group_tree)?.ok_or(Error::Corrupt)?;
-        let mut cursor = Cursor::seek(volume, &groups, &Key::new(0, 0, 0))?;
-        while let Some((key, data)) = cursor.get() {
-            if key.kind == item::BLOCK_GROUP_ITEM {
-                let flags = u64_at(data, 16);
-                let group = Group {
-                    start: key.objectid,
-                    len: key.offset,
-                    flags,
-                    free: mem::vec(),
-                    log: mem::vec(),
-                    used_delta: 0,
-                    hint: key.objectid,
-                };
-                mem::push(&mut space.groups, group)?;
-            }
-            cursor.advance()?;
-        }
-        drop(cursor);
+        let mut space = Space { groups: read_groups(volume, group_tree)?, group_tree };
         let free_tree = volume.tree(tree::FREE_SPACE)?.ok_or(Error::Corrupt)?;
         for at in 0..space.groups.len() {
             let (start, len) = (space.groups[at].start, space.groups[at].len);
@@ -163,8 +148,57 @@ impl Space {
             let group = &mut space.groups[at];
             group.free = free;
             exclude_mirrors(volume, group)?;
+            group.free_bytes = group.free.iter().map(|&(s, e)| e - s).sum();
         }
         Ok(space)
+    }
+
+    /// Adds the block group of a chunk just made, `[start, start + len)`
+    /// with `flags`: free but around the superblock's copies. The commit
+    /// writes its free space as it does every group's changes.
+    pub(crate) fn add_group(
+        &mut self,
+        volume: &Volume,
+        start: u64,
+        len: u64,
+        flags: u64,
+    ) -> Result<()> {
+        let mut group = Group {
+            start,
+            len,
+            flags,
+            free: mem::vec(),
+            log: mem::vec(),
+            used_delta: 0,
+            hint: start,
+            free_bytes: 0,
+            pinned: 0,
+        };
+        add(&mut group.free, start, start + len)?;
+        exclude_mirrors(volume, &mut group)?;
+        group.free_bytes = group.free.iter().map(|&(s, e)| e - s).sum();
+        for &(s, e) in &group.free {
+            mem::push(&mut group.log, (s, e, true))?;
+        }
+        let at = self.groups.partition_point(|g| g.start < start);
+        mem::insert(&mut self.groups, at, group)?;
+        Ok(())
+    }
+
+    /// The bytes that may be taken now for `want`.
+    pub(crate) fn free_bytes(&self, want: u64) -> u64 {
+        self.groups.iter().filter(|g| g.flags & TYPE & want != 0).map(|g| g.free_bytes).sum()
+    }
+
+    /// The bytes for `want` that may be taken once the commit is durable.
+    pub(crate) fn pinned_bytes(&self, want: u64) -> u64 {
+        self.groups.iter().filter(|g| g.flags & TYPE & want != 0).map(|g| g.pinned).sum()
+    }
+
+    /// The flags of the first block group that holds `want`, which a new
+    /// one for `want` takes; `None` if there is none.
+    pub(crate) fn flags_for(&self, want: u64) -> Option<u64> {
+        self.groups.iter().find(|g| g.flags & TYPE & want != 0).map(|g| g.flags)
     }
 
     /// The tree that holds block group items.
@@ -201,6 +235,7 @@ impl Space {
             if let Some(at) = found {
                 remove(&mut group.free, at, at + size)?;
                 mem::push(&mut group.log, (at, at + size, false))?;
+                group.free_bytes -= size;
                 group.used_delta += size as i64;
                 group.hint = at + size;
                 return Ok(at);
@@ -215,6 +250,7 @@ impl Space {
         let group = self.group_mut(start)?;
         add(&mut group.free, start, start + len)?;
         mem::push(&mut group.log, (start, start + len, true))?;
+        group.free_bytes += len;
         group.used_delta -= len as i64;
         Ok(())
     }
@@ -225,6 +261,7 @@ impl Space {
     pub(crate) fn free_pinned(&mut self, start: u64, len: u64) -> Result<()> {
         let group = self.group_mut(start)?;
         mem::push(&mut group.log, (start, start + len, true))?;
+        group.pinned += len;
         group.used_delta -= len as i64;
         Ok(())
     }
@@ -233,7 +270,10 @@ impl Space {
     /// commit being durable.
     pub(crate) fn unpin(&mut self, start: u64, len: u64) -> Result<()> {
         let group = self.group_mut(start)?;
-        add(&mut group.free, start, start + len)
+        add(&mut group.free, start, start + len)?;
+        group.pinned = group.pinned.saturating_sub(len);
+        group.free_bytes += len;
+        Ok(())
     }
 
     /// The block groups whose items or free space trail what was taken
@@ -257,6 +297,35 @@ impl Space {
         let delta = core::mem::take(&mut group.used_delta);
         Ok((group.len, log, delta))
     }
+}
+
+/// The block groups the tree `group_tree` holds, with no free space yet.
+/// A frame of its own, as each of a mount's reads has: a mount runs in a
+/// system call, on a 16 KiB stack.
+#[inline(never)]
+fn read_groups(volume: &Volume, group_tree: u64) -> Result<KVec<Group>> {
+    let mut groups = mem::vec();
+    let tree = volume.tree(group_tree)?.ok_or(Error::Corrupt)?;
+    let mut cursor = Cursor::seek(volume, &tree, &Key::new(0, 0, 0))?;
+    while let Some((key, data)) = cursor.get() {
+        if key.kind == item::BLOCK_GROUP_ITEM {
+            let flags = u64_at(data, 16);
+            let group = Group {
+                start: key.objectid,
+                len: key.offset,
+                flags,
+                free: mem::vec(),
+                log: mem::vec(),
+                used_delta: 0,
+                hint: key.objectid,
+                free_bytes: 0,
+                pinned: 0,
+            };
+            mem::push(&mut groups, group)?;
+        }
+        cursor.advance()?;
+    }
+    Ok(groups)
 }
 
 /// The free ranges the free-space tree has for the group `[start, start
@@ -301,23 +370,34 @@ pub(crate) fn read_free(
 
 /// Keeps the ranges around the superblock's copies that lie in `group`
 /// from use.
+#[inline(never)]
 fn exclude_mirrors(volume: &Volume, group: &mut Group) -> Result<()> {
-    let Some(chunk) = volume.chunks().find(group.start) else { return Err(Error::Corrupt) };
-    for mirror in MIRRORS {
-        for stripe in &chunk.stripes {
-            if stripe.devid != volume.superblock().devid {
-                continue;
+    let devid = volume.superblock().devid;
+    // Found under the chunk map's read lock, which allows no allocation.
+    let mut ranges = [(0, 0); MIRRORS.len() * MAX_COPIES];
+    let mut n = 0;
+    volume.with_chunks(|map| {
+        let Some(chunk) = map.find(group.start) else { return Err(Error::Corrupt) };
+        for mirror in MIRRORS {
+            for stripe in chunk.stripes.iter().filter(|s| s.devid == devid) {
+                let first = mirror;
+                let end = mirror + MIRROR_GUARD;
+                if end <= stripe.offset || first >= stripe.offset + chunk.length {
+                    continue;
+                }
+                // Single and DUP keep the chunk whole on each stripe.
+                let lo = chunk.start + first.saturating_sub(stripe.offset);
+                let hi = chunk.start + (end - stripe.offset).min(chunk.length);
+                if let Some(slot) = ranges.get_mut(n) {
+                    *slot = (lo, hi);
+                    n += 1;
+                }
             }
-            let first = mirror;
-            let end = mirror + MIRROR_GUARD;
-            if end <= stripe.offset || first >= stripe.offset + chunk.length {
-                continue;
-            }
-            // Single and DUP keep the chunk whole on each stripe.
-            let lo = chunk.start + first.saturating_sub(stripe.offset);
-            let hi = chunk.start + (end - stripe.offset).min(chunk.length);
-            remove(&mut group.free, lo, hi)?;
         }
+        Ok(())
+    })?;
+    for &(lo, hi) in &ranges[..n] {
+        remove(&mut group.free, lo, hi)?;
     }
     Ok(())
 }

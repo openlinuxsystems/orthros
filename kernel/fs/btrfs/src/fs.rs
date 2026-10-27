@@ -43,7 +43,7 @@ use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
 use crate::cow::Writer;
 use crate::dir::Entries;
 use crate::files::Files;
-use crate::format::{Key, item, name_hash, tree, u64_at};
+use crate::format::{Key, item, name_hash, tree};
 use crate::node::BtrfsNode;
 use crate::superblock::incompat;
 use crate::tree::{Cursor, Root};
@@ -97,7 +97,7 @@ type Entry = ((u64, u64), Weak<BtrfsNode, Alloc>);
 
 /// What a filesystem's nodes share.
 pub(crate) struct Inner {
-    pub(crate) volume: Volume,
+    pub(crate) volume: KBox<Volume>,
     /// The checksum tree's root, if it has one, on a read-only mount.
     csums: Option<Root>,
     /// The nodes in use, by subvolume and inode number, sorted.
@@ -113,6 +113,11 @@ pub(crate) struct Inner {
     reap: Mutex<KVec<(u64, u64)>>,
     /// When the oldest change the disk lacks was made, or 0 if none.
     since: AtomicU64,
+    /// The bytes of the dirty pages of files, which write-back takes
+    /// data space for.
+    data_reserved: AtomicU64,
+    /// The bytes data could take, as last counted under the transaction.
+    data_room: AtomicU64,
 }
 
 /// A mounted Btrfs filesystem.
@@ -148,6 +153,14 @@ impl BtrfsFs {
     fn mount_with(device: DeviceRef, writable: bool) -> Result<KArc<BtrfsFs>> {
         let logical_block = device.info().logical_block;
         let inner = Inner::open(device, writable)?;
+        BtrfsFs::with_root(inner, logical_block, writable)
+    }
+
+    /// The filesystem of `inner`, at its default subvolume. A frame of its
+    /// own, apart from [`Inner::open`]'s deep reads: a mount runs in a
+    /// system call, on a 16 KiB stack.
+    #[inline(never)]
+    fn with_root(inner: KArc<Inner>, logical_block: u32, writable: bool) -> Result<KArc<BtrfsFs>> {
         let volume = &inner.volume;
         let sectorsize = volume.superblock().sectorsize;
         if sectorsize as usize != PAGE_SIZE || logical_block > sectorsize {
@@ -191,27 +204,29 @@ fn default_subvolume(volume: &Volume) -> Result<u64> {
 }
 
 impl Inner {
-    /// Opens the volume on `device`, on the heap: a volume is too large
-    /// for [`BtrfsFs::mount`]'s stack frame to hold as well.
+    /// Opens the volume on `device`, in a frame of its own. The writer
+    /// reads every block group, the deepest calls of a mount: they come
+    /// before the frame that builds the rest.
     #[inline(never)]
     fn open(device: DeviceRef, writable: bool) -> Result<KArc<Inner>> {
-        Inner::of(Volume::open(device)?, writable)
-    }
-
-    /// What the nodes of `volume` share, on the heap, in a frame of its
-    /// own.
-    #[inline(never)]
-    fn of(volume: Volume, writable: bool) -> Result<KArc<Inner>> {
-        let csums = volume.tree(tree::CSUM)?;
-        let tx = if writable {
+        let volume = Volume::open(device)?;
+        let writer = if writable {
             if !volume.superblock().has(incompat::NO_HOLES) {
                 return Err(Error::NotSupported);
             }
-            let writer = Writer::new(&volume)?;
-            Some(Mutex::new(Txn { writer, next_ino: mem::vec() }))
+            Some(Writer::new(&volume)?)
         } else {
             None
         };
+        Inner::of(volume, writer)
+    }
+
+    /// What the nodes of `volume` share, on the heap, in a frame of its
+    /// own; `writer` writes it on a writable mount.
+    #[inline(never)]
+    fn of(volume: KBox<Volume>, writer: Option<Writer>) -> Result<KArc<Inner>> {
+        let csums = volume.tree(tree::CSUM)?;
+        let tx = writer.map(|writer| Mutex::new(Txn { writer, next_ino: mem::vec() }));
         Ok(mem::arc(Inner {
             volume,
             csums,
@@ -221,6 +236,8 @@ impl Inner {
             dirty: Mutex::new(mem::vec()),
             reap: Mutex::new(mem::vec()),
             since: AtomicU64::new(0),
+            data_reserved: AtomicU64::new(0),
+            data_room: AtomicU64::new(0),
         })?)
     }
 
@@ -235,13 +252,62 @@ impl Inner {
         self.tx.as_ref().map(Mutex::lock)
     }
 
-    /// Runs the change `f` in the running transaction; fails with
-    /// [`Error::ReadOnly`] on a read-only mount.
+    /// Runs the change `f` in the running transaction, once metadata has
+    /// room for it (ADR 0131); fails with [`Error::ReadOnly`] on a
+    /// read-only mount, and with [`Error::NoSpace`] before it starts when
+    /// there is no room.
     pub(crate) fn change<R>(&self, f: impl FnOnce(&mut Txn) -> Result<R>) -> Result<R> {
+        self.change_with(false, f)
+    }
+
+    /// Runs the change `f`, which frees more than it takes (removing,
+    /// cutting): it may use the room kept for commits, so a full
+    /// filesystem can be made less full.
+    pub(crate) fn freeing<R>(&self, f: impl FnOnce(&mut Txn) -> Result<R>) -> Result<R> {
+        self.change_with(true, f)
+    }
+
+    fn change_with<R>(&self, freeing: bool, f: impl FnOnce(&mut Txn) -> Result<R>) -> Result<R> {
         let tx = self.tx.as_ref().ok_or(Error::ReadOnly)?;
         let mut txn = tx.lock();
+        txn.writer.make_room(&self.volume, freeing)?;
         self.touch();
-        f(&mut txn)
+        let result = f(&mut txn);
+        self.count_data_room(&mut txn);
+        result
+    }
+
+    /// Counts again the bytes data could take.
+    fn count_data_room(&self, txn: &mut Txn) {
+        if let Ok(room) = txn.writer.room(&self.volume, crate::chunk::kind::DATA) {
+            self.data_room.store(room, Ordering::Release);
+        }
+    }
+
+    /// Takes room for `bytes` of data that dirty pages will need when they
+    /// are written back; fails with [`Error::NoSpace`] when data has no
+    /// room for them, as Linux's `write` does. Read-only mounts write
+    /// nothing back.
+    pub(crate) fn reserve_data(&self, bytes: u64) -> Result<()> {
+        let Some(tx) = &self.tx else { return Ok(()) };
+        let total = self.data_reserved.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        if total <= self.data_room.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // The room counted may be old: count it again.
+        self.count_data_room(&mut tx.lock());
+        if total <= self.data_room.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.data_reserved.fetch_sub(bytes, Ordering::AcqRel);
+        Err(Error::NoSpace)
+    }
+
+    /// Gives back the room [`Inner::reserve_data`] took for `bytes`.
+    pub(crate) fn release_data(&self, bytes: u64) {
+        let _ = self
+            .data_reserved
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |r| Some(r.saturating_sub(bytes)));
     }
 
     /// Notes that the disk lacks a change made now.
@@ -287,7 +353,7 @@ impl Inner {
     /// Frees the files a crash left removed but open: those with orphan
     /// items, in every subvolume.
     fn clean_orphans(&self) -> Result<()> {
-        self.change(|txn| {
+        self.freeing(|txn| {
             let volume = &self.volume;
             let mut key = Key::first(tree::FS, item::ROOT_ITEM);
             loop {
@@ -467,18 +533,19 @@ impl FileSystem for BtrfsFs {
         let volume = &self.inner.volume;
         let sb = volume.superblock();
         let sector = u64::from(sb.sectorsize);
-        let used = match &self.inner.tx {
+        // What a file may still take, as Linux's `df` counts what is
+        // available: data's room, less what dirty pages will take.
+        let free = match &self.inner.tx {
             Some(tx) => {
-                let delta = tx.lock().writer.bytes_used;
-                let last = volume.superblock_bytes().map_or(sb.bytes_used, |b| u64_at(&b, 0x78));
-                last.saturating_add_signed(delta)
+                let room = tx.lock().writer.room(volume, crate::chunk::kind::DATA).unwrap_or(0);
+                room.saturating_sub(self.inner.data_reserved.load(Ordering::Acquire))
             }
-            None => sb.bytes_used,
+            None => sb.total_bytes.saturating_sub(sb.bytes_used),
         };
         FsInfo {
             block_size: sb.sectorsize,
             blocks: sb.total_bytes / sector,
-            free: sb.total_bytes.saturating_sub(used) / sector,
+            free: free / sector,
             ..FsInfo::default()
         }
     }

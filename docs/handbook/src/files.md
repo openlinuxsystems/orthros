@@ -90,14 +90,18 @@ drives, `vda1` for the first partition of `vda` and `nvme0n1p1` for the
 first of `nvme0n1`. Spark then mounts
 the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
 disk with no partition table, at `/volumes/<name>`, read-write, or its
-Btrfs filesystem, read-only for now: Dukovo reads Btrfs disks Linux made,
-with their subvolumes, and checks every block and every sector of data
-against its checksum, and reads files compressed with zlib, LZO or zstd,
-but writes them only from Phase 10c. Anything else is left alone.
+Btrfs filesystem: Dukovo reads and writes Btrfs disks Linux made, and
+checks every block and every sector of data against its checksum. It
+reads files compressed with zlib, LZO or zstd and writes them
+uncompressed; a Btrfs that uses a feature Dukovo does not write yet
+(such as quotas, or one made without `no-holes`) is mounted read-only. Anything else
+is left alone.
 
-Changes reach the disk within five seconds, or at once when a program
-asks for it, so a power cut loses at most the last five seconds of
-writes.
+Changes reach a FAT disk within five seconds, and a Btrfs disk within
+30 seconds, as on Linux, or at once when a program asks for it, so a
+power cut loses at most the last five, or 30, seconds of writes. A
+Btrfs disk is whole after a power cut at any moment: it holds either a
+commit or the one before.
 
 Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
 two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
@@ -172,9 +176,12 @@ mkfs.btrfs -L MYBTRFS --rootdir files btrfs.img
 ```
 
 ```text
-Files: mounted btrfs from vda on /volumes/vda, read-only, labelled MYBTRFS
-spark: mounted the Btrfs filesystem of vda at /volumes/vda, read-only
+Files: mounted btrfs from vda on /volumes/vda, labelled MYBTRFS
+spark: mounted the Btrfs filesystem of vda at /volumes/vda
 ```
 
 The `btrfs` boot test (`./ob test --case btrfs`) reads every file of two
-such disks and checks each byte on the host.
+such disks and checks each byte on the host; `btrfs-write` writes two
+such disks, then checks them with Linux's `btrfs check` and reads them
+back on the host and after a reboot, and `btrfs-power-cut` cuts the
+power while a disk is being written.

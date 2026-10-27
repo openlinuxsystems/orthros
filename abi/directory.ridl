@@ -72,7 +72,7 @@ enum FilesystemKind: u8 {
     /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
     /// `pipefs`.
     pipe = 6;
-    /// Btrfs on a disk, read-only until Phase 10c: `btrfs`.
+    /// Btrfs on a disk: `btrfs`.
     btrfs = 7;
 }
 
@@ -188,8 +188,8 @@ interface directory = 0x000b version 4 {
     /// `source`, the others with `source` 0. A second mount on a directory
     /// stacks on the first. Needs the control right, and the read right on
     /// `source` (and for `fat` the write right unless `flags` has
-    /// read_only). Btrfs mounts read-only whatever `flags` say, until
-    /// Phase 10c writes it.
+    /// read_only). A Btrfs that Radix cannot write yet fails with
+    /// invalid_argument unless `flags` has read_only, as on Linux.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,

@@ -58,7 +58,7 @@ use core::sync::atomic::{self, AtomicBool, AtomicU8, AtomicU32, AtomicU64, Atomi
 use radix_hal::{
     Cpu, CpuLocal, InterruptController, Ipi, MAX_CPUS, PageTable, Smp, Threads, Timer, UserMode,
 };
-use radix_klog::{error, info};
+use radix_klog::{error, info, warn};
 use radix_mm::{FRAMES, Flags, HEAP, Kmalloc};
 use radix_sched::{
     CpuLoad, CpuSet, HaltPoll, LOAD_INTERVAL_NS, LoadAverage, Loads, Place, Split, Topology,
@@ -75,6 +75,11 @@ pub use thread::{Name, Policy, Run, Thread, ThreadRef};
 
 /// Pages of stack a kernel thread gets unless it asks otherwise: 16 KiB.
 pub const STACK_PAGES: usize = 4;
+
+/// The kernel stack a thread should still have when it sleeps: deep calls
+/// end waiting for a disk, and what they call while they run must fit
+/// below.
+const STACK_MARGIN: usize = 4096;
 
 /// The mutex owner token used before threads exist (as `radix_sync`'s).
 const NO_TOKEN: usize = 2;
@@ -1197,6 +1202,25 @@ enum Switch {
     Exit,
 }
 
+/// With the lock checker on, warns once, with a backtrace, when thread
+/// `me` sleeps at `here` with less than [`STACK_MARGIN`] of its kernel
+/// stack left, so that the tests that run with it find a call that comes
+/// near its stack's guard page before one goes past it.
+#[inline(never)]
+fn check_stack(me: &Thread, here: usize) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let stack = Arch::stack(&me.context);
+    let left = here.wrapping_sub(stack.start);
+    if stack.contains(&here) && left < STACK_MARGIN && !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            "Threads: `{}` sleeps with {left} bytes of its {} KiB kernel stack left",
+            me.name(),
+            stack.len() / 1024
+        );
+        crate::symbols::Backtrace::here().write(&mut |line| warn!("{line}"));
+    }
+}
+
 /// Lets this CPU run whatever should run now. See the module comment.
 fn reschedule(why: Switch) {
     let were = Arch::disable_interrupts();
@@ -1221,6 +1245,10 @@ fn reschedule(why: Switch) {
              an RCU read section is held",
             me.name()
         );
+    }
+    if matches!(why, Switch::Block(_)) && hooks::lockdep_enabled() {
+        // The address of a local: where the sleeping call's frame is.
+        check_stack(&me, (&raw const why).addr());
     }
     let mut state = matches!(why, Switch::Block(_) | Switch::Exit).then(|| me.state.lock());
     if matches!(why, Switch::Block(_)) && me.wake_pending.swap(false, Ordering::AcqRel) {

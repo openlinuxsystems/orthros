@@ -3,12 +3,14 @@
 
 //! storage: the test program of the `storage` boot test, from
 //! `/system/tests/storage` in the boot archive. Spark starts it with the
-//! root directory, after mounting each FAT disk at `/volumes/<name>`.
+//! root directory, after mounting each FAT or Btrfs disk at
+//! `/volumes/<name>`.
 //!
 //! - `storage write` writes a set of files to every volume (short and long
 //!   names, a file of many clusters, a directory of many entries, a
-//!   rename, a removal, appends and a cut), syncs, and checks `/tmp`,
-//!   `/devices`, `/processes` and `/kernel`;
+//!   rename, a removal, appends and a cut, and on Btrfs a file larger
+//!   than its first data chunk), syncs, and checks `/tmp`, `/devices`,
+//!   `/processes` and `/kernel`;
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
 //!   (with mtools, from `ob test`), then checks `/processes` again;
@@ -20,7 +22,11 @@
 //! - `storage list` prints every file, directory and link of every volume,
 //!   with each file's size and FNV-1a hash, and checks that the volumes
 //!   refuse writes: the `btrfs` boot test's host compares what it prints
-//!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]).
+//!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]);
+//! - `storage churn` writes, syncs and renames a file at a time on the one
+//!   volume, removing older ones, until the `btrfs-power-cut` boot test
+//!   cuts the power ([`churn`]); `storage churned`, after the reboot,
+//!   checks what the cut left and writes the volume again ([`churned`]).
 //!
 //! It prints a line per step, `storage: FAILED: ...` for each check that
 //! fails, and exits with 0 only if none did.
@@ -38,7 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libradix::abi::capability::Rights;
-use libradix::abi::directory::{FileKind, OpenFlags};
+use libradix::abi::directory::{FileKind, FilesystemKind, OpenFlags};
 use libradix::abi::errors::File as FileError;
 use libradix::abi::file::APPEND;
 use libradix::abi::process;
@@ -53,6 +59,10 @@ const HELLO: &[u8] = b"Written by Dukovo before a reboot.\n";
 /// The size of `big.bin`: more than a cluster on every FAT this test
 /// makes, and not a whole number of them.
 const BIG: usize = 200 * 1024 + 123;
+/// The size of `grow.bin`, which a Btrfs volume gets too: more than the
+/// 8 MiB of the first data chunk `mkfs.btrfs` makes on the tests' disks,
+/// so that Radix makes another.
+const GROW: usize = 12 * 1024 * 1024 + 4321;
 /// The files in `many/`: more than one directory cluster's entries.
 const MANY: usize = 40;
 /// The long name the test uses, which needs long-name entries.
@@ -85,6 +95,37 @@ fn big_byte(offset: usize) -> u8 {
         [3]
 }
 
+/// The byte at `offset` of `grow.bin`.
+fn grow_byte(offset: usize) -> u8 {
+    big_byte(offset).wrapping_add(1)
+}
+
+/// How many files the churn keeps: each round removes the file of the
+/// round this many before.
+const CHURN_KEEP: usize = 8;
+/// The churn's rounds, if the power is not cut first.
+const CHURN_ROUNDS: usize = 2000;
+
+/// The size of the churn's file of round `round`: from a byte to 192 KiB.
+fn churn_size(round: usize) -> usize {
+    1 + round * 37_813 % (192 * 1024)
+}
+
+/// The byte at `offset` of the churn's file of round `round`.
+fn churn_byte(round: usize, offset: usize) -> u8 {
+    big_byte(offset + round * 4099)
+}
+
+/// The round of a churn file's name, and whether it is the file written
+/// before the rename (`temp-N`) rather than after it (`file-N`).
+fn churn_name(name: &str) -> Option<(usize, bool)> {
+    let (number, temp) = match name.strip_prefix("file-") {
+        Some(number) => (number, false),
+        None => (name.strip_prefix("temp-")?, true),
+    };
+    Some((number.parse().ok()?, temp))
+}
+
 fn main(_: &Startup) -> u64 {
     let number = process::info(&SYS, SLOT_PROCESS).map_or(0, |info| info.number);
     let mode = args().nth(1).unwrap_or("");
@@ -101,6 +142,9 @@ fn main(_: &Startup) -> u64 {
     };
     if volumes.is_empty() && matches!(mode, "write" | "check" | "list") {
         fail("no volumes are mounted under /volumes");
+    }
+    if volumes.len() != 1 && matches!(mode, "churn" | "churned") {
+        fail(&format!("`{mode}` takes one volume, not {}", volumes.len()));
     }
     match mode {
         "raw" | "errors" => {
@@ -130,9 +174,20 @@ fn main(_: &Startup) -> u64 {
                 list_volume(&root, name);
             }
         }
+        "churn" => {
+            for name in &volumes {
+                churn(&root, name);
+            }
+        }
+        "churned" => {
+            for name in &volumes {
+                churned(&root, name);
+            }
+        }
         _ => {
             println!(
-                "storage: FAILED: say `write`, `check`, `list`, `raw` or `errors`, not `{mode}`"
+                "storage: FAILED: say `write`, `check`, `list`, `churn`, `churned`, `raw` or \
+                 `errors`, not `{mode}`"
             );
             return 1;
         }
@@ -271,16 +326,22 @@ fn write_volume(root: &Dir, name: &str) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
     };
-    match dir.info() {
-        Ok(info) => println!(
-            "storage: /volumes/{name}: {}, {} KiB free of {} KiB in {}-byte clusters",
-            info.kind.name(),
-            info.free * u64::from(info.block_size) / 1024,
-            info.blocks * u64::from(info.block_size) / 1024,
-            info.block_size
-        ),
-        Err(err) => fail(&format!("/volumes/{name}: info: {err}")),
-    }
+    let btrfs = match dir.info() {
+        Ok(info) => {
+            println!(
+                "storage: /volumes/{name}: {}, {} KiB free of {} KiB in {}-byte clusters",
+                info.kind.name(),
+                info.free * u64::from(info.block_size) / 1024,
+                info.blocks * u64::from(info.block_size) / 1024,
+                info.block_size
+            );
+            info.kind == FilesystemKind::Btrfs
+        }
+        Err(err) => {
+            fail(&format!("/volumes/{name}: info: {err}"));
+            false
+        }
+    };
     let mut written = 0usize;
     let mut files = 0usize;
     let mut step = |what: &str, result: radix_rt::fs::Result<usize>| match result {
@@ -311,6 +372,27 @@ fn write_volume(root: &Dir, name: &str) {
             Ok(BIG)
         }),
     );
+
+    // On Btrfs, more data than its first chunk holds, 64 KiB at a time:
+    // the program's heap has no room for much larger pieces.
+    if btrfs {
+        step(
+            "grow.bin",
+            dir.create("grow.bin").and_then(|file| {
+                let mut piece = alloc::vec![0u8; 64 * 1024];
+                let mut at = 0;
+                while at < GROW {
+                    let len = piece.len().min(GROW - at);
+                    for (i, byte) in piece[..len].iter_mut().enumerate() {
+                        *byte = grow_byte(at + i);
+                    }
+                    file.write_all_at(at as u64, &piece[..len])?;
+                    at += len;
+                }
+                Ok(GROW)
+            }),
+        );
+    }
 
     // A long name, in a directory.
     step("make notes/", dir.make_dir("notes").map(|()| 0));
@@ -409,34 +491,10 @@ fn check_volume(root: &Dir, name: &str) {
     for i in 0..MANY {
         same(&format!("many/file-{i:02}.txt"), format!("file {i}\n").as_bytes());
     }
-    // The big file, read a piece at a time.
-    match dir.open_read("big.bin") {
-        Ok(file) => {
-            let mut piece = alloc::vec![0u8; 16 * 1024];
-            let mut at = 0;
-            let mut wrong = None;
-            loop {
-                match file.read_at(at as u64, &mut piece) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if wrong.is_none() {
-                            wrong = (0..n).find(|&i| piece[i] != big_byte(at + i)).map(|i| at + i);
-                        }
-                        at += n;
-                    }
-                    Err(err) => {
-                        fail(&format!("/volumes/{name}/big.bin at {at}: {err}"));
-                        break;
-                    }
-                }
-            }
-            checked += 1;
-            check(at == BIG, || format!("/volumes/{name}/big.bin is {at} bytes, not {BIG}"));
-            if let Some(offset) = wrong {
-                fail(&format!("/volumes/{name}/big.bin differs at byte {offset}"));
-            }
-        }
-        Err(err) => fail(&format!("/volumes/{name}/big.bin: {err}")),
+    // The big files, read a piece at a time.
+    checked += usize::from(check_pattern(&dir, name, "big.bin", BIG, big_byte));
+    if dir.info().is_ok_and(|info| info.kind == FilesystemKind::Btrfs) {
+        checked += usize::from(check_pattern(&dir, name, "grow.bin", GROW, grow_byte));
     }
     // What was renamed and removed has gone.
     for gone in ["draft.txt", "scratch.txt"] {
@@ -455,6 +513,142 @@ fn check_volume(root: &Dir, name: &str) {
     println!(
         "storage: /volumes/{name}: {checked} files read back after the reboot, every byte as written"
     );
+}
+
+/// Checks that `path` in the volume `name` is `len` bytes of `byte`'s,
+/// reading it 16 KiB at a time; whether it could be read.
+fn check_pattern(dir: &Dir, name: &str, path: &str, len: usize, byte: fn(usize) -> u8) -> bool {
+    let file = match dir.open_read(path) {
+        Ok(file) => file,
+        Err(err) => {
+            fail(&format!("/volumes/{name}/{path}: {err}"));
+            return false;
+        }
+    };
+    let mut piece = alloc::vec![0u8; 16 * 1024];
+    let mut at = 0;
+    let mut wrong = None;
+    loop {
+        match file.read_at(at as u64, &mut piece) {
+            Ok(0) => break,
+            Ok(n) => {
+                if wrong.is_none() {
+                    wrong = (0..n).find(|&i| piece[i] != byte(at + i)).map(|i| at + i);
+                }
+                at += n;
+            }
+            Err(err) => {
+                fail(&format!("/volumes/{name}/{path} at {at}: {err}"));
+                break;
+            }
+        }
+    }
+    check(at == len, || format!("/volumes/{name}/{path} is {at} bytes, not {len}"));
+    if let Some(offset) = wrong {
+        fail(&format!("/volumes/{name}/{path} differs at byte {offset}"));
+    }
+    true
+}
+
+/// `storage churn`: in each round, writes a file as `temp-N`, syncs it,
+/// renames it `file-N` and syncs the directory, as a program saves a file
+/// whole; then removes the file of [`CHURN_KEEP`] rounds before and syncs
+/// again. Each step's line comes once it is synced, so the
+/// `btrfs-power-cut` test knows what the disk must hold after the cut.
+fn churn(root: &Dir, name: &str) {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let dir = match root.open_dir(&format!("volumes/{name}"), rw) {
+        Ok(dir) => dir,
+        Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
+    };
+    for round in 0..CHURN_ROUNDS {
+        let (temp, file) = (format!("temp-{round:04}"), format!("file-{round:04}"));
+        let data: Vec<u8> = (0..churn_size(round)).map(|at| churn_byte(round, at)).collect();
+        let saved = dir
+            .create(&temp)
+            .and_then(|made| {
+                made.write_all_at(0, &data)?;
+                made.sync()
+            })
+            .and_then(|()| dir.rename(&temp, &dir, &file))
+            .and_then(|()| dir.sync());
+        if let Err(err) = saved {
+            return fail(&format!("/volumes/{name}/{file}: {err}"));
+        }
+        println!("storage: churn: synced {file}");
+        if let Some(old) = round.checked_sub(CHURN_KEEP) {
+            let old = format!("file-{old:04}");
+            if let Err(err) = dir.remove(&old).and_then(|()| dir.sync()) {
+                return fail(&format!("/volumes/{name}/{old}: removing it: {err}"));
+            }
+            println!("storage: churn: removed {old}");
+        }
+    }
+    println!("storage: churn: done");
+}
+
+/// `storage churned`, after the power was cut during [`churn`]: each
+/// `file-N` must be whole and each `temp-N` a start of itself (the boot
+/// test's host checks which must be there); then they are removed, and a
+/// file written, synced and read back.
+fn churned(root: &Dir, name: &str) {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let dir = match root.open_dir(&format!("volumes/{name}"), rw) {
+        Ok(dir) => dir,
+        Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
+    };
+    let entries = match dir.entries() {
+        Ok(entries) => entries,
+        Err(err) => return fail(&format!("cannot list /volumes/{name}: {err}")),
+    };
+    let (mut whole, mut unfinished) = (0, 0);
+    for entry in entries {
+        let data = match dir.read_file(&entry.name) {
+            Ok(data) => data,
+            Err(err) => {
+                fail(&format!("/volumes/{name}/{}: {err}", entry.name));
+                continue;
+            }
+        };
+        if entry.name == FROM_HOST {
+            check(data == FROM_HOST_TEXT, || format!("/volumes/{name}/{FROM_HOST} reads wrong"));
+            continue;
+        }
+        let Some((round, temp)) = churn_name(&entry.name) else {
+            fail(&format!("/volumes/{name} holds {}, which the churn never made", entry.name));
+            continue;
+        };
+        let size = churn_size(round);
+        let start = data.iter().enumerate().all(|(at, &byte)| byte == churn_byte(round, at));
+        let sized = if temp { data.len() <= size } else { data.len() == size };
+        check(start && sized, || {
+            format!(
+                "/volumes/{name}/{} holds {} bytes, not what the churn wrote ({size} bytes)",
+                entry.name,
+                data.len()
+            )
+        });
+        if temp {
+            unfinished += 1;
+        } else {
+            whole += 1;
+        }
+        if let Err(err) = dir.remove(&entry.name) {
+            fail(&format!("/volumes/{name}/{}: removing it: {err}", entry.name));
+        }
+    }
+    println!(
+        "storage: /volumes/{name}: after the power cut, {whole} files whole and {unfinished} \
+         unfinished"
+    );
+    let again = dir.write_file("after.txt", HELLO).and_then(|()| dir.sync());
+    match again.and_then(|()| dir.read_file("after.txt")) {
+        Ok(data) if data == HELLO => {
+            println!("storage: /volumes/{name}: written again after the power cut");
+        }
+        Ok(_) => fail(&format!("/volumes/{name}/after.txt reads back wrong")),
+        Err(err) => fail(&format!("/volumes/{name}/after.txt: {err}")),
+    }
 }
 
 /// Writes, reads back and removes a file in `/tmp`.

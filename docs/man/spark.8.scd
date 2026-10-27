@@ -101,8 +101,10 @@ Init: /system/commands/spark is process 1
   starts it with all of them.
 . It looks for disks in _/devices_ and mounts the FAT or Btrfs
   filesystem of each partition, or of each disk with no partition table,
-  at _/volumes/_*name*: FAT read-write, or read-only when the device is;
-  Btrfs read-only, until Phase 10c writes it. FAT is tried first, as
+  at _/volumes/_*name*, read-write, or read-only when the device is or,
+  for Btrfs, when the kernel refuses to write it (*read_only* from the
+  disk, or *invalid_argument* for a feature Radix does not write yet).
+  FAT is tried first, as
   *mkfs.btrfs* clears the sectors FAT starts in while *mkfs.fat* may
   leave an older Btrfs superblock. A device that holds neither is left
   alone, and so is every device with *--no-volumes*.

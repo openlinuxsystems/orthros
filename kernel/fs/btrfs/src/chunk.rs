@@ -140,6 +140,42 @@ impl Chunk {
         ITEM_SIZE + num_stripes * STRIPE_SIZE
     }
 
+    /// Writes its chunk item to `out`, [`Chunk::item_size`] bytes, as
+    /// Linux writes one: the extent tree owns it, and its stripes are on
+    /// the device `dev_uuid`.
+    pub fn write(&self, out: &mut [u8], sectorsize: u32, dev_uuid: &[u8; 16]) {
+        /// The extent tree, which owns every chunk.
+        const OWNER: u64 = 2;
+        let put_u64 = |out: &mut [u8], at: usize, v: u64| {
+            out[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        };
+        let io = u32::try_from(self.stripe_len).unwrap_or(u32::MAX);
+        put_u64(out, 0, self.length);
+        put_u64(out, 8, OWNER);
+        put_u64(out, 16, self.stripe_len);
+        put_u64(out, 24, self.kind);
+        out[32..36].copy_from_slice(&io.to_le_bytes());
+        out[36..40].copy_from_slice(&io.to_le_bytes());
+        out[40..44].copy_from_slice(&sectorsize.to_le_bytes());
+        out[44..46].copy_from_slice(&(self.stripes.len() as u16).to_le_bytes());
+        out[46..48].copy_from_slice(&self.sub_stripes.to_le_bytes());
+        for (i, stripe) in self.stripes.iter().enumerate() {
+            let at = ITEM_SIZE + i * STRIPE_SIZE;
+            put_u64(out, at, stripe.devid);
+            put_u64(out, at + 8, stripe.offset);
+            out[at + 16..at + 32].copy_from_slice(dev_uuid);
+        }
+    }
+
+    /// A copy of it.
+    pub fn copy(&self) -> Result<Chunk> {
+        let mut stripes = mem::vec_with_capacity(self.stripes.len())?;
+        for &stripe in &self.stripes {
+            mem::push(&mut stripes, stripe)?;
+        }
+        Ok(Chunk { stripes, ..*self })
+    }
+
     /// Where the logical address `logical`, in the chunk, lies on device
     /// `devid`; copies on other devices are left out.
     ///
@@ -276,5 +312,20 @@ impl ChunkMap {
     /// The chunks, taken out.
     pub fn into_chunks(self) -> KVec<Chunk> {
         self.chunks
+    }
+
+    /// A copy of the map, with `chunk` too.
+    pub fn with(&self, chunk: Chunk) -> Result<ChunkMap> {
+        let mut map = ChunkMap { chunks: mem::vec_with_capacity(self.chunks.len() + 1)? };
+        for c in &self.chunks {
+            mem::push(&mut map.chunks, c.copy()?)?;
+        }
+        map.insert(chunk)?;
+        Ok(map)
+    }
+
+    /// The first logical address after every chunk.
+    pub fn end(&self) -> u64 {
+        self.chunks.iter().map(|c| c.start + c.length).max().unwrap_or(0)
     }
 }
