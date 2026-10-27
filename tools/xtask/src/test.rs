@@ -3129,7 +3129,7 @@ fn btrfs_files() -> Vec<(String, Made)> {
                 vec![(1 << 20, bytes(7, 4096)), ((4 << 20) - 100, bytes(9, 100))],
             ),
         ),
-        (BTRFS_DAMAGED.to_string(), Made::File(bytes(12_345, 3 * 4096))),
+        (BTRFS_DAMAGED.to_string(), Made::File(btrfs_noise(12_345, 3 * 4096))),
         ("docs".to_string(), Made::Dir),
         ("docs/deep".to_string(), Made::Dir),
         ("docs/deep/deeper".to_string(), Made::Dir),
@@ -3149,6 +3149,23 @@ fn btrfs_files() -> Vec<(String, Made)> {
         files.push((format!("many/file-{n:03}"), Made::File(format!("file {n}\n").into_bytes())));
     }
     files
+}
+
+/// `len` bytes of noise from `seed` (SplitMix64), which no other file of
+/// the test holds, so that [`make_btrfs`] finds the damaged file's sector
+/// on the disk wherever `mkfs.btrfs` put the files.
+fn btrfs_noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        out.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
+    }
+    out.truncate(len);
+    out
 }
 
 /// A file's bytes, holes and all.
@@ -3236,6 +3253,9 @@ fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(
     let at = bytes.windows(second.len()).position(|w| w == second).ok_or_else(|| {
         format!("{BTRFS_DAMAGED}'s second sector is nowhere on {}", path.display())
     })?;
+    if bytes[at + 1..].windows(second.len()).any(|w| w == second) {
+        return Err(format!("{BTRFS_DAMAGED}'s second sector is on {} twice", path.display()));
+    }
     bytes[at + 100] ^= 0x40;
     std::fs::write(path, &bytes).map_err(|err| format!("writing {}: {err}", path.display()))?;
     let sum = host_tool(std::process::Command::new("sha256sum").arg(path))?;
