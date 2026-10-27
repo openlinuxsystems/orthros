@@ -49,7 +49,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use radix_abi::endpoint::NO_SLOT;
 use radix_abi::startup;
@@ -129,6 +129,13 @@ pub struct ProcessObject {
     /// Set, with the state locked, once its phase has left created and
     /// running: what a signal's sender looks at without the lock.
     ending: AtomicBool,
+    /// Set, with the state locked, once it has exited: what a waiter for
+    /// its end looks at, with the wait table's lock held, which interrupt
+    /// handlers take and the state's lock must not be taken under.
+    exited: AtomicBool,
+    /// How many of its threads have not exited, set with the state locked
+    /// whenever it changes, for the same reason: `exec` waits on it.
+    live_threads: AtomicUsize,
     /// Called once it has exited: Spark's end stops the kernel.
     on_exit: Option<fn(&ProcessObject, u64)>,
     /// The next process waiting to be finished, while it waits.
@@ -325,6 +332,8 @@ fn allocate(
             finishing: false,
         }),
         ending: AtomicBool::new(false),
+        exited: AtomicBool::new(false),
+        live_threads: AtomicUsize::new(0),
         on_exit,
         pending: SpinLock::new(None),
         made: SpinLock::new(Some(Vec::new_in(HEAP.with(Flags::ATOMIC)))),
@@ -447,9 +456,10 @@ impl ProcessObject {
         }
     }
 
-    /// How many of its threads have not exited.
+    /// How many of its threads have not exited, read without a lock: as
+    /// of a moment ago.
     pub fn thread_count(&self) -> usize {
-        self.state.lock().threads.len()
+        self.live_threads.load(Ordering::Acquire)
     }
 
     /// What waiters for one of its threads to exit wait on.
@@ -653,7 +663,7 @@ impl ProcessObject {
     /// `deadline_ns`. Returns whether it exited.
     pub fn wait_until(&self, deadline_ns: u64) -> bool {
         wait::wait_until_or_timeout(self.key(), "process", deadline_ns, || {
-            self.state.lock().phase == ProcessState::Exited
+            self.exited.load(Ordering::Acquire)
         })
     }
 
@@ -752,6 +762,7 @@ impl ProcessObject {
             }
             // Room was reserved above.
             let _ = state.threads.push_within_capacity(thread.clone());
+            process.live_threads.store(state.threads.len(), Ordering::Release);
             state.phase = ProcessState::Running;
         }
         set_ready(&user);
@@ -808,6 +819,7 @@ impl ProcessObject {
                 return;
             };
             let gone = state.threads.swap_remove(index);
+            self.live_threads.store(state.threads.len(), Ordering::Release);
             let running = state.phase == ProcessState::Running;
             // Its CPU time stays the process's, under the state's lock so
             // that `cpu_ns` never misses it.
@@ -894,6 +906,7 @@ impl ProcessObject {
         let (code, notify) = {
             let mut state = self.state.lock();
             state.phase = ProcessState::Exited;
+            self.exited.store(true, Ordering::Release);
             (state.code, state.notify.take())
         };
         if let Some((notification, badge)) = notify {

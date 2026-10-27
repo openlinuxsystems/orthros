@@ -97,7 +97,7 @@ asks for it, so a power cut loses at most the last five seconds of
 writes.
 
 Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
-SSD and hard disk are `sda` and `sdb`; on the Framework Desktop, its two
+two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
 NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks need the USB drivers
 (Phase 11), which also bring mounting by label, `/volumes/<label>`, and
 safe eject.

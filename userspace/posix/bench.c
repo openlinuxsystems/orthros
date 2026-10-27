@@ -276,6 +276,24 @@ static void signal_delivery(uint64_t rounds) {
 		fail("signal delivery");
 }
 
+// A chain of additions, each waiting for the one before, so one clock
+// cycle each on any x86-64 processor: the time of one is the processor's
+// clock cycle, which says how fast each system runs it. `ob bench
+// --from` shows it beside the rows (ADR 0124); no row compares it.
+static void cpu_cycle(uint64_t rounds) {
+#ifdef __x86_64__
+	uint64_t x = 0;
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++)
+		__asm__ volatile(".rept 100\n\taddq $1, %0\n\t.endr" : "+r"(x));
+	report("cpu_cycle", started, rounds * 100);
+	if(x != rounds * 100)
+		fail("cpu_cycle");
+#else
+	(void)rounds;
+#endif
+}
+
 // poll on a pipe with data to read, which returns at once.
 static void poll_ready(uint64_t rounds) {
 	int fds[2];
@@ -443,6 +461,7 @@ int main(int argc, char **argv) {
 		fail("finding a CPU");
 	home_cpu = cpus[0];
 	pin(home_cpu);
+	cpu_cycle(1000000);
 	fork_wait(2000);
 	fork_exec_wait(self, 500);
 	pipe_throughput();

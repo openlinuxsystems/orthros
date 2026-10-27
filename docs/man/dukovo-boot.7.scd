@@ -446,7 +446,15 @@ them to *init*, and the kernel does not read them.
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
 	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
 	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz* or *bench*.
-	See *radix-debug*(7). *ob test* uses these.
+	See *radix-debug*(7). *ob test* uses these. The first program does
+	not start after a self-test, unless *init-after-selftest* is given.
+
+*init-after-selftest*
+	Start the first program after the self-test of *selftest*, as after a
+	boot without one. It is not process 1 then, but takes the next number
+	after the test's programs. The boot entry of the disk check
+	(*ob image --disk-check*) runs *selftest=bench* this way before its
+	program.
 
 *fuzz-seed*=_number_
 	Give the programs of *selftest=fuzz* the seeds from _number_ on, to

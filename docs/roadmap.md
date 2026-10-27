@@ -384,7 +384,7 @@ Every phase has the same definition of done: code merged with CI green, tests ad
 - **10c Btrfs read-write (L):** copy-on-write with transaction commits; subvolumes and snapshots; zstd compression and scrub; the single and DUP profiles on one disk. Space is reserved so deleting files and snapshots always works on a full disk. Linux `btrfs check` runs in CI on every image Radix writes, and power-cut tests kill QEMU at random points and check consistency. Done when the root filesystem is Btrfs and a long stress run passes `btrfs check` clean.
 - **10d Swap and other filesystems (M):** swap partitions in the standard swap format; page reclaim and swap-out; exFAT read-write, and ext4 read-write with its journal replayed after a power cut. Done when the system survives memory pressure by swapping.
 - **10e Multi-disk and storage tools (M):** RAID1 and RAID10 across several disks for servers, with degraded mounts, device replacement and rebuilds. RAID5 and RAID6 are never offered, because they are unsafe even on Linux. Disk-pull tests detach a disk at random points and check consistency. Disk health: SMART for SATA and the NVMe health log, read by `diskhealth` and reported to logd and the web console. The storage rows of the administration command set (lsblk, blkid, findmnt, fstrim, iostat, the `btrfs` admin command and the rest).
-- **Exit:** the root filesystem is Btrfs, a long filesystem stress run passes `btrfs check` clean, a two-disk RAID1 survives losing either disk and rebuilds onto a new one (in QEMU and on the Dell's SSD and hard disk), and the system survives memory pressure by swapping.
+- **Exit:** the root filesystem is Btrfs, a long filesystem stress run passes `btrfs check` clean, a two-disk RAID1 survives losing either disk and rebuilds onto a new one (in QEMU and on the Dell's two SSDs), and the system survives memory pressure by swapping.
 
 ### Phase 11: USB, input, platform and removable media (L)
 
@@ -720,7 +720,7 @@ The Dell Inspiron 15 5570 with a Core i7-8550U was the first real-hardware targe
 | --- | --- | --- | --- |
 | CPU and memory | Core i7-8550U, 4 cores and 8 threads, VT-x and VT-d; 8 GB DDR4-2400 in one slot | SMP, PCID, SMEP and SMAP. No CET; the Framework covers shadow stacks for Phase 23 | 1, 2 |
 | Firmware | Dell UEFI, factory-set to UEFI boot with GPT; likely offers a Legacy boot option and Intel PTT (TPM 2.0) | GRUB UEFI and BIOS paths; TPM in Phase 23 | 0, 1, 23 |
-| Storage | 128 GB SK hynix SC311 M.2 SATA SSD holding Windows 10, plus a 1 TB 5400 rpm 2.5-inch hard drive; shipped in Intel RST "RAID On" mode | AHCI driver first; NVMe is covered by the Framework | 10 |
+| Storage | 128 GB Samsung PM871b M.2 SATA SSD and a 512 GB TEAM T253 2.5-inch SATA SSD, in place of the factory SK hynix SC311 SSD (Windows 10) and 1 TB 5400 rpm hard drive; shipped in Intel RST "RAID On" mode | AHCI driver first; NVMe is covered by the Framework | 10 |
 | Ethernet | Realtek RTL810x 10/100 Fast Ethernet, PCI ID 10ec:8136 (from published specs, to confirm) | Realtek r8169-family driver; a USB 3 gigabit adapter for speed tests | 12 |
 | Wi-Fi and Bluetooth | Qualcomm QCA9377 (Dell Wireless 1810) on an M.2 card | Post-1.0 | 24 |
 | Graphics and display | Intel UHD 620 only, no discrete GPU; 15.6-inch 1920x1080 AU Optronics eDP panel, non-touch | UEFI GOP text console at 1920x1080 in 1.0; Lumen in 1.1; native Intel driver post-1.0 | 1, 17, 24 |
@@ -751,7 +751,7 @@ Neither machine has a serial port, so three tools are folded into the phases abo
 - The latest USB image is smoke-booted on the Dell at the end of Phases 1, 2, 6 and 9, then at the end of every later phase. Results go in the handbook's Supported hardware chapter (`docs/handbook/src/hardware.md`), the first entry of the supported-hardware list.
 - In 1.0 the laptop gets the power button, a clean power-off, battery and AC status, and CPU frequency scaling. The lid lock and brightness keys arrive with Lumen in Phase 17, and suspend with Phase 27.
 
-Decided: Dukovo installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 1 TB hard drive untouched; it can be formatted later with rdisk and used under /shared or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
+Decided: Dukovo installs onto the 128 GB SSD with the guided layout, erasing Windows 10. The guided install leaves the 512 GB SSD untouched; it can be formatted later with rdisk and used under /shared or /volumes. Anything worth keeping on the SSD needs backing up before the first Phase 14 install.
 
 ### Framework Desktop
 
@@ -1029,7 +1029,7 @@ Twenty-two are decided and three remain open. The repository also records each o
 | Native filesystem | Decided: Btrfs, our own Rust implementation | Fallback: OpenZFS port as a userspace filesystem server. Rejected: reusing Linux's GPL Btrfs code, a purpose-built filesystem |
 | Linking of system programs | Decided: Static | Dynamic with mlibc's loader |
 | Default install image | Decided (2026-10-23): the server image, with the console, the web console and the 1.0 services; Lumen joins the default image in 1.1 | A full image with Lumen in 1.0 (the earlier plan); a console-only image without the web console |
-| Install target on the Dell | Decided: the 128 GB SSD, erasing Windows; the 1 TB hard disk is kept for /shared | Keep Windows and dual boot |
+| Install target on the Dell | Decided: the 128 GB SSD, erasing Windows; the 512 GB SSD is kept for /shared | Keep Windows and dual boot |
 | Closed firmware (microcode, Wi-Fi) | Decided: a separate optional package, kept outside /system | Include it in the base system, or leave it out entirely |
 | Unified app runtime | Decided: WebAssembly components (WASI) on Wasmtime, post-1.0 Phase 22 | Port .NET (CoreCLR) as the primary runtime |
 | UI toolkit and desktop look | Decided: our own UI kit on Iced; Lumen draws title bars; GTK and Qt only inside third-party bundles; optional personality shell in Phase 26 | Port GTK and Qt into /system; a fully from-scratch toolkit; Slint |

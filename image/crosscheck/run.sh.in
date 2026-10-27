@@ -11,7 +11,10 @@
 # `ob image --disk-check` wrote the serial number of the disk to check
 # below. Linux's side finds that disk, reads back what Dukovo wrote to
 # it, measures the same transfers on Linux, and saves the comparison as
-# dukovo-disk-check.md in the current directory, or else in /tmp.
+# dukovo-disk-check.md in the current directory, or else in /tmp. Then it
+# runs the benchmarks of `ob bench` on Linux, and saves their numbers
+# with Dukovo's, which Dukovo's check left in its report, as
+# dukovo-bench.txt beside it, for `ob bench --from` (ADR 0124).
 
 set -eu
 
@@ -36,19 +39,78 @@ if [ "$answer" != yes ]; then
     exit 1
 fi
 
-# The stick's filesystem may not run programs, so a copy runs.
+# The stick's filesystem may not run programs, so copies run.
 work=$(mktemp -d)
-trap 'rm -rf "${work:?}"' EXIT
-cp "$here/disktest" "$work/disktest"
-chmod 755 "$work/disktest"
+for program in disktest linux-bench posix-bench; do
+    cp "$here/$program" "$work/$program"
+    chmod 755 "$work/$program"
+done
+
+# Linux measures as Dukovo runs (ADR 0124). Dukovo sets no CPU
+# performance states yet (Intel HWP is Phase 11c), so its processor runs
+# at the clock the firmware left it; it idles in C1; and it keeps SATA
+# links at full power. So while Linux measures, its turbo is off, every
+# CPU is held at its highest clock without it, no CPU idles deeper than
+# C1, and every SATA link stays at full power. Each setting is put back
+# at the end.
+saved=$work/saved
+: > "$saved"
+change() {
+    if [ -w "$1" ]; then
+        printf '%s %s\n' "$1" "$(cat "$1")" >> "$saved"
+        echo "$2" > "$1" || true
+    fi
+}
+restore() {
+    while read -r file value; do
+        echo "$value" > "$file" || true
+    done < "$saved"
+}
+trap 'restore; rm -rf "${work:?}"' EXIT
 
 report=$(pwd)/dukovo-disk-check.md
 if ! touch "$report" 2>/dev/null; then
     report=/tmp/dukovo-disk-check.md
 fi
+bench=$(dirname "$report")/dukovo-bench.txt
+
+change /sys/devices/system/cpu/intel_pstate/no_turbo 1
+change /sys/devices/system/cpu/cpufreq/boost 0
+for governor in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+    change "$governor" performance
+done
+for state in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*; do
+    case $(cat "$state/name" 2>/dev/null) in
+        POLL | C1 | C1-*) ;;
+        *) change "$state/disable" 1 ;;
+    esac
+done
+for link in /sys/class/scsi_host/host[0-9]*/link_power_management_policy; do
+    change "$link" max_performance
+done
+
 status=0
-"$work/disktest" --yes-erase "$serial" > "$report" || status=$?
+"$work/disktest" --yes-erase "$serial" --bench-out "$work/dukovo" > "$report" || status=$?
 cat "$report"
 echo
 echo "Saved as $report."
+if [ ! -s "$work/dukovo" ]; then
+    echo "Dukovo's report holds no benchmarks, so Linux's are not measured."
+    exit "$status"
+fi
+
+echo
+echo "Measuring the benchmarks of ob bench on Linux (a few minutes)."
+{
+    echo "machine: $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //')"
+    echo "kernel: $(uname -sr)"
+    if grep -qw mitigations=off /proc/cmdline; then
+        echo "mitigations: off"
+    else
+        echo "mitigations: on; boot the live system with mitigations=off, as the handbook says"
+    fi
+    cat "$work/dukovo"
+    "$work/linux-bench" --posix-bench "$work/posix-bench" | sed 's/^/linux: /'
+} > "$bench"
+echo "Saved the benchmarks' numbers as $bench: send it with $report."
 exit "$status"

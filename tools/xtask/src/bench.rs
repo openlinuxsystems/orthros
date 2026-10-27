@@ -30,6 +30,10 @@
 //! time, so each `BENCH` line gives the instructions an operation took:
 //! the same on every machine, unlike the timings. With `--gate` it fails
 //! if an operation on one CPU takes more than its [`BUDGETS`].
+//!
+//! With `--from FILE` it measures nothing, and reports the numbers of a
+//! real machine instead: Dukovo's and Linux's, which the disk check
+//! measures on it in turn and Linux's side saves in FILE (ADR 0124).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -369,8 +373,18 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     };
     let summary = args.value("--summary")?;
     let given_kernel = args.value("--linux-kernel")?;
+    let from = args.value("--from")?;
     let profile = args.profile(&ctx.config)?;
     args.finish()?;
+    if let Some(path) = from {
+        if gate || instructions || !linux || given_kernel.is_some() {
+            crate::bail!(
+                "--from reports the numbers of a real machine, which are a check, not a gate, \
+                 so it takes only --summary"
+            );
+        }
+        return from_machine(ctx, &path, summary.as_deref());
+    }
     if gate && !linux && !instructions {
         crate::bail!("--gate compares with Linux, so it cannot go with --no-linux");
     }
@@ -713,10 +727,136 @@ fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
     Ok(std::fs::File::open(&own).is_ok().then_some(own))
 }
 
+/// `ob bench --from FILE`: the report of a real machine's numbers, from
+/// the file of Linux's side of the disk check (ADR 0124), where each of
+/// Dukovo's lines follows `dukovo: ` and each of Linux's `linux: `.
+fn from_machine(ctx: &Ctx, path: &str, summary: Option<&str>) -> Result<()> {
+    let text = std::fs::read_to_string(path).context(|| format!("reading {path}"))?;
+    let (numbers, facts) = machine_numbers(&text);
+    if numbers.radix.is_empty() || numbers.linux_vm.is_empty() {
+        crate::bail!(
+            "{path} holds no numbers of {}: give the dukovo-bench.txt of the disk check's \
+             crosscheck/run.sh",
+            if numbers.radix.is_empty() { "Dukovo's" } else { "Linux's" }
+        );
+    }
+    let report = machine_report(&numbers, &facts);
+    let dir = ctx.out.join("bench");
+    process::create_dir(&dir)?;
+    let markdown = dir.join("machine.md");
+    std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
+    if let Some(path) = summary {
+        append(path, &report)?;
+    }
+    eprintln!("\n{report}");
+    step(&format!("The machine's report in {}", ctx.display(&markdown)));
+    Ok(())
+}
+
+/// The numbers in a file of Linux's side of the disk check, with Linux's
+/// as the baseline, and what it says of the machine and both systems.
+fn machine_numbers(text: &str) -> (Numbers, Vec<String>) {
+    let side = |prefix: &str| -> String {
+        text.lines().filter_map(|line| line.strip_prefix(prefix)).collect::<Vec<_>>().join("\n")
+    };
+    let (dukovo, linux) = (side("dukovo: "), side("linux: "));
+    let mut radix = parse(&dukovo);
+    let mut counts = parse_counts(&dukovo);
+    per_switch(&mut radix, &counts);
+    counts.extend(parse_counts(&linux));
+    let numbers = Numbers {
+        runs: 1,
+        more: 0,
+        radix,
+        counts,
+        linux_vm: parse(&linux),
+        linux_host: Vec::new(),
+    };
+    let facts = text
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("dukovo: system ").unwrap_or(line);
+            let fact = ["machine: ", "kernel: ", "mitigations: "]
+                .iter()
+                .find_map(|key| line.strip_prefix(key).map(|value| (key, value)));
+            match fact {
+                Some((&"machine: ", value)) => Some(format!("the machine is {value}")),
+                Some((&"kernel: ", value)) => Some(format!("Linux is {value}")),
+                Some((_, value)) => Some(format!("Linux's mitigations are {value}")),
+                None if line.starts_with("Radix ") => Some(format!("Dukovo is {line}")),
+                None => None,
+            }
+        })
+        .collect();
+    (numbers, facts)
+}
+
+/// The report of a real machine's numbers, in Markdown.
+fn machine_report(numbers: &Numbers, facts: &[String]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## Benchmarks on a real machine\n");
+    let _ = writeln!(
+        out,
+        "Dukovo and then Linux on the same machine, measured by the disk check (ADR 0124): {}. \
+         Each number is the average cost of one operation; lower is better, and a ratio in bold \
+         is over {GATE_RATIO:.2}. The disk's transfers are in the disk check's own report.\n",
+        facts.join("; ")
+    );
+    let clock = |list: &[Measurement]| {
+        find(list, "cpu_cycle").filter(|m| m.ns > 0.0).map(|m| format!("{:.2} GHz", 1.0 / m.ns))
+    };
+    if let (Some(ours), Some(theirs)) = (clock(&numbers.radix), clock(&numbers.linux_vm)) {
+        let _ = writeln!(
+            out,
+            "The processor ran at {ours} on Dukovo and {theirs} on Linux (a chain of additions \
+             of one clock cycle each).\n"
+        );
+    }
+    let _ = writeln!(out, "| Operation | Dukovo | Linux | Ratio | Linux equivalent |");
+    let _ = writeln!(out, "| --- | ---: | ---: | ---: | --- |");
+    let mut over = Vec::new();
+    for row in ROWS {
+        let ours = find(&numbers.radix, row.radix);
+        let (theirs, how) = match row.linux {
+            Some((name, how)) => (find(&numbers.linux_vm, name), how),
+            None => (None, "none"),
+        };
+        if ours.is_none() && theirs.is_none() {
+            continue;
+        }
+        let ratio = match ratio(numbers, row) {
+            Some(ratio) if ratio > GATE_RATIO => {
+                over.push(format!("{} ({})", row.what, shown(ratio)));
+                format!("**{}**", shown(ratio))
+            }
+            Some(ratio) => shown(ratio),
+            None => String::new(),
+        };
+        let shown_ns = |m: Option<&Measurement>| m.map_or("missing".into(), |m| show(m.ns));
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {ratio} | {how} |",
+            row.what,
+            shown_ns(ours),
+            if row.linux.is_some() { shown_ns(theirs) } else { String::new() }
+        );
+    }
+    if over.is_empty() {
+        let _ = writeln!(out, "\nEvery operation is as fast on Dukovo as on Linux, or faster.");
+    } else {
+        let _ = writeln!(out, "\nSlower on Dukovo than on Linux: {}.", over.join("; "));
+    }
+    if !numbers.counts.is_empty() {
+        counts_table(&mut out, &numbers.counts, false);
+    }
+    out
+}
+
 /// Builds the POSIX benchmarks for Linux, static, with this machine's C
 /// library and the Clang that builds them for Radix (or else its C
-/// compiler), at the same optimisation, and returns the program.
-fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
+/// compiler), at the same optimisation, and returns the program, which
+/// is `posix-bench` in `dir`.
+pub fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
     step("Building the POSIX benchmarks for Linux as a static program");
     let compiler = crate::ports::find_clang()
         .map(|(clang, _)| clang)
@@ -739,6 +879,18 @@ fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
 /// POSIX benchmarks at `posix` beside it.
 fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
+    let program = linux_bench_static(ctx)?;
+    let init = std::fs::read(&program).context(|| format!("reading {}", program.display()))?;
+    let posix = std::fs::read(posix).context(|| format!("reading {}", posix.display()))?;
+    let initrd = dir.join("linux-bench.cpio");
+    std::fs::write(&initrd, initramfs(&init, &posix))
+        .context(|| format!("writing {}", initrd.display()))?;
+    Ok(initrd)
+}
+
+/// Builds `linux-bench` as a static program, which runs on any Linux of
+/// the same processor, and returns it.
+pub fn linux_bench_static(ctx: &Ctx) -> Result<PathBuf> {
     let target = ctx.target.join("linux-guest");
     let mut cmd = process::cargo(ctx);
     cmd.args(["build", "--quiet", "--release", "-p", "linux-bench"])
@@ -746,13 +898,7 @@ fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path) -> Result<PathBuf> {
         .env("CARGO_TARGET_DIR", &target)
         .env("RUSTFLAGS", "-C target-feature=+crt-static");
     process::run(ctx, &mut cmd)?;
-    let program = target.join("x86_64-unknown-linux-gnu/release/linux-bench");
-    let init = std::fs::read(&program).context(|| format!("reading {}", program.display()))?;
-    let posix = std::fs::read(posix).context(|| format!("reading {}", posix.display()))?;
-    let initrd = dir.join("linux-bench.cpio");
-    std::fs::write(&initrd, initramfs(&init, &posix))
-        .context(|| format!("writing {}", initrd.display()))?;
-    Ok(initrd)
+    Ok(target.join("x86_64-unknown-linux-gnu/release/linux-bench"))
 }
 
 /// Boots `kernel` in a virtual machine set up like Radix's, with the
@@ -1264,6 +1410,38 @@ fn results_json(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_machines_numbers() {
+        let file = "machine: Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz\n\
+                    kernel: Linux 6.8.0-38-generic\n\
+                    mitigations: off\n\
+                    dukovo: system Radix 0.10.0 (Dukovo Server 0.10.0)\n\
+                    dukovo: BENCH name=syscall_null ns=40.00 iterations=200000\n\
+                    dukovo: BENCH name=cpu_cycle ns=0.56 iterations=100000000\n\
+                    dukovo: BENCH name=posix_signal ns=900.00 iterations=100000\n\
+                    linux: BENCH name=getppid ns=50.00 iterations=200000\n\
+                    linux: BENCH name=cpu_cycle ns=0.56 iterations=100000000\n\
+                    linux: BENCH name=posix_signal ns=600.00 iterations=100000\n\
+                    BENCH name=getppid ns=1.00 iterations=1\n";
+        let (numbers, facts) = machine_numbers(file);
+        assert_eq!(numbers.radix.len(), 3);
+        assert_eq!(find(&numbers.linux_vm, "getppid").map(|m| m.ns), Some(50.0));
+        assert_eq!(
+            facts,
+            [
+                "the machine is Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+                "Linux is Linux 6.8.0-38-generic",
+                "Linux's mitigations are off",
+                "Dukovo is Radix 0.10.0 (Dukovo Server 0.10.0)",
+            ]
+        );
+        let report = machine_report(&numbers, &facts);
+        assert!(report.contains("| System call, entry and exit only | 40 ns | 50 ns | 0.80 |"));
+        assert!(report.contains("at 1.79 GHz on Dukovo and 1.79 GHz on Linux"));
+        assert!(report.contains("Slower on Dukovo than on Linux: POSIX: signal sent"));
+        assert!(!report.contains("Disk: 4 KiB read"), "rows measured on neither side are left out");
+    }
 
     #[test]
     fn reads_bench_lines() {

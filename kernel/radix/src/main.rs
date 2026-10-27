@@ -238,8 +238,11 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     }
 
     info!("Boot complete.");
-    // The first program, unless a self-test has the machine to itself.
-    if settings.selftest.is_none() && user::init::has_archive() {
+    // The first program, unless a self-test has the machine to itself:
+    // `init-after-selftest` starts it after the test too, for the disk
+    // check that also runs the benchmarks (ADR 0124).
+    let init = settings.selftest.is_none() || flags.has("init-after-selftest");
+    if init && user::init::has_archive() {
         let path = flags.value("init").unwrap_or(user::init::DEFAULT_INIT);
         user::init::start(path, flags.init_args());
     }
