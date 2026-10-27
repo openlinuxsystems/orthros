@@ -23,6 +23,11 @@ about one's own machine. In practice:
   then the user decides.
 - No telemetry, no ads, no required online accounts, and no data leaves the
   machine unless the user sends it.
+- No age or identity verification, ever. Dukovo never asks for, checks,
+  estimates or stores anyone's age, birth date or identity documents: not
+  when it installs, when an account is made, at sign-in, in the Store or
+  anywhere else, and it gives apps no age signal. An account is a name the
+  owner chooses ([ADR 0126](docs/adr/0126-no-age-or-identity-verification.md)).
 - Secure defaults, all of which the owner can change.
 - Legal and fair to others: every license is honored, and every project we
   build on is credited.
