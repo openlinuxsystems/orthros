@@ -216,7 +216,8 @@ USB when the machine is set up.
 | Firmware | Insyde UEFI, UEFI boot only | Turn Secure Boot off; boot the USB stick from the F12 menu |
 | Serial port | None | Screen, crash log, and later netlog and the xHCI debug console |
 
-From Phase 10 each sub-phase ends with the [disk check](#disk-check) on
-this machine too, on the one NVMe drive agreed for testing. The other
-drive is never checked before Phase 10e's RAID tests, which erase both
-only when the project lead says so.
+This machine serves other work until Dukovo runs containers (Phase 20),
+so Phase 10's checks run on the Dell. From then, the
+[disk check](#disk-check) runs on this machine too, on the one NVMe drive
+agreed for testing; the other drive is written only when the project
+lead says so.
