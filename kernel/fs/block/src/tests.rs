@@ -374,7 +374,7 @@ fn gpt_partitions_and_the_backup_header() {
     for damage in [false, true] {
         let disk = gpt_disk(8192, &[(2048, 4095, "EFI system"), (4096, 8000, "data")], damage);
         let (scheme, found) = table(&disk).unwrap();
-        assert_eq!(scheme, Scheme::Gpt);
+        assert_eq!(scheme, if damage { Scheme::GptBackup } else { Scheme::Gpt });
         assert_eq!(found.len(), 2);
         assert_eq!((found[0].number, found[0].first, found[0].sectors), (1, 2048, 2048));
         assert_eq!(found[1].name().collect::<std::string::String>(), "data");

@@ -186,7 +186,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     let volume = Volume::new(disk, 0, info);
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
-    register(&name, device.clone());
+    register(&name, device.clone(), None);
     partitions(&name, &device);
     Ok(())
 }

@@ -9,9 +9,11 @@
 //!
 //! - `/kernel/version`, `/kernel/cmdline`, `/kernel/cpus`;
 //! - `/kernel/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
-//!   for every disk and partition, and in its `queue` the sizes and flags
-//!   of radix-block(2)'s requests as Linux names them (`rotational`,
-//!   `logical_block_size`, `discard_max_bytes` and the rest);
+//!   for every disk and partition; for a partition, its number in its
+//!   disk's table (`partition`) and its first sector (`start`); and for a
+//!   disk, in its `queue`, the sizes and flags of radix-block(2)'s
+//!   requests as Linux names them (`rotational`, `logical_block_size`,
+//!   `discard_max_bytes` and the rest);
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
 //!   hexadecimal, for every PCI function the scan found.
 //!
@@ -84,7 +86,7 @@ struct Blocks;
 impl Listing for Blocks {
     fn list(&self, f: &mut dyn FnMut(&str, Kind) -> bool) {
         let mut more = true;
-        disk::for_each(|name, _| {
+        disk::for_each(|name, _, _| {
             if more {
                 more = f(name, Kind::Directory);
             }
@@ -92,17 +94,24 @@ impl Listing for Blocks {
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
-        let mut found: Option<DeviceRef> = None;
-        disk::for_each(|n, device| {
+        let mut found: Option<(DeviceRef, Option<disk::Place>)> = None;
+        disk::for_each(|n, device, place| {
             if n == name {
-                found = Some(device.clone());
+                found = Some((device.clone(), place));
             }
         });
-        let device = found.ok_or(Error::NotFound)?;
+        let (device, place) = found.ok_or(Error::NotFound)?;
         let dir = FixedDir::new(next_id())?;
         let info = device.info();
         dir.add("size", value(move |text| writeln!(text, "{}", info.sectors))?)?;
         dir.add("ro", value(move |text| writeln!(text, "{}", u8::from(info.read_only)))?)?;
+        // A partition has its number and first sector, and its disk the
+        // queue, as on Linux.
+        if let Some(place) = place {
+            dir.add("partition", value(move |text| writeln!(text, "{}", place.number))?)?;
+            dir.add("start", value(move |text| writeln!(text, "{}", place.first))?)?;
+            return Ok(dir);
+        }
         let queue = dir.add_dir("queue", next_id())?;
         let sector = radix_block::SECTOR;
         for (name, number) in [

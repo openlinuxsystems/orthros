@@ -78,8 +78,18 @@ pub fn pci_functions(mut f: impl FnMut(&PciFunction)) {
     }
 }
 
-/// Every disk and partition, by name.
-static DISKS: Mutex<Option<alloc::vec::Vec<(Name, DeviceRef), Kmalloc>>> = Mutex::new(None);
+/// Where a partition is on its disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// Its number in the disk's table, as in its name.
+    pub number: u32,
+    /// Its first sector on the disk.
+    pub first: u64,
+}
+
+/// Every disk and partition, by name, with where each partition is.
+type Disks = alloc::vec::Vec<(Name, DeviceRef, Option<Place>), Kmalloc>;
+static DISKS: Mutex<Option<Disks>> = Mutex::new(None);
 
 /// Finds and sets up the disks.
 pub fn init() {
@@ -210,6 +220,12 @@ fn partitions(name: &Name, device: &DeviceRef) {
         }
         partition::Scheme::Mbr => "an MBR",
         partition::Scheme::Gpt => "a GPT",
+        partition::Scheme::GptBackup => {
+            warn!(
+                "Disk: {name}: its GPT's primary header or entries are damaged; using the backup"
+            );
+            "a GPT"
+        }
     };
     let count = found.len();
     info!(
@@ -252,7 +268,7 @@ fn partitions(name: &Name, device: &DeviceRef) {
             }
         );
         let device: DeviceRef = slice;
-        register(&part_name, device);
+        register(&part_name, device, Some(Place { number: part.number, first: part.first }));
     }
 }
 
@@ -277,7 +293,7 @@ impl core::fmt::Display for Size {
 }
 
 /// Adds a disk or partition under `name`, to `/devices` and `/kernel/block`.
-fn register(name: &Name, device: DeviceRef) {
+fn register(name: &Name, device: DeviceRef, place: Option<Place>) {
     {
         let mut disks = DISKS.lock();
         let disks =
@@ -286,7 +302,7 @@ fn register(name: &Name, device: DeviceRef) {
             warn!("Disk: out of memory registering {name}");
             return;
         }
-        let _ = disks.push_within_capacity((name.clone(), device.clone()));
+        let _ = disks.push_within_capacity((name.clone(), device.clone(), place));
     }
     super::devfs::add_block(name.as_str(), device);
 }
@@ -296,7 +312,7 @@ fn register(name: &Name, device: DeviceRef) {
 /// filesystems have written back what they hold, before the machine is
 /// powered off, restarted or halted; requests after it may fail.
 pub fn shutdown() {
-    for_each(|name, device| {
+    for_each(|name, device, _| {
         if let Err(err) = device.flush() {
             warn!("Disk: {name}: its write cache could not be emptied: {err}");
         }
@@ -307,14 +323,14 @@ pub fn shutdown() {
 /// The name a disk or partition was registered under.
 pub fn name_of(device: &DeviceRef) -> Option<Name> {
     let disks = DISKS.lock();
-    disks.as_ref()?.iter().find(|(_, d)| Arc::ptr_eq(d, device)).map(|(name, _)| name.clone())
+    disks.as_ref()?.iter().find(|(_, d, _)| Arc::ptr_eq(d, device)).map(|(name, ..)| name.clone())
 }
 
 /// Calls `f` with each disk and partition, in the order they were found.
-pub fn for_each(mut f: impl FnMut(&str, &DeviceRef)) {
+pub fn for_each(mut f: impl FnMut(&str, &DeviceRef, Option<Place>)) {
     let disks = DISKS.lock();
-    for (name, device) in disks.iter().flatten() {
-        f(name.as_str(), device);
+    for (name, device, place) in disks.iter().flatten() {
+        f(name.as_str(), device, *place);
     }
 }
 

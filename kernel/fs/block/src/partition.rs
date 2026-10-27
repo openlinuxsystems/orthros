@@ -78,6 +78,9 @@ pub enum Scheme {
     Mbr,
     /// A GUID partition table.
     Gpt,
+    /// A GUID partition table read from its backup at the disk's end,
+    /// the primary one being damaged.
+    GptBackup,
 }
 
 /// Why the table could not be read.
@@ -190,8 +193,8 @@ pub fn read(disk: u64, read: ReadSector<'_>) -> Result<(Scheme, KVec<Partition>)
     read(0, &mut sector)?;
     let Some(entries) = mbr_entries(&sector) else { return Ok((Scheme::None, found)) };
     if entries.iter().any(|e| e.kind == PROTECTIVE) {
-        gpt(disk, read, &mut found)?;
-        return Ok((Scheme::Gpt, found));
+        let scheme = gpt(disk, read, &mut found)?;
+        return Ok((scheme, found));
     }
     if entries.iter().all(|e| e.kind == 0) {
         return Ok((Scheme::None, found));
@@ -311,13 +314,15 @@ fn header(sector: &[u8; SECTOR], at: u64, disk: u64) -> Option<Header> {
     sane.then_some(header)
 }
 
-fn gpt(disk: u64, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<(), Error> {
+/// Reads a GPT: the primary header and its entries, or else the backup
+/// header in the disk's last sector and its entries.
+fn gpt(disk: u64, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<Scheme, Error> {
     let mut sector = [0u8; SECTOR];
-    for at in [1, disk - 1] {
+    for (at, scheme) in [(1, Scheme::Gpt), (disk - 1, Scheme::GptBackup)] {
         read(at, &mut sector)?;
         let Some(header) = header(&sector, at, disk) else { continue };
         match gpt_entries(disk, &header, read, found) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(scheme),
             Err(Error::Damaged(_)) => found.clear(),
             Err(err) => return Err(err),
         }

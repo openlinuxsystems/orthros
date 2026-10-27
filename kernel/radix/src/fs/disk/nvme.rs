@@ -402,7 +402,7 @@ fn add(
         if info.discard_sectors > 0 { ", deallocates" } else { "" },
     );
     let device: DeviceRef = volume;
-    register(&name, device.clone());
+    register(&name, device.clone(), None);
     partitions(&name, &device);
 }
 

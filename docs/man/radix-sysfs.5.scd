@@ -47,6 +47,12 @@ _/kernel/block/_*name*_/size_
 _/kernel/block/_*name*_/ro_
 	*1* if the device is read-only, *0* if not.
 
+_/kernel/block/_*name*_/partition_, _start_
+	For a partition: its number in its disk's table, the one its name
+	ends in, and its first sector on the disk, in 512-byte sectors. A
+	partition has these instead of a _queue_ directory, as on Linux,
+	whose tools read the queue of the partition's disk.
+
 _/kernel/block/_*name*_/queue/logical_block_size_, _physical_block_size_
 	The sizes in bytes of the device's sectors, *512*, and of the
 	blocks it writes without reading first (*radix-block*(2)).

@@ -206,9 +206,10 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   spark            the kernel starts Spark, which starts a program and reaps it
   storage          four FAT disks: what is written reads back after a reboot
                    and on the host
-  storage-sata     the same on four SATA disks of an AHCI controller
+  storage-sata     the same on four SATA disks of an AHCI controller, the
+                   partition in a GPT
   storage-nvme     the same on four NVMe namespaces of two controllers,
-                   with a queue for each of 4 CPUs
+                   with a queue for each of 4 CPUs, the partition in a GPT
   disk-raw         raw reads, writes and discards of a virtio, a SATA and an
                    NVMe disk, and Linux's block requests; the host checks
                    every byte

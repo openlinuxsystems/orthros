@@ -434,15 +434,19 @@ _target/userspace/_).
 	*storage-sata*
 		The *storage* test with the same four disks on SATA, the ports
 		of an AHCI controller added to the machine (QEMU's *ich9-ahci*),
-		the last of them solid state. The kernel must name them _sda_ to
-		_sdd_ and find their queue depth, write cache and TRIM.
+		the last of them solid state, with its partition in a GPT rather
+		than an MBR. The kernel must name them _sda_ to _sdd_, find
+		their queue depth, write cache and TRIM, and name the partition
+		_sdd1_ with its GPT name. The host checks that both copies of
+		the GPT are as it wrote them.
 
 	*storage-nvme*
 		The *storage* test with the same four disks as NVMe namespaces,
 		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on
-		4 CPUs. The kernel must name them _nvme0n1_, _nvme0n2_, _nvme1n1_
-		and _nvme1n2_, the partition _nvme1n2p1_, and give each
-		controller 4 I/O queues with an MSI-X vector for each CPU.
+		4 CPUs, the partition in a GPT as in *storage-sata*. The kernel
+		must name them _nvme0n1_, _nvme0n2_, _nvme1n1_ and _nvme1n2_, the
+		partition _nvme1n2p1_, and give each controller 4 I/O queues with
+		an MSI-X vector for each CPU.
 
 	*disk-raw*
 		Boot 2 CPUs under UEFI with three 8 MiB disks of known bytes, a
