@@ -72,6 +72,8 @@ enum FilesystemKind: u8 {
     /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
     /// `pipefs`.
     pipe = 6;
+    /// Btrfs on a disk, read-only until Phase 10c: `btrfs`.
+    btrfs = 7;
 }
 
 /// How `open` opens.
@@ -181,11 +183,13 @@ interface directory = 0x000b version 4 {
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt, too_many_links];
     /// Mounts a filesystem of kind `filesystem` (its name, as
-    /// FilesystemKind lists them) on the directory at `path`: `fat` on the
-    /// block device whose file capability is in slot `source`, the others
-    /// with `source` 0. A second mount on a directory stacks on the first.
-    /// Needs the control right, and the read right on `source` (and the
-    /// write right unless `flags` has read_only).
+    /// FilesystemKind lists them) on the directory at `path`: `fat` and
+    /// `btrfs` on the block device whose file capability is in slot
+    /// `source`, the others with `source` 0. A second mount on a directory
+    /// stacks on the first. Needs the control right, and the read right on
+    /// `source` (and for `fat` the write right unless `flags` has
+    /// read_only). Btrfs mounts read-only whatever `flags` say, until
+    /// Phase 10c writes it.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,

@@ -36,6 +36,7 @@ impl Volume {
     /// [`Error::NotSupported`] for what Radix cannot read yet: a
     /// filesystem on more than one device, or one whose log of fsyncs has
     /// not been replayed (both Phase 10e and 10c).
+    #[inline(never)]
     pub fn open(device: DeviceRef) -> Result<Volume> {
         let info = device.info();
         let device_bytes = info.sectors * radix_block::SECTOR;
@@ -64,6 +65,7 @@ impl Volume {
 
     /// Reads every chunk in the chunk tree, which the system chunk array
     /// only starts.
+    #[inline(never)]
     fn read_chunk_tree(&mut self) -> Result<()> {
         let mut chunks = ChunkMap::empty();
         let mut devices = 0;
@@ -154,6 +156,31 @@ impl Volume {
         }
         let root = RootItem::read(data).ok_or(Error::Corrupt)?;
         Ok(Some(Root { bytenr: root.bytenr, level: root.level, generation: root.generation }))
+    }
+
+    /// Subvolume `id`'s tree and its top directory's inode number; `None`
+    /// if there is no such subvolume, or it was deleted and waits to be
+    /// cleaned up (no references are left to it).
+    pub fn subvolume(&self, id: u64) -> Result<Option<(Root, u64)>> {
+        if id != tree::FS && id < tree::FIRST_FREE {
+            return Ok(None);
+        }
+        let cursor = Cursor::seek(self, &self.root_tree(), &Key::first(id, item::ROOT_ITEM))?;
+        let Some((key, data)) = cursor.get() else { return Ok(None) };
+        if !key.is(id, item::ROOT_ITEM) {
+            return Ok(None);
+        }
+        let root = RootItem::read(data).ok_or(Error::Corrupt)?;
+        if root.refs == 0 {
+            return Ok(None);
+        }
+        let tree = Root { bytenr: root.bytenr, level: root.level, generation: root.generation };
+        Ok(Some((tree, root.root_dirid)))
+    }
+
+    /// The device.
+    pub fn device(&self) -> &DeviceRef {
+        self.cache.device()
     }
 
     /// Keeps up to `limit` tree blocks read, for tests of a full cache.

@@ -510,8 +510,10 @@ pub struct Made {
     pub source: radix_klog::TextBuf<32>,
 }
 
-/// Makes a filesystem of the kind named `kind` for `mount`: `fat` on the
-/// block device `source` stands for, the others from nothing.
+/// Makes a filesystem of the kind named `kind` for `mount`: `fat` and
+/// `btrfs` on the block device `source` stands for, the others from
+/// nothing. Btrfs mounts read-only whatever `read_only` says, until Phase
+/// 10c writes it, as Linux mounts a disk that refuses writes.
 pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs::Result<Made> {
     use core::fmt::Write;
     let mut name = radix_klog::TextBuf::<32>::new();
@@ -529,6 +531,15 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
                 None => name.write_str("fat"),
             };
             fs_ref(radix_fat::FatFs::mount(device, read_only)?)?
+        }
+        "btrfs" => {
+            let node = source.ok_or(Error::NotBlockDevice)?;
+            let device = node.block_device().ok_or(Error::NotBlockDevice)?;
+            let _ = match disk::name_of(&device) {
+                Some(disk) => name.write_str(disk.as_str()),
+                None => name.write_str("btrfs"),
+            };
+            fs_ref(radix_btrfs::BtrfsFs::mount(device)?)?
         }
         "proc" => procfs::make()?,
         "sys" => sysfs::make()?,

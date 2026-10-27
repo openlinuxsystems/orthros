@@ -8,6 +8,7 @@
 //! ob(1); `docs/man/ob.1.scd` is the source of that page.
 
 mod bench;
+mod btrfs;
 mod config;
 mod corpus;
 mod docs;
@@ -225,6 +226,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    by its serial number; Linux's side checks it on the host
   disk-errors      QEMU fails SATA and NVMe reads and writes: retried, then
                    EIO
+  btrfs            two Btrfs disks Linux made, mounted read-only: every
+                   file reads as the host wrote it, a damaged one fails
   posix            C programs on mlibc, a Rust std one and the ported
                    utilities: fork, exec, signals, pipes, terminals, files,
                    threads

@@ -25,12 +25,19 @@ use crate::format::{Key, item, name_hash, tree, u16_at, u64_at};
 use crate::superblock::{self, incompat};
 use crate::tree::{Cursor, HEADER_SIZE, Root, find};
 
-/// A tool of btrfs-progs.
+/// A tool of btrfs-progs: from the directory `RADIX_BTRFS_PROGS` names,
+/// where `ob test` puts a newer copy when the system's is too old for
+/// these tests, or else the system's.
 fn tool(name: &str) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = ["/usr/sbin", "/sbin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/local/bin"]
-        .into_iter()
+    let dirs = std::env::var_os("RADIX_BTRFS_PROGS")
         .map(PathBuf::from)
+        .into_iter()
+        .chain(
+            ["/usr/sbin", "/sbin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/local/bin"]
+                .into_iter()
+                .map(PathBuf::from),
+        )
         .chain(std::env::split_paths(&path));
     for dir in dirs {
         let path = dir.join(name);
@@ -515,3 +522,5 @@ fn a_cache_full_of_blocks_still_reads() {
     assert_eq!(listing(&volume).unwrap(), names_of(3000));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+mod files;

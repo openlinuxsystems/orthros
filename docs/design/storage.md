@@ -17,7 +17,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115, 0117 and 0125.
+0052 to 0059, 0111, 0112, 0115, 0117, 0125 and 0127.
 
 ## Crates
 
@@ -39,8 +39,9 @@ kernel/fs/vfs           radix-vfs: nodes, filesystems, paths, the mount
                         boot archive (compartment)
 kernel/fs/fat           radix-fat: FAT12/16/32 with long names (compartment);
                         tla/Clusters.tla, the model of cluster reuse
-kernel/fs/btrfs         radix-btrfs: Btrfs's checksums, superblock, chunks
-                        and trees, read (compartment, Phase 10b)
+kernel/fs/btrfs         radix-btrfs: Btrfs's checksums, superblock, chunks,
+                        trees, files and subvolumes, read-only
+                        (compartment, Phase 10b)
 kernel/radix            fs/: the tree, disks and their queue, devfs,
                         procfs, sysfs, the writeback thread; user/files.rs:
                         the directory and file methods
@@ -392,8 +393,9 @@ Howard Hinnant's civil-date algorithms.
 
 ## Btrfs
 
-`radix-btrfs` reads Btrfs from its published format documentation (ADR
-0125); Phase 10b.1 has its trees, 10b.2 its files and its mount.
+`radix-btrfs` reads Btrfs from its published format documentation (ADRs
+0125 and 0127): Phase 10b.1 has its trees, 10b.2 its files and its mount,
+read-only until 10c writes it.
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -414,7 +416,28 @@ Howard Hinnant's civil-date algorithms.
 - `volume::Volume` is an opened device: its superblock, its chunk map, a
   block cache of its sectors, and the roots of its trees, the chunk tree
   and the root tree from the superblock, every other tree from its root
-  item.
+  item, and each subvolume's tree with its top directory.
+- `inode`, `dir` and `extent` read the items a subvolume's tree keeps
+  under each inode number: its inode item, its directory entries by name
+  hash (`DIR_ITEM`) and in the order they were made (`DIR_INDEX`), and
+  its file extents (inline, on the disk, or reserved), each with the
+  checksum tree's checksum of its sectors.
+- `fs::BtrfsFs` mounts the default subvolume, as Linux does without
+  `subvol=`: the one the root tree's `default` entry names. Its nodes
+  are found in a table by subvolume and inode number, of weak
+  references, so a file with two names, or a subvolume found twice, is
+  one node. A node is read before the table is locked, and a node read
+  twice by two lookups at once is dropped, which only frees memory. A
+  directory entry that names a subvolume leads to that subvolume's top
+  directory; the inode numbers of the top subvolume are its files' IDs,
+  and other subvolumes' carry their number from bit 40.
+- `node::BtrfsNode` is a file, directory or link. A file's page cache
+  reads each page from its extent: a hole or a reserved extent reads as
+  zeros, an inline one from its item, and one on the disk straight into
+  the page, whose checksum must then match, or the next copy is read;
+  when none matches, or the sector has no checksum and the file is not
+  `NODATASUM`, the read fails with `Io`, as Linux's does. Compressed
+  extents fail with `NotSupported` until 10b.3.
 
 ## tmpfs and the generated trees
 
@@ -468,7 +491,8 @@ makes the links with Unix's names (`/dev`, `/proc`, `/sys`, `/run`,
 `/etc`, `/var`, `/bin`, `/sbin`, `/usr`) and the `.hidden` file that
 keeps them out of listings (ADR 0113); and mounts the FAT filesystem of
 each disk or partition in `/devices` at `/volumes/<name>`, read-only
-when the device is. A disk with a partition table is not mounted whole.
+when the device is, or else its Btrfs filesystem, read-only. A disk with
+a partition table is not mounted whole.
 It then starts the program its arguments name with the root, read and
 write, or since Phase 9 the services.
 
@@ -572,7 +596,10 @@ host, and reads everything back after a second boot.
   and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
-- Btrfs is read only, on one device, and not yet mounted (Phase 10b.2).
+- Btrfs is read-only (10c writes it), on one device (10e), with 4 KiB
+  sectors, and without compressed files (10b.3). Its `statfs` sizes are
+  the superblock's, without Linux's view of the profiles and unallocated
+  space.
   Its tree blocks are read through the sector cache, a page at a time,
   so a block of 16 KiB takes four requests and is held twice, in the
   sector cache and checked in its own.

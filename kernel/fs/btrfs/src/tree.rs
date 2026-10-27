@@ -369,6 +369,31 @@ impl<'v> Cursor<'v> {
     /// A cursor at the first item of the tree `root` whose key is `key`
     /// or after it; past the end if there is none.
     pub fn seek(volume: &'v Volume, root: &Root, key: &Key) -> Result<Cursor<'v>> {
+        let mut cursor = Cursor::descend(volume, root, key)?;
+        cursor.settle()?;
+        Ok(cursor)
+    }
+
+    /// A cursor at the last item of the tree `root` whose key is `key` or
+    /// before it; `None` if there is none.
+    pub fn seek_last(volume: &'v Volume, root: &Root, key: &Key) -> Result<Option<Cursor<'v>>> {
+        let mut cursor = Cursor::descend(volume, root, key)?;
+        let Some((leaf, slot)) = &mut cursor.path[0] else { return Ok(None) };
+        if *slot < leaf.nritems() && leaf.key(*slot) == *key {
+            return Ok(Some(cursor));
+        }
+        // The leaf's first key is its parent's key pointer's, which is
+        // `key` or before it unless every key in the tree is after it.
+        if *slot == 0 {
+            return Ok(None);
+        }
+        *slot -= 1;
+        Ok(Some(cursor))
+    }
+
+    /// A cursor at the slot of the leaf where `key` is or would be: down
+    /// each node's last child whose first key is `key` or before it.
+    fn descend(volume: &'v Volume, root: &Root, key: &Key) -> Result<Cursor<'v>> {
         let mut cursor = Cursor { volume, path: Default::default(), top: usize::from(root.level) };
         let mut block = read_block(volume, root, &Bounds::default())?;
         loop {
@@ -390,7 +415,6 @@ impl<'v> Cursor<'v> {
             cursor.path[level] = Some((block, slot));
             block = read_block(volume, &child, &bounds)?;
         }
-        cursor.settle()?;
         Ok(cursor)
     }
 

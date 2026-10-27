@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
-use crate::{Ctx, Error, Result, kernel, ports, qemu, tla};
+use crate::{Ctx, Error, Result, btrfs, kernel, ports, qemu, tla};
 
 /// mdBook release the handbook is built and tested with.
 pub const MDBOOK_VERSION: &str = "0.4.52";
@@ -299,15 +299,9 @@ fn requirements() -> Vec<Requirement> {
         Requirement {
             name: "btrfs-progs",
             purpose: "makes the Btrfs filesystems Radix's Btrfs tests read",
-            // In /usr/sbin too.
-            found: |_| {
-                ["/usr/sbin/mkfs.btrfs", "/sbin/mkfs.btrfs"]
-                    .iter()
-                    .map(PathBuf::from)
-                    .find(|path| path.exists())
-                    .or_else(|| process::find_program("mkfs.btrfs"))
-                    .map(|path| path.display().to_string())
-            },
+            // In /usr/sbin too; `ob test` fetches a newer copy when
+            // this one is too old for the tests (`btrfs.rs`).
+            found: |_| btrfs::system_mkfs().map(|path| path.display().to_string()),
             packages: all("btrfs-progs"),
             fallback: None,
         },

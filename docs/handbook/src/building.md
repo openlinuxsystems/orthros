@@ -75,6 +75,12 @@ through wrappers `ob` writes (ADR 0069); Ubuntu 24.04 and Linux Mint 22
 have Clang 20 in their updates. The C.UTF-8 locale is compiled with the
 host's `localedef`, which every glibc system has.
 
+btrfs-progs makes the filesystems Radix's Btrfs tests read. Ubuntu 24.04
+and Linux Mint 22 have version 6.6, which lacks options the tests use, so
+`./ob test` fetches Ubuntu 26.04's package (6.17.1), checks its SHA-256 and
+unpacks it into `.cache/btrfs-progs/` without installing it. Fedora and
+Arch Linux have a recent enough version.
+
 Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no `rustup` package and
 no Clang 20: install rustup from <https://rustup.rs> and Clang 20 from
 LLVM's packages at <https://apt.llvm.org>, or build in the container.

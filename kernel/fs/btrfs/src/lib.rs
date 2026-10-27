@@ -16,12 +16,17 @@
 //! - [`chunk`]: where logical addresses lie on the device.
 //! - [`tree`]: reading and checking tree blocks, and searching trees.
 //! - [`volume::Volume`]: an opened device, its chunks and its trees.
+//! - [`inode`], [`dir`] and [`extent`]: the items a subvolume's tree
+//!   keeps for its files, directories and data.
+//! - [`fs::BtrfsFs`] and [`node::BtrfsNode`]: a mounted filesystem, read
+//!   through the VFS.
 //!
 //! The crate is a compartment: it has no `unsafe` code, and builds for the
 //! host (feature `host`).
 
 #![cfg_attr(not(any(test, kani, feature = "host")), no_std)]
 #![forbid(unsafe_code)]
+#![feature(allocator_ext)]
 #![feature(vec_push_within_capacity)]
 
 extern crate alloc;
@@ -29,7 +34,12 @@ extern crate alloc;
 mod blake2b;
 pub mod chunk;
 pub mod csum;
+pub mod dir;
+pub mod extent;
 pub mod format;
+pub mod fs;
+pub mod inode;
+pub mod node;
 mod sha256;
 pub mod superblock;
 pub mod tree;
@@ -38,6 +48,7 @@ pub mod volume;
 #[cfg(test)]
 mod tests;
 
+pub use fs::BtrfsFs;
 pub use volume::Volume;
 
 use radix_vfs::mem::{self, KVec, NoMemory};

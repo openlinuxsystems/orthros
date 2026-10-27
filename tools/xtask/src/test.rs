@@ -10,6 +10,7 @@
 //! image; only the kernel command line in its grub.cfg differs, written
 //! into a slot reserved for it.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,9 @@ use crate::config::{Firmware, Media};
 use crate::image::{self, ImageSpec};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
-use crate::{Args, Ctx, Error, Result, VERSION, corpus, doctor, kernel, screen, tla, userspace};
+use crate::{
+    Args, Ctx, Error, Result, VERSION, btrfs, corpus, doctor, kernel, screen, tla, userspace,
+};
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
 pub const QEMU_EXIT_SUCCESS: i32 = 33;
@@ -116,13 +119,13 @@ pub struct Case {
 /// the reason.
 type Script = fn(&mut Vm, &Case) -> Result<(), String>;
 
-/// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, or raw
-/// bytes.
+/// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, a Btrfs one
+/// `mkfs.btrfs` makes, or raw bytes.
 pub struct Disk {
     /// Its size in KiB.
     kib: u64,
-    /// 12, 16 or 32; or 0 for no filesystem, the disk holding
-    /// [`storage_big_byte`]'s bytes.
+    /// 12, 16 or 32; [`BTRFS`] for Btrfs, of [`btrfs_files`]; or 0 for no
+    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The filesystem's label.
     label: &'static str,
@@ -142,6 +145,9 @@ pub struct Disk {
     /// What the host checks after each boot: [`fsck`] for a FAT disk.
     check: fn(&DiskImage) -> Result<(), String>,
 }
+
+/// [`Disk::fat`] for a Btrfs disk.
+const BTRFS: u8 = 1;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -240,8 +246,8 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
         .collect()
 }
 
-/// The volumes Spark mounts from a case's FAT disks: each disk, or its
-/// partition.
+/// The volumes Spark mounts from a case's FAT and Btrfs disks: each
+/// disk, or its partition.
 fn volume_names(disks: &[Disk]) -> Vec<String> {
     disk_names(disks)
         .into_iter()
@@ -375,6 +381,32 @@ const ERROR_DISKS: &[Disk] = &[
     Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Sata, raw_unchanged) },
     Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Nvme(0), raw_unchanged) },
 ];
+
+/// The size of the `btrfs` test's disks.
+const BTRFS_KIB: u64 = 128 * 1024;
+
+/// A Btrfs test disk on `bus`, with sectors of `sector` bytes, which the
+/// host checks is as it made it: Radix's Btrfs is read-only.
+const fn btrfs_disk(bus: Bus, sector: u64) -> Disk {
+    Disk {
+        kib: BTRFS_KIB,
+        fat: BTRFS,
+        label: "RADIXBTRFS",
+        table: Table::None,
+        bus,
+        sector,
+        device: "",
+        errors: None,
+        check: btrfs_unchanged,
+    }
+}
+
+/// The `btrfs` test's disks: an NVMe namespace of 4 KiB sectors with
+/// BLAKE2b, nodes of 4 KiB and metadata once, and a virtio disk made as
+/// `mkfs.btrfs` makes one by default (CRC-32C, nodes of 16 KiB, metadata
+/// twice) ([`make_btrfs`]): `nvme0n1` and `vda`, in the order the kernel
+/// finds them, as the NVMe controller comes first.
+const BTRFS_DISKS: &[Disk] = &[btrfs_disk(Bus::Nvme(0), 4096), btrfs_disk(Bus::Virtio, 512)];
 
 /// QEMU's blkdebug rules for [`ERROR_DISKS`].
 const ERROR_RULES: &str = "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
@@ -1031,6 +1063,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "btrfs",
+        about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, read-only; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage list",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: btrfs_list,
+        disks: BTRFS_DISKS,
+        second: None,
+    },
+    Case {
         name: "posix",
         about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
@@ -1133,6 +1181,9 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
     let mut cmd = kernel::cargo(ctx, "test");
     for library in KERNEL_LIBRARIES {
         cmd.args(["-p", library]);
+    }
+    if let Some(progs) = btrfs::for_tests(ctx)? {
+        cmd.env("RADIX_BTRFS_PROGS", progs);
     }
     process::run(ctx, &mut cmd)?;
 
@@ -1319,7 +1370,7 @@ fn run_case(
 ) -> Result<(), String> {
     let image = dir.join(format!("{}.img", case.name));
     let qmp = dir.join(format!("{}.qmp", case.name));
-    let disks = make_disks(dir, case)?;
+    let disks = make_disks(ctx, dir, case)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
@@ -1414,10 +1465,10 @@ fn run_case(
 /// The first sector of a partitioned test disk's filesystem: 1 MiB in.
 const PARTITION_START: u64 = 2048;
 
-/// Makes the case's disks afresh in `dir`: with `mkfs.fat`, or filled
-/// with [`storage_big_byte`]'s bytes; and the configuration files of
-/// their errors.
-fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
+/// Makes the case's disks afresh in `dir`: with `mkfs.fat` or
+/// `mkfs.btrfs`, or filled with [`storage_big_byte`]'s bytes; and the
+/// configuration files of their errors.
+fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
     let mut made = Vec::new();
     for (i, disk) in case.disks.iter().enumerate() {
         let path = dir.join(format!("{}-disk{i}.img", case.name));
@@ -1436,6 +1487,11 @@ fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
         if disk.fat == 0 {
             std::fs::write(&image.path, raw_bytes(image.bytes))
                 .map_err(|err| format!("writing {}: {err}", image.path.display()))?;
+            made.push(image);
+            continue;
+        }
+        if disk.fat == BTRFS {
+            make_btrfs(ctx, dir, disk, &image)?;
             made.push(image);
             continue;
         }
@@ -3033,6 +3089,290 @@ fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What a path of the `btrfs` test's tree is.
+enum Made {
+    Dir,
+    File(Vec<u8>),
+    /// A file of this many bytes, these pieces written into it and holes
+    /// elsewhere.
+    Sparse(u64, Vec<(u64, Vec<u8>)>),
+    Link(&'static str),
+    /// Another name of the file at this path, which is made first.
+    Hard(&'static str),
+    Pipe,
+}
+
+/// The file whose second sector [`make_btrfs`] damages on the disk, which
+/// then fails to read.
+const BTRFS_DAMAGED: &str = "damaged.bin";
+
+/// The subvolume of the `btrfs` test's disks.
+const BTRFS_SUBVOLUME: &str = "sub";
+
+/// What the `btrfs` test's disks hold, from the top, each path after its
+/// directory: files around the inline and sector sizes, a sparse one,
+/// links of both kinds, a FIFO, deep and wide directories, a name that is
+/// not ASCII, and a subvolume.
+fn btrfs_files() -> Vec<(String, Made)> {
+    let bytes = |from: usize, len: usize| (from..from + len).map(storage_big_byte).collect();
+    let mut files = vec![
+        ("hello.txt".to_string(), Made::File(b"Written by Linux's mkfs.btrfs.\n".to_vec())),
+        ("empty".to_string(), Made::File(Vec::new())),
+        ("inline.txt".to_string(), Made::File(b"inline ".repeat(15))),
+        ("big.bin".to_string(), Made::File(bytes(0, (1 << 20) + 123))),
+        (
+            "sparse.bin".to_string(),
+            Made::Sparse(
+                4 << 20,
+                vec![(1 << 20, bytes(7, 4096)), ((4 << 20) - 100, bytes(9, 100))],
+            ),
+        ),
+        (BTRFS_DAMAGED.to_string(), Made::File(btrfs_noise(12_345, 3 * 4096))),
+        ("docs".to_string(), Made::Dir),
+        ("docs/deep".to_string(), Made::Dir),
+        ("docs/deep/deeper".to_string(), Made::Dir),
+        ("docs/deep/deeper/note.txt".to_string(), Made::File(b"At the bottom.\n".to_vec())),
+        ("hard.txt".to_string(), Made::Hard("docs/deep/deeper/note.txt")),
+        ("link".to_string(), Made::Link("hello.txt")),
+        ("dangling".to_string(), Made::Link("no/such/file")),
+        ("na\u{ef}ve.txt".to_string(), Made::File(b"Not ASCII.\n".to_vec())),
+        ("pipe".to_string(), Made::Pipe),
+        ("many".to_string(), Made::Dir),
+        (BTRFS_SUBVOLUME.to_string(), Made::Dir),
+        (format!("{BTRFS_SUBVOLUME}/inside.txt"), Made::File(b"In a subvolume.\n".to_vec())),
+        (format!("{BTRFS_SUBVOLUME}/nested"), Made::Dir),
+        (format!("{BTRFS_SUBVOLUME}/nested/deep.txt"), Made::File(bytes(77, 5000))),
+    ];
+    for n in 0..100 {
+        files.push((format!("many/file-{n:03}"), Made::File(format!("file {n}\n").into_bytes())));
+    }
+    files
+}
+
+/// `len` bytes of noise from `seed` (SplitMix64), which no other file of
+/// the test holds, so that [`make_btrfs`] finds the damaged file's sector
+/// on the disk wherever `mkfs.btrfs` put the files.
+fn btrfs_noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        out.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+/// A file's bytes, holes and all.
+fn made_bytes(made: &Made) -> Vec<u8> {
+    match made {
+        Made::File(bytes) => bytes.clone(),
+        Made::Sparse(len, pieces) => {
+            let mut bytes = vec![0; *len as usize];
+            for (at, piece) in pieces {
+                bytes[*at as usize..*at as usize + piece.len()].copy_from_slice(piece);
+            }
+            bytes
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Makes the `btrfs` test's tree of files in `dir`, afresh.
+fn write_btrfs_tree(dir: &Path) -> Result<(), String> {
+    let failed = |what: &Path, err: std::io::Error| format!("making {}: {err}", what.display());
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|err| failed(dir, err))?;
+    }
+    std::fs::create_dir_all(dir).map_err(|err| failed(dir, err))?;
+    for (path, made) in btrfs_files() {
+        let at = dir.join(&path);
+        match made {
+            Made::Dir => std::fs::create_dir(&at).map_err(|err| failed(&at, err))?,
+            Made::File(_) | Made::Sparse(..) => {
+                use std::io::SeekFrom;
+                let mut file = std::fs::File::create(&at).map_err(|err| failed(&at, err))?;
+                let pieces = match &made {
+                    Made::Sparse(len, pieces) => {
+                        file.set_len(*len).map_err(|err| failed(&at, err))?;
+                        pieces.clone()
+                    }
+                    _ => vec![(0, made_bytes(&made))],
+                };
+                for (offset, piece) in pieces {
+                    file.seek(SeekFrom::Start(offset)).map_err(|err| failed(&at, err))?;
+                    file.write_all(&piece).map_err(|err| failed(&at, err))?;
+                }
+            }
+            Made::Link(target) => {
+                std::os::unix::fs::symlink(target, &at).map_err(|err| failed(&at, err))?;
+            }
+            Made::Hard(first) => {
+                std::fs::hard_link(dir.join(first), &at).map_err(|err| failed(&at, err))?;
+            }
+            Made::Pipe => {
+                host_tool(std::process::Command::new("mkfifo").arg(&at))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Makes a disk of the `btrfs` test: `mkfs.btrfs` puts [`btrfs_files`]
+/// on it, with [`BTRFS_SUBVOLUME`] a subvolume, as the disk's sectors
+/// say ([`BTRFS_DISKS`]); then a byte of [`BTRFS_DAMAGED`]'s second sector
+/// is changed on the disk, and the disk's SHA-256 kept beside it for
+/// [`btrfs_unchanged`].
+fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(), String> {
+    let tree = dir.join("btrfs-tree");
+    write_btrfs_tree(&tree)?;
+    let path = &image.path;
+    let file =
+        std::fs::File::create(path).map_err(|err| format!("making {}: {err}", path.display()))?;
+    file.set_len(image.bytes).map_err(|err| format!("sizing {}: {err}", path.display()))?;
+    let mkfs = btrfs::mkfs(ctx).map_err(|err| err.to_string())?;
+    let mut cmd = std::process::Command::new(mkfs);
+    cmd.args(["-q", "-f", "-L", disk.label, "--rootdir"]).arg(&tree);
+    cmd.args(["--subvol", &format!("rw:{BTRFS_SUBVOLUME}")]);
+    if disk.sector == 4096 {
+        cmd.args(["--csum", "blake2", "--nodesize", "4096", "-m", "single"]);
+    }
+    host_tool(cmd.arg(path).stdin(Stdio::null()))?;
+    let mut bytes =
+        std::fs::read(path).map_err(|err| format!("reading {}: {err}", path.display()))?;
+    let damaged = btrfs_files()
+        .into_iter()
+        .find(|(name, _)| name == BTRFS_DAMAGED)
+        .map_or_else(Vec::new, |(_, made)| made_bytes(&made));
+    let second = &damaged[4096..4096 + 64];
+    let at = bytes.windows(second.len()).position(|w| w == second).ok_or_else(|| {
+        format!("{BTRFS_DAMAGED}'s second sector is nowhere on {}", path.display())
+    })?;
+    if bytes[at + 1..].windows(second.len()).any(|w| w == second) {
+        return Err(format!("{BTRFS_DAMAGED}'s second sector is on {} twice", path.display()));
+    }
+    bytes[at + 100] ^= 0x40;
+    std::fs::write(path, &bytes).map_err(|err| format!("writing {}: {err}", path.display()))?;
+    let sum = host_tool(std::process::Command::new("sha256sum").arg(path))?;
+    let sums = path.with_extension("sha256");
+    std::fs::write(&sums, sum).map_err(|err| format!("writing {}: {err}", sums.display()))
+}
+
+/// Checks that a Btrfs disk is as [`make_btrfs`] made it.
+fn btrfs_unchanged(disk: &DiskImage) -> Result<(), String> {
+    let sums = disk.path.with_extension("sha256");
+    let made = std::fs::read(&sums).map_err(|err| format!("reading {}: {err}", sums.display()))?;
+    let now = host_tool(std::process::Command::new("sha256sum").arg(&disk.path))?;
+    if now != made {
+        return Err(format!("{} changed, though it was mounted read-only", disk.path.display()));
+    }
+    Ok(())
+}
+
+/// The lines the storage program's `list` prints for a volume of the
+/// `btrfs` test ([`btrfs_files`]): as Linux would list them, but for the
+/// damaged file, which fails with `io`.
+fn btrfs_listing(volume: &str) -> Vec<String> {
+    let files = btrfs_files();
+    let mut lines = Vec::new();
+    // The first path of each file with more than one name.
+    let mut first: BTreeMap<&str, String> = BTreeMap::new();
+    fn walk<'a>(
+        files: &'a [(String, Made)],
+        at: &str,
+        volume: &str,
+        first: &mut BTreeMap<&'a str, String>,
+        lines: &mut Vec<String>,
+    ) {
+        let mut inside: Vec<&(String, Made)> = files
+            .iter()
+            .filter(|(path, _)| match at {
+                "" => !path.contains('/'),
+                _ => path
+                    .strip_prefix(at)
+                    .and_then(|p| p.strip_prefix('/'))
+                    .is_some_and(|p| !p.contains('/')),
+            })
+            .collect();
+        inside.sort_by(|a, b| a.0.cmp(&b.0));
+        for (path, made) in inside {
+            let line = |what: String| format!("storage: list {volume}: {what}");
+            match made {
+                Made::Dir => {
+                    lines.push(line(format!("dir /{path}")));
+                    walk(files, path, volume, first, lines);
+                }
+                Made::Link(target) => lines.push(line(format!("link /{path} -> {target}"))),
+                Made::Pipe => lines.push(line(format!("pipe /{path}"))),
+                Made::Hard(of) => match first.get(*of) {
+                    Some(seen) => {
+                        lines.push(line(format!("file /{path}: the same file as {seen}")));
+                    }
+                    None => {
+                        first.insert(of, format!("/{path}"));
+                        let bytes = files.iter().find(|(p, _)| p == of).map(|(_, m)| made_bytes(m));
+                        lines.push(line(file_line(path, &bytes.unwrap_or_default())));
+                    }
+                },
+                Made::File(_) | Made::Sparse(..) => match first.get(path.as_str()) {
+                    Some(seen) => {
+                        lines.push(line(format!("file /{path}: the same file as {seen}")));
+                    }
+                    None => {
+                        first.insert(path.as_str(), format!("/{path}"));
+                        if path == BTRFS_DAMAGED {
+                            lines.push(line(format!("file /{path}: io")));
+                        } else {
+                            lines.push(line(file_line(path, &made_bytes(made))));
+                        }
+                    }
+                },
+            }
+        }
+    }
+    /// A file's line: its size and FNV-1a hash.
+    fn file_line(path: &str, bytes: &[u8]) -> String {
+        let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        format!("file /{path}: {} bytes, FNV-1a {hash:016x}", bytes.len())
+    }
+    walk(&files, "", volume, &mut first, &mut lines);
+    lines.push(format!("storage: list {volume}: {} entries", files.len()));
+    lines.push(format!("storage: list {volume}: writes fail with read_only"));
+    lines
+}
+
+/// The `btrfs` test: Spark mounts each disk read-only, and the storage
+/// program lists every volume as [`btrfs_listing`] says.
+fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    let volumes = volume_names(case.disks);
+    for (disk, name) in case.disks.iter().zip(&volumes) {
+        let label = disk.label;
+        vm.expect(&format!(
+            "Files: mounted btrfs from {name} on /volumes/{name}, read-only, labelled {label}"
+        ))?;
+        vm.expect(&format!(
+            "spark: mounted the Btrfs filesystem of {name} at /volumes/{name}, read-only"
+        ))?;
+    }
+    vm.expect("spark: started /system/tests/storage as process ")?;
+    // The program lists the volumes in name order.
+    let mut sorted = volumes.clone();
+    sorted.sort();
+    for name in &sorted {
+        for line in btrfs_listing(name) {
+            vm.expect(&line)?;
+        }
+    }
+    storage_end(vm, "list")
 }
 
 /// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s

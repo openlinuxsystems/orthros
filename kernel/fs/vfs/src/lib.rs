@@ -509,6 +509,8 @@ pub enum FsKind {
     Tmpfs,
     /// FAT12, FAT16 or FAT32 on a disk.
     Fat,
+    /// Btrfs on a disk.
+    Btrfs,
     /// The processes (`/processes`).
     Proc,
     /// The kernel's devices and settings (`/kernel`).
@@ -528,6 +530,7 @@ impl FsKind {
         match self {
             FsKind::Tmpfs => "tmpfs",
             FsKind::Fat => "fat",
+            FsKind::Btrfs => "btrfs",
             FsKind::Proc => "proc",
             FsKind::Sys => "sys",
             FsKind::Dev => "dev",
