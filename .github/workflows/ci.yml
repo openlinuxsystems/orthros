@@ -62,6 +62,25 @@ jobs:
         with:
           workspaces: ". -> target"
 
+      # The ports' builds come from main's last run, so a pull request
+      # rebuilds only the ports its changes reach: ob's stamps decide, as
+      # they do in a local tree. Main always builds them from scratch, and
+      # saves them for the pull requests after it.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
+
       - name: ./ob setup
         run: ./ob setup
 
@@ -76,6 +95,16 @@ jobs:
 
       - name: ./ob image
         run: ./ob image
+
+      - name: Save the built ports
+        if: github.event_name == 'push' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
 
       # `ob image` already refuses components outside their area's
       # allow-list; this checks the SPDX document itself (ADR 0021).
@@ -139,6 +168,22 @@ jobs:
         with:
           workspaces: ". -> target"
 
+      # The ports main built last, as in the build job.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
+
       # The baseline Radix is held to is Linux in the same kind of virtual
       # machine (ADR 0039): the runner's own kernel, which only root may
       # read where Ubuntu installs it.
@@ -187,6 +232,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+
+      # The ports main built last, as in the build job.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
 
       - name: ./ob bench --instructions
         run: ./ob bench --instructions --gate --summary "$GITHUB_STEP_SUMMARY"
@@ -327,11 +388,38 @@ jobs:
             sudo udevadm trigger --name-match=kvm
           fi
 
+      # The ports main built last, as in the build job, keyed by the
+      # container's definition, which holds its Clang.
+      - name: Note the build container's version
+        id: ports-key
+        run: echo "toolchain=$(sha256sum tools/container/Containerfile | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/container/ports/sources
+          key: ports-container-${{ steps.ports-key.outputs.toolchain }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-container-${{ steps.ports-key.outputs.toolchain }}-
+
       - name: ./ob --container doctor
         run: ./ob --container doctor
 
       - name: ./ob --container test
         run: ./ob --container test
+
+      - name: Save the built ports
+        if: github.event_name == 'push' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/sysroot
+            out/ports
+            target/container/ports/sources
+          key: ports-container-${{ steps.ports-key.outputs.toolchain }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
 
   deny:
     name: Licenses and advisories
