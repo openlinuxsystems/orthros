@@ -119,7 +119,8 @@ These run on the build machine or in CI and are never part of an image.
 | [RustSec advisory database](https://github.com/rustsec/advisory-db) | Advisories for cargo-deny | CC0-1.0 |
 | [spdx-tools](https://github.com/spdx/tools-python) 0.8.3 | Validating each image's license manifest | Apache-2.0 |
 | [REUSE tool](https://codeberg.org/fsfe/reuse-tool) 6.2.0, by the FSFE | Checking that every file has copyright and license information | GPL-3.0-or-later |
-| [Python](https://www.python.org/) `hashlib` and [OpenSSL](https://www.openssl.org/) | Reference values for the BLAKE2s and ChaCha20 tests | PSF-2.0, Apache-2.0 |
+| [Python](https://www.python.org/) `hashlib` and `zlib`, [OpenSSL](https://www.openssl.org/) and [zlib](https://zlib.net/) by Jean-loup Gailly and Mark Adler | Reference values for the BLAKE2s and ChaCha20 tests, and the zlib streams the Btrfs decoder's tests inflate | PSF-2.0, Apache-2.0, Zlib |
+| The [Zstandard](https://facebook.github.io/zstd/) program, Ubuntu 24.04's 1.5.5 | Making the zstd frames the Btrfs decoder's tests keep (`kernel/fs/btrfs/src/tests/zstd`) | BSD-3-Clause OR GPL-2.0-only |
 | [Eclipse Temurin](https://adoptium.net/) | The Java runtime for TLC in CI | GPL-2.0-only WITH Classpath-exception-2.0 |
 | [Ubuntu](https://ubuntu.com/) 24.04 | The build container's base image and CI's runners | Various free licenses |
 | [Podman](https://podman.io/) and [Docker Engine](https://github.com/moby/moby) | Running the build container | Apache-2.0 |
@@ -161,6 +162,21 @@ We implement these from their published descriptions. No code is copied.
   Jean-Philippe Aumasson, Samuel Neves, Zooko Wilcox-O'Hearn and Christian
   Winnerlein, specified by Markku-Juhani O. Saarinen and Jean-Philippe
   Aumasson.
+- DEFLATE, by Phil Katz, and zlib's format, from
+  [RFC 1951](https://www.rfc-editor.org/rfc/rfc1951) and
+  [RFC 1950](https://www.rfc-editor.org/rfc/rfc1950), specified by L. Peter
+  Deutsch and Jean-loup Gailly: the Btrfs zlib decoder.
+- Zstandard, by Yann Collet, from
+  [RFC 8878](https://www.rfc-editor.org/rfc/rfc8878), specified by Yann
+  Collet and Murray Kucherawy, and XXH64, from Yann Collet's
+  [xxHash specification](https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md):
+  the Btrfs zstd decoder and one of Btrfs's checksums.
+- LZO1X, by Markus F. X. J. Oberhumer, as Linux's
+  [`Documentation/staging/lzo.rst`](https://docs.kernel.org/staging/lzo.html)
+  describes its format: the Btrfs LZO decoder. We use no LZO code.
+- Btrfs's on-disk format, from the
+  [Btrfs documentation](https://btrfs.readthedocs.io/) and what Linux's
+  `mkfs.btrfs` writes.
 - Daniel J. Bernstein's
   ["Fast-key-erasure random-number generators"](https://blog.cr.yp.to/20170723-random.html),
   the design of the kernel's random number generator and its per-CPU

@@ -24,13 +24,13 @@ use crate::fs::BtrfsFs;
 use crate::node::{BtrfsNode, id_of};
 
 /// The filesystem in `image`, mounted.
-fn mount(image: &[u8]) -> Result<KArc<BtrfsFs>, Error> {
+pub(super) fn mount(image: &[u8]) -> Result<KArc<BtrfsFs>, Error> {
     let device: DeviceRef = disk_of(512, image);
     BtrfsFs::mount(device)
 }
 
 /// `len` bytes no compressor shrinks, from `seed`.
-fn noise(seed: u64, len: usize) -> Vec<u8> {
+pub(super) fn noise(seed: u64, len: usize) -> Vec<u8> {
     let mut random = XorShift(seed | 1);
     (0..len).map(|_| random.next() as u8).collect()
 }
@@ -83,7 +83,7 @@ fn rich_tree() -> PathBuf {
 }
 
 /// Every byte of a file, read through the VFS in pieces of `piece`.
-fn contents(node: &dyn Node, piece: usize) -> Result<Vec<u8>, Error> {
+pub(super) fn contents(node: &dyn Node, piece: usize) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut buf = vec![0; piece];
     loop {
@@ -125,7 +125,7 @@ fn host_kind(meta: &std::fs::Metadata) -> Kind {
 /// Checks that `node` holds what the host directory `host` does, all
 /// the way down; the inodes seen, the host's by device and number, and
 /// ours by ID, must pair up one to one.
-fn same_tree(node: &NodeRef, host: &Path, inodes: &mut BTreeMap<(u64, u64), u64>) {
+pub(super) fn same_tree(node: &NodeRef, host: &Path, inodes: &mut BTreeMap<(u64, u64), u64>) {
     let ours = entries(&**node).unwrap();
     let theirs: BTreeSet<String> = std::fs::read_dir(host)
         .unwrap()
@@ -313,21 +313,6 @@ fn damaged_data_is_read_from_its_other_copy_or_fails() {
         let read = contents(&*file, 4096).unwrap();
         assert_eq!(read.len(), unsummed.len());
         assert_eq!(read[10], unsummed[10] ^ 1, "{profile}");
-    }
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn compressed_data_waits_for_its_decompressors() {
-    let dir = scratch("compressed");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("text"), "Dukovo reads Btrfs.\n".repeat(10_000)).unwrap();
-    for algorithm in ["zlib", "lzo", "zstd"] {
-        let image = mkfs(&["--compress", algorithm], &dir);
-        let fs = mount(&image).unwrap();
-        let file = fs.root().lookup("text").unwrap();
-        assert_eq!(file.stat().size, 200_000);
-        assert_eq!(contents(&*file, 4096), Err(Error::NotSupported), "{algorithm}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

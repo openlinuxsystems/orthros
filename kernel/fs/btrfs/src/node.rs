@@ -19,11 +19,12 @@ use radix_vfs::mem::KArc;
 use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat};
 
 use crate::dir::Entries;
-use crate::extent::{self, Compression, Extent};
+use crate::extent::{self, Compression, Extent, Regular};
 use crate::format::{Key, item, name_hash, tree};
 use crate::fs::Inner;
 use crate::inode::Inode;
 use crate::tree::{Cursor, Root};
+use crate::unpack;
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -91,12 +92,18 @@ impl BtrfsNode {
         Ok(node)
     }
 
-    /// Reads the file's page `index`, `len` bytes of it, into `page`.
-    fn read_page(&self, index: u64, page: &mut Page, len: usize) -> Result<()> {
+    /// Reads the file's page `index`, `len` bytes of it, into `page`;
+    /// offers `more` the extent's other pages when it uncompresses one.
+    fn read_page(
+        &self,
+        index: u64,
+        page: &mut Page,
+        len: usize,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<()> {
         let pos = index * PAGE;
         let volume = &self.fs.volume;
         let key = Key::new(self.ino, item::EXTENT_DATA, pos);
-        let bytes = page.bytes_mut();
         // The extent that starts at `pos` or before it; when it ends
         // before `pos`, or there is none, the page is in a hole.
         let cursor = Cursor::seek_last(volume, &self.tree, &key)?;
@@ -111,47 +118,110 @@ impl BtrfsNode {
             },
             None => None,
         };
+        let bytes = page.bytes_mut();
         match found {
-            None | Some((_, Extent::Prealloc { .. })) => bytes.fill(0),
-            Some((into, Extent::Inline { compression, data, .. })) => {
-                if compression != Compression::None {
-                    return Err(Error::NotSupported);
-                }
+            None
+            | Some((
+                _,
+                Extent::Prealloc { .. } | Extent::Regular(Regular { disk_bytenr: 0, .. }),
+            )) => bytes.fill(0),
+            Some((into, Extent::Inline { compression, data, ram_bytes })) => {
                 // An inline extent is the file's start, and its only extent.
-                let from = usize::try_from(into).map_err(|_| Error::Corrupt)?;
-                let n = data.len().saturating_sub(from).min(PAGE_SIZE);
-                bytes[..n].copy_from_slice(&data[from..from + n]);
-                bytes[n..].fill(0);
-            }
-            Some((
-                into,
-                Extent::Regular {
-                    disk_bytenr, disk_num_bytes, offset, num_bytes, compression, ..
-                },
-            )) => {
-                if disk_bytenr == 0 {
-                    bytes.fill(0);
-                } else if compression != Compression::None {
-                    return Err(Error::NotSupported);
+                if compression == Compression::None {
+                    copy_from(data, into, bytes);
                 } else {
-                    // Within the extent on the disk, and a whole sector
-                    // of it: damage may say otherwise.
-                    if offset.checked_add(num_bytes).is_none_or(|end| end > disk_num_bytes) {
-                        return Err(Error::Corrupt);
-                    }
-                    // `into` is below `num_bytes`, so this cannot overflow.
-                    let logical = disk_bytenr
-                        .checked_add(offset + into)
-                        .filter(|at| at.is_multiple_of(PAGE))
-                        .ok_or(Error::Corrupt)?;
-                    drop(cursor);
-                    self.read_data(logical, page)?;
+                    let len = usize::try_from(ram_bytes).map_err(|_| Error::Corrupt)?;
+                    self.fs.with_workspace(|workspace| {
+                        let data = workspace.unpack(compression, data, len, PAGE_SIZE)?;
+                        copy_from(data, into, bytes);
+                        Ok(())
+                    })?;
+                }
+            }
+            Some((into, Extent::Regular(extent))) => {
+                drop(cursor);
+                if extent.compression == Compression::None {
+                    self.read_plain(&extent, into, page)?;
+                } else {
+                    self.read_compressed(&extent, pos - into, into, page, more)?;
                 }
             }
         }
         // The disk's bytes past the end of the file are not the file's.
         page.bytes_mut()[len..].fill(0);
         Ok(())
+    }
+
+    /// Reads the page `into` bytes into `extent`, uncompressed, into
+    /// `page`.
+    fn read_plain(&self, extent: &Regular, into: u64, page: &mut Page) -> Result<()> {
+        // Within the extent on the disk, and a whole sector of it: damage
+        // may say otherwise.
+        let Regular { disk_bytenr, disk_num_bytes, offset, num_bytes, .. } = *extent;
+        if offset.checked_add(num_bytes).is_none_or(|end| end > disk_num_bytes) {
+            return Err(Error::Corrupt);
+        }
+        // `into` is below `num_bytes`, so this cannot overflow.
+        let logical = disk_bytenr
+            .checked_add(offset + into)
+            .filter(|at| at.is_multiple_of(PAGE))
+            .ok_or(Error::Corrupt)?;
+        self.read_data(logical, page)
+    }
+
+    /// Reads the page `into` bytes into the compressed `extent`, which
+    /// starts at `start` in the file, into `page`: the whole extent is
+    /// read, checked and uncompressed, and its other pages offered to
+    /// `more`.
+    fn read_compressed(
+        &self,
+        extent: &Regular,
+        start: u64,
+        into: u64,
+        page: &mut Page,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<()> {
+        let Regular { disk_bytenr, disk_num_bytes, offset, num_bytes, ram_bytes, compression } =
+            *extent;
+        let compressed = usize::try_from(disk_num_bytes).map_err(|_| Error::Corrupt)?;
+        let len = usize::try_from(ram_bytes).map_err(|_| Error::Corrupt)?;
+        let end = start.checked_add(num_bytes).ok_or(Error::Corrupt)?;
+        if compressed == 0
+            || compressed > unpack::MAX_COMPRESSED
+            || !compressed.is_multiple_of(PAGE_SIZE)
+            || !disk_bytenr.is_multiple_of(PAGE)
+            || disk_bytenr.checked_add(disk_num_bytes).is_none()
+            || len > unpack::MAX_UNCOMPRESSED
+        {
+            return Err(Error::Corrupt);
+        }
+        self.fs.with_workspace(|workspace| {
+            for at in (0..compressed).step_by(PAGE_SIZE) {
+                self.read_data(disk_bytenr + at as u64, &mut workspace.sector)?;
+                workspace.input[at..at + PAGE_SIZE].copy_from_slice(workspace.sector.bytes());
+            }
+            let data = workspace.unpack_input(compression, compressed, len, PAGE_SIZE)?;
+            copy_from(data, offset.saturating_add(into), page.bytes_mut());
+            // The extent's other whole pages in the file, for its cache,
+            // as far as its data goes.
+            let index = (start + into) / PAGE;
+            let mut at = start.next_multiple_of(PAGE);
+            while at.checked_add(PAGE).is_some_and(|next| next <= end) {
+                let Some(from) = offset
+                    .checked_add(at - start)
+                    .and_then(|from| usize::try_from(from).ok())
+                    .filter(|&from| from < len)
+                else {
+                    break;
+                };
+                if at / PAGE != index && !more(at / PAGE, &data[from..(from + PAGE_SIZE).min(len)])
+                {
+                    break;
+                }
+                at += PAGE;
+            }
+            Ok(())
+        })
     }
 
     /// Reads the data sector at logical address `logical` into `page`,
@@ -204,7 +274,17 @@ impl Backing for FileBacking<'_> {
     }
 
     fn read_page(&self, index: u64, page: &mut Page, len: usize) -> Result<()> {
-        self.0.read_page(index, page, len)
+        self.0.read_page(index, page, len, &mut |_, _| false)
+    }
+
+    fn read_pages(
+        &self,
+        index: u64,
+        page: &mut Page,
+        len: usize,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<()> {
+        self.0.read_page(index, page, len, more)
     }
 
     fn reserve(&self, _size: u64) -> Result<()> {
@@ -367,10 +447,24 @@ impl Node for BtrfsNode {
 
 impl BtrfsNode {
     /// Drops up to `max` pages of its cache; returns how many.
+    /// How many pages the file's cache holds.
+    #[cfg(test)]
+    pub(crate) fn cached_pages(&self) -> usize {
+        self.cache.as_ref().map_or(0, FileCache::pages)
+    }
+
     pub(crate) fn shrink(&self, max: usize) -> usize {
         match &self.cache {
             Some(cache) => cache.shrink(max, &FileBacking(self)),
             None => 0,
         }
     }
+}
+
+/// Copies `data` from byte `from` on into `to`, with zeros after its end.
+fn copy_from(data: &[u8], from: u64, to: &mut [u8]) {
+    let from = usize::try_from(from).map_or(data.len(), |from| from.min(data.len()));
+    let n = (data.len() - from).min(to.len());
+    to[..n].copy_from_slice(&data[from..from + n]);
+    to[n..].fill(0);
 }

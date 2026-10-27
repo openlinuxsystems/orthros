@@ -42,28 +42,32 @@ pub enum Extent<'a> {
         /// Them, as kept.
         data: &'a [u8],
     },
-    /// `num_bytes` bytes from `offset` into the extent of `disk_num_bytes`
-    /// bytes at logical address `disk_bytenr` (`ram_bytes` once
-    /// uncompressed); a hole if `disk_bytenr` is 0.
-    Regular {
-        /// The extent's logical address.
-        disk_bytenr: u64,
-        /// Its size on the disk.
-        disk_num_bytes: u64,
-        /// Where the file's bytes start in it, uncompressed.
-        offset: u64,
-        /// How many of its bytes the file has.
-        num_bytes: u64,
-        /// Its size, uncompressed.
-        ram_bytes: u64,
-        /// How it is compressed.
-        compression: Compression,
-    },
+    /// Bytes of an extent elsewhere on the disk.
+    Regular(Regular),
     /// `num_bytes` bytes allocated and not yet written: zeros.
     Prealloc {
         /// How many.
         num_bytes: u64,
     },
+}
+
+/// `num_bytes` bytes from `offset` into the extent of `disk_num_bytes`
+/// bytes at logical address `disk_bytenr` (`ram_bytes` once uncompressed);
+/// a hole if `disk_bytenr` is 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Regular {
+    /// The extent's logical address.
+    pub disk_bytenr: u64,
+    /// Its size on the disk.
+    pub disk_num_bytes: u64,
+    /// Where the file's bytes start in it, uncompressed.
+    pub offset: u64,
+    /// How many of its bytes the file has.
+    pub num_bytes: u64,
+    /// Its size, uncompressed.
+    pub ram_bytes: u64,
+    /// How it is compressed.
+    pub compression: Compression,
 }
 
 /// The size of an item's header, and of a regular or preallocated one.
@@ -105,14 +109,14 @@ impl<'a> Extent<'a> {
             }
             1 => {
                 let (disk_bytenr, disk_num_bytes, offset, num_bytes) = regular()?;
-                Ok(Extent::Regular {
+                Ok(Extent::Regular(Regular {
                     disk_bytenr,
                     disk_num_bytes,
                     offset,
                     num_bytes,
                     ram_bytes,
                     compression,
-                })
+                }))
             }
             2 => {
                 let (_, _, _, num_bytes) = regular()?;
@@ -126,7 +130,9 @@ impl<'a> Extent<'a> {
     pub fn len(&self) -> u64 {
         match *self {
             Extent::Inline { ram_bytes, .. } => ram_bytes,
-            Extent::Regular { num_bytes, .. } | Extent::Prealloc { num_bytes } => num_bytes,
+            Extent::Regular(Regular { num_bytes, .. }) | Extent::Prealloc { num_bytes } => {
+                num_bytes
+            }
         }
     }
 

@@ -402,10 +402,11 @@ const fn btrfs_disk(bus: Bus, sector: u64) -> Disk {
 }
 
 /// The `btrfs` test's disks: an NVMe namespace of 4 KiB sectors with
-/// BLAKE2b, nodes of 4 KiB and metadata once, and a virtio disk made as
-/// `mkfs.btrfs` makes one by default (CRC-32C, nodes of 16 KiB, metadata
-/// twice) ([`make_btrfs`]): `nvme0n1` and `vda`, in the order the kernel
-/// finds them, as the NVMe controller comes first.
+/// BLAKE2b, nodes of 4 KiB, metadata once and data compressed with zstd,
+/// and a virtio disk made as `mkfs.btrfs` makes one by default (CRC-32C,
+/// nodes of 16 KiB, metadata twice) but for data compressed with zlib
+/// ([`make_btrfs`]): `nvme0n1` and `vda`, in the order the kernel finds
+/// them, as the NVMe controller comes first.
 const BTRFS_DISKS: &[Disk] = &[btrfs_disk(Bus::Nvme(0), 4096), btrfs_disk(Bus::Virtio, 512)];
 
 /// QEMU's blkdebug rules for [`ERROR_DISKS`].
@@ -1064,7 +1065,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs",
-        about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, read-only; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
+        about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, compressed with zstd and zlib, read-only; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage list",
@@ -3121,6 +3122,7 @@ fn btrfs_files() -> Vec<(String, Made)> {
         ("hello.txt".to_string(), Made::File(b"Written by Linux's mkfs.btrfs.\n".to_vec())),
         ("empty".to_string(), Made::File(Vec::new())),
         ("inline.txt".to_string(), Made::File(b"inline ".repeat(15))),
+        ("text.txt".to_string(), Made::File(btrfs_text())),
         ("big.bin".to_string(), Made::File(bytes(0, (1 << 20) + 123))),
         (
             "sparse.bin".to_string(),
@@ -3152,8 +3154,9 @@ fn btrfs_files() -> Vec<(String, Made)> {
 }
 
 /// `len` bytes of noise from `seed` (SplitMix64), which no other file of
-/// the test holds, so that [`make_btrfs`] finds the damaged file's sector
-/// on the disk wherever `mkfs.btrfs` put the files.
+/// the test holds and no compressor shrinks, so that [`make_btrfs`] finds
+/// the damaged file's sector on the disk, as it is, wherever `mkfs.btrfs`
+/// put the files.
 fn btrfs_noise(seed: u64, len: usize) -> Vec<u8> {
     let mut state = seed;
     let mut out = Vec::with_capacity(len + 8);
@@ -3166,6 +3169,13 @@ fn btrfs_noise(seed: u64, len: usize) -> Vec<u8> {
     }
     out.truncate(len);
     out
+}
+
+/// Text that compresses, of many extents.
+fn btrfs_text() -> Vec<u8> {
+    (0..8000)
+        .flat_map(|n| format!("line {n}: Dukovo reads compressed Btrfs extents.\n").into_bytes())
+        .collect()
 }
 
 /// A file's bytes, holes and all.
@@ -3224,8 +3234,9 @@ fn write_btrfs_tree(dir: &Path) -> Result<(), String> {
 }
 
 /// Makes a disk of the `btrfs` test: `mkfs.btrfs` puts [`btrfs_files`]
-/// on it, with [`BTRFS_SUBVOLUME`] a subvolume, as the disk's sectors
-/// say ([`BTRFS_DISKS`]); then a byte of [`BTRFS_DAMAGED`]'s second sector
+/// on it, with [`BTRFS_SUBVOLUME`] a subvolume, compressed, as the disk's
+/// sectors say ([`BTRFS_DISKS`]), the damaged file's noise kept as it is;
+/// then a byte of [`BTRFS_DAMAGED`]'s second sector
 /// is changed on the disk, and the disk's SHA-256 kept beside it for
 /// [`btrfs_unchanged`].
 fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(), String> {
@@ -3240,7 +3251,9 @@ fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(
     cmd.args(["-q", "-f", "-L", disk.label, "--rootdir"]).arg(&tree);
     cmd.args(["--subvol", &format!("rw:{BTRFS_SUBVOLUME}")]);
     if disk.sector == 4096 {
-        cmd.args(["--csum", "blake2", "--nodesize", "4096", "-m", "single"]);
+        cmd.args(["--csum", "blake2", "--nodesize", "4096", "-m", "single", "--compress", "zstd"]);
+    } else {
+        cmd.args(["--compress", "zlib"]);
     }
     host_tool(cmd.arg(path).stdin(Stdio::null()))?;
     let mut bytes =

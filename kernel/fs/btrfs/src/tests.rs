@@ -523,4 +523,5 @@ fn a_cache_full_of_blocks_still_reads() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+mod compressed;
 mod files;

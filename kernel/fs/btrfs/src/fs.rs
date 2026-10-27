@@ -17,20 +17,23 @@
 //! while reading the disk: a node is read first, and when another was
 //! added for the same inode meanwhile, that one is used and the new one
 //! dropped, which only frees memory. A file's page cache is taken before
-//! the volume's block cache, which is taken before the disk's.
+//! the workspace of compressed reads, which is taken before the volume's
+//! block cache, which is taken before the disk's. Shrinking only tries
+//! the workspace's lock, as a reader that holds it may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
 
 use radix_block::{DeviceRef, PAGE_SIZE};
 use radix_sync::Mutex;
-use radix_vfs::mem::{self, Alloc, KArc, KVec};
+use radix_vfs::mem::{self, Alloc, KArc, KBox, KVec};
 use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
 
 use crate::dir::Entries;
 use crate::format::{Key, item, name_hash, tree};
 use crate::node::BtrfsNode;
 use crate::tree::{Cursor, Root};
+use crate::unpack::Workspace;
 use crate::volume::Volume;
 
 /// An entry of the node table: a node's subvolume and inode number, and
@@ -44,6 +47,8 @@ pub(crate) struct Inner {
     pub(crate) csums: Option<Root>,
     /// The nodes in use, by subvolume and inode number, sorted.
     nodes: Mutex<KVec<Entry>>,
+    /// What reading compressed extents uses, once one is read.
+    workspace: Mutex<Option<KBox<Workspace>>>,
 }
 
 /// A mounted Btrfs filesystem.
@@ -107,9 +112,36 @@ impl Inner {
     /// for [`BtrfsFs::mount`]'s stack frame to hold as well.
     #[inline(never)]
     fn open(device: DeviceRef) -> Result<KArc<Inner>> {
-        let volume = Volume::open(device)?;
+        Inner::of(Volume::open(device)?)
+    }
+
+    /// What the nodes of `volume` share, on the heap, in a frame of its
+    /// own.
+    #[inline(never)]
+    fn of(volume: Volume) -> Result<KArc<Inner>> {
         let csums = volume.tree(tree::CSUM)?;
-        Ok(mem::arc(Inner { volume, csums, nodes: Mutex::new(mem::vec()) })?)
+        let nodes = Mutex::new(mem::vec());
+        Ok(mem::arc(Inner { volume, csums, nodes, workspace: Mutex::new(None) })?)
+    }
+
+    /// Runs `f` with the workspace of compressed reads, made if need be.
+    pub(crate) fn with_workspace<R>(
+        &self,
+        f: impl FnOnce(&mut Workspace) -> Result<R>,
+    ) -> Result<R> {
+        let mut slot = self.workspace.lock();
+        let workspace = match &mut *slot {
+            Some(workspace) => workspace,
+            empty => empty.insert(mem::boxed(Workspace::new()?)?),
+        };
+        f(workspace)
+    }
+
+    /// Drops the workspace of compressed reads, unless one is under way;
+    /// returns the pages it held.
+    fn drop_workspace(&self) -> usize {
+        let Some(mut slot) = self.workspace.try_lock() else { return 0 };
+        slot.take().map_or(0, |workspace| workspace.pages())
     }
 
     /// The node of inode `ino` of subvolume `subvol`, whose tree is
@@ -207,6 +239,9 @@ impl FileSystem for BtrfsFs {
 
     fn shrink(&self, max: usize) -> usize {
         let mut dropped = self.inner.volume.shrink(max);
+        if dropped < max {
+            dropped += self.inner.drop_workspace();
+        }
         if dropped < max {
             let Ok(live) = self.inner.live_nodes() else { return dropped };
             for node in &live {
