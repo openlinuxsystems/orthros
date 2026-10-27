@@ -244,10 +244,16 @@ fn reads_subvolumes_and_the_default_one() {
     same_tree(&fs.root(), &dir, &mut inodes);
     let vol = fs.root().lookup("vol").unwrap();
     let inner = vol.lookup("inner").unwrap();
-    let ids = [fs.root().stat().id, vol.stat().id, inner.stat().id];
-    assert_eq!(ids, [256, id_of(256, 256), id_of(257, 256)]);
+    let other = fs.root().lookup("other").unwrap();
     let node = |node: &NodeRef| node.as_any().downcast_ref::<BtrfsNode>().unwrap().subvol;
-    assert_eq!([node(&fs.root()), node(&vol), node(&inner)], [5, 256, 257]);
+    // `mkfs.btrfs` numbers subvolumes from 256 in the order it finds
+    // them, which is the order the host's directory lists them in.
+    assert_eq!(node(&fs.root()), 5);
+    let mut numbers = [node(&vol), node(&inner), node(&other)];
+    numbers.sort_unstable();
+    assert_eq!(numbers, [256, 257, 258]);
+    let ids = [fs.root().stat().id, vol.stat().id, inner.stat().id];
+    assert_eq!(ids, [256, id_of(node(&vol), 256), id_of(node(&inner), 256)]);
     // The same subvolume, found twice, is one node.
     assert!(KArc::ptr_eq(&vol, &fs.root().lookup("vol").unwrap()));
     // A default subvolume is what mounts.
