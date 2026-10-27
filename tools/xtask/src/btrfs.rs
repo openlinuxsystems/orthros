@@ -103,6 +103,21 @@ pub fn mkfs(ctx: &Ctx) -> Result<PathBuf> {
     }
 }
 
+/// The `btrfs` tool the tests check and read filesystems with: beside
+/// the `mkfs.btrfs` they use ([`mkfs`]), in the pinned copy's `usr/bin`,
+/// or else the system's.
+pub fn tool(ctx: &Ctx) -> Result<PathBuf> {
+    match for_tests(ctx)? {
+        Some(sbin) => Ok(sbin.with_file_name("bin").join("btrfs")),
+        None => ["/usr/bin/btrfs", "/bin/btrfs", "/usr/sbin/btrfs", "/sbin/btrfs"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists())
+            .or_else(|| process::find_program("btrfs"))
+            .ok_or_else(|| Error::new("the btrfs tool of btrfs-progs is missing")),
+    }
+}
+
 /// Downloads the pinned package to `deb`, from the first of [`URLS`]
 /// that serves it whole.
 fn fetch(ctx: &Ctx, deb: &Path) -> Result<()> {

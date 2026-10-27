@@ -24,6 +24,7 @@ use radix_vfs::{Error, Result};
 
 use crate::chunk::kind;
 use crate::format::{Key, item, tree};
+use crate::grow::Grown;
 use crate::space::Space;
 use crate::superblock::{compat_ro, incompat};
 use crate::tree::{Block, Bounds, Cursor, HEADER_SIZE, ITEM_SIZE, MAX_LEVEL, Root, read_block};
@@ -77,6 +78,8 @@ pub struct Writer {
     pub(crate) tree_used: KVec<(u64, i64)>,
     /// The change in bytes allocated, for the superblock.
     pub(crate) bytes_used: i64,
+    /// The chunks it made.
+    pub(crate) grown: Grown,
     /// Whether a change failed half made.
     broken: bool,
 }
@@ -90,6 +93,7 @@ impl Writer {
     /// (Phase 10e), with a log tree Linux left to replay (10c.2), or
     /// without the free-space tree or the skinny extent items every
     /// `mkfs.btrfs` since 2013 makes.
+    #[inline(never)]
     pub fn new(volume: &Volume) -> Result<Writer> {
         /// What the writer does not keep up yet.
         const REFUSED: u64 = incompat::RAID56
@@ -118,6 +122,7 @@ impl Writer {
             pinned: mem::vec(),
             tree_used: mem::vec(),
             bytes_used: 0,
+            grown: Grown::new(),
             broken: false,
         })
     }
@@ -125,7 +130,8 @@ impl Writer {
     /// Fails with [`Error::NotSupported`] if the root tree names a tree
     /// whose blocks may be shared or counted elsewhere: a subvolume that
     /// was ever snapshotted, quotas, or a relocation under way (10c.2 and
-    /// later).
+    /// later). A frame of its own, as each of a mount's reads has.
+    #[inline(never)]
     fn check_trees(volume: &Volume) -> Result<()> {
         /// A tree relocation copies blocks into, for a balance.
         const TREE_RELOC: u64 = (-8i64) as u64;
@@ -336,7 +342,7 @@ impl Writer {
         let want = if tree == tree::CHUNK { kind::SYSTEM } else { kind::METADATA };
         mem::push(&mut self.changes, Change::Made { bytenr: 0, level, owner: tree })?;
         // A block never crosses a stripe of 64 KiB: it is aligned to its size.
-        let bytenr = match self.space.take(want, nodesize, nodesize) {
+        let bytenr = match self.take(volume, want, nodesize, nodesize) {
             Ok(bytenr) => bytenr,
             Err(e) => {
                 self.changes.pop();
@@ -376,12 +382,32 @@ impl Writer {
         self.space.free_pinned(root.bytenr, nodesize)
     }
 
-    /// Takes `len` bytes for file data, whole sectors.
+    /// Takes `len` bytes for file data, whole sectors; commits first if
+    /// only what the last commit freed has room. It is called between
+    /// changes, never inside one.
     pub(crate) fn alloc_data(&mut self, volume: &Volume, len: u64) -> Result<u64> {
         let sector = u64::from(volume.superblock().sectorsize);
-        let at = self.space.take(kind::DATA, len, sector)?;
+        let at = match self.take(volume, kind::DATA, len, sector) {
+            Err(Error::NoSpace) if self.space.pinned_bytes(kind::DATA) >= len => {
+                self.commit(volume)?;
+                self.take(volume, kind::DATA, len, sector)?
+            }
+            taken => taken?,
+        };
         self.bytes_used += len as i64;
         Ok(at)
+    }
+
+    /// Takes `size` bytes aligned to `align` from a block group of `want`,
+    /// or from a new chunk when every such group is full.
+    fn take(&mut self, volume: &Volume, want: u64, size: u64, align: u64) -> Result<u64> {
+        match self.space.take(want, size, align) {
+            Err(Error::NoSpace) => {
+                self.new_chunk(volume, want, size.next_multiple_of(align))?;
+                self.space.take(want, size, align)
+            }
+            taken => taken,
+        }
     }
 
     /// Frees the data extent `[start, start + len)`: at once if this

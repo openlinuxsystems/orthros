@@ -530,18 +530,45 @@ _target/userspace/_).
 	*btrfs*
 		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
 		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB
-		sectors with BLAKE2b, nodes of 4 KiB, metadata once and data
-		compressed with zstd, and a virtio disk as it makes one by default
-		(CRC-32C, nodes of 16 KiB, metadata twice) but for data compressed
-		with zlib. The files are of sizes around the inline and sector
-		limits, sparse, deep and wide, with text that compresses, links of
-		both kinds, a FIFO, a name that is not ASCII and a subvolume; the host changes
-		a byte of one file's second sector on each disk. Spark must mount
-		both read-only, and _/system/tests/storage list_ must list every
-		file, directory and link as the host made it, with each file's
-		size and FNV-1a hash, the damaged file failing with *io*, and
-		every write refused with *read_only*. On the host, each disk must
-		be byte for byte as it was made.
+		sectors with BLAKE2b, nodes of 4 KiB, metadata once, data
+		compressed with zstd and its holes named (*-O ^no-holes*), and a
+		virtio disk as it makes one by default (CRC-32C, nodes of 16 KiB,
+		metadata twice) but for data compressed with zlib. The files are of
+		sizes around the inline and sector limits, sparse, deep and wide,
+		with text that compresses, links of both kinds, a FIFO, a name
+		that is not ASCII and a subvolume; the host changes a byte of one
+		file's second sector on each disk. Radix does not write named
+		holes, and the virtio disk is attached read-only (QEMU's
+		_readonly=on_), so Spark must mount both read-only, and
+		_/system/tests/storage list_ must list every file, directory and
+		link as the host made it, with each file's size and FNV-1a hash,
+		the damaged file failing with *io*, and every write refused with
+		*read_only*. On the host, each disk must be byte for byte as it
+		was made.
+
+	*btrfs-write*
+		The *storage* test on two 128 MiB Btrfs disks of the *btrfs*
+		test's kinds, uncompressed, which *mkfs.btrfs* made holding only
+		the file the host writes to FAT disks between the boots. Spark
+		must mount both to write; on Btrfs the program also writes
+		_grow.bin_, 12 MiB, past the first data chunk. After each boot,
+		Linux's *btrfs check --check-data-csum* must find nothing wrong;
+		between the boots, *btrfs restore* must copy out every file as
+		written, and none of those renamed or removed.
+
+	*btrfs-power-cut*
+		Boot 2 CPUs under UEFI with a 128 MiB Btrfs disk as *mkfs.btrfs*
+		makes one by default. _/system/tests/storage churn_ writes a file,
+		syncs it, renames it and syncs the directory, then removes the
+		file of eight rounds before and syncs again, saying so after each
+		sync, and the host kills QEMU 0 to 1.5 seconds after round 30,
+		mid-write. *btrfs check* must find nothing wrong, and as *btrfs
+		restore* copies the files out, each file said synced must be
+		whole unless said removed, each said removed gone, and any other
+		whole or a start of itself. Booted again,
+		_/system/tests/storage churned_ must find the same, remove the
+		files and write and sync another, and *btrfs check* must pass
+		again.
 
 	*posix*
 		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark

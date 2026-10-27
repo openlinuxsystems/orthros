@@ -229,6 +229,10 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   btrfs            two Btrfs disks Linux made, compressed, mounted
                    read-only: every file reads as the host wrote it, a
                    damaged one fails
+  btrfs-write      the storage test on two Btrfs disks Linux made, past
+                   their first data chunk; Linux's btrfs check passes
+  btrfs-power-cut  the power is cut while Btrfs files are synced: btrfs
+                   check passes, every synced file is whole
   posix            C programs on mlibc, a Rust std one and the ported
                    utilities: fork, exec, signals, pipes, terminals, files,
                    threads

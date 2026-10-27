@@ -22,7 +22,6 @@ use radix_vfs::{Error, FileSystem, SliceMut};
 
 use super::files::{contents, mount, noise, same_tree};
 use super::{XorShift, mkfs, open, scratch};
-use crate::Volume;
 use crate::extent::{Compression, Extent, Regular};
 use crate::format::{Key, item, tree};
 use crate::inflate::Inflate;
@@ -405,7 +404,7 @@ struct Found {
 
 /// The extents of the files of the top subvolume of `image`.
 fn extents(image: &[u8]) -> Vec<Found> {
-    let volume: Volume = open(image).unwrap();
+    let volume = open(image).unwrap();
     let fs = volume.tree(tree::FS).unwrap().unwrap();
     let mut cursor = Cursor::seek(&volume, &fs, &Key::new(0, 0, 0)).unwrap();
     let mut found = Vec::new();

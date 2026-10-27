@@ -79,6 +79,7 @@ impl Writer {
         for (start, len) in core::mem::replace(&mut self.pinned, mem::vec()) {
             self.space.unpin(start, len)?;
         }
+        self.grown_committed();
         self.generation += 1;
         self.bytes_used = 0;
         Ok(())
@@ -89,7 +90,9 @@ impl Writer {
     /// blocks too, so this goes on until a round changes nothing.
     fn catch_up(&mut self, volume: &Volume) -> Result<()> {
         loop {
-            let mut busy = false;
+            // A chunk's items come before its group's used bytes and free
+            // space are written.
+            let mut busy = self.record_chunks(volume)?;
             let changes = core::mem::replace(&mut self.changes, mem::vec());
             busy |= !changes.is_empty();
             for change in changes {
@@ -97,6 +100,9 @@ impl Writer {
             }
             for start in self.space.changed()? {
                 busy = true;
+                if self.unrecorded(start) {
+                    continue;
+                }
                 let (len, log, delta) = self.space.take_changes(start)?;
                 if delta != 0 {
                     self.add_used(volume, start, len, delta)?;
@@ -327,6 +333,7 @@ impl Writer {
         put_u64(&mut sb, at::CHUNK_ROOT_GENERATION, chunk.generation);
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
         put_u64(&mut sb, at::BYTES_USED, used);
+        self.grow_superblock(&mut sb)?;
         Self::write_backup(volume, &mut sb)?;
         let sum = csum.sum(&sb[crate::csum::CSUM_SIZE..]);
         sb[..crate::csum::CSUM_SIZE].copy_from_slice(&sum);

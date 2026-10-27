@@ -461,7 +461,7 @@ impl BtrfsNode {
     /// Drops the file's extents from byte `from` to `to` (whole pages): it
     /// grows over them, and they read as zeros.
     fn zero(&self, from: u64, to: u64) -> Result<()> {
-        self.fs.change(|txn| {
+        self.fs.freeing(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             self.convert_inline(&mut files)?;
             files.whole(|f| {
@@ -483,7 +483,7 @@ impl BtrfsNode {
     fn truncate(&self, size: u64) -> Result<()> {
         let sector = u64::from(self.fs.volume.superblock().sectorsize);
         let time = now();
-        self.fs.change(|txn| {
+        self.fs.freeing(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             if size > 0 {
                 self.convert_inline(&mut files)?;
@@ -654,10 +654,18 @@ impl Backing for FileBacking<'_> {
         self.0.write_run(index, pages, len)
     }
 
-    /// Space is taken when the data is written, at the next sync (10c.1c
-    /// reserves it first).
+    /// Space is taken when the data is written, at the next sync; each
+    /// page reserves its room as it changes ([`Backing::reserve_pages`]).
     fn reserve(&self, _size: u64) -> Result<()> {
         if self.0.fs.writable() { Ok(()) } else { Err(Error::ReadOnly) }
+    }
+
+    fn reserve_pages(&self, pages: usize) -> Result<()> {
+        self.0.fs.reserve_data(pages as u64 * PAGE)
+    }
+
+    fn release_pages(&self, pages: usize) {
+        self.0.fs.release_data(pages as u64 * PAGE);
     }
 
     fn zero(&self, from: u64, to: u64) -> Result<()> {
@@ -854,7 +862,7 @@ impl Node for BtrfsNode {
         self.is_dir()?;
         check_name(name)?;
         let time = now();
-        self.fs.change(|txn| {
+        self.fs.freeing(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             let (ino, old) = self.named(&files, name)?;
             if old.kind()? == Kind::Directory && !files.is_empty_dir(ino)? {
@@ -1023,6 +1031,9 @@ impl Drop for BtrfsNode {
     /// they go at the next sync.
     fn drop(&mut self) {
         if *self.removed.get_mut() {
+            // Its dirty pages are never written: their room goes back.
+            let pages = self.dirty_pages();
+            self.fs.release_data(pages as u64 * PAGE);
             self.fs.reaped(self.subvol, self.ino);
         }
     }

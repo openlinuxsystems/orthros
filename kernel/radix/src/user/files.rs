@@ -482,12 +482,8 @@ pub fn directory_method(
             let kind = kind.copy(a.filesystem)?;
             let kind = kind.as_str()?;
             let source = if kind == "fat" || kind == "btrfs" {
-                // Btrfs is read-only until Phase 10c.
-                let needs = if read_only || kind == "btrfs" {
-                    Rights::READ
-                } else {
-                    Rights::READ.union(Rights::WRITE)
-                };
+                let needs =
+                    if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
                 Some(objects::file(cspace, a.source, needs)?.1)
             } else if a.source != 0 {
                 return Err(Kernel::InvalidArgument.status(2));

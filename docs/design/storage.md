@@ -17,7 +17,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127, 0128, 0129 and 0130.
+0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127, 0128 and 0129 to 0131.
 
 ## Crates
 
@@ -399,7 +399,8 @@ Howard Hinnant's civil-date algorithms.
 0125, 0127 and 0128): Phase 10b.1 has its trees, 10b.2 its files and its
 mount, 10b.3 its compressed extents. Phase 10c.1 writes its trees by
 copying on write, in transactions (ADR 0129), and 10c.1b its files
-through them (ADR 0130); the kernel mounts it writable from 10c.1c.
+through them (ADR 0130); 10c.1c makes chunks as it fills and reserves
+room before a change (ADR 0131), and the kernel mounts it writable.
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -499,6 +500,18 @@ through them (ADR 0130); the kernel mounts it writable from 10c.1c.
   or at the next writable mount from its orphan item. A commit is due 30
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
+- `grow` makes a chunk when a kind (data, metadata or the chunk tree)
+  has no room, in memory at once and on the disk at the commit (ADR
+  0131): Linux's sizes, the first free range of the device from 1 MiB,
+  logical addresses after every other chunk, the profile of its kind.
+  The chunk map is replaced whole under RCU, so readers take no lock.
+  Before each change the writer checks that metadata has room for 16
+  paths of eight levels (the change's and the commit's) and a block per
+  64 new extent items, making chunks or committing for it, or fails the
+  change whole with `NoSpace`; removing and cutting files need only the
+  commit's half. Data takes its room when a page becomes dirty
+  (`Backing::reserve_pages`), so a full disk fails the `write`, never a
+  sync; `statfs` reports data's room less what dirty pages hold.
 
 ## tmpfs and the generated trees
 
@@ -551,8 +564,9 @@ The kernel makes only the root, an empty tmpfs, and gives it to Spark in
 makes the links with Unix's names (`/dev`, `/proc`, `/sys`, `/run`,
 `/etc`, `/var`, `/bin`, `/sbin`, `/usr`) and the `.hidden` file that
 keeps them out of listings (ADR 0113); and mounts the FAT filesystem of
-each disk or partition in `/devices` at `/volumes/<name>`, read-only
-when the device is, or else its Btrfs filesystem, read-only. A disk with
+each disk or partition in `/devices` at `/volumes/<name>`, or else its
+Btrfs filesystem, read-only when the device is (or, for Btrfs, when it
+uses a feature Radix does not write yet). A disk with
 a partition table is not mounted whole.
 It then starts the program its arguments name with the root, read and
 write, or since Phase 9 the services.
@@ -604,6 +618,17 @@ reasons, that run only at boot, in the panic handler or in boot tests.
 Large arrays are built on the heap a slot at a time (the page index's
 nodes), copies of tables go an entry at a time (the PCI functions), and
 the lock checker's graph searches use bit sets instead of queues.
+
+A frame budget does not bound the sum. Btrfs goes deepest: a writable
+mount reads every block group's free space under the mount call, and a
+sync commits under `fsync`. Each filesystem's mount has a frame of its
+own outside `fs::make`, a Btrfs volume lives on the heap, and the reads
+of a Btrfs mount (the trees the writer checks, the block groups, their
+free space) each have a frame of their own, which the frames that build
+the filesystem wait beside, not under. With the lock checker on (every
+boot test) the scheduler warns, once and with a backtrace, when a thread
+goes to sleep with less than 4 KiB of its stack left, which the boot
+tests take as a failure: deep calls end waiting for the disk.
 
 ## Correctness
 
@@ -657,12 +682,11 @@ host, and reads everything back after a second boot.
   and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
-- Btrfs is read-only (10c writes it), on one device (10e), with 4 KiB
-  sectors. Its compressed reads take one workspace in turn, where Linux
-  keeps one per CPU at most, and are not yet measured against Linux's
-  (10c adds the rows). Its `statfs` sizes are
-  the superblock's, without Linux's view of the profiles and unallocated
-  space.
+- Btrfs is on one device (10e), with 4 KiB sectors, and written only
+  with `no-holes`, without snapshots, reflinks, quotas or compression
+  (10c.2). Its compressed reads take one workspace in turn, where Linux
+  keeps one per CPU at most. Empty block groups stay, where Linux removes
+  them in the background.
   Its tree blocks are read through the sector cache, a page at a time,
   so a block of 16 KiB takes four requests and is held twice, in the
   sector cache and checked in its own.

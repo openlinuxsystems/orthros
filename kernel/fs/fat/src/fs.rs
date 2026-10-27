@@ -31,7 +31,7 @@ use alloc::sync::Weak;
 use core::fmt;
 
 use radix_block::cache::BlockCache;
-use radix_block::{DeviceRef, read_sector};
+use radix_block::{BlockDevice, DeviceRef, read_sector};
 use radix_sync::{Mutex, MutexGuard};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::{Error, FileSystem, FsInfo, FsKind, NodeRef, Result};
@@ -97,9 +97,7 @@ impl FatFs {
     /// change (as does a read-only device).
     pub fn mount(device: DeviceRef, read_only: bool) -> Result<KArc<FatFs>> {
         let info = device.info();
-        let mut boot = [0u8; 512];
-        read_sector(&*device, 0, &mut boot)?;
-        let geo = Geometry::parse(&boot, info.sectors * radix_block::SECTOR)?;
+        let geo = read_geometry(&*device, info.sectors * radix_block::SECTOR)?;
         // Its sectors are read and written alone, which a disk with larger
         // ones cannot do: Linux refuses such a volume too.
         if geo.sector_size < info.logical_block {
@@ -115,10 +113,18 @@ impl FatFs {
             dirty: Mutex::new(mem::vec()),
         })?;
         inner.read_fsinfo()?;
+        FatFs::with_root(inner)
+    }
+
+    /// The filesystem of `inner`, with its root directory and label. Its
+    /// own frame, as each step of [`FatFs::mount`] that reads a sector
+    /// has: a mount runs in a system call, on a 16 KiB stack.
+    #[inline(never)]
+    fn with_root(inner: KArc<Inner>) -> Result<KArc<FatFs>> {
         let root = FatNode::root(inner.clone())?;
         // The label in the root directory is the one Windows and mtools
         // set; the boot sector's copy is older, and "NO NAME" is none.
-        let mut label = root.volume_label()?.unwrap_or(geo.label);
+        let mut label = root.volume_label()?.unwrap_or(inner.geo.label);
         if &label == b"NO NAME    " {
             label = [b' '; 11];
         }
@@ -130,6 +136,14 @@ impl FatFs {
     pub fn geometry(&self) -> &Geometry {
         &self.inner.geo
     }
+}
+
+/// The geometry the boot sector of `device`, of `bytes` bytes, gives.
+#[inline(never)]
+fn read_geometry(device: &dyn BlockDevice, bytes: u64) -> Result<Geometry> {
+    let mut boot = [0u8; 512];
+    read_sector(device, 0, &mut boot)?;
+    Geometry::parse(&boot, bytes)
 }
 
 impl Drop for FatFs {

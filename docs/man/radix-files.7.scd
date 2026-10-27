@@ -222,8 +222,9 @@ appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts pas
 the disk's end is skipped, an MBR one that reaches past it is cut to end
 there, and an extended partition shows only its first two sectors. Spark
 mounts the FAT or Btrfs filesystem of each partition, or of each disk with
-no partition table, at _/volumes/_*name*: FAT read-write, or read-only when
-the device is, and Btrfs read-only until Phase 10c writes it. A device with
+no partition table, at _/volumes/_*name*, read-write, or read-only when
+the device is or, for Btrfs, when it uses a feature Radix does not write
+yet (named holes, without *no-holes*, or quotas). A device with
 neither is left alone. Disks are found
 once, at boot. Removable media, mounted by label at _/volumes/_*label*
 with safe eject, come with *volumed* in Phase 11.

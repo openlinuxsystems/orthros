@@ -119,13 +119,18 @@ pub struct Case {
 /// the reason.
 type Script = fn(&mut Vm, &Case) -> Result<(), String>;
 
+/// What the host checks on a disk after each boot, given the boot's
+/// serial log.
+type DiskCheck = fn(&DiskImage, &str) -> Result<(), String>;
+
 /// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, a Btrfs one
 /// `mkfs.btrfs` makes, or raw bytes.
 pub struct Disk {
     /// Its size in KiB.
     kib: u64,
-    /// 12, 16 or 32; [`BTRFS`] for Btrfs, of [`btrfs_files`]; or 0 for no
-    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
+    /// 12, 16 or 32; [`BTRFS`] for Btrfs of [`btrfs_files`], or
+    /// [`BTRFS_NEW`] for Btrfs to write; or 0 for no filesystem, the disk
+    /// holding [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The filesystem's label.
     label: &'static str,
@@ -142,12 +147,19 @@ pub struct Disk {
     /// Errors for QEMU's blkdebug driver to inject, as its configuration
     /// file.
     errors: Option<&'static str>,
+    /// Attached read-only (QEMU's `readonly=on`), so that the kernel takes
+    /// it for a disk that refuses writes.
+    read_only: bool,
     /// What the host checks after each boot: [`fsck`] for a FAT disk.
-    check: fn(&DiskImage) -> Result<(), String>,
+    check: DiskCheck,
 }
 
 /// [`Disk::fat`] for a Btrfs disk.
 const BTRFS: u8 = 1;
+
+/// [`Disk::fat`] for a Btrfs disk to write, holding only the host's file
+/// ([`STORAGE_FROM_HOST_NAME`]).
+const BTRFS_NEW: u8 = 2;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -177,6 +189,11 @@ enum Bus {
 }
 
 impl Disk {
+    /// Whether it holds Btrfs.
+    fn btrfs(&self) -> bool {
+        matches!(self.fat, BTRFS | BTRFS_NEW)
+    }
+
     /// Whether the kernel takes it for solid state: an NVMe disk, or a
     /// SATA one with QEMU's rotation rate of 1.
     fn solid(&self) -> bool {
@@ -214,13 +231,15 @@ pub struct SecondBoot {
 }
 
 /// A disk made for a run: its file, where its filesystem starts, its
-/// size and the size of its sectors, and what checks it.
+/// size and the size of its sectors, what checks it, and for Btrfs the
+/// `btrfs` tool that reads it on the host.
 pub struct DiskImage {
     path: PathBuf,
     offset: u64,
     bytes: u64,
     sector: u64,
-    check: fn(&DiskImage) -> Result<(), String>,
+    check: DiskCheck,
+    btrfs: Option<PathBuf>,
 }
 
 /// The names the kernel gives a case's disks: `vda`, `vdb` and on for
@@ -274,7 +293,18 @@ const TWO_NODES: &[&str] = &[
 /// A FAT test disk on `bus`.
 const fn fat_disk(kib: u64, fat: u8, label: &'static str, table: Table, bus: Bus) -> Disk {
     let check = if matches!(table, Table::Gpt) { fsck_gpt } else { fsck };
-    Disk { kib, fat, label, table, bus, sector: 512, device: "", errors: None, check }
+    Disk {
+        kib,
+        fat,
+        label,
+        table,
+        bus,
+        sector: 512,
+        device: "",
+        errors: None,
+        read_only: false,
+        check,
+    }
 }
 
 /// The storage test's disks: FAT12, FAT16 and FAT32 on whole disks, and
@@ -325,7 +355,7 @@ const DISKS_4K: &[Disk] = &[
 const RAW_KIB: u64 = 8 * 1024;
 
 /// A raw test disk on `bus`, which the host checks with `check`.
-const fn raw_disk(bus: Bus, check: fn(&DiskImage) -> Result<(), String>) -> Disk {
+const fn raw_disk(bus: Bus, check: DiskCheck) -> Disk {
     Disk {
         kib: RAW_KIB,
         fat: 0,
@@ -335,6 +365,7 @@ const fn raw_disk(bus: Bus, check: fn(&DiskImage) -> Result<(), String>) -> Disk
         sector: 512,
         device: "",
         errors: None,
+        read_only: false,
         check,
     }
 }
@@ -385,29 +416,53 @@ const ERROR_DISKS: &[Disk] = &[
 /// The size of the `btrfs` test's disks.
 const BTRFS_KIB: u64 = 128 * 1024;
 
-/// A Btrfs test disk on `bus`, with sectors of `sector` bytes, which the
-/// host checks is as it made it: Radix's Btrfs is read-only.
-const fn btrfs_disk(bus: Bus, sector: u64) -> Disk {
+/// A Btrfs test disk on `bus`, with sectors of `sector` bytes, holding
+/// `fat` ([`BTRFS`] or [`BTRFS_NEW`]), which the host checks with
+/// `check`.
+const fn btrfs_disk(bus: Bus, sector: u64, fat: u8, check: DiskCheck) -> Disk {
     Disk {
         kib: BTRFS_KIB,
-        fat: BTRFS,
+        fat,
         label: "RADIXBTRFS",
         table: Table::None,
         bus,
         sector,
         device: "",
         errors: None,
-        check: btrfs_unchanged,
+        read_only: false,
+        check,
     }
 }
 
 /// The `btrfs` test's disks: an NVMe namespace of 4 KiB sectors with
-/// BLAKE2b, nodes of 4 KiB, metadata once and data compressed with zstd,
-/// and a virtio disk made as `mkfs.btrfs` makes one by default (CRC-32C,
-/// nodes of 16 KiB, metadata twice) but for data compressed with zlib
+/// BLAKE2b, nodes of 4 KiB, metadata once, data compressed with zstd and
+/// holes named, without `no-holes`, which Radix does not write; and a
+/// virtio disk made as `mkfs.btrfs` makes one by default (CRC-32C, nodes
+/// of 16 KiB, metadata twice) but for data compressed with zlib, attached
+/// read-only, as QEMU's NVMe namespaces do not say they are
 /// ([`make_btrfs`]): `nvme0n1` and `vda`, in the order the kernel finds
-/// them, as the NVMe controller comes first.
-const BTRFS_DISKS: &[Disk] = &[btrfs_disk(Bus::Nvme(0), 4096), btrfs_disk(Bus::Virtio, 512)];
+/// them, as the NVMe controller comes first. Spark mounts both read-only,
+/// and the host checks that they are as it made them.
+const BTRFS_DISKS: &[Disk] = &[
+    btrfs_disk(Bus::Nvme(0), 4096, BTRFS, btrfs_unchanged),
+    Disk { read_only: true, ..btrfs_disk(Bus::Virtio, 512, BTRFS, btrfs_unchanged) },
+];
+
+/// The `btrfs-write` test's disks: of the `btrfs` test's two kinds, but
+/// not compressed, and holding only the host's file; Linux's
+/// `btrfs check` checks them after each boot.
+const BTRFS_WRITE_DISKS: &[Disk] = &[
+    btrfs_disk(Bus::Nvme(0), 4096, BTRFS_NEW, btrfs_checked),
+    btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_checked),
+];
+
+/// The `btrfs-power-cut` test's disk: a virtio disk as `mkfs.btrfs` makes
+/// one by default, holding only the host's file.
+const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_cut)];
+
+/// The round of the storage program's churn after whose file the
+/// `btrfs-power-cut` test cuts the power, 0 to 1.5 seconds later.
+const CUT_AFTER: usize = 30;
 
 /// QEMU's blkdebug rules for [`ERROR_DISKS`].
 const ERROR_RULES: &str = "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
@@ -423,6 +478,11 @@ const STORAGE_MANY: usize = 40;
 /// What the host writes to each disk between the boots, for the program
 /// to read back.
 const STORAGE_FROM_HOST: &[u8] = b"Written on the host between the boots.\n";
+/// Its name, which `mkfs.btrfs` puts on a Btrfs disk to write before the
+/// first boot instead.
+const STORAGE_FROM_HOST_NAME: &str = "Written on the host.txt";
+/// The size of the program's `grow.bin`, on Btrfs volumes only.
+const STORAGE_GROW: usize = 12 * 1024 * 1024 + 4321;
 
 /// The CPU the microcode test emulates: an Intel Skylake client part,
 /// signature 0x506e3.
@@ -1065,7 +1125,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs",
-        about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, compressed with zstd and zlib, read-only; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
+        about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, compressed with zstd and zlib, read-only, one as the disk is and one as Radix does not write its holes; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage list",
@@ -1078,6 +1138,46 @@ pub const CASES: &[Case] = &[
         script: btrfs_list,
         disks: BTRFS_DISKS,
         second: None,
+    },
+    Case {
+        name: "btrfs-write",
+        about: "The storage test on two Btrfs disks Linux's mkfs.btrfs made, past their first data chunk: Linux's btrfs check passes after each boot, and btrfs restore reads back what was written",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: BTRFS_WRITE_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
+        name: "btrfs-power-cut",
+        about: "The power is cut while files are written, synced, renamed and removed on Btrfs: Linux's btrfs check passes, every synced file is whole, and the disk mounts and is written again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage churn",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: power_cut,
+        disks: POWER_CUT_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage churned",
+            before: power_cut_host,
+            script: power_cut_check,
+        }),
     },
     Case {
         name: "posix",
@@ -1391,7 +1491,8 @@ fn run_case(
         }
         // Discards reach the disk's file as holes, which read as zeros.
         extra.push("-drive".into());
-        extra.push(format!("file={file},if=none,id=disk{i},format=raw,discard=unmap"));
+        let ro = if disk.read_only { ",readonly=on" } else { "" };
+        extra.push(format!("file={file},if=none,id=disk{i},format=raw,discard=unmap{ro}"));
         extra.push("-device".into());
         let device = match disk.sector {
             512 => disk.device.to_string(),
@@ -1441,7 +1542,8 @@ fn run_case(
         let result = script(&mut vm, case).and_then(|()| kernel_complaints(&vm, case));
         vm.stop();
         result?;
-        disks.iter().try_for_each(|disk| (disk.check)(disk))
+        let log = vm.log();
+        disks.iter().try_for_each(|disk| (disk.check)(disk, &log))
     };
     let mut result = boot(case.name, case.cmdline, case.script);
     if let (Ok(()), Some(second)) = (&result, &case.second) {
@@ -1480,6 +1582,7 @@ fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, Stri
             bytes: disk.kib * 1024,
             sector: disk.sector,
             check: disk.check,
+            btrfs: None,
         };
         if let Some(rules) = disk.errors {
             let at = image.path.with_extension("blkdebug");
@@ -1491,8 +1594,10 @@ fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, Stri
             made.push(image);
             continue;
         }
-        if disk.fat == BTRFS {
-            make_btrfs(ctx, dir, disk, &image)?;
+        if disk.btrfs() {
+            let tool = btrfs::tool(ctx).map_err(|err| err.to_string())?;
+            let image = DiskImage { btrfs: Some(tool), ..image };
+            make_btrfs(ctx, disk, &image)?;
             made.push(image);
             continue;
         }
@@ -1544,14 +1649,14 @@ fn raw_bytes(bytes: u64) -> Vec<u8> {
 }
 
 /// Checks that a raw disk holds what it held before the boot.
-fn raw_unchanged(disk: &DiskImage) -> Result<(), String> {
+fn raw_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
     raw_same(disk, &raw_bytes(disk.bytes))
 }
 
 /// Checks a disk of the `disk-raw` test: what [`RAW_WRITES`] wrote, the
 /// write at the end, zeros where [`RAW_DISCARD`] discarded, and the bytes
 /// it held before everywhere else.
-fn raw_check(disk: &DiskImage) -> Result<(), String> {
+fn raw_check(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let mut want = raw_bytes(disk.bytes);
     let end = (disk.bytes - 10, 10);
     for &(offset, len) in RAW_WRITES.iter().chain([&end]) {
@@ -1692,7 +1797,7 @@ fn write_gpt(path: &Path, sectors: u64, block: u64) -> Result<(), String> {
 
 /// Checks a GPT disk: both of its tables as [`write_gpt`] wrote them, and
 /// its filesystem with [`fsck`].
-fn fsck_gpt(disk: &DiskImage) -> Result<(), String> {
+fn fsck_gpt(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let bytes = std::fs::read(&disk.path).map_err(|err| format!("reading a disk: {err}"))?;
     let (primary, backup) = gpt_tables(disk.bytes / 512, disk.sector);
     let end = bytes.len();
@@ -1702,7 +1807,7 @@ fn fsck_gpt(disk: &DiskImage) -> Result<(), String> {
     {
         return Err(format!("{}: its GPT is not the one written", disk.path.display()));
     }
-    fsck(disk)
+    fsck(disk, "")
 }
 
 /// Writes an MBR with one FAT32 (LBA) partition from [`PARTITION_START`]
@@ -1752,7 +1857,7 @@ fn host_tool(cmd: &mut std::process::Command) -> Result<Vec<u8>, String> {
 
 /// Checks a disk's filesystem with `fsck.fat`, changing nothing: a
 /// partition is copied out first, as `fsck.fat` reads whole files only.
-fn fsck(disk: &DiskImage) -> Result<(), String> {
+fn fsck(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let checked = if disk.offset == 0 {
         disk.path.clone()
     } else {
@@ -2266,7 +2371,9 @@ fn kernel_complaints(vm: &Vm, case: &Case) -> Result<(), String> {
         let checker = line.contains("Lock checker: ")
             && !line.contains("Lock checker: on; ")
             && !line.contains("Lock checker: off");
-        (checker && case.name != "lockdep") || line.contains("with preemption held off")
+        (checker && case.name != "lockdep")
+            || line.contains("with preemption held off")
+            || line.contains("KiB kernel stack left")
     });
     match complaint {
         Some(line) => Err(format!("the kernel complained: {}", line.trim())),
@@ -2778,11 +2885,12 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
             512 => String::new(),
             size => format!(", {size}-byte sectors"),
         };
+        let ro = if disk.read_only { ", read-only" } else { "" };
         let (line, want) = match disk.bus {
             Bus::Virtio => (
                 line_of(&format!("Disk: {name} is a virtio block device of {size} at "))?,
                 format!(
-                    ", {} bytes a block{sectors}, write cache, discards, MSI-X vector ",
+                    ", {} bytes a block{sectors}{ro}, write cache, discards, MSI-X vector ",
                     disk.sector
                 ),
             ),
@@ -2798,7 +2906,7 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
             }
             Bus::Nvme(_) => (
                 line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
-                format!("{} bytes a block{sectors}, write cache, deallocates", disk.sector),
+                format!("{} bytes a block{sectors}{ro}, write cache, deallocates", disk.sector),
             ),
         };
         // Only a SATA disk's line says whether it is solid state.
@@ -2843,8 +2951,11 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
         let label = disk.label;
-        vm.expect(&format!("Files: mounted fat from {name} on /volumes/{name}, labelled {label}"))?;
-        vm.expect(&format!("spark: mounted the FAT filesystem of {name} at /volumes/{name}"))?;
+        let (kind, said) = if disk.btrfs() { ("btrfs", "Btrfs") } else { ("fat", "FAT") };
+        vm.expect(&format!(
+            "Files: mounted {kind} from {name} on /volumes/{name}, labelled {label}"
+        ))?;
+        vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
     vm.expect("spark: started /system/tests/storage as process ")
 }
@@ -2878,14 +2989,16 @@ fn disk_size(kib: u64) -> String {
 fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_boot(vm, case)?;
     let volumes = volume_names(case.disks);
-    for name in &volumes {
-        vm.expect(&format!("storage: /volumes/{name}: fat, "))?;
+    let filesystems: Vec<&Disk> = case.disks.iter().filter(|disk| disk.fat != 0).collect();
+    for (name, disk) in volumes.iter().zip(&filesystems) {
+        let kind = if disk.btrfs() { "btrfs" } else { "fat" };
+        vm.expect(&format!("storage: /volumes/{name}: {kind}, "))?;
         vm.expect(&format!("storage: /volumes/{name}: wrote "))?;
     }
     vm.expect("storage: /tmp: a 10000-byte file written, read back and removed")?;
     vm.expect("storage: /devices: ")?;
     vm.expect(" of them disks; zero, random and null work")?;
-    for (name, disk) in volumes.iter().zip(case.disks.iter().filter(|disk| disk.fat != 0)) {
+    for (name, disk) in volumes.iter().zip(&filesystems) {
         vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
         let model = match disk.bus {
             Bus::Sata => "QEMU HARDDISK",
@@ -2906,66 +3019,136 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("storage: /processes lists ")?;
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
-    vm.expect("storage: /processes/mounts lists 13 mounts, 4 of them FAT")?;
+    // Spark's nine, and the volumes.
+    let fat = filesystems.iter().filter(|disk| !disk.btrfs()).count();
+    vm.expect(&format!(
+        "storage: /processes/mounts lists {} mounts, {fat} of them FAT",
+        9 + volumes.len()
+    ))?;
     vm.expect("storage: /processes/meminfo: ")?;
     storage_end(vm, "write")
 }
 
-/// Between the boots: the host reads what the program wrote with mtools,
-/// and writes a file of its own to each disk, from beside the disks in
-/// out/test (not the shared temporary directory, where another user could
-/// put a link in its place).
+/// Between the boots: the host reads what the program wrote, with
+/// mtools from a FAT disk, to which it then writes a file of its own,
+/// from beside the disks in out/test (not the shared temporary directory,
+/// where another user could put a link in its place); and from a Btrfs
+/// disk with Linux's `btrfs restore`, whose file of the host's
+/// `mkfs.btrfs` put there.
 fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
     let Some(first) = disks.first() else { return Err("the case has no disks".into()) };
     let source = first.path.with_file_name("storage-from-host.txt");
     std::fs::write(&source, STORAGE_FROM_HOST)
         .map_err(|err| format!("writing {}: {err}", source.display()))?;
-    let result = disks.iter().zip(volume_names(case.disks)).try_for_each(|(disk, name)| {
-        let image = mtools_image(disk);
-        let mtype =
-            |path: &str| host_tool(std::process::Command::new("mtype").args(["-i", &image, path]));
-        let same = |path: &str, want: &[u8]| -> Result<(), String> {
-            let got = mtype(path)?;
-            if got != want {
-                return Err(format!(
-                    "{image}: mtype {path} gives {} bytes, not the {} written",
-                    got.len(),
-                    want.len()
-                ));
+    let filesystems = case.disks.iter().filter(|disk| disk.fat != 0);
+    let result = disks.iter().zip(filesystems).zip(volume_names(case.disks)).try_for_each(
+        |((disk, made), name)| {
+            if made.btrfs() {
+                btrfs_written(disk, &name)
+            } else {
+                fat_written(disk, &name, &source)
             }
-            Ok(())
-        };
-        same("::/hello.txt", STORAGE_HELLO)?;
-        same(&format!("::/notes/{STORAGE_LONG_NAME}"), format!("Saved on {name}.\n").as_bytes())?;
-        same("::/notes/final.txt", b"final\n")?;
-        same("::/log.txt", b"one\ntwo\n")?;
-        same("::/cut.txt", &[b'x'; 1000])?;
-        let big = mtype("::/big.bin")?;
-        let want: Vec<u8> = (0..STORAGE_BIG).map(storage_big_byte).collect();
-        if big != want {
-            let at = big
-                .iter()
-                .zip(&want)
-                .position(|(a, b)| a != b)
-                .unwrap_or(big.len().min(want.len()));
-            return Err(format!("{image}: big.bin as mtools reads it differs at byte {at}"));
-        }
-        let listing =
-            host_tool(std::process::Command::new("mdir").args(["-i", &image, "-b", "::/many"]))?;
-        // FAT names match without regard to case.
-        let txt = |line: &&str| {
-            Path::new(line).extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
-        };
-        let files = String::from_utf8_lossy(&listing).lines().filter(txt).count();
-        if files != STORAGE_MANY {
-            return Err(format!("{image}: mdir lists {files} files in many/, not {STORAGE_MANY}"));
-        }
-        let to = "::/Written on the host.txt";
-        host_tool(std::process::Command::new("mcopy").args(["-i", &image]).arg(&source).arg(to))?;
-        Ok(())
-    });
+        },
+    );
     let _ = std::fs::remove_file(&source);
     result
+}
+
+/// [`storage_host`] for a FAT disk.
+fn fat_written(disk: &DiskImage, name: &str, source: &Path) -> Result<(), String> {
+    let image = mtools_image(disk);
+    let read = |path: &str| {
+        host_tool(std::process::Command::new("mtype").args(["-i", &image, &format!("::/{path}")]))
+    };
+    let listing =
+        host_tool(std::process::Command::new("mdir").args(["-i", &image, "-b", "::/many"]))?;
+    // FAT names match without regard to case.
+    let txt =
+        |line: &&str| Path::new(line).extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"));
+    let many = String::from_utf8_lossy(&listing).lines().filter(txt).count();
+    storage_written(&image, name, &read, many)?;
+    let to = format!("::/{STORAGE_FROM_HOST_NAME}");
+    host_tool(std::process::Command::new("mcopy").args(["-i", &image]).arg(source).arg(to))?;
+    Ok(())
+}
+
+/// [`storage_host`] for a Btrfs disk: its files as `btrfs restore` copies
+/// them out, `grow.bin` and the host's file too, and none of those the
+/// program renamed or removed.
+fn btrfs_written(disk: &DiskImage, name: &str) -> Result<(), String> {
+    let restored = btrfs_restore(disk)?;
+    let image = disk.path.display().to_string();
+    let read = |path: &str| {
+        std::fs::read(restored.join(path))
+            .map_err(|err| format!("{image}: {path}, as btrfs restore copies it out: {err}"))
+    };
+    let result = (|| {
+        let many = std::fs::read_dir(restored.join("many"))
+            .map_err(|err| format!("{image}: many/: {err}"))?
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|e| Path::new(&e.file_name()).extension() == Some("txt".as_ref()))
+            })
+            .count();
+        storage_written(&image, name, &read, many)?;
+        let grow: Vec<u8> =
+            (0..STORAGE_GROW).map(|at| storage_big_byte(at).wrapping_add(1)).collect();
+        if read("grow.bin")? != grow {
+            return Err(format!(
+                "{image}: grow.bin as btrfs restore copies it out is not as written"
+            ));
+        }
+        if read(STORAGE_FROM_HOST_NAME)? != STORAGE_FROM_HOST {
+            return Err(format!("{image}: the host's file is not as mkfs.btrfs wrote it"));
+        }
+        for gone in ["draft.txt", "scratch.txt"] {
+            if restored.join(gone).exists() {
+                return Err(format!("{image}: {gone} is still there"));
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&restored);
+    result
+}
+
+/// Checks what the storage program's `write` wrote to volume `name`, as
+/// `read` reads a file of it on the host, with `many` text files in its
+/// `many/`; `image` names the disk.
+fn storage_written(
+    image: &str,
+    name: &str,
+    read: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+    many: usize,
+) -> Result<(), String> {
+    let same = |path: &str, want: &[u8]| -> Result<(), String> {
+        let got = read(path)?;
+        if got != want {
+            return Err(format!(
+                "{image}: {path} holds {} bytes on the host, not the {} written",
+                got.len(),
+                want.len()
+            ));
+        }
+        Ok(())
+    };
+    same("hello.txt", STORAGE_HELLO)?;
+    same(&format!("notes/{STORAGE_LONG_NAME}"), format!("Saved on {name}.\n").as_bytes())?;
+    same("notes/final.txt", b"final\n")?;
+    same("log.txt", b"one\ntwo\n")?;
+    same("cut.txt", &[b'x'; 1000])?;
+    let big = read("big.bin")?;
+    let want: Vec<u8> = (0..STORAGE_BIG).map(storage_big_byte).collect();
+    if big != want {
+        let at =
+            big.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(big.len().min(want.len()));
+        return Err(format!("{image}: big.bin as the host reads it differs at byte {at}"));
+    }
+    if many != STORAGE_MANY {
+        return Err(format!("{image}: the host finds {many} files in many/, not {STORAGE_MANY}"));
+    }
+    Ok(())
 }
 
 /// The byte at `offset` of the program's `big.bin`, and of a raw test
@@ -3047,7 +3230,7 @@ fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// built for the host from the same source, it must find Dukovo's report,
 /// read back every place Dukovo wrote, and give the lines of Dukovo's
 /// benchmarks, the kernel's and the POSIX ones, after its version.
-fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
+fn linux_disk_check(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let (program, source) = (disk.path.with_extension("disktest"), disk.path.with_extension("c"));
     let bench = disk.path.with_extension("bench");
     std::fs::write(&source, include_str!("../../../userspace/posix/disktest.c"))
@@ -3233,15 +3416,28 @@ fn write_btrfs_tree(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Makes a disk of the `btrfs` test: `mkfs.btrfs` puts [`btrfs_files`]
-/// on it, with [`BTRFS_SUBVOLUME`] a subvolume, compressed, as the disk's
-/// sectors say ([`BTRFS_DISKS`]), the damaged file's noise kept as it is;
-/// then a byte of [`BTRFS_DAMAGED`]'s second sector
-/// is changed on the disk, and the disk's SHA-256 kept beside it for
-/// [`btrfs_unchanged`].
-fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(), String> {
-    let tree = dir.join("btrfs-tree");
-    write_btrfs_tree(&tree)?;
+/// Makes a Btrfs test disk. One of the `btrfs` test ([`BTRFS`]):
+/// `mkfs.btrfs` puts [`btrfs_files`] on it, with [`BTRFS_SUBVOLUME`] a
+/// subvolume, compressed, as the disk's sectors say ([`BTRFS_DISKS`]),
+/// the damaged file's noise kept as it is; then a byte of
+/// [`BTRFS_DAMAGED`]'s second sector is changed on the disk, and the
+/// disk's SHA-256 kept beside it for [`btrfs_unchanged`]. One to write
+/// ([`BTRFS_NEW`]): `mkfs.btrfs` puts the host's file on it, the disk's
+/// sectors choosing the rest as for the `btrfs` test.
+fn make_btrfs(ctx: &Ctx, disk: &Disk, image: &DiskImage) -> Result<(), String> {
+    let tree = image.path.with_extension("tree");
+    if disk.fat == BTRFS {
+        write_btrfs_tree(&tree)?;
+    } else {
+        if tree.exists() {
+            std::fs::remove_dir_all(&tree)
+                .map_err(|err| format!("removing {}: {err}", tree.display()))?;
+        }
+        std::fs::create_dir(&tree).map_err(|err| format!("making {}: {err}", tree.display()))?;
+        let host = tree.join(STORAGE_FROM_HOST_NAME);
+        std::fs::write(&host, STORAGE_FROM_HOST)
+            .map_err(|err| format!("writing {}: {err}", host.display()))?;
+    }
     let path = &image.path;
     let file =
         std::fs::File::create(path).map_err(|err| format!("making {}: {err}", path.display()))?;
@@ -3249,13 +3445,23 @@ fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(
     let mkfs = btrfs::mkfs(ctx).map_err(|err| err.to_string())?;
     let mut cmd = std::process::Command::new(mkfs);
     cmd.args(["-q", "-f", "-L", disk.label, "--rootdir"]).arg(&tree);
-    cmd.args(["--subvol", &format!("rw:{BTRFS_SUBVOLUME}")]);
     if disk.sector == 4096 {
-        cmd.args(["--csum", "blake2", "--nodesize", "4096", "-m", "single", "--compress", "zstd"]);
-    } else {
-        cmd.args(["--compress", "zlib"]);
+        cmd.args(["--csum", "blake2", "--nodesize", "4096", "-m", "single"]);
     }
-    host_tool(cmd.arg(path).stdin(Stdio::null()))?;
+    if disk.fat == BTRFS {
+        cmd.args(["--subvol", &format!("rw:{BTRFS_SUBVOLUME}")]);
+        if disk.sector == 4096 {
+            cmd.args(["--compress", "zstd", "-O", "^no-holes"]);
+        } else {
+            cmd.args(["--compress", "zlib"]);
+        }
+    }
+    let made = host_tool(cmd.arg(path).stdin(Stdio::null()));
+    let _ = std::fs::remove_dir_all(&tree);
+    made?;
+    if disk.fat == BTRFS_NEW {
+        return Ok(());
+    }
     let mut bytes =
         std::fs::read(path).map_err(|err| format!("reading {}: {err}", path.display()))?;
     let damaged = btrfs_files()
@@ -3276,8 +3482,173 @@ fn make_btrfs(ctx: &Ctx, dir: &Path, disk: &Disk, image: &DiskImage) -> Result<(
     std::fs::write(&sums, sum).map_err(|err| format!("writing {}: {err}", sums.display()))
 }
 
+/// Checks a Btrfs disk with Linux's `btrfs check`, the data's checksums
+/// too.
+fn btrfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    let mut cmd = std::process::Command::new(tool);
+    cmd.args(["check", "--check-data-csum"]).arg(&disk.path).stdin(Stdio::null());
+    host_tool(&mut cmd)
+        .map(drop)
+        .map_err(|err| format!("{} fails Linux's btrfs check: {err}", disk.path.display()))
+}
+
+/// Copies the files of a Btrfs disk's top subvolume out with Linux's
+/// `btrfs restore`, into a directory beside it made afresh, which the
+/// caller removes.
+fn btrfs_restore(disk: &DiskImage) -> Result<PathBuf, String> {
+    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    let to = disk.path.with_extension("restored");
+    if to.exists() {
+        std::fs::remove_dir_all(&to).map_err(|err| format!("removing {}: {err}", to.display()))?;
+    }
+    std::fs::create_dir(&to).map_err(|err| format!("making {}: {err}", to.display()))?;
+    let mut cmd = std::process::Command::new(tool);
+    cmd.arg("restore").arg(&disk.path).arg(&to).stdin(Stdio::null());
+    if let Err(err) = host_tool(&mut cmd) {
+        let _ = std::fs::remove_dir_all(&to);
+        return Err(err);
+    }
+    Ok(to)
+}
+
+/// The size of the storage program's churn file of round `round`.
+fn churn_size(round: usize) -> usize {
+    1 + round * 37_813 % (192 * 1024)
+}
+
+/// The byte at `offset` of the churn file of round `round`.
+fn churn_byte(round: usize, offset: usize) -> u8 {
+    storage_big_byte(offset + round * 4099)
+}
+
+/// The round of a churn file's name, and whether it is the one before
+/// the rename (`temp-N`).
+fn churn_name(name: &str) -> Option<(usize, bool)> {
+    let (number, temp) = match name.strip_prefix("file-") {
+        Some(number) => (number, false),
+        None => (name.strip_prefix("temp-")?, true),
+    };
+    Some((number.parse().ok()?, temp))
+}
+
+/// The rounds of the churn's lines `storage: churn: <what> file-NNNN` in
+/// `log`; a line the power cut short, without its four digits, is not
+/// counted.
+fn churn_rounds(log: &str, what: &str) -> Vec<usize> {
+    let start = format!("storage: churn: {what} file-");
+    log.lines()
+        .filter_map(|line| line.split_once(start.as_str()))
+        .map(|(_, number)| number.trim())
+        .filter(|number| number.len() == 4)
+        .filter_map(|number| number.parse().ok())
+        .collect()
+}
+
+/// Checks the `btrfs-power-cut` test's disk after a boot: Linux's
+/// `btrfs check` finds nothing wrong; and after the boot whose power was
+/// cut, as `btrfs restore` copies the files out, each file the program
+/// said it synced is whole unless it said it removed it, each it said it
+/// removed has gone, every other `file-N` is whole and every `temp-N` a
+/// start of itself.
+fn btrfs_cut(disk: &DiskImage, log: &str) -> Result<(), String> {
+    btrfs_checked(disk, log)?;
+    let synced = churn_rounds(log, "synced");
+    let Some(&last) = synced.last() else { return Ok(()) };
+    let removed = churn_rounds(log, "removed");
+    let restored = btrfs_restore(disk)?;
+    let result = churn_left(&restored, &synced, &removed);
+    let _ = std::fs::remove_dir_all(&restored);
+    result.map_err(|err| {
+        format!("{}: {err}, after a power cut after file-{last:04} was synced", disk.path.display())
+    })
+}
+
+/// [`btrfs_cut`]'s check of the files copied out to `dir`.
+fn churn_left(dir: &Path, synced: &[usize], removed: &[usize]) -> Result<(), String> {
+    let mut found = BTreeMap::new();
+    let entries = std::fs::read_dir(dir).map_err(|err| format!("listing it: {err}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("listing it: {err}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let bytes = std::fs::read(entry.path()).map_err(|err| format!("reading {name}: {err}"))?;
+        found.insert(name, bytes);
+    }
+    for (name, bytes) in &found {
+        if name == STORAGE_FROM_HOST_NAME {
+            if bytes != STORAGE_FROM_HOST {
+                return Err(format!("{name} is not as mkfs.btrfs wrote it"));
+            }
+            continue;
+        }
+        let Some((round, temp)) = churn_name(name) else {
+            return Err(format!("it holds {name}, which the churn never made"));
+        };
+        let size = churn_size(round);
+        let start = bytes.iter().enumerate().all(|(at, &byte)| byte == churn_byte(round, at));
+        if !start || bytes.len() > size || (!temp && bytes.len() != size) {
+            return Err(format!(
+                "{name} holds {} bytes, not what the churn wrote ({size} bytes)",
+                bytes.len()
+            ));
+        }
+        if temp && synced.contains(&round) {
+            return Err(format!("{name} is still there, though it was renamed and synced"));
+        }
+    }
+    for round in synced.iter().filter(|round| !removed.contains(round)) {
+        if !found.contains_key(&format!("file-{round:04}")) {
+            return Err(format!("file-{round:04} has gone, though it was synced"));
+        }
+    }
+    for round in removed {
+        if found.contains_key(&format!("file-{round:04}")) {
+            return Err(format!(
+                "file-{round:04} is still there, though it was removed and synced"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `btrfs-power-cut` test's first boot: the program churns files on
+/// the disk until the host cuts the power, 0 to 1.5 seconds after the
+/// program said it synced round [`CUT_AFTER`]'s; then [`btrfs_cut`]
+/// checks the disk.
+fn power_cut(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_boot(vm, case)?;
+    vm.expect(&format!("storage: churn: synced file-{:04}", CUT_AFTER - 1))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    std::thread::sleep(Duration::from_millis(u64::from(nanos % 1500)));
+    if vm.log().contains("storage: churn: done") {
+        return Err("the churn ended before the power was cut".into());
+    }
+    Ok(())
+}
+
+/// Between the boots of the `btrfs-power-cut` test: nothing, as the
+/// disk's check reads it.
+fn power_cut_host(_: &Case, _: &[DiskImage]) -> Result<(), String> {
+    Ok(())
+}
+
+/// The `btrfs-power-cut` test's second boot: the program finds the
+/// churn's files whole or a start of themselves, removes them, and
+/// writes the volume again.
+fn power_cut_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_boot(vm, case)?;
+    for name in volume_names(case.disks) {
+        vm.expect(&format!("storage: /volumes/{name}: after the power cut, "))?;
+        vm.expect(&format!("storage: /volumes/{name}: written again after the power cut"))?;
+    }
+    vm.expect("storage: /processes lists ")?;
+    storage_end(vm, "churned")
+}
+
 /// Checks that a Btrfs disk is as [`make_btrfs`] made it.
-fn btrfs_unchanged(disk: &DiskImage) -> Result<(), String> {
+fn btrfs_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let sums = disk.path.with_extension("sha256");
     let made = std::fs::read(&sums).map_err(|err| format!("reading {}: {err}", sums.display()))?;
     let now = host_tool(std::process::Command::new("sha256sum").arg(&disk.path))?;
@@ -3361,8 +3732,9 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
     lines
 }
 
-/// The `btrfs` test: Spark mounts each disk read-only, and the storage
-/// program lists every volume as [`btrfs_listing`] says.
+/// The `btrfs` test: Spark mounts each disk read-only, the first as Radix
+/// does not write it yet and the second as the disk refuses writes, and
+/// the storage program lists every volume as [`btrfs_listing`] says.
 fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;

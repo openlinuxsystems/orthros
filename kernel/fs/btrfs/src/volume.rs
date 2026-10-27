@@ -7,7 +7,8 @@
 use radix_block::DeviceRef;
 use radix_block::cache::BlockCache;
 use radix_sync::Mutex;
-use radix_vfs::mem::KVec;
+use radix_sync::rcu::RcuCell;
+use radix_vfs::mem::{self, Alloc, KBox, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::chunk::{Chunk, ChunkMap, Place};
@@ -25,7 +26,8 @@ pub struct Volume {
     cache: BlockCache,
     /// Its size, in bytes.
     device_bytes: u64,
-    chunks: ChunkMap,
+    /// Read without a lock; a new chunk replaces the map whole.
+    chunks: RcuCell<ChunkMap, Alloc>,
     blocks: Blocks,
     current: Mutex<Current>,
 }
@@ -50,7 +52,7 @@ impl Volume {
     /// filesystem on more than one device, or one whose log of fsyncs has
     /// not been replayed (both Phase 10e and 10c).
     #[inline(never)]
-    pub fn open(device: DeviceRef) -> Result<Volume> {
+    pub fn open(device: DeviceRef) -> Result<KBox<Volume>> {
         let info = device.info();
         let device_bytes = info.sectors * radix_block::SECTOR;
         if device_bytes < superblock::OFFSET + superblock::SIZE as u64 {
@@ -69,7 +71,9 @@ impl Volume {
         if u64_at(&bytes, 0xc9 + 8) > device_bytes {
             return Err(Error::Corrupt);
         }
-        let chunks = ChunkMap::bootstrap(sb.sys_chunks(), sb.sectorsize)?;
+        let chunks =
+            RcuCell::new_in(ChunkMap::bootstrap(sb.sys_chunks(), sb.sectorsize)?, mem::alloc())
+                .map_err(|_| Error::NoMemory)?;
         let blocks = Blocks::new(sb.nodesize);
         let current = Mutex::new(Current {
             root: Root { bytenr: sb.root, level: sb.root_level, generation: sb.generation },
@@ -80,7 +84,9 @@ impl Volume {
             },
             superblock: bytes,
         });
-        let mut volume = Volume { sb, cache, device_bytes, chunks, blocks, current };
+        // On the heap at once: a volume is large, and the mount's frames
+        // above this one need not each hold a copy.
+        let mut volume = mem::boxed(Volume { sb, cache, device_bytes, chunks, blocks, current })?;
         volume.read_chunk_tree()?;
         Ok(volume)
     }
@@ -109,11 +115,11 @@ impl Volume {
             return Err(Error::Corrupt);
         }
         // The system chunk array's chunks are in the tree too.
-        let bootstrap = core::mem::replace(&mut self.chunks, ChunkMap::empty());
+        let bootstrap = core::mem::replace(self.chunks.get_mut(), ChunkMap::empty());
         for chunk in bootstrap.into_chunks() {
             chunks.insert(chunk)?;
         }
-        self.chunks = chunks;
+        *self.chunks.get_mut() = chunks;
         // Its blocks were checked against the bootstrap chunks; they are
         // the same blocks.
         Ok(())
@@ -124,9 +130,17 @@ impl Volume {
         &self.sb
     }
 
-    /// The chunks.
-    pub fn chunks(&self) -> &ChunkMap {
-        &self.chunks
+    /// Runs `f` on the chunks, which must not sleep.
+    pub fn with_chunks<R>(&self, f: impl FnOnce(&ChunkMap) -> R) -> R {
+        self.chunks.read(f)
+    }
+
+    /// Adds `chunk`, which a transaction made. It waits until no reader
+    /// sees the old map, so it sleeps.
+    pub(crate) fn add_chunk(&self, chunk: Chunk) -> Result<()> {
+        let map = self.chunks.read(|map| map.with(chunk))?;
+        self.chunks.replace(map).map_err(|_| Error::NoMemory)?;
+        Ok(())
     }
 
     /// The tree blocks read so far.
@@ -141,7 +155,7 @@ impl Volume {
 
     /// Where `logical` is on the device.
     pub fn place(&self, logical: u64) -> Result<Place> {
-        self.chunks.place(logical, self.sb.devid)
+        self.chunks.read(|map| map.place(logical, self.sb.devid))
     }
 
     /// Reads `out.len()` bytes from byte `physical` of the device.
