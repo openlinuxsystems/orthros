@@ -27,12 +27,12 @@
 //! place; it is never held while a program's memory is copied, which may
 //! fault and read a file. Then come a node's inode, the node table, the
 //! nodes kept for the sync and the list of nodes to remove, then the
-//! workspace of compressed reads, the volume's block cache and the
+//! workspaces of compressed reads, the volume's block cache and the
 //! disk's. `nodes` is held only to find or add a node, never while
 //! reading the disk: a node is read first, and when another was added
 //! for the same inode meanwhile, that one is used and the new one
 //! dropped, which only frees memory. Shrinking only tries the
-//! workspace's lock, as a reader that holds it may be making memory.
+//! workspaces' lock, as a reader that holds it may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
@@ -105,8 +105,10 @@ pub(crate) struct Inner {
     csums: Option<Root>,
     /// The nodes in use, by subvolume and inode number, sorted.
     nodes: Mutex<KVec<Entry>>,
-    /// What reading compressed extents uses, once one is read.
-    workspace: Mutex<Option<KBox<Workspace>>>,
+    /// What reading compressed extents uses, once one is read: a
+    /// workspace for the reader, and one for the half of a run another
+    /// CPU uncompresses (ADR 0133).
+    workspaces: Mutex<[Option<KBox<Workspace>>; 2]>,
     /// The running transaction, on a writable mount.
     tx: Option<Mutex<Txn>>,
     /// The nodes whose data or inode waits for the next sync.
@@ -234,7 +236,7 @@ impl Inner {
             volume,
             csums,
             nodes: Mutex::new(mem::vec()),
-            workspace: Mutex::new(None),
+            workspaces: Mutex::new([None, None]),
             tx,
             dirty: Mutex::new(mem::vec()),
             reap: Mutex::new(mem::vec()),
@@ -465,19 +467,36 @@ impl Inner {
         &self,
         f: impl FnOnce(&mut Workspace) -> Result<R>,
     ) -> Result<R> {
-        let mut slot = self.workspace.lock();
-        let workspace = match &mut *slot {
-            Some(workspace) => workspace,
-            empty => empty.insert(mem::boxed(Workspace::new()?)?),
-        };
-        f(workspace)
+        self.with_workspaces(false, |workspace, _| f(workspace))
     }
 
-    /// Drops the workspace of compressed reads, unless one is under way;
-    /// returns the pages it held.
+    /// Runs `f` with the workspace of compressed reads, made if need be,
+    /// and, when `two` and `radix_vfs::join` may use another CPU, the
+    /// second, for the half of a run that CPU uncompresses: made if there
+    /// is memory for it, or else `None`.
+    pub(crate) fn with_workspaces<R>(
+        &self,
+        two: bool,
+        f: impl FnOnce(&mut Workspace, Option<&mut Workspace>) -> Result<R>,
+    ) -> Result<R> {
+        let mut slots = self.workspaces.lock();
+        let [first, second] = &mut *slots;
+        let first = match first {
+            Some(workspace) => workspace,
+            empty => empty.insert(Workspace::boxed()?),
+        };
+        let two = two && radix_vfs::joins();
+        if two && second.is_none() {
+            *second = Workspace::boxed().ok();
+        }
+        f(first, if two { second.as_deref_mut() } else { None })
+    }
+
+    /// Drops the workspaces of compressed reads, unless a read is under
+    /// way; returns the pages they held.
     fn drop_workspace(&self) -> usize {
-        let Some(mut slot) = self.workspace.try_lock() else { return 0 };
-        slot.take().map_or(0, |workspace| workspace.pages())
+        let Some(mut slots) = self.workspaces.try_lock() else { return 0 };
+        slots.iter_mut().filter_map(Option::take).map(|workspace| workspace.pages()).sum()
     }
 
     /// The node of inode `ino` of subvolume `subvol`, whose tree is

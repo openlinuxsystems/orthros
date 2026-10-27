@@ -95,8 +95,19 @@ fn mkfs(args: &[&str], dir: &Path) -> Vec<u8> {
     image
 }
 
-/// A disk of logical blocks of `block` bytes, holding `image`.
+/// Runs the halves of a `radix_vfs::join` on two threads, as the kernel
+/// runs them on two CPUs.
+fn join_on_threads(a: &mut dyn FnMut(), b: &mut (dyn FnMut() + Send)) {
+    std::thread::scope(|scope| {
+        scope.spawn(b);
+        a();
+    });
+}
+
+/// A disk of logical blocks of `block` bytes, holding `image`. Its
+/// filesystem's joins run on two threads.
 fn disk_of(block: u32, image: &[u8]) -> KArc<RamDisk> {
+    radix_vfs::set_join(join_on_threads);
     let sectors = image.len() as u64 / 512;
     let disk = mem::arc(RamDisk::with_blocks(sectors, true, block)).unwrap();
     disk.load(0, image).unwrap();

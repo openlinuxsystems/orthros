@@ -11,15 +11,16 @@
 //! the extent's size reads as zeros after its end, as on Linux; data that
 //! does not decode fails the read with `Io`.
 //!
-//! A filesystem has one [`Workspace`] of buffers and tables, made at its
-//! first compressed read and dropped when memory runs short; reads of
-//! compressed extents take its lock in turn. A file's page cache keeps
+//! A filesystem has a [`Workspace`] of buffers and tables, made at its
+//! first compressed read, and a second for the half of a run another CPU
+//! uncompresses (ADR 0133), both dropped when memory runs short; reads of
+//! compressed extents take their lock in turn. A file's page cache keeps
 //! every page of an extent once it is uncompressed, so it is uncompressed
 //! once.
 
 use radix_block::PAGE_SIZE;
 use radix_block::mem::CachePage;
-use radix_vfs::mem::{self, KVec};
+use radix_vfs::mem::{self, KBox, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::extent::Compression;
@@ -59,6 +60,13 @@ impl Workspace {
             inflate: None,
             zstd: None,
         })
+    }
+
+    /// A new workspace, on the heap: in a frame of its own, as a workspace
+    /// is large.
+    #[inline(never)]
+    pub(crate) fn boxed() -> Result<KBox<Workspace>> {
+        Ok(mem::boxed(Workspace::new()?)?)
     }
 
     /// Uncompresses the first `input` bytes of [`Workspace::input`] into

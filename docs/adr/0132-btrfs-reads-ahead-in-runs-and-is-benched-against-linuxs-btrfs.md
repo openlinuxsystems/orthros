@@ -106,8 +106,8 @@ Rejected:
   pages already cached behind a read size its run as well for a reader
   going through a file, with no state per file.
 - **Several extents per run**: a run ends at its extent's end, so a file
-  of 128 KiB compressed extents takes a request each. Requests for
-  neighbouring extents could be merged later; the gate decides.
+  of 128 KiB compressed extents takes a request each; ADR 0133 reads
+  compressed extents several to a run.
 - **A built Btrfs in the Linux VM's kernel**: the runner's kernel is the
   one every other row boots, and building another would compare against
   a kernel no one runs.

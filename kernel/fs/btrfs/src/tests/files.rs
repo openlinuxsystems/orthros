@@ -352,9 +352,11 @@ fn files_are_read_in_runs_and_whole_compressed_extents() {
     // as the disk takes (64).
     let read = requests("plain", &plain, 1 << 20);
     assert!(read <= 8, "{read} requests");
-    // Text is eight compressed extents of 128 KiB, one request each.
+    // Text is eight compressed extents of 128 KiB, which follow each
+    // other on the disk: read in two runs of four, each half of a run is
+    // one request.
     let read = requests("text", text, 128 << 10);
-    assert!((8..=12).contains(&read), "{read} requests");
+    assert!((4..=8).contains(&read), "{read} requests");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

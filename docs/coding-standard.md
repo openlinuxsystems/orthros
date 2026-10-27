@@ -59,8 +59,10 @@ Only the trusted computing base may use `unsafe`. Today that is:
   `Platform` trait and the stress test); its allocators' logic is safe
   code, checked on the host and by Kani;
 - the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
-  allows it at three marked sites: exporting its entry point, putting the
-  locks into panic mode, and calling the context switch.
+  allows it only at marked sites: exporting its entry point, putting the
+  locks into panic mode, the context switch and borrowing the running
+  thread, per-CPU data, building an open file in place, and handing half
+  of a `join` on the caller's stack to another CPU's helper (ADR 0133).
 
 Every other kernel crate, including the other libraries under
 `kernel/lib/`, the HAL, the AArch64 stubs and the system call interface

@@ -455,19 +455,25 @@ room before a change (ADR 0131), and the kernel mounts it writable.
   `NODATASUM`, the run ends before it, and fails with `Io` if it is the
   run's first, as Linux's read does. CRC-32C is the processor's
   instruction where it has one (`radix_hw::crc32c`), the tables
-  elsewhere. A compressed extent is read whole
-  in one request, checked so, uncompressed, and its pages copied out:
-  those of the run, and the others offered to the page cache
-  (`Backing::read_pages`), which keeps those it lacks, so an extent is
-  uncompressed once, as on Linux.
+  elsewhere. A compressed extent is read whole, checked so,
+  uncompressed, and its pages copied out: those of the run, and the
+  others offered to the page cache (`Backing::read_pages`), which keeps
+  those it lacks, so an extent is uncompressed once, as on Linux. A run
+  that starts in one takes the compressed extents after it in the file
+  as far as the run goes, up to eight, and uncompresses the first half
+  of them on the reader's CPU and the rest on another
+  (`radix_vfs::join`, ADR 0133); extents that follow each other on the
+  disk too are one request, up to 128 KiB.
 - `inflate` (zlib, RFC 1950 and 1951), `zstd` (RFC 8878, with its XXH64
   checksum) and `lzo` (LZO1X in Btrfs's segments) are the crate's own
   decoders, written from the formats' descriptions (ADR 0128): safe,
   bounds-checked, with every table allocated once, so data that does not
   decode fails with `Io`. `unpack::Workspace` holds an extent's
   compressed bytes, its data and the decoders' tables, about 400 KiB, one
-  per filesystem, made at its first compressed read and dropped by its
-  shrinker.
+  per filesystem, made at its first compressed read, and a second for
+  the half of a run another CPU uncompresses, made at the first such
+  run when there is a second CPU and memory for it; its shrinker drops
+  both.
 - `cow::Writer` is the running transaction. It walks down a tree as a
   `Cursor` does, but copies each block on the way that the transaction
   did not make to a new place, and points the block above, or the tree's
