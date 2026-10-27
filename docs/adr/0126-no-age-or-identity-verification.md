@@ -59,11 +59,13 @@ date, and nothing tells an app about them.
 - authd stores no birth date, and its account records have no field for
   one. The manifest schema (Phase 13d) has no age or identity field and
   no permission that gives one.
-- Laws that ask an operating system or app store for age checks are a
-  legal risk, tracked in the roadmap's risks table. AB 1856, passed by
-  California's legislature in August 2026, would exempt systems under
-  licenses that let anyone copy, change and share them, as Apache-2.0
-  OR MIT does. The attorney check before Phase 14 confirms whether that
-  covers Dukovo and its Store's catalogs; where a law still applies, the
-  answer is decided then, without adding a check.
+- Dukovo does not comply with laws that ask an operating system or app
+  store for age checks or age signals, in California or anywhere else,
+  whether or not an exemption covers it (the maintainer, 2026-10-27).
+  California's Digital Age Assurance Act (AB 1043) applies from
+  2027-01-01; AB 1856, passed by the legislature in August 2026, would
+  exempt systems under licenses that let anyone copy, change and share
+  them, as Apache-2.0 OR MIT does. The attorney check before Phase 14
+  looks at what this exposes the project and its distributors to, so it
+  can be planned for; it does not reopen the rule.
 - Contributions that add any age or identity check are declined.
