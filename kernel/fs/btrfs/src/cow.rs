@@ -476,6 +476,10 @@ impl Writer {
     /// Walks down tree `tree` to where `key` is or would be, making every
     /// block on the way the transaction's, and making room for `want`.
     fn search(&mut self, volume: &Volume, tree: u64, key: &Key, want: Want) -> Result<Path> {
+        if tree == tree::ROOT {
+            // A change to the root tree may move another tree's root.
+            volume.forget_trees();
+        }
         let nodesize = volume.superblock().nodesize;
         let blocks = volume.blocks();
         let root = Self::tree_root(volume, tree)?;

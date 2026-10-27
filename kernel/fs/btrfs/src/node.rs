@@ -70,6 +70,9 @@ pub struct BtrfsNode {
     cache: Option<FileCache>,
     /// Whether it has no names left: its items go when it does.
     removed: AtomicBool,
+    /// Whether its items went with its last name, as no one had it open:
+    /// none are left for it to free.
+    freed: AtomicBool,
     /// Whether the filesystem keeps it for the next sync.
     pinned: AtomicBool,
     /// Itself, to be kept.
@@ -108,6 +111,7 @@ impl BtrfsNode {
             kind,
             cache,
             removed: AtomicBool::new(false),
+            freed: AtomicBool::new(false),
             pinned: AtomicBool::new(false),
             me: Once::new(),
         })
@@ -1028,19 +1032,42 @@ impl Node for BtrfsNode {
         self.is_dir()?;
         check_name(name)?;
         let time = now();
-        self.fs.freeing(|txn| {
+        let mut taken = None;
+        let removed = self.fs.freeing(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             let (ino, old) = self.named(&files, name)?;
             if old.kind()? == Kind::Directory && !files.is_empty_dir(ino)? {
                 return Err(Error::NotEmpty);
             }
             let live = self.fs.live(self.subvol, ino);
+            // A file no one has open, kept only for the sync, goes with its
+            // last name, as Linux evicts an inode then: its pages are never
+            // written, and its items go now, with no orphan item.
+            let last = old.kind()? == Kind::Directory || old.nlink <= 1;
+            let idle = last && live.as_ref().is_some_and(|node| self.fs.take_idle(node));
+            if idle {
+                taken.clone_from(&live);
+            }
             let gone = files.whole(|f| {
-                BtrfsNode::unname(f, self.ino, name.as_bytes(), ino, &old, live.is_some(), time)
+                let open = live.is_some() && !idle;
+                BtrfsNode::unname(f, self.ino, name.as_bytes(), ino, &old, open, time)
             })?;
+            if let Some(node) = live.as_ref().filter(|_| idle) {
+                node.removed.store(true, Ordering::Release);
+                node.freed.store(true, Ordering::Release);
+            }
             self.reload(&files)?;
             self.after(&files, ino, gone)
-        })
+        });
+        // Taken for nothing, the name staying: back to the sync, or written
+        // now without the memory to keep it.
+        if let Some(node) = taken
+            && !node.freed.load(Ordering::Acquire)
+            && !node.pin()
+        {
+            node.flush()?;
+        }
+        removed
     }
 
     fn rename(&self, from: &str, to_dir: &dyn Node, to: &str) -> Result<()> {
@@ -1194,13 +1221,15 @@ impl BtrfsNode {
 
 impl Drop for BtrfsNode {
     /// A node of an inode with no names left was all that kept its items:
-    /// they go at the next sync.
+    /// they go at the next sync, unless they went with its last name.
     fn drop(&mut self) {
         if *self.removed.get_mut() {
             // Its dirty pages are never written: their room goes back.
             let pages = self.dirty_pages();
             self.fs.release_data(pages as u64 * PAGE);
-            self.fs.reaped(self.subvol, self.ino);
+            if !*self.freed.get_mut() {
+                self.fs.reaped(self.subvol, self.ino);
+            }
         }
     }
 }

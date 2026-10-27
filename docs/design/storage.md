@@ -510,8 +510,12 @@ room before a change (ADR 0131), and the kernel mounts it writable.
   sets the inode's size and bytes. An inline extent is rewritten as a
   regular one before any change but a write over all of it. A node with
   pages or an inode the disk lacks stays in the mount's dirty list until
-  the next sync; one removed while open is deleted after its last close,
-  or at the next writable mount from its orphan item. A commit is due 30
+  the next sync, unless its file loses its last name with no one holding
+  it open: then the file is deleted at once and its pages dropped, their
+  room given back, as Linux evicts the inode (ADR 0132). One removed while
+  open is deleted after its last close, or at the next writable mount
+  from its orphan item. The volume keeps the roots of the last four trees
+  looked up, forgotten at any change to the root tree. A commit is due 30
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
 - `grow` makes a chunk when a kind (data, metadata or the chunk tree)

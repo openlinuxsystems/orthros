@@ -38,9 +38,16 @@ pub struct Volume {
 struct Current {
     root: Root,
     chunk: Root,
+    /// The roots of the last few trees looked up, as their root items in
+    /// the root tree give them: a change to the root tree forgets them.
+    trees: [Option<(u64, Root)>; TREES],
     /// The superblock on the disk, as read or last written.
     superblock: KVec<u8>,
 }
+
+/// The trees whose roots [`Current`] keeps: a subvolume's, and those its
+/// changes reach.
+const TREES: usize = 4;
 
 impl Volume {
     /// Opens the Btrfs filesystem on `device`: reads its superblock and
@@ -82,6 +89,7 @@ impl Volume {
                 level: sb.chunk_root_level,
                 generation: sb.chunk_root_generation,
             },
+            trees: [None; TREES],
             superblock: bytes,
         });
         // On the heap at once: a volume is large, and the mount's frames
@@ -206,13 +214,30 @@ impl Volume {
     /// from its root item in the root tree; `None` if there is no such
     /// tree.
     pub fn tree(&self, id: u64) -> Result<Option<Root>> {
+        // Every change to a file looks its tree up, and more than once.
+        if let Some(&(_, root)) = self.current.lock().trees.iter().flatten().find(|t| t.0 == id) {
+            return Ok(Some(root));
+        }
         let cursor = Cursor::seek(self, &self.root_tree(), &Key::first(id, item::ROOT_ITEM))?;
         let Some((key, data)) = cursor.get() else { return Ok(None) };
         if !key.is(id, item::ROOT_ITEM) {
             return Ok(None);
         }
-        let root = RootItem::read(data).ok_or(Error::Corrupt)?;
-        Ok(Some(Root { bytenr: root.bytenr, level: root.level, generation: root.generation }))
+        let item = RootItem::read(data).ok_or(Error::Corrupt)?;
+        let root = Root { bytenr: item.bytenr, level: item.level, generation: item.generation };
+        let mut current = self.current.lock();
+        let trees = &mut current.trees;
+        trees.rotate_right(1);
+        trees[0] = Some((id, root));
+        Ok(Some(root))
+    }
+
+    /// Forgets the trees' roots kept, as the root tree is about to change.
+    /// The transaction's lock, held by every change and by every read of
+    /// the trees on a writable mount, keeps a lookup from noting a root
+    /// meanwhile.
+    pub(crate) fn forget_trees(&self) {
+        self.current.lock().trees = [None; TREES];
     }
 
     /// Subvolume `id`'s tree and its top directory's inode number; `None`

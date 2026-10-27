@@ -414,6 +414,33 @@ fn a_file_removed_while_open_goes_when_it_closes_or_at_the_next_mount() {
 }
 
 #[test]
+fn files_written_closed_and_removed_before_a_sync_give_their_room_back_at_once() {
+    // Half again what the filesystem holds, made and removed with no sync
+    // between: each file's items and room go with its last name, as on
+    // Linux, not at the sync.
+    let disk = writable(&mkfs_empty(&[]));
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    let data = noise(41, 64 * 1024);
+    let mut gone = Vec::new();
+    for n in 0..3000 {
+        let file = root.create("temp", Kind::File).unwrap();
+        put(&file, 0, &data);
+        if n % 500 == 0 {
+            gone.push(file.stat().id);
+        }
+        drop(file);
+        root.remove("temp").unwrap();
+    }
+    fs.sync().unwrap();
+    let image = image_of(&disk, SIZE as usize);
+    assert_checks(&image);
+    for ino in gone {
+        assert_eq!(inode_items(&image, ino), (false, false), "{ino}");
+    }
+}
+
+#[test]
 fn a_power_cut_anywhere_keeps_the_last_sync() {
     let image = mkfs_empty(&[]);
     let disk = mem::arc(CrashDisk::new(&image)).unwrap();

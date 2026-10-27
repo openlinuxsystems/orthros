@@ -73,6 +73,18 @@ Radix writes that Linux has in the same form.
   literals are copied into the literals buffer for that); Huffman
   literals come from four streams at once. Everything stays safe Rust:
   the Btrfs compartment has no `unsafe`.
+- **Files made and removed between syncs**: a file whose last name goes
+  while only the dirty list keeps its node (no one has it open, and the
+  sync has not taken it) is deleted at once, as ADR 0130 deletes a file
+  with no node, and its pages are dropped, their room given back: Linux
+  evicts the inode then. Before, it was kept as if open, with an orphan
+  item, until the next sync, so a program making and removing temporary
+  files grew the tree and could run out of room before the sync came.
+- **Tree roots kept**: every change to a file looked its subvolume's
+  tree up in the root tree, several times; the volume keeps the last
+  four trees' roots, forgotten whenever the root tree changes (which may
+  move one). The transaction's lock, held by every change and every read
+  of the trees on a writable mount, keeps them true.
 - **Benchmarks** (docs/design/ipc.md): a third disk, a virtio disk of 192
   MiB that `ob bench` makes afresh with `mkfs.btrfs --compress zstd`,
   holds 32 files of 1 MiB of noise, which `mkfs.btrfs` stores plain, and
@@ -113,6 +125,9 @@ Rejected:
   instruction against the bit-at-a-time definition at every length
   around a pass's three runs, and Btrfs's tests check the tables against
   it.
+- Making a file, writing 4 KiB, closing and removing it took 14.6 µs in
+  Btrfs on a test host, and takes 5.5 µs; a host test makes and removes
+  half again the filesystem's size with no sync between.
 - The zstd decoder went from 226 to 666 MB/s on a test host's text of
   the benchmark's kind, where the reference `zstd` tool (C, with its
   assembly and BMI2) decodes 814 MB/s.

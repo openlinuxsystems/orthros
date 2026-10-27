@@ -13,9 +13,11 @@
 //! files through it ([`crate::files`]); a commit makes them durable at the
 //! next sync, every [`COMMIT_NS`], or sooner when the pages waiting to be
 //! written pass [`DIRTY_PAGES_MAX`]. A node whose data or inode waits for
-//! the sync is kept until then; a file removed while open keeps its items
-//! until its last node goes, with an orphan item that cleans it up at the
-//! next writable mount if the power goes first.
+//! the sync is kept until then, unless its file loses its last name with
+//! no one holding it open: then its items go at once and its pages are
+//! never written, as Linux evicts the inode. A file removed while open
+//! keeps its items until its last node goes, with an orphan item that
+//! cleans it up at the next writable mount if the power goes first.
 //!
 //! # Locks
 //!
@@ -23,13 +25,14 @@
 //! transaction's lock comes next, held by every change and also by every
 //! read of the trees, since a change edits the transaction's blocks in
 //! place; it is never held while a program's memory is copied, which may
-//! fault and read a file. Then come a node's inode, the node table and
-//! the list of nodes to remove, then the workspace of compressed reads,
-//! the volume's block cache and the disk's. `nodes` is held only to find
-//! or add a node, never while reading the disk: a node is read first, and
-//! when another was added for the same inode meanwhile, that one is used
-//! and the new one dropped, which only frees memory. Shrinking only tries
-//! the workspace's lock, as a reader that holds it may be making memory.
+//! fault and read a file. Then come a node's inode, the node table, the
+//! nodes kept for the sync and the list of nodes to remove, then the
+//! workspace of compressed reads, the volume's block cache and the
+//! disk's. `nodes` is held only to find or add a node, never while
+//! reading the disk: a node is read first, and when another was added
+//! for the same inode meanwhile, that one is used and the new one
+//! dropped, which only frees memory. Shrinking only tries the
+//! workspace's lock, as a reader that holds it may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
@@ -330,6 +333,27 @@ impl Inner {
         }
         let _ = dirty.push_within_capacity(node);
         Ok(())
+    }
+
+    /// Takes `node`, of a file whose last name is going, out of the nodes
+    /// kept for the next sync when nothing else holds it: no one has it
+    /// open (the caller's is the other reference) and the sync has not
+    /// taken it, so its pages are never written. The caller holds the
+    /// transaction, so no lookup finds the node meanwhile; the node table's
+    /// lock keeps a shrink from taking it.
+    pub(crate) fn take_idle(&self, node: &KArc<BtrfsNode>) -> bool {
+        let _nodes = self.nodes.lock();
+        let mut dirty = self.dirty.lock();
+        if KArc::strong_count(node) != 2 {
+            return false;
+        }
+        let Some(i) = dirty.iter().rposition(|kept| KArc::ptr_eq(kept, node)) else {
+            return false;
+        };
+        // The caller's reference stays, so this drops nothing.
+        drop(dirty.remove(i));
+        node.unpinned();
+        true
     }
 
     /// Notes that the last node of inode `ino` of subvolume `subvol`, which
