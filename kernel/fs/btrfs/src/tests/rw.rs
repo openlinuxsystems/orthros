@@ -506,6 +506,77 @@ fn a_power_cut_anywhere_keeps_the_last_sync() {
     }
 }
 
+/// The storage boot test's churn (`storage churn`): a file written,
+/// synced, renamed, its directory synced, and the file of eight rounds
+/// before removed and the directory synced again, with no sync of the
+/// whole filesystem between, as on a fast machine. A power cut anywhere
+/// keeps the last commit.
+#[test]
+fn a_power_cut_in_a_churn_of_synced_files_keeps_the_last_commit() {
+    let image = mkfs_empty(&[]);
+    let disk = mem::arc(CrashDisk::new(&image)).unwrap();
+    let throughs =
+        |disk: &CrashDisk| disk.ops().iter().filter(|op| matches!(op, Op::Through(..))).count();
+    let mut states: BTreeMap<usize, Model> = BTreeMap::new();
+    states.insert(0, Model::new());
+    {
+        let device: DeviceRef = disk.clone();
+        let fs = BtrfsFs::mount_writable(device).unwrap();
+        let root = fs.root();
+        let mut model = Model::new();
+        let mut note = |model: &Model| {
+            states.insert(throughs(&disk), model.clone());
+        };
+        for round in 0..48u64 {
+            let (temp, file) = (format!("temp-{round:04}"), format!("file-{round:04}"));
+            let data = noise(round, (round as usize * 40_009) % (192 << 10) + 1);
+            let made = root.create(&temp, Kind::File).unwrap();
+            put(&made, 0, &data);
+            model.insert(format!("/{temp}"), Thing::File(data));
+            made.sync().unwrap();
+            note(&model);
+            drop(made);
+            root.rename(&temp, &*root, &file).unwrap();
+            let moved = model.remove(&format!("/{temp}")).unwrap();
+            model.insert(format!("/{file}"), moved);
+            root.sync().unwrap();
+            note(&model);
+            if let Some(old) = round.checked_sub(8) {
+                root.remove(&format!("file-{old:04}")).unwrap();
+                model.remove(&format!("/file-{old:04}"));
+                root.sync().unwrap();
+                note(&model);
+            }
+        }
+    }
+    let ops = disk.ops();
+    let mut cuts: BTreeSet<usize> = BTreeSet::new();
+    let mut random = XorShift(0xc0ffee);
+    for (at, op) in ops.iter().enumerate() {
+        if matches!(op, Op::Flush | Op::Through(..)) {
+            cuts.extend([at, at + 1]);
+        }
+    }
+    for _ in 0..24 {
+        cuts.insert(random.below(ops.len() + 1));
+    }
+    for cut in cuts {
+        let (medium, durable) = disk.cut(cut, || random.next() & 1 == 0);
+        let (whole, text) = btrfs_check(&medium);
+        assert!(whole, "a cut before op {cut} of {}: btrfs check failed:\n{text}", ops.len());
+        let ro = mount(&medium).unwrap();
+        let (_, want) = states.range(..=durable).next_back().unwrap();
+        let read = snapshot(&ro.root());
+        assert_eq!(
+            read.keys().collect::<Vec<_>>(),
+            want.keys().collect::<Vec<_>>(),
+            "a cut before op {cut} of {}, {durable} commits",
+            ops.len()
+        );
+        assert!(read == *want, "a cut before op {cut} of {}: the files differ", ops.len());
+    }
+}
+
 #[test]
 fn random_changes_match_a_model() {
     for args in [&[][..], &["--nodesize", "4096", "--csum", "sha256"]] {
