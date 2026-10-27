@@ -90,7 +90,15 @@ pub fn copy(bytes: &[u8]) -> Result<KVec<u8>, NoMemory> {
 }
 
 /// Appends `bytes` to `v`, growing it if need be (the kernel's `alloc`
-/// has no `extend_from_slice`, which cannot fail).
+/// has no `extend_from_slice`, which cannot fail): as a string store does
+/// ([`radix_mm::bytes::extend`]), not a byte at a time.
+#[cfg(not(kani))]
+pub fn extend(v: &mut KVec<u8>, bytes: &[u8]) -> Result<(), NoMemory> {
+    radix_mm::bytes::extend(v, bytes).map_err(|_| NoMemory)
+}
+
+/// Appends `bytes` to `v`, growing it if need be.
+#[cfg(kani)]
 pub fn extend(v: &mut KVec<u8>, bytes: &[u8]) -> Result<(), NoMemory> {
     v.try_reserve(bytes.len()).map_err(|_| NoMemory)?;
     for &byte in bytes {

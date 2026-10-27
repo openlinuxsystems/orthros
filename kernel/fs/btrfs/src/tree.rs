@@ -146,10 +146,11 @@ impl Block {
     /// The first slot whose key is `key` or after it; `nritems` if every
     /// key is before it.
     pub fn lower_bound(&self, key: &Key) -> usize {
+        let size = if self.is_leaf() { ITEM_SIZE } else { PTR_SIZE };
         let (mut low, mut high) = (0, self.nritems());
         while low < high {
             let mid = low + (high - low) / 2;
-            if self.key(mid) < *key {
+            if Key::read(&self.bytes, HEADER_SIZE + mid * size) < *key {
                 low = mid + 1;
             } else {
                 high = mid;
