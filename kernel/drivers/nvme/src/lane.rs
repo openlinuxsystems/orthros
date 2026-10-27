@@ -41,10 +41,6 @@ const LIST_SIZE: usize = LIST_ENTRIES * 8;
 /// Pages of DMA memory a lane takes.
 pub const MEMORY_PAGES: usize = (LISTS + SLOTS * LIST_SIZE) / 4096;
 
-/// The size of a block: the block layer's sector, which the driver
-/// takes namespaces of only.
-const BLOCK: u64 = 512;
-
 /// An I/O queue pair, made on the controller.
 pub struct Lane {
     memory: Dma,
@@ -176,18 +172,21 @@ impl Lane {
         self.statuses.get(usize::from(slot)).copied().unwrap_or(command::Status::SUCCESS)
     }
 
-    /// Starts a request as `slot`: `op` on namespace `namespace` from block
+    /// Starts a request as `slot`: `op` on namespace `namespace`, whose
+    /// logical blocks are `lba_bytes` long (512 to 4096), from block
     /// `block`, with `data` buffers (physical address, length) that
     /// together cover whole blocks, each inside a page and all of them
     /// one run of pages ([`command::prps`]); none for a flush or a
     /// deallocation. The doorbell is written at once if `ring`, or by
     /// [`Lane::ring`]. The buffers must stay the request's alone until
     /// [`Lane::complete`] hands the slot back.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &mut self,
         slot: u8,
         op: Op,
         namespace: u32,
+        lba_bytes: u32,
         block: u64,
         data: &[(u64, u32)],
         ring: bool,
@@ -207,9 +206,13 @@ impl Lane {
         let mut command = match op {
             Op::Read | Op::Write | Op::WriteThrough => {
                 let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
-                let blocks = bytes / BLOCK;
+                let lba = u64::from(lba_bytes);
+                if !lba.is_power_of_two() || !(512..=4096).contains(&lba) {
+                    return Err(Error::BadRequest);
+                }
+                let blocks = bytes / lba;
                 if data.len() > self.max_pages
-                    || !bytes.is_multiple_of(BLOCK)
+                    || !bytes.is_multiple_of(lba)
                     || !(1..=65_536).contains(&blocks)
                 {
                     return Err(Error::BadRequest);

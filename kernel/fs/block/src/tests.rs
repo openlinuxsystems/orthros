@@ -102,16 +102,16 @@ proptest! {
 
 #[test]
 fn requests_are_checked() {
-    assert_eq!(check(16, 4, 0, [(0, 4096)].into_iter()), Ok(8));
-    assert_eq!(check(16, 4, 8, [(0, 4096)].into_iter()), Ok(8));
-    assert_eq!(check(16, 4, 9, [(0, 4096)].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(16, 4, 0, [(512, 3584), (0, 512)].into_iter()), Ok(8));
-    assert_eq!(check(16, 4, 0, [(100, 512)].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(16, 4, 0, [(3584, 1024)].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(16, 4, 0, [(0, 0)].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(16, 4, 0, [].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(16, 1, 0, [(0, 512), (0, 512)].into_iter()), Err(Error::OutOfRange));
-    assert_eq!(check(u64::MAX, 4, u64::MAX, [(0, 512)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 4, 0, [(0, 4096)].into_iter()), Ok(8));
+    assert_eq!(check(16, 1, 4, 8, [(0, 4096)].into_iter()), Ok(8));
+    assert_eq!(check(16, 1, 4, 9, [(0, 4096)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 4, 0, [(512, 3584), (0, 512)].into_iter()), Ok(8));
+    assert_eq!(check(16, 1, 4, 0, [(100, 512)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 4, 0, [(3584, 1024)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 4, 0, [(0, 0)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 4, 0, [].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 1, 1, 0, [(0, 512), (0, 512)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(u64::MAX, 1, 4, u64::MAX, [(0, 512)].into_iter()), Err(Error::OutOfRange));
 }
 
 #[test]
@@ -138,10 +138,10 @@ fn ram_disk_and_slices() {
 fn discards_and_writes_through() {
     let (disk, device) = shared(RamDisk::new(64, false));
     disk.load(0, &std::vec![0xaa; 64 * 512]).unwrap();
-    assert_eq!(crate::check_discard(64, 0, 64), Ok(()));
-    assert_eq!(crate::check_discard(64, 0, 0), Err(Error::OutOfRange));
-    assert_eq!(crate::check_discard(64, 60, 5), Err(Error::OutOfRange));
-    assert_eq!(crate::check_discard(64, u64::MAX, 2), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 1, 0, 64), Ok(()));
+    assert_eq!(crate::check_discard(64, 1, 0, 0), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 1, 60, 5), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 1, u64::MAX, 2), Err(Error::OutOfRange));
     // Through a partition: sectors 8 to 23 of the disk. Its sectors 3 to
     // 12 (disk 11 to 20) go: part of the disk's second page, the third
     // whole, and part of the fourth.
@@ -180,6 +180,7 @@ impl BlockDevice for Lending {
     fn info(&self) -> crate::Info {
         crate::Info {
             sectors: 64,
+            logical_block: 512,
             block_size: 512,
             read_only: false,
             max_segments: 16,
@@ -233,8 +234,8 @@ fn lent_memory_goes_through_partitions() {
     assert_eq!(slice.write_frames(0, &[(0x2_0e00, 1024)]), Err(Error::OutOfRange));
     assert_eq!(slice.write_frames(0, &[]), Err(Error::OutOfRange));
     let many = std::vec![(0x2_0000, 512); crate::MAX_FRAMES + 1];
-    assert_eq!(crate::check_frames(1 << 20, 0, &many), Err(Error::OutOfRange));
-    assert_eq!(crate::check_frames(1 << 20, 0, &many[1..]), Ok(crate::MAX_FRAMES as u64));
+    assert_eq!(crate::check_frames(1 << 20, 1, 0, &many), Err(Error::OutOfRange));
+    assert_eq!(crate::check_frames(1 << 20, 1, 0, &many[1..]), Ok(crate::MAX_FRAMES as u64));
     assert_eq!(disk.asked.lock().unwrap().len(), 2);
     // A device that cannot reach lent memory says so, and the caller
     // copies.
@@ -258,8 +259,8 @@ fn mbr(entries: &[(u8, u8, u32, u32)]) -> [u8; 512] {
 }
 
 fn table(disk: &RamDisk) -> Result<(Scheme, Vec<partition::Partition>), partition::Error> {
-    let sectors = disk.info().sectors;
-    let (scheme, found) = partition::read(sectors, &mut |at, out| {
+    let info = disk.info();
+    let (scheme, found) = partition::read(info.sectors, info.unit(), &mut |at, out| {
         crate::read_sector(disk, at, out).map_err(|_| partition::Error::Io)
     })?;
     Ok((scheme, found.clone()))
@@ -327,8 +328,15 @@ fn mbr_partitions_past_the_end_are_cut_or_skipped() {
 /// A GPT disk of `sectors` with `parts` (first, last, name), both headers
 /// written; `damage` breaks the primary header.
 fn gpt_disk(sectors: u64, parts: &[(u64, u64, &str)], damage: bool) -> RamDisk {
-    let disk = RamDisk::new(sectors, false);
-    disk.load(0, &mbr(&[(0, 0xee, 1, (sectors - 1) as u32)])).unwrap();
+    gpt_disk_in(512, sectors, parts, damage)
+}
+
+/// A disk of `sectors` sectors in logical blocks of `block` bytes, with a
+/// GPT of `parts` (first and last block, name) counted in its blocks.
+fn gpt_disk_in(block: u64, sectors: u64, parts: &[(u64, u64, &str)], damage: bool) -> RamDisk {
+    let disk = RamDisk::with_blocks(sectors, false, block as u32);
+    let blocks = sectors * 512 / block;
+    disk.load(0, &mbr(&[(0, 0xee, 1, (blocks - 1) as u32)])).unwrap();
     let mut entries = std::vec![0u8; 128 * 128];
     for (i, &(first, last, name)) in parts.iter().enumerate() {
         let e = &mut entries[i * 128..(i + 1) * 128];
@@ -345,26 +353,28 @@ fn gpt_disk(sectors: u64, parts: &[(u64, u64, &str)], damage: bool) -> RamDisk {
         }
     }
     let entries_crc = crc32(&entries);
-    for (at, entries_at, alternate) in [(1, 2, sectors - 1), (sectors - 1, sectors - 33, 1)] {
+    let table = entries.len() as u64 / block;
+    let last = blocks - 1;
+    for (at, entries_at, alternate) in [(1, 2, last), (last, last - table, 1)] {
         let mut h = [0u8; 512];
         h[0..8].copy_from_slice(b"EFI PART");
         h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
         h[12..16].copy_from_slice(&92u32.to_le_bytes());
         h[24..32].copy_from_slice(&at.to_le_bytes());
         h[32..40].copy_from_slice(&alternate.to_le_bytes());
-        h[40..48].copy_from_slice(&34u64.to_le_bytes());
-        h[48..56].copy_from_slice(&(sectors - 34).to_le_bytes());
+        h[40..48].copy_from_slice(&(2 + table).to_le_bytes());
+        h[48..56].copy_from_slice(&(last - 1 - table).to_le_bytes());
         h[72..80].copy_from_slice(&entries_at.to_le_bytes());
         h[80..84].copy_from_slice(&128u32.to_le_bytes());
         h[84..88].copy_from_slice(&128u32.to_le_bytes());
         h[88..92].copy_from_slice(&entries_crc.to_le_bytes());
         let crc = partition::header_crc(&h[..92]);
         h[16..20].copy_from_slice(&crc.to_le_bytes());
-        disk.load(at * 512, &h).unwrap();
-        disk.load(entries_at * 512, &entries).unwrap();
+        disk.load(at * block, &h).unwrap();
+        disk.load(entries_at * block, &entries).unwrap();
     }
     if damage {
-        disk.load(512 + 40, &[0xff]).unwrap();
+        disk.load(block + 40, &[0xff]).unwrap();
     }
     disk
 }
@@ -388,6 +398,83 @@ fn gpt_partitions_and_the_backup_header() {
     let (_, found) = table(&disk).unwrap();
     let kept: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors)).collect();
     assert_eq!(kept, [(1, 10, 4086), (4, 8100, 51)]);
+}
+
+#[test]
+fn gpt_partitions_in_4k_blocks() {
+    // 8 MiB in 2048 blocks of 4 KiB: the table counts blocks, the
+    // partitions come out in sectors.
+    for damage in [false, true] {
+        let disk =
+            gpt_disk_in(4096, 16384, &[(256, 511, "EFI system"), (512, 2000, "data")], damage);
+        let (scheme, found) = table(&disk).unwrap();
+        assert_eq!(scheme, if damage { Scheme::GptBackup } else { Scheme::Gpt });
+        let kept: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors)).collect();
+        assert_eq!(kept, [(1, 2048, 2048), (2, 4096, 1489 * 8)]);
+    }
+    // Read as if its blocks were sectors, the table is no GPT's.
+    let disk = gpt_disk_in(4096, 16384, &[(256, 511, "")], false);
+    let read = partition::read(16384, 1, &mut |at, out| {
+        crate::read_sector(&disk, at, out).map_err(|_| partition::Error::Io)
+    });
+    assert!(matches!(read, Err(partition::Error::Damaged(_))));
+}
+
+#[test]
+fn mbr_partitions_in_4k_blocks() {
+    let disk = RamDisk::with_blocks(8192, false, 4096);
+    disk.load(0, &mbr(&[(0, 0x0c, 256, 512), (0, 0x05, 768, 100)])).unwrap();
+    disk.load(768 * 4096, &mbr(&[(0, 0x83, 1, 10)])).unwrap();
+    let (scheme, found) = table(&disk).unwrap();
+    assert_eq!(scheme, Scheme::Mbr);
+    let numbers: Vec<_> = found.iter().map(|p| (p.number, p.first, p.sectors)).collect();
+    // The extended one shows its first block only.
+    assert_eq!(numbers, [(1, 2048, 4096), (2, 6144, 8), (5, 6152, 80)]);
+}
+
+#[test]
+fn disks_with_4k_sectors_take_whole_blocks() {
+    assert_eq!(check(16, 8, 4, 0, [(0, 4096)].into_iter()), Ok(8));
+    assert_eq!(check(16, 8, 4, 4, [(0, 4096)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 8, 4, 0, [(0, 512)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(check(16, 8, 4, 0, [(512, 3584), (0, 512)].into_iter()), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 8, 8, 16), Ok(()));
+    assert_eq!(crate::check_discard(64, 8, 8, 4), Err(Error::OutOfRange));
+    assert_eq!(crate::check_discard(64, 8, 4, 8), Err(Error::OutOfRange));
+    let (disk, device) = shared(RamDisk::with_blocks(64, false, 4096));
+    assert_eq!((device.info().logical_block, device.info().unit()), (4096, 8));
+    disk.load(512 * 10, b"tenth sector").unwrap();
+    // A slice is whole blocks; a sector is read in the block that holds it.
+    assert!(Slice::new(device.clone(), 4, 16).is_none());
+    assert!(Slice::new(device.clone(), 8, 12).is_none());
+    let slice = Slice::new(device.clone(), 8, 16).unwrap();
+    let mut sector = [0u8; 512];
+    crate::read_sector(&slice, 2, &mut sector).unwrap();
+    assert_eq!(&sector[..12], b"tenth sector");
+    let mut page = CachePage::new().unwrap();
+    let mut seg = [SegmentMut { page: &mut page, offset: 0, len: 512 }];
+    assert_eq!(slice.read(0, &mut seg), Err(Error::OutOfRange));
+    // The cache reads and writes whole blocks: a write of three bytes
+    // reads its block first, and syncs it whole.
+    let cache = BlockCache::new(device);
+    cache.write(5130, b"abc").unwrap();
+    let mut out = [0u8; 15];
+    cache.read(5120, &mut out).unwrap();
+    assert_eq!(&out, b"tenth sectabc\0\0");
+    cache.fill(8192, 4096, 1).unwrap();
+    let requests = disk.requests();
+    cache.sync().unwrap();
+    // Two blocks written, and the flush.
+    assert_eq!(disk.requests(), requests + 3);
+    let mut raw = [0u8; 15];
+    disk.dump(5120, &mut raw);
+    assert_eq!(&raw, b"tenth sectabc\0\0");
+    // What is discarded goes in whole blocks only.
+    cache.write(0, b"zz").unwrap();
+    cache.discard(0, 512);
+    assert!(cache.is_dirty());
+    cache.discard(0, 4096);
+    assert!(!cache.is_dirty());
 }
 
 proptest! {

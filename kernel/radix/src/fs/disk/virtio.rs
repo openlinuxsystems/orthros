@@ -157,6 +157,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     let _ = write!(name, "vd{}", (b'a' + index as u8) as char);
     let info = Info {
         sectors: found.sectors,
+        logical_block: found.logical_block,
         block_size: found.block_size,
         read_only: found.read_only,
         max_segments: found.max_segments as usize,
@@ -176,9 +177,10 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         None => how.write_str("polled"),
     };
     info!(
-        "Disk: {name} is a virtio block device of {size} at {}, {} bytes a block{}{}{}, {how}",
+        "Disk: {name} is a virtio block device of {size} at {}, {} bytes a block{}{}{}{}, {how}",
         function.address(),
         info.block_size,
+        super::sector_note(&info),
         if info.read_only { ", read-only" } else { "" },
         if found.flush { ", write cache" } else { "" },
         if info.discard_sectors > 0 { ", discards" } else { "" },

@@ -92,6 +92,8 @@ struct State {
     /// Doorbells rung, and interrupts the device would raise.
     doorbells: u64,
     interrupts: u64,
+    /// Its `blk_size`, 512 if 0.
+    blk_size: u32,
 }
 
 /// The device's BAR: the common configuration, the device configuration
@@ -243,7 +245,9 @@ impl Registers for Device {
             // size_max, if offered.
             (0x2008, 4) => 2048,
             (0x200c, 4) => 8,
-            (0x2014, 4) => 4096,
+            (0x2014, 4) => u64::from(if s.blk_size == 0 { 512 } else { s.blk_size }),
+            // Eight logical blocks to a physical one.
+            (0x2018, 4) => 3,
             (0x2024, 4) => 32,
             (0x2028, 4) => 1,
             _ => 0,
@@ -295,6 +299,7 @@ const FEATURES: u64 = common_feature::VERSION_1
     | feature::SEG_MAX
     | feature::BLK_SIZE
     | feature::FLUSH
+    | feature::TOPOLOGY
     | (1 << 34);
 
 /// The most requests the tests have in flight, a table each.
@@ -310,7 +315,13 @@ fn alloc(pages: usize) -> Option<Dma> {
 }
 
 fn setup(features: u64) -> (Arc<Device>, Blk) {
+    setup_with(features, 0)
+}
+
+/// [`setup`], with a device whose `blk_size` is `blk_size`.
+fn setup_with(features: u64, blk_size: u32) -> (Arc<Device>, Blk) {
     let device = Device::new(features);
+    device.state.lock().unwrap().blk_size = blk_size;
     let f = function(2, 0x1042);
     let regs = device.clone();
     let transport =
@@ -334,11 +345,25 @@ fn finds_the_device_type() {
 }
 
 #[test]
+fn blk_size_is_the_logical_block() {
+    // A disk with 4 KiB sectors, eight to a physical block or alone.
+    let (_, blk) = setup_with(FEATURES, 4096);
+    assert_eq!((blk.info().logical_block, blk.info().block_size), (4096, 32_768));
+    let (_, blk) = setup_with(FEATURES & !feature::TOPOLOGY, 4096);
+    assert_eq!((blk.info().logical_block, blk.info().block_size), (4096, 4096));
+    // One it cannot take is a sector's, as is one it does not say.
+    let (_, blk) = setup_with(FEATURES, 1000);
+    assert_eq!(blk.info().logical_block, 512);
+    let (_, blk) = setup_with(FEATURES & !feature::BLK_SIZE, 4096);
+    assert_eq!((blk.info().logical_block, blk.info().block_size), (512, 4096));
+}
+
+#[test]
 fn sets_up_with_the_features_it_wants() {
     let (device, blk) = setup(FEATURES);
     let info = blk.info();
     assert_eq!(info.sectors, SECTORS);
-    assert_eq!(info.block_size, 4096);
+    assert_eq!((info.logical_block, info.block_size), (512, 4096));
     assert_eq!(info.max_segments, 8);
     assert!(info.flush && !info.read_only);
     let s = device.state.lock().unwrap();
@@ -349,7 +374,8 @@ fn sets_up_with_the_features_it_wants() {
             | common_feature::EVENT_IDX
             | feature::SEG_MAX
             | feature::BLK_SIZE
-            | feature::FLUSH,
+            | feature::FLUSH
+            | feature::TOPOLOGY,
         "not packed rings (bit 34), which it does not use"
     );
     assert_eq!(

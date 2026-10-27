@@ -81,6 +81,17 @@ fn port_op(op: Op) -> radix_ahci::Op {
     }
 }
 
+/// `request`'s op and first sector as the disk counts them: in its own
+/// logical sectors, which are a block layer's sector or eight.
+fn in_disk_sectors(request: &Request<'_>) -> (radix_ahci::Op, u64) {
+    let unit = request.unit;
+    let op = match port_op(request.op) {
+        radix_ahci::Op::Trim(count) => radix_ahci::Op::Trim(count / unit),
+        op => op,
+    };
+    (op, request.sector / unit)
+}
+
 impl Controller for SataPort {
     fn room(&self, op: Op, _segments: usize) -> bool {
         self.port.room(port_op(op))
@@ -91,8 +102,8 @@ impl Controller for SataPort {
     }
 
     fn submit(&mut self, slot: u8, request: &Request<'_>, _more: bool) -> Result<(), Error> {
-        let Request { op, sector, data, .. } = *request;
-        let tag = self.port.submit(port_op(op), sector, data).map_err(|err| match err {
+        let (op, sector) = in_disk_sectors(request);
+        let tag = self.port.submit(op, sector, request.data).map_err(|err| match err {
             radix_ahci::Error::BadRequest => Error::OutOfRange,
             _ => Error::Io,
         })?;
@@ -258,12 +269,15 @@ fn add(
     let _ = write!(name, "sd{}", (b'a' + *next as u8) as char);
     let found = port.info();
     let identity = port.identity().copied();
+    // The disk counts in its own sectors, the block layer in 512 bytes.
+    let unit = u64::from(found.sector_size) / radix_block::SECTOR;
     let info = Info {
-        sectors: found.sectors,
+        sectors: found.sectors.saturating_mul(unit),
+        logical_block: found.sector_size,
         block_size: found.block_size,
         read_only: false,
         max_segments: radix_ahci::MAX_SEGMENTS,
-        discard_sectors: found.trim_sectors,
+        discard_sectors: found.trim_sectors.saturating_mul(unit),
         // A disk that does not say spins, as Linux takes it.
         rotational: found.rotational.unwrap_or(true),
     };
@@ -288,9 +302,10 @@ fn add(
     }
     info!(
         "Disk: {name} is a SATA disk of {} on AHCI port {number}: {model}, {} bytes a \
-         block{queued}{}{}{}{}",
+         block{}{queued}{}{}{}{}",
         Size(info.sectors * radix_block::SECTOR),
         info.block_size,
+        super::sector_note(&info),
         if found.write_cache { ", write cache" } else { "" },
         if found.fua { ", FUA" } else { "" },
         if info.discard_sectors > 0 { ", TRIM" } else { "" },

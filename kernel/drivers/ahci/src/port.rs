@@ -126,9 +126,6 @@ const SIG_PORT_MULTIPLIER: u32 = 0x9669_0101;
 /// The most buffers one request takes.
 pub const MAX_SEGMENTS: usize = 32;
 
-/// The size of the disk's sectors, in bytes: the only one supported.
-const SECTOR: u64 = 512;
-
 /// Where things are in the port's memory, and how big it is.
 const COMMAND_LIST: usize = 0;
 const HEADER_SIZE: usize = 32;
@@ -197,8 +194,11 @@ pub enum Outcome {
 /// What the disk on a port is and does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Info {
-    /// Its capacity in 512-byte sectors.
+    /// Its capacity in its logical sectors, which requests count in.
     pub sectors: u64,
+    /// Its logical sector size in bytes: 512, or 4096 on a disk with
+    /// 4 KiB sectors.
+    pub sector_size: u32,
     /// Its physical sector size in bytes, the smallest unit it writes
     /// without reading first.
     pub block_size: u32,
@@ -265,6 +265,7 @@ impl Port {
             identity: None,
             info: Info {
                 sectors: 0,
+                sector_size: 512,
                 block_size: 512,
                 depth: 1,
                 queued: false,
@@ -372,6 +373,7 @@ impl Port {
         let trim_entries = (BUFFER_SIZE / ata::TRIM_ENTRY) as u64;
         self.info = Info {
             sectors: identity.sectors,
+            sector_size: identity.logical_sector,
             block_size: identity.physical_sector,
             depth: if queued { slots.min(identity.queue_depth) } else { 1 },
             queued,
@@ -502,9 +504,9 @@ impl Port {
         !self.info.queued || matches!(op, Op::Flush | Op::Trim(_))
     }
 
-    /// Starts a request: `op` on the sectors from `sector`, with `data`
-    /// buffers (physical address, length) that together cover whole
-    /// sectors, none for a flush or a trim. Returns its slot, which
+    /// Starts a request: `op` on the disk's logical sectors from `sector`,
+    /// with `data` buffers (physical address, length) that together cover
+    /// whole sectors, none for a flush or a trim. Returns its slot, which
     /// [`Port::complete`] gives back. The buffers must stay the request's
     /// alone until then.
     pub fn submit(&mut self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<u8, Error> {
@@ -574,14 +576,15 @@ impl Port {
         match op {
             Op::Read | Op::Write | Op::WriteThrough => {
                 let bytes: u64 = data.iter().map(|&(_, len)| u64::from(len)).sum();
-                let sectors = bytes / SECTOR;
+                let size = u64::from(self.info.sector_size);
+                let sectors = bytes / size;
                 let even = data
                     .iter()
                     .all(|&(phys, len)| len > 0 && len.is_multiple_of(2) && phys.is_multiple_of(2));
                 if data.is_empty()
                     || data.len() > MAX_SEGMENTS
                     || !even
-                    || !bytes.is_multiple_of(SECTOR)
+                    || !bytes.is_multiple_of(size)
                     || !(1..=65_536).contains(&sectors)
                     || !fits(sectors)
                 {

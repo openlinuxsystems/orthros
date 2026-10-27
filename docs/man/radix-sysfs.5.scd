@@ -62,8 +62,10 @@ _/kernel/block/_*name*_/device/model_, _serial_, _firmware_rev_
 	follow the order the controllers are found in.
 
 _/kernel/block/_*name*_/queue/logical_block_size_, _physical_block_size_
-	The sizes in bytes of the device's sectors, *512*, and of the
-	blocks it writes without reading first (*radix-block*(2)).
+	The sizes in bytes of the device's logical blocks, the least it
+	reads or writes (*512*, or *4096* for a disk with 4 KiB sectors),
+	and of the blocks it writes without reading first (*radix-block*(2)).
+	Offsets and sizes elsewhere stay in 512-byte sectors, as on Linux.
 
 _/kernel/block/_*name*_/queue/minimum_io_size_, _optimal_io_size_
 	The smallest write it prefers, its physical block size, and the
@@ -74,8 +76,8 @@ _/kernel/block/_*name*_/queue/rotational_
 	state disk.
 
 _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
-	*512*, and the most bytes one discard (TRIM) covers, if the device
-	discards; *0* and *0* if not.
+	Its logical block size, and the most bytes one discard (TRIM)
+	covers, if the device discards; *0* and *0* if not.
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
 	virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_ for the first

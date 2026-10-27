@@ -586,6 +586,25 @@ fn identify_data_say_what_the_disk_is() {
 }
 
 #[test]
+fn disks_with_4k_sectors_count_in_them() {
+    // 4,096-byte logical sectors: 2,048 words each, eight to a physical
+    // one as the words say, or one when it is too big to take.
+    let mut id = identify_words(1 << 20, 32, false);
+    id[106] |= 1 << 12;
+    id[117] = 2048;
+    checksum(&mut id);
+    let identity = ata::identify(&id).unwrap();
+    assert_eq!((identity.sectors, identity.logical_sector), (1 << 20, 4096));
+    assert_eq!(identity.physical_sector, 32_768);
+    id[106] = (id[106] & !0xf) | 5;
+    checksum(&mut id);
+    assert_eq!(ata::identify(&id).unwrap().physical_sector, 4096);
+    // A disk that does not say otherwise has 512-byte sectors.
+    let identity = ata::identify(&identify_words(64, 32, false)).unwrap();
+    assert_eq!(identity.logical_sector, 512);
+}
+
+#[test]
 fn identify_data_that_do_not_fit_are_refused() {
     let mut id = identify_words(64, 32, false);
     id[3] ^= 1;
@@ -596,12 +615,12 @@ fn identify_data_that_do_not_fit_are_refused() {
     checksum(&mut id);
     assert_eq!(ata::identify(&id), Err(ata::Unsupported::No48Bit));
 
-    // 4,096-byte logical sectors: 2,048 words each.
+    // 1,024-byte logical sectors: 512 words each.
     let mut id = identify_words(64, 32, false);
     id[106] |= 1 << 12;
-    id[117] = 2048;
+    id[117] = 512;
     checksum(&mut id);
-    assert_eq!(ata::identify(&id), Err(ata::Unsupported::SectorSize(4096)));
+    assert_eq!(ata::identify(&id), Err(ata::Unsupported::SectorSize(1024)));
 
     let mut id = identify_words(64, 32, false);
     id[0] = 1 << 15;

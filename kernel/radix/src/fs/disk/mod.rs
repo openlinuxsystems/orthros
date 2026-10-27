@@ -23,7 +23,7 @@ use core::sync::atomic::AtomicU64;
 use radix_abi::Status;
 use radix_abi::block as request;
 use radix_abi::errors::{File as FileError, Kernel};
-use radix_block::{DeviceRef, partition};
+use radix_block::{DeviceRef, Info, partition};
 use radix_hal::{Devices, PciSegment, UserMode};
 use radix_hw::pci::{self, Function};
 use radix_klog::{TextBuf, info, warn};
@@ -244,14 +244,24 @@ fn describe(function: &Function) {
     );
 }
 
+/// What a disk's line in the log says of its sectors: nothing for those
+/// of 512 bytes, else their size (a disk with 4 KiB sectors).
+fn sector_note(info: &Info) -> TextBuf<24> {
+    let mut note = TextBuf::new();
+    if info.logical_block != radix_block::SECTOR as u32 {
+        let _ = write!(note, ", {}-byte sectors", info.logical_block);
+    }
+    note
+}
+
 /// Reads the partition table of the disk `name` and registers each
 /// partition.
 fn partitions(name: &Name, device: &DeviceRef) {
-    let sectors = device.info().sectors;
+    let info = device.info();
     let mut read = |sector: u64, out: &mut [u8; 512]| {
         radix_block::read_sector(&**device, sector, out).map_err(|_| partition::Error::Io)
     };
-    let (scheme, found) = match partition::read(sectors, &mut read) {
+    let (scheme, found) = match partition::read(info.sectors, info.unit(), &mut read) {
         Ok(read) => read,
         Err(err) => {
             warn!("Disk: {name}: {err}");
@@ -402,7 +412,7 @@ pub fn control(
     match request {
         request::GET_SIZE_BYTES => put(&(info.sectors * radix_block::SECTOR).to_le_bytes()),
         request::GET_SIZE_SECTORS => put(&info.sectors.to_le_bytes()),
-        request::GET_SECTOR_SIZE => put(&(radix_block::SECTOR as u32).to_le_bytes()),
+        request::GET_SECTOR_SIZE => put(&info.logical_block.to_le_bytes()),
         request::GET_PHYSICAL_BLOCK_SIZE | request::GET_MINIMUM_IO => {
             put(&info.block_size.to_le_bytes())
         }
@@ -419,9 +429,10 @@ pub fn control(
             }
             let (pair, _) = range.as_chunks::<8>();
             let (start, len) = (u64::from_le_bytes(pair[0]), u64::from_le_bytes(pair[1]));
-            let sector = radix_block::SECTOR;
+            // Whole logical blocks, as Linux takes them.
+            let (sector, block) = (radix_block::SECTOR, u64::from(info.logical_block));
             let fits = start.checked_add(len).is_some_and(|end| end <= info.sectors * sector);
-            if !start.is_multiple_of(sector) || !len.is_multiple_of(sector) || !fits {
+            if !start.is_multiple_of(block) || !len.is_multiple_of(block) || !fits {
                 return Err(Kernel::InvalidArgument.status(1));
             }
             if len == 0 {

@@ -194,7 +194,7 @@ pub enum Unsupported {
     NotAta,
     /// It has no 48-bit addresses, which ATA-6 brought in 2002.
     No48Bit,
-    /// Its logical sectors are not 512 bytes.
+    /// Its logical sectors are not 512 or 4096 bytes.
     SectorSize(u32),
     /// It reports no sectors.
     Empty,
@@ -203,10 +203,13 @@ pub enum Unsupported {
 /// What a disk says of itself in IDENTIFY DEVICE (ACS-4, 7.13.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
-    /// Its capacity in 512-byte sectors.
+    /// Its capacity in its logical sectors.
     pub sectors: u64,
+    /// Its logical sector size in bytes, which commands count in: 512, or
+    /// 4096 on a disk with 4 KiB sectors (4Kn).
+    pub logical_sector: u32,
     /// Its physical sector size in bytes: the smallest unit it writes
-    /// without reading first.
+    /// without reading first, no smaller than a logical sector.
     pub physical_sector: u32,
     /// How many commands it queues (native command queuing), or 0.
     pub queue_depth: u8,
@@ -300,11 +303,11 @@ pub fn identify(id: &[u16; 256]) -> Result<Identity, Unsupported> {
             physical = logical;
         }
     }
-    if logical != 512 {
+    if logical != 512 && logical != 4096 {
         return Err(Unsupported::SectorSize(logical));
     }
-    if !physical.is_power_of_two() || !(512..=65_536).contains(&physical) {
-        physical = 512;
+    if !physical.is_power_of_two() || !(logical..=65_536).contains(&physical) {
+        physical = logical;
     }
     // Word 76 is all ones or zero on devices that are not Serial ATA.
     let sata = id[76] != 0 && id[76] != 0xffff;
@@ -316,6 +319,7 @@ pub fn identify(id: &[u16; 256]) -> Result<Identity, Unsupported> {
     };
     Ok(Identity {
         sectors,
+        logical_sector: logical,
         physical_sector: physical,
         queue_depth,
         write_cache: bit(id, 82, 5) && enabled && bit(id, 85, 5),
@@ -349,17 +353,19 @@ mod proofs {
     use super::*;
 
     /// Whatever a disk answers to IDENTIFY DEVICE, reading it does not
-    /// panic, and a disk it accepts has sectors, 512-byte logical sectors,
-    /// a physical sector size the block layer can take, at most 32
-    /// commands queued, and TRIM ranges only where it says it trims.
+    /// panic, and a disk it accepts has sectors, logical sectors of 512 or
+    /// 4096 bytes, a physical sector size the block layer can take, at
+    /// most 32 commands queued, and TRIM ranges only where it says it
+    /// trims.
     #[kani::proof]
     #[kani::unwind(257)]
     fn identify_reads_any_answer() {
         let id: [u16; 256] = kani::any();
         if let Ok(found) = identify(&id) {
             assert!(found.sectors > 0);
+            assert!(found.logical_sector == 512 || found.logical_sector == 4096);
             assert!(found.physical_sector.is_power_of_two());
-            assert!((512..=65_536).contains(&found.physical_sector));
+            assert!((found.logical_sector..=65_536).contains(&found.physical_sector));
             assert!(found.queue_depth <= 32);
             assert!((found.trim_blocks > 0) == (id[169] & 1 != 0));
         }

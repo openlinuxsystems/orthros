@@ -153,12 +153,13 @@ pub fn raw(root: &Dir, name: &str) {
         ("queue/logical_block_size", Some(sector)),
         ("queue/physical_block_size", Some(physical)),
         ("queue/rotational", Some(rotational)),
-        ("queue/discard_granularity", Some(512)),
+        // Discards cover whole sectors, of 4 KiB on a disk of them.
+        ("queue/discard_granularity", Some(sector)),
     ] {
         check(sys(file) == want, || format!("/kernel/block/{name}/{file} is {:?}", sys(file)));
     }
     let most = sys("queue/discard_max_bytes").unwrap_or(0);
-    check(most >= 512, || format!("/kernel/block/{name}/queue/discard_max_bytes is {most}"));
+    check(most >= sector, || format!("/kernel/block/{name}/queue/discard_max_bytes is {most}"));
 
     for &(from, len) in RAW_READS {
         let offset = if from < 0 { size - from.unsigned_abs() } else { from as u64 };

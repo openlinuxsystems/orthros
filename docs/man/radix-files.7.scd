@@ -235,7 +235,9 @@ takes Linux's requests for its size, sector size and discards
 sector's boundary, into or out of memory on a sector's boundary (an
 aligned *posix_memalign*(3) or *mmap*(2) buffer), go straight between
 the disk and the program's memory; the rest is copied. A write that
-covers part of a sector reads the rest of the sector first. Writing to
+covers part of a sector reads the rest of the sector first. A sector is
+the disk's own: 512 bytes, or 4096 on a disk of 4 KiB sectors, which
+*BLKSSZGET* gives, and which a discard must cover whole. Writing to
 a disk that holds a mounted filesystem damages the filesystem, as on
 every system.
 
@@ -297,8 +299,8 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 - virtio block devices, SATA disks on AHCI controllers and NVMe
   namespaces have drivers; USB storage comes in Phase 11. Port
-  multipliers, optical drives, disks with 4096-byte logical sectors and
-  NVMe namespaces with metadata are not supported.
+  multipliers, optical drives, disks with logical sectors larger than
+  4096 bytes and NVMe namespaces with metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
 - There is no name cache, no read-ahead and no hot plug yet.

@@ -100,6 +100,11 @@ impl FatFs {
         let mut boot = [0u8; 512];
         read_sector(&*device, 0, &mut boot)?;
         let geo = Geometry::parse(&boot, info.sectors * radix_block::SECTOR)?;
+        // Its sectors are read and written alone, which a disk with larger
+        // ones cannot do: Linux refuses such a volume too.
+        if geo.sector_size < info.logical_block {
+            return Err(Error::NotSupported);
+        }
         let inner = mem::arc(Inner {
             geo,
             cache: BlockCache::new(device),

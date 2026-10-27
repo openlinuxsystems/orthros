@@ -10,6 +10,12 @@
 //! A disk whose first sector is no partition table (a filesystem made on
 //! the whole disk, as on a "superfloppy") has none, and is used whole.
 //!
+//! A table counts in the disk's logical blocks: on a disk with 4 KiB
+//! sectors (4Kn), the GPT header is in the second 4 KiB and an entry's
+//! first block is 4 KiB to its sector, as UEFI and Linux have them. The
+//! partitions [`read`] returns are in 512-byte sectors, as every block
+//! address is.
+//!
 //! Everything read from the disk is checked before use: GPT headers and
 //! entry arrays by their CRC-32, with the backup header at the disk's
 //! last sector when the primary one is damaged, and every partition
@@ -47,9 +53,9 @@ pub enum Kind {
 pub struct Partition {
     /// Its number: 1 for the first.
     pub number: u32,
-    /// Its first sector.
+    /// Its first 512-byte sector.
     pub first: u64,
-    /// Its size in sectors.
+    /// Its size in 512-byte sectors.
     pub sectors: u64,
     /// What kind it is.
     pub kind: Kind,
@@ -110,7 +116,7 @@ impl core::fmt::Display for Error {
     }
 }
 
-/// Reads a sector of the disk: its number, and where to put it.
+/// Reads a 512-byte sector of the disk: its number, and where to put it.
 pub type ReadSector<'a> = &'a mut dyn FnMut(u64, &mut [u8; SECTOR]) -> Result<(), Error>;
 
 /// Whether `sectors` sectors from `first` fit on a disk of `disk`
@@ -182,11 +188,33 @@ fn is_extended(kind: u8) -> bool {
     matches!(kind, 0x05 | 0x0f | 0x85)
 }
 
-/// Reads the partition table of a disk of `disk` sectors, reading sectors
-/// with `read`.
-pub fn read(disk: u64, read: ReadSector<'_>) -> Result<(Scheme, KVec<Partition>), Error> {
+/// A disk as its table counts it: in logical blocks of `unit` sectors,
+/// `blocks` of them.
+#[derive(Clone, Copy)]
+struct Disk {
+    blocks: u64,
+    unit: u64,
+}
+
+impl Disk {
+    /// A partition of the table's: from block `first`, `blocks` of them.
+    fn partition(&self, number: u32, first: u64, blocks: u64, kind: Kind) -> Partition {
+        let (first, sectors) = (first * self.unit, blocks * self.unit);
+        Partition { number, first, sectors, kind, name: [0; 36], truncated: false }
+    }
+}
+
+/// Reads the partition table of a disk of `disk` sectors in logical
+/// blocks of `unit` sectors ([`crate::Info::unit`]), reading sectors with
+/// `read`.
+pub fn read(
+    disk: u64,
+    unit: u64,
+    read: ReadSector<'_>,
+) -> Result<(Scheme, KVec<Partition>), Error> {
     let mut found = mem::vec();
-    if disk < 2 {
+    let disk = Disk { blocks: disk / unit.max(1), unit: unit.max(1) };
+    if disk.blocks < 2 {
         return Ok((Scheme::None, found));
     }
     let mut sector = [0u8; SECTOR];
@@ -206,34 +234,38 @@ pub fn read(disk: u64, read: ReadSector<'_>) -> Result<(Scheme, KVec<Partition>)
         // One of no size or that starts past the disk's end is skipped,
         // and one that reaches past the end cut to fit, as Linux does.
         let first = u64::from(entry.first);
-        let Some((sectors, truncated)) = fit(first, u64::from(entry.sectors), disk) else {
+        let Some((blocks, truncated)) = fit(first, u64::from(entry.sectors), disk.blocks) else {
             continue;
         };
         let number = i as u32 + 1;
+        let kind = Kind::Mbr(entry.kind);
         if is_extended(entry.kind) {
-            // Shown as its first two sectors only, as on Linux, so that a
-            // filesystem made on it by mistake cannot wipe the logical
-            // partitions inside.
-            mem::push(&mut found, mbr_partition(number, first, sectors.min(2), entry.kind, false))?;
-            logical(disk, first, sectors, read, &mut found)?;
+            // Shown as its first two sectors only (one block, where a
+            // block is more), as on Linux, so that a filesystem made on it
+            // by mistake cannot wipe the logical partitions inside.
+            let shown = Partition {
+                sectors: (blocks * disk.unit).min(2.max(disk.unit)),
+                ..disk.partition(number, first, blocks, kind)
+            };
+            mem::push(&mut found, shown)?;
+            logical(disk, first, blocks, read, &mut found)?;
         } else {
-            mem::push(&mut found, mbr_partition(number, first, sectors, entry.kind, truncated))?;
+            mem::push(
+                &mut found,
+                Partition { truncated, ..disk.partition(number, first, blocks, kind) },
+            )?;
         }
     }
     Ok((Scheme::Mbr, found))
 }
 
-fn mbr_partition(number: u32, first: u64, sectors: u64, kind: u8, truncated: bool) -> Partition {
-    Partition { number, first, sectors, kind: Kind::Mbr(kind), name: [0; 36], truncated }
-}
-
-/// The logical partitions of the extended partition at `base`, of `size`
-/// sectors: a chain of extended boot records, each with a partition
+/// The logical partitions of the extended partition at block `base`, of
+/// `size` blocks: a chain of extended boot records, each with a partition
 /// (relative to it) and the next record (relative to `base`). A record
 /// that cannot be read or is not one, or a link backwards or outside,
 /// ends the chain there, as on Linux, keeping what came before.
 fn logical(
-    disk: u64,
+    disk: Disk,
     base: u64,
     size: u64,
     read: ReadSector<'_>,
@@ -242,16 +274,20 @@ fn logical(
     let mut record = base;
     let mut sector = [0u8; SECTOR];
     for number in 5..5 + MAX_LOGICAL as u32 {
-        if read(record, &mut sector).is_err() {
+        if read(record * disk.unit, &mut sector).is_err() {
             return Ok(());
         }
         let Some(entries) = mbr_entries(&sector) else { return Ok(()) };
         let this = entries[0];
         if this.kind != 0
             && let Some(first) = record.checked_add(u64::from(this.first))
-            && let Some((sectors, truncated)) = fit(first, u64::from(this.sectors), disk)
+            && let Some((blocks, truncated)) = fit(first, u64::from(this.sectors), disk.blocks)
         {
-            mem::push(found, mbr_partition(number, first, sectors, this.kind, truncated))?;
+            let kind = Kind::Mbr(this.kind);
+            mem::push(
+                found,
+                Partition { truncated, ..disk.partition(number, first, blocks, kind) },
+            )?;
         }
         let next = entries[1];
         if !is_extended(next.kind) || next.first == 0 {
@@ -278,8 +314,8 @@ struct Header {
 
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 
-/// The GPT header in `sector`, read from sector `at` of a disk of `disk`
-/// sectors, if it is one and its CRC matches.
+/// The GPT header in `sector`, read from block `at` of a disk of `disk`
+/// blocks, if it is one and its CRC matches.
 fn header(sector: &[u8; SECTOR], at: u64, disk: u64) -> Option<Header> {
     if &sector[0..8] != GPT_SIGNATURE {
         return None;
@@ -315,12 +351,12 @@ fn header(sector: &[u8; SECTOR], at: u64, disk: u64) -> Option<Header> {
 }
 
 /// Reads a GPT: the primary header and its entries, or else the backup
-/// header in the disk's last sector and its entries.
-fn gpt(disk: u64, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<Scheme, Error> {
+/// header in the disk's last block and its entries.
+fn gpt(disk: Disk, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<Scheme, Error> {
     let mut sector = [0u8; SECTOR];
-    for (at, scheme) in [(1, Scheme::Gpt), (disk - 1, Scheme::GptBackup)] {
-        read(at, &mut sector)?;
-        let Some(header) = header(&sector, at, disk) else { continue };
+    for (at, scheme) in [(1, Scheme::Gpt), (disk.blocks - 1, Scheme::GptBackup)] {
+        read(at * disk.unit, &mut sector)?;
+        let Some(header) = header(&sector, at, disk.blocks) else { continue };
         match gpt_entries(disk, &header, read, found) {
             Ok(()) => return Ok(scheme),
             Err(Error::Damaged(_)) => found.clear(),
@@ -331,7 +367,7 @@ fn gpt(disk: u64, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<S
 }
 
 fn gpt_entries(
-    disk: u64,
+    disk: Disk,
     header: &Header,
     read: ReadSector<'_>,
     found: &mut KVec<Partition>,
@@ -339,14 +375,14 @@ fn gpt_entries(
     let size = header.entry_size as usize;
     let per_sector = SECTOR / size;
     let sectors = (header.entries as usize).div_ceil(per_sector) as u64;
-    if !within(header.entries_at, sectors, disk) {
+    if !within(header.entries_at, sectors.div_ceil(disk.unit), disk.blocks) {
         return Err(Error::Damaged("the GPT entries reach past the end of the disk"));
     }
     let mut crc = Crc32::new();
     let mut sector = [0u8; SECTOR];
     let mut left = header.entries as usize;
     for s in 0..sectors {
-        read(header.entries_at + s, &mut sector)?;
+        read(header.entries_at * disk.unit + s, &mut sector)?;
         let here = left.min(per_sector);
         crc.update(&sector[..here * size]);
         for i in 0..here {
@@ -360,26 +396,16 @@ fn gpt_entries(
             // One that is not wholly on the disk is skipped, as Linux
             // skips it; the table's CRC says it was written so.
             let (first, last) = (u64_at(entry, 32), u64_at(entry, 40));
-            if last < first || !within(first, last - first + 1, disk) {
+            if last < first || !within(first, last - first + 1, disk.blocks) {
                 continue;
             }
-            let sectors = last - first + 1;
             let mut name = [0u16; 36];
             for (j, c) in name.iter_mut().enumerate() {
                 *c = u16::from_le_bytes([entry[56 + 2 * j], entry[57 + 2 * j]]);
             }
             if found.len() < MAX_PARTITIONS {
-                mem::push(
-                    found,
-                    Partition {
-                        number,
-                        first,
-                        sectors,
-                        kind: Kind::Gpt(kind),
-                        name,
-                        truncated: false,
-                    },
-                )?;
+                let partition = disk.partition(number, first, last - first + 1, Kind::Gpt(kind));
+                mem::push(found, Partition { name, ..partition })?;
             }
         }
         left -= here;

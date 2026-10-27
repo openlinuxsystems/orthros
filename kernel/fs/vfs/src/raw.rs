@@ -7,14 +7,15 @@
 //! Nothing is cached, as with FreeBSD's disks, or Linux's opened with
 //! `O_DIRECT`: a read reads what the device holds when it is made, a
 //! write has reached the device when it returns, and fsync(2) empties
-//! the device's own cache. Whole sectors to or from a program's memory
-//! on a sector boundary go straight between the device and that memory,
+//! the device's own cache. Whole logical blocks (sectors, or 4 KiB on a
+//! disk with 4 KiB sectors) to or from a program's memory on a block's
+//! boundary go straight between the device and that memory,
 //! which the program lends for the request ([`Out::lend`]), a mebibyte
 //! at a time, as Linux's `O_DIRECT` has them. Unlike Linux, any offset,
 //! length and buffer work: the rest goes through pages of the kernel's,
 //! at most [`MAX_PAGES`] a request, and a write that covers part of a
-//! sector reads that sector first and writes it back whole, under the
-//! node's lock so that two such writes to one sector cannot lose each
+//! block reads that block first and writes it back whole, under the
+//! node's lock so that two such writes to one block cannot lose each
 //! other's bytes.
 
 use radix_block::mem::CachePage;
@@ -27,12 +28,10 @@ use crate::{APPEND, Error, In, Out, Result};
 /// The most pages one request moves.
 pub const MAX_PAGES: usize = 16;
 
-/// A sector's bytes, as a `usize`.
-const SECTOR_BYTES: usize = SECTOR as usize;
-
 /// One request's worth of a transfer: from byte `at` of the device,
-/// `want` bytes of the caller's, inside the whole sectors from `sector`
-/// that make `bytes` bytes; the caller's start `skip` bytes into them.
+/// `want` bytes of the caller's, inside the whole logical blocks from
+/// `sector` that make `bytes` bytes; the caller's start `skip` bytes into
+/// them.
 struct Chunk {
     sector: u64,
     skip: usize,
@@ -42,15 +41,16 @@ struct Chunk {
 
 impl Chunk {
     /// The chunk at byte `at` of up to `left` bytes, in pages of at most
-    /// `pages`.
-    fn at(at: u64, left: usize, pages: usize) -> Chunk {
-        let skip = (at % SECTOR) as usize;
+    /// `pages`, of a device whose logical blocks are `block` bytes (a
+    /// power of two, at most a page).
+    fn at(at: u64, left: usize, pages: usize, block: usize) -> Chunk {
+        let skip = (at % block as u64) as usize;
         let want = left.min(pages * PAGE_SIZE - skip);
         Chunk {
-            sector: at / SECTOR,
+            sector: (at - skip as u64) / SECTOR,
             skip,
             want,
-            bytes: (skip + want).next_multiple_of(SECTOR_BYTES),
+            bytes: (skip + want).next_multiple_of(block),
         }
     }
 
@@ -63,20 +63,22 @@ impl Chunk {
 mod proofs {
     use super::*;
 
-    /// A chunk starts in the sector holding its first byte, takes at
-    /// least one of the bytes left and no more, and lies in whole sectors
+    /// A chunk starts in the block holding its first byte, takes at
+    /// least one of the bytes left and no more, and lies in whole blocks
     /// within the pages it may use.
     #[kani::proof]
     fn chunks_fit_their_pages() {
         let at: u64 = kani::any();
         let left: usize = kani::any_where(|&left: &usize| left > 0);
         let pages: usize = kani::any_where(|&pages: &usize| (1..=MAX_PAGES).contains(&pages));
-        let chunk = Chunk::at(at, left, pages);
+        let block: usize = kani::any_where(|&block: &usize| block == 512 || block == 4096);
+        let chunk = Chunk::at(at, left, pages, block);
         assert_eq!(chunk.sector * SECTOR + chunk.skip as u64, at);
+        assert!(chunk.skip < block && (chunk.sector * SECTOR).is_multiple_of(block as u64));
         assert!(chunk.want > 0 && chunk.want <= left);
-        assert!(chunk.bytes.is_multiple_of(SECTOR_BYTES));
+        assert!(chunk.bytes.is_multiple_of(block));
         assert!(chunk.skip + chunk.want <= chunk.bytes);
-        assert!(chunk.bytes - (chunk.skip + chunk.want) < SECTOR_BYTES);
+        assert!(chunk.bytes - (chunk.skip + chunk.want) < block);
         assert!(chunk.pages() <= pages);
     }
 }
@@ -94,7 +96,7 @@ fn grow(pages: &mut KVec<CachePage>, count: usize) -> Result<()> {
     Ok(())
 }
 
-/// Reads the `bytes` bytes (whole sectors) from `sector` into `pages`,
+/// Reads the `bytes` bytes (whole blocks) from `sector` into `pages`,
 /// from the first page's start.
 fn read_pages(
     device: &dyn BlockDevice,
@@ -112,7 +114,7 @@ fn read_pages(
     Ok(device.read(sector, &mut segments)?)
 }
 
-/// Writes the `bytes` bytes (whole sectors) of `pages` from `sector`.
+/// Writes the `bytes` bytes (whole blocks) of `pages` from `sector`.
 fn write_pages(
     device: &dyn BlockDevice,
     pages: &[CachePage],
@@ -129,27 +131,33 @@ fn write_pages(
     Ok(device.write(sector, &segments)?)
 }
 
-/// Reads sector `sector` into the chunk's pages, `at` bytes from their
-/// start.
-fn read_sector(
+/// Reads the `block` bytes of the logical block at `sector` into the
+/// chunk's pages, `at` bytes from their start.
+fn read_block(
     device: &dyn BlockDevice,
     pages: &mut [CachePage],
     sector: u64,
     at: usize,
+    block: usize,
 ) -> Result<()> {
     let page = &mut pages[at / PAGE_SIZE];
-    let segment = SegmentMut { page, offset: at % PAGE_SIZE, len: SECTOR_BYTES };
+    let segment = SegmentMut { page, offset: at % PAGE_SIZE, len: block };
     Ok(device.read(sector, &mut [segment])?)
 }
 
-/// How many of `len` bytes from byte `offset` of a device can go
-/// straight to or from lent memory: the whole sectors, if `offset` is on
-/// a sector's boundary.
-fn whole_sectors(offset: u64, len: usize) -> usize {
-    if offset.is_multiple_of(SECTOR) { len - len % SECTOR_BYTES } else { 0 }
+/// The size of `device`'s logical blocks, in bytes.
+fn block_of(device: &dyn BlockDevice) -> usize {
+    (device.info().unit() * SECTOR) as usize
 }
 
-/// Reads the whole sectors of the `len` bytes from byte `offset` of
+/// How many of `len` bytes from byte `offset` of a device can go
+/// straight to or from lent memory: the whole blocks of `block` bytes, if
+/// `offset` is on a block's boundary.
+fn whole_blocks(offset: u64, len: usize, block: usize) -> usize {
+    if offset.is_multiple_of(block as u64) { len - len % block } else { 0 }
+}
+
+/// Reads the whole blocks of the `len` bytes from byte `offset` of
 /// `device` straight into `out`'s memory, lent a piece at a time, for as
 /// long as `out` lends it and the device takes it: returns how many bytes
 /// it read, and what stopped it, if something failed.
@@ -159,7 +167,8 @@ fn read_lent(
     len: usize,
     out: &mut dyn Out,
 ) -> (usize, Result<()>) {
-    let whole = whole_sectors(offset, len);
+    let block = block_of(device);
+    let whole = whole_blocks(offset, len, block);
     let mut done = 0;
     while done < whole {
         let sector = (offset + done as u64) / SECTOR;
@@ -171,7 +180,7 @@ fn read_lent(
             }
             result => Ok(result?),
         };
-        match out.lend(done, whole - done, SECTOR_BYTES, &mut with) {
+        match out.lend(done, whole - done, block, &mut with) {
             Some(Ok(n)) if n > 0 && !unsupported => done += n,
             Some(Err(err)) => return (done, Err(err)),
             _ => break,
@@ -180,7 +189,7 @@ fn read_lent(
     (done, Ok(()))
 }
 
-/// Writes the whole sectors of the `len` bytes from byte `offset` of
+/// Writes the whole blocks of the `len` bytes from byte `offset` of
 /// `device` straight from `data`'s memory, as [`read_lent`] reads.
 fn write_lent(
     device: &dyn BlockDevice,
@@ -188,7 +197,8 @@ fn write_lent(
     len: usize,
     data: &dyn In,
 ) -> (usize, Result<()>) {
-    let whole = whole_sectors(offset, len);
+    let block = block_of(device);
+    let whole = whole_blocks(offset, len, block);
     let mut done = 0;
     while done < whole {
         let sector = (offset + done as u64) / SECTOR;
@@ -200,7 +210,7 @@ fn write_lent(
             }
             result => Ok(result?),
         };
-        match data.lend(done, whole - done, SECTOR_BYTES, &mut with) {
+        match data.lend(done, whole - done, block, &mut with) {
             Some(Ok(n)) if n > 0 && !unsupported => done += n,
             Some(Err(err)) => return (done, Err(err)),
             _ => break,
@@ -222,10 +232,10 @@ pub fn read(device: &dyn BlockDevice, offset: u64, out: &mut dyn Out) -> Result<
     if let Err(err) = lent {
         return if done > 0 { Ok(done) } else { Err(err) };
     }
-    let most = request_pages(device);
+    let (most, block) = (request_pages(device), block_of(device));
     let mut pages = mem::vec();
     while done < len {
-        let chunk = Chunk::at(offset + done as u64, len - done, most);
+        let chunk = Chunk::at(offset + done as u64, len - done, most, block);
         let result = grow(&mut pages, chunk.pages())
             .and_then(|()| {
                 read_pages(device, &mut pages[..chunk.pages()], chunk.sector, chunk.bytes)
@@ -298,25 +308,26 @@ pub fn write(
     if let Err(err) = lent {
         return if done > 0 { Ok(done) } else { Err(err) };
     }
-    let most = request_pages(device);
+    let (most, block) = (request_pages(device), block_of(device));
     let mut pages = mem::vec();
     while done < len {
-        let chunk = Chunk::at(offset + done as u64, len - done, most);
+        let chunk = Chunk::at(offset + done as u64, len - done, most, block);
         let result = grow(&mut pages, chunk.pages()).and_then(|()| {
             let pages = &mut pages[..chunk.pages()];
             let head = chunk.skip != 0;
-            let tail = !(chunk.skip + chunk.want).is_multiple_of(SECTOR_BYTES);
+            let tail = !(chunk.skip + chunk.want).is_multiple_of(block);
             if !head && !tail {
                 get(pages, 0, chunk.want, data, done)?;
                 return write_pages(device, pages, chunk.sector, chunk.bytes);
             }
             let _partial = partial.lock();
             if head {
-                read_sector(device, pages, chunk.sector, 0)?;
+                read_block(device, pages, chunk.sector, 0, block)?;
             }
-            let last = chunk.bytes - SECTOR_BYTES;
+            let last = chunk.bytes - block;
             if tail && !(head && last == 0) {
-                read_sector(device, pages, chunk.sector + (last / SECTOR_BYTES) as u64, last)?;
+                let sector = chunk.sector + (last as u64) / SECTOR;
+                read_block(device, pages, sector, last, block)?;
             }
             get(pages, chunk.skip, chunk.want, data, done)?;
             write_pages(device, pages, chunk.sector, chunk.bytes)

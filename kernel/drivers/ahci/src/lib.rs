@@ -186,7 +186,7 @@ impl fmt::Display for Absent {
                 ata::Unsupported::NotAta => f.write_str("not an ATA device"),
                 ata::Unsupported::No48Bit => f.write_str("it has no 48-bit addresses"),
                 ata::Unsupported::SectorSize(size) => {
-                    write!(f, "its sectors are {size} bytes, and only 512 are supported")
+                    write!(f, "its sectors are {size} bytes, and only 512 and 4096 are supported")
                 }
                 ata::Unsupported::Empty => f.write_str("it has no sectors"),
             },

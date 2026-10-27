@@ -122,14 +122,14 @@ impl Listing for Blocks {
             device.add("firmware_rev", firmware)?;
         }
         let queue = dir.add_dir("queue", next_id())?;
-        let sector = radix_block::SECTOR;
+        let (sector, logical) = (radix_block::SECTOR, u64::from(info.logical_block));
         for (name, number) in [
-            ("logical_block_size", sector),
+            ("logical_block_size", logical),
             ("physical_block_size", u64::from(info.block_size)),
             ("minimum_io_size", u64::from(info.block_size)),
             ("optimal_io_size", 0),
             ("rotational", u64::from(info.rotational)),
-            ("discard_granularity", if info.discard_sectors > 0 { sector } else { 0 }),
+            ("discard_granularity", if info.discard_sectors > 0 { logical } else { 0 }),
             ("discard_max_bytes", info.discard_sectors.saturating_mul(sector)),
         ] {
             queue.add(name, value(move |text| writeln!(text, "{number}"))?)?;

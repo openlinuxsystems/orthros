@@ -459,6 +459,16 @@ _target/userspace/_).
 		partition _nvme1n2p1_, and give each controller 4 I/O queues with
 		an MSI-X vector for each CPU.
 
+	*storage-4k*
+		The *storage* test on disks of 4 KiB sectors (QEMU's
+		_logical_block_size=4096_): FAT12 and FAT16 on two virtio disks,
+		and FAT32 on two 288 MiB NVMe namespaces, the smallest FAT32
+		volumes of such sectors, the second in a GPT counted in 4 KiB
+		blocks. Each filesystem has sectors of 4 KiB too
+		(*mkfs.fat -S 4096*). The kernel must say that the disks have
+		4096-byte sectors and give the partition's start in 512-byte
+		sectors, as Linux does.
+
 	*disk-raw*
 		Boot 2 CPUs under UEFI with three 8 MiB disks of known bytes, a
 		virtio disk, a solid state SATA disk and an NVMe namespace, and no
@@ -472,6 +482,12 @@ _target/userspace/_).
 		and a discard or a write without the write right. On the host,
 		every byte of every disk must be what the writes left, with the
 		discarded range zeroed (QEMU punches holes for discards).
+
+	*disk-raw-4k*
+		The *disk-raw* test on a virtio disk and an NVMe namespace of
+		4 KiB sectors, where a part of a sector is a part of 4 KiB: the
+		kernel reads the whole sectors around it and writes them back,
+		and a discard must cover whole 4 KiB sectors.
 
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
