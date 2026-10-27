@@ -79,6 +79,11 @@ clears, where it was one shootdown for each page.
   the space's tables are freed, keeps 4 KiB pages there.
 - An unmap that cuts through a large page needs a page table, so it can
   fail for want of memory, as splitting a region already could.
+- Small mappings cost what they did. A space remembers whether it ever
+  held a large page, and until it does an unmap looks for none to split;
+  an unmap of one page goes without a walk of the tables. The
+  instruction budget of a page mapped and unmapped (`tlb_local`, ADR
+  0045) holds that, at about 3,000 instructions.
 - In a large page's entry, bit 12 is the PAT bit and bit 7 is the size.
   All user memory is write-back, with the PAT bits clear. A cache mode
   for user mappings would have to place them.

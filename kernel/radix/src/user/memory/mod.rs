@@ -357,9 +357,14 @@ impl SpaceObject {
 
     /// Unmaps a frame's or ring's pages from `start` to `end`, in one walk
     /// of the page tables, large pages and all: their frames are not the
-    /// space's to give back.
+    /// space's to give back. A page alone is no large page's, and goes
+    /// without the walk.
     fn unmap_range(&self, start: u64, end: u64) {
-        Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |_| {});
+        if end - start == PAGE_SIZE {
+            Arch::unmap_page(&self.arch, start);
+        } else {
+            Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |_| {});
+        }
     }
 
     /// Takes away everything mapped in it, and its page tables, once its

@@ -34,7 +34,7 @@
 //! CPU, and large pages.
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
 use radix_hal::{MAX_CPUS, MapPageError, UserAccess};
 use radix_mm::{AllocError, Owner, Pcids};
@@ -99,6 +99,9 @@ pub struct AddressSpace {
     lock: SpinLock<()>,
     /// [`UserSpace`] handles to it.
     handles: AtomicUsize,
+    /// Whether a large page was ever mapped in it: until one is,
+    /// [`AddressSpace::split`] has nothing to look for.
+    large: AtomicBool,
 }
 
 const _: () = assert!(core::mem::size_of::<AddressSpace>() <= PAGE as usize);
@@ -134,6 +137,7 @@ impl AddressSpace {
                 seen: [const { AtomicU64::new(0) }; MAX_CPUS],
                 lock: SpinLock::new(()),
                 handles: AtomicUsize::new(0),
+                large: AtomicBool::new(false),
             });
             Ok(&*space)
         }
@@ -258,6 +262,7 @@ impl AddressSpace {
             _ => return Ok(false),
         }
         slot.store(large_entry(phys, access), Ordering::Relaxed);
+        self.large.store(true, Ordering::Relaxed);
         Ok(true)
     }
 
@@ -271,7 +276,9 @@ impl AddressSpace {
     /// touches it meanwhile faults, and finds it mapped again once the
     /// split is done, under the lock of its regions its fault waits for.
     pub fn split(&self, at: u64) -> Result<(), MapPageError> {
-        if at.is_multiple_of(LARGE_PAGE) || at >= USER_END {
+        // The caller orders its maps and splits of a space (the regions'
+        // lock), so a large page it mapped is seen here.
+        if at.is_multiple_of(LARGE_PAGE) || at >= USER_END || !self.large.load(Ordering::Relaxed) {
             return Ok(());
         }
         let _guard = self.lock.lock();
@@ -710,7 +717,10 @@ impl<'a> Walk<'a> {
             // As for a page table's entries: the target's lock is held,
             // and no CPU runs it.
             match paging::entry(to.pml4, base, 2, true) {
-                Ok(target) => target.store(large_entry(frame, access), Ordering::Relaxed),
+                Ok(target) => {
+                    target.store(large_entry(frame, access), Ordering::Relaxed);
+                    to.large.store(true, Ordering::Relaxed);
+                }
                 Err(_) => {
                     self.failed = Some(base);
                     return;
