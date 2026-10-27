@@ -128,7 +128,7 @@ out/toolchain/meson. `./ob build` runs this first.
         }
         "image" => {
             "Usage: ./ob image [--iso] [--cmdline <flags>] [--microcode <path>]
-                  [--debug | --release]
+                  [--disk-check <serial>] [--debug | --release]
 
 Builds the kernel, then a hybrid boot image that starts under UEFI and
 legacy BIOS from a USB stick, a hard disk or optical media:
@@ -137,7 +137,11 @@ legacy BIOS from a USB stick, a hard disk or optical media:
 
   --iso                Name the output .iso for virtual machines and optical media
   --cmdline <flags>    Kernel flags instead of boot.cmdline (dukovo-boot(7))
-  --microcode <path>   Intel microcode file or directory instead of image.microcode"
+  --microcode <path>   Intel microcode file or directory instead of image.microcode
+  --disk-check <serial>
+                       Add a boot entry that checks, and erases, the disk with
+                       this serial number, and Linux's side of the check in
+                       crosscheck/ (the handbook's Supported hardware chapter)"
         }
         "run" => {
             "Usage: ./ob run [--bios | --uefi] [--media usb|cdrom|disk] [--headless] [--gdb]
@@ -206,12 +210,19 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   spark            the kernel starts Spark, which starts a program and reaps it
   storage          four FAT disks: what is written reads back after a reboot
                    and on the host
-  storage-sata     the same on four SATA disks of an AHCI controller
+  storage-sata     the same on four SATA disks of an AHCI controller, the
+                   partition in a GPT
   storage-nvme     the same on four NVMe namespaces of two controllers,
-                   with a queue for each of 4 CPUs
+                   with a queue for each of 4 CPUs, the partition in a GPT
+  storage-4k       the same on two virtio disks and two NVMe namespaces of
+                   4 KiB sectors, the partition in a GPT of 4 KiB blocks
   disk-raw         raw reads, writes and discards of a virtio, a SATA and an
                    NVMe disk, and Linux's block requests; the host checks
                    every byte
+  disk-raw-4k      the same on a virtio disk and an NVMe namespace of 4 KiB
+                   sectors
+  disk-check       the disk check of a real machine, on an NVMe disk found
+                   by its serial number; Linux's side checks it on the host
   disk-errors      QEMU fails SATA and NVMe reads and writes: retried, then
                    EIO
   posix            C programs on mlibc, a Rust std one and the ported
@@ -546,6 +557,7 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
             let overrides = image::Overrides {
                 cmdline: args.value("--cmdline")?,
                 microcode: args.value("--microcode")?,
+                disk_check: args.value("--disk-check")?,
             };
             let profile = args.profile(&ctx.config)?;
             args.finish()?;

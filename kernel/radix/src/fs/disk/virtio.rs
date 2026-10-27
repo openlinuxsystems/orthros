@@ -24,7 +24,7 @@ use radix_virtio::blk::{self, Blk};
 use radix_virtio::{NO_VECTOR, Transport};
 
 use super::queue::{Controller, Disk, Op, Outcome, Request, Volume};
-use super::{Name, Size, partitions, register};
+use super::{Entry, Name, Size, partitions, register};
 use crate::Arch;
 
 /// The most virtio disks.
@@ -157,6 +157,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     let _ = write!(name, "vd{}", (b'a' + index as u8) as char);
     let info = Info {
         sectors: found.sectors,
+        logical_block: found.logical_block,
         block_size: found.block_size,
         read_only: found.read_only,
         max_segments: found.max_segments as usize,
@@ -176,9 +177,10 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         None => how.write_str("polled"),
     };
     info!(
-        "Disk: {name} is a virtio block device of {size} at {}, {} bytes a block{}{}{}, {how}",
+        "Disk: {name} is a virtio block device of {size} at {}, {} bytes a block{}{}{}{}, {how}",
         function.address(),
         info.block_size,
+        super::sector_note(&info),
         if info.read_only { ", read-only" } else { "" },
         if found.flush { ", write cache" } else { "" },
         if info.discard_sectors > 0 { ", discards" } else { "" },
@@ -186,7 +188,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
     let volume = Volume::new(disk, 0, info);
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
-    register(&name, device.clone());
+    register(Entry { name: name.clone(), device: device.clone(), place: None, ident: None });
     partitions(&name, &device);
     Ok(())
 }

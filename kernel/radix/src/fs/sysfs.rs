@@ -9,9 +9,12 @@
 //!
 //! - `/kernel/version`, `/kernel/cmdline`, `/kernel/cpus`;
 //! - `/kernel/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
-//!   for every disk and partition, and in its `queue` the sizes and flags
-//!   of radix-block(2)'s requests as Linux names them (`rotational`,
-//!   `logical_block_size`, `discard_max_bytes` and the rest);
+//!   for every disk and partition; for a partition, its number in its
+//!   disk's table (`partition`) and its first sector (`start`); and for a
+//!   disk, in its `queue`, the sizes and flags of radix-block(2)'s
+//!   requests as Linux names them (`rotational`, `logical_block_size`,
+//!   `discard_max_bytes` and the rest), and in its `device` the `model`,
+//!   `serial` and `firmware_rev` it gives, for SATA and NVMe disks;
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
 //!   hexadecimal, for every PCI function the scan found.
 //!
@@ -84,34 +87,49 @@ struct Blocks;
 impl Listing for Blocks {
     fn list(&self, f: &mut dyn FnMut(&str, Kind) -> bool) {
         let mut more = true;
-        disk::for_each(|name, _| {
+        disk::for_each(|entry| {
             if more {
-                more = f(name, Kind::Directory);
+                more = f(entry.name.as_str(), Kind::Directory);
             }
         });
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
-        let mut found: Option<DeviceRef> = None;
-        disk::for_each(|n, device| {
-            if n == name {
-                found = Some(device.clone());
+        let mut found: Option<(DeviceRef, Option<disk::Place>, Option<disk::Ident>)> = None;
+        disk::for_each(|entry| {
+            if entry.name.as_str() == name {
+                found = Some((entry.device.clone(), entry.place, entry.ident));
             }
         });
-        let device = found.ok_or(Error::NotFound)?;
+        let (device, place, ident) = found.ok_or(Error::NotFound)?;
         let dir = FixedDir::new(next_id())?;
         let info = device.info();
         dir.add("size", value(move |text| writeln!(text, "{}", info.sectors))?)?;
         dir.add("ro", value(move |text| writeln!(text, "{}", u8::from(info.read_only)))?)?;
+        // A partition has its number and first sector, and its disk the
+        // queue, as on Linux.
+        if let Some(place) = place {
+            dir.add("partition", value(move |text| writeln!(text, "{}", place.number))?)?;
+            dir.add("start", value(move |text| writeln!(text, "{}", place.first))?)?;
+            return Ok(dir);
+        }
+        // What the disk says it is, where Linux has an NVMe controller's.
+        if let Some(ident) = ident {
+            let device = dir.add_dir("device", next_id())?;
+            device.add("model", value(move |text| writeln!(text, "{}", ident.model()))?)?;
+            device.add("serial", value(move |text| writeln!(text, "{}", ident.serial()))?)?;
+            let firmware = value(move |text| writeln!(text, "{}", ident.firmware()))?;
+            device.add("firmware_rev", firmware)?;
+        }
         let queue = dir.add_dir("queue", next_id())?;
-        let sector = radix_block::SECTOR;
+        let (sector, logical) = (radix_block::SECTOR, u64::from(info.logical_block));
         for (name, number) in [
-            ("logical_block_size", sector),
+            ("logical_block_size", logical),
             ("physical_block_size", u64::from(info.block_size)),
             ("minimum_io_size", u64::from(info.block_size)),
             ("optimal_io_size", 0),
             ("rotational", u64::from(info.rotational)),
-            ("discard_granularity", if info.discard_sectors > 0 { sector } else { 0 }),
+            ("discard_granularity", if info.discard_sectors > 0 { logical } else { 0 }),
             ("discard_max_bytes", info.discard_sectors.saturating_mul(sector)),
         ] {
             queue.add(name, value(move |text| writeln!(text, "{number}"))?)?;

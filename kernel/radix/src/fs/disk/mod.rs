@@ -23,7 +23,7 @@ use core::sync::atomic::AtomicU64;
 use radix_abi::Status;
 use radix_abi::block as request;
 use radix_abi::errors::{File as FileError, Kernel};
-use radix_block::{DeviceRef, partition};
+use radix_block::{DeviceRef, Info, partition};
 use radix_hal::{Devices, PciSegment, UserMode};
 use radix_hw::pci::{self, Function};
 use radix_klog::{TextBuf, info, warn};
@@ -78,8 +78,63 @@ pub fn pci_functions(mut f: impl FnMut(&PciFunction)) {
     }
 }
 
-/// Every disk and partition, by name.
-static DISKS: Mutex<Option<alloc::vec::Vec<(Name, DeviceRef), Kmalloc>>> = Mutex::new(None);
+/// Where a partition is on its disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// Its number in the disk's table, as in its name.
+    pub number: u32,
+    /// Its first sector on the disk.
+    pub first: u64,
+}
+
+/// What a disk says it is, as its controller identifies it: text padded
+/// with spaces or NULs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ident {
+    /// Its model.
+    pub model: [u8; 40],
+    /// Its serial number.
+    pub serial: [u8; 20],
+    /// Its firmware's revision.
+    pub firmware: [u8; 8],
+}
+
+impl Ident {
+    /// Its model, without the padding.
+    pub fn model(&self) -> &str {
+        unpadded(&self.model)
+    }
+
+    /// Its serial number, without the padding.
+    pub fn serial(&self) -> &str {
+        unpadded(&self.serial)
+    }
+
+    /// Its firmware's revision, without the padding.
+    pub fn firmware(&self) -> &str {
+        unpadded(&self.firmware)
+    }
+}
+
+/// Text a disk gave, without the spaces and NULs around it; empty if it
+/// is not UTF-8.
+fn unpadded(text: &[u8]) -> &str {
+    core::str::from_utf8(text).unwrap_or("").trim_matches(|c: char| c == ' ' || c == '\0')
+}
+
+/// A disk or partition the kernel has.
+pub struct Entry {
+    /// Its name, as in `/devices`.
+    pub name: Name,
+    pub device: DeviceRef,
+    /// For a partition, where it is on its disk.
+    pub place: Option<Place>,
+    /// For a disk that says, what it is.
+    pub ident: Option<Ident>,
+}
+
+/// Every disk and partition, in the order they were found.
+static DISKS: Mutex<Option<alloc::vec::Vec<Entry, Kmalloc>>> = Mutex::new(None);
 
 /// Finds and sets up the disks.
 pub fn init() {
@@ -189,14 +244,24 @@ fn describe(function: &Function) {
     );
 }
 
+/// What a disk's line in the log says of its sectors: nothing for those
+/// of 512 bytes, else their size (a disk with 4 KiB sectors).
+fn sector_note(info: &Info) -> TextBuf<24> {
+    let mut note = TextBuf::new();
+    if info.logical_block != radix_block::SECTOR as u32 {
+        let _ = write!(note, ", {}-byte sectors", info.logical_block);
+    }
+    note
+}
+
 /// Reads the partition table of the disk `name` and registers each
 /// partition.
 fn partitions(name: &Name, device: &DeviceRef) {
-    let sectors = device.info().sectors;
+    let info = device.info();
     let mut read = |sector: u64, out: &mut [u8; 512]| {
         radix_block::read_sector(&**device, sector, out).map_err(|_| partition::Error::Io)
     };
-    let (scheme, found) = match partition::read(sectors, &mut read) {
+    let (scheme, found) = match partition::read(info.sectors, info.unit(), &mut read) {
         Ok(read) => read,
         Err(err) => {
             warn!("Disk: {name}: {err}");
@@ -210,6 +275,12 @@ fn partitions(name: &Name, device: &DeviceRef) {
         }
         partition::Scheme::Mbr => "an MBR",
         partition::Scheme::Gpt => "a GPT",
+        partition::Scheme::GptBackup => {
+            warn!(
+                "Disk: {name}: its GPT's primary header or entries are damaged; using the backup"
+            );
+            "a GPT"
+        }
     };
     let count = found.len();
     info!(
@@ -252,7 +323,8 @@ fn partitions(name: &Name, device: &DeviceRef) {
             }
         );
         let device: DeviceRef = slice;
-        register(&part_name, device);
+        let place = Place { number: part.number, first: part.first };
+        register(Entry { name: part_name, device, place: Some(place), ident: None });
     }
 }
 
@@ -277,7 +349,8 @@ impl core::fmt::Display for Size {
 }
 
 /// Adds a disk or partition under `name`, to `/devices` and `/kernel/block`.
-fn register(name: &Name, device: DeviceRef) {
+fn register(entry: Entry) {
+    let (name, device) = (entry.name.clone(), entry.device.clone());
     {
         let mut disks = DISKS.lock();
         let disks =
@@ -286,7 +359,7 @@ fn register(name: &Name, device: DeviceRef) {
             warn!("Disk: out of memory registering {name}");
             return;
         }
-        let _ = disks.push_within_capacity((name.clone(), device.clone()));
+        let _ = disks.push_within_capacity(entry);
     }
     super::devfs::add_block(name.as_str(), device);
 }
@@ -296,9 +369,9 @@ fn register(name: &Name, device: DeviceRef) {
 /// filesystems have written back what they hold, before the machine is
 /// powered off, restarted or halted; requests after it may fail.
 pub fn shutdown() {
-    for_each(|name, device| {
-        if let Err(err) = device.flush() {
-            warn!("Disk: {name}: its write cache could not be emptied: {err}");
+    for_each(|entry| {
+        if let Err(err) = entry.device.flush() {
+            warn!("Disk: {}: its write cache could not be emptied: {err}", entry.name);
         }
     });
     nvme::shutdown();
@@ -307,14 +380,14 @@ pub fn shutdown() {
 /// The name a disk or partition was registered under.
 pub fn name_of(device: &DeviceRef) -> Option<Name> {
     let disks = DISKS.lock();
-    disks.as_ref()?.iter().find(|(_, d)| Arc::ptr_eq(d, device)).map(|(name, _)| name.clone())
+    disks.as_ref()?.iter().find(|e| Arc::ptr_eq(&e.device, device)).map(|e| e.name.clone())
 }
 
 /// Calls `f` with each disk and partition, in the order they were found.
-pub fn for_each(mut f: impl FnMut(&str, &DeviceRef)) {
+pub fn for_each(mut f: impl FnMut(&Entry)) {
     let disks = DISKS.lock();
-    for (name, device) in disks.iter().flatten() {
-        f(name.as_str(), device);
+    for entry in disks.iter().flatten() {
+        f(entry);
     }
 }
 
@@ -339,7 +412,7 @@ pub fn control(
     match request {
         request::GET_SIZE_BYTES => put(&(info.sectors * radix_block::SECTOR).to_le_bytes()),
         request::GET_SIZE_SECTORS => put(&info.sectors.to_le_bytes()),
-        request::GET_SECTOR_SIZE => put(&(radix_block::SECTOR as u32).to_le_bytes()),
+        request::GET_SECTOR_SIZE => put(&info.logical_block.to_le_bytes()),
         request::GET_PHYSICAL_BLOCK_SIZE | request::GET_MINIMUM_IO => {
             put(&info.block_size.to_le_bytes())
         }
@@ -356,9 +429,10 @@ pub fn control(
             }
             let (pair, _) = range.as_chunks::<8>();
             let (start, len) = (u64::from_le_bytes(pair[0]), u64::from_le_bytes(pair[1]));
-            let sector = radix_block::SECTOR;
+            // Whole logical blocks, as Linux takes them.
+            let (sector, block) = (radix_block::SECTOR, u64::from(info.logical_block));
             let fits = start.checked_add(len).is_some_and(|end| end <= info.sectors * sector);
-            if !start.is_multiple_of(sector) || !len.is_multiple_of(sector) || !fits {
+            if !start.is_multiple_of(block) || !len.is_multiple_of(block) || !fits {
                 return Err(Kernel::InvalidArgument.status(1));
             }
             if len == 0 {

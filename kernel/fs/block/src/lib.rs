@@ -4,7 +4,10 @@
 //! The Radix block layer (Phase 7): block devices and what sits on them.
 //!
 //! - [`BlockDevice`] is a disk, or a part of one, addressed in 512-byte
-//!   sectors. A request reads or writes sectors from one place into
+//!   sectors, as Linux addresses them, whatever the size of its logical
+//!   blocks ([`Info::logical_block`]): 512 bytes, or 4 KiB on a disk with
+//!   4 KiB sectors (4Kn), whose requests start and end on whole blocks of
+//!   eight sectors. A request reads or writes sectors from one place into
 //!   [`Segment`]s of pages, which the device reaches by DMA: nothing is
 //!   copied on the way (spec 6.3). Requests block the calling thread until
 //!   the device is done; the driver below keeps its own queue (a virtqueue
@@ -53,6 +56,9 @@ pub const SECTOR: u64 = 512;
 /// Sectors in a page.
 pub const SECTORS_PER_PAGE: u64 = PAGE_SIZE as u64 / SECTOR;
 
+/// The largest logical block a device may have, in bytes: a page.
+pub const MAX_LOGICAL_BLOCK: u32 = PAGE_SIZE as u32;
+
 /// The most frames one [`BlockDevice::read_frames`] or
 /// [`BlockDevice::write_frames`] takes: a mebibyte of whole pages.
 pub const MAX_FRAMES: usize = 256;
@@ -65,7 +71,7 @@ pub enum Error {
     /// The device refuses writes.
     ReadOnly,
     /// The request reaches past the end of the device, or is not whole
-    /// sectors.
+    /// logical blocks.
     OutOfRange,
     /// Out of memory for the request.
     NoMemory,
@@ -94,8 +100,13 @@ impl From<mem::NoMemory> for Error {
 /// What a block device is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Info {
-    /// Its size in sectors.
+    /// Its size in sectors, a whole number of logical blocks.
     pub sectors: u64,
+    /// The size of its logical blocks in bytes: the least it reads or
+    /// writes, a power of two from 512 to [`MAX_LOGICAL_BLOCK`] (4096 on
+    /// a 4Kn disk). A request's first sector, and every segment's offset
+    /// and length, are whole blocks.
+    pub logical_block: u32,
     /// The smallest unit it writes without reading first, in bytes.
     pub block_size: u32,
     /// Whether it refuses writes.
@@ -109,8 +120,15 @@ pub struct Info {
     pub rotational: bool,
 }
 
+impl Info {
+    /// The sectors in one of its logical blocks.
+    pub fn unit(&self) -> u64 {
+        (u64::from(self.logical_block) / SECTOR).max(1)
+    }
+}
+
 /// Part of a page the device reads from: `len` bytes from `offset`, both
-/// multiples of [`SECTOR`].
+/// whole logical blocks ([`Info::logical_block`]).
 pub struct Segment<'a> {
     /// The page.
     pub page: &'a Page,
@@ -161,8 +179,8 @@ pub trait BlockDevice: Send + Sync {
     /// Reads the sectors from `sector` straight into `frames` (physical
     /// address, length), in order, as [`read`] does into pages: memory
     /// that its owner, a program, lends for the request, at most
-    /// [`MAX_FRAMES`] parts of pages, each a multiple of [`SECTOR`] long
-    /// and starting at one. They stay in place, and their owner's, until
+    /// [`MAX_FRAMES`] parts of pages, each whole logical blocks long and
+    /// starting at one. They stay in place, and their owner's, until
     /// it returns, so it returns only once the device is done with every
     /// one of them, even when the request fails. Fails with
     /// [`Error::Unsupported`] on a device that cannot, which the default
@@ -194,15 +212,17 @@ pub trait BlockDevice: Send + Sync {
 /// A block device, shared.
 pub type DeviceRef = KArc<dyn BlockDevice>;
 
-/// Checks a request: whole sectors, within a device of `sectors` sectors,
-/// segments inside their pages, and no more than `max` of them. Returns
-/// the request's length in sectors.
+/// Checks a request: whole logical blocks of `unit` sectors ([`Info::unit`])
+/// within a device of `sectors` sectors, segments inside their pages, and
+/// no more than `max` of them. Returns the request's length in sectors.
 pub fn check(
     sectors: u64,
+    unit: u64,
     max: usize,
     sector: u64,
     lengths: impl Iterator<Item = (usize, usize)>,
 ) -> Result<u64, Error> {
+    let block = unit * SECTOR;
     let mut bytes = 0u64;
     let mut count = 0;
     for (offset, len) in lengths {
@@ -210,14 +230,14 @@ pub fn check(
         let inside = offset.checked_add(len).is_some_and(|end| end <= PAGE_SIZE);
         if len == 0
             || !inside
-            || !(offset as u64).is_multiple_of(SECTOR)
-            || !(len as u64).is_multiple_of(SECTOR)
+            || !(offset as u64).is_multiple_of(block)
+            || !(len as u64).is_multiple_of(block)
         {
             return Err(Error::OutOfRange);
         }
         bytes += len as u64;
     }
-    if count == 0 || count > max {
+    if count == 0 || count > max || !sector.is_multiple_of(unit) {
         return Err(Error::OutOfRange);
     }
     let length = bytes / SECTOR;
@@ -229,19 +249,32 @@ pub fn check(
 
 /// Checks a request to or from lent memory ([`BlockDevice::read_frames`]),
 /// as [`check`] does pages: each frame (physical address, length) whole
-/// sectors inside its page, and no more than [`MAX_FRAMES`] of them.
-/// Returns the request's length in sectors.
-pub fn check_frames(sectors: u64, sector: u64, frames: &[(u64, u32)]) -> Result<u64, Error> {
+/// logical blocks inside its page, and no more than [`MAX_FRAMES`] of
+/// them. Returns the request's length in sectors.
+pub fn check_frames(
+    sectors: u64,
+    unit: u64,
+    sector: u64,
+    frames: &[(u64, u32)],
+) -> Result<u64, Error> {
     let lengths =
         frames.iter().map(|&(phys, len)| ((phys % PAGE_SIZE as u64) as usize, len as usize));
-    check(sectors, MAX_FRAMES, sector, lengths)
+    check(sectors, unit, MAX_FRAMES, sector, lengths)
 }
 
 /// Checks a discard of `count` sectors from `sector` on a device of
-/// `sectors` sectors: at least one, all on the device.
-pub fn check_discard(sectors: u64, sector: u64, count: u64) -> Result<(), Error> {
+/// `sectors` sectors in logical blocks of `unit`: at least one block, all
+/// on the device, and whole blocks.
+pub fn check_discard(sectors: u64, unit: u64, sector: u64, count: u64) -> Result<(), Error> {
     match sector.checked_add(count) {
-        Some(end) if count > 0 && end <= sectors => Ok(()),
+        Some(end)
+            if count > 0
+                && end <= sectors
+                && sector.is_multiple_of(unit)
+                && count.is_multiple_of(unit) =>
+        {
+            Ok(())
+        }
         _ => Err(Error::OutOfRange),
     }
 }
@@ -251,34 +284,39 @@ mod proofs {
     use super::*;
 
     /// A request [`check`] accepts lies wholly on the device, in whole
-    /// sectors, each segment inside its page, and its length is what the
-    /// segments add up to.
+    /// logical blocks, each segment inside its page, and its length is
+    /// what the segments add up to.
     #[kani::proof]
     #[kani::unwind(4)]
     fn accepted_requests_fit() {
         let sectors: u64 = kani::any();
         let sector: u64 = kani::any();
+        let unit: u64 = kani::any_where(|&unit: &u64| unit == 1 || unit == 8);
         let segments: [(usize, usize); 2] = kani::any();
         let count: usize = kani::any_where(|&c: &usize| c <= 2);
-        if let Ok(len) = check(sectors, 2, sector, segments[..count].iter().copied()) {
+        if let Ok(len) = check(sectors, unit, 2, sector, segments[..count].iter().copied()) {
             assert!(sector.checked_add(len).is_some_and(|end| end <= sectors));
+            assert!(sector % unit == 0 && len % unit == 0);
+            let block = (unit * SECTOR) as usize;
             let mut bytes = 0u64;
             for &(offset, segment) in &segments[..count] {
                 assert!(segment > 0 && offset + segment <= PAGE_SIZE);
-                assert!(offset % SECTOR as usize == 0 && segment % SECTOR as usize == 0);
+                assert!(offset % block == 0 && segment % block == 0);
                 bytes += segment as u64;
             }
             assert_eq!(bytes / SECTOR, len);
         }
     }
 
-    /// A discard [`check_discard`] accepts covers sectors, all of them on
-    /// the device.
+    /// A discard [`check_discard`] accepts covers whole logical blocks,
+    /// all of them on the device.
     #[kani::proof]
     fn accepted_discards_fit() {
         let (sectors, sector, count): (u64, u64, u64) = kani::any();
-        if check_discard(sectors, sector, count).is_ok() {
+        let unit: u64 = kani::any_where(|&unit: &u64| unit == 1 || unit == 8);
+        if check_discard(sectors, unit, sector, count).is_ok() {
             assert!(count > 0 && sector < sectors && sectors - sector >= count);
+            assert!(sector % unit == 0 && count % unit == 0);
         }
     }
 
@@ -299,14 +337,24 @@ pub struct Slice {
     device: DeviceRef,
     first: u64,
     sectors: u64,
+    /// The sectors of the device's logical blocks.
+    unit: u64,
 }
 
 impl Slice {
     /// The `sectors` sectors from `first` of `device`. `None` if they
-    /// are not all on it.
+    /// are not all on it, or not whole logical blocks of it.
     pub fn new(device: DeviceRef, first: u64, sectors: u64) -> Option<Slice> {
         let end = first.checked_add(sectors)?;
-        (sectors > 0 && end <= device.info().sectors).then_some(Slice { device, first, sectors })
+        let info = device.info();
+        let unit = info.unit();
+        let whole = first.is_multiple_of(unit) && sectors.is_multiple_of(unit);
+        (sectors > 0 && end <= info.sectors && whole).then_some(Slice {
+            device,
+            first,
+            sectors,
+            unit,
+        })
     }
 }
 
@@ -317,13 +365,13 @@ impl BlockDevice for Slice {
 
     fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
-        check(self.sectors, usize::MAX, sector, lengths)?;
+        check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.read(self.first + sector, segments)
     }
 
     fn write(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
-        check(self.sectors, usize::MAX, sector, lengths)?;
+        check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.write(self.first + sector, segments)
     }
 
@@ -333,35 +381,40 @@ impl BlockDevice for Slice {
 
     fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
-        check(self.sectors, usize::MAX, sector, lengths)?;
+        check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.write_through(self.first + sector, segments)
     }
 
     fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
-        check_frames(self.sectors, sector, frames)?;
+        check_frames(self.sectors, self.unit, sector, frames)?;
         self.device.read_frames(self.first + sector, frames)
     }
 
     fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
-        check_frames(self.sectors, sector, frames)?;
+        check_frames(self.sectors, self.unit, sector, frames)?;
         self.device.write_frames(self.first + sector, frames)
     }
 
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
-        check_discard(self.sectors, sector, count)?;
+        check_discard(self.sectors, self.unit, sector, count)?;
         self.device.discard(self.first + sector, count)
     }
 }
 
 /// Reads sector `sector` of `device` into `out`, through a page: for
-/// partition tables and superblocks.
+/// partition tables and superblocks. On a device with larger logical
+/// blocks, the whole block that holds it is read.
 pub fn read_sector(
     device: &dyn BlockDevice,
     sector: u64,
     out: &mut [u8; 512],
 ) -> Result<(), Error> {
+    let unit = device.info().unit();
+    let first = sector - sector % unit;
     let mut page = mem::CachePage::new()?;
-    device.read(sector, &mut [SegmentMut { page: &mut page, offset: 0, len: 512 }])?;
-    out.copy_from_slice(&page.bytes()[..512]);
+    let len = (unit * SECTOR) as usize;
+    device.read(first, &mut [SegmentMut { page: &mut page, offset: 0, len }])?;
+    let at = ((sector - first) * SECTOR) as usize;
+    out.copy_from_slice(&page.bytes()[at..at + 512]);
     Ok(())
 }

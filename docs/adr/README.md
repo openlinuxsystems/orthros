@@ -133,3 +133,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0119](0119-nvme-scatter-gather-lists-for-long-runs.md) | NVMe data in long runs of memory go as scatter gather lists | Accepted |
 | [0120](0120-extended-state-matches-the-host.md) | Extended state enables what the host's does, with AMX held off | Accepted |
 | [0121](0121-large-pages-where-frames-line-up.md) | A frame's pages get 2 MiB pages where they line up | Accepted |
+| [0122](0122-disk-checks-on-real-machines.md) | Real machines' disks are checked by serial number, and Linux checks what Dukovo wrote | Accepted |
+| [0123](0123-disks-of-4k-sectors.md) | Disks of 4 KiB sectors keep 512-byte addresses and move whole sectors | Accepted |

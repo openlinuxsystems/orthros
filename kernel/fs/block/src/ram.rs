@@ -11,8 +11,8 @@ use radix_sync::Mutex;
 use crate::mem::CachePage;
 use crate::pagemap::PageMap;
 use crate::{
-    BlockDevice, Error, Info, PAGE_SIZE, SECTOR, SECTORS_PER_PAGE, Segment, SegmentMut, check,
-    check_discard,
+    BlockDevice, Error, Info, MAX_LOGICAL_BLOCK, PAGE_SIZE, SECTOR, SECTORS_PER_PAGE, Segment,
+    SegmentMut, check, check_discard,
 };
 
 /// A disk whose sectors are pages of memory, allocated as they are
@@ -20,6 +20,8 @@ use crate::{
 pub struct RamDisk {
     sectors: u64,
     read_only: bool,
+    /// The size of its logical blocks, in bytes.
+    logical_block: u32,
     pages: Mutex<PageMap<CachePage>>,
     /// Requests that reached the disk.
     requests: AtomicU64,
@@ -35,9 +37,29 @@ pub struct RamDisk {
 impl RamDisk {
     /// An empty disk of `sectors` sectors.
     pub fn new(sectors: u64, read_only: bool) -> RamDisk {
+        RamDisk::with_blocks(sectors, read_only, SECTOR as u32)
+    }
+
+    /// An empty disk of `sectors` sectors in logical blocks of
+    /// `logical_block` bytes (a power of two from 512 to
+    /// [`MAX_LOGICAL_BLOCK`]), which refuses what is not whole blocks, as
+    /// a disk with 4 KiB sectors does.
+    ///
+    /// # Panics
+    ///
+    /// If `logical_block` is not such a size, or `sectors` not whole
+    /// blocks of it.
+    pub fn with_blocks(sectors: u64, read_only: bool, logical_block: u32) -> RamDisk {
+        assert!(
+            logical_block.is_power_of_two()
+                && (SECTOR as u32..=MAX_LOGICAL_BLOCK).contains(&logical_block)
+                && sectors.is_multiple_of(u64::from(logical_block) / SECTOR),
+            "a disk of {sectors} sectors in blocks of {logical_block} bytes"
+        );
         RamDisk {
             sectors,
             read_only,
+            logical_block,
             pages: Mutex::new(PageMap::new()),
             requests: AtomicU64::new(0),
             flushes: AtomicU64::new(0),
@@ -103,6 +125,11 @@ impl RamDisk {
         self.fail_after.store(count, Ordering::Relaxed);
     }
 
+    /// The sectors of its logical blocks.
+    fn unit(&self) -> u64 {
+        u64::from(self.logical_block) / SECTOR
+    }
+
     fn start(&self) -> Result<(), Error> {
         self.requests.fetch_add(1, Ordering::Relaxed);
         let left = self.fail_after.load(Ordering::Relaxed);
@@ -128,7 +155,8 @@ impl BlockDevice for RamDisk {
     fn info(&self) -> Info {
         Info {
             sectors: self.sectors,
-            block_size: 512,
+            logical_block: self.logical_block,
+            block_size: self.logical_block,
             read_only: self.read_only,
             max_segments: 64,
             discard_sectors: self.sectors,
@@ -137,7 +165,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
-        check(self.sectors, 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
+        check(self.sectors, self.unit(), 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
         self.start()?;
         let mut at = sector * SECTOR;
         for segment in segments.iter_mut() {
@@ -149,7 +177,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn write(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
-        check(self.sectors, 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
+        check(self.sectors, self.unit(), 64, sector, segments.iter().map(|s| (s.offset, s.len)))?;
         if self.read_only {
             return Err(Error::ReadOnly);
         }
@@ -171,7 +199,7 @@ impl BlockDevice for RamDisk {
     /// Discarded sectors read as zeros: whole pages are let go, and the
     /// rest zeroed.
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
-        check_discard(self.sectors, sector, count)?;
+        check_discard(self.sectors, self.unit(), sector, count)?;
         if self.read_only {
             return Err(Error::ReadOnly);
         }

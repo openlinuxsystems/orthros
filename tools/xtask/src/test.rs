@@ -10,7 +10,7 @@
 //! image; only the kernel command line in its grub.cfg differs, written
 //! into a slot reserved for it.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
@@ -125,10 +125,14 @@ pub struct Disk {
     fat: u8,
     /// The filesystem's label.
     label: &'static str,
-    /// Whether the filesystem is in an MBR partition from 1 MiB on, rather
-    /// than the whole disk.
-    partitioned: bool,
+    /// The partition table the filesystem is in, or none for a
+    /// filesystem on the whole disk.
+    table: Table,
     bus: Bus,
+    /// The size of its sectors in bytes, which its filesystem's sectors
+    /// have too: 512, or 4096 for a disk of 4 KiB sectors, which QEMU
+    /// gives virtio and NVMe disks but not SATA ones.
+    sector: u64,
     /// More of QEMU's properties of the disk's device, each after a comma.
     device: &'static str,
     /// Errors for QEMU's blkdebug driver to inject, as its configuration
@@ -136,6 +140,20 @@ pub struct Disk {
     errors: Option<&'static str>,
     /// What the host checks after each boot: [`fsck`] for a FAT disk.
     check: fn(&DiskImage) -> Result<(), String>,
+}
+
+/// The partition table of a test disk with a filesystem.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Table {
+    /// None: the filesystem is the whole disk.
+    None,
+    /// An MBR with one FAT32 (LBA) partition from [`PARTITION_START`] to
+    /// the disk's end.
+    Mbr,
+    /// A GPT with one basic data partition, named [`GPT_NAME`], from
+    /// [`PARTITION_START`] to the last whole MiB before the backup table
+    /// ([`gpt_last`]), as Linux's partitioning tools align it.
+    Gpt,
 }
 
 /// Where a test disk is attached.
@@ -189,11 +207,12 @@ pub struct SecondBoot {
 }
 
 /// A disk made for a run: its file, where its filesystem starts, its
-/// size, and what checks it.
+/// size and the size of its sectors, and what checks it.
 pub struct DiskImage {
     path: PathBuf,
     offset: u64,
     bytes: u64,
+    sector: u64,
     check: fn(&DiskImage) -> Result<(), String>,
 }
 
@@ -227,7 +246,7 @@ fn volume_names(disks: &[Disk]) -> Vec<String> {
         .into_iter()
         .zip(disks)
         .filter(|(_, disk)| disk.fat != 0)
-        .map(|(name, disk)| if disk.partitioned { partition_name(&name, 1) } else { name })
+        .map(|(name, disk)| if disk.table == Table::None { name } else { partition_name(&name, 1) })
         .collect()
 }
 
@@ -246,36 +265,53 @@ const TWO_NODES: &[&str] = &[
 ];
 
 /// A FAT test disk on `bus`.
-const fn fat_disk(kib: u64, fat: u8, label: &'static str, partitioned: bool, bus: Bus) -> Disk {
-    Disk { kib, fat, label, partitioned, bus, device: "", errors: None, check: fsck }
+const fn fat_disk(kib: u64, fat: u8, label: &'static str, table: Table, bus: Bus) -> Disk {
+    let check = if matches!(table, Table::Gpt) { fsck_gpt } else { fsck };
+    Disk { kib, fat, label, table, bus, sector: 512, device: "", errors: None, check }
 }
 
 /// The storage test's disks: FAT12, FAT16 and FAT32 on whole disks, and
 /// FAT32 in an MBR partition, as virtio disks. Spark mounts them at
 /// `/volumes/vda`, `vdb`, `vdc` and `vdd1`.
 const STORAGE_DISKS: &[Disk] = &[
-    fat_disk(1440, 12, "RADIX12", false, Bus::Virtio),
-    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Virtio),
-    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Virtio),
-    fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Virtio),
+    fat_disk(1440, 12, "RADIX12", Table::None, Bus::Virtio),
+    fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Virtio),
+    fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Virtio),
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Mbr, Bus::Virtio),
 ];
 
 /// The same disks on SATA, the last one solid state (QEMU's rotation rate
-/// of 1).
+/// of 1) and its partition in a GPT.
 const SATA_DISKS: &[Disk] = &[
-    fat_disk(1440, 12, "RADIX12", false, Bus::Sata),
-    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Sata),
-    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Sata),
-    Disk { device: ",rotation_rate=1", ..fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Sata) },
+    fat_disk(1440, 12, "RADIX12", Table::None, Bus::Sata),
+    fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Sata),
+    fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Sata),
+    Disk {
+        device: ",rotation_rate=1",
+        ..fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Sata)
+    },
 ];
 
 /// The same disks as NVMe namespaces, two on each of two controllers:
-/// `nvme0n1`, `nvme0n2`, `nvme1n1` and `nvme1n2p1`.
+/// `nvme0n1`, `nvme0n2`, `nvme1n1` and `nvme1n2p1`, the partition in a
+/// GPT.
 const NVME_DISKS: &[Disk] = &[
-    fat_disk(1440, 12, "RADIX12", false, Bus::Nvme(0)),
-    fat_disk(32 * 1024, 16, "RADIX16", false, Bus::Nvme(0)),
-    fat_disk(64 * 1024, 32, "RADIX32", false, Bus::Nvme(1)),
-    fat_disk(48 * 1024, 32, "RADIXPART", true, Bus::Nvme(1)),
+    fat_disk(1440, 12, "RADIX12", Table::None, Bus::Nvme(0)),
+    fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Nvme(0)),
+    fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Nvme(1)),
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Nvme(1)),
+];
+
+/// The storage test's disks with sectors of 4 KiB, and their filesystems
+/// with them: FAT32 on two NVMe namespaces, whole and in a GPT, the
+/// smallest a FAT32 volume of such sectors can be, and FAT12 and FAT16 on
+/// virtio disks: `nvme0n1`, `nvme0n2p1`, `vda` and `vdb`, in the order
+/// the kernel finds them, as the NVMe controller comes first.
+const DISKS_4K: &[Disk] = &[
+    Disk { sector: 4096, ..fat_disk(288 * 1024, 32, "RADIX32", Table::None, Bus::Nvme(0)) },
+    Disk { sector: 4096, ..fat_disk(288 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Nvme(0)) },
+    Disk { sector: 4096, ..fat_disk(1440, 12, "RADIX12", Table::None, Bus::Virtio) },
+    Disk { sector: 4096, ..fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Virtio) },
 ];
 
 /// The size of the raw disks of the `disk-raw` and `disk-errors` tests.
@@ -287,8 +323,9 @@ const fn raw_disk(bus: Bus, check: fn(&DiskImage) -> Result<(), String>) -> Disk
         kib: RAW_KIB,
         fat: 0,
         label: "",
-        partitioned: false,
+        table: Table::None,
         bus,
+        sector: 512,
         device: "",
         errors: None,
         check,
@@ -303,6 +340,13 @@ const RAW_DISKS: &[Disk] = &[
     raw_disk(Bus::Nvme(0), raw_check),
 ];
 
+/// The `disk-raw-4k` test's disks, of 4 KiB sectors: one virtio disk and
+/// an NVMe namespace.
+const RAW_DISKS_4K: &[Disk] = &[
+    Disk { sector: 4096, ..raw_disk(Bus::Virtio, raw_check) },
+    Disk { sector: 4096, ..raw_disk(Bus::Nvme(0), raw_check) },
+];
+
 /// What the `disk-raw` test's program writes to each disk: at these
 /// offsets, these many bytes, each the complement of the one there
 /// before; and one write of 20 bytes 10 before the end, of which 10 fit.
@@ -311,6 +355,15 @@ const RAW_DISKS: &[Disk] = &[
 const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
+
+/// The size of the `disk-check` test's disk: the smallest disktest takes.
+const CHECK_KIB: u64 = 128 * 1024;
+
+/// The `disk-check` test's disk: an NVMe namespace of the first
+/// controller, whose serial number is `dukovo-test-0`, which the host
+/// checks with Linux's side of disktest ([`linux_disk_check`]).
+const CHECK_DISKS: &[Disk] =
+    &[Disk { kib: CHECK_KIB, check: linux_disk_check, ..raw_disk(Bus::Nvme(0), raw_check) }];
 
 /// The `disk-errors` test's disks, a SATA disk and an NVMe namespace,
 /// and the errors QEMU gives their reads and writes ([`ERROR_RULES`]):
@@ -852,7 +905,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "storage-sata",
-        about: "The storage test on four SATA disks of an AHCI controller, one of them solid state",
+        about: "The storage test on four SATA disks of an AHCI controller, one of them solid state and partitioned with a GPT",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -872,7 +925,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "storage-nvme",
-        about: "The storage test on four NVMe namespaces of two controllers, each with a queue and an interrupt for each of four CPUs",
+        about: "The storage test on four NVMe namespaces of two controllers, each with a queue and an interrupt for each of four CPUs, one partitioned with a GPT",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -884,6 +937,26 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: storage_write,
         disks: NVME_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
+        name: "storage-4k",
+        about: "The storage test on two virtio disks and two NVMe namespaces of 4 KiB sectors, their FAT volumes of 4 KiB sectors too, one in a GPT of 4 KiB blocks",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: DISKS_4K,
         second: Some(SecondBoot {
             cmdline: "lockdep -- /system/tests/storage check",
             before: storage_host,
@@ -904,6 +977,38 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: disk_raw,
         disks: RAW_DISKS,
+        second: None,
+    },
+    Case {
+        name: "disk-raw-4k",
+        about: "The raw test on a virtio disk and an NVMe namespace of 4 KiB sectors",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage raw vda nvme0n1",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_raw,
+        disks: RAW_DISKS_4K,
+        second: None,
+    },
+    Case {
+        name: "disk-check",
+        about: "The disk check of a real machine on an NVMe disk it finds by its serial number; then Linux's side reads back on the host what it wrote",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix /system/tests/posix/disktest --yes-erase dukovo-test-0",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_check,
+        disks: CHECK_DISKS,
         second: None,
     },
     Case {
@@ -1114,6 +1219,7 @@ pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -
             cmdline: &cmdline_slot(),
             microcode: (kind == TestImage::Microcode).then(test_microcode),
             programs: Some(&built.programs),
+            disk_check: None,
             staging: dir.join(format!("{name}-root")),
             output: output.clone(),
         },
@@ -1232,16 +1338,20 @@ fn run_case(
         extra.push("-drive".into());
         extra.push(format!("file={file},if=none,id=disk{i},format=raw,discard=unmap"));
         extra.push("-device".into());
+        let device = match disk.sector {
+            512 => disk.device.to_string(),
+            size => format!(",logical_block_size={size},physical_block_size={size}{}", disk.device),
+        };
         extra.push(match disk.bus {
-            Bus::Virtio => format!("virtio-blk-pci,drive=disk{i}{}", disk.device),
+            Bus::Virtio => format!("virtio-blk-pci,drive=disk{i}{device}"),
             Bus::Sata => {
                 port += 1;
-                format!("ide-hd,drive=disk{i},bus=sata.{}{}", port - 1, disk.device)
+                format!("ide-hd,drive=disk{i},bus=sata.{}{device}", port - 1)
             }
             Bus::Nvme(n) => {
                 namespaces[usize::from(n)] += 1;
                 let nsid = namespaces[usize::from(n)];
-                format!("nvme-ns,drive=disk{i},bus=nvme{n},nsid={nsid}{}", disk.device)
+                format!("nvme-ns,drive=disk{i},bus=nvme{n},nsid={nsid}{device}")
             }
         });
     }
@@ -1309,7 +1419,13 @@ fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
     for (i, disk) in case.disks.iter().enumerate() {
         let path = dir.join(format!("{}-disk{i}.img", case.name));
         let _ = std::fs::remove_file(&path);
-        let image = DiskImage { path, offset: 0, bytes: disk.kib * 1024, check: disk.check };
+        let image = DiskImage {
+            path,
+            offset: 0,
+            bytes: disk.kib * 1024,
+            sector: disk.sector,
+            check: disk.check,
+        };
         if let Some(rules) = disk.errors {
             let at = image.path.with_extension("blkdebug");
             std::fs::write(&at, rules).map_err(|err| format!("writing {}: {err}", at.display()))?;
@@ -1324,18 +1440,36 @@ fn make_disks(dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
         let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
         // A fixed volume ID, so that runs match.
         mkfs.args(["-F", &disk.fat.to_string(), "-n", disk.label, "-i", "4f525448"]);
-        let offset = if disk.partitioned {
+        mkfs.args(["-S", &disk.sector.to_string()]);
+        if disk.sector != 512 {
+            // A sector a cluster: of the sectors a cluster `mkfs.fat` picks
+            // for the size, 4 KiB ones would leave FAT16 too few clusters.
+            mkfs.args(["-s", "1"]);
+            if disk.fat != 32 {
+                // A root directory of whole sectors, which `mkfs.fat` leaves
+                // a floppy's 224 entries short of: Linux refuses a volume
+                // whose root directory ends inside a sector, and mtools
+                // reads one otherwise than the specification.
+                mkfs.args(["-r", "512"]);
+            }
+        }
+        let offset = if disk.table == Table::None {
+            mkfs.arg("-C").arg(path).arg(disk.kib.to_string());
+            0
+        } else {
             let file = std::fs::File::create(path)
                 .map_err(|err| format!("making {}: {err}", path.display()))?;
             file.set_len(disk.kib * 1024)
                 .map_err(|err| format!("sizing {}: {err}", path.display()))?;
-            write_mbr(path, disk.kib * 2)?;
-            mkfs.args(["--offset", &PARTITION_START.to_string()]);
-            mkfs.arg(path).arg((disk.kib - PARTITION_START / 2).to_string());
+            if disk.table == Table::Gpt {
+                write_gpt(path, disk.kib * 2, disk.sector)?;
+            } else {
+                write_mbr(path, disk.kib * 2)?;
+            }
+            // In the filesystem's sectors.
+            mkfs.args(["--offset", &(PARTITION_START * 512 / disk.sector).to_string()]);
+            mkfs.arg(path).arg((partition_sectors(disk) / 2).to_string());
             PARTITION_START * 512
-        } else {
-            mkfs.arg("-C").arg(path).arg(disk.kib.to_string());
-            0
         };
         host_tool(&mut mkfs)?;
         made.push(DiskImage { offset, ..image });
@@ -1387,6 +1521,128 @@ fn raw_same(disk: &DiskImage, want: &[u8]) -> Result<(), String> {
         }
         None => Ok(()),
     }
+}
+
+/// The size in sectors of a test disk's partition, which [`Table`] says.
+fn partition_sectors(disk: &Disk) -> u64 {
+    match disk.table {
+        Table::None => 0,
+        Table::Mbr => disk.kib * 2 - PARTITION_START,
+        Table::Gpt => gpt_last(disk.kib * 2, disk.sector) + 1 - PARTITION_START,
+    }
+}
+
+/// The name of a test disk's GPT partition.
+const GPT_NAME: &str = "Dukovo test data";
+
+/// The last sector of the GPT partition of a disk of `sectors` and of
+/// logical blocks of `block` bytes: before the backup table (33 blocks of
+/// 512 bytes, or 5 of 4 KiB), at the end of a whole MiB.
+fn gpt_last(sectors: u64, block: u64) -> u64 {
+    let backup = (1 + GPT_ENTRIES_BYTES / block) * (block / 512);
+    (sectors - backup) / 2048 * 2048 - 1
+}
+
+/// The size of a GPT's 128 entries of 128 bytes.
+const GPT_ENTRIES_BYTES: u64 = 128 * 128;
+
+/// A GPT disk's tables (UEFI 2.10, section 5.3), for a disk of `sectors`
+/// whose logical blocks, which a GPT counts in, are of `block` bytes: the
+/// protective MBR, the primary header and its 128 entries (the first
+/// blocks), and the backup entries and header (the last), with one basic
+/// data partition from [`PARTITION_START`] to [`gpt_last`], named
+/// [`GPT_NAME`], and fixed GUIDs so that runs match.
+fn gpt_tables(sectors: u64, block: u64) -> (Vec<u8>, Vec<u8>) {
+    let per_block = block / 512;
+    let blocks = sectors / per_block;
+    let table = GPT_ENTRIES_BYTES / block;
+    let mut mbr = vec![0u8; block as usize];
+    let entry = &mut mbr[446..462];
+    entry[4] = 0xee;
+    entry[8..12].copy_from_slice(&1u32.to_le_bytes());
+    entry[12..16].copy_from_slice(&u32::try_from(blocks - 1).unwrap_or(u32::MAX).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xaa;
+    let mut entries = vec![0u8; GPT_ENTRIES_BYTES as usize];
+    // The basic data partition type, EBD0A0A2-B9E5-4433-87C0-68B6B72699C7,
+    // in its mixed-endian byte order, and a unique GUID of the test's own.
+    entries[0..16].copy_from_slice(&[
+        0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99,
+        0xc7,
+    ]);
+    entries[16..32].copy_from_slice(b"Dukovo test part");
+    entries[32..40].copy_from_slice(&(PARTITION_START / per_block).to_le_bytes());
+    entries[40..48]
+        .copy_from_slice(&((gpt_last(sectors, block) + 1) / per_block - 1).to_le_bytes());
+    for (i, c) in GPT_NAME.encode_utf16().enumerate() {
+        entries[56 + 2 * i..58 + 2 * i].copy_from_slice(&c.to_le_bytes());
+    }
+    let entries_crc = crc32(&entries);
+    let header = |at: u64, alternate: u64, entries_at: u64| {
+        let mut h = vec![0u8; block as usize];
+        h[0..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&at.to_le_bytes());
+        h[32..40].copy_from_slice(&alternate.to_le_bytes());
+        h[40..48].copy_from_slice(&(2 + table).to_le_bytes());
+        h[48..56].copy_from_slice(&(blocks - 2 - table).to_le_bytes());
+        h[56..72].copy_from_slice(b"Dukovo test disk");
+        h[72..80].copy_from_slice(&entries_at.to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        h[88..92].copy_from_slice(&entries_crc.to_le_bytes());
+        let crc = crc32(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    };
+    let mut primary = mbr;
+    primary.extend(header(1, blocks - 1, 2));
+    primary.extend(&entries);
+    let mut backup = entries;
+    backup.extend(header(blocks - 1, 1, blocks - 1 - table));
+    (primary, backup)
+}
+
+/// The CRC-32 of `bytes` that GPT uses (IEEE 802.3, reflected).
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// Writes [`gpt_tables`] to a disk of `sectors` and of logical blocks of
+/// `block` bytes.
+fn write_gpt(path: &Path, sectors: u64, block: u64) -> Result<(), String> {
+    let (primary, backup) = gpt_tables(sectors, block);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|err| format!("opening {}: {err}", path.display()))?;
+    file.write_all(&primary).map_err(|err| format!("writing {}: {err}", path.display()))?;
+    file.seek(std::io::SeekFrom::Start(sectors * 512 - backup.len() as u64))
+        .and_then(|_| file.write_all(&backup))
+        .map_err(|err| format!("writing {}: {err}", path.display()))
+}
+
+/// Checks a GPT disk: both of its tables as [`write_gpt`] wrote them, and
+/// its filesystem with [`fsck`].
+fn fsck_gpt(disk: &DiskImage) -> Result<(), String> {
+    let bytes = std::fs::read(&disk.path).map_err(|err| format!("reading a disk: {err}"))?;
+    let (primary, backup) = gpt_tables(disk.bytes / 512, disk.sector);
+    let end = bytes.len();
+    if bytes.len() as u64 != disk.bytes
+        || bytes[..primary.len()] != primary[..]
+        || bytes[end - backup.len()..] != backup[..]
+    {
+        return Err(format!("{}: its GPT is not the one written", disk.path.display()));
+    }
+    fsck(disk)
 }
 
 /// Writes an MBR with one FAT32 (LBA) partition from [`PARTITION_START`]
@@ -2457,10 +2713,18 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let mut port = 0;
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let size = disk_size(disk.kib);
+        // A disk of 512-byte sectors says nothing of them.
+        let sectors = match disk.sector {
+            512 => String::new(),
+            size => format!(", {size}-byte sectors"),
+        };
         let (line, want) = match disk.bus {
             Bus::Virtio => (
                 line_of(&format!("Disk: {name} is a virtio block device of {size} at "))?,
-                ", 512 bytes a block, write cache, discards, MSI-X vector ",
+                format!(
+                    ", {} bytes a block{sectors}, write cache, discards, MSI-X vector ",
+                    disk.sector
+                ),
             ),
             Bus::Sata => {
                 port += 1;
@@ -2469,28 +2733,35 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                         "Disk: {name} is a SATA disk of {size} on AHCI port {}: QEMU HARDDISK, ",
                         port - 1
                     ))?,
-                    "512 bytes a block, NCQ depth 32, write cache, TRIM",
+                    "512 bytes a block, NCQ depth 32, write cache, TRIM".to_string(),
                 )
             }
             Bus::Nvme(_) => (
                 line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
-                "512 bytes a block, write cache, deallocates",
+                format!("{} bytes a block{sectors}, write cache, deallocates", disk.sector),
             ),
         };
         // Only a SATA disk's line says whether it is solid state.
         let says_solid = disk.bus == Bus::Sata && disk.solid();
-        if !line.contains(want) || line.ends_with(", solid state") != says_solid {
+        if !line.contains(&want) || line.ends_with(", solid state") != says_solid {
             return Err(format!("the kernel described {name} as \"{line}\""));
         }
-        if disk.partitioned {
-            line_of(&format!("Disk: {name} has an MBR with 1 partition"))?;
-            line_of(&format!(
-                "Disk: {}: {} from sector {PARTITION_START}, type 0x0c",
-                partition_name(&name, 1),
-                disk_size(disk.kib - PARTITION_START / 2)
-            ))?;
-        } else {
-            line_of(&format!("Disk: {name} has no partition table; it is used whole"))?;
+        let part = partition_name(&name, 1);
+        let size = disk_size(partition_sectors(disk) / 2);
+        match disk.table {
+            Table::None => {
+                line_of(&format!("Disk: {name} has no partition table; it is used whole"))?;
+            }
+            Table::Mbr => {
+                line_of(&format!("Disk: {name} has an MBR with 1 partition"))?;
+                line_of(&format!("Disk: {part}: {size} from sector {PARTITION_START}, type 0x0c"))?;
+            }
+            Table::Gpt => {
+                line_of(&format!("Disk: {name} has a GPT with 1 partition"))?;
+                line_of(&format!(
+                    "Disk: {part}: {size} from sector {PARTITION_START}, GPT \"{GPT_NAME}\""
+                ))?;
+            }
         }
     }
     let on = |bus: Bus| case.disks.iter().filter(|disk| disk.bus == bus).count();
@@ -2554,8 +2825,21 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("storage: /tmp: a 10000-byte file written, read back and removed")?;
     vm.expect("storage: /devices: ")?;
     vm.expect(" of them disks; zero, random and null work")?;
-    for name in &volumes {
+    for (name, disk) in volumes.iter().zip(case.disks.iter().filter(|disk| disk.fat != 0)) {
         vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
+        let model = match disk.bus {
+            Bus::Sata => "QEMU HARDDISK",
+            Bus::Nvme(_) => "QEMU NVMe Ctrl",
+            Bus::Virtio => "",
+        };
+        if disk.table == Table::None && !model.is_empty() {
+            vm.expect(&format!("storage: /kernel/block/{name}/device: {model}, serial "))?;
+        }
+        if disk.table != Table::None {
+            vm.expect(&format!(
+                "storage: /kernel/block/{name}: partition 1 from sector {PARTITION_START}"
+            ))?;
+        }
     }
     vm.expect(&format!("storage: /kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
     vm.expect("storage: /kernel/bus/pci/devices: ")?;
@@ -2649,11 +2933,11 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
-        let rotational = u8::from(!disk.solid());
+        let (rotational, sector) = (u8::from(!disk.solid()), disk.sector);
         vm.expect(&format!(
-            "storage: /devices/{name}: {} bytes, {} sectors of 512 bytes, physical blocks of 512, \
-             minimum and optimal I/O 512 and 0, alignment 0, read-only 0, rotational \
-             {rotational}, discarded sectors read as zeros 0",
+            "storage: /devices/{name}: {} bytes, {} sectors of {sector} bytes, physical blocks of \
+             {sector}, minimum and optimal I/O {sector} and 0, alignment 0, read-only 0, \
+             rotational {rotational}, discarded sectors read as zeros 0",
             disk.kib * 1024,
             disk.kib * 2
         ))?;
@@ -2667,6 +2951,61 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: /devices/{name}: discards, flushes and refusals work"))?;
     }
     storage_end(vm, "raw")
+}
+
+/// The `disk-check` test: disktest (userspace/posix/disktest.c, ADR 0122)
+/// finds the NVMe disk by its serial number, writes its places, reads them
+/// back, measures and saves its report; the host then runs Linux's side.
+fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/disktest as process ")?;
+    vm.expect(&format!(
+        "disktest: /devices/nvme0n1 on Dukovo: QEMU NVMe Ctrl, serial dukovo-test-0, {} bytes, \
+         512-byte sectors, 512-byte blocks, solid state",
+        CHECK_KIB * 1024
+    ))?;
+    vm.expect("disktest: a write of 3 bytes off a sector's boundary: passed")?;
+    vm.expect("disktest: 64 of 64 places read back as written")?;
+    vm.expect("disktest: 1 MiB write: ")?;
+    vm.expect("disktest: passed; the report is saved on the disk")?;
+    vm.expect("(/system/tests/posix/disktest) exited with code 0x0")?;
+    Ok(())
+}
+
+/// Linux's side of the disk check, on the `disk-check` test's disk file:
+/// built for the host from the same source, it must find Dukovo's report
+/// and read back every place Dukovo wrote.
+fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
+    let (program, source) = (disk.path.with_extension("disktest"), disk.path.with_extension("c"));
+    std::fs::write(&source, include_str!("../../../userspace/posix/disktest.c"))
+        .map_err(|err| format!("writing {}: {err}", source.display()))?;
+    let compiler = crate::ports::find_clang()
+        .map(|(clang, _)| clang)
+        .or_else(|| crate::process::find_program("cc"))
+        .ok_or("no C compiler is installed, for Linux's side of the disk check")?;
+    let built = host_tool(
+        std::process::Command::new(compiler)
+            .args(["-std=c11", "-D_GNU_SOURCE", "-O2", "-Wall", "-o"])
+            .arg(&program)
+            .arg(&source),
+    );
+    let _ = std::fs::remove_file(&source);
+    built?;
+    let ran = std::process::Command::new(&program)
+        .args(["--yes-erase", "--device"])
+        .arg(&disk.path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("running {}: {err}", program.display()));
+    let _ = std::fs::remove_file(&program);
+    let ran = ran?;
+    let text = String::from_utf8_lossy(&ran.stdout);
+    if !ran.status.success()
+        || !text.contains("| Linux reads what Dukovo wrote, after a restart | 64 of 64 |")
+    {
+        return Err(format!("Linux's side of the disk check failed:\n{text}"));
+    }
+    Ok(())
 }
 
 /// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s
@@ -2848,6 +3187,38 @@ mod tests {
         assert_eq!(disk_size(32 * 1024), "32 MiB");
         assert_eq!(disk_size(48 * 1024 - 1024), "47 MiB");
         assert_eq!(disk_size(3 << 19), "1.5 GiB");
+    }
+
+    #[test]
+    fn gpt_test_tables_are_whole() {
+        // The CRC's check value (the CRC catalogue's CRC-32/ISO-HDLC).
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        let sectors = 48 * 1024 * 2;
+        assert_eq!(gpt_last(sectors, 512), 96_255);
+        // In blocks of 4 KiB, the backup's 5 blocks end at the same MiB.
+        assert_eq!(gpt_last(sectors, 4096), 96_255);
+        for block in [512, 4096] {
+            let b = block as usize;
+            let table = 128 * 128 / b;
+            let blocks = sectors / (block / 512);
+            let (primary, backup) = gpt_tables(sectors, block);
+            assert_eq!((primary.len(), backup.len()), ((2 + table) * b, (1 + table) * b));
+            // Each header's CRC covers its 92 bytes with the CRC field as 0,
+            // and the entries' CRC the 128 entries.
+            for (header, at) in [(&primary[b..2 * b], 1), (&backup[table * b..], blocks - 1)] {
+                let mut copy = header[..92].to_vec();
+                copy[16..20].fill(0);
+                assert_eq!(crc32(&copy).to_le_bytes(), header[16..20]);
+                assert_eq!(header[24..32], u64::to_le_bytes(at));
+                assert_eq!(crc32(&backup[..table * b]).to_le_bytes(), header[88..92]);
+            }
+            assert_eq!(primary[2 * b..], backup[..table * b]);
+            // The partition, in blocks: from 1 MiB to the last whole MiB.
+            let entry = &primary[2 * b..2 * b + 128];
+            let per_mib = (1 << 20) / block;
+            assert_eq!(entry[32..40], u64::to_le_bytes(per_mib));
+            assert_eq!(entry[40..48], u64::to_le_bytes((96_256 / 2048) * per_mib - 1));
+        }
     }
 
     #[test]

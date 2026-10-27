@@ -23,7 +23,8 @@ module block;
 const GET_SIZE_BYTES: u32 = 0x80081272;
 /// Its size in 512-byte sectors, written as a u64 (BLKGETSIZE).
 const GET_SIZE_SECTORS: u32 = 0x1260;
-/// Its logical sector size, written as a u32: 512 (BLKSSZGET).
+/// Its logical sector size, written as a u32: 512, or 4096 for a disk of
+/// 4 KiB sectors (BLKSSZGET).
 const GET_SECTOR_SIZE: u32 = 0x1268;
 /// Its physical block size, the smallest unit it writes without reading
 /// first, written as a u32 (BLKPBSZGET).
@@ -46,7 +47,7 @@ const GET_ROTATIONAL: u32 = 0x127e;
 /// disk need not promise it (BLKDISCARDZEROES).
 const GET_DISCARD_ZEROES: u32 = 0x127c;
 /// Discards a range, read as two u64s: its first byte and its length,
-/// both multiples of 512 and on the device. The device may forget what
+/// both multiples of its logical sector size and on the device. The device may forget what
 /// the range holds (TRIM). Needs the write right; fails with
 /// invalid_argument for a range that is not whole sectors on the device,
 /// read_only on a device that refuses writes, and not_supported on one

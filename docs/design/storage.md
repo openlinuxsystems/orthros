@@ -175,22 +175,30 @@ a program and the disk. Pages come from the frame allocator, owned by
 
 ## The block layer and the block cache
 
-A `BlockDevice` is a disk or a part of one, in 512-byte sectors. A
+A `BlockDevice` is a disk or a part of one, in 512-byte sectors, as
+Linux counts them, whatever the size of the disk's own (ADR 0123). A
+disk of 4 KiB sectors says so in its description (`logical_block`), and
+each request to it must start and end on one of them. A
 request reads or writes sectors from one place into a list of
 `Segment`s, each a range of a page, and blocks the calling thread until
 the device is done. `partition` reads MBR and GPT tables (the GPT's CRC32
 checked, the backup header when the primary is bad) and `Slice` is a
-partition as a device of its own. As on Linux, a bad entry costs only
+partition as a device of its own. Tables count in the disk's own
+sectors, as their specifications say, and partitions in 512-byte ones.
+As on Linux, a bad entry costs only
 itself: one that starts past the disk's end is skipped, an MBR one that
 reaches past it is cut to fit (and logged so), a broken chain of logical
 partitions ends where it breaks, and an extended partition shows only
-its first two sectors, so that nothing made on it can wipe the logical
-ones.
+its first two sectors (the first one, on a disk of 4 KiB sectors), so
+that nothing made on it can
+wipe the logical ones.
 
 A filesystem's metadata goes through a `BlockCache` of its device: page
 `n` holds the device's bytes from `n * 4096`, with a bit per sector for
 *valid* (read or written) and one for *dirty*. A read fetches only the
-sectors it lacks; a write of whole sectors fetches nothing; `sync` writes
+sectors it lacks; a write of whole sectors fetches nothing; on a disk of
+4 KiB sectors, each bit's sector is a part of one of them, and the cache
+fetches, writes and forgets whole ones; `sync` writes
 the dirty sectors in runs and then flushes the device. `discard` forgets
 sectors exactly, without touching their neighbours in the same page, and
 `shrink` drops clean pages, which the cache also does on its own past
@@ -239,8 +247,8 @@ bit 8), as QEMU's does, is given two pages for them before its queues
 are made, and again after a reset (ADR 0117): a lane then writes each
 doorbell to memory, and its register only when the controller's event
 index asks.
-Each active namespace with 512-byte blocks and no metadata becomes a
-disk, its requests naming it; its physical block is the size it is best
+Each active namespace with blocks of 512 to 4096 bytes and no metadata
+becomes a disk, its requests naming it and counting in its blocks; its physical block is the size it is best
 written in, but no more than what is whole after a power failure. At
 power off, after the filesystems are written back, every disk's cache is
 flushed and each NVMe controller is shut down normally (CC.SHN).
@@ -303,7 +311,8 @@ straight to the disk, with nothing cached between, as Linux's do when
 opened with `O_DIRECT`, but at any offset and length.
 
 The whole sectors of a transfer that starts on a sector's boundary, into
-or from memory on a sector's boundary, go straight between the disk and
+or from memory on a sector's boundary, the disk's own sectors of 512
+bytes or 4 KiB, go straight between the disk and
 the program's memory, as Linux's `O_DIRECT` has them: the buffer lends
 its pages (`Out::lend`, `In::lend`), as many as 256 parts of pages at a
 time, a mebibyte from a page's start, and the device moves them

@@ -3,8 +3,9 @@
 
 # GRUB configuration for the Dukovo Server @VERSION@ boot image.
 # `ob image` generates boot/grub/grub.cfg from image/grub/grub.cfg.in by
-# filling in the VERSION, TIMEOUT, CMDLINE and MODULES placeholders. See
-# dukovo-boot(7).
+# filling in the VERSION, TIMEOUT, CMDLINE, MODULES and ENTRIES
+# placeholders; ENTRIES holds the disk check's entry of
+# `ob image --disk-check`, or nothing. See dukovo-boot(7).
 
 set timeout=@TIMEOUT@
 set default=0
@@ -33,3 +34,4 @@ menuentry "Dukovo Server @VERSION@ (Radix)" {
     multiboot2 /boot/radix @CMDLINE@
 @MODULES@    boot
 }
+@ENTRIES@

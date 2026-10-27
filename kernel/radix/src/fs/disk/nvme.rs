@@ -32,7 +32,7 @@ use radix_nvme::{Lane, Nvme, Shadow};
 use radix_sync::{Mutex, Once};
 
 use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
-use super::{Name, Size, partitions, register};
+use super::{Entry, Ident, Name, Size, partitions, register};
 use crate::Arch;
 
 /// The most NVMe controllers.
@@ -84,10 +84,13 @@ impl Controller for NvmeLane {
             Op::Write => radix_nvme::Op::Write,
             Op::WriteThrough => radix_nvme::Op::WriteThrough,
             Op::Flush => radix_nvme::Op::Flush,
-            Op::Discard(count) => radix_nvme::Op::Deallocate(count),
+            Op::Discard(count) => radix_nvme::Op::Deallocate(count / request.unit),
         };
-        let Request { target, sector, data, .. } = *request;
-        self.lane.submit(slot, op, target, sector, data, !more).map_err(|err| match err {
+        // The namespace counts in its own blocks, the request in sectors.
+        let Request { target, sector, data, unit, .. } = *request;
+        let lba_bytes = (unit * radix_block::SECTOR) as u32;
+        let block = sector / unit;
+        self.lane.submit(slot, op, target, lba_bytes, block, data, !more).map_err(|err| match err {
             radix_nvme::Error::BadRequest => Error::OutOfRange,
             _ => Error::Io,
         })
@@ -248,6 +251,7 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
     // What every namespace has; each its own size and blocks.
     let template = Info {
         sectors: 0,
+        logical_block: 512,
         block_size: 512,
         read_only: false,
         max_segments: identity.max_pages,
@@ -372,7 +376,7 @@ fn add(
             let _ = match why {
                 Unusable::BlockSize(0) => text.write_str("its block size is not one it lists"),
                 Unusable::BlockSize(size) => {
-                    write!(text, "its blocks are {size} bytes, and only 512 are supported")
+                    write!(text, "its blocks are {size} bytes, and only 512 to 4096 are supported")
                 }
                 Unusable::Metadata => text.write_str("its blocks carry metadata"),
                 Unusable::Empty => text.write_str("it has no blocks"),
@@ -381,10 +385,18 @@ fn add(
             return;
         }
     };
+    // Its blocks, and the most a deallocation covers, in sectors.
+    let unit = u64::from(namespace.lba_size) / radix_block::SECTOR;
+    let Some(sectors) = namespace.blocks.checked_mul(unit) else {
+        info!("Disk: {name}: it has more blocks than can be counted; not used");
+        return;
+    };
     let info = Info {
-        sectors: namespace.blocks,
+        sectors,
+        logical_block: namespace.lba_size,
         block_size: namespace.block_size,
         read_only: namespace.read_only,
+        discard_sectors: template.discard_sectors.saturating_mul(unit),
         ..*template
     };
     let volume = Volume::new(disk.clone(), id, info);
@@ -393,16 +405,19 @@ fn add(
         return;
     };
     info!(
-        "Disk: {name} is an NVMe namespace of {}: {}, {} bytes a block{}{}{}",
+        "Disk: {name} is an NVMe namespace of {}: {}, {} bytes a block{}{}{}{}",
         Size(info.sectors * radix_block::SECTOR),
         identify::trimmed(&identity.model),
         info.block_size,
+        super::sector_note(&info),
         if info.read_only { ", read-only" } else { "" },
         if identity.write_cache { ", write cache" } else { "" },
         if info.discard_sectors > 0 { ", deallocates" } else { "" },
     );
     let device: DeviceRef = volume;
-    register(&name, device.clone());
+    let ident =
+        Ident { model: identity.model, serial: identity.serial, firmware: identity.firmware };
+    register(Entry { name: name.clone(), device: device.clone(), place: None, ident: Some(ident) });
     partitions(&name, &device);
 }
 

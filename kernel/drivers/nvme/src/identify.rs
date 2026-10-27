@@ -14,8 +14,9 @@ pub const SIZE: usize = 4096;
 /// kibibyte.
 pub const HEAD: usize = 1024;
 
-/// The size of a block the driver takes: the block layer's sector.
-const BLOCK: u32 = 512;
+/// The sizes of logical blocks the driver takes, in bytes: from the
+/// block layer's sector to a page, as a disk with 4 KiB sectors has.
+const BLOCKS: core::ops::RangeInclusive<u32> = 512..=4096;
 
 /// What a controller is and does (Identify Controller).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,11 +60,15 @@ pub struct Controller {
 /// What a namespace is (Identify Namespace).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Namespace {
-    /// Its size in 512-byte blocks.
+    /// Its size in its logical blocks.
     pub blocks: u64,
+    /// The size of its logical blocks (its LBA format's) in bytes: 512,
+    /// 1024, 2048 or 4096.
+    pub lba_size: u32,
     /// The smallest unit it writes without reading first, in bytes: the
     /// size it is best written in (NPWG), but no more than a write that
-    /// is whole after a power failure; a power of two from 512 to 64 KiB.
+    /// is whole after a power failure; a power of two from its logical
+    /// block's size to 64 KiB.
     pub block_size: u32,
     /// Whether it is write-protected.
     pub read_only: bool,
@@ -74,8 +79,8 @@ pub struct Namespace {
 pub enum Unusable {
     /// It has no blocks: an inactive namespace ID.
     Empty,
-    /// Its blocks are not 512 bytes: the size in bytes, or 0 for one too
-    /// large to say.
+    /// Its blocks are not 512 to 4096 bytes: the size in bytes, or 0 for
+    /// one too large to say.
     BlockSize(u32),
     /// Its blocks carry metadata, or end-to-end protection information.
     Metadata,
@@ -169,7 +174,7 @@ pub fn namespace(data: &[u8; HEAD], atomic_blocks: u32) -> Result<Namespace, Unu
     let metadata = format & 0xffff;
     let shift = (format >> 16) & 0xff;
     let size = if shift < 32 { 1u32 << shift } else { 0 };
-    if size != BLOCK {
+    if !BLOCKS.contains(&size) {
         return Err(Unusable::BlockSize(size));
     }
     // Protection information (DPS) needs metadata too, but a namespace
@@ -179,18 +184,21 @@ pub fn namespace(data: &[u8; HEAD], atomic_blocks: u32) -> Result<Namespace, Unu
     }
     // The preferred write granularity (NPWG), when it says (OPTPERF).
     let granularity = if features & (1 << 4) != 0 {
-        (u32::from(u16_at(data, 64)) + 1).saturating_mul(BLOCK)
+        (u32::from(u16_at(data, 64)) + 1).saturating_mul(size)
     } else {
-        BLOCK
+        size
     };
     // The namespace's own power-fail atomic write (NAWUPF), when it says
     // (NSABP), or else the controller's.
     let atomic =
         if features & (1 << 1) != 0 { u32::from(u16_at(data, 44)) + 1 } else { atomic_blocks };
-    let block_size = granularity.min(atomic.saturating_mul(BLOCK));
-    let block_size =
-        if block_size.is_power_of_two() && block_size <= 65_536 { block_size } else { BLOCK };
-    Ok(Namespace { blocks, block_size, read_only: data[99] & 1 != 0 })
+    let block_size = granularity.min(atomic.saturating_mul(size));
+    let block_size = if block_size.is_power_of_two() && (size..=65_536).contains(&block_size) {
+        block_size
+    } else {
+        size
+    };
+    Ok(Namespace { blocks, lba_size: size, block_size, read_only: data[99] & 1 != 0 })
 }
 
 /// Whether `id`, read after `last` from an Identify active namespace
@@ -220,17 +228,18 @@ mod proofs {
     }
 
     /// Whatever a controller answers to Identify Namespace, reading it
-    /// does not panic, and a namespace it accepts has blocks of 512
-    /// bytes, no metadata, and a write size the block layer takes.
+    /// does not panic, and a namespace it accepts has blocks of 512 to
+    /// 4096 bytes, no metadata, and a write size the block layer takes.
     #[kani::proof]
     fn namespace_reads_any_answer() {
         let data: [u8; HEAD] = kani::any();
         if let Ok(found) = namespace(&data, kani::any()) {
             assert!(found.blocks > 0);
+            assert!(found.lba_size.is_power_of_two() && BLOCKS.contains(&found.lba_size));
             assert!(found.block_size.is_power_of_two());
-            assert!((512..=65_536).contains(&found.block_size));
+            assert!((found.lba_size..=65_536).contains(&found.block_size));
             let index = usize::from(data[26] & 0xf) | (usize::from((data[26] >> 5) & 0x3) << 4);
-            assert_eq!(data[128 + 4 * index + 2], 9);
+            assert_eq!(1u32 << data[128 + 4 * index + 2], found.lba_size);
             assert_eq!(data[128 + 4 * index], 0);
             assert_eq!(data[128 + 4 * index + 1], 0);
         }

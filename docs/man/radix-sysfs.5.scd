@@ -47,9 +47,25 @@ _/kernel/block/_*name*_/size_
 _/kernel/block/_*name*_/ro_
 	*1* if the device is read-only, *0* if not.
 
+_/kernel/block/_*name*_/partition_, _start_
+	For a partition: its number in its disk's table, the one its name
+	ends in, and its first sector on the disk, in 512-byte sectors. A
+	partition has these instead of a _queue_ directory, as on Linux,
+	whose tools read the queue of the partition's disk.
+
+_/kernel/block/_*name*_/device/model_, _serial_, _firmware_rev_
+	For a SATA or NVMe disk: its model, serial number and firmware
+	revision, as it gives them, without the padding. Linux has these for
+	an NVMe disk; for a SATA disk it cuts the model to 16 characters and
+	keeps the serial number elsewhere. A tool that must write to one
+	particular disk should find it by its serial number, since disk names
+	follow the order the controllers are found in.
+
 _/kernel/block/_*name*_/queue/logical_block_size_, _physical_block_size_
-	The sizes in bytes of the device's sectors, *512*, and of the
-	blocks it writes without reading first (*radix-block*(2)).
+	The sizes in bytes of the device's logical blocks, the least it
+	reads or writes (*512*, or *4096* for a disk with 4 KiB sectors),
+	and of the blocks it writes without reading first (*radix-block*(2)).
+	Offsets and sizes elsewhere stay in 512-byte sectors, as on Linux.
 
 _/kernel/block/_*name*_/queue/minimum_io_size_, _optimal_io_size_
 	The smallest write it prefers, its physical block size, and the
@@ -60,8 +76,8 @@ _/kernel/block/_*name*_/queue/rotational_
 	state disk.
 
 _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
-	*512*, and the most bytes one discard (TRIM) covers, if the device
-	discards; *0* and *0* if not.
+	Its logical block size, and the most bytes one discard (TRIM)
+	covers, if the device discards; *0* and *0* if not.
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
 	virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_ for the first

@@ -333,9 +333,10 @@ impl Pieces {
     }
 }
 
-/// A file's bytes `len` rounded up to whole sectors.
-fn sectors_of(len: usize) -> usize {
-    len.next_multiple_of(SECTOR as usize)
+/// A file's bytes `len` rounded up to whole sectors of the volume's
+/// (`sector` bytes, no smaller than the disk's logical blocks).
+fn sectors_of(len: usize, sector: u32) -> usize {
+    len.next_multiple_of(sector as usize)
 }
 
 /// A file's page cache backing: its clusters.
@@ -347,7 +348,7 @@ impl Backing for FileBacking<'_> {
     }
 
     fn read_page(&self, index: u64, page: &mut Page, len: usize) -> Result<()> {
-        let whole = sectors_of(len);
+        let whole = sectors_of(len, self.0.fs.geo.sector_size);
         let pieces = self.0.pieces(index * PAGE_SIZE as u64, whole)?;
         let device = self.0.fs.cache.device();
         for (sector, offset, len) in pieces.iter() {
@@ -360,7 +361,8 @@ impl Backing for FileBacking<'_> {
     }
 
     fn write_page(&self, index: u64, page: &Page, len: usize) -> Result<()> {
-        let pieces = self.0.pieces(index * PAGE_SIZE as u64, sectors_of(len))?;
+        let whole = sectors_of(len, self.0.fs.geo.sector_size);
+        let pieces = self.0.pieces(index * PAGE_SIZE as u64, whole)?;
         let device = self.0.fs.cache.device();
         for (sector, offset, len) in pieces.iter() {
             device.write(sector, &[Segment { page, offset, len }])?;

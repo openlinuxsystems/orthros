@@ -33,10 +33,13 @@ pub mod feature {
     pub const SEG_MAX: u64 = 1 << 2;
     /// The disk is read-only.
     pub const RO: u64 = 1 << 5;
-    /// The device says its block size (`blk_size`).
+    /// The device says its logical block size (`blk_size`).
     pub const BLK_SIZE: u64 = 1 << 6;
     /// The device has a write cache that a flush request empties.
     pub const FLUSH: u64 = 1 << 9;
+    /// The device says how many logical blocks make a physical one
+    /// (`physical_block_exp`).
+    pub const TOPOLOGY: u64 = 1 << 10;
     /// The device discards sectors (`max_discard_sectors`).
     pub const DISCARD: u64 = 1 << 13;
 }
@@ -93,9 +96,14 @@ pub enum Outcome {
 /// What the device is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Info {
-    /// Its capacity in 512-byte sectors.
+    /// Its capacity in 512-byte sectors, which requests count in whatever
+    /// its logical blocks.
     pub sectors: u64,
-    /// Its block size, the smallest unit it writes without reading first.
+    /// Its logical block size in bytes, the least it reads or writes: a
+    /// power of two from 512 to 4096. Requests start and end on one.
+    pub logical_block: u32,
+    /// Its physical block size, the smallest unit it writes without
+    /// reading first.
     pub block_size: u32,
     /// Whether it refuses writes.
     pub read_only: bool,
@@ -147,6 +155,7 @@ impl Blk {
             | feature::RO
             | feature::BLK_SIZE
             | feature::FLUSH
+            | feature::TOPOLOGY
             | feature::DISCARD;
         let features = common_feature::VERSION_1
             | (offered & (wanted | common_feature::INDIRECT_DESC | common_feature::EVENT_IDX));
@@ -160,8 +169,17 @@ impl Blk {
             let high = u64::from(config.read32(4));
             let size_max = if features & feature::SIZE_MAX != 0 { config.read32(8) } else { 0 };
             let seg_max = if features & feature::SEG_MAX != 0 { config.read32(12) } else { 0 };
-            let block_size =
-                if features & feature::BLK_SIZE != 0 { config.read32(20) } else { 512 };
+            let logical = if features & feature::BLK_SIZE != 0 { config.read32(20) } else { 512 };
+            let logical = if logical.is_power_of_two() && (512..=4096).contains(&logical) {
+                logical
+            } else {
+                512
+            };
+            // The physical block is 2 to the power of an exponent's logical
+            // ones.
+            let exponent =
+                if features & feature::TOPOLOGY != 0 { config.read32(24) & 0xff } else { 0 };
+            let physical = logical.checked_shl(exponent).filter(|&size| size <= 65_536);
             // A device that discards takes at least one range a request.
             let discard_sectors = if features & feature::DISCARD != 0 && config.read32(40) > 0 {
                 config.read32(36)
@@ -170,11 +188,8 @@ impl Blk {
             };
             Info {
                 sectors: (high << 32) | low,
-                block_size: if block_size >= 512 && block_size.is_power_of_two() {
-                    block_size
-                } else {
-                    512
-                },
+                logical_block: logical,
+                block_size: physical.unwrap_or(logical),
                 read_only: features & feature::RO != 0,
                 flush: features & feature::FLUSH != 0,
                 max_segments: if seg_max == 0 { u32::MAX } else { seg_max },

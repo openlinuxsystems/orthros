@@ -1,0 +1,54 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Linux's side of Dukovo's disk check (ADR 0122, and the handbook's
+# Supported hardware chapter). Run it from a Linux live system on the
+# machine whose disk the Dukovo stick checked, with the stick plugged in:
+#
+#   sudo sh /media/$USER/DUKOVO_*/crosscheck/run.sh
+#
+# `ob image --disk-check` wrote the serial number of the disk to check
+# below. Linux's side finds that disk, reads back what Dukovo wrote to
+# it, measures the same transfers on Linux, and saves the comparison as
+# dukovo-disk-check.md in the current directory, or else in /tmp.
+
+set -eu
+
+serial='@SERIAL@'
+here=$(cd "$(dirname "$0")" && pwd)
+
+if [ "$(id -u)" != 0 ]; then
+    echo "Linux's side of the disk check reads and writes a disk: run it with sudo." >&2
+    exit 1
+fi
+
+echo "This machine's disks:"
+lsblk -d -o NAME,MODEL,SERIAL,SIZE
+echo
+echo "The disk check measures Linux's transfers on the disk whose serial"
+echo "number is $serial, writing over 32 MiB of it, which Dukovo's check"
+echo "has already written over. No other disk is touched."
+printf 'Type yes to go on: '
+read -r answer
+if [ "$answer" != yes ]; then
+    echo "Stopped; nothing was written."
+    exit 1
+fi
+
+# The stick's filesystem may not run programs, so a copy runs.
+work=$(mktemp -d)
+trap 'rm -rf "${work:?}"' EXIT
+cp "$here/disktest" "$work/disktest"
+chmod 755 "$work/disktest"
+
+report=$(pwd)/dukovo-disk-check.md
+if ! touch "$report" 2>/dev/null; then
+    report=/tmp/dukovo-disk-check.md
+fi
+status=0
+"$work/disktest" --yes-erase "$serial" > "$report" || status=$?
+cat "$report"
+echo
+echo "Saved as $report."
+exit "$status"

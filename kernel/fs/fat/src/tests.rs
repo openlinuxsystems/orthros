@@ -57,9 +57,15 @@ const VOLUMES: [(u8, u32, u32); 5] =
 
 /// A fresh volume from `mkfs.fat`.
 fn mkfs(bits: u8, kib: u32, per_cluster: u32) -> Vec<u8> {
+    mkfs_in(512, bits, kib, per_cluster)
+}
+
+/// A fresh volume from `mkfs.fat`, in sectors of `sector` bytes.
+fn mkfs_in(sector: u32, bits: u8, kib: u32, per_cluster: u32) -> Vec<u8> {
     let path = scratch("mkfs");
     let out = Command::new(tool("mkfs.fat"))
-        .args(["-C", "-F", &bits.to_string(), "-s", &per_cluster.to_string(), "-n", "RADIXTEST"])
+        .args(["-C", "-S", &sector.to_string(), "-F", &bits.to_string()])
+        .args(["-s", &per_cluster.to_string(), "-n", "RADIXTEST"])
         .arg(&path)
         .arg(kib.to_string())
         .output()
@@ -126,12 +132,22 @@ struct Volume {
 
 impl Volume {
     fn new(image: &[u8]) -> Volume {
+        Volume::new_in(512, image)
+    }
+
+    /// The volume in `image` on a disk of logical blocks of `block` bytes.
+    fn new_in(block: u32, image: &[u8]) -> Volume {
+        Volume::mount_in(block, image).unwrap()
+    }
+
+    fn mount_in(block: u32, image: &[u8]) -> Result<Volume, Error> {
         radix_vfs::set_clock(clock);
-        let disk = mem::arc(RamDisk::new(image.len() as u64 / 512, false)).unwrap();
+        let sectors = image.len() as u64 / 512;
+        let disk = mem::arc(RamDisk::with_blocks(sectors, false, block)).unwrap();
         disk.load(0, image).unwrap();
         let device: DeviceRef = disk.clone();
-        let fs = FatFs::mount(device, false).unwrap();
-        Volume { disk, fs }
+        let fs = FatFs::mount(device, false)?;
+        Ok(Volume { disk, fs })
     }
 
     fn root(&self) -> NodeRef {
@@ -148,9 +164,10 @@ impl Volume {
 
     /// The volume, synced and mounted again from its bytes.
     fn remount(self) -> Volume {
+        let block = self.disk.info().logical_block;
         let image = self.image();
         drop(self);
-        Volume::new(&image)
+        Volume::new_in(block, &image)
     }
 }
 
@@ -233,6 +250,37 @@ fn each_width_mounts() {
         assert_eq!(info.free, info.blocks - u64::from(bits == 32));
         assert!(names(&volume.root()).is_empty());
     }
+}
+
+#[test]
+fn volumes_of_4k_sectors_on_disks_of_4k_sectors() {
+    for (bits, kib) in [(12, 8192), (16, 32768)] {
+        let image = mkfs_in(4096, bits, kib, 1);
+        let volume = Volume::new_in(4096, &image);
+        let root = volume.root();
+        let dir = root.create("Sub directory", Kind::Directory).unwrap();
+        let mut expected = Vec::new();
+        for (i, &size) in SIZES.iter().enumerate() {
+            let name = format!("file {i}.bin");
+            let data = pattern(i as u32 + 40, size.min(1 << 20));
+            make_file([&root, &dir][i % 2], &name, &data);
+            let path = ["", "Sub directory/"][i % 2];
+            expected.push((format!("{path}{name}"), data));
+        }
+        drop((root, dir));
+        let mut image = volume.image();
+        fsck(&image);
+        for (path, data) in &expected {
+            assert_eq!(&mtools(&mut image, "mtype", &[&format!("::/{path}")]), data, "{path}");
+        }
+        let volume = volume.remount();
+        for (path, data) in &expected {
+            assert_eq!(&read_all(&walk(&volume.root(), path).unwrap()), data, "{path}");
+        }
+    }
+    // Sectors of 512 bytes cannot be written alone on such a disk.
+    let image = mkfs(16, 32768, 8);
+    assert!(matches!(Volume::mount_in(4096, &image), Err(Error::NotSupported)));
 }
 
 #[test]

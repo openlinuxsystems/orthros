@@ -35,7 +35,13 @@ struct Space {
 
 /// What block `block` of a namespace holds before it is written.
 fn pattern(block: u64) -> Vec<u8> {
-    (block * 512..block * 512 + 512).map(|i| (i % 251) as u8).collect()
+    pattern_in(block, 512)
+}
+
+/// What block `block` of a namespace of blocks of `size` bytes holds
+/// before it is written.
+fn pattern_in(block: u64, size: u64) -> Vec<u8> {
+    (block * size..block * size + size).map(|i| (i % 251) as u8).collect()
 }
 
 /// A queue of the simulated controller: where it is, its size, and how
@@ -381,9 +387,11 @@ impl State {
                 0x80 | (1 << 14)
             }
             (nvm::READ, Some(space)) => {
+                let size = 1u64 << space.shift;
                 let mut bytes = Vec::new();
                 for b in block..block + blocks {
-                    bytes.extend(space.written.get(&b).cloned().unwrap_or_else(|| pattern(b)));
+                    let held = space.written.get(&b).cloned();
+                    bytes.extend(held.unwrap_or_else(|| pattern_in(b, size)));
                 }
                 let mut at = 0;
                 for (phys, len) in data_of(command, bytes.len() as u64, &mut self.sgl_blocks) {
@@ -394,13 +402,14 @@ impl State {
             }
             (nvm::WRITE, Some(space)) if space.read_only => 0x20 | (1 << 14),
             (nvm::WRITE, Some(space)) => {
-                let mut bytes = std::vec![0u8; blocks as usize * 512];
+                let size = 1usize << space.shift;
+                let mut bytes = std::vec![0u8; blocks as usize * size];
                 let mut at = 0;
                 for (phys, len) in data_of(command, bytes.len() as u64, &mut self.sgl_blocks) {
                     fake_memory(phys, &mut bytes[at..at + len as usize]);
                     at += len as usize;
                 }
-                for (i, chunk) in bytes.chunks(512).enumerate() {
+                for (i, chunk) in bytes.chunks(size).enumerate() {
                     space.written.insert(block + i as u64, chunk.to_vec());
                 }
                 0
@@ -653,19 +662,51 @@ fn lists_the_namespaces_it_takes_and_why_not_the_others() {
     let (sim, mut nvme) = setup();
     {
         let mut state = sim.state();
-        state.spaces.push(Space { shift: 12, ..space(3, 64) });
+        state.spaces.push(Space { shift: 13, ..space(3, 64) });
         state.spaces.push(Space { metadata: 8, ..space(4, 64) });
         state.spaces.push(Space { read_only: true, ..space(5, 64) });
+        state.spaces.push(Space { shift: 12, ..space(6, 64) });
     }
     let mut found = Vec::new();
     nvme.namespaces(&mut |_| {}, &mut |id, answer| found.push((id, answer))).unwrap();
     let ids: Vec<u32> = found.iter().map(|(id, _)| *id).collect();
-    assert_eq!(ids, [1, 2, 3, 4, 5]);
+    assert_eq!(ids, [1, 2, 3, 4, 5, 6]);
     let one = found[0].1.unwrap();
     assert_eq!((one.info.blocks, one.info.block_size, one.info.read_only), (2048, 4096, false));
-    assert_eq!(found[2].1.err(), Some(Unusable::BlockSize(4096)));
+    assert_eq!(one.info.lba_size, 512);
+    assert_eq!(found[2].1.err(), Some(Unusable::BlockSize(8192)));
     assert_eq!(found[3].1.err(), Some(Unusable::Metadata));
     assert!(found[4].1.unwrap().info.read_only);
+    // 4 KiB blocks: a disk with 4 KiB sectors.
+    let six = found[5].1.unwrap().info;
+    assert_eq!((six.blocks, six.lba_size, six.block_size), (64, 4096, 32_768));
+}
+
+#[test]
+fn namespaces_of_4k_blocks_count_in_them() {
+    let (sim, mut nvme) = setup();
+    sim.state().spaces.push(Space { shift: 12, ..space(7, 64) });
+    nvme.request_queues(2, &mut |_| {}).unwrap();
+    let mut lane = lane(&mut nvme, 1);
+    let base = pages(2);
+    let text: Vec<u8> = (0..2 * PAGE).map(|i| (i * 3) as u8).collect();
+    fake_memory_write(base, &text);
+    let data = [(base, PAGE as u32), (base + PAGE, PAGE as u32)];
+    lane.submit(0, Op::Write, 7, 4096, 5, &data, true).unwrap();
+    assert_eq!(next(&mut lane), (0, Outcome::Done));
+    // Two blocks from block 5: a count of 1, as the command has it less
+    // one.
+    let (_, _, _, dwords) = *sim.state().commands.last().unwrap();
+    assert_eq!((dwords[0], dwords[2] & 0xffff), (5, 1));
+    fake_memory_write(base, &std::vec![0u8; 2 * PAGE as usize]);
+    lane.submit(0, Op::Read, 7, 4096, 5, &data, true).unwrap();
+    assert_eq!(next(&mut lane), (0, Outcome::Done));
+    assert_eq!(read_host(base, 2 * PAGE as usize), text);
+    assert_eq!(sim.state().spaces[2].written[&6], text[4096..]);
+    // Less than a block, or blocks of a size it does not take.
+    let part = [(base, 512)];
+    assert_eq!(lane.submit(0, Op::Read, 7, 4096, 0, &part, true), Err(Error::BadRequest));
+    assert_eq!(lane.submit(0, Op::Read, 7, 8192, 0, &data, true), Err(Error::BadRequest));
 }
 
 #[test]
@@ -689,12 +730,12 @@ fn reads_and_writes_through_prp_lists() {
             fake_memory_write(phys, &text[at..at + len as usize]);
             at += len as usize;
         }
-        lane.submit(slot, Op::Write, 1, block, &data, true).unwrap();
+        lane.submit(slot, Op::Write, 1, 512, block, &data, true).unwrap();
         assert_eq!(next(&mut lane), (slot, Outcome::Done));
         for &(phys, len) in &data {
             fake_memory_write(phys, &std::vec![0u8; len as usize]);
         }
-        lane.submit(slot, Op::Read, 1, block, &data, true).unwrap();
+        lane.submit(slot, Op::Read, 1, 512, block, &data, true).unwrap();
         assert_eq!(next(&mut lane), (slot, Outcome::Done));
         let mut back = Vec::new();
         for &(phys, len) in &data {
@@ -728,12 +769,12 @@ fn long_runs_of_memory_go_in_scatter_gather_lists() {
         for (i, &(phys, len)) in data.iter().enumerate() {
             fake_memory_write(phys, &text[i * PAGE as usize..i * PAGE as usize + len as usize]);
         }
-        queue.submit(slot, Op::Write, 1, block, data, true).unwrap();
+        queue.submit(slot, Op::Write, 1, 512, block, data, true).unwrap();
         assert_eq!(next(&mut queue), (slot, Outcome::Done));
         for &(phys, len) in data {
             fake_memory_write(phys, &std::vec![0u8; len as usize]);
         }
-        queue.submit(slot, Op::Read, 1, block, data, true).unwrap();
+        queue.submit(slot, Op::Read, 1, 512, block, data, true).unwrap();
         assert_eq!(next(&mut queue), (slot, Outcome::Done));
         let back: Vec<u8> =
             data.iter().flat_map(|&(phys, len)| read_host(phys, len as usize)).collect();
@@ -743,15 +784,15 @@ fn long_runs_of_memory_go_in_scatter_gather_lists() {
     // Buffers PRPs cannot describe are refused as by any controller: off
     // a multiple of four bytes, or across a page.
     let odd = [(base + 2, 4094), (base + PAGE, 4096)];
-    assert_eq!(queue.submit(0, Op::Read, 1, 0, &odd, true), Err(Error::BadRequest));
+    assert_eq!(queue.submit(0, Op::Read, 1, 512, 0, &odd, true), Err(Error::BadRequest));
     let across = [(base, 2 * PAGE as u32)];
-    assert_eq!(queue.submit(0, Op::Read, 1, 0, &across, true), Err(Error::BadRequest));
+    assert_eq!(queue.submit(0, Op::Read, 1, 512, 0, &across, true), Err(Error::BadRequest));
     // A controller without them gets PRPs whatever the runs.
     let (sim, mut nvme) = setup();
     assert!(!nvme.identity().sgls);
     nvme.request_queues(1, &mut |_| {}).unwrap();
     let mut lane = lane(&mut nvme, 1);
-    lane.submit(0, Op::Read, 1, 0, &one, true).unwrap();
+    lane.submit(0, Op::Read, 1, 512, 0, &one, true).unwrap();
     assert_eq!(next(&mut lane), (0, Outcome::Done));
     assert!(sim.state().sgl_blocks.is_empty());
 }
@@ -762,9 +803,9 @@ fn writes_through_with_fua_and_flushes_and_deallocates() {
     nvme.request_queues(1, &mut |_| {}).unwrap();
     let mut lane = lane(&mut nvme, 1);
     let page = pages(1);
-    lane.submit(0, Op::WriteThrough, 2, 5, &[(page, 4096)], true).unwrap();
-    lane.submit(1, Op::Flush, 2, 0, &[], true).unwrap();
-    lane.submit(2, Op::Deallocate(64), 2, 10, &[], true).unwrap();
+    lane.submit(0, Op::WriteThrough, 2, 512, 5, &[(page, 4096)], true).unwrap();
+    lane.submit(1, Op::Flush, 2, 512, 0, &[], true).unwrap();
+    lane.submit(2, Op::Deallocate(64), 2, 512, 10, &[], true).unwrap();
     let mut outcomes: Vec<_> = (0..3).map(|_| next(&mut lane)).collect();
     outcomes.sort_by_key(|outcome| outcome.0);
     assert_eq!(outcomes, [(0, Outcome::Done), (1, Outcome::Done), (2, Outcome::Done)]);
@@ -792,9 +833,9 @@ fn refuses_buffers_a_prp_list_cannot_describe() {
         (0..33).map(|i| (base + i * PAGE, 4096)).collect(),
     ];
     for data in bad {
-        assert_eq!(lane.submit(0, Op::Read, 1, 0, &data, true), Err(Error::BadRequest));
+        assert_eq!(lane.submit(0, Op::Read, 1, 512, 0, &data, true), Err(Error::BadRequest));
     }
-    assert_eq!(lane.submit(0, Op::Flush, 1, 0, &[(base, 512)], true), Err(Error::BadRequest));
+    assert_eq!(lane.submit(0, Op::Flush, 1, 512, 0, &[(base, 512)], true), Err(Error::BadRequest));
     assert!(lane.room());
 }
 
@@ -808,11 +849,11 @@ fn keeps_at_most_63_in_flight_and_rings_once_for_a_batch() {
     let before = sim.state().doorbells.len();
     for slot in 0..DEPTH as u8 {
         let last = u32::from(slot) + 1 == DEPTH;
-        lane.submit(slot, Op::Read, 1, u64::from(slot), &[(page, 512)], last).unwrap();
+        lane.submit(slot, Op::Read, 1, 512, u64::from(slot), &[(page, 512)], last).unwrap();
     }
     assert!(!lane.room());
-    assert_eq!(lane.submit(63, Op::Read, 1, 0, &[(page, 512)], true), Err(Error::Full));
-    assert_eq!(lane.submit(5, Op::Read, 1, 0, &[(page, 512)], true), Err(Error::BadRequest));
+    assert_eq!(lane.submit(63, Op::Read, 1, 512, 0, &[(page, 512)], true), Err(Error::Full));
+    assert_eq!(lane.submit(5, Op::Read, 1, 512, 0, &[(page, 512)], true), Err(Error::BadRequest));
     // One doorbell for the 63.
     assert_eq!(sim.state().doorbells.len(), before + 1);
     assert_eq!(sim.state().held.len(), DEPTH as usize);
@@ -831,7 +872,7 @@ fn wraps_both_queues_many_times() {
     let page = pages(1);
     for i in 0..300u64 {
         let slot = (i % 7) as u8;
-        lane.submit(slot, Op::Read, 1, i % 2048, &[(page, 512)], true).unwrap();
+        lane.submit(slot, Op::Read, 1, 512, i % 2048, &[(page, 512)], true).unwrap();
         assert_eq!(next(&mut lane), (slot, Outcome::Done));
         assert_eq!(read_host(page, 512), pattern(i % 2048));
     }
@@ -858,7 +899,7 @@ fn do_not_retry_fails_and_others_go_again() {
     for (block, outcome) in
         [(1, Outcome::Failed), (2, Outcome::Retry), (3, Outcome::Failed), (4, Outcome::Retry)]
     {
-        lane.submit(0, Op::Read, 1, block, &[(page, 512)], true).unwrap();
+        lane.submit(0, Op::Read, 1, 512, block, &[(page, 512)], true).unwrap();
         assert_eq!(next(&mut lane), (0, outcome));
     }
     let (errors, last) = lane.errors();
@@ -877,7 +918,7 @@ fn completions_come_out_of_order_and_strays_are_ignored() {
     sim.state().hold = true;
     let page = pages(1);
     for slot in 0..3u8 {
-        lane.submit(slot, Op::Read, 1, 0, &[(page, 512)], true).unwrap();
+        lane.submit(slot, Op::Read, 1, 512, 0, &[(page, 512)], true).unwrap();
     }
     sim.answer(2, 0);
     assert_eq!(next(&mut lane), (2, Outcome::Done));
@@ -900,8 +941,8 @@ fn a_reset_makes_the_queues_again_and_sends_what_was_in_flight_again() {
     let mut lanes = [lane(&mut nvme, 1), lane(&mut nvme, 2)];
     sim.state().hold = true;
     let page = pages(1);
-    lanes[0].submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
-    lanes[1].submit(7, Op::Write, 1, 9, &[(page, 512)], true).unwrap();
+    lanes[0].submit(4, Op::Read, 1, 512, 9, &[(page, 512)], true).unwrap();
+    lanes[1].submit(7, Op::Write, 1, 512, 9, &[(page, 512)], true).unwrap();
     // The controller never answers: the kernel resets it.
     for lane in &mut lanes {
         lane.restart();
@@ -914,9 +955,9 @@ fn a_reset_makes_the_queues_again_and_sends_what_was_in_flight_again() {
     assert_eq!(next(&mut lanes[0]), (4, Outcome::Retry));
     assert_eq!(next(&mut lanes[1]), (7, Outcome::Retry));
     sim.state().hold = false;
-    lanes[0].submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
+    lanes[0].submit(4, Op::Read, 1, 512, 9, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lanes[0]), (4, Outcome::Done));
-    lanes[1].submit(7, Op::Read, 2, 1, &[(page, 512)], true).unwrap();
+    lanes[1].submit(7, Op::Read, 2, 512, 1, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lanes[1]), (7, Outcome::Done));
     assert_eq!(read_host(page, 512), pattern(1));
 }
@@ -928,7 +969,7 @@ fn a_controller_that_does_not_come_back_kills_its_lanes() {
     let mut lane = lane(&mut nvme, 1);
     sim.state().hold = true;
     let page = pages(1);
-    lane.submit(1, Op::Read, 1, 0, &[(page, 512)], true).unwrap();
+    lane.submit(1, Op::Read, 1, 512, 0, &[(page, 512)], true).unwrap();
     sim.state().fatal = true;
     lane.restart();
     assert_eq!(nvme.restart(&mut |_| {}), Err(Error::Failed));
@@ -936,7 +977,7 @@ fn a_controller_that_does_not_come_back_kills_its_lanes() {
     lane.kill();
     assert_eq!(next(&mut lane), (1, Outcome::Failed));
     assert!(lane.dead());
-    assert_eq!(lane.submit(1, Op::Read, 1, 0, &[(page, 512)], true), Err(Error::Dead));
+    assert_eq!(lane.submit(1, Op::Read, 1, 512, 0, &[(page, 512)], true), Err(Error::Dead));
 }
 
 #[test]
@@ -1031,7 +1072,7 @@ fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
     let page = pages(1);
     // An idle controller asks to hear of the next command, and of the
     // head moving past the completion it writes.
-    lane.submit(0, Op::Read, 1, 3, &[(page, 512)], true).unwrap();
+    lane.submit(0, Op::Read, 1, 512, 3, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lane), (0, Outcome::Done));
     assert_eq!(read_host(page, 512), pattern(3));
     assert_eq!(rung(&sim), [true, false]);
@@ -1040,7 +1081,7 @@ fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
     // One that asks to hear of entry 10 only finds the next command in
     // memory when it looks.
     sim.ask(2, 10);
-    lane.submit(1, Op::Read, 1, 4, &[(page, 512)], true).unwrap();
+    lane.submit(1, Op::Read, 1, 512, 4, &[(page, 512)], true).unwrap();
     assert_eq!(rung(&sim), [true, false]);
     assert_eq!(sim.shadow_word(2).0, 2);
     assert!(lane.complete().is_none());
@@ -1049,7 +1090,7 @@ fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
     assert_eq!(read_host(page, 512), pattern(4));
     assert_eq!(rung(&sim), [true, false, false]);
     // A head it does not ask for stays in memory.
-    lane.submit(2, Op::Read, 1, 5, &[(page, 512)], true).unwrap();
+    lane.submit(2, Op::Read, 1, 512, 5, &[(page, 512)], true).unwrap();
     sim.ask(3, 40);
     assert_eq!(next(&mut lane), (2, Outcome::Done));
     assert_eq!(rung(&sim), [true, false, false, true]);
@@ -1057,7 +1098,7 @@ fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
     // As QEMU's does, it asks next for the head it last heard of, which
     // the driver has passed: the heads stay in memory from then on.
     for slot in 3..8 {
-        lane.submit(slot, Op::Read, 1, u64::from(slot), &[(page, 512)], true).unwrap();
+        lane.submit(slot, Op::Read, 1, 512, u64::from(slot), &[(page, 512)], true).unwrap();
         assert_eq!(next(&mut lane), (slot, Outcome::Done));
         assert_eq!(read_host(page, 512), pattern(u64::from(slot)));
     }
@@ -1074,7 +1115,7 @@ fn a_reset_gives_the_shadow_doorbells_again_or_goes_without() {
     let mut lane = lane(&mut nvme, 1);
     let page = pages(1);
     sim.state().hold = true;
-    lane.submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
+    lane.submit(4, Op::Read, 1, 512, 9, &[(page, 512)], true).unwrap();
     lane.restart();
     nvme.restart(&mut |_| {}).unwrap();
     // Given again, and zeroed: the queues start empty.
@@ -1084,7 +1125,7 @@ fn a_reset_gives_the_shadow_doorbells_again_or_goes_without() {
     nvme.remake(&mut lane, &mut |_| {}).unwrap();
     assert_eq!(next(&mut lane), (4, Outcome::Retry));
     sim.state().hold = false;
-    lane.submit(4, Op::Read, 1, 9, &[(page, 512)], true).unwrap();
+    lane.submit(4, Op::Read, 1, 512, 9, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lane), (4, Outcome::Done));
     assert_eq!(read_host(page, 512), pattern(9));
     assert_eq!(sim.shadow_word(2).0, 1);
@@ -1097,7 +1138,7 @@ fn a_reset_gives_the_shadow_doorbells_again_or_goes_without() {
     assert_eq!(sim.state().shadow, None);
     nvme.remake(&mut lane, &mut |_| {}).unwrap();
     let before = rung(&sim).len();
-    lane.submit(5, Op::Read, 1, 10, &[(page, 512)], true).unwrap();
+    lane.submit(5, Op::Read, 1, 512, 10, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lane), (5, Outcome::Done));
     assert_eq!(rung(&sim)[before..], [true, false]);
     let configs =

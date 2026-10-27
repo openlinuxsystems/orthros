@@ -135,6 +135,10 @@ pub struct Request<'a> {
     pub sector: u64,
     /// Its buffers.
     pub data: &'a [(u64, u32)],
+    /// The sectors in one of the volume's logical blocks: the request
+    /// starts and ends on a block's boundary, and every buffer is whole
+    /// blocks, which is how a driver whose disk counts in blocks takes it.
+    pub unit: u64,
 }
 
 /// How a request ended.
@@ -766,13 +770,17 @@ impl<C: Controller> Volume<C> {
     /// namespaces, which `info` says what it is. Its requests take as many
     /// segments as the disk's do.
     pub fn new(disk: Arc<Disk<C>, Kmalloc>, target: u32, info: Info) -> Self {
-        let info = Info { max_segments: disk.info.max_segments, ..info };
+        // A discard of the most sectors is whole blocks too.
+        let unit = info.unit();
+        let discard_sectors = info.discard_sectors / unit * unit;
+        let info = Info { max_segments: disk.info.max_segments, discard_sectors, ..info };
         Volume { disk, target, info }
     }
 
     /// Carries out `op` from `sector` with `data`, as [`Disk::request`].
     fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
-        self.disk.request(&Request { op, target: self.target, sector, data })
+        let unit = self.info.unit();
+        self.disk.request(&Request { op, target: self.target, sector, data, unit })
     }
 
     /// Writes `segments` from `sector`, as `op`.
@@ -781,7 +789,8 @@ impl<C: Controller> Volume<C> {
             return Err(Error::ReadOnly);
         }
         let lengths = segments.iter().map(|s| (s.offset, s.len));
-        radix_block::check(self.info.sectors, self.info.max_segments, sector, lengths)?;
+        let Info { sectors, max_segments, .. } = self.info;
+        radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
         let mut data = [(0u64, 0u32); MAX_SEGMENTS];
         for (i, segment) in segments.iter().enumerate() {
             data[i] = (segment.page.phys() + segment.offset as u64, segment.len as u32);
@@ -798,7 +807,8 @@ impl<C: Controller> BlockDevice for Volume<C> {
 
     fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
-        radix_block::check(self.info.sectors, self.info.max_segments, sector, lengths)?;
+        let Info { sectors, max_segments, .. } = self.info;
+        radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
         let mut data = [(0u64, 0u32); MAX_SEGMENTS];
         for (i, segment) in segments.iter().enumerate() {
             data[i] = (segment.page.phys() + segment.offset as u64, segment.len as u32);
@@ -824,8 +834,9 @@ impl<C: Controller> BlockDevice for Volume<C> {
     }
 
     fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
-        radix_block::check_frames(self.info.sectors, sector, frames)?;
-        let request = Request { op: Op::Read, target: self.target, sector, data: frames };
+        let unit = self.info.unit();
+        radix_block::check_frames(self.info.sectors, unit, sector, frames)?;
+        let request = Request { op: Op::Read, target: self.target, sector, data: frames, unit };
         self.disk.request_all(&request)?;
         radix_hw::device_barrier();
         Ok(())
@@ -835,9 +846,10 @@ impl<C: Controller> BlockDevice for Volume<C> {
         if self.info.read_only {
             return Err(Error::ReadOnly);
         }
-        radix_block::check_frames(self.info.sectors, sector, frames)?;
+        let unit = self.info.unit();
+        radix_block::check_frames(self.info.sectors, unit, sector, frames)?;
         radix_hw::device_barrier();
-        let request = Request { op: Op::Write, target: self.target, sector, data: frames };
+        let request = Request { op: Op::Write, target: self.target, sector, data: frames, unit };
         self.disk.request_all(&request)
     }
 
@@ -850,7 +862,7 @@ impl<C: Controller> BlockDevice for Volume<C> {
     }
 
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
-        radix_block::check_discard(self.info.sectors, sector, count)?;
+        radix_block::check_discard(self.info.sectors, self.info.unit(), sector, count)?;
         if self.info.read_only {
             return Err(Error::ReadOnly);
         }

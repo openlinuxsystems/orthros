@@ -143,6 +143,45 @@ issue for anything that fails, with the photos.
 | 2 | not yet run | | | | |
 | 6 | 2026-10-22 | `daa2682` (Phase 6) | not recorded | not recorded | The project lead reported that it boots without issue. Which firmware mode, and the individual checks above, were not recorded. |
 
+### Disk check
+
+From Phase 10, each sub-phase also ends with the disk check on the
+machine's disks (ADR 0122). It writes over the disk it checks, so it
+checks only the disk whose serial number it is given, and the image is
+built for that one disk. On this laptop both disks may be checked, one
+at a time. Two USB sticks are needed: one for Dukovo, and one with a
+Linux live system, Linux Mint or Ubuntu 22.04 or later.
+
+1. Boot the Linux live stick and list the disks with their serial
+   numbers:
+
+   ```sh
+   lsblk -d -o NAME,MODEL,SERIAL,SIZE
+   ```
+
+2. Build the image for the disk to check, and write it to the Dukovo
+   stick as in [Creating USB install media](usb-media.md):
+
+   ```sh
+   ./ob image --disk-check SERIAL
+   ```
+
+3. Boot the Dukovo stick from the F12 menu and choose **Dukovo disk
+   check: erases the disk with serial SERIAL**. The check takes about a
+   minute; photograph the `disktest:` lines. The last one must say
+   `disktest: passed; the report is saved on the disk`.
+4. Restart into the Linux live system with the Dukovo stick plugged in,
+   open a terminal, and run Linux's side, which reads back what Dukovo
+   wrote, measures the same transfers on Linux, and asks before it
+   writes:
+
+   ```sh
+   sudo sh /media/$USER/DUKOVO_*/crosscheck/run.sh
+   ```
+
+   It prints the comparison and saves it as `dukovo-disk-check.md` in
+   the terminal's directory; send that file with the photos.
+
 ### Help wanted: the Ethernet chip
 
 The network driver for Phase 12 depends on the exact Ethernet controller,
@@ -176,3 +215,8 @@ USB when the machine is set up.
 | Wi-Fi and Bluetooth | MediaTek MT7925 | After 1.0; needs closed firmware |
 | Firmware | Insyde UEFI, UEFI boot only | Turn Secure Boot off; boot the USB stick from the F12 menu |
 | Serial port | None | Screen, crash log, and later netlog and the xHCI debug console |
+
+From Phase 10 each sub-phase ends with the [disk check](#disk-check) on
+this machine too, on the one NVMe drive agreed for testing. The other
+drive is never checked before Phase 10e's RAID tests, which erase both
+only when the project lead says so.

@@ -118,7 +118,7 @@ _target/userspace/_).
 		Build this port even if nothing changed; repeat the option for
 		more.
 
-*image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*]
+*image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--disk-check* _serial_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
 	_out/dukovo-VERSION-x86_64.img_. The image is a hybrid: it starts
 	under UEFI and under legacy BIOS, from a USB stick, a hard disk or
@@ -150,6 +150,17 @@ _target/userspace/_).
 		such as _/lib/firmware/intel-ucode_, instead of those named by
 		*image.microcode*. Every update is checked, and the command fails
 		if _path_ holds none. See *MICROCODE* in *dukovo-boot*(7).
+
+	*--disk-check* _serial_
+		Add a second boot menu entry, *Dukovo disk check: erases the disk
+		with serial* _serial_, which runs the disk check of a real
+		machine on the disk with that serial number and on no other
+		(ADR 0122), and put Linux's side of the check in the image's
+		_crosscheck_ directory: the program built for Linux, linked
+		against the C library of the live system it runs on, and
+		_run.sh_, which runs it there. Everything on the disk is lost.
+		The handbook's Supported hardware chapter gives the steps. The
+		kernel command line may not have a *--* part with it.
 
 *run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--gdb*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*] [*--* _qemu-args_...]
 	Build the image and boot it in QEMU on a q35 machine with
@@ -434,15 +445,29 @@ _target/userspace/_).
 	*storage-sata*
 		The *storage* test with the same four disks on SATA, the ports
 		of an AHCI controller added to the machine (QEMU's *ich9-ahci*),
-		the last of them solid state. The kernel must name them _sda_ to
-		_sdd_ and find their queue depth, write cache and TRIM.
+		the last of them solid state, with its partition in a GPT rather
+		than an MBR. The kernel must name them _sda_ to _sdd_, find
+		their queue depth, write cache and TRIM, and name the partition
+		_sdd1_ with its GPT name. The host checks that both copies of
+		the GPT are as it wrote them.
 
 	*storage-nvme*
 		The *storage* test with the same four disks as NVMe namespaces,
 		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on
-		4 CPUs. The kernel must name them _nvme0n1_, _nvme0n2_, _nvme1n1_
-		and _nvme1n2_, the partition _nvme1n2p1_, and give each
-		controller 4 I/O queues with an MSI-X vector for each CPU.
+		4 CPUs, the partition in a GPT as in *storage-sata*. The kernel
+		must name them _nvme0n1_, _nvme0n2_, _nvme1n1_ and _nvme1n2_, the
+		partition _nvme1n2p1_, and give each controller 4 I/O queues with
+		an MSI-X vector for each CPU.
+
+	*storage-4k*
+		The *storage* test on disks of 4 KiB sectors (QEMU's
+		_logical_block_size=4096_): FAT12 and FAT16 on two virtio disks,
+		and FAT32 on two 288 MiB NVMe namespaces, the smallest FAT32
+		volumes of such sectors, the second in a GPT counted in 4 KiB
+		blocks. Each filesystem has sectors of 4 KiB too
+		(*mkfs.fat -S 4096*). The kernel must say that the disks have
+		4096-byte sectors and give the partition's start in 512-byte
+		sectors, as Linux does.
 
 	*disk-raw*
 		Boot 2 CPUs under UEFI with three 8 MiB disks of known bytes, a
@@ -457,6 +482,23 @@ _target/userspace/_).
 		and a discard or a write without the write right. On the host,
 		every byte of every disk must be what the writes left, with the
 		discarded range zeroed (QEMU punches holes for discards).
+
+	*disk-raw-4k*
+		The *disk-raw* test on a virtio disk and an NVMe namespace of
+		4 KiB sectors, where a part of a sector is a part of 4 KiB: the
+		kernel reads the whole sectors around it and writes them back,
+		and a discard must cover whole 4 KiB sectors.
+
+	*disk-check*
+		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
+		number is _dukovo-test-0_, and run the disk check of a real
+		machine on it (*ob image --disk-check*, ADR 0122):
+		_/system/tests/posix/disktest --yes-erase dukovo-test-0_ must
+		find the disk by its serial number, write its 64 places, read
+		them back, measure its transfers and save its report on the
+		disk. The host then builds Linux's side of the same program and
+		runs it on the disk's file, which must find the report and read
+		back every place.
 
 	*disk-errors*
 		Boot 2 CPUs under UEFI with an 8 MiB SATA disk and an 8 MiB NVMe

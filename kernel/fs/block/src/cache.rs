@@ -7,8 +7,10 @@
 //! directories) as bytes at offsets on the device; the cache keeps the
 //! device's pages in memory, page `n` holding the device's bytes from
 //! `n * PAGE_SIZE`, and remembers per sector which ones it read
-//! (`valid`) and which it changed (`dirty`). A read fetches only the
-//! sectors it lacks; a write of whole sectors fetches nothing first; and
+//! (`valid`) and which it changed (`dirty`), in whole logical blocks of
+//! the device (eight sectors at a time on a disk with 4 KiB sectors). A
+//! read fetches only the blocks it lacks; a write of whole blocks fetches
+//! nothing first; and
 //! [`BlockCache::sync`] writes only the dirty sectors, in runs, then
 //! flushes the device. So writes stay in memory until the filesystem
 //! syncs (on the writeback thread's schedule, or when asked), and
@@ -50,16 +52,19 @@ struct State {
 pub struct BlockCache {
     device: DeviceRef,
     sectors: u64,
+    /// The sectors of the device's logical blocks.
+    unit: u64,
     state: Mutex<State>,
 }
 
-/// The sectors of page `index` with bytes in `start..end` of the device,
-/// as a mask.
-fn mask(index: u64, start: u64, end: u64) -> Mask {
+/// The sectors of page `index` in the logical blocks of `unit` sectors
+/// with bytes in `start..end` of the device, as a mask.
+fn mask(index: u64, unit: u64, start: u64, end: u64) -> Mask {
     let page_start = index * PAGE_SIZE as u64;
     let first = start.max(page_start) - page_start;
     let last = end.min(page_start + PAGE_SIZE as u64) - page_start;
-    let (first, last) = (first / SECTOR, last.div_ceil(SECTOR));
+    let first = first / SECTOR / unit * unit;
+    let last = last.div_ceil(SECTOR).next_multiple_of(unit);
     let mut m = 0;
     for s in first..last {
         m |= 1 << s;
@@ -67,14 +72,15 @@ fn mask(index: u64, start: u64, end: u64) -> Mask {
     m
 }
 
-/// The sectors of `index` that are wholly inside `start..end`.
-fn whole(index: u64, start: u64, end: u64) -> Mask {
+/// The sectors of `index` in the logical blocks of `unit` sectors that
+/// are wholly inside `start..end`.
+fn whole(index: u64, unit: u64, start: u64, end: u64) -> Mask {
     let page_start = index * PAGE_SIZE as u64;
     let mut m = 0;
-    for s in 0..SECTORS_PER_PAGE {
-        let (a, b) = (page_start + s * SECTOR, page_start + (s + 1) * SECTOR);
+    for s in (0..SECTORS_PER_PAGE).step_by(unit as usize) {
+        let (a, b) = (page_start + s * SECTOR, page_start + (s + unit) * SECTOR);
         if a >= start && b <= end {
-            m |= 1 << s;
+            m |= run_mask(s, unit);
         }
     }
     m
@@ -106,10 +112,11 @@ fn runs(m: Mask) -> impl Iterator<Item = (u64, u64)> {
 impl BlockCache {
     /// An empty cache of `device`.
     pub fn new(device: DeviceRef) -> BlockCache {
-        let sectors = device.info().sectors;
+        let info = device.info();
         BlockCache {
             device,
-            sectors,
+            sectors: info.sectors,
+            unit: info.unit(),
             state: Mutex::new(State { blocks: PageMap::new(), dirty: 0 }),
         }
     }
@@ -162,7 +169,7 @@ impl BlockCache {
             let index = at / PAGE_SIZE as u64;
             let within = (at % PAGE_SIZE as u64) as usize;
             let n = (PAGE_SIZE - within).min((end - at) as usize);
-            let block = self.block(&mut state, index, mask(index, at, at + n as u64))?;
+            let block = self.block(&mut state, index, mask(index, self.unit, at, at + n as u64))?;
             let done = (at - offset) as usize;
             out[done..done + n].copy_from_slice(&block.page.bytes()[within..within + n]);
             at += n as u64;
@@ -199,9 +206,9 @@ impl BlockCache {
             let index = at / PAGE_SIZE as u64;
             let within = (at % PAGE_SIZE as u64) as usize;
             let n = (PAGE_SIZE - within).min((end - at) as usize);
-            let touched = mask(index, at, at + n as u64);
-            // Sectors written whole need not be read first.
-            let need = touched & !whole(index, at, at + n as u64);
+            let touched = mask(index, self.unit, at, at + n as u64);
+            // Blocks written whole need not be read first.
+            let need = touched & !whole(index, self.unit, at, at + n as u64);
             let block = self.block(&mut state, index, need)?;
             f(&mut block.page.bytes_mut()[within..within + n], (at - offset) as usize);
             let was_dirty = block.dirty != 0;
@@ -215,14 +222,14 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Forgets `len` bytes from `offset` (whole sectors), dirty or not:
-    /// they are read from the device again if needed.
+    /// Forgets `len` bytes from `offset` (whole logical blocks), dirty or
+    /// not: they are read from the device again if needed.
     pub fn discard(&self, offset: u64, len: usize) {
         let Ok(end) = self.range(offset, len) else { return };
         let mut state = self.state.lock();
         let mut index = offset / PAGE_SIZE as u64;
         while index * (PAGE_SIZE as u64) < end {
-            let gone = whole(index, offset, end);
+            let gone = whole(index, self.unit, offset, end);
             if let Some(block) = state.blocks.get_mut(index) {
                 let was_dirty = block.dirty != 0;
                 block.valid &= !gone;

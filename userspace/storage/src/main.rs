@@ -387,8 +387,8 @@ fn check_dev(root: &Dir) {
     }
 }
 
-/// Reads the size of each volume's disk in `/kernel/block`, and the kernel's
-/// version.
+/// Reads the size of each volume's disk in `/kernel/block`, and where
+/// each partition is on its disk, and the kernel's version.
 fn check_sys(root: &Dir, volumes: &[String]) {
     for name in volumes {
         match root.read_file(&format!("kernel/block/{name}/size")) {
@@ -401,6 +401,48 @@ fn check_sys(root: &Dir, volumes: &[String]) {
                 println!("storage: /kernel/block/{name}/size: {} sectors", text.trim_end());
             }
             Err(err) => fail(&format!("/kernel/block/{name}/size: {err}")),
+        }
+        // A partition says its number and first sector, and has no queue;
+        // a disk has a queue.
+        let read = |file: &str| root.read_file(&format!("kernel/block/{name}/{file}"));
+        match (read("partition"), read("start")) {
+            (Ok(number), Ok(start)) => {
+                let (number, start) =
+                    (String::from_utf8_lossy(&number), String::from_utf8_lossy(&start));
+                println!(
+                    "storage: /kernel/block/{name}: partition {} from sector {}",
+                    number.trim_end(),
+                    start.trim_end()
+                );
+                check(read("queue/rotational").is_err(), || {
+                    format!("partition {name} has a queue in /kernel/block")
+                });
+            }
+            (Err(_), Err(_)) => {
+                check(read("queue/rotational").is_ok(), || {
+                    format!("disk {name} has no queue in /kernel/block")
+                });
+                // A SATA or NVMe disk says what it is; a virtio one cannot.
+                if name.starts_with("sd") || name.starts_with("nvme") {
+                    let text = |file: &str| {
+                        read(file)
+                            .map(|text| String::from(String::from_utf8_lossy(&text).trim_end()))
+                    };
+                    match (text("device/model"), text("device/serial"), text("device/firmware_rev"))
+                    {
+                        (Ok(model), Ok(serial), Ok(firmware))
+                            if !model.is_empty() && !serial.is_empty() =>
+                        {
+                            println!(
+                                "storage: /kernel/block/{name}/device: {model}, serial {serial}, \
+                                 firmware {firmware}"
+                            );
+                        }
+                        other => fail(&format!("/kernel/block/{name}/device gives {other:?}")),
+                    }
+                }
+            }
+            _ => fail(&format!("/kernel/block/{name} has only one of `partition` and `start`")),
         }
     }
     match root.read_file("kernel/version") {
