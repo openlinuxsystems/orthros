@@ -621,6 +621,47 @@ pub fn now() -> u64 {
     CLOCK.get().map_or(0, |now| now())
 }
 
+/// A kernel's [`join`]: runs its first argument on the caller's CPU and
+/// its second on another, and returns when both are done.
+pub type Join = fn(&mut dyn FnMut(), &mut (dyn FnMut() + Send));
+
+static JOIN: radix_sync::Once<Join> = radix_sync::Once::new();
+
+/// Registers the kernel's [`join`], which it gives only with a second CPU
+/// (ADR 0133).
+pub fn set_join(join: Join) {
+    let _ = JOIN.set(join);
+}
+
+/// Whether [`join`] may run its halves on two CPUs.
+pub fn joins() -> bool {
+    JOIN.get().is_some()
+}
+
+/// Runs `a` here and `b` on another CPU when one is free, and returns when
+/// both are done; without a kernel's [`set_join`], `a`, then `b`. It may
+/// sleep, so the caller holds no spin lock.
+pub fn join(a: impl FnOnce(), b: impl FnOnce() + Send) {
+    let (mut a, mut b) = (Some(a), Some(b));
+    let mut a = || {
+        if let Some(a) = a.take() {
+            a();
+        }
+    };
+    let mut b = || {
+        if let Some(b) = b.take() {
+            b();
+        }
+    };
+    match JOIN.get() {
+        Some(join) => join(&mut a, &mut b),
+        None => {
+            a();
+            b();
+        }
+    }
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A number for a new filesystem, unique since boot.

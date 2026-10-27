@@ -95,8 +95,19 @@ fn mkfs(args: &[&str], dir: &Path) -> Vec<u8> {
     image
 }
 
-/// A disk of logical blocks of `block` bytes, holding `image`.
+/// Runs the halves of a `radix_vfs::join` on two threads, as the kernel
+/// runs them on two CPUs.
+fn join_on_threads(a: &mut dyn FnMut(), b: &mut (dyn FnMut() + Send)) {
+    std::thread::scope(|scope| {
+        scope.spawn(b);
+        a();
+    });
+}
+
+/// A disk of logical blocks of `block` bytes, holding `image`. Its
+/// filesystem's joins run on two threads.
 fn disk_of(block: u32, image: &[u8]) -> KArc<RamDisk> {
+    radix_vfs::set_join(join_on_threads);
     let sectors = image.len() as u64 / 512;
     let disk = mem::arc(RamDisk::with_blocks(sectors, true, block)).unwrap();
     disk.load(0, image).unwrap();
@@ -167,6 +178,12 @@ fn reseal_superblock(image: &mut [u8]) {
 fn checksums_match_their_specifications() {
     assert_eq!(csum::crc32c(b"123456789"), 0xe306_9283);
     assert_eq!(csum::crc32c(b""), 0);
+    // The tables give what the processor's instruction does.
+    let data = files::noise(3, 20_000);
+    for len in [0, 1, 7, 8, 9, 4096, 4097, 12_345, 20_000] {
+        let part = &data[..len];
+        assert_eq!(csum::crc32c_tables(!0, part), csum::crc32c_update(!0, part), "{len}");
+    }
     assert_eq!(csum::xxhash64(b""), 0xef46_db37_51d8_e999);
     assert_eq!(csum::xxhash64(b"a"), 0xd24e_c4f1_a98c_6e5b);
     assert_eq!(csum::xxhash64(b"Nobody inspects the spammish repetition"), 0xfbce_a83c_8a37_8bf1);

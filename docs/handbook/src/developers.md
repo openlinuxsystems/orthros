@@ -64,8 +64,8 @@ replies, cancellation and closing interact (`kernel/ipc/tla/`,
 ADR 0032), how the two ends of a shared-memory channel wake each other
 (`userspace/libradix/tla/`), how a FAT volume's clusters change hands
 while their data waits to be written back (`kernel/fs/fat/tla/`), and
-how futex, `poll`, timer and file-lock waits are woken
-(`kernel/radix/tla/`). `./ob test tla` checks the models with the TLC
+how futex, `poll`, timer and file-lock waits are woken and how `join`
+hands half of some work to another CPU (`kernel/radix/tla/`). `./ob test tla` checks the models with the TLC
 model checker in about twelve minutes. It needs Java; `ob` downloads
 the pinned TLA+ tools itself:
 

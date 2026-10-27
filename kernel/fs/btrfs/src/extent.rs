@@ -11,6 +11,7 @@
 //! later writes replaced the rest), or preallocated and not yet written,
 //! which reads as zeros. Bytes no item covers are a hole, also zeros.
 
+use radix_block::SegmentMut;
 use radix_vfs::{Error, Result};
 
 use crate::format::{Key, item, tree, u16_at, u64_at};
@@ -166,4 +167,54 @@ pub fn data_sum(volume: &Volume, csums: &Root, logical: u64) -> Result<Option<[u
     let mut out = [0; 32];
     out[..size].copy_from_slice(sum);
     Ok(Some(out))
+}
+
+/// Checks the data sectors in the pages of `sectors`, which a read put
+/// there from logical address `logical` on, one each, against the
+/// checksum tree `csums`, walking its items once; calls `bad` with the
+/// place in `sectors` of each one whose checksum differs or is missing.
+pub fn check_sums(
+    volume: &Volume,
+    csums: &Root,
+    logical: u64,
+    sectors: &[SegmentMut<'_>],
+    bad: &mut dyn FnMut(usize),
+) -> Result<()> {
+    let sb = volume.superblock();
+    let (csum, size, sector) = (sb.csum_type, sb.csum_type.size(), u64::from(sb.sectorsize));
+    let key = Key::new(tree::EXTENT_CSUM, item::EXTENT_CSUM, logical);
+    // The item that covers `logical`, or else the first after it.
+    let mut cursor = match Cursor::seek_last(volume, csums, &key)? {
+        Some(cursor) => cursor,
+        None => Cursor::seek(volume, csums, &key)?,
+    };
+    let mut at = 0;
+    while at < sectors.len() {
+        let address = logical + at as u64 * sector;
+        let Some((found, sums)) = cursor.get() else { break };
+        if !found.is(tree::EXTENT_CSUM, item::EXTENT_CSUM) {
+            break;
+        }
+        if !sums.len().is_multiple_of(size) {
+            return Err(Error::Corrupt);
+        }
+        let end = found.offset.saturating_add((sums.len() / size) as u64 * sector);
+        if address >= end {
+            cursor.advance()?;
+            continue;
+        }
+        if address < found.offset {
+            // No checksum for the sectors before the item.
+            bad(at);
+        } else {
+            let from = ((address - found.offset) / sector) as usize * size;
+            if !csum.matches(sectors[at].page.bytes(), &sums[from..from + size]) {
+                bad(at);
+            }
+        }
+        at += 1;
+    }
+    // Past the last item, no sector has its checksum.
+    (at..sectors.len()).for_each(bad);
+    Ok(())
 }

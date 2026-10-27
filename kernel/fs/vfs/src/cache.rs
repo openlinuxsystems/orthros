@@ -43,12 +43,20 @@ use radix_block::pagemap::PageMap;
 use radix_block::{PAGE_SIZE, Page};
 use radix_sync::Mutex;
 
-use crate::{APPEND, Error, In, Out, Result};
+use crate::{APPEND, Error, In, Out, Result, mem};
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
 /// The most pages [`FileCache::sync`] hands its backing in one write.
 pub const WRITE_RUN: usize = 32;
+
+/// The fewest pages a read that misses asks its backing for beyond those
+/// it copies, when it goes on from where the cached pages end or starts
+/// at the file's start: 128 KiB, Linux's default `read_ahead_kb`.
+pub const READ_AHEAD: usize = 32;
+
+/// The most pages one read that misses asks its backing for: 1 MiB.
+pub const READ_RUN: usize = 256;
 
 /// The most of a program's memory made at once when a copy finds a page
 /// missing: the pages it will copy next, so a large read into new memory
@@ -84,6 +92,32 @@ pub trait Backing {
     ) -> Result<()> {
         let _ = more;
         self.read_page(index, page, len)
+    }
+
+    /// Reads the file's pages from `index` on into `pages`, one page each,
+    /// in the file of `size` bytes, which the pages do not pass: as many
+    /// as the backing reads at once (one extent's, one request to the
+    /// disk). Returns how many it filled, at least one; their bytes past
+    /// the file's end are zero. Pages past the run that it reads on the
+    /// way go to `more`, as in [`Backing::read_pages`]. By default, the
+    /// first page alone.
+    fn read_run(
+        &self,
+        index: u64,
+        pages: &mut [CachePage],
+        size: u64,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let Some(page) = pages.first_mut() else { return Err(Error::Io) };
+        self.read_pages(index, page, page_len(index, size), more)?;
+        Ok(1)
+    }
+
+    /// The most pages [`Backing::read_run`] fills at once: one, unless it
+    /// does better. The page cache reads ahead only for a backing that
+    /// reads more.
+    fn run_pages(&self) -> usize {
+        1
     }
 
     /// Writes the first `len` bytes of page `index` to the disk.
@@ -166,7 +200,7 @@ enum Copied {
 }
 
 /// The bytes of page `index` inside a file of `size` bytes.
-fn page_len(index: u64, size: u64) -> usize {
+pub fn page_len(index: u64, size: u64) -> usize {
     size.saturating_sub(index * PAGE).min(PAGE) as usize
 }
 
@@ -251,7 +285,8 @@ impl FileCache {
             let copied = if let Some(slot) = state.pages.get(index) {
                 out.put_now(*done, &slot.page.bytes()[within..within + n])?
             } else {
-                match load(&mut state, index, backing, false, true)? {
+                let last = (offset + len as u64 - 1) / PAGE;
+                match load_run(&mut state, index, last, backing)? {
                     Some(slot) => out.put_now(*done, &slot.page.bytes()[within..within + n])?,
                     // A hole.
                     None => zero_now(out, *done, n)?,
@@ -535,6 +570,64 @@ fn load<'s>(
             radix_hw::device_wrote(page.bytes_mut());
         }
         state.pages.insert(index, Slot { page, dirty: false }).map_err(|_| Error::NoMemory)?;
+    }
+    Ok(state.pages.get_mut(index))
+}
+
+/// Page `index`, which is not in memory, read from the backing for a read
+/// that copies up to page `last`, with the pages after it that one read
+/// of the backing gives: up to `last`, and more when the read starts the
+/// file (three times what it asks for) or goes on from cached pages (as
+/// many as are cached right before it), [`READ_AHEAD`] at least, up to
+/// [`READ_RUN`] in all and no more than the backing reads at once, and
+/// none that is in memory or past the end. Without a disk, or with one
+/// read a page at a time, [`load`]'s.
+fn load_run<'s>(
+    state: &'s mut State,
+    index: u64,
+    last: u64,
+    backing: &dyn Backing,
+) -> Result<Option<&'s mut Slot>> {
+    let most = backing.run_pages().min(READ_RUN) as u64;
+    if !backing.persistent() || most <= 1 || state.size <= index * PAGE {
+        return load(state, index, backing, false, true);
+    }
+    // A read from the start reads ahead three times what it asks for, and
+    // one that goes on from cached pages as many as it goes on from: the
+    // window doubles while a reader keeps on.
+    let wanted = last + 1 - index;
+    let behind =
+        (1..=most.min(index)).take_while(|&n| state.pages.get(index - n).is_some()).count();
+    let ahead = match (index, behind) {
+        (0, _) => (3 * wanted).max(READ_AHEAD as u64),
+        (_, 0) => 0,
+        (_, behind) => (behind as u64).max(READ_AHEAD as u64),
+    };
+    let end_page = state.size.div_ceil(PAGE);
+    let end = (last + 1).saturating_add(ahead).min(index + most).min(end_page);
+    // Short of memory, a shorter run.
+    let mut pages =
+        mem::vec_with_capacity((end - index) as usize).or_else(|_| mem::vec_with_capacity(1))?;
+    for at in index..end {
+        if pages.len() == pages.capacity() || at != index && state.pages.get(at).is_some() {
+            break;
+        }
+        match CachePage::new() {
+            Ok(page) => mem::push(&mut pages, page)?,
+            Err(e) if at == index => return Err(e.into()),
+            Err(_) => break,
+        }
+    }
+    // Pages of the run are the backing's to fill, not to offer.
+    let run = index..index + pages.len() as u64;
+    let (map, size) = (&mut state.pages, state.size);
+    let mut more = |at, bytes: &[u8]| run.contains(&at) || keep(map, size, index, at, bytes);
+    let read = backing.read_run(index, &mut pages, size, &mut more)?;
+    for (at, mut page) in (index..).zip(pages.into_iter().take(read.max(1))) {
+        radix_hw::device_wrote(page.bytes_mut());
+        if state.pages.get(at).is_none() {
+            state.pages.insert(at, Slot { page, dirty: false }).map_err(|_| Error::NoMemory)?;
+        }
     }
     Ok(state.pages.get_mut(index))
 }

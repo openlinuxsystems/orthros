@@ -49,16 +49,20 @@ Only the trusted computing base may use `unsafe`. Today that is:
 - `kernel/lib/sync`, whose locks hand out references guarded by atomics;
 - the device access library `kernel/lib/hw`, which is
   `#![deny(unsafe_code)]` and allows it only in the volatile accesses to
-  device registers and DMA memory and in the `unsafe` constructors that
-  the architecture calls, whose contracts say what it promises;
+  device registers and DMA memory, in the `unsafe` constructors that
+  the architecture calls, whose contracts say what it promises, and in
+  the processor's CRC-32C instruction, which reads and writes registers
+  alone;
 - the memory manager `kernel/mm`, which is `#![deny(unsafe_code)]` and
   allows it only in the modules that touch the memory it manages (its raw
   accesses, the slab free-object pattern, the heap's `free`, its
   `Platform` trait and the stress test); its allocators' logic is safe
   code, checked on the host and by Kani;
 - the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
-  allows it at three marked sites: exporting its entry point, putting the
-  locks into panic mode, and calling the context switch.
+  allows it only at marked sites: exporting its entry point, putting the
+  locks into panic mode, the context switch and borrowing the running
+  thread, per-CPU data, building an open file in place, and handing half
+  of a `join` on the caller's stack to another CPU's helper (ADR 0133).
 
 Every other kernel crate, including the other libraries under
 `kernel/lib/`, the HAL, the AArch64 stubs and the system call interface

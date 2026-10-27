@@ -3532,6 +3532,11 @@ fn churn_name(name: &str) -> Option<(usize, bool)> {
     Some((number.parse().ok()?, temp))
 }
 
+/// How many files the storage program's churn keeps, as it has it: each
+/// round removes the file of the round this many before, after the
+/// round's line `synced`.
+const CHURN_KEEP: usize = 8;
+
 /// The rounds of the churn's lines `storage: churn: <what> file-NNNN` in
 /// `log`; a line the power cut short, without its four digits, is not
 /// counted.
@@ -3550,22 +3555,30 @@ fn churn_rounds(log: &str, what: &str) -> Vec<usize> {
 /// cut, as `btrfs restore` copies the files out, each file the program
 /// said it synced is whole unless it said it removed it, each it said it
 /// removed has gone, every other `file-N` is whole and every `temp-N` a
-/// start of itself.
+/// start of itself. The file the churn removes after the last round it
+/// said it synced may have gone too, with no line to say so: the power
+/// may go after the removal's sync and before or during its line.
 fn btrfs_cut(disk: &DiskImage, log: &str) -> Result<(), String> {
     btrfs_checked(disk, log)?;
     let synced = churn_rounds(log, "synced");
     let Some(&last) = synced.last() else { return Ok(()) };
     let removed = churn_rounds(log, "removed");
     let restored = btrfs_restore(disk)?;
-    let result = churn_left(&restored, &synced, &removed);
+    let result = churn_left(&restored, &synced, &removed, last.checked_sub(CHURN_KEEP));
     let _ = std::fs::remove_dir_all(&restored);
     result.map_err(|err| {
         format!("{}: {err}, after a power cut after file-{last:04} was synced", disk.path.display())
     })
 }
 
-/// [`btrfs_cut`]'s check of the files copied out to `dir`.
-fn churn_left(dir: &Path, synced: &[usize], removed: &[usize]) -> Result<(), String> {
+/// [`btrfs_cut`]'s check of the files copied out to `dir`; the file of
+/// round `removing` may have gone unsaid.
+fn churn_left(
+    dir: &Path,
+    synced: &[usize],
+    removed: &[usize],
+    removing: Option<usize>,
+) -> Result<(), String> {
     let mut found = BTreeMap::new();
     let entries = std::fs::read_dir(dir).map_err(|err| format!("listing it: {err}"))?;
     for entry in entries {
@@ -3596,7 +3609,9 @@ fn churn_left(dir: &Path, synced: &[usize], removed: &[usize]) -> Result<(), Str
             return Err(format!("{name} is still there, though it was renamed and synced"));
         }
     }
-    for round in synced.iter().filter(|round| !removed.contains(round)) {
+    for round in
+        synced.iter().filter(|&&round| !removed.contains(&round) && Some(round) != removing)
+    {
         if !found.contains_key(&format!("file-{round:04}")) {
             return Err(format!("file-{round:04} has gone, though it was synced"));
         }
@@ -3922,6 +3937,39 @@ fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_churn_cut_short_may_have_removed_one_file_unsaid() {
+        // Rounds 0 to 9 synced, round 8 removed file-0000, and the power
+        // went as round 9's removal of file-0001 was said.
+        let mut log = String::new();
+        for round in 0..10 {
+            log += &format!("storage: churn: synced file-{round:04}\n");
+            if round == 8 {
+                log += "storage: churn: removed file-0000\n";
+            }
+        }
+        log += "storage: churn: removed fi";
+        let (synced, removed) = (churn_rounds(&log, "synced"), churn_rounds(&log, "removed"));
+        assert_eq!(synced, (0..10).collect::<Vec<_>>());
+        assert_eq!(removed, [0]);
+        let dir = std::env::temp_dir().join(format!("churn-left-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for round in 1..10 {
+            let bytes: Vec<u8> = (0..churn_size(round)).map(|at| churn_byte(round, at)).collect();
+            std::fs::write(dir.join(format!("file-{round:04}")), bytes).unwrap();
+        }
+        let removing = synced.last().and_then(|last| last.checked_sub(CHURN_KEEP));
+        assert_eq!(removing, Some(1));
+        // file-0001 may stay, whole, or have gone.
+        assert_eq!(churn_left(&dir, &synced, &removed, removing), Ok(()));
+        std::fs::remove_file(dir.join("file-0001")).unwrap();
+        assert_eq!(churn_left(&dir, &synced, &removed, removing), Ok(()));
+        // Any other synced file may not.
+        std::fs::remove_file(dir.join("file-0002")).unwrap();
+        assert!(churn_left(&dir, &synced, &removed, removing).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn types_on_a_us_keyboard() {

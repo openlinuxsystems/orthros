@@ -305,7 +305,8 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
   4096 bytes and NVMe namespaces with metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
-- There is no name cache, no read-ahead and no hot plug yet.
+- There is no name cache and no hot plug yet, and FAT files are read a
+  page per request (Btrfs reads ahead).
 
 # SEE ALSO
 

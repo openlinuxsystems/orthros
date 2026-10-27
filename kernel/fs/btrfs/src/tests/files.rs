@@ -317,6 +317,49 @@ fn damaged_data_is_read_from_its_other_copy_or_fails() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn files_are_read_in_runs_and_whole_compressed_extents() {
+    let dir = scratch("runs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plain = noise(9, 1 << 20);
+    let mut text = String::new();
+    for n in 0..100_000 {
+        text += &format!("line {n}\n");
+    }
+    let text = &text.as_bytes()[..1 << 20];
+    std::fs::write(dir.join("plain"), &plain).unwrap();
+    std::fs::write(dir.join("text"), text).unwrap();
+    let image = mkfs(&["--compress", "zstd"], &dir);
+    // Requests for each file, read whole in 128 KiB pieces, then again
+    // from its cache.
+    let requests = |name: &str, data: &[u8], piece: usize| {
+        let disk = disk_of(512, &image);
+        let device: DeviceRef = disk.clone();
+        let fs = BtrfsFs::mount(device).unwrap();
+        let file = fs.root().lookup(name).unwrap();
+        let before = disk.requests();
+        assert!(contents(&*file, piece).unwrap() == data, "{name}");
+        let read = disk.requests() - before;
+        assert!(contents(&*file, piece).unwrap() == data, "{name}");
+        assert_eq!(disk.requests() - before, read, "{name}");
+        read
+    };
+    // 1 MiB of noise is one extent, read in runs of 64 pages, and its
+    // checksums, a page of them.
+    let read = requests("plain", &plain, 128 << 10);
+    assert!(read <= 8, "{read} requests");
+    // Read at once, it is one run of 256 pages, in requests of as many
+    // as the disk takes (64).
+    let read = requests("plain", &plain, 1 << 20);
+    assert!(read <= 8, "{read} requests");
+    // Text is eight compressed extents of 128 KiB, which follow each
+    // other on the disk: read in two runs of four, each half of a run is
+    // one request.
+    let read = requests("text", text, 128 << 10);
+    assert!((4..=8).contains(&read), "{read} requests");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Reads everything below `node` that damage lets it read, at most
 /// `depth` directories down and `budget` entries in all: damage can make
 /// a directory its own child, and a file's size anything.

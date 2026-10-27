@@ -31,9 +31,10 @@
 //! device's alike.
 //!
 //! A raw transfer ([`BlockDevice::read_frames`], into memory a program
-//! lends) goes in requests of as many segments as the device takes, not
-//! the [`MAX_SEGMENTS`] of the page cache's: a virtio disk's take 254
-//! pages, an AHCI disk's 32. A transfer of more goes as several requests,
+//! lends), and one of the page cache's or a filesystem's of more than
+//! [`MAX_SEGMENTS`], goes in requests of as many segments as the device
+//! takes: a virtio disk's take 254 pages, an AHCI disk's 32. A transfer
+//! of more goes as several requests,
 //! all in flight at once, and the device hears of them
 //! together: a controller may hold back the doorbell of a request that
 //! has another right behind it ([`Controller::submit`]'s `more`), which
@@ -76,9 +77,10 @@ use crate::user::posix::priority;
 pub const SLOTS: usize = 64;
 /// The most requests one raw transfer has in flight at once.
 pub const PARTS: usize = 16;
-/// The most segments one request of the page cache or a filesystem
-/// takes: theirs take one page each, so this is plenty. A raw transfer's
-/// requests take as many as the device does.
+/// The most segments a request of the page cache or a filesystem takes
+/// as one request, its buffers listed on the stack. One of more, up to
+/// [`radix_block::MAX_FRAMES`], goes as a raw transfer does: requests of
+/// as many as the device takes, all in flight at once.
 pub const MAX_SEGMENTS: usize = 16;
 /// How many times a request goes to the device before it fails, when the
 /// device keeps handing it back to go again.
@@ -339,7 +341,7 @@ impl<C: Controller> Disk<C> {
             attention: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
             failures: SpinLock::new((0, 0)),
-            info: Info { max_segments: info.max_segments.min(MAX_SEGMENTS), ..info },
+            info: Info { max_segments: radix_block::MAX_FRAMES, ..info },
             raw_segments: info.max_segments.max(1),
             write_cache,
             fua,
@@ -791,12 +793,37 @@ impl<C: Controller> Volume<C> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         let Info { sectors, max_segments, .. } = self.info;
         radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
-        let mut data = [(0u64, 0u32); MAX_SEGMENTS];
-        for (i, segment) in segments.iter().enumerate() {
-            data[i] = (segment.page.phys() + segment.offset as u64, segment.len as u32);
-        }
         radix_hw::device_barrier();
-        self.request(op, sector, &data[..segments.len()])
+        let buffers = segments.iter().map(|s| (s.page.phys() + s.offset as u64, s.len as u32));
+        self.transfer(op, sector, buffers)
+    }
+
+    /// Carries out `op` from `sector` with `buffers`: as one request when
+    /// they are at most [`MAX_SEGMENTS`], and otherwise as a transfer of
+    /// requests of as many as the device takes, all in flight at once
+    /// ([`Disk::request_all`]), which QEMU's virtio disk merges again.
+    fn transfer(
+        &self,
+        op: Op,
+        sector: u64,
+        buffers: impl ExactSizeIterator<Item = (u64, u32)>,
+    ) -> Result<(), Error> {
+        let count = buffers.len();
+        if count <= MAX_SEGMENTS {
+            let mut data = [(0u64, 0u32); MAX_SEGMENTS];
+            for (slot, buffer) in data.iter_mut().zip(buffers) {
+                *slot = buffer;
+            }
+            return self.request(op, sector, &data[..count]);
+        }
+        let mut data = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        data.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
+        for buffer in buffers {
+            // Room was made above.
+            let _ = data.push_within_capacity(buffer);
+        }
+        let unit = self.info.unit();
+        self.disk.request_all(&Request { op, target: self.target, sector, data: &data, unit })
     }
 }
 
@@ -809,11 +836,8 @@ impl<C: Controller> BlockDevice for Volume<C> {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         let Info { sectors, max_segments, .. } = self.info;
         radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
-        let mut data = [(0u64, 0u32); MAX_SEGMENTS];
-        for (i, segment) in segments.iter().enumerate() {
-            data[i] = (segment.page.phys() + segment.offset as u64, segment.len as u32);
-        }
-        self.request(Op::Read, sector, &data[..segments.len()])?;
+        let buffers = segments.iter().map(|s| (s.page.phys() + s.offset as u64, s.len as u32));
+        self.transfer(Op::Read, sector, buffers)?;
         for segment in segments.iter_mut() {
             let (offset, len) = (segment.offset, segment.len);
             radix_hw::device_wrote(&mut segment.page.bytes_mut()[offset..offset + len]);

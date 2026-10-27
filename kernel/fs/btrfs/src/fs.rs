@@ -13,9 +13,11 @@
 //! files through it ([`crate::files`]); a commit makes them durable at the
 //! next sync, every [`COMMIT_NS`], or sooner when the pages waiting to be
 //! written pass [`DIRTY_PAGES_MAX`]. A node whose data or inode waits for
-//! the sync is kept until then; a file removed while open keeps its items
-//! until its last node goes, with an orphan item that cleans it up at the
-//! next writable mount if the power goes first.
+//! the sync is kept until then, unless its file loses its last name with
+//! no one holding it open: then its items go at once and its pages are
+//! never written, as Linux evicts the inode. A file removed while open
+//! keeps its items until its last node goes, with an orphan item that
+//! cleans it up at the next writable mount if the power goes first.
 //!
 //! # Locks
 //!
@@ -23,13 +25,14 @@
 //! transaction's lock comes next, held by every change and also by every
 //! read of the trees, since a change edits the transaction's blocks in
 //! place; it is never held while a program's memory is copied, which may
-//! fault and read a file. Then come a node's inode, the node table and
-//! the list of nodes to remove, then the workspace of compressed reads,
-//! the volume's block cache and the disk's. `nodes` is held only to find
-//! or add a node, never while reading the disk: a node is read first, and
-//! when another was added for the same inode meanwhile, that one is used
-//! and the new one dropped, which only frees memory. Shrinking only tries
-//! the workspace's lock, as a reader that holds it may be making memory.
+//! fault and read a file. Then come a node's inode, the node table, the
+//! nodes kept for the sync and the list of nodes to remove, then the
+//! workspaces of compressed reads, the volume's block cache and the
+//! disk's. `nodes` is held only to find or add a node, never while
+//! reading the disk: a node is read first, and when another was added
+//! for the same inode meanwhile, that one is used and the new one
+//! dropped, which only frees memory. Shrinking only tries the
+//! workspaces' lock, as a reader that holds it may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
@@ -102,8 +105,10 @@ pub(crate) struct Inner {
     csums: Option<Root>,
     /// The nodes in use, by subvolume and inode number, sorted.
     nodes: Mutex<KVec<Entry>>,
-    /// What reading compressed extents uses, once one is read.
-    workspace: Mutex<Option<KBox<Workspace>>>,
+    /// What reading compressed extents uses, once one is read: a
+    /// workspace for the reader, and one for the half of a run another
+    /// CPU uncompresses (ADR 0133).
+    workspaces: Mutex<[Option<KBox<Workspace>>; 2]>,
     /// The running transaction, on a writable mount.
     tx: Option<Mutex<Txn>>,
     /// The nodes whose data or inode waits for the next sync.
@@ -231,7 +236,7 @@ impl Inner {
             volume,
             csums,
             nodes: Mutex::new(mem::vec()),
-            workspace: Mutex::new(None),
+            workspaces: Mutex::new([None, None]),
             tx,
             dirty: Mutex::new(mem::vec()),
             reap: Mutex::new(mem::vec()),
@@ -330,6 +335,27 @@ impl Inner {
         }
         let _ = dirty.push_within_capacity(node);
         Ok(())
+    }
+
+    /// Takes `node`, of a file whose last name is going, out of the nodes
+    /// kept for the next sync when nothing else holds it: no one has it
+    /// open (the caller's is the other reference) and the sync has not
+    /// taken it, so its pages are never written. The caller holds the
+    /// transaction, so no lookup finds the node meanwhile; the node table's
+    /// lock keeps a shrink from taking it.
+    pub(crate) fn take_idle(&self, node: &KArc<BtrfsNode>) -> bool {
+        let _nodes = self.nodes.lock();
+        let mut dirty = self.dirty.lock();
+        if KArc::strong_count(node) != 2 {
+            return false;
+        }
+        let Some(i) = dirty.iter().rposition(|kept| KArc::ptr_eq(kept, node)) else {
+            return false;
+        };
+        // The caller's reference stays, so this drops nothing.
+        drop(dirty.remove(i));
+        node.unpinned();
+        true
     }
 
     /// Notes that the last node of inode `ino` of subvolume `subvol`, which
@@ -441,19 +467,36 @@ impl Inner {
         &self,
         f: impl FnOnce(&mut Workspace) -> Result<R>,
     ) -> Result<R> {
-        let mut slot = self.workspace.lock();
-        let workspace = match &mut *slot {
-            Some(workspace) => workspace,
-            empty => empty.insert(mem::boxed(Workspace::new()?)?),
-        };
-        f(workspace)
+        self.with_workspaces(false, |workspace, _| f(workspace))
     }
 
-    /// Drops the workspace of compressed reads, unless one is under way;
-    /// returns the pages it held.
+    /// Runs `f` with the workspace of compressed reads, made if need be,
+    /// and, when `two` and `radix_vfs::join` may use another CPU, the
+    /// second, for the half of a run that CPU uncompresses: made if there
+    /// is memory for it, or else `None`.
+    pub(crate) fn with_workspaces<R>(
+        &self,
+        two: bool,
+        f: impl FnOnce(&mut Workspace, Option<&mut Workspace>) -> Result<R>,
+    ) -> Result<R> {
+        let mut slots = self.workspaces.lock();
+        let [first, second] = &mut *slots;
+        let first = match first {
+            Some(workspace) => workspace,
+            empty => empty.insert(Workspace::boxed()?),
+        };
+        let two = two && radix_vfs::joins();
+        if two && second.is_none() {
+            *second = Workspace::boxed().ok();
+        }
+        f(first, if two { second.as_deref_mut() } else { None })
+    }
+
+    /// Drops the workspaces of compressed reads, unless a read is under
+    /// way; returns the pages they held.
     fn drop_workspace(&self) -> usize {
-        let Some(mut slot) = self.workspace.try_lock() else { return 0 };
-        slot.take().map_or(0, |workspace| workspace.pages())
+        let Some(mut slots) = self.workspaces.try_lock() else { return 0 };
+        slots.iter_mut().filter_map(Option::take).map(|workspace| workspace.pages()).sum()
     }
 
     /// The node of inode `ino` of subvolume `subvol`, whose tree is

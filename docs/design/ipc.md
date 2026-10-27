@@ -418,7 +418,16 @@ given `--nvme`, an NVMe disk the same way (`posix_nvme_read_4k` to
 and NVMe disk, each a 64 MiB file on the host made afresh for each boot:
 `vda` and `nvme0n1` (`/devices/vda`, `/devices/nvme0n1`), raw on Radix,
 and `/dev/vda` and `/dev/nvme0n1`, opened with `O_DIRECT`, on Linux, so
-that neither has a cache between the program and the disk.
+that neither has a cache between the program and the disk. Given
+`--btrfs`, a directory where a third virtio disk is mounted, it reads 32
+files of 1 MiB of noise, stored plain, and 32 of text, stored as zstd
+extents, each whole in 128 KiB reads (`posix_btrfs_read_mib`,
+`posix_btrfs_read_zstd_mib`, per file), then makes a file, writes 4 KiB
+to it, closes and removes it (`posix_btrfs_create`, ADR 0132). `ob
+bench` makes that disk with `mkfs.btrfs --compress zstd` once, and each
+boot gets a fresh copy, mounted at `/volumes/vdb` on Radix and at
+`/mnt/vdb` on Linux, whose init first loads the Btrfs modules of the
+runner's kernel, which `ob bench` puts in its initramfs.
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

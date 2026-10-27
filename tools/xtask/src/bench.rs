@@ -50,13 +50,24 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
-/// with the benchmarks' disks ([`disk_args`]).
-const POSIX_CMDLINE: &str =
-    "-- --posix /system/tests/posix/bench --disk /devices/vda --nvme /devices/nvme0n1";
+/// with the benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
+/// mounts it.
+const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /devices/vda --nvme \
+                             /devices/nvme0n1 --btrfs /volumes/vdb";
 
 /// The size of each disk both systems' POSIX benchmarks read and write:
 /// the 32 MiB they go through, with room.
 const DISK_BYTES: usize = 64 << 20;
+
+/// The files of each kind on the Btrfs disk ([`btrfs_disk`]), and the
+/// size of each: what `BTRFS_FILES` and `BTRFS_FILE` are in
+/// [`POSIX_SOURCE`].
+const BTRFS_FILES: usize = 32;
+const BTRFS_FILE_BYTES: usize = 1 << 20;
+
+/// The Btrfs disk's size: its files, with room for what the benchmarks
+/// write.
+const BTRFS_DISK_BYTES: u64 = 192 << 20;
 
 /// The POSIX benchmarks: one C program, which Radix's build makes for
 /// Radix (`userspace::build`, with the other C test programs) and
@@ -108,8 +119,8 @@ const ICOUNT: &str = "shift=0,align=off";
 /// when the budget was set, plus a tenth, rounded up to two significant
 /// figures (the count it was set from is in the comment). Operations on
 /// two CPUs depend on how QEMU interleaves the CPUs, and its clock runs on
-/// while one waits, so they have no budget; nor do the disk transfers,
-/// which wait for the disk. A change that makes an
+/// while one waits, so they have no budget; nor do the disk transfers
+/// and the Btrfs rows, which wait for the disk or start writing to it. A change that makes an
 /// operation longer raises its budget in the same pull request, and says
 /// why.
 pub const BUDGETS: &[(&str, u64)] = &[
@@ -192,6 +203,12 @@ const fn posix(name: &'static str, what: &'static str) -> Row {
 /// disk opened with `O_DIRECT`.
 const fn disk(name: &'static str, what: &'static str) -> Row {
     Row { radix: name, what, linux: Some((name, "the same C program, on glibc, `O_DIRECT`")) }
+}
+
+/// A row of the POSIX benchmarks' files on the Btrfs disk: on Linux, on
+/// its own Btrfs, mounted with no options.
+const fn btrfs(name: &'static str, what: &'static str) -> Row {
+    Row { radix: name, what, linux: Some((name, "the same C program, on glibc, on Linux's Btrfs")) }
 }
 
 /// The report's rows, in order.
@@ -357,6 +374,15 @@ const ROWS: &[Row] = &[
     disk("posix_nvme_write_64k", "Disk: 64 KiB written raw to an NVMe disk"),
     disk("posix_nvme_read_mib", "Disk: 1 MiB read raw from an NVMe disk"),
     disk("posix_nvme_write_mib", "Disk: 1 MiB written raw to an NVMe disk"),
+    btrfs(
+        "posix_btrfs_read_mib",
+        "Btrfs: a 1 MiB file read from a virtio disk, its checksums checked, per file",
+    ),
+    btrfs(
+        "posix_btrfs_read_zstd_mib",
+        "Btrfs: a 1 MiB file of text read from a virtio disk and uncompressed (zstd), per file",
+    ),
+    btrfs("posix_btrfs_create", "Btrfs: a file made, 4 KiB written, closed and removed, unsynced"),
 ];
 
 /// `ob bench`.
@@ -398,8 +424,9 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let dir = ctx.out.join("bench");
     process::create_dir(&dir)?;
     let image = test::build_test_image(ctx, &built, &dir, TestImage::Plain)?;
+    let btrfs = btrfs_disk(ctx, &dir)?;
     if instructions {
-        return count_instructions(ctx, &dir, &image, gate, summary.as_deref());
+        return count_instructions(ctx, &dir, &image, &btrfs, gate, summary.as_deref());
     }
     let kvm = qemu::kvm_available();
     if !kvm {
@@ -412,7 +439,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let posix_linux = if linux { Some(posix_for_linux(ctx, &dir)?) } else { None };
     let vm_kernel = if let Some(posix) = &posix_linux {
         match linux_kernel(given_kernel)? {
-            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir, posix)?)),
+            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir, posix, &kernel)?)),
             Some(_) => {
                 eprintln!(
                     "    No KVM: the Linux virtual machine would measure the emulator too, so \
@@ -452,7 +479,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         per_switch(&mut radix, &counts);
         keep_best(&mut numbers.radix, radix);
         step(&format!("Booting Radix with the POSIX benchmarks on 2 CPUs{of}"));
-        let (posix, posix_counts) = radix_posix_numbers(ctx, &dir, &image, Accel::of(kvm))?;
+        let (posix, posix_counts) = radix_posix_numbers(ctx, &dir, &image, &btrfs, Accel::of(kvm))?;
         keep_best(&mut numbers.radix, posix);
         if numbers.counts.is_empty() {
             numbers.counts = counts;
@@ -464,7 +491,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
                  Radix's{of}",
                 ctx.display(kernel)
             ));
-            let (linux, linux_counts) = linux_vm_numbers(ctx, &dir, kernel, initrd)?;
+            let (linux, linux_counts) = linux_vm_numbers(ctx, &dir, kernel, initrd, &btrfs)?;
             keep_best(&mut numbers.linux_vm, linux);
             if numbers.runs == 0 {
                 numbers.counts.extend(linux_counts);
@@ -537,6 +564,7 @@ fn count_instructions(
     ctx: &Ctx,
     dir: &Path,
     image: &[u8],
+    btrfs: &Path,
     gate: bool,
     summary: Option<&str>,
 ) -> Result<()> {
@@ -544,7 +572,7 @@ fn count_instructions(
     let (mut radix, counts) = radix_numbers(ctx, dir, image, Accel::Count)?;
     per_switch(&mut radix, &counts);
     step("Booting Radix with the POSIX benchmarks on 2 CPUs, counting instructions (minutes)");
-    radix.extend(radix_posix_numbers(ctx, dir, image, Accel::Count)?.0);
+    radix.extend(radix_posix_numbers(ctx, dir, image, btrfs, Accel::Count)?.0);
     let report = budget_report(&radix);
     let markdown = dir.join("instructions.md");
     std::fs::write(&markdown, &report).context(|| format!("writing {}", markdown.display()))?;
@@ -876,16 +904,107 @@ pub fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
 
 /// Builds `linux-bench` as a static program and writes the initramfs
 /// that makes it the Linux virtual machine's init process, with the
-/// POSIX benchmarks at `posix` beside it.
-fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path) -> Result<PathBuf> {
+/// POSIX benchmarks at `posix` beside it, and the modules `kernel` needs
+/// to mount the Btrfs disk ([`linux_modules`]).
+fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path, kernel: &Path) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
     let program = linux_bench_static(ctx)?;
     let init = std::fs::read(&program).context(|| format!("reading {}", program.display()))?;
     let posix = std::fs::read(posix).context(|| format!("reading {}", posix.display()))?;
+    let mut modules = Vec::new();
+    for (i, path) in linux_modules(kernel)?.iter().enumerate() {
+        let file = path.file_name().map_or_default(|name| name.to_string_lossy());
+        let bytes = std::fs::read(path).context(|| format!("reading {}", path.display()))?;
+        modules.push((format!("{i:02}-{file}"), bytes));
+    }
     let initrd = dir.join("linux-bench.cpio");
-    std::fs::write(&initrd, initramfs(&init, &posix))
+    std::fs::write(&initrd, initramfs(&init, &posix, &modules))
         .context(|| format!("writing {}", initrd.display()))?;
     Ok(initrd)
+}
+
+/// The modules the Linux kernel `kernel` loads to mount Btrfs, in the
+/// order they load: none when it has Btrfs built in, else Btrfs's and
+/// those it needs, from the directory of its modules, `/lib/modules/
+/// <release>` or `OB_LINUX_MODULES`, as its `modules.dep` lists them.
+fn linux_modules(kernel: &Path) -> Result<Vec<PathBuf>> {
+    let image = std::fs::read(kernel).context(|| format!("reading {}", kernel.display()))?;
+    let Some(release) = kernel_release(&image) else {
+        crate::bail!("{} holds no Linux kernel version", kernel.display());
+    };
+    let dir = std::env::var_os("OB_LINUX_MODULES")
+        .map_or_else(|| Path::new("/lib/modules").join(&release), PathBuf::from);
+    let builtin = std::fs::read_to_string(dir.join("modules.builtin")).unwrap_or_default();
+    if builtin.lines().any(|line| line.ends_with("/btrfs.ko")) {
+        return Ok(Vec::new());
+    }
+    let deps = dir.join("modules.dep");
+    let listed = std::fs::read_to_string(&deps).context(|| {
+        format!(
+            "reading {}, for the module Linux {release} mounts the Btrfs disk with \
+             (OB_LINUX_MODULES names another directory of its modules)",
+            deps.display()
+        )
+    })?;
+    let Some(order) = load_order(&listed, "btrfs") else {
+        crate::bail!("{} lists no Btrfs module", deps.display());
+    };
+    Ok(order.iter().map(|module| dir.join(module)).collect())
+}
+
+/// The release of the Linux kernel image `image`, as `uname -r` gives
+/// it: the first word of the version its boot protocol header points to
+/// (the `kernel_version` field, Documentation/arch/x86/boot.rst).
+fn kernel_release(image: &[u8]) -> Option<String> {
+    if image.get(0x202..0x206)? != b"HdrS" {
+        return None;
+    }
+    let at = usize::from(u16::from_le_bytes([*image.get(0x20e)?, *image.get(0x20f)?]));
+    let text = image.get(0x200 + at..).filter(|_| at != 0)?;
+    let end = text.iter().position(|&b| b == 0 || b == b' ')?;
+    String::from_utf8(text[..end].to_vec()).ok().filter(|release| !release.is_empty())
+}
+
+/// The modules, by their paths in the `modules.dep` listing `deps`, that
+/// loading the module `name` takes: each after those it needs, the module
+/// last.
+fn load_order(deps: &str, name: &str) -> Option<Vec<String>> {
+    let needs: Vec<(&str, Vec<&str>)> = deps
+        .lines()
+        .filter_map(|line| {
+            let (module, rest) = line.split_once(':')?;
+            Some((module, rest.split_whitespace().collect()))
+        })
+        .collect();
+    let named = |module: &str| {
+        let file = module.rsplit('/').next().unwrap_or(module);
+        file.split('.').next() == Some(name)
+    };
+    let (module, _) = needs.iter().find(|(module, _)| named(module))?;
+    let mut order = Vec::new();
+    add_with_needs(&needs, module, &mut order, 0);
+    Some(order)
+}
+
+/// Adds `module` to `order` after the modules it needs, unless it is
+/// there; `depth` modules wait on it, which a loop in the listing cannot
+/// take past the listing's length.
+fn add_with_needs(
+    needs: &[(&str, Vec<&str>)],
+    module: &str,
+    order: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > needs.len() || order.iter().any(|done| done == module) {
+        return;
+    }
+    let first = needs.iter().find(|(listed, _)| *listed == module);
+    for need in first.map_or_default(|(_, needs)| needs.as_slice()) {
+        add_with_needs(needs, need, order, depth + 1);
+    }
+    if !order.iter().any(|done| done == module) {
+        order.push(module.to_string());
+    }
 }
 
 /// Builds `linux-bench` as a static program, which runs on any Linux of
@@ -909,6 +1028,7 @@ fn linux_vm_numbers(
     dir: &Path,
     kernel: &Path,
     initrd: &Path,
+    btrfs: &Path,
 ) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let machine = Machine {
         firmware: Firmware::Bios,
@@ -924,7 +1044,7 @@ fn linux_vm_numbers(
         reboot: false,
         gdb: false,
         qmp: None,
-        extra: disk_args(dir)?,
+        extra: disk_args(dir, btrfs)?,
         direct: Some(DirectBoot {
             kernel: kernel.to_path_buf(),
             initrd: initrd.to_path_buf(),
@@ -946,14 +1066,21 @@ fn linux_vm_numbers(
 }
 
 /// An initramfs (a cpio archive in the "newc" format Linux reads) that
-/// holds `init`, the console device it writes to, and the POSIX
-/// benchmarks it runs, `posix`, at `/posix-bench`.
-pub fn initramfs(init: &[u8], posix: &[u8]) -> Vec<u8> {
+/// holds `init`, the console device it writes to, the POSIX benchmarks it
+/// runs, `posix`, at `/posix-bench`, and `modules`, by name, in
+/// `/modules`.
+pub fn initramfs(init: &[u8], posix: &[u8], modules: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     newc_entry(&mut out, 1, "dev", 0o040_755, (0, 0), &[]);
     newc_entry(&mut out, 2, "dev/console", 0o020_600, (5, 1), &[]);
     newc_entry(&mut out, 3, "init", 0o100_755, (0, 0), init);
     newc_entry(&mut out, 4, "posix-bench", 0o100_755, (0, 0), posix);
+    if !modules.is_empty() {
+        newc_entry(&mut out, 5, "modules", 0o040_755, (0, 0), &[]);
+    }
+    for (ino, (name, bytes)) in (6..).zip(modules) {
+        newc_entry(&mut out, ino, &format!("modules/{name}"), 0o100_644, (0, 0), bytes);
+    }
     newc_entry(&mut out, 0, "TRAILER!!!", 0, (0, 0), &[]);
     out
 }
@@ -1084,13 +1211,14 @@ fn radix_posix_numbers(
     ctx: &Ctx,
     dir: &Path,
     base: &[u8],
+    btrfs: &Path,
     accel: Accel,
 ) -> Result<(Vec<Measurement>, Vec<Counts>)> {
     let image = dir.join("posix-bench.img");
     let bytes = test::with_cmdline(base, POSIX_CMDLINE).map_err(crate::Error::new)?;
     std::fs::write(&image, bytes).context(|| format!("writing {}", image.display()))?;
     let mut extra = accel.extra();
-    extra.extend(disk_args(dir)?);
+    extra.extend(disk_args(dir, btrfs)?);
     let machine = Machine {
         firmware: Firmware::Bios,
         media: Media::Usb,
@@ -1127,18 +1255,24 @@ fn radix_posix_numbers(
 /// Makes the benchmarks' disks afresh in `dir`, filled with bytes rather
 /// than holes, which the host would read faster, and returns QEMU's
 /// arguments for them: a virtio block device, `vda` on both systems
-/// (`/devices/vda` on Radix, `/dev/vda` on Linux), and an NVMe
-/// controller with one namespace, `nvme0n1`. Each boot gets the same
-/// disks.
-fn disk_args(dir: &Path) -> Result<Vec<String>> {
+/// (`/devices/vda` on Radix, `/dev/vda` on Linux), an NVMe controller
+/// with one namespace, `nvme0n1`, and a second virtio block device,
+/// `vdb`, a copy of the Btrfs disk `btrfs` ([`btrfs_disk`]). Each boot
+/// gets the same disks.
+fn disk_args(dir: &Path, btrfs: &Path) -> Result<Vec<String>> {
     let mut args = Vec::new();
     for (name, device) in [
         ("bench-disk", "virtio-blk-pci,drive=bench-disk"),
         ("bench-nvme", "nvme,serial=bench,drive=bench-nvme"),
+        ("bench-btrfs", "virtio-blk-pci,drive=bench-btrfs"),
     ] {
         let disk = dir.join(format!("{name}.img"));
-        std::fs::write(&disk, vec![0x5a; DISK_BYTES])
-            .context(|| format!("writing {}", disk.display()))?;
+        if name == "bench-btrfs" {
+            std::fs::copy(btrfs, &disk).context(|| format!("writing {}", disk.display()))?;
+        } else {
+            std::fs::write(&disk, vec![0x5a; DISK_BYTES])
+                .context(|| format!("writing {}", disk.display()))?;
+        }
         args.extend([
             "-drive".into(),
             format!("file={},if=none,id={name},format=raw", qemu::option_value(&disk)),
@@ -1147,6 +1281,84 @@ fn disk_args(dir: &Path) -> Result<Vec<String>> {
         ]);
     }
     Ok(args)
+}
+
+/// Makes the Btrfs disk of the POSIX benchmarks in `dir` with Linux's
+/// `mkfs.btrfs`, as a copy onto a filesystem mounted to compress with
+/// zstd leaves it: [`BTRFS_FILES`] files of bytes that do not compress,
+/// stored as they are, in `plain/`, and as many of text, compressed, in
+/// `zstd/`, each [`BTRFS_FILE_BYTES`] long and named by its number. Each
+/// boot gets a copy ([`disk_args`]).
+fn btrfs_disk(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
+    let tree = dir.join("bench-btrfs.tree");
+    if tree.exists() {
+        std::fs::remove_dir_all(&tree).context(|| format!("removing {}", tree.display()))?;
+    }
+    for (kind, bytes) in [("plain", noise as fn(usize, usize) -> Vec<u8>), ("zstd", text)] {
+        let at = tree.join(kind);
+        process::create_dir(&at)?;
+        for n in 0..BTRFS_FILES {
+            let file = at.join(n.to_string());
+            std::fs::write(&file, bytes(n, BTRFS_FILE_BYTES))
+                .context(|| format!("writing {}", file.display()))?;
+        }
+    }
+    let disk = dir.join("bench-btrfs.base");
+    let file = std::fs::File::create(&disk).context(|| format!("making {}", disk.display()))?;
+    file.set_len(BTRFS_DISK_BYTES).context(|| format!("sizing {}", disk.display()))?;
+    let mut cmd = std::process::Command::new(crate::btrfs::mkfs(ctx)?);
+    cmd.args(["-q", "-f", "-L", "BENCH", "--compress", "zstd", "--rootdir"]).arg(&tree).arg(&disk);
+    let made = process::run(ctx, &mut cmd);
+    let _ = std::fs::remove_dir_all(&tree);
+    made?;
+    Ok(disk)
+}
+
+/// `len` bytes that do not compress: the `n`th run of a xorshift
+/// generator's.
+fn noise(n: usize, len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15 ^ (n as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 32) as u8
+        })
+        .collect()
+}
+
+/// `len` bytes of text, the `n`th: lines of common English words in an
+/// order a xorshift generator picks, which zstd compresses about as much
+/// as prose.
+fn text(n: usize, len: usize) -> Vec<u8> {
+    const WORDS: &[&str] = &[
+        "the", "of", "and", "to", "a", "in", "is", "it", "that", "for", "on", "was", "with", "as",
+        "be", "at", "by", "this", "from", "or", "an", "but", "not", "are", "which", "file", "disk",
+        "data", "block", "tree", "page", "read", "write", "copy", "space", "free", "system",
+        "kernel", "memory", "process", "every", "when", "where", "time", "first", "last", "new",
+        "old", "each", "other", "more", "than", "into", "after", "before", "its", "their", "they",
+        "there", "what", "about", "would", "could", "should",
+    ];
+    let mut state = 0x2545_f491_4f6c_dd1d ^ (n as u64 + 1).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mut out = Vec::with_capacity(len + 16);
+    let mut column = 0;
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let word = WORDS[(state >> 40) as usize % WORDS.len()];
+        out.extend_from_slice(word.as_bytes());
+        column += word.len() + 1;
+        if column > 72 {
+            out.push(b'\n');
+            column = 0;
+        } else {
+            out.push(b' ');
+        }
+    }
+    out.truncate(len);
+    out
 }
 
 /// Builds and runs the Linux baseline on the host, with the POSIX
@@ -1628,12 +1840,64 @@ mod tests {
     }
 
     #[test]
+    fn kernel_release_comes_from_the_boot_header() {
+        let mut image = vec![0u8; 0x1000];
+        image[0x202..0x206].copy_from_slice(b"HdrS");
+        image[0x20e..0x210].copy_from_slice(&0x0400u16.to_le_bytes());
+        let version = b"6.17.0-1022-azure (buildd@lcy02) #22-Ubuntu SMP\0";
+        image[0x600..0x600 + version.len()].copy_from_slice(version);
+        assert_eq!(kernel_release(&image).as_deref(), Some("6.17.0-1022-azure"));
+        image[0x202] = b'X';
+        assert_eq!(kernel_release(&image), None, "not a bzImage");
+    }
+
+    #[test]
+    fn modules_load_after_those_they_need() {
+        let deps = "kernel/crypto/xor.ko.zst:\n\
+                    kernel/fs/btrfs/btrfs.ko.zst: kernel/lib/raid6/raid6_pq.ko.zst \
+                    kernel/crypto/xor.ko.zst\n\
+                    kernel/lib/raid6/raid6_pq.ko.zst: kernel/crypto/xor.ko.zst\n\
+                    kernel/fs/ext4/ext4.ko.zst: kernel/fs/mbcache.ko.zst\n";
+        assert_eq!(
+            load_order(deps, "btrfs").unwrap(),
+            [
+                "kernel/crypto/xor.ko.zst",
+                "kernel/lib/raid6/raid6_pq.ko.zst",
+                "kernel/fs/btrfs/btrfs.ko.zst"
+            ]
+        );
+        assert_eq!(load_order(deps, "vfat"), None);
+        // A loop in the listing still ends, with each module once.
+        let looped = "a.ko: b.ko\nb.ko: a.ko\n";
+        assert_eq!(load_order(looped, "a").unwrap(), ["a.ko", "b.ko"]);
+    }
+
+    #[test]
+    fn the_btrfs_files_are_noise_and_text() {
+        let plain = noise(3, 1 << 16);
+        assert_eq!(plain.len(), 1 << 16);
+        assert_ne!(plain, noise(4, 1 << 16), "each file differs");
+        let words = text(3, 1 << 16);
+        assert_eq!(words.len(), 1 << 16);
+        assert!(words.iter().all(|&b| b.is_ascii_lowercase() || b == b' ' || b == b'\n'));
+    }
+
+    #[test]
     fn initramfs_is_newc() {
-        let archive = initramfs(b"\x7fELF", b"\x7fELF");
+        let modules = [("00-btrfs.ko.zst".to_string(), b"(\xb5/\xfd".to_vec())];
+        let archive = initramfs(b"\x7fELF", b"\x7fELF", &modules);
         assert!(archive.starts_with(b"070701"));
         assert_eq!(archive.len() % 4, 0);
         let text = String::from_utf8_lossy(&archive);
-        for name in ["dev\0", "dev/console\0", "init\0", "posix-bench\0", "TRAILER!!!\0"] {
+        for name in [
+            "dev\0",
+            "dev/console\0",
+            "init\0",
+            "posix-bench\0",
+            "modules\0",
+            "modules/00-btrfs.ko.zst\0",
+            "TRAILER!!!\0",
+        ] {
             assert!(text.contains(name), "{name}");
         }
         // Every header starts on a 4-byte boundary: the next magic number

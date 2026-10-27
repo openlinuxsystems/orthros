@@ -11,15 +11,16 @@
 //! the extent's size reads as zeros after its end, as on Linux; data that
 //! does not decode fails the read with `Io`.
 //!
-//! A filesystem has one [`Workspace`] of buffers and tables, made at its
-//! first compressed read and dropped when memory runs short; reads of
-//! compressed extents take its lock in turn. A file's page cache keeps
+//! A filesystem has a [`Workspace`] of buffers and tables, made at its
+//! first compressed read, and a second for the half of a run another CPU
+//! uncompresses (ADR 0133), both dropped when memory runs short; reads of
+//! compressed extents take their lock in turn. A file's page cache keeps
 //! every page of an extent once it is uncompressed, so it is uncompressed
 //! once.
 
 use radix_block::PAGE_SIZE;
 use radix_block::mem::CachePage;
-use radix_vfs::mem::KVec;
+use radix_vfs::mem::{self, KBox, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::extent::Compression;
@@ -35,8 +36,9 @@ pub const MAX_COMPRESSED: usize = 128 * 1024;
 
 /// Buffers and tables for uncompressing extents.
 pub(crate) struct Workspace {
-    /// A sector being read.
-    pub(crate) sector: CachePage,
+    /// An extent's compressed sectors, as the disk gives them, a page
+    /// each.
+    pub(crate) pages: KVec<CachePage>,
     /// An extent's compressed bytes.
     pub(crate) input: KVec<u8>,
     /// Its data: room for an extent and for a segment of LZO past it.
@@ -47,13 +49,24 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new() -> Result<Workspace> {
+        let mut pages = mem::vec_with_capacity(MAX_COMPRESSED / PAGE_SIZE)?;
+        for _ in 0..MAX_COMPRESSED / PAGE_SIZE {
+            mem::push(&mut pages, CachePage::new()?)?;
+        }
         Ok(Workspace {
-            sector: CachePage::new()?,
+            pages,
             input: crate::zeroed(MAX_COMPRESSED)?,
             output: crate::zeroed(MAX_UNCOMPRESSED + lzo::SEGMENT_MAX)?,
             inflate: None,
             zstd: None,
         })
+    }
+
+    /// A new workspace, on the heap: in a frame of its own, as a workspace
+    /// is large.
+    #[inline(never)]
+    pub(crate) fn boxed() -> Result<KBox<Workspace>> {
+        Ok(mem::boxed(Workspace::new()?)?)
     }
 
     /// Uncompresses the first `input` bytes of [`Workspace::input`] into

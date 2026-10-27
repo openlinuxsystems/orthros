@@ -54,6 +54,7 @@ mod console;
 mod crashlog;
 mod domains;
 mod fs;
+mod join;
 mod kdb;
 mod oom;
 mod panic;
@@ -225,6 +226,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     report::cpus(online);
     sched::start_threads();
     work::start();
+    join::start();
     oom::start();
     fs::disk::init();
     fs::writeback::start();

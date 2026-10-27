@@ -123,8 +123,15 @@ pub fn crc32c(data: &[u8]) -> u32 {
 
 /// The CRC-32C register `crc` after `data`, with neither the first nor
 /// the last inversion: Btrfs hashes names with it, from `!1`
-/// ([`crate::format::name_hash`]).
+/// ([`crate::format::name_hash`]). The processor's instruction works it
+/// out where it has one ([`radix_hw::crc32c`]), over ten times as fast
+/// as the tables.
 pub fn crc32c_update(crc: u32, data: &[u8]) -> u32 {
+    radix_hw::crc32c::crc32c(crc, data).unwrap_or_else(|| crc32c_tables(crc, data))
+}
+
+/// [`crc32c_update`] with the tables.
+pub fn crc32c_tables(crc: u32, data: &[u8]) -> u32 {
     let mut crc = crc;
     let (words, rest) = data.as_chunks::<8>();
     for word in words {

@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use radix_block::mem::CachePage;
 use radix_block::{PAGE_SIZE, Page, SegmentMut};
 use radix_sync::{Mutex, Once};
-use radix_vfs::cache::{Backing, FileCache};
+use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
 use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat, now};
@@ -35,7 +35,7 @@ use crate::format::{Key, item, name_hash, tree};
 use crate::fs::{Inner, Txn};
 use crate::inode::{self, Inode};
 use crate::tree::{Cursor, Root};
-use crate::unpack;
+use crate::unpack::{self, Workspace};
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -70,6 +70,9 @@ pub struct BtrfsNode {
     cache: Option<FileCache>,
     /// Whether it has no names left: its items go when it does.
     removed: AtomicBool,
+    /// Whether its items went with its last name, as no one had it open:
+    /// none are left for it to free.
+    freed: AtomicBool,
     /// Whether the filesystem keeps it for the next sync.
     pinned: AtomicBool,
     /// Itself, to be kept.
@@ -108,6 +111,7 @@ impl BtrfsNode {
             kind,
             cache,
             removed: AtomicBool::new(false),
+            freed: AtomicBool::new(false),
             pinned: AtomicBool::new(false),
             me: Once::new(),
         })
@@ -302,9 +306,10 @@ impl BtrfsNode {
             Some((into, Extent::Regular(extent))) => {
                 drop(cursor);
                 if extent.compression == Compression::None {
-                    self.read_plain(&extent, into, page)?;
+                    let segment = SegmentMut { page: &mut *page, offset: 0, len: PAGE_SIZE };
+                    self.read_plain(&extent, into, &mut [segment])?;
                 } else {
-                    self.read_compressed(&extent, pos - into, into, page, more)?;
+                    self.read_compressed(&extent, pos - into, index, page, more)?;
                 }
             }
         }
@@ -313,9 +318,71 @@ impl BtrfsNode {
         Ok(())
     }
 
-    /// Reads the page `into` bytes into `extent`, uncompressed, into
-    /// `page`.
-    fn read_plain(&self, extent: &Regular, into: u64, page: &mut Page) -> Result<()> {
+    /// Reads the file's pages from `index` on into `pages`, in the file of
+    /// `size` bytes: as many as the extent that holds page `index` has
+    /// from there, up to one for each of `pages`, each run of sectors in
+    /// one request to the disk; or, from a compressed extent, as many as
+    /// it and the compressed extents after it in the file have, each
+    /// read whole, half of them uncompressed on another CPU
+    /// ([`BtrfsNode::read_packed`]). Returns how many; pages of the first
+    /// extent outside them go to `more`.
+    fn read_run(
+        &self,
+        index: u64,
+        pages: &mut [CachePage],
+        size: u64,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let _reading = self.fs.reading();
+        let pos = index * PAGE;
+        let key = Key::new(self.ino, item::EXTENT_DATA, pos);
+        let cursor = Cursor::seek_last(&self.fs.volume, &self.tree()?, &key)?;
+        let found = match cursor.as_ref().and_then(Cursor::get) {
+            Some((at, data)) if at.is(self.ino, item::EXTENT_DATA) => match Extent::read(data)? {
+                Extent::Regular(extent)
+                    if extent.disk_bytenr != 0 && pos - at.offset < extent.num_bytes =>
+                {
+                    Some((at.offset, extent))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((start, extent)) = found else {
+            drop(cursor);
+            // A hole, or an inline or preallocated extent: a page.
+            let page = pages.first_mut().ok_or(Error::Io)?;
+            self.read_page_in(index, page, page_len(index, size), more)?;
+            return Ok(1);
+        };
+        let read = if extent.compression == Compression::None {
+            drop(cursor);
+            let mut segments = mem::vec_with_capacity(pages.len())?;
+            for page in pages.iter_mut() {
+                mem::push(&mut segments, SegmentMut { page, offset: 0, len: PAGE_SIZE })?;
+            }
+            self.read_plain(&extent, pos - start, &mut segments)?
+        } else {
+            let end = (index + pages.len() as u64) * PAGE;
+            let extents = packed_run(self.ino, cursor, (start, extent), end)?;
+            self.read_packed(&extents, index, pages, more)?
+        };
+        for (at, page) in (index..).zip(&mut pages[..read]) {
+            page.bytes_mut()[page_len(at, size)..].fill(0);
+        }
+        Ok(read)
+    }
+
+    /// Reads the pages `into` bytes into the uncompressed `extent` on into
+    /// those of `segments`: as many as it has room for and the extent
+    /// holds, at least one, up to one that cannot be read. Returns how
+    /// many.
+    fn read_plain(
+        &self,
+        extent: &Regular,
+        into: u64,
+        segments: &mut [SegmentMut<'_>],
+    ) -> Result<usize> {
         // Within the extent on the disk, and a whole sector of it: damage
         // may say otherwise.
         let Regular { disk_bytenr, disk_num_bytes, offset, num_bytes, .. } = *extent;
@@ -327,45 +394,194 @@ impl BtrfsNode {
             .checked_add(offset + into)
             .filter(|at| at.is_multiple_of(PAGE))
             .ok_or(Error::Corrupt)?;
-        self.read_data(logical, page)
+        let left = usize::try_from((num_bytes - into) / PAGE).unwrap_or(usize::MAX);
+        let n = segments.len().min(left.max(1));
+        self.read_sectors(logical, &mut segments[..n])
     }
 
-    /// Reads the page `into` bytes into the compressed `extent`, which
-    /// starts at `start` in the file, into `page`: the whole extent is
-    /// read, checked and uncompressed, and its other pages offered to
-    /// `more`.
+    /// Reads the file's pages from `index` on into `pages` from the
+    /// compressed `extents` ([`packed_run`]), the first holding page
+    /// `index`: the first half of them here, the rest on another CPU when
+    /// one is free (`radix_vfs::join`), each half with a workspace of its
+    /// own. Pages of the first extent outside `pages` go to `more`.
+    /// Returns how many of `pages` from the first on are filled.
+    fn read_packed(
+        &self,
+        extents: &[(u64, Regular)],
+        index: u64,
+        pages: &mut [CachePage],
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let mine = extents.len().div_ceil(2);
+        let at = match extents.get(mine) {
+            Some(&(start, _)) => usize::try_from((start / PAGE).saturating_sub(index))
+                .ok()
+                .filter(|&at| at > 0 && at < pages.len()),
+            None => None,
+        };
+        self.fs.with_workspaces(at.is_some(), |own, other| {
+            let (Some(at), Some(other)) = (at, other) else {
+                return self.unpack(own, extents, index, Some(index), pages, more);
+            };
+            let (mine, theirs) = extents.split_at(mine);
+            let (head, tail) = pages.split_at_mut(at);
+            let (mut first, mut second) = (Ok(0), Ok(0));
+            let from = index + at as u64;
+            radix_vfs::join(
+                || first = self.unpack(own, mine, index, Some(index), head, more),
+                || second = self.unpack(other, theirs, from, None, tail, &mut |_, _| false),
+            );
+            let first = first?;
+            // The second half's pages count when the first's are all
+            // there; its failure leaves the run at the first's end.
+            Ok(if first == at { at + second.unwrap_or(0) } else { first })
+        })
+    }
+
+    /// Reads the compressed `extents`, which follow each other in the file,
+    /// with `workspace`: those that follow each other on the disk too, as
+    /// many as its pages hold, in one request, then each uncompressed. The
+    /// whole pages of each in the file, and page `asked` whatever its
+    /// data, go into `pages` (the file's pages from `base` on) or, when
+    /// not among them, to `more`, until it returns false. Returns how many
+    /// of `pages` from the first on are filled, at least the one asked
+    /// for: an extent that cannot be read or uncompressed fails the read
+    /// when none is, and ends it otherwise. A frame of its own, not one in
+    /// each of the join's halves.
+    #[inline(never)]
+    fn unpack(
+        &self,
+        workspace: &mut Workspace,
+        extents: &[(u64, Regular)],
+        base: u64,
+        asked: Option<u64>,
+        pages: &mut [CachePage],
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        let mut filled = 0;
+        let mut offer = true;
+        let stop = |filled: usize, e: Error| if filled > 0 { Ok(filled) } else { Err(e) };
+        let mut next = 0;
+        while let Some(&(_, first)) = extents.get(next) {
+            // The extents from `next` that follow each other on the disk.
+            let mut sectors = packed_sizes(&first)?.0;
+            let mut count = 1;
+            while let Some((_, extent)) = extents.get(next + count) {
+                let (_, last) = extents[next + count - 1];
+                let follows =
+                    last.disk_bytenr.checked_add(last.disk_num_bytes) == Some(extent.disk_bytenr);
+                let n = packed_sizes(extent)?.0;
+                if !follows || sectors + n > workspace.pages.len() {
+                    break;
+                }
+                sectors += n;
+                count += 1;
+            }
+            let group = &extents[next..next + count];
+            next += count;
+            let mut segments = match mem::vec_with_capacity(sectors) {
+                Ok(segments) => segments,
+                Err(e) => return stop(filled, e.into()),
+            };
+            for page in workspace.pages.iter_mut().take(sectors) {
+                let _ =
+                    segments.push_within_capacity(SegmentMut { page, offset: 0, len: PAGE_SIZE });
+            }
+            let read = match self.read_sectors(first.disk_bytenr, &mut segments) {
+                Ok(read) => read,
+                Err(e) => return stop(filled, e),
+            };
+            drop(segments);
+            let mut sector = 0;
+            for &(start, extent) in group {
+                let (n, len) = packed_sizes(&extent)?;
+                if sector + n > read {
+                    return stop(filled, Error::Io);
+                }
+                for (at, page) in workspace.pages[sector..sector + n].iter().enumerate() {
+                    workspace.input[at * PAGE_SIZE..(at + 1) * PAGE_SIZE]
+                        .copy_from_slice(page.bytes());
+                }
+                sector += n;
+                let compressed = n * PAGE_SIZE;
+                let data =
+                    match workspace.unpack_input(extent.compression, compressed, len, PAGE_SIZE) {
+                        Ok(data) => data,
+                        Err(e) => return stop(filled, e),
+                    };
+                let end = start.checked_add(extent.num_bytes).ok_or(Error::Corrupt)?;
+                let mut at = start.next_multiple_of(PAGE);
+                while at < end {
+                    let page = at / PAGE;
+                    let whole = at.checked_add(PAGE).is_some_and(|after| after <= end);
+                    let from = extent.offset.saturating_add(at - start);
+                    let from =
+                        usize::try_from(from).map_or(data.len(), |from| from.min(data.len()));
+                    // The page asked for whatever it holds; others whole,
+                    // and within the extent's data: the rest are read when
+                    // asked for.
+                    let given = (whole && from < data.len()) || asked == Some(page);
+                    match page.checked_sub(base).and_then(|k| usize::try_from(k).ok()) {
+                        Some(k) if k < pages.len() => {
+                            if !given {
+                                break;
+                            }
+                            if k == filled {
+                                copy_from(data, from as u64, pages[k].bytes_mut());
+                                filled += 1;
+                            }
+                        }
+                        // The cache takes no more when memory is short.
+                        _ if given && offer => {
+                            offer = more(page, &data[from..(from + PAGE_SIZE).min(data.len())]);
+                        }
+                        _ => {}
+                    }
+                    let Some(after) = at.checked_add(PAGE) else { break };
+                    at = after;
+                }
+            }
+        }
+        if filled == 0 && asked.is_some() {
+            return Err(Error::Corrupt);
+        }
+        Ok(filled)
+    }
+
+    /// Reads the compressed `extent`, which starts at `start` in the file
+    /// and holds its page `index`: the whole extent is read in one
+    /// request, checked and uncompressed, page `index` copied into `page`,
+    /// and each other whole page of the file it holds given to `put`, in
+    /// order, until `put` returns false.
     fn read_compressed(
         &self,
         extent: &Regular,
         start: u64,
-        into: u64,
+        index: u64,
         page: &mut Page,
-        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+        put: &mut dyn FnMut(u64, &[u8]) -> bool,
     ) -> Result<()> {
-        let Regular { disk_bytenr, disk_num_bytes, offset, num_bytes, ram_bytes, compression } =
-            *extent;
-        let compressed = usize::try_from(disk_num_bytes).map_err(|_| Error::Corrupt)?;
-        let len = usize::try_from(ram_bytes).map_err(|_| Error::Corrupt)?;
+        let Regular { disk_bytenr, offset, num_bytes, compression, .. } = *extent;
+        let (sectors, len) = packed_sizes(extent)?;
+        let compressed = sectors * PAGE_SIZE;
         let end = start.checked_add(num_bytes).ok_or(Error::Corrupt)?;
-        if compressed == 0
-            || compressed > unpack::MAX_COMPRESSED
-            || !compressed.is_multiple_of(PAGE_SIZE)
-            || !disk_bytenr.is_multiple_of(PAGE)
-            || disk_bytenr.checked_add(disk_num_bytes).is_none()
-            || len > unpack::MAX_UNCOMPRESSED
-        {
-            return Err(Error::Corrupt);
-        }
+        let into = (index * PAGE).checked_sub(start).ok_or(Error::Corrupt)?;
         self.fs.with_workspace(|workspace| {
-            for at in (0..compressed).step_by(PAGE_SIZE) {
-                self.read_data(disk_bytenr + at as u64, &mut workspace.sector)?;
-                workspace.input[at..at + PAGE_SIZE].copy_from_slice(workspace.sector.bytes());
+            let mut segments = mem::vec_with_capacity(sectors)?;
+            for page in workspace.pages.iter_mut().take(sectors) {
+                mem::push(&mut segments, SegmentMut { page, offset: 0, len: PAGE_SIZE })?;
+            }
+            if self.read_sectors(disk_bytenr, &mut segments)? < sectors {
+                return Err(Error::Io);
+            }
+            drop(segments);
+            for (at, page) in workspace.pages.iter().take(sectors).enumerate() {
+                workspace.input[at * PAGE_SIZE..(at + 1) * PAGE_SIZE].copy_from_slice(page.bytes());
             }
             let data = workspace.unpack_input(compression, compressed, len, PAGE_SIZE)?;
             copy_from(data, offset.saturating_add(into), page.bytes_mut());
             // The extent's other whole pages in the file, for its cache,
             // as far as its data goes.
-            let index = (start + into) / PAGE;
             let mut at = start.next_multiple_of(PAGE);
             while at.checked_add(PAGE).is_some_and(|next| next <= end) {
                 let Some(from) = offset
@@ -375,14 +591,78 @@ impl BtrfsNode {
                 else {
                     break;
                 };
-                if at / PAGE != index && !more(at / PAGE, &data[from..(from + PAGE_SIZE).min(len)])
-                {
+                if at / PAGE != index && !put(at / PAGE, &data[from..(from + PAGE_SIZE).min(len)]) {
                     break;
                 }
                 at += PAGE;
             }
             Ok(())
         })
+    }
+
+    /// Reads the data sectors from logical address `logical` on into the
+    /// pages of `segments`, one each, in as few requests to the disk as
+    /// it takes, and checks them against their checksums. A sector whose checksum fails,
+    /// or each of them when the request does, is read again on its own,
+    /// from the first copy that holds it whole ([`BtrfsNode::read_data`]).
+    /// Returns how many sectors from the first on it read: those up to one
+    /// that no copy gives, which fails the read if it is the first. The
+    /// pages from there on hold no data.
+    fn read_sectors(&self, logical: u64, segments: &mut [SegmentMut<'_>]) -> Result<usize> {
+        let volume = &self.fs.volume;
+        let bytes = segments.len() as u64 * PAGE;
+        let place = volume.place(logical)?;
+        let read = match place.copies().first() {
+            Some(&physical)
+                if place.len >= bytes
+                    && physical
+                        .checked_add(bytes)
+                        .is_some_and(|end| end <= volume.device_bytes()) =>
+            {
+                let device = volume.device();
+                let most = device.info().max_segments.max(1);
+                (physical..).step_by(most * PAGE_SIZE).zip(segments.chunks_mut(most)).all(
+                    |(physical, part)| device.read(physical / radix_block::SECTOR, part).is_ok(),
+                )
+            }
+            _ => false,
+        };
+        let again =
+            |at: usize, page: &mut Page| match self.read_data(logical + at as u64 * PAGE, page) {
+                Ok(()) => Ok(None),
+                Err(e) if at == 0 => Err(e),
+                Err(_) => Ok(Some(at)),
+            };
+        if !read {
+            for (at, segment) in segments.iter_mut().enumerate() {
+                if let Some(good) = again(at, segment.page)? {
+                    return Ok(good);
+                }
+            }
+            return Ok(segments.len());
+        }
+        for segment in segments.iter_mut() {
+            radix_hw::device_wrote(segment.page.bytes_mut());
+        }
+        if !self.inode().has_sums() {
+            return Ok(segments.len());
+        }
+        // Data without its checksum fails, as on Linux.
+        let csums = self.fs.csums()?.ok_or(Error::Io)?;
+        let mut bad = mem::vec();
+        let mut noted = Ok(());
+        extent::check_sums(volume, &csums, logical, segments, &mut |at| {
+            if noted.is_ok() {
+                noted = mem::push(&mut bad, at);
+            }
+        })?;
+        noted?;
+        for at in bad {
+            if let Some(good) = again(at, segments[at].page)? {
+                return Ok(good);
+            }
+        }
+        Ok(segments.len())
     }
 
     /// Reads the data sector at logical address `logical` into `page`,
@@ -646,6 +926,20 @@ impl Backing for FileBacking<'_> {
         self.0.read_page(index, page, len, more)
     }
 
+    fn read_run(
+        &self,
+        index: u64,
+        pages: &mut [CachePage],
+        size: u64,
+        more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        self.0.read_run(index, pages, size, more)
+    }
+
+    fn run_pages(&self) -> usize {
+        radix_vfs::cache::READ_RUN
+    }
+
     fn write_page(&self, index: u64, page: &Page, len: usize) -> Result<()> {
         self.0.write_run(index, &[page], len)
     }
@@ -862,19 +1156,42 @@ impl Node for BtrfsNode {
         self.is_dir()?;
         check_name(name)?;
         let time = now();
-        self.fs.freeing(|txn| {
+        let mut taken = None;
+        let removed = self.fs.freeing(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             let (ino, old) = self.named(&files, name)?;
             if old.kind()? == Kind::Directory && !files.is_empty_dir(ino)? {
                 return Err(Error::NotEmpty);
             }
             let live = self.fs.live(self.subvol, ino);
+            // A file no one has open, kept only for the sync, goes with its
+            // last name, as Linux evicts an inode then: its pages are never
+            // written, and its items go now, with no orphan item.
+            let last = old.kind()? == Kind::Directory || old.nlink <= 1;
+            let idle = last && live.as_ref().is_some_and(|node| self.fs.take_idle(node));
+            if idle {
+                taken.clone_from(&live);
+            }
             let gone = files.whole(|f| {
-                BtrfsNode::unname(f, self.ino, name.as_bytes(), ino, &old, live.is_some(), time)
+                let open = live.is_some() && !idle;
+                BtrfsNode::unname(f, self.ino, name.as_bytes(), ino, &old, open, time)
             })?;
+            if let Some(node) = live.as_ref().filter(|_| idle) {
+                node.removed.store(true, Ordering::Release);
+                node.freed.store(true, Ordering::Release);
+            }
             self.reload(&files)?;
             self.after(&files, ino, gone)
-        })
+        });
+        // Taken for nothing, the name staying: back to the sync, or written
+        // now without the memory to keep it.
+        if let Some(node) = taken
+            && !node.freed.load(Ordering::Acquire)
+            && !node.pin()
+        {
+            node.flush()?;
+        }
+        removed
     }
 
     fn rename(&self, from: &str, to_dir: &dyn Node, to: &str) -> Result<()> {
@@ -1028,13 +1345,15 @@ impl BtrfsNode {
 
 impl Drop for BtrfsNode {
     /// A node of an inode with no names left was all that kept its items:
-    /// they go at the next sync.
+    /// they go at the next sync, unless they went with its last name.
     fn drop(&mut self) {
         if *self.removed.get_mut() {
             // Its dirty pages are never written: their room goes back.
             let pages = self.dirty_pages();
             self.fs.release_data(pages as u64 * PAGE);
-            self.fs.reaped(self.subvol, self.ino);
+            if !*self.freed.get_mut() {
+                self.fs.reaped(self.subvol, self.ino);
+            }
         }
     }
 }
@@ -1053,6 +1372,62 @@ impl BtrfsNode {
             None => 0,
         }
     }
+}
+
+/// The most compressed extents a run takes: 1 MiB of data.
+const RUN_EXTENTS: usize = 8;
+
+/// The sectors of the disk that the compressed `extent` takes, and its
+/// data's size; fails with `Corrupt` when they are not what Linux makes.
+fn packed_sizes(extent: &Regular) -> Result<(usize, usize)> {
+    let compressed = usize::try_from(extent.disk_num_bytes).map_err(|_| Error::Corrupt)?;
+    let len = usize::try_from(extent.ram_bytes).map_err(|_| Error::Corrupt)?;
+    if compressed == 0
+        || compressed > unpack::MAX_COMPRESSED
+        || !compressed.is_multiple_of(PAGE_SIZE)
+        || !extent.disk_bytenr.is_multiple_of(PAGE)
+        || extent.disk_bytenr.checked_add(extent.disk_num_bytes).is_none()
+        || len > unpack::MAX_UNCOMPRESSED
+    {
+        return Err(Error::Corrupt);
+    }
+    Ok((compressed / PAGE_SIZE, len))
+}
+
+/// The compressed extents of a run that ends at `end` in the file of
+/// inode `ino`: `first`, (its start in the file, it), at `cursor`, and
+/// those right after it in the file, compressed and whole before `end`,
+/// up to [`RUN_EXTENTS`] in all. What does not read stops the run, for a
+/// read of its own to find.
+fn packed_run(
+    ino: u64,
+    cursor: Option<Cursor<'_>>,
+    first: (u64, Regular),
+    end: u64,
+) -> Result<KVec<(u64, Regular)>> {
+    let mut extents = mem::vec_with_capacity(RUN_EXTENTS)?;
+    mem::push(&mut extents, first)?;
+    let Some(mut cursor) = cursor else { return Ok(extents) };
+    let mut next = first.0.checked_add(first.1.num_bytes).ok_or(Error::Corrupt)?;
+    while extents.len() < RUN_EXTENTS && cursor.advance().is_ok() {
+        let Some((at, data)) = cursor.get() else { break };
+        if !at.is(ino, item::EXTENT_DATA) || at.offset != next || !at.offset.is_multiple_of(PAGE) {
+            break;
+        }
+        let Ok(Extent::Regular(extent)) = Extent::read(data) else { break };
+        let after = at.offset.checked_add(extent.num_bytes);
+        if extent.compression == Compression::None
+            || extent.disk_bytenr == 0
+            || extent.num_bytes == 0
+            || after.is_none_or(|after| after > end)
+            || packed_sizes(&extent).is_err()
+        {
+            break;
+        }
+        mem::push(&mut extents, (at.offset, extent))?;
+        next = at.offset + extent.num_bytes;
+    }
+    Ok(extents)
 }
 
 /// Copies `data` from byte `from` on into `to`, with zeros after its end.

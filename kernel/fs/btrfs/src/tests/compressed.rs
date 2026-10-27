@@ -547,6 +547,40 @@ fn damaged_compressed_data_is_read_from_its_other_copy_or_fails() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A run of compressed extents, halves of it uncompressed on two threads,
+/// ends before an extent that does not read, in either half: the reads
+/// before it and after it are the file's, and one of it fails.
+#[test]
+fn a_run_of_compressed_extents_ends_before_one_that_fails() {
+    let dir = scratch("compressed-run-damage");
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = sample(51, 1 << 20);
+    std::fs::write(dir.join("text"), &text).unwrap();
+    let image = mkfs(&["--compress", "zstd"], &dir);
+    let found: Vec<Regular> = extents(&image).into_iter().filter_map(|f| f.regular).collect();
+    assert_eq!(found.len(), 8);
+    let piece = 128 << 10;
+    // The first run is the first four extents: two in each half.
+    for (damaged, extent) in found.iter().enumerate().take(4) {
+        let mut image = image.clone();
+        let at = open(&image).unwrap().place(extent.disk_bytenr).unwrap().copies()[0];
+        image[at as usize + 100] ^= 1;
+        let fs = mount(&image).unwrap();
+        let file = fs.root().lookup("text").unwrap();
+        let mut buf = vec![0; piece];
+        for n in 0..8 {
+            let read = file.read((n * piece) as u64, &mut SliceMut(&mut buf));
+            if n == damaged {
+                assert_eq!(read, Err(Error::Io), "extent {damaged}");
+            } else {
+                assert_eq!(read, Ok(piece), "extent {damaged}, piece {n}");
+                assert!(buf == text[n * piece..(n + 1) * piece], "extent {damaged}, piece {n}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Compressed extents with damage the checksums do not see (as though
 /// they were damaged before they were written): every one decodes or
 /// fails, and none panics or makes more than its size.

@@ -45,8 +45,9 @@
 //!
 //! `ob bench` runs it on the host, and also as the init process of a Linux
 //! virtual machine set up like the one Radix runs in: as process 1 it
-//! mounts `/proc` and `/dev`, prints `linux-bench: done` at the end and
-//! powers the machine off.
+//! mounts `/proc` and `/dev`, loads the kernel modules of the initramfs
+//! (Btrfs, where the kernel has it as a module), mounts the Btrfs disk,
+//! prints `linux-bench: done` at the end and powers the machine off.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -63,6 +64,20 @@ const POSIX_BENCH: &str = "/posix-bench";
 /// a virtio disk and an NVMe one.
 const DISK: &str = "/dev/vda";
 const NVME: &str = "/dev/nvme0n1";
+
+/// The virtual machine's Btrfs disk, for the POSIX benchmarks' Btrfs
+/// benchmarks, and where it is mounted.
+const BTRFS_DISK: &str = "/dev/vdb";
+const BTRFS_AT: &str = "/mnt/vdb";
+
+/// Where `ob bench` puts the kernel modules the disk needs, in the
+/// initramfs: named so that they load in the order of their names.
+const MODULES: &str = "/modules";
+
+/// finit_module(2)'s flag for a compressed module, which the kernel
+/// uncompresses itself (Linux 6.6 and later, with
+/// CONFIG_MODULE_DECOMPRESS).
+const MODULE_INIT_COMPRESSED_FILE: libc::c_uint = 4;
 
 fn main() {
     let mut rounds = 100_000u64;
@@ -84,6 +99,7 @@ fn main() {
     if std::process::id() == 1 {
         mount("proc", "/proc");
         mount("devtmpfs", "/dev");
+        load_modules();
     }
     let cpus = allowed_cpus();
     let Some(&first) = cpus.first() else {
@@ -144,6 +160,9 @@ fn main() {
             }
             there
         });
+        if std::process::id() == 1 && mount_btrfs() {
+            disks.push(("--btrfs", Path::new(BTRFS_AT)));
+        }
         posix_bench(&program, &cpus, &disks);
     }
 
@@ -507,6 +526,57 @@ fn mount(kind: &str, at: &str) {
     if result != 0 {
         eprintln!("linux-bench: cannot mount {at}: {}", std::io::Error::last_os_error());
     }
+}
+
+/// Loads the kernel modules in [`MODULES`], in the order of their names.
+fn load_modules() {
+    let Ok(entries) = std::fs::read_dir(MODULES) else { return };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|entry| Some(entry.ok()?.path())).collect();
+    paths.sort();
+    for path in paths {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("linux-bench: cannot open {}: {err}", path.display());
+                continue;
+            }
+        };
+        let compressed = path.extension().is_some_and(|e| e == "zst" || e == "xz" || e == "gz");
+        let flags = if compressed { MODULE_INIT_COMPRESSED_FILE } else { 0 };
+        // SAFETY: the descriptor is open, and the parameters are an empty
+        // NUL-terminated string that lives through the call.
+        let result =
+            unsafe { libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), c"".as_ptr(), flags) };
+        let err = std::io::Error::last_os_error();
+        if result != 0 && err.raw_os_error() != Some(libc::EEXIST) {
+            eprintln!("linux-bench: cannot load {}: {err}", path.display());
+        }
+    }
+}
+
+/// Mounts the Btrfs disk [`BTRFS_DISK`] on [`BTRFS_AT`], as Linux's
+/// `mount` does with no options; returns whether it did.
+fn mount_btrfs() -> bool {
+    if !Path::new(BTRFS_DISK).exists() {
+        eprintln!("linux-bench: the virtual machine has no {BTRFS_DISK}, for the Btrfs benchmarks");
+        return false;
+    }
+    let _ = std::fs::create_dir_all(BTRFS_AT);
+    // SAFETY: the strings are NUL-terminated and live through the call;
+    // the mount takes no data.
+    let result = unsafe {
+        libc::mount(
+            c"/dev/vdb".as_ptr(),
+            c"/mnt/vdb".as_ptr(),
+            c"btrfs".as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        eprintln!("linux-bench: cannot mount {BTRFS_DISK}: {}", std::io::Error::last_os_error());
+    }
+    result == 0
 }
 
 fn print_line(name: &str, started: Instant, count: u64) {
