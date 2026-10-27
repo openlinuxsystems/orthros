@@ -776,6 +776,99 @@ fn a_gap_that_cannot_be_zeroed_gives_its_room_back() {
     assert_eq!(cache.size(), 0);
 }
 
+/// A disk for one file whose page `i` holds the byte `i` throughout, read
+/// in runs of at most `most` pages, with the runs asked for recorded.
+struct RunDisk {
+    most: usize,
+    runs: StdMutex<Vec<(u64, usize)>>,
+}
+
+impl Backing for RunDisk {
+    fn persistent(&self) -> bool {
+        true
+    }
+
+    fn read_page(&self, index: u64, page: &mut radix_block::Page, len: usize) -> Result<()> {
+        page.bytes_mut()[..len].fill(index as u8);
+        Ok(())
+    }
+
+    fn read_run(
+        &self,
+        index: u64,
+        pages: &mut [mem::CachePage],
+        size: u64,
+        _more: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<usize> {
+        self.runs.lock().unwrap().push((index, pages.len()));
+        let n = pages.len().min(self.most);
+        for (at, page) in (index..).zip(&mut pages[..n]) {
+            let len = size.saturating_sub(at * 4096).min(4096) as usize;
+            page.bytes_mut().fill(0);
+            self.read_page(at, page, len)?;
+        }
+        Ok(n)
+    }
+
+    fn run_pages(&self) -> usize {
+        usize::MAX
+    }
+
+    fn reserve(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn truncate(&self, _: u64) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Reads `len` bytes at `offset` through `cache` and checks them against
+/// [`RunDisk`]'s pattern; returns the runs the read asked for.
+fn read_runs(cache: &FileCache, disk: &RunDisk, offset: u64, len: usize) -> Vec<(u64, usize)> {
+    let mut out = std::vec![0xaau8; len];
+    let read = cache.read(offset, &mut SliceMut(&mut out[..]), disk).unwrap();
+    let end = (offset + len as u64).min(cache.size());
+    assert_eq!(read as u64, end.saturating_sub(offset));
+    for (at, byte) in (offset..end).zip(&out) {
+        assert_eq!(*byte, (at / 4096) as u8, "byte {at}");
+    }
+    core::mem::take(&mut *disk.runs.lock().unwrap())
+}
+
+#[test]
+fn reads_go_to_the_disk_in_runs_and_read_ahead_when_sequential() {
+    use crate::cache::{READ_AHEAD, READ_RUN};
+    let disk = RunDisk { most: usize::MAX, runs: StdMutex::new(Vec::new()) };
+    // 1200 pages, the last one short.
+    let size = 1200 * 4096 - 100;
+    let cache = FileCache::new(size, 0);
+    let piece = 128 << 10;
+    // The start of the file: the read's 32 pages and as many again.
+    assert_eq!(read_runs(&cache, &disk, 0, piece), [(0, 32 + READ_AHEAD)]);
+    // Cached already.
+    assert_eq!(read_runs(&cache, &disk, piece as u64, piece), []);
+    // On from cached pages: read ahead again.
+    assert_eq!(read_runs(&cache, &disk, 2 * piece as u64, piece), [(64, 32 + READ_AHEAD)]);
+    // Elsewhere, no read ahead: the page read alone.
+    assert_eq!(read_runs(&cache, &disk, 300 * 4096 + 7, 10), [(300, 1)]);
+    // A run stops at a cached page, and goes on after it with read ahead.
+    assert_eq!(read_runs(&cache, &disk, 290 * 4096, 20 * 4096), [(290, 10), (301, 9 + READ_AHEAD)]);
+    // At most READ_RUN pages a run.
+    assert_eq!(read_runs(&cache, &disk, 400 * 4096, 2 << 20), [(400, READ_RUN), (656, READ_RUN)]);
+    // None past the end.
+    assert_eq!(read_runs(&cache, &disk, 1100 * 4096, 1 << 20), [(1100, 100)]);
+}
+
+#[test]
+fn a_run_read_short_keeps_what_was_read() {
+    let disk = RunDisk { most: 3, runs: StdMutex::new(Vec::new()) };
+    let cache = FileCache::new(20 * 4096, 0);
+    assert_eq!(read_runs(&cache, &disk, 0, 8 * 4096), [(0, 20), (3, 17), (6, 14)]);
+    // Pages 0 to 8 are cached; reads past them go on from there.
+    assert_eq!(read_runs(&cache, &disk, 0, 9 * 4096), []);
+}
+
 /// Which pages of a program's buffer of `len` bytes are there, `skew`
 /// bytes into its first page: page `i` if bit `i % 64` of `mask` is set.
 fn pages_made(len: usize, skew: usize, mask: u64) -> Vec<bool> {

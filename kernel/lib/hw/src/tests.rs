@@ -282,3 +282,50 @@ fn dma_accesses_are_checked() {
     let dma = Dma::fake(16);
     dma.write64(16, 1);
 }
+
+/// CRC-32C a bit at a time, as RFC 3720 defines it.
+fn crc32c_bits(crc: u32, data: &[u8]) -> u32 {
+    let mut crc = crc;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82f6_3b78 } else { crc >> 1 };
+        }
+    }
+    crc
+}
+
+#[test]
+fn crc32c_matches_its_definition() {
+    let Some(_) = crate::crc32c::crc32c(0, b"") else {
+        std::eprintln!("no CRC-32C instruction here");
+        return;
+    };
+    // RFC 3720, B.4: 32 bytes of zeros, of ones, counting up and down.
+    let up: Vec<u8> = (0..32).collect();
+    let down: Vec<u8> = (0..32).rev().collect();
+    for (data, sum) in [
+        (&[0u8; 32][..], 0x8a91_36aa),
+        (&[0xff; 32][..], 0x62a8_ab43),
+        (&up, 0x46dd_794e),
+        (&down, 0x113f_db5c),
+    ] {
+        assert_eq!(!crate::crc32c::crc32c(!0, data).unwrap(), sum);
+    }
+    // Every length around the three runs of a pass, from any register.
+    let mut seed = 0x1234_5678_9abc_def1u64;
+    let data: Vec<u8> = (0..3 * 4080 + 200)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+    for len in (0..64).chain(4000..4200).chain([8160, 8161, 12_240, 12_340]) {
+        for (start, crc) in [(0, 0), (3, !0), (5, 0xdead_beef)] {
+            let part = &data[start..start + len];
+            assert_eq!(crate::crc32c::crc32c(crc, part), Some(crc32c_bits(crc, part)), "{len}");
+        }
+    }
+}

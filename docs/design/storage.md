@@ -158,6 +158,12 @@ dirty.
 - A read copies from the pages to the caller, fetching missing pages
   through the file's `Backing` first. Bytes past the end read as nothing;
   a page never written reads as zeros.
+- A missing page is read with the pages after it, up to the read's last,
+  and when the read goes on from a cached page or starts the file,
+  `READ_AHEAD` (32) more, at most `READ_RUN` (256) in all, stopping at a
+  cached page and at the end (ADR 0132). The backing fills as many of
+  them as one read of its own gives (`Backing::read_run`; one, unless
+  the filesystem does better), and the cache keeps those.
 - A write copies into the pages and marks them dirty, growing the file
   first (`Backing::reserve`) if it ends past the end. The bytes between
   the old end and the new data are zeroed, in memory and on the disk
@@ -437,13 +443,19 @@ room before a change (ADR 0131), and the kernel mounts it writable.
   directory; the inode numbers of the top subvolume are its files' IDs,
   and other subvolumes' carry their number from bit 40.
 - `node::BtrfsNode` is a file, directory or link. A file's page cache
-  reads each page from its extent: a hole or a reserved extent reads as
-  zeros, an inline one from its item, and one on the disk straight into
-  the page, whose checksum must then match, or the next copy is read;
+  reads runs of pages from one extent: a hole or a reserved extent reads
+  as a page of zeros, an inline one from its item, and one on the disk
+  straight into the pages, as many as the run and the extent have, in
+  one request from the first copy, their checksums found in one walk of
+  the checksum tree (ADR 0132). A sector whose checksum fails, or each
+  of them when the request fails, is read again from the next copy;
   when none matches, or the sector has no checksum and the file is not
-  `NODATASUM`, the read fails with `Io`, as Linux's does. A compressed
-  extent is read whole, each sector checked so, uncompressed, and the
-  page copied out; its other pages are offered to the page cache
+  `NODATASUM`, the run ends before it, and fails with `Io` if it is the
+  run's first, as Linux's read does. CRC-32C is the processor's
+  instruction where it has one (`radix_hw::crc32c`), the tables
+  elsewhere. A compressed extent is read whole
+  in one request, checked so, uncompressed, and its pages copied out:
+  those of the run, and the others offered to the page cache
   (`Backing::read_pages`), which keeps those it lacks, so an extent is
   uncompressed once, as on Linux.
 - `inflate` (zlib, RFC 1950 and 1951), `zstd` (RFC 8878, with its XXH64
@@ -676,7 +688,8 @@ host, and reads everything back after a second boot.
   first things to measure as the trees grow.
 - A file's cache lock is held across its disk I/O, so one file has one
   request in flight; FAT holds one namespace lock for all directory work.
-- No read-ahead and no write clustering beyond one file's dirty pages in
+- Read-ahead is a fixed window, for Btrfs only (FAT reads a page per
+  request), and no write clustering beyond one file's dirty pages in
   order; no `O_DIRECT` for files (block devices are always raw).
 - Raw writes of parts of one sector through two different nodes (a disk
   and its partition) are not kept apart.

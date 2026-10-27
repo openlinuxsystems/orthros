@@ -15,6 +15,8 @@
 // and writes that disk, with nothing cached between (the disk
 // benchmarks), and with --nvme <device> that NVMe disk; `ob bench` gives
 // both systems the same virtio disk and NVMe disk, files on the host.
+// With --btrfs <directory> it reads, makes and removes files in that
+// directory, where `ob bench` has each system mount the same Btrfs disk.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -440,15 +442,80 @@ static void disk(const char *path, int nvme) {
 	close(fd);
 }
 
+// The files of the Btrfs disk `ob bench` makes with Linux's mkfs.btrfs,
+// each BTRFS_FILE bytes: `plain/<n>`, of bytes that do not compress, and
+// `zstd/<n>`, of text that zstd compresses, in 128 KiB extents as Linux
+// writes compressed files.
+#define BTRFS_FILES 32
+#define BTRFS_FILE (1u << 20)
+
+// What a read of a file asks for at a time: what cp and cat ask for.
+#define BTRFS_READ (128u << 10)
+
+// Reads each of the files `dir`/`kind`/<n> once, whole, BTRFS_READ bytes
+// at a time: from the disk, as nothing has read them since the machine
+// started.
+static void btrfs_reads(const char *dir, const char *kind, const char *name) {
+	char *buffer = malloc(BTRFS_READ);
+	if(!buffer)
+		fail("malloc");
+	char path[256];
+	struct mark started = start();
+	for(int i = 0; i < BTRFS_FILES; i++) {
+		snprintf(path, sizeof(path), "%s/%s/%d", dir, kind, i);
+		int fd = open(path, O_RDONLY);
+		if(fd < 0)
+			fail(path);
+		size_t total = 0;
+		ssize_t n;
+		while((n = read(fd, buffer, BTRFS_READ)) > 0)
+			total += (size_t)n;
+		if(n < 0 || total != BTRFS_FILE)
+			fail(path);
+		close(fd);
+	}
+	report(name, started, BTRFS_FILES);
+	free(buffer);
+}
+
+// Makes a file in `dir`, writes 4 KiB to it, closes it and removes it,
+// `rounds` times: changes that the filesystem keeps in memory, as nothing
+// syncs them.
+static void btrfs_create(const char *dir, uint64_t rounds) {
+	char path[256];
+	static char data[4096];
+	memset(data, 0x5a, sizeof(data));
+	snprintf(path, sizeof(path), "%s/made", dir);
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++) {
+		int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+		if(fd < 0 || write(fd, data, sizeof(data)) != (ssize_t)sizeof(data))
+			fail("making a file");
+		close(fd);
+		if(unlink(path) != 0)
+			fail("removing a file");
+	}
+	report("posix_btrfs_create", started, rounds);
+}
+
+// The Btrfs benchmarks, in the directory `dir` where the Btrfs disk is.
+static void btrfs(const char *dir) {
+	btrfs_reads(dir, "plain", "posix_btrfs_read_mib");
+	btrfs_reads(dir, "zstd", "posix_btrfs_read_zstd_mib");
+	btrfs_create(dir, 5000);
+}
+
 int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "--exit"))
 		return 0;
-	const char *disk_path = NULL, *nvme_path = NULL;
+	const char *disk_path = NULL, *nvme_path = NULL, *btrfs_path = NULL;
 	for(int i = 1; i + 1 < argc; i += 2) {
 		if(!strcmp(argv[i], "--disk"))
 			disk_path = argv[i + 1];
 		else if(!strcmp(argv[i], "--nvme"))
 			nvme_path = argv[i + 1];
+		else if(!strcmp(argv[i], "--btrfs"))
+			btrfs_path = argv[i + 1];
 	}
 	const char *self = argv[0];
 	if(!self || !strchr(self, '/')) {
@@ -477,6 +544,8 @@ int main(int argc, char **argv) {
 		disk(disk_path, 0);
 	if(nvme_path)
 		disk(nvme_path, 1);
+	if(btrfs_path)
+		btrfs(btrfs_path);
 	printf("posix-bench: done\n");
 	fflush(stdout);
 	return 0;

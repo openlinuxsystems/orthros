@@ -20,7 +20,9 @@
 //!   the vector it raises;
 //! - [`pci`], PCI configuration space through the PCI Express enhanced
 //!   configuration access mechanism (ECAM): finding functions, sizing
-//!   their base address registers and setting up MSI and MSI-X.
+//!   their base address registers and setting up MSI and MSI-X;
+//! - [`crc32c`], CRC-32C with the processor's instruction for it, which
+//!   checks what disks give the filesystems.
 //!
 //! The architecture maps device memory uncached and allocates DMA memory
 //! (`radix_hal::Devices`); only it calls the `unsafe` constructors, whose
@@ -31,6 +33,7 @@
 #![cfg_attr(not(any(test, feature = "fake")), no_std)]
 #![deny(unsafe_code)]
 
+pub mod crc32c;
 pub mod pci;
 
 #[cfg(any(test, feature = "fake"))]

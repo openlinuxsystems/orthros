@@ -49,8 +49,10 @@ Only the trusted computing base may use `unsafe`. Today that is:
 - `kernel/lib/sync`, whose locks hand out references guarded by atomics;
 - the device access library `kernel/lib/hw`, which is
   `#![deny(unsafe_code)]` and allows it only in the volatile accesses to
-  device registers and DMA memory and in the `unsafe` constructors that
-  the architecture calls, whose contracts say what it promises;
+  device registers and DMA memory, in the `unsafe` constructors that
+  the architecture calls, whose contracts say what it promises, and in
+  the processor's CRC-32C instruction, which reads and writes registers
+  alone;
 - the memory manager `kernel/mm`, which is `#![deny(unsafe_code)]` and
   allows it only in the modules that touch the memory it manages (its raw
   accesses, the slab free-object pattern, the heap's `free`, its
