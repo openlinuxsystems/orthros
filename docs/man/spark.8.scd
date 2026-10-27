@@ -99,11 +99,13 @@ Init: /system/commands/spark is process 1
   already there is never replaced, so an update can add settings without
   undoing edits; until _/system/settings_ is kept on a disk, each boot
   starts it with all of them.
-. It looks for disks in _/devices_ and mounts the FAT filesystem of each
-  partition, or of each disk with no partition table, at
-  _/volumes/_*name*: read-write, or read-only when the device is. A
-  device that holds no FAT filesystem is left alone, and so is every
-  device with *--no-volumes*.
+. It looks for disks in _/devices_ and mounts the FAT or Btrfs
+  filesystem of each partition, or of each disk with no partition table,
+  at _/volumes/_*name*: FAT read-write, or read-only when the device is;
+  Btrfs read-only, until Phase 10c writes it. FAT is tried first, as
+  *mkfs.btrfs* clears the sectors FAT starts in while *mkfs.fat* may
+  leave an older Btrfs superblock. A device that holds neither is left
+  alone, and so is every device with *--no-volumes*.
 . It listens at _/system/live/spark/control_.
 . With no program on the command line, as on a normal boot, it starts
   the services that _/system/settings/spark/services_ enables, the lowest
@@ -417,12 +419,15 @@ _/volumes/_*name*
 *spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_, *spark: cannot link /*_name_ *to /*_target_*:* _error_
 	Building the hierarchy failed; Spark starts nothing.
 
-_name_ *holds no FAT filesystem; left alone*
-	A disk or partition that is not FAT is not mounted.
+_name_ *holds no FAT or Btrfs filesystem; left alone*
+	A disk or partition that is neither is not mounted.
 
 *spark: cannot mount* _name_*:* _error_
-	A FAT filesystem that could not be mounted: *corrupt* when its boot
-	sector or tables are damaged.
+	A FAT or Btrfs filesystem that could not be mounted: *corrupt* when
+	its boot sector, tables, superblock or trees are damaged, and
+	*invalid_argument* for a Btrfs filesystem Radix cannot read yet (on
+	more than one device, with a log of fsyncs not yet replayed, or with
+	sectors other than 4 KiB).
 
 *spark: cannot make a pseudo-terminal:* _reason_, *spark: could not start* _path_*:* _reason_
 	Running a POSIX program failed before it started: _/devices/ptmx_ could

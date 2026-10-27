@@ -23,6 +23,7 @@ radix-block = { path = "../fs/block" }
 radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-elf = { path = "../lib/elf" }
+radix-btrfs = { path = "../fs/btrfs" }
 radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }

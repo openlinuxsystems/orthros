@@ -435,8 +435,8 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
     }
 }
 
-/// Mounts the FAT filesystem of each disk partition, or of each disk with
-/// no partitions, at `/volumes/<name>`.
+/// Mounts the FAT or Btrfs filesystem of each disk partition, or of each
+/// disk with no partitions, at `/volumes/<name>`.
 fn mount_disks(root: &Dir) {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
@@ -465,8 +465,11 @@ fn mount_disks(root: &Dir) {
     }
 }
 
-/// Mounts the FAT filesystem on `/devices/<name>` at `/volumes/<name>`,
-/// read-only if the disk is.
+/// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
+/// read-only if the disk is, or else Btrfs, read-only until Phase 10c
+/// writes it. FAT is tried first: `mkfs.btrfs` clears where FAT keeps its
+/// boot sector, but `mkfs.fat` can leave an older Btrfs superblock behind,
+/// so the FAT one is the newer.
 fn mount_disk(root: &Dir, name: &str) {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
@@ -483,15 +486,22 @@ fn mount_disk(root: &Dir, name: &str) {
     if let Err(err) = root.make_dir(&at) {
         return println!("spark: cannot make /{at}: {err}");
     }
-    match root.mount(&at, FilesystemKind::Fat, Some(&device), flags) {
-        Ok(()) => {
+    let mounted = match root.mount(&at, FilesystemKind::Fat, Some(&device), flags) {
+        Err(err) if err.is(FileError::UnknownFilesystem) => {
+            let flags = MountFlags::READ_ONLY;
+            root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags).map(|()| ("Btrfs", flags))
+        }
+        done => done.map(|()| ("FAT", flags)),
+    };
+    match mounted {
+        Ok((kind, flags)) => {
             let ro = if flags.contains(MountFlags::READ_ONLY) { ", read-only" } else { "" };
-            println!("spark: mounted the FAT filesystem of {name} at /{at}{ro}");
+            println!("spark: mounted the {kind} filesystem of {name} at /{at}{ro}");
         }
         Err(err) => {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
-                println!("spark: {name} holds no FAT filesystem; left alone");
+                println!("spark: {name} holds no FAT or Btrfs filesystem; left alone");
             } else {
                 println!("spark: cannot mount {name}: {err}");
             }

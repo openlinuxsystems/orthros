@@ -16,7 +16,11 @@
 //!   odd offsets, discards part of it, flushes it, and asks it Linux's
 //!   block requests (the `disk-raw` boot test, [`disk::raw`]);
 //! - `storage errors <disk>` reads and writes the sectors QEMU fails on
-//!   it (the `disk-errors` boot test, [`disk::errors`]).
+//!   it (the `disk-errors` boot test, [`disk::errors`]);
+//! - `storage list` prints every file, directory and link of every volume,
+//!   with each file's size and FNV-1a hash, and checks that the volumes
+//!   refuse writes: the `btrfs` boot test's host compares what it prints
+//!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]).
 //!
 //! It prints a line per step, `storage: FAILED: ...` for each check that
 //! fails, and exits with 0 only if none did.
@@ -95,7 +99,7 @@ fn main(_: &Startup) -> u64 {
             return 1;
         }
     };
-    if volumes.is_empty() && matches!(mode, "write" | "check") {
+    if volumes.is_empty() && matches!(mode, "write" | "check" | "list") {
         fail("no volumes are mounted under /volumes");
     }
     match mode {
@@ -121,8 +125,15 @@ fn main(_: &Startup) -> u64 {
                 check_volume(&root, name);
             }
         }
+        "list" => {
+            for name in &volumes {
+                list_volume(&root, name);
+            }
+        }
         _ => {
-            println!("storage: FAILED: say `write`, `check`, `raw` or `errors`, not `{mode}`");
+            println!(
+                "storage: FAILED: say `write`, `check`, `list`, `raw` or `errors`, not `{mode}`"
+            );
             return 1;
         }
     }
@@ -143,6 +154,114 @@ fn volumes(root: &Dir) -> radix_rt::fs::Result<Vec<String>> {
     let mut names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
     names.sort();
     Ok(names)
+}
+
+/// FNV-1a's 64-bit start, the hash of nothing.
+const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a, 64 bits, of `hash`'s bytes followed by `data`: the hash the
+/// `btrfs` boot test's host takes of each file too.
+fn fnv1a(hash: u64, data: &[u8]) -> u64 {
+    data.iter().fold(hash, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The length and FNV-1a hash of the file `path` of `dir`, read a piece
+/// at a time: a program's heap is too small for some files whole.
+fn hash_file(dir: &Dir, path: &str) -> radix_rt::fs::Result<(u64, u64)> {
+    let file = dir.open_read(path)?;
+    let mut piece = alloc::vec![0u8; 16 * 1024];
+    let (mut len, mut hash) = (0u64, FNV_START);
+    loop {
+        let n = file.read_at(len, &mut piece)?;
+        if n == 0 {
+            return Ok((len, hash));
+        }
+        hash = fnv1a(hash, &piece[..n]);
+        len += n as u64;
+    }
+}
+
+/// Prints every file, directory and link of the read-only volume at
+/// `/volumes/<name>`, a line each, in name order and depth first: a
+/// file's size and hash, or the error reading it gave, or the file it is
+/// another name of; a link's target. Then checks that a write fails.
+fn list_volume(root: &Dir, name: &str) {
+    let dir = match root.open_dir(&format!("volumes/{name}"), Rights::READ) {
+        Ok(dir) => dir,
+        Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
+    };
+    let mut seen = Vec::new();
+    let mut count = 0;
+    list_dir(&dir, name, "", &mut seen, &mut count);
+    println!("storage: list {name}: {count} entries");
+    let rw = Rights::READ.union(Rights::WRITE);
+    let write = root.open_dir(&format!("volumes/{name}"), rw);
+    match write.and_then(|dir| dir.write_file("new.txt", b"refused")) {
+        Err(err) if err.is(FileError::ReadOnly) => {
+            println!("storage: list {name}: writes fail with read_only");
+        }
+        Err(err) => fail(&format!("a write to /volumes/{name} failed with {err}, not read_only")),
+        Ok(()) => fail(&format!("/volumes/{name} took a write")),
+    }
+}
+
+/// [`list_volume`]'s lines for the directory `dir`, at `at` in the
+/// volume; `seen` holds each file's ID and the first path it was found
+/// at.
+fn list_dir(dir: &Dir, volume: &str, at: &str, seen: &mut Vec<(u64, String)>, count: &mut usize) {
+    let mut entries = match dir.entries() {
+        Ok(entries) => entries,
+        Err(err) => return fail(&format!("cannot list /volumes/{volume}{at}: {err}")),
+    };
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    for entry in entries {
+        *count += 1;
+        let path = format!("{at}/{}", entry.name);
+        let line = |what: &str| println!("storage: list {volume}: {what}");
+        match entry.kind {
+            FileKind::Directory => {
+                line(&format!("dir {path}"));
+                match dir.open_dir(&entry.name, Rights::READ) {
+                    Ok(inner) => list_dir(&inner, volume, &path, seen, count),
+                    Err(err) => fail(&format!("cannot open /volumes/{volume}{path}: {err}")),
+                }
+            }
+            FileKind::Symlink => match dir.read_link(&entry.name) {
+                Ok(target) => {
+                    line(&format!("link {path} -> {}", String::from_utf8_lossy(&target)));
+                }
+                Err(err) => line(&format!("link {path}: {err}")),
+            },
+            FileKind::File => {
+                let stat = match dir.stat(&entry.name) {
+                    Ok(stat) => stat,
+                    Err(err) => {
+                        fail(&format!("cannot stat /volumes/{volume}{path}: {err}"));
+                        continue;
+                    }
+                };
+                if let Some((_, first)) = seen.iter().find(|(id, _)| *id == stat.id) {
+                    line(&format!("file {path}: the same file as {first}"));
+                    continue;
+                }
+                seen.push((stat.id, path.clone()));
+                match hash_file(dir, &entry.name) {
+                    Ok((len, hash)) => {
+                        check(len == stat.size, || {
+                            format!(
+                                "/volumes/{volume}{path} read {len} bytes, but its size is {}",
+                                stat.size
+                            )
+                        });
+                        line(&format!("file {path}: {len} bytes, FNV-1a {hash:016x}"));
+                    }
+                    Err(err) => line(&format!("file {path}: {err}")),
+                }
+            }
+            FileKind::Pipe => line(&format!("pipe {path}")),
+            _ => line(&format!("other {path}")),
+        }
+    }
 }
 
 /// Writes the test's files to the volume at `/volumes/<name>`.

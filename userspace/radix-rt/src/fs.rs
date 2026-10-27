@@ -254,6 +254,20 @@ impl Dir {
         Ok(directory::make_link(&SYS, self.held.slot, path.as_bytes(), target.as_bytes())?)
     }
 
+    /// Where the symbolic link at `path` points.
+    pub fn read_link(&self, path: &str) -> Result<Vec<u8>> {
+        let mut target = alloc::vec![0u8; 256];
+        loop {
+            let read = directory::read_link(&SYS, self.held.slot, path.as_bytes(), &mut target)?;
+            let len = usize::try_from(read.len).unwrap_or(usize::MAX);
+            if len <= target.len() {
+                target.truncate(len);
+                return Ok(target);
+            }
+            target.resize(len, 0);
+        }
+    }
+
     /// What the file at `path` is (`.` for this directory), following a
     /// symbolic link there.
     pub fn stat(&self, path: &str) -> Result<Stat> {

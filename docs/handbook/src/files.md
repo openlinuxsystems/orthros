@@ -89,8 +89,11 @@ virtual disks, `sda`, `sdb` for SATA disks, `nvme0n1`, `nvme1n1` for NVMe
 drives, `vda1` for the first partition of `vda` and `nvme0n1p1` for the
 first of `nvme0n1`. Spark then mounts
 the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
-disk with no partition table, at `/volumes/<name>`, read-write. Anything
-that is not FAT is left alone.
+disk with no partition table, at `/volumes/<name>`, read-write, or its
+Btrfs filesystem, read-only for now: Dukovo reads Btrfs disks Linux made,
+with their subvolumes, and checks every block and every sector of data
+against its checksum, but writes them only from Phase 10c. Compressed
+files on Btrfs read from Phase 10b.3. Anything else is left alone.
 
 Changes reach the disk within five seconds, or at once when a program
 asks for it, so a power cut loses at most the last five seconds of
@@ -157,3 +160,21 @@ The `storage` boot test (`./ob test --case storage`) does all of this
 with four disks: it writes files from a Dukovo program, checks them with
 `fsck.fat` and mtools, writes one more from the host, reboots, and checks
 that every byte reads back.
+
+A Btrfs disk works the same way:
+
+```sh
+sudo apt install btrfs-progs
+mkdir files && echo "Hello from the host" > files/hello.txt
+truncate -s 128M btrfs.img
+mkfs.btrfs -L MYBTRFS --rootdir files btrfs.img
+./ob run -- -drive file=btrfs.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+```text
+Files: mounted btrfs from vda on /volumes/vda, read-only, labelled MYBTRFS
+spark: mounted the Btrfs filesystem of vda at /volumes/vda, read-only
+```
+
+The `btrfs` boot test (`./ob test --case btrfs`) reads every file of two
+such disks and checks each byte on the host.

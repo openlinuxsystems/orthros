@@ -3,7 +3,7 @@
 
 [package]
 name = "radix-btrfs"
-description = "Btrfs for Radix: its superblock, chunks, trees and checksums"
+description = "Btrfs for Radix: its trees, checksums, files and subvolumes, read-only"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,7 @@ host = ["radix-vfs/host", "radix-block/host"]
 
 [dependencies]
 radix-block = { path = "../block" }
+radix-hw = { path = "../../lib/hw" }
 radix-sync = { path = "../../lib/sync" }
 radix-vfs = { path = "../vfs" }
 

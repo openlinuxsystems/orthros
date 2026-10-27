@@ -219,6 +219,12 @@ _target/userspace/_).
 	Give *unit* or *boot* to run only that part. Without KVM the boot
 	tests take a few minutes.
 
+	The Btrfs tests make their filesystems with *mkfs.btrfs*. When the
+	system's lacks *--subvol*, *--compress* or *--inode-flags*, as Ubuntu
+	24.04's btrfs-progs 6.6 does, *test* fetches Ubuntu 26.04's
+	btrfs-progs package (6.17.1), checks its SHA-256, and unpacks it into
+	_.cache/btrfs-progs/_ with *dpkg-deb*(1), without installing it.
+
 	*kani* checks the Kani proof harnesses of the kernel's memory manager,
 	capability core, scheduling policy and IPC arithmetic instead (see
 	*Verification* in _docs/design/memory.md_,
@@ -520,6 +526,21 @@ _target/userspace/_).
 		NVMe status for the namespace's.
 		The kernel must log each recovery of the port, 16 in all, and
 		the disk must hold on the host what it held before.
+
+	*btrfs*
+		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
+		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB
+		sectors with BLAKE2b, nodes of 4 KiB and metadata once, and a
+		virtio disk as it makes one by default (CRC-32C, nodes of 16 KiB,
+		metadata twice). The files are of sizes around the inline and
+		sector limits, sparse, deep and wide, with links of both kinds, a
+		FIFO, a name that is not ASCII and a subvolume; the host changes
+		a byte of one file's second sector on each disk. Spark must mount
+		both read-only, and _/system/tests/storage list_ must list every
+		file, directory and link as the host made it, with each file's
+		size and FNV-1a hash, the damaged file failing with *io*, and
+		every write refused with *read_only*. On the host, each disk must
+		be byte for byte as it was made.
 
 	*posix*
 		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark

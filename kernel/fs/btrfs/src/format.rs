@@ -175,6 +175,9 @@ pub struct RootItem {
     pub root_dirid: u64,
     /// The logical address of its root block.
     pub bytenr: u64,
+    /// How many directory entries name it, for a subvolume: 0 once it is
+    /// deleted.
+    pub refs: u32,
     /// The level of its root block: 0 for a leaf.
     pub level: u8,
 }
@@ -193,6 +196,7 @@ impl RootItem {
             generation: u64_at(bytes, 160),
             root_dirid: u64_at(bytes, 168),
             bytenr: u64_at(bytes, 176),
+            refs: u32_at(bytes, 216),
             level: bytes[238],
         })
     }
