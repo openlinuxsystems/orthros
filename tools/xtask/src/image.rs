@@ -171,11 +171,17 @@ fn module_lines(modules: &[(&str, &str)]) -> String {
 /// Where the disk check's program is in the boot archive.
 const DISK_CHECK_PROGRAM: &str = "/system/tests/posix/disktest";
 
+/// Where the POSIX benchmarks are in the boot archive.
+const BENCH_PROGRAM: &str = "/system/tests/posix/bench";
+
 /// The boot menu entry of the disk check of the disk with serial number
-/// `serial` (ADR 0122), which runs its program under Spark, and Linux's
-/// side of the check in the image's `crosscheck` directory: the program
-/// built for Linux, linked against the live system's C library so that
-/// the image carries none of it, and `run.sh`.
+/// `serial` (ADR 0122), which runs the kernel's benchmarks and then its
+/// program under Spark, with no disk mounted, which also runs the POSIX
+/// benchmarks (ADR 0124);
+/// and Linux's side of the check in the image's `crosscheck` directory:
+/// the program built for Linux, linked against the live system's C
+/// library so that the image carries none of it, the benchmarks built
+/// for Linux as static programs, and `run.sh`.
 fn disk_check(
     ctx: &Ctx,
     spec: &ImageSpec<'_>,
@@ -197,6 +203,12 @@ fn disk_check(
              cannot have a `--` part"
         );
     }
+    if spec.cmdline.split_whitespace().any(|word| word.starts_with("selftest=")) {
+        crate::bail!(
+            "--disk-check runs the kernel's benchmarks, so the kernel command line cannot \
+             name another self-test"
+        );
+    }
     step(&format!("Adding the disk check of the disk with serial number {serial}"));
     let dir = spec.staging.join("crosscheck");
     process::create_dir(&dir)?;
@@ -212,6 +224,8 @@ fn disk_check(
         .arg(dir.join("disktest"))
         .arg(ctx.root.join("userspace/posix/disktest.c"));
     process::run(ctx, &mut cmd)?;
+    crate::bench::posix_for_linux(ctx, &dir)?;
+    process::copy(&crate::bench::linux_bench_static(ctx)?, &dir.join("linux-bench"))?;
     let template = ctx.root.join("image/crosscheck/run.sh.in");
     let script =
         std::fs::read_to_string(&template).context(|| format!("reading {}", template.display()))?;
@@ -222,8 +236,9 @@ fn disk_check(
     let space = if cmdline.is_empty() { "" } else { " " };
     Ok(format!(
         "\nmenuentry \"Dukovo disk check: erases the disk with serial {serial}\" {{\n    \
-         multiboot2 /boot/radix {cmdline}{space}-- --posix {DISK_CHECK_PROGRAM} --yes-erase \
-         {serial}\n{}    boot\n}}\n",
+         multiboot2 /boot/radix {cmdline}{space}selftest=bench init-after-selftest -- \
+         --no-volumes --posix {DISK_CHECK_PROGRAM} --yes-erase {serial} --bench \
+         {BENCH_PROGRAM}\n{}    boot\n}}\n",
         module_lines(modules)
     ))
 }

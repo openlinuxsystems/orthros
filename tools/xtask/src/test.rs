@@ -997,10 +997,12 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "disk-check",
-        about: "The disk check of a real machine on an NVMe disk it finds by its serial number; then Linux's side reads back on the host what it wrote",
+        about: "The disk check of a real machine on an NVMe disk it finds by its serial number, with the benchmarks; then Linux's side reads back on the host what it wrote",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- --posix /system/tests/posix/disktest --yes-erase dukovo-test-0",
+        cmdline: "lockdep selftest=bench init-after-selftest -- --no-volumes --posix \
+                  /system/tests/posix/disktest --yes-erase dukovo-test-0 --bench \
+                  /system/tests/posix/bench",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -2953,11 +2955,20 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_end(vm, "raw")
 }
 
-/// The `disk-check` test: disktest (userspace/posix/disktest.c, ADR 0122)
-/// finds the NVMe disk by its serial number, writes its places, reads them
-/// back, measures and saves its report; the host then runs Linux's side.
+/// The `disk-check` test: after the kernel's benchmarks, with no disk
+/// mounted, disktest (userspace/posix/disktest.c, ADR 0122) finds the
+/// NVMe disk by its serial number, writes its places, reads them back,
+/// measures and saves its report, and then adds the kernel's and the
+/// POSIX benchmarks' lines to it (ADR 0124); the host then runs Linux's
+/// side.
 fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
+    // The benchmarks end before `Boot complete.`, which disks_found waits
+    // for.
+    if !vm.log().contains("selftest bench: passed") {
+        return Err("the kernel's benchmarks did not pass".into());
+    }
+    vm.expect("spark: leaving every disk's filesystems unmounted")?;
     vm.expect("spark: started /system/tests/posix/disktest as process ")?;
     vm.expect(&format!(
         "disktest: /devices/nvme0n1 on Dukovo: QEMU NVMe Ctrl, serial dukovo-test-0, {} bytes, \
@@ -2967,16 +2978,20 @@ fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("disktest: a write of 3 bytes off a sector's boundary: passed")?;
     vm.expect("disktest: 64 of 64 places read back as written")?;
     vm.expect("disktest: 1 MiB write: ")?;
+    vm.expect("lines of the kernel's benchmarks")?;
+    vm.expect("posix-bench: done")?;
     vm.expect("disktest: passed; the report is saved on the disk")?;
     vm.expect("(/system/tests/posix/disktest) exited with code 0x0")?;
     Ok(())
 }
 
 /// Linux's side of the disk check, on the `disk-check` test's disk file:
-/// built for the host from the same source, it must find Dukovo's report
-/// and read back every place Dukovo wrote.
+/// built for the host from the same source, it must find Dukovo's report,
+/// read back every place Dukovo wrote, and give the lines of Dukovo's
+/// benchmarks, the kernel's and the POSIX ones, after its version.
 fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
     let (program, source) = (disk.path.with_extension("disktest"), disk.path.with_extension("c"));
+    let bench = disk.path.with_extension("bench");
     std::fs::write(&source, include_str!("../../../userspace/posix/disktest.c"))
         .map_err(|err| format!("writing {}: {err}", source.display()))?;
     let compiler = crate::ports::find_clang()
@@ -2992,7 +3007,9 @@ fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
     let _ = std::fs::remove_file(&source);
     built?;
     let ran = std::process::Command::new(&program)
-        .args(["--yes-erase", "--device"])
+        .args(["--yes-erase", "--bench-out"])
+        .arg(&bench)
+        .arg("--device")
         .arg(&disk.path)
         .stdin(std::process::Stdio::null())
         .output()
@@ -3004,6 +3021,15 @@ fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
         || !text.contains("| Linux reads what Dukovo wrote, after a restart | 64 of 64 |")
     {
         return Err(format!("Linux's side of the disk check failed:\n{text}"));
+    }
+    let lines = std::fs::read_to_string(&bench);
+    let _ = std::fs::remove_file(&bench);
+    let lines = lines.map_err(|err| format!("reading {}: {err}", bench.display()))?;
+    let version = concat!("dukovo: system Radix ", env!("CARGO_PKG_VERSION"), " ");
+    for want in [version, "dukovo: BENCH name=syscall_null ", "dukovo: BENCH name=posix_signal "] {
+        if !lines.lines().any(|line| line.starts_with(want)) {
+            return Err(format!("Linux's side gave no line `{want}...` of Dukovo's benchmarks"));
+        }
     }
     Ok(())
 }

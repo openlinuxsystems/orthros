@@ -155,12 +155,18 @@ _target/userspace/_).
 		Add a second boot menu entry, *Dukovo disk check: erases the disk
 		with serial* _serial_, which runs the disk check of a real
 		machine on the disk with that serial number and on no other
-		(ADR 0122), and put Linux's side of the check in the image's
-		_crosscheck_ directory: the program built for Linux, linked
-		against the C library of the live system it runs on, and
-		_run.sh_, which runs it there. Everything on the disk is lost.
-		The handbook's Supported hardware chapter gives the steps. The
-		kernel command line may not have a *--* part with it.
+		(ADR 0122), after the kernel's benchmarks (*selftest=bench
+		init-after-selftest*) and then the POSIX benchmarks, whose
+		numbers its report keeps, with Spark mounting no disk (ADR
+		0124). Put Linux's side of the
+		check in the image's _crosscheck_ directory: the program built
+		for Linux, linked against the C library of the live system it
+		runs on, *linux-bench* and the POSIX benchmarks built for Linux
+		as static programs, and _run.sh_, which runs them there and
+		saves both systems' numbers for *bench --from*. Everything on the
+		disk is lost. The handbook's Supported hardware chapter gives the
+		steps. The kernel command line may not have a *--* part, or a
+		*selftest* flag, with it.
 
 *run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--gdb*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*] [*--* _qemu-args_...]
 	Build the image and boot it in QEMU on a q35 machine with
@@ -496,9 +502,12 @@ _target/userspace/_).
 		_/system/tests/posix/disktest --yes-erase dukovo-test-0_ must
 		find the disk by its serial number, write its 64 places, read
 		them back, measure its transfers and save its report on the
-		disk. The host then builds Linux's side of the same program and
-		runs it on the disk's file, which must find the report and read
-		back every place.
+		disk. The kernel's benchmarks run first, Spark mounts no disk
+		(*--no-volumes*), and the program then runs the POSIX benchmarks
+		and keeps their lines and the kernel's in its report (ADR 0124). The host then builds Linux's side of
+		the same program and runs it on the disk's file, which must find
+		the report, read back every place and give the benchmarks'
+		lines.
 
 	*disk-errors*
 		Boot 2 CPUs under UEFI with an 8 MiB SATA disk and an 8 MiB NVMe
@@ -554,7 +563,7 @@ _target/userspace/_).
 		Fail a boot test that has not finished after this long. The
 		default is 300.
 
-*bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--summary* _file_] [*--debug* | *--release*]
+*bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--from* _file_] [*--summary* _file_] [*--debug* | *--release*]
 	Measure what system calls, IPC round trips, context switches, fresh
 	pages, TLB shootdowns, memory copies, files and POSIX calls cost on
 	Radix, next to Linux.
@@ -641,6 +650,16 @@ _target/userspace/_).
 		*ob bench --instructions --gate* on every pull request and every
 		merge, so a longer hot path fails there even when the timings are
 		noisy.
+
+	*--from* _file_
+		Measure nothing, and report the numbers of a real machine
+		instead: Dukovo's and Linux's, which the disk check measures on
+		it in turn (*image --disk-check*, ADR 0124) and Linux's side
+		saves as _dukovo-bench.txt_, given as _file_. Each row compares
+		Dukovo with Linux on the same machine, and the report gives the
+		processor's clock on each. It is printed and written to
+		_out/bench/machine.md_. A real machine's numbers are a check,
+		not a gate, so *--from* takes no other option but *--summary*.
 
 	*--summary* _file_
 		Also append the Markdown report to _file_. CI passes

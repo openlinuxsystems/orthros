@@ -235,7 +235,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
         }
         "bench" => {
             "Usage: ./ob bench [--no-linux] [--gate] [--linux-kernel <file>] [--runs <n>]
-                [--instructions] [--summary <file>] [--debug | --release]
+                [--instructions] [--from <file>] [--summary <file>]
+                [--debug | --release]
 
 Boots Radix in QEMU on 2 CPUs with selftest=bench, where user programs time
 the cheapest system calls and IPC round trips over endpoints,
@@ -258,6 +259,8 @@ and take minutes.
   --instructions      Count the instructions each operation takes instead,
                       under QEMU's instruction counting; with --gate, fail
                       if an operation on one CPU goes over its budget
+  --from <file>       Measure nothing: report a real machine's numbers, from
+                      the dukovo-bench.txt of the disk check's run.sh
   --summary <file>    Also append the Markdown report to <file> (CI passes
                       $GITHUB_STEP_SUMMARY)"
         }

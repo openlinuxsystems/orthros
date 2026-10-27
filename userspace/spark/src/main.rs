@@ -173,11 +173,17 @@ fn run() -> Option<Supervisor> {
         return None;
     }
     seed_settings(&root);
-    mount_disks(&root);
+    let mut words = args().skip(1).peekable();
+    // `--no-volumes` leaves every disk's filesystems unmounted, for the
+    // disk check, which writes over a whole disk (ADR 0124).
+    if words.next_if_eq(&"--no-volumes").is_some() {
+        println!("spark: leaving every disk's filesystems unmounted");
+    } else {
+        mount_disks(&root);
+    }
     let Ok(supervised) = Dir::at(root.slot()) else { return None };
     let mut supervisor = Supervisor::new(supervised);
     supervisor.listen();
-    let mut words = args().skip(1).peekable();
     let (mut with_services, mut services) = (false, SERVICES_DIR);
     loop {
         if words.next_if_eq(&"--services").is_some() {

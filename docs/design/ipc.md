@@ -396,8 +396,12 @@ vulnerabilities yet. The method follows lmbench's `lat_syscall`,
 The POSIX benchmarks (ADR 0106) are one C program,
 `userspace/posix/bench.c`, which Spark runs on Radix in a second boot of
 the test image and `linux-bench` runs last on Linux, built from the same
-file with the same compiler. It times, with `clock_gettime`, `fork` and
-`waitpid` of a child that exits at once (`posix_fork_wait`); `fork`,
+file with the same compiler. It times, with `clock_gettime`, first a
+chain of additions, each waiting for the one before, one clock cycle
+each, which gives the processor's clock (`cpu_cycle`; no row compares
+it, and `ob bench --from` shows it for a real machine, ADR 0124); then
+`fork` and `waitpid` of a child that exits at once (`posix_fork_wait`);
+`fork`,
 `execv` of itself and `waitpid` (`posix_fork_exec_wait`); 256 MiB
 through a pipe in 64 KiB writes from a child, both on one CPU, per MiB
 (`posix_pipe_mib`); `kill` of itself with a handler for the signal

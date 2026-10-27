@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 ## Context
 
 Phase 10's disk work is checked on the Dell Inspiron 15 5570 (an AHCI
-controller with an SSD and a hard disk). The Framework Desktop (two NVMe
+controller with two SATA SSDs). The Framework Desktop (two NVMe
 drives) serves other work until Dukovo runs containers (Phase 20), so
 its drives are checked from then; until then NVMe disks, and disks of
 4 KiB sectors, which neither machine has, are checked in QEMU only.

@@ -20,6 +20,13 @@
 // Markdown. `--device PATH` names the disk, or a disk image file, instead
 // of a serial number, for the boot test.
 //
+// With `--bench PROGRAM`, Dukovo's side then also runs the POSIX
+// benchmarks of `ob bench` (userspace/posix/bench.c) and adds their
+// `BENCH` and `BENCHCOUNT` lines, and the kernel's from its log
+// (`selftest=bench`), to the report (ADR 0124). With `--bench-out FILE`,
+// Linux's side writes those lines to FILE, each after `dukovo: `, for
+// `ob bench --from`.
+//
 // The disk's layout: the first MiB is a pattern place, the next 32 MiB
 // the transfers' span, the MiB after them the report area, and the other
 // 63 places spread from there to the disk's last MiB.
@@ -32,15 +39,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifdef __radix__
 #define BLOCK_DIR "/kernel/block"
 #define DEVICE_DIR "/devices"
+#define MOUNTS "/processes/mounts"
 #define SYSTEM "Dukovo"
 #else
 #define BLOCK_DIR "/sys/block"
 #define DEVICE_DIR "/dev"
+#define MOUNTS "/proc/mounts"
 #define SYSTEM "Linux"
 #endif
 
@@ -60,6 +70,8 @@
 #define REPEATS 3
 // The first line of a report, which says it is one.
 #define MAGIC "Dukovo disk check report 1\n"
+// The most the benchmarks' lines take in the report.
+#define BENCH_BYTES ((size_t)512 << 10)
 
 // What a run found.
 struct results {
@@ -193,6 +205,45 @@ static void find_disk(const char *serial, char *name, size_t size) {
 	}
 }
 
+// Fails if a filesystem of disk `name`, or of one of its partitions, is
+// mounted: the check writes over the whole disk, and the filesystem's
+// write-back could write over the check (ADR 0124).
+static void refuse_mounted(const char *name) {
+	FILE *mounts = fopen(MOUNTS, "r");
+	if(!mounts)
+		die(MOUNTS);
+	size_t n = strlen(name);
+	int digit = n > 0 && name[n - 1] >= '0' && name[n - 1] <= '9';
+	char line[1024];
+	while(fgets(line, sizeof(line), mounts)) {
+		// "source path filesystem ...", the source a device's name or
+		// path.
+		char *source = line, *at = strchr(line, ' ');
+		if(!at)
+			continue;
+		*at++ = 0;
+		at[strcspn(at, " \n")] = 0;
+		if(!strncmp(source, DEVICE_DIR "/", strlen(DEVICE_DIR "/")))
+			source += strlen(DEVICE_DIR "/");
+		if(strncmp(source, name, n))
+			continue;
+		// The disk itself, or a partition: its number, after a `p` when
+		// the disk's name ends in a digit (`sda1`, but `nvme0n1p1`).
+		const char *rest = source + n;
+		if(digit && rest[0] == 'p' && rest[1])
+			rest++;
+		else if(digit && rest[0])
+			continue;
+		if(strspn(rest, "0123456789") != strlen(rest))
+			continue;
+		printf("disktest: FAILED: %s, on the disk to check, is mounted at %s, and the check "
+		       "would write over it\n",
+		       source, at);
+		exit(1);
+	}
+	fclose(mounts);
+}
+
 static void transfer(int fd, void *buffer, size_t size, off_t at, int writing, const char *what) {
 	ssize_t done = writing ? pwrite(fd, buffer, size, at) : pread(fd, buffer, size, at);
 	if(done != (ssize_t)size) {
@@ -262,8 +313,110 @@ static int small_write(int fd, uint64_t *buffer) {
 	return !memcmp(bytes, before, sizeof(before));
 }
 
-// Dukovo's side: write, read back, measure, and save the report.
-static int dukovo(int fd, off_t size, uint64_t *buffer, uint64_t *want) {
+// Adds the part of `line` from `BENCH` on to `out`, which holds `used`
+// bytes, as a `bench` line of the report, if it is a benchmark's line;
+// returns how many bytes `out` then holds.
+static size_t keep_bench(char *out, size_t used, const char *line) {
+	const char *at = strstr(line, "BENCH ");
+	if(!at)
+		at = strstr(line, "BENCHCOUNT ");
+	if(!at)
+		return used;
+	int length = (int)strcspn(at, "\n");
+	if(used + (size_t)length + 8 > BENCH_BYTES)
+		return used;
+	return used + (size_t)snprintf(out + used, BENCH_BYTES - used, "bench %.*s\n", length, at);
+}
+
+// Keeps the kernel's version, and the lines of its benchmarks
+// (`selftest=bench`) from its log, which gives one record a read, as
+// Linux's /dev/kmsg does.
+static size_t kernel_bench(char *out, size_t used) {
+	int log = open(DEVICE_DIR "/kmsg", O_RDONLY | O_NONBLOCK);
+	if(log < 0)
+		die(DEVICE_DIR "/kmsg");
+	char record[1024];
+	read_text("/kernel/version", record, sizeof(record));
+	used += (size_t)snprintf(out + used, BENCH_BYTES - used, "bench system %s\n", record);
+	int lines = 0, first = 1;
+	for(;;) {
+		ssize_t n = read(log, record, sizeof(record) - 1);
+		if(n < 0 && errno == EPIPE)
+			continue;
+		if(n <= 0)
+			break;
+		record[n] = 0;
+		// "level,sequence,time,flags;text": the oldest record kept is
+		// the log's first unless the log has had to drop some.
+		const char *comma = strchr(record, ',');
+		if(first && comma && strtoull(comma + 1, NULL, 10) != 0)
+			printf("disktest: the kernel log has dropped its first %llu records: some of the "
+			       "kernel's benchmarks may be missing\n",
+			       strtoull(comma + 1, NULL, 10));
+		first = 0;
+		const char *text = strchr(record, ';');
+		if(!text)
+			continue;
+		size_t before = used;
+		used = keep_bench(out, used, text + 1);
+		lines += used != before;
+	}
+	close(log);
+	printf("disktest: kept %d lines of the kernel's benchmarks\n", lines);
+	return used;
+}
+
+// Runs the POSIX benchmarks `program`, showing and keeping their lines;
+// false if they failed.
+static int posix_bench(const char *program, char *out, size_t *used) {
+	int pipes[2];
+	if(pipe(pipes) != 0)
+		die("pipe");
+	fflush(stdout);
+	pid_t child = fork();
+	if(child < 0)
+		die("fork");
+	if(child == 0) {
+		dup2(pipes[1], 1);
+		close(pipes[0]);
+		close(pipes[1]);
+		execl(program, program, (char *)NULL);
+		_exit(127);
+	}
+	close(pipes[1]);
+	FILE *from = fdopen(pipes[0], "r");
+	if(!from)
+		die("fdopen");
+	char line[512];
+	while(fgets(line, sizeof(line), from)) {
+		fputs(line, stdout);
+		*used = keep_bench(out, *used, line);
+	}
+	fclose(from);
+	int status = 0;
+	if(waitpid(child, &status, 0) != child)
+		die("waitpid");
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Writes the report of `r`, with the benchmarks' lines `bench`, to the
+// disk's report area.
+static void save_report(int fd, char *text, const struct results *r, const char *bench) {
+	memset(text, 0, MIB);
+	int n = snprintf(text, MIB, MAGIC "run %016llx\nwritten %d\nread_back %d\nsmall %d\n",
+	                 (unsigned long long)r->run, r->written, r->read_back, r->small);
+	for(int t = 0; t < 6; t++)
+		n += snprintf(text + n, MIB - n, "%s %llu\n", TRANSFERS[t].key,
+		              (unsigned long long)r->ns[t]);
+	snprintf(text + n, MIB - n, "%s", bench);
+	transfer(fd, text, MIB, REPORT_AT, 1, "writing the report");
+	if(fsync(fd) != 0)
+		die("emptying the disk's write cache");
+}
+
+// Dukovo's side: write, read back, measure, and save the report; with
+// `bench`, the POSIX benchmarks to run, add the benchmarks' lines to it.
+static int dukovo(int fd, off_t size, uint64_t *buffer, uint64_t *want, const char *bench) {
 	struct results r = {0};
 	r.run = mix(now_ns() ^ (uint64_t)time(NULL));
 	r.small = small_write(fd, buffer);
@@ -280,17 +433,20 @@ static int dukovo(int fd, off_t size, uint64_t *buffer, uint64_t *want) {
 	r.read_back = check_places(fd, size, buffer, want, r.run);
 	printf("disktest: %d of %d places read back as written\n", r.read_back, PLACES);
 	measure(fd, buffer, r.ns);
-	char *text = (char *)buffer;
-	memset(text, 0, MIB);
-	int n = snprintf(text, MIB, MAGIC "run %016llx\nwritten %d\nread_back %d\nsmall %d\n",
-	                 (unsigned long long)r.run, r.written, r.read_back, r.small);
-	for(int t = 0; t < 6; t++)
-		n += snprintf(text + n, MIB - n, "%s %llu\n", TRANSFERS[t].key,
-		              (unsigned long long)r.ns[t]);
-	transfer(fd, text, MIB, REPORT_AT, 1, "writing the report");
-	if(fsync(fd) != 0)
-		die("emptying the disk's write cache");
+	save_report(fd, (char *)buffer, &r, "");
 	int passed = r.small && r.read_back == PLACES;
+	if(bench) {
+		char *lines = calloc(1, BENCH_BYTES);
+		if(!lines)
+			die("calloc");
+		size_t used = kernel_bench(lines, 0);
+		if(!posix_bench(bench, lines, &used)) {
+			printf("disktest: FAILED: the POSIX benchmarks %s did not finish\n", bench);
+			passed = 0;
+		}
+		save_report(fd, (char *)buffer, &r, lines);
+		free(lines);
+	}
 	printf("disktest: %s; the report is saved on the disk. Restart into a Linux live system "
 	       "and run the stick's crosscheck/run.sh for the comparison\n",
 	       passed ? "passed" : "FAILED");
@@ -317,8 +473,9 @@ static int field(const char *line, const char *key, unsigned base, unsigned long
 	return 1;
 }
 
-// Dukovo's report on the disk, if there is one.
-static int read_report(int fd, char *text, struct results *r) {
+// Dukovo's report on the disk, if there is one; its benchmarks' lines go
+// to `bench`, if given, each after `dukovo: `.
+static int read_report(int fd, char *text, struct results *r, FILE *bench) {
 	transfer(fd, text, MIB, REPORT_AT, 0, "reading the report");
 	text[MIB - 1] = 0;
 	if(strncmp(text, MAGIC, strlen(MAGIC)))
@@ -343,6 +500,8 @@ static int read_report(int fd, char *text, struct results *r) {
 		} else if(field(line, "small", 10, &value)) {
 			r->small = (int)value;
 			fields++;
+		} else if(bench && !strncmp(line, "bench ", 6)) {
+			fprintf(bench, "dukovo: %s\n", line + 6);
 		}
 		for(int t = 0; t < 6; t++)
 			if(field(line, TRANSFERS[t].key, 10, &value)) {
@@ -362,9 +521,15 @@ static void micros(char *out, size_t size, uint64_t ns) {
 
 // Linux's side: read Dukovo's report and pattern back, measure, compare.
 static int linux_side(int fd, off_t size, uint64_t *buffer, uint64_t *want, const char *model,
-                      const char *serial) {
+                      const char *serial, const char *bench_out) {
+	FILE *bench = NULL;
+	if(bench_out && !(bench = fopen(bench_out, "w")))
+		die(bench_out);
 	struct results dukovo;
-	if(!read_report(fd, (char *)buffer, &dukovo)) {
+	int found = read_report(fd, (char *)buffer, &dukovo, bench);
+	if(bench && fclose(bench) != 0)
+		die(bench_out);
+	if(!found) {
 		printf("disktest: FAILED: the disk holds no report of Dukovo's: boot the Dukovo stick's "
 		       "disk check first\n");
 		return 1;
@@ -400,18 +565,25 @@ static int linux_side(int fd, off_t size, uint64_t *buffer, uint64_t *want, cons
 #endif
 
 int main(int argc, char **argv) {
-	const char *serial = NULL, *device = NULL;
+	const char *serial = NULL, *device = NULL, *bench = NULL;
 	int erase = 0;
 	for(int i = 1; i < argc; i++) {
 		if(!strcmp(argv[i], "--yes-erase"))
 			erase = 1;
 		else if(!strcmp(argv[i], "--device") && i + 1 < argc)
 			device = argv[++i];
+#ifdef __radix__
+		else if(!strcmp(argv[i], "--bench") && i + 1 < argc)
+#else
+		else if(!strcmp(argv[i], "--bench-out") && i + 1 < argc)
+#endif
+			bench = argv[++i];
 		else
 			serial = argv[i];
 	}
 	if(!erase || (!serial && !device)) {
-		printf("usage: disktest --yes-erase SERIAL, or --yes-erase --device PATH\n"
+		printf("usage: disktest --yes-erase SERIAL, or --yes-erase --device PATH; on Dukovo\n"
+		       "also --bench PROGRAM, on Linux --bench-out FILE\n"
 		       "Everything on the disk is lost.\n");
 		return 2;
 	}
@@ -422,6 +594,7 @@ int main(int argc, char **argv) {
 		snprintf(found_serial, sizeof(found_serial), "%s", serial ? serial : "none");
 	} else {
 		find_disk(serial, name, sizeof(name));
+		refuse_mounted(name);
 		snprintf(path, sizeof(path), DEVICE_DIR "/%s", name);
 		attribute(name, "device/model", model, sizeof(model));
 		snprintf(found_serial, sizeof(found_serial), "%s", serial);
@@ -453,9 +626,9 @@ int main(int argc, char **argv) {
 	if(posix_memalign((void **)&buffer, 4096, MIB) || posix_memalign((void **)&want, 4096, MIB))
 		die("posix_memalign");
 #ifdef __radix__
-	int code = dukovo(fd, size, buffer, want);
+	int code = dukovo(fd, size, buffer, want, bench);
 #else
-	int code = linux_side(fd, size, buffer, want, model, found_serial);
+	int code = linux_side(fd, size, buffer, want, model, found_serial, bench);
 #endif
 	close(fd);
 	return code;

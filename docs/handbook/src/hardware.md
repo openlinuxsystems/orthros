@@ -17,16 +17,16 @@ change or release:
 
 ## Dell Inspiron 15 5570
 
-This is the factory configuration of the reference machine, from Dell's
-parts list for its service tag.
+This is the reference machine as it is: Dell's parts list for its
+service tag, with the two SSDs it has now in place of the factory disks.
 
 | Component | Part | Dukovo support |
 | --- | --- | --- |
 | Processor | Intel Core i7-8550U (4 cores, 8 threads) | All 8 threads started from Phase 1; early microcode with the optional firmware |
 | Memory | 8 GB DDR4-2400, one module | Managed by the frame allocator and kernel heap from Phase 2 (one NUMA node) |
 | Graphics | Intel UHD Graphics 620 | Firmware framebuffer console from Phase 1; no native GPU driver in 1.0 |
-| SSD | 128 GB SK hynix SC311, M.2 SATA | AHCI driver, Phase 10; Dukovo installs here |
-| Hard disk | 1 TB 2.5" SATA, 5400 rpm | AHCI driver, Phase 10; kept for `/shared` |
+| SSD | 128 GB Samsung PM871b, M.2 SATA (the factory part was an SK hynix SC311) | AHCI driver, Phase 10; Dukovo installs here |
+| Second SSD | 512 GB TEAM T253, 2.5" SATA (in place of the factory 1 TB hard disk) | AHCI driver, Phase 10; kept for `/shared` |
 | USB | Intel xHCI | Phase 11 |
 | Keyboard | Built-in, PS/2 (i8042) | Phase 9 |
 | Touchpad | Likely I2C-HID (Intel Serial IO) | Phase 11, to be confirmed |
@@ -146,9 +146,10 @@ issue for anything that fails, with the photos.
 ### Disk check
 
 From Phase 10, each sub-phase also ends with the disk check on the
-machine's disks (ADR 0122). It writes over the disk it checks, so it
-checks only the disk whose serial number it is given, and the image is
-built for that one disk. On this laptop both disks may be checked, one
+machine's disks (ADR 0122), which also measures the benchmarks of
+`ob bench` on Dukovo and on Linux in turn (ADR 0124). It writes over the
+disk it checks, so it checks only the disk whose serial number it is
+given, and the image is built for that one disk. On this laptop both disks may be checked, one
 at a time. Two USB sticks are needed: one for Dukovo, and one with a
 Linux live system, Linux Mint or Ubuntu 22.04 or later.
 
@@ -167,11 +168,16 @@ Linux live system, Linux Mint or Ubuntu 22.04 or later.
    ```
 
 3. Boot the Dukovo stick from the F12 menu and choose **Dukovo disk
-   check: erases the disk with serial SERIAL**. The check takes about a
-   minute; photograph the `disktest:` lines. The last one must say
+   check: erases the disk with serial SERIAL**. The kernel's benchmarks
+   run first, then the check, then the POSIX benchmarks: a few minutes
+   in all. Photograph the `disktest:` lines. The last one must say
    `disktest: passed; the report is saved on the disk`.
-4. Restart into the Linux live system with the Dukovo stick plugged in,
-   open a terminal, and run Linux's side, which reads back what Dukovo
+4. Restart into the Linux live system with the Dukovo stick plugged in.
+   Linux measures with the mitigations of CPU vulnerabilities off, as
+   Dukovo has none yet: at the live stick's boot menu, press **e**, add
+   ` mitigations=off` to the end of the line that starts with `linux`,
+   and press **Ctrl-X** (or **F10**).
+5. Open a terminal and run Linux's side, which reads back what Dukovo
    wrote, measures the same transfers on Linux, and asks before it
    writes:
 
@@ -180,7 +186,17 @@ Linux live system, Linux Mint or Ubuntu 22.04 or later.
    ```
 
    It prints the comparison and saves it as `dukovo-disk-check.md` in
-   the terminal's directory; send that file with the photos.
+   the terminal's directory. Then it measures the benchmarks on Linux,
+   and saves both systems' numbers as `dukovo-bench.txt` beside it. Send
+   both files with the photos. While it measures, Linux runs as Dukovo
+   does (ADR 0124): the processor's turbo off, no idle state deeper than
+   C1, and the SATA links at full power; it puts each setting back at the
+   end.
+6. On the build machine, the benchmarks' report comes from that file:
+
+   ```sh
+   ./ob bench --from dukovo-bench.txt
+   ```
 
 ### Help wanted: the Ethernet chip
 

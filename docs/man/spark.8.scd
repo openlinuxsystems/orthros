@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -35,7 +35,9 @@ it as a POSIX program (see *POSIX PROGRAMS*); it starts the services too
 only when *--services* comes first. *--service-dir* _directory_ starts
 the services that _directory_ describes instead of
 _/system/settings/spark/services_, with or without a program: the *spark-oom*
-boot test points it at _/system/tests/services_.
+boot test points it at _/system/tests/services_. *--no-volumes*, before
+the rest, leaves every disk's filesystems unmounted, for the disk check
+(*ob image --disk-check*), which writes over a whole disk.
 
 # STARTING
 
@@ -100,7 +102,8 @@ Init: /system/commands/spark is process 1
 . It looks for disks in _/devices_ and mounts the FAT filesystem of each
   partition, or of each disk with no partition table, at
   _/volumes/_*name*: read-write, or read-only when the device is. A
-  device that holds no FAT filesystem is left alone.
+  device that holds no FAT filesystem is left alone, and so is every
+  device with *--no-volumes*.
 . It listens at _/system/live/spark/control_.
 . With no program on the command line, as on a normal boot, it starts
   the services that _/system/settings/spark/services_ enables, the lowest
