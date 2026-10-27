@@ -185,6 +185,58 @@ impl BlockCache {
         })
     }
 
+    /// Writes `data` at byte `offset` of the device, whole logical blocks,
+    /// and returns once it is durable there
+    /// ([`BlockDevice::write_through`]): what else is dirty stays dirty.
+    /// The cache keeps the data.
+    ///
+    /// [`BlockDevice::write_through`]: crate::BlockDevice::write_through
+    pub fn write_through(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        self.write_now(offset, data, true)
+    }
+
+    /// Writes `data` at byte `offset` of the device, whole logical blocks,
+    /// now rather than at the next [`BlockCache::sync`]: it is durable
+    /// after the device's next flush. What else is dirty stays dirty.
+    pub fn write_out(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        self.write_now(offset, data, false)
+    }
+
+    fn write_now(&self, offset: u64, data: &[u8], through: bool) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        self.change_in(&mut state, offset, data.len(), |bytes, done| {
+            bytes.copy_from_slice(&data[done..done + bytes.len()]);
+        })?;
+        let end = offset + data.len() as u64;
+        let State { blocks, dirty } = &mut *state;
+        let mut at = offset;
+        while at < end {
+            let index = at / PAGE_SIZE as u64;
+            let next = ((index + 1) * PAGE_SIZE as u64).min(end);
+            let block = blocks.get_mut(index).ok_or(Error::NoMemory)?;
+            let touched = mask(index, self.unit, at, next) & block.dirty;
+            for (first, count) in runs(touched) {
+                let segment = Segment {
+                    page: &block.page,
+                    offset: (first * SECTOR) as usize,
+                    len: (count * SECTOR) as usize,
+                };
+                let sector = index * SECTORS_PER_PAGE + first;
+                if through {
+                    self.device.write_through(sector, &[segment])?;
+                } else {
+                    self.device.write(sector, &[segment])?;
+                }
+                block.dirty &= !run_mask(first, count);
+                if block.dirty == 0 {
+                    *dirty -= 1;
+                }
+            }
+            at = next;
+        }
+        Ok(())
+    }
+
     /// Sets `len` bytes from `offset` to `byte`, in the cache.
     pub fn fill(&self, offset: u64, len: usize, byte: u8) -> Result<(), Error> {
         self.change(offset, len, |bytes, _| bytes.fill(byte))
@@ -194,13 +246,22 @@ impl BlockCache {
         &self,
         offset: u64,
         len: usize,
+        f: impl FnMut(&mut [u8], usize),
+    ) -> Result<(), Error> {
+        self.change_in(&mut self.state.lock(), offset, len, f)
+    }
+
+    fn change_in(
+        &self,
+        state: &mut State,
+        offset: u64,
+        len: usize,
         mut f: impl FnMut(&mut [u8], usize),
     ) -> Result<(), Error> {
         if self.device.info().read_only {
             return Err(Error::ReadOnly);
         }
         let end = self.range(offset, len)?;
-        let mut state = self.state.lock();
         let mut at = offset;
         while at < end {
             let index = at / PAGE_SIZE as u64;
@@ -209,7 +270,7 @@ impl BlockCache {
             let touched = mask(index, self.unit, at, at + n as u64);
             // Blocks written whole need not be read first.
             let need = touched & !whole(index, self.unit, at, at + n as u64);
-            let block = self.block(&mut state, index, need)?;
+            let block = self.block(state, index, need)?;
             f(&mut block.page.bytes_mut()[within..within + n], (at - offset) as usize);
             let was_dirty = block.dirty != 0;
             block.valid |= touched;

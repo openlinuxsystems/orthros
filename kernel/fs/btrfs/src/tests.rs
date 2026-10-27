@@ -27,12 +27,14 @@ use crate::tree::{Cursor, HEADER_SIZE, Root, find};
 
 /// A tool of btrfs-progs: from the directory `RADIX_BTRFS_PROGS` names,
 /// where `ob test` puts a newer copy when the system's is too old for
-/// these tests, or else the system's.
+/// these tests (its `sbin`, and the `bin` beside it), or else the
+/// system's.
 fn tool(name: &str) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let dirs = std::env::var_os("RADIX_BTRFS_PROGS")
         .map(PathBuf::from)
         .into_iter()
+        .flat_map(|sbin| [sbin.join("../bin"), sbin])
         .chain(
             ["/usr/sbin", "/sbin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/local/bin"]
                 .into_iter()
@@ -525,3 +527,4 @@ fn a_cache_full_of_blocks_still_reads() {
 
 mod compressed;
 mod files;
+mod write;

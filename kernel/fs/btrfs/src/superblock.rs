@@ -33,6 +33,22 @@ const SYS_CHUNK_ARRAY_AT: usize = 0x32b;
 /// The most bytes a label holds, its NUL included.
 pub const LABEL_MAX: usize = 256;
 
+/// Features a filesystem may have that a writer must know (the
+/// superblock's `compat_ro_flags`): one it does not know mounts read-only.
+pub mod compat_ro {
+    /// The free-space tree keeps each block group's free space.
+    pub const FREE_SPACE_TREE: u64 = 1 << 0;
+    /// The free-space tree is complete and current.
+    pub const FREE_SPACE_TREE_VALID: u64 = 1 << 1;
+    /// Some files have fs-verity's Merkle trees.
+    pub const VERITY: u64 = 1 << 2;
+    /// Block group items are in a tree of their own.
+    pub const BLOCK_GROUP_TREE: u64 = 1 << 3;
+
+    /// The features Radix writes.
+    pub const WRITE: u64 = FREE_SPACE_TREE | FREE_SPACE_TREE_VALID | BLOCK_GROUP_TREE;
+}
+
 /// Features a filesystem may use that change what is on the disk; a
 /// filesystem with one Radix does not know cannot be read.
 pub mod incompat {

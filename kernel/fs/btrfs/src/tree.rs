@@ -29,11 +29,11 @@ use crate::volume::Volume;
 pub const HEADER_SIZE: usize = 101;
 
 /// The size of an item in a leaf: its key, then where its data is.
-const ITEM_SIZE: usize = Key::SIZE + 8;
+pub(crate) const ITEM_SIZE: usize = Key::SIZE + 8;
 
 /// The size of a key pointer in a node: a key, an address and a
 /// transaction.
-const PTR_SIZE: usize = Key::SIZE + 16;
+pub(crate) const PTR_SIZE: usize = Key::SIZE + 16;
 
 /// The deepest a tree goes: levels 0 to 7.
 pub const MAX_LEVEL: u8 = 8;
@@ -80,8 +80,8 @@ pub struct Root {
 
 /// A tree block, checked.
 pub struct Block {
-    bytenr: u64,
-    bytes: KVec<u8>,
+    pub(crate) bytenr: u64,
+    pub(crate) bytes: KVec<u8>,
 }
 
 impl Block {
@@ -116,7 +116,7 @@ impl Block {
     }
 
     /// Where item or key pointer `slot` starts.
-    fn entry(&self, slot: usize) -> usize {
+    pub(crate) fn entry(&self, slot: usize) -> usize {
         HEADER_SIZE + slot * if self.is_leaf() { ITEM_SIZE } else { PTR_SIZE }
     }
 
@@ -234,6 +234,9 @@ struct Cached {
     /// The blocks, by address, each with whether it was used since the
     /// clock hand last passed it.
     entries: KVec<(u64, KArc<Block>, bool)>,
+    /// The running transaction's blocks, by address: never dropped, and
+    /// found before `entries` (ADR 0129).
+    dirty: KVec<(u64, KArc<Block>)>,
     hand: usize,
     /// The most blocks kept.
     limit: usize,
@@ -248,15 +251,74 @@ impl Blocks {
     /// An empty cache of up to `limit` blocks.
     pub fn with_limit(limit: usize) -> Blocks {
         let limit = limit.max(1);
-        Blocks { blocks: Mutex::new(Cached { entries: mem::vec(), hand: 0, limit }) }
+        let cached = Cached { entries: mem::vec(), dirty: mem::vec(), hand: 0, limit };
+        Blocks { blocks: Mutex::new(cached) }
     }
 
     fn get(&self, bytenr: u64) -> Option<KArc<Block>> {
         let mut cached = self.blocks.lock();
+        if let Ok(at) = cached.dirty.binary_search_by_key(&bytenr, |e| e.0) {
+            return Some(cached.dirty[at].1.clone());
+        }
         let at = cached.entries.binary_search_by_key(&bytenr, |e| e.0).ok()?;
         let entry = &mut cached.entries[at];
         entry.2 = true;
         Some(entry.1.clone())
+    }
+
+    /// Adds a block of the running transaction, or puts back one taken.
+    pub(crate) fn put_dirty(&self, block: KArc<Block>) -> Result<()> {
+        let mut cached = self.blocks.lock();
+        // A clean copy at the same address is older: a block freed by a
+        // commit and taken again.
+        if let Ok(at) = cached.entries.binary_search_by_key(&block.bytenr, |e| e.0) {
+            cached.entries.remove(at);
+        }
+        match cached.dirty.binary_search_by_key(&block.bytenr, |e| e.0) {
+            Ok(at) => cached.dirty[at].1 = block,
+            Err(at) => mem::insert(&mut cached.dirty, at, (block.bytenr, block))?,
+        }
+        Ok(())
+    }
+
+    /// Takes the running transaction's block at `bytenr` out, to change
+    /// it: `None` if it has none there.
+    pub(crate) fn take_dirty(&self, bytenr: u64) -> Option<KArc<Block>> {
+        let mut cached = self.blocks.lock();
+        let at = cached.dirty.binary_search_by_key(&bytenr, |e| e.0).ok()?;
+        Some(cached.dirty.remove(at).1)
+    }
+
+    /// Runs `f` on the running transaction's block at `bytenr`, to change
+    /// it. Fails with [`Error::InUse`] while a reader holds it.
+    pub(crate) fn edit<R>(&self, bytenr: u64, f: impl FnOnce(&mut Block) -> R) -> Result<R> {
+        let mut cached = self.blocks.lock();
+        let at = cached.dirty.binary_search_by_key(&bytenr, |e| e.0).map_err(|_| Error::Corrupt)?;
+        let block = KArc::get_mut(&mut cached.dirty[at].1).ok_or(Error::InUse)?;
+        Ok(f(block))
+    }
+
+    /// Runs `f` on the running transaction's block at `bytenr`.
+    pub(crate) fn view<R>(&self, bytenr: u64, f: impl FnOnce(&Block) -> R) -> Result<R> {
+        let cached = self.blocks.lock();
+        let at = cached.dirty.binary_search_by_key(&bytenr, |e| e.0).map_err(|_| Error::Corrupt)?;
+        Ok(f(&cached.dirty[at].1))
+    }
+
+    /// Makes room for `more` blocks of the running transaction.
+    pub(crate) fn reserve_dirty(&self, more: usize) -> Result<()> {
+        let mut cached = self.blocks.lock();
+        cached.dirty.try_reserve(more).map_err(|_| Error::NoMemory)
+    }
+
+    /// Whether the running transaction has a block at `bytenr`.
+    pub(crate) fn is_dirty(&self, bytenr: u64) -> bool {
+        self.blocks.lock().dirty.binary_search_by_key(&bytenr, |e| e.0).is_ok()
+    }
+
+    /// Takes every block of the running transaction out, by address.
+    pub(crate) fn take_all_dirty(&self) -> KVec<(u64, KArc<Block>)> {
+        core::mem::replace(&mut self.blocks.lock().dirty, mem::vec())
     }
 
     fn put(&self, block: &KArc<Block>) {
@@ -275,6 +337,11 @@ impl Blocks {
         if cached.entries.len() < cached.limit {
             let _ = mem::insert(&mut cached.entries, at, (block.bytenr, block.clone(), false));
         }
+    }
+
+    /// Keeps a block a commit wrote, as if read.
+    pub(crate) fn put_clean(&self, block: &KArc<Block>) {
+        self.put(block);
     }
 
     /// Drops up to `max` blocks nobody holds; returns how many.

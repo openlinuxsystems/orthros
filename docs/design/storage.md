@@ -17,7 +17,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127 and 0128.
+0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127, 0128 and 0129.
 
 ## Crates
 
@@ -395,7 +395,9 @@ Howard Hinnant's civil-date algorithms.
 
 `radix-btrfs` reads Btrfs from its published format documentation (ADRs
 0125, 0127 and 0128): Phase 10b.1 has its trees, 10b.2 its files and its
-mount, 10b.3 its compressed extents, read-only until 10c writes it.
+mount, 10b.3 its compressed extents. Phase 10c.1 writes its trees by
+copying on write, in transactions (ADR 0129); the mount stays read-only
+until 10c.1b writes files through it.
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -449,6 +451,36 @@ mount, 10b.3 its compressed extents, read-only until 10c writes it.
   compressed bytes, its data and the decoders' tables, about 400 KiB, one
   per filesystem, made at its first compressed read and dropped by its
   shrinker.
+- `cow::Writer` is the running transaction. It walks down a tree as a
+  `Cursor` does, but copies each block on the way that the transaction
+  did not make to a new place, and points the block above, or the tree's
+  root item, at the copy; the blocks it made change in place (`edit`),
+  kept in the block cache's map of the transaction's blocks, which
+  readers find before the blocks read from the disk. Inserting splits a
+  node that might fill on the way down and the leaf that lacks room, at
+  the split nearest even that fits the new item, or around it when it is
+  too big for either half. Deleting frees an emptied block, merges a block
+  under a quarter full into a neighbor that has room, and lets a root
+  node with one child give way to it. A change that fails half made
+  leaves the writer refusing every change and commit: the disk keeps the
+  last commit. A filesystem whose blocks may be shared (snapshots),
+  counted (quotas) or moved (a relocation) is not written yet.
+- `space::Space` reads every block group and its free ranges from the
+  free-space tree at the first write, kept as extents or bitmaps; the
+  ranges around the superblock's copies are never taken. A tree block is
+  taken aligned to its size, so it never crosses a stripe. A block the
+  transaction made and freed is free at once; any other is pinned until
+  the commit is durable. Each group logs its changes in order, and the
+  commit replays them onto what the free-space tree says.
+- `commit` brings the extent tree (a skinny item and inline reference
+  per tree block made, the item deleted per block freed), the block group
+  items, the free-space tree and the root items' byte counts up to date,
+  in rounds until one changes nothing; seals and writes every block of
+  the transaction to each copy; flushes the disk; writes the superblock
+  through (FUA), with the next backup root filled in; writes its copies
+  at 64 MiB and 256 GiB, durable at the next flush; and then lets the
+  pinned places be taken. `tla/Commit.tla` is the model of that order
+  `ob test tla` checks.
 
 ## tmpfs and the generated trees
 
