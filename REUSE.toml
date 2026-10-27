@@ -15,6 +15,7 @@ path = [
     "kernel/Cargo.lock",
     "userspace/Cargo.lock",
     "userspace/programs/Cargo.lock",
+    "userspace/programs/host/Cargo.lock",
 ]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"

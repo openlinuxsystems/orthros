@@ -194,12 +194,20 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 /// host: what they test does not need Radix.
 pub const HOST_TESTED: &[&str] = &["consoled", "nukesh", "systools"];
 
+/// The Cargo.lock of the host builds of the programs on Rust's standard
+/// library. They take the crates the ports patch for Radix from
+/// crates.io, so they keep a lock of their own: with one lock for both,
+/// each build locked the other's crates afresh, to crates.io's newest.
+pub const HOST_LOCK: &str = "userspace/programs/host/Cargo.lock";
+
 /// A Cargo command for the workspace of programs on Rust's standard
 /// library, building for the host, writing to `target/programs-host`:
 /// for their unit tests.
 pub fn host_cargo(ctx: &Ctx, subcommand: &str) -> Command {
     let mut cmd = process::cargo(ctx);
     cmd.args([subcommand, "--manifest-path", STD_MANIFEST])
+        .arg("--config")
+        .arg(format!(r#"resolver.lockfile-path="{}""#, ctx.root.join(HOST_LOCK).display()))
         .arg("--target-dir")
         .arg(ctx.target.join("programs-host"));
     for package in HOST_TESTED {
