@@ -26,10 +26,10 @@ use crate::format::{Key, item, name_hash, tree};
 const TOP: u64 = 256;
 
 /// The size of the filesystems these tests write.
-const SIZE: u64 = 128 << 20;
+pub(super) const SIZE: u64 = 128 << 20;
 
 /// An empty filesystem from `mkfs.btrfs args`, `SIZE` bytes.
-fn mkfs_empty(args: &[&str]) -> Vec<u8> {
+pub(super) fn mkfs_empty(args: &[&str]) -> Vec<u8> {
     let path = scratch("empty");
     let file = std::fs::File::create(&path).unwrap();
     file.set_len(SIZE).unwrap();
@@ -47,14 +47,14 @@ fn mkfs_empty(args: &[&str]) -> Vec<u8> {
 }
 
 /// A disk that can be written, holding `image`.
-fn writable(image: &[u8]) -> KArc<RamDisk> {
+pub(super) fn writable(image: &[u8]) -> KArc<RamDisk> {
     let disk = mem::arc(RamDisk::with_blocks(image.len() as u64 / 512, false, 512)).unwrap();
     disk.load(0, image).unwrap();
     disk
 }
 
 /// What the disk holds.
-fn image_of(disk: &RamDisk, len: usize) -> Vec<u8> {
+pub(super) fn image_of(disk: &RamDisk, len: usize) -> Vec<u8> {
     let mut out = vec![0; len];
     disk.dump(0, &mut out);
     out
@@ -62,11 +62,11 @@ fn image_of(disk: &RamDisk, len: usize) -> Vec<u8> {
 
 /// What `btrfs check` says of `image`: whether it found it whole, and
 /// what it printed.
-fn btrfs_check(image: &[u8]) -> (bool, String) {
+pub(super) fn btrfs_check(image: &[u8]) -> (bool, String) {
     let path = scratch("check");
     write_sparse(&path, image);
     let out = Command::new(tool("btrfs"))
-        .args(["check", "--readonly"])
+        .args(["check", "--readonly", "--check-data-csum"])
         .arg(&path)
         .stdin(std::process::Stdio::null())
         .output()
@@ -91,7 +91,7 @@ fn write_sparse(path: &std::path::Path, image: &[u8]) {
     }
 }
 
-fn assert_checks(image: &[u8]) {
+pub(super) fn assert_checks(image: &[u8]) {
     let (whole, text) = btrfs_check(image);
     assert!(whole, "btrfs check failed:\n{text}");
 }
@@ -433,7 +433,7 @@ fn every_checksum_and_node_size_writes_what_btrfs_check_passes() {
 
 /// What a [`CrashDisk`] was asked to do.
 #[derive(Clone)]
-enum Op {
+pub(super) enum Op {
     /// A write into the disk's cache: durable at the next flush.
     Write(u64, Vec<u8>),
     /// A flush.
@@ -445,14 +445,14 @@ enum Op {
 /// A disk with a write cache that loses power: it records every write
 /// and flush, so that what a cut at any point leaves on the medium can be
 /// made afterwards ([`CrashDisk::cut`]).
-struct CrashDisk {
+pub(super) struct CrashDisk {
     base: Vec<u8>,
     now: std::sync::Mutex<Vec<u8>>,
     log: std::sync::Mutex<Vec<Op>>,
 }
 
 impl CrashDisk {
-    fn new(image: &[u8]) -> CrashDisk {
+    pub(super) fn new(image: &[u8]) -> CrashDisk {
         CrashDisk {
             base: image.to_vec(),
             now: std::sync::Mutex::new(image.to_vec()),
@@ -463,7 +463,7 @@ impl CrashDisk {
     /// What the medium holds after a cut before op `at`: every write before
     /// the last flush, and each one after it as `keep` says; and how many
     /// writes through it holds.
-    fn cut(&self, at: usize, mut keep: impl FnMut() -> bool) -> (Vec<u8>, usize) {
+    pub(super) fn cut(&self, at: usize, mut keep: impl FnMut() -> bool) -> (Vec<u8>, usize) {
         let log = self.log.lock().unwrap();
         let mut medium = self.base.clone();
         let mut cache: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -493,7 +493,7 @@ impl CrashDisk {
         (medium, throughs)
     }
 
-    fn ops(&self) -> Vec<Op> {
+    pub(super) fn ops(&self) -> Vec<Op> {
         self.log.lock().unwrap().clone()
     }
 

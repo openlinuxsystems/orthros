@@ -86,15 +86,27 @@ impl Writer {
     ///
     /// Fails with [`Error::ReadOnly`] for a device that cannot be written,
     /// and [`Error::NotSupported`] for a filesystem Radix cannot write
-    /// yet: one with features it does not write, or without the
-    /// free-space tree or the skinny extent items every `mkfs.btrfs`
-    /// since 2013 makes.
+    /// yet: one with features it does not write, on more than one device
+    /// (Phase 10e), with a log tree Linux left to replay (10c.2), or
+    /// without the free-space tree or the skinny extent items every
+    /// `mkfs.btrfs` since 2013 makes.
     pub fn new(volume: &Volume) -> Result<Writer> {
+        /// What the writer does not keep up yet.
+        const REFUSED: u64 = incompat::RAID56
+            | incompat::ZONED
+            | incompat::EXTENT_TREE_V2
+            | incompat::RAID_STRIPE_TREE
+            | incompat::SIMPLE_QUOTA;
         let sb = volume.superblock();
         if volume.device().info().read_only {
             return Err(Error::ReadOnly);
         }
-        if sb.compat_ro_flags & !compat_ro::WRITE != 0 || !sb.has(incompat::SKINNY_METADATA) {
+        if sb.compat_ro_flags & !compat_ro::WRITE != 0
+            || !sb.has(incompat::SKINNY_METADATA)
+            || sb.incompat_flags & REFUSED != 0
+            || sb.num_devices != 1
+            || sb.log_root != 0
+        {
             return Err(Error::NotSupported);
         }
         Writer::check_trees(volume)?;
@@ -362,6 +374,26 @@ impl Writer {
         )?;
         mem::push(&mut self.pinned, (root.bytenr, nodesize))?;
         self.space.free_pinned(root.bytenr, nodesize)
+    }
+
+    /// Takes `len` bytes for file data, whole sectors.
+    pub(crate) fn alloc_data(&mut self, volume: &Volume, len: u64) -> Result<u64> {
+        let sector = u64::from(volume.superblock().sectorsize);
+        let at = self.space.take(kind::DATA, len, sector)?;
+        self.bytes_used += len as i64;
+        Ok(at)
+    }
+
+    /// Frees the data extent `[start, start + len)`: at once if this
+    /// transaction wrote it (`made`), so no tree on the disk names it,
+    /// after the commit otherwise.
+    pub(crate) fn free_data(&mut self, start: u64, len: u64, made: bool) -> Result<()> {
+        self.bytes_used -= len as i64;
+        if made {
+            return self.space.free_now(start, len);
+        }
+        mem::push(&mut self.pinned, (start, len))?;
+        self.space.free_pinned(start, len)
     }
 
     /// A new, empty block at `level` of tree `tree`, with the UUIDs of

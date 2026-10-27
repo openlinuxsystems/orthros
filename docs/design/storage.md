@@ -17,7 +17,7 @@ clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127, 0128 and 0129.
+0052 to 0059, 0111, 0112, 0115, 0117, 0125, 0127, 0128, 0129 and 0130.
 
 ## Crates
 
@@ -165,8 +165,10 @@ dirty.
 - Cutting a file drops the pages wholly past the new end, dirty or not,
   zeroes the rest of the last page, and then has the backing free the
   space (`Backing::truncate`).
-- `sync` writes the dirty pages back through the backing; a page whose
-  write fails stays dirty.
+- `sync` writes the dirty pages back through the backing, each run of up
+  to `WRITE_RUN` (32) contiguous ones in one call (`Backing::write_pages`,
+  which writes them one at a time unless the filesystem does better); a
+  page whose write fails stays dirty.
 - `shrink` drops clean pages.
 
 One mutex guards a file's pages and size, and is held while the disk
@@ -396,8 +398,8 @@ Howard Hinnant's civil-date algorithms.
 `radix-btrfs` reads Btrfs from its published format documentation (ADRs
 0125, 0127 and 0128): Phase 10b.1 has its trees, 10b.2 its files and its
 mount, 10b.3 its compressed extents. Phase 10c.1 writes its trees by
-copying on write, in transactions (ADR 0129); the mount stays read-only
-until 10c.1b writes files through it.
+copying on write, in transactions (ADR 0129), and 10c.1b its files
+through them (ADR 0130); the kernel mounts it writable from 10c.1c.
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -481,6 +483,22 @@ until 10c.1b writes files through it.
   at 64 MiB and 256 GiB, durable at the next flush; and then lets the
   pinned places be taken. `tla/Commit.tla` is the model of that order
   `ob test tla` checks.
+- A writable mount (`BtrfsFs::mount_writable`, ADR 0130) needs
+  `no-holes` and one device, and holds the running transaction behind
+  one lock, which every change and every read of the trees takes. `files`
+  makes the items of a change: inode items, the three items of a name
+  (`DIR_ITEM`, `DIR_INDEX`, `INODE_REF`), orphan items, and file extents
+  with their `EXTENT_ITEM`s, references and checksums. A node's write-back
+  writes each run of dirty pages to a new extent, then, under the lock,
+  drops the references of the extents it replaces (freeing an extent with
+  its last), adds its own and the checksums of the pages it wrote, and
+  sets the inode's size and bytes. An inline extent is rewritten as a
+  regular one before any change but a write over all of it. A node with
+  pages or an inode the disk lacks stays in the mount's dirty list until
+  the next sync; one removed while open is deleted after its last close,
+  or at the next writable mount from its orphan item. A commit is due 30
+  seconds after the first change the disk lacks, or once more than
+  16384 pages wait; `fsync` is a sync.
 
 ## tmpfs and the generated trees
 
