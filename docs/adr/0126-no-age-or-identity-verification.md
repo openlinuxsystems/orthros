@@ -47,9 +47,12 @@ Dukovo never verifies anyone's age or identity.
   sign-in to a mail provider, is between the user and that service;
   Dukovo passes nothing about the user's age or identity to it.
 
-Choices an owner makes about their own machine stay open to them: an
-owner may limit what another account can run with the ordinary
-per-account permissions, which never involve an age.
+Choices an owner makes about their own machine stay open to them. An
+owner may limit what another account can install, and the approved
+Settings design has optional Parental controls: time and app limits on
+an account the owner chooses, off unless set up. These are the owner's
+settings for an account, never an age: setting them up asks for no birth
+date, and nothing tells an app about them.
 
 ## Consequences
 
