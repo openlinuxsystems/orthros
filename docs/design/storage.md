@@ -5,18 +5,19 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Storage: files, disks and FAT
 
-This note describes Radix's storage as of Phase 7, with the disks of
-Phase 10: the virtual file system and its capability-relative paths,
-directory and file objects, the page cache and the block cache, the
-block layer, the disk queue and its virtio, AHCI and NVMe drivers, raw access
-to block devices, FAT, tmpfs and the generated trees, writeback and
+This note describes Radix's storage as of Phase 7, with the disks and
+the start of Btrfs of Phase 10: the virtual file system and its
+capability-relative paths, directory and file objects, the page cache
+and the block cache, the block layer, the disk queue and its virtio, AHCI
+and NVMe drivers, raw access to block devices, FAT, Btrfs, tmpfs and the
+generated trees, writeback and
 reclaim, and the hierarchy Spark builds. It ends with the semi-formal
 arguments that paths never leave their directory and that freed
 clusters are never written by their old owner, the lock order, and the
 known limits. The user-facing descriptions are radix-directory(2),
 radix-file(2), radix-block(2), radix-files(7), radix-proc(5),
 radix-sysfs(5) and spark(8); the decisions behind the design are ADRs
-0052 to 0059, 0111, 0112, 0115 and 0117.
+0052 to 0059, 0111, 0112, 0115, 0117 and 0125.
 
 ## Crates
 
@@ -38,6 +39,8 @@ kernel/fs/vfs           radix-vfs: nodes, filesystems, paths, the mount
                         boot archive (compartment)
 kernel/fs/fat           radix-fat: FAT12/16/32 with long names (compartment);
                         tla/Clusters.tla, the model of cluster reuse
+kernel/fs/btrfs         radix-btrfs: Btrfs's checksums, superblock, chunks
+                        and trees, read (compartment, Phase 10b)
 kernel/radix            fs/: the tree, disks and their queue, devfs,
                         procfs, sysfs, the writeback thread; user/files.rs:
                         the directory and file methods
@@ -387,6 +390,32 @@ Howard Hinnant's civil-date algorithms.
 - Both tables are written; FSInfo's free count and hint are kept, and
   counted once from the table when FSInfo has none.
 
+## Btrfs
+
+`radix-btrfs` reads Btrfs from its published format documentation (ADR
+0125); Phase 10b.1 has its trees, 10b.2 its files and its mount.
+
+- `csum` has the four checksums, each the crate's own code: CRC-32C by
+  slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
+  BLAKE2b-256 (`blake2b`). `format` has keys, item and tree numbers and
+  root items, and the name hash (CRC-32C from `!1`, without the final
+  inversion) that orders a directory's `DIR_ITEM`s.
+- `superblock` reads the first superblock and refuses one that is
+  damaged or that uses a feature Radix does not read.
+- `chunk` maps logical addresses to their copies on the device: the
+  chunks of the superblock's system chunk array first, then those of the
+  chunk tree, which must agree with them.
+- `tree` reads tree blocks and checks each before use, as Linux's tree
+  checker does, against the address, level, transaction and keys its
+  parent gives; a block that fails is read from the next copy. Checked
+  blocks stay in a cache of 8 MiB, by address, dropped by a clock. A
+  `Cursor` holds a block at each level of a tree: it seeks the first item
+  at a key or after it, and advances through the leaves in order.
+- `volume::Volume` is an opened device: its superblock, its chunk map, a
+  block cache of its sectors, and the roots of its trees, the chunk tree
+  and the root tree from the superblock, every other tree from its root
+  item.
+
 ## tmpfs and the generated trees
 
 tmpfs is a page cache with nothing below it: its pages are the only copy,
@@ -543,6 +572,10 @@ host, and reads everything back after a second boot.
   and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
+- Btrfs is read only, on one device, and not yet mounted (Phase 10b.2).
+  Its tree blocks are read through the sector cache, a page at a time,
+  so a block of 16 KiB takes four requests and is held twice, in the
+  sector cache and checked in its own.
 - Disks are found once, at boot, and mounted by device name; there is no
   hot plug yet, and no labels in `/volumes`.
 - The user heap of radix-rt keeps freed large blocks mapped and reuses

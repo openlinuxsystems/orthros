@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-btrfs"
+description = "Btrfs for Radix: its superblock, chunks, trees and checksums"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# Host memory instead of the kernel's, for tests on the host.
+host = ["radix-vfs/host", "radix-block/host"]
+
+[dependencies]
+radix-block = { path = "../block" }
+radix-sync = { path = "../../lib/sync" }
+radix-vfs = { path = "../vfs" }
+
+[dev-dependencies]
+radix-block = { path = "../block", features = ["host"] }
+radix-vfs = { path = "../vfs", features = ["host"] }
+
+[lints]
+workspace = true
