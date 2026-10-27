@@ -136,3 +136,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0122](0122-disk-checks-on-real-machines.md) | Real machines' disks are checked by serial number, and Linux checks what Dukovo wrote | Accepted |
 | [0123](0123-disks-of-4k-sectors.md) | Disks of 4 KiB sectors keep 512-byte addresses and move whole sectors | Accepted |
 | [0124](0124-the-disk-check-measures-the-benchmarks.md) | The disk check also measures the benchmarks on the machine | Accepted |
+| [0126](0126-no-age-or-identity-verification.md) | Dukovo never verifies anyone's age or identity | Accepted |
