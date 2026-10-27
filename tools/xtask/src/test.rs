@@ -331,6 +331,15 @@ const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 
+/// The size of the `disk-check` test's disk: the smallest disktest takes.
+const CHECK_KIB: u64 = 128 * 1024;
+
+/// The `disk-check` test's disk: an NVMe namespace of the first
+/// controller, whose serial number is `dukovo-test-0`, which the host
+/// checks with Linux's side of disktest ([`linux_disk_check`]).
+const CHECK_DISKS: &[Disk] =
+    &[Disk { kib: CHECK_KIB, check: linux_disk_check, ..raw_disk(Bus::Nvme(0), raw_check) }];
+
 /// The `disk-errors` test's disks, a SATA disk and an NVMe namespace,
 /// and the errors QEMU gives their reads and writes ([`ERROR_RULES`]):
 /// a read of sector 6000 fails once, one of sector 10000 every time, and
@@ -926,6 +935,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "disk-check",
+        about: "The disk check of a real machine on an NVMe disk it finds by its serial number; then Linux's side reads back on the host what it wrote",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix /system/tests/posix/disktest --yes-erase dukovo-test-0",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_check,
+        disks: CHECK_DISKS,
+        second: None,
+    },
+    Case {
         name: "disk-errors",
         about: "QEMU fails reads and writes of a SATA and an NVMe disk: one that fails once goes again, one that always fails ends in EIO",
         firmware: Firmware::Uefi,
@@ -1133,6 +1158,7 @@ pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -
             cmdline: &cmdline_slot(),
             microcode: (kind == TestImage::Microcode).then(test_microcode),
             programs: Some(&built.programs),
+            disk_check: None,
             staging: dir.join(format!("{name}-root")),
             output: output.clone(),
         },
@@ -2822,6 +2848,61 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: /devices/{name}: discards, flushes and refusals work"))?;
     }
     storage_end(vm, "raw")
+}
+
+/// The `disk-check` test: disktest (userspace/posix/disktest.c, ADR 0122)
+/// finds the NVMe disk by its serial number, writes its places, reads them
+/// back, measures and saves its report; the host then runs Linux's side.
+fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/disktest as process ")?;
+    vm.expect(&format!(
+        "disktest: /devices/nvme0n1 on Dukovo: QEMU NVMe Ctrl, serial dukovo-test-0, {} bytes, \
+         512-byte sectors, 512-byte blocks, solid state",
+        CHECK_KIB * 1024
+    ))?;
+    vm.expect("disktest: a write of 3 bytes off a sector's boundary: passed")?;
+    vm.expect("disktest: 64 of 64 places read back as written")?;
+    vm.expect("disktest: 1 MiB write: ")?;
+    vm.expect("disktest: passed; the report is saved on the disk")?;
+    vm.expect("(/system/tests/posix/disktest) exited with code 0x0")?;
+    Ok(())
+}
+
+/// Linux's side of the disk check, on the `disk-check` test's disk file:
+/// built for the host from the same source, it must find Dukovo's report
+/// and read back every place Dukovo wrote.
+fn linux_disk_check(disk: &DiskImage) -> Result<(), String> {
+    let (program, source) = (disk.path.with_extension("disktest"), disk.path.with_extension("c"));
+    std::fs::write(&source, include_str!("../../../userspace/posix/disktest.c"))
+        .map_err(|err| format!("writing {}: {err}", source.display()))?;
+    let compiler = crate::ports::find_clang()
+        .map(|(clang, _)| clang)
+        .or_else(|| crate::process::find_program("cc"))
+        .ok_or("no C compiler is installed, for Linux's side of the disk check")?;
+    let built = host_tool(
+        std::process::Command::new(compiler)
+            .args(["-std=c11", "-D_GNU_SOURCE", "-O2", "-Wall", "-o"])
+            .arg(&program)
+            .arg(&source),
+    );
+    let _ = std::fs::remove_file(&source);
+    built?;
+    let ran = std::process::Command::new(&program)
+        .args(["--yes-erase", "--device"])
+        .arg(&disk.path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("running {}: {err}", program.display()));
+    let _ = std::fs::remove_file(&program);
+    let ran = ran?;
+    let text = String::from_utf8_lossy(&ran.stdout);
+    if !ran.status.success()
+        || !text.contains("| Linux reads what Dukovo wrote, after a restart | 64 of 64 |")
+    {
+        return Err(format!("Linux's side of the disk check failed:\n{text}"));
+    }
+    Ok(())
 }
 
 /// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s

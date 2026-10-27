@@ -118,7 +118,7 @@ _target/userspace/_).
 		Build this port even if nothing changed; repeat the option for
 		more.
 
-*image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*]
+*image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--disk-check* _serial_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
 	_out/dukovo-VERSION-x86_64.img_. The image is a hybrid: it starts
 	under UEFI and under legacy BIOS, from a USB stick, a hard disk or
@@ -150,6 +150,17 @@ _target/userspace/_).
 		such as _/lib/firmware/intel-ucode_, instead of those named by
 		*image.microcode*. Every update is checked, and the command fails
 		if _path_ holds none. See *MICROCODE* in *dukovo-boot*(7).
+
+	*--disk-check* _serial_
+		Add a second boot menu entry, *Dukovo disk check: erases the disk
+		with serial* _serial_, which runs the disk check of a real
+		machine on the disk with that serial number and on no other
+		(ADR 0122), and put Linux's side of the check in the image's
+		_crosscheck_ directory: the program built for Linux, linked
+		against the C library of the live system it runs on, and
+		_run.sh_, which runs it there. Everything on the disk is lost.
+		The handbook's Supported hardware chapter gives the steps. The
+		kernel command line may not have a *--* part with it.
 
 *run* [*--uefi* | *--bios*] [*--media* _kind_] [*--headless*] [*--gdb*] [*--cmdline* _flags_] [*--microcode* _path_] [*--debug* | *--release*] [*--* _qemu-args_...]
 	Build the image and boot it in QEMU on a q35 machine with
@@ -461,6 +472,17 @@ _target/userspace/_).
 		and a discard or a write without the write right. On the host,
 		every byte of every disk must be what the writes left, with the
 		discarded range zeroed (QEMU punches holes for discards).
+
+	*disk-check*
+		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
+		number is _dukovo-test-0_, and run the disk check of a real
+		machine on it (*ob image --disk-check*, ADR 0122):
+		_/system/tests/posix/disktest --yes-erase dukovo-test-0_ must
+		find the disk by its serial number, write its 64 places, read
+		them back, measure its transfers and save its report on the
+		disk. The host then builds Linux's side of the same program and
+		runs it on the disk's file, which must find the report and read
+		back every place.
 
 	*disk-errors*
 		Boot 2 CPUs under UEFI with an 8 MiB SATA disk and an 8 MiB NVMe

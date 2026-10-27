@@ -29,6 +29,9 @@ pub struct ImageSpec<'a> {
     /// The user programs: the test image and the boot archive, each
     /// loaded as a boot module.
     pub programs: Option<&'a userspace::Programs>,
+    /// The serial number of the disk for a disk check entry in the boot
+    /// menu, with Linux's side of the check beside it ([`disk_check`]).
+    pub disk_check: Option<&'a str>,
     /// Staging directory, recreated on every build.
     pub staging: PathBuf,
     /// Output file.
@@ -51,6 +54,8 @@ pub struct Overrides {
     pub cmdline: Option<String>,
     /// Microcode file or directory instead of `image.microcode`.
     pub microcode: Option<String>,
+    /// The serial number of a disk to add the disk check of (ADR 0122).
+    pub disk_check: Option<String>,
 }
 
 /// Builds the kernel and the release image described by dukovo.toml.
@@ -76,6 +81,7 @@ pub fn build_release(
             cmdline: overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline),
             microcode,
             programs: Some(&programs),
+            disk_check: overrides.disk_check.as_deref(),
             staging: ctx.out.join("image-root"),
             output: ctx.out.join(file_name(iso)),
         },
@@ -129,28 +135,97 @@ pub fn read_microcode(ctx: &Ctx, path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Fills `@VERSION@`, `@TIMEOUT@`, `@CMDLINE@` and `@MODULES@` in the
-/// grub.cfg template. `modules` are (path, command line) pairs.
+/// Fills `@VERSION@`, `@TIMEOUT@`, `@CMDLINE@`, `@MODULES@` and
+/// `@ENTRIES@` in the grub.cfg template. `modules` are (path, command
+/// line) pairs, and `entries` more menu entries.
 pub fn render_grub_cfg(
     template: &str,
     timeout: u32,
     cmdline: &str,
     modules: &[(&str, &str)],
+    entries: &str,
 ) -> Result<String> {
     config::validate_cmdline(cmdline)?;
-    let mut lines = String::new();
-    for (path, args) in modules {
-        let _ = writeln!(lines, "    module2 {path} {args}");
-    }
+    let lines = module_lines(modules);
     let rendered = template
         .replace("@VERSION@", VERSION)
         .replace("@TIMEOUT@", &timeout.to_string())
         .replace("@CMDLINE@", cmdline.trim())
-        .replace("@MODULES@", &lines);
+        .replace("@MODULES@", &lines)
+        .replace("@ENTRIES@", entries);
     if let Some(name) = find_placeholder(&rendered) {
         crate::bail!("image/grub/grub.cfg.in uses unknown placeholder {name}");
     }
     Ok(rendered)
+}
+
+/// A menu entry's `module2` lines for `modules`.
+fn module_lines(modules: &[(&str, &str)]) -> String {
+    let mut lines = String::new();
+    for (path, args) in modules {
+        let _ = writeln!(lines, "    module2 {path} {args}");
+    }
+    lines
+}
+
+/// Where the disk check's program is in the boot archive.
+const DISK_CHECK_PROGRAM: &str = "/system/tests/posix/disktest";
+
+/// The boot menu entry of the disk check of the disk with serial number
+/// `serial` (ADR 0122), which runs its program under Spark, and Linux's
+/// side of the check in the image's `crosscheck` directory: the program
+/// built for Linux, linked against the live system's C library so that
+/// the image carries none of it, and `run.sh`.
+fn disk_check(
+    ctx: &Ctx,
+    spec: &ImageSpec<'_>,
+    serial: &str,
+    modules: &[(&str, &str)],
+) -> Result<String> {
+    let valid = !serial.is_empty()
+        && serial.len() <= 40
+        && serial.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    if !valid {
+        crate::bail!(
+            "--disk-check takes a disk's serial number, of up to 40 letters, digits, dots, \
+             dashes and underscores, not `{serial}`"
+        );
+    }
+    if spec.cmdline.split_whitespace().any(|word| word == "--") {
+        crate::bail!(
+            "--disk-check runs a program of its own under Spark, so the kernel command line \
+             cannot have a `--` part"
+        );
+    }
+    step(&format!("Adding the disk check of the disk with serial number {serial}"));
+    let dir = spec.staging.join("crosscheck");
+    process::create_dir(&dir)?;
+    let compiler = crate::ports::find_clang()
+        .map(|(clang, _)| clang)
+        .or_else(|| process::find_program("cc"))
+        .ok_or_else(|| {
+            Error::new("no C compiler is installed, for Linux's side of the disk check")
+                .hint("run `./ob doctor`")
+        })?;
+    let mut cmd = Command::new(compiler);
+    cmd.args(["-std=c11", "-D_GNU_SOURCE", "-O2", "-Wall", "-o"])
+        .arg(dir.join("disktest"))
+        .arg(ctx.root.join("userspace/posix/disktest.c"));
+    process::run(ctx, &mut cmd)?;
+    let template = ctx.root.join("image/crosscheck/run.sh.in");
+    let script =
+        std::fs::read_to_string(&template).context(|| format!("reading {}", template.display()))?;
+    let run = dir.join("run.sh");
+    std::fs::write(&run, script.replace("@SERIAL@", serial))
+        .context(|| format!("writing {}", run.display()))?;
+    let cmdline = spec.cmdline.trim();
+    let space = if cmdline.is_empty() { "" } else { " " };
+    Ok(format!(
+        "\nmenuentry \"Dukovo disk check: erases the disk with serial {serial}\" {{\n    \
+         multiboot2 /boot/radix {cmdline}{space}-- --posix {DISK_CHECK_PROGRAM} --yes-erase \
+         {serial}\n{}    boot\n}}\n",
+        module_lines(modules)
+    ))
 }
 
 /// Returns the first `@NAME@` left in `text`.
@@ -219,7 +294,11 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
     let template_path = ctx.root.join("image/grub/grub.cfg.in");
     let template = std::fs::read_to_string(&template_path)
         .context(|| format!("reading {}", template_path.display()))?;
-    let grub_cfg = render_grub_cfg(&template, spec.timeout, spec.cmdline, &modules)?;
+    let entries = match spec.disk_check {
+        Some(serial) => disk_check(ctx, spec, serial, &modules)?,
+        None => String::new(),
+    };
+    let grub_cfg = render_grub_cfg(&template, spec.timeout, spec.cmdline, &modules, &entries)?;
     let cfg_path = spec.staging.join("boot/grub/grub.cfg");
     process::create_dir(cfg_path.parent().expect("grub.cfg has a parent"))?;
     std::fs::write(&cfg_path, grub_cfg).context(|| format!("writing {}", cfg_path.display()))?;
@@ -278,7 +357,7 @@ mod tests {
 
     #[test]
     fn renders_the_repository_template() {
-        let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit", &[]).unwrap();
+        let cfg = render_grub_cfg(TEMPLATE, 0, "qemu-exit", &[], "").unwrap();
         assert!(cfg.contains("set timeout=0"));
         assert!(cfg.contains("multiboot2 /boot/radix qemu-exit\n    boot\n"));
         assert!(cfg.contains(&format!("Dukovo Server {VERSION} (Radix)")));
@@ -289,14 +368,14 @@ mod tests {
 
     #[test]
     fn renders_modules() {
-        let cfg = render_grub_cfg(TEMPLATE, 0, "", &[(MICROCODE_PATH, "microcode")]).unwrap();
+        let cfg = render_grub_cfg(TEMPLATE, 0, "", &[(MICROCODE_PATH, "microcode")], "").unwrap();
         assert!(cfg.contains(&format!("    module2 {MICROCODE_PATH} microcode\n    boot\n")));
     }
 
     #[test]
     fn rejects_unknown_placeholders_and_bad_cmdlines() {
-        assert!(render_grub_cfg("set x=@NOPE@", 0, "", &[]).is_err());
-        assert!(render_grub_cfg(TEMPLATE, 0, "a; reboot", &[]).is_err());
+        assert!(render_grub_cfg("set x=@NOPE@", 0, "", &[], "").is_err());
+        assert!(render_grub_cfg(TEMPLATE, 0, "a; reboot", &[], "").is_err());
     }
 
     #[test]

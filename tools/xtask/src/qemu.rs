@@ -239,8 +239,11 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     };
     let headless = args.flag("--headless") || !has_display();
     let gdb = args.flag("--gdb");
-    let mut overrides =
-        Overrides { cmdline: args.value("--cmdline")?, microcode: args.value("--microcode")? };
+    let mut overrides = Overrides {
+        cmdline: args.value("--cmdline")?,
+        microcode: args.value("--microcode")?,
+        disk_check: None,
+    };
     if gdb {
         // GDB's symbols are at the link address, so the kernel must stay
         // there.
