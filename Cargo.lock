@@ -32,7 +32,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "linux-bench"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "libc",
 ]
@@ -57,11 +57,11 @@ dependencies = [
 
 [[package]]
 name = "radix-bootfs"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-fbcon"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "radix-hal",
  "radix-klog",
@@ -69,45 +69,45 @@ dependencies = [
 
 [[package]]
 name = "radix-hal"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-hw"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-kdb"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-klog"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "radix-sync",
 ]
 
 [[package]]
 name = "radix-ksyms"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-microcode"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-relocs"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "radix-sync"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "ridlc"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "rustc-demangle"
@@ -224,7 +224,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "xtask"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "radix-bootfs",
  "radix-fbcon",
