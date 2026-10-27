@@ -65,7 +65,10 @@ jobs:
       # The ports' builds come from main's last run, so a pull request
       # rebuilds only the ports its changes reach: ob's stamps decide, as
       # they do in a local tree. Main always builds them from scratch, and
-      # saves them for the pull requests after it.
+      # saves them for the pull requests after it. The cache holds every
+      # folder a port installs into: out/toolchain too, where Rust's
+      # standard library, the patched crates and the C++ headers go, or a
+      # stamp would call a port built whose files are missing.
       - name: Note the port toolchain's version
         id: ports-key
         run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
@@ -76,6 +79,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/ports/sources
           key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
@@ -102,6 +106,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/ports/sources
           key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
@@ -179,6 +184,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/ports/sources
           key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
@@ -244,6 +250,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/ports/sources
           key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
@@ -400,6 +407,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/container/ports/sources
           key: ports-container-${{ steps.ports-key.outputs.toolchain }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
@@ -417,6 +425,7 @@ jobs:
         with:
           path: |
             out/sysroot
+            out/toolchain
             out/ports
             target/container/ports/sources
           key: ports-container-${{ steps.ports-key.outputs.toolchain }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}

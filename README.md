@@ -94,7 +94,7 @@ Settings live in [`dukovo.toml`](dukovo.toml). The full manual is
 ```sh
 ./ob image
 lsblk -d -o NAME,SIZE,MODEL,TRAN          # find your stick, for example sdb
-sudo dd if=out/dukovo-0.10.0-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=out/dukovo-0.10.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 Everything on the target device is erased. balenaEtcher, GNOME Disks
