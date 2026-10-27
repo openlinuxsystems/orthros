@@ -104,6 +104,7 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue, and reading and writing the FAT disks of the `storage` boot test on the host | GPL-3.0-or-later |
 | [dosfstools](https://github.com/dosfstools/dosfstools) (`mkfs.fat`, `fsck.fat`) | Making the FAT volumes Radix's FAT tests and the `storage` boot test use, and checking what Radix wrote to them | GPL-3.0-or-later |
+| [btrfs-progs](https://github.com/kdave/btrfs-progs) (`mkfs.btrfs`) | Making the Btrfs filesystems Radix's Btrfs tests read | GPL-2.0-only |
 | [Clang, LLD and LLVM](https://llvm.org/) 20 | Building the C library, its ports and C programs for Radix ([ADR 0069](docs/adr/0069-clang-toolchain-and-ports.md)) | Apache-2.0 WITH LLVM-exception |
 | [Meson](https://mesonbuild.com/) and [Ninja](https://ninja-build.org/) | Building mlibc | Apache-2.0 |
 | [freestnd-cxx-hdrs](https://github.com/osdev0/freestnd-cxx-hdrs) 14.3.0 (libstdc++'s freestanding headers from GCC 14), by the osdev0 contributors and the GCC project | The C++ headers mlibc is compiled with; nothing of them reaches an image | GPL-3.0-or-later WITH GCC-exception-3.1 |

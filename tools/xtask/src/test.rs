@@ -48,6 +48,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-bootfs",
     "radix-block",
     "radix-bootinfo",
+    "radix-btrfs",
     "radix-cap",
     "radix-elf",
     "radix-fat",

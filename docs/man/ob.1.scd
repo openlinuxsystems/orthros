@@ -62,12 +62,11 @@ _target/userspace/_).
 *doctor*
 	Check every host tool the build needs: rustup, the pinned toolchain
 	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
-	UEFI, xorriso, mtools, dosfstools, the tools that build the ports
-	(Clang 20 or later with compiler-rt's builtins, LLD, LLVM's tools,
-	Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc, mandoc
-	and mdBook. For anything missing,
-	print the exact install command for Debian, Ubuntu, Fedora or Arch
-	Linux. Also report whether KVM is usable (without it QEMU still works,
+	UEFI, xorriso, mtools, dosfstools, btrfs-progs, the tools that build
+	the ports (Clang 20 or later with compiler-rt's builtins, LLD, LLVM's
+	tools, Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc,
+	mandoc and mdBook. For anything missing, print the exact install
+	command for Debian, Ubuntu, Fedora or Arch Linux. Also report whether KVM is usable (without it QEMU still works,
 	only slower), whether GDB is installed for *run --gdb*, and whether
 	dash, bash, *unshare*, *prlimit* and *setpriv* are there for *test
 	corpus*. Exits with status 1 when a required tool is missing.
