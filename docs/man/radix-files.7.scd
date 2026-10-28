@@ -192,6 +192,21 @@ takes an empty subvolume too, as Linux's *rmdir*(2) does. A subvolume
 that is the default, holds another, or has something in it open fails
 to go (*in_use*, *not_empty*).
 
+A Btrfs file's *control* takes Linux's *FICLONE* and *FICLONERANGE*
+(*ioctl_ficlone*(2)): the file opened for writing shares the blocks of
+another, opened for reading on the same filesystem, whole or a range of
+whole blocks, until either changes them, so the copy takes no room.
+*cp*(1) clones this way unless given *--reflink=never*. Offsets and
+lengths not in whole blocks, ranges of one file that overlap, and a file
+with checksums cloned to or from one without fail with EINVAL; another
+filesystem fails with EXDEV. Other filesystems fail with EOPNOTSUPP.
+
+A Btrfs directory's *scrub* reads every block of its filesystem that
+the last commit holds, every copy, checks each against its checksum,
+and writes a good copy over a bad one unless asked only to read, as
+Linux's *btrfs scrub* does (*scrub*(8)). It needs the directory's read
+right, and its write right to mend.
+
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
 or anything holds a capability to a place in it. A rename never moves a
@@ -370,4 +385,4 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 *radix-directory*(2), *radix-file*(2), *radix-block*(2), *radix-ring*(2),
 *radix-errors*(2),
 *radix-proc*(5), *radix-sysfs*(5), *radix-capabilities*(7),
-*radix-processes*(7), *spark*(8), *subvolume*(8)
+*radix-processes*(7), *scrub*(8), *spark*(8), *subvolume*(8)

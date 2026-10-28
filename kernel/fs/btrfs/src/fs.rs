@@ -719,6 +719,10 @@ impl FileSystem for BtrfsFs {
 
     /// Whether a commit is due: the oldest change the disk lacks is
     /// [`COMMIT_NS`] old, or more than [`DIRTY_PAGES_MAX`] pages wait.
+    fn scrub(&self, repair: bool) -> Result<radix_vfs::Scrub> {
+        crate::scrub::scrub(&self.inner, repair)
+    }
+
     fn is_dirty(&self) -> bool {
         let since = self.inner.since.load(Ordering::Acquire);
         if since == 0 {

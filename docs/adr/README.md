@@ -150,6 +150,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md) | An NVMe completion head the controller asks for goes to its register at the next completion | Accepted |
 | [0137](0137-the-root-is-the-dukovo-root-partitions-btrfs-subvolumes.md) | The root is the Btrfs subvolumes of a Dukovo root partition | Accepted |
 | [0138](0138-btrfs-snapshots-and-subvolumes-with-linuxs-back-references.md) | Btrfs snapshots and subvolumes, with Linux's back references | Accepted |
+| [0139](0139-btrfs-clones-files-extents-as-linuxs-ficlone-does.md) | Btrfs clones files' extents as Linux's `FICLONE` does | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |
 | [0141](0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md) | ext4 is our own implementation from its documentation, journaling whole blocks at each sync | Accepted |
 | [0142](0142-the-kernel-hears-the-fixed-acpi-power-button-and-spark-powers-off.md) | The kernel hears ACPI's fixed power button, and pressing it asks Spark to power off | Accepted |
@@ -157,3 +158,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0144](0144-lspci-lscpu-and-lsmem-with-the-pci-id-database.md) | lspci, lscpu and lsmem are systools, with the PCI ID database as a port | Accepted |
 | [0145](0145-machine-checks-are-reported-and-the-unrecoverable-ones-panic.md) | Machine checks are reported, and the ones the CPU cannot go on after panic | Accepted |
 | [0146](0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md) | xHCI controllers are driven by a kernel thread each, from Intel's specification | Accepted |
+| [0150](0150-btrfs-scrubs-the-last-commit-a-run-of-extents-at-a-time.md) | Btrfs scrubs the last commit, a run of extents at a time | Accepted |

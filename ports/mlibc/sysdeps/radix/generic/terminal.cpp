@@ -189,6 +189,31 @@ int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *re
 	}
 	case TCSBRK:
 		return sysdep<Isatty>(fd);
+	case RADIX_FILE_CLONE: {
+		// Linux's FICLONE, whose argument is the source's descriptor: the
+		// kernel takes its slot (ADR 0139).
+		uint32_t source = radix::slot_of(static_cast<int>(reinterpret_cast<intptr_t>(arg)));
+		if(source == radix::NO_SLOT)
+			return EBADF;
+		if(int e = control(fd, RADIX_FILE_CLONE, source, nullptr, 0); e)
+			return e;
+		*result = 0;
+		return 0;
+	}
+	case RADIX_FILE_CLONE_RANGE: {
+		// FICLONERANGE's struct file_clone_range, with the source's slot
+		// for its src_fd.
+		uint64_t range[4];
+		memcpy(range, arg, sizeof(range));
+		uint32_t source = radix::slot_of(static_cast<int>(range[0]));
+		if(source == radix::NO_SLOT)
+			return EBADF;
+		range[0] = source;
+		if(int e = control(fd, RADIX_FILE_CLONE_RANGE, 0, range, sizeof(range)); e)
+			return e;
+		*result = 0;
+		return 0;
+	}
 	default:
 		break;
 	}

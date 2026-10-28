@@ -22,7 +22,7 @@ use radix_abi::Status;
 use radix_abi::capability::{self, ObjectKind, Rights};
 use radix_abi::directory::{
     self, DirEntry, FileKind, FileStatus, FilesystemKind, LinkFlags, MountFlags, OpenFlags,
-    PathFlags,
+    PathFlags, ScrubProgress,
 };
 use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::{file, startup};
@@ -130,6 +130,20 @@ impl From<&[u8; FileStatus::SIZE]> for Stat {
             device: word(FileStatus::OFFSET_DEVICE),
         }
     }
+}
+
+/// What [`Dir::scrub`] read and found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrubbed {
+    /// The bytes it read, every copy.
+    pub bytes: u64,
+    /// The sectors it failed to read or found bad, and the bad copies of
+    /// the superblock.
+    pub errors: u64,
+    /// The bad sectors with a good copy.
+    pub corrected: u64,
+    /// The bad sectors with none.
+    pub uncorrectable: u64,
 }
 
 /// What `info` says of a directory's filesystem.
@@ -315,6 +329,30 @@ impl Dir {
     /// Removes the Btrfs subvolume at `path`, with everything in it.
     pub fn remove_subvolume(&self, path: &str) -> Result<()> {
         Ok(directory::remove_subvolume(&SYS, self.held.slot, path.as_bytes())?)
+    }
+
+    /// Reads every block of the directory's Btrfs filesystem, every copy,
+    /// and checks it, writing a good copy over a bad one if `repair`
+    /// (ADR 0150).
+    pub fn scrub(&self, repair: bool) -> Result<Scrubbed> {
+        let mut progress = [0u8; ScrubProgress::SIZE];
+        directory::scrub(&SYS, self.held.slot, repair, &mut progress)?;
+        let word =
+            |at: usize| u64::from_le_bytes(progress[at..at + 8].try_into().unwrap_or([0; 8]));
+        Ok(Scrubbed {
+            bytes: word(ScrubProgress::OFFSET_DATA_BYTES) + word(ScrubProgress::OFFSET_TREE_BYTES),
+            errors: [
+                ScrubProgress::OFFSET_READ_ERRORS,
+                ScrubProgress::OFFSET_CSUM_ERRORS,
+                ScrubProgress::OFFSET_VERIFY_ERRORS,
+                ScrubProgress::OFFSET_SUPER_ERRORS,
+            ]
+            .into_iter()
+            .map(word)
+            .sum(),
+            corrected: word(ScrubProgress::OFFSET_CORRECTED_ERRORS),
+            uncorrectable: word(ScrubProgress::OFFSET_UNCORRECTABLE_ERRORS),
+        })
     }
 
     /// Where the symbolic link at `path` points.
@@ -504,6 +542,13 @@ impl File {
     /// Makes the file `size` bytes long.
     pub fn set_size(&self, size: u64) -> Result<()> {
         Ok(file::set_size(&SYS, self.held.slot, size)?)
+    }
+
+    /// Makes the file share all of `source`'s data, which takes no room
+    /// until one of the two changes it (Linux's FICLONE, ADR 0139).
+    pub fn clone_from(&self, source: &File) -> Result<()> {
+        file::control(&SYS, self.held.slot, file::CLONE, source.held.slot.into(), 0, 0)?;
+        Ok(())
     }
 
     /// Waits until the disk has the changes of the file's filesystem.

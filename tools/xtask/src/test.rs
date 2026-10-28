@@ -1452,7 +1452,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "root",
-        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot, as is a read-only snapshot of /users; Linux's btrfs check passes after each boot",
+        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot, as is a read-only snapshot of /users, and a scrub finds no errors; Linux's btrfs check passes after each boot",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage root",
@@ -4288,16 +4288,19 @@ fn root_write(vm: &mut Vm, _: &Case) -> Result<(), String> {
     root_boot(vm, true)?;
     vm.expect("storage: /system: writes fail with read_only")?;
     vm.expect("storage: a snapshot of /users keeps its file as /users changes it")?;
+    vm.expect("storage: a clone in /users took no room and kept its data")?;
     storage_end(vm, "root")
 }
 
 /// The `root` test's second boot: the same, with no default settings to
-/// add, and the program reads the files back, the snapshot's too, and
-/// removes the snapshot.
+/// add, and the program reads the files back, the snapshot's too,
+/// removes the snapshot, and scrubs the filesystem.
 fn root_read(vm: &mut Vm, _: &Case) -> Result<(), String> {
     root_boot(vm, false)?;
     vm.expect("storage: /system: writes fail with read_only")?;
     vm.expect("storage: the snapshot of /users kept its file, and went")?;
+    vm.expect("storage: a scrub of Dukovo's root found no errors")?;
+    vm.expect("storage: a scrub through /system may not mend: missing_rights")?;
     storage_end(vm, "rooted")
 }
 

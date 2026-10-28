@@ -56,6 +56,7 @@ pub mod lzo;
 pub mod node;
 mod pack;
 mod refs;
+mod scrub;
 mod sha256;
 pub mod space;
 mod subvol;

@@ -180,8 +180,26 @@ pub fn check_sums(
     sectors: &[SegmentMut<'_>],
     bad: &mut dyn FnMut(usize),
 ) -> Result<()> {
+    let csum = volume.superblock().csum_type;
+    each_sum(volume, csums, logical, sectors.len(), &mut |at, sum| {
+        if !sum.is_some_and(|sum| csum.matches(sectors[at].page.bytes(), sum)) {
+            bad(at);
+        }
+    })
+}
+
+/// Calls `f` with the place of each of the `count` data sectors from
+/// logical address `logical` on, in order, and the checksum the tree
+/// `csums` keeps for it, if it keeps one; walks the tree's items once.
+pub fn each_sum(
+    volume: &Volume,
+    csums: &Root,
+    logical: u64,
+    count: usize,
+    f: &mut dyn FnMut(usize, Option<&[u8]>),
+) -> Result<()> {
     let sb = volume.superblock();
-    let (csum, size, sector) = (sb.csum_type, sb.csum_type.size(), u64::from(sb.sectorsize));
+    let (size, sector) = (sb.csum_type.size(), u64::from(sb.sectorsize));
     let key = Key::new(tree::EXTENT_CSUM, item::EXTENT_CSUM, logical);
     // The item that covers `logical`, or else the first after it.
     let mut cursor = match Cursor::seek_last(volume, csums, &key)? {
@@ -189,7 +207,7 @@ pub fn check_sums(
         None => Cursor::seek(volume, csums, &key)?,
     };
     let mut at = 0;
-    while at < sectors.len() {
+    while at < count {
         let address = logical + at as u64 * sector;
         let Some((found, sums)) = cursor.get() else { break };
         if !found.is(tree::EXTENT_CSUM, item::EXTENT_CSUM) {
@@ -205,16 +223,14 @@ pub fn check_sums(
         }
         if address < found.offset {
             // No checksum for the sectors before the item.
-            bad(at);
+            f(at, None);
         } else {
             let from = ((address - found.offset) / sector) as usize * size;
-            if !csum.matches(sectors[at].page.bytes(), &sums[from..from + size]) {
-                bad(at);
-            }
+            f(at, Some(&sums[from..from + size]));
         }
         at += 1;
     }
     // Past the last item, no sector has its checksum.
-    (at..sectors.len()).for_each(bad);
+    (at..count).for_each(|at| f(at, None));
     Ok(())
 }
