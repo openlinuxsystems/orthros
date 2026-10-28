@@ -39,7 +39,9 @@
 //! - [`Device`] is a device in a slot: [`Device::address`] gives it one
 //!   and its address, and it makes control transfers on its default
 //!   control pipe, recovering the pipe when the device stalls or does not
-//!   answer.
+//!   answer. [`Device::configure`] sets up its other endpoints, whose
+//!   transfers the kernel starts and whose events it reads with the rest;
+//!   a hub's slot says so ([`Device::set_hub`]).
 //!
 //! The crate is a compartment: it has no `unsafe` code, and reaches the
 //! controller only through the [`Mmio`] window and the [`Dma`] memory that
@@ -60,7 +62,7 @@ mod tests;
 
 use core::fmt;
 
-pub use device::{BUFFER_SIZE, Device, Place};
+pub use device::{BUFFER_SIZE, Device, HubSlot, MAX_ENDPOINTS, Place, endpoint_index, interval};
 use radix_hw::{Dma, Mmio, PAGE_SIZE};
 use radix_usb::Speed;
 use ring::{EventRing, Ring, Trb, control, kind};

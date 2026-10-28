@@ -171,12 +171,14 @@ impl Forward<'_> {
 /// bits are read from a window of the 8 bytes before `end`, from the
 /// top; reading past the start reads zeros and takes [`Backward::left`]
 /// below zero.
+#[derive(Clone, Copy)]
 struct Backward<'a> {
     data: &'a [u8],
     /// The 8 bytes before `end`, little-endian, zero before the start.
     bits: u64,
-    /// How many of `bits`, from the top, are read.
-    used: u32,
+    /// How many of `bits`, from the bottom, are not read yet: the next
+    /// read ends at bit `pos`. Below zero once reads pass the window.
+    pos: i32,
     end: usize,
 }
 
@@ -203,29 +205,32 @@ impl<'a> Backward<'a> {
             return Err(Stop::Bad);
         }
         let end = data.len();
-        Ok(Backward { data, bits: window(data, end), used: last.leading_zeros() + 1, end })
+        let pos = 63 - last.leading_zeros() as i32;
+        Ok(Backward { data, bits: window(data, end), pos, end })
     }
 
     /// The bits not yet read; below zero once reads pass the start.
     fn left(&self) -> isize {
-        (self.end * 8) as isize - self.used as isize
+        (self.end * 8) as isize - 64 + self.pos as isize
     }
 
     /// Moves the window back over the whole bytes read, as far as the
     /// start.
     #[inline(always)]
     fn refill(&mut self) {
-        let back = (self.used >> 3) as usize;
-        if back + 8 <= self.end {
+        let used = (64 - self.pos) as u32;
+        let back = (used >> 3) as usize;
+        let end = self.end.wrapping_sub(back);
+        if let Some(bytes) = self.data.get(end.wrapping_sub(8)..end) {
             // Most refills: whole bytes back, far from the start.
-            self.end -= back;
-            self.used &= 7;
-            self.bits = u64_at(self.data, self.end - 8);
+            self.end = end;
+            self.pos = 64 - (used & 7) as i32;
+            self.bits = u64_at(bytes, 0);
             return;
         }
         let back = back.min(self.end);
         self.end -= back;
-        self.used -= (back as u32) << 3;
+        self.pos += (back as i32) << 3;
         self.bits = match self.data.get(self.end.wrapping_sub(8)..self.end) {
             Some(bytes) => u64_at(bytes, 0),
             None => window(self.data, self.end),
@@ -235,15 +240,15 @@ impl<'a> Backward<'a> {
     /// The next `n` bits (up to 56): the first read is the highest.
     #[inline(always)]
     fn peek(&mut self, n: u32) -> u64 {
-        if self.used + n > 64 {
+        if self.pos < n as i32 {
             self.refill();
         }
-        bits_at(self.bits, self.used + n, n)
+        bits_at(self.bits, self.pos - n as i32, n)
     }
 
     #[inline(always)]
     fn skip(&mut self, n: u32) {
-        self.used += n;
+        self.pos -= n as i32;
     }
 
     #[inline(always)]
@@ -259,15 +264,15 @@ impl<'a> Backward<'a> {
     /// bits of nonsense, which [`Backward::left`] finds at the end.
     #[inline(always)]
     fn take<S: Shifts>(&mut self, shifts: S, n: u32) -> u64 {
-        let value = shifts.bits(self.bits, self.used, n);
-        self.used += n;
-        value
+        self.pos -= n as i32;
+        shifts.bits(self.bits, self.pos, n)
     }
 }
 
-/// `(1 << n) - 1` for each `n` below 64: a mask of the lowest `n` bits.
-const MASKS: [u64; 64] = {
-    let mut masks = [0; 64];
+/// `(1 << n) - 1` for each `n` of a byte: a mask of the lowest `n` bits,
+/// all of them from 64 on. A byte needs no other check to index it.
+const MASKS: [u64; 256] = {
+    let mut masks = [u64::MAX; 256];
     let mut n = 0;
     while n < 64 {
         masks[n] = (1 << n) - 1;
@@ -276,21 +281,20 @@ const MASKS: [u64; 64] = {
     masks
 };
 
-/// The `n` bits (up to 56) of `bits` that end `end` bits from its top:
-/// one shift, where taking them from the top takes three, which are more
-/// than one operation each on Intel's processors without BMI2. Past 64,
-/// which only a stream read past its start reaches, they are nonsense.
+/// The `n` bits (up to 56) of `bits` from bit `at` up: one shift and a
+/// mask. Below zero, which only a stream read past its start reaches,
+/// they are nonsense.
 #[inline(always)]
-fn bits_at(bits: u64, end: u32, n: u32) -> u64 {
-    (bits >> (64u32.wrapping_sub(end) & 63)) & MASKS[(n & 63) as usize]
+fn bits_at(bits: u64, at: i32, n: u32) -> u64 {
+    (bits >> (at & 63)) & MASKS[(n & 0xff) as usize]
 }
 
 /// How a sequence's values are taken from the window of bits: with the
-/// shifts every x86-64 processor has ([`Plain`]), or with BMI2's, each
-/// one operation, where the processor has them.
+/// shifts every x86-64 processor has ([`Plain`]), or with BMI2's, one
+/// operation by a count in any register, where the processor has them.
 trait Shifts: Copy {
-    /// The `n` bits (up to 56) of `bits` after its top `used`.
-    fn bits(self, bits: u64, used: u32, n: u32) -> u64;
+    /// The `n` bits (up to 56) of `bits` from bit `at` up.
+    fn bits(self, bits: u64, at: i32, n: u32) -> u64;
 }
 
 /// The shifts every x86-64 processor has: [`bits_at`].
@@ -299,17 +303,18 @@ struct Plain;
 
 impl Shifts for Plain {
     #[inline(always)]
-    fn bits(self, bits: u64, used: u32, n: u32) -> u64 {
-        bits_at(bits, used + n, n)
+    fn bits(self, bits: u64, at: i32, n: u32) -> u64 {
+        bits_at(bits, at, n)
     }
 }
 
 impl Shifts for Bmi2 {
-    /// Three shifts, two of them right so that `n` may be 0, each one
-    /// operation, and no mask to load.
+    /// `shrx`, which takes its count modulo 64 from any register, where
+    /// the shift every x86-64 has takes it from `cl`, which costs a move
+    /// and, on Intel's processors, more than one operation.
     #[inline(always)]
-    fn bits(self, bits: u64, used: u32, n: u32) -> u64 {
-        self.shr(self.shl(bits, used) >> 1, 63 - n)
+    fn bits(self, bits: u64, at: i32, n: u32) -> u64 {
+        self.shr(bits, at as u32) & MASKS[(n & 0xff) as usize]
     }
 }
 
@@ -321,6 +326,22 @@ struct Fse {
     log: u32,
     /// Whether a block of this frame made it, for the next to repeat.
     ready: bool,
+}
+
+/// A state of a code of a block's sequences, as they read it: its
+/// value's base and extra bits, and the next state's base and the bits
+/// read for it. Its parts are each loaded from the table on their own,
+/// where taking them from one word would cost shifts and masks.
+#[derive(Clone, Copy)]
+struct Seq {
+    value: u32,
+    extra: u8,
+    state: u16,
+    state_bits: u8,
+}
+
+impl Seq {
+    const ZERO: Seq = Seq { value: 0, extra: 0, state: 0, state_bits: 0 };
 }
 
 /// The parts of a table entry.
@@ -341,9 +362,8 @@ impl Fse {
     }
 
     /// Fills `seq` from the table of a code of `kind`: each state as
-    /// sequences read it, the next state's base and bits and its value's
-    /// extra bits and base (`base | bits << 16 | extra << 24 | value << 32`).
-    fn spell(&self, kind: Kind, seq: &mut [u64]) -> Step<()> {
+    /// sequences read it.
+    fn spell(&self, kind: Kind, seq: &mut [Seq]) -> Step<()> {
         let states = self.table.get(..1 << self.log).ok_or(Stop::Bad)?;
         for (seq, &entry) in seq.iter_mut().zip(states) {
             let sym = symbol(entry);
@@ -355,10 +375,12 @@ impl Fse {
                 }
             };
             let (Some(extra), Some(value)) = (extra, value) else { return Err(Stop::Bad) };
-            *seq = u64::from(entry >> 16)
-                | u64::from((entry >> 8) & 0xff) << 16
-                | u64::from(extra) << 24
-                | u64::from(value) << 32;
+            *seq = Seq {
+                value,
+                extra,
+                state: (entry >> 16) as u16,
+                state_bits: ((entry >> 8) & 0xff) as u8,
+            };
         }
         Ok(())
     }
@@ -366,7 +388,7 @@ impl Fse {
     /// Sets the code for a block's sequences, and `seq` from it (as
     /// [`Fse::spell`] fills it), from its mode and the bytes after it;
     /// returns how many it used.
-    fn prepare(&mut self, mode: u8, data: &[u8], kind: Kind, seq: &mut [u64]) -> Step<usize> {
+    fn prepare(&mut self, mode: u8, data: &[u8], kind: Kind, seq: &mut [Seq]) -> Step<usize> {
         let (max_symbol, max_log) = kind.limits();
         let used = match mode {
             0 => {
@@ -529,7 +551,7 @@ pub struct Zstd {
     ml: Fse,
     /// The three codes of sequences' states, as [`Fse::spell`] gives
     /// them: literals' lengths, offsets and matches' lengths.
-    seqs: KVec<u64>,
+    seqs: KVec<Seq>,
     /// BMI2's shifts, where the processor has them, for the sequences.
     bmi2: Option<Bmi2>,
 }
@@ -666,7 +688,7 @@ impl Zstd {
             ll: Fse::new()?,
             of: Fse::new()?,
             ml: Fse::new()?,
-            seqs: crate::filled(3 * STATES, 0)?,
+            seqs: crate::filled(3 * STATES, Seq::ZERO)?,
             bmi2: Bmi2::get(),
         })
     }
@@ -766,7 +788,7 @@ impl Zstd {
         let (lits_len, rest) = read_literals(data, literals, huffman, huffman_bits)?;
         let lits = <&[u8; LITERALS]>::try_from(&literals[..]).map_err(|_| Stop::Bad)?;
         let codes = [(ll, Kind::Literals), (of, Kind::Offsets), (ml, Kind::Matches)];
-        let seqs = <&mut [u64; 3 * STATES]>::try_from(&mut seqs[..]).map_err(|_| Stop::Bad)?;
+        let seqs = <&mut [Seq; 3 * STATES]>::try_from(&mut seqs[..]).map_err(|_| Stop::Bad)?;
         sequences(rest, (lits, lits_len), (codes, seqs), *bmi2, o, repeats)
     }
 }
@@ -1015,7 +1037,7 @@ fn huffman_stream(data: &[u8], out: &mut [u8], table: &[u16], bits: u32) -> Step
 fn sequences(
     data: &[u8],
     lits: (&[u8; LITERALS], usize),
-    codes: ([(&mut Fse, Kind); 3], &mut [u64; 3 * STATES]),
+    codes: ([(&mut Fse, Kind); 3], &mut [Seq; 3 * STATES]),
     bmi2: Option<Bmi2>,
     o: &mut Output<'_>,
     repeats: &mut [usize; 3],
@@ -1045,7 +1067,7 @@ fn sequences(
     at += ll.prepare(modes >> 6, &data[at..], ll_kind, ll_seq)?;
     at += of.prepare((modes >> 4) & 3, &data[at..], of_kind, of_seq)?;
     at += ml.prepare((modes >> 2) & 3, &data[at..], ml_kind, ml_seq)?;
-    let tables: &[u64; 3 * STATES] = tables;
+    let tables: &[Seq; 3 * STATES] = tables;
     let mut stream = Backward::new(&data[at..])?;
     // States are below the size of their tables, which is at most
     // `STATES`; masked, they need no other check.
@@ -1069,25 +1091,32 @@ fn sequences(
 /// its literals from the start of `lits` on; returns where the literals
 /// not yet copied start. Decoding is a chain of steps, each waiting on
 /// the one before; the copies, which wait on nothing in it, are made
-/// while it waits.
+/// while it waits. What the loop changes is kept in locals, which stay
+/// in registers, where what is behind a reference would be stored back
+/// at every step.
 #[inline(never)]
 fn run<S: Shifts>(
     shifts: S,
     stream: &mut Backward<'_>,
-    (tables, states): (&[u64; 3 * STATES], [usize; 3]),
+    (tables, states): (&[Seq; 3 * STATES], [usize; 3]),
     count: usize,
     lits: (&[u8; LITERALS], usize),
     o: &mut Output<'_>,
     repeats: &mut [usize; 3],
 ) -> Step<usize> {
-    let mut states = states;
-    let mut r = *repeats;
+    let mut s = *stream;
+    let (mut states, mut r) = (states, *repeats);
     let (mut lit, mut made) = (0, o.made);
-    for left in (0..count).rev() {
-        let seq = sequence(shifts, stream, tables, &mut states, &mut r, left != 0);
-        (lit, made) = execute(seq, lits, (lit, made), o)?;
+    let buf = &mut *o.buf;
+    // All but the last move the states on.
+    for _ in 1..count {
+        let seq = sequence(shifts, &mut s, tables, &mut states, &mut r, true);
+        (lit, made) = execute(seq, lits, (lit, made), buf)?;
     }
+    let seq = sequence(shifts, &mut s, tables, &mut states, &mut r, false);
+    (lit, made) = execute(seq, lits, (lit, made), buf)?;
     o.made = made;
+    *stream = s;
     *repeats = r;
     Ok(lit)
 }
@@ -1099,7 +1128,7 @@ fn run<S: Shifts>(
 fn sequence<S: Shifts>(
     shifts: S,
     stream: &mut Backward<'_>,
-    tables: &[u64; 3 * STATES],
+    tables: &[Seq; 3 * STATES],
     states: &mut [usize; 3],
     repeats: &mut [usize; 3],
     next: bool,
@@ -1107,32 +1136,30 @@ fn sequence<S: Shifts>(
     let [ll_state, of_state, ml_state] = *states;
     // States are below the size of their tables, which is at most
     // `STATES`; masked, they need no other check.
-    let (l, f, m) = (
-        tables[ll_state % STATES],
-        tables[STATES + of_state % STATES],
-        tables[2 * STATES + ml_state % STATES],
-    );
+    let l = &tables[ll_state % STATES];
+    let f = &tables[STATES + of_state % STATES];
+    let m = &tables[2 * STATES + ml_state % STATES];
     // Up to 31 bits for the offset, 16 each for the lengths and 26 for
     // the states: the window is refilled where they could run past its
     // 64, which they seldom do.
     stream.refill();
-    let value = (f >> 32) as usize + stream.take(shifts, extra(f)) as usize;
-    if stream.used > 32 {
+    let value = f.value as usize + stream.take(shifts, u32::from(f.extra)) as usize;
+    if stream.pos < 32 {
         stream.refill();
     }
-    let ml_len = (m >> 32) as usize + stream.take(shifts, extra(m)) as usize;
-    let ll_len = (l >> 32) as usize + stream.take(shifts, extra(l)) as usize;
+    let ml_len = m.value as usize + stream.take(shifts, u32::from(m.extra)) as usize;
+    let ll_len = l.value as usize + stream.take(shifts, u32::from(l.extra)) as usize;
     let [r0, r1, r2] = *repeats;
     // Told apart by the codes' entries, which are known before their
     // bits are: an offset code over 1 is a new offset (a value over 3),
     // and only the literals' length code 0 (base 0) is no literals.
-    let offset = if extra(f) > 1 {
+    let offset = if f.extra > 1 {
         *repeats = [value - 3, r0, r1];
         value - 3
     } else {
         // The last three offsets: with no literals, the next one, and
         // the last less one byte after the third.
-        match value - 1 + usize::from(l >> 32 == 0) {
+        match value - 1 + usize::from(l.value == 0) {
             0 => r0,
             1 => {
                 *repeats = [r1, r0, r2];
@@ -1151,63 +1178,66 @@ fn sequence<S: Shifts>(
     };
     // The last sequence has no next states: their bits are not read.
     if next {
-        if stream.used > 38 {
+        if stream.pos < 26 {
             stream.refill();
         }
         // In the order the format reads them: literals, matches, offsets.
-        let ll_state = state(l) + stream.take(shifts, state_bits(l)) as usize;
-        let ml_state = state(m) + stream.take(shifts, state_bits(m)) as usize;
-        let of_state = state(f) + stream.take(shifts, state_bits(f)) as usize;
+        let ll_state = usize::from(l.state) + stream.take(shifts, u32::from(l.state_bits)) as usize;
+        let ml_state = usize::from(m.state) + stream.take(shifts, u32::from(m.state_bits)) as usize;
+        let of_state = usize::from(f.state) + stream.take(shifts, u32::from(f.state_bits)) as usize;
         *states = [ll_state, of_state, ml_state];
     }
     [ll_len, ml_len, offset]
 }
 
-/// Makes the copies of the sequence `[ll_len, ml_len, offset]` into `o`,
+/// Makes the copies of the sequence `[ll_len, ml_len, offset]` into `buf`,
 /// of which `made` bytes are made, its literals from `lit` on of `lits`;
 /// returns where the next literals start and how many bytes are made.
 #[inline(always)]
 fn execute(
     [ll_len, ml_len, offset]: [usize; 3],
-    lits: (&[u8; LITERALS], usize),
+    (lits, lits_len): (&[u8; LITERALS], usize),
     (lit, made): (usize, usize),
-    o: &mut Output<'_>,
+    buf: &mut [u8],
 ) -> Step<(usize, usize)> {
-    let (lits, lits_len) = lits;
     let (lit_end, to) = (lit + ll_len, made + ll_len);
+    // Most sequences: their literals and their match are a copy of 16
+    // bytes each, which may run past them. Taken as these, the copies'
+    // bounds are the checks that they fit, which are then not repeated.
     if (ll_len | ml_len) < 16
         && lit_end <= lits_len
-        && to + 32 <= o.buf.len()
-        && (16..=to).contains(&offset)
+        && offset >= 16
+        && let Some(src) = to.checked_sub(offset)
+        && let Some(lit16) = lits.get(lit..lit + 16)
+        && let Some(win) = buf.get_mut(made..made + 48)
     {
-        // Most sequences: their literals and their match are a copy of
-        // 16 bytes each, which may run past them.
-        o.buf[made..made + 16].copy_from_slice(&lits[lit..lit + 16]);
-        let (before, after) = o.buf.split_at_mut(to);
-        after[..16].copy_from_slice(&before[to - offset..to - offset + 16]);
+        win[..16].copy_from_slice(lit16);
+        buf.copy_within(src..src + 16, to);
         return Ok((lit_end, to + ml_len));
     }
+    execute_long([ll_len, ml_len, offset], (lits, lits_len), (lit, made), buf)
+}
+
+/// [`execute`] for the sequences two copies of 16 bytes do not make:
+/// long ones, near the end of the output, and ones whose match overlaps
+/// itself. Out of the loop, where it would take registers its other
+/// sequences need.
+#[cold]
+#[inline(never)]
+fn execute_long(
+    [ll_len, ml_len, offset]: [usize; 3],
+    (lits, lits_len): (&[u8; LITERALS], usize),
+    (lit, made): (usize, usize),
+    buf: &mut [u8],
+) -> Step<(usize, usize)> {
+    let lit_end = lit + ll_len;
     if lit_end > lits_len {
         return Err(Stop::Bad);
     }
-    o.made = made;
+    let mut o = Output { buf, made };
     o.put_from(lits, lit, ll_len)?;
     o.copy(offset, ml_len)?;
     Ok((lit_end, o.made))
-}
-
-/// The parts of a [`Fse::seq`] entry: the next state's base, its bits,
-/// and the value's extra bits.
-fn state(entry: u64) -> usize {
-    (entry & 0xffff) as usize
-}
-
-fn state_bits(entry: u64) -> u32 {
-    ((entry >> 16) & 0xff) as u32
-}
-
-fn extra(entry: u64) -> u32 {
-    ((entry >> 24) & 0xff) as u32
 }
 
 const P1: u64 = 0x9E37_79B1_85EB_CA87;

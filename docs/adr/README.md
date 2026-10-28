@@ -158,5 +158,6 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0144](0144-lspci-lscpu-and-lsmem-with-the-pci-id-database.md) | lspci, lscpu and lsmem are systools, with the PCI ID database as a port | Accepted |
 | [0145](0145-machine-checks-are-reported-and-the-unrecoverable-ones-panic.md) | Machine checks are reported, and the ones the CPU cannot go on after panic | Accepted |
 | [0146](0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md) | xHCI controllers are driven by a kernel thread each, from Intel's specification | Accepted |
+| [0147](0147-usb-hubs-and-every-device-configured-by-its-controllers-thread.md) | USB hubs are driven by their controller's thread, which configures every device | Accepted |
 | [0150](0150-btrfs-scrubs-the-last-commit-a-run-of-extents-at-a-time.md) | Btrfs scrubs the last commit, a run of extents at a time | Accepted |
 | [0151](0151-btrfs-replays-the-log-of-fsyncs-linux-leaves-at-mount.md) | Btrfs replays the log of fsyncs Linux leaves, at mount | Accepted |

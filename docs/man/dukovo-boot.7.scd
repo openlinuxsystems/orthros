@@ -533,17 +533,25 @@ logs what it is, its ports (USB 3 and USB 2 ones apart) and its interrupt:
 	USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3
 	on 1-4, USB 2 on 5-8), 64 device slots, MSI-X vector 0x50
 
-Each device plugged into a root port, at boot or later, is reset,
-addressed and named with its bus and port, as Linux names them: its
-product, vendor and product IDs, maker, class and speed. Unplugging it is
-logged too:
+Each device plugged into a root port or a hub, at boot or later, is
+reset, addressed and named with its bus, its root port and the hub ports
+it is behind, as Linux names them: its product, vendor and product IDs,
+maker, class and speed. It is then configured, with the endpoints of its
+first configuration. A hub says how many ports it has, and the devices
+on them follow. Unplugging a device is logged, and unplugging a hub lets
+go of everything behind it:
 
 	USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed
-	USB: 1-6: QEMU USB Keyboard was unplugged
+	USB: 1-7: QEMU USB Hub (0409:55aa, QEMU), hub, full speed
+	USB: 1-7: a hub of 8 ports
+	USB: 1-7.1: QEMU USB Mouse (0627:0001, QEMU), mouse, full speed
+	USB: 1-7: QEMU USB Hub was unplugged
+	USB: 1-7.1: QEMU USB Mouse was unplugged
 
 A device that cannot be set up twice is left alone until it is unplugged.
-Before the machine is powered off or restarted, every controller is
-halted. Hubs, keyboards and mice, and USB storage come later (ADR 0146).
+Hub ports past 15 and hubs more than five deep are not used. Before the
+machine is powered off or restarted, every controller is halted.
+Keyboards and mice, and USB storage, come later (ADRs 0146 and 0147).
 
 # REAL HARDWARE
 

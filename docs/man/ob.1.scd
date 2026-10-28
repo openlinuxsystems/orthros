@@ -323,12 +323,15 @@ _target/userspace/_).
 
 	*usb-devices*
 		Boot normally under UEFI with the lock checker on, with QEMU's
-		USB keyboard and mouse on the xHCI controller's second and third
-		ports beside the boot stick. The kernel must name the controller
-		and each device on its port; a USB tablet plugged in on the
-		fourth port with QEMU's _device_add_ must be named too, and
-		pulling it out with _device_del_ logged. The power button ends
-		the test (*dukovo-boot*(7)'s *USB*).
+		USB keyboard on the xHCI controller's second port beside the boot
+		stick, and a hub on the third with a mouse behind it and a second
+		hub with a keyboard behind that. The kernel must name the
+		controller, each hub and each device on its port; USB tablets
+		plugged into the fourth port and into the first hub with QEMU's
+		_device_add_ must be named too, and pulling them out with
+		_device_del_ logged; pulling out the second hub must let go of its
+		keyboard. The power button ends the test (*dukovo-boot*(7)'s
+		*USB*).
 
 	*watchdog*, *watchdog-tco*
 		Boot with *--watchdog 12 --test-hang* for Spark, with QEMU's
