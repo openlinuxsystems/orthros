@@ -207,12 +207,17 @@ pub struct RootItem {
     pub refs: u32,
     /// The level of its root block: 0 for a leaf.
     pub level: u8,
+    /// Its flags: [`RootItem::READ_ONLY`] for a subvolume nothing in may
+    /// change.
+    pub flags: u64,
 }
 
 impl RootItem {
     /// The bytes a root item needs, up to its root block's level; newer
     /// ones are longer.
     pub const SIZE: usize = 239;
+    /// The flag of a read-only subvolume (`BTRFS_ROOT_SUBVOL_RDONLY`).
+    pub const READ_ONLY: u64 = 1;
 
     /// The root item in `bytes`, if it is long enough to be one.
     pub fn read(bytes: &[u8]) -> Option<RootItem> {
@@ -225,6 +230,7 @@ impl RootItem {
             bytenr: u64_at(bytes, 176),
             refs: u32_at(bytes, 216),
             level: bytes[238],
+            flags: u64_at(bytes, 208),
         })
     }
 }

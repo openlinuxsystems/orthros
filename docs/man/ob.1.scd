@@ -125,6 +125,14 @@ _target/userspace/_).
 	optical media. Write it to a USB stick as shown in *EXAMPLES*.
 	*dukovo-boot*(7) lists what the image contains.
 
+	After grub-mkrescue's partitions the image has a Dukovo root
+	partition, the fifth, of 512 MiB: Btrfs made by *mkfs.btrfs* (the
+	pinned btrfs-progs of the Btrfs tests when the system's is older
+	than 6.17), with the system in the read-only subvolume _@system.a_
+	and empty subvolumes for settings, state, applications, users and
+	shared files. Booted from a disk Radix sees, Spark mounts them
+	(*spark*(8)).
+
 	Every image carries a license manifest. *ob* lists each component
 	that goes into it: the crates linked into the kernel (from *cargo
 	tree*), the standard library crates built from the Rust sources, GRUB,
@@ -139,7 +147,8 @@ _target/userspace/_).
 
 	*--iso*
 		Name the output _out/dukovo-VERSION-x86_64.iso_ instead, for
-		virtual machines and optical media. The contents are the same.
+		virtual machines and optical media. It has no Dukovo root
+		partition, as optical media are read-only.
 
 	*--cmdline* _flags_
 		Kernel command-line flags instead of *boot.cmdline*, such as
@@ -636,6 +645,21 @@ _target/userspace/_).
 		again, Radix replays the journal itself, and
 		_/system/tests/storage churned_ must find the same, remove the
 		files and write and sync another, and *e2fsck* must pass again.
+
+	*root*
+		Boot 2 CPUs under UEFI from the test image as a USB stick, with
+		a copy of it and its Dukovo root partition, as *image* makes
+		one, as a virtio disk. Spark must find Dukovo's root on _vda5_,
+		mount it again to compress, mount its subvolumes and copy the
+		default settings in. _/system/tests/storage root_ checks in
+		_/processes/mounts_ that _/system_ is _@system.a_, read-only,
+		and the others are on the same disk, that _/system_ refuses a
+		file, and writes and syncs a file in _/system/settings_,
+		_/system/state_, _/applications_, _/users_ and _/shared_.
+		Booted again, Spark must add no default settings, and
+		_/system/tests/storage rooted_ must read each file back. After
+		each boot, *btrfs check --check-data-csum* must find nothing
+		wrong in the partition.
 
 	*posix*
 		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark

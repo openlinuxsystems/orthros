@@ -20,7 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::config::{Firmware, Media};
-use crate::image::{self, ImageSpec};
+use crate::image::{self, ImageSpec, crc32};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
 use crate::{
@@ -176,6 +176,11 @@ const EXFAT: u8 = 3;
 /// ([`STORAGE_FROM_HOST_NAME`]).
 const EXT4: u8 = 4;
 
+/// [`Disk::fat`] for a copy of the test image with a Dukovo root
+/// partition after its own, as `./ob image` makes one
+/// ([`image::append_root`]); [`Disk::kib`] is not used.
+const ROOT: u8 = 5;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -206,7 +211,7 @@ enum Bus {
 impl Disk {
     /// Whether it holds Btrfs.
     fn btrfs(&self) -> bool {
-        matches!(self.fat, BTRFS | BTRFS_NEW)
+        matches!(self.fat, BTRFS | BTRFS_NEW | ROOT)
     }
 
     /// Whether it holds exFAT.
@@ -505,6 +510,11 @@ const BTRFS_COMPRESSED: &str = "nvme0n1";
 /// The `btrfs-power-cut` test's disk: a virtio disk as `mkfs.btrfs` makes
 /// one by default, holding only the host's file.
 const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_cut)];
+
+/// The `root` test's disk: a copy of the test image with a Dukovo root
+/// partition, its fifth, as a virtio disk: `vda5`.
+const ROOT_DISKS: &[Disk] =
+    &[Disk { label: image::ROOT_LABEL, ..btrfs_disk(Bus::Virtio, 512, ROOT, root_checked) }];
 
 /// The round of the storage program's churn after whose file the
 /// `btrfs-power-cut` test cuts the power, 0 to 1.5 seconds later.
@@ -1421,6 +1431,26 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "root",
+        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot; Linux's btrfs check passes after each boot",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage root",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: root_write,
+        disks: ROOT_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage rooted",
+            before: power_cut_host,
+            script: root_read,
+        }),
+    },
+    Case {
         name: "posix",
         about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
@@ -1618,6 +1648,7 @@ pub fn build_test_image(ctx: &Ctx, built: &Built, dir: &Path, kind: TestImage) -
             microcode: (kind == TestImage::Microcode).then(test_microcode),
             programs: Some(&built.programs),
             disk_check: None,
+            root: None,
             staging: dir.join(format!("{name}-root")),
             output: output.clone(),
         },
@@ -1667,6 +1698,14 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
         None
     };
 
+    let root = if cases.iter().any(|case| case.disks.iter().any(|disk| disk.fat == ROOT)) {
+        let path = dir.join("root.btrfs");
+        image::make_root(ctx, &built.programs.bootfs, &dir.join("root-staging"), &path)?;
+        Some(path)
+    } else {
+        None
+    };
+
     let kvm = qemu::kvm_available();
     step(&format!(
         "Running {} boot tests in QEMU ({})",
@@ -1681,7 +1720,7 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
         };
         let started = Instant::now();
         let log = dir.join(format!("boot-{}.log", case.name));
-        let outcome = run_case(ctx, case, base, &dir, kvm, timeout);
+        let outcome = run_case(ctx, case, base, root.as_deref(), &dir, kvm, timeout);
         let secs = started.elapsed().as_secs_f32();
         match outcome {
             Ok(()) => eprintln!("    PASS  {:<15} {} ({secs:.1} s)", case.name, case.about),
@@ -1697,6 +1736,9 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
             }
         }
     }
+    if let Some(path) = &root {
+        let _ = std::fs::remove_file(path);
+    }
     if failures > 0 {
         crate::bail!("{failures} of {} boot tests failed", cases.len());
     }
@@ -1708,13 +1750,14 @@ fn run_case(
     ctx: &Ctx,
     case: &Case,
     base: &[u8],
+    root: Option<&Path>,
     dir: &Path,
     kvm: bool,
     timeout: Duration,
 ) -> Result<(), String> {
     let image = dir.join(format!("{}.img", case.name));
     let qmp = dir.join(format!("{}.qmp", case.name));
-    let disks = make_disks(ctx, dir, case)?;
+    let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
@@ -1812,9 +1855,16 @@ fn run_case(
 const PARTITION_START: u64 = 2048;
 
 /// Makes the case's disks afresh in `dir`: with `mkfs.fat` or
-/// `mkfs.btrfs`, or filled with [`storage_big_byte`]'s bytes; and the
-/// configuration files of their errors.
-fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, String> {
+/// `mkfs.btrfs`, filled with [`storage_big_byte`]'s bytes, or as the
+/// test image `base` with the Dukovo root's filesystem in the file `root`
+/// after its partitions; and the configuration files of their errors.
+fn make_disks(
+    ctx: &Ctx,
+    dir: &Path,
+    case: &Case,
+    base: &[u8],
+    root: Option<&Path>,
+) -> Result<Vec<DiskImage>, String> {
     let mut made = Vec::new();
     for (i, disk) in case.disks.iter().enumerate() {
         let path = dir.join(format!("{}-disk{i}.img", case.name));
@@ -1835,6 +1885,20 @@ fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, Stri
             std::fs::write(&image.path, raw_bytes(image.bytes))
                 .map_err(|err| format!("writing {}: {err}", image.path.display()))?;
             made.push(image);
+            continue;
+        }
+        if disk.fat == ROOT {
+            let root = root.ok_or("the Dukovo root's filesystem was not made")?;
+            std::fs::write(&image.path, base)
+                .map_err(|err| format!("writing {}: {err}", image.path.display()))?;
+            let first = image::append_root(&image.path, root).map_err(|err| err.to_string())?;
+            let tool = btrfs::tool(ctx).map_err(|err| err.to_string())?;
+            made.push(DiskImage {
+                offset: first * 512,
+                bytes: image::ROOT_BYTES,
+                btrfs: Some(tool),
+                ..image
+            });
             continue;
         }
         if disk.btrfs() {
@@ -2020,18 +2084,6 @@ fn gpt_tables(sectors: u64, block: u64) -> (Vec<u8>, Vec<u8>) {
     let mut backup = entries;
     backup.extend(header(blocks - 1, 1, blocks - 1 - table));
     (primary, backup)
-}
-
-/// The CRC-32 of `bytes` that GPT uses (IEEE 802.3, reflected).
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
 }
 
 /// Writes [`gpt_tables`] to a disk of `sectors` and of logical blocks of
@@ -3478,7 +3530,8 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    // Spark mounts the disks while it builds the hierarchy, to find
+    // Dukovo's root among them (ADR 0137).
     for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
         let label = disk.label;
         let (kind, said) = disk.kind();
@@ -3487,6 +3540,7 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     vm.expect("spark: started /system/tests/storage as process ")
 }
 
@@ -4141,6 +4195,66 @@ fn btrfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
         .map_err(|err| format!("{} fails Linux's btrfs check: {err}", disk.path.display()))
 }
 
+/// Checks the Dukovo root partition of the `root` test's disk with
+/// Linux's `btrfs check`, as [`btrfs_checked`] does, on a copy of it
+/// beside the disk.
+fn root_checked(disk: &DiskImage, log: &str) -> Result<(), String> {
+    let copy = DiskImage {
+        path: disk.path.with_extension("root"),
+        offset: 0,
+        bytes: disk.bytes,
+        sector: disk.sector,
+        check: disk.check,
+        btrfs: disk.btrfs.clone(),
+    };
+    let checked = (|| {
+        let mut from = std::fs::File::open(&disk.path)?;
+        let mut to = std::fs::File::create(&copy.path)?;
+        to.set_len(disk.bytes)?;
+        image::copy_sparse(&mut from, disk.offset, &mut to, 0, disk.bytes)
+    })()
+    .map_err(|err| format!("copying the root partition of {}: {err}", disk.path.display()))
+    .and_then(|()| btrfs_checked(&copy, log));
+    let _ = std::fs::remove_file(&copy.path);
+    checked
+}
+
+/// The `root` test's first boot: Spark finds Dukovo's root on the disk,
+/// mounts its subvolumes and copies the default settings in; the program
+/// checks the mounts and that `/system` refuses changes, and writes a
+/// file to each of the others.
+fn root_write(vm: &mut Vm, _: &Case) -> Result<(), String> {
+    root_boot(vm, true)?;
+    vm.expect("storage: /system: writes fail with read_only")?;
+    storage_end(vm, "root")
+}
+
+/// The `root` test's second boot: the same, with no default settings to
+/// add, and the program reads the files back.
+fn root_read(vm: &mut Vm, _: &Case) -> Result<(), String> {
+    root_boot(vm, false)?;
+    vm.expect("storage: /system: writes fail with read_only")?;
+    storage_end(vm, "rooted")
+}
+
+/// What Spark says of the `root` test's disk: it mounts its Btrfs, then
+/// again to compress, as nothing asked it to; then mounts the subvolumes,
+/// adds the default settings the `first` boot only, and starts the
+/// program.
+fn root_boot(vm: &mut Vm, first: bool) -> Result<(), String> {
+    let disk = partition_name(&disk_names(ROOT_DISKS)[0], 5);
+    let mounted = format!("spark: mounted the Btrfs filesystem of {disk} at /volumes/{disk}");
+    vm.expect(&mounted)?;
+    vm.expect(&format!("{mounted}, compressed (zstd)"))?;
+    vm.expect(&format!("spark: /system is Dukovo's root on {disk}, compressed (zstd)"))?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 11 filesystems")?;
+    let added = program_line(vm, "spark: added ")?;
+    if (added == "0 default settings to /system/settings") == first {
+        return Err(format!("Spark added {added}"));
+    }
+    vm.expect("spark: started /system/tests/storage as process ")
+}
+
 /// Copies the files of a Btrfs disk's top subvolume out with Linux's
 /// `btrfs restore`, into a directory beside it made afresh, which the
 /// caller removes.
@@ -4307,8 +4421,8 @@ fn power_cut(vm: &mut Vm, case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-/// Between the boots of the `btrfs-power-cut` test: nothing, as the
-/// disk's check reads it.
+/// Between the boots of the `btrfs-power-cut` and `root` tests: nothing,
+/// as the disk's check reads it.
 fn power_cut_host(_: &Case, _: &[DiskImage]) -> Result<(), String> {
     Ok(())
 }
@@ -4416,7 +4530,6 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
 /// the storage program lists every volume as [`btrfs_listing`] says.
 fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     let volumes = volume_names(case.disks);
     for (disk, name) in case.disks.iter().zip(&volumes) {
         let label = disk.label;
@@ -4427,6 +4540,7 @@ fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
             "spark: mounted the Btrfs filesystem of {name} at /volumes/{name}, read-only"
         ))?;
     }
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     // The program lists the volumes in name order.
     let mut sorted = volumes.clone();

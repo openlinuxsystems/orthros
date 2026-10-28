@@ -86,28 +86,9 @@ Init: /system/commands/spark is process 1
 . It makes the root's nine directories, _/system_, _/applications_,
   _/users_, _/shared_, _/tmp_, _/devices_, _/processes_, _/kernel_ and
   _/volumes_ (see *radix-files*(7) for what each is for).
-. It mounts, in this order, the boot archive read-only on _/system_;
-  tmpfs on _/system/settings_, _/system/state_, _/system/live_ and
-  _/tmp_; and the *dev*, *proc* and *sys* trees on _/devices_,
-  _/processes_ and _/kernel_ (*radix-proc*(5), *radix-sysfs*(5)); then
-  it makes _/system/state/tmp_, for temporary files that are to outlive
-  a restart. If any of this fails, it starts nothing.
-. It makes the symbolic links with Unix's names, for Unix programs,
-  scripts and people: _/bin_ and _/sbin_ to _system/commands_, _/usr_
-  to _system_, _/etc_ to _system/settings_, _/var_ to _system/state_,
-  _/run_ to _system/live_, _/dev_ to _devices_, _/proc_ to _processes_,
-  _/sys_ to _kernel_, and _/system/state/run_ to _../live_. It writes the names
-  of those in the root to _/.hidden_, and _run_ to _/system/state/.hidden_,
-  so that listings leave them out (*radix-files*(7)). The boot archive
-  holds _/system_'s own links, _bin_, _lib_ and _share_.
-. It copies each default setting in
-  _/system/resources/default-settings_ that _/system/settings_ lacks
-  into it, with the directories it is in: the
-  defaults the system ships, such as nano's _nanorc_ and the service
-  files, which an administrator edits in _/system/settings_. A file
-  already there is never replaced, so an update can add settings without
-  undoing edits; until _/system/settings_ is kept on a disk, each boot
-  starts it with all of them.
+. It mounts tmpfs on _/tmp_, and the *dev*, *proc* and *sys* trees on
+  _/devices_, _/processes_ and _/kernel_ (*radix-proc*(5),
+  *radix-sysfs*(5)).
 . It looks for disks in _/devices_ and mounts the FAT, exFAT, Btrfs or
   ext4 filesystem of each partition, or of each disk with no partition
   table, at _/volumes/_*name*, read-write, or read-only when the device
@@ -120,6 +101,37 @@ Init: /system/commands/spark is process 1
   older Btrfs or ext4 superblock. A
   device that holds none of them is left alone, and so is every device
   with *--no-volumes*.
+. The first Btrfs mounted read-write whose top holds the subvolumes
+  _@system.a_, _@settings_, _@state_, _@applications_, _@users_ and
+  _@shared_ is Dukovo's root, as *./ob image* makes it on its Dukovo root
+  partition. Spark mounts it again to compress if it was not, as the
+  root always does, then mounts _@system.a_ read-only on _/system_,
+  _@settings_ on _/system/settings_, _@state_ on _/system/state_,
+  _@applications_ on _/applications_, _@users_ on _/users_ and _@shared_
+  on _/shared_, each as a directory of the mount at _/volumes/_*name*
+  (the *bind* kind of *radix-files*(7)), and tmpfs on _/system/live_.
+  With no such disk, or with *--no-volumes*, it mounts the boot archive
+  read-only on _/system_ and tmpfs on _/system/settings_, _/system/state_
+  and _/system/live_, which the next boot starts without. Then it makes
+  _/system/state/tmp_, for temporary files that are to outlive a
+  restart. If any of this fails, it starts nothing.
+. It makes the symbolic links with Unix's names, for Unix programs,
+  scripts and people: _/bin_ and _/sbin_ to _system/commands_, _/usr_
+  to _system_, _/etc_ to _system/settings_, _/var_ to _system/state_,
+  _/run_ to _system/live_, _/dev_ to _devices_, _/proc_ to _processes_,
+  _/sys_ to _kernel_, and _/system/state/run_ to _../live_. It writes the names
+  of those in the root to _/.hidden_, and _run_ to _/system/state/.hidden_,
+  so that listings leave them out (*radix-files*(7)). The boot archive
+  holds _/system_'s own links, _bin_, _lib_ and _share_. A directory or
+  link that Dukovo's root kept from the boot before is left as it is.
+. It copies each default setting in
+  _/system/resources/default-settings_ that _/system/settings_ lacks
+  into it, with the directories it is in: the
+  defaults the system ships, such as nano's _nanorc_ and the service
+  files, which an administrator edits in _/system/settings_. A file
+  already there is never replaced, so an update can add settings without
+  undoing edits. On Dukovo's root the first boot copies them all; with
+  _/system/settings_ in memory, every boot does.
 . It listens at _/system/live/spark/control_.
 . With no program on the command line, as on a normal boot, it starts
   the services that _/system/settings/spark/services_ enables, the lowest
@@ -145,6 +157,14 @@ spark: added 4 default settings to /system/settings
 spark: listening at /system/live/spark/control
 spark: 1 services in /system/settings/spark/services, 1 enabled
 spark: started consoled (/system/commands/consoled) as process 12
+```
+
+On Dukovo's root, as on a SATA disk written from the image, the
+hierarchy line comes after the root's:
+
+```
+spark: /system is Dukovo's root on sda5, compressed (zstd)
+spark: built the hierarchy of 9 directories and mounted 11 filesystems
 ```
 
 and in a boot test that names a program:

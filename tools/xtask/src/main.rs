@@ -135,8 +135,11 @@ Builds the kernel, then a hybrid boot image that starts under UEFI and
 legacy BIOS from a USB stick, a hard disk or optical media:
   out/dukovo-<version>-x86_64.img   (default)
   out/dukovo-<version>-x86_64.iso   (with --iso)
+The .img ends with a Dukovo root partition: the system and the
+subvolumes for what changes, on Btrfs.
 
-  --iso                Name the output .iso for virtual machines and optical media
+  --iso                Name the output .iso for virtual machines and optical media,
+                       without the Dukovo root partition
   --cmdline <flags>    Kernel flags instead of boot.cmdline (dukovo-boot(7))
   --microcode <path>   Intel microcode file or directory instead of image.microcode
   --disk-check <serial>
@@ -248,6 +251,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   ext4-power-cut   the power is cut while ext4 files are synced: e2fsck
                    passes after the journal's replay, every synced file is
                    whole
+  root             Dukovo's root on a copy of the image: Spark mounts its
+                   subvolumes, and what is written lasts through a reboot
   posix            C programs on mlibc, a Rust std one and the ported
                    utilities: fork, exec, signals, pipes, terminals, files,
                    threads

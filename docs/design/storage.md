@@ -112,8 +112,11 @@ word whole, so no bit a mount still needs is ever clear.
 `mount` needs the control right. It resolves the path, checks that it is
 a directory, makes the filesystem (`crate::fs::make`: `tmpfs`, `fat` on a
 block device the caller names by a file capability, or the generated
-`proc`, `sys`, `dev` and `bootfs`), and adds the mount. A second mount on
-the same place stacks on the first, as on Linux. `unmount` takes off the
+`proc`, `sys`, `dev` and `bootfs`), and adds the mount. The `bind` kind
+makes no filesystem: the mount is of the filesystem of the directory
+the caller names by a capability, with that directory as its root,
+read-only if asked or if the directory's mount is (ADR 0137). A second
+mount on the same place stacks on the first, as on Linux. `unmount` takes off the
 mount whose root the path names, after syncing it, unless something is
 mounted on it or anything holds a place on it: the table and the call
 hold two references to the mount, and any more is a handle. A rename
@@ -134,7 +137,8 @@ has gone.
 
 `open` hands on at most the rights of the directory it opens through: a
 file gets read and write, a directory read, write and control, both copy
-and transfer. Opening a file for writing on a read-only mount fails with
+and transfer. Opening a file for writing on a read-only mount, or in a
+read-only Btrfs subvolume (a node whose `read_only` says so), fails with
 `read_only`.
 
 Releasing a file object can mean freeing a removed FAT file's clusters,
@@ -446,7 +450,9 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   twice by two lookups at once is dropped, which only frees memory. A
   directory entry that names a subvolume leads to that subvolume's top
   directory; the inode numbers of the top subvolume are its files' IDs,
-  and other subvolumes' carry their number from bit 40.
+  and other subvolumes' carry their number from bit 40. Every node of a
+  subvolume whose root item has Linux's read-only flag refuses changes
+  with `ReadOnly` though the filesystem is mounted to write (ADR 0137).
 - `node::BtrfsNode` is a file, directory or link. A file's page cache
   reads runs of pages from one extent: a hole or a reserved extent reads
   as a page of zeros, an inline one from its item, and one on the disk
@@ -615,17 +621,22 @@ never inside an allocation.
 The kernel makes only the root, an empty tmpfs, and gives it to Spark in
 `SLOT_ROOT`. Spark (spark(8), since v1) makes `/system`, `/applications`,
 `/users`, `/shared`, `/tmp`, `/devices`, `/processes`, `/kernel` and
-`/volumes`; mounts the boot archive read-only on `/system`, tmpfs on
-`/system/settings`, `/system/state`, `/system/live` and `/tmp`, and the
-`dev`, `proc` and `sys` trees on `/devices`, `/processes` and `/kernel`;
-makes the links with Unix's names (`/dev`, `/proc`, `/sys`, `/run`,
-`/etc`, `/var`, `/bin`, `/sbin`, `/usr`) and the `.hidden` file that
-keeps them out of listings (ADR 0113); and mounts the FAT filesystem of
-each disk or partition in `/devices` at `/volumes/<name>`, or else its
-Btrfs filesystem, read-only when the device is (or, for Btrfs, when it
-uses a feature Radix does not write yet), and for Btrfs compressing
-what is written when `--compress` names the disk (ADR 0134). A disk with
-a partition table is not mounted whole.
+`/volumes`; mounts tmpfs on `/tmp` and the `dev`, `proc` and `sys`
+trees on `/devices`, `/processes` and `/kernel`; mounts the FAT, exFAT
+or Btrfs filesystem of each disk or partition in `/devices` at
+`/volumes/<name>`, read-only when the device is (or when it uses a
+feature Radix does not write yet), and for Btrfs compressing what is
+written when `--compress` names the disk (ADR 0134), a disk with a
+partition table not whole; then mounts `/system`. On Dukovo's root, the
+first Btrfs mounted to write that holds its subvolumes (ADR 0137), it
+binds `@system.a` read-only on `/system`, `@settings`, `@state`,
+`@applications`, `@users` and `@shared` where they belong, and tmpfs on
+`/system/live`, with the root compressing. Otherwise it mounts the boot
+archive read-only on `/system` and tmpfs on `/system/settings`,
+`/system/state` and `/system/live`. Last, it makes the links with Unix's
+names (`/dev`, `/proc`, `/sys`, `/run`, `/etc`, `/var`, `/bin`, `/sbin`,
+`/usr`) and the `.hidden` file that keeps them out of listings (ADR
+0113).
 It then starts the program its arguments name with the root, read and
 write, or since Phase 9 the services.
 

@@ -240,10 +240,10 @@ impl Volume {
         self.current.lock().trees = [None; TREES];
     }
 
-    /// Subvolume `id`'s tree and its top directory's inode number; `None`
-    /// if there is no such subvolume, or it was deleted and waits to be
-    /// cleaned up (no references are left to it).
-    pub fn subvolume(&self, id: u64) -> Result<Option<(Root, u64)>> {
+    /// Subvolume `id`'s tree, its top directory's inode number and whether
+    /// it is read-only; `None` if there is no such subvolume, or it was
+    /// deleted and waits to be cleaned up (no references are left to it).
+    pub fn subvolume(&self, id: u64) -> Result<Option<(Root, u64, bool)>> {
         if id != tree::FS && id < tree::FIRST_FREE {
             return Ok(None);
         }
@@ -257,7 +257,7 @@ impl Volume {
             return Ok(None);
         }
         let tree = Root { bytenr: root.bytenr, level: root.level, generation: root.generation };
-        Ok(Some((tree, root.root_dirid)))
+        Ok(Some((tree, root.root_dirid, root.flags & RootItem::READ_ONLY != 0)))
     }
 
     /// The device.
