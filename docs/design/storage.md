@@ -260,7 +260,8 @@ A controller that takes shadow doorbells (Doorbell Buffer Config, OACS
 bit 8), as QEMU's does, is given two pages for them before its queues
 are made, and again after a reset (ADR 0117): a lane then writes each
 doorbell to memory, and its register only when the controller's event
-index asks.
+index asks: a completion head when the lane next finds a completion,
+unless the queue could look full to the controller first (ADR 0136).
 Each active namespace with blocks of 512 to 4096 bytes and no metadata
 becomes a disk, its requests naming it and counting in its blocks; its physical block is the size it is best
 written in, but no more than what is whole after a power failure. At

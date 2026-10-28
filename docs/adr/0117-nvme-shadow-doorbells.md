@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0117. NVMe shadow doorbells, and virtio requests of 254 pages
 
-- Status: Accepted
+- Status: Accepted; a completion head the controller asks for goes to its register at the next completion since [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md)
 - Date: 2026-10-26
 
 ## Context
