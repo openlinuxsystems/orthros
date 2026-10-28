@@ -96,9 +96,26 @@ _/kernel/bus/pci/devices/_*address*_/class_
 	in hexadecimal with six digits: *0x010000* for a SCSI-like storage
 	controller, *0x010601* for an AHCI one, *0x010802* for an NVMe one.
 
+_/kernel/bus/pci/devices/_*address*_/revision_
+	Its revision, in hexadecimal with two digits: *0x02*.
+
+_/kernel/bus/pci/devices/_*address*_/subsystem_vendor_, _subsystem_device_
+	The vendor and model of the board around it, in hexadecimal with
+	four digits: *0x1af4* and *0x1100* on QEMU. A bridge's are in its
+	Subsystem ID capability; *0x0000* for a function that has none.
+
 	A function's address is its PCI segment, bus, device and function,
 	as Linux writes it: _0000:00:03.0_. Every function the kernel's scan
-	found is listed, whether or not a driver uses it.
+	found is listed, whether or not a driver uses it. *lspci*(8) reads
+	them.
+
+_/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
+	The firmware's memory map, as the boot loader gave it to the kernel,
+	a directory a range numbered from *0* in its order, as Linux's
+	_/sys/firmware/memmap_: the range's first and last byte, in
+	hexadecimal (*0x0* and *0x9fbff*), and its type, in Linux's names:
+	*System RAM*, *Reserved*, *ACPI Tables*, *ACPI Non-volatile Storage*
+	or *Unusable memory*. *lsmem*(1) reads it.
 
 _/kernel/class/watchdog/watchdog0/identity_
 	The hardware watchdog the kernel drives, if any (*spark*(8)'s
@@ -125,4 +142,4 @@ virtio function for each of its four disks in _/kernel/bus/pci/devices_.
 # SEE ALSO
 
 *radix-proc*(5), *radix-block*(2), *radix-files*(7), *dukovo-boot*(7), *ob*(1),
-*spark*(8), *watchdog*(8)
+*spark*(8), *watchdog*(8), *lspci*(8), *lsmem*(1)

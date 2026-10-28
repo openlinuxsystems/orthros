@@ -20,7 +20,7 @@ is named for what it holds:
 | `/system` | The operating system: programs and the system's own files, read-only |
 | `/system/commands` | The programs, where the shell finds commands |
 | `/system/libraries` | The libraries, the dynamic linker and the locales |
-| `/system/resources` | What else the programs read: manual pages, terminal descriptions, the licenses, the default settings |
+| `/system/resources` | What else the programs read: manual pages, terminal descriptions, the PCI ID database, the licenses, the default settings |
 | `/system/settings` | The system's settings (in memory for now) |
 | `/system/state` | The system's changing data: logs, caches (in memory for now) |
 | `/system/live` | The state of running services: sockets, locks, process IDs, in memory |

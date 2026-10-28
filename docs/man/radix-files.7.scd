@@ -196,7 +196,8 @@ on it at every boot. Each folder is named for what it holds:
 :< the libraries, the dynamic linker _ld.so_ and the locales
 |  _/system/resources_
 :< everything else the programs read: manual pages, terminal
-   descriptions, completions, the licenses, and the default settings
+   descriptions, completions, the PCI ID database, the licenses, and the
+   default settings
 |  _/system/settings_
 :< the system's settings, a tmpfs for now, which starts from the
    defaults in _/system/resources/default-settings_ (*spark*(8))

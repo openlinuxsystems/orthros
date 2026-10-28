@@ -47,6 +47,8 @@ const CAPABILITIES: usize = 0x34;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
 /// The most capabilities followed: a malformed list cannot loop.
 const MAX_CAPABILITIES: usize = 48;
+/// The capability that holds a bridge's subsystem IDs.
+const CAP_SUBSYSTEM: u8 = 0x0d;
 
 /// Capability IDs.
 pub mod capability {
@@ -165,6 +167,19 @@ impl Function {
     /// Its subsystem ID (header type 0 only, else 0).
     pub fn subsystem_id(&self) -> u16 {
         if self.header_type() == 0 { self.config.read16(SUBSYSTEM_ID) } else { 0 }
+    }
+
+    /// Its subsystem vendor and subsystem IDs, as Linux reads them: from
+    /// an endpoint's header, or from a bridge's Subsystem ID capability;
+    /// (0, 0) for a function that has neither.
+    pub fn subsystem(&self) -> (u16, u16) {
+        match self.header_type() {
+            0 => (self.config.read16(SUBSYSTEM_VENDOR_ID), self.config.read16(SUBSYSTEM_ID)),
+            1 => self
+                .find_capability(CAP_SUBSYSTEM)
+                .map_or((0, 0), |at| (self.config.read16(at + 4), self.config.read16(at + 6))),
+            _ => (0, 0),
+        }
     }
 
     /// Its class code: base class, subclass and programming interface.

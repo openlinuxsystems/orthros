@@ -49,7 +49,8 @@ pub static WRITES: AtomicU64 = AtomicU64::new(0);
 pub static WRITTEN_SECTORS: AtomicU64 = AtomicU64::new(0);
 
 /// What the PCI scan found: where each function is, its vendor and
-/// device IDs, and its class code, for `/kernel/bus/pci`.
+/// device IDs, its class code, revision and subsystem, for
+/// `/kernel/bus/pci`.
 #[derive(Clone, Copy, Debug)]
 pub struct PciFunction {
     /// Where it is.
@@ -60,6 +61,10 @@ pub struct PciFunction {
     pub device: u16,
     /// Its class, subclass and programming interface.
     pub class: u32,
+    /// Its revision.
+    pub revision: u8,
+    /// Its subsystem vendor and subsystem IDs, (0, 0) for none.
+    pub subsystem: (u16, u16),
 }
 
 /// The most functions [`pci_functions`] lists.
@@ -203,6 +208,8 @@ fn describe(function: &Function) {
                 vendor: function.vendor_id(),
                 device: function.device_id(),
                 class: (u32::from(class) << 16) | (u32::from(subclass) << 8) | u32::from(interface),
+                revision: function.revision(),
+                subsystem: function.subsystem(),
             });
             found.1 += 1;
         }

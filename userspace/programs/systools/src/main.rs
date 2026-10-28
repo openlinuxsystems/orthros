@@ -19,7 +19,10 @@ mod column;
 mod df;
 mod dmesg;
 mod hexdump;
+mod lscpu;
+mod lsmem;
 mod lsof;
+mod lspci;
 mod memory;
 mod modes;
 mod pidstat;
@@ -65,7 +68,10 @@ const TOOLS: &[(&str, Tool)] = &[
     ("hexdump", hexdump::main),
     ("ionice", priority::ionice),
     ("kill", signals::kill),
+    ("lscpu", lscpu::main),
+    ("lsmem", lsmem::main),
     ("lsof", lsof::main),
+    ("lspci", lspci::main),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
