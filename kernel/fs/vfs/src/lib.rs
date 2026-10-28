@@ -93,7 +93,8 @@ pub enum Error {
     Outside,
     /// The operation would move a file between filesystems.
     CrossMount,
-    /// The file is in use: a mount point, or a filesystem with files open.
+    /// The file is in use: a mount point, a filesystem with files open, or
+    /// a disk that is a swap area.
     InUse,
     /// The disk failed to read or write.
     Io,

@@ -56,3 +56,29 @@ const DISCARD: u32 = 0x1277;
 /// Empties the disk's write cache, as radix-file(2)'s `sync` does
 /// (BLKFLSBUF). Needs the write right.
 const FLUSH: u32 = 0x1261;
+
+/// Turns on the swap area mkswap(8) made on the device (swapon(8), ADR
+/// 0152): Dukovo's own request, as Linux has the swapon(2) system call
+/// for it, whose flags it reads as a u32. With SWAP_PREFER set, the low
+/// 15 bits are the area's priority; without it, the area gets the next
+/// of the default priorities, -2, -3 and on. Needs the write right; fails
+/// with in_use if the area is on already, invalid_argument if the device
+/// holds no swap area of version 1 for pages of 4 KiB or the flags have
+/// other bits set, not_supported for Linux's discard flags, read_only on
+/// a device that refuses writes, and busy if eight areas are on. While it
+/// is on, the device's raw writes and mounts fail with in_use.
+const SWAP_ON: u32 = 0x40045201;
+/// Turns off the swap area on the device, once every page swapped out to
+/// it is read back into memory (swapoff(8)); the argument is not used.
+/// Needs the write right; fails with invalid_argument if it is not on,
+/// no_memory if its pages do not fit in memory, and io if one cannot be
+/// read, and stays on then.
+const SWAP_OFF: u32 = 0x5202;
+/// SWAP_ON's flag that says a priority is given (Linux's
+/// SWAP_FLAG_PREFER).
+const SWAP_PREFER: u32 = 0x8000;
+/// The bits of SWAP_ON's flags that hold the priority.
+const SWAP_PRIORITY_MASK: u32 = 0x7fff;
+/// Linux's flags for discarding an area's pages (SWAP_FLAG_DISCARD,
+/// SWAP_FLAG_DISCARD_ONCE and SWAP_FLAG_DISCARD_PAGES).
+const SWAP_DISCARD_FLAGS: u32 = 0x70000;

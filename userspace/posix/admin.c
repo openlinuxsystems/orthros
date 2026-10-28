@@ -4,7 +4,7 @@
 // The native administration tools (systools, ADR 0096) as an
 // administrator's commands and scripts use them, each through its link
 // in /bin: the process tools and their signals, sessions, memory and
-// disks, subvolumes and scrubs, priorities, CPU affinity and I/O
+// disks, subvolumes and scrubs, swap areas, priorities, CPU affinity and I/O
 // classes, held files, traces, the kernel log, the dump and layout tools,
 // script, watch and pidstat, shutdown and service through Spark, and the
 // hardware tools. With them, what the kernel tells them: /processes
@@ -238,6 +238,37 @@ static void subvolumes(void) {
 	STATUS(1, "/bin/scrub", "start", "-r", DIR);
 	STATUS(1, "/bin/scrub", "status", DIR);
 	STATUS(1, "/bin/scrub");
+}
+
+// mkswap, swapon and swapoff on a file in tmpfs, which takes a swap
+// area's header but cannot be one; the swap boot test turns on a disk's.
+static void swap_tools(void) {
+	STATUS(0, "/bin/mkdir", "-p", DIR);
+	STATUS(0, "/bin/truncate", "-s", "1M", DIR "/swapfile");
+	CONTAINS("Setting up swapspace version 1, size = 1020 KiB (1044480 bytes)\n"
+			"LABEL=admin, UUID=8e2d7c7b-46a2-4e0c-9d7c-bd0a1f6e5a3e\n",
+			"/bin/mkswap", "-L", "admin", "-U", "8e2d7c7b-46a2-4e0c-9d7c-bd0a1f6e5a3e",
+			DIR "/swapfile");
+	// Linux's header: version 1, the last page, the UUID and the label.
+	unsigned char page[4096];
+	int fd = open(DIR "/swapfile", O_RDONLY | O_CLOEXEC);
+	CHECK(fd >= 0 && pread(fd, page, sizeof(page), 0) == (ssize_t)sizeof(page));
+	if(fd >= 0)
+		close(fd);
+	CHECK(!memcmp(page + 4086, "SWAPSPACE2", 10));
+	CHECK(page[1024] == 1 && page[1028] == 255 && page[1029] == 0);
+	CHECK(page[1036] == 0x8e && page[1051] == 0x3e && !memcmp(page + 1052, "admin", 6));
+	STATUS(1, "/bin/swapon", DIR "/swapfile");
+	STATUS(4, "/bin/swapoff", DIR "/swapfile");
+	STATUS(16, "/bin/swapoff");
+	OUTPUT("", "", "/bin/swapon", "--show");
+	CONTAINS("Filename", "/bin/swapon", "-s");
+	CONTAINS("Swap:", "/bin/free");
+	STATUS(0, "/bin/truncate", "-s", "16K", DIR "/small");
+	STATUS(1, "/bin/mkswap", DIR "/small");
+	STATUS(1, "/bin/mkswap");
+	STATUS(1, "/bin/swapon", "-a");
+	STATUS(0, "/bin/rm", DIR "/swapfile", DIR "/small");
 }
 
 // renice, ionice and taskset: levels, classes and CPUs, set on a child
@@ -593,6 +624,7 @@ int main(void) {
 	RUN(sessions);
 	RUN(memory);
 	RUN(subvolumes);
+	RUN(swap_tools);
 	RUN(priorities);
 	RUN(files);
 	RUN(tracing);

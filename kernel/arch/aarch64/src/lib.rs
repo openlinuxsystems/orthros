@@ -21,8 +21,8 @@ use core::sync::atomic::AtomicU32;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
     InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageEdit, PageTable, PciSegment,
-    Platform, Shootdowns, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault,
-    UserMode,
+    Platform, Scanned, Shootdowns, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess,
+    UserFault, UserMode,
 };
 
 /// The AArch64 implementation of the HAL traits.
@@ -310,6 +310,22 @@ impl UserMode for Arch {
     }
 
     fn frames(_: &Space, _: u64, _: u64, _: bool, _: &mut dyn FnMut(u64) -> bool) {}
+
+    fn scan(_: &Space, _: u64, _: u64, _: bool, _: &mut dyn FnMut(u64, Scanned) -> bool) {}
+
+    fn swap_out(_: &Space, _: u64, _: u64, _: u64) -> bool {
+        false
+    }
+
+    fn set_swapped(_: &Space, _: u64, _: u64) -> Result<(), MapPageError> {
+        Err(MapPageError::NoMemory)
+    }
+
+    fn swapped(_: &Space, _: u64) -> Option<u64> {
+        None
+    }
+
+    fn clear_swapped(_: &Space, _: u64, _: u64, _: &mut dyn FnMut(u64)) {}
 
     fn edit_pages(
         _: &Space,

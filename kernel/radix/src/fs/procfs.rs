@@ -83,7 +83,7 @@ pub fn write_escaped_str(out: &mut dyn Write, text: &str, special: &[u8]) -> fmt
 }
 
 /// The files of `/processes` besides the processes' directories.
-const FILES: [&str; 5] = ["loadavg", "meminfo", "mounts", "stat", "uptime"];
+const FILES: [&str; 6] = ["loadavg", "meminfo", "mounts", "stat", "swaps", "uptime"];
 
 /// The files of a process's directory.
 const PROCESS_FILES: [&str; 4] = ["cmdline", "files", "status", "threads"];
@@ -137,6 +137,7 @@ impl Listing for Root {
             "meminfo" => meminfo,
             "mounts" => mounts,
             "stat" => stat,
+            "swaps" => swaps,
             "uptime" => uptime,
             _ => {
                 let number: u64 = name.parse().map_err(|_| Error::NotFound)?;
@@ -483,7 +484,15 @@ fn meminfo(text: &mut Text) -> fmt::Result {
         }
         writeln!(text, "{}: {} KiB", key.as_str(), kib(FRAMES.owner_pages(owner)))?;
     }
-    Ok(())
+    // The swap areas on (ADR 0152): the pages they hold, and those free.
+    let (slots, used) = crate::swap::totals();
+    writeln!(text, "swap_total: {} KiB", kib(slots))?;
+    writeln!(text, "swap_free: {} KiB", kib(slots.saturating_sub(used)))
+}
+
+/// `/processes/swaps`: the swap areas on, as Linux's `/proc/swaps`.
+fn swaps(text: &mut Text) -> fmt::Result {
+    crate::swap::list(text)
 }
 
 /// `/processes/stat`: each online CPU's times, as `cpuN: key=value` lines, and
@@ -523,6 +532,8 @@ fn stat(text: &mut Text) -> fmt::Result {
     writeln!(text, "disk_read_sectors: {}", count(&super::disk::READ_SECTORS))?;
     writeln!(text, "disk_writes: {}", count(&super::disk::WRITES))?;
     writeln!(text, "disk_written_sectors: {}", count(&super::disk::WRITTEN_SECTORS))?;
+    writeln!(text, "swap_ins: {}", count(&crate::swap::IN))?;
+    writeln!(text, "swap_outs: {}", count(&crate::swap::OUT))?;
     // What costs an exit to the host under a hypervisor, as `ob bench`
     // counts it for its benchmarks.
     let events = sched::counters();

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! free(1) and vmstat(8), from `/processes/meminfo` and `/processes/stat`. Radix has
-//! no swap until Phase 10 and counts no interrupts per CPU, so those
-//! columns are 0; the page cache is free(1)'s buff/cache, which the kernel
-//! can drop for programs, so it counts as available.
+//! free(1) and vmstat(8), from `/processes/meminfo` and `/processes/stat`.
+//! Radix counts no interrupts per CPU, so those columns are 0; the page
+//! cache is free(1)'s buff/cache, which the kernel can drop for programs,
+//! so it counts as available, and swap is the swap areas on (ADR 0152).
 
 use std::io::{self, Write};
 use std::thread;
@@ -178,18 +178,18 @@ pub fn free(args: &mut Args) -> Result<i32, Fail> {
             out,
             "{:7}{:>w$} {:>w$} {:>w$}",
             "Swap:",
-            show(0, unit),
-            show(0, unit),
-            show(0, unit)
+            show(m.swap_total, unit),
+            show(m.swap_used(), unit),
+            show(m.swap_free, unit)
         )?;
         if total {
             writeln!(
                 out,
                 "{:7}{:>w$} {:>w$} {:>w$}",
                 "Total:",
-                show(m.total, unit),
-                show(m.used(), unit),
-                show(m.free, unit)
+                show(m.total + m.swap_total, unit),
+                show(m.used() + m.swap_used(), unit),
+                show(m.free + m.swap_free, unit)
             )?;
         }
     }
@@ -270,9 +270,9 @@ pub fn vmstat(args: &mut Args) -> Result<i32, Fail> {
             (m.free, "K free memory"),
             (0, "K buffer memory"),
             (m.cache, "K swap cache"),
-            (0, "K total swap"),
-            (0, "K used swap"),
-            (0, "K free swap"),
+            (m.swap_total, "K total swap"),
+            (m.swap_used(), "K used swap"),
+            (m.swap_free, "K free swap"),
             (ticks(s.all.user_ns), "non-nice user cpu ticks"),
             (ticks(s.all.system_ns), "system cpu ticks"),
             (ticks(s.all.idle_ns), "idle cpu ticks"),
@@ -344,7 +344,7 @@ fn header(out: &mut impl Write, wide: bool, timestamp: bool) -> io::Result<()> {
 
 fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit: u64) -> String {
     let s = &now.stat;
-    let (cpu, seconds, read, written, switches) = match before {
+    let (cpu, seconds, read, written, switches, swapped) = match before {
         Some(b) => {
             let d = |a: u64, b: u64| a.saturating_sub(b);
             let cpu = (
@@ -359,6 +359,7 @@ fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit
                 d(s.disk_read_sectors, b.stat.disk_read_sectors),
                 d(s.disk_written_sectors, b.stat.disk_written_sectors),
                 d(s.all.switches, b.stat.all.switches),
+                (d(s.swap_ins, b.stat.swap_ins), d(s.swap_outs, b.stat.swap_outs)),
             )
         }
         // The first line: averages since boot.
@@ -370,6 +371,7 @@ fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit
                 s.disk_read_sectors,
                 s.disk_written_sectors,
                 s.all.switches,
+                (s.swap_ins, s.swap_outs),
             )
         }
     };
@@ -380,17 +382,19 @@ fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit
     let mem = |kib: u64| kib * 1024 / unit;
     // Blocks of 1 KiB, as Linux's bi and bo count them.
     let (bi, bo) = (per(read / 2), per(written / 2));
+    // Pages of 4 KiB swapped in and out, as KiB a second, as Linux's.
+    let (si, so) = (per(swapped.0 * 4) * 1024 / unit, per(swapped.1 * 4) * 1024 / unit);
     let mut text = if wide {
         format!(
             "{:>4} {:>4} {:>12} {:>12} {:>12} {:>12} {:>4} {:>4} {:>5} {:>5} {:>4} {:>4} {:>3} {:>3} {:>3} {:>3} {:>3} {:>3}",
             s.running,
             s.disk_waiting,
-            0,
+            mem(m.swap_used()),
             mem(m.free),
             0,
             mem(m.cache),
-            0,
-            0,
+            si,
+            so,
             bi,
             bo,
             0,
@@ -407,12 +411,12 @@ fn line(now: &Sample, before: Option<&Sample>, wide: bool, timestamp: bool, unit
             "{:>2} {:>2} {:>6} {:>6} {:>6} {:>6} {:>4} {:>4} {:>5} {:>5} {:>4} {:>4} {:>2} {:>2} {:>2} {:>2} {:>2} {:>2}",
             s.running,
             s.disk_waiting,
-            0,
+            mem(m.swap_used()),
             mem(m.free),
             0,
             mem(m.cache),
-            0,
-            0,
+            si,
+            so,
             bi,
             bo,
             0,

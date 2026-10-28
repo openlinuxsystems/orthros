@@ -137,8 +137,9 @@ pub struct Disk {
     kib: u64,
     /// 12, 16 or 32; [`EXFAT`] for exFAT; [`BTRFS`] for Btrfs of
     /// [`btrfs_files`], [`BTRFS_NEW`] for Btrfs to write, or [`BTRFS_LOG`]
-    /// for Btrfs Linux left with a log; [`EXT4`] for ext4; or 0 for no
-    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
+    /// for Btrfs Linux left with a log; [`EXT4`] for ext4; [`SWAP`] for a
+    /// swap area; or 0 for no filesystem, the disk holding
+    /// [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The size of an exFAT disk's clusters, or an ext4 disk's blocks, in
     /// bytes; 0 for the others.
@@ -187,6 +188,9 @@ const ROOT: u8 = 5;
 /// [`Disk::fat`] for the Btrfs disk Linux left with changes in its log
 /// of fsyncs alone, as `ob fixture btrfs-log` keeps it (ADR 0151).
 const BTRFS_LOG: u8 = 6;
+
+/// [`Disk::fat`] for a swap area the host's `mkswap` makes (ADR 0152).
+const SWAP: u8 = 7;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -523,6 +527,27 @@ const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs
 const LOG_DISKS: &[Disk] =
     &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
 
+/// The `swap` test's disk: a 1 GiB swap area on a virtio disk, `vda`.
+const SWAP_DISKS: &[Disk] = &[Disk {
+    kib: SWAP_KIB,
+    fat: SWAP,
+    cluster: 0,
+    label: "SWAPTEST",
+    table: Table::None,
+    bus: Bus::Virtio,
+    sector: 512,
+    device: "",
+    errors: None,
+    read_only: false,
+    check: swap_kept,
+}];
+
+/// The size of the `swap` test's area, in KiB.
+const SWAP_KIB: u64 = 1 << 20;
+
+/// The UUID the host's `mkswap` gives the `swap` test's area.
+const SWAP_UUID: &str = "6c6f9a34-1b7e-4f0e-9a51-0d2f3c5b8e17";
+
 /// The `root` test's disk: a copy of the test image with a Dukovo root
 /// partition, its fifth, as a virtio disk: `vda5`.
 const ROOT_DISKS: &[Disk] =
@@ -837,6 +862,22 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: spark_oom,
         disks: &[],
+        second: None,
+    },
+    Case {
+        name: "swap",
+        about: "a swap area Linux's mkswap made on a virtio disk: swapon turns it on, a program fills 384 MiB of a 256 MiB machine and gets it all back, through a fork too, and swapoff turns it off with pages still on it; the area stays as mkswap made it",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix /system/tests/posix/swaptest /devices/vda 384",
+        cpus: 2,
+        memory: "256M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: swap,
+        disks: SWAP_DISKS,
         second: None,
     },
     Case {
@@ -1944,6 +1985,11 @@ fn make_disks(
             made.push(image);
             continue;
         }
+        if disk.fat == SWAP {
+            make_swap(disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
         if disk.fat == ROOT {
             let root = root.ok_or("the Dukovo root's filesystem was not made")?;
             std::fs::write(&image.path, base)
@@ -2207,6 +2253,21 @@ fn fat_tool(name: &str) -> PathBuf {
         .map(|dir| Path::new(dir).join(name))
         .find(|path| path.exists())
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Makes a swap area of `disk`'s size at `path` with the host's `mkswap`,
+/// with a fixed UUID so that runs match.
+fn make_swap(disk: &Disk, path: &Path) -> Result<(), String> {
+    let file =
+        std::fs::File::create(path).map_err(|err| format!("making {}: {err}", path.display()))?;
+    file.set_len(disk.kib * 1024).map_err(|err| format!("sizing {}: {err}", path.display()))?;
+    drop(file);
+    host_tool(
+        std::process::Command::new(fat_tool("mkswap"))
+            .args(["-q", "-L", disk.label, "-U", SWAP_UUID])
+            .arg(path),
+    )
+    .map(drop)
 }
 
 /// Runs a host program on a test disk; fails with what it said.
@@ -4737,6 +4798,58 @@ fn btrfs_log(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     storage_end(vm, "replayed")
+}
+
+/// The `swap` test: swaptest (userspace/posix/swaptest.c) turns on the
+/// area with swapon(8), fills more memory than the machine has and reads
+/// it back, through a fork too, and turns the area off with swapoff(8)
+/// while some of it is still out there; no domain may be stopped for
+/// want of memory meanwhile.
+fn swap(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: vda holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone")?;
+    vm.expect("spark: started /system/tests/posix/swaptest as process ")?;
+    let slots = SWAP_KIB / 4 - 1;
+    vm.expect(&format!("Swap: vda: {} MiB in {slots} slots, priority -2", slots * 4 / 1024))?;
+    vm.expect(&format!("swaptest: swap is on, {} KiB", slots * 4))?;
+    vm.expect("swaptest: filled 384 MiB")?;
+    vm.expect("swaptest: read it back, ")?;
+    vm.expect("swaptest: a child changed its copy")?;
+    vm.expect("Swap: vda: off")?;
+    vm.expect("swaptest: swap is off")?;
+    vm.expect("swaptest: every check passed")?;
+    let code = program_line(vm, "(/system/tests/posix/swaptest) exited with code ")?;
+    if code != "0x0" {
+        return Err(format!("swaptest exited with code {code}"));
+    }
+    let log = vm.log();
+    if let Some(line) = log
+        .lines()
+        .find(|line| line.contains("Out of memory") || line.contains("no memory for a page"))
+    {
+        return Err(format!("memory ran out though swap was on: {}", line.trim()));
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// Checks that the `swap` test's area is as `mkswap` made it: Linux's
+/// header, with its last page, UUID and label.
+fn swap_kept(disk: &DiskImage, _: &str) -> Result<(), String> {
+    let mut page = [0; 4096];
+    std::fs::File::open(&disk.path)
+        .and_then(|file| std::os::unix::fs::FileExt::read_exact_at(&file, &mut page, 0))
+        .map_err(|err| format!("reading {}: {err}", disk.path.display()))?;
+    let word = |at: usize| u32::from_le_bytes([page[at], page[at + 1], page[at + 2], page[at + 3]]);
+    let label = &page[1052..1052 + 8];
+    if &page[4086..] != b"SWAPSPACE2"
+        || word(1024) != 1
+        || u64::from(word(1028)) != SWAP_KIB / 4 - 1
+        || label != b"SWAPTEST"
+    {
+        return Err(format!("{}: the swap area's header changed", disk.path.display()));
+    }
+    Ok(())
 }
 
 /// Checks that the replay was committed, the superblock naming no log,

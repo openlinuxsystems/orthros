@@ -21,6 +21,7 @@
 //!   metadata of the filesystems on it, written back when they sync.
 //! - [`pagemap::PageMap`] is the radix tree that indexes page caches.
 //! - [`mem`] is where the storage compartments get memory.
+//! - [`swap`] reads the header of Linux's swap areas.
 //!
 //! The crate is a compartment: it has no `unsafe` code, and builds for
 //! the host (feature `host`), where its tests run against [`ram::RamDisk`].
@@ -40,6 +41,7 @@ pub mod mem;
 pub mod pagemap;
 pub mod partition;
 pub mod ram;
+pub mod swap;
 
 #[cfg(test)]
 mod tests;

@@ -42,8 +42,8 @@ pub use boot::{
 };
 pub use radix_hw::{Dma, Mmio, MsiMessage, Page};
 pub use user::{
-    MapPageError, PageEdit, SignalFrame, SyscallRegs, UserAccess, UserFault, UserFaultKind,
-    UserMode,
+    MapPageError, PageEdit, Scanned, SignalFrame, SyscallRegs, UserAccess, UserFault,
+    UserFaultKind, UserMode,
 };
 
 /// Most CPUs the kernel manages. Per-CPU tables are sized by this.

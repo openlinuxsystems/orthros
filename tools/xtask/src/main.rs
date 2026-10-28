@@ -200,6 +200,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    the next boot finds it
   spark-oom        a service that runs the machine out of memory is stopped
                    and started again
+  swap             a program fills more memory than the machine has, with a
+                   swap area Linux's mkswap made on, and gets it all back
   spark-stop       Spark stops a service that ignores SIGTERM, and what a
                    service leaves behind
   page-fault       a page fault's panic report, on serial and on screen

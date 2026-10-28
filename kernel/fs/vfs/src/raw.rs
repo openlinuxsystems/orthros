@@ -284,8 +284,9 @@ fn get(
 
 /// Writes `data` at byte `offset` of `device`: as much as fits before
 /// its end, and none at or past it ([`Error::NoSpace`], as Linux has
-/// it). `partial` keeps writes of parts of sectors apart. An error after
-/// some bytes went ends the write short.
+/// it), nor on a device whose swap area is on ([`Error::InUse`]).
+/// `partial` keeps writes of parts of sectors apart. An error after some
+/// bytes went ends the write short.
 pub fn write(
     device: &dyn BlockDevice,
     partial: &Mutex<()>,
@@ -295,6 +296,9 @@ pub fn write(
     let info = device.info();
     if info.read_only {
         return Err(Error::ReadOnly);
+    }
+    if radix_block::swap::is_on(device) {
+        return Err(Error::InUse);
     }
     if data.is_empty() {
         return Ok(0);

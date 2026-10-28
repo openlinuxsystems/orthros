@@ -348,6 +348,9 @@ pub struct Stat {
     pub disk_read_sectors: u64,
     pub disk_writes: u64,
     pub disk_written_sectors: u64,
+    /// Pages read back from swap, and written to it, since boot.
+    pub swap_ins: u64,
+    pub swap_outs: u64,
     /// When the system started, in nanoseconds since the epoch.
     pub boot_time_ns: u64,
 }
@@ -383,6 +386,8 @@ pub fn parse_stat(text: &[u8]) -> Stat {
             b"disk_read_sectors" => stat.disk_read_sectors = number(value),
             b"disk_writes" => stat.disk_writes = number(value),
             b"disk_written_sectors" => stat.disk_written_sectors = number(value),
+            b"swap_ins" => stat.swap_ins = number(value),
+            b"swap_outs" => stat.swap_outs = number(value),
             b"boot_time_ns" => stat.boot_time_ns = number(value),
             _ => {}
         }
@@ -411,6 +416,9 @@ pub struct Memory {
     pub free: u64,
     /// The page cache, which the kernel can drop for programs.
     pub cache: u64,
+    /// The swap areas' room, and what of it is free.
+    pub swap_total: u64,
+    pub swap_free: u64,
 }
 
 impl Memory {
@@ -423,13 +431,24 @@ impl Memory {
     pub fn available(&self) -> u64 {
         self.free + self.cache
     }
+
+    /// The swap in use.
+    pub fn swap_used(&self) -> u64 {
+        self.swap_total.saturating_sub(self.swap_free)
+    }
 }
 
 /// The system's memory.
 pub fn memory() -> io::Result<Memory> {
     let info = meminfo()?;
     let get = |key: &str| info.iter().find(|(k, _)| k == key).map_or(0, |(_, v)| *v);
-    Ok(Memory { total: get("total"), free: get("free"), cache: get("page_cache") })
+    Ok(Memory {
+        total: get("total"),
+        free: get("free"),
+        cache: get("page_cache"),
+        swap_total: get("swap_total"),
+        swap_free: get("swap_free"),
+    })
 }
 
 /// The load averages over 1, 5 and 15 minutes.

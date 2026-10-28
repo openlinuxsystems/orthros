@@ -37,12 +37,20 @@
 //! Entries for pages under `PROT_NONE` keep their page without access
 //! (the architecture's held entries), so `mprotect` can take access away
 //! and give it back without losing what the page holds.
+//!
+//! A page of a private region that only this space maps, lent to no
+//! device, can be swapped out (ADR 0152, [`SpaceObject::swap_out`]): the
+//! swap thread looks for pages no CPU used since its last look, writes
+//! them to a swap area in runs, and has their entries hold their slots;
+//! the next fault at one reads it back ([`SpaceObject::resolve`]). A
+//! swapped-out page stays counted and charged, a fork shares its slot as
+//! it shares a page, and unmapping it frees the slot.
 
 use core::sync::atomic::Ordering;
 
 use radix_abi::address_space::{ANONYMOUS_TOP, PAGE_SIZE, USER_START};
 use radix_abi::errors::Kernel;
-use radix_hal::{PageEdit, UserAccess, UserMode};
+use radix_hal::{PageEdit, Scanned, UserAccess, UserMode};
 use radix_mm::{FRAMES, Flags, Owner};
 use radix_vfs::{NodeRef, Out};
 
@@ -56,6 +64,7 @@ use super::{Backing, Region, SpaceObject, SpaceRef, first_after, insert, overlap
 use crate::Arch;
 use crate::domains::DomainRef;
 use crate::sched::wait;
+use crate::swap;
 use crate::user::{Result, error};
 
 /// The most the place of anonymous memory moves below ANONYMOUS_TOP, at
@@ -214,6 +223,11 @@ pub enum Fault {
     Io,
     /// The space's domain has no room for another page, or memory ran out.
     NoMemory,
+    /// Memory ran short with the space's regions locked, and the fault did
+    /// not wait for any to be reclaimed: [`SpaceObject::resolve`] lets go
+    /// of them, so that the swap thread can swap this space's pages out
+    /// too, and tries again. `resolve` never returns it.
+    Short,
 }
 
 /// The access a page of a private region gets while `sharers` spaces map
@@ -306,7 +320,8 @@ impl SpaceObject {
 
     /// Lets go of every page of anonymous memory from `start` to `end`.
     pub(super) fn release_range(&self, start: u64, end: u64) {
-        let mut released = 0;
+        // Slots first, so that the walk below finds the lines it empties.
+        let mut released = self.release_swapped(start, end);
         Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |phys| {
             unshare(phys);
             released += 1;
@@ -314,11 +329,26 @@ impl SpaceObject {
         self.uncharge(released);
     }
 
+    /// Lets go of the swap slots of the pages from `start` to `end` that
+    /// are swapped out: how many there were.
+    fn release_swapped(&self, start: u64, end: u64) -> u64 {
+        if self.swapped.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        let mut released = 0;
+        Arch::clear_swapped(&self.arch, start, end, &mut |slot| {
+            crate::swap::free(slot);
+            released += 1;
+        });
+        self.swapped.fetch_sub(released, Ordering::Relaxed);
+        released
+    }
+
     /// Unmaps everything from `start` to `end`, whatever region it is in,
     /// in one walk of the page tables: how an ending space lets go of all
     /// it maps. Pages of anonymous memory are given back and uncharged.
     pub(super) fn release_all(&self, start: u64, end: u64) {
-        let mut released = 0;
+        let mut released = self.release_swapped(start, end);
         Arch::edit_pages(&self.arch, start, end, &mut |_, _, _| PageEdit::Clear, &mut |phys| {
             released += u64::from(unshare_if_anon(phys));
         });
@@ -478,6 +508,7 @@ impl SpaceObject {
         region: &Region,
         anon: &Anon,
         page: u64,
+        wait: bool,
     ) -> core::result::Result<u64, Fault> {
         self.charge(1).map_err(|_| Fault::NoMemory)?;
         let flags = Flags { zero: anon.file.is_none(), ..Flags::MAY_SLEEP };
@@ -491,14 +522,12 @@ impl SpaceObject {
             && region.pages >= u64::from(radix_mm::RUN_FRAMES)
             && page > region.start
             && Arch::query_entry(&self.arch, page - PAGE_SIZE).is_some();
-        let frame = if in_order {
-            FRAMES.alloc_sequential(flags, Owner::Anon)
-        } else {
-            FRAMES.alloc(0, flags, Owner::Anon)
-        };
-        let Ok(phys) = frame else {
-            self.uncharge(1);
-            return Err(Fault::NoMemory);
+        let phys = match fault_frame(flags, in_order, wait) {
+            Ok(phys) => phys,
+            Err(fault) => {
+                self.uncharge(1);
+                return Err(fault);
+            }
         };
         if let Some(file) = &anon.file {
             let from = (region.offset + (page - region.start) / PAGE_SIZE) * PAGE_SIZE;
@@ -534,15 +563,33 @@ impl SpaceObject {
     /// anonymous memory that allows the access, or copies it if it is
     /// shared with another space and written to.
     pub fn resolve(&self, address: u64, write: bool, execute: bool) -> Fault {
-        let fault = self.resolve_page(address & !(PAGE_SIZE - 1), write, execute);
+        let page = address & !(PAGE_SIZE - 1);
+        // With a swap area on, a fault that finds memory short does not
+        // wait for it with the regions locked, where the swap thread would
+        // pass this space over: it lets go of them, has the swap thread
+        // make room, and tries again. The last try waits, as any
+        // allocation does.
+        let mut tries = if swap::on_any() { SHORT_TRIES } else { 0 };
+        let fault = loop {
+            match self.resolve_page(page, write, execute, tries == 0) {
+                Fault::Short => {
+                    tries -= 1;
+                    if !swap::reclaim(SHORT_WAIT_NS) {
+                        tries = 0;
+                    }
+                }
+                fault => break fault,
+            }
+        };
         if fault == Fault::Resolved {
             self.faults.fetch_add(1, Ordering::Relaxed);
         }
         fault
     }
 
-    /// [`resolve`](Self::resolve), at page `page`.
-    fn resolve_page(&self, page: u64, write: bool, execute: bool) -> Fault {
+    /// [`resolve`](Self::resolve), at page `page`: [`Fault::Short`] if
+    /// memory ran short and not `wait`.
+    fn resolve_page(&self, page: u64, write: bool, execute: bool, wait: bool) -> Fault {
         let regions = self.regions.lock();
         let Some(region) = regions.get(first_after(&regions, page)).filter(|r| r.start <= page)
         else {
@@ -586,8 +633,9 @@ impl SpaceObject {
                 }
                 // Copy on write: the copy is this space's, the original
                 // stays with the others.
-                let Ok(copy) = FRAMES.alloc(0, Flags::MAY_SLEEP, Owner::Anon) else {
-                    return Fault::NoMemory;
+                let copy = match fault_frame(Flags::MAY_SLEEP, false, wait) {
+                    Ok(copy) => copy,
+                    Err(fault) => return fault,
                 };
                 Arch::copy_frame(copy, phys);
                 if let Some(info) = FRAMES.info(copy) {
@@ -615,7 +663,12 @@ impl SpaceObject {
                 if let Some(pages) = &anon.shared {
                     return self.map_shared(pages, region, page, access);
                 }
-                let phys = match self.new_page(region, anon, page) {
+                if self.swapped.load(Ordering::Relaxed) > 0
+                    && let Some(slot) = Arch::swapped(&self.arch, page)
+                {
+                    return self.swap_in(page, slot, Some(access), wait);
+                }
+                let phys = match self.new_page(region, anon, page, wait) {
                     Ok(phys) => phys,
                     Err(fault) => return fault,
                 };
@@ -754,7 +807,7 @@ impl SpaceObject {
         match self.resolve(page, false, false) {
             Fault::Resolved => {}
             Fault::Io => return Err(radix_abi::errors::File::Io.status(0)),
-            Fault::NoMemory => return Err(error(Kernel::NoMemory)),
+            Fault::NoMemory | Fault::Short => return Err(error(Kernel::NoMemory)),
             Fault::Refused => return Err(error(Kernel::BadAddress)),
         }
         Arch::query_entry(&self.arch, page).map(|(phys, _)| phys).ok_or(error(Kernel::BadAddress))
@@ -860,6 +913,14 @@ impl SpaceObject {
                 child.uncharge(total - given);
                 return Err(error(Kernel::NoMemory));
             }
+            if self.swapped.load(Ordering::Relaxed) > 0 {
+                let swapped = self.fork_swapped(child, start, end);
+                given += swapped.unwrap_or_else(|given| given);
+                if swapped.is_err() {
+                    child.uncharge(total - given);
+                    return Err(error(Kernel::NoMemory));
+                }
+            }
             child.uncharge(total.saturating_sub(given));
         }
         // Each frame unmaps itself from the child too when it goes. One
@@ -881,6 +942,235 @@ impl SpaceObject {
         }
         Ok(())
     }
+}
+
+/// The pages [`SpaceObject::swap_out`] looks at in one go: where each is,
+/// and its frame or slot.
+type Found = [(u64, u64); swap::BATCH];
+
+impl SpaceObject {
+    /// Gives `child` the pages from `start` to `end` that are swapped out,
+    /// sharing their slots, with this space's regions locked: how many,
+    /// or how many before memory ran out.
+    #[inline(never)]
+    fn fork_swapped(
+        &self,
+        child: &SpaceObject,
+        start: u64,
+        end: u64,
+    ) -> core::result::Result<u64, u64> {
+        let mut given = 0;
+        let mut at = start;
+        while at < end {
+            let (found, n, next) = self.find(at, end, false, |scanned| match scanned {
+                Scanned::Swapped(slot) => Some(slot),
+                Scanned::Frame { .. } => None,
+            });
+            for &(virt, slot) in &found[..n] {
+                if !swap::share(slot) {
+                    return Err(given);
+                }
+                if Arch::set_swapped(&child.arch, virt, slot).is_err() {
+                    swap::free(slot);
+                    return Err(given);
+                }
+                child.swapped.fetch_add(1, Ordering::Relaxed);
+                given += 1;
+            }
+            at = next;
+        }
+        Ok(given)
+    }
+
+    /// Up to [`swap::BATCH`] pages from `start` to `end` that `pick` takes,
+    /// forgetting their use if `forget`: where each is and what `pick`
+    /// gave, how many, and where to look on.
+    fn find(
+        &self,
+        start: u64,
+        end: u64,
+        forget: bool,
+        mut pick: impl FnMut(Scanned) -> Option<u64>,
+    ) -> (Found, usize, u64) {
+        let mut found = [(0, 0); swap::BATCH];
+        let (mut n, mut next) = (0, end);
+        Arch::scan(&self.arch, start, end, forget, &mut |virt, scanned| {
+            if let Some(value) = pick(scanned) {
+                found[n] = (virt, value);
+                n += 1;
+                if n == found.len() {
+                    next = virt + PAGE_SIZE;
+                    return false;
+                }
+            }
+            true
+        });
+        (found, n, next)
+    }
+
+    /// Swaps out up to `want` pages of its private anonymous memory that
+    /// it alone maps, lent to no device, and unused since the last look,
+    /// going on from where the last call stopped: how many went. A space
+    /// whose regions are locked is passed over, as its owner may be
+    /// waiting for memory with them locked, and so is one no thread has
+    /// run in yet. `None` once no swap area has room.
+    pub(super) fn swap_out(&self, want: u64) -> Option<u64> {
+        if !self.running.load(Ordering::Acquire) {
+            return Some(0);
+        }
+        let Some(regions) = self.regions.try_lock() else { return Some(0) };
+        let from = self.swap_cursor.load(Ordering::Relaxed);
+        let mut out = 0;
+        for region in &regions[first_after(&regions, from)..] {
+            let Backing::Anon(anon) = &region.backing else { continue };
+            let Some(access) = anon.access.filter(|_| anon.shared.is_none()) else { continue };
+            let mut at = region.start.max(from);
+            while at < region.end() && out < want {
+                let (found, n, next) = self.find(at, region.end(), true, |scanned| match scanned {
+                    Scanned::Frame { phys, used: false } => FRAMES
+                        .info(phys)
+                        .filter(|info| {
+                            info.owner() == Owner::Anon
+                                && info.share_count() == 1
+                                && info.pins() == 0
+                        })
+                        .map(|_| phys),
+                    _ => None,
+                });
+                let Some(went) = self.swap_batch(&found[..n], access) else {
+                    self.swap_cursor.store(at, Ordering::Relaxed);
+                    return None;
+                };
+                out += went;
+                at = next;
+            }
+            if out >= want {
+                self.swap_cursor.store(at, Ordering::Relaxed);
+                return Some(out);
+            }
+        }
+        // Round to the start for the next call.
+        self.swap_cursor.store(0, Ordering::Relaxed);
+        Some(out)
+    }
+
+    /// Swaps out `pages` (where each is, and its frame), which the scan
+    /// found unused, of a region whose pages have `access`: how many went,
+    /// or `None` if no swap area has room. A page used since, or whose run
+    /// could not be written, stays.
+    #[inline(never)]
+    fn swap_batch(&self, pages: &[(u64, u64)], access: UserAccess) -> Option<u64> {
+        if pages.is_empty() {
+            return Some(0);
+        }
+        let (first, got) = swap::take(pages.len())?;
+        let mut taken = [false; swap::BATCH];
+        for (i, &(virt, phys)) in pages[..got].iter().enumerate() {
+            taken[i] = Arch::swap_out(&self.arch, virt, phys, first + i as u64);
+            if !taken[i] {
+                swap::free(first + i as u64);
+            }
+        }
+        let mut out = 0;
+        let mut i = 0;
+        while i < got {
+            if !taken[i] {
+                i += 1;
+                continue;
+            }
+            let mut frames = [0u64; swap::BATCH];
+            let mut j = i;
+            while j < got && taken[j] {
+                frames[j - i] = pages[j].1;
+                j += 1;
+            }
+            let written = swap::write(first + i as u64, &frames[..j - i]).is_ok();
+            for (k, &(virt, phys)) in pages.iter().enumerate().take(j).skip(i) {
+                if written {
+                    unshare(phys);
+                    out += 1;
+                } else {
+                    // Back as it was: its table is there, with the regions
+                    // locked, so nothing need be made.
+                    let _ = Arch::set_entry(&self.arch, virt, phys, Some(access), false);
+                    swap::free(first + k as u64);
+                }
+            }
+            i = j;
+        }
+        self.swapped.fetch_add(out, Ordering::Relaxed);
+        Some(out)
+    }
+
+    /// Reads the page at `page` back from `slot`, with `access` (`None`:
+    /// held without access), with the regions locked: [`Fault::Short`] if
+    /// memory is short and not `wait`.
+    fn swap_in(&self, page: u64, slot: u64, access: Option<UserAccess>, wait: bool) -> Fault {
+        let phys = match fault_frame(Flags::MAY_SLEEP, false, wait) {
+            Ok(phys) => phys,
+            Err(fault) => return fault,
+        };
+        if swap::read(slot, phys).is_err() {
+            let _ = FRAMES.free(phys, 0, Owner::Anon);
+            return Fault::Io;
+        }
+        if let Some(info) = FRAMES.info(phys) {
+            info.set_share_count(1);
+        }
+        if Arch::set_entry(&self.arch, page, phys, access, false).is_err() {
+            let _ = FRAMES.free(phys, 0, Owner::Anon);
+            return Fault::NoMemory;
+        }
+        swap::free(slot);
+        self.swapped.fetch_sub(1, Ordering::Relaxed);
+        self.file_faults.fetch_add(1, Ordering::Relaxed);
+        Fault::Resolved
+    }
+
+    /// Reads back every page swapped out to swap area `area`.
+    pub(super) fn swap_in_area(&self, area: u64) -> core::result::Result<(), Fault> {
+        if self.swapped.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        let regions = self.regions.lock();
+        for region in regions.iter() {
+            let Backing::Anon(anon) = &region.backing else { continue };
+            let mut at = region.start;
+            while at < region.end() {
+                let (found, n, next) =
+                    self.find(at, region.end(), false, |scanned| match scanned {
+                        Scanned::Swapped(slot) if slot >> 32 == area => Some(slot),
+                        _ => None,
+                    });
+                for &(virt, slot) in &found[..n] {
+                    match self.swap_in(virt, slot, anon.access, true) {
+                        Fault::Resolved => {}
+                        fault => return Err(fault),
+                    }
+                }
+                at = next;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How many times a fault lets go of its space's regions for the swap
+/// thread to make room ([`SpaceObject::resolve`]), and how long it waits
+/// each time.
+const SHORT_TRIES: u32 = 16;
+const SHORT_WAIT_NS: u64 = 200_000_000;
+
+/// A frame of anonymous memory for a fault, with `flags`, from the CPU's
+/// run if `sequential`: if not `wait`, taken without reclaiming, and
+/// [`Fault::Short`] if none is free then.
+fn fault_frame(flags: Flags, sequential: bool, wait: bool) -> core::result::Result<u64, Fault> {
+    let frame = match (wait, sequential) {
+        (false, _) => FRAMES.alloc_unreclaimed(flags, Owner::Anon, sequential),
+        (true, true) => FRAMES.alloc_sequential(flags, Owner::Anon),
+        (true, false) => FRAMES.alloc(0, flags, Owner::Anon),
+    };
+    frame.map_err(|_| if wait { Fault::NoMemory } else { Fault::Short })
 }
 
 /// Zeroes a page of RAM from byte `from` to its end.

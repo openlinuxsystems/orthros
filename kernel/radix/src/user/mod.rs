@@ -51,7 +51,7 @@ pub mod init;
 mod ipc;
 pub mod launch;
 mod loader;
-mod memory;
+pub(crate) mod memory;
 mod methods;
 mod notify;
 pub mod objects;
@@ -241,7 +241,7 @@ fn on_fault(fault: &UserFault) {
             Fault::Resolved => return,
             Fault::Refused => {}
             Fault::Io => bus = true,
-            Fault::NoMemory => {
+            Fault::NoMemory | Fault::Short => {
                 warn!(
                     "User: thread {} ({}) ended: no memory for a page at {address:#x}",
                     thread.id(),

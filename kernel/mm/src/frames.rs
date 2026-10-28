@@ -487,6 +487,20 @@ impl Frames {
         self.alloc_inner(0, flags, owner, 0, true, true)
     }
 
+    /// Like an order-0 [`Frames::alloc`] (or [`Frames::alloc_sequential`]
+    /// if `sequential`) that fails, without running the reclaim or
+    /// out-of-memory hooks, when no frame is free above the reserves: for
+    /// a caller holding a lock that reclaiming may need, which lets go of
+    /// it and has memory reclaimed before it tries again.
+    pub fn alloc_unreclaimed(
+        &self,
+        flags: Flags,
+        owner: Owner,
+        sequential: bool,
+    ) -> Result<u64, AllocError> {
+        self.alloc_inner(0, flags, owner, 0, false, sequential)
+    }
+
     /// The allocation itself. Without `reclaim`, a `MaySleep` allocation
     /// keeps out of the reserves but does not run the reclaim hook: the
     /// heap allocates its own bookkeeping this way, so reclaim never runs

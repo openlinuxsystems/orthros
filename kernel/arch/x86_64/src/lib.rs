@@ -65,8 +65,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
     BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest, InterruptController,
-    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, Shootdowns, SignalFrame, Smp,
-    SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
+    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, Scanned, Shootdowns, SignalFrame,
+    Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -585,6 +585,39 @@ impl UserMode for Arch {
         each: &mut dyn FnMut(u64) -> bool,
     ) {
         space.space().frames(start, end.min(user::USER_TOP), write, each);
+    }
+
+    fn scan(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        forget: bool,
+        each: &mut dyn FnMut(u64, Scanned) -> bool,
+    ) {
+        space.space().scan(start, end, forget, each);
+    }
+
+    fn swap_out(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool {
+        virt < user::USER_TOP && space.space().swap_out(virt, phys, slot)
+    }
+
+    fn set_swapped(space: &Self::Space, virt: u64, slot: u64) -> Result<(), MapPageError> {
+        assert!(
+            (user::USER_START..user::USER_TOP).contains(&virt),
+            "{virt:#x} is outside the user half"
+        );
+        space.space().set_swapped(virt, slot)
+    }
+
+    fn swapped(space: &Self::Space, virt: u64) -> Option<u64> {
+        if virt >= user::USER_TOP {
+            return None;
+        }
+        space.space().swapped(virt)
+    }
+
+    fn clear_swapped(space: &Self::Space, start: u64, end: u64, each: &mut dyn FnMut(u64)) {
+        space.space().clear_swapped(start, end.min(user::USER_TOP), each);
     }
 
     fn set_entry(

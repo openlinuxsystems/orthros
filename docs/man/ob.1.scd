@@ -360,6 +360,18 @@ _target/userspace/_).
 		domain; check that Spark says so and starts it again, waiting
 		longer the second time (*spark*(8)).
 
+	*swap*
+		Boot 2 CPUs with 256 MiB and a 1 GiB virtio disk the host's
+		*mkswap* made a swap area of. _/system/tests/posix/swaptest_
+		must turn it on with *swapon*(8), find that it cannot be turned
+		on twice and that the disk refuses writes, fill 384 MiB with a
+		pattern and read it all back, fork a child that checks half of
+		it and changes a quarter while the parent's stays, and turn the
+		area off with *swapoff*(8) while some of the 64 MiB it keeps is
+		still on it, all without the out-of-memory policy stopping a
+		domain. The area's header must be as *mkswap* made it after the
+		boot.
+
 	*spark-stop*
 		Point Spark at three test services: _stubborn_ ignores SIGTERM,
 		and Spark stops its domain 5 seconds after *service stubborn

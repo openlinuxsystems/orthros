@@ -32,6 +32,12 @@
 //! spaces share by what they share and its place in it
 //! ([`SpaceObject::futex_key`]).
 //!
+//! A page of a space's private anonymous memory that only it maps can be
+//! swapped out when memory runs short (ADR 0152, [`swap_out`]): its entry
+//! then holds a swap slot, and the next fault at it reads it back. Every
+//! space is in a list of weak handles, which the swap thread goes
+//! through in turn.
+//!
 //! Lock order: the capability store, then a frame's zeroing step, then its
 //! list of address spaces, then an address space's regions, then a shared
 //! mapping's pages (then the architecture's page-table lock, then the
@@ -42,7 +48,7 @@ pub mod futex;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use radix_abi::address_space::PAGE_SIZE;
 use radix_abi::capability::Rights as AbiRights;
@@ -164,6 +170,68 @@ pub struct SpaceObject {
     /// How many lendings of its memory to devices are under way
     /// ([`SpaceObject::lend`]), which a fork waits for.
     lending: AtomicU64,
+    /// How many of its pages of anonymous memory are swapped out: counted
+    /// in `anon_pages` and charged still.
+    swapped: AtomicU64,
+    /// Where the swap thread goes on looking for pages to swap out.
+    swap_cursor: AtomicU64,
+    /// Whether a thread was made to run in it: until then the kernel
+    /// writes its new pages by their frames ([`SpaceObject::write_new`]),
+    /// so none is swapped out.
+    running: AtomicBool,
+}
+
+/// Every address space, for the swap thread: dropped handles are let go
+/// of as spaces are added.
+static SPACES: Mutex<Option<Vec<Weak<SpaceObject, Kmalloc>, Kmalloc>>> = Mutex::new(None);
+
+/// Where the swap thread goes on in [`SPACES`].
+static NEXT_SPACE: AtomicUsize = AtomicUsize::new(0);
+
+/// The space at or after place `at` of [`SPACES`] that is still there,
+/// and the place after it.
+fn space_at(at: usize) -> Option<(SpaceRef, usize)> {
+    let spaces = SPACES.lock();
+    let spaces = spaces.as_ref()?;
+    let len = spaces.len();
+    (0..len).find_map(|step| {
+        let place = (at + step) % len;
+        spaces[place].upgrade().map(|space| (space, place + 1))
+    })
+}
+
+/// Swaps out up to `want` pages of the spaces' anonymous memory, going on
+/// from where the last call stopped, for the swap thread: through every
+/// space twice at most, since the first look at a page may only find it
+/// used since the one before. Returns how many went.
+pub fn swap_out(want: u64) -> u64 {
+    let count = SPACES.lock().as_ref().map_or(0, Vec::len);
+    let mut done = 0;
+    for _ in 0..2 * count {
+        let Some((space, next)) = space_at(NEXT_SPACE.load(Ordering::Relaxed)) else { break };
+        let Some(went) = space.swap_out(want - done) else {
+            // No room left; this space goes on from where it stopped.
+            return done;
+        };
+        NEXT_SPACE.store(next, Ordering::Relaxed);
+        done += went;
+        if done >= want {
+            break;
+        }
+    }
+    done
+}
+
+/// Brings back every page swapped out to area `area`, for swapoff(8).
+pub fn swap_in_all(area: u64) -> core::result::Result<(), Fault> {
+    let count = SPACES.lock().as_ref().map_or(0, Vec::len);
+    for at in 0..count {
+        let space = SPACES.lock().as_ref().and_then(|spaces| spaces.get(at)?.upgrade());
+        if let Some(space) = space {
+            space.swap_in_area(area)?;
+        }
+    }
+    Ok(())
 }
 
 /// Pages a step of zeroing a new frame clears: 256 KiB, a few tens of
@@ -201,8 +269,25 @@ impl SpaceObject {
             anon_top: anon::random_top(),
             may_share: AtomicBool::new(false),
             lending: AtomicU64::new(0),
+            swapped: AtomicU64::new(0),
+            swap_cursor: AtomicU64::new(0),
+            running: AtomicBool::new(false),
         };
-        Arc::try_new_in(space, kmalloc()).ok()
+        let space = Arc::try_new_in(space, kmalloc()).ok()?;
+        let mut spaces = SPACES.lock();
+        let spaces = spaces.get_or_insert_with(|| Vec::new_in(kmalloc()));
+        spaces.retain(|space| space.strong_count() > 0);
+        // A space the list has no room for is never swapped out.
+        if spaces.try_reserve(1).is_ok() {
+            let _ = spaces.push_within_capacity(Arc::downgrade(&space));
+        }
+        Some(space)
+    }
+
+    /// Notes that a thread runs in it from now on, after which its pages
+    /// may be swapped out.
+    pub fn set_running(&self) {
+        self.running.store(true, Ordering::Release);
     }
 
     /// How many pages of anonymous memory it maps.
@@ -216,7 +301,7 @@ impl SpaceObject {
     pub fn sizes(&self) -> (u64, u64) {
         let regions = self.regions.lock();
         let mut mapped = 0;
-        let mut resident = self.anon_pages();
+        let mut resident = self.anon_pages().saturating_sub(self.swapped.load(Ordering::Relaxed));
         for region in regions.iter() {
             mapped += region.pages;
             if !matches!(region.backing, Backing::Anon(_)) {

@@ -304,8 +304,10 @@ with safe eject, come with *volumed* in Phase 11.
 A disk or partition in _/devices_ is read and written raw, at any offset and
 length, with nothing cached between, as Linux's are when opened with
 *O_DIRECT*; *fsync*(2) empties the disk's write cache, and *ioctl*(2)
-takes Linux's requests for its size, sector size and discards
-(*radix-block*(2)). The whole sectors of a transfer that starts on a
+takes Linux's requests for its size, sector size and discards, and
+Dukovo's for turning on and off the swap area *mkswap*(8) made on it
+(*radix-block*(2), *swapon*(8)). While its swap area is on, writes to
+the device and mounts of it fail with *in_use* (EBUSY). The whole sectors of a transfer that starts on a
 sector's boundary, into or out of memory on a sector's boundary (an
 aligned *posix_memalign*(3) or *mmap*(2) buffer), go straight between
 the disk and the program's memory; the rest is copied. A write that
