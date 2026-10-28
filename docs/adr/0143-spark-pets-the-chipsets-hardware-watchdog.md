@@ -52,8 +52,9 @@ has a watchdog of its own (Phase 11e). Neither can be tested in QEMU.
   defaults to; halting stops it.
 - Spark starts it once it supervises, with a timeout of 60 seconds
   (`--watchdog <seconds>` on the kernel command line sets another, 0
-  none), and pets it every third of that from its loop. A boot program
-  Spark runs and waits for, as the boot tests do, runs before.
+  none), and pets it every third of that from its loop. A native boot
+  program, which Spark waits for, runs before it starts the watchdog; a
+  POSIX one, which Spark watches as it supervises, runs with it.
 - kdb pets a running watchdog about once a second while it waits for a
   command, since it stops the CPU Spark may need, and after a panic
   every CPU: whoever is at the debugger is not a hung machine.

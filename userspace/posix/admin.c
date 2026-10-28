@@ -530,9 +530,11 @@ static void power(void) {
 	STATUS(4, "/bin/service", "nothing", "status");
 	STATUS(1, "/bin/service", "nothing", "start");
 	STATUS(1, "/bin/service");
-	// q35's TCO timer, which Spark starts only once it supervises: after
-	// the boot program the tests run in (spark(8)'s WATCHDOG).
-	CONTAINS("Device:    the Intel ICH9 TCO timer\nState:     stopped\n", "/bin/watchdog");
+	// q35's TCO timer, which Spark started as it began to supervise this
+	// test (spark(8)'s WATCHDOG).
+	CONTAINS("Device:    the Intel ICH9 TCO timer\nState:     running, petted by Spark\n"
+	         "Timeout:   60 seconds\n",
+	         "/bin/watchdog");
 	STATUS(1, "/bin/watchdog", "now");
 }
 
