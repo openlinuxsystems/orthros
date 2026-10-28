@@ -61,9 +61,12 @@ These tools write the same image and check the target is removable:
 
 The screen then shows the kernel's log, under UEFI and legacy BIOS boot
 alike, ending with "Boot complete.". The computer then idles; switch it
-off with the power button. If the kernel panics instead, the screen shows
-a report; [Debugging the kernel](debugging.md) explains it, and what to
-include when you report it.
+off with the power button. Where the kernel hears the button, the log
+says "Power: the ACPI power button asks Spark to power the machine off",
+and a press stops the services and powers the machine off cleanly;
+elsewhere the firmware handles the button. If the kernel panics
+instead, the screen shows a report; [Debugging the kernel](debugging.md)
+explains it, and what to include when you report it.
 
 To include the processor's microcode updates, which Dukovo does not ship
 itself, build the image with the build host's copy, for example from

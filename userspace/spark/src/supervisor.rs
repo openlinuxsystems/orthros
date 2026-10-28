@@ -27,7 +27,10 @@
 //! poweroff(8), halt(8) and service(8) send a request there, one line, and
 //! read the answer. Shutting down stops the services the highest `order`
 //! first, each group with SIGTERM and then, after STOP_WAIT, by stopping
-//! its domain, then calls the power capability (radix-power(2)).
+//! its domain, then calls the power capability (radix-power(2)). Pressing
+//! the power button, which the kernel tells of through another
+//! notification (`notify_button`), powers the machine off the same way,
+//! at once, as systemd-logind's default HandlePowerKey=poweroff does.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -247,6 +250,9 @@ pub struct Supervisor {
     power: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
+    /// The notification the kernel signals when the power button is
+    /// pressed, if it can hear it.
+    button: Option<u32>,
     listener: Option<File>,
     connections: Vec<Connection>,
     services: Vec<Service>,
@@ -270,11 +276,21 @@ impl Supervisor {
         if children.is_none() {
             println!("spark: cannot hear of children ending; services are not watched");
         }
+        let power = holds(power, ObjectKind::Power).then_some(power);
+        // Not supported where the kernel cannot hear the button: the
+        // firmware keeps it.
+        let button = power.and_then(|power| {
+            slots::take().filter(|&slot| {
+                process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
+                    && power::notify_button(&SYS, power, slot).is_ok()
+            })
+        });
         Supervisor {
             root,
             services_domain: holds(domain, ObjectKind::ResourceDomain).then_some(domain),
-            power: holds(power, ObjectKind::Power).then_some(power),
+            power,
             children,
+            button,
             listener: None,
             connections: Vec::new(),
             services: Vec::new(),
@@ -842,6 +858,18 @@ impl Supervisor {
         }
     }
 
+    /// The power button was pressed: powers the machine off now, unless it
+    /// is shutting down already. A shutdown set for later is moved to now,
+    /// and a restart or halt becomes a power-off.
+    fn button_pressed(&mut self) {
+        if let Some(Shutdown::Stopping { end, .. }) = self.shutdown {
+            println!("spark: the power button was pressed; going to {} already", end.words());
+            return;
+        }
+        println!("spark: the power button was pressed; powering off the machine");
+        self.shutdown = Some(Shutdown::Pending { end: End::PowerOff, at: now() });
+    }
+
     /// Ends the machine with the power capability.
     fn power(&mut self, end: End) -> ! {
         if let Some(slot) = self.power {
@@ -998,9 +1026,9 @@ impl Supervisor {
     /// Supervises for good.
     pub fn run(&mut self) -> ! {
         loop {
-            // The children's notification, the control socket, the
-            // connections, the services' outputs and the program's
-            // terminal, in that order.
+            // The children's notification, the power button's, the
+            // control socket, the connections, the services' outputs and
+            // the program's terminal, in that order.
             let mut entries: Vec<(PollEntry, Source)> = Vec::new();
             let readable = PollEvents::READABLE.0 as u16;
             let mut add = |slot: u32, source: Source| {
@@ -1008,6 +1036,9 @@ impl Supervisor {
             };
             if let Some(slot) = self.children {
                 add(slot, Source::Children);
+            }
+            if let Some(slot) = self.button {
+                add(slot, Source::Button);
             }
             if let Some(listener) = &self.listener {
                 add(listener.slot(), Source::Listener);
@@ -1053,6 +1084,12 @@ impl Supervisor {
                                 let _ = syscalls::wait(&SYS, slot, WaitFlags::POLL, 0);
                             }
                         }
+                        Source::Button => {
+                            if let Some(slot) = self.button {
+                                let _ = syscalls::wait(&SYS, slot, WaitFlags::POLL, 0);
+                            }
+                            self.button_pressed();
+                        }
                         Source::Listener => self.accept(),
                         Source::Connection(i) => self.serve(i),
                         Source::Output(i) => {
@@ -1097,6 +1134,7 @@ impl Supervisor {
 #[derive(Clone, Copy)]
 enum Source {
     Children,
+    Button,
     Listener,
     Connection(usize),
     Output(usize),

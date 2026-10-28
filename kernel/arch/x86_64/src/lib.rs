@@ -47,6 +47,7 @@ mod percpu;
 mod power;
 mod random;
 mod rtc;
+mod sci;
 mod serial;
 mod smp;
 mod space;
@@ -377,6 +378,10 @@ impl Devices for Arch {
 
     fn keyboard_send(byte: u8) -> bool {
         i8042::send(byte)
+    }
+
+    fn start_power_button(pressed: fn()) -> Option<&'static str> {
+        sci::start(pressed)
     }
 }
 

@@ -228,6 +228,10 @@ impl Devices for Arch {
     fn keyboard_send(_byte: u8) -> bool {
         false
     }
+
+    fn start_power_button(_pressed: fn()) -> Option<&'static str> {
+        None
+    }
 }
 
 /// A placeholder thread context.

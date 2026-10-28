@@ -232,6 +232,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::writeback::start();
     fs::kmsg::start();
     fs::keyboard::start();
+    user::power::start();
     check_timers(online);
     check_ipis(online);
 

@@ -182,6 +182,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   screen           the boot log on the UEFI framebuffer
   consoles         a shell on consoled's virtual consoles: typing, Alt+F2,
                    poweroff
+  power-button     pressing the ACPI power button powers the machine off,
+                   after Spark stops the services
   spark-oom        a service that runs the machine out of memory is stopped
                    and started again
   spark-stop       Spark stops a service that ignores SIGTERM, and what a

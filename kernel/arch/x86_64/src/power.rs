@@ -4,7 +4,7 @@
 //! Restarting the machine, powering it off, leaving QEMU, and polling the
 //! keyboard.
 
-use radix_acpi::{GenericAddress, Memory, Sdt};
+use radix_acpi::{Fadt, GenericAddress, Memory, Sdt};
 
 use crate::io::{inb, inw, outb, outl, outw};
 use crate::paging::{self, Access, Cache};
@@ -24,10 +24,11 @@ const SLEEP_ENABLE: u8 = 1 << 5;
 /// Sleep status: the wake status bit, cleared by writing it.
 const WAKE_STATUS: u8 = 1 << 7;
 
-/// A register of ACPI's power management: a PM1 control register, or a
-/// hardware-reduced machine's sleep control or status register.
+/// A register of ACPI's power management: a PM1 control register, a
+/// hardware-reduced machine's sleep control or status register, or one of
+/// the event registers the power button's interrupt reads (`sci`).
 #[derive(Clone, Copy)]
-enum Control {
+pub(crate) enum Control {
     /// In I/O space, at this port.
     Port(u16),
     /// In memory, mapped uncached at this address.
@@ -38,14 +39,21 @@ impl Control {
     /// The register `register` names, mapped once if it is in memory (the
     /// wait for ACPI mode reads it hundreds of times); `None` if it is in
     /// neither space.
-    fn find(register: GenericAddress) -> Option<Self> {
+    pub(crate) fn find(register: GenericAddress) -> Option<Self> {
+        Self::block(register, 2)
+    }
+
+    /// The first register of the `length` bytes of registers at
+    /// `register`, mapped together if they are in memory; the others are
+    /// reached with [`Control::offset`].
+    pub(crate) fn block(register: GenericAddress, length: usize) -> Option<Self> {
         match register.space {
-            GenericAddress::IO if register.address <= 0xffff => {
+            GenericAddress::IO if register.address + length as u64 <= 0x1_0000 => {
                 Some(Self::Port(register.address as u16))
             }
             GenericAddress::MEMORY => Some(Self::Mapped(paging::map_physical(
                 register.address,
-                2,
+                length as u64,
                 Access::ReadWrite,
                 Cache::Uncached,
             ))),
@@ -53,39 +61,83 @@ impl Control {
         }
     }
 
-    fn read(self) -> u16 {
+    /// The register `bytes` past this one, in the block [`Control::block`]
+    /// found.
+    pub(crate) fn offset(self, bytes: usize) -> Self {
         match self {
-            // SAFETY: the FADT names this port as a PM1 control register;
-            // reading it has no side effects.
+            Self::Port(port) => Self::Port(port + bytes as u16),
+            Self::Mapped(virt) => Self::Mapped(virt + bytes),
+        }
+    }
+
+    pub(crate) fn read(self) -> u16 {
+        match self {
+            // SAFETY: the FADT names this port as one of ACPI's control,
+            // status or enable registers; reading them has no side
+            // effects.
             Self::Port(port) => unsafe { inw(port) },
             // SAFETY: `virt` maps the register the FADT names, uncached.
             Self::Mapped(virt) => unsafe { (virt as *const u16).read_volatile() },
         }
     }
 
-    fn write(self, value: u16) {
+    pub(crate) fn write(self, value: u16) {
         match self {
-            // SAFETY: the FADT names this port as a PM1 control register,
-            // and writing it with SLP_EN is how ACPI powers the machine
-            // off.
+            // SAFETY: the FADT names this port as one of ACPI's control,
+            // status or enable registers: writing a PM1 control register
+            // with SLP_EN is how ACPI powers the machine off, a status
+            // register's set bits clear its events, and an enable
+            // register's choose which raise the SCI.
             Self::Port(port) => unsafe { outw(port, value) },
             // SAFETY: as above, for a memory-mapped register.
             Self::Mapped(virt) => unsafe { (virt as *mut u16).write_volatile(value) },
         }
     }
 
+    /// Reads an 8-bit register: a general-purpose event register.
+    pub(crate) fn read8(self) -> u8 {
+        match self {
+            // SAFETY: as for `read`.
+            Self::Port(port) => unsafe { inb(port) },
+            // SAFETY: `virt` maps the register the FADT names, uncached.
+            Self::Mapped(virt) => unsafe { (virt as *const u8).read_volatile() },
+        }
+    }
+
     /// Writes an 8-bit register: the sleep control and status registers
-    /// of a hardware-reduced machine.
-    fn write8(self, value: u8) {
+    /// of a hardware-reduced machine, or a general-purpose event register.
+    pub(crate) fn write8(self, value: u8) {
         match self {
             // SAFETY: the FADT names this port as a sleep control or status
-            // register; writing it with SLP_EN is how such a machine powers
-            // off, and writing the wake status bit clears it.
+            // register, or a general-purpose event one; writing a sleep
+            // control register with SLP_EN is how such a machine powers
+            // off, and writing a status register's set bits clears them.
             Self::Port(port) => unsafe { outb(port, value) },
             // SAFETY: as above, for a memory-mapped register.
             Self::Mapped(virt) => unsafe { (virt as *mut u8).write_volatile(value) },
         }
     }
+}
+
+/// Takes the machine into ACPI mode, if the firmware left it out of it,
+/// through the FADT's SMI command port, and waits up to 3 s for SCI_EN in
+/// the PM1 control register `control`. Returns whether the machine is in
+/// ACPI mode.
+pub(crate) fn enter_acpi_mode(fadt: &Fadt, control: Control) -> bool {
+    if control.read() & SCI_EN != 0 {
+        return true;
+    }
+    let Some((port, value)) = fadt.acpi_enable else { return false };
+    // SAFETY: the FADT names this port and value as the way into ACPI
+    // mode; the firmware hands the power-management hardware over.
+    unsafe { outb(port, value) };
+    for _ in 0..300 {
+        if control.read() & SCI_EN != 0 {
+            return true;
+        }
+        time::delay_us(10_000);
+    }
+    false
 }
 
 /// How the machine enters a sleep state.
@@ -138,19 +190,8 @@ pub fn power_off() {
         return;
     };
     radix_klog::info!("Power: powering off (ACPI S5, sleep types {type_a} and {type_b})");
-    if let Sleep::Pm1(control, _) = sleep
-        && let Some((port, value)) = fadt.acpi_enable
-        && control.read() & SCI_EN == 0
-    {
-        // SAFETY: the FADT names this port and value as the way into ACPI
-        // mode; the firmware hands the power-management hardware over.
-        unsafe { outb(port, value) };
-        for _ in 0..300 {
-            if control.read() & SCI_EN != 0 {
-                break;
-            }
-            time::delay_us(10_000);
-        }
+    if let Sleep::Pm1(control, _) = sleep {
+        enter_acpi_mode(&fadt, control);
     }
     let were_enabled = cpu::disable_interrupts();
     cpu::wbinvd();

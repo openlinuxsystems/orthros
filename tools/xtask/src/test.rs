@@ -707,6 +707,23 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "power-button",
+        about: "a normal boot under BIOS; pressing the ACPI power button stops the services and powers the machine off",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        // No program: Spark starts the services, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: power_button,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-oom",
         about: "a service that runs the machine out of memory is stopped, and Spark starts it again",
         firmware: Firmware::Bios,
@@ -2329,6 +2346,13 @@ impl Vm {
         Ok(())
     }
 
+    /// Presses the machine's power button: QMP's `system_powerdown`, which
+    /// raises ACPI's power button event.
+    pub fn press_power_button(&mut self) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        Qmp::connect(&socket)?.execute(r#"{"execute":"system_powerdown"}"#)
+    }
+
     /// Types `text` on the PS/2 keyboard, a key at a time on a US layout.
     pub fn type_text(&mut self, text: &str) -> Result<(), String> {
         let combos = text.chars().map(key_combo).collect::<Result<Vec<_>, _>>()?;
@@ -2768,6 +2792,25 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said before the boot report ends.
+    if !vm.log().contains("Power: the ACPI power button asks Spark to power the machine off") {
+        return Err("the kernel does not say it hears the ACPI power button".into());
+    }
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: listening at /system/live/spark/control")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.press_power_button()?;
+    vm.expect("Power: the power button was pressed")?;
+    vm.expect("spark: the power button was pressed; powering off the machine")?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
