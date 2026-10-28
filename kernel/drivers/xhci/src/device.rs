@@ -20,9 +20,20 @@
 //! driver resets it and points it past the transfer (Reset Endpoint, Set
 //! TR Dequeue Pointer). A transfer that takes too long is stopped (Stop
 //! Endpoint) and skipped the same way, so the pipe works for the next.
+//!
+//! [`Device::configure`] gives the controller the device's other
+//! endpoints (Configure Endpoint, 4.6.6), each with a transfer ring and a
+//! page for its data, then sends the device SET_CONFIGURATION (ADR 0147).
+//! A transfer on one of them, [`Device::submit_in`] or
+//! [`Device::submit_out`], is one Normal TRB that interrupts when done:
+//! the driver does not wait for it, and its event comes with the others.
+//! A hub's slot says it is a hub, and how many ports it has
+//! ([`Device::set_hub`]); a low- or full-speed device behind a high-speed
+//! hub names the hub's slot and port, whose Transaction Translator talks
+//! to it ([`Place`]).
 
 use radix_hw::{Dma, PAGE_SIZE};
-use radix_usb::{Setup, Speed};
+use radix_usb::{EndpointDescriptor, Setup, Speed, TransferType};
 
 use crate::ring::{Ring, Trb, control, kind};
 use crate::{Command, Error, Event, Host, POLL_US, Xhci, code};
@@ -50,6 +61,59 @@ const EP0: u8 = 1;
 /// retries on errors (CErr).
 const CONTROL_ENDPOINT: u32 = 4 << 3;
 const RETRIES: u32 = 3 << 1;
+/// The slot context's Hub and Multi-TT flags (6.2.2).
+const SLOT_HUB: u32 = 1 << 26;
+const SLOT_MULTI_TT: u32 = 1 << 25;
+
+/// The most endpoints a device is given besides endpoint 0.
+pub const MAX_ENDPOINTS: usize = 8;
+
+/// The device context index of the endpoint at `address`
+/// (bEndpointAddress): twice its number, plus one for IN (4.5.1);
+/// endpoint 0's is 1.
+pub fn endpoint_index(address: u8) -> u8 {
+    let number = address & 0x0f;
+    if number == 0 { EP0 } else { number * 2 + u8::from(address & 0x80 != 0) }
+}
+
+/// The xHCI Interval of an endpoint at `speed` (6.2.3.6): the time
+/// between its service opportunities, as 125 µs times 2 to its power.
+/// bInterval is frames (1 ms) for low- and full-speed interrupt
+/// endpoints, and a power of two of frames or microframes for the rest
+/// of the periodic ones; bulk and control endpoints have none.
+pub fn interval(endpoint: &EndpointDescriptor, speed: Speed) -> u8 {
+    let b = endpoint.interval;
+    match (endpoint.transfer_type(), speed) {
+        (TransferType::Bulk | TransferType::Control, _) => 0,
+        (TransferType::Interrupt, Speed::Low | Speed::Full) => {
+            // floor(log2(bInterval)) frames of 8 microframes.
+            (b.max(1).ilog2() as u8 + 3).clamp(3, 10)
+        }
+        (TransferType::Isochronous, Speed::Low | Speed::Full) => b.clamp(1, 16) + 2,
+        _ => b.clamp(1, 16) - 1,
+    }
+}
+
+/// What a hub's slot says of it (6.2.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HubSlot {
+    /// How many downstream ports it has.
+    pub ports: u8,
+    /// A high-speed hub's TT think time, 0 to 3.
+    pub think_time: u8,
+    /// A high-speed hub with a Transaction Translator per port, in the
+    /// interface setting that uses them.
+    pub multi_tt: bool,
+}
+
+/// An endpoint the device was configured with.
+struct Endpoint {
+    /// Its device context index.
+    index: u8,
+    /// Its ring, in the first page of its memory; the second page holds
+    /// its transfers' data.
+    ring: Ring,
+}
 
 /// Where a device is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +127,19 @@ pub struct Place {
     pub speed: Speed,
     /// The Port Speed ID its speed has on its root port's protocol.
     pub speed_id: u8,
+    /// For a low- or full-speed device behind a high-speed hub: the slot
+    /// of the hub whose Transaction Translator talks to it, and the port
+    /// it is on (or the port of the hub it is behind); 0 otherwise.
+    pub tt_slot: u8,
+    /// See `tt_slot`.
+    pub tt_port: u8,
+}
+
+impl Place {
+    /// A device on root port `root_port`.
+    pub fn root(root_port: u8, speed: Speed, speed_id: u8) -> Place {
+        Place { root_port, route: 0, speed, speed_id, tt_slot: 0, tt_port: 0 }
+    }
 }
 
 /// A device the controller has a slot for.
@@ -74,11 +151,18 @@ pub struct Device {
     memory: Dma,
     ep0: Ring,
     max_packet: u16,
+    /// The endpoints it was configured with.
+    endpoints: [Option<Endpoint>; MAX_ENDPOINTS],
+    /// The last valid endpoint context's index (Context Entries).
+    entries: u8,
+    /// What its slot says if it is a hub.
+    hub: Option<HubSlot>,
 }
 
 impl Device {
     /// Gives the device at `place` a slot and its address, with memory from
     /// `alloc`.
+    #[inline(never)]
     pub fn address(
         xhci: &mut Xhci,
         host: &mut dyn Host,
@@ -105,11 +189,14 @@ impl Device {
             memory,
             ep0,
             max_packet: place.speed.default_max_packet(),
+            endpoints: [const { None }; MAX_ENDPOINTS],
+            entries: EP0,
+            hub: None,
         };
         xhci.set_device_context(slot, device.memory.phys() + OUTPUT as u64);
         device.clear_input();
         device.memory.write32(INPUT + 4, ADD_SLOT | ADD_EP0);
-        device.write_slot_context(1);
+        device.write_slot_context();
         device.write_ep0_context();
         let input = device.memory.phys() + INPUT as u64;
         match xhci.command(Command::AddressDevice { slot, input, block: false }, host) {
@@ -155,19 +242,71 @@ impl Device {
         }
     }
 
-    /// Fills the input slot context: where the device is, its speed, and
-    /// how many endpoint contexts are valid (`entries`, the last one's
-    /// device context index).
-    fn write_slot_context(&self, entries: u8) {
+    /// Fills the input slot context: where the device is, its speed, how
+    /// many endpoint contexts are valid (the last one's device context
+    /// index), what a hub has, and which Transaction Translator a slow
+    /// device behind a hub uses.
+    fn write_slot_context(&self) {
         let at = self.input(1);
         let place = self.place;
+        let hub = self.hub.map_or(0, |hub| SLOT_HUB | if hub.multi_tt { SLOT_MULTI_TT } else { 0 });
         self.memory.write32(
             at,
             (place.route & 0xf_ffff)
                 | u32::from(place.speed_id & 0xf) << 20
-                | u32::from(entries & 0x1f) << 27,
+                | hub
+                | u32::from(self.entries & 0x1f) << 27,
         );
-        self.memory.write32(at + 4, u32::from(place.root_port) << 16);
+        let ports = self.hub.map_or(0, |hub| hub.ports);
+        self.memory.write32(at + 4, u32::from(place.root_port) << 16 | u32::from(ports) << 24);
+        let think_time = self.hub.map_or(0, |hub| hub.think_time & 3);
+        self.memory.write32(
+            at + 8,
+            u32::from(place.tt_slot) | u32::from(place.tt_port) << 8 | u32::from(think_time) << 16,
+        );
+    }
+
+    /// Fills the input context of endpoint `index`, described by
+    /// `endpoint`, with its ring.
+    fn write_endpoint_context(&self, index: u8, endpoint: EndpointDescriptor, ring: &Ring) {
+        let at = self.input(usize::from(index) + 1);
+        let speed = self.place.speed;
+        let max_packet = u32::from(endpoint.max_packet());
+        // Packets in a burst: a SuperSpeed endpoint's companion says; a
+        // high-speed periodic endpoint's extra transactions are its burst.
+        let burst = if speed.is_super() {
+            u32::from(endpoint.max_burst.min(15))
+        } else if speed == Speed::High
+            && matches!(
+                endpoint.transfer_type(),
+                TransferType::Interrupt | TransferType::Isochronous
+            )
+        {
+            u32::from(endpoint.extra_transactions().min(2))
+        } else {
+            0
+        };
+        let (kind, periodic) = match (endpoint.transfer_type(), endpoint.is_in()) {
+            (TransferType::Isochronous, false) => (1, true),
+            (TransferType::Bulk, false) => (2, false),
+            (TransferType::Interrupt, false) => (3, true),
+            (TransferType::Control, _) => (4, false),
+            (TransferType::Isochronous, true) => (5, true),
+            (TransferType::Bulk, true) => (6, false),
+            (TransferType::Interrupt, true) => (7, true),
+        };
+        // The most bytes it moves in a service interval (6.2.3.8).
+        let esit = if periodic { max_packet * (burst + 1) } else { 0 };
+        // Isochronous endpoints get no retries; the rest three.
+        let retries =
+            if endpoint.transfer_type() == TransferType::Isochronous { 0 } else { RETRIES };
+        self.memory.write32(at, u32::from(interval(&endpoint, speed)) << 16 | (esit >> 16) << 24);
+        self.memory.write32(at + 4, retries | kind << 3 | burst << 8 | max_packet << 16);
+        self.memory.write64(at + 8, ring.dequeue_pointer());
+        // The average TRB length (4.14.1.1): a periodic endpoint's
+        // interval's worth; 3 KiB for bulk.
+        let average = if periodic { esit.max(1) } else { 3072 };
+        self.memory.write32(at + 16, (average & 0xffff) | (esit & 0xffff) << 16);
     }
 
     /// Fills the input context for endpoint 0: a control endpoint with its
@@ -197,6 +336,171 @@ impl Device {
         self.write_ep0_context();
         let input = self.memory.phys() + INPUT as u64;
         xhci.command(Command::EvaluateContext { slot: self.slot, input }, host).map(|_| ())
+    }
+
+    /// Gives the controller `endpoints` (at most [`MAX_ENDPOINTS`]), each
+    /// with a ring and a page for its data from `alloc`, then puts the
+    /// device in configuration `value` (bConfigurationValue).
+    #[inline(never)]
+    pub fn configure(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        alloc: &mut dyn FnMut(usize, bool) -> Option<Dma>,
+        value: u8,
+        endpoints: &[EndpointDescriptor],
+    ) -> Result<(), Error> {
+        if endpoints.len() > MAX_ENDPOINTS
+            || self.endpoints.iter().any(Option::is_some)
+            || endpoints.iter().any(|e| e.number() == 0 || e.max_packet() == 0)
+        {
+            return Err(Error::BadRequest);
+        }
+        self.clear_input();
+        let mut add = ADD_SLOT;
+        let mut entries = EP0;
+        for (i, endpoint) in endpoints.iter().enumerate() {
+            let index = endpoint_index(endpoint.address);
+            let ring = if add & 1 << index != 0 {
+                Err(Error::BadRequest)
+            } else {
+                alloc(2, xhci.below_4g()).and_then(Ring::new).ok_or(Error::NoMemory)
+            };
+            let ring = match ring {
+                Ok(ring) => ring,
+                Err(err) => {
+                    self.drop_endpoints();
+                    return Err(err);
+                }
+            };
+            self.write_endpoint_context(index, *endpoint, &ring);
+            add |= 1 << index;
+            entries = entries.max(index);
+            self.endpoints[i] = Some(Endpoint { index, ring });
+        }
+        self.memory.write32(INPUT + 4, add);
+        let before = self.entries;
+        self.entries = entries;
+        self.write_slot_context();
+        let input = self.memory.phys() + INPUT as u64;
+        let slot = self.slot;
+        if let Err(err) =
+            xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host)
+        {
+            // Refused: the controller never had them.
+            self.entries = before;
+            self.drop_endpoints();
+            return Err(err);
+        }
+        self.control_out(xhci, host, Setup::set_configuration(value), &[])
+    }
+
+    /// Gives back the endpoints' memory, which the controller does not
+    /// have.
+    fn drop_endpoints(&mut self) {
+        for endpoint in &mut self.endpoints {
+            *endpoint = None;
+        }
+    }
+
+    /// Tells the controller the device is a hub (Configure Endpoint with
+    /// the slot context alone, 4.6.6).
+    pub fn set_hub(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        hub: HubSlot,
+    ) -> Result<(), Error> {
+        let before = self.hub.replace(hub);
+        self.clear_input();
+        self.memory.write32(INPUT + 4, ADD_SLOT);
+        self.write_slot_context();
+        let input = self.memory.phys() + INPUT as u64;
+        let slot = self.slot;
+        let result =
+            xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host);
+        if result.is_err() {
+            self.hub = before;
+        }
+        result.map(|_| ())
+    }
+
+    /// The configured endpoint with device context index `index`.
+    fn endpoint(&mut self, index: u8) -> Option<&mut Endpoint> {
+        self.endpoints.iter_mut().flatten().find(|e| e.index == index)
+    }
+
+    /// Starts a transfer of up to `length` bytes from the IN endpoint at
+    /// device context index `index` into its page; returns the TRB's
+    /// physical address, which its event names. [`Device::received`]
+    /// reads what came once it is done.
+    pub fn submit_in(&mut self, xhci: &Xhci, index: u8, length: usize) -> Result<u64, Error> {
+        if index & 1 == 0 || length == 0 || length > PAGE_SIZE {
+            return Err(Error::BadRequest);
+        }
+        let slot = self.slot;
+        let endpoint = self.endpoint(index).ok_or(Error::BadRequest)?;
+        let buffer = endpoint.ring.phys() + PAGE_SIZE as u64;
+        let at = endpoint.ring.push(Trb {
+            parameter: buffer,
+            status: length as u32,
+            control: control::kind(kind::NORMAL) | control::IOC | control::ISP,
+        });
+        xhci.ring(slot, u32::from(index));
+        Ok(at)
+    }
+
+    /// Starts a transfer of `data` (a page at most) to the OUT endpoint at
+    /// device context index `index`; returns the TRB's physical address.
+    pub fn submit_out(&mut self, xhci: &Xhci, index: u8, data: &[u8]) -> Result<u64, Error> {
+        if index & 1 != 0 || index == 0 || data.len() > PAGE_SIZE {
+            return Err(Error::BadRequest);
+        }
+        let slot = self.slot;
+        let endpoint = self.endpoint(index).ok_or(Error::BadRequest)?;
+        endpoint.ring.memory().write(PAGE_SIZE, data);
+        let buffer = endpoint.ring.phys() + PAGE_SIZE as u64;
+        let at = endpoint.ring.push(Trb {
+            parameter: buffer,
+            status: data.len() as u32,
+            control: control::kind(kind::NORMAL) | control::IOC,
+        });
+        xhci.ring(slot, u32::from(index));
+        Ok(at)
+    }
+
+    /// Copies what the last transfer on the IN endpoint at device context
+    /// index `index` brought, `out.len()` bytes, into `out`.
+    pub fn received(&mut self, index: u8, out: &mut [u8]) -> Result<(), Error> {
+        let endpoint = self.endpoint(index).ok_or(Error::BadRequest)?;
+        if out.len() > PAGE_SIZE {
+            return Err(Error::BadRequest);
+        }
+        endpoint.ring.memory().read(PAGE_SIZE, out);
+        Ok(())
+    }
+
+    /// Brings the endpoint at device context index `index` back after a
+    /// transfer on it failed with `code` (an error halts it; a stall also
+    /// halts the device's side, which CLEAR_FEATURE ends) or took too long
+    /// ([`code::STOPPED`]): its ring then starts after the transfer.
+    pub fn recover(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        index: u8,
+        failed: u8,
+    ) -> Result<(), Error> {
+        if index == EP0 || self.endpoint(index).is_none() {
+            return Err(Error::BadRequest);
+        }
+        self.skip(xhci, host, index, failed)?;
+        if failed == code::STALL {
+            // Endpoint `index` is number index / 2, IN if odd.
+            let address = (index / 2) | if index & 1 != 0 { 0x80 } else { 0 };
+            self.control_out(xhci, host, Setup::clear_halt(address), &[])?;
+        }
+        Ok(())
     }
 
     /// A control transfer that reads up to `setup.length` bytes into
@@ -300,24 +604,31 @@ impl Device {
                     code::SUCCESS => {}
                     failed => {
                         xhci.events_read();
-                        self.skip(xhci, host, failed)?;
+                        self.skip(xhci, host, EP0, failed)?;
                         return Err(Error::Completion(failed));
                     }
                 }
             }
             xhci.events_read();
             if host.now_us() >= deadline {
-                self.skip(xhci, host, code::STOPPED)?;
+                self.skip(xhci, host, EP0, code::STOPPED)?;
                 return Err(Error::TimedOut);
             }
             host.wait(POLL_US);
         }
     }
 
-    /// Brings endpoint 0 back after a transfer that failed with `code`
-    /// (halting it) or took too long ([`code::STOPPED`]): resets or stops
-    /// it, then points it past the transfer.
-    fn skip(&mut self, xhci: &mut Xhci, host: &mut dyn Host, code: u8) -> Result<(), Error> {
+    /// Brings endpoint `endpoint` (a device context index) back after a
+    /// transfer that failed with `code` (halting it) or took too long
+    /// ([`code::STOPPED`]): resets or stops it, then points it past the
+    /// transfer.
+    fn skip(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        endpoint: u8,
+        code: u8,
+    ) -> Result<(), Error> {
         let slot = self.slot;
         let tolerate = |result: Result<_, Error>| match result {
             // Not in the state the command expects: already halted, or
@@ -329,19 +640,23 @@ impl Device {
             // Stopped, unless it halted meanwhile, which Reset Endpoint
             // ends.
             if let Err(Error::Completion(code::CONTEXT_STATE)) =
-                xhci.command(Command::StopEndpoint { slot, endpoint: EP0 }, host)
+                xhci.command(Command::StopEndpoint { slot, endpoint }, host)
             {
-                tolerate(xhci.command(Command::ResetEndpoint { slot, endpoint: EP0 }, host))?;
+                tolerate(xhci.command(Command::ResetEndpoint { slot, endpoint }, host))?;
             }
         } else {
-            tolerate(xhci.command(Command::ResetEndpoint { slot, endpoint: EP0 }, host))?;
+            tolerate(xhci.command(Command::ResetEndpoint { slot, endpoint }, host))?;
         }
-        let pointer = self.ep0.dequeue_pointer();
-        let dequeue = Command::SetDequeue { slot, endpoint: EP0, pointer };
+        let pointer = if endpoint == EP0 {
+            self.ep0.dequeue_pointer()
+        } else {
+            self.endpoint(endpoint).ok_or(Error::BadRequest)?.ring.dequeue_pointer()
+        };
+        let dequeue = Command::SetDequeue { slot, endpoint, pointer };
         match xhci.command(dequeue, host) {
             // Running after all: stop it, and move it then.
             Err(Error::Completion(code::CONTEXT_STATE)) => {
-                tolerate(xhci.command(Command::StopEndpoint { slot, endpoint: EP0 }, host))?;
+                tolerate(xhci.command(Command::StopEndpoint { slot, endpoint }, host))?;
                 xhci.command(dequeue, host).map(|_| ())
             }
             other => other.map(|_| ()),
@@ -351,6 +666,7 @@ impl Device {
     /// Gives the slot back (Disable Slot). If the controller does not
     /// answer, the device's memory is never given back, since the
     /// controller may still use it.
+    #[inline(never)]
     pub fn disable(self, xhci: &mut Xhci, host: &mut dyn Host) -> Result<(), Error> {
         let result = xhci.command(Command::DisableSlot { slot: self.slot }, host);
         xhci.set_device_context(self.slot, 0);

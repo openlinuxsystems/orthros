@@ -6,10 +6,11 @@
 //! [`run`] takes the controller from the firmware and starts it
 //! (`radix_xhci::Xhci::new`), then loops: it reads the controller's
 //! events, and for each root port that changed, sets up the device
-//! plugged into it or lets go of the one pulled out. Root ports with a
-//! device on them when the controller starts raise no event, so each is
-//! looked at once first. The thread sleeps until the interrupt wakes it,
-//! or for 10 ms when there is none (and at most a second either way).
+//! plugged into it or lets go of the one pulled out (and of every device
+//! behind it, if it is a hub). Root ports with a device on them when the
+//! controller starts raise no event, so each is looked at once first. The
+//! thread sleeps until the interrupt wakes it, or for 10 ms when there is
+//! none (and at most a second either way).
 //!
 //! Setting up a device: a USB 2 port is reset, which enables it (a USB 3
 //! port enables itself once its link is up, or after a warm reset); after
@@ -17,23 +18,33 @@
 //! address; the first eight bytes of its descriptor give endpoint 0's
 //! packet size, then the whole descriptor, its strings (in the first
 //! language it lists) and its first configuration say what it is, which
-//! the log says. A device that cannot be set up is tried once more, with
-//! another port reset, and then left alone until it is plugged in again.
-//! Events that come while the thread waits for a command or a transfer
-//! are kept, and handled after.
+//! the log says. The controller is given the endpoints of the
+//! configuration's interfaces, and the device is put in it. A device that
+//! cannot be set up is tried once more, with another port reset, and then
+//! left alone until it is plugged in again. Events that come while the
+//! thread waits for a command or a transfer are kept, and handled after.
+//!
+//! A hub is set up the same way, then driven from [`super::hub`]: the
+//! ports it reports changed are queued, and the thread looks at each in
+//! turn, so that a hub found behind a hub is never set up from inside
+//! another's setup.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 
 use radix_hal::Devices;
 use radix_hw::Dma;
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
-use radix_usb::{Configuration, DeviceDescriptor, Setup, Speed, class, class_name, descriptor};
-use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, Place, Xhci, code};
+use radix_usb::{
+    Configuration, DeviceDescriptor, EndpointDescriptor, Setup, Speed, class, class_name,
+    descriptor, hub,
+};
+use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place, Xhci, code};
 
 use super::STARTS;
+use super::hub::Hub;
 use crate::Arch;
 use crate::sched;
 
@@ -43,18 +54,20 @@ const POLL_NS: u64 = 10_000_000;
 const IDLE_NS: u64 = 1_000_000_000;
 /// How long a port reset may take: USB 2.0 asks 10 to 20 ms of a hub's
 /// port (7.1.7.5); Linux allows 500.
-const RESET_US: u64 = 500_000;
+pub(super) const RESET_US: u64 = 500_000;
 /// How long a device has to recover after its port's reset (TRSTRCY,
 /// USB 2.0 7.1.7.5).
-const RECOVERY_NS: u64 = 10_000_000;
+pub(super) const RECOVERY_NS: u64 = 10_000_000;
 /// Events kept while the thread waits for another.
 const KEPT: usize = 256;
+/// Hub ports waiting to be looked at.
+const WORK: usize = 256;
 /// Root ports: up to 255, a bit each.
 const PORT_WORDS: usize = 4;
 
 /// What the driver waits with: the thread's sleep, and the events kept
 /// meanwhile.
-struct KernelHost {
+pub(super) struct KernelHost {
     kept: Vec<Event, Kmalloc>,
     /// Events that did not fit.
     lost: u64,
@@ -77,33 +90,78 @@ impl Host for KernelHost {
 }
 
 /// DMA memory for the controller.
-fn alloc(pages: usize, below_4g: bool) -> Option<Dma> {
+pub(super) fn alloc(pages: usize, below_4g: bool) -> Option<Dma> {
     <Arch as Devices>::alloc_dma(pages, below_4g)
 }
 
-/// A device on a root port.
-struct Attached {
-    port: u8,
-    device: Device,
+/// Where a device is: the root port it is on, or its hubs are on, and
+/// the route string of hub ports below that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Path {
+    pub(super) root_port: u8,
+    pub(super) route: u32,
+}
+
+impl Path {
+    /// How many hubs are between it and its root port.
+    pub(super) fn depth(self) -> usize {
+        hub::depth(self.route)
+    }
+
+    /// Where the device on port `port` of the hub here is.
+    pub(super) fn child(self, port: u8) -> Option<Path> {
+        Some(Path { root_port: self.root_port, route: hub::child_route(self.route, port)? })
+    }
+
+    /// Whether it is below the hub at `hub`.
+    pub(super) fn is_below(self, hub: Path) -> bool {
+        self.root_port == hub.root_port && hub::is_below(self.route, hub.route)
+    }
+}
+
+/// A device's name in the log, as Linux names it: its bus, its root port
+/// and its hub ports, `1-3.2`.
+pub(super) struct Name(pub(super) usize, pub(super) Path);
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Name(bus, path) = self;
+        write!(f, "{bus}-{}", path.root_port)?;
+        for level in 0..path.depth() {
+            write!(f, ".{}", (path.route >> (4 * level)) & 0xf)?;
+        }
+        Ok(())
+    }
+}
+
+/// A device the thread has set up.
+pub(super) struct Attached {
+    pub(super) path: Path,
+    /// On the heap: its endpoints make it big.
+    pub(super) device: Box<Device, Kmalloc>,
     /// What it calls itself, for the log.
-    name: TextBuf<64>,
+    pub(super) name: TextBuf<64>,
+    /// What the thread keeps of it if it is a hub.
+    pub(super) hub: Option<Hub>,
 }
 
 /// A controller, as its thread runs it.
-struct Controller {
-    bus: usize,
-    xhci: Box<Xhci, Kmalloc>,
-    host: KernelHost,
-    devices: Vec<Attached, Kmalloc>,
-    /// The ports whose device could not be set up, left alone until it is
-    /// plugged in again.
+pub(super) struct Controller {
+    pub(super) bus: usize,
+    pub(super) xhci: Box<Xhci, Kmalloc>,
+    pub(super) host: KernelHost,
+    pub(super) devices: Vec<Attached, Kmalloc>,
+    /// The root ports whose device could not be set up, left alone until
+    /// it is plugged in again.
     failed: [u64; PORT_WORDS],
     /// Where control transfers' data lands.
-    buffer: Vec<u8, Kmalloc>,
+    pub(super) buffer: Vec<u8, Kmalloc>,
+    /// Hub ports to look at: the hub's slot and the port.
+    pub(super) work: Vec<(u8, u8), Kmalloc>,
 }
 
 /// Why a device could not be set up.
-enum Why {
+pub(super) enum Why {
     Driver(radix_xhci::Error),
     Device(&'static str),
 }
@@ -114,13 +172,25 @@ impl From<radix_xhci::Error> for Why {
     }
 }
 
-impl core::fmt::Display for Why {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for Why {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Why::Driver(err) => write!(f, "{err}"),
             Why::Device(why) => f.write_str(why),
         }
     }
+}
+
+/// What a device's first configuration holds, for setting it up.
+struct Plan {
+    /// bConfigurationValue.
+    value: u8,
+    /// The endpoints of its interfaces' first settings, the first
+    /// `count`.
+    endpoints: [EndpointDescriptor; MAX_ENDPOINTS],
+    count: usize,
+    /// A hub's endpoint that reports its changes.
+    hub: Option<EndpointDescriptor>,
 }
 
 /// The thread of controller `index`.
@@ -133,7 +203,7 @@ pub fn run(index: usize) {
     }
     let sleep = if start.interrupt.is_some() { IDLE_NS } else { POLL_NS };
     loop {
-        controller.events();
+        let busy = controller.events() | controller.work();
         if controller.xhci.failed() {
             error!(
                 "USB: bus {}: the controller stopped with an error; its devices are gone",
@@ -141,7 +211,9 @@ pub fn run(index: usize) {
             );
             return;
         }
-        sched::block_until(sched::now_ns().saturating_add(sleep), "usb");
+        if !busy {
+            sched::block_until(sched::now_ns().saturating_add(sleep), "usb");
+        }
     }
 }
 
@@ -198,8 +270,10 @@ impl Controller {
         let heap = HEAP.with(Flags::MAY_SLEEP);
         let mut host = KernelHost { kept: Vec::new_in(heap), lost: 0 };
         let mut buffer = Vec::new_in(heap);
+        let mut work = Vec::new_in(heap);
         if host.kept.try_reserve_exact(KEPT).is_err()
             || buffer.try_reserve_exact(BUFFER_SIZE).is_err()
+            || work.try_reserve_exact(WORK).is_err()
         {
             error!("USB: out of memory for the controller at {}", start.address);
             return None;
@@ -224,12 +298,15 @@ impl Controller {
             devices: Vec::new_in(heap),
             failed: [0; PORT_WORDS],
             buffer,
+            work,
         };
         Box::try_new_in(controller, heap).ok()
     }
 
-    /// Handles the events that came, and those kept meanwhile.
-    fn events(&mut self) {
+    /// Handles the events that came, and those kept meanwhile; says
+    /// whether there were any.
+    fn events(&mut self) -> bool {
+        let mut any = false;
         loop {
             let event = if self.host.kept.is_empty() {
                 match self.xhci.next_event() {
@@ -239,8 +316,12 @@ impl Controller {
             } else {
                 self.host.kept.remove(0)
             };
+            any = true;
             match event {
                 Event::Port { port } => self.port_changed(port),
+                Event::Transfer { trb, slot, endpoint, code, residual } => {
+                    self.transfer(trb, slot, endpoint, code, residual);
+                }
                 Event::Controller { code } => {
                     warn!("USB: bus {}: the controller says: {}", self.bus, code::name(code));
                 }
@@ -257,6 +338,51 @@ impl Controller {
             for port in 1..=self.xhci.info().ports {
                 self.port_changed(port);
             }
+            for at in 0..self.devices.len() {
+                let attached = &self.devices[at];
+                if let Some(hub) = &attached.hub {
+                    let (slot, ports) = (attached.device.slot(), hub.ports);
+                    for port in 1..=ports {
+                        self.queue(slot, port);
+                    }
+                }
+            }
+        }
+        any
+    }
+
+    /// Looks at the hub ports queued; says whether there were any.
+    fn work(&mut self) -> bool {
+        if self.work.is_empty() {
+            return false;
+        }
+        while !self.work.is_empty() {
+            let (slot, port) = self.work.remove(0);
+            self.hub_port(slot, port);
+        }
+        true
+    }
+
+    /// Queues port `port` of the hub in slot `slot` to be looked at.
+    pub(super) fn queue(&mut self, slot: u8, port: u8) {
+        if !self.work.contains(&(slot, port))
+            && self.work.push_within_capacity((slot, port)).is_err()
+        {
+            warn!("USB: bus {}: too many hub ports to look at; one is skipped", self.bus);
+        }
+    }
+
+    /// Where the device in slot `slot` is in [`Controller::devices`].
+    pub(super) fn find(&self, slot: u8) -> Option<usize> {
+        self.devices.iter().position(|d| d.device.slot() == slot)
+    }
+
+    /// The transfer at `trb` on an endpoint other than 0 finished.
+    fn transfer(&mut self, trb: u64, slot: u8, endpoint: u8, code: u8, residual: u32) {
+        let Some(at) = self.find(slot) else { return };
+        let hub = self.devices[at].hub.as_ref();
+        if hub.is_some_and(|hub| hub.status == endpoint && hub.pending == trb) {
+            self.hub_status(at, code, residual);
         }
     }
 
@@ -273,28 +399,48 @@ impl Controller {
         }
     }
 
+    /// Lets go of the device at `path` and of every device below it, as
+    /// they were unplugged: the hub first, as Linux says it.
+    pub(super) fn detach(&mut self, path: Path) {
+        let bus = self.bus;
+        while let Some(at) =
+            self.devices.iter().position(|d| d.path == path || d.path.is_below(path))
+        {
+            let gone = self.devices.remove(at);
+            let slot = gone.device.slot();
+            info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
+            self.give_back(gone.device, gone.path);
+            // A hub's queued ports are not looked at: its slot may be
+            // given to another device.
+            self.work.retain(|&(hub, _)| hub != slot);
+        }
+    }
+
+    /// Gives the slot of the device at `path` back. Kept out of its
+    /// callers' frames, which would hold the device.
+    #[inline(never)]
+    fn give_back(&mut self, device: Box<Device, Kmalloc>, path: Path) {
+        if let Err(err) = (*device).disable(&mut self.xhci, &mut self.host) {
+            warn!("USB: {}: its slot could not be given back: {err}", Name(self.bus, path));
+        }
+    }
+
     /// Root port `port` may have changed: lets go of a device that left,
     /// and sets up one that came.
     #[inline(never)]
     fn port_changed(&mut self, port: u8) {
         let status = self.xhci.port_status(port);
         self.xhci.acknowledge_port(port, status);
-        let bus = self.bus;
+        let path = Path { root_port: port, route: 0 };
         if status.connect_changed() || !status.connected() {
             self.set_failed(port, false);
-            if let Some(at) = self.devices.iter().position(|d| d.port == port) {
-                let gone = self.devices.remove(at);
-                info!("USB: {bus}-{port}: {} was unplugged", gone.name);
-                if let Err(err) = gone.device.disable(&mut self.xhci, &mut self.host) {
-                    warn!("USB: {bus}-{port}: its slot could not be given back: {err}");
-                }
-            }
+            self.detach(path);
         }
         if status.changes() & radix_xhci::portsc::OVER_CURRENT_CHANGE != 0 && status.over_current()
         {
-            warn!("USB: {bus}-{port}: the port draws too much current");
+            warn!("USB: {}: the port draws too much current", Name(self.bus, path));
         }
-        if status.connected() && !self.failed(port) && !self.devices.iter().any(|d| d.port == port)
+        if status.connected() && !self.failed(port) && !self.devices.iter().any(|d| d.path == path)
         {
             self.attach(port);
         }
@@ -307,7 +453,11 @@ impl Controller {
                 Ok(()) => return,
                 Err(why) => {
                     if attempt == 1 || !self.xhci.port_status(port).connected() {
-                        warn!("USB: {}-{port}: the device could not be set up: {why}", self.bus);
+                        let path = Path { root_port: port, route: 0 };
+                        warn!(
+                            "USB: {}: the device could not be set up: {why}",
+                            Name(self.bus, path)
+                        );
                         self.set_failed(port, true);
                         return;
                     }
@@ -350,34 +500,57 @@ impl Controller {
             .xhci
             .port_speed(port, status)
             .ok_or(Why::Device("its port says a speed it does not name"))?;
-        let place = Place { root_port: port, route: 0, speed, speed_id: status.speed_id() };
-        let mut device = Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?;
+        self.set_up(Place::root(port, speed, status.speed_id()))
+    }
+
+    /// Gives the device at `place`, its port reset, a slot and an
+    /// address, reads what it is, and configures it; a hub is then
+    /// started.
+    #[inline(never)]
+    pub(super) fn set_up(&mut self, place: Place) -> Result<(), Why> {
+        let path = Path { root_port: place.root_port, route: place.route };
+        // The memory first, so that a device given a slot always has a
+        // home, and a place in the list.
+        let heap = HEAP.with(Flags::MAY_SLEEP);
+        let (Ok(home), Ok(())) = (Box::try_new_uninit_in(heap), self.devices.try_reserve(1)) else {
+            return Err(Why::Device("out of memory"));
+        };
+        let mut device =
+            Box::write(home, Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?);
         let mut name = TextBuf::<64>::new();
-        match self.identify(&mut device, speed, &mut name, port) {
-            Ok(()) => {
-                if self.devices.try_reserve(1).is_err() {
-                    let _ = device.disable(&mut self.xhci, &mut self.host);
-                    return Err(Why::Device("out of memory"));
-                }
-                let _ = self.devices.push_within_capacity(Attached { port, device, name });
-                Ok(())
-            }
+        let result = self.identify(&mut device, path, &mut name).and_then(|plan| {
+            let endpoints = &plan.endpoints[..plan.count];
+            device.configure(&mut self.xhci, &mut self.host, &mut alloc, plan.value, endpoints)?;
+            Ok(plan)
+        });
+        let plan = match result {
+            Ok(plan) => plan,
             Err(why) => {
-                let _ = device.disable(&mut self.xhci, &mut self.host);
-                Err(why)
+                self.give_back(device, path);
+                return Err(why);
             }
+        };
+        let slot = device.slot();
+        let _ = self.devices.push_within_capacity(Attached { path, device, name, hub: None });
+        if let Some(status) = plan.hub
+            && let Err(why) = self.start_hub(slot, status)
+        {
+            warn!("USB: {}: the hub could not be started: {why}", Name(self.bus, path));
         }
+        Ok(())
     }
 
     /// Reads what the device is, gives the controller its packet size, and
-    /// logs it; its name goes in `name`.
+    /// logs it; its name goes in `name`. Returns what its first
+    /// configuration holds.
+    #[inline(never)]
     fn identify(
         &mut self,
         device: &mut Device,
-        speed: Speed,
+        path: Path,
         name: &mut TextBuf<64>,
-        port: u8,
-    ) -> Result<(), Why> {
+    ) -> Result<Plan, Why> {
+        let speed = device.place().speed;
         let Controller { xhci, host, buffer, bus, .. } = self;
         let mut bytes = [0u8; radix_usb::DEVICE_DESCRIPTOR_SIZE];
         let first = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 8);
@@ -413,36 +586,56 @@ impl Controller {
         if name.is_empty() {
             let _ = name.write_str("a USB device");
         }
-        // What it is: its class, or its interfaces' classes.
+        // Its first configuration: what its interfaces are, and their
+        // endpoints.
+        let header = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 9);
+        let total = device
+            .control_in(xhci, host, header, &mut buffer[..9])
+            .ok()
+            .and_then(|came| Configuration::parse(&buffer[..came]))
+            .map_or(0, |config| usize::from(config.total_length).min(BUFFER_SIZE));
+        if total < 9 {
+            return Err(Why::Device("it has no configuration"));
+        }
+        let all = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, total as u16);
+        let came = device.control_in(xhci, host, all, &mut buffer[..total])?;
+        let config = Configuration::parse(&buffer[..came])
+            .ok_or(Why::Device("its configuration is broken"))?;
+        let mut plan = Plan {
+            value: config.value,
+            endpoints: [EndpointDescriptor::default(); MAX_ENDPOINTS],
+            count: 0,
+            hub: None,
+        };
+        let mut named: [&str; 4] = [""; 4];
+        let mut count = 0;
+        let mut endpoints = 0;
+        for interface in config.interfaces().filter(|i| i.descriptor.alternate == 0) {
+            let d = interface.descriptor;
+            let this = class_name(d.class, d.subclass, d.protocol);
+            if count < named.len() && !named[..count].contains(&this) {
+                named[count] = this;
+                count += 1;
+            }
+            for endpoint in interface.endpoints() {
+                if found.class == class::HUB
+                    && d.class == class::HUB
+                    && endpoint.is_in()
+                    && plan.hub.is_none()
+                {
+                    plan.hub = Some(endpoint);
+                }
+                if let Some(slot) = plan.endpoints.get_mut(plan.count) {
+                    *slot = endpoint;
+                    plan.count += 1;
+                }
+                endpoints += 1;
+            }
+        }
         let mut kind = TextBuf::<64>::new();
         if found.class != class::PER_INTERFACE {
             let _ = kind.write_str(class_name(found.class, found.subclass, found.protocol));
         } else {
-            let header = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 9);
-            let total = device
-                .control_in(xhci, host, header, &mut buffer[..9])
-                .ok()
-                .and_then(|came| Configuration::parse(&buffer[..came]))
-                .map_or(0, |config| usize::from(config.total_length).min(BUFFER_SIZE));
-            let all = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, total as u16);
-            let config = if total >= 9 {
-                device
-                    .control_in(xhci, host, all, &mut buffer[..total])
-                    .ok()
-                    .and_then(|came| Configuration::parse(&buffer[..came]))
-            } else {
-                None
-            };
-            let mut named: [&str; 4] = [""; 4];
-            let mut count = 0;
-            for interface in config.into_iter().flat_map(Configuration::interfaces) {
-                let d = interface.descriptor;
-                let this = class_name(d.class, d.subclass, d.protocol);
-                if count < named.len() && !named[..count].contains(&this) {
-                    named[count] = this;
-                    count += 1;
-                }
-            }
             for (i, this) in named[..count].iter().enumerate() {
                 let _ = write!(kind, "{}{this}", if i == 0 { "" } else { " and " });
             }
@@ -455,9 +648,24 @@ impl Controller {
             let _ = write!(from, ", {maker}");
         }
         info!(
-            "USB: {bus}-{port}: {name} ({:04x}:{:04x}{from}), {kind}, {speed}",
-            found.vendor, found.product
+            "USB: {}: {name} ({:04x}:{:04x}{from}), {kind}, {speed}",
+            Name(*bus, path),
+            found.vendor,
+            found.product
         );
-        Ok(())
+        if endpoints > plan.count {
+            warn!(
+                "USB: {}: only {} of its {endpoints} endpoints are used",
+                Name(*bus, path),
+                plan.count
+            );
+        }
+        Ok(plan)
     }
+}
+
+/// The speeds below high speed, which a high-speed hub's Transaction
+/// Translator carries.
+pub(super) fn translated(speed: Speed) -> bool {
+    matches!(speed, Speed::Low | Speed::Full)
 }
