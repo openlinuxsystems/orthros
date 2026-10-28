@@ -175,8 +175,7 @@ impl Device {
     fn write_ep0_context(&self) {
         let at = self.input(2);
         self.memory.write32(at, 0);
-        self.memory
-            .write32(at + 4, RETRIES | CONTROL_ENDPOINT | u32::from(self.max_packet) << 16);
+        self.memory.write32(at + 4, RETRIES | CONTROL_ENDPOINT | u32::from(self.max_packet) << 16);
         self.memory.write64(at + 8, self.ep0.dequeue_pointer());
         // The average TRB length: 8, a setup packet, as the spec suggests.
         self.memory.write32(at + 16, 8);
@@ -236,7 +235,12 @@ impl Device {
 
     /// Makes the control transfer `setup`, whose data (if any) is in the
     /// buffer; returns how many bytes moved.
-    fn control(&mut self, xhci: &mut Xhci, host: &mut dyn Host, setup: Setup) -> Result<usize, Error> {
+    fn control(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        setup: Setup,
+    ) -> Result<usize, Error> {
         let length = usize::from(setup.length);
         if length > BUFFER_SIZE {
             return Err(Error::BadRequest);

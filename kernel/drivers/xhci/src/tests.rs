@@ -45,7 +45,23 @@ struct SimDevice {
 /// descriptor's byte).
 fn keyboard(speed_id: u8, max_packet0: u8) -> SimDevice {
     let device = std::vec![
-        18, 1, 0x00, 0x02, 0, 0, 0, max_packet0, 0x27, 0x06, 0x01, 0x00, 0x00, 0x00, 1, 4, 11,
+        18,
+        1,
+        0x00,
+        0x02,
+        0,
+        0,
+        0,
+        max_packet0,
+        0x27,
+        0x06,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        1,
+        4,
+        11,
         1,
     ];
     let mut config = std::vec![9, 2, 34, 0, 1, 1, 6, 0xa0, 50];
@@ -238,7 +254,11 @@ impl State {
     }
 
     fn port_event(&mut self, port: u8) {
-        self.post(u64::from(port) << 24, u32::from(code::SUCCESS) << 24, kind::PORT_STATUS_CHANGE << 10);
+        self.post(
+            u64::from(port) << 24,
+            u32::from(code::SUCCESS) << 24,
+            kind::PORT_STATUS_CHANGE << 10,
+        );
     }
 
     /// What a port's register holds with `device` connected (or none)
@@ -338,7 +358,14 @@ impl State {
         }
     }
 
-    fn command(&mut self, kind: u32, slot: u8, endpoint: u8, parameter: u64, control: u32) -> (u8, u8) {
+    fn command(
+        &mut self,
+        kind: u32,
+        slot: u8,
+        endpoint: u8,
+        parameter: u64,
+        control: u32,
+    ) -> (u8, u8) {
         let csz = self.context_size as u64;
         match kind {
             kind::NO_OP_COMMAND => (code::SUCCESS, 0),
@@ -379,8 +406,7 @@ impl State {
                 if add != 3 || (ep0 >> 3) & 7 != 4 || dequeue & 1 == 0 {
                     return (code::PARAMETER, slot);
                 }
-                if self.devices.get(usize::from(port).wrapping_sub(1)).is_none_or(Option::is_none)
-                {
+                if self.devices.get(usize::from(port).wrapping_sub(1)).is_none_or(Option::is_none) {
                     return (code::TRANSACTION, slot);
                 }
                 entry.port = port;
@@ -475,7 +501,10 @@ impl State {
             let first = trbs[0].0;
             let device = self.devices.get(usize::from(port).wrapping_sub(1)).cloned().flatten();
             let event = |code: u8, residual: u32| {
-                (u32::from(code) << 24 | residual, kind::TRANSFER_EVENT << 10 | 1 << 16 | u32::from(slot) << 24)
+                (
+                    u32::from(code) << 24 | residual,
+                    kind::TRANSFER_EVENT << 10 | 1 << 16 | u32::from(slot) << 24,
+                )
             };
             let Some(mut device) = device else {
                 // Pulled out: no answer, after the retries.
@@ -500,28 +529,33 @@ impl State {
             self.requests.push((slot, setup));
             let data = trbs.iter().find(|t| (t.3 >> 10) & 0x3f == kind::DATA_STAGE).copied();
             let status_trb = *trbs.last().unwrap();
-            let answer: Option<Vec<u8>> = if device.stalls.contains(&(setup.request, (setup.value >> 8) as u8)) {
-                None
-            } else {
-                match (setup.request, (setup.value >> 8) as u8) {
-                    (6, descriptor::DEVICE) => Some(device.device.clone()),
-                    (6, descriptor::CONFIGURATION) => Some(device.config.clone()),
-                    (6, descriptor::STRING) if setup.value & 0xff == 0 => Some(std::vec![4, 3, 0x09, 0x04]),
-                    (6, descriptor::STRING) => device.strings.get(&(setup.value as u8)).map(|text| {
-                        let units: Vec<u16> = text.encode_utf16().collect();
-                        let mut bytes = std::vec![(2 + 2 * units.len()) as u8, 3];
-                        for unit in units {
-                            bytes.extend(unit.to_le_bytes());
+            let answer: Option<Vec<u8>> =
+                if device.stalls.contains(&(setup.request, (setup.value >> 8) as u8)) {
+                    None
+                } else {
+                    match (setup.request, (setup.value >> 8) as u8) {
+                        (6, descriptor::DEVICE) => Some(device.device.clone()),
+                        (6, descriptor::CONFIGURATION) => Some(device.config.clone()),
+                        (6, descriptor::STRING) if setup.value & 0xff == 0 => {
+                            Some(std::vec![4, 3, 0x09, 0x04])
                         }
-                        bytes
-                    }),
-                    (9, _) => {
-                        device.configuration = setup.value as u8;
-                        Some(Vec::new())
+                        (6, descriptor::STRING) => {
+                            device.strings.get(&(setup.value as u8)).map(|text| {
+                                let units: Vec<u16> = text.encode_utf16().collect();
+                                let mut bytes = std::vec![(2 + 2 * units.len()) as u8, 3];
+                                for unit in units {
+                                    bytes.extend(unit.to_le_bytes());
+                                }
+                                bytes
+                            })
+                        }
+                        (9, _) => {
+                            device.configuration = setup.value as u8;
+                            Some(Vec::new())
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
-            };
+                };
             let entry = self.slots.get_mut(&slot).unwrap();
             let Some(answer) = answer else {
                 entry.state = EpState::Halted;
@@ -608,8 +642,7 @@ impl Registers for Sim {
     fn read(&self, offset: usize, size: usize) -> u64 {
         assert_eq!(size, 4, "a register read of {size} bytes at {offset:#x}");
         let mut s = self.state();
-        let protocols_size: usize =
-            s.protocols.iter().map(|p| 16 + 4 * p.psi.len()).sum::<usize>();
+        let protocols_size: usize = s.protocols.iter().map(|p| 16 + 4 * p.psi.len()).sum::<usize>();
         // The protocols follow the legacy capability, or come first.
         let protocols_at = if s.legacy.is_some() { XCAPS + 8 } else { XCAPS };
         let value = match offset {
@@ -631,7 +664,13 @@ impl Registers for Sim {
                 op::USBCMD => s.usbcmd,
                 op::USBSTS => s.usbsts,
                 op::PAGESIZE => 1,
-                op::CRCR => if s.cmd_running { op::CRCR_RUNNING } else { 0 },
+                op::CRCR => {
+                    if s.cmd_running {
+                        op::CRCR_RUNNING
+                    } else {
+                        0
+                    }
+                }
                 op::CONFIG => s.config,
                 _ => 0,
             },
@@ -639,7 +678,7 @@ impl Registers for Sim {
                 .contains(&o) =>
             {
                 let port = (o - CAPLENGTH - op::PORTS) / 0x10;
-                if (o - CAPLENGTH - op::PORTS) % 0x10 == 0 { s.portsc[port] } else { 0 }
+                if (o - CAPLENGTH - op::PORTS).is_multiple_of(0x10) { s.portsc[port] } else { 0 }
             }
             o if (RUNTIME + 0x20..RUNTIME + 0x40).contains(&o) => match o - RUNTIME - 0x20 {
                 rt::IMAN => s.iman,
@@ -709,7 +748,7 @@ impl Registers for Sim {
                     }
                     s.usbcmd = value;
                     if value & op::RUN != 0 {
-                        assert!(s.usbsts & op::NOT_READY == 0);
+                        assert_eq!(s.usbsts & op::NOT_READY, 0);
                         s.usbsts &= !op::HALTED;
                     } else {
                         s.usbsts |= op::HALTED;
@@ -722,7 +761,11 @@ impl Registers for Sim {
                     if s.crcr_low & op::CRCR_ABORT != 0 && s.cmd_running {
                         s.cmd_running = false;
                         let at = s.cmd_dequeue;
-                        s.post(at, u32::from(code::COMMAND_RING_STOPPED) << 24, kind::COMMAND_COMPLETION << 10);
+                        s.post(
+                            at,
+                            u32::from(code::COMMAND_RING_STOPPED) << 24,
+                            kind::COMMAND_COMPLETION << 10,
+                        );
                     } else if !s.cmd_running {
                         s.cmd_dequeue = u64::from(s.crcr_low & !0x3f) | u64::from(value) << 32;
                         s.cmd_cycle = s.crcr_low & 1 != 0;
@@ -736,7 +779,7 @@ impl Registers for Sim {
             o if (CAPLENGTH + op::PORTS..CAPLENGTH + op::PORTS + 0x10 * usize::from(s.ports))
                 .contains(&o) =>
             {
-                if (o - CAPLENGTH - op::PORTS) % 0x10 == 0 {
+                if (o - CAPLENGTH - op::PORTS).is_multiple_of(0x10) {
                     let port = ((o - CAPLENGTH - op::PORTS) / 0x10 + 1) as u8;
                     s.write_port(port, value);
                 }
@@ -988,7 +1031,12 @@ fn speeds_come_from_the_protocols() {
     state.protocols = std::vec![
         SimProtocol { major: 2, first: 1, count: 2, psi: Vec::new() },
         // A port with its own speed IDs: 5 Gb/s as ID 1, 10 Gb/s as ID 2.
-        SimProtocol { major: 3, first: 3, count: 1, psi: std::vec![5 << 16 | 3 << 4 | 1, 10 << 16 | 3 << 4 | 2] },
+        SimProtocol {
+            major: 3,
+            first: 3,
+            count: 1,
+            psi: std::vec![5 << 16 | 3 << 4 | 1, 10 << 16 | 3 << 4 | 2]
+        },
     ];
     let sim = Sim::new(state);
     let (xhci, _) = start(&sim);
@@ -1016,7 +1064,9 @@ fn a_device_on_a_usb2_port_is_reset_addressed_and_read() {
     let mut device = attach(&mut xhci, &mut host, 6).unwrap();
     // The port was reset with its power kept, and its changes acknowledged.
     let writes = sim.state().port_writes.clone();
-    assert!(writes.iter().any(|&(p, v)| p == 6 && v & portsc::RESET != 0 && v & portsc::POWER != 0));
+    assert!(
+        writes.iter().any(|&(p, v)| p == 6 && v & portsc::RESET != 0 && v & portsc::POWER != 0)
+    );
     assert!(writes.iter().all(|&(_, v)| v & portsc::ENABLED == 0));
     assert_eq!(xhci.port_status(6).changes(), 0);
     let slot = device.slot();
@@ -1184,7 +1234,11 @@ fn rings_wrap_with_their_cycle_state() {
         let mut bytes = [0u8; 64];
         let length = if i % 2 == 0 { 18 } else { 64 };
         let setup = Setup::get_descriptor(descriptor::DEVICE, 0, 0, length);
-        assert_eq!(device.control_in(&mut xhci, &mut host, setup, &mut bytes), Ok(18), "transfer {i}");
+        assert_eq!(
+            device.control_in(&mut xhci, &mut host, setup, &mut bytes),
+            Ok(18),
+            "transfer {i}"
+        );
     }
     // And the command ring.
     for i in 0..(2 * RING_TRBS) {
@@ -1284,4 +1338,3 @@ fn requests_too_long_or_the_wrong_way_are_refused() {
     let setup = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 5000);
     assert_eq!(device.control_in(&mut xhci, &mut host, setup, &mut big), Err(Error::BadRequest));
 }
-

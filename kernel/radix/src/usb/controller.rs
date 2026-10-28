@@ -149,8 +149,11 @@ pub fn run(index: usize) {
 #[inline(never)]
 fn describe(bus: usize, start: &super::Start, xhci: &Xhci) {
     let info = xhci.info();
+    // The protocols' port ranges, in the ports' order.
     let mut protocols = TextBuf::<96>::new();
-    for (i, protocol) in xhci.protocols().iter().enumerate() {
+    let ranges =
+        (1..=info.ports).filter_map(|port| xhci.protocols().iter().find(|p| p.first_port == port));
+    for (i, protocol) in ranges.enumerate() {
         let last = u16::from(protocol.first_port) + u16::from(protocol.ports).max(1) - 1;
         let _ = write!(
             protocols,
@@ -246,7 +249,10 @@ impl Controller {
         }
         self.xhci.events_read();
         if self.host.lost > 0 {
-            warn!("USB: bus {}: {} events were lost; looking at every port", self.bus, self.host.lost);
+            warn!(
+                "USB: bus {}: {} events were lost; looking at every port",
+                self.bus, self.host.lost
+            );
             self.host.lost = 0;
             for port in 1..=self.xhci.info().ports {
                 self.port_changed(port);
@@ -284,12 +290,11 @@ impl Controller {
                 }
             }
         }
-        if status.changes() & radix_xhci::portsc::OVER_CURRENT_CHANGE != 0 && status.over_current() {
+        if status.changes() & radix_xhci::portsc::OVER_CURRENT_CHANGE != 0 && status.over_current()
+        {
             warn!("USB: {bus}-{port}: the port draws too much current");
         }
-        if status.connected()
-            && !self.failed(port)
-            && !self.devices.iter().any(|d| d.port == port)
+        if status.connected() && !self.failed(port) && !self.devices.iter().any(|d| d.port == port)
         {
             self.attach(port);
         }
@@ -430,7 +435,7 @@ impl Controller {
             };
             let mut named: [&str; 4] = [""; 4];
             let mut count = 0;
-            for interface in config.into_iter().flat_map(|c| c.interfaces()) {
+            for interface in config.into_iter().flat_map(Configuration::interfaces) {
                 let d = interface.descriptor;
                 let this = class_name(d.class, d.subclass, d.protocol);
                 if count < named.len() && !named[..count].contains(&this) {

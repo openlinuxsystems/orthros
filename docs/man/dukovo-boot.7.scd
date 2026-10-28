@@ -530,8 +530,8 @@ The PCI scan hands each xHCI controller to the USB driver, unless
 thread takes the controller from the firmware, resets and starts it, and
 logs what it is, its ports (USB 3 and USB 2 ones apart) and its interrupt:
 
-	USB: bus 1 is the xHCI 1.0 controller at 00:02.0: 8 ports (USB 3 on
-	1-4, USB 2 on 5-8), 64 device slots, MSI-X vector 0x31
+	USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3
+	on 1-4, USB 2 on 5-8), 64 device slots, MSI-X vector 0x50
 
 Each device plugged into a root port, at boot or later, is reset,
 addressed and named with its bus and port, as Linux names them: its

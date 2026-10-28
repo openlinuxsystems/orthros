@@ -11,9 +11,8 @@ use crate::*;
 
 /// A high-speed keyboard's device descriptor, as QEMU's `usb-kbd` gives
 /// it.
-const KEYBOARD: [u8; 18] = [
-    18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x27, 0x06, 0x01, 0x00, 0x00, 0x00, 1, 4, 11, 1,
-];
+const KEYBOARD: [u8; 18] =
+    [18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x27, 0x06, 0x01, 0x00, 0x00, 0x00, 1, 4, 11, 1];
 
 /// A configuration with a boot keyboard interface (a HID descriptor and
 /// an interrupt IN endpoint) and a second interface with two bulk
@@ -148,7 +147,10 @@ fn a_configuration_lists_its_interfaces_and_their_endpoints() {
     assert_eq!(endpoints[0].max_packet(), 1024);
     // The companion stays with the interface's descriptors.
     assert_eq!(
-        storage.descriptors().filter(|&(k, _)| k == descriptor::SUPERSPEED_ENDPOINT_COMPANION).count(),
+        storage
+            .descriptors()
+            .filter(|&(k, _)| k == descriptor::SUPERSPEED_ENDPOINT_COMPANION)
+            .count(),
         1
     );
 }

@@ -197,7 +197,7 @@ impl Ring {
     /// Where the controller should read next, with the cycle state in bit
     /// 0: what CRCR and an endpoint's TR Dequeue Pointer take.
     pub fn dequeue_pointer(&self) -> u64 {
-        self.memory.phys() + (self.enqueue * TRB_SIZE) as u64 | u64::from(self.cycle)
+        (self.memory.phys() + (self.enqueue * TRB_SIZE) as u64) | u64::from(self.cycle)
     }
 
     /// Hands `trb` to the controller (once its doorbell is rung), marked
@@ -267,7 +267,7 @@ impl EventRing {
     }
 
     /// The next event, if the controller has written one.
-    pub fn next(&mut self) -> Option<Trb> {
+    pub fn pop(&mut self) -> Option<Trb> {
         let at = self.dequeue * TRB_SIZE;
         let control = self.segment.read32(at + 12);
         if (control & control::CYCLE != 0) != self.cycle {

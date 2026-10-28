@@ -749,12 +749,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &[
-            "-device",
-            "usb-kbd,bus=xhci.0,port=2",
-            "-device",
-            "usb-mouse,bus=xhci.0,port=3",
-        ],
+        qemu: &["-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3"],
         script: usb_devices,
         disks: &[],
         second: None,
@@ -2985,7 +2980,7 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
     for line in [
-        "USB: bus 1 is the xHCI 1.0 controller at ",
+        "USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3 on 1-4, USB 2 on 5-8), 64 device slots, MSI",
         "USB: 1-1: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed",
         "USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
         "USB: 1-7: QEMU USB Mouse (0627:0001, QEMU), mouse, high speed",

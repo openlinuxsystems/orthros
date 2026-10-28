@@ -652,7 +652,8 @@ impl Protocol {
                 _ => None,
             };
         };
-        let psi = (0..psis.len() / 4).map(|i| psis.read32(4 * i)).find(|&psi| (psi & 0xf) as u8 == id)?;
+        let psi =
+            (0..psis.len() / 4).map(|i| psis.read32(4 * i)).find(|&psi| (psi & 0xf) as u8 == id)?;
         // The bit rate: a mantissa times a power of 1000.
         let exponent = (psi >> 4) & 3;
         let rate = u64::from(psi >> 16) * 1000u64.pow(exponent);
@@ -1020,7 +1021,7 @@ impl Xhci {
 
     /// The next event the controller wrote, if any.
     pub fn next_event(&mut self) -> Option<Event> {
-        let trb = self.events.next()?;
+        let trb = self.events.pop()?;
         self.read = true;
         Some(Event::decode(trb))
     }

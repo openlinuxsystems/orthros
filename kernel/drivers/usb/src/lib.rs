@@ -613,8 +613,13 @@ pub fn string(bytes: &[u8], out: &mut dyn fmt::Write) -> fmt::Result {
         return Ok(());
     }
     let len = bytes.len().min(usize::from(bytes[0]));
-    let units =
-        bytes.get(2..len).unwrap_or(&[]).as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair));
+    let units = bytes
+        .get(2..len)
+        .unwrap_or(&[])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair));
     // Leading and trailing spaces dropped: a space is written only once a
     // later character shows it is inside the text.
     let mut started = false;

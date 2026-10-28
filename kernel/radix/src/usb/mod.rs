@@ -81,9 +81,8 @@ pub fn bind(function: &Function) {
         warn!("USB: the xHCI controller at {} has no registers", function.address());
         return;
     };
-    let Some(regs) = usize::try_from(size)
-        .ok()
-        .and_then(|size| <Arch as Devices>::map_device(address, size))
+    let Some(regs) =
+        usize::try_from(size).ok().and_then(|size| <Arch as Devices>::map_device(address, size))
     else {
         warn!("USB: the xHCI controller at {} could not be mapped", function.address());
         return;
@@ -118,7 +117,10 @@ pub fn bind(function: &Function) {
             let _ = THREADS[index].set(thread.clone());
             sched::release(&thread);
         }
-        Err(err) => warn!("USB: could not start the thread for the controller at {}: {err}", function.address()),
+        Err(err) => warn!(
+            "USB: could not start the thread for the controller at {}: {err}",
+            function.address()
+        ),
     }
 }
 
