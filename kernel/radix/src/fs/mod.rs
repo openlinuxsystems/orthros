@@ -510,13 +510,22 @@ pub struct Made {
     pub source: radix_klog::TextBuf<32>,
 }
 
+/// How a disk's filesystem is mounted.
+#[derive(Clone, Copy, Default)]
+pub struct Flags {
+    /// Refusing every change.
+    pub read_only: bool,
+    /// Compressing the data written with zstd: Btrfs only (ADR 0134).
+    pub compress: bool,
+}
+
 /// Makes a filesystem of the kind named `kind` for `mount`: `fat`,
 /// `exfat` and `btrfs` on the block device `source` stands for, the
-/// others from nothing; `read_only` mounts a disk's filesystem so. A
-/// Btrfs that Radix cannot write yet, or an exFAT with two tables, fails
-/// a writable mount with `NotSupported` (ADRs 0130 and 0140), and mounts
-/// read-only.
-pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs::Result<Made> {
+/// others from nothing, mounted as `flags` say. A Btrfs that Radix cannot
+/// write yet, or an exFAT with two tables, fails a writable mount with
+/// `NotSupported` (ADRs 0130 and 0140), and mounts read-only.
+pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Result<Made> {
+    let Flags { read_only, compress } = flags;
     use core::fmt::Write;
     let mut name = radix_klog::TextBuf::<32>::new();
     let fs: FsRef = match kind {
@@ -535,7 +544,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, read_only: bool) -> radix_vfs:
             match kind {
                 "fat" => mount_fat(device, read_only)?,
                 "exfat" => mount_exfat(device, read_only)?,
-                _ => mount_btrfs(device, read_only)?,
+                _ => mount_btrfs(device, read_only, compress)?,
             }
         }
         "proc" => procfs::make()?,
@@ -566,11 +575,17 @@ fn mount_exfat(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Re
 
 /// Mounts the Btrfs filesystem on `device` ([`mount_fat`]).
 #[inline(never)]
-fn mount_btrfs(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+fn mount_btrfs(
+    device: radix_block::DeviceRef,
+    read_only: bool,
+    compress: bool,
+) -> radix_vfs::Result<FsRef> {
     if read_only {
         fs_ref(radix_btrfs::BtrfsFs::mount(device)?)
     } else {
-        fs_ref(radix_btrfs::BtrfsFs::mount_writable(device)?)
+        let fs = radix_btrfs::BtrfsFs::mount_writable(device)?;
+        fs.set_compress(compress);
+        fs_ref(fs)
     }
 }
 

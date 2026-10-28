@@ -21,6 +21,11 @@ pub mod flags {
     /// The file's data is written in place; such files are made with
     /// `NODATASUM` too.
     pub const NODATACOW: u64 = 1 << 1;
+    /// The file's data is never compressed (`chattr +m`).
+    pub const NOCOMPRESS: u64 = 1 << 3;
+    /// The file's data is compressed, whatever the mount says
+    /// (`chattr +c`).
+    pub const COMPRESS: u64 = 1 << 11;
 }
 
 /// The file type bits of a mode, and the types, as POSIX numbers them.

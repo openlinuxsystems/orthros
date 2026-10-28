@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -37,7 +37,11 @@ the services that _directory_ describes instead of
 _/system/settings/spark/services_, with or without a program: the *spark-oom*
 boot test points it at _/system/tests/services_. *--no-volumes*, before
 the rest, leaves every disk's filesystems unmounted, for the disk check
-(*ob image --disk-check*), which writes over a whole disk.
+(*ob image --disk-check*), which writes over a whole disk. *--compress*
+_disk_, before the rest and as often as needed, mounts the Btrfs of the
+device _disk_ (such as *vdb* or *nvme0n1p2*) to compress the data written
+to it with zstd, as Linux's *compress=zstd:1* mount option does; other
+disks are written as they are.
 
 # STARTING
 
@@ -104,7 +108,8 @@ Init: /system/commands/spark is process 1
   at _/volumes/_*name*, read-write, or read-only when the device is or
   when the kernel refuses to write it (*read_only* from the disk, or
   *invalid_argument* for what Radix does not write yet: an exFAT with two
-  tables, or a Btrfs feature). FAT and exFAT are tried first, in that
+  tables, or a Btrfs feature). A Btrfs named with *--compress* compresses
+  what is written to it. FAT and exFAT are tried first, in that
   order, as *mkfs.btrfs* clears the sectors they start in while
   *mkfs.fat* and *mkfs.exfat* may leave an older Btrfs superblock. A
   device that holds none of them is left alone, and so is every device

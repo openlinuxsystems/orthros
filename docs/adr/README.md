@@ -145,4 +145,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0131](0131-btrfs-makes-chunks-as-it-fills-and-reserves-room-before-a-change.md) | Btrfs makes chunks as it fills, and reserves room before a change | Accepted |
 | [0132](0132-btrfs-reads-ahead-in-runs-and-is-benched-against-linuxs-btrfs.md) | Btrfs reads ahead in runs, and is benched against Linux's Btrfs | Accepted |
 | [0133](0133-btrfs-uncompresses-a-runs-extents-on-two-cpus-through-the-kernels-join.md) | Btrfs uncompresses a run's extents on two CPUs, through the kernel's `join` | Accepted |
+| [0134](0134-btrfs-compresses-writes-with-zstd-level-1-on-the-disks-that-ask-for-it.md) | Btrfs compresses writes with zstd level 1 on the disks that ask for it | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |

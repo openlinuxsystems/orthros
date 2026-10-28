@@ -84,7 +84,7 @@ pub(super) fn btrfs_check(image: &[u8]) -> (bool, String) {
 
 /// Writes `image` to `path`, leaving its zeros as holes: most of a
 /// filesystem these tests write is empty.
-fn write_sparse(path: &std::path::Path, image: &[u8]) {
+pub(super) fn write_sparse(path: &std::path::Path, image: &[u8]) {
     use std::io::{Seek, SeekFrom, Write};
     let mut file = std::fs::File::create(path).unwrap();
     file.set_len(image.len() as u64).unwrap();

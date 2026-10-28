@@ -24,6 +24,7 @@ use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 use super::files::{contents, mount, noise};
 use super::write::{
     CrashDisk, Op, SIZE, assert_checks, btrfs_check, image_of, mkfs_empty, mkfs_sized, writable,
+    write_sparse,
 };
 use super::{XorShift, scratch, tool};
 use crate::files::{ORPHAN_ITEM, object};
@@ -792,4 +793,85 @@ fn a_full_filesystem_fails_the_write_not_the_sync_and_empties() {
 #[test]
 fn a_full_mixed_filesystem_keeps_room_for_its_metadata() {
     full(&["--mixed"]);
+}
+
+/// `len` bytes of text, the `n`th: words a xorshift generator picks, which
+/// zstd compresses about as much as prose.
+fn text(n: u64, len: usize) -> Vec<u8> {
+    const WORDS: &[&str] = &[
+        "the", "of", "and", "to", "a", "in", "is", "it", "that", "for", "on", "was", "with",
+        "file", "disk", "data", "block", "tree", "page", "read", "write", "copy", "space",
+        "kernel", "memory", "process", "every", "when", "where", "time", "first", "last",
+    ];
+    let mut rng = XorShift(0x2545_f491_4f6c_dd1d ^ n.wrapping_mul(0x9e37_79b9));
+    let mut out = Vec::with_capacity(len + 16);
+    while out.len() < len {
+        let word = WORDS[rng.next() as usize % WORDS.len()];
+        out.extend_from_slice(word.as_bytes());
+        out.push(if rng.next().is_multiple_of(12) { b'\n' } else { b' ' });
+    }
+    out.truncate(len);
+    out
+}
+
+#[test]
+fn files_written_compressed_read_back_and_linux_restores_them() {
+    let disk = writable(&mkfs_empty(&[]));
+    let fs = mount_rw(&disk);
+    fs.set_compress(true);
+    let free = fs.info().free;
+    let root = fs.root();
+    let mut model = Model::new();
+    let mut logical = 0;
+    // Around the sector and the 128 KiB of an extent; noise, which stays
+    // as it is; and noise followed by text.
+    let mut mixed = noise(9, 200_000);
+    mixed.extend(text(10, 500_000));
+    let files: Vec<(String, Vec<u8>)> = [3000, 5000, 131_072, 131_073, 300_000, 1_048_579]
+        .into_iter()
+        .map(|len| (format!("text-{len}"), text(len as u64, len)))
+        .chain([("noise".to_string(), noise(7, 300_000)), ("mixed".to_string(), mixed)])
+        .collect();
+    for (name, data) in &files {
+        let file = root.create(name, Kind::File).unwrap();
+        put(&file, 0, data);
+        model.insert(format!("/{name}"), Thing::File(data.clone()));
+        logical += data.len() as u64;
+    }
+    synced(&fs, &disk, &model, "written");
+    let used = (free - fs.info().free) * 4096;
+    assert!(used < logical * 3 / 5, "{used} bytes taken for {logical}");
+    // Rewrites and cuts inside compressed extents keep every byte.
+    let file = root.lookup("text-1048579").unwrap();
+    let patch = noise(11, 70_000);
+    put(&file, 200_000, &patch);
+    put_model(&mut model, "/text-1048579", 200_000, &patch);
+    file.set_size(600_001).unwrap();
+    let Some(Thing::File(bytes)) = model.get_mut("/text-1048579") else { unreachable!() };
+    bytes.truncate(600_001);
+    synced(&fs, &disk, &model, "rewritten");
+    // The superblock says zstd is used, and Linux's own decoder, in
+    // `btrfs restore`, gives every file back.
+    let image = image_of(&disk, (disk.info().sectors * radix_block::SECTOR) as usize);
+    let features = u64::from_le_bytes(image[0x10000 + 0xbc..0x10000 + 0xc4].try_into().unwrap());
+    assert_ne!(features & crate::superblock::incompat::COMPRESS_ZSTD, 0);
+    let path = scratch("restore-image");
+    write_sparse(&path, &image);
+    let out_dir = scratch("restored");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let out = Command::new(tool("btrfs"))
+        .arg("restore")
+        .arg(&path)
+        .arg(&out_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "btrfs restore: {}", String::from_utf8_lossy(&out.stderr));
+    for (path_in, thing) in &model {
+        let Thing::File(data) = thing else { continue };
+        let got = std::fs::read(out_dir.join(path_in.trim_start_matches('/'))).unwrap();
+        assert!(got == *data, "{path_in} restores as other bytes");
+    }
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&out_dir);
 }

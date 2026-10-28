@@ -176,11 +176,23 @@ fn run() -> Option<Supervisor> {
     seed_settings(&root);
     let mut words = args().skip(1).peekable();
     // `--no-volumes` leaves every disk's filesystems unmounted, for the
-    // disk check, which writes over a whole disk (ADR 0124).
-    if words.next_if_eq(&"--no-volumes").is_some() {
-        println!("spark: leaving every disk's filesystems unmounted");
+    // disk check, which writes over a whole disk (ADR 0124); `--compress
+    // <disk>` has the Btrfs of a disk compress what is written to it
+    // (ADR 0134).
+    let (mut volumes, mut compress) = (true, Vec::new());
+    loop {
+        if words.next_if_eq(&"--no-volumes").is_some() {
+            volumes = false;
+        } else if words.next_if_eq(&"--compress").is_some() {
+            compress.extend(words.next());
+        } else {
+            break;
+        }
+    }
+    if volumes {
+        mount_disks(&root, &compress);
     } else {
-        mount_disks(&root);
+        println!("spark: leaving every disk's filesystems unmounted");
     }
     let Ok(supervised) = Dir::at(root.slot()) else { return None };
     let mut supervisor = Supervisor::new(supervised);
@@ -438,7 +450,7 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
 
 /// Mounts the FAT, exFAT or Btrfs filesystem of each disk partition, or of
 /// each disk with no partitions, at `/volumes/<name>`.
-fn mount_disks(root: &Dir) {
+fn mount_disks(root: &Dir, compress: &[&str]) {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
             Ok(entries) => entries
@@ -462,7 +474,7 @@ fn mount_disks(root: &Dir) {
         })
     };
     for name in devices.iter().filter(|name| !partitioned(name)) {
-        mount_disk(root, name);
+        mount_disk(root, name, compress.contains(&name.as_str()));
     }
 }
 
@@ -473,8 +485,9 @@ fn mount_disks(root: &Dir) {
 /// `mkfs.btrfs` clears where they keep their boot sectors, but `mkfs.fat`
 /// and `mkfs.exfat` can leave an older Btrfs superblock behind, so theirs
 /// is the newer. FAT and exFAT each take the other's boot sector for
-/// none of theirs.
-fn mount_disk(root: &Dir, name: &str) {
+/// none of theirs. A Btrfs mounted to write compresses its data if
+/// `compress`.
+fn mount_disk(root: &Dir, name: &str, compress: bool) {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
         Ok(device) => (device, MountFlags::NONE),
@@ -490,7 +503,7 @@ fn mount_disk(root: &Dir, name: &str) {
     if let Err(err) = root.make_dir(&at) {
         return println!("spark: cannot make /{at}: {err}");
     }
-    let mount = |kind, said| match root.mount(&at, kind, Some(&device), flags) {
+    let mount = |kind, said, flags: MountFlags| match root.mount(&at, kind, Some(&device), flags) {
         // A disk that refuses writes fails with read_only, and what Radix
         // does not write yet is an argument it does not take, as on Linux
         // (EROFS, EINVAL).
@@ -504,16 +517,21 @@ fn mount_disk(root: &Dir, name: &str) {
         }
         done => done.map(|()| (said, flags)),
     };
-    let mut mounted = mount(FilesystemKind::Fat, "FAT");
-    for (kind, said) in [(FilesystemKind::Exfat, "exFAT"), (FilesystemKind::Btrfs, "Btrfs")] {
+    let packed = if compress { flags.union(MountFlags::COMPRESS) } else { flags };
+    let mut mounted = mount(FilesystemKind::Fat, "FAT", flags);
+    for (kind, said, flags) in
+        [(FilesystemKind::Exfat, "exFAT", flags), (FilesystemKind::Btrfs, "Btrfs", packed)]
+    {
         if matches!(mounted, Err(err) if err.is(FileError::UnknownFilesystem)) {
-            mounted = mount(kind, said);
+            mounted = mount(kind, said, flags);
         }
     }
     match mounted {
         Ok((kind, flags)) => {
             let ro = if flags.contains(MountFlags::READ_ONLY) { ", read-only" } else { "" };
-            println!("spark: mounted the {kind} filesystem of {name} at /{at}{ro}");
+            let zstd =
+                if flags.contains(MountFlags::COMPRESS) { ", compressed (zstd)" } else { "" };
+            println!("spark: mounted the {kind} filesystem of {name} at /{at}{ro}{zstd}");
         }
         Err(err) => {
             let _ = root.remove(&at);

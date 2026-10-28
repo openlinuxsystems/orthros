@@ -477,6 +477,7 @@ pub fn directory_method(
             let a = directory::MountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
             let read_only = a.flags.contains(MountFlags::READ_ONLY);
+            let compress = a.flags.contains(MountFlags::COMPRESS);
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let mut kind = Path::Empty;
@@ -491,8 +492,12 @@ pub fn directory_method(
             } else {
                 None
             };
-            let made = fs::make(kind, source.as_ref().map(|s| &s.at.node), read_only)
-                .map_err(fs::status)?;
+            if compress && kind != "btrfs" {
+                return Err(Kernel::InvalidArgument.status(3));
+            }
+            let flags = fs::Flags { read_only, compress };
+            let made =
+                fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
             let mount = vfs()?
                 .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
                 .map_err(fs::status)?;

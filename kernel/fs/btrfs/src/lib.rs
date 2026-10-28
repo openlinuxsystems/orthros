@@ -54,6 +54,7 @@ pub mod inflate;
 pub mod inode;
 pub mod lzo;
 pub mod node;
+mod pack;
 mod sha256;
 pub mod space;
 pub mod superblock;

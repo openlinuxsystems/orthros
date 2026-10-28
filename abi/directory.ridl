@@ -116,6 +116,9 @@ flags PathFlags: u32 {
 flags MountFlags: u32 {
     /// Refuse every change.
     read_only = 0;
+    /// Compress the data written with zstd, as Linux's `compress=zstd:1`
+    /// does: `btrfs` only.
+    compress = 1;
 }
 
 /// An entry `list` writes: this header, then the name's bytes, then
@@ -191,7 +194,8 @@ interface directory = 0x000b version 4 {
     /// directory stacks on the first. Needs the control right, and the read
     /// right on `source` (and the write right unless `flags` has
     /// read_only). A Btrfs that Radix cannot write yet fails with
-    /// invalid_argument unless `flags` has read_only, as on Linux.
+    /// invalid_argument unless `flags` has read_only, as on Linux, and so
+    /// does compress for a filesystem other than `btrfs`.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,

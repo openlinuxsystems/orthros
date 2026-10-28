@@ -24,6 +24,8 @@ use radix_vfs::{Error, Result};
 
 use crate::format::{u16_at, u32_at, u64_at};
 
+pub mod encode;
+
 /// The magic number that starts a frame.
 const MAGIC: u32 = 0xFD2F_B528;
 

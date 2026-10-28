@@ -174,7 +174,7 @@ dirty.
   zeroes the rest of the last page, and then has the backing free the
   space (`Backing::truncate`).
 - `sync` writes the dirty pages back through the backing, each run of up
-  to `WRITE_RUN` (32) contiguous ones in one call (`Backing::write_pages`,
+  to `WRITE_RUN` (64) contiguous ones in one call (`Backing::write_pages`,
   which writes them one at a time unless the filesystem does better); a
   page whose write fails stays dirty.
 - `shrink` drops clean pages.
@@ -408,7 +408,9 @@ Howard Hinnant's civil-date algorithms.
 mount, 10b.3 its compressed extents. Phase 10c.1 writes its trees by
 copying on write, in transactions (ADR 0129), and 10c.1b its files
 through them (ADR 0130); 10c.1c makes chunks as it fills and reserves
-room before a change (ADR 0131), and the kernel mounts it writable.
+room before a change (ADR 0131), and the kernel mounts it writable;
+10c.2b compresses what it writes with zstd on the mounts that ask
+(ADR 0134).
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -526,6 +528,19 @@ room before a change (ADR 0131), and the kernel mounts it writable.
   it rather than from the tree. A commit is due 30
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
+- `zstd::encode` compresses (ADR 0134), modelled on zstd's level 1:
+  a table of 2^13 positions hashed on six bytes, the last two offsets
+  tried as the reference does, one block a frame, Huffman-coded literals
+  when no byte is above 127, and the sequences' tables picked as the
+  reference picks them; its buffers are allocated with it. On a mount
+  made with `compress`, or for a file with the `COMPRESS` flag (never
+  `NOCOMPRESS` or `NODATASUM`), write-back compresses a run in chunks of
+  up to 128 KiB of the file's bytes, through two `pack::Packer`s, the
+  second chunk on another CPU (`radix_vfs::join`), before it takes the
+  transaction lock; a chunk whose frame saves a sector is written as a
+  compressed extent, the others as they are. The packers are made at the
+  first compressed write and dropped by the shrinker; the superblock
+  gains `COMPRESS_ZSTD` at the commit of the first compressed extent.
 - `grow` makes a chunk when a kind (data, metadata or the chunk tree)
   has no room, in memory at once and on the disk at the commit (ADR
   0131): Linux's sizes, the first free range of the device from 1 MiB,
@@ -592,7 +607,8 @@ makes the links with Unix's names (`/dev`, `/proc`, `/sys`, `/run`,
 keeps them out of listings (ADR 0113); and mounts the FAT filesystem of
 each disk or partition in `/devices` at `/volumes/<name>`, or else its
 Btrfs filesystem, read-only when the device is (or, for Btrfs, when it
-uses a feature Radix does not write yet). A disk with
+uses a feature Radix does not write yet), and for Btrfs compressing
+what is written when `--compress` names the disk (ADR 0134). A disk with
 a partition table is not mounted whole.
 It then starts the program its arguments name with the root, read and
 write, or since Phase 9 the services.
@@ -711,9 +727,10 @@ host, and reads everything back after a second boot.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
-  with `no-holes`, without snapshots, reflinks, quotas or compression
-  (10c.2). Its compressed reads take one workspace in turn, where Linux
-  keeps one per CPU at most. Empty block groups stay, where Linux removes
+  with `no-holes`, without snapshots, reflinks or quotas (10c.2), and
+  compresses only with zstd, never small files inline, with literals of
+  bytes above 127 left raw. Its compressed reads take one workspace in
+  turn, where Linux keeps one per CPU at most. Empty block groups stay, where Linux removes
   them in the background.
   Its tree blocks are read through the sector cache, a page at a time,
   so a block of 16 KiB takes four requests and is held twice, in the
