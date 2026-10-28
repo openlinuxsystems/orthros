@@ -12,10 +12,11 @@
 //! read fetches only the blocks it lacks; a write of whole blocks fetches
 //! nothing first; and
 //! [`BlockCache::sync`] writes only the dirty sectors, in runs, then
-//! flushes the device. So writes stay in memory until the filesystem
-//! syncs (on the writeback thread's schedule, or when asked), and
-//! [`BlockCache::discard`] can forget sectors exactly, without touching
-//! their neighbours in the same page: a filesystem discards a
+//! flushes the device; it looks only at the pages noted dirty, not at
+//! every page the cache holds. So writes stay in memory until the
+//! filesystem syncs (on the writeback thread's schedule, or when asked),
+//! and [`BlockCache::discard`] can forget sectors exactly, without
+//! touching their neighbours in the same page: a filesystem discards a
 //! directory's clusters when it frees them, so that stale metadata is
 //! never written over file data later put there.
 //!
@@ -24,7 +25,7 @@
 
 use radix_sync::Mutex;
 
-use crate::mem::CachePage;
+use crate::mem::{CachePage, KVec};
 use crate::pagemap::PageMap;
 use crate::{DeviceRef, Error, PAGE_SIZE, SECTOR, SECTORS_PER_PAGE, Segment, SegmentMut};
 
@@ -33,6 +34,24 @@ pub const SOFT_LIMIT: usize = 4096;
 
 /// Sectors of a page, as bits of a mask.
 type Mask = u8;
+
+/// The most runs of sectors [`BlockCache::sync`] writes in one request.
+pub const MAX_RUNS: usize = 16;
+
+/// Runs of dirty sectors that follow one another on the device, for one
+/// request: page, first sector in it, and how many.
+struct Request {
+    runs: [(u64, u64, u64); MAX_RUNS],
+    len: usize,
+}
+
+impl Request {
+    /// The sector after its last run.
+    fn end(&self) -> u64 {
+        let (index, first, count) = self.runs[self.len - 1];
+        index * SECTORS_PER_PAGE + first + count
+    }
+}
 
 struct Block {
     page: CachePage,
@@ -46,6 +65,10 @@ struct State {
     blocks: PageMap<Block>,
     /// Pages with dirty sectors.
     dirty: usize,
+    /// Every page with dirty sectors, and maybe some made clean since, in
+    /// no order: what [`BlockCache::sync`] looks at, rather than every
+    /// page the cache holds.
+    dirty_pages: KVec<u64>,
 }
 
 /// A cache of a device's sectors.
@@ -117,7 +140,11 @@ impl BlockCache {
             device,
             sectors: info.sectors,
             unit: info.unit(),
-            state: Mutex::new(State { blocks: PageMap::new(), dirty: 0 }),
+            state: Mutex::new(State {
+                blocks: PageMap::new(),
+                dirty: 0,
+                dirty_pages: crate::mem::vec(),
+            }),
         }
     }
 
@@ -208,7 +235,7 @@ impl BlockCache {
             bytes.copy_from_slice(&data[done..done + bytes.len()]);
         })?;
         let end = offset + data.len() as u64;
-        let State { blocks, dirty } = &mut *state;
+        let State { blocks, dirty, .. } = &mut *state;
         let mut at = offset;
         while at < end {
             let index = at / PAGE_SIZE as u64;
@@ -262,6 +289,9 @@ impl BlockCache {
             return Err(Error::ReadOnly);
         }
         let end = self.range(offset, len)?;
+        // Room to note each page that becomes dirty, before any does.
+        let pages = (end.div_ceil(PAGE_SIZE as u64)).saturating_sub(offset / PAGE_SIZE as u64);
+        state.dirty_pages.try_reserve(pages as usize).map_err(|_| Error::NoMemory)?;
         let mut at = offset;
         while at < end {
             let index = at / PAGE_SIZE as u64;
@@ -277,6 +307,8 @@ impl BlockCache {
             block.dirty |= touched;
             if !was_dirty {
                 state.dirty += 1;
+                // Reserved above.
+                let _ = state.dirty_pages.push_within_capacity(index);
             }
             at += n as u64;
         }
@@ -313,41 +345,87 @@ impl BlockCache {
         self.state.lock().dirty > 0
     }
 
-    /// Writes every dirty sector to the device, then flushes it.
+    /// Writes every dirty sector to the device, then flushes it. Runs of
+    /// dirty sectors that follow one another, across pages, go in one
+    /// request, of up to the device's [`MAX_RUNS`] segments: a filesystem's
+    /// commit writes its blocks of several pages, mostly side by side, and
+    /// each request waits for the device.
     pub fn sync(&self) -> Result<(), Error> {
         {
             let mut state = self.state.lock();
-            let State { blocks, dirty } = &mut *state;
+            let max = self.device.info().max_segments.clamp(1, MAX_RUNS);
+            let mut request = Request { runs: [(0, 0, 0); MAX_RUNS], len: 0 };
             let mut failed = None;
-            let mut index = 0;
-            while let Some((found, _)) = blocks.next(index) {
-                index = found + 1;
-                let Some(block) = blocks.get_mut(found) else { break };
-                if block.dirty == 0 {
-                    continue;
-                }
-                let mut written = 0;
+            let mut pages = core::mem::replace(&mut state.dirty_pages, crate::mem::vec());
+            pages.sort_unstable();
+            pages.dedup();
+            for &index in &pages {
+                let Some(block) = state.blocks.get(index) else { continue };
                 for (first, count) in runs(block.dirty) {
-                    let segment = Segment {
-                        page: &block.page,
-                        offset: (first * SECTOR) as usize,
-                        len: (count * SECTOR) as usize,
-                    };
-                    match self.device.write(found * SECTORS_PER_PAGE + first, &[segment]) {
-                        Ok(()) => written |= run_mask(first, count),
-                        Err(err) => failed = Some(err),
+                    let sector = index * SECTORS_PER_PAGE + first;
+                    if request.len == max || (request.len > 0 && request.end() != sector) {
+                        self.write_request(&mut state, &mut request, &mut failed);
                     }
-                }
-                block.dirty &= !written;
-                if block.dirty == 0 {
-                    *dirty -= 1;
+                    request.runs[request.len] = (index, first, count);
+                    request.len += 1;
                 }
             }
+            self.write_request(&mut state, &mut request, &mut failed);
+            // What failed stays dirty, to be tried again.
+            let blocks = &state.blocks;
+            pages.retain(|&index| blocks.get(index).is_some_and(|block| block.dirty != 0));
+            state.dirty_pages = pages;
             if let Some(err) = failed {
                 return Err(err);
             }
         }
         self.device.flush()
+    }
+
+    /// Writes the runs of `request` in one request, marks them clean if
+    /// it succeeds, or else keeps its error in `failed`; empties it.
+    #[inline(never)]
+    fn write_request(&self, state: &mut State, request: &mut Request, failed: &mut Option<Error>) {
+        let n = request.len;
+        if n == 0 {
+            return;
+        }
+        request.len = 0;
+        let runs = &request.runs[..n];
+        let written = {
+            let blocks = &state.blocks;
+            // The runs were found in the map, with the cache locked since.
+            let Some(block) = blocks.get(runs[0].0) else {
+                *failed = Some(Error::Io);
+                return;
+            };
+            if runs.iter().any(|&(index, _, _)| blocks.get(index).is_none()) {
+                *failed = Some(Error::Io);
+                return;
+            }
+            let segments: [Segment<'_>; MAX_RUNS] = core::array::from_fn(|i| {
+                let (index, first, count) = runs[i.min(n - 1)];
+                Segment {
+                    page: blocks.get(index).map_or(&block.page, |b| &b.page),
+                    offset: (first * SECTOR) as usize,
+                    len: (count * SECTOR) as usize,
+                }
+            });
+            let (index, first, _) = runs[0];
+            self.device.write(index * SECTORS_PER_PAGE + first, &segments[..n])
+        };
+        if let Err(err) = written {
+            *failed = Some(err);
+            return;
+        }
+        for &(index, first, count) in runs {
+            let Some(block) = state.blocks.get_mut(index) else { continue };
+            let was_dirty = block.dirty != 0;
+            block.dirty &= !run_mask(first, count);
+            if was_dirty && block.dirty == 0 {
+                state.dirty -= 1;
+            }
+        }
     }
 
     /// Drops up to `max` clean pages. Returns how many went.

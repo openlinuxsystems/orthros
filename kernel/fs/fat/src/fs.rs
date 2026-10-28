@@ -103,15 +103,7 @@ impl FatFs {
         if geo.sector_size < info.logical_block {
             return Err(Error::NotSupported);
         }
-        let inner = mem::arc(Inner {
-            geo,
-            cache: BlockCache::new(device),
-            read_only: read_only || info.read_only,
-            ns: Mutex::new(Names::new()),
-            space: Mutex::new(Space { free: None, hint: 2, fsinfo_dirty: false }),
-            nodes: Mutex::new(mem::vec()),
-            dirty: Mutex::new(mem::vec()),
-        })?;
+        let inner = Inner::new(geo, device, read_only || info.read_only)?;
         inner.read_fsinfo()?;
         FatFs::with_root(inner)
     }
@@ -212,6 +204,21 @@ impl FileSystem for FatFs {
 }
 
 impl Inner {
+    /// The volume of `geo` on `device`, its cache empty. Its own frame:
+    /// [`FatFs::mount`]'s holds the boot sector meanwhile.
+    #[inline(never)]
+    fn new(geo: Geometry, device: DeviceRef, read_only: bool) -> Result<KArc<Inner>> {
+        Ok(mem::arc(Inner {
+            geo,
+            cache: BlockCache::new(device),
+            read_only,
+            ns: Mutex::new(Names::new()),
+            space: Mutex::new(Space { free: None, hint: 2, fsinfo_dirty: false }),
+            nodes: Mutex::new(mem::vec()),
+            dirty: Mutex::new(mem::vec()),
+        })?)
+    }
+
     /// Table entry `n` (of the first table).
     pub(crate) fn entry(&self, n: u32) -> Result<u32> {
         let width = self.geo.width;

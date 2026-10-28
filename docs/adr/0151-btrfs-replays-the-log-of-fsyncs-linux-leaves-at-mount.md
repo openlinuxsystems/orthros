@@ -91,6 +91,13 @@ Linux's log on the same `fsync`.
   read-only mount too, until Linux mounts it once.
 - Directory entries that name another subvolume are left as they are:
   Linux commits when one is made or taken, so its log never holds them.
+- The row's first run in CI lost, at 5.27 times Linux: the commit was
+  not the cost, the block cache was. It wrote a commit's tree blocks a
+  page per request, waiting for each, and looked at every page it held
+  to find the dirty ones. It now writes the runs of dirty sectors that
+  follow one another in one request, and notes its dirty pages, so a
+  4 KiB `fsync` waits on the disk 9 times rather than about 70, and its
+  kernel work fell from about 1.5 to 0.57 million instructions.
 - A rename into another directory followed by an `fsync` commits on
   Linux 6.8, so the fixture cannot hold one; the replay links and
   unlinks such names as it does any other.
