@@ -104,9 +104,20 @@ impl Block {
         u32_at(&self.bytes, self.entry(slot) + Key::SIZE + 4) as usize
     }
 
-    fn set_data_at(&mut self, slot: usize, offset: usize) {
-        let at = self.entry(slot) + Key::SIZE;
-        put_u32(&mut self.bytes, at, offset as u32);
+    /// Sets the data offset of each item from `slot` to `end` of a leaf
+    /// to `f` of it, as an edit moves their data: in one pass over their
+    /// headers, without a bounds check for each.
+    fn move_data_at(&mut self, slot: usize, end: usize, f: impl Fn(usize) -> usize) {
+        if slot >= end {
+            return;
+        }
+        let (from, to) = (self.entry(slot), self.entry(end));
+        let Some(headers) = self.bytes.get_mut(from..to) else { return };
+        for header in headers.as_chunks_mut::<ITEM_SIZE>().0 {
+            let at = &mut header[Key::SIZE..Key::SIZE + 4];
+            let offset = u32::from_le_bytes([at[0], at[1], at[2], at[3]]) as usize;
+            at.copy_from_slice(&(f(offset) as u32).to_le_bytes());
+        }
     }
 
     /// Where the data of item `slot - 1` starts: the end of item `slot`'s.
@@ -158,10 +169,7 @@ impl Block {
         // The data of the items from `slot` on moves down by `size`.
         let h = HEADER_SIZE;
         self.bytes.copy_within(h + end..h + top, h + end - size);
-        for s in slot..n {
-            let offset = self.data_at(s);
-            self.set_data_at(s, offset - size);
-        }
+        self.move_data_at(slot, n, |offset| offset - size);
         let from = self.entry(slot);
         let to = self.entry(n);
         self.bytes.copy_within(from..to, from + ITEM_SIZE);
@@ -186,10 +194,7 @@ impl Block {
         let end = self.top(n);
         let h = HEADER_SIZE;
         self.bytes.copy_within(h + end..h + low, h + end + gone);
-        for s in slot + count..n {
-            let offset = self.data_at(s);
-            self.set_data_at(s, offset + gone);
-        }
+        self.move_data_at(slot + count, n, |offset| offset + gone);
         let from = self.entry(slot + count);
         let to = self.entry(n);
         let dst = self.entry(slot);
@@ -211,19 +216,13 @@ impl Block {
             // This item's data and the data after it move down; the item
             // then ends where it ended.
             self.bytes.copy_within(h + end..h + at + old, h + end - more);
-            for s in slot..n {
-                let offset = self.data_at(s);
-                self.set_data_at(s, offset - more);
-            }
+            self.move_data_at(slot, n, |offset| offset - more);
             let start = h + at - more + old;
             self.bytes[start..start + more].fill(0);
         } else {
             let less = old - size;
             self.bytes.copy_within(h + end..h + at + size, h + end + less);
-            for s in slot..n {
-                let offset = self.data_at(s);
-                self.set_data_at(s, offset + less);
-            }
+            self.move_data_at(slot, n, |offset| offset + less);
         }
         let entry = self.entry(slot);
         put_u32(&mut self.bytes, entry + Key::SIZE + 4, size as u32);

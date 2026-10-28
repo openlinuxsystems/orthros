@@ -147,6 +147,12 @@ impl BtrfsNode {
 
     /// Reads its inode item again, after a change.
     fn reload(&self, files: &Files<'_>) -> Result<()> {
+        if files.subvol == self.subvol
+            && let Some(inode) = files.changed(self.ino)
+        {
+            *self.inode.lock() = inode;
+            return Ok(());
+        }
         let key = Key::new(self.ino, item::INODE_ITEM, 0);
         let data = files.get(self.subvol, &key)?.ok_or(Error::Corrupt)?;
         *self.inode.lock() = Inode::read(&data)?;
@@ -847,7 +853,8 @@ impl BtrfsNode {
             if live {
                 files.add_orphan(ino)?;
             } else {
-                files.free_inode(ino)?;
+                // No orphan item: it had a name until now.
+                files.free_inode(ino, false)?;
             }
         }
         Ok(nlink == 0)

@@ -98,6 +98,10 @@ fn walk(dir: &NodeRef, prefix: &str, out: &mut Model) {
         true
     })
     .unwrap();
+    // A directory's size is its names' length twice, as Btrfs counts it:
+    // the node's, after the changes, as the item has it.
+    let named: usize = names.iter().map(|(name, _)| name.len()).sum();
+    assert_eq!(dir.stat().size, 2 * named as u64, "{prefix}/");
     for (name, kind) in names {
         let path = format!("{prefix}/{name}");
         let node = dir.lookup(&name).unwrap();
