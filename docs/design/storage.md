@@ -199,7 +199,10 @@ disk of 4 KiB sectors says so in its description (`logical_block`), and
 each request to it must start and end on one of them. A
 request reads or writes sectors from one place into a list of
 `Segment`s, each a range of a page, and blocks the calling thread until
-the device is done. `partition` reads MBR and GPT tables (the GPT's CRC32
+the device is done. `write_all` carries out several writes at once: a
+disk driver has them in flight together and the device told of them
+together, so they cost one wait, as Linux's plugged bios do; a cache's
+sync and a filesystem's superblocks go that way (ADR 0151). `partition` reads MBR and GPT tables (the GPT's CRC32
 checked, the backup header when the primary is bad) and `Slice` is a
 partition as a device of its own. Tables count in the disk's own
 sectors, as their specifications say, and partitions in 512-byte ones.

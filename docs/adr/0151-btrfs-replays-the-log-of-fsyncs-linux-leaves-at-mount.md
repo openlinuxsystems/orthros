@@ -97,7 +97,14 @@ Linux's log on the same `fsync`.
   to find the dirty ones. It now writes the runs of dirty sectors that
   follow one another in one request, and notes its dirty pages, so a
   4 KiB `fsync` waits on the disk 9 times rather than about 70, and its
-  kernel work fell from about 1.5 to 0.57 million instructions.
+  kernel work fell from about 1.5 to 0.57 million instructions. That
+  made 1.45 times Linux: each request still waited for the one before.
+  A disk now takes several writes at once (`BlockDevice::write_all`,
+  the device told of them together, as Linux plugs its bios), so a
+  commit's blocks cost one wait, and the superblock goes with its copies
+  in another, as Linux's `write_all_supers` sends them: the data, the
+  blocks, a flush, the superblocks and a flush, five waits, where
+  Linux's log takes four.
 - A rename into another directory followed by an `fsync` commits on
   Linux 6.8, so the fixture cannot hold one; the replay links and
   unlinks such names as it does any other.

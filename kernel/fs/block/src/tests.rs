@@ -587,6 +587,65 @@ fn sync_writes_runs_that_follow_one_another_in_one_request() {
     assert!(raw[..512].iter().all(|&b| b == 8));
 }
 
+/// A disk that notes how many writes each [`BlockDevice::write_all`] it is
+/// asked for has, and which are to be durable.
+struct Batches {
+    disk: Arc<RamDisk>,
+    calls: std::sync::Mutex<Vec<Vec<bool>>>,
+}
+
+impl BlockDevice for Batches {
+    fn info(&self) -> crate::Info {
+        self.disk.info()
+    }
+
+    fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
+        self.disk.read(sector, segments)
+    }
+
+    fn write(&self, sector: u64, segments: &[crate::Segment<'_>]) -> Result<(), Error> {
+        self.disk.write(sector, segments)
+    }
+
+    fn flush(&self) -> Result<(), Error> {
+        self.disk.flush()
+    }
+
+    fn write_all(&self, writes: &[crate::Write<'_>]) -> Result<(), Error> {
+        self.calls.lock().unwrap().push(writes.iter().map(|w| w.through).collect());
+        self.disk.write_all(writes)
+    }
+}
+
+#[test]
+fn a_sync_and_writes_now_go_to_the_disk_at_once() {
+    let disk = Arc::new(RamDisk::new(1024, false));
+    let batches = Arc::new(Batches { disk: disk.clone(), calls: std::sync::Mutex::default() });
+    let device: DeviceRef = batches.clone();
+    let cache = BlockCache::new(device);
+    // Three runs apart, and two side by side: four requests, given at once.
+    cache.fill(0, 512, 1).unwrap();
+    cache.fill(40 * 4096, 4096, 2).unwrap();
+    cache.fill(41 * 4096, 4096, 3).unwrap();
+    cache.fill(80 * 4096, 1024, 4).unwrap();
+    cache.fill(90 * 4096, 512, 5).unwrap();
+    cache.sync().unwrap();
+    assert_eq!(batches.calls.lock().unwrap().as_slice(), [vec![false; 4]]);
+    // A superblock and its copies: the first durable, all at once.
+    let flushes = disk.flushes();
+    cache.write(8 * 4096, &[6u8; 512]).unwrap();
+    let copy = [7u8; 4096];
+    let pieces = [(16 * 4096, &copy[..], true), (50 * 4096, &copy[..], false)];
+    cache.write_now_all(&pieces).unwrap();
+    assert_eq!(batches.calls.lock().unwrap()[1], [true, false]);
+    assert_eq!(disk.flushes(), flushes + 1);
+    let mut raw = [0u8; 4096];
+    disk.dump(50 * 4096, &mut raw);
+    assert_eq!(raw, copy);
+    // What else was dirty stays dirty.
+    assert!(cache.is_dirty());
+}
+
 #[test]
 fn writes_through_and_out_reach_the_disk_alone() {
     let (disk, device) = shared(RamDisk::new(20, false));

@@ -62,7 +62,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::process::{IO_LEVELS, IoClass};
-use radix_block::{BlockDevice, Error, Info, Segment, SegmentMut};
+use radix_block::{BlockDevice, Error, Info, Segment, SegmentMut, Write};
 use radix_hal::{CpuLocal, Timer};
 use radix_klog::{TextBuf, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -666,6 +666,38 @@ impl<C: Controller> Disk<C> {
         Ok(())
     }
 
+    /// Carries out `requests`, up to [`PARTS`] of them in flight at once in
+    /// this CPU's lane, the device told of each window of them together,
+    /// and waits for every one, as [`Disk::request_all`] does its parts.
+    fn request_many(&self, requests: &[Request<'_>]) -> Result<(), Error> {
+        let (lane, rank) = (self.here(), running_rank());
+        let mut result = Ok(());
+        for window in requests.chunks(PARTS) {
+            let mut slots = [0usize; PARTS];
+            let mut issued = 0;
+            for (i, request) in window.iter().enumerate() {
+                match self.issue(lane, rank, None, request, i + 1 < window.len()) {
+                    Ok(slot) => slots[i] = slot,
+                    Err(err) => {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                issued += 1;
+            }
+            self.kick(lane);
+            // The last first: the others have likely ended by then.
+            for (request, &slot) in window.iter().zip(&slots[..issued]).rev() {
+                let settled = self.settle(lane, rank, slot, request);
+                if result.is_ok() {
+                    result = settled;
+                }
+            }
+            result?;
+        }
+        Ok(())
+    }
+
     /// Waits for `request`, in `slot` of `lane`, to end, sending it again
     /// while the device hands it back to go again, up to [`TRIES`] times
     /// in all; frees the slot.
@@ -779,6 +811,16 @@ impl<C: Controller> Volume<C> {
         Volume { disk, target, info }
     }
 
+    /// Flushes after `writes`, done with `result`, if one of them was to
+    /// be durable and the disk has no forced unit access.
+    fn flush_after(&self, writes: &[Write<'_>], result: Result<(), Error>) -> Result<(), Error> {
+        result?;
+        if !self.disk.fua && writes.iter().any(|w| w.through) {
+            return self.flush();
+        }
+        Ok(())
+    }
+
     /// Carries out `op` from `sector` with `data`, as [`Disk::request`].
     fn request(&self, op: Op, sector: u64, data: &[(u64, u32)]) -> Result<(), Error> {
         let unit = self.info.unit();
@@ -875,6 +917,58 @@ impl<C: Controller> BlockDevice for Volume<C> {
         radix_hw::device_barrier();
         let request = Request { op: Op::Write, target: self.target, sector, data: frames, unit };
         self.disk.request_all(&request)
+    }
+
+    /// Has every write in flight at once ([`Disk::request_many`]); one of
+    /// more than [`MAX_SEGMENTS`] goes on its own. Those `through` are
+    /// written with forced unit access, or flushed once all are done.
+    fn write_all(&self, writes: &[Write<'_>]) -> Result<(), Error> {
+        if self.info.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let Info { sectors, max_segments, .. } = self.info;
+        let unit = self.info.unit();
+        let mut count = 0;
+        for write in writes {
+            let lengths = write.segments.iter().map(|s| (s.offset, s.len));
+            radix_block::check(sectors, unit, max_segments, write.sector, lengths)?;
+            count += write.segments.len();
+        }
+        if writes.len() < 2 || writes.iter().any(|w| w.segments.len() > MAX_SEGMENTS) {
+            let mut result = Ok(());
+            for write in writes {
+                let op = if write.through && self.disk.fua { Op::WriteThrough } else { Op::Write };
+                let done = self.write_as(op, write.sector, write.segments);
+                if result.is_ok() {
+                    result = done;
+                }
+            }
+            return self.flush_after(writes, result);
+        }
+        let flags = HEAP.with(Flags::MAY_SLEEP);
+        let mut data = Vec::new_in(flags);
+        data.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
+        let mut requests = Vec::new_in(flags);
+        requests.try_reserve_exact(writes.len()).map_err(|_| Error::NoMemory)?;
+        radix_hw::device_barrier();
+        for segment in writes.iter().flat_map(|w| w.segments) {
+            // Room was made above.
+            let _ = data.push_within_capacity((
+                segment.page.phys() + segment.offset as u64,
+                segment.len as u32,
+            ));
+        }
+        let mut at = 0;
+        for write in writes {
+            let op = if write.through && self.disk.fua { Op::WriteThrough } else { Op::Write };
+            let part = &data[at..at + write.segments.len()];
+            at += write.segments.len();
+            let request =
+                Request { op, target: self.target, sector: write.sector, data: part, unit };
+            let _ = requests.push_within_capacity(request);
+        }
+        let result = self.disk.request_many(&requests);
+        self.flush_after(writes, result)
     }
 
     fn flush(&self) -> Result<(), Error> {
