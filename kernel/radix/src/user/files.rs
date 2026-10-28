@@ -268,6 +268,7 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
         FsKind::Fat => FilesystemKind::Fat,
         FsKind::Btrfs => FilesystemKind::Btrfs,
         FsKind::Exfat => FilesystemKind::Exfat,
+        FsKind::Ext4 => FilesystemKind::Ext4,
         FsKind::Proc => FilesystemKind::Proc,
         FsKind::Sys => FilesystemKind::Sys,
         FsKind::Dev => FilesystemKind::Dev,
@@ -524,7 +525,7 @@ pub fn directory_method(
                 );
                 return answer(label, 0, [0; 8]);
             }
-            let source = if matches!(kind, "fat" | "exfat" | "btrfs") {
+            let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
                 Some(objects::file(cspace, a.source, rw)?.1)
             } else if a.source != 0 {
                 return Err(Kernel::InvalidArgument.status(2));

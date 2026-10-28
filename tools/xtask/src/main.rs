@@ -238,6 +238,11 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    their first data chunk; Linux's btrfs check passes
   btrfs-power-cut  the power is cut while Btrfs files are synced: btrfs
                    check passes, every synced file is whole
+  ext4-write       the storage test on two ext4 disks Linux made; the host
+                   checks them with e2fsck and debugfs, the journal replayed
+  ext4-power-cut   the power is cut while ext4 files are synced: e2fsck
+                   passes after the journal's replay, every synced file is
+                   whole
   root             Dukovo's root on a copy of the image: Spark mounts its
                    subvolumes, and what is written lasts through a reboot
   posix            C programs on mlibc, a Rust std one and the ported

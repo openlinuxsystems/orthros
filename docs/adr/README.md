@@ -150,3 +150,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md) | An NVMe completion head the controller asks for goes to its register at the next completion | Accepted |
 | [0137](0137-the-root-is-the-dukovo-root-partitions-btrfs-subvolumes.md) | The root is the Btrfs subvolumes of a Dukovo root partition | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |
+| [0141](0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md) | ext4 is our own implementation from its documentation, journaling whole blocks at each sync | Accepted |

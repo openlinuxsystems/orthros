@@ -109,6 +109,7 @@ dependencies = [
  "radix-cap",
  "radix-elf",
  "radix-exfat",
+ "radix-ext4",
  "radix-fat",
  "radix-fbcon",
  "radix-hal",
@@ -223,6 +224,17 @@ dependencies = [
  "proptest",
  "radix-block",
  "radix-fat",
+ "radix-hw",
+ "radix-sync",
+ "radix-vfs",
+]
+
+[[package]]
+name = "radix-ext4"
+version = "0.10.1"
+dependencies = [
+ "proptest",
+ "radix-block",
  "radix-hw",
  "radix-sync",
  "radix-vfs",

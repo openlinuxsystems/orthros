@@ -76,6 +76,8 @@ enum FilesystemKind: u8 {
     btrfs = 7;
     /// exFAT on a disk: `exfat`.
     exfat = 8;
+    /// ext4, or ext2 or ext3, on a disk: `ext4`.
+    ext4 = 9;
 }
 
 /// How `open` opens.
@@ -224,15 +226,16 @@ interface directory = 0x000b version 5 {
                 corrupt, too_many_links];
     /// Mounts a filesystem of kind `filesystem` (its name, as
     /// FilesystemKind lists them) on the directory at `path`: `fat`,
-    /// `exfat` and `btrfs` on the block device whose file capability is in
-    /// slot `source`, the others with `source` 0. With `bind` instead, the
-    /// directory whose capability is in slot `source` is mounted there
+    /// `exfat`, `btrfs` and `ext4` on the block device whose file capability
+    /// is in slot `source`, the others with `source` 0. With `bind` instead,
+    /// the directory whose capability is in slot `source` is mounted there
     /// too, as Linux's bind mounts are, read-only if its own mount is. A
     /// second mount on a directory stacks on the first. Needs the control
     /// right, and the read right on `source` (and the write right unless
-    /// `flags` has read_only). A Btrfs that Radix cannot write yet fails
-    /// with invalid_argument unless `flags` has read_only, as on Linux, and
-    /// so does compress for a filesystem other than `btrfs`.
+    /// `flags` has read_only). A Btrfs that Radix cannot write yet, or an
+    /// ext4 with features Radix only reads, fails with invalid_argument
+    /// unless `flags` has read_only, as on Linux, and so does compress for
+    /// a filesystem other than `btrfs`.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,

@@ -84,15 +84,16 @@ Init: /system/commands/spark is process 1
 . It mounts tmpfs on _/tmp_, and the *dev*, *proc* and *sys* trees on
   _/devices_, _/processes_ and _/kernel_ (*radix-proc*(5),
   *radix-sysfs*(5)).
-. It looks for disks in _/devices_ and mounts the FAT, exFAT or Btrfs
-  filesystem of each partition, or of each disk with no partition table,
-  at _/volumes/_*name*, read-write, or read-only when the device is or
-  when the kernel refuses to write it (*read_only* from the disk, or
-  *invalid_argument* for what Radix does not write yet: an exFAT with two
-  tables, or a Btrfs feature). A Btrfs named with *--compress* compresses
-  what is written to it. FAT and exFAT are tried first, in that
-  order, as *mkfs.btrfs* clears the sectors they start in while
-  *mkfs.fat* and *mkfs.exfat* may leave an older Btrfs superblock. A
+. It looks for disks in _/devices_ and mounts the FAT, exFAT, Btrfs or
+  ext4 filesystem of each partition, or of each disk with no partition
+  table, at _/volumes/_*name*, read-write, or read-only when the device
+  is or when the kernel refuses to write it (*read_only* from the disk,
+  or *invalid_argument* for what Radix does not write yet: an exFAT with
+  two tables, or a Btrfs or ext4 feature). A Btrfs named with
+  *--compress* compresses what is written to it. FAT and exFAT are tried
+  first, in that order, as *mkfs.btrfs* and *mkfs.ext4* clear the
+  sectors they start in while *mkfs.fat* and *mkfs.exfat* may leave an
+  older Btrfs or ext4 superblock. A
   device that holds none of them is left alone, and so is every device
   with *--no-volumes*.
 . The first Btrfs mounted read-write whose top holds the subvolumes
@@ -447,16 +448,18 @@ _/volumes/_*name*
 *spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_, *spark: cannot link /*_name_ *to /*_target_*:* _error_
 	Building the hierarchy failed; Spark starts nothing.
 
-_name_ *holds no FAT, exFAT or Btrfs filesystem; left alone*
+_name_ *holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone*
 	A disk or partition that holds none of them is not mounted.
 
 *spark: cannot mount* _name_*:* _error_
-	A FAT, exFAT or Btrfs filesystem that could not be mounted:
-	*corrupt* when its boot sector, tables, superblock or trees are
-	damaged, and
+	A FAT, exFAT, Btrfs or ext4 filesystem that could not be mounted:
+	*corrupt* when its boot sector, tables, superblock, trees or journal
+	are damaged, and
 	*invalid_argument* for a Btrfs filesystem Radix cannot read yet (on
 	more than one device, with a log of fsyncs not yet replayed, or with
-	sectors other than 4 KiB).
+	sectors other than 4 KiB) or an ext4 one (with clusters of several
+	blocks, *bigalloc*, blocks larger than 4 KiB or inodes larger than 1
+	KiB).
 
 *spark: cannot make a pseudo-terminal:* _reason_, *spark: could not start* _path_*:* _reason_
 	Running a POSIX program failed before it started: _/devices/ptmx_ could
