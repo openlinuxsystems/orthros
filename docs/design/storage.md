@@ -519,6 +519,13 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   a data reference for the new file and offset. The node writes both
   files' pages back first and holds both caches, in address order, until
   the cloned range's pages are dropped, to be read again.
+- `scrub` reads every copy of every block of the last commit's extent
+  tree from the disk, past every cache, and checks it as Linux's `btrfs
+  scrub` does: a tree block as a read checks one, a data sector against
+  the checksum tree, and the superblock's copies (ADR 0150). It holds
+  the transaction for 16 MiB of extents at a time, writes a good copy
+  over a bad one unless it only reads, and counts what it finds as
+  Linux's `struct btrfs_scrub_progress`.
 - `space::Space` reads every block group and its free ranges from the
   free-space tree at the first write, kept as extents or bitmaps; the
   ranges around the superblock's copies are never taken. A tree block is
@@ -773,7 +780,8 @@ host, and reads everything back after a second boot.
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
   with `no-holes`, without quotas, removes a
-  subvolume in one transaction rather than in the background, and
+  subvolume in one transaction rather than in the background, scrubs
+  in the caller's call rather than in a thread of its own, and
   compresses only with zstd, never small files inline, with literals of
   bytes above 127 left raw. Its compressed reads take one workspace in
   turn, where Linux keeps one per CPU at most. Empty block groups stay, where Linux removes

@@ -651,6 +651,46 @@ pub struct FsInfo {
     pub free_files: u64,
 }
 
+/// What a scrub of a filesystem read and found, counted as Linux's
+/// `struct btrfs_scrub_progress` counts it: each copy of a block is
+/// counted, and each of its errors.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrub {
+    /// The data extents read, a copy each.
+    pub data_extents: u64,
+    /// The tree blocks read, a copy each.
+    pub tree_extents: u64,
+    /// The bytes of data read.
+    pub data_bytes: u64,
+    /// The bytes of tree blocks read.
+    pub tree_bytes: u64,
+    /// The sectors or blocks the disk failed to read.
+    pub read_errors: u64,
+    /// The sectors or blocks whose checksum differs.
+    pub csum_errors: u64,
+    /// The tree blocks whose checksum matches but whose header does not
+    /// (its address, filesystem, level or generation).
+    pub verify_errors: u64,
+    /// The data sectors with no checksum (`nodatasum` files).
+    pub no_csum: u64,
+    /// The checksums of data no extent holds.
+    pub csum_discards: u64,
+    /// The copies of the superblock that are bad or old.
+    pub super_errors: u64,
+    /// The times memory ran out.
+    pub malloc_errors: u64,
+    /// The sectors or blocks with no good copy.
+    pub uncorrectable_errors: u64,
+    /// The bad copies written again from a good one.
+    pub corrected_errors: u64,
+    /// Where on the device the scrub got to.
+    pub last_physical: u64,
+    /// The errors a second read did not show.
+    pub unverified_errors: u64,
+    /// The filesystem's UUID.
+    pub fsid: [u8; 16],
+}
+
 /// A filesystem.
 pub trait FileSystem: Send + Sync {
     /// What kind it is.
@@ -674,6 +714,13 @@ pub trait FileSystem: Send + Sync {
     /// Whether it holds changes the disk has not seen.
     fn is_dirty(&self) -> bool {
         false
+    }
+    /// Reads every block it holds, every copy, and checks each against
+    /// its checksum, as Linux's `btrfs scrub` does; writes a good copy
+    /// over a bad one if `repair`. A filesystem that keeps no checksums
+    /// fails with [`Error::NotSupported`].
+    fn scrub(&self, _repair: bool) -> Result<Scrub> {
+        Err(Error::NotSupported)
     }
     /// Drops up to `max` pages it can read again from the disk; returns
     /// how many it dropped.

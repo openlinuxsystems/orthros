@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 
 use libradix::abi::capability::Rights;
 use libradix::abi::directory::{FileKind, FilesystemKind, OpenFlags};
-use libradix::abi::errors::File as FileError;
+use libradix::abi::errors::{File as FileError, Kernel as KernelError};
 use libradix::abi::file::APPEND;
 use libradix::abi::process;
 use libradix::abi::startup::{SLOT_PROCESS, Startup};
@@ -298,8 +298,33 @@ fn check_root(root: &Dir, after: bool) {
         }
     }
     check_snapshots(root, after);
-    if !after {
+    if after {
+        check_scrub(root);
+    } else {
         check_clones(root);
+    }
+}
+
+/// A scrub of Dukovo's root (ADR 0150): through `/users`, which mends
+/// what it finds; through `/system`, read-only, which only reads; and
+/// one that would mend through it, which its read right does not allow.
+fn check_scrub(root: &Dir) {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let mended = root.open_dir("users", rw).and_then(|users| users.scrub(true));
+    let read = root.open_dir("system", Rights::READ).and_then(|system| system.scrub(false));
+    match (mended, read) {
+        (Ok(mended), Ok(read)) if mended.errors + read.errors == 0 && read.bytes > 0 => {
+            println!("storage: a scrub of Dukovo's root found no errors");
+        }
+        (mended, read) => fail(&format!("scrubs of Dukovo's root gave {mended:?} and {read:?}")),
+    }
+    match root.open_dir("system", Rights::READ).and_then(|system| system.scrub(true)) {
+        Err(radix_rt::fs::Error::Status(status))
+            if KernelError::from_status(status) == Some(KernelError::MissingRights) =>
+        {
+            println!("storage: a scrub through /system may not mend: missing_rights");
+        }
+        other => fail(&format!("a scrub through /system that mends gave {other:?}")),
     }
 }
 

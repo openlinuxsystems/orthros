@@ -178,6 +178,46 @@ struct FileStatus {
     reserved: u16;
 }
 
+/// What `scrub` read and found, counted as Linux's
+/// `struct btrfs_scrub_progress` counts it, in its order (ADR 0150): each
+/// copy of a block is counted, and the errors a sector at a time.
+struct ScrubProgress {
+    /// The data extents read, a copy each.
+    data_extents: u64;
+    /// The tree blocks read, a copy each.
+    tree_extents: u64;
+    /// The bytes of data read.
+    data_bytes: u64;
+    /// The bytes of tree blocks read.
+    tree_bytes: u64;
+    /// The sectors the disk failed to read.
+    read_errors: u64;
+    /// The sectors whose checksum differs.
+    csum_errors: u64;
+    /// The sectors of tree blocks whose checksum matches but whose header
+    /// does not.
+    verify_errors: u64;
+    /// The data sectors with no checksum.
+    no_csum: u64;
+    /// The checksums of data no extent holds.
+    csum_discards: u64;
+    /// The copies of the superblock that are bad or old.
+    super_errors: u64;
+    /// The times memory ran out.
+    malloc_errors: u64;
+    /// The sectors with no good copy.
+    uncorrectable_errors: u64;
+    /// The bad sectors with a good copy, written over them unless the
+    /// scrub only read.
+    corrected_errors: u64;
+    /// Where on the device the scrub got to, in bytes.
+    last_physical: u64;
+    /// The errors a second read did not show.
+    unverified_errors: u64;
+    /// The filesystem's UUID.
+    fsid: [u8; 16];
+}
+
 /// A directory.
 interface directory = 0x000b version 5 {
     kind = directory;
@@ -377,4 +417,15 @@ interface directory = 0x000b version 5 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, not_empty, read_only, no_space,
                 name_too_long, bad_name, outside, in_use, io, corrupt, too_many_links];
+    /// Reads every block of the directory's Btrfs filesystem that its
+    /// last commit holds, every copy, and checks each against its
+    /// checksum, as btrfs-scrub(8)'s `start -B` does; with `repair`, writes
+    /// a good copy over each bad one. Writes what it read and found into
+    /// `buffer`, as a ScrubProgress; a buffer smaller than one fails with
+    /// invalid_argument. Other filesystems fail with not_supported, and
+    /// `repair` on a read-only mount with read_only. Needs the read
+    /// right, and the write right to repair.
+    method scrub = 22 (repair: bool, buffer: out bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_supported, read_only, io, corrupt];
 }

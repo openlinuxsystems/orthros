@@ -549,5 +549,6 @@ mod compressed;
 mod files;
 mod links;
 mod rw;
+mod scrub;
 mod snapshots;
 mod write;

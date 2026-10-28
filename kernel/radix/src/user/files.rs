@@ -531,6 +531,25 @@ pub fn directory_method(
             vfs()?.remove_subvolume(&dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
+        directory::SCRUB => {
+            let a = directory::ScrubArgs::decode(args)?;
+            // Mending writes to the disk.
+            let dir = directory_of(found, if a.repair { Rights::WRITE } else { Rights::READ })?;
+            let (address, len) = user_range(a.buffer)?;
+            if len < directory::ScrubProgress::SIZE {
+                return Err(error(Kernel::InvalidArgument));
+            }
+            let mount = &dir.at.mount;
+            if a.repair && mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            let counts = mount.fs.scrub(a.repair).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            put_scrub(&counts, UserOut { address, len })?;
+            answer(label, 0, [0; 8])
+        }
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
@@ -1463,6 +1482,33 @@ fn put_status(stat: &radix_vfs::Stat, mount: u64, buffer: UserBuffer) -> Result<
     bytes[S::OFFSET_LINKS..S::OFFSET_LINKS + 4].copy_from_slice(&stat.links.to_le_bytes());
     bytes[S::OFFSET_KIND] = file_kind(stat.kind).raw();
     UserOut { address, len }.put(0, &bytes).map_err(fs::status)
+}
+
+/// Writes what a scrub read and found to `out`, as a ScrubProgress.
+fn put_scrub(counts: &radix_vfs::Scrub, mut out: UserOut) -> Result<()> {
+    use directory::ScrubProgress as P;
+    let mut bytes = [0u8; P::SIZE];
+    for (at, value) in [
+        (P::OFFSET_DATA_EXTENTS, counts.data_extents),
+        (P::OFFSET_TREE_EXTENTS, counts.tree_extents),
+        (P::OFFSET_DATA_BYTES, counts.data_bytes),
+        (P::OFFSET_TREE_BYTES, counts.tree_bytes),
+        (P::OFFSET_READ_ERRORS, counts.read_errors),
+        (P::OFFSET_CSUM_ERRORS, counts.csum_errors),
+        (P::OFFSET_VERIFY_ERRORS, counts.verify_errors),
+        (P::OFFSET_NO_CSUM, counts.no_csum),
+        (P::OFFSET_CSUM_DISCARDS, counts.csum_discards),
+        (P::OFFSET_SUPER_ERRORS, counts.super_errors),
+        (P::OFFSET_MALLOC_ERRORS, counts.malloc_errors),
+        (P::OFFSET_UNCORRECTABLE_ERRORS, counts.uncorrectable_errors),
+        (P::OFFSET_CORRECTED_ERRORS, counts.corrected_errors),
+        (P::OFFSET_LAST_PHYSICAL, counts.last_physical),
+        (P::OFFSET_UNVERIFIED_ERRORS, counts.unverified_errors),
+    ] {
+        bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[P::OFFSET_FSID..P::OFFSET_FSID + 16].copy_from_slice(&counts.fsid);
+    out.put(0, &bytes).map_err(fs::status)
 }
 
 fn resolve(at: &Location, path: &str, flags: PathFlags) -> Result<Location> {
