@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 69b44c937d77d0bdce7f150d29999ca499a97e59d5f2346c9022b21925a3a046 # shrinks to which = 0, changes = [(true, 3500383980, 20)]

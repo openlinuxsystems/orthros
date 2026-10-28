@@ -104,6 +104,9 @@ These run on the build machine or in CI and are never part of an image.
 | [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue, and reading and writing the FAT disks of the `storage` boot test on the host | GPL-3.0-or-later |
 | [dosfstools](https://github.com/dosfstools/dosfstools) (`mkfs.fat`, `fsck.fat`) | Making the FAT volumes Radix's FAT tests and the `storage` boot test use, and checking what Radix wrote to them | GPL-3.0-or-later |
+| [exfatprogs](https://github.com/exfatprogs/exfatprogs) (`mkfs.exfat`, `fsck.exfat`) | Making the exFAT volumes Radix's exFAT tests and the `exfat-write` boot test use, and checking what Radix wrote to them | GPL-2.0-or-later |
+| [The Sleuth Kit](https://www.sleuthkit.org/sleuthkit/) (`fls`, `icat`), by Brian Carrier and contributors | Reading back, as an exFAT reader of its own, what Radix wrote to the exFAT tests' volumes | IPL-1.0, CPL-1.0 and GPL-2.0-or-later (parts) |
+| [exfat-fuse](https://github.com/relan/exfat) 1.4.0, by Andrew Nayenko | Writing, once, the exFAT volume Radix's exFAT tests read (`kernel/fs/exfat/src/fixtures`); none of its code is in the repository | GPL-2.0-or-later |
 | [btrfs-progs](https://github.com/kdave/btrfs-progs) (`mkfs.btrfs`) | Making the Btrfs filesystems Radix's Btrfs tests read; run as a host tool, the system's or Ubuntu 26.04's package, which `ob test` unpacks into `.cache/btrfs-progs` when the system's is too old, never built into Dukovo | GPL-2.0-only |
 | [Clang, LLD and LLVM](https://llvm.org/) 20 | Building the C library, its ports and C programs for Radix ([ADR 0069](docs/adr/0069-clang-toolchain-and-ports.md)) | Apache-2.0 WITH LLVM-exception |
 | [Meson](https://mesonbuild.com/) and [Ninja](https://ninja-build.org/) | Building mlibc | Apache-2.0 |
@@ -220,6 +223,10 @@ We implement these from their published descriptions. No code is copied.
   (2000), and its long file names, from which `radix-fat` implements
   FAT12, FAT16 and FAT32
   ([ADR 0056](docs/adr/0056-own-fat-implementation.md)).
+- Microsoft's
+  ["exFAT File System Specification"](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification)
+  (2019), from which `radix-exfat` implements exFAT
+  ([ADR 0140](docs/adr/0140-exfat-from-the-specification.md)).
 - Howard Hinnant's
   ["chrono-Compatible Low-Level Date Algorithms"](https://howardhinnant.github.io/date_algorithms.html),
   which FAT's dates are converted with.

@@ -88,6 +88,21 @@ impl Chain {
         Ok(())
     }
 
+    /// Adds the `count` clusters from `cluster` on at the end, in one go:
+    /// exFAT's files that need no table are one such run.
+    pub fn push_run(&mut self, cluster: u32, count: u32) -> Result<(), NoMemory> {
+        if count == 0 {
+            return Ok(());
+        }
+        let len = self.len;
+        match self.runs.last_mut() {
+            Some(run) if run.cluster.checked_add(run.count) == Some(cluster) => run.count += count,
+            _ => mem::push(&mut self.runs, Run { logical: len, cluster, count })?,
+        }
+        self.len += count;
+        Ok(())
+    }
+
     /// Keeps the first `len` clusters.
     pub fn truncate(&mut self, len: u32) {
         if len >= self.len {

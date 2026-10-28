@@ -62,7 +62,8 @@ _target/userspace/_).
 *doctor*
 	Check every host tool the build needs: rustup, the pinned toolchain
 	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
-	UEFI, xorriso, mtools, dosfstools, btrfs-progs, the tools that build
+	UEFI, xorriso, mtools, dosfstools, exfatprogs, The Sleuth Kit,
+	btrfs-progs, the tools that build
 	the ports (Clang 20 or later with compiler-rt's builtins, LLD, LLVM's
 	tools, Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc,
 	mandoc and mdBook. For anything missing, print the exact install
@@ -479,6 +480,18 @@ _target/userspace/_).
 		(*mkfs.fat -S 4096*). The kernel must say that the disks have
 		4096-byte sectors and give the partition's start in 512-byte
 		sectors, as Linux does.
+
+	*exfat-write*
+		The *storage* test on two exFAT disks *mkfs.exfat* made: a 64
+		MiB NVMe namespace with clusters of 32 KiB, larger than a page,
+		and a 32 MiB virtio disk with clusters of a sector. Spark must
+		mount both, as exFAT, to write. After each boot, exfatprogs'
+		*fsck.exfat -n* must find nothing wrong; between the boots, The
+		Sleuth Kit (*fls* and *icat*), an exFAT reader of its own, must
+		read every file back as written, and none of those renamed or
+		removed. The host writes no file of its own to them: no tool on
+		Linux writes to exFAT without mounting it. exfatprogs and The
+		Sleuth Kit must be installed (*ob doctor* says how).
 
 	*disk-raw*
 		Boot 2 CPUs under UEFI with three 8 MiB disks of known bytes, a
