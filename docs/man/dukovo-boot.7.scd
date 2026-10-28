@@ -434,6 +434,15 @@ them to *init*, and the kernel does not read them.
 	warning, when the firmware already switched to x2APIC mode, because
 	the hardware cannot switch back without a reset.
 
+*mce*=off
+	Do not turn machine-check reporting on: the CPUs' banks are not
+	read, and a hardware error that would raise a machine check shuts
+	the CPU down instead. See *MACHINE CHECKS*.
+
+*mce-poll*=_seconds_
+	Read the CPUs' machine-check banks this often for errors the
+	hardware corrected, instead of every 300 seconds. *ob test* uses 1.
+
 *font*=_size_
 	Draw the framebuffer console with the Spleen font of this size:
 	*8x16*, *12x24* or *16x32*.
@@ -485,6 +494,27 @@ was loaded; the count of other CPUs that loaded the update follows the CPU
 list. Hyper-threads share microcode, so the second thread of a core finds
 the update already applied. AMD's format is not supported yet, and the
 module is ignored on AMD processors.
+
+# MACHINE CHECKS
+
+x86-64 processors report hardware errors (in their caches, TLBs, buses
+and the memory they read) in machine-check banks, each holding the last
+error it saw. Each CPU turns reporting on for every bank as it starts,
+unless *mce=off*; the log says how many banks there are, or that the CPU
+has none. At the end of boot the kernel reads every CPU's banks, which
+finds what an earlier boot left there (the banks keep their errors across
+a restart), and again every 300 seconds (*mce-poll*), logging each error
+with its CPU and bank: a warning for one the hardware corrected, an error
+for one it did not but the CPU went on after. For example:
+
+	Machine check: CPU 1 bank 2: corrected data read error in the level 0
+	data cache, address 0x12345000 (status 0x9c00000000000134, misc 0x86)
+
+An error the CPU cannot go on after raises a machine check, and the kernel
+panics with the bank's error: see *radix-debug*(7). Linux decodes the
+same status with *mcelog* or *rasdaemon*. Memory error counts by DIMM and
+error recovery that ends only the program that read bad memory come later
+(ADR 0145).
 
 # REAL HARDWARE
 

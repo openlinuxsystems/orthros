@@ -52,6 +52,12 @@ pub const FLAGS: &[Flag] = &[
         value: None,
         summary: "drive the local APIC in xAPIC mode even if x2APIC is available",
     },
+    Flag { name: "mce", value: Some("off"), summary: "do not turn machine-check reporting on" },
+    Flag {
+        name: "mce-poll",
+        value: Some("seconds"),
+        summary: "read the CPUs' machine-check banks this often (300 by default)",
+    },
     Flag {
         name: "font",
         value: Some("size"),

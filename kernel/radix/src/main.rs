@@ -56,6 +56,7 @@ mod domains;
 mod fs;
 mod join;
 mod kdb;
+mod mce;
 mod oom;
 mod panic;
 mod percpu;
@@ -235,6 +236,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::keyboard::start();
     user::power::start();
     watchdog::find();
+    mce::start(flags.value("mce-poll"));
     check_timers(online);
     check_ipis(online);
 

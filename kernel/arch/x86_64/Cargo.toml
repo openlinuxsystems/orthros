@@ -20,6 +20,7 @@ radix-bootinfo = { path = "../../lib/bootinfo" }
 radix-hal = { path = "../../hal" }
 radix-hw = { path = "../../lib/hw" }
 radix-klog = { path = "../../lib/klog" }
+radix-mca = { path = "../../lib/mca" }
 radix-microcode = { path = "../../lib/microcode" }
 radix-mm = { path = "../../mm" }
 radix-random = { path = "../../lib/random" }
