@@ -506,10 +506,27 @@ pub fn directory_method(
             let mut kind = Path::Empty;
             let kind = kind.copy(a.filesystem)?;
             let kind = kind.as_str()?;
+            let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
+            // A bind mount: the directory in slot `source`, mounted again.
+            if kind == "bind" {
+                if compress {
+                    return Err(Kernel::InvalidArgument.status(3));
+                }
+                let (_, from) = objects::directory(cspace, a.source, rw)?;
+                let mount = vfs()?
+                    .bind(&dir.at, path.as_str()?, &from.at, read_only)
+                    .map_err(fs::status)?;
+                info!(
+                    "Files: mounted a directory of {} from {} on /{}{}",
+                    mount.fs.kind().name(),
+                    mount.source(),
+                    mount.path(),
+                    if mount.read_only() { ", read-only" } else { "" },
+                );
+                return answer(label, 0, [0; 8]);
+            }
             let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
-                let needs =
-                    if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
-                Some(objects::file(cspace, a.source, needs)?.1)
+                Some(objects::file(cspace, a.source, rw)?.1)
             } else if a.source != 0 {
                 return Err(Kernel::InvalidArgument.status(2));
             } else {

@@ -480,7 +480,7 @@ The install log goes to `/tmp/install.log` and is copied to `/system/state/log/i
 | BIOS boot | EF02 | 1 MiB | none | GRUB `core.img` for BIOS machines |
 | EFI System | EF00 | 512 MiB | FAT32 | GRUB, kernels and boot archives for both update slots, `grubenv` |
 | Swap | Linux swap GUID | Equal to RAM, capped at 8 GiB (installer default, adjustable, 0 disables) | swap | Paging and future suspend-to-disk |
-| Dukovo root | Dukovo root GUID (minted in Phase 0) | Remaining space | Btrfs | Everything else |
+| Dukovo root | Dukovo root, 90C9A303-3954-4174-8F8B-EE75A92A9EB0 (ADR 0137) | Remaining space | Btrfs | Everything else |
 
 Btrfs subvolumes on the root partition:
 

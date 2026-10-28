@@ -875,3 +875,43 @@ fn files_written_compressed_read_back_and_linux_restores_them() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+#[test]
+fn nothing_in_a_read_only_subvolume_changes() {
+    let dir = scratch("sealed-tree");
+    std::fs::create_dir_all(dir.join("sealed/inner")).unwrap();
+    std::fs::create_dir_all(dir.join("open")).unwrap();
+    std::fs::write(dir.join("sealed/file"), b"kept").unwrap();
+    let disk = writable(&mkfs_with(&["--subvol", "ro:sealed", "--subvol", "open"], &dir));
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    let sealed = root.lookup("sealed").unwrap();
+    let inner = sealed.lookup("inner").unwrap();
+    let file = sealed.lookup("file").unwrap();
+    assert!(sealed.read_only() && inner.read_only() && file.read_only());
+    assert!(!root.read_only());
+    // Every change fails as on Linux (EROFS), the mount writable or not.
+    let ro = Err(Error::ReadOnly);
+    assert_eq!(sealed.create("new", Kind::File).map(drop), ro);
+    assert_eq!(inner.create("new", Kind::Directory).map(drop), ro);
+    assert_eq!(sealed.make_link("link", "file").map(drop), ro);
+    assert_eq!(sealed.make_node("pipe", Kind::Pipe, 0).map(drop), ro);
+    assert_eq!(sealed.link("again", &file), ro);
+    assert_eq!(sealed.remove("file"), ro);
+    assert_eq!(sealed.rename("file", &*sealed, "moved"), ro);
+    assert_eq!(file.write(0, &Slice(b"x")), ro.map(|()| 0));
+    assert_eq!(file.set_size(0), ro);
+    assert_eq!(file.set_times(Some(1), Some(1)), ro);
+    let vfs = Vfs::new(fs.clone(), "btrfs").unwrap();
+    let top = vfs.root();
+    assert_eq!(vfs.resolve(&top, "sealed/file").unwrap().writable(), ro);
+    assert_eq!(vfs.resolve(&top, "open").unwrap().writable(), Ok(()));
+    let flags = OpenFlags { create: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&top, "sealed/inner/new", flags).map(drop), ro);
+    // The subvolume beside it takes changes, and what was there stays.
+    let made = root.lookup("open").unwrap().create("new", Kind::File).unwrap();
+    put(&made, 0, b"written");
+    fs.sync().unwrap();
+    assert_eq!(contents(&*file, 4096).unwrap(), b"kept");
+    assert_checks(&image_of(&disk, SIZE as usize));
+}

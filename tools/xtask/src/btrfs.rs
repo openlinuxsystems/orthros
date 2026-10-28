@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The btrfs-progs that Radix's Btrfs tests make filesystems with.
+//! The btrfs-progs that Radix's Btrfs tests, and the image's Dukovo root
+//! (ADR 0137), make filesystems with.
 //!
-//! The tests use `mkfs.btrfs` options that some distributions' copies
-//! lack (Ubuntu 24.04 has btrfs-progs 6.6): subvolumes, compression and
-//! inode flags. When the system's copy lacks one, `ob test` fetches
+//! They use `mkfs.btrfs` options that some distributions' copies lack
+//! (Ubuntu 24.04 has btrfs-progs 6.6): subvolumes, compression and inode
+//! flags. When the system's copy lacks one, `ob test` or `ob image` fetches
 //! Ubuntu 26.04's package, pinned by its SHA-256, and unpacks it into
 //! `.cache/btrfs-progs`, without installing it: the tests are pointed at
 //! it by `RADIX_BTRFS_PROGS`. It runs on Ubuntu 24.04 and what is made

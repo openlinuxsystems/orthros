@@ -80,6 +80,9 @@ pub struct BtrfsNode {
     /// read-only mount.
     pub(crate) subvol: u64,
     pub(crate) tree: Root,
+    /// Whether its subvolume is read-only: nothing in it changes, as on
+    /// Linux.
+    read_only: bool,
     /// Its inode number in the subvolume.
     pub(crate) ino: u64,
     /// Its inode item, as the running transaction has it.
@@ -108,9 +111,16 @@ pub fn id_of(subvol: u64, ino: u64) -> u64 {
 
 impl BtrfsNode {
     /// The node of inode `ino` of subvolume `subvol`, whose tree is
-    /// `tree`, read from its inode item. On a writable mount the tree is
-    /// read as the running transaction has it, and the caller holds it.
-    pub(crate) fn load(fs: KArc<Inner>, subvol: u64, tree: Root, ino: u64) -> Result<BtrfsNode> {
+    /// `tree`, read from its inode item; `read_only` if the subvolume is.
+    /// On a writable mount the tree is read as the running transaction
+    /// has it, and the caller holds it.
+    pub(crate) fn load(
+        fs: KArc<Inner>,
+        subvol: u64,
+        tree: Root,
+        ino: u64,
+        read_only: bool,
+    ) -> Result<BtrfsNode> {
         let key = Key::new(ino, item::INODE_ITEM, 0);
         let now = if fs.writable() { fs.volume.tree(subvol)?.ok_or(Error::Corrupt)? } else { tree };
         let cursor = Cursor::seek(&fs.volume, &now, &key)?;
@@ -125,6 +135,7 @@ impl BtrfsNode {
             fs,
             subvol,
             tree,
+            read_only,
             ino,
             inode: Mutex::new(inode),
             kind,
@@ -143,6 +154,12 @@ impl BtrfsNode {
 
     fn is_dir(&self) -> Result<()> {
         if self.kind == Kind::Directory { Ok(()) } else { Err(Error::NotDirectory) }
+    }
+
+    /// Fails with [`Error::ReadOnly`] unless it may change: on a writable
+    /// mount, outside a read-only subvolume.
+    fn writes(&self) -> Result<()> {
+        if self.fs.writable() && !self.read_only { Ok(()) } else { Err(Error::ReadOnly) }
     }
 
     /// The inode item, as the running transaction has it.
@@ -236,13 +253,17 @@ impl BtrfsNode {
     /// or the top directory of another subvolume.
     fn open_entry(&self, location: &Key) -> Result<NodeRef> {
         let node = match location.kind {
-            item::INODE_ITEM => {
-                Inner::node_for(&self.fs, self.subvol, self.tree, location.objectid)?
-            }
+            item::INODE_ITEM => Inner::node_for(
+                &self.fs,
+                self.subvol,
+                self.tree,
+                location.objectid,
+                self.read_only,
+            )?,
             item::ROOT_ITEM => {
-                let (root, dir) =
+                let (root, dir, read_only) =
                     self.fs.volume.subvolume(location.objectid)?.ok_or(Error::NotFound)?;
-                Inner::node_for(&self.fs, location.objectid, root, dir)?
+                Inner::node_for(&self.fs, location.objectid, root, dir, read_only)?
             }
             _ => return Err(Error::Corrupt),
         };
@@ -933,7 +954,7 @@ impl BtrfsNode {
                 f.add_entry(self.ino, name.as_bytes(), ino, file_type(kind), index, time)
             })?;
             self.reload(&files)?;
-            Inner::node_for(&self.fs, self.subvol, self.tree, ino)
+            Inner::node_for(&self.fs, self.subvol, self.tree, ino, self.read_only)
         })?;
         Ok(node)
     }
@@ -1103,7 +1124,7 @@ impl Backing for FileBacking<'_> {
     /// Space is taken when the data is written, at the next sync; each
     /// page reserves its room as it changes ([`Backing::reserve_pages`]).
     fn reserve(&self, _size: u64) -> Result<()> {
-        if self.0.fs.writable() { Ok(()) } else { Err(Error::ReadOnly) }
+        self.0.writes()
     }
 
     fn reserve_pages(&self, pages: usize) -> Result<()> {
@@ -1156,6 +1177,10 @@ impl Node for BtrfsNode {
 
     fn kind(&self) -> Kind {
         self.kind
+    }
+
+    fn read_only(&self) -> bool {
+        self.read_only
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
@@ -1217,10 +1242,9 @@ impl Node for BtrfsNode {
     fn write(&self, offset: u64, data: &dyn In) -> Result<usize> {
         let cache = match (&self.cache, self.kind) {
             (_, Kind::Directory) => return Err(Error::IsDirectory),
-            (Some(cache), _) if self.fs.writable() => cache,
-            (Some(_), _) => return Err(Error::ReadOnly),
-            (None, _) => {
-                return Err(if self.fs.writable() { Error::NotSupported } else { Error::ReadOnly });
+            (cache, _) => {
+                self.writes()?;
+                cache.as_ref().ok_or(Error::NotSupported)?
             }
         };
         let wrote = cache.write(offset, data, &FileBacking(self))?;
@@ -1233,10 +1257,9 @@ impl Node for BtrfsNode {
     fn set_size(&self, size: u64) -> Result<()> {
         let cache = match (&self.cache, self.kind) {
             (_, Kind::Directory) => return Err(Error::IsDirectory),
-            (Some(cache), _) if self.fs.writable() => cache,
-            (Some(_), _) => return Err(Error::ReadOnly),
-            (None, _) => {
-                return Err(if self.fs.writable() { Error::NotSupported } else { Error::ReadOnly });
+            (cache, _) => {
+                self.writes()?;
+                cache.as_ref().ok_or(Error::NotSupported)?
             }
         };
         cache.set_size(size, &FileBacking(self))?;
@@ -1244,6 +1267,7 @@ impl Node for BtrfsNode {
     }
 
     fn set_times(&self, accessed: Option<u64>, modified: Option<u64>) -> Result<()> {
+        self.writes()?;
         let time = now();
         self.fs.change(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
@@ -1279,9 +1303,7 @@ impl Node for BtrfsNode {
 
     fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
         self.is_dir()?;
-        if !self.fs.writable() {
-            return Err(Error::ReadOnly);
-        }
+        self.writes()?;
         let mode = match kind {
             Kind::File => mode::FILE,
             Kind::Directory => mode::DIR,
@@ -1293,9 +1315,7 @@ impl Node for BtrfsNode {
     fn link(&self, name: &str, node: &NodeRef) -> Result<()> {
         self.is_dir()?;
         check_name(name)?;
-        if !self.fs.writable() {
-            return Err(Error::ReadOnly);
-        }
+        self.writes()?;
         let other = radix_vfs::downcast::<BtrfsNode>(&**node).ok_or(Error::CrossMount)?;
         // Linux links nothing across subvolumes either.
         if !KArc::ptr_eq(&other.fs, &self.fs) || other.subvol != self.subvol {
@@ -1343,9 +1363,7 @@ impl Node for BtrfsNode {
 
     fn make_node(&self, name: &str, kind: Kind, device: u64) -> Result<NodeRef> {
         self.is_dir()?;
-        if !self.fs.writable() {
-            return Err(Error::ReadOnly);
-        }
+        self.writes()?;
         let mode = match kind {
             Kind::File => (mode::FILE, 0),
             Kind::Pipe => (mode::FIFO, 0),
@@ -1359,9 +1377,7 @@ impl Node for BtrfsNode {
 
     fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
         self.is_dir()?;
-        if !self.fs.writable() {
-            return Err(Error::ReadOnly);
-        }
+        self.writes()?;
         if target.is_empty() {
             return Err(Error::NotFound);
         }
@@ -1388,6 +1404,7 @@ impl Node for BtrfsNode {
     fn remove(&self, name: &str) -> Result<()> {
         self.is_dir()?;
         check_name(name)?;
+        self.writes()?;
         let time = now();
         let mut taken = None;
         let removed = self.fs.freeing(|txn| {
@@ -1437,6 +1454,7 @@ impl Node for BtrfsNode {
             return Err(Error::CrossMount);
         }
         target.is_dir()?;
+        self.writes()?;
         let time = now();
         self.fs.change(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);

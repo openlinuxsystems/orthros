@@ -21,8 +21,8 @@ is named for what it holds:
 | `/system/commands` | The programs, where the shell finds commands |
 | `/system/libraries` | The libraries, the dynamic linker and the locales |
 | `/system/resources` | What else the programs read: manual pages, terminal descriptions, the PCI ID database, the licenses, the default settings |
-| `/system/settings` | The system's settings (in memory for now) |
-| `/system/state` | The system's changing data: logs, caches (in memory for now) |
+| `/system/settings` | The system's settings |
+| `/system/state` | The system's changing data: logs, caches |
 | `/system/live` | The state of running services: sockets, locks, process IDs, in memory |
 | `/applications` | Applications |
 | `/users` | Each user's home |
@@ -63,11 +63,47 @@ The system ships its default settings in
 `/system/resources/default-settings`, and Spark copies each one that
 `/system/settings` lacks into it at boot, so `/system/settings/nanorc`
 is there to edit. A setting already in
-`/system/settings` is never replaced. While `/system/settings` is in
-memory, each boot starts it afresh from the defaults.
+`/system/settings` is never replaced, so an update adds new settings
+without undoing your edits.
 
-Until the root filesystem lives on a disk (Btrfs, Phase 10),
-`/applications`, `/users` and `/shared` are empty and in memory.
+## Dukovo's root on a disk
+
+The image `./ob image` makes ends with a Dukovo root partition, the
+image's fifth, holding Btrfs with data compressed with zstd. Each part
+of the tree that changes is a subvolume of its own:
+
+| Subvolume | Mounted at |
+| --- | --- |
+| `@system.a` | `/system`, read-only |
+| `@settings` | `/system/settings` |
+| `@state` | `/system/state` |
+| `@applications` | `/applications` |
+| `@users` | `/users` |
+| `@shared` | `/shared` |
+| `@snapshots` | not mounted |
+
+When Dukovo boots from a disk it can see, a SATA, NVMe or virtio disk,
+Spark mounts these from it, and settings, files and everything else
+written there are kept from one boot to the next. `/processes/mounts`
+shows each with its disk:
+
+```text
+sda5 /system btrfs ro label=dukovo-root
+sda5 /system/settings btrfs rw label=dukovo-root
+```
+
+Booted from a USB stick, which Dukovo cannot read until Phase 11, or
+from a CD, `/system` is the system the boot loader loaded and the rest is
+in memory: each boot starts afresh from the default settings, and
+`/applications`, `/users` and `/shared` start empty. An image for
+optical media (`./ob image --iso`) has no Dukovo root partition.
+
+To try it, boot the image as a SATA disk. QEMU keeps what is written
+only until it stops:
+
+```sh
+./ob run --media disk
+```
 
 ## Programs see only what they are given
 

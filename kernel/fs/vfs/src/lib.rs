@@ -388,6 +388,12 @@ pub trait Node: Send + Sync + Any {
         self.stat().kind
     }
 
+    /// Whether nothing in it may change though its filesystem is mounted
+    /// to write: a file or directory of a read-only Btrfs subvolume.
+    fn read_only(&self) -> bool {
+        false
+    }
+
     /// The node a new handle to it uses: `None` for itself (the caller
     /// keeps the reference it has), or for a generated file a snapshot of
     /// its contents taken now, which reads see unchanged.

@@ -367,6 +367,14 @@ impl Dir {
         Ok(directory::mount(&SYS, self.held.slot, path.as_bytes(), name, source, flags)?)
     }
 
+    /// Mounts the directory `from` on the directory at `path` too, as
+    /// Linux's bind mounts do: read-only if `flags` says so, or if
+    /// `from`'s mount is.
+    pub fn bind(&self, path: &str, from: &Dir, flags: MountFlags) -> Result<()> {
+        let (slot, path) = (self.held.slot, path.as_bytes());
+        Ok(directory::mount(&SYS, slot, path, b"bind", from.held.slot, flags)?)
+    }
+
     /// Unmounts the filesystem whose root is at `path`.
     pub fn unmount(&self, path: &str) -> Result<()> {
         Ok(directory::unmount(&SYS, self.held.slot, path.as_bytes())?)

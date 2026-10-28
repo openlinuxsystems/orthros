@@ -28,7 +28,10 @@ panic report, the crash log, the kernel debugger and trace points.
 legacy BIOS (an El Torito boot record and an MBR boot record) and for UEFI
 (an EFI system partition with _EFI/BOOT/BOOTX64.EFI_), so the same file
 boots from a USB stick, a hard disk or optical media, on UEFI and BIOS
-machines. Its files are:
+machines. After those partitions an image for a disk has a fifth, the
+Dukovo root (GPT type 90C9A303-3954-4174-8F8B-EE75A92A9EB0), whose
+Btrfs holds the system and what changes (*spark*(8)). The files GRUB
+reads are:
 
 _/boot/radix_
 	The kernel, an ELF executable.
