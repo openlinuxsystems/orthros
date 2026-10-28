@@ -62,8 +62,14 @@ error that starts with the tool's name.
 :  a process's I/O class and level
 |  *kill*(1)
 :  send a signal
+|  *lscpu*(1)
+:  what the processor is
+|  *lsmem*(1)
+:  the machine's RAM in memory blocks
 |  *lsof*(8)
 :  what each process holds open
+|  *lspci*(8)
+:  the PCI functions
 |  *pgrep*(1), *pkill*(1)
 :  find or signal processes by name
 |  *pidstat*(1)

@@ -152,3 +152,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0141](0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md) | ext4 is our own implementation from its documentation, journaling whole blocks at each sync | Accepted |
 | [0142](0142-the-kernel-hears-the-fixed-acpi-power-button-and-spark-powers-off.md) | The kernel hears ACPI's fixed power button, and pressing it asks Spark to power off | Accepted |
 | [0143](0143-spark-pets-the-chipsets-hardware-watchdog.md) | Spark pets the chipset's hardware watchdog, which restarts a machine whose Spark stops responding | Accepted |
+| [0144](0144-lspci-lscpu-and-lsmem-with-the-pci-id-database.md) | lspci, lscpu and lsmem are systools, with the PCI ID database as a port | Accepted |

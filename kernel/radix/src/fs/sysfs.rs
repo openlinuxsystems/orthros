@@ -15,8 +15,13 @@
 //!   requests as Linux names them (`rotational`, `logical_block_size`,
 //!   `discard_max_bytes` and the rest), and in its `device` the `model`,
 //!   `serial` and `firmware_rev` it gives, for SATA and NVMe disks;
-//! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
+//! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
+//!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
+//!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
+//!   `ACPI Tables`...), for each range of the firmware's memory map
+//!   (ADR 0144);
 //! - `/kernel/class/watchdog/watchdog0`, when the kernel drives a hardware
 //!   watchdog (ADR 0143): its `identity`, its `state` (`active` or
 //!   `inactive`), its `timeout`, `min_timeout` and `max_timeout` in
@@ -28,7 +33,7 @@
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
-use radix_hal::Watchdog;
+use radix_hal::{MemoryKind, MemoryRegion, Watchdog};
 use radix_klog::TextBuf;
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, SyntheticFs};
@@ -60,6 +65,9 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    let firmware = root.add_dir("firmware", next_id())?;
+    let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
+    firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
     if let Some(found) = crate::watchdog::found() {
         let class = root.add_dir("class", next_id())?;
         let dir = class.add_dir("watchdog", next_id())?.add_dir("watchdog0", next_id())?;
@@ -162,6 +170,53 @@ impl Listing for Blocks {
     }
 }
 
+/// `/kernel/firmware/memmap`: a directory per range of the firmware's
+/// memory map, numbered in its order.
+struct MemoryMap;
+
+/// The firmware's memory map, as the kernel was given it.
+fn memory_map() -> &'static [MemoryRegion] {
+    crate::boot_summary().map_or(&[], |boot| boot.memory_map)
+}
+
+/// Linux's name for a kind of memory, as its `/sys/firmware/memmap`
+/// gives it.
+fn linux_name(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Usable => "System RAM",
+        MemoryKind::Reserved => "Reserved",
+        MemoryKind::AcpiReclaimable => "ACPI Tables",
+        MemoryKind::AcpiNvs => "ACPI Non-volatile Storage",
+        MemoryKind::Defective => "Unusable memory",
+    }
+}
+
+impl Listing for MemoryMap {
+    fn list(&self, f: &mut dyn FnMut(&str, Kind) -> bool) {
+        for index in 0..memory_map().len() {
+            let mut name = TextBuf::<8>::new();
+            let _ = write!(name, "{index}");
+            if !f(name.as_str(), Kind::Directory) {
+                break;
+            }
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Result<NodeRef> {
+        let index: usize = name.parse().map_err(|_| Error::NotFound)?;
+        // "1" and not "01": one name for each.
+        if name.len() > 1 && name.starts_with('0') {
+            return Err(Error::NotFound);
+        }
+        let region = *memory_map().get(index).ok_or(Error::NotFound)?;
+        let dir = FixedDir::new(next_id())?;
+        dir.add("start", value(move |text| writeln!(text, "{:#x}", region.start))?)?;
+        dir.add("end", value(move |text| writeln!(text, "{:#x}", region.end - 1))?)?;
+        dir.add("type", value(move |text| writeln!(text, "{}", linux_name(region.kind)))?)?;
+        Ok(dir)
+    }
+}
+
 /// `/kernel/bus/pci/devices`: a directory per PCI function.
 struct PciDevices;
 
@@ -193,6 +248,10 @@ impl Listing for PciDevices {
         dir.add("vendor", value(move |text| writeln!(text, "{:#06x}", function.vendor))?)?;
         dir.add("device", value(move |text| writeln!(text, "{:#06x}", function.device))?)?;
         dir.add("class", value(move |text| writeln!(text, "{:#08x}", function.class))?)?;
+        dir.add("revision", value(move |text| writeln!(text, "{:#04x}", function.revision))?)?;
+        let (vendor, device) = function.subsystem;
+        dir.add("subsystem_vendor", value(move |text| writeln!(text, "{vendor:#06x}"))?)?;
+        dir.add("subsystem_device", value(move |text| writeln!(text, "{device:#06x}"))?)?;
         Ok(dir)
     }
 }
