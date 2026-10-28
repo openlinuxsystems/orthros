@@ -121,6 +121,9 @@ pub enum Error {
     NoMemory,
     /// A buffer of the caller's is not mapped for the access.
     BadAddress,
+    /// An argument the node cannot take: an offset or length a clone
+    /// needs whole blocks of, or ranges of one file that overlap.
+    InvalidArgument,
 }
 
 impl fmt::Display for Error {
@@ -150,6 +153,7 @@ impl fmt::Display for Error {
             Error::TooManyNames => "too many names",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
+            Error::InvalidArgument => "invalid argument",
         })
     }
 }
@@ -525,6 +529,17 @@ pub trait Node: Send + Sync + Any {
     /// Makes a file `size` bytes long: cut, or grown with zeros.
     fn set_size(&self, _size: u64) -> Result<()> {
         Err(Error::IsDirectory)
+    }
+
+    /// Makes this file's `len` bytes from `to` on share the disk's blocks
+    /// that file `source` holds from `from` on, as Linux's `FICLONERANGE`
+    /// does (`len` 0: to `source`'s end), growing it to hold them: a copy
+    /// that takes no room until one of the two changes. The offsets and
+    /// `len` are whole blocks, but for a range that ends at `source`'s end.
+    /// A filesystem that cannot fails with [`Error::NotSupported`], and
+    /// two filesystems with [`Error::CrossMount`].
+    fn clone_range(&self, _source: &NodeRef, _from: u64, _len: u64, _to: u64) -> Result<()> {
+        Err(Error::NotSupported)
     }
 
     /// Sets when it was last read and when its contents last changed, in

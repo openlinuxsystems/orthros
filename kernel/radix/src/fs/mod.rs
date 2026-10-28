@@ -686,6 +686,7 @@ pub fn status(err: Error) -> Status {
         Error::NotSupported => return Kernel::InvalidArgument.status(0),
         Error::NoMemory => return Kernel::NoMemory.status(0),
         Error::BadAddress => return Kernel::BadAddress.status(0),
+        Error::InvalidArgument => return Kernel::InvalidArgument.status(0),
     };
     file.status(0)
 }

@@ -302,6 +302,36 @@ fn file_of(found: &Found, needs: Rights) -> Result<&FileRef> {
     }
 }
 
+/// `control`'s CLONE and CLONE_RANGE (ADR 0139): the file `file`, which
+/// `found` holds open for writing, takes the data of the one the request
+/// names, open for reading, as Linux's FICLONE and FICLONERANGE.
+fn clone_file(user: &UserRef, found: &Found, file: &FileRef, a: &file::ControlArgs) -> Result<()> {
+    found.cap.check(ObjectKind::File, Rights::WRITE).map_err(cap_error)?;
+    // Linux's struct file_clone_range: the source, its offset, the length
+    // and the offset in the file.
+    let mut range = [0u64; 4];
+    if a.request == file::CLONE {
+        range[0] = a.argument;
+    } else {
+        let mut bytes = [0u8; 32];
+        if a.size < 32 || !Arch::copy_from_user(&mut bytes, a.buffer) {
+            return Err(error(Kernel::BadAddress));
+        }
+        for (word, chunk) in range.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*chunk);
+        }
+    }
+    let slot = u32::try_from(range[0]).map_err(|_| error(Kernel::NoSuchSlot))?;
+    let (_, source) = objects::file(user.cspace, slot, Rights::READ)?;
+    file.at.writable().map_err(fs::status)?;
+    // A filesystem that cannot clone is EOPNOTSUPP, as on Linux.
+    file.at.node.clone_range(&source.at.node, range[1], range[2], range[3]).map_err(|err| match err
+    {
+        radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+        err => fs::status(err),
+    })
+}
+
 /// The directory interface, on the directory `found` in a slot.
 pub fn directory_method(
     user: &UserRef,
@@ -842,6 +872,10 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Target::Framebuffer => {
                     let may_write = found.cap.check(ObjectKind::File, Rights::WRITE).is_ok();
                     fs::framebuffer::control(file, a.request, may_write)?;
+                    0
+                }
+                Target::Node if matches!(a.request, file::CLONE | file::CLONE_RANGE) => {
+                    clone_file(user, found, file, &a)?;
                     0
                 }
                 Target::Node => {

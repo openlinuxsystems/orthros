@@ -1,0 +1,88 @@
+SPDX-FileCopyrightText: The uutils developers
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: MIT
+
+On Radix, `cp` shares a Btrfs file's data with the copy as it does on
+Linux: --reflink=auto, the default, as on Linux, tries Linux's FICLONE
+and copies when the filesystem cannot share, and --reflink=always fails
+then (ADR 0139). Dukovo only.
+
+--- a/src/uu/cp/src/cp.rs
++++ b/src/uu/cp/src/cp.rs
+@@ -173,11 +173,21 @@
+ impl Default for ReflinkMode {
+     #[allow(clippy::derivable_impls)]
+     fn default() -> Self {
+-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
++        #[cfg(any(
++            target_os = "linux",
++            target_os = "android",
++            target_os = "macos",
++            target_os = "radix"
++        ))]
+         {
+             Self::Auto
+         }
+-        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
++        #[cfg(not(any(
++            target_os = "linux",
++            target_os = "android",
++            target_os = "macos",
++            target_os = "radix"
++        )))]
+         {
+             Self::Never
+         }
+--- a/src/uu/cp/src/platform/other_unix.rs
++++ b/src/uu/cp/src/platform/other_unix.rs
+@@ -24,7 +24,29 @@
+     source_is_stream: bool,
+     nofollow: bool,
+ ) -> CopyResult<CopyDebug> {
+-    if reflink_mode != ReflinkMode::Never {
++    // Dukovo shares a Btrfs file's data as Linux does, with FICLONE; with
++    // --reflink=auto, anything else is copied.
++    #[cfg(target_os = "radix")]
++    if reflink_mode != ReflinkMode::Never && !source_is_stream {
++        match clone(source, dest, nofollow) {
++            Ok(()) => {
++                return Ok(CopyDebug {
++                    offload: OffloadReflinkDebug::Unknown,
++                    reflink: OffloadReflinkDebug::Yes,
++                    sparse_detection: SparseDebug::No,
++                });
++            }
++            Err(e) if reflink_mode == ReflinkMode::Always => {
++                return Err(CpError::IoErrContext(e, context.to_owned()));
++            }
++            Err(_) => {}
++        }
++    }
++    #[cfg(target_os = "radix")]
++    let unsupported = reflink_mode == ReflinkMode::Always;
++    #[cfg(not(target_os = "radix"))]
++    let unsupported = reflink_mode != ReflinkMode::Never;
++    if unsupported {
+         return Err(translate!("cp-error-reflink-not-supported")
+             .to_string()
+             .into());
+@@ -72,3 +94,19 @@
+ 
+     Ok(copy_debug)
+ }
++
++/// Makes `dest` share `source`'s data, with Linux's FICLONE, which Radix
++/// takes for files of one Btrfs filesystem (ADR 0139).
++#[cfg(target_os = "radix")]
++fn clone(source: &Path, dest: &Path, nofollow: bool) -> std::io::Result<()> {
++    use std::os::fd::AsRawFd;
++    const FICLONE: libc::Ioctl = 0x4004_9409;
++    let src_file = open_source(source, nofollow)?;
++    let dst_file = create_dest_restrictive(dest, false)?;
++    // SAFETY: FICLONE takes the source's descriptor as its argument.
++    if unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) } == 0 {
++        Ok(())
++    } else {
++        Err(std::io::Error::last_os_error())
++    }
++}

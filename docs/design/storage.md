@@ -512,6 +512,13 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   and removes one by walking its tree in one transaction, freeing what
   only it holds and turning blocks a later snapshot shares into
   `FULL_BACKREF` ones first.
+- `files::clone_extents` clones a range of a file's extents into another
+  file, or elsewhere in the same one, as Linux's `FICLONE` and
+  `FICLONERANGE` do (ADR 0139): it drops what the destination held
+  there, copies each extent item cut to the range, and gives the extent
+  a data reference for the new file and offset. The node writes both
+  files' pages back first and holds both caches, in address order, until
+  the cloned range's pages are dropped, to be read again.
 - `space::Space` reads every block group and its free ranges from the
   free-space tree at the first write, kept as extents or bitmaps; the
   ranges around the superblock's copies are never taken. A tree block is
@@ -765,7 +772,7 @@ host, and reads everything back after a second boot.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
-  with `no-holes`, without reflinks or quotas (10c.2), removes a
+  with `no-holes`, without quotas, removes a
   subvolume in one transaction rather than in the background, and
   compresses only with zstd, never small files inline, with literals of
   bytes above 127 left raw. Its compressed reads take one workspace in

@@ -298,6 +298,54 @@ fn check_root(root: &Dir, after: bool) {
         }
     }
     check_snapshots(root, after);
+    if !after {
+        check_clones(root);
+    }
+}
+
+/// The file in `/users` that `storage root` clones, and its clone.
+const CLONED: &str = "storage-root/cloned.bin";
+const CLONE: &str = "storage-root/clone.bin";
+
+/// Clones on Dukovo's root (ADR 0139): a clone of a file in `/users`
+/// takes no room for its data, which it keeps as the source changes. The
+/// file is 1 MiB, written and checked 64 KiB at a time: the program's
+/// heap has no room for it whole.
+fn check_clones(root: &Dir) {
+    const PIECE: u32 = 64 * 1024;
+    let made = || -> radix_rt::fs::Result<()> {
+        let users = root.open_dir("users", Rights::READ.union(Rights::WRITE))?;
+        let source = users.create(CLONED)?;
+        let mut hash = FNV_START;
+        for at in (0..16 * PIECE).step_by(PIECE as usize) {
+            let piece: Vec<u8> =
+                (at..at + PIECE).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+            hash = fnv1a(hash, &piece);
+            source.write_all_at(at.into(), &piece)?;
+        }
+        users.sync()?;
+        let room = |info: radix_rt::fs::Info| info.free * u64::from(info.block_size);
+        let before = room(users.info()?);
+        users.create(CLONE)?.clone_from(&source)?;
+        users.sync()?;
+        let took = before.saturating_sub(room(users.info()?));
+        check(took < 100_000, || format!("the clone of a 1 MiB file took {took} bytes"));
+        let whole = (u64::from(16 * PIECE), hash);
+        check(hash_file(&users, CLONE)? == whole, || {
+            "the clone does not hold the file's data".into()
+        });
+        source.write_all_at(4096, b"changed\n")?;
+        drop(source);
+        check(hash_file(&users, CLONE)? == whole, || "the clone changed with its source".into());
+        check(hash_file(&users, CLONED)? != whole, || "the source did not change".into());
+        users.remove(CLONED)?;
+        users.remove(CLONE)?;
+        users.sync()
+    };
+    match made() {
+        Ok(()) => println!("storage: a clone in /users took no room and kept its data"),
+        Err(err) => fail(&format!("clones: {err}")),
+    }
 }
 
 /// The read-only snapshot of `/users` that `storage root` makes in the

@@ -78,8 +78,8 @@ two changes it, so each block must say who holds it, the way Linux and
   the default subvolume, fails with `EBUSY`; Linux lets open files live
   until they close and refuses the default with `EPERM`. Removing a
   subvolume that holds another fails with `ENOTEMPTY`, as on Linux.
-  Reflinks (`FICLONE`), quotas, `send` and `receive`, and setting the
-  default subvolume come later.
+  Reflinks (`FICLONE`, ADR 0139), quotas, `send` and `receive`, and
+  setting the default subvolume come later.
 
 ## Alternatives
 
