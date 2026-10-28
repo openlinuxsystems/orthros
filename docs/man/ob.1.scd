@@ -1164,7 +1164,7 @@ Build the image and write it to a USB stick. Check the device name with
 ```
 ./ob image
 lsblk -d -o NAME,SIZE,MODEL,TRAN
-sudo dd if=out/dukovo-0.10.1-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=out/dukovo-0.10.2-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 Graphical alternatives that write the same image are balenaEtcher, GNOME
