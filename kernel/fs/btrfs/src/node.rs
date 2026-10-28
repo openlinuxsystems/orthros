@@ -253,9 +253,13 @@ impl BtrfsNode {
     /// or the top directory of another subvolume.
     fn open_entry(&self, location: &Key) -> Result<NodeRef> {
         let node = match location.kind {
-            item::INODE_ITEM => {
-                Inner::node_for(&self.fs, self.subvol, self.tree, location.objectid, self.read_only)?
-            }
+            item::INODE_ITEM => Inner::node_for(
+                &self.fs,
+                self.subvol,
+                self.tree,
+                location.objectid,
+                self.read_only,
+            )?,
             item::ROOT_ITEM => {
                 let (root, dir, read_only) =
                     self.fs.volume.subvolume(location.objectid)?.ok_or(Error::NotFound)?;

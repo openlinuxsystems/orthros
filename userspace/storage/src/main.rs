@@ -90,7 +90,8 @@ const FROM_HOST_TEXT: &[u8] = b"Written on the host between the boots.\n";
 /// Where `storage root` writes [`ROOT_FILE`] before a reboot, and
 /// `storage rooted` reads it after: each subvolume of Dukovo's root that
 /// changes (ADR 0137).
-const ROOT_PLACES: [&str; 5] = ["system/settings", "system/state", "applications", "users", "shared"];
+const ROOT_PLACES: [&str; 5] =
+    ["system/settings", "system/state", "applications", "users", "shared"];
 /// The file `storage root` writes in each of [`ROOT_PLACES`], in a
 /// directory of its own.
 const ROOT_FILE: &str = "storage-root/written.txt";
