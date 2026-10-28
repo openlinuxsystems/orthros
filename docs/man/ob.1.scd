@@ -630,6 +630,15 @@ _target/userspace/_).
 		files and write and sync another, and *btrfs check* must pass
 		again.
 
+	*btrfs-log*
+		Boot 2 CPUs under UEFI with the 128 MiB Btrfs disk Linux left
+		with changes in its log of fsyncs alone, which *ob fixture
+		btrfs-log* made. Spark must mount it, which replays the log;
+		_/system/tests/storage replayed_ must list every file, directory
+		and link as Linux listed them after its own replay of the same
+		disk, then write and sync a file. The superblock must name no
+		log after the boot, and *btrfs check* must find nothing wrong.
+
 	*ext4-write*
 		The *storage* test on two ext4 disks *mkfs.ext4* made holding
 		only the file the host writes to FAT disks between the boots: a
@@ -816,6 +825,25 @@ _target/userspace/_).
 	*--debug*, *--release*
 		As for *build*.
 
+*fixture* *btrfs-log* [*--linux-kernel* _file_]
+	Make test data that only Linux makes, for the host tests of Radix's
+	filesystems. *btrfs-log* makes a 128 MiB Btrfs disk with
+	*mkfs.btrfs*, boots Linux in a virtual machine on it with
+	_tools/linux-bench_ as its only process (*--btrfs-log make*), which
+	commits a set of files, changes them with an *fsync*(2) after each
+	change and powers off, so that the changes are in Btrfs's log tree
+	alone; then boots it again on a copy (*--btrfs-log list*) to list the
+	disk as its last commit has it and as Linux has it after replaying
+	the log. The disk, kept as its blocks that are not all zeros, and the
+	lists go to _kernel/fs/btrfs/src/tests/fixtures/_, which the
+	Btrfs host tests check Radix's replay against (ADR 0151). The
+	fixtures are checked in; make them again only to change what the
+	log holds.
+
+	*--linux-kernel* _file_
+		As for *bench*; the kernel needs Btrfs, built in or as a module
+		in *OB_LINUX_MODULES*.
+
 *docs* [*--check*]
 	Build the man pages from _docs/man/\*.scd_ into _out/docs/man/_ and the
 	handbook from _docs/handbook/_ into _out/docs/handbook/_. The pages of
@@ -988,7 +1016,13 @@ fails the build.
 	Program to use for *--container*, such as *podman* or *docker*.
 
 *OB_LINUX_KERNEL*
-	The Linux kernel *bench* boots, when *--linux-kernel* is not given.
+	The Linux kernel *bench* and *fixture* boot, when *--linux-kernel* is
+	not given.
+
+*OB_LINUX_MODULES*
+	The directory of that kernel's modules, when they are not in
+	_/lib/modules/_ under its release: *ob* loads Btrfs from it, and the
+	modules its _modules.dep_ says Btrfs needs.
 
 *OB_OVMF_CODE*, *OB_OVMF_VARS*
 	Paths to OVMF's code and variable-store images, when they are installed

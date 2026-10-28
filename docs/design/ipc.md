@@ -423,8 +423,10 @@ that neither has a cache between the program and the disk. Given
 files of 1 MiB of noise, stored plain, and 32 of text, stored as zstd
 extents, each whole in 128 KiB reads (`posix_btrfs_read_mib`,
 `posix_btrfs_read_zstd_mib`, per file), then makes a file, writes 4 KiB
-to it, closes and removes it (`posix_btrfs_create`, ADR 0132), and last
-writes 32 new files, each a copy of the first file of text, in 128 KiB
+to it, closes and removes it (`posix_btrfs_create`, ADR 0132), writes
+4 KiB over one of the first 16 blocks of a file and makes it durable
+with `fsync`, 200 times (`posix_btrfs_fsync`: Linux writes its log tree,
+Radix commits, ADR 0151), and last writes 32 new files, each a copy of the first file of text, in 128 KiB
 writes, and syncs the filesystem, which compresses them as it writes
 them (`posix_btrfs_write_zstd_mib`, per file, ADR 0134). `ob bench` makes
 that disk with `mkfs.btrfs --compress zstd` once, and each boot gets a

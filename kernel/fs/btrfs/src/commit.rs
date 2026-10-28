@@ -33,10 +33,12 @@ mod at {
     pub const GENERATION: usize = 0x48;
     pub const ROOT: usize = 0x50;
     pub const CHUNK_ROOT: usize = 0x58;
+    pub const LOG_ROOT: usize = 0x60;
     pub const BYTES_USED: usize = 0x78;
     pub const CHUNK_ROOT_GENERATION: usize = 0xa4;
     pub const ROOT_LEVEL: usize = 0xc6;
     pub const CHUNK_ROOT_LEVEL: usize = 0xc7;
+    pub const LOG_ROOT_LEVEL: usize = 0xc8;
     pub const INCOMPAT: usize = 0xbc;
     pub const TOTAL_BYTES: usize = 0x70;
     pub const NUM_DEVICES: usize = 0x88;
@@ -333,6 +335,9 @@ impl Writer {
         put_u64(&mut sb, at::CHUNK_ROOT, chunk.bytenr);
         sb[at::CHUNK_ROOT_LEVEL] = chunk.level;
         put_u64(&mut sb, at::CHUNK_ROOT_GENERATION, chunk.generation);
+        // Radix keeps no log of fsyncs; one a mount replayed is gone.
+        put_u64(&mut sb, at::LOG_ROOT, 0);
+        sb[at::LOG_ROOT_LEVEL] = 0;
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
         put_u64(&mut sb, at::BYTES_USED, used);
         let features = u64_at(&sb, at::INCOMPAT) | self.incompat;

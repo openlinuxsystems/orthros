@@ -1,0 +1,28 @@
+# Made by `ob fixture btrfs-log` with Linux 6.8.0-71-generic: the disk as its last commit has it, and as Linux replays its log.
+LIST committed
+LIST / dir 755 0 0 1 42 - -
+LIST /attrs file 644 0 0 1 32 c6631b0534794ba6 user.changed=6f6c64,user.kept=6f6e65,user.removed=676f6e65
+LIST /d dir 755 0 0 1 18 - -
+LIST /d/gone file 644 0 0 1 3000 3d3392b566ad0b04 -
+LIST /d/stays file 644 0 0 1 3000 3d0c96b07093350a -
+LIST /into dir 755 0 0 1 10 - -
+LIST /into/moved file 644 0 0 1 8192 931a3c3001471ce6 -
+LIST /kept file 644 0 0 1 65536 be4b78e9f12ddf1a -
+LIST /shrinks file 644 0 0 1 40960 c16c244d841b1d92 -
+LIST replayed
+LIST / dir 755 0 0 1 86 - -
+LIST /attrs file 644 0 0 1 32 c6631b0534794ba6 user.added=6164646564,user.changed=6e6577,user.kept=6f6e65
+LIST /d dir 755 0 0 1 18 - -
+LIST /d/link file 644 0 0 2 96256 8d9414ef53bff201 -
+LIST /d/stays file 644 0 0 1 3000 3d0c96b07093350a -
+LIST /into dir 755 0 0 1 10 - -
+LIST /into/moved file 644 0 0 1 8192 931a3c3001471ce6 -
+LIST /kept file 644 0 0 2 96256 8d9414ef53bff201 -
+LIST /new file 644 0 0 1 40960 26feb15a2929a849 -
+LIST /newdir dir 755 0 0 1 20 - -
+LIST /newdir/other file 644 0 0 1 5000 c3d8aa6c0bf67a21 -
+LIST /newdir/small file 644 0 0 1 33 bc43b45bbf3a5e04 -
+LIST /pointer link 777 0 0 1 4 kept -
+LIST /shrinks file 644 0 0 1 5000 533e8dedba740fbf -
+LIST /zipped file 644 0 0 1 204800 eaa8191e89236225 btrfs.compression=7a6c6962
+LIST end

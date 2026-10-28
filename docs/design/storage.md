@@ -526,6 +526,16 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   the transaction for 16 MiB of extents at a time, writes a good copy
   over a bad one unless it only reads, and counts what it finds as
   Linux's `struct btrfs_scrub_progress`.
+- `replay` replays the log of fsyncs Linux leaves when it stops between
+  an `fsync` and the next commit (ADR 0151), in the mount's first
+  transaction, which commits it with no log: a read-only mount replays
+  it too, and a disk that cannot be written is refused with `ReadOnly`,
+  as on Linux. Each logged inode gets the log's inode item; a logged
+  directory loses the names its `DIR_LOG_INDEX` ranges hold whole but
+  the log lacks; then the log's names, file extents with their
+  checksums and extended attributes go in, and the links, sizes and
+  bytes of what it touched are counted again. The log's blocks are kept
+  from use for the mount's life, and the data it names is taken first.
 - `space::Space` reads every block group and its free ranges from the
   free-space tree at the first write, kept as extents or bitmaps; the
   ranges around the superblock's copies are never taken. A tree block is
@@ -781,7 +791,8 @@ host, and reads everything back after a second boot.
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
   with `no-holes`, without quotas, removes a
   subvolume in one transaction rather than in the background, scrubs
-  in the caller's call rather than in a thread of its own, and
+  in the caller's call rather than in a thread of its own, replays
+  Linux's log of fsyncs but writes none (`fsync` is a commit), and
   compresses only with zstd, never small files inline, with literals of
   bytes above 127 left raw. Its compressed reads take one workspace in
   turn, where Linux keeps one per CPU at most. Empty block groups stay, where Linux removes

@@ -48,6 +48,12 @@
 //! mounts `/proc` and `/dev`, loads the kernel modules of the initramfs
 //! (Btrfs, where the kernel has it as a module), mounts the Btrfs disk,
 //! prints `linux-bench: done` at the end and powers the machine off.
+//!
+//! With `--btrfs-log make` or `--btrfs-log list`, as process 1, it
+//! makes or lists the Btrfs log of `ob fixture btrfs-log` instead
+//! ([`btrfs_log`]).
+
+mod btrfs_log;
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -82,6 +88,7 @@ const MODULE_INIT_COMPRESSED_FILE: libc::c_uint = 4;
 fn main() {
     let mut rounds = 100_000u64;
     let mut posix = None;
+    let mut btrfs_log = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let value = args.next();
@@ -90,8 +97,14 @@ fn main() {
                 rounds = count.parse().unwrap_or(rounds);
             }
             ("--posix-bench", Some(program)) => posix = Some(PathBuf::from(program)),
+            ("--btrfs-log", Some(mode)) if mode == "make" || mode == "list" => {
+                btrfs_log = Some(mode);
+            }
             _ => {
-                eprintln!("usage: linux-bench [--rounds <count>] [--posix-bench <program>]");
+                eprintln!(
+                    "usage: linux-bench [--rounds <count>] [--posix-bench <program>] \
+                     [--btrfs-log make|list]"
+                );
                 std::process::exit(2);
             }
         }
@@ -100,6 +113,14 @@ fn main() {
         mount("proc", "/proc");
         mount("devtmpfs", "/dev");
         load_modules();
+    }
+    if let Some(mode) = btrfs_log {
+        if mode == "make" {
+            btrfs_log::make();
+        } else {
+            btrfs_log::list();
+        }
+        power_off();
     }
     let cpus = allowed_cpus();
     let Some(&first) = cpus.first() else {
@@ -169,12 +190,20 @@ fn main() {
     if std::process::id() == 1 {
         // The init process of `ob bench`'s Linux virtual machine.
         println!("linux-bench: done");
-        // SAFETY: as process 1, this program may power the machine off;
-        // there is nothing to save first.
-        unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
-        loop {
-            std::thread::park();
-        }
+        power_off();
+    }
+}
+
+/// Powers the machine off, as its process 1, with nothing saved first:
+/// what is not on the disks yet is lost, as at a power cut.
+fn power_off() {
+    if std::process::id() != 1 {
+        return;
+    }
+    // SAFETY: as process 1, this program may power the machine off.
+    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
+    loop {
+        std::thread::park();
     }
 }
 
