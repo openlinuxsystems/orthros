@@ -3309,7 +3309,8 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    // Spark mounts the disks while it builds the hierarchy, to find
+    // Dukovo's root among them (ADR 0137).
     for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
         let label = disk.label;
         let (kind, said) = disk.kind();
@@ -3318,6 +3319,7 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     vm.expect("spark: started /system/tests/storage as process ")
 }
 
@@ -4307,7 +4309,6 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
 /// the storage program lists every volume as [`btrfs_listing`] says.
 fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     let volumes = volume_names(case.disks);
     for (disk, name) in case.disks.iter().zip(&volumes) {
         let label = disk.label;
@@ -4318,6 +4319,7 @@ fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
             "spark: mounted the Btrfs filesystem of {name} at /volumes/{name}, read-only"
         ))?;
     }
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     // The program lists the volumes in name order.
     let mut sorted = volumes.clone();
