@@ -24,8 +24,8 @@ use super::{
     HUFFMAN_MAX_BITS, Kind, LL_BASE, LL_BITS, MAGIC, MAX_BLOCK, ML_BASE, ML_BITS, copy_short,
 };
 
-/// The bits of a hash of five bytes, which index the table of matches.
-const HASH_LOG: u32 = 13;
+/// The bits of a hash of six bytes, which index the table of matches.
+const HASH_LOG: u32 = 14;
 
 /// The shortest match taken.
 const MIN_MATCH: usize = 4;
@@ -608,6 +608,30 @@ fn plain_header(kind: u32, n: usize, out: &mut [u8]) -> Option<usize> {
     Some(len)
 }
 
+/// What [`Encoder::find`] has found so far: the block's literals and
+/// sequences.
+struct Found<'e> {
+    literals: &'e mut [u8],
+    sequences: &'e mut [Sequence],
+    count: usize,
+    lits: usize,
+}
+
+impl Found<'_> {
+    /// Adds the sequence of `literals` and a match of `len` bytes at
+    /// offset value `offset`; with no room, the block is cut short there.
+    #[inline(always)]
+    fn emit(&mut self, literals: &[u8], offset: usize, len: usize) {
+        let n = literals.len();
+        let Some(to) = self.literals.get_mut(self.lits..self.lits + n) else { return };
+        let Some(seq) = self.sequences.get_mut(self.count) else { return };
+        copy_short(to, literals);
+        *seq = Sequence { literals: n as u32, offset: offset as u32, len: len as u32 };
+        self.count += 1;
+        self.lits += n;
+    }
+}
+
 /// Makes zstd frames.
 pub struct Encoder {
     /// The data to compress.
@@ -707,21 +731,11 @@ impl Encoder {
             Err(_) => return (0, 0),
         };
         table.fill(0);
-        let (mut count, mut lits) = (0, 0);
-        let mut emit = |anchor: usize, at: usize, offset: usize, len: usize| {
-            let n = at - anchor;
-            let copied = match literals.get_mut(lits..lits + n) {
-                Some(to) => {
-                    copy_short(to, &src[anchor..at]);
-                    true
-                }
-                None => false,
-            };
-            if let Some(seq) = sequences.get_mut(count).filter(|_| copied) {
-                *seq = Sequence { literals: n as u32, offset: offset as u32, len: len as u32 };
-                count += 1;
-                lits += n;
-            }
+        let mut found = Found {
+            literals: literals.as_mut_slice(),
+            sequences: sequences.as_mut_slice(),
+            count: 0,
+            lits: 0,
         };
         let (mut rep, mut before) = (1, 4);
         let end = n.saturating_sub(TAIL);
@@ -734,7 +748,7 @@ impl Encoder {
             let next = ip + 1;
             if rep <= next && word4(src, next - rep) == word4(src, next) {
                 let len = MIN_MATCH + alike(src, n, next + 4, next + 4 - rep);
-                emit(anchor, next, 1, len);
+                found.emit(&src[anchor..next], 1, len);
                 ip = next + len;
             } else if seen < ip && word4(src, seen) == word4(src, ip) {
                 let (mut at, mut from) = (ip, seen);
@@ -743,7 +757,7 @@ impl Encoder {
                     (at, from, len) = (at - 1, from - 1, len + 1);
                 }
                 let offset = at - from;
-                emit(anchor, at, offset + 3, len);
+                found.emit(&src[anchor..at], offset + 3, len);
                 (before, rep) = (rep, offset);
                 ip = at + len;
             } else {
@@ -761,11 +775,12 @@ impl Encoder {
                 let len = MIN_MATCH + alike(src, n, ip + 4, ip + 4 - before);
                 (rep, before) = (before, rep);
                 table[hash(word(src, ip))] = ip as u32;
-                emit(anchor, ip, 1, len);
+                found.emit(&src[anchor..ip], 1, len);
                 ip += len;
                 anchor = ip;
             }
         }
+        let Found { literals, count, mut lits, .. } = found;
         if let Some(to) = literals.get_mut(lits..lits + (n - anchor)) {
             to.copy_from_slice(&src[anchor..n]);
             lits += n - anchor;
@@ -933,16 +948,13 @@ impl Encoder {
         // The bases are multiples of their codes' ranges: the extra bits
         // are the low bits of the lengths (less 3, for matches).
         let (ll_bits, ml_bits) = (padded(&LL_BITS), padded(&ML_BITS));
-        let extra = |bits: &mut Bits<'_>, s: &Sequence, ll: usize, ml: usize| {
-            bits.add(u64::from(s.literals), u32::from(ll_bits[ll & 63]));
-            bits.add(u64::from(s.len - 3), u32::from(ml_bits[ml & 63]));
-        };
         let last = &seqs[count - 1];
         let [ll, ml, of] = codes[count - 1].map(usize::from);
         let mut ml_state = ml_table.first(ml);
         let mut of_state = of_table.first(of);
         let mut ll_state = ll_table.first(ll);
-        extra(&mut bits, last, ll, ml);
+        bits.add(u64::from(last.literals), u32::from(ll_bits[ll & 63]));
+        bits.add(u64::from(last.len - 3), u32::from(ml_bits[ml & 63]));
         bits.add(u64::from(last.offset), of as u32);
         bits.flush()?;
         for (s, code) in seqs[..count - 1].iter().zip(&codes[..count - 1]).rev() {
@@ -950,11 +962,13 @@ impl Encoder {
             of_table.put(&mut bits, &mut of_state, of);
             ml_table.put(&mut bits, &mut ml_state, ml);
             ll_table.put(&mut bits, &mut ll_state, ll);
+            let (ll_extra, ml_extra) = (u32::from(ll_bits[ll & 63]), u32::from(ml_bits[ml & 63]));
             // The states take at most 26 bits, the extra bits 49.
-            if u32::from(ll_bits[ll & 63]) + u32::from(ml_bits[ml & 63]) + of as u32 >= 31 {
+            if ll_extra + ml_extra + of as u32 >= 31 {
                 bits.flush()?;
             }
-            extra(&mut bits, s, ll, ml);
+            bits.add(u64::from(s.literals), ll_extra);
+            bits.add(u64::from(s.len - 3), ml_extra);
             bits.add(u64::from(s.offset), of as u32);
             bits.flush()?;
         }

@@ -529,7 +529,7 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
 - `zstd::encode` compresses (ADR 0134), modelled on zstd's level 1:
-  a table of 2^13 positions hashed on six bytes, the last two offsets
+  a table of 2^14 positions hashed on six bytes, the last two offsets
   tried as the reference does, one block a frame, Huffman-coded literals
   when no byte is above 127, and the sequences' tables picked as the
   reference picks them; its buffers are allocated with it. On a mount
@@ -538,7 +538,8 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   up to 128 KiB of the file's bytes, through two `pack::Packer`s, the
   second chunk on another CPU (`radix_vfs::join`), before it takes the
   transaction lock; a chunk whose frame saves a sector is written as a
-  compressed extent, the others as they are. The packers are made at the
+  compressed extent, the others as they are, and a run's frames go to
+  the disk in one request. The packers are made at the
   first compressed write and dropped by the shrinker; the superblock
   gains `COMPRESS_ZSTD` at the commit of the first compressed extent.
 - `grow` makes a chunk when a kind (data, metadata or the chunk tree)

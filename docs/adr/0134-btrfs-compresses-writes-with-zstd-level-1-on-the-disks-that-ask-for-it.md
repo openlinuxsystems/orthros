@@ -28,7 +28,7 @@ upstream), and Dukovo's decoder is its own (ADR 0128).
 
 - **An encoder of its own** (`kernel/fs/btrfs/src/zstd/encode.rs`),
   written from RFC 8878 and modelled on the "fast" strategy of zstd's
-  level 1: a table of 2^13 positions hashed on six bytes, matches of four
+  level 1: a table of 2^14 positions hashed on six bytes, matches of four
   bytes or more, the last offset tried one byte on before the table,
   matches extended backwards, the offset before last tried at once after
   each match, and steps that grow by one every 256 bytes without a
@@ -39,15 +39,19 @@ upstream), and Dukovo's decoder is its own (ADR 0128).
   sequences use the predefined tables, a single code, or tables fitted
   to their counts when 64 or more are coded, whichever the reference
   picks. Every buffer is allocated with the encoder; nothing allocates
-  per call. On text in 128 KiB frames its output is 1.3% larger than the
-  reference `zstd -1`, and it runs within about 10% of it.
+  per call. On text in 128 KiB frames its output is 0.3% larger than the
+  reference `zstd -1`, and it runs as fast (the reference's table has
+  2^13 positions for frames this small; one of 2^14 finds more matches
+  for the same time and makes up for the rest of the encoder).
 - **Compressed extents**: write-back compresses a run of a file's dirty
   pages in chunks of up to 128 KiB, only the bytes before the end of the
   file, and writes a chunk compressed when the frame saves at least one
   of the sectors those bytes fill, as Linux has it. The extent's
   `EXTENT_DATA` gives the chunk's pages as its length and the frame's
   sectors as its size on the disk, with compression type 3; checksums
-  are of the sectors written. Two packers, an encoder and the frame's
+  are of the sectors written. The frames of a run go to the disk one
+  after the other, in one request, and a request now holds up to
+  128 KiB (it held 64 KiB). Two packers, an encoder and the frame's
   pages each, are made at a filesystem's first compressed write and
   dropped by its shrinker; a run compresses two chunks at a time, the
   second on another CPU when one is free (`radix_vfs::join`, ADR 0133),
