@@ -250,7 +250,7 @@ fn check_root(root: &Dir, after: bool) {
     };
     // The last mount at a path is the one seen there.
     let mount = |at: &str| {
-        mounts.lines().filter(|line| line.split(' ').nth(1) == Some(at)).last().unwrap_or("")
+        mounts.lines().rfind(|line| line.split(' ').nth(1) == Some(at)).unwrap_or("")
     };
     let system = mount("/system");
     check(system.ends_with(" /system btrfs ro label=dukovo-root"), || {
