@@ -317,7 +317,9 @@ _target/userspace/_).
 		i6300esb under BIOS (*watchdog*) or with the TCO timer of q35's
 		ICH9 under UEFI (*watchdog-tco*). The kernel must find the
 		watchdog and Spark start it, then stop responding; the watchdog
-		must restart the machine, and the next boot must say it did. Spark
+		must restart the machine, and the next boot must say it did.
+		*watchdog* also boots with *kdb*, which must keep the machine
+		from restarting while it waits, for twice the timeout. Spark
 		then pets it for twice its timeout without a restart, and the
 		power button powers the machine off (*spark*(8)'s *WATCHDOG*).
 

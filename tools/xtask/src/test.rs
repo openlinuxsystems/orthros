@@ -725,10 +725,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "watchdog",
-        about: "Spark pets QEMU's i6300esb; when it stops responding, the watchdog restarts the machine, and the next boot says so",
+        about: "Spark pets QEMU's i6300esb; when it stops responding, the watchdog restarts the machine once kdb stops petting it, and the next boot says so",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "-- --watchdog 12 --test-hang",
+        cmdline: "kdb -- --watchdog 12 --test-hang",
         cpus: 2,
         memory: "1G",
         reboot: true,
@@ -2858,12 +2858,16 @@ fn watchdog_tco(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// Spark, asked to stop responding, leaves the watchdog `found` unpetted,
-/// and it restarts the machine. The next boot says so, Spark pets the
-/// watchdog for twice its timeout, and the power button powers off.
+/// and it restarts the machine. With `kdb` on the command line, kdb waits
+/// at the end of each boot, and in the first pets the watchdog for twice
+/// its timeout, until it is told to continue. The next boot says the
+/// watchdog restarted it, Spark pets the watchdog for twice its timeout,
+/// and the power button powers off.
 fn watchdog_restarts(vm: &mut Vm, case: &Case, found: &str) -> Result<(), String> {
     let name = found.split(", with").next().unwrap_or(found);
     let started =
         format!("Watchdog: `spark` started {name}: the machine restarts unless petted every 12 s");
+    let kdb = case.cmdline.starts_with("kdb ");
     for boot in 1..=2 {
         boot_report(vm, case)?;
         // Said before the boot report ends.
@@ -2872,9 +2876,28 @@ fn watchdog_restarts(vm: &mut Vm, case: &Case, found: &str) -> Result<(), String
             return Err(format!("boot {boot}: the kernel did not find {name}"));
         }
         vm.expect("Boot complete.")?;
+        if kdb {
+            // kdb stops kmain's CPU; Spark runs on the other.
+            vm.expect("kdb on CPU ")?;
+        }
         vm.expect(&started)?;
         if boot == 1 {
             vm.expect("spark: not responding, as --test-hang asks, until the watchdog restarts")?;
+        } else {
+            vm.expect(
+                "spark: the watchdog restarted the machine: the last boot stopped responding",
+            )?;
+        }
+        if kdb {
+            if boot == 1 {
+                std::thread::sleep(Duration::from_secs(24));
+                if vm.log().matches("Boot complete.").count() != 1 {
+                    return Err("the watchdog restarted the machine while kdb petted it".into());
+                }
+            }
+            vm.kdb("", &[])?;
+            vm.send("continue\r")?;
+            vm.expect("kdb: continuing")?;
         }
     }
     let restarted =
@@ -2884,7 +2907,6 @@ fn watchdog_restarts(vm: &mut Vm, case: &Case, found: &str) -> Result<(), String
             "the kernel does not say the watchdog restarted it: no \"{restarted}\""
         ));
     }
-    vm.expect("spark: the watchdog restarted the machine: the last boot stopped responding")?;
     // Petted, it lets the machine run on.
     std::thread::sleep(Duration::from_secs(24));
     let log = vm.log();

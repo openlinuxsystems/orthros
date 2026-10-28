@@ -54,6 +54,9 @@ has a watchdog of its own (Phase 11e). Neither can be tested in QEMU.
   (`--watchdog <seconds>` on the kernel command line sets another, 0
   none), and pets it every third of that from its loop. A boot program
   Spark runs and waits for, as the boot tests do, runs before.
+- kdb pets a running watchdog about once a second while it waits for a
+  command, since it stops the CPU Spark may need, and after a panic
+  every CPU: whoever is at the debugger is not a hung machine.
 - `/kernel/class/watchdog/watchdog0` shows it with Linux's names
   (`identity`, `state`, `timeout`, `min_timeout`, `max_timeout`,
   `bootstatus` with WDIOF_CARDRESET), and watchdog(8) shows that as

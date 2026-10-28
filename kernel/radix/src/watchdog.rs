@@ -11,6 +11,7 @@
 //! Before the machine is powered off or restarted, [`ending`] gives it its
 //! longest timeout, up to [`ENDING_SECONDS`], so that a long write-back is
 //! not cut short but a hung one still ends; before it is halted, it stops.
+//! kdb pets it while it waits for a command ([`pet_from_kdb`]).
 //! `/kernel/class/watchdog/watchdog0` shows its state, as Linux's sysfs
 //! does.
 
@@ -83,6 +84,18 @@ pub fn pet() -> bool {
         Arch::watchdog_pet();
     }
     state.0
+}
+
+/// Pets it from kdb, which stops the CPU Spark may need, and after a
+/// panic every CPU: whoever is at the debugger is not a hung machine. It
+/// waits for no lock, since a stopped CPU may hold it, and skips a pet
+/// that one was in the middle of.
+pub fn pet_from_kdb() {
+    if let Some(state) = STATE.try_lock()
+        && state.0
+    {
+        Arch::watchdog_pet();
+    }
 }
 
 /// Stops it, for `who`; false without a watchdog.
