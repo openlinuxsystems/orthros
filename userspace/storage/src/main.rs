@@ -24,6 +24,9 @@
 //!   with each file's size and FNV-1a hash, and checks that the volumes
 //!   refuse writes: the `btrfs` boot test's host compares what it prints
 //!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]);
+//!   `storage replayed` lists them so too, then writes a file to each:
+//!   the `btrfs-log` boot test's host compares the list with Linux's after
+//!   it replayed the same disk's log of fsyncs (ADR 0151);
 //! - `storage churn` writes, syncs and renames a file at a time on the one
 //!   volume, removing older ones, until the `btrfs-power-cut` or
 //!   `ext4-power-cut` boot test cuts the power ([`churn`]); `storage
@@ -175,7 +178,7 @@ fn main(_: &Startup) -> u64 {
             return 1;
         }
     };
-    if volumes.is_empty() && matches!(mode, "write" | "check" | "list") {
+    if volumes.is_empty() && matches!(mode, "write" | "check" | "list" | "replayed") {
         fail("no volumes are mounted under /volumes");
     }
     if volumes.len() != 1 && matches!(mode, "churn" | "churned") {
@@ -204,9 +207,9 @@ fn main(_: &Startup) -> u64 {
                 check_volume(&root, name);
             }
         }
-        "list" => {
+        "list" | "replayed" => {
             for name in &volumes {
-                list_volume(&root, name);
+                list_volume(&root, name, mode == "list");
             }
         }
         "churn" => {
@@ -222,8 +225,8 @@ fn main(_: &Startup) -> u64 {
         "root" | "rooted" => check_root(&root, mode == "rooted"),
         _ => {
             println!(
-                "storage: FAILED: say `write`, `check`, `list`, `churn`, `churned`, `root`, \
-                 `rooted`, `raw` or `errors`, not `{mode}`"
+                "storage: FAILED: say `write`, `check`, `list`, `replayed`, `churn`, `churned`, \
+                 `root`, `rooted`, `raw` or `errors`, not `{mode}`"
             );
             return 1;
         }
@@ -464,11 +467,12 @@ fn hash_file(dir: &Dir, path: &str) -> radix_rt::fs::Result<(u64, u64)> {
     }
 }
 
-/// Prints every file, directory and link of the read-only volume at
+/// Prints every file, directory and link of the volume at
 /// `/volumes/<name>`, a line each, in name order and depth first: a
 /// file's size and hash, or the error reading it gave, or the file it is
-/// another name of; a link's target. Then checks that a write fails.
-fn list_volume(root: &Dir, name: &str) {
+/// another name of; a link's target. Then checks that a write fails, if
+/// the volume is `read_only`, or that one is taken and synced.
+fn list_volume(root: &Dir, name: &str, read_only: bool) {
     let dir = match root.open_dir(&format!("volumes/{name}"), Rights::READ) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
@@ -479,6 +483,17 @@ fn list_volume(root: &Dir, name: &str) {
     println!("storage: list {name}: {count} entries");
     let rw = Rights::READ.union(Rights::WRITE);
     let write = root.open_dir(&format!("volumes/{name}"), rw);
+    if !read_only {
+        let written = write.and_then(|dir| {
+            dir.write_file("new.txt", b"after the replay")?;
+            dir.sync()
+        });
+        match written {
+            Ok(()) => println!("storage: list {name}: takes writes"),
+            Err(err) => fail(&format!("a write to /volumes/{name} failed with {err}")),
+        }
+        return;
+    }
     match write.and_then(|dir| dir.write_file("new.txt", b"refused")) {
         Err(err) if err.is(FileError::ReadOnly) => {
             println!("storage: list {name}: writes fail with read_only");

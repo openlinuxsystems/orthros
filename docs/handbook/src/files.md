@@ -276,8 +276,10 @@ reboot. A volume with two tables (TexFAT) mounts read-only.
 The `btrfs` boot test (`./ob test --case btrfs`) reads every file of two
 such disks and checks each byte on the host; `btrfs-write` writes two
 such disks, then checks them with Linux's `btrfs check` and reads them
-back on the host and after a reboot, and `btrfs-power-cut` cuts the
-power while a disk is being written.
+back on the host and after a reboot, `btrfs-power-cut` cuts the
+power while a disk is being written, and `btrfs-log` mounts a disk Linux
+left with changes in its log of fsyncs alone, which the mount replays as
+Linux does.
 
 An ext4 disk, the kind most Linux machines use, is made the same way:
 

@@ -24,7 +24,8 @@ use crate::image::{self, ImageSpec, crc32};
 use crate::process::{self, step};
 use crate::qemu::{self, Machine, Serial};
 use crate::{
-    Args, Ctx, Error, Result, VERSION, btrfs, corpus, doctor, kernel, screen, tla, userspace,
+    Args, Ctx, Error, Result, VERSION, btrfs, corpus, doctor, fixture, kernel, screen, tla,
+    userspace,
 };
 
 /// QEMU's exit status after the kernel writes 0x10 to isa-debug-exit.
@@ -135,9 +136,9 @@ pub struct Disk {
     /// Its size in KiB.
     kib: u64,
     /// 12, 16 or 32; [`EXFAT`] for exFAT; [`BTRFS`] for Btrfs of
-    /// [`btrfs_files`], or [`BTRFS_NEW`] for Btrfs to write; [`EXT4`] for
-    /// ext4; or 0 for no filesystem, the disk holding
-    /// [`storage_big_byte`]'s bytes.
+    /// [`btrfs_files`], [`BTRFS_NEW`] for Btrfs to write, or [`BTRFS_LOG`]
+    /// for Btrfs Linux left with a log; [`EXT4`] for ext4; or 0 for no
+    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The size of an exFAT disk's clusters, or an ext4 disk's blocks, in
     /// bytes; 0 for the others.
@@ -183,6 +184,10 @@ const EXT4: u8 = 4;
 /// ([`image::append_root`]); [`Disk::kib`] is not used.
 const ROOT: u8 = 5;
 
+/// [`Disk::fat`] for the Btrfs disk Linux left with changes in its log
+/// of fsyncs alone, as `ob fixture btrfs-log` keeps it (ADR 0151).
+const BTRFS_LOG: u8 = 6;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -213,7 +218,7 @@ enum Bus {
 impl Disk {
     /// Whether it holds Btrfs.
     fn btrfs(&self) -> bool {
-        matches!(self.fat, BTRFS | BTRFS_NEW | ROOT)
+        matches!(self.fat, BTRFS | BTRFS_NEW | ROOT | BTRFS_LOG)
     }
 
     /// Whether it holds exFAT.
@@ -512,6 +517,11 @@ const BTRFS_COMPRESSED: &str = "nvme0n1";
 /// The `btrfs-power-cut` test's disk: a virtio disk as `mkfs.btrfs` makes
 /// one by default, holding only the host's file.
 const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_cut)];
+
+/// The `btrfs-log` test's disk: the virtio disk of 128 MiB Linux left
+/// with a log of fsyncs to replay.
+const LOG_DISKS: &[Disk] =
+    &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
 
 /// The `root` test's disk: a copy of the test image with a Dukovo root
 /// partition, its fifth, as a virtio disk: `vda5`.
@@ -1411,6 +1421,22 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "btrfs-log",
+        about: "Spark mounts a Btrfs disk Linux left with changes in its log of fsyncs alone, which the mount replays: every file, link and directory lists as Linux lists them after its own replay, the disk takes a write, and Linux's btrfs check passes",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage replayed",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: btrfs_log,
+        disks: LOG_DISKS,
+        second: None,
+    },
+    Case {
         name: "ext4-write",
         about: "The storage test on two ext4 disks Linux's mkfs.ext4 made, with blocks of 4 KiB and 1 KiB: e2fsck passes after each boot, with the journal as Radix left it and replayed, and debugfs reads back what was written",
         firmware: Firmware::Uefi,
@@ -1924,6 +1950,16 @@ fn make_disks(
         if disk.btrfs() {
             let tool = btrfs::tool(ctx).map_err(|err| err.to_string())?;
             let image = DiskImage { btrfs: Some(tool), ..image };
+            if disk.fat == BTRFS_LOG {
+                let kept = ctx.root.join(fixture::FIXTURES).join("btrfs-log.sparse");
+                std::fs::read(&kept)
+                    .and_then(|bytes| fixture::write_sparse(&bytes, &image.path))
+                    .map_err(|err| {
+                    format!("writing {} from {}: {err}", image.path.display(), kept.display())
+                })?;
+                made.push(image);
+                continue;
+            }
             make_btrfs(ctx, disk, &image)?;
             made.push(image);
             continue;
@@ -4618,6 +4654,73 @@ fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     storage_end(vm, "list")
+}
+
+/// Linux's lists of the `btrfs-log` test's disk, before and after its
+/// replay, as `ob fixture btrfs-log` keeps them.
+const LOG_LISTS: &str = include_str!("../../../kernel/fs/btrfs/src/tests/fixtures/btrfs-log.txt");
+
+/// The lines the storage program's `replayed` prints for the volume
+/// `volume` of the `btrfs-log` test: Linux's list after its replay, a
+/// file with more than one name listed once, then the write it takes.
+fn log_listing(volume: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    // The hash and first path of each file with more than one name.
+    let mut first: Vec<(&str, &str)> = Vec::new();
+    let replayed = LOG_LISTS
+        .lines()
+        .skip_while(|line| *line != "LIST replayed")
+        .skip(1)
+        .take_while(|line| *line != "LIST end");
+    for entry in replayed {
+        // LIST <path> <kind> <mode> <uid> <gid> <links> <size> <what> <xattrs>
+        let fields: Vec<&str> = entry.split(' ').collect();
+        let ["LIST", path, kind, _, _, _, links, size, what, _] = fields[..] else { continue };
+        let what = match kind {
+            _ if path == "/" => continue,
+            "dir" => format!("dir {path}"),
+            "link" => format!("link {path} -> {what}"),
+            _ => match first.iter().find(|(hash, _)| links != "1" && *hash == what) {
+                Some((_, seen)) => format!("file {path}: the same file as {seen}"),
+                None => {
+                    if links != "1" {
+                        first.push((what, path));
+                    }
+                    format!("file {path}: {size} bytes, FNV-1a {what}")
+                }
+            },
+        };
+        lines.push(format!("storage: list {volume}: {what}"));
+    }
+    lines.push(format!("storage: list {volume}: {} entries", lines.len()));
+    lines.push(format!("storage: list {volume}: takes writes"));
+    lines
+}
+
+/// The `btrfs-log` test: Spark mounts the disk, which replays Linux's
+/// log of fsyncs (ADR 0151), and the storage program lists it as
+/// [`log_listing`] says, then writes to it.
+fn btrfs_log(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_boot(vm, case)?;
+    for name in volume_names(case.disks) {
+        for line in log_listing(&name) {
+            vm.expect(&line)?;
+        }
+    }
+    storage_end(vm, "replayed")
+}
+
+/// Checks that the replay was committed, the superblock naming no log,
+/// and that Linux's `btrfs check` passes ([`btrfs_checked`]).
+fn btrfs_replayed(disk: &DiskImage, log: &str) -> Result<(), String> {
+    let mut root = [0; 8];
+    std::fs::File::open(&disk.path)
+        .and_then(|file| std::os::unix::fs::FileExt::read_exact_at(&file, &mut root, 0x1_0060))
+        .map_err(|err| format!("reading {}: {err}", disk.path.display()))?;
+    if u64::from_le_bytes(root) != 0 {
+        return Err(format!("{} still names a log to replay", disk.path.display()));
+    }
+    btrfs_checked(disk, log)
 }
 
 /// The `disk-errors` test: the reads and writes of [`ERROR_DISKS`]'s

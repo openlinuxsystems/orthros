@@ -494,10 +494,11 @@ _name_ *holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone*
 	*corrupt* when its boot sector, tables, superblock, trees or journal
 	are damaged, and
 	*invalid_argument* for a Btrfs filesystem Radix cannot read yet (on
-	more than one device, with a log of fsyncs not yet replayed, or with
-	sectors other than 4 KiB) or an ext4 one (with clusters of several
-	blocks, *bigalloc*, blocks larger than 4 KiB or inodes larger than 1
-	KiB).
+	more than one device, or with sectors other than 4 KiB) or an ext4
+	one (with clusters of several blocks, *bigalloc*, blocks larger than
+	4 KiB or inodes larger than 1 KiB), and
+	*read_only* for a Btrfs filesystem with a log of fsyncs to replay on
+	a disk that cannot be written.
 
 *spark: cannot make a pseudo-terminal:* _reason_, *spark: could not start* _path_*:* _reason_
 	Running a POSIX program failed before it started: _/devices/ptmx_ could

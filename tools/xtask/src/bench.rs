@@ -78,7 +78,7 @@ const POSIX_SOURCE: &str = "userspace/posix/bench.c";
 /// restart after a panic, so that QEMU exits, and none of the mitigations
 /// of CPU vulnerabilities, which Radix does not have yet either (plan item
 /// 3.3): like for like, and the harder baseline to match.
-const LINUX_CMDLINE: &str = "console=ttyS0 panic=-1 quiet mitigations=off";
+pub(crate) const LINUX_CMDLINE: &str = "console=ttyS0 panic=-1 quiet mitigations=off";
 
 /// What both virtual machines get.
 const VM_MEMORY: &str = "1G";
@@ -383,6 +383,7 @@ const ROWS: &[Row] = &[
         "Btrfs: a 1 MiB file of text read from a virtio disk and uncompressed (zstd), per file",
     ),
     btrfs("posix_btrfs_create", "Btrfs: a file made, 4 KiB written, closed and removed, unsynced"),
+    btrfs("posix_btrfs_fsync", "Btrfs: 4 KiB written over a file and made durable with fsync"),
     btrfs(
         "posix_btrfs_write_zstd_mib",
         "Btrfs: a 1 MiB file of text written, compressed (zstd) and synced with 31 others, per file",
@@ -443,7 +444,9 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let posix_linux = if linux { Some(posix_for_linux(ctx, &dir)?) } else { None };
     let vm_kernel = if let Some(posix) = &posix_linux {
         match linux_kernel(given_kernel)? {
-            Some(kernel) if kvm => Some((kernel.clone(), linux_init(ctx, &dir, posix, &kernel)?)),
+            Some(kernel) if kvm => {
+                Some((kernel.clone(), linux_init(ctx, &dir, Some(posix), &kernel)?))
+            }
             Some(_) => {
                 eprintln!(
                     "    No KVM: the Linux virtual machine would measure the emulator too, so \
@@ -746,7 +749,7 @@ fn check_gate(numbers: &Numbers) -> Result<()> {
 
 /// The Linux kernel to boot: `--linux-kernel`, `OB_LINUX_KERNEL`, or the
 /// host's own if this user may read it.
-fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
+pub(crate) fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
     let given = given.or_else(|| std::env::var("OB_LINUX_KERNEL").ok());
     if let Some(path) = given {
         let path = PathBuf::from(path);
@@ -908,13 +911,22 @@ pub fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
 
 /// Builds `linux-bench` as a static program and writes the initramfs
 /// that makes it the Linux virtual machine's init process, with the
-/// POSIX benchmarks at `posix` beside it, and the modules `kernel` needs
-/// to mount the Btrfs disk ([`linux_modules`]).
-fn linux_init(ctx: &Ctx, dir: &Path, posix: &Path, kernel: &Path) -> Result<PathBuf> {
+/// POSIX benchmarks at `posix` beside it (an empty file without them),
+/// and the modules `kernel` needs to mount the Btrfs disk
+/// ([`linux_modules`]).
+pub(crate) fn linux_init(
+    ctx: &Ctx,
+    dir: &Path,
+    posix: Option<&Path>,
+    kernel: &Path,
+) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
     let program = linux_bench_static(ctx)?;
     let init = std::fs::read(&program).context(|| format!("reading {}", program.display()))?;
-    let posix = std::fs::read(posix).context(|| format!("reading {}", posix.display()))?;
+    let posix = match posix {
+        Some(posix) => std::fs::read(posix).context(|| format!("reading {}", posix.display()))?,
+        None => Vec::new(),
+    };
     let mut modules = Vec::new();
     for (i, path) in linux_modules(kernel)?.iter().enumerate() {
         let file = path.file_name().map_or_default(|name| name.to_string_lossy());
@@ -954,6 +966,15 @@ fn linux_modules(kernel: &Path) -> Result<Vec<PathBuf>> {
         crate::bail!("{} lists no Btrfs module", deps.display());
     };
     Ok(order.iter().map(|module| dir.join(module)).collect())
+}
+
+/// The release of the Linux kernel image at `kernel`, as `uname -r`
+/// gives it.
+pub(crate) fn release_of(kernel: &Path) -> Result<String> {
+    let image = std::fs::read(kernel).context(|| format!("reading {}", kernel.display()))?;
+    kernel_release(&image).ok_or_else(|| {
+        crate::Error::new(format!("{} holds no Linux kernel version", kernel.display()))
+    })
 }
 
 /// The release of the Linux kernel image `image`, as `uname -r` gives

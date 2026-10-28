@@ -158,9 +158,8 @@ impl Writer {
     /// Fails with [`Error::ReadOnly`] for a device that cannot be written,
     /// and [`Error::NotSupported`] for a filesystem Radix cannot write
     /// yet: one with features it does not write, on more than one device
-    /// (Phase 10e), with a log tree Linux left to replay (10c.2), or
-    /// without the free-space tree or the skinny extent items every
-    /// `mkfs.btrfs` since 2013 makes.
+    /// (Phase 10e), or without the free-space tree or the skinny extent
+    /// items every `mkfs.btrfs` since 2013 makes.
     #[inline(never)]
     pub fn new(volume: &Volume) -> Result<Writer> {
         /// What the writer does not keep up yet.
@@ -177,7 +176,6 @@ impl Writer {
             || !sb.has(incompat::SKINNY_METADATA)
             || sb.incompat_flags & REFUSED != 0
             || sb.num_devices != 1
-            || sb.log_root != 0
         {
             return Err(Error::NotSupported);
         }
@@ -574,6 +572,20 @@ impl Writer {
         };
         self.bytes_used += len as i64;
         Ok(at)
+    }
+
+    /// Keeps the block `[start, start + len)` of a log being replayed from
+    /// use while this mount lasts (ADR 0151).
+    pub(crate) fn keep_from_use(&mut self, start: u64, len: u64) -> Result<()> {
+        self.space.keep_from_use(start, len)
+    }
+
+    /// Takes the data extent `[start, start + len)` that a log being
+    /// replayed names and no commit took (ADR 0151).
+    pub(crate) fn take_logged(&mut self, start: u64, len: u64) -> Result<()> {
+        self.space.claim(start, len)?;
+        self.bytes_used += len as i64;
+        Ok(())
     }
 
     /// Takes `size` bytes aligned to `align` from a block group of `want`,

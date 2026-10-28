@@ -499,6 +499,32 @@ static void btrfs_create(const char *dir, uint64_t rounds) {
 	report("posix_btrfs_create", started, rounds);
 }
 
+// Writes 4 KiB to a file in `dir` and makes it durable with fsync,
+// `rounds` times, each to the next of its first 16 blocks: what a
+// database's log does. Linux writes the change to Btrfs's log tree;
+// Radix commits a transaction (ADR 0151).
+static void btrfs_fsync(const char *dir, uint64_t rounds) {
+	char path[256];
+	static char data[4096];
+	uint32_t state = 0x9e3779b9;
+	for(size_t i = 0; i < sizeof(data); i++) {
+		state = state * 1664525 + 1013904223;
+		data[i] = (char)(state >> 24);
+	}
+	snprintf(path, sizeof(path), "%s/synced", dir);
+	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+	if(fd < 0)
+		fail(path);
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++) {
+		off_t at = (off_t)(i % 16) * (off_t)sizeof(data);
+		if(pwrite(fd, data, sizeof(data), at) != (ssize_t)sizeof(data) || fsync(fd) != 0)
+			fail("writing and syncing a file");
+	}
+	report("posix_btrfs_fsync", started, rounds);
+	close(fd);
+}
+
 // Writes BTRFS_FILES files `dir`/written/<n>, each the text of `zstd/0`,
 // BTRFS_READ bytes at a time, and then has the filesystem write them to
 // the disk: compressed, as the disk is mounted to compress with zstd
@@ -546,6 +572,7 @@ static void btrfs(const char *dir) {
 	btrfs_reads(dir, "plain", "posix_btrfs_read_mib");
 	btrfs_reads(dir, "zstd", "posix_btrfs_read_zstd_mib");
 	btrfs_create(dir, 5000);
+	btrfs_fsync(dir, 200);
 	btrfs_writes(dir);
 }
 

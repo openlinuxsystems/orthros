@@ -14,6 +14,7 @@ mod corpus;
 mod docs;
 mod doctor;
 mod elf;
+mod fixture;
 mod frames;
 mod image;
 mod kernel;
@@ -53,6 +54,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("run", "Boot the image in QEMU with the serial console on this terminal"),
     ("test", "Run unit tests, then boot the image in QEMU under UEFI and BIOS"),
     ("bench", "Measure system calls and IPC round trips on Radix and on this machine's Linux"),
+    ("fixture", "Make test data that only Linux makes, such as a Btrfs log of fsyncs"),
     ("docs", "Build the man pages and the handbook into out/docs"),
     ("lint", "Check formatting and run Clippy with warnings denied"),
     ("fmt", "Format all Rust code"),
@@ -249,6 +251,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    their first data chunk; Linux's btrfs check passes
   btrfs-power-cut  the power is cut while Btrfs files are synced: btrfs
                    check passes, every synced file is whole
+  btrfs-log        a Btrfs disk Linux left with a log of fsyncs: the mount
+                   replays it, and every file lists as after Linux's replay
   ext4-write       the storage test on two ext4 disks Linux made; the host
                    checks them with e2fsck and debugfs, the journal replayed
   ext4-power-cut   the power is cut while ext4 files are synced: e2fsck
@@ -294,6 +298,22 @@ and take minutes.
                       the dukovo-bench.txt of the disk check's run.sh
   --summary <file>    Also append the Markdown report to <file> (CI passes
                       $GITHUB_STEP_SUMMARY)"
+        }
+        "fixture" => {
+            "Usage: ./ob fixture btrfs-log [--linux-kernel <file>]
+
+Makes test data that only Linux makes. btrfs-log boots Linux in QEMU on a
+new Btrfs disk with tools/linux-bench as its only process, which commits
+files, changes them with an fsync after each change and powers off, so the
+changes are in Btrfs's log tree alone; then boots it on a copy to list the
+disk before and after Linux replays the log. Writes the disk and the lists
+to kernel/fs/btrfs/src/tests/fixtures, which the Btrfs host tests check
+Radix's replay against.
+
+  --linux-kernel <file>
+                      The Linux kernel to boot (else OB_LINUX_KERNEL or this
+                      machine's own); it needs Btrfs, built in or as a
+                      module in OB_LINUX_MODULES"
         }
         "docs" => {
             "Usage: ./ob docs [--check]
@@ -605,6 +625,7 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         "run" => qemu::run_command(&ctx, &mut args),
         "test" => test::command(&ctx, &mut args),
         "bench" => bench::command(&ctx, &mut args),
+        "fixture" => fixture::command(&ctx, &mut args),
         "docs" => {
             let check = args.flag("--check");
             args.finish()?;

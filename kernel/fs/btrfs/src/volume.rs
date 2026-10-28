@@ -56,8 +56,8 @@ impl Volume {
     /// Fails with [`Error::UnknownFilesystem`] when the device holds no
     /// Btrfs, [`Error::Corrupt`] when what it holds is damaged, and
     /// [`Error::NotSupported`] for what Radix cannot read yet: a
-    /// filesystem on more than one device, or one whose log of fsyncs has
-    /// not been replayed (both Phase 10e and 10c).
+    /// filesystem on more than one device (Phase 10e). A log of fsyncs
+    /// is the mount's to replay (ADR 0151).
     #[inline(never)]
     pub fn open(device: DeviceRef) -> Result<KBox<Volume>> {
         let info = device.info();
@@ -70,7 +70,7 @@ impl Volume {
         let mut bytes = crate::zeroed(superblock::SIZE)?;
         cache.read(superblock::OFFSET, &mut bytes)?;
         let sb = Superblock::read(&bytes)?;
-        if sb.num_devices != 1 || sb.log_root != 0 {
+        if sb.num_devices != 1 {
             return Err(Error::NotSupported);
         }
         // The device item's size: a device smaller than the filesystem
