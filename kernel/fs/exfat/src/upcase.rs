@@ -103,7 +103,8 @@ impl Upcase {
 
     /// Whether two names, as UTF-16 units, are the same to exFAT.
     pub fn same(&self, a: &[u16], b: &[u16]) -> bool {
-        a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| x == y || self.upper(x) == self.upper(y))
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(&x, &y)| x == y || self.upper(x) == self.upper(y))
     }
 }
 

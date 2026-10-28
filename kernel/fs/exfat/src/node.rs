@@ -76,6 +76,17 @@ pub(crate) struct Meta {
     pub(crate) accessed: u64,
     /// Whether the entries on disk are behind.
     pub(crate) dirty: bool,
+    /// How many times they have fallen behind, so that a change made
+    /// while they are stored is stored again ([`ExfatNode::store`]).
+    pub(crate) changes: u64,
+}
+
+impl Meta {
+    /// Notes that its entries on disk are behind.
+    pub(crate) fn behind(&mut self) {
+        self.dirty = true;
+        self.changes = self.changes.wrapping_add(1);
+    }
 }
 
 /// An exFAT file or directory.
@@ -98,7 +109,13 @@ pub(crate) fn id_of(dir: u32, index: u32) -> u64 {
 }
 
 impl ExfatNode {
-    fn make(fs: KArc<Inner>, kind: Kind, root: bool, meta: Meta, size: u64) -> Result<KArc<ExfatNode>> {
+    fn make(
+        fs: KArc<Inner>,
+        kind: Kind,
+        root: bool,
+        meta: Meta,
+        size: u64,
+    ) -> Result<KArc<ExfatNode>> {
         let cache = (kind == Kind::File).then(|| FileCache::new(size, meta.modified));
         let node = mem::arc(ExfatNode {
             fs,
@@ -130,6 +147,7 @@ impl ExfatNode {
             modified: 0,
             accessed: 0,
             dirty: false,
+            changes: 0,
         };
         ExfatNode::make(fs, Kind::Directory, true, meta, 0)
     }
@@ -163,6 +181,7 @@ impl ExfatNode {
             modified: file.modified.ns(),
             accessed: file.accessed.ns(),
             dirty: false,
+            changes: 0,
         };
         let size = if kind == Kind::File { stream.size } else { 0 };
         ExfatNode::make(fs, kind, false, meta, size)
@@ -172,15 +191,6 @@ impl ExfatNode {
     fn clusters_for(&self, size: u64) -> Result<u32> {
         let cs = u64::from(self.fs.geo.cluster_size);
         u32::try_from(size.div_ceil(cs)).map_err(|_| Error::TooBig)
-    }
-
-    /// Its size as its entry has it: a file's cache's, a directory's
-    /// clusters'.
-    fn size(&self, meta: &Meta) -> u64 {
-        match &self.cache {
-            Some(cache) => cache.size(),
-            None => meta.size,
-        }
     }
 
     /// Its chain, loaded the first time: one run from its first cluster,
@@ -248,7 +258,7 @@ impl ExfatNode {
     /// Notes that a file's entries are behind, and keeps it in memory
     /// until the volume syncs. The caller holds no lock.
     fn changed(&self) {
-        self.meta.lock().dirty = true;
+        self.meta.lock().behind();
         if !self.pin() {
             // No memory to remember it: it is written now instead.
             let _ = self.flush();
@@ -288,7 +298,13 @@ impl ExfatNode {
     /// Writes its first cluster, sizes, attributes and times to its set,
     /// with the set's new checksum. The caller holds `ns`.
     pub(crate) fn store(&self) -> Result<()> {
-        let modified = self.cache.as_ref().map(FileCache::modified);
+        // What the cache says is read without the node's lock, which ranks
+        // below the cache's: a change made meanwhile is stored next time.
+        let seen = self.meta.lock().changes;
+        let (cached, modified) = match &self.cache {
+            Some(cache) => (Some(cache.size()), Some(cache.modified())),
+            None => (None, None),
+        };
         let mut meta = self.meta.lock();
         if !meta.dirty {
             return Ok(());
@@ -297,7 +313,7 @@ impl ExfatNode {
             meta.dirty = false;
             return Ok(());
         }
-        let size = self.size(&meta);
+        let size = cached.unwrap_or(meta.size);
         let valid = if self.kind == Kind::File { meta.valid.min(size) } else { size };
         let modified = Stamp::of(modified.unwrap_or(meta.modified), true);
         let accessed = Stamp::of(meta.accessed, false);
@@ -350,7 +366,7 @@ impl ExfatNode {
         for (n, bytes) in head.iter().enumerate() {
             self.fs.cache.write(offset_of(&meta.set, n).ok_or(Error::Corrupt)?, bytes)?;
         }
-        meta.dirty = false;
+        meta.dirty = meta.changes != seen;
         Ok(())
     }
 
@@ -369,7 +385,7 @@ impl ExfatNode {
         {
             let mut meta = self.meta.lock();
             meta.modified = now();
-            meta.dirty = true;
+            meta.behind();
         }
         let _ = self.pin();
     }
@@ -576,7 +592,8 @@ impl Backing for FileBacking<'_> {
     ) -> Result<usize> {
         let node = self.0;
         let pos = index * PAGE;
-        let max = pages.len().min(node.fs.cache.device().info().max_segments.clamp(1, MAX_SEGMENTS));
+        let max =
+            pages.len().min(node.fs.cache.device().info().max_segments.clamp(1, MAX_SEGMENTS));
         let (byte, n) = match node.run_at(pos, max)? {
             Ok((byte, n)) if n > 1 => (byte, n),
             _ => {
@@ -657,7 +674,7 @@ impl Backing for FileBacking<'_> {
         let mut meta = node.meta.lock();
         if end > meta.valid {
             meta.valid = end;
-            meta.dirty = true;
+            meta.behind();
         }
         Ok(())
     }
@@ -665,23 +682,23 @@ impl Backing for FileBacking<'_> {
     fn reserve(&self, size: u64) -> Result<()> {
         let node = self.0;
         let needed = node.clusters_for(size)?;
-        let mut meta = node.meta.lock();
-        node.chain(&mut meta)?;
-        let Meta { chain, first, contiguous, dirty, .. } = &mut *meta;
-        let Some(chain) = chain else { return Err(Error::Corrupt) };
-        if chain.len() >= needed {
-            return Ok(());
-        }
-        // Pinned before it takes clusters, so that a sync meanwhile keeps
-        // the volume marked dirty until its entries say so.
+        // The file grows, which its entries must say. It is pinned before
+        // it takes clusters, so that a sync meanwhile keeps the volume
+        // marked dirty until they do.
         if !node.pin() {
             return Err(Error::NoMemory);
         }
-        if chain.is_empty() {
-            *contiguous = true;
+        let mut meta = node.meta.lock();
+        node.chain(&mut meta)?;
+        let Meta { chain, first, contiguous, .. } = &mut *meta;
+        let Some(chain) = chain else { return Err(Error::Corrupt) };
+        if chain.len() < needed {
+            if chain.is_empty() {
+                *contiguous = true;
+            }
+            node.fs.grow(chain, first, contiguous, needed, false)?;
         }
-        node.fs.grow(chain, first, contiguous, needed, false)?;
-        *dirty = true;
+        meta.behind();
         Ok(())
     }
 
@@ -697,18 +714,19 @@ impl Backing for FileBacking<'_> {
     fn truncate(&self, size: u64) -> Result<()> {
         let node = self.0;
         let keep = node.clusters_for(size)?;
+        if !node.pin() {
+            return Err(Error::NoMemory);
+        }
         let mut meta = node.meta.lock();
         node.chain(&mut meta)?;
-        let Meta { chain, first, contiguous, dirty, valid, .. } = &mut *meta;
-        let Some(chain) = chain else { return Ok(()) };
-        if keep < chain.len() {
+        let Meta { chain, first, contiguous, valid, .. } = &mut *meta;
+        if let Some(chain) = chain
+            && keep < chain.len()
+        {
             node.fs.cut(chain, first, contiguous, keep, false)?;
-            *dirty = true;
         }
-        if *valid > size {
-            *valid = size;
-            *dirty = true;
-        }
+        *valid = (*valid).min(size);
+        meta.behind();
         Ok(())
     }
 
@@ -740,6 +758,7 @@ impl Drop for ExfatNode {
                 modified: 0,
                 accessed: 0,
                 dirty: false,
+                changes: 0,
             },
         );
         if self.chain(&mut meta).is_err() {
@@ -787,7 +806,8 @@ fn set_entry(file: &File, stream: &Stream, units: &[u16], k: usize) -> [u8; ENTR
 /// The set's file entry with its checksum, for `count` entries.
 fn sealed(mut file: File, stream: &Stream, units: &[u16], count: usize) -> File {
     file.checksum = 0;
-    let sum = (0..count).fold(0, |sum, k| add_to_checksum(sum, k, &set_entry(&file, stream, units, k)));
+    let sum =
+        (0..count).fold(0, |sum, k| add_to_checksum(sum, k, &set_entry(&file, stream, units, k)));
     file.checksum = sum;
     file
 }

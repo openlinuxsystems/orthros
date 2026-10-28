@@ -287,7 +287,12 @@ impl ExfatNode {
     /// The set called `name`, but for case, other than those at the
     /// indices in `skip`. [`Names::runs`] then says where its entries
     /// are.
-    pub(crate) fn find(&self, names: &mut Names, name: &str, skip: &[u32]) -> Result<Option<Found>> {
+    pub(crate) fn find(
+        &self,
+        names: &mut Names,
+        name: &str,
+        skip: &[u32],
+    ) -> Result<Option<Found>> {
         let upcase = &self.fs.upcase;
         let Some((len, hash)) = hash_of(upcase, name) else { return Ok(None) };
         let mut found = None;
@@ -369,7 +374,7 @@ impl ExfatNode {
         let Some(chain) = chain.as_mut() else { return Err(Error::Corrupt) };
         self.fs.grow(chain, first, contiguous, clusters, true)?;
         meta.size = u64::from(clusters) * u64::from(cs);
-        meta.dirty = true;
+        meta.behind();
         Ok(())
     }
 

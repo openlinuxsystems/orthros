@@ -95,7 +95,11 @@ fn fsck(image: &[u8]) {
 fn sleuthkit_files(image: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let path = scratch("tsk");
     std::fs::write(&path, image).unwrap();
-    let out = Command::new(tool("fls")).args(["-r", "-p", "-u", "-F", "-f", "exfat"]).arg(&path).output().unwrap();
+    let out = Command::new(tool("fls"))
+        .args(["-r", "-p", "-u", "-F", "-f", "exfat"])
+        .arg(&path)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "fls: {}", String::from_utf8_lossy(&out.stderr));
     let mut files = BTreeMap::new();
     for line in String::from_utf8(out.stdout).unwrap().lines() {
@@ -105,7 +109,12 @@ fn sleuthkit_files(image: &[u8]) -> BTreeMap<String, Vec<u8>> {
         if name.starts_with('$') || name.ends_with("(Volume Label Entry)") {
             continue;
         }
-        let data = Command::new(tool("icat")).args(["-f", "exfat"]).arg(&path).arg(number).output().unwrap();
+        let data = Command::new(tool("icat"))
+            .args(["-f", "exfat"])
+            .arg(&path)
+            .arg(number)
+            .output()
+            .unwrap();
         assert!(data.status.success(), "icat {name}: {}", String::from_utf8_lossy(&data.stderr));
         files.insert(String::from(name), data.stdout);
     }
@@ -775,8 +784,7 @@ fn set_of(image: &[u8], name: &str) -> Option<(File, Stream)> {
         .iter()
         .flat_map(|&c| image[geo.cluster_offset(c) as usize..][..cs].iter().copied())
         .collect();
-    let entries: Vec<[u8; ENTRY]> =
-        bytes.as_chunks::<ENTRY>().0.to_vec();
+    let entries: Vec<[u8; ENTRY]> = bytes.as_chunks::<ENTRY>().0.to_vec();
     let wanted: Vec<u16> = name.encode_utf16().collect();
     for (i, e) in entries.iter().enumerate() {
         if e[0] != kind::FILE {
@@ -839,9 +847,8 @@ fn format_4k(mib: u32, cluster: u32) -> Vec<u8> {
     image.copy_within(0..backup, backup);
     // The table: media and reserved entries, then the three clusters.
     let fat = fat_offset * ss;
-    for (i, value) in [0xffff_fff8u32, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff]
-        .iter()
-        .enumerate()
+    for (i, value) in
+        [0xffff_fff8u32, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff].iter().enumerate()
     {
         image[fat + 4 * i..fat + 4 * i + 4].copy_from_slice(&value.to_le_bytes());
     }

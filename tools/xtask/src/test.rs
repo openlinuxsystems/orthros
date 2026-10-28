@@ -1943,11 +1943,24 @@ fn make_exfat(disk: &Disk, path: &Path) -> Result<(), String> {
     host_tool(&mut mkfs).map(drop)
 }
 
-/// Checks an exFAT disk with exfatprogs' `fsck.exfat`, changing nothing.
+/// Checks an exFAT disk with exfatprogs' `fsck.exfat`, changing nothing,
+/// and that the volume is not left marked dirty, which `fsck.exfat` does
+/// not mind: the program syncs what it wrote, and reads write nothing.
 fn exfat_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
     host_tool(std::process::Command::new(fat_tool("fsck.exfat")).arg("-n").arg(&disk.path))
-        .map(drop)
-        .map_err(|err| format!("{} fails exfatprogs' fsck.exfat: {err}", disk.path.display()))
+        .map_err(|err| format!("{} fails exfatprogs' fsck.exfat: {err}", disk.path.display()))?;
+    let mut flags = [0u8; 2];
+    std::fs::File::open(&disk.path)
+        .and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(106))?;
+            file.read_exact(&mut flags)
+        })
+        .map_err(|err| format!("reading {}: {err}", disk.path.display()))?;
+    // VolumeFlags' VolumeDirty bit.
+    if u16::from_le_bytes(flags) & 2 != 0 {
+        return Err(format!("{} was left marked dirty", disk.path.display()));
+    }
+    Ok(())
 }
 
 /// Checks a disk's filesystem with `fsck.fat`, changing nothing: a
@@ -3196,7 +3209,10 @@ fn exfat_written(disk: &DiskImage, name: &str) -> Result<(), String> {
     };
     let many = files
         .keys()
-        .filter(|path| path.strip_prefix("many/").is_some_and(|name| name.ends_with(".txt")))
+        .filter(|path| {
+            path.strip_prefix("many/")
+                .is_some_and(|name| Path::new(name).extension() == Some("txt".as_ref()))
+        })
         .count();
     storage_written(&image, name, &read, many)?;
     for gone in ["draft.txt", "scratch.txt"] {

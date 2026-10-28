@@ -49,7 +49,7 @@ use radix_block::mem::CachePage;
 use radix_block::{BlockDevice, DeviceRef, read_sector};
 use radix_fat::chain::Chain;
 use radix_sync::Mutex;
-use radix_vfs::mem::{self, Alloc, KArc, KVec};
+use radix_vfs::mem::{self, Alloc, KArc, KBox, KVec};
 use radix_vfs::{Error, FileSystem, FsInfo, FsKind, NodeRef, Result};
 
 use crate::boot::{self, FLAGS_AT, Geometry, REGION_SECTORS};
@@ -78,7 +78,7 @@ pub(crate) struct Inner {
     pub(crate) read_only: bool,
     /// The namespace lock (see the module documentation), with the room
     /// directory scans put names together in.
-    pub(crate) ns: Mutex<Names>,
+    pub(crate) ns: Mutex<KBox<Names>>,
     space: Mutex<Space>,
     /// The nodes in use, by where their entries are ([`key`]), sorted.
     nodes: Mutex<KVec<(u64, Weak<ExfatNode, Alloc>)>>,
@@ -157,7 +157,7 @@ impl ExfatFs {
             geo,
             cache,
             read_only,
-            ns: Mutex::new(Names::new()),
+            ns: Mutex::new(names()?),
             space: Mutex::new(Space { free: None, hint: 2, marked }),
             nodes: Mutex::new(mem::vec()),
             dirty: Mutex::new(mem::vec()),
@@ -482,9 +482,9 @@ impl Inner {
             self.cache.write(at, &buf[..n as usize])?;
             byte += n;
         }
-        space.free = space.free.map(|free| {
-            if used { free.saturating_sub(count) } else { free.saturating_add(count) }
-        });
+        space.free = space
+            .free
+            .map(|free| if used { free.saturating_sub(count) } else { free.saturating_add(count) });
         Ok(())
     }
 
@@ -650,7 +650,8 @@ impl Inner {
         while let Some((cluster, run)) = chain.extent(i) {
             self.set_bits(space, cluster, run, false)?;
             if discard {
-                self.cache.discard(self.geo.cluster_offset(cluster), (u64::from(run) * cs) as usize);
+                self.cache
+                    .discard(self.geo.cluster_offset(cluster), (u64::from(run) * cs) as usize);
             }
             i += run;
         }
@@ -787,10 +788,7 @@ impl Inner {
     }
 
     /// Keeps `node` alive until the next sync: it has changes in memory.
-    pub(crate) fn pin(
-        &self,
-        node: KArc<ExfatNode>,
-    ) -> core::result::Result<(), KArc<ExfatNode>> {
+    pub(crate) fn pin(&self, node: KArc<ExfatNode>) -> core::result::Result<(), KArc<ExfatNode>> {
         let mut dirty = self.dirty.lock();
         if dirty.try_reserve(1).is_err() {
             return Err(node);
@@ -832,4 +830,12 @@ impl Inner {
         }
         Ok(())
     }
+}
+
+/// The namespace's buffers, on the heap: they are larger than a kernel
+/// stack frame may be (ADR 0058).
+#[inline(never)]
+fn names() -> Result<KBox<Names>> {
+    const EMPTY: Names = Names::new();
+    Ok(mem::boxed(EMPTY)?)
 }

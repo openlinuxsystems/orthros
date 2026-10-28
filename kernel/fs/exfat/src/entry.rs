@@ -102,8 +102,11 @@ impl Stamp {
     pub fn of(ns: u64, fine: bool) -> Stamp {
         let (date, time) = to_fat(ns);
         let base = from_fat(date, time);
-        let hundredths =
-            if fine && base != 0 { (ns.saturating_sub(base) / 10_000_000).min(199) as u8 } else { 0 };
+        let hundredths = if fine && base != 0 {
+            (ns.saturating_sub(base) / 10_000_000).min(199) as u8
+        } else {
+            0
+        };
         Stamp { stamp: (u32::from(date) << 16) | u32::from(time), hundredths, utc: 0x80 }
     }
 
@@ -279,7 +282,11 @@ pub fn table_checksum(b: &[u8; ENTRY]) -> u32 {
 /// `sum`: the checksum's own two bytes in the file entry are left out.
 pub fn add_to_checksum(sum: u16, n: usize, entry: &[u8; ENTRY]) -> u16 {
     entry.iter().enumerate().fold(sum, |sum, (i, &b)| {
-        if n == 0 && (i == 2 || i == 3) { sum } else { sum.rotate_right(1).wrapping_add(u16::from(b)) }
+        if n == 0 && (i == 2 || i == 3) {
+            sum
+        } else {
+            sum.rotate_right(1).wrapping_add(u16::from(b))
+        }
     })
 }
 
@@ -361,7 +368,8 @@ mod tests {
         let east = Stamp { utc: 0x80 | 8, ..Stamp::of(ns + 7_200_000_000_000, true) };
         assert_eq!(east.ns(), ns);
         // And one west of it, earlier.
-        let west = Stamp { utc: 0x80 | (-4i8 as u8 & 0x7f), ..Stamp::of(ns - 3_600_000_000_000, true) };
+        let west =
+            Stamp { utc: 0x80 | (-4i8 as u8 & 0x7f), ..Stamp::of(ns - 3_600_000_000_000, true) };
         assert_eq!(west.ns(), ns);
         assert_eq!(Stamp::default().ns(), 0);
     }
