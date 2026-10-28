@@ -3143,9 +3143,9 @@ const MOTIONS: &str = r#"'2/4 "%x" 8/4 " %d" "\n"'"#;
 /// Each USB keyboard's keys go where the PS/2 one's do: the test types on
 /// the screen's shell with both. A key held on the USB keyboard repeats,
 /// as the kernel repeats it, and stops when the keyboard is pulled out
-/// with the key still down. A shell reads `/devices/mouse` with
-/// hexdump(1) while the mouse moves and clicks, and while a tablet
-/// plugged in then points. QEMU hands a button to a pointer bound to the
+/// with the key still down. A shell reads `/devices/mouse` a motion at a
+/// time, with dd(1) and hexdump(1), while the mouse moves and clicks, and
+/// while a tablet plugged in then points. QEMU hands a button to a pointer bound to the
 /// display before any other, so the tablet comes after the mouse's
 /// clicks. The controller's thread runs alongside the boot, so what it
 /// says at boot is looked for anywhere in the log.
@@ -3174,10 +3174,16 @@ fn usb_input(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_screen(&["xxxxxxxxxx held"])?;
     // The mouse moves, then its left button goes down and up; a tablet
     // plugged in points at the right edge, halfway down.
-    // A subshell opens the device before it says so; the shell's own
+    // A subshell opens the device before it says so, and what it says is
+    // a product it works out, which the command echoed does not show: a
+    // motion made before the device is opened is not read. dd(1) reads
+    // one motion at a time, so each shows as it comes. The shell's own
     // descriptors from 3 up are its line editor's.
-    vm.type_text(&format!("(echo opened; hexdump -v -n 160 -e {MOTIONS}) </devices/mouse\n"))?;
-    vm.expect_screen(&["opened"])?;
+    let one = format!("dd bs=40 count=1 status=none | hexdump -v -e {MOTIONS}");
+    vm.type_text(&format!(
+        "(echo $((5 * 8)) opened; for i in 1 2 3 4; do {one}; done) </devices/mouse\n"
+    ))?;
+    vm.expect_screen(&["40 opened"])?;
     let rel = |axis: &str, value: i32| {
         format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{value}}}}}"#)
     };
