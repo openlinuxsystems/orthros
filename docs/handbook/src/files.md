@@ -95,14 +95,20 @@ Btrfs filesystem: Dukovo reads and writes Btrfs disks Linux made, and
 checks every block and every sector of data against its checksum. It
 reads files compressed with zlib, LZO or zstd and writes them
 uncompressed; a Btrfs that uses a feature Dukovo does not write yet
-(such as quotas, or one made without `no-holes`) is mounted read-only. Anything else
-is left alone.
+(such as quotas, or one made without `no-holes`) is mounted read-only. Its
+ext4 filesystem mounts too, read-write, and so do ext2 and ext3: Dukovo
+replays the journal Linux left, checks every checksum, and gives a file
+of an ext3 block map extents when it changes it. An ext4 that uses a
+feature Dukovo does not write yet (such as quotas, inline data or
+encryption) is mounted read-only. Anything else is left alone.
 
-Changes reach a FAT or exFAT disk within five seconds, and a Btrfs disk within
-30 seconds, as on Linux, or at once when a program asks for it, so a
-power cut loses at most the last five, or 30, seconds of writes. A
-Btrfs disk is whole after a power cut at any moment: it holds either a
-commit or the one before.
+Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
+disk within 30 seconds, as on Linux, or at once when a program asks for
+it, so a power cut loses at most the last five, or 30, seconds of
+writes. A Btrfs disk is whole after a power cut at any moment: it holds
+either a commit or the one before. So is an ext4 disk with a journal, as
+`mkfs.ext4` makes them: Dukovo writes each commit to the journal first,
+and the next mount, on Dukovo or Linux, replays it.
 
 Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
 two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
@@ -208,3 +214,25 @@ such disks and checks each byte on the host; `btrfs-write` writes two
 such disks, then checks them with Linux's `btrfs check` and reads them
 back on the host and after a reboot, and `btrfs-power-cut` cuts the
 power while a disk is being written.
+
+An ext4 disk, the kind most Linux machines use, is made the same way:
+
+```sh
+sudo apt install e2fsprogs
+mkdir files && echo "Hello from the host" > files/hello.txt
+truncate -s 64M ext4.img
+mkfs.ext4 -L MYEXT4 -d files ext4.img
+./ob run -- -drive file=ext4.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+```text
+Files: mounted ext4 from vda on /volumes/vda, labelled MYEXT4
+spark: mounted the ext4 filesystem of vda at /volumes/vda
+```
+
+After QEMU stops, `e2fsck -fn ext4.img` checks what Dukovo wrote, and
+`debugfs -R "ls -l /" ext4.img` lists it. The `ext4-write` boot test
+writes two such disks, checks them with `e2fsck`, reads them back on the
+host with `debugfs` and after a reboot, and `ext4-power-cut` cuts the
+power while a disk is being written, then checks that `e2fsck`'s replay
+of the journal leaves a whole volume.

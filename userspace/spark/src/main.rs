@@ -448,8 +448,8 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
     }
 }
 
-/// Mounts the FAT, exFAT or Btrfs filesystem of each disk partition, or of
-/// each disk with no partitions, at `/volumes/<name>`.
+/// Mounts the FAT, exFAT, Btrfs or ext4 filesystem of each disk
+/// partition, or of each disk with no partitions, at `/volumes/<name>`.
 fn mount_disks(root: &Dir, compress: &[&str]) {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
@@ -479,14 +479,15 @@ fn mount_disks(root: &Dir, compress: &[&str]) {
 }
 
 /// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
-/// exFAT or Btrfs, read-only if the disk is. A filesystem that the disk
-/// or Radix cannot write (yet) mounts read-only, as Linux's `mount` does
-/// with a disk that refuses writes. FAT and exFAT are tried first:
-/// `mkfs.btrfs` clears where they keep their boot sectors, but `mkfs.fat`
-/// and `mkfs.exfat` can leave an older Btrfs superblock behind, so theirs
-/// is the newer. FAT and exFAT each take the other's boot sector for
-/// none of theirs. A Btrfs mounted to write compresses its data if
-/// `compress`.
+/// exFAT, Btrfs or ext4, read-only if the disk is. A filesystem that the
+/// disk or Radix cannot write (yet) mounts read-only, as Linux's `mount`
+/// does with a disk that refuses writes. FAT and exFAT are tried first:
+/// `mkfs.btrfs` and `mkfs.ext4` clear where they keep their boot sectors,
+/// but `mkfs.fat` and `mkfs.exfat` can leave an older Btrfs or ext4
+/// superblock behind, so theirs is the newer. FAT and exFAT each take the
+/// other's boot sector for none of theirs, and `mkfs.btrfs` and
+/// `mkfs.ext4` each clear the other's superblock. A Btrfs mounted to
+/// write compresses its data if `compress`.
 fn mount_disk(root: &Dir, name: &str, compress: bool) {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
@@ -519,9 +520,11 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) {
     };
     let packed = if compress { flags.union(MountFlags::COMPRESS) } else { flags };
     let mut mounted = mount(FilesystemKind::Fat, "FAT", flags);
-    for (kind, said, flags) in
-        [(FilesystemKind::Exfat, "exFAT", flags), (FilesystemKind::Btrfs, "Btrfs", packed)]
-    {
+    for (kind, said, flags) in [
+        (FilesystemKind::Exfat, "exFAT", flags),
+        (FilesystemKind::Btrfs, "Btrfs", packed),
+        (FilesystemKind::Ext4, "ext4", flags),
+    ] {
         if matches!(mounted, Err(err) if err.is(FileError::UnknownFilesystem)) {
             mounted = mount(kind, said, flags);
         }
@@ -536,7 +539,7 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) {
         Err(err) => {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
-                println!("spark: {name} holds no FAT, exFAT or Btrfs filesystem; left alone");
+                println!("spark: {name} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone");
             } else {
                 println!("spark: cannot mount {name}: {err}");
             }

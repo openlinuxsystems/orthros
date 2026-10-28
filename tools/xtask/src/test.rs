@@ -55,6 +55,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-cap",
     "radix-elf",
     "radix-exfat",
+    "radix-ext4",
     "radix-fat",
     "radix-fbcon",
     "radix-hal",
@@ -125,15 +126,18 @@ type Script = fn(&mut Vm, &Case) -> Result<(), String>;
 type DiskCheck = fn(&DiskImage, &str) -> Result<(), String>;
 
 /// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, an exFAT one
-/// `mkfs.exfat` makes, a Btrfs one `mkfs.btrfs` makes, or raw bytes.
+/// `mkfs.exfat` makes, a Btrfs one `mkfs.btrfs` makes, an ext4 one
+/// `mkfs.ext4` makes, or raw bytes.
 pub struct Disk {
     /// Its size in KiB.
     kib: u64,
     /// 12, 16 or 32; [`EXFAT`] for exFAT; [`BTRFS`] for Btrfs of
-    /// [`btrfs_files`], or [`BTRFS_NEW`] for Btrfs to write; or 0 for no
-    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
+    /// [`btrfs_files`], or [`BTRFS_NEW`] for Btrfs to write; [`EXT4`] for
+    /// ext4; or 0 for no filesystem, the disk holding
+    /// [`storage_big_byte`]'s bytes.
     fat: u8,
-    /// The size of an exFAT disk's clusters in bytes; 0 for the others.
+    /// The size of an exFAT disk's clusters, or an ext4 disk's blocks, in
+    /// bytes; 0 for the others.
     cluster: u32,
     /// The filesystem's label.
     label: &'static str,
@@ -166,6 +170,10 @@ const BTRFS_NEW: u8 = 2;
 
 /// [`Disk::fat`] for an exFAT disk.
 const EXFAT: u8 = 3;
+
+/// [`Disk::fat`] for an ext4 disk, holding only the host's file
+/// ([`STORAGE_FROM_HOST_NAME`]).
+const EXT4: u8 = 4;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -205,12 +213,19 @@ impl Disk {
         self.fat == EXFAT
     }
 
+    /// Whether it holds ext4.
+    fn ext4(&self) -> bool {
+        self.fat == EXT4
+    }
+
     /// The filesystem's name, as the kernel and Spark give it.
     fn kind(&self) -> (&'static str, &'static str) {
         if self.btrfs() {
             ("btrfs", "Btrfs")
         } else if self.exfat() {
             ("exfat", "exFAT")
+        } else if self.ext4() {
+            ("ext4", "ext4")
         } else {
             ("fat", "FAT")
         }
@@ -519,6 +534,46 @@ const EXFAT_DISKS: &[Disk] = &[
     exfat_disk(64 * 1024, 32 * 1024, "RADIXEXFAT", Bus::Nvme(0)),
     exfat_disk(32 * 1024, 512, "RADIXSMALL", Bus::Virtio),
 ];
+
+/// An ext4 test disk on `bus` of `kib` KiB, with sectors of `sector`
+/// bytes and blocks of `block`, as `mkfs.ext4` makes it, which the host
+/// checks with `check`.
+const fn ext4_disk(
+    kib: u64,
+    block: u32,
+    label: &'static str,
+    bus: Bus,
+    sector: u64,
+    check: DiskCheck,
+) -> Disk {
+    Disk {
+        kib,
+        fat: EXT4,
+        cluster: block,
+        label,
+        table: Table::None,
+        bus,
+        sector,
+        device: "",
+        errors: None,
+        read_only: false,
+        check,
+    }
+}
+
+/// The `ext4-write` test's disks: an NVMe namespace of 4 KiB sectors with
+/// 4 KiB blocks, as `mkfs.ext4` makes it by default, and a virtio disk
+/// with 1 KiB blocks, smaller than a page: `nvme0n1` and `vda`, in the
+/// order the kernel finds them.
+const EXT4_DISKS: &[Disk] = &[
+    ext4_disk(64 * 1024, 4096, "RADIXEXT4", Bus::Nvme(0), 4096, ext4_checked),
+    ext4_disk(32 * 1024, 1024, "RADIXSMALL", Bus::Virtio, 512, ext4_checked),
+];
+
+/// The `ext4-power-cut` test's disk: a virtio disk as `mkfs.ext4` makes
+/// one by default, holding only the host's file.
+const EXT4_CUT_DISKS: &[Disk] =
+    &[ext4_disk(64 * 1024, 4096, "RADIXEXT4", Bus::Virtio, 512, ext4_cut)];
 
 /// QEMU's blkdebug rules for [`ERROR_DISKS`].
 const ERROR_RULES: &str = "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
@@ -1260,6 +1315,46 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "ext4-write",
+        about: "The storage test on two ext4 disks Linux's mkfs.ext4 made, with blocks of 4 KiB and 1 KiB: e2fsck passes after each boot, with the journal as Radix left it and replayed, and debugfs reads back what was written",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: EXT4_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
+        name: "ext4-power-cut",
+        about: "The power is cut while files are written, synced, renamed and removed on ext4: e2fsck passes once the journal is replayed, every synced file is whole, and Radix replays the journal and writes the disk again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage churn",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: power_cut,
+        disks: EXT4_CUT_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage churned",
+            before: power_cut_host,
+            script: power_cut_check,
+        }),
+    },
+    Case {
         name: "posix",
         about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
@@ -1383,6 +1478,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-vfs",
     "radix-fat",
     "radix-exfat",
+    "radix-ext4",
     "radix-ahci",
     "radix-nvme",
 ];
@@ -1687,6 +1783,11 @@ fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, Stri
             made.push(image);
             continue;
         }
+        if disk.ext4() {
+            make_ext4(disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
         let path = &image.path;
         let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
         // A fixed volume ID, so that runs match.
@@ -1970,6 +2071,97 @@ fn exfat_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
         return Err(format!("{} was left marked dirty", disk.path.display()));
     }
     Ok(())
+}
+
+/// Makes an ext4 disk with `mkfs.ext4`, holding only the host's file
+/// ([`STORAGE_FROM_HOST_NAME`]): no tool on Linux writes a file to ext4
+/// without mounting it, which takes the administrator, but `mkfs.ext4 -d`
+/// copies a directory in. A fixed UUID, so that runs match.
+fn make_ext4(disk: &Disk, path: &Path) -> Result<(), String> {
+    let tree = path.with_extension("tree");
+    if tree.exists() {
+        std::fs::remove_dir_all(&tree)
+            .map_err(|err| format!("removing {}: {err}", tree.display()))?;
+    }
+    std::fs::create_dir(&tree).map_err(|err| format!("making {}: {err}", tree.display()))?;
+    let host = tree.join(STORAGE_FROM_HOST_NAME);
+    std::fs::write(&host, STORAGE_FROM_HOST)
+        .map_err(|err| format!("writing {}: {err}", host.display()))?;
+    let file =
+        std::fs::File::create(path).map_err(|err| format!("making {}: {err}", path.display()))?;
+    file.set_len(disk.kib * 1024).map_err(|err| format!("sizing {}: {err}", path.display()))?;
+    drop(file);
+    let mut mkfs = std::process::Command::new(fat_tool("mkfs.ext4"));
+    mkfs.args(["-q", "-F", "-L", disk.label, "-b", &disk.cluster.to_string()]);
+    mkfs.args(["-U", "4f525448-0000-4000-8000-000000000001", "-E", "root_owner=0:0", "-d"]);
+    let made = host_tool(mkfs.arg(&tree).arg(path)).map(drop);
+    let _ = std::fs::remove_dir_all(&tree);
+    made
+}
+
+/// Checks an ext4 disk with e2fsprogs' `e2fsck`, changing nothing, both
+/// as it is and with its journal replayed as Linux would at its next
+/// mount: Radix keeps the journal's last transaction there while the
+/// volume is mounted, as Linux does, and after a sync its blocks are home
+/// too.
+fn ext4_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+    ext4_fsck(disk, &disk.path)?;
+    ext4_replayed_fsck(disk)
+}
+
+/// Checks an ext4 disk with `e2fsck` after its journal is replayed only:
+/// cut off while a commit's blocks were going home, as the disk is after
+/// a power cut, it is whole only so, on Linux as on Radix.
+fn ext4_replayed_fsck(disk: &DiskImage) -> Result<(), String> {
+    let replayed = ext4_replayed(disk)?;
+    let result = ext4_fsck(disk, &replayed);
+    let _ = std::fs::remove_file(&replayed);
+    result
+}
+
+/// Runs `e2fsck -fn` on `path`, the image of `disk` or a copy of it.
+fn ext4_fsck(disk: &DiskImage, path: &Path) -> Result<(), String> {
+    host_tool(std::process::Command::new(fat_tool("e2fsck")).arg("-fn").arg(path))
+        .map(drop)
+        .map_err(|err| format!("{} fails e2fsprogs' e2fsck: {err}", disk.path.display()))
+}
+
+/// A copy of an ext4 disk beside it, its journal replayed by `e2fsck` as
+/// Linux would at its next mount, and nothing else changed.
+fn ext4_replayed(disk: &DiskImage) -> Result<PathBuf, String> {
+    let copy = disk.path.with_extension("replayed");
+    std::fs::copy(&disk.path, &copy)
+        .map_err(|err| format!("copying {}: {err}", disk.path.display()))?;
+    let mut e2fsck = std::process::Command::new(fat_tool("e2fsck"));
+    if let Err(err) = host_tool(e2fsck.args(["-y", "-E", "journal_only"]).arg(&copy)) {
+        let _ = std::fs::remove_file(&copy);
+        return Err(format!("{}: e2fsck cannot replay its journal: {err}", disk.path.display()));
+    }
+    Ok(copy)
+}
+
+/// An ext4 disk's files, copied out beside it by `debugfs` (`rdump`) after
+/// its journal is replayed, but for `lost+found`.
+fn ext4_dump(disk: &DiskImage) -> Result<PathBuf, String> {
+    let replayed = ext4_replayed(disk)?;
+    let to = disk.path.with_extension("restored");
+    let result = (|| {
+        if to.exists() {
+            std::fs::remove_dir_all(&to)
+                .map_err(|err| format!("removing {}: {err}", to.display()))?;
+        }
+        std::fs::create_dir(&to).map_err(|err| format!("making {}: {err}", to.display()))?;
+        let mut debugfs = std::process::Command::new(fat_tool("debugfs"));
+        debugfs.arg("-R").arg(format!("rdump / {}", to.display())).arg(&replayed);
+        host_tool(debugfs.stdin(Stdio::null()))?;
+        std::fs::remove_dir_all(to.join("lost+found"))
+            .map_err(|err| format!("{}: no lost+found: {err}", disk.path.display()))
+    })();
+    let _ = std::fs::remove_file(&replayed);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&to);
+    }
+    result.map(|()| to)
 }
 
 /// Checks a disk's filesystem with `fsck.fat`, changing nothing: a
@@ -3137,7 +3329,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
     // Spark's nine, and the volumes.
-    let fat = filesystems.iter().filter(|disk| !disk.btrfs() && !disk.exfat()).count();
+    let fat = filesystems.iter().filter(|disk| disk.kind().0 == "fat").count();
     vm.expect(&format!(
         "storage: /processes/mounts lists {} mounts, {fat} of them FAT",
         9 + volumes.len()
@@ -3150,8 +3342,9 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// mtools from a FAT disk, to which it then writes a file of its own,
 /// from beside the disks in out/test (not the shared temporary directory,
 /// where another user could put a link in its place); from an exFAT disk
-/// with The Sleuth Kit; and from a Btrfs disk with Linux's `btrfs
-/// restore`, whose file of the host's `mkfs.btrfs` put there.
+/// with The Sleuth Kit; from a Btrfs disk with Linux's `btrfs restore`,
+/// whose file of the host's `mkfs.btrfs` put there; and from an ext4 disk
+/// with `debugfs`, whose file `mkfs.ext4` put there.
 fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
     let Some(first) = disks.first() else { return Err("the case has no disks".into()) };
     let source = first.path.with_file_name("storage-from-host.txt");
@@ -3164,6 +3357,8 @@ fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
                 btrfs_written(disk, &name)
             } else if made.exfat() {
                 exfat_written(disk, &name)
+            } else if made.ext4() {
+                ext4_written(disk, &name)
             } else {
                 fat_written(disk, &name, &source)
             }
@@ -3230,6 +3425,40 @@ fn exfat_written(disk: &DiskImage, name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// [`storage_host`] for an ext4 disk: its files as `debugfs` copies them
+/// out, the host's file too, and none of those the program renamed or
+/// removed.
+fn ext4_written(disk: &DiskImage, name: &str) -> Result<(), String> {
+    let restored = ext4_dump(disk)?;
+    let image = disk.path.display().to_string();
+    let read = |path: &str| {
+        std::fs::read(restored.join(path))
+            .map_err(|err| format!("{image}: {path}, as debugfs copies it out: {err}"))
+    };
+    let result = (|| {
+        let many = std::fs::read_dir(restored.join("many"))
+            .map_err(|err| format!("{image}: many/: {err}"))?
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|e| Path::new(&e.file_name()).extension() == Some("txt".as_ref()))
+            })
+            .count();
+        storage_written(&image, name, &read, many)?;
+        if read(STORAGE_FROM_HOST_NAME)? != STORAGE_FROM_HOST {
+            return Err(format!("{image}: the host's file is not as mkfs.ext4 wrote it"));
+        }
+        for gone in ["draft.txt", "scratch.txt"] {
+            if restored.join(gone).exists() {
+                return Err(format!("{image}: {gone} is still there"));
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&restored);
+    result
 }
 
 /// [`storage_host`] for a Btrfs disk: its files as `btrfs restore` copies
@@ -3769,6 +3998,22 @@ fn btrfs_cut(disk: &DiskImage, log: &str) -> Result<(), String> {
     })
 }
 
+/// Checks the `ext4-power-cut` test's disk after a boot as [`btrfs_cut`]
+/// checks Btrfs: with its journal replayed, `e2fsck` finds nothing wrong,
+/// and the files are as the churn left them.
+fn ext4_cut(disk: &DiskImage, log: &str) -> Result<(), String> {
+    ext4_replayed_fsck(disk)?;
+    let synced = churn_rounds(log, "synced");
+    let Some(&last) = synced.last() else { return Ok(()) };
+    let removed = churn_rounds(log, "removed");
+    let restored = ext4_dump(disk)?;
+    let result = churn_left(&restored, &synced, &removed, last.checked_sub(CHURN_KEEP));
+    let _ = std::fs::remove_dir_all(&restored);
+    result.map_err(|err| {
+        format!("{}: {err}, after a power cut after file-{last:04} was synced", disk.path.display())
+    })
+}
+
 /// [`btrfs_cut`]'s check of the files copied out to `dir`; the file of
 /// round `removing` may have gone unsaid.
 fn churn_left(
@@ -3788,7 +4033,7 @@ fn churn_left(
     for (name, bytes) in &found {
         if name == STORAGE_FROM_HOST_NAME {
             if bytes != STORAGE_FROM_HOST {
-                return Err(format!("{name} is not as mkfs.btrfs wrote it"));
+                return Err(format!("{name} is not as the host's mkfs wrote it"));
             }
             continue;
         }

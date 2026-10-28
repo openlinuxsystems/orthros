@@ -520,10 +520,11 @@ pub struct Flags {
 }
 
 /// Makes a filesystem of the kind named `kind` for `mount`: `fat`,
-/// `exfat` and `btrfs` on the block device `source` stands for, the
-/// others from nothing, mounted as `flags` say. A Btrfs that Radix cannot
-/// write yet, or an exFAT with two tables, fails a writable mount with
-/// `NotSupported` (ADRs 0130 and 0140), and mounts read-only.
+/// `exfat`, `btrfs` and `ext4` on the block device `source` stands for,
+/// the others from nothing, mounted as `flags` say. A Btrfs that Radix
+/// cannot write yet, an exFAT with two tables, or an ext4 with features
+/// Radix only reads, fails a writable mount with `NotSupported` (ADRs
+/// 0130, 0140 and 0141), and mounts read-only.
 pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Result<Made> {
     let Flags { read_only, compress } = flags;
     use core::fmt::Write;
@@ -534,7 +535,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
             fs_ref(tmpfs(max)?)?
         }
-        "fat" | "exfat" | "btrfs" => {
+        "fat" | "exfat" | "btrfs" | "ext4" => {
             let node = source.ok_or(Error::NotBlockDevice)?;
             let device = node.block_device().ok_or(Error::NotBlockDevice)?;
             let _ = match disk::name_of(&device) {
@@ -544,6 +545,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
             match kind {
                 "fat" => mount_fat(device, read_only)?,
                 "exfat" => mount_exfat(device, read_only)?,
+                "ext4" => mount_ext4(device, read_only)?,
                 _ => mount_btrfs(device, read_only, compress)?,
             }
         }
@@ -571,6 +573,12 @@ fn mount_fat(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Resu
 #[inline(never)]
 fn mount_exfat(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
     fs_ref(radix_exfat::ExfatFs::mount(device, read_only)?)
+}
+
+/// Mounts the ext4 filesystem on `device` ([`mount_fat`]).
+#[inline(never)]
+fn mount_ext4(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+    fs_ref(radix_ext4::Ext4Fs::mount(device, read_only)?)
 }
 
 /// Mounts the Btrfs filesystem on `device` ([`mount_fat`]).

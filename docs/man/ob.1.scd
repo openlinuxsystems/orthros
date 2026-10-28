@@ -63,7 +63,7 @@ _target/userspace/_).
 	Check every host tool the build needs: rustup, the pinned toolchain
 	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
 	UEFI, xorriso, mtools, dosfstools, exfatprogs, The Sleuth Kit,
-	btrfs-progs, the tools that build
+	btrfs-progs, e2fsprogs, the tools that build
 	the ports (Clang 20 or later with compiler-rt's builtins, LLD, LLVM's
 	tools, Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc,
 	mandoc and mdBook. For anything missing, print the exact install
@@ -582,6 +582,31 @@ _target/userspace/_).
 		_/system/tests/storage churned_ must find the same, remove the
 		files and write and sync another, and *btrfs check* must pass
 		again.
+
+	*ext4-write*
+		The *storage* test on two ext4 disks *mkfs.ext4* made holding
+		only the file the host writes to FAT disks between the boots: a
+		64 MiB NVMe namespace of 4 KiB sectors with blocks of 4 KiB, as
+		it makes one by default, and a 32 MiB virtio disk with blocks of
+		1 KiB, smaller than a page. Spark must mount both, as ext4, to
+		write. After each boot, e2fsprogs' *e2fsck -fn* must find nothing
+		wrong, both on the disk as Radix left it and on a copy whose
+		journal *e2fsck* replayed; between the boots, *debugfs* must copy
+		out every file as written, and none of those renamed or removed.
+		e2fsprogs must be installed (*ob doctor* says how).
+
+	*ext4-power-cut*
+		The *btrfs-power-cut* test on a 64 MiB ext4 disk as *mkfs.ext4*
+		makes one by default: the host kills QEMU after round 30 of
+		_/system/tests/storage churn_, mid-write, and on a copy of the
+		disk whose journal *e2fsck* replayed, as Linux would at its next
+		mount, *e2fsck -fn* must find nothing wrong, and as *debugfs*
+		copies the files out, each file said synced must be whole unless
+		said removed, each said removed gone, and any other whole or a
+		start of itself. Booted
+		again, Radix replays the journal itself, and
+		_/system/tests/storage churned_ must find the same, remove the
+		files and write and sync another, and *e2fsck* must pass again.
 
 	*posix*
 		Boot 4 CPUs under UEFI from USB with the lock checker on; Spark
