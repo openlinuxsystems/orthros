@@ -102,7 +102,9 @@ Rejected:
   and shells' named pipes work on Btrfs and tmpfs, and Linux's `btrfs
   check` passes on disks Radix gives them.
 - `stat` copies an 80-byte record to the caller where it returned
-  registers. Linux copies 144 bytes for its `struct stat`.
+  registers. Linux copies 144 bytes for its `struct stat`. A file's
+  status by name on tmpfs went from 1,430 instructions to 1,657, and its
+  budget from 1,600 to 1,900.
 - The devices in `/devices` still give 0 as their device number, so a
   copy of `/devices/null` with `cp -a` makes a node that opens nothing.
   Giving them their numbers is a later change of devfs alone.
