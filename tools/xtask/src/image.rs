@@ -410,9 +410,8 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
         }
         process::create_dir(path.parent().expect("an entry is inside the system"))?;
         if entry.kind == radix_bootfs::Kind::Symlink {
-            let target = std::str::from_utf8(entry.data).map_err(|_| {
-                Error::new(format!("the link {} is not UTF-8", path.display()))
-            })?;
+            let target = std::str::from_utf8(entry.data)
+                .map_err(|_| Error::new(format!("the link {} is not UTF-8", path.display())))?;
             std::os::unix::fs::symlink(target, &path)
                 .context(|| format!("linking {}", path.display()))?;
             continue;
@@ -425,7 +424,9 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
                 file.set_permissions(std::fs::Permissions::from_mode(entry.mode & 0o7777))
             })
             .and_then(|()| {
-                file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry.mtime))
+                file.set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry.mtime),
+                )
             })
             .context(|| format!("writing {}", path.display()))?;
     }
@@ -464,7 +465,9 @@ pub fn append_root(image: &Path, root: &Path) -> Result<u64> {
     disk.read_exact(&mut head).map_err(failed("reading"))?;
     let word = |at: usize| u32::from_le_bytes(head[at..at + 4].try_into().expect("4 bytes"));
     let long = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().expect("8 bytes"));
-    if &head[SECTOR..SECTOR + 8] != b"EFI PART" || word(SECTOR + 12) != 92 || word(SECTOR + 84) != 128
+    if &head[SECTOR..SECTOR + 8] != b"EFI PART"
+        || word(SECTOR + 12) != 92
+        || word(SECTOR + 84) != 128
     {
         crate::bail!("{} has no GPT of 128-byte entries", image.display());
     }
@@ -476,9 +479,9 @@ pub fn append_root(image: &Path, root: &Path) -> Result<u64> {
         .and_then(|_| disk.read_exact(&mut entries))
         .map_err(failed("reading the GPT entries of"))?;
     let entry = |i: usize| &entries[i * 128..(i + 1) * 128];
-    let free = (0..count).find(|&i| entry(i)[..16] == [0; 16]).ok_or_else(|| {
-        Error::new(format!("the GPT of {} has no empty entry", image.display()))
-    })?;
+    let free = (0..count)
+        .find(|&i| entry(i)[..16] == [0; 16])
+        .ok_or_else(|| Error::new(format!("the GPT of {} has no empty entry", image.display())))?;
     let used = (0..count)
         .filter(|&i| entry(i)[..16] != [0; 16])
         .map(|i| u64::from_le_bytes(entry(i)[40..48].try_into().expect("8 bytes")))
