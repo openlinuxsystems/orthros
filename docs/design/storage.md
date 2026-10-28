@@ -174,7 +174,7 @@ dirty.
   zeroes the rest of the last page, and then has the backing free the
   space (`Backing::truncate`).
 - `sync` writes the dirty pages back through the backing, each run of up
-  to `WRITE_RUN` (32) contiguous ones in one call (`Backing::write_pages`,
+  to `WRITE_RUN` (64) contiguous ones in one call (`Backing::write_pages`,
   which writes them one at a time unless the filesystem does better); a
   page whose write fails stays dirty.
 - `shrink` drops clean pages.

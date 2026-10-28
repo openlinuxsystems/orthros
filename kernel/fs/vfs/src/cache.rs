@@ -47,8 +47,10 @@ use crate::{APPEND, Error, In, Out, Result, mem};
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
-/// The most pages [`FileCache::sync`] hands its backing in one write.
-pub const WRITE_RUN: usize = 32;
+/// The most pages [`FileCache::sync`] hands its backing in one write:
+/// 256 KiB, two of the extents Btrfs compresses, which it compresses at
+/// once on two CPUs (ADR 0134).
+pub const WRITE_RUN: usize = 64;
 
 /// The fewest pages a read that misses asks its backing for beyond those
 /// it copies, when it goes on from where the cached pages end or starts

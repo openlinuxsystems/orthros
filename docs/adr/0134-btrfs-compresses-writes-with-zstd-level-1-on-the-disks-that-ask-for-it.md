@@ -51,9 +51,10 @@ upstream), and Dukovo's decoder is its own (ADR 0128).
   pages each, are made at a filesystem's first compressed write and
   dropped by its shrinker; a run compresses two chunks at a time, the
   second on another CPU when one is free (`radix_vfs::join`, ADR 0133),
-  before it takes the transaction lock, so reads go on meanwhile. The
-  superblock gains `COMPRESS_ZSTD` at the commit of the first compressed
-  extent.
+  before it takes the transaction lock, so reads go on meanwhile; the
+  page cache hands write-back runs of up to 64 pages (it handed 32), so
+  that a run is two chunks. The superblock gains `COMPRESS_ZSTD` at the
+  commit of the first compressed extent.
 - **Which files**: a mount compresses when it is made with the new
   `compress` flag of `directory.mount` (refused with `invalid_argument`
   on a filesystem other than Btrfs). A file with Btrfs's `COMPRESS` flag
