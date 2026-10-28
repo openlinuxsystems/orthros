@@ -54,6 +54,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-btrfs",
     "radix-cap",
     "radix-elf",
+    "radix-exfat",
     "radix-fat",
     "radix-fbcon",
     "radix-hal",
@@ -123,15 +124,17 @@ type Script = fn(&mut Vm, &Case) -> Result<(), String>;
 /// serial log.
 type DiskCheck = fn(&DiskImage, &str) -> Result<(), String>;
 
-/// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, a Btrfs one
-/// `mkfs.btrfs` makes, or raw bytes.
+/// A disk of a boot test: a FAT filesystem `mkfs.fat` makes, an exFAT one
+/// `mkfs.exfat` makes, a Btrfs one `mkfs.btrfs` makes, or raw bytes.
 pub struct Disk {
     /// Its size in KiB.
     kib: u64,
-    /// 12, 16 or 32; [`BTRFS`] for Btrfs of [`btrfs_files`], or
-    /// [`BTRFS_NEW`] for Btrfs to write; or 0 for no filesystem, the disk
-    /// holding [`storage_big_byte`]'s bytes.
+    /// 12, 16 or 32; [`EXFAT`] for exFAT; [`BTRFS`] for Btrfs of
+    /// [`btrfs_files`], or [`BTRFS_NEW`] for Btrfs to write; or 0 for no
+    /// filesystem, the disk holding [`storage_big_byte`]'s bytes.
     fat: u8,
+    /// The size of an exFAT disk's clusters in bytes; 0 for the others.
+    cluster: u32,
     /// The filesystem's label.
     label: &'static str,
     /// The partition table the filesystem is in, or none for a
@@ -160,6 +163,9 @@ const BTRFS: u8 = 1;
 /// [`Disk::fat`] for a Btrfs disk to write, holding only the host's file
 /// ([`STORAGE_FROM_HOST_NAME`]).
 const BTRFS_NEW: u8 = 2;
+
+/// [`Disk::fat`] for an exFAT disk.
+const EXFAT: u8 = 3;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +198,22 @@ impl Disk {
     /// Whether it holds Btrfs.
     fn btrfs(&self) -> bool {
         matches!(self.fat, BTRFS | BTRFS_NEW)
+    }
+
+    /// Whether it holds exFAT.
+    fn exfat(&self) -> bool {
+        self.fat == EXFAT
+    }
+
+    /// The filesystem's name, as the kernel and Spark give it.
+    fn kind(&self) -> (&'static str, &'static str) {
+        if self.btrfs() {
+            ("btrfs", "Btrfs")
+        } else if self.exfat() {
+            ("exfat", "exFAT")
+        } else {
+            ("fat", "FAT")
+        }
     }
 
     /// Whether the kernel takes it for solid state: an NVMe disk, or a
@@ -296,6 +318,7 @@ const fn fat_disk(kib: u64, fat: u8, label: &'static str, table: Table, bus: Bus
     Disk {
         kib,
         fat,
+        cluster: 0,
         label,
         table,
         bus,
@@ -359,6 +382,7 @@ const fn raw_disk(bus: Bus, check: DiskCheck) -> Disk {
     Disk {
         kib: RAW_KIB,
         fat: 0,
+        cluster: 0,
         label: "",
         table: Table::None,
         bus,
@@ -423,6 +447,7 @@ const fn btrfs_disk(bus: Bus, sector: u64, fat: u8, check: DiskCheck) -> Disk {
     Disk {
         kib: BTRFS_KIB,
         fat,
+        cluster: 0,
         label: "RADIXBTRFS",
         table: Table::None,
         bus,
@@ -468,6 +493,32 @@ const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs
 /// The round of the storage program's churn after whose file the
 /// `btrfs-power-cut` test cuts the power, 0 to 1.5 seconds later.
 const CUT_AFTER: usize = 30;
+
+/// An exFAT test disk on `bus` of `kib` KiB, with clusters of `cluster`
+/// bytes, which exfatprogs' `fsck.exfat` checks after each boot.
+const fn exfat_disk(kib: u64, cluster: u32, label: &'static str, bus: Bus) -> Disk {
+    Disk {
+        kib,
+        fat: EXFAT,
+        cluster,
+        label,
+        table: Table::None,
+        bus,
+        sector: 512,
+        device: "",
+        errors: None,
+        read_only: false,
+        check: exfat_checked,
+    }
+}
+
+/// The `exfat-write` test's disks: an NVMe namespace with clusters of 32
+/// KiB, larger than a page, and a virtio disk with clusters of a sector:
+/// `nvme0n1` and `vda`, in the order the kernel finds them.
+const EXFAT_DISKS: &[Disk] = &[
+    exfat_disk(64 * 1024, 32 * 1024, "RADIXEXFAT", Bus::Nvme(0)),
+    exfat_disk(32 * 1024, 512, "RADIXSMALL", Bus::Virtio),
+];
 
 /// QEMU's blkdebug rules for [`ERROR_DISKS`].
 const ERROR_RULES: &str = "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"6000\"\nonce = \"on\"\n\n\
@@ -1067,6 +1118,26 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "exfat-write",
+        about: "The storage test on two exFAT disks Linux's mkfs.exfat made, with clusters of a sector and of 32 KiB: fsck.exfat passes after each boot, and The Sleuth Kit reads back what was written",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_write,
+        disks: EXFAT_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_check,
+        }),
+    },
+    Case {
         name: "disk-raw",
         about: "Raw reads, writes and discards of a virtio, a SATA and an NVMe disk, and Linux's block requests; the host checks every byte",
         firmware: Firmware::Uefi,
@@ -1311,6 +1382,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-block",
     "radix-vfs",
     "radix-fat",
+    "radix-exfat",
     "radix-ahci",
     "radix-nvme",
 ];
@@ -1610,6 +1682,11 @@ fn make_disks(ctx: &Ctx, dir: &Path, case: &Case) -> Result<Vec<DiskImage>, Stri
             made.push(image);
             continue;
         }
+        if disk.exfat() {
+            make_exfat(disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
         let path = &image.path;
         let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
         // A fixed volume ID, so that runs match.
@@ -1862,6 +1939,37 @@ fn host_tool(cmd: &mut std::process::Command) -> Result<Vec<u8>, String> {
         return Err(format!("`{program}` failed ({}): {}", output.status, said.trim()));
     }
     Ok(output.stdout)
+}
+
+/// Makes an exFAT test disk with exfatprogs' `mkfs.exfat`.
+fn make_exfat(disk: &Disk, path: &Path) -> Result<(), String> {
+    let file =
+        std::fs::File::create(path).map_err(|err| format!("making {}: {err}", path.display()))?;
+    file.set_len(disk.kib * 1024).map_err(|err| format!("sizing {}: {err}", path.display()))?;
+    drop(file);
+    let mut mkfs = std::process::Command::new(fat_tool("mkfs.exfat"));
+    mkfs.args(["-q", "-L", disk.label, "-c", &disk.cluster.to_string()]).arg(path);
+    host_tool(&mut mkfs).map(drop)
+}
+
+/// Checks an exFAT disk with exfatprogs' `fsck.exfat`, changing nothing,
+/// and that the volume is not left marked dirty, which `fsck.exfat` does
+/// not mind: the program syncs what it wrote, and reads write nothing.
+fn exfat_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+    host_tool(std::process::Command::new(fat_tool("fsck.exfat")).arg("-n").arg(&disk.path))
+        .map_err(|err| format!("{} fails exfatprogs' fsck.exfat: {err}", disk.path.display()))?;
+    let mut flags = [0u8; 2];
+    std::fs::File::open(&disk.path)
+        .and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(106))?;
+            file.read_exact(&mut flags)
+        })
+        .map_err(|err| format!("reading {}: {err}", disk.path.display()))?;
+    // VolumeFlags' VolumeDirty bit.
+    if u16::from_le_bytes(flags) & 2 != 0 {
+        return Err(format!("{} was left marked dirty", disk.path.display()));
+    }
+    Ok(())
 }
 
 /// Checks a disk's filesystem with `fsck.fat`, changing nothing: a
@@ -2960,7 +3068,7 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
         let label = disk.label;
-        let (kind, said) = if disk.btrfs() { ("btrfs", "Btrfs") } else { ("fat", "FAT") };
+        let (kind, said) = disk.kind();
         vm.expect(&format!(
             "Files: mounted {kind} from {name} on /volumes/{name}, labelled {label}"
         ))?;
@@ -3000,7 +3108,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let volumes = volume_names(case.disks);
     let filesystems: Vec<&Disk> = case.disks.iter().filter(|disk| disk.fat != 0).collect();
     for (name, disk) in volumes.iter().zip(&filesystems) {
-        let kind = if disk.btrfs() { "btrfs" } else { "fat" };
+        let (kind, _) = disk.kind();
         vm.expect(&format!("storage: /volumes/{name}: {kind}, "))?;
         vm.expect(&format!("storage: /volumes/{name}: wrote "))?;
     }
@@ -3029,7 +3137,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
     // Spark's nine, and the volumes.
-    let fat = filesystems.iter().filter(|disk| !disk.btrfs()).count();
+    let fat = filesystems.iter().filter(|disk| !disk.btrfs() && !disk.exfat()).count();
     vm.expect(&format!(
         "storage: /processes/mounts lists {} mounts, {fat} of them FAT",
         9 + volumes.len()
@@ -3041,9 +3149,9 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// Between the boots: the host reads what the program wrote, with
 /// mtools from a FAT disk, to which it then writes a file of its own,
 /// from beside the disks in out/test (not the shared temporary directory,
-/// where another user could put a link in its place); and from a Btrfs
-/// disk with Linux's `btrfs restore`, whose file of the host's
-/// `mkfs.btrfs` put there.
+/// where another user could put a link in its place); from an exFAT disk
+/// with The Sleuth Kit; and from a Btrfs disk with Linux's `btrfs
+/// restore`, whose file of the host's `mkfs.btrfs` put there.
 fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
     let Some(first) = disks.first() else { return Err("the case has no disks".into()) };
     let source = first.path.with_file_name("storage-from-host.txt");
@@ -3054,6 +3162,8 @@ fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
         |((disk, made), name)| {
             if made.btrfs() {
                 btrfs_written(disk, &name)
+            } else if made.exfat() {
+                exfat_written(disk, &name)
             } else {
                 fat_written(disk, &name, &source)
             }
@@ -3078,6 +3188,47 @@ fn fat_written(disk: &DiskImage, name: &str, source: &Path) -> Result<(), String
     storage_written(&image, name, &read, many)?;
     let to = format!("::/{STORAGE_FROM_HOST_NAME}");
     host_tool(std::process::Command::new("mcopy").args(["-i", &image]).arg(source).arg(to))?;
+    Ok(())
+}
+
+/// [`storage_host`] for an exFAT disk: its files as The Sleuth Kit, an
+/// exFAT reader of its own, reads them (`fls` lists them and `icat`
+/// copies each out), and none of those the program renamed or removed.
+/// The host writes no file of its own there: no tool on Linux writes to
+/// exFAT without mounting it, which takes the administrator.
+fn exfat_written(disk: &DiskImage, name: &str) -> Result<(), String> {
+    let image = disk.path.display().to_string();
+    let mut fls = std::process::Command::new("fls");
+    fls.args(["-r", "-p", "-u", "-F", "-f", "exfat"]).arg(&disk.path);
+    let listing = String::from_utf8_lossy(&host_tool(&mut fls)?).into_owned();
+    // `r/r 323:\tnotes/final.txt`: the entry's number, then its path.
+    let files: BTreeMap<&str, &str> = listing
+        .lines()
+        .filter_map(|line| {
+            let (number, path) = line.split_once(":\t")?;
+            Some((path, number.rsplit(' ').next()?))
+        })
+        .collect();
+    let read = |path: &str| {
+        let number =
+            files.get(path).ok_or_else(|| format!("{image}: The Sleuth Kit finds no {path}"))?;
+        host_tool(
+            std::process::Command::new("icat").args(["-f", "exfat"]).arg(&disk.path).arg(number),
+        )
+    };
+    let many = files
+        .keys()
+        .filter(|path| {
+            path.strip_prefix("many/")
+                .is_some_and(|name| Path::new(name).extension() == Some("txt".as_ref()))
+        })
+        .count();
+    storage_written(&image, name, &read, many)?;
+    for gone in ["draft.txt", "scratch.txt"] {
+        if files.contains_key(gone) {
+            return Err(format!("{image}: {gone} is still there"));
+        }
+    }
     Ok(())
 }
 

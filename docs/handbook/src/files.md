@@ -88,8 +88,9 @@ GPT. Disks and partitions get the names Linux gives them: `vda`, `vdb` for
 virtual disks, `sda`, `sdb` for SATA disks, `nvme0n1`, `nvme1n1` for NVMe
 drives, `vda1` for the first partition of `vda` and `nvme0n1p1` for the
 first of `nvme0n1`. Spark then mounts
-the FAT filesystem (FAT12, FAT16 or FAT32) of each partition, or of each
-disk with no partition table, at `/volumes/<name>`, read-write, or its
+the FAT filesystem (FAT12, FAT16 or FAT32) or exFAT filesystem of each
+partition, or of each disk with no partition table, at
+`/volumes/<name>`, read-write, or its
 Btrfs filesystem: Dukovo reads and writes Btrfs disks Linux made, and
 checks every block and every sector of data against its checksum. It
 reads files compressed with zlib, LZO or zstd and writes them
@@ -97,7 +98,7 @@ uncompressed; a Btrfs that uses a feature Dukovo does not write yet
 (such as quotas, or one made without `no-holes`) is mounted read-only. Anything else
 is left alone.
 
-Changes reach a FAT disk within five seconds, and a Btrfs disk within
+Changes reach a FAT or exFAT disk within five seconds, and a Btrfs disk within
 30 seconds, as on Linux, or at once when a program asks for it, so a
 power cut loses at most the last five, or 30, seconds of writes. A
 Btrfs disk is whole after a power cut at any moment: it holds either a
@@ -179,6 +180,28 @@ mkfs.btrfs -L MYBTRFS --rootdir files btrfs.img
 Files: mounted btrfs from vda on /volumes/vda, labelled MYBTRFS
 spark: mounted the Btrfs filesystem of vda at /volumes/vda
 ```
+
+An exFAT disk, as SD cards and large USB sticks come formatted, works
+the same way too. No tool on Linux copies a file onto one without
+mounting it, so make it on the host with `sudo mount`, or let Dukovo
+write it:
+
+```sh
+sudo apt install exfatprogs
+truncate -s 64M exfat.img
+mkfs.exfat -L MYEXFAT exfat.img
+./ob run -- -drive file=exfat.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+```text
+Files: mounted exfat from vda on /volumes/vda, labelled MYEXFAT
+spark: mounted the exFAT filesystem of vda at /volumes/vda
+```
+
+After QEMU stops, `fsck.exfat -n exfat.img` checks what Dukovo wrote.
+The `exfat-write` boot test writes two such disks, checks them with
+`fsck.exfat`, reads them back on the host with The Sleuth Kit and after a
+reboot. A volume with two tables (TexFAT) mounts read-only.
 
 The `btrfs` boot test (`./ob test --case btrfs`) reads every file of two
 such disks and checks each byte on the host; `btrfs-write` writes two

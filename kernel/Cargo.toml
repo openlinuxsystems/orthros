@@ -20,6 +20,7 @@ members = [
     "drivers/virtio",
     "fs/block",
     "fs/btrfs",
+    "fs/exfat",
     "fs/fat",
     "fs/vfs",
     "ipc",

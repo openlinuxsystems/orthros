@@ -217,6 +217,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    with a queue for each of 4 CPUs, the partition in a GPT
   storage-4k       the same on two virtio disks and two NVMe namespaces of
                    4 KiB sectors, the partition in a GPT of 4 KiB blocks
+  exfat-write      the storage test on two exFAT disks Linux made; the host
+                   checks them with fsck.exfat and The Sleuth Kit
   disk-raw         raw reads, writes and discards of a virtio, a SATA and an
                    NVMe disk, and Linux's block requests; the host checks
                    every byte

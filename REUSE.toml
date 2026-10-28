@@ -67,3 +67,10 @@ SPDX-License-Identifier = "Apache-2.0 OR MIT"
 path = "kernel/fs/btrfs/src/tests/zstd/*.zst"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# The sectors of an exFAT volume exfat-fuse wrote, which the exFAT
+# driver's tests read (kernel/fs/exfat/src/tests.rs).
+[[annotations]]
+path = "kernel/fs/exfat/src/fixtures/*.sectors"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

@@ -265,6 +265,7 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
         FsKind::Tmpfs => FilesystemKind::Tmpfs,
         FsKind::Fat => FilesystemKind::Fat,
         FsKind::Btrfs => FilesystemKind::Btrfs,
+        FsKind::Exfat => FilesystemKind::Exfat,
         FsKind::Proc => FilesystemKind::Proc,
         FsKind::Sys => FilesystemKind::Sys,
         FsKind::Dev => FilesystemKind::Dev,
@@ -482,7 +483,7 @@ pub fn directory_method(
             let mut kind = Path::Empty;
             let kind = kind.copy(a.filesystem)?;
             let kind = kind.as_str()?;
-            let source = if kind == "fat" || kind == "btrfs" {
+            let source = if matches!(kind, "fat" | "exfat" | "btrfs") {
                 let needs =
                     if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
                 Some(objects::file(cspace, a.source, needs)?.1)

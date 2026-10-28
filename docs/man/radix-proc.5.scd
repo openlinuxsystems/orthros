@@ -164,8 +164,9 @@ _/processes/mounts_
 	One line per mount, in the order they were made, of four fields
 	separated by spaces, and a fifth when the filesystem has a label:
 	where it was mounted from (a device name such as _vda1_, or the
-	filesystem's kind), where it is, its kind (*tmpfs*, *fat*, *proc*,
-	*sys*, *dev* or *bootfs*), *rw* or *ro*, and *label=*_label_. The
+	filesystem's kind), where it is, its kind (*tmpfs*, *fat*, *exfat*,
+	*btrfs*, *proc*, *sys*, *dev* or *bootfs*), *rw* or *ro*, and
+	*label=*_label_. The
 	first four fields are those of Linux's _/proc/mounts_, and as there,
 	a space, tab, newline or backslash in a field is written *\\040*,
 	*\\011*, *\\012* or *\\134*.
