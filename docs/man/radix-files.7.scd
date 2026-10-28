@@ -175,6 +175,14 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	The boot archive (*radix-processes*(7)), read-only, with the
 	symbolic links the archive holds.
 
+*bind*
+	A directory of a filesystem already mounted, whose capability the
+	call names, mounted again at the path: the same files, one
+	filesystem. It is read-only if the call asks or the directory's own
+	mount is. Spark mounts the subvolumes of Dukovo's root this way
+	(*spark*(8)). A directory of a read-only Btrfs subvolume refuses
+	every change with EROFS, as on Linux, however it is mounted.
+
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
 or anything holds a capability to a place in it. A rename never moves a
@@ -189,7 +197,9 @@ on it at every boot. Each folder is named for what it holds:
 [[ *Path*
 :< *What it is*
 |  _/system_
-:< the boot archive, read-only: programs and the system's own files
+:< the system, read-only: programs and the system's own files; the
+   _@system.a_ subvolume of Dukovo's root on a disk, or else the boot
+   archive
 |  _/system/commands_
 :< the programs, where the shell's *PATH* leads
 |  _/system/libraries_
@@ -198,11 +208,13 @@ on it at every boot. Each folder is named for what it holds:
 :< everything else the programs read: manual pages, terminal
    descriptions, completions, the licenses, and the default settings
 |  _/system/settings_
-:< the system's settings, a tmpfs for now, which starts from the
-   defaults in _/system/resources/default-settings_ (*spark*(8))
+:< the system's settings, which start from the defaults in
+   _/system/resources/default-settings_ (*spark*(8)): _@settings_ on
+   Dukovo's root, or else a tmpfs
 |  _/system/state_
-:< the system's changing data, a tmpfs for now, with
-   _/system/state/tmp_ for temporary files that are to outlive a restart
+:< the system's changing data, _@state_ on Dukovo's root or else a
+   tmpfs, with _/system/state/tmp_ for temporary files that are to
+   outlive a restart
 |  _/system/live_
 :< a tmpfs: the state of running services, such as Spark's control
    socket

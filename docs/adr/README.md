@@ -148,4 +148,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0134](0134-btrfs-compresses-writes-with-zstd-level-1-on-the-disks-that-ask-for-it.md) | Btrfs compresses writes with zstd level 1 on the disks that ask for it | Accepted |
 | [0135](0135-hard-links-named-pipes-device-nodes-and-a-change-time.md) | Hard links, named pipes, device nodes, socket names on disk, and a change time | Accepted |
 | [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md) | An NVMe completion head the controller asks for goes to its register at the next completion | Accepted |
+| [0137](0137-the-root-is-the-dukovo-root-partitions-btrfs-subvolumes.md) | The root is the Btrfs subvolumes of a Dukovo root partition | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |

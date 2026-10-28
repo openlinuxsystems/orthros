@@ -298,9 +298,9 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "btrfs-progs",
-            purpose: "makes the Btrfs filesystems Radix's Btrfs tests read",
-            // In /usr/sbin too; `ob test` fetches a newer copy when
-            // this one is too old for the tests (`btrfs.rs`).
+            purpose: "makes the image's Dukovo root and the Btrfs filesystems of the Btrfs tests",
+            // In /usr/sbin too; `ob test` and `ob image` fetch a newer
+            // copy when this one is too old (`btrfs.rs`).
             found: |_| btrfs::system_mkfs().map(|path| path.display().to_string()),
             packages: all("btrfs-progs"),
             fallback: None,

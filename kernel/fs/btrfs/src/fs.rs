@@ -192,8 +192,8 @@ impl BtrfsFs {
             return Err(Error::NotSupported);
         }
         let subvol = default_subvolume(volume)?;
-        let (top, dir) = volume.subvolume(subvol)?.ok_or(Error::Corrupt)?;
-        let root = Inner::node_for(&inner, subvol, top, dir)?;
+        let (top, dir, read_only) = volume.subvolume(subvol)?.ok_or(Error::Corrupt)?;
+        let root = Inner::node_for(&inner, subvol, top, dir, read_only)?;
         if root.kind() != Kind::Directory {
             return Err(Error::Corrupt);
         }
@@ -589,6 +589,7 @@ impl Inner {
         subvol: u64,
         tree: Root,
         ino: u64,
+        read_only: bool,
     ) -> Result<KArc<BtrfsNode>> {
         let key = (subvol, ino);
         {
@@ -599,7 +600,7 @@ impl Inner {
                 return Ok(node);
             }
         }
-        let node = mem::arc(BtrfsNode::load(this.clone(), subvol, tree, ino)?)?;
+        let node = mem::arc(BtrfsNode::load(this.clone(), subvol, tree, ino, read_only)?)?;
         BtrfsNode::placed(&node);
         let mut nodes = this.nodes.lock();
         let weak = KArc::downgrade(&node);

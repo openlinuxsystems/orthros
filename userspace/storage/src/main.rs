@@ -27,7 +27,12 @@
 //! - `storage churn` writes, syncs and renames a file at a time on the one
 //!   volume, removing older ones, until the `btrfs-power-cut` boot test
 //!   cuts the power ([`churn`]); `storage churned`, after the reboot,
-//!   checks what the cut left and writes the volume again ([`churned`]).
+//!   checks what the cut left and writes the volume again ([`churned`]);
+//! - `storage root` checks that `/system` is the read-only subvolume of
+//!   Dukovo's root on a disk and refuses changes, and writes a file to each
+//!   of the root's other subvolumes; `storage rooted`, after a reboot,
+//!   checks the same and reads the files back (the `root` boot test,
+//!   [`check_root`]).
 //!
 //! It prints a line per step, `storage: FAILED: ...` for each check that
 //! fails, and exits with 0 only if none did.
@@ -81,6 +86,14 @@ const LONG_NAME: &str = "A file with a long name, and spaces.txt";
 /// with mtools, and its text.
 const FROM_HOST: &str = "Written on the host.txt";
 const FROM_HOST_TEXT: &[u8] = b"Written on the host between the boots.\n";
+
+/// Where `storage root` writes [`ROOT_FILE`] before a reboot, and
+/// `storage rooted` reads it after: each subvolume of Dukovo's root that
+/// changes (ADR 0137).
+const ROOT_PLACES: [&str; 5] = ["system/settings", "system/state", "applications", "users", "shared"];
+/// The file `storage root` writes in each of [`ROOT_PLACES`], in a
+/// directory of its own.
+const ROOT_FILE: &str = "storage-root/written.txt";
 
 /// Failures so far.
 static FAILURES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -204,10 +217,11 @@ fn main(_: &Startup) -> u64 {
                 churned(&root, name);
             }
         }
+        "root" | "rooted" => check_root(&root, mode == "rooted"),
         _ => {
             println!(
-                "storage: FAILED: say `write`, `check`, `list`, `churn`, `churned`, `raw` or \
-                 `errors`, not `{mode}`"
+                "storage: FAILED: say `write`, `check`, `list`, `churn`, `churned`, `root`, \
+                 `rooted`, `raw` or `errors`, not `{mode}`"
             );
             return 1;
         }
@@ -220,6 +234,67 @@ fn main(_: &Startup) -> u64 {
     } else {
         println!("storage: {mode}: {failures} checks failed");
         1
+    }
+}
+
+/// `storage root`, or `storage rooted` if `after` the reboot: checks in
+/// `/processes/mounts` that `/system` is a read-only Btrfs labelled
+/// `dukovo-root` and each of [`ROOT_PLACES`] one to write on the same
+/// disk, and that `/system` refuses a new file; then writes [`ROOT_FILE`]
+/// in each place and syncs it, or reads it back as written.
+fn check_root(root: &Dir, after: bool) {
+    let mounts = match root.read_file("processes/mounts") {
+        Ok(text) => String::from_utf8_lossy(&text).into_owned(),
+        Err(err) => return fail(&format!("/processes/mounts: {err}")),
+    };
+    // The last mount at a path is the one seen there.
+    let mount = |at: &str| {
+        mounts.lines().filter(|line| line.split(' ').nth(1) == Some(at)).last().unwrap_or("")
+    };
+    let system = mount("/system");
+    check(system.ends_with(" /system btrfs ro label=dukovo-root"), || {
+        format!("/system is not the read-only system of Dukovo's root: `{system}`")
+    });
+    println!("storage: /system: {system}");
+    let disk = system.split(' ').next().unwrap_or("");
+    for place in ROOT_PLACES {
+        let line = mount(&format!("/{place}"));
+        check(line == format!("{disk} /{place} btrfs rw label=dukovo-root"), || {
+            format!("/{place} is not a subvolume of Dukovo's root on {disk}: `{line}`")
+        });
+    }
+    let rw = Rights::READ.union(Rights::WRITE);
+    match root.open_dir("system", rw).and_then(|dir| dir.write_file("storage-root.txt", b"no")) {
+        Err(err) if err.is(FileError::ReadOnly) => {
+            println!("storage: /system: writes fail with read_only");
+        }
+        Err(err) => fail(&format!("a write to /system failed with {err}, not read_only")),
+        Ok(()) => fail("/system took a write"),
+    }
+    for place in ROOT_PLACES {
+        let text = format!("Written by Dukovo in /{place} before a reboot.\n");
+        if after {
+            match root.read_file(&format!("{place}/{ROOT_FILE}")) {
+                Ok(read) if read == text.as_bytes() => {
+                    println!("storage: /{place}/{ROOT_FILE} is as written before the reboot");
+                }
+                Ok(read) => fail(&format!(
+                    "/{place}/{ROOT_FILE} holds `{}`",
+                    String::from_utf8_lossy(&read).trim_end()
+                )),
+                Err(err) => fail(&format!("/{place}/{ROOT_FILE}: {err}")),
+            }
+        } else {
+            let written = root.open_dir(place, rw).and_then(|dir| {
+                dir.make_dir("storage-root")?;
+                dir.write_file(ROOT_FILE, text.as_bytes())?;
+                dir.sync()
+            });
+            match written {
+                Ok(()) => println!("storage: /{place}: wrote {ROOT_FILE} and synced"),
+                Err(err) => fail(&format!("/{place}: writing {ROOT_FILE}: {err}")),
+            }
+        }
     }
 }
 

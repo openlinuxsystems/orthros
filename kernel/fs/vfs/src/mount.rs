@@ -139,9 +139,10 @@ impl Location {
             .then_some(&self.mount.path[..])
     }
 
-    /// Fails with [`Error::ReadOnly`] if its mount is read-only.
+    /// Fails with [`Error::ReadOnly`] if its mount, or the node itself, is
+    /// read-only.
     pub fn writable(&self) -> Result<()> {
-        if self.mount.read_only() { Err(Error::ReadOnly) } else { Ok(()) }
+        if self.mount.read_only() || self.node.read_only() { Err(Error::ReadOnly) } else { Ok(()) }
     }
 }
 
@@ -618,6 +619,39 @@ impl Vfs {
         source: &str,
         read_only: bool,
     ) -> Result<MountRef> {
+        let root = fs.root();
+        self.mount_at(base, path, fs, root, source, read_only)
+    }
+
+    /// Mounts the directory `from` on the directory `path` beneath `base`,
+    /// as Linux's bind mounts do: the same files, from another place. The
+    /// mount is read-only if `read_only`, or if `from`'s is.
+    pub fn bind(
+        &self,
+        base: &Location,
+        path: &str,
+        from: &Location,
+        read_only: bool,
+    ) -> Result<MountRef> {
+        if from.node.kind() != Kind::Directory {
+            return Err(Error::NotDirectory);
+        }
+        let read_only = read_only || from.mount.read_only();
+        let (fs, root) = (from.mount.fs.clone(), from.node.clone());
+        self.mount_at(base, path, fs, root, from.mount.source(), read_only)
+    }
+
+    /// Mounts `fs`, its directory `root` at the top, on the directory
+    /// `path` beneath `base`.
+    fn mount_at(
+        &self,
+        base: &Location,
+        path: &str,
+        fs: FsRef,
+        root: NodeRef,
+        source: &str,
+        read_only: bool,
+    ) -> Result<MountRef> {
         let (at, where_) = self.walk(base, path, true, |chain, names| {
             let at = chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)?;
             let mut where_ = mem::vec();
@@ -633,7 +667,6 @@ impl Vfs {
         if at.node.kind() != Kind::Directory {
             return Err(Error::NotDirectory);
         }
-        let root = fs.root();
         let mount = mem::arc(Mount {
             id: crate::next_id(),
             fs,

@@ -111,18 +111,37 @@ const LINKS: [(&str, &str); 10] = [
     ("system/state/run", "../live"),
 ];
 
-/// What is mounted where, in this order. `/system/settings`,
-/// `/system/state`, `/system/live` and `/system/boot` are directories of
-/// the boot archive's, for this.
-const MOUNTS: [(&str, FilesystemKind, MountFlags); 8] = [
-    ("system", FilesystemKind::Bootfs, MountFlags::READ_ONLY),
-    ("system/settings", FilesystemKind::Tmpfs, MountFlags::NONE),
-    ("system/state", FilesystemKind::Tmpfs, MountFlags::NONE),
-    ("system/live", FilesystemKind::Tmpfs, MountFlags::NONE),
+/// What is mounted where before the disks, in this order.
+const MOUNTS: [(&str, FilesystemKind, MountFlags); 4] = [
     ("tmp", FilesystemKind::Tmpfs, MountFlags::NONE),
     ("devices", FilesystemKind::Dev, MountFlags::NONE),
     ("processes", FilesystemKind::Proc, MountFlags::NONE),
     ("kernel", FilesystemKind::Sys, MountFlags::NONE),
+];
+
+/// What `/system` is with no Dukovo root on a disk, in this order: the
+/// boot archive, read-only, and memory for what changes, which the next
+/// boot starts without. `/system/settings`, `/system/state`,
+/// `/system/live` and `/system/boot` are directories of the boot
+/// archive's, for this.
+const IN_MEMORY: [(&str, FilesystemKind, MountFlags); 4] = [
+    ("system", FilesystemKind::Bootfs, MountFlags::READ_ONLY),
+    ("system/settings", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("system/state", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("system/live", FilesystemKind::Tmpfs, MountFlags::NONE),
+];
+
+/// The subvolumes of Dukovo's root on a disk and where each is mounted, in
+/// this order (ADR 0137): the system, read-only, then what changes. The
+/// system holds the directories the others are mounted on, as the boot
+/// archive does, and `/system/live` is memory here too.
+const ON_DISK: [(&str, &str, MountFlags); 6] = [
+    ("@system.a", "system", MountFlags::READ_ONLY),
+    ("@settings", "system/settings", MountFlags::NONE),
+    ("@state", "system/state", MountFlags::NONE),
+    ("@applications", "applications", MountFlags::NONE),
+    ("@users", "users", MountFlags::NONE),
+    ("@shared", "shared", MountFlags::NONE),
 ];
 
 /// Directories of the mounted tmpfs that Unix programs expect there:
@@ -170,10 +189,6 @@ fn run() -> Option<Supervisor> {
         println!("spark: the kernel gave no root directory");
         return None;
     };
-    if !build(&root) {
-        return None;
-    }
-    seed_settings(&root);
     let mut words = args().skip(1).peekable();
     // `--no-volumes` leaves every disk's filesystems unmounted, for the
     // disk check, which writes over a whole disk (ADR 0124); `--compress
@@ -189,11 +204,10 @@ fn run() -> Option<Supervisor> {
             break;
         }
     }
-    if volumes {
-        mount_disks(&root, &compress);
-    } else {
-        println!("spark: leaving every disk's filesystems unmounted");
+    if !build(&root, volumes, &compress) {
+        return None;
     }
+    seed_settings(&root);
     let Ok(supervised) = Dir::at(root.slot()) else { return None };
     let mut supervisor = Supervisor::new(supervised);
     supervisor.listen();
@@ -347,8 +361,11 @@ fn open_pty(root: &Dir) -> Result<(File, File), String> {
 }
 
 /// Makes the hierarchy's directories, mounts what goes on them and makes
-/// the links to them. Returns whether all of it worked.
-fn build(root: &Dir) -> bool {
+/// the links to them. Returns whether all of it worked. The disks'
+/// filesystems are mounted unless not `volumes`, those of the disks in
+/// `compress` compressed, and `/system` is Dukovo's root on a disk if one
+/// holds it, else the boot archive and memory.
+fn build(root: &Dir, volumes: bool, compress: &[&str]) -> bool {
     for name in HIERARCHY {
         if let Err(err) = root.make_dir(name) {
             println!("spark: cannot make /{name}: {err}");
@@ -361,14 +378,41 @@ fn build(root: &Dir) -> bool {
             return false;
         }
     }
+    let disk = if volumes {
+        let btrfs = mount_disks(root, compress);
+        root_volume(root, &btrfs)
+    } else {
+        println!("spark: leaving every disk's filesystems unmounted");
+        None
+    };
+    let mounted = match disk {
+        Some(disk) if mount_root(root, &disk) => {
+            println!("spark: /system is Dukovo's root on {disk}, compressed (zstd)");
+            ON_DISK.len() + 1
+        }
+        _ => {
+            for (path, kind, flags) in IN_MEMORY {
+                if let Err(err) = root.mount(path, kind, None, flags) {
+                    println!("spark: cannot mount {} on /{path}: {err}", kind.name());
+                    return false;
+                }
+            }
+            IN_MEMORY.len()
+        }
+    };
+    // Dukovo's root on a disk keeps these from the boot before.
+    let again = |done: Result<(), radix_rt::fs::Error>| match done {
+        Err(err) if err.is(FileError::Exists) => Ok(()),
+        done => done,
+    };
     for name in MOUNTED_DIRS {
-        if let Err(err) = root.make_dir(name) {
+        if let Err(err) = again(root.make_dir(name)) {
             println!("spark: cannot make /{name}: {err}");
             return false;
         }
     }
     for (path, target) in LINKS {
-        if let Err(err) = root.make_link(path, target) {
+        if let Err(err) = again(root.make_link(path, target)) {
             println!("spark: cannot link /{path} to /{target}: {err}");
             return false;
         }
@@ -382,7 +426,7 @@ fn build(root: &Dir) -> bool {
     println!(
         "spark: built the hierarchy of {} directories and mounted {} filesystems",
         HIERARCHY.len(),
-        MOUNTS.len()
+        MOUNTS.len() + mounted
     );
     true
 }
@@ -390,8 +434,8 @@ fn build(root: &Dir) -> bool {
 /// Where the system keeps its default settings, and where the settings
 /// are, which start with each default that is not there yet: the plan's
 /// way for updates to add settings without replacing edited ones
-/// (spark(8)). `/system/settings` is a tmpfs until Btrfs, so each boot
-/// starts it with all of them.
+/// (spark(8)). On Dukovo's root on a disk the first boot copies them all;
+/// with `/system/settings` in memory, every boot does.
 const DEFAULTS: &str = "system/resources/default-settings";
 const SETTINGS: &str = "system/settings";
 
@@ -449,8 +493,9 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
 }
 
 /// Mounts the FAT, exFAT or Btrfs filesystem of each disk partition, or of
-/// each disk with no partitions, at `/volumes/<name>`.
-fn mount_disks(root: &Dir, compress: &[&str]) {
+/// each disk with no partitions, at `/volumes/<name>`. Returns the names of
+/// those it mounted Btrfs from, and how.
+fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
             Ok(entries) => entries
@@ -460,7 +505,7 @@ fn mount_disks(root: &Dir, compress: &[&str]) {
                 .collect(),
             Err(err) => {
                 println!("spark: cannot list /devices: {err}");
-                return;
+                return Vec::new();
             }
         };
     // A partition has its disk's name and its number, after a `p` when
@@ -473,9 +518,13 @@ fn mount_disks(root: &Dir, compress: &[&str]) {
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
     };
+    let mut btrfs = Vec::new();
     for name in devices.iter().filter(|name| !partitioned(name)) {
-        mount_disk(root, name, compress.contains(&name.as_str()));
+        if let Some(flags) = mount_disk(root, name, compress.contains(&name.as_str())) {
+            btrfs.push((name.clone(), flags));
+        }
     }
+    btrfs
 }
 
 /// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
@@ -486,22 +535,29 @@ fn mount_disks(root: &Dir, compress: &[&str]) {
 /// and `mkfs.exfat` can leave an older Btrfs superblock behind, so theirs
 /// is the newer. FAT and exFAT each take the other's boot sector for
 /// none of theirs. A Btrfs mounted to write compresses its data if
-/// `compress`.
-fn mount_disk(root: &Dir, name: &str, compress: bool) {
+/// `compress`. Returns how it mounted a Btrfs.
+fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
         Ok(device) => (device, MountFlags::NONE),
         Err(err) if err.is(FileError::ReadOnly) => {
             match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, Rights::READ) {
                 Ok(device) => (device, MountFlags::READ_ONLY),
-                Err(err) => return println!("spark: cannot open /devices/{name}: {err}"),
+                Err(err) => {
+                    println!("spark: cannot open /devices/{name}: {err}");
+                    return None;
+                }
             }
         }
-        Err(err) => return println!("spark: cannot open /devices/{name}: {err}"),
+        Err(err) => {
+            println!("spark: cannot open /devices/{name}: {err}");
+            return None;
+        }
     };
     let at = alloc::format!("volumes/{name}");
     if let Err(err) = root.make_dir(&at) {
-        return println!("spark: cannot make /{at}: {err}");
+        println!("spark: cannot make /{at}: {err}");
+        return None;
     }
     let mount = |kind, said, flags: MountFlags| match root.mount(&at, kind, Some(&device), flags) {
         // A disk that refuses writes fails with read_only, and what Radix
@@ -532,6 +588,7 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) {
             let zstd =
                 if flags.contains(MountFlags::COMPRESS) { ", compressed (zstd)" } else { "" };
             println!("spark: mounted the {kind} filesystem of {name} at /{at}{ro}{zstd}");
+            (kind == "Btrfs").then_some(flags)
         }
         Err(err) => {
             let _ = root.remove(&at);
@@ -540,8 +597,76 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) {
             } else {
                 println!("spark: cannot mount {name}: {err}");
             }
+            None
         }
     }
+}
+
+/// Which Btrfs of `btrfs`, mounted at `/volumes/<name>`, is Dukovo's root:
+/// the first with the subvolumes [`ON_DISK`] mounts, as `./ob image` and
+/// the installer make it (ADR 0137). Like Fedora's, the root compresses
+/// what is written to it (ADR 0134): mounted without, it is mounted again.
+fn root_volume(root: &Dir, btrfs: &[(String, MountFlags)]) -> Option<String> {
+    let (name, flags) = btrfs.iter().find(|(name, _)| {
+        ON_DISK.iter().all(|(subvolume, _, _)| {
+            root.stat(&format!("volumes/{name}/{subvolume}"))
+                .is_ok_and(|stat| stat.kind == FileKind::Directory)
+        })
+    })?;
+    if flags.contains(MountFlags::READ_ONLY) {
+        println!("spark: {name} holds Dukovo's root but cannot be written; left alone");
+        return None;
+    }
+    if !flags.contains(MountFlags::COMPRESS) {
+        let at = format!("volumes/{name}");
+        if let Err(err) = root.unmount(&at).and_then(|()| root.remove(&at)) {
+            println!("spark: cannot mount {name} again to compress: {err}");
+            return None;
+        }
+        mount_disk(root, name, true)?;
+    }
+    Some(name.clone())
+}
+
+/// Mounts the subvolumes of Dukovo's root on `/volumes/<disk>` where
+/// [`ON_DISK`] says, then memory on `/system/live`. Returns whether all of
+/// it worked; if not, what it mounted is unmounted again.
+fn mount_root(root: &Dir, disk: &str) -> bool {
+    let mut mounted = Vec::new();
+    let mut failed = None;
+    for (subvolume, at, flags) in ON_DISK {
+        let rights = if flags.contains(MountFlags::READ_ONLY) {
+            Rights::READ
+        } else {
+            Rights::READ.union(Rights::WRITE)
+        };
+        let path = format!("volumes/{disk}/{subvolume}");
+        let from = match root.open_dir(&path, rights) {
+            Ok(from) => from,
+            Err(err) => {
+                failed = Some(format!("cannot open /{path}: {err}"));
+                break;
+            }
+        };
+        if let Err(err) = root.bind(at, &from, flags) {
+            failed = Some(format!("cannot mount /{path} on /{at}: {err}"));
+            break;
+        }
+        mounted.push(at);
+    }
+    if failed.is_none() {
+        match root.mount("system/live", FilesystemKind::Tmpfs, None, MountFlags::NONE) {
+            Ok(()) => return true,
+            Err(err) => failed = Some(format!("cannot mount tmpfs on /system/live: {err}")),
+        }
+    }
+    println!("spark: {}; /system stays in memory", failed.unwrap_or_default());
+    for at in mounted.into_iter().rev() {
+        if let Err(err) = root.unmount(at) {
+            println!("spark: cannot unmount /{at}: {err}");
+        }
+    }
+    false
 }
 
 /// Waits for good.
