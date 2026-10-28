@@ -17,7 +17,7 @@
 
 use alloc::sync::Weak;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use radix_sync::Mutex;
 
@@ -37,13 +37,26 @@ struct Shared {
     used: AtomicU64,
     /// The most files and directories it may hold, its root included.
     max_files: u64,
-    /// The files and directories it holds.
+    /// The files and directories it holds, and the names of files past
+    /// their first.
     files: AtomicU64,
     next_id: AtomicU64,
     /// Held while names are made, removed or moved, so that a move sees
     /// both directories unchanged and two moves cannot make a loop. Only
     /// one directory is locked at a time under it.
     namespace: Mutex<()>,
+}
+
+impl Shared {
+    /// Counts one more file, or name, against the limit.
+    fn count_file(&self) -> Result<()> {
+        self.files
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |files| {
+                (files < self.max_files).then_some(files + 1)
+            })
+            .map(drop)
+            .map_err(|_| Error::NoSpace)
+    }
 }
 
 /// A tmpfs.
@@ -141,20 +154,33 @@ enum Body {
         modified: AtomicU64,
     },
     /// A socket's name, with what the kernel keeps in it
-    /// ([`Node::make_socket`]), and when it was last changed, as
-    /// `set_times` sets it.
+    /// ([`Node::make_socket`]; nothing for one `make_node` made), and
+    /// when it was last changed, as `set_times` sets it.
     Socket {
-        binding: SocketBinding,
+        binding: Option<SocketBinding>,
+        modified: AtomicU64,
+    },
+    /// A named pipe or a device node ([`Node::make_node`]): its kind, the
+    /// device number it stands for, and when it was last changed.
+    Special {
+        kind: Kind,
+        device: u64,
         modified: AtomicU64,
     },
 }
 
-/// A tmpfs file, directory, symbolic link or socket's name.
+/// A tmpfs file, directory, symbolic link, socket's name, named pipe or
+/// device node.
 pub struct TmpNode {
     id: u64,
     created: u64,
     /// When it was last read, as `set_times` set it; reads leave it.
     accessed: AtomicU64,
+    /// When a name of it or a time was last changed; its contents'
+    /// changes are its modification time, which is later then.
+    changed: AtomicU64,
+    /// How many names it has.
+    links: AtomicU32,
     shared: KArc<Shared>,
     /// The directory it is in; none for the root, or once it is removed.
     parent: Mutex<Option<Weak<TmpNode, Alloc>>>,
@@ -242,7 +268,11 @@ impl TmpNode {
     }
 
     /// A socket's name, holding `binding`.
-    fn socket(id: u64, shared: KArc<Shared>, binding: SocketBinding) -> Result<KArc<TmpNode>> {
+    fn socket(
+        id: u64,
+        shared: KArc<Shared>,
+        binding: Option<SocketBinding>,
+    ) -> Result<KArc<TmpNode>> {
         let created = now();
         let body = Body::Socket { binding, modified: AtomicU64::new(created) };
         TmpNode::with_body(id, shared, created, body)
@@ -253,10 +283,7 @@ impl TmpNode {
     fn with_body(id: u64, shared: KArc<Shared>, created: u64, body: Body) -> Result<KArc<TmpNode>> {
         // Each counts against the limit until it is dropped, as with
         // Linux's nr_inodes, so that empty files cannot use up the heap.
-        let counted = shared.files.try_update(Ordering::Relaxed, Ordering::Relaxed, |files| {
-            (files < shared.max_files).then_some(files + 1)
-        });
-        if counted.is_err() {
+        if shared.count_file().is_err() {
             if let Body::Link { target, .. } = &body {
                 shared.used.fetch_sub(target.len() as u64, Ordering::Relaxed);
             }
@@ -266,6 +293,8 @@ impl TmpNode {
             id,
             created,
             accessed: AtomicU64::new(created),
+            changed: AtomicU64::new(created),
+            links: AtomicU32::new(0),
             shared,
             parent: Mutex::new(None),
             me: radix_sync::Once::new(),
@@ -283,7 +312,7 @@ impl TmpNode {
     fn dir(&self) -> Result<&Mutex<DirState>> {
         match &self.body {
             Body::Dir(dir) => Ok(dir),
-            Body::File { .. } | Body::Link { .. } | Body::Socket { .. } => Err(Error::NotDirectory),
+            _ => Err(Error::NotDirectory),
         }
     }
 
@@ -292,13 +321,24 @@ impl TmpNode {
             Body::File { cache, charged } => Ok((cache, Charge { shared: &self.shared, charged })),
             Body::Dir(_) => Err(Error::IsDirectory),
             // Resolution follows links, so only a caller that asked not
-            // to reaches one here; a socket's name cannot be opened.
-            Body::Link { .. } | Body::Socket { .. } => Err(Error::NotSupported),
+            // to reaches one here; a socket's name cannot be opened, and
+            // the kernel opens pipes and devices for their nodes.
+            Body::Link { .. } | Body::Socket { .. } | Body::Special { .. } => {
+                Err(Error::NotSupported)
+            }
         }
     }
 
     /// Adds `node`, new, to this directory as `name`.
     fn add(&self, name: &str, node: KArc<TmpNode>) -> Result<NodeRef> {
+        self.add_name(name, node, false)
+    }
+
+    /// Adds `name` for `node`, a new node, or with `again` one more name
+    /// of a file that has one. Each name after a file's first counts
+    /// against the limit as a file does, as on Linux, since each holds
+    /// memory until it is removed.
+    fn add_name(&self, name: &str, node: KArc<TmpNode>, again: bool) -> Result<NodeRef> {
         let dir = self.dir()?;
         let name_bytes = mem::copy(name.as_bytes())?;
         let _namespace = self.shared.namespace.lock();
@@ -306,10 +346,42 @@ impl TmpNode {
         let Err(at) = dir.find(name) else {
             return Err(Error::Exists);
         };
-        *node.parent.lock() = self.weak();
-        dir.insert(at, name_bytes, node.clone())?;
-        dir.modified = now();
+        if matches!(node.body, Body::Dir(_)) {
+            *node.parent.lock() = self.weak();
+        }
+        if again {
+            // A file whose names are all gone stays gone, as on Linux
+            // (ENOENT).
+            if node.links.load(Ordering::Relaxed) == 0 {
+                return Err(Error::NotFound);
+            }
+            self.shared.count_file()?;
+        }
+        if let Err(e) = dir.insert(at, name_bytes, node.clone()) {
+            if again {
+                self.shared.files.fetch_sub(1, Ordering::Relaxed);
+            }
+            return Err(e);
+        }
+        let time = now();
+        dir.modified = time;
+        node.named(time);
         Ok(node)
+    }
+
+    /// It has gained a name at `time`.
+    fn named(&self, time: u64) {
+        self.links.fetch_add(1, Ordering::Relaxed);
+        self.changed.store(time, Ordering::Relaxed);
+    }
+
+    /// It has lost a name at `time`. A name past its first gives back
+    /// what it counted ([`TmpNode::add_name`]).
+    fn unnamed(&self, time: u64) {
+        if self.links.fetch_sub(1, Ordering::Relaxed) > 1 {
+            self.shared.files.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.changed.store(time, Ordering::Relaxed);
     }
 
     /// Whether it is a directory with nothing in it. Called with its
@@ -365,7 +437,7 @@ impl Drop for TmpNode {
         let charged = match &self.body {
             Body::File { charged, .. } => charged.load(Ordering::Relaxed),
             Body::Link { target, .. } => target.len() as u64,
-            Body::Dir(_) | Body::Socket { .. } => 0,
+            Body::Dir(_) | Body::Socket { .. } | Body::Special { .. } => 0,
         };
         self.shared.used.fetch_sub(charged, Ordering::Relaxed);
     }
@@ -379,7 +451,13 @@ impl Node for TmpNode {
             Body::Link { target, modified } => {
                 (target.len() as u64, modified.load(Ordering::Relaxed), 0)
             }
-            Body::Socket { modified, .. } => (0, modified.load(Ordering::Relaxed), 0),
+            Body::Socket { modified, .. } | Body::Special { modified, .. } => {
+                (0, modified.load(Ordering::Relaxed), 0)
+            }
+        };
+        let device = match self.body {
+            Body::Special { device, .. } => device,
+            _ => 0,
         };
         let allocated = (pages * radix_block::PAGE_SIZE) as u64;
         Stat {
@@ -390,6 +468,14 @@ impl Node for TmpNode {
             created: self.created,
             modified,
             accessed: self.accessed.load(Ordering::Relaxed),
+            changed: self.changed.load(Ordering::Relaxed).max(modified),
+            // A directory's count of its subdirectories is not kept: 1,
+            // as Btrfs has it, says so to programs that look.
+            links: match self.body {
+                Body::Dir(_) => 1,
+                _ => self.links.load(Ordering::Relaxed),
+            },
+            device,
         }
     }
 
@@ -399,6 +485,7 @@ impl Node for TmpNode {
             Body::File { .. } => Kind::File,
             Body::Link { .. } => Kind::Symlink,
             Body::Socket { .. } => Kind::Socket,
+            Body::Special { kind, .. } => kind,
         }
     }
 
@@ -433,12 +520,45 @@ impl Node for TmpNode {
         check_name(name)?;
         self.dir()?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        self.add(name, TmpNode::socket(id, self.shared.clone(), binding)?)
+        self.add(name, TmpNode::socket(id, self.shared.clone(), Some(binding))?)
+    }
+
+    fn link(&self, name: &str, node: &NodeRef) -> Result<()> {
+        check_name(name)?;
+        self.dir()?;
+        let node = crate::downcast::<TmpNode>(&**node).ok_or(Error::CrossMount)?;
+        if !KArc::ptr_eq(&node.shared, &self.shared) {
+            return Err(Error::CrossMount);
+        }
+        if matches!(node.body, Body::Dir(_)) {
+            return Err(Error::IsDirectory);
+        }
+        let me = node.weak().and_then(|weak| weak.upgrade()).ok_or(Error::NotFound)?;
+        self.add_name(name, me, true).map(drop)
+    }
+
+    fn make_node(&self, name: &str, kind: Kind, device: u64) -> Result<NodeRef> {
+        check_name(name)?;
+        self.dir()?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let shared = self.shared.clone();
+        let node = match kind {
+            Kind::File => TmpNode::new(id, shared, kind)?,
+            Kind::Socket => TmpNode::socket(id, shared, None)?,
+            Kind::Pipe | Kind::CharDevice | Kind::BlockDevice => {
+                let created = now();
+                let device = if kind == Kind::Pipe { 0 } else { device };
+                let body = Body::Special { kind, device, modified: AtomicU64::new(created) };
+                TmpNode::with_body(id, shared, created, body)?
+            }
+            _ => return Err(Error::NotSupported),
+        };
+        self.add(name, node)
     }
 
     fn socket_binding(&self) -> Option<SocketBinding> {
         match &self.body {
-            Body::Socket { binding, .. } => Some(binding.clone()),
+            Body::Socket { binding, .. } => binding.clone(),
             _ => None,
         }
     }
@@ -464,8 +584,10 @@ impl Node for TmpNode {
             return Err(Error::NotEmpty);
         }
         *node.parent.lock() = None;
+        let time = now();
+        node.unnamed(time);
         dir.remove(at);
-        dir.modified = now();
+        dir.modified = time;
         Ok(())
     }
 
@@ -497,15 +619,23 @@ impl Node for TmpNode {
             match dest.find(to) {
                 Ok(at) => {
                     let entry = dest.at_mut(at);
+                    // Two names of one file: nothing happens, as POSIX has it.
+                    if KArc::ptr_eq(&entry.node, &moving) {
+                        return Ok(());
+                    }
                     check_replace(&moving, &entry.node)?;
                     *entry.node.parent.lock() = None;
+                    entry.node.unnamed(now());
                     entry.node = moving.clone();
                 }
                 Err(at) => dest.insert(at, name, moving.clone())?,
             }
             dest.modified = now();
         }
-        *moving.parent.lock() = target.weak();
+        if matches!(moving.body, Body::Dir(_)) {
+            *moving.parent.lock() = target.weak();
+        }
+        moving.changed.store(now(), Ordering::Relaxed);
         // The namespace lock kept the entry where it was.
         let mut source = self.dir()?.lock();
         if let Ok(at) = source.find(from) {
@@ -549,11 +679,15 @@ impl Node for TmpNode {
             match &self.body {
                 Body::Dir(dir) => dir.lock().modified = modified,
                 Body::File { cache, .. } => cache.set_modified(modified),
-                Body::Link { modified: time, .. } | Body::Socket { modified: time, .. } => {
+                Body::Link { modified: time, .. }
+                | Body::Socket { modified: time, .. }
+                | Body::Special { modified: time, .. } => {
                     time.store(modified, Ordering::Relaxed);
                 }
             }
         }
+        // Setting a time changes the node, now.
+        self.changed.store(now(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -601,8 +735,14 @@ fn rename_within(dir: &mut DirState, from: &str, to: &str) -> Result<()> {
         Ok(old) => {
             let moving = dir.at_mut(at).node.clone();
             let entry = dir.at_mut(old);
+            // Two names of one file: nothing happens, as POSIX has it.
+            if KArc::ptr_eq(&entry.node, &moving) {
+                return Ok(());
+            }
             check_replace(&moving, &entry.node)?;
             *entry.node.parent.lock() = None;
+            entry.node.unnamed(now());
+            moving.changed.store(now(), Ordering::Relaxed);
             entry.node = moving;
             dir.remove(at);
         }
@@ -612,7 +752,9 @@ fn rename_within(dir: &mut DirState, from: &str, to: &str) -> Result<()> {
             let index = dir.by_name.remove(at);
             let to_at = if to_at > at { to_at - 1 } else { to_at };
             mem::insert(&mut dir.by_name, to_at, index)?;
-            core::mem::swap(&mut dir.entries[index as usize].name, &mut name);
+            let entry = &mut dir.entries[index as usize];
+            core::mem::swap(&mut entry.name, &mut name);
+            entry.node.changed.store(now(), Ordering::Relaxed);
         }
     }
     dir.modified = now();

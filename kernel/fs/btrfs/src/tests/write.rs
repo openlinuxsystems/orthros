@@ -405,6 +405,23 @@ fn a_change_already_there_or_missing_fails_and_changes_nothing() {
 }
 
 #[test]
+fn inserting_a_key_already_in_a_full_leaf_fails_and_splits_nothing() {
+    let image = mkfs_empty(&[]);
+    let disk = writable(&image);
+    let volume = open(&disk);
+    let mut w = Writer::new(&volume).unwrap();
+    // An item that fills a leaf, as a file's names in one directory can.
+    let max = crate::tree::Block::max_item(volume.superblock().nodesize);
+    let key = Key::new(1000, item::INODE_REF, 256);
+    w.insert(&volume, tree::FS, &key, &vec![7; max]).unwrap();
+    let items = super::count(&volume, &volume.tree(tree::FS).unwrap().unwrap()).unwrap();
+    assert_eq!(w.insert(&volume, tree::FS, &key, &[0; 100]), Err(Error::Exists));
+    let fs = volume.tree(tree::FS).unwrap().unwrap();
+    assert_eq!(super::count(&volume, &fs).unwrap(), items);
+    assert_eq!(crate::tree::find(&volume, &fs, &key).unwrap().unwrap().len(), max);
+}
+
+#[test]
 fn every_checksum_and_node_size_writes_what_btrfs_check_passes() {
     for args in [
         &["--csum", "xxhash"][..],

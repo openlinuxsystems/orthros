@@ -221,6 +221,9 @@ impl Node for BootNode {
             created: time,
             modified: time,
             accessed: time,
+            changed: time,
+            links: 1,
+            device: 0,
         }
     }
 

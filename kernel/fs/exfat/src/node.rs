@@ -874,7 +874,18 @@ impl Node for ExfatNode {
                 (allocated, allocated, dir_modified)
             }
         };
-        Stat { kind: self.kind, size, allocated, id, created, modified, accessed }
+        Stat {
+            kind: self.kind,
+            size,
+            allocated,
+            id,
+            created,
+            modified,
+            accessed,
+            changed: modified,
+            links: 1,
+            device: 0,
+        }
     }
 
     fn kind(&self) -> Kind {

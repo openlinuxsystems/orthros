@@ -115,6 +115,8 @@ pub enum Error {
     Loop,
     /// The node is not a symbolic link.
     NotLink,
+    /// The file has as many names as its filesystem keeps for one.
+    TooManyNames,
     /// Out of memory.
     NoMemory,
     /// A buffer of the caller's is not mapped for the access.
@@ -145,6 +147,7 @@ impl fmt::Display for Error {
             Error::NotSupported => "not supported",
             Error::Loop => "too many levels of symbolic links",
             Error::NotLink => "not a symbolic link",
+            Error::TooManyNames => "too many names",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
         })
@@ -211,6 +214,27 @@ pub struct Stat {
     /// program set (`set_times`), since reading does not change it (as
     /// with Linux's `noatime`, ADR 0076).
     pub accessed: u64,
+    /// When it last changed, its contents or what is said of it (its
+    /// names, times or size), likewise (ADR 0135).
+    pub changed: u64,
+    /// How many names it has in the tree, 1 for a node with none of its
+    /// own (ADR 0135).
+    pub links: u32,
+    /// The number of the device a device node stands for, as
+    /// [`Node::make_node`] took it; 0 for any other node.
+    pub device: u64,
+}
+
+/// The device number of `major` and `minor`, as [`Stat::device`] holds
+/// it: the major number in its high half.
+pub const fn device_number(major: u32, minor: u32) -> u64 {
+    ((major as u64) << 32) | minor as u64
+}
+
+/// The major and minor numbers of device number `device`
+/// ([`device_number`]).
+pub const fn device_parts(device: u64) -> (u32, u32) {
+    ((device >> 32) as u32, device as u32)
 }
 
 /// A node, shared.
@@ -385,6 +409,31 @@ pub trait Node: Send + Sync + Any {
     /// directory of a filesystem that has none fails with
     /// [`Error::NotSupported`].
     fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
+        if self.kind() == Kind::Directory {
+            Err(Error::NotSupported)
+        } else {
+            Err(Error::NotDirectory)
+        }
+    }
+
+    /// Makes `name` in a directory another name of `node`, a file (not a
+    /// directory) of the same filesystem: a hard link (ADR 0135). A
+    /// directory of a filesystem that has none fails with
+    /// [`Error::NotSupported`].
+    fn link(&self, _name: &str, _node: &NodeRef) -> Result<()> {
+        if self.kind() == Kind::Directory {
+            Err(Error::NotSupported)
+        } else {
+            Err(Error::NotDirectory)
+        }
+    }
+
+    /// Makes `name` in a directory a node of `kind`: a named pipe
+    /// ([`Kind::Pipe`]), a device node ([`Kind::CharDevice`] or
+    /// [`Kind::BlockDevice`]) that stands for device number `device`, an
+    /// empty file, or a socket's name that holds no socket. A directory
+    /// of a filesystem that has none fails with [`Error::NotSupported`].
+    fn make_node(&self, _name: &str, _kind: Kind, _device: u64) -> Result<NodeRef> {
         if self.kind() == Kind::Directory {
             Err(Error::NotSupported)
         } else {

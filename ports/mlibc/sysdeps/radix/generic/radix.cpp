@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/sysmacros.h>
 #include <sys/uio.h>
 #include <time.h>
 
@@ -308,60 +309,53 @@ void forget_pid() {
 	__atomic_store_n(&cached_pid, 0, __ATOMIC_RELAXED);
 }
 
-void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocated, uint64_t id,
-		uint64_t created, uint64_t modified, uint64_t accessed, uint64_t mount) {
+void fill_stat(struct ::stat *st, const struct radix_file_status &f) {
 	memset(st, 0, sizeof(*st));
 	// A file's number is unique on its filesystem, and the mount's number
 	// tells the filesystems apart.
-	st->st_dev = mount;
-	st->st_ino = id;
-	switch(kind) {
+	st->st_dev = f.mount;
+	st->st_ino = f.id;
+	switch(f.kind) {
 	case RADIX_FILE_KIND_DIRECTORY:
 		st->st_mode = S_IFDIR | 0755;
-		st->st_nlink = 2;
 		break;
 	case RADIX_FILE_KIND_BLOCK_DEVICE:
 		st->st_mode = S_IFBLK | 0660;
-		st->st_nlink = 1;
 		break;
 	case RADIX_FILE_KIND_CHAR_DEVICE:
 		st->st_mode = S_IFCHR | 0666;
-		st->st_nlink = 1;
 		break;
 	case RADIX_FILE_KIND_PIPE:
 		st->st_mode = S_IFIFO | 0600;
-		st->st_nlink = 1;
 		break;
 	case RADIX_FILE_KIND_SYMLINK:
 		st->st_mode = S_IFLNK | 0777;
-		st->st_nlink = 1;
 		break;
 	case RADIX_FILE_KIND_SOCKET:
 		st->st_mode = S_IFSOCK | 0777;
-		st->st_nlink = 1;
 		break;
 	default:
 		// Files have no permissions until users come (Phase 13): all may
 		// read, write and run them.
 		st->st_mode = S_IFREG | 0755;
-		st->st_nlink = 1;
 		break;
 	}
-	st->st_size = size;
+	st->st_nlink = f.links;
+	if(f.kind == RADIX_FILE_KIND_CHAR_DEVICE || f.kind == RADIX_FILE_KIND_BLOCK_DEVICE)
+		st->st_rdev = makedev(static_cast<unsigned int>(f.device >> 32),
+				static_cast<unsigned int>(f.device));
+	st->st_size = f.size;
 	st->st_blksize = 4096;
-	st->st_blocks = (allocated + 511) / 512;
+	st->st_blocks = (f.allocated + 511) / 512;
 	auto at = [](uint64_t ns) {
 		struct timespec ts;
 		ts.tv_sec = ns / 1000000000;
 		ts.tv_nsec = ns % 1000000000;
 		return ts;
 	};
-	// The kernel keeps no time of the last change to a file's status, so
-	// st_ctim is the last change to its contents (docs/design/posix.md).
-	st->st_mtim = at(modified);
-	st->st_ctim = at(modified);
-	st->st_atim = at(accessed);
-	(void)created;
+	st->st_mtim = at(f.modified);
+	st->st_ctim = at(f.changed);
+	st->st_atim = at(f.accessed);
 }
 
 uint64_t dir_cursor(int fd) {

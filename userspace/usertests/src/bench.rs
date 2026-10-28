@@ -169,9 +169,12 @@ pub fn files(argument: Argument) -> u64 {
         directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, none, Rights::READ, SLOT_OPENED).is_ok()
             && capability::delete(&SYS, SLOT_OPENED).is_ok()
     });
+    let mut status = [0u8; directory::FileStatus::SIZE];
     measure("file_stat", rounds, || {
-        directory::stat(&SYS, SLOT_DIRECTORY, FILE_NAME, directory::PathFlags::NONE)
-            .is_ok_and(|stat| stat.size == FILE_SIZE as u64)
+        let at = directory::FileStatus::OFFSET_SIZE;
+        directory::stat(&SYS, SLOT_DIRECTORY, FILE_NAME, directory::PathFlags::NONE, &mut status)
+            .is_ok()
+            && status[at..at + 8] == (FILE_SIZE as u64).to_le_bytes()
     });
     measure("file_read_4k", rounds, || {
         file::read(&SYS, SLOT_FILE, 0, buffer).is_ok_and(|read| read.count == FILE_SIZE as u64)

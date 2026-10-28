@@ -27,11 +27,13 @@
 //! unless it starts there, so the files come out with the bytes they were
 //! sent with; a read that does not take them closes them.
 
+use alloc::sync::Weak;
+use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use radix_abi::Status;
-use radix_abi::errors::Kernel;
+use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::file::FILES_IN_FLIGHT_MAX;
 use radix_abi::process::PipeFlags;
 use radix_abi::signal::SIGPIPE;
@@ -121,11 +123,29 @@ pub struct Pipe {
     id: u64,
     /// Its pollers.
     polled: Polled,
+    /// How many times an end was opened to read, and to write: a named
+    /// pipe's open waits for the other kind's to change.
+    opened: [AtomicU32; 2],
+    /// For a named pipe, its node, kept while the pipe is open so that
+    /// [`NAMED`] finds the pipe by the node's address.
+    _named: Option<NodeRef>,
 }
+
+/// Pipes by the address of their node.
+type ByNode = Vec<(usize, Weak<Pipe, Kmalloc>), Kmalloc>;
+
+/// The named pipes open now, by the address of their node.
+static NAMED: Mutex<Option<ByNode>> = Mutex::new(None);
 
 impl Pipe {
     /// A new, empty pipe, with one end reading it and one writing it.
     pub(super) fn new() -> Result<KArc<Pipe>, Status> {
+        Pipe::with_ends(1, None)
+    }
+
+    /// A new, empty pipe, with `ends` ends reading it and as many writing
+    /// it, the pipe `named` is if any.
+    fn with_ends(ends: u32, named: Option<NodeRef>) -> Result<KArc<Pipe>, Status> {
         let mut buffer = alloc::vec::Vec::new_in(heap());
         buffer.try_reserve_exact(CAPACITY).map_err(|_| Kernel::NoMemory.status(0))?;
         while buffer.len() < CAPACITY {
@@ -136,11 +156,13 @@ impl Pipe {
         mem::arc(Pipe {
             buffer: Mutex::new(buffer),
             len: AtomicUsize::new(0),
-            readers: AtomicU32::new(1),
-            writers: AtomicU32::new(1),
+            readers: AtomicU32::new(ends),
+            writers: AtomicU32::new(ends),
             files: AtomicUsize::new(0),
             id: next_id(),
             polled: Polled::new(),
+            opened: [AtomicU32::new(0), AtomicU32::new(0)],
+            _named: named,
         })
         .map_err(|_| Kernel::NoMemory.status(0))
     }
@@ -416,6 +438,9 @@ pub struct End {
     pipe: KArc<Pipe>,
     /// Whether it is the writing end.
     pub write: bool,
+    /// Whether a writing end reads too: a named pipe opened to read and
+    /// write, as Linux allows.
+    reads_too: bool,
 }
 
 impl End {
@@ -423,13 +448,20 @@ impl End {
     pub fn pipe(&self) -> &Pipe {
         &self.pipe
     }
+
+    /// The events `poll` finds on it ([`Pipe::events`]).
+    pub fn events(&self) -> u16 {
+        let events = self.pipe.events(self.write);
+        if self.reads_too { events | self.pipe.events(false) } else { events }
+    }
 }
 
 impl Drop for End {
     fn drop(&mut self) {
         if self.write {
             self.pipe.close_writer();
-        } else {
+        }
+        if !self.write || self.reads_too {
             self.pipe.close_reader();
         }
     }
@@ -445,6 +477,9 @@ impl Node for End {
             created: 0,
             modified: 0,
             accessed: 0,
+            changed: 0,
+            links: 1,
+            device: 0,
         }
     }
 
@@ -534,8 +569,8 @@ pub fn make(
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
     let end = |write: bool| -> Result<FileRef, Status> {
-        let node: NodeRef =
-            mem::arc(End { pipe: pipe.clone(), write }).map_err(|_| Kernel::NoMemory.status(0))?;
+        let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write, reads_too: false })
+            .map_err(|_| Kernel::NoMemory.status(0))?;
         let at = Location { mount: mount.clone(), node };
         FileObject::with(at, description).ok_or(Kernel::NoMemory.status(0))
     };
@@ -574,10 +609,76 @@ pub fn make(
 pub(super) fn for_kernel() -> Result<(KArc<Pipe>, FileRef), Status> {
     let mount = mount().map_err(super::status)?;
     let pipe = Pipe::new()?;
-    let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write: false })
+    let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write: false, reads_too: false })
         .map_err(|_| Kernel::NoMemory.status(0))?;
     let reader = FileObject::new(Location { mount, node }).ok_or(Kernel::NoMemory.status(0))?;
     Ok((pipe, reader))
+}
+
+/// Opens the named pipe `at`, a filesystem's node of the pipe kind, to
+/// read, to write, or both (ADR 0135): an end of the one pipe its opens
+/// share while any is open, which starts empty. As POSIX has it, an open
+/// only to read waits until a writer opens, and one only to write until a
+/// reader does, unless `non_blocking`, when one to write that finds no
+/// reader fails with no_device (ENXIO); one to read and write waits for
+/// nothing.
+pub fn open_named(
+    at: &Location,
+    read: bool,
+    write: bool,
+    non_blocking: bool,
+) -> Result<NodeRef, Status> {
+    let key = radix_vfs::address(&at.node);
+    let pipe = {
+        let mut named = NAMED.lock();
+        let named = named.get_or_insert_with(|| Vec::new_in(heap()));
+        named.retain(|(_, pipe)| pipe.strong_count() > 0);
+        match named.iter().find(|(k, _)| *k == key).and_then(|(_, pipe)| pipe.upgrade()) {
+            Some(pipe) => pipe,
+            None => {
+                let pipe = Pipe::with_ends(0, Some(at.node.clone()))?;
+                named.try_reserve(1).map_err(|_| Kernel::NoMemory.status(0))?;
+                let _ = named.push_within_capacity((key, KArc::downgrade(&pipe)));
+                pipe
+            }
+        }
+    };
+    let (other, mine) = if write { (&pipe.readers, 1) } else { (&pipe.writers, 0) };
+    if write && !read && non_blocking && other.load(Ordering::Acquire) == 0 {
+        return Err(FileError::NoDevice.status(0));
+    }
+    // Counted before the wait, so that an open of the other kind waiting
+    // meanwhile sees it.
+    if write {
+        pipe.writers.fetch_add(1, Ordering::AcqRel);
+    }
+    if read {
+        pipe.readers.fetch_add(1, Ordering::AcqRel);
+    }
+    pipe.opened[mine].fetch_add(1, Ordering::AcqRel);
+    let end = mem::arc(End { pipe: pipe.clone(), write, reads_too: read && write });
+    let end: NodeRef = match end {
+        Ok(end) => end,
+        Err(_) => {
+            // No end holds the counts: they go back as one dropped would.
+            drop(End { pipe, write, reads_too: read && write });
+            return Err(Kernel::NoMemory.status(0));
+        }
+    };
+    pipe.changed();
+    if read != write && !non_blocking {
+        let theirs = &pipe.opened[1 - mine];
+        let seen = theirs.load(Ordering::Acquire);
+        wait::wait_until(pipe.key(), "fifo open", || {
+            other.load(Ordering::Acquire) > 0
+                || theirs.load(Ordering::Acquire) != seen
+                || sched::interrupted()
+        });
+        if other.load(Ordering::Acquire) == 0 && theirs.load(Ordering::Acquire) == seen {
+            return Err(interrupted(Restart::Always));
+        }
+    }
+    Ok(end)
 }
 
 /// The pipe end `node` is, if it is one.

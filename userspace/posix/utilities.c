@@ -144,17 +144,23 @@ static void file_tools(void) {
 	OUTPUT("", "1000000000\n", "/bin/stat", "-c", "%Y", "/tmp/file-tools/t");
 	STATUS(0, "/bin/cp", "-p", "/tmp/file-tools/t", "/tmp/file-tools/kept");
 	OUTPUT("", "1000000000\n", "/bin/stat", "-c", "%Y", "/tmp/file-tools/kept");
-	// No hard links, named pipes or device nodes until Btrfs (Phase 10,
-	// radix-posix(7)): link, mkfifo and mknod fail and say so. (link
-	// says EPERM as "Permission denied", as uutils' tools do on Linux.)
-	RUN_WITH(1, "", "link: cannot create link", 1, "/bin/sh", "-c",
-			"link /tmp/file-tools/t /tmp/file-tools/l 2>&1");
+	// Hard links, named pipes and device nodes (ADR 0135): a reader and
+	// a writer meet through the pipe, and the node writes to the null
+	// device.
+	STATUS(0, "/bin/link", "/tmp/file-tools/t", "/tmp/file-tools/l");
+	STATUS(0, "/bin/ln", "/tmp/file-tools/t", "/tmp/file-tools/l2");
+	OUTPUT("", "3 1000000000\n", "/bin/stat", "-c", "%h %Y", "/tmp/file-tools/l2");
+	STATUS(0, "/bin/rm", "/tmp/file-tools/l", "/tmp/file-tools/l2");
 	OUTPUT("", "1\n", "/bin/stat", "-c", "%h", "/tmp/file-tools/t");
-	RUN_WITH(1, "", "Function not implemented", 1, "/bin/sh", "-c",
-			"mkfifo /tmp/file-tools/fifo 2>&1");
-	RUN_WITH(1, "", "Operation not permitted", 1, "/bin/sh", "-c",
-			"mknod /tmp/file-tools/node p 2>&1");
-	STATUS(1, "/bin/test", "-e", "/tmp/file-tools/node");
+	STATUS(0, "/bin/mkfifo", "/tmp/file-tools/fifo");
+	OUTPUT("", "fifo\n", "/bin/stat", "-c", "%F", "/tmp/file-tools/fifo");
+	OUTPUT("", "through\n", "/bin/sh", "-c",
+			"echo through > /tmp/file-tools/fifo & cat /tmp/file-tools/fifo; wait");
+	STATUS(0, "/bin/mknod", "/tmp/file-tools/node", "c", "1", "3");
+	OUTPUT("", "character special file 1 3\n", "/bin/stat", "-c", "%F %t %T",
+			"/tmp/file-tools/node");
+	OUTPUT("", "", "/bin/sh", "-c", "echo lost > /tmp/file-tools/node; cat /tmp/file-tools/node");
+	STATUS(0, "/bin/rm", "/tmp/file-tools/fifo", "/tmp/file-tools/node");
 	CONTAINS("/tmp/file-tools/x.", "/bin/mktemp", "/tmp/file-tools/x.XXXXXX");
 	CONTAINS("/tmp/file-tools/d.", "/bin/mktemp", "-d", "/tmp/file-tools/d.XXXXXX");
 	OUTPUT("1\n2\n3\n", "", "/bin/split", "-l", "1", "-", "/tmp/file-tools/part.");

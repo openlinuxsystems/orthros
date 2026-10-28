@@ -672,6 +672,7 @@ pub fn status(err: Error) -> Status {
         Error::NoDevice => FileError::NoDevice,
         Error::Loop => FileError::TooManyLinks,
         Error::NotLink => FileError::NotLink,
+        Error::TooManyNames => FileError::TooManyNames,
         // What a node does not do is an argument it does not take.
         Error::NotSupported => return Kernel::InvalidArgument.status(0),
         Error::NoMemory => return Kernel::NoMemory.status(0),

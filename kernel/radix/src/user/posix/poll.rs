@@ -191,7 +191,7 @@ fn events_of(object: &Object) -> u16 {
     match object {
         Object::File(file) => {
             if let Some(end) = file.pipe_end() {
-                end.pipe().events(end.write)
+                end.events()
             } else if let Some(socket) = file.socket() {
                 socket.events()
             } else if let Some(handle) = file.tty_handle() {

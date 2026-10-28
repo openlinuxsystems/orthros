@@ -106,6 +106,36 @@ _/processes/meminfo_.
 A file removed while it is open lives on, unnamed, until its last
 capability goes, then its space is freed.
 
+# NAMES AND SPECIAL FILES
+
+A file can have more than one name, its *hard links*, which *link* in
+*radix-directory*(2) makes, on the same filesystem and not for a
+directory. Removing a name leaves the file to its others; the file goes
+when its last name and its last capability have. *stat* gives how many
+names it has, *links*: on Btrfs at most 65,535, and one more fails with
+*too_many_names* (EMLINK). A directory says 1, as Linux's Btrfs does.
+
+*make_node* makes a *named pipe*, a *device node* or a *socket's name*.
+Opening one opens what it stands for, on a read-only mount too:
+
+- A named pipe opens an end of the one pipe its opens share while any
+  is open. An open only to read waits for a writer, and one only to
+  write waits for a reader; with *non_blocking*, a read open succeeds
+  at once and a write open with no reader fails with *no_device*
+  (ENXIO). An open to read and write waits for nothing.
+- A device node opens the device in _/devices_ with Linux's number:
+  _null_ 1:3, _zero_ 1:5, _random_ 1:8, _urandom_ 1:9, _kmsg_ 1:11,
+  _tty_ 5:0, _ptmx_ 5:2 and _fb0_ 29:0. Any other fails with
+  *no_device*.
+- A socket's name is bound with *bind_socket* and connected through
+  with *connect_socket* (*radix-directory*(2)), and fails with
+  *no_device* when opened. On Btrfs it stays on the disk,
+  but what is bound to it lasts only while the filesystem is mounted,
+  as on Linux.
+
+*stat*'s *changed* is when the file's names, times or contents last
+changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
+
 # FILESYSTEMS
 
 *mount* takes a filesystem kind by name:
@@ -113,7 +143,8 @@ capability goes, then its space is freed.
 *tmpfs*
 	Files in memory only. A tmpfs a program mounts may grow to half of
 	memory and hold one file or directory for every two pages of it, as
-	on Linux; nothing in it survives a reboot. It keeps symbolic links.
+	on Linux; nothing in it survives a reboot. It keeps symbolic links,
+	hard links and the special files below.
 
 *fat*
 	FAT12, FAT16 or FAT32, read-write, with long names, on the block
@@ -251,7 +282,8 @@ status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
 *is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
 *bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
 *too_big*, *unknown_filesystem*, *not_block_device*, *no_device*,
-*too_many_links* (ELOOP) and *not_link* (EINVAL), each with the POSIX
+*too_many_links* (ELOOP), *not_link* (EINVAL) and *too_many_names*
+(EMLINK), each with the POSIX
 errno it maps to.
 
 The kernel logs each disk, partition and mount:

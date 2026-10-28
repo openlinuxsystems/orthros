@@ -554,6 +554,14 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   commit's half. Data takes its room when a page becomes dirty
   (`Backing::reserve_pages`), so a full disk fails the `write`, never a
   sync; `statfs` reports data's room less what dirty pages hold.
+- A hard link adds an `INODE_REF` (or a name to one) and raises the
+  inode's `nlink`, at most 65,535, Linux's limit (ADR 0135). FIFO,
+  character device, block device and socket inodes keep `rdev` as
+  Linux's `dev_t` does (the major number above 20 bits of the minor),
+  and `stat` gives the later of the inode's `ctime` and the page
+  cache's modification time. What the kernel binds to a socket's name
+  is kept in a list per mount, by subvolume and inode, and goes with
+  the inode or the mount.
 
 ## tmpfs and the generated trees
 
@@ -563,6 +571,8 @@ as on Linux, for those programs mount; 1 MiB for the root, which holds
 only mount points). Like Linux's `nr_inodes`, a tmpfs also holds at
 most one file or directory for every two pages of memory, counted until
 the node is dropped, so that empty files cannot use up the kernel's heap.
+Each node counts its names, for hard links, and keeps a change time
+(ADR 0135); named pipes and device nodes are nodes with no contents.
 Directories are sorted vectors of entries, under a
 mutex each, and a namespace lock per tmpfs keeps creates, removes and
 renames apart.

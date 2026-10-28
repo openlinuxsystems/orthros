@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <sys/uio.h>
 
 #include "check.h"
@@ -451,12 +452,17 @@ static void links(void) {
 	CHECK(stat("/tmp/links/a/b", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK(unlink("/tmp/links/moved") == 0 && unlink("/tmp/links/abs") == 0);
 	CHECK(stat("/tmp/links/a/b/file", &st) == 0);
-	// No hard links, named pipes or device nodes yet (radix-posix(7)),
-	// and nothing new in /system.
-	CHECK_ERROR(link("/tmp/links/a/b/file", "/tmp/links/hard"), EPERM);
-	CHECK_ERROR(mkfifo("/tmp/links/fifo", 0644), ENOSYS);
-	CHECK_ERROR(mknod("/tmp/links/node", S_IFIFO | 0644, 0), EPERM);
+	// A hard link to a symbolic link is to the link itself, unless
+	// followed; nothing new goes in /system.
+	CHECK(symlink("a/b/file", "/tmp/links/to-file") == 0);
+	CHECK(link("/tmp/links/to-file", "/tmp/links/hard") == 0);
+	CHECK(lstat("/tmp/links/hard", &st) == 0 && S_ISLNK(st.st_mode) && st.st_nlink == 2);
+	CHECK(linkat(AT_FDCWD, "/tmp/links/to-file", AT_FDCWD, "/tmp/links/followed",
+			AT_SYMLINK_FOLLOW) == 0);
+	CHECK(lstat("/tmp/links/followed", &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 2);
+	CHECK_ERROR(linkat(AT_FDCWD, "/tmp/links/to-file", AT_FDCWD, "/tmp/links/x", 0x10000), EINVAL);
 	CHECK_ERROR(symlink("x", "/system/new"), EROFS);
+	CHECK_ERROR(link("/tmp/links/a/b/file", "/system/new"), EROFS);
 	CHECK(nftw("/tmp/links", remove_entry, 8, FTW_DEPTH | FTW_PHYS) == 0);
 	CHECK_ERROR(lstat("/tmp/links", &st), ENOENT);
 	// Spark's links to /system, for Unix programs and scripts.
@@ -466,6 +472,122 @@ static void links(void) {
 	CHECK(stat("/etc", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK(stat("/var", &st) == 0 && S_ISDIR(st.st_mode));
 	CHECK(realpath("/sbin/.", real) && !strcmp(real, "/system/commands"));
+}
+
+// A file's second name, through which it reads and changes, and which
+// it outlives; the change time, which a name and times change and
+// reading does not.
+static void hard_links(void) {
+	CHECK(mkdir("/tmp/hard", 0755) == 0 && mkdir("/tmp/hard/sub", 0755) == 0);
+	int fd = open("/tmp/hard/a", O_RDWR | O_CREAT | O_EXCL, 0644);
+	CHECK(fd >= 0 && write(fd, "named", 5) == 5);
+	struct stat st, other;
+	CHECK(fstat(fd, &st) == 0 && st.st_nlink == 1);
+	// A directory says 1, as on Linux's Btrfs.
+	CHECK(stat("/tmp/hard/sub", &other) == 0 && other.st_nlink == 1);
+	struct timespec old[2] = {{.tv_sec = 5}, {.tv_sec = 5}};
+	CHECK(futimens(fd, old) == 0 && fstat(fd, &st) == 0);
+	time_t before = st.st_ctim.tv_sec;
+	CHECK(st.st_mtim.tv_sec == 5 && before >= time(NULL) - 60);
+	CHECK(link("/tmp/hard/a", "/tmp/hard/sub/b") == 0);
+	CHECK(stat("/tmp/hard/sub/b", &other) == 0 && other.st_ino == st.st_ino);
+	CHECK(other.st_dev == st.st_dev && other.st_nlink == 2 && other.st_ctim.tv_sec >= before);
+	CHECK(fstat(fd, &st) == 0 && st.st_nlink == 2);
+	CHECK_ERROR(link("/tmp/hard/a", "/tmp/hard/sub/b"), EEXIST);
+	CHECK_ERROR(link("/tmp/hard/sub", "/tmp/hard/dir"), EPERM);
+	CHECK_ERROR(link("/tmp/hard/none", "/tmp/hard/c"), ENOENT);
+	CHECK_ERROR(link("/tmp/hard/a", "/tmp/hard/none/c"), ENOENT);
+	// Written through one name, read through the other.
+	int second = open("/tmp/hard/sub/b", O_WRONLY | O_APPEND);
+	CHECK(second >= 0 && write(second, "!", 1) == 1);
+	close(second);
+	char text[8] = {0};
+	CHECK(pread(fd, text, sizeof(text), 0) == 6 && !strcmp(text, "named!"));
+	// Reading leaves the change time; renaming a name onto another of
+	// the same file does nothing, as POSIX has it.
+	CHECK(fstat(fd, &st) == 0);
+	CHECK(rename("/tmp/hard/a", "/tmp/hard/sub/b") == 0);
+	CHECK(stat("/tmp/hard/a", &other) == 0 && other.st_nlink == 2);
+	CHECK(other.st_ctim.tv_sec == st.st_ctim.tv_sec && other.st_ctim.tv_nsec == st.st_ctim.tv_nsec);
+	// The file outlives its first name, and then its second.
+	CHECK(unlink("/tmp/hard/a") == 0);
+	CHECK(stat("/tmp/hard/sub/b", &other) == 0 && other.st_nlink == 1);
+	CHECK(other.st_ctim.tv_sec >= st.st_ctim.tv_sec);
+	CHECK(unlink("/tmp/hard/sub/b") == 0);
+	CHECK(fstat(fd, &st) == 0 && st.st_nlink == 0);
+	CHECK(pread(fd, text, sizeof(text), 0) == 6);
+	close(fd);
+	CHECK(rmdir("/tmp/hard/sub") == 0 && rmdir("/tmp/hard") == 0);
+}
+
+// Named pipes: an open to read waits for a writer and one to write for a
+// reader, but not with O_NONBLOCK or both ways; the ends share one pipe
+// while any is open. Device nodes open the device of Linux's number for
+// them, and a socket's name opens nothing.
+static void special_files(void) {
+	CHECK(mkdir("/tmp/special", 0755) == 0);
+	CHECK(mkfifo("/tmp/special/fifo", 0644) == 0);
+	CHECK_ERROR(mkfifo("/tmp/special/fifo", 0644), EEXIST);
+	struct stat st;
+	CHECK(stat("/tmp/special/fifo", &st) == 0 && S_ISFIFO(st.st_mode) && st.st_size == 0);
+	// No reader: a writer that will not wait is refused.
+	CHECK_ERROR(open("/tmp/special/fifo", O_WRONLY | O_NONBLOCK), ENXIO);
+	int reader = open("/tmp/special/fifo", O_RDONLY | O_NONBLOCK);
+	CHECK(reader >= 0);
+	char byte;
+	CHECK(read(reader, &byte, 1) == 0);
+	int writer = open("/tmp/special/fifo", O_WRONLY | O_NONBLOCK);
+	CHECK(writer >= 0 && write(writer, "p", 1) == 1);
+	CHECK(read(reader, &byte, 1) == 1 && byte == 'p');
+	close(writer);
+	close(reader);
+	// A reader and a writer that wait for each other.
+	pid_t pid = fork();
+	CHECK(pid >= 0);
+	if(pid == 0) {
+		int out = open("/tmp/special/fifo", O_WRONLY);
+		_exit(out >= 0 && write(out, "hi", 2) == 2 ? 0 : 1);
+	}
+	reader = open("/tmp/special/fifo", O_RDONLY);
+	char text[4] = {0};
+	CHECK(reader >= 0 && read(reader, text, sizeof(text)) == 2 && !strcmp(text, "hi"));
+	CHECK(read(reader, text, 1) == 0);
+	close(reader);
+	CHECK_CHILD(pid);
+	// Both ways at once waits for nothing.
+	int both = open("/tmp/special/fifo", O_RDWR);
+	CHECK(both >= 0 && write(both, "x", 1) == 1 && read(both, &byte, 1) == 1 && byte == 'x');
+	close(both);
+	CHECK(mknod("/tmp/special/fifo2", S_IFIFO | 0600, 0) == 0);
+	CHECK(lstat("/tmp/special/fifo2", &st) == 0 && S_ISFIFO(st.st_mode));
+	// Device nodes, by Linux's numbers.
+	CHECK(mknod("/tmp/special/null", S_IFCHR | 0666, makedev(1, 3)) == 0);
+	CHECK(mknod("/tmp/special/zero", S_IFCHR | 0666, makedev(1, 5)) == 0);
+	CHECK(mknod("/tmp/special/other", S_IFCHR | 0666, makedev(250, 70000)) == 0);
+	CHECK(mknod("/tmp/special/disk", S_IFBLK | 0600, makedev(259, 0)) == 0);
+	CHECK(stat("/tmp/special/null", &st) == 0 && S_ISCHR(st.st_mode));
+	CHECK(major(st.st_rdev) == 1 && minor(st.st_rdev) == 3);
+	CHECK(stat("/tmp/special/other", &st) == 0 && major(st.st_rdev) == 250);
+	CHECK(minor(st.st_rdev) == 70000);
+	CHECK(stat("/tmp/special/disk", &st) == 0 && S_ISBLK(st.st_mode));
+	int fd = open("/tmp/special/null", O_RDWR);
+	CHECK(fd >= 0 && write(fd, "gone", 4) == 4 && read(fd, text, sizeof(text)) == 0);
+	close(fd);
+	fd = open("/tmp/special/zero", O_RDONLY);
+	memset(text, 'x', sizeof(text));
+	CHECK(fd >= 0 && read(fd, text, sizeof(text)) == 4 && !memcmp(text, "\0\0\0\0", 4));
+	close(fd);
+	CHECK_ERROR(open("/tmp/special/other", O_RDONLY), ENXIO);
+	CHECK_ERROR(open("/tmp/special/disk", O_RDONLY), ENXIO);
+	CHECK(mknod("/tmp/special/file", S_IFREG | 0644, 0) == 0);
+	CHECK(stat("/tmp/special/file", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 0);
+	CHECK(mknod("/tmp/special/socket", S_IFSOCK | 0755, 0) == 0);
+	CHECK(lstat("/tmp/special/socket", &st) == 0 && S_ISSOCK(st.st_mode));
+	CHECK_ERROR(open("/tmp/special/socket", O_RDONLY), ENXIO);
+	CHECK_ERROR(mknod("/tmp/special/dir", S_IFDIR | 0755, 0), EPERM);
+	CHECK_ERROR(mknod("/tmp/special/bad", 0170000 | 0644, 0), EINVAL);
+	CHECK_ERROR(mkfifo("/system/fifo", 0644), EROFS);
+	CHECK(nftw("/tmp/special", remove_entry, 8, FTW_DEPTH | FTW_PHYS) == 0);
 }
 
 // Whether descriptor `fd` is the directory `path`.
@@ -787,6 +909,8 @@ int main(void) {
 	RUN(temporary_files);
 	RUN(times);
 	RUN(links);
+	RUN(hard_links);
+	RUN(special_files);
 	RUN(climbing);
 	RUN(mapped);
 	RUN(folder_names);

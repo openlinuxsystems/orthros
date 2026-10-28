@@ -16,7 +16,7 @@ use radix_block::DeviceRef;
 use radix_klog::{error, warn};
 use radix_sync::Once;
 use radix_vfs::synthetic::{BlockNode, FixedDir, Null, Random, SyntheticFs, Zero};
-use radix_vfs::{FsKind, FsRef, KArc, NodeRef, Result, mem, next_id};
+use radix_vfs::{FsKind, FsRef, KArc, Kind, Node, NodeRef, Result, mem, next_id};
 
 static ROOT: Once<KArc<FixedDir>> = Once::new();
 
@@ -48,6 +48,30 @@ pub fn init() {
         }
         Err(err) => error!("Files: could not make /devices: {err}"),
     }
+}
+
+/// The character devices of the tree that a device node made elsewhere
+/// opens, by Linux's numbers for them (ADR 0135).
+const NUMBERS: [((u32, u32), &str); 8] = [
+    ((1, 3), "null"),
+    ((1, 5), "zero"),
+    ((1, 8), "random"),
+    ((1, 9), "urandom"),
+    ((1, 11), "kmsg"),
+    ((5, 0), "tty"),
+    ((5, 2), "ptmx"),
+    ((29, 0), "fb0"),
+];
+
+/// The device a device node of `kind` that stands for device number
+/// `device` opens: its node in the tree, if the tree has it.
+pub fn by_number(kind: Kind, device: u64) -> Option<NodeRef> {
+    let parts = radix_vfs::device_parts(device);
+    let (_, name) = NUMBERS.iter().find(|(number, _)| *number == parts)?;
+    if kind != Kind::CharDevice {
+        return None;
+    }
+    ROOT.get()?.lookup(name).ok()
 }
 
 /// Adds the block device `device` as `name`.
