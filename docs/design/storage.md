@@ -260,7 +260,8 @@ A controller that takes shadow doorbells (Doorbell Buffer Config, OACS
 bit 8), as QEMU's does, is given two pages for them before its queues
 are made, and again after a reset (ADR 0117): a lane then writes each
 doorbell to memory, and its register only when the controller's event
-index asks.
+index asks: a completion head when the lane next finds a completion,
+unless the queue could look full to the controller first (ADR 0136).
 Each active namespace with blocks of 512 to 4096 bytes and no metadata
 becomes a disk, its requests naming it and counting in its blocks; its physical block is the size it is best
 written in, but no more than what is whole after a power failure. At
@@ -470,7 +471,11 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   checksum) and `lzo` (LZO1X in Btrfs's segments) are the crate's own
   decoders, written from the formats' descriptions (ADR 0128): safe,
   bounds-checked, with every table allocated once, so data that does not
-  decode fails with `Io`. `unpack::Workspace` holds an extent's
+  decode fails with `Io`. The zstd decoder makes each sequence's copies
+  as it decodes it, and takes the sequence's values from its stream
+  with BMI2's shifts (`radix_hw::bmi2`) where the processor has them,
+  as Linux's decoder does: the shifts every x86-64 has are two or three
+  operations each on Intel's processors. `unpack::Workspace` holds an extent's
   compressed bytes, its data and the decoders' tables, about 400 KiB, one
   per filesystem, made at its first compressed read, and a second for
   the half of a run another CPU uncompresses, made at the first such
@@ -529,7 +534,7 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
 - `zstd::encode` compresses (ADR 0134), modelled on zstd's level 1:
-  a table of 2^13 positions hashed on six bytes, the last two offsets
+  a table of 2^14 positions hashed on six bytes, the last two offsets
   tried as the reference does, one block a frame, Huffman-coded literals
   when no byte is above 127, and the sequences' tables picked as the
   reference picks them; its buffers are allocated with it. On a mount
@@ -538,7 +543,8 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   up to 128 KiB of the file's bytes, through two `pack::Packer`s, the
   second chunk on another CPU (`radix_vfs::join`), before it takes the
   transaction lock; a chunk whose frame saves a sector is written as a
-  compressed extent, the others as they are. The packers are made at the
+  compressed extent, the others as they are, and a run's frames go to
+  the disk in one request. The packers are made at the
   first compressed write and dropped by the shrinker; the superblock
   gains `COMPRESS_ZSTD` at the commit of the first compressed extent.
 - `grow` makes a chunk when a kind (data, metadata or the chunk tree)
@@ -553,6 +559,14 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   commit's half. Data takes its room when a page becomes dirty
   (`Backing::reserve_pages`), so a full disk fails the `write`, never a
   sync; `statfs` reports data's room less what dirty pages hold.
+- A hard link adds an `INODE_REF` (or a name to one) and raises the
+  inode's `nlink`, at most 65,535, Linux's limit (ADR 0135). FIFO,
+  character device, block device and socket inodes keep `rdev` as
+  Linux's `dev_t` does (the major number above 20 bits of the minor),
+  and `stat` gives the later of the inode's `ctime` and the page
+  cache's modification time. What the kernel binds to a socket's name
+  is kept in a list per mount, by subvolume and inode, and goes with
+  the inode or the mount.
 
 ## tmpfs and the generated trees
 
@@ -562,6 +576,8 @@ as on Linux, for those programs mount; 1 MiB for the root, which holds
 only mount points). Like Linux's `nr_inodes`, a tmpfs also holds at
 most one file or directory for every two pages of memory, counted until
 the node is dropped, so that empty files cannot use up the kernel's heap.
+Each node counts its names, for hard links, and keeps a change time
+(ADR 0135); named pipes and device nodes are nodes with no contents.
 Directories are sorted vectors of entries, under a
 mutex each, and a namespace lock per tmpfs keeps creates, removes and
 renames apart.

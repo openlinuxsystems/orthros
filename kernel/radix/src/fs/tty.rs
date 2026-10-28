@@ -794,7 +794,18 @@ impl Drop for Handle {
 }
 
 fn char_device(id: u64) -> Stat {
-    Stat { kind: Kind::CharDevice, size: 0, allocated: 0, id, created: 0, modified: 0, accessed: 0 }
+    Stat {
+        kind: Kind::CharDevice,
+        size: 0,
+        allocated: 0,
+        id,
+        created: 0,
+        modified: 0,
+        accessed: 0,
+        changed: 0,
+        links: 1,
+        device: 0,
+    }
 }
 
 impl Node for Handle {

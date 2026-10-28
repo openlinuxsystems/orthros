@@ -711,14 +711,15 @@ list go before it sets the timer, the race above; a waiter reading
 - `poll` wakes every poller on a change to anything polled.
 - A directory descriptor's path is the one it was opened by, and one from
   before exec has none (ADR 0089); `getcwd` is the C library's string.
-- No named pipes (`mkfifo` fails with ENOSYS: no filesystem keeps them
-  yet), no device nodes (`mknod` fails with EPERM), no hard links (EPERM)
-  until Btrfs. Symbolic links work on tmpfs and in the boot archive;
-  FAT has none (EPERM).
+- Hard links, named pipes, device nodes and socket names work on tmpfs
+  and Btrfs (ADR 0135); FAT and exFAT have none (EPERM). A device node
+  opens only the devices with fixed Linux numbers (`null`, `zero`,
+  `random`, `urandom`, `kmsg`, `tty`, `ptmx`, `fb0`); others fail with
+  ENXIO. Symbolic links work on tmpfs, Btrfs and in the boot archive.
 - `chmod`, `chown` and `umask` change nothing until users (Phase 13).
-- The kernel keeps no time of the last change to a file's status, so
-  `st_ctim` is `st_mtim`; reading a file never changes `st_atim`
-  (ADR 0076).
+- `st_ctim` is the file's change time on tmpfs and Btrfs, and
+  `st_mtim` on FAT and exFAT, which keep none (ADR 0135); reading a file
+  never changes `st_atim` (ADR 0076).
 - CPU time is split between user mode and the kernel by the timer's
   samples, 100 a second, as Linux splits it (`times`, `getrusage`,
   `wait`'s times; ADR 0092); CPU-time timers fire within a tick (10 ms).

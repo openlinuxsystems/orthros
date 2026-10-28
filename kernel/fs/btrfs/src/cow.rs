@@ -493,9 +493,16 @@ impl Writer {
         loop {
             let (leaf, n) = blocks.view(bytenr, |b| (b.is_leaf(), b.nritems()))?;
             if leaf {
-                let slot = blocks.view(bytenr, |b| b.lower_bound(key))?;
+                let (slot, there) = blocks.view(bytenr, |b| {
+                    let slot = b.lower_bound(key);
+                    (slot, slot < n && b.key(slot) == *key)
+                })?;
                 path.steps[0] = Some((bytenr, slot));
+                // An insert of a key already there fails, and must not split
+                // the leaf first: the split could move the item away from
+                // the slot the insert checks.
                 if let Want::Insert(size) = want
+                    && !there
                     && blocks.view(bytenr, Block::leaf_free)? < size + ITEM_SIZE
                 {
                     if path.top == 0 {

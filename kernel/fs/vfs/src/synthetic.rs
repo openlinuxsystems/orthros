@@ -60,6 +60,9 @@ impl Node for Generated {
             created: 0,
             modified: 0,
             accessed: 0,
+            changed: 0,
+            links: 1,
+            device: 0,
         }
     }
 
@@ -103,6 +106,9 @@ impl Node for Snapshot {
             created: self.taken,
             modified: self.taken,
             accessed: self.taken,
+            changed: self.taken,
+            links: 1,
+            device: 0,
         }
     }
 
@@ -191,6 +197,9 @@ impl Node for FixedDir {
             created: 0,
             modified: 0,
             accessed: 0,
+            changed: 0,
+            links: 1,
+            device: 0,
         }
     }
 
@@ -262,6 +271,9 @@ impl Node for ListedDir {
             created: 0,
             modified: 0,
             accessed: 0,
+            changed: 0,
+            links: 1,
+            device: 0,
         }
     }
 
@@ -296,7 +308,18 @@ impl Node for ListedDir {
 }
 
 fn device_stat(id: u64, kind: Kind, size: u64) -> Stat {
-    Stat { kind, size, allocated: 0, id, created: 0, modified: 0, accessed: 0 }
+    Stat {
+        kind,
+        size,
+        allocated: 0,
+        id,
+        created: 0,
+        modified: 0,
+        accessed: 0,
+        changed: 0,
+        links: 1,
+        device: 0,
+    }
 }
 
 /// `/devices/null`: reads nothing, swallows writes.

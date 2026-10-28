@@ -200,8 +200,9 @@ blocks it has, its number (*st_ino*), the number of the mount it is on
 (*st_dev*), when its contents last changed (*st_mtim*) and when it was
 last read (*st_atim*). Reading a file does not change *st_atim*, as with
 Linux's *noatime*: it is when the file was made, or what a program set.
-*st_ctim* is *st_mtim*, since the kernel keeps no time of the last
-change to a file's status. Until users come in Phase 13, everything
+*st_ctim* is when the file's names, times or contents last changed on
+tmpfs and Btrfs, and *st_mtim* on FAT and exFAT. *st_nlink* is its number
+of names (1 for a directory), and *st_rdev* a device node's number. Until users come in Phase 13, everything
 belongs to user 0, regular files and directories have mode 0755,
 devices 0660 or 0666, pipes 0600 and sockets 0777.
 
@@ -536,10 +537,11 @@ passed*; the boot test fails on any failure.
 # LIMITS
 
 - Only *AF_UNIX* stream sockets until networking (Phase 12), and no
-  sockets passed over them. No hard links until Btrfs
-  (Phase 10: *link* fails with EPERM), no named pipes (*mkfifo* fails
-  with ENOSYS) and no device nodes (*mknod* fails with EPERM). Symbolic
-  links work on tmpfs and in the boot archive, not on FAT.
+  sockets passed over them. Hard links, named pipes (*mkfifo*), device
+  nodes (*mknod*) and socket names work on tmpfs and Btrfs, not on FAT
+  or exFAT (EPERM); a device node opens only the devices with fixed
+  Linux numbers (*radix-files*(7)). Symbolic links work on tmpfs, Btrfs
+  and in the boot archive, not on FAT or exFAT.
 - A directory descriptor from before exec has no path: *..* above it
   fails with EXDEV, and *fchdir* to it with ENOSYS. One whose directory
   was moved while it was open still goes by the old path for both.

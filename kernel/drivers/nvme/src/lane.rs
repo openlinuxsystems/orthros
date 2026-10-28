@@ -20,6 +20,15 @@
 //! entries it has read. With shadow doorbells ([`Shadow`]), a doorbell
 //! moves in memory, and its register is written only when the controller
 //! asks.
+//!
+//! A completion head the controller asks to hear of goes to its register
+//! when the lane next finds a completion, not at once, unless the queue
+//! could look full to the controller before then (ADR 0136). QEMU's
+//! controller sets the event index to the head it last heard of each
+//! time it writes a completion: a head written at once is the one it then
+//! asks for, so one command at a time rings at every completion. A head
+//! written after its next completion leaves it one head behind, after
+//! which it asks for none.
 
 use radix_hw::{Dma, Mmio, device_barrier};
 
@@ -64,6 +73,9 @@ pub struct Lane {
     phase: bool,
     /// Whether the tail moved since its doorbell was last written.
     unrung: bool,
+    /// How many completions the last pass read whose head the controller
+    /// asked to hear of by register and has not yet.
+    owed: u16,
     /// Slots in flight.
     busy: u64,
     /// Finished slots not yet handed out, by how they ended.
@@ -113,6 +125,7 @@ impl Lane {
             head: 0,
             phase: true,
             unrung: false,
+            owed: 0,
             busy: 0,
             done: 0,
             failed: 0,
@@ -273,6 +286,11 @@ impl Lane {
         self.tail = (self.tail + 1) % ENTRIES;
         self.busy |= 1 << index;
         self.unrung = true;
+        // With this command and the head it is owed, the controller could
+        // see its completion queue full: the head cannot wait.
+        if self.owed != 0 && self.busy.count_ones() + u32::from(self.owed) >= DEPTH {
+            self.write_head();
+        }
         if ring {
             self.ring();
         }
@@ -318,7 +336,7 @@ impl Lane {
     /// Takes in the completions the controller has written since it last
     /// looked.
     fn collect(&mut self) {
-        let mut moved = false;
+        let mut read = 0;
         loop {
             let at = CQ + usize::from(self.head) * COMPLETION_SIZE;
             // The phase tag first: the rest of an entry is the
@@ -327,13 +345,18 @@ impl Lane {
                 break;
             }
             device_barrier();
+            // The controller has written since the last pass: the head
+            // that pass owes it goes to the register now.
+            if read == 0 && self.owed != 0 {
+                self.write_head();
+            }
             let dwords = core::array::from_fn(|i| self.memory.read32(at + 4 * i));
             let entry = Completion::from_dwords(dwords);
             self.head = (self.head + 1) % ENTRIES;
             if self.head == 0 {
                 self.phase = !self.phase;
             }
-            moved = true;
+            read += 1;
             let index = usize::from(entry.id);
             // A completion for no command in flight is the controller's
             // mistake: left alone.
@@ -355,15 +378,23 @@ impl Lane {
                 }
             }
         }
-        if moved {
-            let register = match self.shadow {
-                Some((shadow, _, at)) => shadow.update(at, self.head),
-                None => true,
-            };
-            if register {
-                self.cq_doorbell.write32(0, u32::from(self.head));
+        if read != 0 {
+            match self.shadow {
+                Some((shadow, _, at)) => {
+                    if shadow.update(at, self.head) {
+                        self.owed = read;
+                    }
+                }
+                None => self.write_head(),
             }
         }
+    }
+
+    /// Writes the completion queue's head to its register, which pays
+    /// what the lane owed.
+    fn write_head(&mut self) {
+        self.cq_doorbell.write32(0, u32::from(self.head));
+        self.owed = 0;
     }
 
     /// Starts afresh before the controller is reset, which forgets the
@@ -376,6 +407,7 @@ impl Lane {
         self.head = 0;
         self.phase = true;
         self.unrung = false;
+        self.owed = 0;
         self.memory.write(CQ, &[0u8; SLOTS * COMPLETION_SIZE]);
     }
 

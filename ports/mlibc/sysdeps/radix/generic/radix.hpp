@@ -175,8 +175,7 @@ uint64_t pid();
 void forget_pid();
 
 // A Linux-style `struct stat` from what the kernel says about a file.
-void fill_stat(struct ::stat *st, uint8_t kind, uint64_t size, uint64_t allocated, uint64_t id,
-		uint64_t created, uint64_t modified, uint64_t accessed, uint64_t mount);
+void fill_stat(struct ::stat *st, const struct radix_file_status &f);
 
 // The cursor of the directory listing descriptor `fd` reads next.
 uint64_t dir_cursor(int fd);

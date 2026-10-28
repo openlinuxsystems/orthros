@@ -118,7 +118,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 4 {
+interface file = 0x000c version 5 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -131,11 +131,10 @@ interface file = 0x000c version 4 {
     method write = 2 (offset: u64, data: in bytes) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
                 is_directory, read_only, no_space, too_big, io, corrupt];
-    /// What the file is, as radix-directory(2)'s `stat` says.
-    method stat = 3 ()
-        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
-            accessed: u64, mount: u64)
-        raises [no_such_slot, empty_slot];
+    /// Writes what the file is into `buffer`, as radix-directory(2)'s
+    /// `stat` does.
+    method stat = 3 (buffer: out bytes) -> ()
+        raises [no_such_slot, empty_slot, invalid_argument, bad_address];
     /// Makes the file `size` bytes long: cut, or grown with zeros. Needs
     /// the write right.
     method set_size = 4 (size: u64) -> ()

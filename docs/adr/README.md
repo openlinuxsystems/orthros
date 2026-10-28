@@ -128,7 +128,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0114](0114-plain-names-inside-system.md) | The folders inside /system have plain names, and Unix's names are hidden links to them | Accepted |
 | [0115](0115-nvme-from-the-specification.md) | NVMe disks, written from the specification, with a queue for each CPU | Accepted |
 | [0116](0116-idle-polling-learns-from-other-cpus.md) | Idle polling learns only from wake-ups that other CPUs send | Accepted |
-| [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted |
+| [0117](0117-nvme-shadow-doorbells.md) | NVMe shadow doorbells, and virtio requests of 254 pages | Accepted; changed by [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md) |
 | [0118](0118-frames-in-order-for-memory-written-in-order.md) | Memory written in order gets frames in order, and virtio merges buffers that follow each other | Accepted |
 | [0119](0119-nvme-scatter-gather-lists-for-long-runs.md) | NVMe data in long runs of memory go as scatter gather lists | Accepted |
 | [0120](0120-extended-state-matches-the-host.md) | Extended state enables what the host's does, with AMX held off | Accepted |
@@ -146,5 +146,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0132](0132-btrfs-reads-ahead-in-runs-and-is-benched-against-linuxs-btrfs.md) | Btrfs reads ahead in runs, and is benched against Linux's Btrfs | Accepted |
 | [0133](0133-btrfs-uncompresses-a-runs-extents-on-two-cpus-through-the-kernels-join.md) | Btrfs uncompresses a run's extents on two CPUs, through the kernel's `join` | Accepted |
 | [0134](0134-btrfs-compresses-writes-with-zstd-level-1-on-the-disks-that-ask-for-it.md) | Btrfs compresses writes with zstd level 1 on the disks that ask for it | Accepted |
+| [0135](0135-hard-links-named-pipes-device-nodes-and-a-change-time.md) | Hard links, named pipes, device nodes, socket names on disk, and a change time | Accepted |
+| [0136](0136-nvme-completion-heads-go-to-the-register-at-the-next-completion.md) | An NVMe completion head the controller asks for goes to its register at the next completion | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |
 | [0141](0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md) | ext4 is our own implementation from its documentation, journaling whole blocks at each sync | Accepted |

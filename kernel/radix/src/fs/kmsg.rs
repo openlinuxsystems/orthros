@@ -57,6 +57,9 @@ impl Node for Kmsg {
             created: 0,
             modified: 0,
             accessed: 0,
+            changed: 0,
+            links: 1,
+            device: 0,
         }
     }
 

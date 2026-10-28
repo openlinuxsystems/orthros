@@ -1071,39 +1071,81 @@ fn a_lane_writes_a_doorbell_register_only_when_the_controller_asks() {
     let mut lane = lane(&mut nvme, 1);
     let page = pages(1);
     // An idle controller asks to hear of the next command, and of the
-    // head moving past the completion it writes.
+    // head moving past the completion it writes, which waits for its next
+    // completion.
     lane.submit(0, Op::Read, 1, 512, 3, &[(page, 512)], true).unwrap();
     assert_eq!(next(&mut lane), (0, Outcome::Done));
     assert_eq!(read_host(page, 512), pattern(3));
-    assert_eq!(rung(&sim), [true, false]);
+    assert_eq!(rung(&sim), [true]);
     assert_eq!(sim.shadow_word(2), (1, 1));
-    assert_eq!(sim.shadow_word(3).0, 1);
+    assert_eq!(sim.shadow_word(3), (1, 0));
     // One that asks to hear of entry 10 only finds the next command in
     // memory when it looks.
     sim.ask(2, 10);
     lane.submit(1, Op::Read, 1, 512, 4, &[(page, 512)], true).unwrap();
-    assert_eq!(rung(&sim), [true, false]);
+    assert_eq!(rung(&sim), [true]);
     assert_eq!(sim.shadow_word(2).0, 2);
     assert!(lane.complete().is_none());
     sim.look();
     assert_eq!(next(&mut lane), (1, Outcome::Done));
     assert_eq!(read_host(page, 512), pattern(4));
-    assert_eq!(rung(&sim), [true, false, false]);
-    // A head it does not ask for stays in memory.
-    lane.submit(2, Op::Read, 1, 512, 5, &[(page, 512)], true).unwrap();
-    sim.ask(3, 40);
-    assert_eq!(next(&mut lane), (2, Outcome::Done));
-    assert_eq!(rung(&sim), [true, false, false, true]);
-    assert_eq!(sim.shadow_word(3).0, 3);
-    // As QEMU's does, it asks next for the head it last heard of, which
+    assert_eq!(rung(&sim), [true, false]);
+    assert_eq!(sim.state().heads[&1], 1);
+    // As QEMU's does, it asked for the head it had last heard of, which
     // the driver has passed: the heads stay in memory from then on.
-    for slot in 3..8 {
+    for slot in 2..8 {
         lane.submit(slot, Op::Read, 1, 512, u64::from(slot), &[(page, 512)], true).unwrap();
         assert_eq!(next(&mut lane), (slot, Outcome::Done));
         assert_eq!(read_host(page, 512), pattern(u64::from(slot)));
     }
-    assert_eq!(rung(&sim).iter().filter(|&&tail| !tail).count(), 2);
+    assert_eq!(rung(&sim).iter().filter(|&&tail| !tail).count(), 1);
     assert_eq!(sim.shadow_word(3).0, 8);
+    // Asked for the head as it is, the controller hears of it at the next
+    // completion, and is a head behind again from then on.
+    lane.submit(8, Op::Read, 1, 512, 8, &[(page, 512)], true).unwrap();
+    sim.ask(3, 8);
+    assert_eq!(next(&mut lane), (8, Outcome::Done));
+    assert_eq!(rung(&sim).iter().filter(|&&tail| !tail).count(), 1);
+    for slot in 9..12 {
+        lane.submit(slot, Op::Read, 1, 512, u64::from(slot), &[(page, 512)], true).unwrap();
+        assert_eq!(next(&mut lane), (slot, Outcome::Done));
+    }
+    assert_eq!(rung(&sim).iter().filter(|&&tail| !tail).count(), 2);
+    assert_eq!(sim.state().heads[&1], 11);
+}
+
+#[test]
+fn a_head_waits_for_the_next_completion_unless_the_queue_could_look_full() {
+    let (sim, mut nvme) = setup_with(|state| state.offers_shadow = true);
+    nvme.request_queues(1, &mut |_| {}).unwrap();
+    nvme.use_shadow(shadow(), &mut |_| {}).unwrap();
+    let mut lane = lane(&mut nvme, 1);
+    let page = pages(1);
+    let heads = |sim: &Sim| rung(sim).iter().filter(|&&tail| !tail).count();
+    lane.submit(0, Op::Read, 1, 512, 3, &[(page, 512)], true).unwrap();
+    assert_eq!(next(&mut lane), (0, Outcome::Done));
+    assert_eq!(heads(&sim), 0);
+    // With the head it is owed and the commands in flight, the controller
+    // could see its completion queue full: the head goes first.
+    sim.state().hold = true;
+    let last = DEPTH as u8 - 1;
+    for slot in 1..last {
+        lane.submit(slot, Op::Read, 1, 512, u64::from(slot), &[(page, 512)], false).unwrap();
+    }
+    assert_eq!(heads(&sim), 0);
+    lane.submit(last, Op::Read, 1, 512, u64::from(last), &[(page, 512)], true).unwrap();
+    assert_eq!(heads(&sim), 1);
+    assert_eq!(sim.state().heads[&1], 1);
+    sim.finish();
+    let mut done = Vec::new();
+    for _ in 1..=last {
+        let (slot, outcome) = next(&mut lane);
+        assert_eq!(outcome, Outcome::Done);
+        done.push(slot);
+    }
+    done.sort_unstable();
+    assert!(done.into_iter().eq(1..=last));
+    assert_eq!(heads(&sim), 1);
 }
 
 #[test]

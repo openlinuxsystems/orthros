@@ -51,7 +51,7 @@ fn mount_rw(disk: &KArc<RamDisk>) -> KArc<BtrfsFs> {
 
 /// A filesystem of `SIZE` bytes from `mkfs.btrfs args`, holding the files
 /// of `dir`, with room to write.
-fn mkfs_with(args: &[&str], dir: &Path) -> Vec<u8> {
+pub(super) fn mkfs_with(args: &[&str], dir: &Path) -> Vec<u8> {
     let path = scratch("rootdir");
     let file = std::fs::File::create(&path).unwrap();
     file.set_len(SIZE).unwrap();
@@ -191,7 +191,7 @@ fn files_written_read_back_and_pass_btrfs_check() {
     root.make_link("long-link", &long).unwrap();
     model.insert("/long-link".into(), Thing::Link(long));
     assert_eq!(root.create("docs", Kind::File).map(|_| ()), Err(Error::Exists));
-    assert_eq!(root.create("pipe", Kind::Pipe).map(|_| ()), Err(Error::NotSupported));
+    assert_eq!(root.create("link", Kind::Symlink).map(|_| ()), Err(Error::NotSupported));
     assert_eq!(root.create("", Kind::File).map(|_| ()), Err(Error::BadName));
     assert_eq!(snapshot(&root), model, "before the sync");
     // The pages written take their room as they change, as on Linux.
