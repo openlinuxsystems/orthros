@@ -41,7 +41,7 @@
 use radix_block::mem::CachePage;
 use radix_block::pagemap::PageMap;
 use radix_block::{PAGE_SIZE, Page};
-use radix_sync::Mutex;
+use radix_sync::{Mutex, MutexGuard};
 
 use crate::{APPEND, Error, In, Out, Result, mem};
 
@@ -475,6 +475,54 @@ impl FileCache {
         }
         state.modified = crate::now();
         Ok(())
+    }
+
+    /// Holds off writes and size changes until the guard goes, while the
+    /// file's bytes change on the disk beneath the cache (a clone). Two
+    /// files held at once are held in one order, the second `second`.
+    pub fn hold(&self, second: bool) -> MutexGuard<'_, ()> {
+        self.writing.lock_nested(u8::from(second))
+    }
+
+    /// Grows the file to `size` bytes, its new bytes zeros, as
+    /// [`set_size`](FileCache::set_size) does, for a caller that
+    /// [holds](FileCache::hold) it.
+    pub fn grow_held(&self, size: u64, backing: &dyn Backing) -> Result<()> {
+        let mut state = self.state.lock();
+        let old = state.size;
+        if size > old {
+            if size > backing.max_size() {
+                return Err(Error::TooBig);
+            }
+            backing.reserve(size)?;
+            zero_gap(&mut state, old, size, backing)?;
+            state.size = size;
+        }
+        Ok(())
+    }
+
+    /// Says the disk's bytes of the file from `from` to `to` changed
+    /// beneath the cache, which the caller [held](FileCache::hold) after
+    /// writing them back, and that the file is now at least `size` bytes
+    /// long: the pages there go, to be read again.
+    pub fn replaced(&self, from: u64, to: u64, size: u64, backing: &dyn Backing) {
+        let mut state = self.state.lock();
+        let (first, end) = (from / PAGE, to.div_ceil(PAGE));
+        let mut lost_dirty = 0;
+        state.pages.retain(
+            |index, slot| {
+                let keep = index < first || index >= end;
+                if !keep && slot.dirty {
+                    lost_dirty += 1;
+                }
+                keep
+            },
+            drop,
+        );
+        state.dirty -= lost_dirty;
+        backing.release_pages(lost_dirty);
+        state.size = state.size.max(size);
+        state.modified = crate::now();
     }
 
     /// Writes every dirty page back, in runs of up to [`WRITE_RUN`] pages

@@ -506,6 +506,13 @@ impl File {
         Ok(file::set_size(&SYS, self.held.slot, size)?)
     }
 
+    /// Makes the file share all of `source`'s data, which takes no room
+    /// until one of the two changes it (Linux's FICLONE, ADR 0139).
+    pub fn clone_from(&self, source: &File) -> Result<()> {
+        file::control(&SYS, self.held.slot, file::CLONE, source.held.slot.into(), 0, 0)?;
+        Ok(())
+    }
+
     /// Waits until the disk has the changes of the file's filesystem.
     pub fn sync(&self) -> Result<()> {
         Ok(file::sync(&SYS, self.held.slot)?)

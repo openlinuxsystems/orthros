@@ -1335,6 +1335,75 @@ impl Node for BtrfsNode {
         self.changed()
     }
 
+    fn clone_range(&self, source: &NodeRef, from: u64, len: u64, to: u64) -> Result<()> {
+        let source = radix_vfs::downcast::<BtrfsNode>(&**source).ok_or(Error::CrossMount)?;
+        if !KArc::ptr_eq(&source.fs, &self.fs) {
+            return Err(Error::CrossMount);
+        }
+        if self.kind == Kind::Directory || source.kind == Kind::Directory {
+            return Err(Error::IsDirectory);
+        }
+        let (Some(cache), Some(source_cache)) = (&self.cache, &source.cache) else {
+            return Err(Error::InvalidArgument);
+        };
+        self.writes()?;
+        // As on Linux: data with checksums and data without do not mix.
+        if self.inode().has_sums() != source.inode().has_sums() {
+            return Err(Error::InvalidArgument);
+        }
+        // What was written goes to the disk first, and then nothing writes
+        // either file until the extents have changed. Two clones lock the
+        // two files in one order, as Linux's `lock_two_nondirectories`.
+        source.flush()?;
+        self.flush()?;
+        let same = core::ptr::eq(self, source);
+        let (first, second) = if core::ptr::from_ref(self) < core::ptr::from_ref(source) {
+            (cache, source_cache)
+        } else {
+            (source_cache, cache)
+        };
+        let _held = first.hold(false);
+        let _also = (!same).then(|| second.hold(true));
+        source_cache.sync(&FileBacking(source))?;
+        cache.sync(&FileBacking(self))?;
+        let sector = u64::from(self.fs.volume.superblock().sectorsize);
+        let (size, dest_size) = (source_cache.size(), cache.size());
+        let len =
+            if len == 0 { size.checked_sub(from).ok_or(Error::InvalidArgument)? } else { len };
+        let past = from.checked_add(len).ok_or(Error::InvalidArgument)?;
+        let end = to.checked_add(len).ok_or(Error::InvalidArgument)?;
+        // Whole blocks, but for the source's last, which only goes to the
+        // end of the file or past it, as Linux's `generic_remap_checks`.
+        if !from.is_multiple_of(sector) || !to.is_multiple_of(sector) || past > size {
+            return Err(Error::InvalidArgument);
+        }
+        if !len.is_multiple_of(sector) && (past != size || end < dest_size) {
+            return Err(Error::InvalidArgument);
+        }
+        if end > FileBacking(self).max_size() {
+            return Err(Error::TooBig);
+        }
+        let blocks = len.next_multiple_of(sector);
+        if same && from < to + blocks && to < from + blocks {
+            return Err(Error::InvalidArgument);
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        // Between the end and a clone past it, zeros, as when the file
+        // grows (Linux's `btrfs_cont_expand`): the disk's bytes past the
+        // end of its last block may not be.
+        cache.grow_held(to, &FileBacking(self))?;
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            self.convert_inline(&mut files)?;
+            files.clone_extents((source.subvol, source.ino, from), blocks, (self.ino, to), end)?;
+            self.reload(&files)
+        })?;
+        cache.replaced(to, to + blocks, end, &FileBacking(self));
+        self.changed()
+    }
+
     fn set_times(&self, accessed: Option<u64>, modified: Option<u64>) -> Result<()> {
         self.writes()?;
         let time = now();

@@ -4228,6 +4228,7 @@ fn root_write(vm: &mut Vm, _: &Case) -> Result<(), String> {
     root_boot(vm, true)?;
     vm.expect("storage: /system: writes fail with read_only")?;
     vm.expect("storage: a snapshot of /users keeps its file as /users changes it")?;
+    vm.expect("storage: a clone in /users took no room and kept its data")?;
     storage_end(vm, "root")
 }
 

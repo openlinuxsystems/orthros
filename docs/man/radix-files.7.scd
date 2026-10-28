@@ -192,6 +192,15 @@ takes an empty subvolume too, as Linux's *rmdir*(2) does. A subvolume
 that is the default, holds another, or has something in it open fails
 to go (*in_use*, *not_empty*).
 
+A Btrfs file's *control* takes Linux's *FICLONE* and *FICLONERANGE*
+(*ioctl_ficlone*(2)): the file opened for writing shares the blocks of
+another, opened for reading on the same filesystem, whole or a range of
+whole blocks, until either changes them, so the copy takes no room.
+*cp*(1) clones this way unless given *--reflink=never*. Offsets and
+lengths not in whole blocks, ranges of one file that overlap, and a file
+with checksums cloned to or from one without fail with EINVAL; another
+filesystem fails with EXDEV. Other filesystems fail with EOPNOTSUPP.
+
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
 or anything holds a capability to a place in it. A rename never moves a

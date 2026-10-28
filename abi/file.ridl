@@ -31,6 +31,21 @@
 
 module file;
 
+/// `control`'s request that makes a file share all of another's data,
+/// Linux's FICLONE (ADR 0139): `argument` is the slot of the source, open
+/// for reading, and the file is open for writing; `buffer` and `size` are
+/// not used. The two are on one Btrfs filesystem (else cross_mount; a
+/// filesystem that cannot clone raises not_supported), and the file's
+/// data before it goes; a copy that takes no room until one of the two
+/// changes.
+const CLONE: u32 = 0x40049409;
+/// `control`'s request that makes part of a file share part of another's
+/// data, Linux's FICLONERANGE: `buffer` holds Linux's struct
+/// file_clone_range, its `src_fd` the slot of the source, and `size` is
+/// 32. The offsets and the length are whole blocks, but for a range that
+/// ends at the source's end; a length of 0 goes to the source's end.
+const CLONE_RANGE: u32 = 0x4020940d;
+
 /// The offset of a write that appends: at the end of the file, wherever
 /// that is when the write happens.
 const APPEND: u64 = 0xffffffffffffffff;
@@ -157,13 +172,14 @@ interface file = 0x000c version 5 {
     /// A device's own request, as Linux's `ioctl`: `request` with its
     /// `argument`, and `size` bytes at `buffer` it reads or writes.
     /// Terminals take the termios, window size, process group and
-    /// controlling terminal requests radix-terminal(2) lists, and block
-    /// devices the size, sector and discard requests radix-block(2) lists;
-    /// other files fail with not_terminal.
+    /// controlling terminal requests radix-terminal(2) lists, block
+    /// devices the size, sector and discard requests radix-block(2) lists,
+    /// and files `CLONE` and `CLONE_RANGE`; other files fail with
+    /// not_terminal.
     method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
                 not_terminal, not_permitted, interrupted, io, read_only, not_supported,
-                no_memory];
+                no_memory, cross_mount, is_directory, no_space];
     /// Takes, changes or lets go of (`kind` none) a lock of `owner`'s on
     /// the `length` bytes from `start` (0: all those past it, however the
     /// file grows); a description lock always covers the whole file. A

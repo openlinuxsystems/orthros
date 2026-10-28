@@ -663,16 +663,97 @@ impl Files<'_> {
     /// The extent of file `ino` that holds byte `pos`, or the first after
     /// it.
     fn extent_at(&self, ino: u64, pos: u64) -> Result<Option<(Key, KVec<u8>)>> {
+        self.extent_in(self.subvol, ino, pos)
+    }
+
+    /// [`Files::extent_at`] for a file of the subvolume whose tree is
+    /// `tree`.
+    fn extent_in(&self, tree: u64, ino: u64, pos: u64) -> Result<Option<(Key, KVec<u8>)>> {
         let key = Key::new(ino, item::EXTENT_DATA, pos);
         // An extent before `pos` may hold it; none starts before byte 0.
         if pos > 0
-            && let Some((found, data)) = self.prev(self.subvol, &key)?
+            && let Some((found, data)) = self.prev(tree, &key)?
             && found.is(ino, item::EXTENT_DATA)
             && found.offset.saturating_add(FileExtent::read(&data)?.len) > pos
         {
             return Ok(Some((found, data)));
         }
-        Ok(self.next(self.subvol, &key)?.filter(|(found, _)| found.is(ino, item::EXTENT_DATA)))
+        Ok(self.next(tree, &key)?.filter(|(found, _)| found.is(ino, item::EXTENT_DATA)))
+    }
+
+    /// Makes file `ino`'s `len` bytes from `to` on (whole sectors) name
+    /// the data file `source` of the subvolume whose tree is `from` names
+    /// from `pos` on, as Linux's `btrfs_clone` does: an item each for the
+    /// same extents, with a reference of the file's, after what the file
+    /// named there goes. Holes stay holes. An inline extent, which must be
+    /// a file's only one, is copied only to the start of a file that
+    /// holds nothing past the range; otherwise this fails with
+    /// [`Error::NotSupported`], before any change. The file grows to
+    /// `size` if it is smaller. The two ranges are apart.
+    pub(crate) fn clone_extents(
+        &mut self,
+        (from, source, pos): (u64, u64, u64),
+        len: u64,
+        (ino, to): (u64, u64),
+        size: u64,
+    ) -> Result<()> {
+        let stop = pos.checked_add(len).ok_or(Error::InvalidArgument)?;
+        let end = to.checked_add(len).ok_or(Error::InvalidArgument)?;
+        if let Some((_, data)) = self.extent_in(from, source, pos)?
+            && FileExtent::read(&data)?.kind == extent_type::INLINE
+            && (pos != 0 || to != 0 || self.extent_in(self.subvol, ino, end)?.is_some())
+        {
+            return Err(Error::NotSupported);
+        }
+        let generation = self.w.generation;
+        self.whole(|f| {
+            let lost = f.drop_extents(ino, to, end)?;
+            let mut gained = 0;
+            let mut cur = pos;
+            while cur < stop
+                && let Some((key, data)) = f.extent_in(from, source, cur)?
+                && key.offset < stop
+            {
+                let extent = FileExtent::read(&data)?;
+                let (a, b) =
+                    (key.offset, key.offset.checked_add(extent.len).ok_or(Error::Corrupt)?);
+                if b <= cur {
+                    return Err(Error::Corrupt);
+                }
+                let (start, stop_at) = (a.max(cur), b.min(stop));
+                cur = b;
+                let mut copy = mem::copy(&data)?;
+                put_u64(&mut copy, 0, generation);
+                if extent.kind == extent_type::INLINE {
+                    f.w.insert(f.volume, f.subvol, &Key::new(ino, item::EXTENT_DATA, 0), &copy)?;
+                    gained += extent.len;
+                    continue;
+                }
+                if extent.disk_bytenr == 0 {
+                    continue;
+                }
+                let offset = extent.offset + (start - a);
+                let place = to + (start - pos);
+                put_u64(&mut copy, 37, offset);
+                put_u64(&mut copy, 45, stop_at - start);
+                f.w.insert(f.volume, f.subvol, &Key::new(ino, item::EXTENT_DATA, place), &copy)?;
+                // As every reference of a file's: where the extent would
+                // start in it.
+                f.add_data_ref(
+                    extent.disk_bytenr,
+                    extent.disk_num_bytes,
+                    ino,
+                    place.wrapping_sub(offset),
+                )?;
+                gained += stop_at - start;
+            }
+            f.change_inode(ino, |d| {
+                put_u64(d, at::NBYTES, u64_at(d, at::NBYTES).saturating_sub(lost) + gained);
+                if u64_at(d, at::SIZE) < size {
+                    put_u64(d, at::SIZE, size);
+                }
+            })
+        })
     }
 
     /// Whether file `ino` keeps its bytes inline, in its one extent item.

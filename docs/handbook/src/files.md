@@ -112,6 +112,12 @@ subvolume snapshot -r /users /volumes/sda5/@snapshots/users-monday
 Phase 15's `snap` makes, lists, restores and prunes snapshots on its
 own.
 
+A copy within Btrfs is a clone too: `cp` makes the copy share the
+original's blocks, as `cp --reflink=auto` does on Linux, so a copy of a
+large file takes no room and no time until one of the two changes.
+`cp --reflink=never` copies the bytes, and `--reflink=always` fails
+where a clone cannot be made, such as onto another filesystem.
+
 To try it, boot the image as a SATA disk. QEMU keeps what is written
 only until it stops:
 
