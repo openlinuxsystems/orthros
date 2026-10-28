@@ -521,7 +521,9 @@ room before a change (ADR 0131), and the kernel mounts it writable.
   room given back, as Linux evicts the inode (ADR 0132). One removed while
   open is deleted after its last close, or at the next writable mount
   from its orphan item. The volume keeps the roots of the last four trees
-  looked up, forgotten at any change to the root tree. A commit is due 30
+  looked up, forgotten at any change to the root tree, and a change keeps
+  the last two inode items it changed, which their nodes read back from
+  it rather than from the tree. A commit is due 30
   seconds after the first change the disk lacks, or once more than
   16384 pages wait; `fsync` is a sync.
 - `grow` makes a chunk when a kind (data, metadata or the chunk tree)
