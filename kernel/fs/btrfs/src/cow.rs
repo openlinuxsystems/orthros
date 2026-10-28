@@ -80,6 +80,9 @@ pub struct Writer {
     pub(crate) bytes_used: i64,
     /// The chunks it made.
     pub(crate) grown: Grown,
+    /// The incompatible features its changes use, which the commit sets
+    /// in the superblock: zstd, once it writes an extent so.
+    pub(crate) incompat: u64,
     /// Whether a change failed half made.
     broken: bool,
 }
@@ -123,6 +126,7 @@ impl Writer {
             tree_used: mem::vec(),
             bytes_used: 0,
             grown: Grown::new(),
+            incompat: 0,
             broken: false,
         })
     }

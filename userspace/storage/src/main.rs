@@ -63,6 +63,11 @@ const BIG: usize = 200 * 1024 + 123;
 /// 8 MiB of the first data chunk `mkfs.btrfs` makes on the tests' disks,
 /// so that Radix makes another.
 const GROW: usize = 12 * 1024 * 1024 + 4321;
+/// The size of `words.txt`, text a Btrfs volume gets too, which
+/// compresses (ADR 0134): four extents' worth and a part.
+const WORDS: usize = 4 * 128 * 1024 + 70_001;
+/// The text of each 64-byte line of `words.txt`, after its number.
+const WORDS_LINE: &[u8; 56] = b" words of a file that compresses, alike on each of them\n";
 /// The files in `many/`: more than one directory cluster's entries.
 const MANY: usize = 40;
 /// The long name the test uses, which needs long-name entries.
@@ -98,6 +103,16 @@ fn big_byte(offset: usize) -> u8 {
 /// The byte at `offset` of `grow.bin`.
 fn grow_byte(offset: usize) -> u8 {
     big_byte(offset).wrapping_add(1)
+}
+
+/// The byte at `offset` of `words.txt`: lines of 64 bytes, each its
+/// number in eight digits and [`WORDS_LINE`].
+fn words_byte(offset: usize) -> u8 {
+    let (line, at) = (offset / 64, offset % 64);
+    match at.checked_sub(8) {
+        Some(at) => WORDS_LINE[at],
+        None => b'0' + (line / 10usize.pow(7 - at as u32) % 10) as u8,
+    }
 }
 
 /// How many files the churn keeps: each round removes the file of the
@@ -392,6 +407,23 @@ fn write_volume(root: &Dir, name: &str) {
                 Ok(GROW)
             }),
         );
+        // Text, which a volume that compresses writes compressed.
+        step(
+            "words.txt",
+            dir.create("words.txt").and_then(|file| {
+                let mut piece = alloc::vec![0u8; 64 * 1024];
+                let mut at = 0;
+                while at < WORDS {
+                    let len = piece.len().min(WORDS - at);
+                    for (i, byte) in piece[..len].iter_mut().enumerate() {
+                        *byte = words_byte(at + i);
+                    }
+                    file.write_all_at(at as u64, &piece[..len])?;
+                    at += len;
+                }
+                Ok(WORDS)
+            }),
+        );
     }
 
     // A long name, in a directory.
@@ -495,6 +527,7 @@ fn check_volume(root: &Dir, name: &str) {
     checked += usize::from(check_pattern(&dir, name, "big.bin", BIG, big_byte));
     if dir.info().is_ok_and(|info| info.kind == FilesystemKind::Btrfs) {
         checked += usize::from(check_pattern(&dir, name, "grow.bin", GROW, grow_byte));
+        checked += usize::from(check_pattern(&dir, name, "words.txt", WORDS, words_byte));
     }
     // What was renamed and removed has gone.
     for gone in ["draft.txt", "scratch.txt"] {

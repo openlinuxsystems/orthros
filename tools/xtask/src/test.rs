@@ -449,12 +449,17 @@ const BTRFS_DISKS: &[Disk] = &[
 ];
 
 /// The `btrfs-write` test's disks: of the `btrfs` test's two kinds, but
-/// not compressed, and holding only the host's file; Linux's
-/// `btrfs check` checks them after each boot.
+/// holding only the host's file; Linux's `btrfs check` checks them after
+/// each boot. Spark has the first, [`BTRFS_COMPRESSED`], compress what is
+/// written to it.
 const BTRFS_WRITE_DISKS: &[Disk] = &[
     btrfs_disk(Bus::Nvme(0), 4096, BTRFS_NEW, btrfs_checked),
     btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_checked),
 ];
+
+/// The disk of the `btrfs-write` test that compresses (its command line
+/// names it to Spark too).
+const BTRFS_COMPRESSED: &str = "nvme0n1";
 
 /// The `btrfs-power-cut` test's disk: a virtio disk as `mkfs.btrfs` makes
 /// one by default, holding only the host's file.
@@ -483,6 +488,10 @@ const STORAGE_FROM_HOST: &[u8] = b"Written on the host between the boots.\n";
 const STORAGE_FROM_HOST_NAME: &str = "Written on the host.txt";
 /// The size of the program's `grow.bin`, on Btrfs volumes only.
 const STORAGE_GROW: usize = 12 * 1024 * 1024 + 4321;
+/// The size of the program's `words.txt` on a Btrfs volume, and the text
+/// of each of its 64-byte lines after the line's number.
+const STORAGE_WORDS: usize = 4 * 128 * 1024 + 70_001;
+const STORAGE_WORDS_LINE: &[u8; 56] = b" words of a file that compresses, alike on each of them\n";
 
 /// The CPU the microcode test emulates: an Intel Skylake client part,
 /// signature 0x506e3.
@@ -1141,10 +1150,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-write",
-        about: "The storage test on two Btrfs disks Linux's mkfs.btrfs made, past their first data chunk: Linux's btrfs check passes after each boot, and btrfs restore reads back what was written",
+        about: "The storage test on two Btrfs disks Linux's mkfs.btrfs made, past their first data chunk, one compressing with zstd: Linux's btrfs check passes after each boot, and btrfs restore reads back what was written",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- /system/tests/storage write",
+        cmdline: "lockdep -- --compress nvme0n1 /system/tests/storage write",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -1154,7 +1163,7 @@ pub const CASES: &[Case] = &[
         script: storage_write,
         disks: BTRFS_WRITE_DISKS,
         second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage check",
+            cmdline: "lockdep -- --compress nvme0n1 /system/tests/storage check",
             before: storage_host,
             script: storage_check,
         }),
@@ -3099,8 +3108,20 @@ fn btrfs_written(disk: &DiskImage, name: &str) -> Result<(), String> {
                 "{image}: grow.bin as btrfs restore copies it out is not as written"
             ));
         }
+        let words: Vec<u8> = (0..STORAGE_WORDS).map(storage_words_byte).collect();
+        if read("words.txt")? != words {
+            return Err(format!(
+                "{image}: words.txt as btrfs restore copies it out is not as written"
+            ));
+        }
         if read(STORAGE_FROM_HOST_NAME)? != STORAGE_FROM_HOST {
             return Err(format!("{image}: the host's file is not as mkfs.btrfs wrote it"));
+        }
+        if btrfs_zstd(disk)? != (name == BTRFS_COMPRESSED) {
+            return Err(format!(
+                "{image}: the superblock's zstd feature is not set if and only if Spark had \
+                 the disk compress"
+            ));
         }
         for gone in ["draft.txt", "scratch.txt"] {
             if restored.join(gone).exists() {
@@ -3149,6 +3170,28 @@ fn storage_written(
         return Err(format!("{image}: the host finds {many} files in many/, not {STORAGE_MANY}"));
     }
     Ok(())
+}
+
+/// Whether a Btrfs disk's superblock has the `COMPRESS_ZSTD` feature,
+/// which Radix sets at its first extent compressed with zstd.
+fn btrfs_zstd(disk: &DiskImage) -> Result<bool, String> {
+    let mut features = [0; 8];
+    std::fs::File::open(&disk.path)
+        .and_then(|file| {
+            std::os::unix::fs::FileExt::read_exact_at(&file, &mut features, 0x10000 + 0xbc)
+        })
+        .map_err(|err| format!("reading the superblock of {}: {err}", disk.path.display()))?;
+    Ok(u64::from_le_bytes(features) & 1 << 4 != 0)
+}
+
+/// The byte at `offset` of the program's `words.txt`: lines of 64 bytes,
+/// each its number in eight digits and [`STORAGE_WORDS_LINE`].
+fn storage_words_byte(offset: usize) -> u8 {
+    let (line, at) = (offset / 64, offset % 64);
+    match at.checked_sub(8) {
+        Some(at) => STORAGE_WORDS_LINE[at],
+        None => b'0' + (line / 10usize.pow(7 - at as u32) % 10) as u8,
+    }
 }
 
 /// The byte at `offset` of the program's `big.bin`, and of a raw test

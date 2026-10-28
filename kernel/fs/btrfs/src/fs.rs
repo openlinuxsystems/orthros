@@ -21,8 +21,9 @@
 //!
 //! # Locks
 //!
-//! A file's page cache is taken first. On a writable mount the
-//! transaction's lock comes next, held by every change and also by every
+//! A file's page cache is taken first, then, by a write that compresses,
+//! the packers (ADR 0134). On a writable mount the transaction's lock
+//! comes next, held by every change and also by every
 //! read of the trees, since a change edits the transaction's blocks in
 //! place; it is never held while a program's memory is copied, which may
 //! fault and read a file. Then come a node's inode, the node table, the
@@ -32,11 +33,12 @@
 //! reading the disk: a node is read first, and when another was added
 //! for the same inode meanwhile, that one is used and the new one
 //! dropped, which only frees memory. Shrinking only tries the
-//! workspaces' lock, as a reader that holds it may be making memory.
+//! workspaces' and the packers' locks, as a reader or a writer that holds
+//! one may be making memory.
 
 use alloc::sync::Weak;
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_block::{DeviceRef, PAGE_SIZE};
 use radix_sync::{Mutex, MutexGuard};
@@ -48,6 +50,7 @@ use crate::dir::Entries;
 use crate::files::Files;
 use crate::format::{Key, item, name_hash, tree};
 use crate::node::BtrfsNode;
+use crate::pack::Packer;
 use crate::superblock::incompat;
 use crate::tree::{Cursor, Root};
 use crate::unpack::Workspace;
@@ -109,6 +112,12 @@ pub(crate) struct Inner {
     /// workspace for the reader, and one for the half of a run another
     /// CPU uncompresses (ADR 0133).
     workspaces: Mutex<[Option<KBox<Workspace>>; 2]>,
+    /// Whether data written is compressed with zstd, as Linux's
+    /// `compress=zstd:1` mount option has it (ADR 0134).
+    compress: AtomicBool,
+    /// What compressing extents uses, once one is written: a packer for
+    /// the writer, and one for the extent another CPU compresses.
+    packers: Mutex<[Option<KBox<Packer>>; 2]>,
     /// The running transaction, on a writable mount.
     tx: Option<Mutex<Txn>>,
     /// The nodes whose data or inode waits for the next sync.
@@ -153,6 +162,14 @@ impl BtrfsFs {
     /// is not written yet.
     pub fn mount_writable(device: DeviceRef) -> Result<KArc<BtrfsFs>> {
         BtrfsFs::mount_with(device, true)
+    }
+
+    /// Has the data written from now on compressed with zstd, or not:
+    /// Linux's `compress=zstd:1` mount option (ADR 0134). Files without
+    /// checksums, or marked not to be compressed, are written as they
+    /// are; a file marked to be compressed is, either way.
+    pub fn set_compress(&self, on: bool) {
+        self.inner.compress.store(on, Ordering::Relaxed);
     }
 
     fn mount_with(device: DeviceRef, writable: bool) -> Result<KArc<BtrfsFs>> {
@@ -237,6 +254,8 @@ impl Inner {
             csums,
             nodes: Mutex::new(mem::vec()),
             workspaces: Mutex::new([None, None]),
+            compress: AtomicBool::new(false),
+            packers: Mutex::new([None, None]),
             tx,
             dirty: Mutex::new(mem::vec()),
             reap: Mutex::new(mem::vec()),
@@ -492,6 +511,40 @@ impl Inner {
         f(first, if two { second.as_deref_mut() } else { None })
     }
 
+    /// Whether data written is compressed.
+    pub(crate) fn compress(&self) -> bool {
+        self.compress.load(Ordering::Relaxed)
+    }
+
+    /// Runs `f` with the packer of compressed writes, made if need be,
+    /// and, when `two` and `radix_vfs::join` may use another CPU, the
+    /// second, for the extent that CPU compresses: made if there is
+    /// memory for it, or else `None`.
+    pub(crate) fn with_packers<R>(
+        &self,
+        two: bool,
+        f: impl FnOnce(&mut Packer, Option<&mut Packer>) -> Result<R>,
+    ) -> Result<R> {
+        let mut slots = self.packers.lock();
+        let [first, second] = &mut *slots;
+        let first = match first {
+            Some(packer) => packer,
+            empty => empty.insert(Packer::boxed()?),
+        };
+        let two = two && radix_vfs::joins();
+        if two && second.is_none() {
+            *second = Packer::boxed().ok();
+        }
+        f(first, if two { second.as_deref_mut() } else { None })
+    }
+
+    /// Drops the packers of compressed writes, unless a write is under
+    /// way; returns the pages they held.
+    fn drop_packers(&self) -> usize {
+        let Some(mut slots) = self.packers.try_lock() else { return 0 };
+        slots.iter_mut().filter_map(Option::take).map(|packer| packer.held()).sum()
+    }
+
     /// Drops the workspaces of compressed reads, unless a read is under
     /// way; returns the pages they held.
     fn drop_workspace(&self) -> usize {
@@ -626,6 +679,9 @@ impl FileSystem for BtrfsFs {
         let mut dropped = self.inner.volume.shrink(max);
         if dropped < max {
             dropped += self.inner.drop_workspace();
+        }
+        if dropped < max {
+            dropped += self.inner.drop_packers();
         }
         if dropped < max {
             let Ok(live) = self.inner.live_nodes() else { return dropped };

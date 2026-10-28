@@ -23,6 +23,7 @@ use crate::cow::Writer;
 use crate::csum::crc32c_update;
 use crate::format::{Key, item, name_hash, tree, u16_at, u32_at, u64_at};
 use crate::inode::Inode;
+use crate::superblock::incompat;
 use crate::tree::{Block, Cursor, ITEM_SIZE};
 use crate::volume::Volume;
 
@@ -75,6 +76,12 @@ pub(crate) mod at {
     pub const CTIME: usize = 124;
     pub const MTIME: usize = 136;
     pub const OTIME: usize = 148;
+}
+
+/// How a file extent's data is compressed.
+pub(crate) mod compression {
+    pub const NONE: u8 = 0;
+    pub const ZSTD: u8 = 3;
 }
 
 /// The kinds of file extent item.
@@ -642,6 +649,37 @@ impl Files<'_> {
         size: u64,
     ) -> Result<()> {
         let len = pages.len() as u64 * PAGE;
+        self.write_extent(ino, pos, pages, (len, compression::NONE), sums, size)
+    }
+
+    /// [`Files::write_data`] for an extent whose `pages` hold file
+    /// `ino`'s `len` bytes from `pos` on compressed as `kind` says
+    /// ([`compression`]), with the checksums of their sectors.
+    pub(crate) fn write_packed(
+        &mut self,
+        ino: u64,
+        pos: u64,
+        pages: &[&Page],
+        (len, kind): (u64, u8),
+        size: u64,
+    ) -> Result<()> {
+        self.write_extent(ino, pos, pages, (len, kind), true, size)?;
+        if kind == compression::ZSTD {
+            self.w.incompat |= incompat::COMPRESS_ZSTD;
+        }
+        Ok(())
+    }
+
+    fn write_extent(
+        &mut self,
+        ino: u64,
+        pos: u64,
+        pages: &[&Page],
+        (len, kind): (u64, u8),
+        sums: bool,
+        size: u64,
+    ) -> Result<()> {
+        let disk = pages.len() as u64 * PAGE;
         let sb = self.volume.superblock();
         let csum = sb.csum_type;
         let mut checksums = mem::vec();
@@ -652,9 +690,9 @@ impl Files<'_> {
                 out.copy_from_slice(&csum.sum(page.bytes())[..size]);
             }
         }
-        let bytenr = self.w.alloc_data(self.volume, len)?;
+        let bytenr = self.w.alloc_data(self.volume, disk)?;
         if let Err(e) = write_pages(self.volume, bytenr, pages) {
-            self.w.free_data(bytenr, len, true)?;
+            self.w.free_data(bytenr, disk, true)?;
             return Err(e);
         }
         let generation = self.w.generation;
@@ -665,12 +703,13 @@ impl Files<'_> {
                 d.fill(0);
                 put_u64(d, 0, generation);
                 put_u64(d, 8, len);
+                d[16] = kind;
                 d[20] = extent_type::REGULAR;
                 put_u64(d, 21, bytenr);
-                put_u64(d, 29, len);
+                put_u64(d, 29, disk);
                 put_u64(d, 45, len);
             })?;
-            f.new_data_extent(bytenr, len, ino, pos)?;
+            f.new_data_extent(bytenr, disk, ino, pos)?;
             if sums {
                 f.add_sums(bytenr, &checksums)?;
             }

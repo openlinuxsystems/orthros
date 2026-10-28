@@ -30,10 +30,11 @@ use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBindi
 
 use crate::dir::Entries;
 use crate::extent::{self, Compression, Extent, Regular};
-use crate::files::{Files, at, file_type, put_time, put_u32, put_u64};
+use crate::files::{Files, at, compression, file_type, put_time, put_u32, put_u64};
 use crate::format::{Key, item, name_hash, tree};
 use crate::fs::{Inner, Txn};
 use crate::inode::{self, Inode};
+use crate::pack::{CHUNK, Packer};
 use crate::tree::{Cursor, Root};
 use crate::unpack::{self, Workspace};
 
@@ -733,13 +734,104 @@ impl BtrfsNode {
     fn write_run(&self, index: u64, pages: &[&Page], len: usize) -> Result<()> {
         let pos = index * PAGE;
         let end = pos + (pages.len() as u64 - 1) * PAGE + len as u64;
-        let sums = self.inode().has_sums();
+        let inode = self.inode();
+        let sums = inode.has_sums();
+        // As on Linux: never without checksums, never when the file says
+        // not to, and always when it says to.
+        let flags = inode.flags;
+        if sums
+            && flags & inode::flags::NOCOMPRESS == 0
+            && (self.fs.compress() || flags & inode::flags::COMPRESS != 0)
+        {
+            return self.write_packed(index, pages, end);
+        }
         self.fs.change(|txn| {
             let mut files = txn.files(&self.fs.volume, self.subvol);
             if pos != 0 {
                 self.convert_inline(&mut files)?;
             }
             write_split(&mut files, self.ino, pos, pages, sums, end)?;
+            self.reload(&files)
+        })
+    }
+
+    /// [`BtrfsNode::write_run`] with the data compressed, a chunk of up to
+    /// 128 KiB to an extent (ADR 0134): two chunks at a time, the second on
+    /// another CPU when one is free, compressed before the transaction is
+    /// taken. A chunk that would not save a sector is written as it is.
+    /// The file ends at `end`.
+    fn write_packed(&self, index: u64, pages: &[&Page], end: u64) -> Result<()> {
+        // The bytes of the chunk of `n` pages from page `at` that are the
+        // file's.
+        let bytes = |at: u64, n: usize| {
+            usize::try_from(end.saturating_sub(at * PAGE))
+                .map_or(n * PAGE_SIZE, |b| b.min(n * PAGE_SIZE))
+        };
+        let mut done = 0;
+        while done < pages.len() {
+            let rest = &pages[done..];
+            let at = index + done as u64;
+            done += self.fs.with_packers(rest.len() > CHUNK, |own, other| {
+                let (first, rest) = rest.split_at(rest.len().min(CHUNK));
+                let second = &rest[..rest.len().min(CHUNK)];
+                let (mut a, mut b) = (None, None);
+                match other {
+                    Some(other) if !second.is_empty() => {
+                        let next = at + CHUNK as u64;
+                        radix_vfs::join(
+                            || a = own.pack(first, bytes(at, first.len())),
+                            || b = other.pack(second, bytes(next, second.len())),
+                        );
+                        self.write_chunks(at, [(first, a, &*own), (second, b, &*other)], end)?;
+                        Ok(first.len() + second.len())
+                    }
+                    _ => {
+                        a = own.pack(first, bytes(at, first.len()));
+                        self.write_chunks(at, [(first, a, &*own), (&[], None, &*own)], end)?;
+                        Ok(first.len())
+                    }
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Writes `chunks`, the file's pages from `index` on, each compressed
+    /// into its packer when its frame's length is given, in one change.
+    #[inline(never)]
+    fn write_chunks(
+        &self,
+        index: u64,
+        chunks: [(&[&Page], Option<usize>, &Packer); 2],
+        end: u64,
+    ) -> Result<()> {
+        self.fs.change(|txn| {
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            if index != 0 {
+                self.convert_inline(&mut files)?;
+            }
+            let mut pos = index * PAGE;
+            for (pages, made, packer) in chunks {
+                let len = pages.len() as u64 * PAGE;
+                let size = end.min(pos + len);
+                match made {
+                    Some(made) => {
+                        let mut disk: [&Page; CHUNK] = [pages[0]; CHUNK];
+                        let mut n = 0;
+                        for (slot, page) in disk.iter_mut().zip(packer.pages(made)) {
+                            *slot = page;
+                            n += 1;
+                        }
+                        let kind = (len, compression::ZSTD);
+                        files.write_packed(self.ino, pos, &disk[..n], kind, size)?;
+                    }
+                    None if !pages.is_empty() => {
+                        write_split(&mut files, self.ino, pos, pages, true, size)?;
+                    }
+                    None => {}
+                }
+                pos += len;
+            }
             self.reload(&files)
         })
     }

@@ -36,6 +36,7 @@ mod at {
     pub const CHUNK_ROOT_GENERATION: usize = 0xa4;
     pub const ROOT_LEVEL: usize = 0xc6;
     pub const CHUNK_ROOT_LEVEL: usize = 0xc7;
+    pub const INCOMPAT: usize = 0xbc;
     pub const TOTAL_BYTES: usize = 0x70;
     pub const NUM_DEVICES: usize = 0x88;
     /// The four backup roots, after the system chunk array.
@@ -333,6 +334,8 @@ impl Writer {
         put_u64(&mut sb, at::CHUNK_ROOT_GENERATION, chunk.generation);
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
         put_u64(&mut sb, at::BYTES_USED, used);
+        let features = u64_at(&sb, at::INCOMPAT) | self.incompat;
+        put_u64(&mut sb, at::INCOMPAT, features);
         self.grow_superblock(&mut sb)?;
         Self::write_backup(volume, &mut sb)?;
         let sum = csum.sum(&sb[crate::csum::CSUM_SIZE..]);

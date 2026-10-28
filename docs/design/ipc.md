@@ -423,11 +423,15 @@ that neither has a cache between the program and the disk. Given
 files of 1 MiB of noise, stored plain, and 32 of text, stored as zstd
 extents, each whole in 128 KiB reads (`posix_btrfs_read_mib`,
 `posix_btrfs_read_zstd_mib`, per file), then makes a file, writes 4 KiB
-to it, closes and removes it (`posix_btrfs_create`, ADR 0132). `ob
-bench` makes that disk with `mkfs.btrfs --compress zstd` once, and each
-boot gets a fresh copy, mounted at `/volumes/vdb` on Radix and at
-`/mnt/vdb` on Linux, whose init first loads the Btrfs modules of the
-runner's kernel, which `ob bench` puts in its initramfs.
+to it, closes and removes it (`posix_btrfs_create`, ADR 0132), and last
+writes 32 new files, each a copy of the first file of text, in 128 KiB
+writes, and syncs the filesystem, which compresses them as it writes
+them (`posix_btrfs_write_zstd_mib`, per file, ADR 0134). `ob bench` makes
+that disk with `mkfs.btrfs --compress zstd` once, and each boot gets a
+fresh copy, mounted to compress what is written with zstd at level 1:
+at `/volumes/vdb` on Radix (Spark's `--compress vdb`) and at `/mnt/vdb`
+on Linux (`compress=zstd:1`), whose init first loads the Btrfs modules
+of the runner's kernel, which `ob bench` puts in its initramfs.
 
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that

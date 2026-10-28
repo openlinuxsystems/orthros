@@ -555,22 +555,23 @@ fn load_modules() {
 }
 
 /// Mounts the Btrfs disk [`BTRFS_DISK`] on [`BTRFS_AT`], as Linux's
-/// `mount` does with no options; returns whether it did.
+/// `mount -o compress=zstd:1` does (Fedora's default), so that what the
+/// benchmarks write is compressed as Radix compresses it; returns whether
+/// it did.
 fn mount_btrfs() -> bool {
     if !Path::new(BTRFS_DISK).exists() {
         eprintln!("linux-bench: the virtual machine has no {BTRFS_DISK}, for the Btrfs benchmarks");
         return false;
     }
     let _ = std::fs::create_dir_all(BTRFS_AT);
-    // SAFETY: the strings are NUL-terminated and live through the call;
-    // the mount takes no data.
+    // SAFETY: the strings are NUL-terminated and live through the call.
     let result = unsafe {
         libc::mount(
             c"/dev/vdb".as_ptr(),
             c"/mnt/vdb".as_ptr(),
             c"btrfs".as_ptr(),
             0,
-            std::ptr::null(),
+            c"compress=zstd:1".as_ptr().cast(),
         )
     };
     if result != 0 {

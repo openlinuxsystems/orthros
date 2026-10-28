@@ -51,9 +51,9 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
 /// with the benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
-/// mounts it.
-const POSIX_CMDLINE: &str = "-- --posix /system/tests/posix/bench --disk /devices/vda --nvme \
-                             /devices/nvme0n1 --btrfs /volumes/vdb";
+/// mounts it, to compress what is written to it, as Linux mounts it.
+const POSIX_CMDLINE: &str = "-- --compress vdb --posix /system/tests/posix/bench --disk /devices/vda \
+                             --nvme /devices/nvme0n1 --btrfs /volumes/vdb";
 
 /// The size of each disk both systems' POSIX benchmarks read and write:
 /// the 32 MiB they go through, with room.
@@ -383,6 +383,10 @@ const ROWS: &[Row] = &[
         "Btrfs: a 1 MiB file of text read from a virtio disk and uncompressed (zstd), per file",
     ),
     btrfs("posix_btrfs_create", "Btrfs: a file made, 4 KiB written, closed and removed, unsynced"),
+    btrfs(
+        "posix_btrfs_write_zstd_mib",
+        "Btrfs: a 1 MiB file of text written, compressed (zstd) and synced with 31 others, per file",
+    ),
 ];
 
 /// `ob bench`.

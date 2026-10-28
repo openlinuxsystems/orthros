@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -498,11 +499,54 @@ static void btrfs_create(const char *dir, uint64_t rounds) {
 	report("posix_btrfs_create", started, rounds);
 }
 
+// Writes BTRFS_FILES files `dir`/written/<n>, each the text of `zstd/0`,
+// BTRFS_READ bytes at a time, and then has the filesystem write them to
+// the disk: compressed, as the disk is mounted to compress with zstd
+// (Linux's `compress=zstd:1`, Spark's `--compress`). On Radix, syncing a
+// directory syncs its filesystem, as syncfs does on Linux.
+static void btrfs_writes(const char *dir) {
+	char *text = malloc(BTRFS_FILE);
+	if(!text)
+		fail("malloc");
+	char path[256];
+	snprintf(path, sizeof(path), "%s/zstd/0", dir);
+	int fd = open(path, O_RDONLY);
+	if(fd < 0 || read(fd, text, BTRFS_FILE) != (ssize_t)BTRFS_FILE)
+		fail(path);
+	close(fd);
+	snprintf(path, sizeof(path), "%s/written", dir);
+	if(mkdir(path, 0755) != 0)
+		fail(path);
+	struct mark started = start();
+	for(int i = 0; i < BTRFS_FILES; i++) {
+		snprintf(path, sizeof(path), "%s/written/%d", dir, i);
+		fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+		if(fd < 0)
+			fail(path);
+		for(size_t at = 0; at < BTRFS_FILE; at += BTRFS_READ)
+			if(write(fd, text + at, BTRFS_READ) != (ssize_t)BTRFS_READ)
+				fail(path);
+		close(fd);
+	}
+	snprintf(path, sizeof(path), "%s/written", dir);
+	fd = open(path, O_RDONLY | O_DIRECTORY);
+#ifdef __linux__
+	if(fd < 0 || syncfs(fd) != 0)
+#else
+	if(fd < 0 || fsync(fd) != 0)
+#endif
+		fail("syncing the written files");
+	report("posix_btrfs_write_zstd_mib", started, BTRFS_FILES);
+	close(fd);
+	free(text);
+}
+
 // The Btrfs benchmarks, in the directory `dir` where the Btrfs disk is.
 static void btrfs(const char *dir) {
 	btrfs_reads(dir, "plain", "posix_btrfs_read_mib");
 	btrfs_reads(dir, "zstd", "posix_btrfs_read_zstd_mib");
 	btrfs_create(dir, 5000);
+	btrfs_writes(dir);
 }
 
 int main(int argc, char **argv) {
