@@ -115,6 +115,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/vmstat", "systools"),
     ("system/commands/w", "systools"),
     ("system/commands/watch", "systools"),
+    ("system/commands/watchdog", "systools"),
     ("system/commands/which", "systools"),
     ("system/commands/who", "systools"),
     ("system/commands/xxd", "systools"),

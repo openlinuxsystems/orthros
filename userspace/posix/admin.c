@@ -511,7 +511,7 @@ static void watching(void) {
 
 // shutdown, reboot, poweroff, halt and service, through Spark's control
 // socket (spark(8)): shutdowns planned and called off, and what Spark
-// answers in a boot that starts no services. The `consoles` boot test
+// answers in a boot that starts no services; and the watchdog it pets. The `consoles` boot test
 // powers the machine off, and `spark-oom` has Spark restart a service.
 static void power(void) {
 	STATUS(1, "/bin/shutdown", "-c");
@@ -530,6 +530,10 @@ static void power(void) {
 	STATUS(4, "/bin/service", "nothing", "status");
 	STATUS(1, "/bin/service", "nothing", "start");
 	STATUS(1, "/bin/service");
+	// q35's TCO timer, which Spark starts only once it supervises: after
+	// the boot program the tests run in (spark(8)'s WATCHDOG).
+	CONTAINS("Device:    the Intel ICH9 TCO timer\nState:     stopped\n", "/bin/watchdog");
+	STATUS(1, "/bin/watchdog", "now");
 }
 
 // The program behind the links.
