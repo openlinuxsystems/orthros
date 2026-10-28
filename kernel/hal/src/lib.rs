@@ -109,6 +109,17 @@ pub trait Cpu {
     /// Writes the cache lines holding `bytes` back to memory, so that they
     /// survive a reset that discards the caches.
     fn flush_to_memory(bytes: &[u8]);
+
+    /// How many banks each CPU reports hardware errors in, through its
+    /// machine-check architecture (Phase 11, ADR 0145): 0 when it has none
+    /// or reporting was turned off.
+    fn machine_check_banks() -> usize;
+
+    /// Reads the errors this CPU's machine-check banks hold and clears
+    /// them, calling `found` with each: its bank, whether the hardware
+    /// corrected it, and what it was. Runs in thread context on the CPU
+    /// whose banks it reads.
+    fn poll_machine_checks(found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display));
 }
 
 /// Data and identity of the current CPU.
@@ -286,6 +297,21 @@ pub struct PciSegment {
     pub last_bus: u8,
 }
 
+/// A hardware watchdog the kernel drives (Phase 11), as
+/// [`Devices::find_watchdog`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Watchdog {
+    /// What it is, for the log and `/kernel/class/watchdog`.
+    pub name: &'static str,
+    /// The shortest timeout it takes, in seconds.
+    pub min_seconds: u32,
+    /// The longest timeout it takes, in seconds.
+    pub max_seconds: u32,
+    /// Whether it restarted the machine: the boot before this one ended
+    /// with it running out.
+    pub restarted: bool,
+}
+
 /// Devices: what drivers need from the machine (Phase 7).
 ///
 /// Drivers never see raw pointers: device registers come as
@@ -348,6 +374,33 @@ pub trait Devices {
     /// [`Devices::start_keyboard`]. Returns false if the controller did
     /// not take it in time.
     fn keyboard_send(byte: u8) -> bool;
+
+    /// Hears the machine's power button, if the kernel can: on a PC the
+    /// ACPI button that is a fixed feature, through the System Control
+    /// Interrupt (Phase 11). `pressed` is called, in an interrupt handler
+    /// with interrupts masked, each time it is pressed. Returns what the
+    /// button is, for the log, or `None`, leaving the button to the
+    /// firmware, if the kernel cannot hear it.
+    fn start_power_button(pressed: fn()) -> Option<&'static str>;
+
+    /// Finds the machine's hardware watchdog, if it has one the kernel
+    /// drives: on a PC, QEMU's i6300esb, or the TCO timer of an Intel
+    /// ICH9 or ICH10 chipset (Phase 11). It is left stopped. Called once,
+    /// after the PCI scan; `None` if there is none.
+    fn find_watchdog() -> Option<Watchdog>;
+
+    /// Starts the watchdog [`Devices::find_watchdog`] found, or changes its
+    /// timeout, so that it restarts the machine unless petted within
+    /// `seconds`, clamped to the timeouts it takes. Its count starts again
+    /// from now. Returns the timeout set. The caller serializes the
+    /// watchdog's methods.
+    fn watchdog_start(seconds: u32) -> u32;
+
+    /// Pets the running watchdog: its count starts again.
+    fn watchdog_pet();
+
+    /// Stops the watchdog.
+    fn watchdog_stop();
 }
 
 /// Kernel threads: their saved contexts and switching between them.

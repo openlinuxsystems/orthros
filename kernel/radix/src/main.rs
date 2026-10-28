@@ -56,6 +56,7 @@ mod domains;
 mod fs;
 mod join;
 mod kdb;
+mod mce;
 mod oom;
 mod panic;
 mod percpu;
@@ -66,6 +67,7 @@ mod selftest;
 mod symbols;
 mod user;
 mod usertest;
+mod watchdog;
 mod work;
 
 #[cfg(target_arch = "aarch64")]
@@ -232,6 +234,9 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::writeback::start();
     fs::kmsg::start();
     fs::keyboard::start();
+    user::power::start();
+    watchdog::find();
+    mce::start(flags.value("mce-poll"));
     check_timers(online);
     check_ipis(online);
 

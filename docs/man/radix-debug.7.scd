@@ -185,7 +185,9 @@ kdb*. The kernel then enters *kdb*:
 
 Only the CPU that entered *kdb* stops; the others keep running, except
 after a panic. Without a serial port *kdb* says so in the log and does not
-run.
+run. While it waits for a command, *kdb* pets a running hardware watchdog
+(*watchdog*(8)) about once a second, so that the machine does not restart
+under it.
 
 Lines are edited with Backspace, Ctrl-U (erase the line) and Ctrl-C
 (cancel the line); the Up arrow recalls the previous command. Addresses
@@ -674,4 +676,4 @@ _out/test/_
 # SEE ALSO
 
 *dukovo-boot*(7), *radix-capabilities*(7), *radix-scheduling*(7), *radix-ipc*(7),
-*ob*(1), *gdb*(1), *qemu-system-x86_64*(1)
+*watchdog*(8), *ob*(1), *gdb*(1), *qemu-system-x86_64*(1)

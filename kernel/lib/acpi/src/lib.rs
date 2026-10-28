@@ -25,7 +25,7 @@ mod madt;
 mod numa;
 mod sleep;
 
-pub use fadt::{Fadt, GenericAddress};
+pub use fadt::{Fadt, GenericAddress, RegisterBlock};
 pub use madt::{Madt, MadtEntry};
 pub use numa::{Slit, Srat, SratEntry};
 pub use sleep::sleep_types;

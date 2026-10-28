@@ -75,6 +75,12 @@ impl Cpu for Arch {
     fn breakpoint() {}
 
     fn flush_to_memory(_bytes: &[u8]) {}
+
+    fn machine_check_banks() -> usize {
+        0
+    }
+
+    fn poll_machine_checks(_found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display)) {}
 }
 
 impl CpuLocal for Arch {
@@ -228,6 +234,22 @@ impl Devices for Arch {
     fn keyboard_send(_byte: u8) -> bool {
         false
     }
+
+    fn start_power_button(_pressed: fn()) -> Option<&'static str> {
+        None
+    }
+
+    fn find_watchdog() -> Option<radix_hal::Watchdog> {
+        None
+    }
+
+    fn watchdog_start(seconds: u32) -> u32 {
+        seconds
+    }
+
+    fn watchdog_pet() {}
+
+    fn watchdog_stop() {}
 }
 
 /// A placeholder thread context.

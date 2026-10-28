@@ -185,6 +185,14 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   screen           the boot log on the UEFI framebuffer
   consoles         a shell on consoled's virtual consoles: typing, Alt+F2,
                    poweroff
+  power-button     pressing the ACPI power button powers the machine off,
+                   after Spark stops the services
+  watchdog, watchdog-tco   a Spark that stops responding leaves the hardware
+                   watchdog unpetted, and it restarts the machine (QEMU's
+                   i6300esb under BIOS, q35's TCO timer under UEFI)
+  machine-check    QEMU puts errors in the CPUs' machine-check banks: a
+                   corrected one is logged, an uncorrected one panics and
+                   the next boot finds it
   spark-oom        a service that runs the machine out of memory is stopped
                    and started again
   spark-stop       Spark stops a service that ignores SIGTERM, and what a

@@ -6,9 +6,10 @@
 // in /bin: the process tools and their signals, sessions, memory and
 // disks, priorities, CPU affinity and I/O classes, held files, traces,
 // the kernel log, the dump and layout tools, script, watch and pidstat,
-// and shutdown and service through Spark. With them, what the kernel
-// tells them: /processes (radix-proc(5)), /devices/kmsg, getloadavg, and the
-// priorities a child inherits.
+// shutdown and service through Spark, and the hardware tools. With them,
+// what the kernel tells them: /processes (radix-proc(5)), /devices/kmsg,
+// /kernel (radix-sysfs(5)), getloadavg, and the priorities a child
+// inherits.
 
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -511,7 +512,7 @@ static void watching(void) {
 
 // shutdown, reboot, poweroff, halt and service, through Spark's control
 // socket (spark(8)): shutdowns planned and called off, and what Spark
-// answers in a boot that starts no services. The `consoles` boot test
+// answers in a boot that starts no services; and the watchdog it pets. The `consoles` boot test
 // powers the machine off, and `spark-oom` has Spark restart a service.
 static void power(void) {
 	STATUS(1, "/bin/shutdown", "-c");
@@ -530,6 +531,34 @@ static void power(void) {
 	STATUS(4, "/bin/service", "nothing", "status");
 	STATUS(1, "/bin/service", "nothing", "start");
 	STATUS(1, "/bin/service");
+	// q35's TCO timer, which Spark started as it began to supervise this
+	// test (spark(8)'s WATCHDOG).
+	CONTAINS("Device:    the Intel ICH9 TCO timer\nState:     running, petted by Spark\n"
+	         "Timeout:   60 seconds\n",
+	         "/bin/watchdog");
+	STATUS(1, "/bin/watchdog", "now");
+}
+
+// lspci, lscpu and lsmem (ADR 0144): what they say of QEMU's q35 with 4
+// CPUs and 1 GiB, from /kernel and the PCI ID database.
+static void hardware(void) {
+	CONTAINS("00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller\n",
+	         "/bin/lspci");
+	CONTAINS("00:00.0 0600: 8086:29c0\n", "/bin/lspci", "-n");
+	OUTPUT("", "00:00.0 Host bridge [0600]: Intel Corporation 82G33/G31/P35/P31 Express DRAM "
+	           "Controller [8086:29c0]\n\tSubsystem: Red Hat, Inc. QEMU Virtual Machine [1af4:1100]\n\n",
+	       "/bin/lspci", "-nnv", "-s", "00:00.0");
+	CONTAINS("00:1f.2 \"SATA controller\" \"Intel Corporation\"", "/bin/lspci", "-mm", "-d", "8086:");
+	OUTPUT("", "", "/bin/lspci", "-d", "ffff:");
+	STATUS(1, "/bin/lspci", "-s", "1:2:3:4");
+	CONTAINS("Architecture:             x86_64\n", "/bin/lscpu");
+	CONTAINS("CPU(s):                   4\n  On-line CPU(s) list:    0-3\n", "/bin/lscpu");
+	CONTAINS(" sse2 ", "/bin/lscpu");
+	CONTAINS("0x0000000000000000-0x000000003fffffff   1G online   0-7\n", "/bin/lsmem");
+	OUTPUT("", "Memory block size:       128M\nTotal online memory:       1G\n"
+	           "Total offline memory:      0B\n",
+	       "/bin/lsmem", "--summary");
+	STATUS(1, "/bin/lsmem", "--summary=sometimes");
 }
 
 // The program behind the links.
@@ -554,6 +583,7 @@ int main(void) {
 	RUN(dumping);
 	RUN(watching);
 	RUN(power);
+	RUN(hardware);
 	RUN(links);
 	return check_end();
 }

@@ -62,8 +62,14 @@ error that starts with the tool's name.
 :  a process's I/O class and level
 |  *kill*(1)
 :  send a signal
+|  *lscpu*(1)
+:  what the processor is
+|  *lsmem*(1)
+:  the machine's RAM in memory blocks
 |  *lsof*(8)
 :  what each process holds open
+|  *lspci*(8)
+:  the PCI functions
 |  *pgrep*(1), *pkill*(1)
 :  find or signal processes by name
 |  *pidstat*(1)
@@ -94,6 +100,8 @@ error that starts with the tool's name.
 :  memory, CPU and disk activity
 |  *watch*(1)
 :  run a command again and again
+|  *watchdog*(8)
+:  the hardware watchdog Spark pets
 |  *which*(1)
 :  where a command is
 |  *xxd*(1)

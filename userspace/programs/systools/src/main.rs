@@ -19,7 +19,10 @@ mod column;
 mod df;
 mod dmesg;
 mod hexdump;
+mod lscpu;
+mod lsmem;
 mod lsof;
+mod lspci;
 mod memory;
 mod modes;
 mod pidstat;
@@ -36,6 +39,7 @@ mod top;
 mod tree;
 mod util;
 mod watch;
+mod watchdog;
 mod which;
 mod xxd;
 
@@ -64,7 +68,10 @@ const TOOLS: &[(&str, Tool)] = &[
     ("hexdump", hexdump::main),
     ("ionice", priority::ionice),
     ("kill", signals::kill),
+    ("lscpu", lscpu::main),
+    ("lsmem", lsmem::main),
     ("lsof", lsof::main),
+    ("lspci", lspci::main),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
@@ -84,6 +91,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("vmstat", memory::vmstat),
     ("w", sessions::w),
     ("watch", watch::main),
+    ("watchdog", watchdog::main),
     ("which", which::main),
     ("who", sessions::who),
     ("xxd", xxd::main),

@@ -313,6 +313,35 @@ _target/userspace/_).
 		and power the machine off with *poweroff*(8) (*consoled*(8),
 		*spark*(8)).
 
+	*power-button*
+		Boot normally under BIOS, and once consoled has started, press
+		the machine's power button with QMP's _system_powerdown_, which
+		raises ACPI's power button event. The kernel must say it hears
+		the button, then that it was pressed; Spark must stop the
+		services and power the machine off, and QEMU end on ACPI's S5
+		(*radix-power*(2), *spark*(8)).
+
+	*watchdog*, *watchdog-tco*
+		Boot with *--watchdog 12 --test-hang* for Spark, with QEMU's
+		i6300esb under BIOS (*watchdog*) or with the TCO timer of q35's
+		ICH9 under UEFI (*watchdog-tco*). The kernel must find the
+		watchdog and Spark start it, then stop responding; the watchdog
+		must restart the machine, and the next boot must say it did.
+		*watchdog* also boots with *kdb*, which must keep the machine
+		from restarting while it waits, for twice the timeout. Spark
+		then pets it for twice its timeout without a restart, and the
+		power button powers the machine off (*spark*(8)'s *WATCHDOG*).
+
+	*machine-check*
+		Boot with *mce-poll=1 panic=0* and fill the CPUs'
+		machine-check banks with QEMU's _mce_ monitor command, as a
+		CPU would: a corrected cache error on CPU 1, which the kernel
+		must log, decoded, within a second, then an uncorrected memory
+		error on CPU 0 with the processor's state corrupt, which must
+		panic with the decoded error. The machine restarts, the next
+		boot must find the error in its bank, and the power button
+		powers the machine off (*dukovo-boot*(7)'s *MACHINE CHECKS*).
+
 	*spark-oom*
 		Boot with 256 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its

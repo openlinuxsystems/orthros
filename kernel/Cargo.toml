@@ -35,6 +35,7 @@ members = [
     "lib/kdb",
     "lib/klog",
     "lib/lockdep",
+    "lib/mca",
     "lib/ksyms",
     "lib/microcode",
     "lib/posix",

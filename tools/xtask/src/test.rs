@@ -66,6 +66,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-klog",
     "radix-lockdep",
     "radix-ksyms",
+    "radix-mca",
     "radix-microcode",
     "radix-mm",
     "radix-nvme",
@@ -713,6 +714,71 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: consoles,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "power-button",
+        about: "a normal boot under BIOS; pressing the ACPI power button stops the services and powers the machine off",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        // No program: Spark starts the services, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: power_button,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "watchdog",
+        about: "Spark pets QEMU's i6300esb; when it stops responding, the watchdog restarts the machine once kdb stops petting it, and the next boot says so",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "kdb -- --watchdog 12 --test-hang",
+        cpus: 2,
+        memory: "1G",
+        reboot: true,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "i6300esb"],
+        script: watchdog_esb,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "watchdog-tco",
+        about: "as watchdog, under UEFI, with the TCO timer of q35's ICH9",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "-- --watchdog 12 --test-hang",
+        cpus: 2,
+        memory: "1G",
+        reboot: true,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: watchdog_tco,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "machine-check",
+        about: "a corrected error QEMU puts in a machine-check bank is logged at the next read; an uncorrected one panics, and the next boot finds it in its bank",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "mce-poll=1 panic=0",
+        cpus: 2,
+        memory: "1G",
+        reboot: true,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: machine_check,
         disks: &[],
         second: None,
     },
@@ -2381,6 +2447,28 @@ impl Vm {
         Ok(())
     }
 
+    /// Presses the machine's power button: QMP's `system_powerdown`, which
+    /// raises ACPI's power button event.
+    pub fn press_power_button(&mut self) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        Qmp::connect(&socket)?.execute(r#"{"execute":"system_powerdown"}"#)
+    }
+
+    /// Runs a command of QEMU's human monitor. QEMU prints nothing for
+    /// the commands the tests use unless it refuses them, so anything
+    /// printed is an error.
+    pub fn monitor(&mut self, command: &str) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        let reply = Qmp::connect(&socket)?.execute_reply(&format!(
+            r#"{{"execute":"human-monitor-command","arguments":{{"command-line":{}}}}}"#,
+            crate::bench::json_string(command)
+        ))?;
+        match reply.trim() {
+            r#"{"return": ""}"# => Ok(()),
+            other => Err(format!("QEMU's monitor, asked to `{command}`: {other}")),
+        }
+    }
+
     /// Types `text` on the PS/2 keyboard, a key at a time on a US layout.
     pub fn type_text(&mut self, text: &str) -> Result<(), String> {
         let combos = text.chars().map(key_combo).collect::<Result<Vec<_>, _>>()?;
@@ -2507,11 +2595,16 @@ impl Qmp {
 
     /// Sends a command and waits for its reply, skipping events.
     fn execute(&mut self, command: &str) -> Result<(), String> {
+        self.execute_reply(command).map(drop)
+    }
+
+    /// As [`Qmp::execute`], giving the reply's line.
+    fn execute_reply(&mut self, command: &str) -> Result<String, String> {
         writeln!(self.stream, "{command}").map_err(|err| format!("writing to QMP: {err}"))?;
         loop {
             let line = self.read_line()?;
             if line.contains(r#""return""#) {
-                return Ok(());
+                return Ok(line);
             }
             if line.contains(r#""error""#) {
                 return Err(format!("QMP: {}", line.trim()));
@@ -2823,6 +2916,134 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said before the boot report ends.
+    if !vm.log().contains("Power: the ACPI power button asks Spark to power the machine off") {
+        return Err("the kernel does not say it hears the ACPI power button".into());
+    }
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: listening at /system/live/spark/control")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.press_power_button()?;
+    vm.expect("Power: the power button was pressed")?;
+    vm.expect("spark: the power button was pressed; powering off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// QEMU's `mce` monitor command fills a bank as a CPU would. A corrected
+/// error raises nothing: the kernel's next read of the banks finds it. An
+/// uncorrected one with the processor's state corrupt raises #MC and the
+/// kernel panics, restarting at once (`panic=0`); the bank keeps the
+/// error across the restart, as on real machines, and the next boot finds
+/// it. The power button ends the test.
+fn machine_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    // Said before the boot report ends, with QEMU's 10 banks.
+    if !vm.log().contains("Machine check: 10 banks on each CPU, read at boot and every 1 s") {
+        return Err("the kernel did not turn machine-check reporting on".into());
+    }
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    // CPU 1, bank 2: VAL, EN, MISCV and ADDRV; a level 0 data cache error
+    // on a data read.
+    vm.monitor("mce 1 2 0x9c00000000000134 0 0x12345000 0x86")?;
+    vm.expect(
+        "Machine check: CPU 1 bank 2: corrected data read error in the level 0 data cache, \
+         address 0x12345000 (status 0x9c00000000000134, misc 0x86)",
+    )?;
+    // CPU 0, bank 1: VAL, UC, EN, ADDRV and PCC, a memory read error, with
+    // only MCIP in MCG_STATUS: the interrupted code cannot restart.
+    let fatal = "bank 1: uncorrected memory read error, address 0x9876000; the processor's \
+                 state is corrupt (status 0xb60000000000009f)";
+    vm.monitor("mce 0 1 0xb60000000000009f 0x4 0x9876000 0")?;
+    vm.expect("Radix panic on CPU 0")?;
+    vm.expect("Machine check (#MC) at 0x")?;
+    vm.expect(&format!("{fatal}; the interrupted code cannot restart"))?;
+    vm.expect("Crash log: boot 2; the previous boot (1) ended with a kernel panic")?;
+    vm.expect(&format!("Machine check: CPU 0 {}", fatal.replacen(':', ", at boot:", 1)))?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.press_power_button()?;
+    vm.expect("spark: the power button was pressed; powering off the machine")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn watchdog_esb(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    watchdog_restarts(vm, case, "the Intel 6300ESB watchdog, with timeouts from 1 to 2082 s")
+}
+
+fn watchdog_tco(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    watchdog_restarts(vm, case, "the Intel ICH9 TCO timer, with timeouts from 4 to 1227 s")
+}
+
+/// Spark, asked to stop responding, leaves the watchdog `found` unpetted,
+/// and it restarts the machine. With `kdb` on the command line, kdb waits
+/// at the end of each boot, and in the first pets the watchdog for twice
+/// its timeout, until it is told to continue. The next boot says the
+/// watchdog restarted it, Spark pets the watchdog for twice its timeout,
+/// and the power button powers off.
+fn watchdog_restarts(vm: &mut Vm, case: &Case, found: &str) -> Result<(), String> {
+    let name = found.split(", with").next().unwrap_or(found);
+    let started =
+        format!("Watchdog: `spark` started {name}: the machine restarts unless petted every 12 s");
+    let kdb = case.cmdline.starts_with("kdb ");
+    for boot in 1..=2 {
+        boot_report(vm, case)?;
+        // Said before the boot report ends.
+        let log = vm.log();
+        if !log.contains(&format!("Watchdog: {found}; Spark starts it")) {
+            return Err(format!("boot {boot}: the kernel did not find {name}"));
+        }
+        vm.expect("Boot complete.")?;
+        if kdb {
+            // kdb stops kmain's CPU; Spark runs on the other.
+            vm.expect("kdb on CPU ")?;
+        }
+        vm.expect(&started)?;
+        if boot == 1 {
+            vm.expect("spark: not responding, as --test-hang asks, until the watchdog restarts")?;
+        } else {
+            vm.expect(
+                "spark: the watchdog restarted the machine: the last boot stopped responding",
+            )?;
+        }
+        if kdb {
+            if boot == 1 {
+                std::thread::sleep(Duration::from_secs(24));
+                if vm.log().matches("Boot complete.").count() != 1 {
+                    return Err("the watchdog restarted the machine while kdb petted it".into());
+                }
+            }
+            vm.kdb("", &[])?;
+            vm.send("continue\r")?;
+            vm.expect("kdb: continuing")?;
+        }
+    }
+    let restarted =
+        format!("Watchdog: {name} restarted the machine: the boot before this one hung");
+    if !vm.log().contains(&restarted) {
+        return Err(format!(
+            "the kernel does not say the watchdog restarted it: no \"{restarted}\""
+        ));
+    }
+    // Petted, it lets the machine run on.
+    std::thread::sleep(Duration::from_secs(24));
+    let log = vm.log();
+    if log.matches("Boot complete.").count() != 2 {
+        return Err("the watchdog restarted a machine whose Spark petted it".into());
+    }
+    if !log.contains("consoled: 6 consoles; tty1 is shown") {
+        return Err("the second boot did not start the consoles".into());
+    }
+    vm.press_power_button()?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

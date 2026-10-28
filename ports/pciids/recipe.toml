@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The PCI ID database (ADR 0144): the names of PCI vendors, devices,
+# subsystems and classes, which lspci(8) shows, from the PCI ID Project,
+# in /system/resources/hwdata/pci.ids, where hwdata puts it on Linux
+# (/usr/share/hwdata).
+#
+# Only data is taken, no code. The database may be distributed under the
+# GPL, version 2 or later, or the 3-clause BSD license; Dukovo takes the
+# BSD license. Its README says so, and names the copyright holders.
+name = "pciids"
+version = "2026.10.28"
+summary = "the PCI ID database, which names PCI devices"
+license = "BSD-3-Clause"
+homepage = "https://pci-ids.ucw.cz/"
+image = ["system/resources/hwdata/pci.ids"]
+notices = ["README.md"]
+
+# The history of pci.ids, one commit for each daily snapshot.
+[source]
+git = "https://github.com/pciutils/pciids.git"
+commit = "6bf2473e60693bcc2d8e778da53034678f4ace55"

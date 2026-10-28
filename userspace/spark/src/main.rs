@@ -193,13 +193,20 @@ fn run() -> Option<Supervisor> {
     // `--no-volumes` leaves every disk's filesystems unmounted, for the
     // disk check, which writes over a whole disk (ADR 0124); `--compress
     // <disk>` has the Btrfs of a disk compress what is written to it
-    // (ADR 0134).
+    // (ADR 0134); `--watchdog <seconds>` sets the hardware watchdog's
+    // timeout, 0 to leave it off, and `--test-hang` has Spark stop
+    // responding once it runs, for the watchdog's boot test (ADR 0143).
     let (mut volumes, mut compress) = (true, Vec::new());
+    let (mut watchdog, mut hang) = (supervisor::WATCHDOG_SECONDS, false);
     loop {
         if words.next_if_eq(&"--no-volumes").is_some() {
             volumes = false;
         } else if words.next_if_eq(&"--compress").is_some() {
             compress.extend(words.next());
+        } else if words.next_if_eq(&"--watchdog").is_some() {
+            watchdog = words.next().and_then(|w| w.parse().ok()).unwrap_or(watchdog);
+        } else if words.next_if_eq(&"--test-hang").is_some() {
+            hang = true;
         } else {
             break;
         }
@@ -210,6 +217,7 @@ fn run() -> Option<Supervisor> {
     seed_settings(&root);
     let Ok(supervised) = Dir::at(root.slot()) else { return None };
     let mut supervisor = Supervisor::new(supervised);
+    supervisor.set_watchdog(watchdog, hang);
     supervisor.listen();
     let (mut with_services, mut services) = (false, SERVICES_DIR);
     loop {
