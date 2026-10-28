@@ -249,9 +249,8 @@ fn check_root(root: &Dir, after: bool) {
         Err(err) => return fail(&format!("/processes/mounts: {err}")),
     };
     // The last mount at a path is the one seen there.
-    let mount = |at: &str| {
-        mounts.lines().rfind(|line| line.split(' ').nth(1) == Some(at)).unwrap_or("")
-    };
+    let mount =
+        |at: &str| mounts.lines().rfind(|line| line.split(' ').nth(1) == Some(at)).unwrap_or("");
     let system = mount("/system");
     check(system.ends_with(" /system btrfs ro label=dukovo-root"), || {
         format!("/system is not the read-only system of Dukovo's root: `{system}`")
