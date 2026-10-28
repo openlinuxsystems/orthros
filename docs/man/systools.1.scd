@@ -94,6 +94,8 @@ error that starts with the tool's name.
 :  memory, CPU and disk activity
 |  *watch*(1)
 :  run a command again and again
+|  *watchdog*(8)
+:  the hardware watchdog Spark pets
 |  *which*(1)
 :  where a command is
 |  *xxd*(1)

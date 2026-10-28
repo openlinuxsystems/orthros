@@ -111,9 +111,15 @@ fn enter(session: &Session<'_>, why: &str) {
     ));
     let mut editor = LineEditor::<LINE>::new();
     Arch::console_write("kdb> ");
+    let mut idle: u32 = 0;
     loop {
         let Some(byte) = Arch::console_read() else {
             Arch::delay_us(100);
+            idle = idle.wrapping_add(1);
+            // About once a second, so the watchdog leaves the debugger be.
+            if idle.is_multiple_of(10_000) {
+                crate::watchdog::pet_from_kdb();
+            }
             continue;
         };
         let Some(line) = editor.feed(byte, &mut |echo| Arch::console_write(echo)) else {

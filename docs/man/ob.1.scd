@@ -312,6 +312,17 @@ _target/userspace/_).
 		services and power the machine off, and QEMU end on ACPI's S5
 		(*radix-power*(2), *spark*(8)).
 
+	*watchdog*, *watchdog-tco*
+		Boot with *--watchdog 12 --test-hang* for Spark, with QEMU's
+		i6300esb under BIOS (*watchdog*) or with the TCO timer of q35's
+		ICH9 under UEFI (*watchdog-tco*). The kernel must find the
+		watchdog and Spark start it, then stop responding; the watchdog
+		must restart the machine, and the next boot must say it did.
+		*watchdog* also boots with *kdb*, which must keep the machine
+		from restarting while it waits, for twice the timeout. Spark
+		then pets it for twice its timeout without a restart, and the
+		power button powers the machine off (*spark*(8)'s *WATCHDOG*).
+
 	*spark-oom*
 		Boot with 256 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its

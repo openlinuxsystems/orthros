@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -41,7 +41,12 @@ the rest, leaves every disk's filesystems unmounted, for the disk check
 _disk_, before the rest and as often as needed, mounts the Btrfs of the
 device _disk_ (such as *vdb* or *nvme0n1p2*) to compress the data written
 to it with zstd, as Linux's *compress=zstd:1* mount option does; other
-disks are written as they are.
+disks are written as they are. *--watchdog* _seconds_, before the rest,
+sets the hardware watchdog's timeout (60 seconds unless it is given; 0
+leaves the watchdog off), and *--test-hang* has Spark stop responding
+once it has started the watchdog, unless the watchdog restarted the
+machine at the end of the last boot: the *watchdog* boot test's (see
+*WATCHDOG*).
 
 # STARTING
 
@@ -312,6 +317,25 @@ spark: shutting down to power off: stopping 1 services
 
 Where the kernel cannot hear it, the firmware keeps the button.
 
+# WATCHDOG
+
+Once it supervises, Spark starts the machine's hardware watchdog, where
+the kernel drives one (QEMU's i6300esb, or the TCO timer of an Intel ICH9
+or ICH10; *radix-power*(2)'s *start_watchdog*), with a timeout of 60
+seconds, and pets it every third of that from its loop. If Spark stops
+responding, or the kernel stops running it, the watchdog restarts the
+machine, as systemd's *RuntimeWatchdogSec* does; the next boot says so:
+
+```
+Watchdog: the Intel 6300ESB watchdog restarted the machine: the boot before this one hung
+Watchdog: `spark` started the Intel 6300ESB watchdog: the machine restarts unless petted every 60 s
+spark: the watchdog restarted the machine: the last boot stopped responding
+```
+
+Powering off or restarting gives the watchdog its longest timeout, up to
+ten minutes, while the kernel writes the filesystems back; halting stops
+it. *watchdog*(8) shows its state.
+
 # POSIX PROGRAMS
 
 With *--posix* as its first argument, Spark runs the program after it as
@@ -499,4 +523,5 @@ _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory poli
 *service*(8), *shutdown*(8), *reboot*(8), *consoled*(8), *dukovo-boot*(7),
 *radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
 *radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
-*radix-resource-domain*(2), *radix-power*(2), *radix-startup*(2), *ob*(1)
+*radix-resource-domain*(2), *radix-power*(2), *radix-startup*(2), *ob*(1),
+*watchdog*(8)

@@ -184,6 +184,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    poweroff
   power-button     pressing the ACPI power button powers the machine off,
                    after Spark stops the services
+  watchdog, watchdog-tco   a Spark that stops responding leaves the hardware
+                   watchdog unpetted, and it restarts the machine (QEMU's
+                   i6300esb under BIOS, q35's TCO timer under UEFI)
   spark-oom        a service that runs the machine out of memory is stopped
                    and started again
   spark-stop       Spark stops a service that ignores SIGTERM, and what a

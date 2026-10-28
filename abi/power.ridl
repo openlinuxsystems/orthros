@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The power capability (Phase 9, ADR 0099): turning the machine off,
-//! restarting it or halting it, and hearing its power button (Phase 11,
-//! ADR 0142).
+//! restarting it or halting it, hearing its power button (Phase 11,
+//! ADR 0142), and its hardware watchdog (Phase 11, ADR 0143).
 //!
 //! Spark gets the one capability to it when it starts and keeps it
 //! (spark(8)): shutdown(8), reboot(8), poweroff(8) and halt(8) ask Spark,
@@ -11,11 +11,13 @@
 //! methods. Each first writes back every filesystem with changes (as
 //! sync(2) does), logs what it does, and does not return once it has
 //! worked. Pressing the power button asks Spark the same as poweroff(8).
+//! Spark starts the watchdog and pets it while it runs, so that a Spark
+//! that stops responding, or a kernel, restarts the machine.
 
 module power;
 
 /// The machine's power. Every method needs the control right.
-interface power = 0x000e version 2 {
+interface power = 0x000e version 3 {
     kind = power;
     /// Turns the machine off: ACPI's S5 state on a PC. Fails with
     /// not_supported, after syncing, if the firmware gives no way to.
@@ -36,5 +38,24 @@ interface power = 0x000e version 2 {
     /// one that is not an ACPI fixed feature, whose presses only AML
     /// tells of. Needs the send right on the notification.
     method notify_button = 4 (notification: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+    /// Starts the machine's hardware watchdog, or changes its timeout:
+    /// unless `pet_watchdog` is called within `seconds`, which the kernel
+    /// clamps to the timeouts the watchdog takes, it restarts the machine.
+    /// Its count starts again from now. Returns the timeout set, and
+    /// whether the watchdog restarted the machine at the end of the boot
+    /// before this one. Powering off or restarting gives it its longest
+    /// timeout, up to ten minutes, while the filesystems are written back;
+    /// halting stops it. Fails with not_supported if the kernel drives no
+    /// watchdog.
+    method start_watchdog = 5 (seconds: u32) -> (seconds: u32, restarted: bool)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+    /// Pets the watchdog: its count starts again. Fails with
+    /// not_supported if it is not running.
+    method pet_watchdog = 6 () -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+    /// Stops the watchdog. Fails with not_supported if the kernel drives
+    /// none.
+    method stop_watchdog = 7 () -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
 }

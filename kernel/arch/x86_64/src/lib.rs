@@ -55,6 +55,7 @@ mod thread;
 mod time;
 mod user;
 mod vga;
+mod watchdog;
 
 use core::fmt;
 use core::ops::Range;
@@ -382,6 +383,22 @@ impl Devices for Arch {
 
     fn start_power_button(pressed: fn()) -> Option<&'static str> {
         sci::start(pressed)
+    }
+
+    fn find_watchdog() -> Option<radix_hal::Watchdog> {
+        watchdog::find()
+    }
+
+    fn watchdog_start(seconds: u32) -> u32 {
+        watchdog::start(seconds)
+    }
+
+    fn watchdog_pet() {
+        watchdog::pet();
+    }
+
+    fn watchdog_stop() {
+        watchdog::stop();
     }
 }
 
