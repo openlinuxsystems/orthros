@@ -86,6 +86,8 @@ error that starts with the tool's name.
 :  start, stop and look at the services
 |  *shutdown*(8)
 :  stop the system, now or later
+|  *subvolume*(8)
+:  make, snapshot and remove Btrfs subvolumes
 |  *taskset*(1)
 :  the CPUs a process may run on
 |  *top*(1)

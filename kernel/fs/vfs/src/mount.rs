@@ -573,6 +573,54 @@ impl Vfs {
         dir.node.remove(name)
     }
 
+    /// Makes `path` beneath `base` a new, empty subvolume
+    /// ([`crate::Node::make_subvolume`]).
+    pub fn make_subvolume(&self, base: &Location, path: &str) -> Result<()> {
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.node.make_subvolume(name)
+    }
+
+    /// Makes `to` beneath `to_base` a snapshot of the subvolume that holds
+    /// `source` beneath `base`, read-only if `read_only`
+    /// ([`crate::Node::snapshot`]).
+    pub fn snapshot(
+        &self,
+        base: &Location,
+        source: &str,
+        to_base: &Location,
+        to: &str,
+        read_only: bool,
+    ) -> Result<()> {
+        let from = self.resolve(base, source)?;
+        let (dir, name) = self.resolve_parent(to_base, to)?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.writable()?;
+        // On one filesystem, through whichever mounts of it, as Linux has
+        // it: the filesystem checks.
+        dir.node.snapshot(name, &from.node, read_only)
+    }
+
+    /// Removes the subvolume `path` beneath `base`, with everything in it
+    /// ([`crate::Node::remove_subvolume`]).
+    pub fn remove_subvolume(&self, base: &Location, path: &str) -> Result<()> {
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        let node = dir.node.lookup(name)?;
+        let mounted = self.mounted_on(&dir.mount, &node).is_some();
+        // Let go of it first: held here, the subvolume would be in use.
+        drop(node);
+        if mounted {
+            return Err(Error::InUse);
+        }
+        dir.node.remove_subvolume(name)
+    }
+
     /// Moves `from` beneath `base` to `to` beneath `to_base`, on one
     /// filesystem.
     pub fn rename(&self, base: &Location, from: &str, to_base: &Location, to: &str) -> Result<()> {

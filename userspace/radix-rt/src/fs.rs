@@ -300,6 +300,23 @@ impl Dir {
         Ok(directory::make_node(&SYS, self.held.slot, path.as_bytes(), kind, device)?)
     }
 
+    /// Makes a new, empty Btrfs subvolume at `path`.
+    pub fn make_subvolume(&self, path: &str) -> Result<()> {
+        Ok(directory::make_subvolume(&SYS, self.held.slot, path.as_bytes())?)
+    }
+
+    /// Makes `to` beneath `to_dir` a snapshot of the Btrfs subvolume that
+    /// holds `path`, read-only if `read_only`.
+    pub fn snapshot(&self, path: &str, to_dir: &Dir, to: &str, read_only: bool) -> Result<()> {
+        let (slot, to_slot) = (self.held.slot, to_dir.held.slot);
+        Ok(directory::snapshot(&SYS, slot, path.as_bytes(), to_slot, to.as_bytes(), read_only)?)
+    }
+
+    /// Removes the Btrfs subvolume at `path`, with everything in it.
+    pub fn remove_subvolume(&self, path: &str) -> Result<()> {
+        Ok(directory::remove_subvolume(&SYS, self.held.slot, path.as_bytes())?)
+    }
+
     /// Where the symbolic link at `path` points.
     pub fn read_link(&self, path: &str) -> Result<Vec<u8>> {
         let mut target = alloc::vec![0u8; 256];

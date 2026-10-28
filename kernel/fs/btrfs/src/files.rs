@@ -21,9 +21,9 @@ use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Kind, Result};
 
 use crate::cow::Writer;
-use crate::csum::crc32c_update;
-use crate::format::{Key, item, name_hash, tree, u16_at, u32_at, u64_at};
+use crate::format::{Key, item, name_hash, tree, u16_at, u64_at};
 use crate::inode::Inode;
+use crate::refs::Backref;
 use crate::superblock::incompat;
 use crate::tree::{Block, Cursor, ITEM_SIZE};
 use crate::volume::Volume;
@@ -44,10 +44,6 @@ pub(crate) const ORPHAN_ITEM: u8 = 48;
 
 /// What a data extent's item says it is.
 const EXTENT_FLAG_DATA: u64 = 1 << 0;
-
-/// An inline reference to a tree that owns a data extent, for simple
-/// quotas (refused by the writer, skipped here).
-const EXTENT_OWNER_REF: u8 = 172;
 
 /// The size of a directory entry before its name.
 const DIR_HEADER: usize = 30;
@@ -148,14 +144,6 @@ pub(crate) fn file_type(kind: Kind) -> u8 {
     }
 }
 
-/// The key of a data extent's reference from a file, when it is an item
-/// of its own: Linux's `hash_extent_data_ref`.
-fn data_ref_hash(root: u64, ino: u64, offset: u64) -> u64 {
-    let high = crc32c_update(!0, &root.to_le_bytes());
-    let low = crc32c_update(crc32c_update(!0, &ino.to_le_bytes()), &offset.to_le_bytes());
-    (u64::from(high) << 31) ^ u64::from(low)
-}
-
 /// Where the entry named `name` is in the `DIR_ITEM` `data`: its start
 /// and length.
 fn dir_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>> {
@@ -220,32 +208,6 @@ fn ref_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize, u64)>> {
     Ok(None)
 }
 
-/// Where the file `ino` of tree `root`'s reference with `offset` is
-/// among the inline references of the data extent item `data`.
-fn inline_ref(data: &[u8], root: u64, ino: u64, offset: u64) -> Result<Option<usize>> {
-    let mut at = EXTENT_HEADER;
-    while at < data.len() {
-        let size = match data[at] {
-            item::EXTENT_DATA_REF => 1 + DATA_REF,
-            item::SHARED_DATA_REF => 1 + 12,
-            item::TREE_BLOCK_REF | item::SHARED_BLOCK_REF | EXTENT_OWNER_REF => 1 + 8,
-            _ => return Err(Error::Corrupt),
-        };
-        if at + size > data.len() {
-            return Err(Error::Corrupt);
-        }
-        if data[at] == item::EXTENT_DATA_REF
-            && u64_at(data, at + 1) == root
-            && u64_at(data, at + 9) == ino
-            && u64_at(data, at + 17) == offset
-        {
-            return Ok(Some(at));
-        }
-        at += size;
-    }
-    Ok(None)
-}
-
 /// A file extent item's fields.
 #[derive(Clone, Copy)]
 struct FileExtent {
@@ -278,6 +240,17 @@ impl FileExtent {
             len: u64_at(data, 45),
         })
     }
+}
+
+/// The data extent the file extent item `data` names: its address, its
+/// size and the offset in it the item starts at; `None` if it names
+/// none, inline or a hole.
+pub(crate) fn disk_extent(data: &[u8]) -> Result<Option<(u64, u64, u64)>> {
+    let extent = FileExtent::read(data)?;
+    if extent.kind == extent_type::INLINE || extent.disk_bytenr == 0 {
+        return Ok(None);
+    }
+    Ok(Some((extent.disk_bytenr, extent.disk_num_bytes, extent.offset)))
 }
 
 /// A subvolume, changed in the running transaction.
@@ -482,7 +455,7 @@ impl Files<'_> {
 
     /// Adds `bytes` to the end of item `key` of tree `tree`, made if it is
     /// missing.
-    fn append(&mut self, tree: u64, key: &Key, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn append(&mut self, tree: u64, key: &Key, bytes: &[u8]) -> Result<()> {
         // Most often it is missing (a name's hash or a file's directory
         // seldom has one already): one walk down the tree.
         match self.w.insert(self.volume, tree, key, bytes) {
@@ -496,7 +469,14 @@ impl Files<'_> {
 
     /// Cuts `len` bytes from `start` out of item `key` of tree `tree`,
     /// `old` long; deletes it when nothing is left.
-    fn cut(&mut self, tree: u64, key: &Key, old: usize, start: usize, len: usize) -> Result<()> {
+    pub(crate) fn cut(
+        &mut self,
+        tree: u64,
+        key: &Key,
+        old: usize,
+        start: usize,
+        len: usize,
+    ) -> Result<()> {
         if old == len {
             return self.w.delete(self.volume, tree, key);
         }
@@ -516,8 +496,31 @@ impl Files<'_> {
         index: u64,
         now: u64,
     ) -> Result<()> {
+        self.add_dir_entries(dir, name, &Key::new(ino, item::INODE_ITEM, 0), ft, index, now)?;
+        let mut reference = crate::zeroed(REF_HEADER + name.len())?;
+        put_u64(&mut reference, 0, index);
+        put_u16(&mut reference, 8, name.len() as u16);
+        reference[REF_HEADER..].copy_from_slice(name);
+        let key = Key::new(ino, item::INODE_REF, dir);
+        match self.w.insert(self.volume, self.subvol, &key, &reference) {
+            Err(Error::Exists) => self.add_reference(&key, &reference, dir, index, name),
+            made => made,
+        }
+    }
+
+    /// Names what `location` is, of type byte `ft`, `name` in directory
+    /// `dir`, at index `index`: the directory's two entries, and its size
+    /// and times.
+    pub(crate) fn add_dir_entries(
+        &mut self,
+        dir: u64,
+        name: &[u8],
+        location: &Key,
+        ft: u8,
+        index: u64,
+        now: u64,
+    ) -> Result<()> {
         let mut entry = crate::zeroed(DIR_HEADER + name.len())?;
-        let location = Key::new(ino, item::INODE_ITEM, 0);
         put_u64(&mut entry, 0, location.objectid);
         entry[8] = location.kind;
         put_u64(&mut entry, 9, location.offset);
@@ -527,15 +530,6 @@ impl Files<'_> {
         entry[DIR_HEADER..].copy_from_slice(name);
         self.append(self.subvol, &Key::new(dir, item::DIR_ITEM, name_hash(name)), &entry)?;
         self.w.insert(self.volume, self.subvol, &Key::new(dir, item::DIR_INDEX, index), &entry)?;
-        let mut reference = crate::zeroed(REF_HEADER + name.len())?;
-        put_u64(&mut reference, 0, index);
-        put_u16(&mut reference, 8, name.len() as u16);
-        reference[REF_HEADER..].copy_from_slice(name);
-        let key = Key::new(ino, item::INODE_REF, dir);
-        match self.w.insert(self.volume, self.subvol, &key, &reference) {
-            Err(Error::Exists) => self.add_reference(&key, &reference, dir, index, name)?,
-            made => made?,
-        }
         self.change_inode(dir, |d| {
             put_u64(d, at::SIZE, u64_at(d, at::SIZE) + 2 * name.len() as u64);
             put_time(d, at::MTIME, now);
@@ -575,10 +569,7 @@ impl Files<'_> {
     /// directory's two entries and the inode's reference, and the
     /// directory's size and times.
     pub(crate) fn remove_entry(&mut self, dir: u64, name: &[u8], ino: u64, now: u64) -> Result<()> {
-        let key = Key::new(dir, item::DIR_ITEM, name_hash(name));
-        let entries = self.get(self.subvol, &key)?.ok_or(Error::Corrupt)?;
-        let (start, len) = dir_entry(&entries, name)?.ok_or(Error::Corrupt)?;
-        self.cut(self.subvol, &key, entries.len(), start, len)?;
+        self.cut_dir_item(dir, name)?;
         let ref_key = Key::new(ino, item::INODE_REF, dir);
         let found = match self.get(self.subvol, &ref_key)? {
             Some(refs) => ref_entry(&refs, name)?.map(|at| (ref_key, refs.len(), at)),
@@ -593,6 +584,26 @@ impl Files<'_> {
             }
         };
         self.cut(self.subvol, &key, old, start, len)?;
+        self.drop_dir_index(dir, name, index, now)
+    }
+
+    /// Takes the entry `name` out of directory `dir`'s `DIR_ITEM`.
+    pub(crate) fn cut_dir_item(&mut self, dir: u64, name: &[u8]) -> Result<()> {
+        let key = Key::new(dir, item::DIR_ITEM, name_hash(name));
+        let entries = self.get(self.subvol, &key)?.ok_or(Error::Corrupt)?;
+        let (start, len) = dir_entry(&entries, name)?.ok_or(Error::Corrupt)?;
+        self.cut(self.subvol, &key, entries.len(), start, len)
+    }
+
+    /// Deletes directory `dir`'s entry at `index`, named `name`, and sets
+    /// its size and times.
+    pub(crate) fn drop_dir_index(
+        &mut self,
+        dir: u64,
+        name: &[u8],
+        index: u64,
+        now: u64,
+    ) -> Result<()> {
         self.w.delete(self.volume, self.subvol, &Key::new(dir, item::DIR_INDEX, index))?;
         self.change_inode(dir, |d| {
             put_u64(d, at::SIZE, u64_at(d, at::SIZE).saturating_sub(2 * name.len() as u64));
@@ -876,92 +887,34 @@ impl Files<'_> {
         })
     }
 
-    /// The key of file `ino`'s reference to the data extent at `bytenr`
-    /// with `offset`, when it is an item of its own, and its count.
-    fn keyed_ref(&self, bytenr: u64, ino: u64, offset: u64) -> Result<Option<(Key, u32)>> {
-        let mut key =
-            Key::new(bytenr, item::EXTENT_DATA_REF, data_ref_hash(self.subvol, ino, offset));
-        // Hashes alike go to the next key free, as Linux places them.
-        while let Some((found, data)) = self.next(tree::EXTENT, &key)?
-            && found.is(bytenr, item::EXTENT_DATA_REF)
-        {
-            if u64_at(&data, 0) == self.subvol
-                && u64_at(&data, 8) == ino
-                && u64_at(&data, 16) == offset
-            {
-                return Ok(Some((found, u32_at(&data, 24))));
-            }
-            key = Key::new(bytenr, item::EXTENT_DATA_REF, found.offset.wrapping_add(1));
-            if found.offset == u64::MAX {
-                break;
-            }
-        }
-        Ok(None)
-    }
-
     /// Adds one to file `ino`'s count of names for the data extent
     /// `[bytenr, bytenr + len)` with `offset`: a cut made it two items.
     fn add_data_ref(&mut self, bytenr: u64, len: u64, ino: u64, offset: u64) -> Result<()> {
         let key = Key::new(bytenr, item::EXTENT_ITEM, len);
-        let data = self.get(tree::EXTENT, &key)?.ok_or(Error::Corrupt)?;
-        let inline = inline_ref(&data, self.subvol, ino, offset)?;
-        let keyed = match inline {
-            Some(_) => None,
-            None => Some(self.keyed_ref(bytenr, ino, offset)?.ok_or(Error::Corrupt)?),
-        };
-        self.w.update(self.volume, tree::EXTENT, &key, |d| {
-            put_u64(d, 0, u64_at(d, 0) + 1);
-            if let Some(at) = inline {
-                put_u32(d, at + 25, u32_at(d, at + 25) + 1);
-            }
-        })?;
-        if let Some((rkey, count)) = keyed {
-            self.w.update(self.volume, tree::EXTENT, &rkey, |d| put_u32(d, 24, count + 1))?;
-        }
-        Ok(())
+        self.w.add_ref(self.volume, &key, Backref::Data { root: self.subvol, ino, offset }, 1)
     }
 
     /// Takes one from file `ino`'s count of names for the data extent
     /// `[bytenr, bytenr + len)` with `offset`, and frees the extent and
-    /// its checksums once no name is left.
+    /// its checksums once nothing refers to it.
     fn drop_data_ref(&mut self, bytenr: u64, len: u64, ino: u64, offset: u64) -> Result<()> {
         let key = Key::new(bytenr, item::EXTENT_ITEM, len);
-        let data = self.get(tree::EXTENT, &key)?.ok_or(Error::Corrupt)?;
-        let refs = u64_at(&data, 0);
-        match inline_ref(&data, self.subvol, ino, offset)? {
-            Some(at) => {
-                let count = u32_at(&data, at + 25);
-                if refs > 1 && count > 1 {
-                    self.w.update(self.volume, tree::EXTENT, &key, |d| {
-                        put_u64(d, 0, refs - 1);
-                        put_u32(d, at + 25, count - 1);
-                    })?;
-                } else if refs > 1 {
-                    self.w.update(self.volume, tree::EXTENT, &key, |d| put_u64(d, 0, refs - 1))?;
-                    self.cut(tree::EXTENT, &key, data.len(), at, 1 + DATA_REF)?;
-                }
-            }
-            None => {
-                let (rkey, count) = self.keyed_ref(bytenr, ino, offset)?.ok_or(Error::Corrupt)?;
-                if count > 1 {
-                    self.w
-                        .update(self.volume, tree::EXTENT, &rkey, |d| put_u32(d, 24, count - 1))?;
-                } else {
-                    self.w.delete(self.volume, tree::EXTENT, &rkey)?;
-                }
-                if refs > 1 {
-                    self.w.update(self.volume, tree::EXTENT, &key, |d| put_u64(d, 0, refs - 1))?;
-                }
-            }
+        self.drop_data(&key, Backref::Data { root: self.subvol, ino, offset })
+    }
+
+    /// Takes the reference `r` from the data extent of item `key`, and
+    /// frees the extent and its checksums once nothing refers to it.
+    pub(crate) fn drop_data(&mut self, key: &Key, r: Backref) -> Result<()> {
+        let data = self.get(tree::EXTENT, key)?.ok_or(Error::Corrupt)?;
+        // An extent only this refers to, the most common, goes as it is.
+        if !r.only(&data)? && self.w.drop_ref(self.volume, key, r)? != 0 {
+            return Ok(());
         }
-        if refs <= 1 {
-            self.w.delete(self.volume, tree::EXTENT, &key)?;
-            self.delete_sums(bytenr, len)?;
-            // An extent this transaction wrote is named by no tree on the disk.
-            let made = u64_at(&data, 8) == self.w.generation;
-            self.w.free_data(bytenr, len, made)?;
-        }
-        Ok(())
+        self.w.delete(self.volume, tree::EXTENT, key)?;
+        self.delete_sums(key.objectid, key.offset)?;
+        // An extent this transaction wrote is named by no tree on the disk.
+        let made = u64_at(&data, 8) == self.w.generation;
+        self.w.free_data(key.objectid, key.offset, made)
     }
 
     /// The key of the checksum item from logical address `at`.

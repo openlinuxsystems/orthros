@@ -1457,7 +1457,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "root",
-        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot; Linux's btrfs check passes after each boot",
+        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot, as is a read-only snapshot of /users; Linux's btrfs check passes after each boot",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage root",
@@ -4286,19 +4286,23 @@ fn root_checked(disk: &DiskImage, log: &str) -> Result<(), String> {
 
 /// The `root` test's first boot: Spark finds Dukovo's root on the disk,
 /// mounts its subvolumes and copies the default settings in; the program
-/// checks the mounts and that `/system` refuses changes, and writes a
-/// file to each of the others.
+/// checks the mounts and that `/system` refuses changes, writes a file to
+/// each of the others, and makes a read-only snapshot of `/users` that
+/// keeps its file as it was (ADR 0138).
 fn root_write(vm: &mut Vm, _: &Case) -> Result<(), String> {
     root_boot(vm, true)?;
     vm.expect("storage: /system: writes fail with read_only")?;
+    vm.expect("storage: a snapshot of /users keeps its file as /users changes it")?;
     storage_end(vm, "root")
 }
 
 /// The `root` test's second boot: the same, with no default settings to
-/// add, and the program reads the files back.
+/// add, and the program reads the files back, the snapshot's too, and
+/// removes the snapshot.
 fn root_read(vm: &mut Vm, _: &Case) -> Result<(), String> {
     root_boot(vm, false)?;
     vm.expect("storage: /system: writes fail with read_only")?;
+    vm.expect("storage: the snapshot of /users kept its file, and went")?;
     storage_end(vm, "rooted")
 }
 

@@ -101,6 +101,10 @@ pub struct BtrfsNode {
     me: Once<Weak<BtrfsNode, Alloc>>,
 }
 
+/// The inode number of the empty directory a snapshot has where its
+/// source named a subvolume, Linux's `BTRFS_EMPTY_SUBVOL_DIR_OBJECTID`.
+const EMPTY_SUBVOL_DIR: u64 = 2;
+
 /// A number for the inode `ino` of subvolume `subvol`, unique among the
 /// filesystem's nodes: the inode number in the top subvolume, as Linux's
 /// `st_ino` is, and with the subvolume's number from bit 40 in the others
@@ -1007,6 +1011,65 @@ impl BtrfsNode {
         Ok((ino, inode))
     }
 
+    /// Whether subvolume `id` is named `name` in this directory, as the
+    /// root tree's reference says. The caller holds the transaction on a
+    /// writable mount.
+    fn names_subvolume(&self, id: u64, name: &str) -> Result<bool> {
+        let volume = &self.fs.volume;
+        let key = Key::new(self.subvol, item::ROOT_REF, id);
+        let Some(data) = crate::tree::find(volume, &volume.root_tree(), &key)? else {
+            return Ok(false);
+        };
+        Ok(data.len() >= 18
+            && crate::format::u64_at(&data, 0) == self.ino
+            && data[18..] == *name.as_bytes())
+    }
+
+    /// Whether the entry `name` of this directory is a subvolume's.
+    fn is_subvolume(&self, name: &str) -> Result<bool> {
+        let _txn = self.fs.reading();
+        Ok(self.entry(name)?.is_some_and(|location| location.kind == item::ROOT_ITEM))
+    }
+
+    /// Removes the subvolume `name` of this directory, with everything in
+    /// it, or with `empty` only if nothing is. The caller committed. Not
+    /// the default subvolume, which a mount opens when none is named, nor
+    /// one with a node in use or a subvolume in it.
+    fn drop_subvolume(&self, txn: &mut Txn, name: &str, empty: bool, time: u64) -> Result<()> {
+        let volume = &self.fs.volume;
+        let location = self.entry(name)?.ok_or(Error::NotFound)?;
+        if location.kind != item::ROOT_ITEM {
+            return Err(Error::NotSupported);
+        }
+        let id = location.objectid;
+        if !self.names_subvolume(id, name)? {
+            // A snapshot's copy of its source's entry, which is empty.
+            if !empty {
+                return Err(Error::NotSupported);
+            }
+            let mut files = txn.files(volume, self.subvol);
+            files.whole(|f| f.unlink_stub(self.ino, name.as_bytes(), time))?;
+            return self.reload(&files);
+        }
+        let (_, top, _) = volume.subvolume(id)?.ok_or(Error::Corrupt)?;
+        if empty && !txn.files(volume, id).is_empty_dir(top)? {
+            return Err(Error::NotEmpty);
+        }
+        if id == crate::fs::default_subvolume(volume)? || self.fs.in_use(id) {
+            return Err(Error::InUse);
+        }
+        {
+            let mut files = txn.files(volume, self.subvol);
+            if files.has_subvolumes(id)? {
+                return Err(Error::NotEmpty);
+            }
+            files.whole(|f| f.remove_subvolume(self.ino, name.as_bytes(), id, time))?;
+            self.reload(&files)?;
+        }
+        txn.forget(id);
+        Ok(())
+    }
+
     /// After a change to inode `ino`: its node in use reads its item again,
     /// and is marked removed if it has no names left.
     fn after(&self, files: &Files<'_>, ino: u64, gone: bool) -> Result<()> {
@@ -1187,6 +1250,12 @@ impl Node for BtrfsNode {
         self.is_dir()?;
         let _reading = self.fs.reading();
         let location = self.entry(name)?.ok_or(Error::NotFound)?;
+        // A subvolume a snapshot's source held is not in the snapshot: its
+        // entry there is an empty directory, as Linux's
+        // `fixup_tree_root_location` finds.
+        if location.kind == item::ROOT_ITEM && !self.names_subvolume(location.objectid, name)? {
+            return Ok(radix_vfs::synthetic::FixedDir::new(id_of(self.subvol, EMPTY_SUBVOL_DIR))?);
+        }
         self.open_entry(&location)
     }
 
@@ -1405,6 +1474,12 @@ impl Node for BtrfsNode {
         self.is_dir()?;
         check_name(name)?;
         self.writes()?;
+        // An empty subvolume goes as an empty directory does, as on Linux.
+        if self.is_subvolume(name)? {
+            self.fs.sync()?;
+            let time = now();
+            return self.fs.alone(true, |txn| self.drop_subvolume(txn, name, true, time));
+        }
         let time = now();
         let mut taken = None;
         let removed = self.fs.freeing(|txn| {
@@ -1442,6 +1517,54 @@ impl Node for BtrfsNode {
             node.flush()?;
         }
         removed
+    }
+
+    fn make_subvolume(&self, name: &str) -> Result<()> {
+        self.is_dir()?;
+        check_name(name)?;
+        self.writes()?;
+        let time = now();
+        self.fs.change(|txn| {
+            if self.entry(name)?.is_some() {
+                return Err(Error::Exists);
+            }
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            files.whole(|f| f.make_subvolume(self.ino, name.as_bytes(), time))?;
+            self.reload(&files)
+        })
+    }
+
+    fn snapshot(&self, name: &str, source: &NodeRef, read_only: bool) -> Result<()> {
+        self.is_dir()?;
+        check_name(name)?;
+        self.writes()?;
+        // The subvolume `source` is in, as Linux snapshots it.
+        let source = radix_vfs::downcast::<BtrfsNode>(&**source).ok_or(Error::CrossMount)?;
+        if !KArc::ptr_eq(&source.fs, &self.fs) {
+            return Err(Error::CrossMount);
+        }
+        // What is written so far is in it.
+        self.fs.sync()?;
+        let time = now();
+        self.fs.alone(false, |txn| {
+            if self.entry(name)?.is_some() {
+                return Err(Error::Exists);
+            }
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            files
+                .whole(|f| f.snapshot(source.subvol, self.ino, name.as_bytes(), read_only, time))?;
+            self.reload(&files)
+        })
+    }
+
+    fn remove_subvolume(&self, name: &str) -> Result<()> {
+        self.is_dir()?;
+        check_name(name)?;
+        self.writes()?;
+        // Its nodes waiting for the sync go first.
+        self.fs.sync()?;
+        let time = now();
+        self.fs.alone(true, |txn| self.drop_subvolume(txn, name, false, time))
     }
 
     fn rename(&self, from: &str, to_dir: &dyn Node, to: &str) -> Result<()> {

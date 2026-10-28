@@ -194,9 +194,9 @@ interface directory = 0x000b version 5 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, read_only, no_space,
                 name_too_long, bad_name, outside, io, corrupt, too_many_links];
-    /// Removes the file, symbolic link or empty directory at `path`. A
-    /// file still open lives on until its last capability goes. Needs the
-    /// write right.
+    /// Removes the file, symbolic link or empty directory, an empty Btrfs
+    /// subvolume too, at `path`. A file still open lives on until its last
+    /// capability goes. Needs the write right.
     method remove = 3 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, not_empty, read_only, name_too_long,
@@ -345,4 +345,36 @@ interface directory = 0x000b version 5 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, read_only, no_space,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
+    /// Makes a new, empty Btrfs subvolume at `path`, as
+    /// btrfs-subvolume(8)'s `create` does: a directory whose files are a
+    /// tree of their own, which `snapshot` copies at once (ADR 0138).
+    /// Other filesystems fail with invalid_argument. Needs the write
+    /// right.
+    method make_subvolume = 19 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt, too_many_links];
+    /// Makes `to` beneath the directory in slot `to_dir` a snapshot of
+    /// the Btrfs subvolume that holds `path`, read-only if `read_only`, as
+    /// btrfs-subvolume(8)'s `snapshot` makes one: what the subvolume holds
+    /// now, what was written but not yet synced included, in blocks the
+    /// two share until either changes them. A subvolume in the source is
+    /// an empty directory in the snapshot, as on Linux. On the same
+    /// filesystem, or cross_mount; other filesystems fail with
+    /// invalid_argument. Needs the write right on `to_dir`.
+    method snapshot = 20 (path: in bytes, to_dir: slot, to: in bytes, read_only: bool) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, cross_mount, io, corrupt, too_many_links];
+    /// Removes the Btrfs subvolume at `path` with everything in it, as
+    /// btrfs-subvolume(8)'s `delete` does, freeing what no snapshot
+    /// shares; `remove` takes an empty one too. Fails with not_empty while
+    /// it holds a subvolume, with in_use while a file in it is open or
+    /// while it is the filesystem's default subvolume (Linux lets open
+    /// files live on, and refuses the default with EPERM), and with
+    /// invalid_argument if it is no subvolume. Needs the write right.
+    method remove_subvolume = 21 (path: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, not_empty, read_only, no_space,
+                name_too_long, bad_name, outside, in_use, io, corrupt, too_many_links];
 }

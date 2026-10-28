@@ -98,6 +98,20 @@ in memory: each boot starts afresh from the default settings, and
 `/applications`, `/users` and `/shared` start empty. An image for
 optical media (`./ob image --iso`) has no Dukovo root partition.
 
+The partition's top, with every subvolume in it, is mounted in
+`/volumes` too, under the partition's name. `subvolume`(8) makes,
+snapshots and removes subvolumes there, as Linux's `btrfs subvolume`
+does. A snapshot holds what its subvolume held when it was made, and
+shares the disk's blocks with it until either changes them, so it takes
+room only for what changes since. A read-only snapshot of `/users`:
+
+```sh
+subvolume snapshot -r /users /volumes/sda5/@snapshots/users-monday
+```
+
+Phase 15's `snap` makes, lists, restores and prunes snapshots on its
+own.
+
 To try it, boot the image as a SATA disk. QEMU keeps what is written
 only until it stops:
 
