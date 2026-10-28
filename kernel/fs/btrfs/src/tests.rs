@@ -546,5 +546,6 @@ fn a_cache_full_of_blocks_still_reads() {
 
 mod compressed;
 mod files;
+mod links;
 mod rw;
 mod write;

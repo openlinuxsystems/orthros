@@ -984,16 +984,19 @@ mod tests {
     use super::*;
     use crate::zstd::Zstd;
 
-    /// Compresses `data` and has the decoder give it back.
+    /// Compresses `data` and has the decoder give it back, with BMI2's
+    /// shifts where the host has them and without.
     fn round_trip(data: &[u8]) -> Option<usize> {
         let mut encoder = Encoder::new().unwrap();
         let mut frame = vec![0; MAX_BLOCK + 64];
         encoder.input()[..data.len()].copy_from_slice(data);
         let made = encoder.compress(data.len(), &mut frame, MAX_BLOCK + 32)?;
-        let mut out = vec![0; data.len()];
-        let got = Zstd::new().unwrap().decompress(&frame[..made], &mut out).unwrap();
-        assert_eq!(got, data.len());
-        assert!(out == data, "the frame of {} bytes gives other bytes", data.len());
+        for mut zstd in [Zstd::new().unwrap(), Zstd::new().unwrap().without_bmi2()] {
+            let mut out = vec![0; data.len()];
+            let got = zstd.decompress(&frame[..made], &mut out).unwrap();
+            assert_eq!(got, data.len());
+            assert!(out == data, "the frame of {} bytes gives other bytes", data.len());
+        }
         Some(made)
     }
 

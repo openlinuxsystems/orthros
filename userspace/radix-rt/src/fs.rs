@@ -21,7 +21,8 @@ use libradix::SYS;
 use radix_abi::Status;
 use radix_abi::capability::{self, ObjectKind, Rights};
 use radix_abi::directory::{
-    self, DirEntry, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags,
+    self, DirEntry, FileKind, FileStatus, FilesystemKind, LinkFlags, MountFlags, OpenFlags,
+    PathFlags,
 };
 use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::{file, startup};
@@ -99,6 +100,36 @@ pub struct Stat {
     pub accessed: u64,
     /// The number of the mount it is on, unique since boot.
     pub mount: u64,
+    /// When it last changed in any way, its names, times or size too
+    /// (0 if unknown).
+    pub changed: u64,
+    /// How many names it has.
+    pub links: u32,
+    /// The device a device node stands for (FileStatus's `device`).
+    pub device: u64,
+}
+
+impl From<&[u8; FileStatus::SIZE]> for Stat {
+    /// What a FileStatus `stat` wrote says.
+    fn from(bytes: &[u8; FileStatus::SIZE]) -> Stat {
+        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8]));
+        let links = bytes[FileStatus::OFFSET_LINKS..FileStatus::OFFSET_LINKS + 4]
+            .try_into()
+            .map_or(1, u32::from_le_bytes);
+        Stat {
+            kind: FileKind::from_raw(bytes[FileStatus::OFFSET_KIND]).unwrap_or(FileKind::File),
+            size: word(FileStatus::OFFSET_SIZE),
+            allocated: word(FileStatus::OFFSET_ALLOCATED),
+            id: word(FileStatus::OFFSET_ID),
+            created: word(FileStatus::OFFSET_CREATED),
+            modified: word(FileStatus::OFFSET_MODIFIED),
+            accessed: word(FileStatus::OFFSET_ACCESSED),
+            mount: word(FileStatus::OFFSET_MOUNT),
+            changed: word(FileStatus::OFFSET_CHANGED),
+            links,
+            device: word(FileStatus::OFFSET_DEVICE),
+        }
+    }
 }
 
 /// What `info` says of a directory's filesystem.
@@ -254,6 +285,21 @@ impl Dir {
         Ok(directory::make_link(&SYS, self.held.slot, path.as_bytes(), target.as_bytes())?)
     }
 
+    /// Makes `to` beneath `to_dir` another name of the file at `path`, a
+    /// hard link: of a symbolic link itself, unless `follow`.
+    pub fn link(&self, path: &str, follow: bool, to_dir: &Dir, to: &str) -> Result<()> {
+        let flags = if follow { LinkFlags::FOLLOW } else { LinkFlags::NONE };
+        let (slot, to_slot) = (self.held.slot, to_dir.held.slot);
+        Ok(directory::link(&SYS, slot, path.as_bytes(), flags, to_slot, to.as_bytes())?)
+    }
+
+    /// Makes a file of `kind` at `path`: a named pipe, a device node that
+    /// stands for `device` (its major number in the high 32 bits), an
+    /// empty file or a socket's name.
+    pub fn make_node(&self, path: &str, kind: FileKind, device: u64) -> Result<()> {
+        Ok(directory::make_node(&SYS, self.held.slot, path.as_bytes(), kind, device)?)
+    }
+
     /// Where the symbolic link at `path` points.
     pub fn read_link(&self, path: &str) -> Result<Vec<u8>> {
         let mut target = alloc::vec![0u8; 256];
@@ -271,17 +317,9 @@ impl Dir {
     /// What the file at `path` is (`.` for this directory), following a
     /// symbolic link there.
     pub fn stat(&self, path: &str) -> Result<Stat> {
-        let s = directory::stat(&SYS, self.held.slot, path.as_bytes(), PathFlags::NONE)?;
-        Ok(Stat {
-            kind: s.kind,
-            size: s.size,
-            allocated: s.allocated,
-            id: s.id,
-            created: s.created,
-            modified: s.modified,
-            accessed: s.accessed,
-            mount: s.mount,
-        })
+        let mut status = [0u8; FileStatus::SIZE];
+        directory::stat(&SYS, self.held.slot, path.as_bytes(), PathFlags::NONE, &mut status)?;
+        Ok(Stat::from(&status))
     }
 
     /// The directory's entries, but `.` and `..`, in the order its
@@ -433,17 +471,9 @@ impl File {
 
     /// What the file is.
     pub fn stat(&self) -> Result<Stat> {
-        let s = file::stat(&SYS, self.held.slot)?;
-        Ok(Stat {
-            kind: s.kind,
-            size: s.size,
-            allocated: s.allocated,
-            id: s.id,
-            created: s.created,
-            modified: s.modified,
-            accessed: s.accessed,
-            mount: s.mount,
-        })
+        let mut status = [0u8; FileStatus::SIZE];
+        file::stat(&SYS, self.held.slot, &mut status)?;
+        Ok(Stat::from(&status))
     }
 
     /// Makes the file `size` bytes long.

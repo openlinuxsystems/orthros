@@ -112,6 +112,13 @@ flags PathFlags: u32 {
     no_follow = 0;
 }
 
+/// How `link` takes its path.
+flags LinkFlags: u32 {
+    /// A symbolic link that is the last name is followed, as
+    /// AT_SYMLINK_FOLLOW has it.
+    follow = 0;
+}
+
 /// How a filesystem is mounted.
 flags MountFlags: u32 {
     /// Refuse every change.
@@ -136,8 +143,41 @@ struct DirEntry {
     reserved: u32;
 }
 
+/// What a file is, as `stat` writes it (ADR 0135).
+struct FileStatus {
+    /// Its size in bytes; a symbolic link's is its target's length.
+    size: u64;
+    /// The bytes it takes on its filesystem.
+    allocated: u64;
+    /// A number unique on its filesystem while it exists.
+    id: u64;
+    /// The number of the mount it is on, unique since boot.
+    mount: u64;
+    /// When it was made, in nanoseconds since 1970 (0 if unknown).
+    created: u64;
+    /// When its contents last changed, likewise.
+    modified: u64;
+    /// When it was last read, likewise.
+    accessed: u64;
+    /// When it last changed in any way, its contents or what is said of
+    /// it (its names, times or size), likewise.
+    changed: u64;
+    /// The number of the device a device node stands for, its major
+    /// number in the high 32 bits (`make_node`); 0 for any other file.
+    device: u64;
+    /// How many names it has: 1 for a file with none of its own in the
+    /// tree, and for a directory whose filesystem does not count them.
+    links: u32;
+    /// What it is: a FileKind.
+    kind: u8;
+    /// Zero.
+    pad: u8;
+    /// Zero.
+    reserved: u16;
+}
+
 /// A directory.
-interface directory = 0x000b version 4 {
+interface directory = 0x000b version 5 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -175,15 +215,10 @@ interface directory = 0x000b version 4 {
     method list = 5 (cursor: u64, buffer: out bytes) -> (count: u32, used: u64, next: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, io,
                 corrupt];
-    /// What the file at `path` (`.` for this directory) is: its kind, its
-    /// size and the bytes it takes on its filesystem, a number unique on
-    /// its filesystem while it exists, when it was made, last changed and
-    /// last read, in nanoseconds since 1970 (0 if unknown), and the number
-    /// of the mount it is on, unique since boot. A symbolic link's size is
-    /// its target's length. Needs the read right.
-    method stat = 6 (path: in bytes, flags: PathFlags)
-        -> (kind: FileKind, size: u64, allocated: u64, id: u64, created: u64, modified: u64,
-            accessed: u64, mount: u64)
+    /// Writes what the file at `path` (`.` for this directory) is into
+    /// `buffer`, as a FileStatus; a buffer smaller than one fails with
+    /// invalid_argument. Needs the read right.
+    method stat = 6 (path: in bytes, flags: PathFlags, buffer: out bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt, too_many_links];
@@ -280,4 +315,29 @@ interface directory = 0x000b version 4 {
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
                 outside, io, corrupt, too_many_links, not_socket, refused, connected, busy,
                 would_block, interrupted];
+    /// Makes `to` beneath the directory in slot `to_dir` another name of
+    /// the file at `path`, a hard link: of the symbolic link itself when
+    /// `path` ends in one, unless `flags` has follow, as linkat(2) has
+    /// it. Not a directory (is_directory); on the same filesystem (and
+    /// Btrfs subvolume), or cross_mount. A filesystem that has no hard
+    /// links, as FAT has none, refuses with not_permitted, and a file
+    /// with as many names as it keeps fails with too_many_names. Needs
+    /// the write right on `to_dir`.
+    method link = 17 (path: in bytes, flags: LinkFlags, to_dir: slot, to: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, exists, not_directory, is_directory,
+                read_only, no_space, name_too_long, bad_name, outside, cross_mount, io,
+                corrupt, not_permitted, too_many_links, too_many_names];
+    /// Makes a file of `kind` at `path`: a named pipe (pipe), which
+    /// opening reads or writes as a pipe; a device node (char_device or
+    /// block_device) that stands for device number `device`, as
+    /// FileStatus has it, which opening opens that device through
+    /// (radix-files(7)); an empty file (file); or a socket's name that
+    /// no socket listens at (socket). Any other kind fails with
+    /// invalid_argument. A filesystem that keeps none, as FAT keeps
+    /// none, refuses with not_permitted. Needs the write right.
+    method make_node = 18 (path: in bytes, kind: FileKind, device: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space,
+                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
 }

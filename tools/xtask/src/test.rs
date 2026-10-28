@@ -3268,6 +3268,10 @@ fn btrfs_written(disk: &DiskImage, name: &str) -> Result<(), String> {
         if read(STORAGE_FROM_HOST_NAME)? != STORAGE_FROM_HOST {
             return Err(format!("{image}: the host's file is not as mkfs.btrfs wrote it"));
         }
+        // The second name of hello.txt (`btrfs check` counts its names).
+        if read("notes/hello-again.txt")? != STORAGE_HELLO {
+            return Err(format!("{image}: hello.txt's second name is not as written"));
+        }
         if btrfs_zstd(disk)? != (name == BTRFS_COMPRESSED) {
             return Err(format!(
                 "{image}: the superblock's zstd feature is not set if and only if Spark had \

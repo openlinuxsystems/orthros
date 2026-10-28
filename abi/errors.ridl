@@ -169,4 +169,7 @@ errors file = 2 {
     too_many_links = 20 => ELOOP;
     /// The file is not a symbolic link.
     not_link = 21 => EINVAL;
+    /// The file has as many names as its filesystem keeps for one
+    /// (radix-directory(2)'s `link`; 65535 on Btrfs).
+    too_many_names = 22 => EMLINK;
 }

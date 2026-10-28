@@ -453,6 +453,44 @@ impl Vfs {
         dir.node.make_link(name, target).map(drop)
     }
 
+    /// Makes `to` beneath `to_base` another name of the file `path`
+    /// beneath `base` ([`crate::Node::link`]): of the link itself when it
+    /// is a symbolic link, unless `follow`, as `linkat` has it.
+    pub fn link(
+        &self,
+        base: &Location,
+        path: &str,
+        to_base: &Location,
+        to: &str,
+        follow: bool,
+    ) -> Result<()> {
+        let from = self.resolve_as(base, path, follow)?;
+        let (dir, name) = self.resolve_parent(to_base, to)?;
+        // In Linux's order of errors.
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.writable()?;
+        if !KArc::ptr_eq(&from.mount, &dir.mount) {
+            return Err(Error::CrossMount);
+        }
+        if from.node.kind() == Kind::Directory {
+            return Err(Error::IsDirectory);
+        }
+        dir.node.link(name, &from.node)
+    }
+
+    /// Makes `path` beneath `base` a node of `kind` that stands for
+    /// device number `device` ([`crate::Node::make_node`]).
+    pub fn make_node(&self, base: &Location, path: &str, kind: Kind, device: u64) -> Result<()> {
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        dir.node.make_node(name, kind, device).map(drop)
+    }
+
     /// Makes a socket's name `path` beneath `base`, which holds `binding`
     /// ([`crate::Node::make_socket`]).
     pub fn make_socket(

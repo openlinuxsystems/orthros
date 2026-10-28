@@ -46,6 +46,24 @@ mod mode {
     pub const FILE: u32 = 0o100_644;
     pub const DIR: u32 = 0o040_755;
     pub const LINK: u32 = 0o120_777;
+    pub const FIFO: u32 = 0o010_644;
+    pub const CHAR: u32 = 0o020_644;
+    pub const BLOCK: u32 = 0o060_644;
+    pub const SOCKET: u32 = 0o140_755;
+}
+
+/// A device number as Linux keeps it in an inode item, its own 32-bit
+/// `dev_t`: 12 bits of the major number above 20 bits of the minor.
+/// Linux drops the bits that do not fit, as `mknod` passes a 32-bit
+/// number.
+fn linux_rdev(device: u64) -> u64 {
+    let (major, minor) = radix_vfs::device_parts(device);
+    (u64::from(major & 0xfff) << 20) | u64::from(minor & 0xf_ffff)
+}
+
+/// The device number an inode item's `rdev` holds ([`linux_rdev`]).
+fn device_of(rdev: u64) -> u64 {
+    radix_vfs::device_number((rdev >> 20) as u32, (rdev & 0xf_ffff) as u32)
 }
 
 /// The longest link Btrfs keeps: inline, in less than a sector.
@@ -878,7 +896,13 @@ impl BtrfsNode {
 
     /// Makes `name` in this directory: a new inode of `kind` with `mode`,
     /// and for a link, `target` inline.
-    fn make(&self, name: &str, mode: u32, kind: Kind, target: Option<&[u8]>) -> Result<NodeRef> {
+    fn make(
+        &self,
+        name: &str,
+        (mode, rdev): (u32, u64),
+        kind: Kind,
+        target: Option<&[u8]>,
+    ) -> Result<NodeRef> {
         self.is_dir()?;
         check_name(name)?;
         let time = now();
@@ -902,7 +926,7 @@ impl BtrfsNode {
             let index = files.next_index(self.ino)?;
             let size = target.map_or(0, |t| t.len() as u64);
             files.whole(|f| {
-                f.make_inode(ino, mode, flags, size, size, time)?;
+                f.make_inode(ino, (mode, rdev), flags, size, size, time)?;
                 if let Some(target) = target {
                     f.inline_extent(ino, target)?;
                 }
@@ -957,9 +981,8 @@ impl BtrfsNode {
         let ino = location.objectid;
         let key = Key::new(ino, item::INODE_ITEM, 0);
         let inode = Inode::read(&files.get(self.subvol, &key)?.ok_or(Error::Corrupt)?)?;
-        // A name kept in an extended reference (thousands of hard links in
-        // one directory, from Linux) is not changed yet.
-        files.index_of(ino, self.ino, name.as_bytes())?.ok_or(Error::NotSupported)?;
+        // Its reference, which may be an extended one.
+        files.index_of(ino, self.ino, name.as_bytes())?.ok_or(Error::Corrupt)?;
         Ok((ino, inode))
     }
 
@@ -969,6 +992,9 @@ impl BtrfsNode {
         let Some(node) = self.fs.live(self.subvol, ino) else { return Ok(()) };
         if gone {
             node.removed.store(true, Ordering::Release);
+            if node.kind == Kind::Socket {
+                self.fs.set_socket(self.subvol, ino, None)?;
+            }
             return Ok(());
         }
         node.reload(files)
@@ -1119,6 +1145,12 @@ impl Node for BtrfsNode {
             created: inode.otime,
             modified,
             accessed: inode.atime,
+            changed: inode.ctime.max(modified),
+            links: inode.nlink,
+            device: match self.kind {
+                Kind::CharDevice | Kind::BlockDevice => device_of(inode.rdev),
+                _ => 0,
+            },
         }
     }
 
@@ -1253,7 +1285,73 @@ impl Node for BtrfsNode {
         let mode = match kind {
             Kind::File => mode::FILE,
             Kind::Directory => mode::DIR,
-            // Devices, pipes and sockets are made in 10c.3.
+            _ => return self.make_node(name, kind, 0),
+        };
+        self.make(name, (mode, 0), kind, None)
+    }
+
+    fn link(&self, name: &str, node: &NodeRef) -> Result<()> {
+        self.is_dir()?;
+        check_name(name)?;
+        if !self.fs.writable() {
+            return Err(Error::ReadOnly);
+        }
+        let other = radix_vfs::downcast::<BtrfsNode>(&**node).ok_or(Error::CrossMount)?;
+        // Linux links nothing across subvolumes either.
+        if !KArc::ptr_eq(&other.fs, &self.fs) || other.subvol != self.subvol {
+            return Err(Error::CrossMount);
+        }
+        if other.kind == Kind::Directory {
+            return Err(Error::IsDirectory);
+        }
+        let time = now();
+        self.fs.change(|txn| {
+            if self.removed() || other.removed() {
+                return Err(Error::NotFound);
+            }
+            if self.entry(name)?.is_some() {
+                return Err(Error::Exists);
+            }
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            let key = Key::new(other.ino, item::INODE_ITEM, 0);
+            let inode = Inode::read(&files.get(self.subvol, &key)?.ok_or(Error::Corrupt)?)?;
+            // Linux's most for a file, BTRFS_LINK_MAX.
+            if inode.nlink >= 65_535
+                || files.name_room(self.ino, name.as_bytes(), other.ino)?.is_none()
+            {
+                return Err(Error::TooManyNames);
+            }
+            let index = files.next_index(self.ino)?;
+            files.whole(|f| {
+                f.add_entry(
+                    self.ino,
+                    name.as_bytes(),
+                    other.ino,
+                    file_type(other.kind),
+                    index,
+                    time,
+                )?;
+                f.change_inode(other.ino, |d| {
+                    put_u32(d, at::NLINK, inode.nlink + 1);
+                    put_time(d, at::CTIME, time);
+                })
+            })?;
+            self.reload(&files)?;
+            other.reload(&files)
+        })
+    }
+
+    fn make_node(&self, name: &str, kind: Kind, device: u64) -> Result<NodeRef> {
+        self.is_dir()?;
+        if !self.fs.writable() {
+            return Err(Error::ReadOnly);
+        }
+        let mode = match kind {
+            Kind::File => (mode::FILE, 0),
+            Kind::Pipe => (mode::FIFO, 0),
+            Kind::Socket => (mode::SOCKET, 0),
+            Kind::CharDevice => (mode::CHAR, linux_rdev(device)),
+            Kind::BlockDevice => (mode::BLOCK, linux_rdev(device)),
             _ => return Err(Error::NotSupported),
         };
         self.make(name, mode, kind, None)
@@ -1270,12 +1368,21 @@ impl Node for BtrfsNode {
         if target.len() > LINK_MAX {
             return Err(Error::NameTooLong);
         }
-        self.make(name, mode::LINK, Kind::Symlink, Some(target.as_bytes()))
+        self.make(name, (mode::LINK, 0), Kind::Symlink, Some(target.as_bytes()))
     }
 
-    fn make_socket(&self, _name: &str, _binding: SocketBinding) -> Result<NodeRef> {
-        self.is_dir()?;
-        if self.fs.writable() { Err(Error::NotSupported) } else { Err(Error::ReadOnly) }
+    fn make_socket(&self, name: &str, binding: SocketBinding) -> Result<NodeRef> {
+        let node = self.make_node(name, Kind::Socket, 0)?;
+        let made = radix_vfs::downcast::<BtrfsNode>(&*node).ok_or(Error::Corrupt)?;
+        self.fs.set_socket(made.subvol, made.ino, Some(binding))?;
+        Ok(node)
+    }
+
+    fn socket_binding(&self) -> Option<SocketBinding> {
+        if self.kind != Kind::Socket {
+            return None;
+        }
+        self.fs.socket(self.subvol, self.ino)
     }
 
     fn remove(&self, name: &str) -> Result<()> {
@@ -1368,6 +1475,10 @@ impl Node for BtrfsNode {
                 }
                 None => None,
             };
+            // Only a file with other names can fill its reference items.
+            if inode.nlink > 1 && files.name_room(target.ino, to.as_bytes(), moving)?.is_none() {
+                return Err(Error::TooManyNames);
+            }
             let index = files.next_index(target.ino)?;
             let ft = file_type(inode.kind()?);
             let gone = files.whole(|f| {

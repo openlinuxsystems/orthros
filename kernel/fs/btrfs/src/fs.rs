@@ -43,7 +43,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use radix_block::{DeviceRef, PAGE_SIZE};
 use radix_sync::{Mutex, MutexGuard};
 use radix_vfs::mem::{self, Alloc, KArc, KBox, KVec};
-use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
+use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result, SocketBinding};
 
 use crate::cow::Writer;
 use crate::dir::Entries;
@@ -125,6 +125,9 @@ pub(crate) struct Inner {
     /// Inodes removed while open and since closed, by subvolume and
     /// number: their items go at the next sync.
     reap: Mutex<KVec<(u64, u64)>>,
+    /// What the sockets named on it hold, by subvolume and inode number:
+    /// the kernel's, kept while it is mounted, as on Linux (ADR 0135).
+    sockets: Mutex<KVec<((u64, u64), SocketBinding)>>,
     /// When the oldest change the disk lacks was made, or 0 if none.
     since: AtomicU64,
     /// The bytes of the dirty pages of files, which write-back takes
@@ -259,6 +262,7 @@ impl Inner {
             tx,
             dirty: Mutex::new(mem::vec()),
             reap: Mutex::new(mem::vec()),
+            sockets: Mutex::new(mem::vec()),
             since: AtomicU64::new(0),
             data_reserved: AtomicU64::new(0),
             data_room: AtomicU64::new(0),
@@ -389,6 +393,32 @@ impl Inner {
     }
 
     /// The node of inode `ino` of subvolume `subvol`, if one is in use.
+    /// What the socket named by inode `ino` of subvolume `subvol` holds,
+    /// if one was named there since the mount.
+    pub(crate) fn socket(&self, subvol: u64, ino: u64) -> Option<SocketBinding> {
+        let sockets = self.sockets.lock();
+        let i = sockets.binary_search_by_key(&(subvol, ino), |(k, _)| *k).ok()?;
+        Some(sockets[i].1.clone())
+    }
+
+    /// Notes that inode `ino` of subvolume `subvol` names a socket that
+    /// holds `binding`, or that it no longer does.
+    pub(crate) fn set_socket(
+        &self,
+        subvol: u64,
+        ino: u64,
+        binding: Option<SocketBinding>,
+    ) -> Result<()> {
+        let mut sockets = self.sockets.lock();
+        match (sockets.binary_search_by_key(&(subvol, ino), |(k, _)| *k), binding) {
+            (Ok(i), Some(binding)) => sockets[i].1 = binding,
+            (Ok(i), None) => drop(sockets.remove(i)),
+            (Err(i), Some(binding)) => mem::insert(&mut sockets, i, ((subvol, ino), binding))?,
+            (Err(_), None) => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn live(&self, subvol: u64, ino: u64) -> Option<KArc<BtrfsNode>> {
         let nodes = self.nodes.lock();
         let i = nodes.binary_search_by_key(&(subvol, ino), |(k, _)| *k).ok()?;

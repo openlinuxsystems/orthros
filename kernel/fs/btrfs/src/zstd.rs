@@ -17,8 +17,11 @@
 //! run of literals and a match, coded with three FSE (tANS) codes, for
 //! the literals' length, the match's offset and the match's length. FSE
 //! and Huffman streams are read backwards, from their last byte, whose
-//! highest set bit marks where they end.
+//! highest set bit marks where they end. A sequence's values are taken
+//! from its stream with BMI2's shifts where the processor has them, as
+//! Linux's decoder does, and with the shifts every x86-64 has where not.
 
+use radix_hw::bmi2::Bmi2;
 use radix_vfs::mem::{KVec, NoMemory};
 use radix_vfs::{Error, Result};
 
@@ -38,10 +41,6 @@ const LITERALS: usize = MAX_BLOCK + 16;
 
 /// The states of the largest FSE code of sequences (accuracy log 9).
 const STATES: usize = 1 << 9;
-
-/// The sequences decoded at a time, before their copies are made: apart,
-/// each loop keeps what it needs in registers.
-const BATCH: usize = 128;
 
 /// The most bits a Huffman code of literals has.
 const HUFFMAN_MAX_BITS: u32 = 11;
@@ -239,8 +238,7 @@ impl<'a> Backward<'a> {
         if self.used + n > 64 {
             self.refill();
         }
-        // In two shifts, so that `n` may be 0.
-        (self.bits.wrapping_shl(self.used) >> 1) >> (63 - n)
+        bits_at(self.bits, self.used + n, n)
     }
 
     #[inline(always)]
@@ -260,10 +258,58 @@ impl<'a> Backward<'a> {
     /// in a stream too short for its reads, they are no more than `n`
     /// bits of nonsense, which [`Backward::left`] finds at the end.
     #[inline(always)]
-    fn take(&mut self, n: u32) -> u64 {
-        let value = (self.bits.wrapping_shl(self.used) >> 1) >> (63 - n);
+    fn take<S: Shifts>(&mut self, shifts: S, n: u32) -> u64 {
+        let value = shifts.bits(self.bits, self.used, n);
         self.used += n;
         value
+    }
+}
+
+/// `(1 << n) - 1` for each `n` below 64: a mask of the lowest `n` bits.
+const MASKS: [u64; 64] = {
+    let mut masks = [0; 64];
+    let mut n = 0;
+    while n < 64 {
+        masks[n] = (1 << n) - 1;
+        n += 1;
+    }
+    masks
+};
+
+/// The `n` bits (up to 56) of `bits` that end `end` bits from its top:
+/// one shift, where taking them from the top takes three, which are more
+/// than one operation each on Intel's processors without BMI2. Past 64,
+/// which only a stream read past its start reaches, they are nonsense.
+#[inline(always)]
+fn bits_at(bits: u64, end: u32, n: u32) -> u64 {
+    (bits >> (64u32.wrapping_sub(end) & 63)) & MASKS[(n & 63) as usize]
+}
+
+/// How a sequence's values are taken from the window of bits: with the
+/// shifts every x86-64 processor has ([`Plain`]), or with BMI2's, each
+/// one operation, where the processor has them.
+trait Shifts: Copy {
+    /// The `n` bits (up to 56) of `bits` after its top `used`.
+    fn bits(self, bits: u64, used: u32, n: u32) -> u64;
+}
+
+/// The shifts every x86-64 processor has: [`bits_at`].
+#[derive(Clone, Copy)]
+struct Plain;
+
+impl Shifts for Plain {
+    #[inline(always)]
+    fn bits(self, bits: u64, used: u32, n: u32) -> u64 {
+        bits_at(bits, used + n, n)
+    }
+}
+
+impl Shifts for Bmi2 {
+    /// Three shifts, two of them right so that `n` may be 0, each one
+    /// operation, and no mask to load.
+    #[inline(always)]
+    fn bits(self, bits: u64, used: u32, n: u32) -> u64 {
+        self.shr(self.shl(bits, used) >> 1, 63 - n)
     }
 }
 
@@ -484,9 +530,8 @@ pub struct Zstd {
     /// The three codes of sequences' states, as [`Fse::spell`] gives
     /// them: literals' lengths, offsets and matches' lengths.
     seqs: KVec<u64>,
-    /// Sequences decoded and not yet copied: each its literals' length,
-    /// its match's length and its offset.
-    batch: KVec<[usize; 3]>,
+    /// BMI2's shifts, where the processor has them, for the sequences.
+    bmi2: Option<Bmi2>,
 }
 
 /// The output buffer, and how much of it is made.
@@ -622,8 +667,15 @@ impl Zstd {
             of: Fse::new()?,
             ml: Fse::new()?,
             seqs: crate::filled(3 * STATES, 0)?,
-            batch: crate::filled(BATCH, [0; 3])?,
+            bmi2: Bmi2::get(),
         })
+    }
+
+    /// The decoder with the shifts every x86-64 processor has, for tests
+    /// on processors with BMI2.
+    #[cfg(test)]
+    pub(crate) fn without_bmi2(self) -> Zstd {
+        Zstd { bmi2: None, ..self }
     }
 
     /// Decodes the frame at the start of `input` into `out`; returns how
@@ -710,13 +762,12 @@ impl Zstd {
 
     /// Decodes the compressed block `data` into `o`.
     fn block(&mut self, data: &[u8], o: &mut Output<'_>, repeats: &mut [usize; 3]) -> Step<()> {
-        let Zstd { literals, huffman, huffman_bits, ll, of, ml, seqs, batch } = self;
+        let Zstd { literals, huffman, huffman_bits, ll, of, ml, seqs, bmi2 } = self;
         let (lits_len, rest) = read_literals(data, literals, huffman, huffman_bits)?;
         let lits = <&[u8; LITERALS]>::try_from(&literals[..]).map_err(|_| Stop::Bad)?;
         let codes = [(ll, Kind::Literals), (of, Kind::Offsets), (ml, Kind::Matches)];
-        let batch = <&mut [[usize; 3]; BATCH]>::try_from(&mut batch[..]).map_err(|_| Stop::Bad)?;
         let seqs = <&mut [u64; 3 * STATES]>::try_from(&mut seqs[..]).map_err(|_| Stop::Bad)?;
-        sequences(rest, (lits, lits_len), (codes, seqs), batch, o, repeats)
+        sequences(rest, (lits, lits_len), (codes, seqs), *bmi2, o, repeats)
     }
 }
 
@@ -960,12 +1011,12 @@ fn huffman_stream(data: &[u8], out: &mut [u8], table: &[u16], bits: u32) -> Step
 
 /// Decodes a block's sequences section `data` and runs its sequences,
 /// with the literals `lits` (and any bytes after them in their buffer),
-/// into `o`.
+/// into `o`, with BMI2's shifts if `bmi2`.
 fn sequences(
     data: &[u8],
     lits: (&[u8; LITERALS], usize),
     codes: ([(&mut Fse, Kind); 3], &mut [u64; 3 * STATES]),
-    batch: &mut [[usize; 3]; BATCH],
+    bmi2: Option<Bmi2>,
     o: &mut Output<'_>,
     repeats: &mut [usize; 3],
 ) -> Step<()> {
@@ -1001,133 +1052,148 @@ fn sequences(
     let ll_state = stream.read(ll.log) as usize;
     let of_state = stream.read(of.log) as usize;
     let ml_state = stream.read(ml.log) as usize;
-    let mut states = [ll_state, of_state, ml_state];
-    let mut lit = 0;
-    let mut left = count;
-    while left != 0 {
-        let n = left.min(BATCH);
-        left -= n;
-        let batch = &mut batch[..n];
-        decode(&mut stream, tables, &mut states, repeats, batch, left != 0);
-        lit = execute(batch, (lits, lits_len), lit, o)?;
-    }
+    let codes = (tables, [ll_state, of_state, ml_state]);
+    let all = (lits, lits_len);
+    let lit = match bmi2 {
+        Some(bmi2) => run(bmi2, &mut stream, codes, count, all, o, repeats)?,
+        None => run(Plain, &mut stream, codes, count, all, o, repeats)?,
+    };
     if stream.left() != 0 {
         return Err(Stop::Bad);
     }
     o.put(&lits[lit..lits_len])
 }
 
-/// Decodes `batch.len()` sequences from `stream` into `batch`, each its
-/// literals' length, its match's length and its offset, with the codes'
-/// `tables` from `states` on; the last moves the states on only when
-/// `more` follow it.
+/// Decodes `count` sequences from `stream`, with the codes' `tables` from
+/// `states` on, and makes each one's copies into `o` as it is decoded,
+/// its literals from the start of `lits` on; returns where the literals
+/// not yet copied start. Decoding is a chain of steps, each waiting on
+/// the one before; the copies, which wait on nothing in it, are made
+/// while it waits.
 #[inline(never)]
-fn decode(
+fn run<S: Shifts>(
+    shifts: S,
+    stream: &mut Backward<'_>,
+    (tables, states): (&[u64; 3 * STATES], [usize; 3]),
+    count: usize,
+    lits: (&[u8; LITERALS], usize),
+    o: &mut Output<'_>,
+    repeats: &mut [usize; 3],
+) -> Step<usize> {
+    let mut states = states;
+    let mut r = *repeats;
+    let (mut lit, mut made) = (0, o.made);
+    for left in (0..count).rev() {
+        let seq = sequence(shifts, stream, tables, &mut states, &mut r, left != 0);
+        (lit, made) = execute(seq, lits, (lit, made), o)?;
+    }
+    o.made = made;
+    *repeats = r;
+    Ok(lit)
+}
+
+/// Decodes the next sequence from `stream`, with the codes' `tables` at
+/// `states`: its literals' length, its match's length and its offset;
+/// moves the states on if `next`, as all but the last do.
+#[inline(always)]
+fn sequence<S: Shifts>(
+    shifts: S,
     stream: &mut Backward<'_>,
     tables: &[u64; 3 * STATES],
     states: &mut [usize; 3],
     repeats: &mut [usize; 3],
-    batch: &mut [[usize; 3]],
-    more: bool,
-) {
-    let [mut ll_state, mut of_state, mut ml_state] = *states;
-    let [mut r0, mut r1, mut r2] = *repeats;
-    let mut entries = (0, 0, 0);
-    for slot in batch {
-        // States are below the size of their tables, which is at most
-        // `STATES`; masked, they need no other check.
-        let (l, f, m) = (
-            tables[ll_state % STATES],
-            tables[STATES + of_state % STATES],
-            tables[2 * STATES + ml_state % STATES],
-        );
-        entries = (l, f, m);
-        // Up to 31 bits for the offset, 16 each for the lengths and 26
-        // for the states: the window is refilled where they could run
-        // past its 64, which they seldom do.
+    next: bool,
+) -> [usize; 3] {
+    let [ll_state, of_state, ml_state] = *states;
+    // States are below the size of their tables, which is at most
+    // `STATES`; masked, they need no other check.
+    let (l, f, m) = (
+        tables[ll_state % STATES],
+        tables[STATES + of_state % STATES],
+        tables[2 * STATES + ml_state % STATES],
+    );
+    // Up to 31 bits for the offset, 16 each for the lengths and 26 for
+    // the states: the window is refilled where they could run past its
+    // 64, which they seldom do.
+    stream.refill();
+    let value = (f >> 32) as usize + stream.take(shifts, extra(f)) as usize;
+    if stream.used > 32 {
         stream.refill();
-        let value = (f >> 32) as usize + stream.take(extra(f)) as usize;
-        if stream.used > 32 {
-            stream.refill();
-        }
-        let ml_len = (m >> 32) as usize + stream.take(extra(m)) as usize;
-        let ll_len = (l >> 32) as usize + stream.take(extra(l)) as usize;
-        let offset = if value > 3 {
-            (r0, r1, r2) = (value - 3, r0, r1);
-            r0
-        } else {
-            // The last three offsets: with no literals, the next one, and
-            // the last less one byte after the third.
-            match value - 1 + usize::from(ll_len == 0) {
-                0 => r0,
-                1 => {
-                    (r0, r1) = (r1, r0);
-                    r0
-                }
-                2 => {
-                    (r0, r1, r2) = (r2, r0, r1);
-                    r0
-                }
-                _ => {
-                    (r0, r1, r2) = (r0.wrapping_sub(1), r0, r1);
-                    r0
-                }
+    }
+    let ml_len = (m >> 32) as usize + stream.take(shifts, extra(m)) as usize;
+    let ll_len = (l >> 32) as usize + stream.take(shifts, extra(l)) as usize;
+    let [r0, r1, r2] = *repeats;
+    // Told apart by the codes' entries, which are known before their
+    // bits are: an offset code over 1 is a new offset (a value over 3),
+    // and only the literals' length code 0 (base 0) is no literals.
+    let offset = if extra(f) > 1 {
+        *repeats = [value - 3, r0, r1];
+        value - 3
+    } else {
+        // The last three offsets: with no literals, the next one, and
+        // the last less one byte after the third.
+        match value - 1 + usize::from(l >> 32 == 0) {
+            0 => r0,
+            1 => {
+                *repeats = [r1, r0, r2];
+                r1
             }
-        };
+            2 => {
+                *repeats = [r2, r0, r1];
+                r2
+            }
+            _ => {
+                let offset = r0.wrapping_sub(1);
+                *repeats = [offset, r0, r1];
+                offset
+            }
+        }
+    };
+    // The last sequence has no next states: their bits are not read.
+    if next {
         if stream.used > 38 {
             stream.refill();
         }
-        ll_state = state(l) + stream.take(state_bits(l)) as usize;
-        ml_state = state(m) + stream.take(state_bits(m)) as usize;
-        of_state = state(f) + stream.take(state_bits(f)) as usize;
-        *slot = [ll_len, ml_len, offset];
+        // In the order the format reads them: literals, matches, offsets.
+        let ll_state = state(l) + stream.take(shifts, state_bits(l)) as usize;
+        let ml_state = state(m) + stream.take(shifts, state_bits(m)) as usize;
+        let of_state = state(f) + stream.take(shifts, state_bits(f)) as usize;
+        *states = [ll_state, of_state, ml_state];
     }
-    if !more {
-        // The last sequence has no next states: their bits are not read.
-        let (l, f, m) = entries;
-        stream.used -= state_bits(l) + state_bits(m) + state_bits(f);
-    }
-    *states = [ll_state, of_state, ml_state];
-    *repeats = [r0, r1, r2];
+    [ll_len, ml_len, offset]
 }
 
-/// Makes the copies of the sequences of `batch` into `o`, their literals
-/// from `lit` on of `lits`; returns where the next literals start.
-#[inline(never)]
+/// Makes the copies of the sequence `[ll_len, ml_len, offset]` into `o`,
+/// of which `made` bytes are made, its literals from `lit` on of `lits`;
+/// returns where the next literals start and how many bytes are made.
+#[inline(always)]
 fn execute(
-    batch: &[[usize; 3]],
+    [ll_len, ml_len, offset]: [usize; 3],
     lits: (&[u8; LITERALS], usize),
-    lit: usize,
+    (lit, made): (usize, usize),
     o: &mut Output<'_>,
-) -> Step<usize> {
+) -> Step<(usize, usize)> {
     let (lits, lits_len) = lits;
-    let (mut lit, mut made) = (lit, o.made);
-    for &[ll_len, ml_len, offset] in batch {
-        let (lit_end, to) = (lit + ll_len, made + ll_len);
-        if (ll_len | ml_len) < 16
-            && lit_end <= lits_len
-            && to + 32 <= o.buf.len()
-            && (16..=to).contains(&offset)
-        {
-            // Most sequences: their literals and their match are a copy of
-            // 16 bytes each, which may run past them.
-            o.buf[made..made + 16].copy_from_slice(&lits[lit..lit + 16]);
-            let (before, after) = o.buf.split_at_mut(to);
-            after[..16].copy_from_slice(&before[to - offset..to - offset + 16]);
-            made = to + ml_len;
-        } else {
-            if lit_end > lits_len {
-                return Err(Stop::Bad);
-            }
-            o.made = made;
-            o.put_from(lits, lit, ll_len)?;
-            o.copy(offset, ml_len)?;
-            made = o.made;
-        }
-        lit = lit_end;
+    let (lit_end, to) = (lit + ll_len, made + ll_len);
+    if (ll_len | ml_len) < 16
+        && lit_end <= lits_len
+        && to + 32 <= o.buf.len()
+        && (16..=to).contains(&offset)
+    {
+        // Most sequences: their literals and their match are a copy of
+        // 16 bytes each, which may run past them.
+        o.buf[made..made + 16].copy_from_slice(&lits[lit..lit + 16]);
+        let (before, after) = o.buf.split_at_mut(to);
+        after[..16].copy_from_slice(&before[to - offset..to - offset + 16]);
+        return Ok((lit_end, to + ml_len));
+    }
+    if lit_end > lits_len {
+        return Err(Stop::Bad);
     }
     o.made = made;
-    Ok(lit)
+    o.put_from(lits, lit, ll_len)?;
+    o.copy(offset, ml_len)?;
+    Ok((lit_end, o.made))
 }
 
 /// The parts of a [`Fse::seq`] entry: the next state's base, its bits,

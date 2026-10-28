@@ -139,6 +139,9 @@ pub(super) fn same_tree(node: &NodeRef, host: &Path, inodes: &mut BTreeMap<(u64,
         let stat = child.stat();
         assert_eq!(kind, host_kind(&meta), "{}", path.display());
         assert_eq!(stat.kind, kind, "{}", path.display());
+        // A directory has one name, as Btrfs counts it.
+        let links = if kind == Kind::Directory { 1 } else { meta.nlink() };
+        assert_eq!(u64::from(stat.links), links, "{}", path.display());
         let id = *inodes.entry((meta.dev(), meta.ino())).or_insert(stat.id);
         assert_eq!(id, stat.id, "{} is another inode", path.display());
         // `mkfs.btrfs` keeps whole seconds.

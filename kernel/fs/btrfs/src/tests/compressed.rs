@@ -220,25 +220,29 @@ fn inflates_what_zlib_makes() {
 
 #[test]
 fn decodes_what_zstd_makes() {
-    let mut zstd = Zstd::new().unwrap();
-    for (name, frame, make, _) in ZSTD {
-        let data = make();
-        let mut out = vec![0xaa; data.len() + 100];
-        assert_eq!(zstd.decompress(frame, &mut out), Ok(data.len()), "{name}");
-        assert!(out[..data.len()] == data[..], "{name}");
-        // A buffer the data fills ends the frame there.
-        let mut part = vec![0; data.len() / 3];
-        assert_eq!(zstd.decompress(frame, &mut part), Ok(part.len()), "{name}");
-        assert!(part[..] == data[..part.len()], "{name}");
-        // A frame cut short fails, and so does a checksum that does not
-        // match.
-        assert_eq!(zstd.decompress(&frame[..frame.len() - 5], &mut out), Err(Error::Io), "{name}");
-        if frame[4] & 0x04 != 0 {
-            let mut damaged = frame.to_vec();
-            *damaged.last_mut().unwrap() ^= 1;
-            assert_eq!(zstd.decompress(&damaged, &mut out), Err(Error::Io), "{name}");
+    // With BMI2's shifts where the host has them, and without.
+    for mut zstd in [Zstd::new().unwrap(), Zstd::new().unwrap().without_bmi2()] {
+        for (name, frame, make, _) in ZSTD {
+            let data = make();
+            let mut out = vec![0xaa; data.len() + 100];
+            assert_eq!(zstd.decompress(frame, &mut out), Ok(data.len()), "{name}");
+            assert!(out[..data.len()] == data[..], "{name}");
+            // A buffer the data fills ends the frame there.
+            let mut part = vec![0; data.len() / 3];
+            assert_eq!(zstd.decompress(frame, &mut part), Ok(part.len()), "{name}");
+            assert!(part[..] == data[..part.len()], "{name}");
+            // A frame cut short fails, and so does a checksum that does
+            // not match.
+            let cut = &frame[..frame.len() - 5];
+            assert_eq!(zstd.decompress(cut, &mut out), Err(Error::Io), "{name}");
+            if frame[4] & 0x04 != 0 {
+                let mut damaged = frame.to_vec();
+                *damaged.last_mut().unwrap() ^= 1;
+                assert_eq!(zstd.decompress(&damaged, &mut out), Err(Error::Io), "{name}");
+            }
         }
     }
+    let mut zstd = Zstd::new().unwrap();
     // Frames of one raw or RLE block, by hand: single segment, a content
     // size of 1 byte, and a checksum when asked.
     let frame = |flags: u8, size: u8, block: &[u8]| {

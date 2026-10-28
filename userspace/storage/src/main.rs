@@ -60,6 +60,10 @@ const HELLO: &[u8] = b"Written by Dukovo before a reboot.\n";
 /// The size of `big.bin`: more than a cluster on every FAT this test
 /// makes, and not a whole number of them.
 const BIG: usize = 200 * 1024 + 123;
+/// Linux's number for the zero device, 1:5, as the kernel's interfaces
+/// give device numbers: the major number in the high 32 bits.
+const ZERO: u64 = (1 << 32) | 5;
+
 /// The size of `grow.bin`, which a Btrfs volume gets too: more than the
 /// 8 MiB of the first data chunk `mkfs.btrfs` makes on the tests' disks,
 /// so that Radix makes another.
@@ -435,6 +439,14 @@ fn write_volume(root: &Dir, name: &str) {
         dir.write_file(&format!("notes/{LONG_NAME}"), text.as_bytes()).map(|()| text.len()),
     );
 
+    // On Btrfs, a second name of a file, a named pipe and a device node
+    // (ADR 0135).
+    if btrfs {
+        step("link", dir.link("hello.txt", false, &dir, "notes/hello-again.txt").map(|()| 0));
+        step("pipe", dir.make_node("pipe", FileKind::Pipe, 0).map(|()| 0));
+        step("zero", dir.make_node("zero", FileKind::CharDevice, ZERO).map(|()| 0));
+    }
+
     // A rename across directories, and a removal.
     step("draft.txt", dir.write_file("draft.txt", b"final\n").map(|()| 6));
     step("rename draft.txt", dir.rename("draft.txt", &dir, "notes/final.txt").map(|()| 0));
@@ -535,6 +547,9 @@ fn check_volume(root: &Dir, name: &str) {
         checked += usize::from(check_pattern(&dir, name, "grow.bin", GROW, grow_byte));
         checked += usize::from(check_pattern(&dir, name, "words.txt", WORDS, words_byte));
     }
+    if dir.info().is_ok_and(|info| info.kind == FilesystemKind::Btrfs) {
+        checked += check_special(&dir, name);
+    }
     // What was renamed and removed has gone.
     for gone in ["draft.txt", "scratch.txt"] {
         match dir.stat(gone) {
@@ -552,6 +567,48 @@ fn check_volume(root: &Dir, name: &str) {
     println!(
         "storage: /volumes/{name}: {checked} files read back after the reboot, every byte as written"
     );
+}
+
+/// Checks the second name, the named pipe and the device node that
+/// `write_volume` made on the Btrfs volume `name`; how many it found as
+/// made.
+fn check_special(dir: &Dir, name: &str) -> usize {
+    let mut found = 0;
+    match (dir.stat("hello.txt"), dir.stat("notes/hello-again.txt")) {
+        (Ok(one), Ok(two)) => {
+            let ok = one.id == two.id && one.links == 2 && two.links == 2;
+            check(ok, || format!("/volumes/{name}/hello.txt has not two names: {one:?} {two:?}"));
+            found += usize::from(ok);
+        }
+        (Err(err), _) | (_, Err(err)) => {
+            fail(&format!("/volumes/{name}: hello.txt's names: {err}"));
+        }
+    }
+    match dir.stat("pipe") {
+        Ok(stat) => {
+            let ok = stat.kind == FileKind::Pipe && stat.links == 1;
+            check(ok, || format!("/volumes/{name}/pipe is no named pipe: {stat:?}"));
+            found += usize::from(ok);
+        }
+        Err(err) => fail(&format!("/volumes/{name}/pipe: {err}")),
+    }
+    // The node opens the device itself: a file it made would read empty.
+    let mut zeros = [1u8; 16];
+    match dir
+        .stat("zero")
+        .and_then(|stat| Ok((stat, dir.open_read("zero")?.read_at(0, &mut zeros)?)))
+    {
+        Ok((stat, read)) => {
+            let ok = stat.kind == FileKind::CharDevice
+                && stat.device == ZERO
+                && read == zeros.len()
+                && zeros == [0; 16];
+            check(ok, || format!("/volumes/{name}/zero is not the zero device: {stat:?}, {read}"));
+            found += usize::from(ok);
+        }
+        Err(err) => fail(&format!("/volumes/{name}/zero: {err}")),
+    }
+    found
 }
 
 /// Checks that `path` in the volume `name` is `len` bytes of `byte`'s,

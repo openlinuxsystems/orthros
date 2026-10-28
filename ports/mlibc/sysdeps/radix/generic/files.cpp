@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -174,22 +175,19 @@ int stat_fd(int fd, struct stat *st) {
 	uint32_t slot = radix::slot_of(fd);
 	if(slot == radix::NO_SLOT)
 		return EBADF;
-	struct radix_file_stat_results f;
-	uint64_t status = radix_file_stat(slot, &f);
+	struct radix_file_status f;
+	uint64_t status = radix_file_stat(slot, &f, sizeof(f));
 	if(!status) {
-		radix::fill_stat(st, f.kind, f.size, f.allocated, f.id, f.created, f.modified, f.accessed,
-				f.mount);
+		radix::fill_stat(st, f);
 		return 0;
 	}
 	if(!other_kind(status))
 		return radix::to_errno(status);
 	// A directory.
-	struct radix_directory_stat_results d;
-	status = radix_directory_stat(slot, ".", 1, 0, &d);
+	status = radix_directory_stat(slot, ".", 1, 0, &f, sizeof(f));
 	if(status)
 		return radix::to_errno(status);
-	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
-			d.mount);
+	radix::fill_stat(st, f);
 	return 0;
 }
 
@@ -201,12 +199,12 @@ uint32_t path_flags(int flags) {
 // What the file at `path` is, as `struct stat`: with `flags`
 // AT_SYMLINK_NOFOLLOW, a symbolic link there itself.
 int stat_path(const radix::Path &path, struct stat *st, int flags = 0) {
-	struct radix_directory_stat_results d;
-	uint64_t status = radix_directory_stat(path.dir, path.text, path.len, path_flags(flags), &d);
+	struct radix_file_status d;
+	uint64_t status =
+			radix_directory_stat(path.dir, path.text, path.len, path_flags(flags), &d, sizeof(d));
 	if(status)
 		return radix::to_errno(status);
-	radix::fill_stat(st, d.kind, d.size, d.allocated, d.id, d.created, d.modified, d.accessed,
-			d.mount);
+	radix::fill_stat(st, d);
 	return 0;
 }
 
@@ -494,8 +492,8 @@ int Sysdeps<ReadEntries>::operator()(int handle, void *buffer, size_t max_size,
 	uint64_t cursor = radix::dir_cursor(handle);
 	if(cursor == 0) {
 		// Only a directory lists.
-		struct radix_directory_stat_results d;
-		if(uint64_t status = radix_directory_stat(slot, ".", 1, 0, &d); status)
+		struct radix_file_status d;
+		if(uint64_t status = radix_directory_stat(slot, ".", 1, 0, &d, sizeof(d)); status)
 			return other_kind(status) ? ENOTDIR : radix::to_errno(status);
 		if(!put_entry(out, max_size, used, ".", 1, DOTDOT_CURSOR, DT_DIR))
 			return EINVAL;
@@ -1151,13 +1149,19 @@ int Sysdeps<Link>::operator()(const char *old_path, const char *new_path) {
 
 int Sysdeps<Linkat>::operator()(int olddirfd, const char *old_path, int newdirfd,
 		const char *new_path, int flags) {
-	(void)olddirfd;
-	(void)old_path;
-	(void)newdirfd;
-	(void)new_path;
-	(void)flags;
-	// No filesystem has hard links yet.
-	return EPERM;
+	if(flags & ~AT_SYMLINK_FOLLOW)
+		return EINVAL;
+	radix::Path from;
+	if(int e = radix::resolve(olddirfd, old_path, &from); e)
+		return e;
+	radix::Path to;
+	if(int e = radix::resolve(newdirfd, new_path, &to); e)
+		return e;
+	uint32_t link_flags = flags & AT_SYMLINK_FOLLOW ? RADIX_LINK_FLAGS_FOLLOW : 0;
+	int e = radix::to_errno(radix_directory_link(from.dir, from.text, from.len, link_flags, to.dir,
+			to.text, to.len));
+	// Linux refuses a directory with EPERM, as POSIX allows.
+	return e == EISDIR ? EPERM : e;
 }
 
 int Sysdeps<Symlink>::operator()(const char *target_path, const char *link_path) {
@@ -1277,19 +1281,41 @@ int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
 }
 
 int Sysdeps<Mkfifoat>::operator()(int dirfd, const char *path, mode_t mode) {
-	(void)dirfd;
-	(void)path;
-	(void)mode;
-	// Named pipes need a filesystem that keeps them (docs/design/posix.md).
-	return ENOSYS;
+	return sysdep<Mknodat>(dirfd, path, S_IFIFO | (mode & 07777), 0);
 }
 
+// The mode's permissions are not kept until users come (Phase 13).
 int Sysdeps<Mknodat>::operator()(int dirfd, const char *path, int mode, int dev) {
-	(void)dirfd;
-	(void)path;
-	(void)mode;
-	(void)dev;
-	return EPERM;
+	enum radix_file_kind kind;
+	uint64_t device = 0;
+	switch(mode & S_IFMT) {
+	case 0:
+	case S_IFREG:
+		kind = RADIX_FILE_KIND_FILE;
+		break;
+	case S_IFIFO:
+		kind = RADIX_FILE_KIND_PIPE;
+		break;
+	case S_IFSOCK:
+		kind = RADIX_FILE_KIND_SOCKET;
+		break;
+	case S_IFCHR:
+	case S_IFBLK:
+		kind = (mode & S_IFMT) == S_IFCHR ? RADIX_FILE_KIND_CHAR_DEVICE
+				: RADIX_FILE_KIND_BLOCK_DEVICE;
+		device = (static_cast<uint64_t>(major(static_cast<dev_t>(dev))) << 32)
+				| minor(static_cast<dev_t>(dev));
+		break;
+	case S_IFDIR:
+		return EPERM;
+	default:
+		return EINVAL;
+	}
+	radix::Path resolved;
+	if(int e = radix::resolve(dirfd, path, &resolved); e)
+		return e;
+	return radix::to_errno(radix_directory_make_node(resolved.dir, resolved.text, resolved.len,
+			kind, device));
 }
 
 int Sysdeps<Pipe>::operator()(int *fds, int flags) {

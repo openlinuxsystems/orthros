@@ -24,7 +24,9 @@
 use core::mem::size_of;
 
 use radix_abi::capability::SlotFlags;
-use radix_abi::directory::{self, FileKind, FilesystemKind, MountFlags, OpenFlags, PathFlags};
+use radix_abi::directory::{
+    self, FileKind, FilesystemKind, LinkFlags, MountFlags, OpenFlags, PathFlags,
+};
 use radix_abi::errors::Kernel;
 use radix_abi::file::{DescriptionFlags, LockKind, LockOwner, SocketFlags, Whence};
 use radix_abi::process::{LimitKind, MAX_SLOTS};
@@ -35,7 +37,7 @@ use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 use radix_vfs::mount::{Location, OpenFlags as VfsOpen};
-use radix_vfs::{FsKind, In, Kind, Out, PATH_MAX};
+use radix_vfs::{FsKind, In, Kind, NodeRef, Out, PATH_MAX};
 
 use super::account::Account;
 use super::memory::cap_rights;
@@ -343,7 +345,7 @@ pub fn directory_method(
                 directory: a.flags.contains(OpenFlags::DIRECTORY),
                 no_follow: a.flags.contains(OpenFlags::NO_FOLLOW),
             };
-            let at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
+            let mut at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
             let description = Description {
                 append: a.flags.contains(OpenFlags::APPEND),
                 non_blocking: a.flags.contains(OpenFlags::NON_BLOCKING),
@@ -357,7 +359,11 @@ pub fn directory_method(
             if !missing.is_empty() {
                 return Err(cap_error(CapError::MissingRights(missing)));
             }
-            if object_kind == ObjectKind::File && wanted.contains(Rights::WRITE) {
+            // A filesystem's named pipe, device node or socket's name opens
+            // what it stands for, on a read-only mount too (ADR 0135).
+            if let Some(node) = stands_for(&at, wanted, description.non_blocking)? {
+                at.node = node;
+            } else if object_kind == ObjectKind::File && wanted.contains(Rights::WRITE) {
                 at.writable().map_err(fs::status)?;
             }
             let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER);
@@ -415,18 +421,8 @@ pub fn directory_method(
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let at = resolve(&dir.at, path.as_str()?, a.flags)?;
-            let stat = at.node.stat();
-            let results = directory::StatResults {
-                kind: file_kind(stat.kind),
-                size: stat.size,
-                allocated: stat.allocated,
-                id: stat.id,
-                created: stat.created,
-                modified: stat.modified,
-                accessed: stat.accessed,
-                mount: at.mount.id,
-            };
-            answer(label, directory::StatResults::WORDS, results.encode())
+            put_status(&at.node.stat(), at.mount.id, a.buffer)?;
+            answer(label, 0, [0; 8])
         }
         directory::SET_TIMES => {
             let a = directory::SetTimesArgs::decode(args)?;
@@ -442,13 +438,39 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let (mut path, mut target) = (Path::Empty, Path::Empty);
             let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
-            vfs()?.make_link(&dir.at, path.as_str()?, target.as_target()?).map_err(
-                |err| match err {
-                    // FAT has no links: Linux says EPERM.
-                    radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
-                    err => fs::status(err),
-                },
-            )?;
+            vfs()?
+                .make_link(&dir.at, path.as_str()?, target.as_target()?)
+                .map_err(refused_as_not_permitted)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::LINK => {
+            let a = directory::LinkArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
+            let (mut from, mut to) = (Path::Empty, Path::Empty);
+            let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
+            let follow = a.flags.contains(LinkFlags::FOLLOW);
+            vfs()?
+                .link(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?, follow)
+                .map_err(refused_as_not_permitted)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::MAKE_NODE => {
+            let a = directory::MakeNodeArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let kind = match a.kind {
+                FileKind::File => Kind::File,
+                FileKind::Pipe => Kind::Pipe,
+                FileKind::CharDevice => Kind::CharDevice,
+                FileKind::BlockDevice => Kind::BlockDevice,
+                FileKind::Socket => Kind::Socket,
+                _ => return Err(error(Kernel::InvalidArgument)),
+            };
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            vfs()?
+                .make_node(&dir.at, path.as_str()?, kind, a.device)
+                .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
         directory::READ_LINK => {
@@ -683,20 +705,10 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             answer(label, file::WriteResults::WORDS, results.encode())
         }
         file::STAT => {
-            file::StatArgs::decode(args)?;
+            let a = file::StatArgs::decode(args)?;
             let file = file_of(found, Rights::NONE)?;
-            let stat = file.at.node.stat();
-            let results = file::StatResults {
-                kind: file_kind(stat.kind),
-                size: stat.size,
-                allocated: stat.allocated,
-                id: stat.id,
-                created: stat.created,
-                modified: stat.modified,
-                accessed: stat.accessed,
-                mount: file.at.mount.id,
-            };
-            answer(label, file::StatResults::WORDS, results.encode())
+            put_status(&file.at.node.stat(), file.at.mount.id, a.buffer)?;
+            answer(label, 0, [0; 8])
         }
         file::SET_TIMES => {
             let a = file::SetTimesArgs::decode(args)?;
@@ -1311,6 +1323,69 @@ fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64> {
 
 /// Where `path` leads from `at`, following a symbolic link that is its
 /// last name unless `flags` says no_follow.
+/// What the node `at` opened stands for, when it is a filesystem's named
+/// pipe (an end of its pipe, opened with `rights`), device node (the
+/// device, which the kernel must have) or socket's name (which no open
+/// takes: no_device, ENXIO); none for any other node.
+fn stands_for(at: &Location, rights: Rights, non_blocking: bool) -> Result<Option<NodeRef>> {
+    let kind = at.node.kind();
+    if !matches!(kind, Kind::Pipe | Kind::CharDevice | Kind::BlockDevice | Kind::Socket)
+        || matches!(at.mount.fs.kind(), FsKind::Dev | FsKind::Pipe)
+        || pipe::end_of(&at.node).is_some()
+        || socket::socket_of(&at.node).is_some()
+    {
+        return Ok(None);
+    }
+    let no_device = || radix_abi::errors::File::NoDevice.status(0);
+    match kind {
+        Kind::Pipe => {
+            let (read, write) = (rights.contains(Rights::READ), rights.contains(Rights::WRITE));
+            pipe::open_named(at, read, write, non_blocking).map(Some)
+        }
+        Kind::Socket => Err(no_device()),
+        _ => {
+            let device = fs::devfs::by_number(kind, at.node.stat().device).ok_or_else(no_device)?;
+            Ok(Some(device.open().map_err(fs::status)?.unwrap_or(device)))
+        }
+    }
+}
+
+/// A filesystem error as a status, with what a filesystem does not do
+/// (FAT's hard links or device nodes) refused as Linux does it: EPERM.
+fn refused_as_not_permitted(err: radix_vfs::Error) -> radix_abi::Status {
+    match err {
+        radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
+        err => fs::status(err),
+    }
+}
+
+/// Writes `stat`, of a file on the mount numbered `mount`, to the
+/// caller's `buffer` as a FileStatus.
+fn put_status(stat: &radix_vfs::Stat, mount: u64, buffer: UserBuffer) -> Result<()> {
+    use directory::FileStatus as S;
+    let (address, len) = user_range(buffer)?;
+    if len < S::SIZE {
+        return Err(error(Kernel::InvalidArgument));
+    }
+    let mut bytes = [0u8; S::SIZE];
+    for (at, value) in [
+        (S::OFFSET_SIZE, stat.size),
+        (S::OFFSET_ALLOCATED, stat.allocated),
+        (S::OFFSET_ID, stat.id),
+        (S::OFFSET_MOUNT, mount),
+        (S::OFFSET_CREATED, stat.created),
+        (S::OFFSET_MODIFIED, stat.modified),
+        (S::OFFSET_ACCESSED, stat.accessed),
+        (S::OFFSET_CHANGED, stat.changed),
+        (S::OFFSET_DEVICE, stat.device),
+    ] {
+        bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[S::OFFSET_LINKS..S::OFFSET_LINKS + 4].copy_from_slice(&stat.links.to_le_bytes());
+    bytes[S::OFFSET_KIND] = file_kind(stat.kind).raw();
+    UserOut { address, len }.put(0, &bytes).map_err(fs::status)
+}
+
 fn resolve(at: &Location, path: &str, flags: PathFlags) -> Result<Location> {
     let vfs = vfs()?;
     if flags.contains(PathFlags::NO_FOLLOW) {

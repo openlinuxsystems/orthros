@@ -1798,3 +1798,122 @@ proptest! {
         prop_assert!(back == model);
     }
 }
+
+#[test]
+fn files_have_hard_links_that_count_against_the_limit() {
+    let fs = Tmpfs::new(1 << 20, 5).unwrap();
+    let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
+    let root = vfs.root();
+    write(&vfs, &root, "a", b"one file").unwrap();
+    vfs.make_directory(&root, "sub").unwrap();
+    let sub = vfs.resolve(&root, "sub").unwrap();
+    vfs.link(&root, "a", &sub, "b", false).unwrap();
+    assert_eq!(vfs.stat(&root, "a").unwrap().links, 2);
+    assert_eq!(vfs.stat(&sub, "b").unwrap().id, vfs.stat(&root, "a").unwrap().id);
+    assert_eq!(read_all(&vfs.resolve(&sub, "b").unwrap().node), b"one file");
+    // A directory says 1, as on Btrfs, and has no other names.
+    assert_eq!(vfs.stat(&root, "sub").unwrap().links, 1);
+    assert_eq!(vfs.link(&root, "sub", &root, "dir", false).err(), Some(Error::IsDirectory));
+    assert_eq!(vfs.link(&root, "a", &sub, "b", false).err(), Some(Error::Exists));
+    // The root, "a", "sub" and the second name of "a".
+    assert_eq!(fs.info().free_files, 1);
+    vfs.link(&root, "a", &root, "c", false).unwrap();
+    assert_eq!(vfs.link(&root, "a", &root, "d", false).err(), Some(Error::NoSpace));
+    // A rename onto another name of the same file changes nothing.
+    vfs.rename(&root, "a", &root, "c").unwrap();
+    assert_eq!(vfs.stat(&root, "a").unwrap().links, 3);
+    vfs.remove(&root, "a").unwrap();
+    vfs.remove(&sub, "b").unwrap();
+    assert_eq!(fs.info().free_files, 2);
+    assert_eq!(vfs.stat(&root, "c").unwrap().links, 1);
+    assert_eq!(read_all(&vfs.resolve(&root, "c").unwrap().node), b"one file");
+    // A file with no names left gets none again.
+    let open = vfs.resolve(&root, "c").unwrap();
+    vfs.remove(&root, "c").unwrap();
+    assert_eq!(open.node.stat().links, 0);
+    assert_eq!(sub.node.link("again", &open.node).err(), Some(Error::NotFound));
+    drop(open);
+    // A symbolic link is linked itself unless followed.
+    write(&vfs, &root, "target", b"x").unwrap();
+    vfs.make_link(&root, "sym", "target").unwrap();
+    vfs.link(&root, "sym", &root, "sym2", false).unwrap();
+    assert_eq!(vfs.stat_link(&root, "sym2").unwrap().kind, Kind::Symlink);
+    vfs.remove(&root, "sym2").unwrap();
+    vfs.link(&root, "sym", &root, "sym2", true).unwrap();
+    assert_eq!(vfs.stat_link(&root, "sym2").unwrap().kind, Kind::File);
+    // Not from one filesystem to another.
+    let other = Tmpfs::new(1 << 20, 5).unwrap();
+    vfs.mount(&root, "sub", other, "tmpfs", false).unwrap();
+    let sub = vfs.resolve(&root, "sub").unwrap();
+    assert_eq!(vfs.link(&root, "target", &sub, "x", false).err(), Some(Error::CrossMount));
+}
+
+#[test]
+fn special_files_hold_their_kind_and_number() {
+    let fs = Tmpfs::new(1 << 20, 16).unwrap();
+    let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
+    let root = vfs.root();
+    let null = crate::device_number(1, 3);
+    vfs.make_node(&root, "fifo", Kind::Pipe, 0).unwrap();
+    vfs.make_node(&root, "null", Kind::CharDevice, null).unwrap();
+    vfs.make_node(&root, "disk", Kind::BlockDevice, crate::device_number(259, 0)).unwrap();
+    vfs.make_node(&root, "socket", Kind::Socket, 0).unwrap();
+    vfs.make_node(&root, "file", Kind::File, 0).unwrap();
+    assert_eq!(vfs.make_node(&root, "fifo", Kind::Pipe, 0).err(), Some(Error::Exists));
+    assert_eq!(vfs.make_node(&root, "dir", Kind::Directory, 0).err(), Some(Error::NotSupported));
+    let stat = vfs.stat(&root, "null").unwrap();
+    assert_eq!((stat.kind, stat.device, stat.links, stat.size), (Kind::CharDevice, null, 1, 0));
+    assert_eq!(crate::device_parts(stat.device), (1, 3));
+    assert_eq!(vfs.stat(&root, "fifo").unwrap().device, 0);
+    assert_eq!(vfs.stat(&root, "disk").unwrap().kind, Kind::BlockDevice);
+    // A socket's name with nothing bound to it.
+    assert!(vfs.resolve(&root, "socket").unwrap().node.socket_binding().is_none());
+    assert_eq!(vfs.stat(&root, "file").unwrap().kind, Kind::File);
+    // They have names as files do: moved, linked and removed.
+    vfs.rename(&root, "fifo", &root, "pipe").unwrap();
+    vfs.link(&root, "null", &root, "null2", false).unwrap();
+    assert_eq!(vfs.stat(&root, "null").unwrap().links, 2);
+    for name in ["pipe", "null", "null2", "disk", "socket", "file"] {
+        vfs.remove(&root, name).unwrap();
+    }
+    assert_eq!(fs.info().free_files, 15);
+}
+
+#[test]
+fn the_change_time_follows_names_and_times() {
+    // The clock is the host's here: each step is at a later time.
+    crate::set_clock(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            as u64
+    });
+    let fs = Tmpfs::new(1 << 20, 16).unwrap();
+    let vfs = Vfs::new(fs, "tmpfs").unwrap();
+    let root = vfs.root();
+    write(&vfs, &root, "a", b"x").unwrap();
+    let made = vfs.stat(&root, "a").unwrap();
+    assert!(made.changed >= made.modified);
+    let later = |before: u64, what: &str| {
+        let changed = vfs.stat(&root, "a").unwrap().changed;
+        assert!(changed > before, "{what}: {changed} <= {before}");
+        changed
+    };
+    let mut t = made.changed;
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    vfs.link(&root, "a", &root, "b", false).unwrap();
+    t = later(t, "link");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    vfs.remove(&root, "b").unwrap();
+    t = later(t, "remove");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    vfs.rename(&root, "a", &root, "a2").unwrap();
+    vfs.rename(&root, "a2", &root, "a").unwrap();
+    t = later(t, "rename");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    vfs.resolve(&root, "a").unwrap().node.set_times(Some(1), Some(1)).unwrap();
+    t = later(t, "set_times");
+    // A write is a modification, which the change time is never before.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    write(&vfs, &root, "a", b"y").unwrap();
+    let after = vfs.stat(&root, "a").unwrap();
+    assert!(after.changed > t && after.changed == after.modified);
+}
