@@ -157,3 +157,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0143](0143-spark-pets-the-chipsets-hardware-watchdog.md) | Spark pets the chipset's hardware watchdog, which restarts a machine whose Spark stops responding | Accepted |
 | [0144](0144-lspci-lscpu-and-lsmem-with-the-pci-id-database.md) | lspci, lscpu and lsmem are systools, with the PCI ID database as a port | Accepted |
 | [0145](0145-machine-checks-are-reported-and-the-unrecoverable-ones-panic.md) | Machine checks are reported, and the ones the CPU cannot go on after panic | Accepted |
+| [0150](0150-btrfs-scrubs-the-last-commit-a-run-of-extents-at-a-time.md) | Btrfs scrubs the last commit, a run of extents at a time | Accepted |

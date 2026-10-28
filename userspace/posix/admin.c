@@ -4,10 +4,10 @@
 // The native administration tools (systools, ADR 0096) as an
 // administrator's commands and scripts use them, each through its link
 // in /bin: the process tools and their signals, sessions, memory and
-// disks, subvolumes, priorities, CPU affinity and I/O classes, held
-// files, traces, the kernel log, the dump and layout tools, script, watch
-// and pidstat, shutdown and service through Spark, and the hardware
-// tools. With them, what the kernel tells them: /processes
+// disks, subvolumes and scrubs, priorities, CPU affinity and I/O
+// classes, held files, traces, the kernel log, the dump and layout tools,
+// script, watch and pidstat, shutdown and service through Spark, and the
+// hardware tools. With them, what the kernel tells them: /processes
 // (radix-proc(5)), /devices/kmsg, /kernel (radix-sysfs(5)), getloadavg,
 // and the priorities a child inherits.
 
@@ -224,9 +224,9 @@ static void memory(void) {
 	STATUS(1, "/bin/df", "/nowhere");
 }
 
-// subvolume on a filesystem that is not Btrfs, which refuses each
-// action, and with an unknown action or none; the root boot test makes,
-// snapshots and removes subvolumes through the same calls.
+// subvolume and scrub on a filesystem that is not Btrfs, which refuses
+// each action, and with an unknown action or none; the root boot test
+// makes, snapshots, removes and scrubs subvolumes through the same calls.
 static void subvolumes(void) {
 	STATUS(0, "/bin/mkdir", "-p", DIR);
 	STATUS(1, "/bin/subvolume", "create", DIR "/sub");
@@ -234,6 +234,10 @@ static void subvolumes(void) {
 	STATUS(1, "/bin/subvolume", "delete", DIR "/sub");
 	STATUS(1, "/bin/subvolume", "list");
 	STATUS(1, "/bin/subvolume");
+	STATUS(1, "/bin/scrub", "start", "-B", DIR);
+	STATUS(1, "/bin/scrub", "start", "-r", DIR);
+	STATUS(1, "/bin/scrub", "status", DIR);
+	STATUS(1, "/bin/scrub");
 }
 
 // renice, ionice and taskset: levels, classes and CPUs, set on a child

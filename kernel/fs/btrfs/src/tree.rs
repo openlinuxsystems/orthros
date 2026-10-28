@@ -423,6 +423,33 @@ pub fn read_block(volume: &Volume, want: &Root, bounds: &Bounds) -> Result<KArc<
     Err(failed)
 }
 
+/// What is wrong with a copy of a tree block a scrub reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fault {
+    /// Its checksum differs.
+    Sum,
+    /// Its checksum matches, but its header or its items do not hold.
+    Header,
+}
+
+/// Checks the copy `bytes` of the tree block `want` names, read from the
+/// disk, as [`read_block`] checks one, with no parent to say its keys;
+/// gives the bytes back.
+pub(crate) fn check_copy(
+    volume: &Volume,
+    want: &Root,
+    bytes: KVec<u8>,
+) -> (Option<Fault>, KVec<u8>) {
+    let sb = volume.superblock();
+    if bytes.len() < HEADER_SIZE || !sb.csum_type.matches(&bytes[CSUM_SIZE..], &bytes[..CSUM_SIZE])
+    {
+        return (Some(Fault::Sum), bytes);
+    }
+    let block = Block { bytenr: want.bytenr, bytes };
+    let fault = block.check(volume, want, &Bounds::default()).err().map(|_| Fault::Header);
+    (fault, block.bytes)
+}
+
 /// A place in a tree: the blocks from the root down to a leaf, and the
 /// slot in each.
 pub struct Cursor<'v> {

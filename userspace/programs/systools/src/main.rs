@@ -32,6 +32,7 @@ mod proc;
 mod ps;
 mod rtrace;
 mod script;
+mod scrub;
 mod sessions;
 mod signals;
 mod subvolume;
@@ -82,6 +83,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("renice", priority::renice),
     ("rtrace", rtrace::main),
     ("script", script::main),
+    ("scrub", scrub::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
     ("subvolume", subvolume::main),
