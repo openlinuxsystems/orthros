@@ -523,7 +523,12 @@ impl Vfs {
         let (dir, name) = self.resolve_parent(base, path)?;
         dir.writable()?;
         let node = dir.node.lookup(name)?;
-        if self.mounted_on(&dir.mount, &node).is_some() {
+        let mounted = self.mounted_on(&dir.mount, &node).is_some();
+        // Let go of it first: held here, a file no one has open would look
+        // open to its filesystem, which keeps an open file past its last
+        // name rather than freeing it.
+        drop(node);
+        if mounted {
             return Err(Error::InUse);
         }
         dir.node.remove(name)

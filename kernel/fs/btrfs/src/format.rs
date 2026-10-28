@@ -68,12 +68,23 @@ impl Key {
         Key { objectid, kind, offset }
     }
 
-    /// The key at `at` in `bytes`.
+    /// The key at `at` in `bytes`: its fields with one bounds check, as a
+    /// tree's binary search reads many; zeros where `bytes` ends first.
     pub fn read(bytes: &[u8], at: usize) -> Key {
+        let Some(key) = bytes.get(at..).and_then(<[u8]>::first_chunk::<{ Key::SIZE }>) else {
+            return Key {
+                objectid: u64_at(bytes, at),
+                kind: bytes.get(at + 8).copied().unwrap_or(0),
+                offset: u64_at(bytes, at + 9),
+            };
+        };
+        let (mut objectid, mut offset) = ([0; 8], [0; 8]);
+        objectid.copy_from_slice(&key[..8]);
+        offset.copy_from_slice(&key[9..]);
         Key {
-            objectid: u64_at(bytes, at),
-            kind: bytes.get(at + 8).copied().unwrap_or(0),
-            offset: u64_at(bytes, at + 9),
+            objectid: u64::from_le_bytes(objectid),
+            kind: key[8],
+            offset: u64::from_le_bytes(offset),
         }
     }
 

@@ -22,6 +22,7 @@ use radix_vfs::{Error, Kind, Result};
 use crate::cow::Writer;
 use crate::csum::crc32c_update;
 use crate::format::{Key, item, name_hash, tree, u16_at, u32_at, u64_at};
+use crate::inode::Inode;
 use crate::tree::{Block, Cursor, ITEM_SIZE};
 use crate::volume::Volume;
 
@@ -226,6 +227,10 @@ pub(crate) struct Files<'a> {
     pub(crate) volume: &'a Volume,
     /// The subvolume: the number of its tree.
     pub(crate) subvol: u64,
+    /// The inode items the last two inodes it changed have, as
+    /// [`Files::change_inode`] left them: what a node of one reads again
+    /// after the change, without a walk down the tree.
+    pub(crate) changed: [Option<(u64, Inode)>; 2],
 }
 
 impl Files<'_> {
@@ -238,6 +243,23 @@ impl Files<'_> {
             self.w.break_off();
         }
         result
+    }
+
+    /// Inode `ino`'s item as this change last left it, if it changed it.
+    pub(crate) fn changed(&self, ino: u64) -> Option<Inode> {
+        self.changed.iter().flatten().find(|(i, _)| *i == ino).map(|&(_, inode)| inode)
+    }
+
+    /// Notes inode `ino`'s item as a change left it, or that it went.
+    fn note_inode(&mut self, ino: u64, inode: Option<Inode>) {
+        let [last, before] = &mut self.changed;
+        if last.is_some_and(|(i, _)| i != ino) {
+            *before = last.take();
+        }
+        if before.is_some_and(|(i, _)| i == ino) {
+            *before = None;
+        }
+        *last = inode.map(|inode| (ino, inode));
     }
 
     /// A copy of item `key` of tree `tree`.
@@ -361,25 +383,29 @@ impl Files<'_> {
     ) -> Result<R> {
         let generation = self.w.generation;
         let key = Key::new(ino, item::INODE_ITEM, 0);
-        self.w.update(self.volume, self.subvol, &key, |d| {
+        let (result, inode) = self.w.update(self.volume, self.subvol, &key, |d| {
             put_u64(d, at::TRANSID, generation);
             let sequence = u64_at(d, at::SEQUENCE);
             put_u64(d, at::SEQUENCE, sequence.wrapping_add(1));
-            f(d)
-        })
+            let result = f(d);
+            (result, Inode::read(d).ok())
+        })?;
+        self.note_inode(ino, inode);
+        Ok(result)
     }
 
     /// Adds `bytes` to the end of item `key` of tree `tree`, made if it is
     /// missing.
     fn append(&mut self, tree: u64, key: &Key, bytes: &[u8]) -> Result<()> {
-        match self.get(tree, key)? {
-            None => self.w.insert(self.volume, tree, key, bytes),
-            Some(old) => {
-                let n = old.len();
-                self.w.resize(self.volume, tree, key, n + bytes.len())?;
-                self.w.update(self.volume, tree, key, |d| d[n..].copy_from_slice(bytes))
-            }
+        // Most often it is missing (a name's hash or a file's directory
+        // seldom has one already): one walk down the tree.
+        match self.w.insert(self.volume, tree, key, bytes) {
+            Err(Error::Exists) => {}
+            made => return made,
         }
+        let n = self.get(tree, key)?.ok_or(Error::Corrupt)?.len();
+        self.w.resize(self.volume, tree, key, n + bytes.len())?;
+        self.w.update(self.volume, tree, key, |d| d[n..].copy_from_slice(bytes))
     }
 
     /// Cuts `len` bytes from `start` out of item `key` of tree `tree`,
@@ -473,12 +499,21 @@ impl Files<'_> {
 
     /// Deletes inode `ino`: every item it has, its extents, and its
     /// orphan item.
-    pub(crate) fn free_inode(&mut self, ino: u64) -> Result<()> {
+    pub(crate) fn free_inode(&mut self, ino: u64, orphan: bool) -> Result<()> {
         self.drop_extents(ino, 0, u64::MAX)?;
+        self.note_inode(ino, None);
+        // The inode item, then whatever else is left (extended attributes).
+        match self.w.delete(self.volume, self.subvol, &Key::new(ino, item::INODE_ITEM, 0)) {
+            Ok(()) | Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
         while let Some((key, _)) = self.next(self.subvol, &Key::new(ino, 0, 0))?
             && key.objectid == ino
         {
             self.w.delete(self.volume, self.subvol, &key)?;
+        }
+        if !orphan {
+            return Ok(());
         }
         match self.w.delete(self.volume, self.subvol, &Key::new(object::ORPHAN, ORPHAN_ITEM, ino)) {
             Ok(()) | Err(Error::NotFound) => Ok(()),
@@ -490,7 +525,9 @@ impl Files<'_> {
     /// it.
     fn extent_at(&self, ino: u64, pos: u64) -> Result<Option<(Key, KVec<u8>)>> {
         let key = Key::new(ino, item::EXTENT_DATA, pos);
-        if let Some((found, data)) = self.prev(self.subvol, &key)?
+        // An extent before `pos` may hold it; none starts before byte 0.
+        if pos > 0
+            && let Some((found, data)) = self.prev(self.subvol, &key)?
             && found.is(ino, item::EXTENT_DATA)
             && found.offset.saturating_add(FileExtent::read(&data)?.len) > pos
         {

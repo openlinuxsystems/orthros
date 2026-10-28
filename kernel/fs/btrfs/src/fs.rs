@@ -72,7 +72,7 @@ pub(crate) struct Txn {
 impl Txn {
     /// Subvolume `subvol`, to change.
     pub(crate) fn files<'a>(&'a mut self, volume: &'a Volume, subvol: u64) -> Files<'a> {
-        Files { w: &mut self.writer, volume, subvol }
+        Files { w: &mut self.writer, volume, subvol, changed: [None; 2] }
     }
 
     /// A number for a new inode of subvolume `subvol`.
@@ -403,7 +403,7 @@ impl Inner {
                         break;
                     }
                     for ino in orphans {
-                        files.whole(|f| f.free_inode(ino))?;
+                        files.whole(|f| f.free_inode(ino, true))?;
                     }
                 }
             }
@@ -438,7 +438,7 @@ impl Inner {
         {
             let mut txn = tx.lock();
             for &(subvol, ino) in &reap {
-                txn.files(&self.volume, subvol).whole(|f| f.free_inode(ino))?;
+                txn.files(&self.volume, subvol).whole(|f| f.free_inode(ino, true))?;
             }
             self.commit_locked(&mut txn)?;
         }
