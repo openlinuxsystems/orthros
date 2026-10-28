@@ -192,6 +192,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
                    hubs and the devices behind them, and follows devices
                    plugged in and pulled out
+  usb-input        a USB keyboard types into the console beside the PS/2
+                   one, and repeats a held key; /devices/mouse reads a USB
+                   mouse and a tablet
   watchdog, watchdog-tco   a Spark that stops responding leaves the hardware
                    watchdog unpetted, and it restarts the machine (QEMU's
                    i6300esb under BIOS, q35's TCO timer under UEFI)

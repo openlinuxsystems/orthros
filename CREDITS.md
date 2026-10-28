@@ -244,6 +244,14 @@ We implement these from their published descriptions. No code is copied.
   [ADR 0147](docs/adr/0147-usb-hubs-and-every-device-configured-by-its-controllers-thread.md)).
   We use no code of Linux's or the BSDs' USB stacks, or of QEMU's
   controller, which the boot tests run against.
+- The USB-IF's "Device Class Definition for Human Interface Devices
+  (HID)", version 1.11, and its "HID Usage Tables", version 1.5
+  ([usb.org/hid](https://www.usb.org/hid)), from which `radix-hid` lays
+  out report descriptors and decodes keyboards', mice's and tablets'
+  reports
+  ([ADR 0148](docs/adr/0148-usb-keyboards-and-mice-are-read-through-their-hid-reports.md)).
+  Its keys are radix-input(2)'s, which are Linux's key codes; we use no
+  code of Linux's `hid-core` or `hid-input`, or of the BSDs' HID drivers.
 - Howard Hinnant's
   ["chrono-Compatible Low-Level Date Algorithms"](https://howardhinnant.github.io/date_algorithms.html),
   which FAT's dates are converted with.

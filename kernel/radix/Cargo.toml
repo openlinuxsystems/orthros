@@ -30,6 +30,7 @@ radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-hal = { path = "../hal" }
 radix-hw = { path = "../lib/hw" }
+radix-hid = { path = "../lib/hid" }
 radix-input = { path = "../lib/input" }
 radix-ipc = { path = "../ipc" }
 radix-kdb = { path = "../lib/kdb" }

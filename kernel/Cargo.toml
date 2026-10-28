@@ -32,6 +32,7 @@ members = [
     "lib/bootfs",
     "lib/elf",
     "lib/fbcon",
+    "lib/hid",
     "lib/hw",
     "lib/input",
     "lib/kdb",

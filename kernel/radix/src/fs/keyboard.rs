@@ -4,24 +4,27 @@
 //! `/devices/kbd` (Phase 9, radix-input(2)): the keys of the machine's
 //! keyboards, as events, for consoled(8).
 //!
-//! The keyboard's interrupt hands each byte it sends to [`byte`], which
-//! decodes it (`radix_input::Set1`) and puts the key event into the ring
-//! [`RING`], numbered from boot. A description of `/devices/kbd` keeps in its
-//! offset one more than the number of the next event it reads, starting
-//! with the first after it was opened, so that nobody reads keys typed
-//! before. The interrupt cannot wake the readers itself (waking takes the
-//! wait table's lock, which interrupt handlers must not take, `kmsg`), so
-//! it wakes the `kbd` thread, which wakes the readers and `poll`. The
-//! thread also lights the keyboard's lock lights (SET_LEDS): each byte of
-//! that command waits for the keyboard's answer, which comes back through
-//! the interrupt.
+//! The PS/2 keyboard's interrupt hands each byte it sends to [`byte`],
+//! which decodes it (`radix_input::Set1`) and puts the key event into the
+//! ring [`EVENTS`] (`events`). The interrupt cannot wake the readers itself
+//! (waking takes the wait table's lock, which interrupt handlers must not
+//! take, `kmsg`), so it wakes the `kbd` thread, which wakes the readers and
+//! `poll`. The thread also lights the keyboard's lock lights (SET_LEDS):
+//! each byte of that command waits for the keyboard's answer, which comes
+//! back through the interrupt.
+//!
+//! USB keyboards (Phase 11a, ADR 0148) hand their keys to [`usb_key`]
+//! from their controller's thread. A PS/2 keyboard repeats a key held down
+//! itself, a USB one does not, so the `kbd` thread repeats the last key a
+//! USB keyboard pressed, as Linux's input core does: 250 ms after it went
+//! down, then every 33 ms, until a key goes up. The controllers' threads
+//! light their keyboards' lights from [`lights`].
 
 use core::any::Any;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::Status;
-use radix_abi::errors::Kernel;
-use radix_abi::input::{EVENTS_KEPT, Event};
+use radix_abi::input::{EVENTS_KEPT, Event, PRESSED, RELEASED, REPEATED};
 use radix_hal::Devices;
 use radix_input::Set1;
 use radix_klog::{error, info};
@@ -29,10 +32,10 @@ use radix_sync::{Once, SpinLock};
 use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
 
 use super::FileObject;
+use super::events::{Events, Record};
 use crate::Arch;
 use crate::sched::{self, Options, Policy, ThreadRef, wait};
 use crate::user::posix::poll::{self, Polled};
-use crate::user::posix::signal::{Restart, interrupted};
 
 /// Events kept.
 const KEPT: usize = EVENTS_KEPT as usize;
@@ -46,14 +49,32 @@ const RESEND: u8 = 0xfe;
 /// milliseconds.
 const ANSWER_MS: u32 = 50;
 
-/// The events, and the number of the next.
-struct Ring {
-    events: [(u64, u16, u16); KEPT],
-    next: u64,
+/// How long a USB keyboard's key is held before it repeats, and how often
+/// it repeats then: Linux's defaults.
+const REPEAT_DELAY_NS: u64 = 250_000_000;
+const REPEAT_PERIOD_NS: u64 = 33_000_000;
+
+/// A key event: when, the key, and what it did.
+#[derive(Clone, Copy)]
+struct Key {
+    time_ns: u64,
+    code: u16,
+    value: u16,
 }
 
-static RING: SpinLock<Ring> = SpinLock::new(Ring { events: [(0, 0, 0); KEPT], next: 0 });
-/// Touched only by the interrupt, but locked as `RING` is.
+impl Record for Key {
+    const SIZE: usize = Event::SIZE;
+
+    fn encode(&self, out: &mut [u8]) {
+        out.fill(0);
+        out[Event::OFFSET_TIME_NS..][..8].copy_from_slice(&self.time_ns.to_le_bytes());
+        out[Event::OFFSET_CODE..][..2].copy_from_slice(&self.code.to_le_bytes());
+        out[Event::OFFSET_VALUE..][..2].copy_from_slice(&self.value.to_le_bytes());
+    }
+}
+
+static EVENTS: Events<Key, KEPT> = Events::new(Key { time_ns: 0, code: 0, value: 0 });
+/// Touched only by the interrupt, but locked: it may come on any CPU.
 static DECODER: SpinLock<Set1> = SpinLock::new(Set1::new());
 /// The thread that wakes the readers.
 static THREAD: Once<ThreadRef> = Once::new();
@@ -70,6 +91,9 @@ static WAITING: AtomicBool = AtomicBool::new(false);
 static ANSWER: AtomicU32 = AtomicU32::new(0);
 /// The keyboard is ready to be sent commands.
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// The key a USB keyboard holds down, which the thread repeats, and when
+/// it next does.
+static REPEAT: SpinLock<Option<(u16, u64)>> = SpinLock::new(None);
 
 /// The node of `/devices/kbd`, numbered as its id.
 pub struct Keyboard(pub u64);
@@ -116,16 +140,19 @@ pub fn is_keyboard(node: &NodeRef) -> bool {
 
 /// The offset a new description starts with: the next event's.
 pub(super) fn opened() -> u64 {
-    next() + 1
-}
-
-fn next() -> u64 {
-    RING.lock_irq().next
+    EVENTS.opened()
 }
 
 /// What readers wait on.
 fn key() -> usize {
     core::ptr::addr_of!(SEEN).addr()
+}
+
+/// Wakes the thread, which wakes the readers.
+fn wake_thread() {
+    if let Some(thread) = THREAD.get() {
+        sched::wake(thread);
+    }
 }
 
 /// A byte from the keyboard, in its interrupt.
@@ -134,15 +161,24 @@ fn byte(byte: u8) {
         ANSWER.store(u32::from(byte), Ordering::Release);
     } else {
         let Some(key) = DECODER.lock_irq().feed(byte) else { return };
-        let time = sched::now_ns();
-        let mut ring = RING.lock_irq();
-        let at = (ring.next % KEPT as u64) as usize;
-        ring.events[at] = (time, key.code, key.value);
-        ring.next += 1;
+        EVENTS.push(Key { time_ns: sched::now_ns(), code: key.code, value: key.value });
     }
-    if let Some(thread) = THREAD.get() {
-        sched::wake(thread);
-    }
+    wake_thread();
+}
+
+/// A USB keyboard's key `code` went down, or up: from its controller's
+/// thread.
+pub fn usb_key(code: u16, down: bool) {
+    let now = sched::now_ns();
+    EVENTS.push(Key { time_ns: now, code, value: if down { PRESSED } else { RELEASED } });
+    // A key going down repeats; any going up stops it, as on Linux.
+    *REPEAT.lock_irq() = down.then_some((code, now + REPEAT_DELAY_NS));
+    wake_thread();
+}
+
+/// The lock lights consoled(8) last asked for: LED_* bits.
+pub fn lights() -> u32 {
+    LIGHTS.load(Ordering::Acquire)
 }
 
 /// Reads as many of the reader's next events as `out` holds whole, waiting
@@ -150,65 +186,19 @@ fn byte(byte: u8) {
 /// cannot hold one, and with gone once if events were lost before the
 /// reader read them, moving on to the oldest kept.
 pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<usize, Status> {
-    let room = out.len() / Event::SIZE;
-    if room == 0 {
-        return Err(Kernel::InvalidArgument.status(0));
-    }
-    let mut offset = file.offset.lock();
-    loop {
-        let mut wanted = offset.saturating_sub(1);
-        // A batch at a time, copied out with the ring let go of: the copy
-        // may wait for a page.
-        let mut batch = [(0u64, 0u16, 0u16); 32];
-        let (count, lost) = {
-            let ring = RING.lock_irq();
-            let oldest = ring.next.saturating_sub(KEPT as u64);
-            let lost = wanted < oldest;
-            wanted = wanted.max(oldest);
-            let count = (ring.next - wanted).min(room.min(batch.len()) as u64) as usize;
-            for (i, slot) in batch[..count].iter_mut().enumerate() {
-                *slot = ring.events[((wanted + i as u64) % KEPT as u64) as usize];
-            }
-            (count, lost)
-        };
-        if lost {
-            *offset = wanted + 1;
-            return Err(Kernel::Gone.status(0));
-        }
-        if count > 0 {
-            for (i, &(time_ns, code, value)) in batch[..count].iter().enumerate() {
-                let mut bytes = [0u8; Event::SIZE];
-                bytes[Event::OFFSET_TIME_NS..][..8].copy_from_slice(&time_ns.to_le_bytes());
-                bytes[Event::OFFSET_CODE..][..2].copy_from_slice(&code.to_le_bytes());
-                bytes[Event::OFFSET_VALUE..][..2].copy_from_slice(&value.to_le_bytes());
-                out.put(i * Event::SIZE, &bytes).map_err(super::status)?;
-            }
-            *offset = wanted + count as u64 + 1;
-            return Ok(count * Event::SIZE);
-        }
-        if non_blocking {
-            return Err(Kernel::WouldBlock.status(0));
-        }
-        wait::wait_until(key(), "kbd", || next() > wanted || sched::interrupted());
-        if sched::interrupted() && next() <= wanted {
-            return Err(interrupted(Restart::Always));
-        }
-    }
+    EVENTS.read(file, out, non_blocking, key(), "kbd")
 }
 
 /// What `poll` finds on `file`: readable while an event waits for it.
 pub fn events(file: &FileObject) -> u16 {
-    // A read in progress holds the offset: it has nothing to read yet.
-    let Some(offset) = file.offset.try_lock() else { return 0 };
-    if next() > offset.saturating_sub(1) { poll::READABLE } else { 0 }
+    if EVENTS.readable(file) { poll::READABLE } else { 0 }
 }
 
 /// SET_LEDS: lights the lock lights `lights` names.
 pub fn set_lights(lights: u32) {
     LIGHTS.store(lights & 7, Ordering::Release);
-    if let Some(thread) = THREAD.get() {
-        sched::wake(thread);
-    }
+    wake_thread();
+    crate::usb::lights_changed();
 }
 
 /// Starts the thread, then the keyboard.
@@ -227,9 +217,7 @@ pub fn start() {
         Some(name) => {
             info!("Keyboard: {name} reads into /devices/kbd");
             STARTED.store(true, Ordering::Release);
-            if let Some(thread) = THREAD.get() {
-                sched::wake(thread);
-            }
+            wake_thread();
         }
         None => info!("Keyboard: no built-in keyboard"),
     }
@@ -264,11 +252,28 @@ fn send(byte: u8) -> bool {
     false
 }
 
-/// The thread: wakes the readers and `poll` when events came, and sets the
-/// lights when they are to change.
+/// Repeats the key a USB keyboard holds, if it is time; returns when it
+/// is next to, if one is held.
+fn repeat() -> Option<u64> {
+    let now = sched::now_ns();
+    let mut repeat = REPEAT.lock_irq();
+    let (code, at) = (*repeat)?;
+    if now < at {
+        return Some(at);
+    }
+    EVENTS.push(Key { time_ns: now, code, value: REPEATED });
+    // Late, it goes on from now: no burst to catch up.
+    let next = (at + REPEAT_PERIOD_NS).max(now + 1);
+    *repeat = Some((code, next));
+    Some(next)
+}
+
+/// The thread: wakes the readers and `poll` when events came, sets the
+/// lights when they are to change, and repeats a USB keyboard's key.
 fn run(_: usize) {
     loop {
-        let next = next();
+        let repeat_at = repeat();
+        let next = EVENTS.next();
         if SEEN.swap(next, Ordering::AcqRel) != next {
             wait::wake_all(key());
             POLLED.changed();
@@ -282,6 +287,9 @@ fn run(_: usize) {
                 info!("Keyboard: the keyboard did not take the lock lights");
             }
         }
-        sched::block("kbd");
+        match repeat_at {
+            Some(at) => sched::block_until(at, "kbd"),
+            None => sched::block("kbd"),
+        }
     }
 }

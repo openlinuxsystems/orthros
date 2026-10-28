@@ -20,6 +20,8 @@
 //! - [`class_name`]: words for a device's or an interface's class.
 //! - [`hub`]: what hubs say of themselves and of their ports, and the
 //!   requests that drive them (Phase 11a, ADR 0147).
+//! - [`hid`]: what a HID interface says of itself, and the class's
+//!   requests (Phase 11a, ADR 0148).
 //!
 //! The crate knows nothing of the kernel or of a controller, so its tests
 //! run on the host.
@@ -29,6 +31,7 @@
 
 use core::fmt;
 
+pub mod hid;
 pub mod hub;
 #[cfg(test)]
 mod tests;

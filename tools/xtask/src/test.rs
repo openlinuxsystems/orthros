@@ -60,6 +60,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-fat",
     "radix-fbcon",
     "radix-hal",
+    "radix-hid",
     "radix-hw",
     "radix-input",
     "radix-ipc",
@@ -772,6 +773,38 @@ pub const CASES: &[Case] = &[
             "usb-kbd,bus=xhci.0,port=3.8.4",
         ],
         script: usb_devices,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "usb-input",
+        about: "a USB keyboard types on the screen's shell beside the PS/2 one, its held key repeats, and a USB mouse and tablet are read from /devices/mouse",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark starts the services, as on a normal boot.
+        cmdline: "lockdep",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        // The USB keyboard is bound to the display, so that QMP's
+        // input-send-event reaches it and send-key the PS/2 keyboard. A
+        // USB mouse cannot be bound; QEMU gives it the motion and buttons
+        // that no pointer bound to the display takes, before the PS/2
+        // mouse, which the kernel does not start. The script plugs a
+        // tablet in later.
+        qemu: &[
+            "-vga",
+            "none",
+            "-device",
+            "VGA,id=video0",
+            "-device",
+            "usb-kbd,bus=xhci.0,port=2,id=usbkbd,display=video0",
+            "-device",
+            "usb-mouse,bus=xhci.0,port=3",
+        ],
+        script: usb_input,
         disks: &[],
         second: None,
     },
@@ -2525,6 +2558,46 @@ impl Vm {
         Ok(())
     }
 
+    /// Sends QEMU input events (QMP's InputEvent, as JSON) to the devices
+    /// bound to the display `display`, through QMP's `input-send-event`;
+    /// `send-key` reaches only the devices bound to none, the PS/2 ones.
+    pub fn input_events(&mut self, display: &str, events: &[String]) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        Qmp::connect(&socket)?.execute(&format!(
+            r#"{{"execute":"input-send-event","arguments":{{"device":"{display}","events":[{}]}}}}"#,
+            events.join(",")
+        ))
+    }
+
+    /// Holds down, or lets go of, `keys` (QEMU key codes) on the keyboard
+    /// bound to `display`.
+    pub fn keys_on(&mut self, display: &str, keys: &[&str], down: bool) -> Result<(), String> {
+        let events: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                format!(
+                    r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                )
+            })
+            .collect();
+        self.input_events(display, &events)
+    }
+
+    /// Types `text` on the keyboard bound to `display`, a key at a time on
+    /// a US layout, as [`Vm::type_text`] does on the PS/2 one.
+    pub fn type_on(&mut self, display: &str, text: &str) -> Result<(), String> {
+        for c in text.chars() {
+            let combo = key_combo(c)?;
+            let keys: Vec<&str> = combo.split('-').collect();
+            self.keys_on(display, &keys, true)?;
+            std::thread::sleep(Duration::from_millis(20));
+            let up: Vec<&str> = keys.iter().rev().copied().collect();
+            self.keys_on(display, &up, false)?;
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        Ok(())
+    }
+
     /// Presses the machine's power button: QMP's `system_powerdown`, which
     /// raises ACPI's power button event.
     pub fn press_power_button(&mut self) -> Result<(), String> {
@@ -3055,6 +3128,99 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("USB: 1-7.8.4: QEMU USB Keyboard was unplugged")?;
     vm.press_power_button()?;
     vm.expect("Power: the power button was pressed")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The display the USB devices of `usb-input` are bound to.
+const VIDEO: &str = "video0";
+
+/// How a line of `/devices/mouse`'s records reads through hexdump(1): the
+/// time in hex, then dx, dy, wheel, pan, x, y, buttons and flags.
+const MOTIONS: &str = r#"'2/4 "%x" 8/4 " %d" "\n"'"#;
+
+/// A USB keyboard and mouse beside the PS/2 keyboard, on a normal boot.
+/// Each USB keyboard's keys go where the PS/2 one's do: the test types on
+/// the screen's shell with both. A key held on the USB keyboard repeats,
+/// as the kernel repeats it, and stops when the keyboard is pulled out
+/// with the key still down. A shell reads `/devices/mouse` with
+/// hexdump(1) while the mouse moves and clicks, and while a tablet
+/// plugged in then points. QEMU hands a button to a pointer bound to the
+/// display before any other, so the tablet comes after the mouse's
+/// clicks. The controller's thread runs alongside the boot, so what it
+/// says at boot is looked for anywhere in the log.
+fn usb_input(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    for line in [
+        "USB: 1-6: interface 0: a keyboard, read into /devices/kbd",
+        "USB: 1-7: interface 0: a mouse, read into /devices/mouse",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    vm.type_on(VIDEO, "echo $((6 * 7)) usb\n")?;
+    vm.expect_screen(&["# echo $((6 * 7)) usb", "42 usb"])?;
+    vm.type_text("echo $((6 * 8)) ps2\n")?;
+    vm.expect_screen(&["# echo $((6 * 8)) ps2", "48 ps2"])?;
+    // Held for a second: down, then repeated after 250 ms and every 33 ms,
+    // some 20 times; emulated, fewer, but more than ten.
+    vm.type_on(VIDEO, "echo ")?;
+    vm.keys_on(VIDEO, &["x"], true)?;
+    std::thread::sleep(Duration::from_millis(1000));
+    vm.keys_on(VIDEO, &["x"], false)?;
+    vm.type_on(VIDEO, " held\n")?;
+    vm.expect_screen(&["xxxxxxxxxx held"])?;
+    // The mouse moves, then its left button goes down and up; a tablet
+    // plugged in points at the right edge, halfway down.
+    // A subshell opens the device before it says so; the shell's own
+    // descriptors from 3 up are its line editor's.
+    vm.type_text(&format!("(echo opened; hexdump -v -n 160 -e {MOTIONS}) </devices/mouse\n"))?;
+    vm.expect_screen(&["opened"])?;
+    let rel = |axis: &str, value: i32| {
+        format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{value}}}}}"#)
+    };
+    let abs = |axis: &str, value: i32| {
+        format!(r#"{{"type":"abs","data":{{"axis":"{axis}","value":{value}}}}}"#)
+    };
+    let button =
+        |down: bool| format!(r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#);
+    // Time between them, for the device to report each on its own.
+    vm.input_events(VIDEO, &[rel("x", 10), rel("y", -5)])?;
+    std::thread::sleep(Duration::from_millis(200));
+    vm.input_events(VIDEO, &[button(true)])?;
+    std::thread::sleep(Duration::from_millis(200));
+    vm.input_events(VIDEO, &[button(false)])?;
+    vm.monitor("device_add usb-tablet,bus=xhci.0,port=4,id=tablet,display=video0")?;
+    vm.expect("USB: 1-8: interface 0: a tablet, read into /devices/mouse")?;
+    vm.input_events(VIDEO, &[abs("x", 0x7fff), abs("y", 0x4000)])?;
+    // 0x4000 of QEMU's 0x7fff is 32768 of POSITION_MAX, 65535.
+    vm.expect_screen(&[
+        " 10 -5 0 0 0 0 0 0",
+        " 0 0 0 0 0 0 1 0",
+        " 0 0 0 0 0 0 0 0",
+        " 0 0 0 0 65535 32768 0 1",
+    ])?;
+    // Pulled out with a key down: the key goes up, and stops repeating.
+    vm.type_on(VIDEO, "echo ")?;
+    vm.keys_on(VIDEO, &["y"], true)?;
+    std::thread::sleep(Duration::from_millis(500));
+    vm.monitor("device_del usbkbd")?;
+    vm.expect("USB: 1-6: QEMU USB Keyboard was unplugged")?;
+    let count = |vm: &mut Vm| -> Result<usize, String> {
+        Ok(vm.screen()?.iter().map(|line| line.matches('y').count()).sum())
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let before = count(vm)?;
+    std::thread::sleep(Duration::from_millis(1000));
+    if count(vm)? != before {
+        return Err("the key of the keyboard pulled out went on repeating".into());
+    }
+    vm.type_text(" gone\n")?;
+    vm.expect_screen(&["y gone"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
     vm.expect("spark: every service has stopped")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }

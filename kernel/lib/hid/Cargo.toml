@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-hid"
+description = "HID reports for the Radix kernel: report descriptors, and the reports of keyboards, mice and tablets as key events and pointer motion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-abi = { path = "../../abi" }
+
+[dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

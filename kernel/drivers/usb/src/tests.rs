@@ -372,3 +372,35 @@ fn routes_name_the_ports_below_the_root_port() {
     assert_eq!(hub::child_route(0x3, 0), None);
     assert_eq!(hub::child_route(0x1_1111, 1), None);
 }
+
+#[test]
+fn a_hid_interface_says_how_long_its_report_descriptor_is() {
+    let bytes = configuration();
+    let config = Configuration::parse(&bytes).unwrap();
+    let keyboard = config.interfaces().next().unwrap();
+    let (_, hid) = keyboard.descriptors().find(|&(kind, _)| kind == descriptor::HID).unwrap();
+    assert_eq!(
+        hid::HidDescriptor::parse(hid),
+        Some(hid::HidDescriptor { version: 0x0111, country: 0, report_length: 63 })
+    );
+    // A physical descriptor listed first, then the report descriptor.
+    let two = [12, 0x21, 0x10, 0x01, 33, 2, 0x23, 9, 0, 0x22, 0x40, 0x01];
+    assert_eq!(
+        hid::HidDescriptor::parse(&two),
+        Some(hid::HidDescriptor { version: 0x0110, country: 33, report_length: 0x140 })
+    );
+    // Short, of another type, or without a report descriptor.
+    assert_eq!(hid::HidDescriptor::parse(&[9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63]), None);
+    assert_eq!(hid::HidDescriptor::parse(&[9, 0x29, 0x11, 0x01, 0, 1, 0x22, 63, 0]), None);
+    assert_eq!(hid::HidDescriptor::parse(&[9, 0x21, 0x11, 0x01, 0, 1, 0x23, 63, 0]), None);
+    assert_eq!(hid::HidDescriptor::parse(&[9, 0x21, 0x11, 0x01, 0, 4, 0x23, 63, 0]), None);
+}
+
+#[test]
+fn hid_requests_go_to_the_interface() {
+    assert_eq!(Setup::report_descriptor(1, 63).to_u64(), 0x003f_0001_2200_0681);
+    assert_eq!(Setup::set_idle(0).to_u64(), 0x0000_0000_0000_0a21);
+    assert_eq!(Setup::set_protocol(2, false).to_u64(), 0x0000_0002_0000_0b21);
+    assert_eq!(Setup::set_protocol(2, true).to_u64(), 0x0000_0002_0001_0b21);
+    assert_eq!(Setup::set_report(0, hid::REPORT_OUTPUT, 1, 2).to_u64(), 0x0002_0000_0201_0921);
+}
