@@ -8,7 +8,7 @@
 //! answer. Its layout is QEMU's `qemu-xhci`: USB 3 ports first, then USB 2
 //! ones, unless a test gives other protocols.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::string::String;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
@@ -39,6 +39,15 @@ struct SimDevice {
     /// It never answers.
     silent: bool,
     configuration: u8,
+    /// What its interrupt or bulk IN endpoints send next, a transfer each;
+    /// a transfer waits while there is none.
+    reports: VecDeque<Vec<u8>>,
+    /// What came to its OUT endpoints.
+    received: Vec<Vec<u8>>,
+    /// Its next transfer on an endpoint other than 0 stalls.
+    stall_next: bool,
+    /// How many endpoints its slot had when SET_CONFIGURATION came.
+    endpoints_when_configured: Option<usize>,
 }
 
 /// A keyboard at `speed_id`, with a packet size of `max_packet0` (the
@@ -81,7 +90,40 @@ fn keyboard(speed_id: u8, max_packet0: u8) -> SimDevice {
         stalls: Vec::new(),
         silent: false,
         configuration: 0,
+        reports: VecDeque::new(),
+        received: Vec::new(),
+        stall_next: false,
+        endpoints_when_configured: None,
     }
+}
+
+/// A full-speed hub of `ports` ports, as QEMU's `usb-hub` is: its status
+/// endpoint polled every 255 ms.
+fn hub(ports: u8) -> SimDevice {
+    let mut device = keyboard(1, 8);
+    device.device[4] = radix_usb::class::HUB;
+    device.config = std::vec![9, 2, 25, 0, 1, 1, 0, 0xe0, 0];
+    device.config.extend([9, 4, 0, 0, 1, 9, 0, 0, 0]);
+    device.config.extend([7, 5, 0x81, 3, u16::from(ports).div_ceil(8) as u8 + 1, 0, 255]);
+    device
+}
+
+/// A device with a bulk IN and a bulk OUT endpoint, and an interrupt IN
+/// one, as a USB disk with a status pipe might have, at `speed_id`.
+fn bulk(speed_id: u8) -> SimDevice {
+    let mut device = keyboard(speed_id, 64);
+    device.config = std::vec![9, 2, 39, 0, 1, 1, 0, 0x80, 50];
+    device.config.extend([9, 4, 0, 0, 3, 8, 6, 0x50, 0]);
+    device.config.extend([7, 5, 0x81, 2, 0x00, 0x02, 0]);
+    device.config.extend([7, 5, 0x02, 2, 0x00, 0x02, 0]);
+    device.config.extend([7, 5, 0x83, 3, 0x40, 0x00, 4]);
+    device
+}
+
+/// The endpoints of `device`'s configuration.
+fn endpoints_of(device: &SimDevice) -> Vec<radix_usb::EndpointDescriptor> {
+    let config = radix_usb::Configuration::parse(&device.config).unwrap();
+    config.interfaces().flat_map(|i| i.endpoints().collect::<Vec<_>>()).collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,6 +133,37 @@ enum EpState {
     Stopped,
 }
 
+/// An endpoint's ring, as the simulated controller reads it.
+#[derive(Clone, Copy, Debug)]
+struct SimRing {
+    /// Where it reads next, and its cycle state.
+    dequeue: u64,
+    cycle: bool,
+    state: EpState,
+    /// A transfer the device has not answered: its first TRB.
+    pending: Option<u64>,
+}
+
+impl SimRing {
+    fn new() -> SimRing {
+        SimRing { dequeue: 0, cycle: true, state: EpState::Stopped, pending: None }
+    }
+}
+
+/// An endpoint other than 0, as Configure Endpoint gave it.
+#[derive(Clone, Copy, Debug)]
+struct SimEndpoint {
+    ring: SimRing,
+    /// Its endpoint context's fields.
+    kind: u32,
+    max_packet: u16,
+    interval: u8,
+    burst: u8,
+    retries: u8,
+    esit: u32,
+    average: u32,
+}
+
 /// A slot of the simulated controller.
 struct SimSlot {
     port: u8,
@@ -98,12 +171,14 @@ struct SimSlot {
     route: u32,
     speed_id: u8,
     max_packet: u16,
-    /// Endpoint 0's ring: where it reads next, and its cycle state.
-    dequeue: u64,
-    cycle: bool,
-    state: EpState,
-    /// A transfer the device has not answered: its first TRB.
-    pending: Option<u64>,
+    ep0: SimRing,
+    endpoints: HashMap<u8, SimEndpoint>,
+    /// Context Entries.
+    entries: u8,
+    /// Its slot context's hub fields: ports, TT think time, Multi-TT.
+    hub: Option<(u8, u8, bool)>,
+    /// Its TT hub slot and port.
+    tt: (u8, u8),
 }
 
 /// The firmware's hold on the controller.
@@ -151,6 +226,8 @@ struct State {
     config: u32,
     portsc: Vec<u32>,
     devices: Vec<Option<SimDevice>>,
+    /// Devices behind hubs, by root port and route string.
+    behind: HashMap<(u8, u32), SimDevice>,
 
     iman: u32,
     imod: u32,
@@ -200,6 +277,7 @@ impl State {
             config: 0,
             portsc: std::vec![portsc::POWER; 8],
             devices: std::vec![None; 8],
+            behind: HashMap::new(),
             iman: 0,
             imod: 0,
             erstsz: 0,
@@ -223,6 +301,48 @@ impl State {
 
     fn running(&self) -> bool {
         self.usbsts & op::HALTED == 0
+    }
+
+    /// The device at root port `port` and `route`.
+    fn device(&self, port: u8, route: u32) -> Option<SimDevice> {
+        if route == 0 {
+            self.devices.get(usize::from(port).wrapping_sub(1)).cloned().flatten()
+        } else {
+            self.behind.get(&(port, route)).cloned()
+        }
+    }
+
+    /// Puts back the device at root port `port` and `route`, changed.
+    fn put_device(&mut self, port: u8, route: u32, device: SimDevice) {
+        if route == 0 {
+            self.devices[usize::from(port - 1)] = Some(device);
+        } else {
+            self.behind.insert((port, route), device);
+        }
+    }
+
+    /// Gives the device at `port` and `route` a report to send, and
+    /// sends it if a transfer waits for one.
+    fn report(&mut self, port: u8, route: u32, report: &[u8]) {
+        let mut device = self.device(port, route).unwrap();
+        device.reports.push_back(report.to_vec());
+        self.put_device(port, route, device);
+        let waiting: Vec<(u8, u8)> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.port == port && slot.route == route)
+            .flat_map(|(&id, slot)| {
+                slot.endpoints
+                    .iter()
+                    .filter(|(_, e)| e.ring.pending.is_some())
+                    .map(move |(&index, _)| (id, index))
+            })
+            .collect();
+        for (slot, index) in waiting {
+            self.slots.get_mut(&slot).unwrap().endpoints.get_mut(&index).unwrap().ring.pending =
+                None;
+            self.run_endpoint(slot, index);
+        }
     }
 
     fn usb3(&self, port: u8) -> bool {
@@ -381,10 +501,11 @@ impl State {
                         route: 0,
                         speed_id: 0,
                         max_packet: 0,
-                        dequeue: 0,
-                        cycle: true,
-                        state: EpState::Stopped,
-                        pending: None,
+                        ep0: SimRing::new(),
+                        endpoints: HashMap::new(),
+                        entries: 0,
+                        hub: None,
+                        tt: (0, 0),
                     },
                 );
                 (code::SUCCESS, free)
@@ -398,25 +519,33 @@ impl State {
                 let add = State::read32(input + 4);
                 let slot_ctx = State::read32(input + csz);
                 let port = (State::read32(input + csz + 4) >> 16) as u8;
+                let tt = State::read32(input + csz + 8);
                 let ep0 = State::read32(input + 2 * csz + 4);
                 let dequeue = State::read64(input + 2 * csz + 8);
+                let route = slot_ctx & 0xf_ffff;
+                let present = self.device(port, route).is_some();
                 let Some(entry) = self.slots.get_mut(&slot) else {
                     return (code::SLOT_NOT_ENABLED, slot);
                 };
-                if add != 3 || (ep0 >> 3) & 7 != 4 || dequeue & 1 == 0 {
+                if add != 3 || (ep0 >> 3) & 7 != 4 || dequeue & 1 == 0 || slot_ctx >> 27 != 1 {
                     return (code::PARAMETER, slot);
                 }
-                if self.devices.get(usize::from(port).wrapping_sub(1)).is_none_or(Option::is_none) {
+                if !present {
                     return (code::TRANSACTION, slot);
                 }
                 entry.port = port;
-                entry.route = slot_ctx & 0xf_ffff;
+                entry.route = route;
                 entry.speed_id = ((slot_ctx >> 20) & 0xf) as u8;
                 entry.max_packet = (ep0 >> 16) as u16;
-                entry.dequeue = dequeue & !0xf;
-                entry.cycle = true;
+                entry.entries = 1;
+                entry.tt = (tt as u8, (tt >> 8) as u8);
+                entry.ep0 = SimRing {
+                    dequeue: dequeue & !0xf,
+                    cycle: true,
+                    state: EpState::Running,
+                    pending: None,
+                };
                 entry.addressed = control & control::BSR == 0;
-                entry.state = EpState::Running;
                 // The output slot context: the address, and the addressed
                 // state.
                 let output = State::read64(self.dcbaap + 8 * u64::from(slot));
@@ -434,29 +563,93 @@ impl State {
                 }
                 (code::SUCCESS, slot)
             }
+            kind::CONFIGURE_ENDPOINT => {
+                let input = parameter;
+                let add = State::read32(input + 4);
+                let slot_ctx = State::read32(input + csz);
+                let ports = State::read32(input + csz + 4) >> 24;
+                let ttt = (State::read32(input + csz + 8) >> 16) & 3;
+                let Some(entry) = self.slots.get_mut(&slot) else {
+                    return (code::SLOT_NOT_ENABLED, slot);
+                };
+                if add & 1 == 0 || add & 2 != 0 || !entry.addressed {
+                    return (code::PARAMETER, slot);
+                }
+                let entries = (slot_ctx >> 27) as u8;
+                let mut added = HashMap::new();
+                for index in 2..32u8 {
+                    if add & 1 << index == 0 {
+                        continue;
+                    }
+                    let at = input + (u64::from(index) + 1) * csz;
+                    let (d0, d1) = (State::read32(at), State::read32(at + 4));
+                    let dequeue = State::read64(at + 8);
+                    let d4 = State::read32(at + 16);
+                    let kind = (d1 >> 3) & 7;
+                    if kind == 0
+                        || kind == 4
+                        || d1 >> 16 == 0
+                        || dequeue & 1 == 0
+                        || index > entries
+                    {
+                        return (code::PARAMETER, slot);
+                    }
+                    added.insert(
+                        index,
+                        SimEndpoint {
+                            ring: SimRing {
+                                dequeue: dequeue & !0xf,
+                                cycle: true,
+                                state: EpState::Running,
+                                pending: None,
+                            },
+                            kind,
+                            max_packet: (d1 >> 16) as u16,
+                            interval: (d0 >> 16) as u8,
+                            burst: (d1 >> 8) as u8,
+                            retries: ((d1 >> 1) & 3) as u8,
+                            esit: (d0 >> 24) << 16 | d4 >> 16,
+                            average: d4 & 0xffff,
+                        },
+                    );
+                }
+                entry.entries = entries;
+                entry.endpoints.extend(added);
+                entry.hub = (slot_ctx & 1 << 26 != 0).then_some((
+                    ports as u8,
+                    ttt as u8,
+                    slot_ctx & 1 << 25 != 0,
+                ));
+                (code::SUCCESS, slot)
+            }
             kind::RESET_ENDPOINT | kind::STOP_ENDPOINT | kind::SET_TR_DEQUEUE => {
                 let Some(entry) = self.slots.get_mut(&slot) else {
                     return (code::SLOT_NOT_ENABLED, slot);
                 };
-                if endpoint != 1 {
-                    return (code::ENDPOINT_NOT_ENABLED, slot);
-                }
-                match (kind, entry.state) {
-                    (kind::RESET_ENDPOINT, EpState::Halted) => entry.state = EpState::Stopped,
+                let ring = match endpoint {
+                    1 => &mut entry.ep0,
+                    other => match entry.endpoints.get_mut(&other) {
+                        Some(endpoint) => &mut endpoint.ring,
+                        None => return (code::ENDPOINT_NOT_ENABLED, slot),
+                    },
+                };
+                match (kind, ring.state) {
+                    (kind::RESET_ENDPOINT, EpState::Halted) => ring.state = EpState::Stopped,
                     (kind::STOP_ENDPOINT, EpState::Running) => {
-                        entry.state = EpState::Stopped;
-                        if let Some(trb) = entry.pending.take() {
-                            let stopped = trb;
+                        ring.state = EpState::Stopped;
+                        if let Some(trb) = ring.pending.take() {
                             self.post(
-                                stopped,
+                                trb,
                                 u32::from(code::STOPPED) << 24,
-                                kind::TRANSFER_EVENT << 10 | 1 << 16 | u32::from(slot) << 24,
+                                kind::TRANSFER_EVENT << 10
+                                    | u32::from(endpoint) << 16
+                                    | u32::from(slot) << 24,
                             );
                         }
                     }
                     (kind::SET_TR_DEQUEUE, EpState::Stopped | EpState::Halted) => {
-                        entry.dequeue = parameter & !0xf;
-                        entry.cycle = parameter & 1 != 0;
+                        ring.dequeue = parameter & !0xf;
+                        ring.cycle = parameter & 1 != 0;
                     }
                     _ => return (code::CONTEXT_STATE, slot),
                 }
@@ -469,13 +662,13 @@ impl State {
     /// Runs the transfers on slot `slot`'s endpoint 0.
     fn run_transfers(&mut self, slot: u8) {
         let Some(entry) = self.slots.get_mut(&slot) else { return };
-        if entry.state == EpState::Halted || entry.pending.is_some() {
+        if entry.ep0.state == EpState::Halted || entry.ep0.pending.is_some() {
             return;
         }
-        entry.state = EpState::Running;
+        entry.ep0.state = EpState::Running;
         loop {
             let entry = self.slots.get_mut(&slot).unwrap();
-            let (mut dequeue, mut cycle) = (entry.dequeue, entry.cycle);
+            let (mut dequeue, mut cycle) = (entry.ep0.dequeue, entry.ep0.cycle);
             // A TD: TRBs up to and including one that interrupts.
             let mut trbs = Vec::new();
             loop {
@@ -497,9 +690,10 @@ impl State {
                 }
             }
             let entry = self.slots.get_mut(&slot).unwrap();
-            let port = entry.port;
+            let (port, route) = (entry.port, entry.route);
+            let configured = entry.endpoints.len();
             let first = trbs[0].0;
-            let device = self.devices.get(usize::from(port).wrapping_sub(1)).cloned().flatten();
+            let device = self.device(port, route);
             let event = |code: u8, residual: u32| {
                 (
                     u32::from(code) << 24 | residual,
@@ -509,13 +703,13 @@ impl State {
             let Some(mut device) = device else {
                 // Pulled out: no answer, after the retries.
                 let entry = self.slots.get_mut(&slot).unwrap();
-                entry.state = EpState::Halted;
+                entry.ep0.state = EpState::Halted;
                 let (status, control) = event(code::TRANSACTION, 0);
                 self.post(first, status, control);
                 return;
             };
             if device.silent {
-                self.slots.get_mut(&slot).unwrap().pending = Some(first);
+                self.slots.get_mut(&slot).unwrap().ep0.pending = Some(first);
                 return;
             }
             let (_, setup, _, _) = trbs[0];
@@ -551,22 +745,25 @@ impl State {
                         }
                         (9, _) => {
                             device.configuration = setup.value as u8;
+                            device.endpoints_when_configured = Some(configured);
                             Some(Vec::new())
                         }
+                        // CLEAR_FEATURE(ENDPOINT_HALT).
+                        (1, _) if setup.request_type == 2 => Some(Vec::new()),
                         _ => None,
                     }
                 };
             let entry = self.slots.get_mut(&slot).unwrap();
             let Some(answer) = answer else {
-                entry.state = EpState::Halted;
+                entry.ep0.state = EpState::Halted;
                 let at = data.map_or(status_trb.0, |d| d.0);
                 let (status, control) = event(code::STALL, 0);
                 self.post(at, status, control);
                 return;
             };
-            entry.dequeue = dequeue;
-            entry.cycle = cycle;
-            self.devices[usize::from(port - 1)] = Some(device);
+            entry.ep0.dequeue = dequeue;
+            entry.ep0.cycle = cycle;
+            self.put_device(port, route, device);
             if let Some((at, buffer, length, control)) = data {
                 let length = length & 0x1_ffff;
                 if control & control::DIR_IN != 0 {
@@ -582,6 +779,88 @@ impl State {
             let (status, control) = event(code::SUCCESS, 0);
             self.post(status_trb.0, status, control);
         }
+    }
+
+    /// Runs the transfers on endpoint `index` of slot `slot`: each a
+    /// Normal TRB. An IN transfer takes the device's next report, or
+    /// waits for one; an OUT one's data is kept.
+    fn run_endpoint(&mut self, slot: u8, index: u8) {
+        loop {
+            let Some(entry) = self.slots.get(&slot) else { return };
+            let (port, route) = (entry.port, entry.route);
+            let Some(endpoint) = entry.endpoints.get(&index) else { return };
+            let mut ring = endpoint.ring;
+            if ring.state == EpState::Halted || ring.pending.is_some() {
+                return;
+            }
+            ring.state = EpState::Running;
+            let (parameter, status, control) = State::read_trb(ring.dequeue);
+            if (control & 1 != 0) != ring.cycle {
+                self.set_ring(slot, index, ring);
+                return;
+            }
+            if (control >> 10) & 0x3f == kind::LINK {
+                ring.dequeue = parameter;
+                if control & control::TOGGLE_CYCLE != 0 {
+                    ring.cycle = !ring.cycle;
+                }
+                self.set_ring(slot, index, ring);
+                continue;
+            }
+            assert_eq!((control >> 10) & 0x3f, kind::NORMAL);
+            let at = ring.dequeue;
+            let event = |code: u8, residual: u32| {
+                (
+                    u32::from(code) << 24 | residual,
+                    kind::TRANSFER_EVENT << 10 | u32::from(index) << 16 | u32::from(slot) << 24,
+                )
+            };
+            let length = status & 0x1_ffff;
+            let Some(mut device) = self.device(port, route) else {
+                ring.state = EpState::Halted;
+                self.set_ring(slot, index, ring);
+                let (status, control) = event(code::TRANSACTION, 0);
+                self.post(at, status, control);
+                return;
+            };
+            if device.stall_next {
+                device.stall_next = false;
+                ring.state = EpState::Halted;
+                self.set_ring(slot, index, ring);
+                self.put_device(port, route, device);
+                let (status, control) = event(code::STALL, 0);
+                self.post(at, status, control);
+                return;
+            }
+            let (status, control) = if index & 1 != 0 {
+                let Some(report) = device.reports.pop_front() else {
+                    ring.pending = Some(at);
+                    self.set_ring(slot, index, ring);
+                    return;
+                };
+                let moved = report.len().min(length as usize);
+                fake_memory_write(parameter, &report[..moved]);
+                let residual = length - moved as u32;
+                if residual > 0 && control & control::ISP != 0 {
+                    event(code::SHORT_PACKET, residual)
+                } else {
+                    event(code::SUCCESS, 0)
+                }
+            } else {
+                let mut data = std::vec![0u8; length as usize];
+                fake_memory(parameter, &mut data);
+                device.received.push(data);
+                event(code::SUCCESS, 0)
+            };
+            ring.dequeue += TRB_SIZE as u64;
+            self.set_ring(slot, index, ring);
+            self.put_device(port, route, device);
+            self.post(at, status, control);
+        }
+    }
+
+    fn set_ring(&mut self, slot: u8, index: u8, ring: SimRing) {
+        self.slots.get_mut(&slot).unwrap().endpoints.get_mut(&index).unwrap().ring = ring;
     }
 
     fn write_port(&mut self, port: u8, value: u32) {
@@ -831,6 +1110,8 @@ impl Registers for Sim {
                     s.run_commands();
                 } else if value == 1 {
                     s.run_transfers(index);
+                } else {
+                    s.run_endpoint(index, value as u8);
                 }
             }
             _ => {}
@@ -900,7 +1181,7 @@ fn attach(xhci: &mut Xhci, host: &mut TestHost, port: u8) -> Result<Device, Erro
     let status = xhci.port_status(port);
     assert!(status.enabled());
     let speed = xhci.port_speed(port, status).unwrap();
-    let place = Place { root_port: port, route: 0, speed, speed_id: status.speed_id() };
+    let place = Place::root(port, speed, status.speed_id());
     let mut below = Vec::new();
     let mut device = Device::address(xhci, host, &mut alloc(&mut below), place)?;
     let mut first = [0u8; 8];
@@ -1216,7 +1497,7 @@ fn a_device_pulled_out_fails_its_transfers_and_its_port_says_so() {
 /// Addresses a device on `port` whatever its status says, for a port with
 /// nothing on it.
 fn attach_error(xhci: &mut Xhci, host: &mut TestHost, port: u8) -> Option<Error> {
-    let place = Place { root_port: port, route: 0, speed: Speed::High, speed_id: 3 };
+    let place = Place::root(port, Speed::High, 3);
     let mut below = Vec::new();
     Device::address(xhci, host, &mut alloc(&mut below), place).err()
 }
@@ -1337,4 +1618,267 @@ fn requests_too_long_or_the_wrong_way_are_refused() {
     let mut big = std::vec![0u8; 8192];
     let setup = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 5000);
     assert_eq!(device.control_in(&mut xhci, &mut host, setup, &mut big), Err(Error::BadRequest));
+}
+
+/// A device on root port 6 (USB 2), attached and configured with every
+/// endpoint of its configuration.
+fn configured(sim: &Arc<Sim>, device: SimDevice) -> (Xhci, TestHost, Device) {
+    let endpoints = endpoints_of(&device);
+    sim.state().devices[5] = Some(device);
+    let (mut xhci, mut host) = start(sim);
+    let mut device = attach(&mut xhci, &mut host, 6).unwrap();
+    let mut below = Vec::new();
+    device.configure(&mut xhci, &mut host, &mut alloc(&mut below), 1, &endpoints).unwrap();
+    // The port's reset said so.
+    assert_eq!(host.others, [Event::Port { port: 6 }]);
+    host.others.clear();
+    (xhci, host, device)
+}
+
+/// The next transfer event handed on, or read from the ring.
+fn transfer(xhci: &mut Xhci, host: &mut TestHost) -> Option<Event> {
+    let event = host.others.pop().or_else(|| xhci.next_event());
+    xhci.events_read();
+    event
+}
+
+#[test]
+fn intervals_follow_the_speed_and_the_kind() {
+    let endpoint = |attributes: u8, interval: u8| radix_usb::EndpointDescriptor {
+        address: 0x81,
+        attributes,
+        max_packet_raw: 8,
+        interval,
+        max_burst: 0,
+        companion_attributes: 0,
+    };
+    // Interrupt, in frames at low and full speed: 255 ms is 2^10
+    // microframes, the longest; 10 ms rounds down to 8.
+    assert_eq!(interval(&endpoint(3, 255), Speed::Full), 10);
+    assert_eq!(interval(&endpoint(3, 10), Speed::Low), 6);
+    assert_eq!(interval(&endpoint(3, 1), Speed::Full), 3);
+    assert_eq!(interval(&endpoint(3, 0), Speed::Full), 3);
+    // A power of two of microframes at high speed and SuperSpeed.
+    assert_eq!(interval(&endpoint(3, 7), Speed::High), 6);
+    assert_eq!(interval(&endpoint(3, 4), Speed::Super), 3);
+    assert_eq!(interval(&endpoint(3, 40), Speed::High), 15);
+    // Of frames for full-speed isochronous endpoints.
+    assert_eq!(interval(&endpoint(1, 1), Speed::Full), 3);
+    assert_eq!(interval(&endpoint(1, 4), Speed::High), 3);
+    // None for bulk.
+    assert_eq!(interval(&endpoint(2, 0), Speed::High), 0);
+    assert_eq!((endpoint_index(0x81), endpoint_index(0x02), endpoint_index(0)), (3, 4, 1));
+    assert_eq!(endpoint_index(0x8f), 31);
+}
+
+#[test]
+fn endpoints_are_given_to_the_controller_before_the_configuration_is_set() {
+    let sim = Sim::new(State::new());
+    let (_xhci, _host, device) = configured(&sim, keyboard(3, 64));
+    let s = sim.state();
+    let slot = &s.slots[&device.slot()];
+    assert_eq!(slot.entries, 3);
+    let endpoint = slot.endpoints[&3];
+    // Interrupt IN, 8 bytes every 2^6 microframes (bInterval 7 at high
+    // speed), three retries, an interval's worth on average.
+    assert_eq!((endpoint.kind, endpoint.max_packet, endpoint.interval), (7, 8, 6));
+    assert_eq!((endpoint.burst, endpoint.retries, endpoint.esit, endpoint.average), (0, 3, 8, 8));
+    let device = s.devices[5].as_ref().unwrap();
+    assert_eq!((device.configuration, device.endpoints_when_configured), (1, Some(1)));
+    let kinds: Vec<u32> = s.commands.iter().map(|&(k, _)| k).collect();
+    assert_eq!(kinds.last(), Some(&kind::CONFIGURE_ENDPOINT));
+}
+
+#[test]
+fn interrupt_transfers_finish_when_the_device_has_something_to_say() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, keyboard(3, 64));
+    let slot = device.slot();
+    let first = device.submit_in(&xhci, 3, 8).unwrap();
+    // Nothing yet: the transfer waits.
+    assert_eq!(transfer(&mut xhci, &mut host), None);
+    sim.state().report(6, 0, &[0, 0, 4, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb: first, code: code::SUCCESS, slot, endpoint: 3, residual: 0 })
+    );
+    let mut report = [0u8; 8];
+    device.received(3, &mut report).unwrap();
+    assert_eq!(report, [0, 0, 4, 0, 0, 0, 0, 0]);
+    // A short one says how much did not come.
+    sim.state().report(6, 0, &[1, 2, 3]);
+    let second = device.submit_in(&xhci, 3, 8).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer {
+            trb: second,
+            code: code::SHORT_PACKET,
+            slot,
+            endpoint: 3,
+            residual: 5
+        })
+    );
+    device.received(3, &mut report[..3]).unwrap();
+    assert_eq!(report[..3], [1, 2, 3]);
+    // Around the ring and back.
+    for i in 0..2 * RING_TRBS {
+        sim.state().report(6, 0, &[i as u8]);
+        let trb = device.submit_in(&xhci, 3, 1).unwrap();
+        assert_eq!(
+            transfer(&mut xhci, &mut host),
+            Some(Event::Transfer { trb, code: code::SUCCESS, slot, endpoint: 3, residual: 0 }),
+            "transfer {i}"
+        );
+    }
+}
+
+#[test]
+fn bulk_transfers_carry_their_data_both_ways() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, bulk(3));
+    let slot = device.slot();
+    {
+        let s = sim.state();
+        let endpoints = &s.slots[&slot].endpoints;
+        let (bulk_in, bulk_out, status) = (endpoints[&3], endpoints[&4], endpoints[&7]);
+        assert_eq!((bulk_in.kind, bulk_in.max_packet, bulk_in.interval), (6, 512, 0));
+        assert_eq!((bulk_in.esit, bulk_in.average), (0, 3072));
+        assert_eq!((bulk_out.kind, status.kind, status.interval), (2, 7, 3));
+        assert_eq!(s.slots[&slot].entries, 7);
+    }
+    let trb = device.submit_out(&xhci, 4, b"hello").unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::SUCCESS, slot, endpoint: 4, residual: 0 })
+    );
+    assert_eq!(sim.state().devices[5].as_ref().unwrap().received, [b"hello".to_vec()]);
+    sim.state().report(6, 0, &[7; 512]);
+    let trb = device.submit_in(&xhci, 3, 512).unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::SUCCESS, slot, endpoint: 3, residual: 0 })
+    );
+}
+
+#[test]
+fn a_stalled_endpoint_is_reset_and_its_halt_cleared() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, keyboard(3, 64));
+    let slot = device.slot();
+    sim.state().devices[5].as_mut().unwrap().stall_next = true;
+    let trb = device.submit_in(&xhci, 3, 8).unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::STALL, slot, endpoint: 3, residual: 0 })
+    );
+    device.recover(&mut xhci, &mut host, 3, code::STALL).unwrap();
+    {
+        let s = sim.state();
+        let commands: Vec<(u32, u8)> = s.commands.iter().rev().take(2).copied().collect();
+        assert_eq!(commands, [(kind::SET_TR_DEQUEUE, slot), (kind::RESET_ENDPOINT, slot)]);
+        let (_, last) = *s.requests.last().unwrap();
+        assert_eq!(last, Setup::clear_halt(0x81));
+        assert_eq!(s.slots[&slot].endpoints[&3].ring.state, EpState::Stopped);
+    }
+    // The pipe works after, from where the driver goes on.
+    sim.state().report(6, 0, &[9; 8]);
+    let trb = device.submit_in(&xhci, 3, 8).unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::SUCCESS, slot, endpoint: 3, residual: 0 })
+    );
+    // A transfer waiting when the driver gives up on it is stopped.
+    let waiting = device.submit_in(&xhci, 3, 8).unwrap();
+    device.recover(&mut xhci, &mut host, 3, code::STOPPED).unwrap();
+    assert!(host.others.iter().any(|e| matches!(
+        e,
+        Event::Transfer { trb, code: code::STOPPED, endpoint: 3, .. } if *trb == waiting
+    )));
+}
+
+#[test]
+fn a_hub_says_so_in_its_slot() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, hub(8));
+    let slot = device.slot();
+    {
+        let s = sim.state();
+        // Full speed, polled every 255 ms: 2^10 microframes.
+        let status = s.slots[&slot].endpoints[&3];
+        assert_eq!((status.kind, status.max_packet, status.interval), (7, 2, 10));
+        assert_eq!(s.slots[&slot].hub, None);
+    }
+    let hub = HubSlot { ports: 8, think_time: 1, multi_tt: false };
+    device.set_hub(&mut xhci, &mut host, hub).unwrap();
+    let s = sim.state();
+    assert_eq!(s.slots[&slot].hub, Some((8, 1, false)));
+    // The endpoints stay.
+    assert_eq!(s.slots[&slot].entries, 3);
+    assert_eq!(s.slots[&slot].endpoints.len(), 1);
+}
+
+#[test]
+fn a_device_behind_a_hub_is_reached_by_its_route_through_the_hubs_translator() {
+    let mut state = State::new();
+    // A full-speed keyboard on port 3 of a high-speed hub in slot 1 on
+    // root port 6.
+    state.behind.insert((6, 0x3), keyboard(1, 8));
+    let sim = Sim::new(state);
+    let (mut xhci, mut host) = start(&sim);
+    let place =
+        Place { root_port: 6, route: 0x3, speed: Speed::Full, speed_id: 1, tt_slot: 1, tt_port: 3 };
+    let mut below = Vec::new();
+    let mut device = Device::address(&mut xhci, &mut host, &mut alloc(&mut below), place).unwrap();
+    {
+        let s = sim.state();
+        let slot = &s.slots[&device.slot()];
+        assert_eq!((slot.port, slot.route, slot.speed_id, slot.tt), (6, 0x3, 1, (1, 3)));
+    }
+    let mut bytes = [0u8; 18];
+    let setup = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 18);
+    assert_eq!(device.control_in(&mut xhci, &mut host, setup, &mut bytes), Ok(18));
+    // Nothing on port 4.
+    let elsewhere = Place { route: 0x4, ..place };
+    assert_eq!(
+        Device::address(&mut xhci, &mut host, &mut alloc(&mut below), elsewhere).err(),
+        Some(Error::Completion(code::TRANSACTION))
+    );
+}
+
+#[test]
+fn configuring_refuses_what_it_cannot_do() {
+    let sim = Sim::new(State::new());
+    let device = keyboard(3, 64);
+    let endpoints = endpoints_of(&device);
+    sim.state().devices[5] = Some(device);
+    let (mut xhci, mut host) = start(&sim);
+    let mut device = attach(&mut xhci, &mut host, 6).unwrap();
+    let mut below = Vec::new();
+    // No transfers before the endpoints are set up.
+    assert_eq!(device.submit_in(&xhci, 3, 8), Err(Error::BadRequest));
+    // Too many, twice the same one, or none of its memory.
+    let many = [endpoints[0]; MAX_ENDPOINTS + 1];
+    let mut configure = |device: &mut Device, endpoints: &[radix_usb::EndpointDescriptor]| {
+        device.configure(&mut xhci, &mut host, &mut alloc(&mut below), 1, endpoints)
+    };
+    assert_eq!(configure(&mut device, &many), Err(Error::BadRequest));
+    assert_eq!(configure(&mut device, &many[..2]), Err(Error::BadRequest));
+    let mut none = |_: usize, _: bool| None;
+    assert_eq!(
+        device.configure(&mut xhci, &mut host, &mut none, 1, &endpoints),
+        Err(Error::NoMemory)
+    );
+    assert!(sim.state().slots[&device.slot()].endpoints.is_empty());
+    let mut below = Vec::new();
+    device.configure(&mut xhci, &mut host, &mut alloc(&mut below), 1, &endpoints).unwrap();
+    // Once is enough; and transfers go the endpoint's way.
+    assert_eq!(
+        device.configure(&mut xhci, &mut host, &mut alloc(&mut below), 1, &endpoints),
+        Err(Error::BadRequest)
+    );
+    assert_eq!(device.submit_out(&xhci, 3, b"x"), Err(Error::BadRequest));
+    assert_eq!(device.submit_in(&xhci, 4, 8), Err(Error::BadRequest));
+    assert_eq!(device.submit_in(&xhci, 3, 0), Err(Error::BadRequest));
+    assert_eq!(device.recover(&mut xhci, &mut host, 1, code::STALL), Err(Error::BadRequest));
 }

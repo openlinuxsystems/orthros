@@ -145,6 +145,8 @@ fn a_configuration_lists_its_interfaces_and_their_endpoints() {
     assert_eq!((endpoints[1].number(), endpoints[1].is_in()), (3, false));
     assert!(endpoints.iter().all(|e| e.transfer_type() == TransferType::Bulk));
     assert_eq!(endpoints[0].max_packet(), 1024);
+    // The bulk IN endpoint's companion: bursts of 16.
+    assert_eq!((endpoints[0].max_burst, endpoints[1].max_burst), (15, 0));
     // The companion stays with the interface's descriptors.
     assert_eq!(
         storage
@@ -247,5 +249,126 @@ proptest! {
         }
         let _ = text(&bytes);
         let _ = first_language(&bytes);
+        for usb3 in [false, true] {
+            if let Some(hub) = hub::HubDescriptor::parse(&bytes, usb3) {
+                prop_assert!(hub.usable_ports() <= hub::MAX_PORTS);
+                prop_assert!(hub.report_size() <= 32);
+            }
+            if let Some(port) = hub::PortStatus::parse(&bytes, usb3) {
+                prop_assert!(port.changes().count() <= 6);
+            }
+        }
     }
+
+    /// Routes built port by port are as deep as the ports given, and
+    /// below each hub on the way.
+    #[test]
+    fn routes_nest(ports in proptest::collection::vec(1u8..=15, 0..7)) {
+        let mut route = 0;
+        let mut hubs = Vec::new();
+        for &port in &ports {
+            match hub::child_route(route, port) {
+                Some(next) => {
+                    hubs.push(route);
+                    route = next;
+                }
+                None => prop_assert_eq!(hub::depth(route), hub::MAX_DEPTH),
+            }
+        }
+        prop_assert_eq!(hub::depth(route), ports.len().min(hub::MAX_DEPTH));
+        for (i, &above) in hubs.iter().enumerate() {
+            prop_assert!(hub::is_below(route, above));
+            prop_assert!(!hub::is_below(above, route));
+            if i > 0 {
+                prop_assert!(hub::is_below(above, hubs[i - 1]));
+                prop_assert!(!hub::is_below(hubs[i - 1], above));
+            }
+        }
+        prop_assert!(!hub::is_below(route, route));
+    }
+}
+
+/// QEMU's `usb-hub`: a full-speed hub of eight ports, each powered alone
+/// with its own over-current report, good 2 ms after power.
+const QEMU_HUB: [u8; 9] = [9, 0x29, 8, 0x0a, 0x00, 0x01, 0x00, 0x00, 0xff];
+
+#[test]
+fn a_hub_descriptor_says_its_ports() {
+    let hub = hub::HubDescriptor::parse(&QEMU_HUB, false).unwrap();
+    assert_eq!((hub.ports, hub.characteristics, hub.power_good_ms), (8, 0x0a, 2));
+    assert_eq!((hub.usable_ports(), hub.report_size(), hub.think_time()), (8, 2, 0));
+    // Not a USB 3 hub's.
+    assert_eq!(hub::HubDescriptor::parse(&QEMU_HUB, true), None);
+    // A USB 3 hub of four ports, good after 100 ms.
+    let usb3 = [12, 0x2a, 4, 0x09, 0x00, 50, 0, 0, 0, 0, 0, 0];
+    let hub = hub::HubDescriptor::parse(&usb3, true).unwrap();
+    assert_eq!((hub.ports, hub.power_good_ms, hub.report_size()), (4, 100, 1));
+    // A big hub: only the ports a route string reaches; think time from
+    // bits 5 and 6.
+    let big = [9, 0x29, 20, 0x60, 0x00, 1, 0, 0, 0];
+    let hub = hub::HubDescriptor::parse(&big, false).unwrap();
+    assert_eq!((hub.usable_ports(), hub.report_size(), hub.think_time()), (15, 3, 3));
+    assert_eq!(hub::HubDescriptor::parse(&QEMU_HUB[..6], false), None);
+}
+
+#[test]
+fn port_statuses_read_by_the_hubs_layout() {
+    use hub::{PortStatus, feature};
+    // A USB 2 hub's port: connected, enabled, powered, low speed; the
+    // connection and reset changed.
+    let port = PortStatus::parse(&[0x03, 0x03, 0x11, 0x00], false).unwrap();
+    assert!(port.connected() && port.enabled() && port.powered() && !port.resetting());
+    assert_eq!(port.speed(), Speed::Low);
+    assert!(port.connect_changed() && port.reset_changed() && !port.over_current_changed());
+    let changes: Vec<u16> = port.changes().collect();
+    assert_eq!(changes, [feature::C_PORT_CONNECTION, feature::C_PORT_RESET]);
+    let high = PortStatus::parse(&[0x03, 0x05, 0, 0], false).unwrap();
+    assert_eq!(high.speed(), Speed::High);
+    let full = PortStatus::parse(&[0x01, 0x01, 0, 0], false).unwrap();
+    assert_eq!((full.speed(), full.enabled()), (Speed::Full, false));
+    // A USB 3 hub's port: power is bit 9, and bit 8 is the link state's;
+    // a warm reset's end and a link change.
+    let port = PortStatus::parse(&[0x03, 0x02, 0x60, 0x00], true).unwrap();
+    assert!(port.connected() && port.powered() && port.reset_changed());
+    assert_eq!(port.speed(), Speed::Super);
+    let changes: Vec<u16> = port.changes().collect();
+    assert_eq!(changes, [feature::C_BH_PORT_RESET, feature::C_PORT_LINK_STATE]);
+    let unpowered = PortStatus::parse(&[0x00, 0x01, 0, 0], true).unwrap();
+    assert!(!unpowered.powered());
+    assert_eq!(PortStatus::parse(&[1, 2, 3], false), None);
+}
+
+#[test]
+fn hub_requests_go_to_the_hub_or_its_ports() {
+    assert_eq!(Setup::hub_descriptor(false, 71).to_u64(), 0x0047_0000_2900_06a0);
+    assert_eq!(Setup::hub_descriptor(true, 12).to_u64(), 0x000c_0000_2a00_06a0);
+    assert_eq!(Setup::port_status(3).to_u64(), 0x0004_0003_0000_00a3);
+    assert_eq!(
+        Setup::set_port_feature(2, hub::feature::PORT_RESET).to_u64(),
+        0x0000_0002_0004_0323
+    );
+    assert_eq!(
+        Setup::clear_port_feature(2, hub::feature::C_PORT_CONNECTION).to_u64(),
+        0x0000_0002_0010_0123
+    );
+    assert_eq!(Setup::set_hub_depth(1).to_u64(), 0x0000_0000_0001_0c20);
+    assert_eq!(Setup::hub_status().to_u64(), 0x0004_0000_0000_00a0);
+    assert_eq!(
+        Setup::clear_hub_feature(hub::feature::C_HUB_OVER_CURRENT).to_u64(),
+        0x0000_0000_0001_0120
+    );
+    assert_eq!(Setup::clear_halt(0x81).to_u64(), 0x0000_0081_0000_0102);
+}
+
+#[test]
+fn routes_name_the_ports_below_the_root_port() {
+    assert_eq!(hub::depth(0), 0);
+    assert_eq!(hub::child_route(0, 3), Some(0x3));
+    assert_eq!(hub::child_route(0x3, 8), Some(0x83));
+    assert_eq!(hub::depth(0x83), 2);
+    assert!(hub::is_below(0x83, 0x3) && hub::is_below(0x83, 0));
+    assert!(!hub::is_below(0x84, 0x3) && !hub::is_below(0x3, 0x3));
+    assert_eq!(hub::child_route(0x3, 16), None);
+    assert_eq!(hub::child_route(0x3, 0), None);
+    assert_eq!(hub::child_route(0x1_1111, 1), None);
 }

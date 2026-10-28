@@ -189,9 +189,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    poweroff
   power-button     pressing the ACPI power button powers the machine off,
                    after Spark stops the services
-  usb-devices      the xHCI controller names the boot stick, a keyboard and a
-                   mouse on their ports, and a tablet plugged in and pulled
-                   out
+  usb-devices      the xHCI controller names the boot stick, a keyboard, two
+                   hubs and the devices behind them, and follows devices
+                   plugged in and pulled out
   watchdog, watchdog-tco   a Spark that stops responding leaves the hardware
                    watchdog unpetted, and it restarts the machine (QEMU's
                    i6300esb under BIOS, q35's TCO timer under UEFI)

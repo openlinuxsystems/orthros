@@ -194,6 +194,11 @@ impl Ring {
         self.memory.phys()
     }
 
+    /// The memory it is in, of which it uses the first page.
+    pub fn memory(&self) -> &Dma {
+        &self.memory
+    }
+
     /// Where the controller should read next, with the cycle state in bit
     /// 0: what CRCR and an endpoint's TR Dequeue Pointer take.
     pub fn dequeue_pointer(&self) -> u64 {

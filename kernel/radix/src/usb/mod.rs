@@ -9,9 +9,10 @@
 //! (MSI-X, else MSI; a controller with neither is polled every 10 ms) and
 //! starts a kernel thread for it, `usb1`, `usb2` and on ([`controller`]).
 //! The thread takes the controller from the firmware and then runs it
-//! alone: the interrupt only wakes it. Bus numbers count controllers from
-//! 1, and a device is named as Linux names one, by its bus and the root
-//! port it is on: `1-3`.
+//! alone: the interrupt only wakes it. It sets up every device it finds,
+//! on the root ports and behind hubs ([`hub`], ADR 0147). Bus numbers
+//! count controllers from 1, and a device is named as Linux names one, by
+//! its bus, the root port and the hub ports it is behind: `1-3.2`.
 //!
 //! `usb=off` leaves the controllers as the firmware left them.
 //! [`shutdown`] halts every controller before the machine is powered off
@@ -29,6 +30,7 @@ use crate::Arch;
 use crate::sched::{self, Options, Policy, ThreadRef};
 
 mod controller;
+mod hub;
 
 /// The most controllers driven.
 const MAX_CONTROLLERS: usize = 8;

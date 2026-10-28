@@ -18,6 +18,8 @@
 //!   may be short, long or wrong; nothing here trusts a length the device
 //!   gave without checking it against the bytes that came.
 //! - [`class_name`]: words for a device's or an interface's class.
+//! - [`hub`]: what hubs say of themselves and of their ports, and the
+//!   requests that drive them (Phase 11a, ADR 0147).
 //!
 //! The crate knows nothing of the kernel or of a controller, so its tests
 //! run on the host.
@@ -27,6 +29,7 @@
 
 use core::fmt;
 
+pub mod hub;
 #[cfg(test)]
 mod tests;
 
@@ -216,6 +219,9 @@ pub struct Setup {
     pub length: u16,
 }
 
+/// The feature selector of an endpoint's halt (USB 2.0, table 9-6).
+pub const ENDPOINT_HALT: u16 = 0;
+
 /// bmRequestType: the data stage goes from the device to the host.
 pub const DEVICE_TO_HOST: u8 = 0x80;
 /// bmRequestType's types: standard, class and vendor.
@@ -255,6 +261,19 @@ impl Setup {
             request: request::SET_CONFIGURATION,
             value: u16::from(value),
             index: 0,
+            length: 0,
+        }
+    }
+
+    /// CLEAR_FEATURE(ENDPOINT_HALT): ends a halt on the endpoint at
+    /// `address` (bEndpointAddress), as the host does after a stall, so
+    /// that the device's side of the pipe starts over too.
+    pub fn clear_halt(address: u8) -> Setup {
+        Setup {
+            request_type: STANDARD | TO_ENDPOINT,
+            request: request::CLEAR_FEATURE,
+            value: ENDPOINT_HALT,
+            index: u16::from(address),
             length: 0,
         }
     }
@@ -472,10 +491,27 @@ impl<'a> Interface<'a> {
         self.rest.clone()
     }
 
-    /// Its endpoints.
+    /// Its endpoints, each with what the SuperSpeed endpoint companion
+    /// after it says (USB 3.2, 9.6.7), if there is one.
     pub fn endpoints(&self) -> impl Iterator<Item = EndpointDescriptor> + use<'a> {
-        self.descriptors().filter_map(|(kind, bytes)| {
-            (kind == descriptor::ENDPOINT).then(|| EndpointDescriptor::parse(bytes)).flatten()
+        let mut descriptors = self.descriptors().peekable();
+        core::iter::from_fn(move || {
+            loop {
+                let (kind, bytes) = descriptors.next()?;
+                if kind != descriptor::ENDPOINT {
+                    continue;
+                }
+                let Some(mut endpoint) = EndpointDescriptor::parse(bytes) else { continue };
+                if let Some(&(descriptor::SUPERSPEED_ENDPOINT_COMPANION, companion)) =
+                    descriptors.peek()
+                    && companion.len() >= 4
+                {
+                    endpoint.max_burst = companion[2];
+                    endpoint.companion_attributes = companion[3];
+                    descriptors.next();
+                }
+                return Some(endpoint);
+            }
         })
     }
 }
@@ -531,7 +567,7 @@ pub enum TransferType {
 }
 
 /// What an endpoint is (USB 2.0, 9.6.6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EndpointDescriptor {
     /// bEndpointAddress: its number, with bit 7 set for IN (to the host).
     pub address: u8,
@@ -542,6 +578,12 @@ pub struct EndpointDescriptor {
     pub max_packet_raw: u16,
     /// bInterval, which [`TransferType`] and the speed give a meaning.
     pub interval: u8,
+    /// A SuperSpeed endpoint's bMaxBurst: the packets it moves in a burst
+    /// after the first (0 to 15); 0 without a companion descriptor.
+    pub max_burst: u8,
+    /// A SuperSpeed endpoint's companion bmAttributes: a bulk endpoint's
+    /// streams, an isochronous one's Mult; 0 without one.
+    pub companion_attributes: u8,
 }
 
 impl EndpointDescriptor {
@@ -555,6 +597,8 @@ impl EndpointDescriptor {
             attributes: bytes[3],
             max_packet_raw: u16::from_le_bytes([bytes[4], bytes[5]]),
             interval: bytes[6],
+            max_burst: 0,
+            companion_attributes: 0,
         })
     }
 

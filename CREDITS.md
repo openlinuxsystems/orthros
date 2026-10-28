@@ -239,8 +239,9 @@ We implement these from their published descriptions. No code is copied.
   ["eXtensible Host Controller Interface for Universal Serial Bus (xHCI)"](https://www.intel.com/content/www/us/en/products/docs/io/universal-serial-bus/extensible-host-controler-interface-usb-xhci.html),
   revision 1.2 (2019), and the USB-IF's Universal Serial Bus 2.0 and 3.2
   specifications, from which `radix-xhci` and `radix-usb` drive USB host
-  controllers and read devices' descriptors
-  ([ADR 0146](docs/adr/0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md)).
+  controllers and hubs and read devices' descriptors
+  ([ADR 0146](docs/adr/0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md),
+  [ADR 0147](docs/adr/0147-usb-hubs-and-every-device-configured-by-its-controllers-thread.md)).
   We use no code of Linux's or the BSDs' USB stacks, or of QEMU's
   controller, which the boot tests run against.
 - Howard Hinnant's

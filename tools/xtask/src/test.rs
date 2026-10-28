@@ -773,7 +773,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "usb-devices",
-        about: "the xHCI controller under UEFI names the boot stick, a keyboard and a mouse on their ports, and a tablet plugged in and pulled out",
+        about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, and follows devices plugged in and pulled out",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, and the power button ends
@@ -784,7 +784,18 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &["-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3"],
+        qemu: &[
+            "-device",
+            "usb-kbd,bus=xhci.0,port=2",
+            "-device",
+            "usb-hub,bus=xhci.0,port=3",
+            "-device",
+            "usb-mouse,bus=xhci.0,port=3.1",
+            "-device",
+            "usb-hub,bus=xhci.0,port=3.8,id=hub2",
+            "-device",
+            "usb-kbd,bus=xhci.0,port=3.8.4",
+        ],
         script: usb_devices,
         disks: &[],
         second: None,
@@ -3066,13 +3077,16 @@ fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
-/// QEMU's xHCI controller, with the boot stick on its first port and a
-/// keyboard and a mouse on the next two. QEMU gives each of its four ports
-/// a USB 3 port (1-4) and a USB 2 one (5-8): the stick takes the USB 3
-/// one, the keyboard and mouse the USB 2 ones. A tablet is plugged in on
-/// the last port and pulled out again, and the power button, which halts
-/// the controller, ends the test. The controller's thread runs alongside
-/// the boot, so what it says is looked for anywhere in the log.
+/// QEMU's xHCI controller, with the boot stick on its first port, a
+/// keyboard on the second, and a hub on the third with a mouse behind it
+/// and a second hub with a keyboard behind that. QEMU gives each of its
+/// four ports a USB 3 port (1-4) and a USB 2 one (5-8): the stick takes
+/// the USB 3 one, the rest the USB 2 ones; its hub is a full-speed one.
+/// A tablet is plugged in on the last root port, and another on the first
+/// hub, and pulled out again; pulling out the second hub takes its
+/// keyboard along. The power button, which halts the controller, ends the
+/// test. The controller's thread runs alongside the boot, so what it says
+/// at boot is looked for anywhere in the log.
 fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
@@ -3080,7 +3094,11 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3 on 1-4, USB 2 on 5-8), 64 device slots, MSI",
         "USB: 1-1: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed",
         "USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
-        "USB: 1-7: QEMU USB Mouse (0627:0001, QEMU), mouse, high speed",
+        "USB: 1-7: QEMU USB Hub (0409:55aa, QEMU), hub, full speed",
+        "USB: 1-7: a hub of 8 ports",
+        "USB: 1-7.1: QEMU USB Mouse (0627:0001, QEMU), mouse, full speed",
+        "USB: 1-7.8: QEMU USB Hub (0409:55aa, QEMU), hub, full speed",
+        "USB: 1-7.8.4: QEMU USB Keyboard (0627:0001, QEMU), keyboard, full speed",
     ] {
         vm.expect_anywhere(line)?;
     }
@@ -3089,6 +3107,13 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("USB: 1-8: QEMU USB Tablet (0627:0001, QEMU), HID, high speed")?;
     vm.monitor("device_del tablet")?;
     vm.expect("USB: 1-8: QEMU USB Tablet was unplugged")?;
+    vm.monitor("device_add usb-tablet,bus=xhci.0,port=3.5,id=tablet")?;
+    vm.expect("USB: 1-7.5: QEMU USB Tablet (0627:0001, QEMU), HID, full speed")?;
+    vm.monitor("device_del tablet")?;
+    vm.expect("USB: 1-7.5: QEMU USB Tablet was unplugged")?;
+    vm.monitor("device_del hub2")?;
+    vm.expect("USB: 1-7.8: QEMU USB Hub was unplugged")?;
+    vm.expect("USB: 1-7.8.4: QEMU USB Keyboard was unplugged")?;
     vm.press_power_button()?;
     vm.expect("Power: the power button was pressed")?;
     vm.expect("spark: every service has stopped")?;
@@ -3543,7 +3568,11 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(" KiB with ")?;
     vm.expect(" files at 0x")?;
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    // Spark's line and hello's first come in either order: hello may run
+    // on another CPU before Spark logs that it started it.
+    let from = vm.cursor;
     let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
+    vm.cursor = from;
     let args = program_line(vm, "hello: process ")?;
     if args != format!("{number}, arguments: /system/tests/hello one two") {
         return Err(format!("hello got `{args}`, not process {number} with its arguments"));
