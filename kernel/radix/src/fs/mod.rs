@@ -454,6 +454,7 @@ const ROOT_MAX: u64 = 1 << 20;
 pub fn init() {
     radix_block::mem::set_page_source(<Arch as Devices>::alloc_cache_page);
     radix_vfs::set_clock(|| <Arch as Timer>::wall_clock_ns().unwrap_or(0));
+    radix_vfs::set_random(radix_random::fill);
     let made = tmpfs(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
     match made {
         Ok(tree) => {

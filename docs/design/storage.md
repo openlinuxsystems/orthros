@@ -499,8 +499,19 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   under a quarter full into a neighbor that has room, and lets a root
   node with one child give way to it. A change that fails half made
   leaves the writer refusing every change and commit: the disk keeps the
-  last commit. A filesystem whose blocks may be shared (snapshots),
-  counted (quotas) or moved (a relocation) is not written yet.
+  last commit. A filesystem whose blocks are counted (quotas) or moved
+  (a relocation) is not written yet.
+- `refs` keeps the back references of an extent item as Linux does:
+  by tree or by the address of the block above for a tree block, by
+  tree, inode and offset or by the leaf's address for data, inline
+  while they fit (ADR 0138). A block of a tree with a snapshot made at
+  or after it may be shared: its copy changes the references of the
+  block and its children as Linux's `update_ref_for_cow` does, through a
+  list of delayed changes made after each change of the filesystem.
+  `subvol` makes subvolumes and snapshots, each between two commits,
+  and removes one by walking its tree in one transaction, freeing what
+  only it holds and turning blocks a later snapshot shares into
+  `FULL_BACKREF` ones first.
 - `space::Space` reads every block group and its free ranges from the
   free-space tree at the first write, kept as extents or bitmaps; the
   ranges around the superblock's copies are never taken. A tree block is
@@ -754,7 +765,8 @@ host, and reads everything back after a second boot.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
-  with `no-holes`, without snapshots, reflinks or quotas (10c.2), and
+  with `no-holes`, without reflinks or quotas (10c.2), removes a
+  subvolume in one transaction rather than in the background, and
   compresses only with zstd, never small files inline, with literals of
   bytes above 127 left raw. Its compressed reads take one workspace in
   turn, where Linux keeps one per CPU at most. Empty block groups stay, where Linux removes

@@ -4,12 +4,12 @@
 // The native administration tools (systools, ADR 0096) as an
 // administrator's commands and scripts use them, each through its link
 // in /bin: the process tools and their signals, sessions, memory and
-// disks, priorities, CPU affinity and I/O classes, held files, traces,
-// the kernel log, the dump and layout tools, script, watch and pidstat,
-// shutdown and service through Spark, and the hardware tools. With them,
-// what the kernel tells them: /processes (radix-proc(5)), /devices/kmsg,
-// /kernel (radix-sysfs(5)), getloadavg, and the priorities a child
-// inherits.
+// disks, subvolumes, priorities, CPU affinity and I/O classes, held
+// files, traces, the kernel log, the dump and layout tools, script, watch
+// and pidstat, shutdown and service through Spark, and the hardware
+// tools. With them, what the kernel tells them: /processes
+// (radix-proc(5)), /devices/kmsg, /kernel (radix-sysfs(5)), getloadavg,
+// and the priorities a child inherits.
 
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -222,6 +222,18 @@ static void memory(void) {
 	CONTAINS(" /tmp\n", "/bin/df", "-P", "/tmp");
 	CONTAINS("tmpfs", "/bin/df", "-T", "/tmp");
 	STATUS(1, "/bin/df", "/nowhere");
+}
+
+// subvolume on a filesystem that is not Btrfs, which refuses each
+// action, and with an unknown action or none; the root boot test makes,
+// snapshots and removes subvolumes through the same calls.
+static void subvolumes(void) {
+	STATUS(0, "/bin/mkdir", "-p", DIR);
+	STATUS(1, "/bin/subvolume", "create", DIR "/sub");
+	STATUS(1, "/bin/subvolume", "snapshot", "-r", DIR, DIR "/snap");
+	STATUS(1, "/bin/subvolume", "delete", DIR "/sub");
+	STATUS(1, "/bin/subvolume", "list");
+	STATUS(1, "/bin/subvolume");
 }
 
 // renice, ionice and taskset: levels, classes and CPUs, set on a child
@@ -576,6 +588,7 @@ int main(void) {
 	RUN(processes);
 	RUN(sessions);
 	RUN(memory);
+	RUN(subvolumes);
 	RUN(priorities);
 	RUN(files);
 	RUN(tracing);

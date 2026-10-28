@@ -95,6 +95,12 @@ impl Txn {
         self.next_ino[at].1 += 1;
         Ok(ino)
     }
+
+    /// Forgets subvolume `subvol`, removed.
+    pub(crate) fn forget(&mut self, subvol: u64) {
+        self.next_ino.retain(|e| e.0 != subvol);
+        self.writer.forget_tree(subvol);
+    }
 }
 
 /// An entry of the node table: a node's subvolume and inode number, and
@@ -211,7 +217,7 @@ impl BtrfsFs {
 
 /// The subvolume mounted when none is asked for: the one the root tree's
 /// `default` entry names, the top one when there is no such entry.
-fn default_subvolume(volume: &Volume) -> Result<u64> {
+pub(crate) fn default_subvolume(volume: &Volume) -> Result<u64> {
     const NAME: &[u8] = b"default";
     let key = Key::new(tree::ROOT_TREE_DIR, item::DIR_ITEM, name_hash(NAME));
     let cursor = Cursor::seek(volume, &volume.root_tree(), &key)?;
@@ -303,6 +309,32 @@ impl Inner {
         let result = f(&mut txn);
         self.count_data_room(&mut txn);
         result
+    }
+
+    /// Runs the change `f` in a transaction of its own, committed before
+    /// and after it, as making a snapshot or removing a subvolume is: the
+    /// trees it shares or drops are as the disk has them, and it is on
+    /// the disk when it returns.
+    pub(crate) fn alone<R>(
+        &self,
+        freeing: bool,
+        f: impl FnOnce(&mut Txn) -> Result<R>,
+    ) -> Result<R> {
+        let tx = self.tx.as_ref().ok_or(Error::ReadOnly)?;
+        let mut txn = tx.lock();
+        self.commit_locked(&mut txn)?;
+        txn.writer.make_room(&self.volume, freeing)?;
+        self.touch();
+        let result = f(&mut txn);
+        self.count_data_room(&mut txn);
+        let result = result?;
+        self.commit_locked(&mut txn)?;
+        Ok(result)
+    }
+
+    /// Whether a node of subvolume `subvol` is in use.
+    pub(crate) fn in_use(&self, subvol: u64) -> bool {
+        self.nodes.lock().iter().any(|((s, _), weak)| *s == subvol && weak.strong_count() > 0)
     }
 
     /// Counts again the bytes data could take.
