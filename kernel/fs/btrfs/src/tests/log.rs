@@ -24,13 +24,19 @@ const SPARSE: &[u8] = include_bytes!("fixtures/btrfs-log.sparse");
 /// Linux's lists of the disk, before and after its replay.
 const LISTS: &str = include_str!("fixtures/btrfs-log.txt");
 
-/// The disk the fixture keeps: `radix-sparse 1\n`, its size, then runs
-/// of blocks, each where it starts, how long it is, and its bytes.
+/// The disk the fixture keeps.
 fn disk_image() -> Vec<u8> {
+    unsparse(SPARSE)
+}
+
+/// The disk a fixture keeps as `sparse`: `radix-sparse 1\n`, its size,
+/// then runs of blocks, each where it starts, how long it is, and its
+/// bytes.
+pub(super) fn unsparse(sparse: &[u8]) -> Vec<u8> {
     let word = |bytes: &[u8], at: usize| {
         u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize
     };
-    let rest = SPARSE.strip_prefix(b"radix-sparse 1\n".as_slice()).unwrap();
+    let rest = sparse.strip_prefix(b"radix-sparse 1\n".as_slice()).unwrap();
     let mut image = vec![0; word(rest, 0)];
     let mut at = 8;
     while at < rest.len() {
@@ -43,7 +49,13 @@ fn disk_image() -> Vec<u8> {
 
 /// Linux's list of the disk after it replays the log.
 fn linux_list() -> Vec<String> {
-    LISTS
+    replayed_list(LISTS)
+}
+
+/// Linux's list of a disk after it replays its log, from a fixture's
+/// `lists`.
+pub(super) fn replayed_list(lists: &str) -> Vec<String> {
+    lists
         .lines()
         .skip_while(|line| *line != "LIST replayed")
         .skip(1)
@@ -53,12 +65,12 @@ fn linux_list() -> Vec<String> {
 }
 
 /// The log root the superblock of `image` names.
-fn log_root(image: &[u8]) -> u64 {
+pub(super) fn log_root(image: &[u8]) -> u64 {
     u64::from_le_bytes(image[0x1_0060..0x1_0068].try_into().unwrap())
 }
 
 /// The files of `fs`, in the lines of Linux's list.
-fn list(fs: &BtrfsFs) -> Vec<String> {
+pub(super) fn list(fs: &BtrfsFs) -> Vec<String> {
     let subvol = fs.volume().tree(tree::FS).unwrap().unwrap();
     let mut out = Vec::new();
     walk(fs, &subvol, &fs.root(), "", &mut out);

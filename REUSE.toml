@@ -68,9 +68,10 @@ path = "kernel/fs/btrfs/src/tests/zstd/*.zst"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
 
-# A Btrfs disk Linux left with a log of fsyncs to replay, and Linux's
-# lists of it, made by `ob fixture btrfs-log`, which the Btrfs tests
-# read (kernel/fs/btrfs/src/tests/log.rs).
+# Btrfs disks Linux and Radix left with a log of fsyncs to replay, and
+# Linux's lists of them, made by `ob fixture btrfs-log` and `ob fixture
+# btrfs-radix-log`, which the Btrfs tests read
+# (kernel/fs/btrfs/src/tests/log.rs and fsync.rs).
 [[annotations]]
 path = "kernel/fs/btrfs/src/tests/fixtures/*"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"

@@ -1,0 +1,20 @@
+# Made by `ob fixture btrfs-radix-log` with Linux 6.8.0-71-generic: the disk Radix left with its log, as its last commit has it, and as Linux replays the log.
+LIST committed
+LIST / dir 755 0 0 1 54 - -
+LIST /cut file 644 0 0 1 200000 2fc57be43c657c91 -
+LIST /d dir 755 0 0 1 10 - -
+LIST /d/inner file 644 0 0 1 50000 a8c8077f9051efb9 -
+LIST /grown file 644 0 0 1 100000 08704dc9e3b9e0ed -
+LIST /holes file 644 0 0 1 300000 621ef111e206562f -
+LIST /times file 644 0 0 1 3000 81fb49140b6188bf -
+LIST /unsynced file 644 0 0 1 5000 b554ffd630b8c1ea -
+LIST replayed
+LIST / dir 755 0 0 1 54 - -
+LIST /cut file 644 0 0 1 50000 34f2a0bfe309e627 -
+LIST /d dir 755 0 0 1 10 - -
+LIST /d/inner file 644 0 0 1 50000 010dc232ed3dca36 -
+LIST /grown file 644 0 0 1 150000 ea3e5d1e26b451b5 -
+LIST /holes file 644 0 0 1 400000 c140241abe1a6b91 -
+LIST /times file 644 0 0 1 3000 81fb49140b6188bf -
+LIST /unsynced file 644 0 0 1 5000 b554ffd630b8c1ea -
+LIST end

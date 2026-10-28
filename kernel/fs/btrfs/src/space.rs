@@ -218,6 +218,33 @@ impl Space {
     /// holds `want` (a [`kind`] of data, metadata or system): a group of
     /// both data and metadata (`mkfs.btrfs --mixed`) holds either.
     pub(crate) fn take(&mut self, want: u64, size: u64, align: u64) -> Result<u64> {
+        let (group, at) = self.find(want, size, align)?;
+        mem::push(&mut group.log, (at, at + size, false))?;
+        group.used_delta += size as i64;
+        Ok(at)
+    }
+
+    /// Takes `size` bytes aligned to `align` from a block group that holds
+    /// `want`, with no change the free-space tree records, as
+    /// [`Space::keep_from_use`] keeps them: a block of the log of fsyncs,
+    /// which no tree counts (ADR 0154). [`Space::release`] gives them
+    /// back.
+    pub(crate) fn take_unrecorded(&mut self, want: u64, size: u64, align: u64) -> Result<u64> {
+        Ok(self.find(want, size, align)?.1)
+    }
+
+    /// Gives back `[start, start + len)`, taken by
+    /// [`Space::take_unrecorded`]: it may be taken again at once.
+    pub(crate) fn release(&mut self, start: u64, len: u64) -> Result<()> {
+        let group = self.group_mut(start)?;
+        add(&mut group.free, start, start + len)?;
+        group.free_bytes += len;
+        Ok(())
+    }
+
+    /// Takes `size` bytes aligned to `align` out of the free space of a
+    /// block group that holds `want`: the group, and where they start.
+    fn find(&mut self, want: u64, size: u64, align: u64) -> Result<(&mut Group, u64)> {
         for group in &mut self.groups {
             if group.flags & TYPE & want == 0 {
                 continue;
@@ -234,11 +261,9 @@ impl Space {
             });
             if let Some(at) = found {
                 remove(&mut group.free, at, at + size)?;
-                mem::push(&mut group.log, (at, at + size, false))?;
                 group.free_bytes -= size;
-                group.used_delta += size as i64;
                 group.hint = at + size;
-                return Ok(at);
+                return Ok((group, at));
             }
         }
         Err(Error::NoSpace)

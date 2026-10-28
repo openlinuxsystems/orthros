@@ -162,3 +162,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0150](0150-btrfs-scrubs-the-last-commit-a-run-of-extents-at-a-time.md) | Btrfs scrubs the last commit, a run of extents at a time | Accepted |
 | [0151](0151-btrfs-replays-the-log-of-fsyncs-linux-leaves-at-mount.md) | Btrfs replays the log of fsyncs Linux leaves, at mount | Accepted |
 | [0152](0152-swap-to-linux-swap-areas-from-a-thread-of-its-own.md) | Swap to Linux's swap areas, from a thread of its own | Accepted |
+| [0154](0154-btrfs-writes-a-log-of-fsyncs-as-linux-does.md) | Btrfs writes a log of fsyncs, as Linux does | Accepted |

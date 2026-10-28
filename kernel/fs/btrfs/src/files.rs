@@ -58,7 +58,7 @@ const EXTENT_HEADER: usize = 24;
 /// offset and count.
 const DATA_REF: usize = 28;
 /// The size of a regular file extent item.
-const FILE_EXTENT: usize = 53;
+pub(crate) const FILE_EXTENT: usize = 53;
 /// The size of an inline file extent item before its data.
 const INLINE_HEADER: usize = 21;
 
@@ -423,6 +423,8 @@ impl Files<'_> {
     /// Makes file `ino`'s one extent: `data` inline, uncompressed, as a
     /// link's path is kept.
     pub(crate) fn inline_extent(&mut self, ino: u64, data: &[u8]) -> Result<()> {
+        let sector = u64::from(self.volume.superblock().sectorsize);
+        self.w.logging.note(self.subvol, ino, 0, sector);
         let generation = self.w.generation;
         let key = Key::new(ino, item::EXTENT_DATA, 0);
         self.w.insert_with(self.volume, self.subvol, &key, INLINE_HEADER + data.len(), |d| {
@@ -804,6 +806,8 @@ impl Files<'_> {
     /// names it. An inline extent only goes whole, from the start.
     /// Returns how many bytes the inode's `nbytes` loses.
     pub(crate) fn drop_extents(&mut self, ino: u64, start: u64, end: u64) -> Result<u64> {
+        // What an fsync's log holds of the file covers this range.
+        self.w.logging.note(self.subvol, ino, start, end);
         let mut lost = 0;
         let mut pos = start;
         while pos < end
