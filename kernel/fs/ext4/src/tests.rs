@@ -27,7 +27,7 @@ use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 use crate::Ext4Fs;
 use crate::inode::flags;
 use crate::sb::{self, at, incompat};
-use crate::{le16, le32};
+use crate::{le16, le32, put16, put32};
 
 /// 2026-10-22 00:42:22 UTC, for files' times.
 fn clock() -> u64 {
@@ -1671,5 +1671,113 @@ proptest! {
     #[test]
     fn changes_match_a_model(volume in 0usize..3, ops in prop::collection::vec(op(), 1..40)) {
         run_model(&model_volume(volume), &ops);
+    }
+}
+
+/// A superblock with each field in its range, and so mostly one that
+/// mounts, then up to four bytes of its fields changed, with the size of
+/// its volume. Its last group is often one of a few blocks that starts a
+/// `meta_bg` group of them, where descriptors come nearest the end.
+fn superblock() -> impl Strategy<Value = (Vec<u8>, u64)> {
+    (
+        (0u32..3, any::<u8>(), prop_oneof![0u32..4, any::<u32>()]),
+        (
+            prop_oneof![0u64..8, 0u64..512, 0u64..1 << 20, 0u64..1 << 34],
+            prop_oneof![Just(0u32), Just(1), any::<u32>()],
+            any::<bool>(),
+        ),
+        (any::<u32>(), prop_oneof![1u32..=64, 1u32..=8192], 0u32..4, any::<u16>()),
+        prop_oneof![Just(0i64), -4096i64..4096, any::<i64>()],
+        prop::collection::vec((0usize..0x160, any::<u8>()), 0..4),
+    )
+        .prop_map(
+            |(
+                (log, features, first_meta_bg),
+                (full, tail, round),
+                (bpg, ipg, isize, reserved),
+                slack,
+                damage,
+            )| {
+                let shift = 10 + log;
+                let block_size = 1u32 << shift;
+                let rev = u32::from(features & 8 == 0);
+                let bit64 = rev == 1 && features & 1 != 0;
+                let fdb = u64::from(block_size == 1024);
+                let bpg = 8 * (1 + bpg % block_size);
+                // Every number of descriptors in a block is a multiple of 16.
+                let full = if round { full / 16 * 16 } else { full };
+                let span = full * u64::from(bpg) + u64::from(1 + tail % bpg);
+                let blocks = if bit64 { fdb + span } else { (fdb + span).min(u64::from(u32::MAX)) };
+                let ipg = ipg.min(block_size * 8);
+                let groups = (blocks - fdb).div_ceil(u64::from(bpg));
+                let mut sb = vec![0; sb::SIZE];
+                put16(&mut sb, at::MAGIC, sb::MAGIC);
+                put32(&mut sb, at::REV_LEVEL, rev);
+                put32(&mut sb, at::LOG_BLOCK_SIZE, log);
+                put32(&mut sb, at::LOG_CLUSTER_SIZE, log);
+                put32(&mut sb, at::BLOCKS_LO, blocks as u32);
+                put32(&mut sb, at::BLOCKS_HI, (blocks >> 32) as u32);
+                put32(&mut sb, at::FIRST_DATA_BLOCK, fdb as u32);
+                put32(&mut sb, at::BLOCKS_PER_GROUP, bpg);
+                put32(&mut sb, at::INODES_PER_GROUP, ipg);
+                put32(&mut sb, at::INODES, (groups * u64::from(ipg)) as u32);
+                put16(&mut sb, at::INODE_SIZE, 128 << isize);
+                put32(&mut sb, at::FIRST_INO, 11);
+                let mut incompat = incompat::FILETYPE | incompat::EXTENTS | incompat::FLEX_BG;
+                if bit64 {
+                    incompat |= incompat::BIT64;
+                    put16(&mut sb, at::DESC_SIZE, 64);
+                }
+                if features & 2 != 0 {
+                    incompat |= incompat::META_BG;
+                }
+                put32(&mut sb, at::INCOMPAT, incompat);
+                put32(
+                    &mut sb,
+                    at::RO_COMPAT,
+                    u32::from(features & 4 != 0) * sb::ro_compat::SPARSE_SUPER,
+                );
+                put32(
+                    &mut sb,
+                    at::COMPAT,
+                    u32::from(features & 16 != 0) * sb::compat::SPARSE_SUPER2,
+                );
+                put32(&mut sb, at::BACKUP_BGS, u32::from(features >> 5));
+                put32(&mut sb, at::BACKUP_BGS + 4, (groups as u32).wrapping_sub(1));
+                put32(&mut sb, at::FIRST_META_BG, first_meta_bg);
+                put16(&mut sb, at::RESERVED_GDT, reserved);
+                for (at, byte) in damage {
+                    sb[at] = byte;
+                }
+                (sb, (blocks << shift).saturating_add_signed(slack))
+            },
+        )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+    /// Whatever its superblock says, a volume that mounts keeps every
+    /// group, and every group's descriptor, on the device. (This was a
+    /// Kani proof, but its products and quotients of 64-bit values are
+    /// more than CBMC finishes.)
+    #[test]
+    fn groups_stay_on_the_device((sb, bytes) in superblock(), pick in any::<u32>()) {
+        let Ok(geo) = sb::Geometry::parse(&sb, bytes) else { return Ok(()) };
+        prop_assert!(geo.blocks << geo.shift <= bytes);
+        let last = geo.groups - 1;
+        let some: Vec<u32> = if geo.groups <= 4096 {
+            (0..geo.groups).collect()
+        } else {
+            vec![0, 1, last / 2, last - 1, last, pick % geo.groups]
+        };
+        for g in some {
+            prop_assert!(geo.group_blocks(g) > 0, "group {} of {:?}", g, geo.groups);
+            prop_assert!(geo.group_start(g) + u64::from(geo.group_blocks(g)) <= geo.blocks);
+            prop_assert!(
+                geo.desc_offset(g) + u64::from(geo.desc_size) <= geo.blocks << geo.shift,
+                "the descriptor of group {} of {}", g, geo.groups
+            );
+        }
     }
 }

@@ -87,8 +87,8 @@ writes ext4 (and ext2 and ext3) volumes:
   transactions in its journal, is replayed (`src/fixtures`); and a power
   cut at points of a workload, a disk that stops taking writes, must
   leave a volume that both Radix and `e2fsck` replay to the same files.
-  A model test, damaged volumes, fuzzed metadata and two Kani proofs
-  complete them.
+  A model test, damaged volumes, fuzzed metadata, fuzzed superblocks
+  and a Kani proof complete them.
 - The boot tests `ext4-write` and `ext4-power-cut` check the same on
   disks in QEMU.
 - Every sync with changes writes their blocks twice, as jbd2 does, and

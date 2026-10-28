@@ -486,28 +486,3 @@ pub fn set_recover(sb: &mut [u8], on: bool) {
 pub fn set_state(sb: &mut [u8], state: u16) {
     put16(sb, at::STATE, state);
 }
-
-#[cfg(kani)]
-mod proofs {
-    use super::*;
-
-    /// Whatever its superblock says, a volume that mounts keeps every
-    /// group, and every group's descriptor, on the device. (A superblock
-    /// with `metadata_csum` is left out: its checksum, over all of it, is
-    /// too much to prove through; the rest is the same.)
-    #[kani::proof]
-    #[kani::unwind(40)]
-    fn groups_stay_on_the_device() {
-        let sb: [u8; SIZE] = kani::any();
-        kani::assume(le32(&sb, at::RO_COMPAT) & ro_compat::METADATA_CSUM == 0);
-        let bytes: u64 = kani::any();
-        if let Ok(geo) = Geometry::parse(&sb, bytes) {
-            let g: u32 = kani::any();
-            kani::assume(g < geo.groups);
-            assert!(geo.group_start(g) + u64::from(geo.group_blocks(g)) <= geo.blocks);
-            assert!(geo.group_blocks(g) > 0);
-            assert!(geo.desc_offset(g) + u64::from(geo.desc_size) <= geo.blocks << geo.shift);
-            assert!(geo.blocks << geo.shift <= bytes);
-        }
-    }
-}
