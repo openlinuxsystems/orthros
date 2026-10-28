@@ -329,3 +329,18 @@ fn crc32c_matches_its_definition() {
         }
     }
 }
+
+#[test]
+fn bmi2_shifts_as_the_others_do() {
+    let Some(bmi2) = crate::bmi2::Bmi2::get() else {
+        std::eprintln!("no BMI2 here");
+        return;
+    };
+    for value in [0, 1, 0x8000_0000_0000_0001, 0x0123_4567_89ab_cdef, !0] {
+        // The count is taken modulo 64, as by `wrapping_shl`.
+        for count in (0..130).chain([u32::MAX - 1, u32::MAX]) {
+            assert_eq!(bmi2.shl(value, count), value.wrapping_shl(count), "{value:x} << {count}");
+            assert_eq!(bmi2.shr(value, count), value.wrapping_shr(count), "{value:x} >> {count}");
+        }
+    }
+}

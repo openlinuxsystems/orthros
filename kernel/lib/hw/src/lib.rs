@@ -22,7 +22,9 @@
 //!   configuration access mechanism (ECAM): finding functions, sizing
 //!   their base address registers and setting up MSI and MSI-X;
 //! - [`crc32c`], CRC-32C with the processor's instruction for it, which
-//!   checks what disks give the filesystems.
+//!   checks what disks give the filesystems;
+//! - [`bmi2`], BMI2's shifts, with which the filesystems' zstd decoder
+//!   takes its bits.
 //!
 //! The architecture maps device memory uncached and allocates DMA memory
 //! (`radix_hal::Devices`); only it calls the `unsafe` constructors, whose
@@ -33,6 +35,7 @@
 #![cfg_attr(not(any(test, feature = "fake")), no_std)]
 #![deny(unsafe_code)]
 
+pub mod bmi2;
 pub mod crc32c;
 pub mod pci;
 

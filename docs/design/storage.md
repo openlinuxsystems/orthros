@@ -471,7 +471,11 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   checksum) and `lzo` (LZO1X in Btrfs's segments) are the crate's own
   decoders, written from the formats' descriptions (ADR 0128): safe,
   bounds-checked, with every table allocated once, so data that does not
-  decode fails with `Io`. `unpack::Workspace` holds an extent's
+  decode fails with `Io`. The zstd decoder makes each sequence's copies
+  as it decodes it, and takes the sequence's values from its stream
+  with BMI2's shifts (`radix_hw::bmi2`) where the processor has them,
+  as Linux's decoder does: the shifts every x86-64 has are two or three
+  operations each on Intel's processors. `unpack::Workspace` holds an extent's
   compressed bytes, its data and the decoders' tables, about 400 KiB, one
   per filesystem, made at its first compressed read, and a second for
   the half of a run another CPU uncompresses, made at the first such
