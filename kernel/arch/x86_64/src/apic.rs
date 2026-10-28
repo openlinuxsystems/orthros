@@ -9,8 +9,9 @@
 //! (registers in memory) otherwise. The 8259 PICs are remapped away from
 //! the exception vectors and masked, and every I/O APIC input is masked
 //! at boot. PCI devices interrupt by message (MSI or MSI-X, ADR 0052),
-//! which needs no I/O APIC; the only input unmasked is the built-in
-//! keyboard's, which [`route_isa`] sends to one CPU.
+//! which needs no I/O APIC; the only inputs unmasked are the built-in
+//! keyboard's, which [`route_isa`] sends to one CPU, and ACPI's System
+//! Control Interrupt, which [`route_sci`] does.
 //!
 //! Under KVM, an EOI written to the APIC leaves the virtual machine, as
 //! most APIC writes do. KVM offers a cheaper way, which Linux guests use
@@ -443,6 +444,20 @@ const LEVEL: u32 = 1 << 15;
 /// triggered and active high). Returns the global system interrupt, or
 /// `None` if no I/O APIC has it.
 pub fn route_isa(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32) -> Option<u32> {
+    route(madt, irq, vector, destination, false)
+}
+
+/// Sends the System Control Interrupt, ISA interrupt `irq`, to `vector`
+/// as [`route_isa`] sends ISA's, but level-triggered and active low where
+/// the MADT's override leaves them to conform, or gives none: the SCI's
+/// own (ACPI 6.5 5.2.9, SCI_INT).
+pub fn route_sci(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32) -> Option<u32> {
+    route(madt, irq, vector, destination, true)
+}
+
+/// [`route_isa`] and [`route_sci`]: `sci` makes a polarity or trigger
+/// mode that conforms to the bus active low and level-triggered.
+fn route(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32, sci: bool) -> Option<u32> {
     let (gsi, flags) = madt
         .and_then(|madt| {
             madt.entries().find_map(|entry| match entry {
@@ -455,12 +470,12 @@ pub fn route_isa(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32)
         .unwrap_or((u32::from(irq), 0));
     // MPS INTI flags: polarity in bits 0-1 and trigger mode in bits 2-3,
     // 3 for active low and for level; 0 conforms to the bus, which for ISA
-    // is active high and edge.
+    // is active high and edge, and for the SCI active low and level.
     let mut low = u32::from(vector);
-    if flags & 3 == 3 {
+    if flags & 3 == 3 || (sci && flags & 3 == 0) {
         low |= ACTIVE_LOW;
     }
-    if (flags >> 2) & 3 == 3 {
+    if (flags >> 2) & 3 == 3 || (sci && (flags >> 2) & 3 == 0) {
         low |= LEVEL;
     }
     let list = IOAPICS.lock_irq();

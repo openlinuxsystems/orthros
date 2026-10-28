@@ -298,6 +298,20 @@ Power: `spark` asked to power off the machine; syncing the filesystems
 
 A machine the kernel cannot power off, with no ACPI, is halted instead.
 
+Pressing the machine's power button, where the kernel hears it (an ACPI
+power button that is a fixed feature; *radix-power*(2)'s
+*notify_button*), starts a shutdown to power off at once, as *poweroff*
+does; one set for later is moved to now, and a press while shutting down
+changes nothing:
+
+```
+Power: the power button was pressed
+spark: the power button was pressed; powering off the machine
+spark: shutting down to power off: stopping 1 services
+```
+
+Where the kernel cannot hear it, the firmware keeps the button.
+
 # POSIX PROGRAMS
 
 With *--posix* as its first argument, Spark runs the program after it as

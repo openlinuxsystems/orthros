@@ -348,6 +348,14 @@ pub trait Devices {
     /// [`Devices::start_keyboard`]. Returns false if the controller did
     /// not take it in time.
     fn keyboard_send(byte: u8) -> bool;
+
+    /// Hears the machine's power button, if the kernel can: on a PC the
+    /// ACPI button that is a fixed feature, through the System Control
+    /// Interrupt (Phase 11). `pressed` is called, in an interrupt handler
+    /// with interrupts masked, each time it is pressed. Returns what the
+    /// button is, for the log, or `None`, leaving the button to the
+    /// firmware, if the kernel cannot hear it.
+    fn start_power_button(pressed: fn()) -> Option<&'static str>;
 }
 
 /// Kernel threads: their saved contexts and switching between them.

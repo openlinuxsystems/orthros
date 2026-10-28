@@ -304,6 +304,14 @@ _target/userspace/_).
 		and power the machine off with *poweroff*(8) (*consoled*(8),
 		*spark*(8)).
 
+	*power-button*
+		Boot normally under BIOS, and once consoled has started, press
+		the machine's power button with QMP's _system_powerdown_, which
+		raises ACPI's power button event. The kernel must say it hears
+		the button, then that it was pressed; Spark must stop the
+		services and power the machine off, and QEMU end on ACPI's S5
+		(*radix-power*(2), *spark*(8)).
+
 	*spark-oom*
 		Boot with 256 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its

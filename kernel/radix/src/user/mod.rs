@@ -56,7 +56,7 @@ mod methods;
 mod notify;
 pub mod objects;
 pub(crate) mod posix;
-mod power;
+pub mod power;
 pub mod process;
 pub mod random;
 mod ring;
