@@ -270,15 +270,17 @@ impl Dma {
 
     /// `len` zeroed bytes of host memory, whose physical address is its
     /// host address, so a simulated device can reach it with
-    /// [`fake_memory`] (for tests).
+    /// [`fake_memory`] (for tests). It starts on a page, as the kernel's
+    /// DMA memory does, since devices take some addresses only aligned.
     #[cfg(any(test, feature = "fake"))]
     pub fn fake(len: usize) -> Dma {
         let pages = len.div_ceil(4096).max(1);
-        let memory = std::boxed::Box::leak(std::vec![0u64; pages * 512].into_boxed_slice());
+        let memory =
+            std::boxed::Box::leak(std::vec![FakePage([0; 4096]); pages].into_boxed_slice());
         let virt = memory.as_mut_ptr() as usize;
         fn release(virt: usize, _phys: u64, len: usize) {
             let pages = len.div_ceil(4096).max(1);
-            let memory = core::ptr::slice_from_raw_parts_mut(virt as *mut u64, pages * 512);
+            let memory = core::ptr::slice_from_raw_parts_mut(virt as *mut FakePage, pages);
             // SAFETY: `fake` leaked exactly this boxed slice.
             #[allow(unsafe_code)]
             drop(unsafe { std::boxed::Box::from_raw(memory) });
@@ -404,6 +406,12 @@ impl Drop for Dma {
         (self.release)(self.virt, self.phys, self.len);
     }
 }
+
+/// A page of host memory aligned as a page, for [`Dma::fake`].
+#[cfg(any(test, feature = "fake"))]
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct FakePage([u8; 4096]);
 
 /// The size of a [`Page`].
 pub const PAGE_SIZE: usize = 4096;

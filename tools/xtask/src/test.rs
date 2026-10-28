@@ -76,8 +76,10 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sched",
     "radix-sync",
     "radix-tty",
+    "radix-usb",
     "radix-vfs",
     "radix-virtio",
+    "radix-xhci",
 ];
 
 /// Length of the command-line slot in the test image's grub.cfg.
@@ -731,6 +733,24 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: power_button,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "usb-devices",
+        about: "the xHCI controller under UEFI names the boot stick, a keyboard and a mouse on their ports, and a tablet plugged in and pulled out",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark starts the services, and the power button ends
+        // the test.
+        cmdline: "lockdep",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3"],
+        script: usb_devices,
         disks: &[],
         second: None,
     },
@@ -2414,6 +2434,17 @@ impl Vm {
         }
     }
 
+    /// Waits until `needle` appears anywhere in the log, for what a thread
+    /// that runs alongside the boot says in an order of its own. The place
+    /// [`Vm::expect`] reads from stays where it is.
+    pub fn expect_anywhere(&mut self, needle: &str) -> Result<(), String> {
+        let cursor = self.cursor;
+        self.cursor = 0;
+        let found = self.expect(needle);
+        self.cursor = cursor;
+        found
+    }
+
     /// Types `text` on the serial port.
     pub fn send(&mut self, text: &str) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or("QEMU's input is closed")?;
@@ -2935,6 +2966,35 @@ fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// QEMU's xHCI controller, with the boot stick on its first port and a
+/// keyboard and a mouse on the next two. QEMU gives each of its four ports
+/// a USB 3 port (1-4) and a USB 2 one (5-8): the stick takes the USB 3
+/// one, the keyboard and mouse the USB 2 ones. A tablet is plugged in on
+/// the last port and pulled out again, and the power button, which halts
+/// the controller, ends the test. The controller's thread runs alongside
+/// the boot, so what it says is looked for anywhere in the log.
+fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    for line in [
+        "USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3 on 1-4, USB 2 on 5-8), 64 device slots, MSI",
+        "USB: 1-1: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed",
+        "USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
+        "USB: 1-7: QEMU USB Mouse (0627:0001, QEMU), mouse, high speed",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.monitor("device_add usb-tablet,bus=xhci.0,port=4,id=tablet")?;
+    vm.expect("USB: 1-8: QEMU USB Tablet (0627:0001, QEMU), HID, high speed")?;
+    vm.monitor("device_del tablet")?;
+    vm.expect("USB: 1-8: QEMU USB Tablet was unplugged")?;
+    vm.press_power_button()?;
+    vm.expect("Power: the power button was pressed")?;
+    vm.expect("spark: every service has stopped")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

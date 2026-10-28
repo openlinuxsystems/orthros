@@ -127,8 +127,10 @@ dependencies = [
  "radix-sched",
  "radix-sync",
  "radix-tty",
+ "radix-usb",
  "radix-vfs",
  "radix-virtio",
+ "radix-xhci",
 ]
 
 [[package]]
@@ -371,6 +373,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-usb"
+version = "0.10.1"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "radix-vfs"
 version = "0.10.1"
 dependencies = [
@@ -386,6 +395,14 @@ name = "radix-virtio"
 version = "0.10.1"
 dependencies = [
  "radix-hw",
+]
+
+[[package]]
+name = "radix-xhci"
+version = "0.10.1"
+dependencies = [
+ "radix-hw",
+ "radix-usb",
 ]
 
 [[package]]
