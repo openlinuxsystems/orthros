@@ -442,7 +442,16 @@ fn refuses_what_it_cannot_read() {
     assert_eq!(with(&resealed(0xbc, flags | incompat::RAID56)), Some(Error::NotSupported));
     assert_eq!(with(&resealed(0xbc, flags | 1 << 20)), Some(Error::NotSupported));
     assert_eq!(with(&resealed(0x88, 2)), Some(Error::NotSupported), "two devices");
-    assert_eq!(with(&resealed(0x60, 0x10000)), Some(Error::NotSupported), "a log to replay");
+    // A log of fsyncs is replayed (ADR 0151), but its root has a level.
+    assert_eq!(
+        with(&|i| {
+            i[sb + 0x60..sb + 0x68].copy_from_slice(&0x10000u64.to_le_bytes());
+            i[sb + 0xc8] = 8;
+            reseal_superblock(i);
+        }),
+        Some(Error::Corrupt),
+        "a log root above the highest level"
+    );
     assert_eq!(
         with(&|i| {
             i[sb + 0xc4] = 9;
@@ -548,6 +557,7 @@ mod clones;
 mod compressed;
 mod files;
 mod links;
+mod log;
 mod rw;
 mod scrub;
 mod snapshots;

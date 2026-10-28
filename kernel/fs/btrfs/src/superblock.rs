@@ -126,6 +126,8 @@ pub struct Superblock {
     pub chunk_root_generation: u64,
     /// The log tree's root block, 0 if there is no log to replay.
     pub log_root: u64,
+    /// The log tree's root block's level.
+    pub log_root_level: u8,
     /// The filesystem's size.
     pub total_bytes: u64,
     /// How much of it is used.
@@ -193,6 +195,7 @@ impl Superblock {
             chunk_root_level: bytes[0xc7],
             chunk_root_generation: u64_at(bytes, 0xa4),
             log_root: u64_at(bytes, 0x60),
+            log_root_level: bytes[0xc8],
             total_bytes: u64_at(bytes, 0x70),
             bytes_used: u64_at(bytes, 0x78),
             num_devices: u64_at(bytes, 0x88),
@@ -229,6 +232,7 @@ impl Superblock {
             && aligned(self.log_root)
             && self.root_level < 8
             && self.chunk_root_level < 8
+            && self.log_root_level < 8
             && self.num_devices > 0
             && self.root != 0
             && self.chunk_root != 0;

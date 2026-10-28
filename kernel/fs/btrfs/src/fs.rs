@@ -238,10 +238,13 @@ impl Inner {
     /// Opens the volume on `device`, in a frame of its own. The writer
     /// reads every block group, the deepest calls of a mount: they come
     /// before the frame that builds the rest.
+    /// A log of fsyncs Linux left is replayed and committed first, on a
+    /// read-only mount too, as Linux's mount does (ADR 0151).
     #[inline(never)]
     fn open(device: DeviceRef, writable: bool) -> Result<KArc<Inner>> {
         let volume = Volume::open(device)?;
-        let writer = if writable {
+        let log = volume.superblock().log_root != 0;
+        let mut writer = if writable || log {
             if !volume.superblock().has(incompat::NO_HOLES) {
                 return Err(Error::NotSupported);
             }
@@ -249,7 +252,20 @@ impl Inner {
         } else {
             None
         };
-        Inner::of(volume, writer)
+        if log && let Some(w) = writer.take() {
+            writer = Some(Inner::replay(&volume, w)?);
+        }
+        Inner::of(volume, writer.filter(|_| writable))
+    }
+
+    /// Replays the log of fsyncs `volume` holds with `writer`, and commits
+    /// it, in a frame of its own.
+    #[inline(never)]
+    fn replay(volume: &Volume, writer: Writer) -> Result<Writer> {
+        let mut txn = Txn { writer, next_ino: mem::vec() };
+        crate::replay::replay(volume, &mut txn)?;
+        txn.writer.commit(volume)?;
+        Ok(txn.writer)
     }
 
     /// What the nodes of `volume` share, on the heap, in a frame of its

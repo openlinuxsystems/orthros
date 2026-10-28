@@ -33,10 +33,12 @@ mod at {
     pub const GENERATION: usize = 0x48;
     pub const ROOT: usize = 0x50;
     pub const CHUNK_ROOT: usize = 0x58;
+    pub const LOG_ROOT: usize = 0x60;
     pub const BYTES_USED: usize = 0x78;
     pub const CHUNK_ROOT_GENERATION: usize = 0xa4;
     pub const ROOT_LEVEL: usize = 0xc6;
     pub const CHUNK_ROOT_LEVEL: usize = 0xc7;
+    pub const LOG_ROOT_LEVEL: usize = 0xc8;
     pub const INCOMPAT: usize = 0xbc;
     pub const TOTAL_BYTES: usize = 0x70;
     pub const NUM_DEVICES: usize = 0x88;
@@ -75,8 +77,7 @@ impl Writer {
         let sb = self.write_blocks(volume)?;
         // The blocks are durable before the superblock that leads to them.
         volume.cache().sync()?;
-        volume.cache().write_through(superblock::OFFSET, &sb)?;
-        Self::write_mirrors(volume, &sb)?;
+        Self::write_supers(volume, &sb)?;
         volume.set_superblock_bytes(sb);
         for (start, len) in core::mem::replace(&mut self.pinned, mem::vec()) {
             self.space.unpin(start, len)?;
@@ -333,6 +334,9 @@ impl Writer {
         put_u64(&mut sb, at::CHUNK_ROOT, chunk.bytenr);
         sb[at::CHUNK_ROOT_LEVEL] = chunk.level;
         put_u64(&mut sb, at::CHUNK_ROOT_GENERATION, chunk.generation);
+        // Radix keeps no log of fsyncs; one a mount replayed is gone.
+        put_u64(&mut sb, at::LOG_ROOT, 0);
+        sb[at::LOG_ROOT_LEVEL] = 0;
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
         put_u64(&mut sb, at::BYTES_USED, used);
         let features = u64_at(&sb, at::INCOMPAT) | self.incompat;
@@ -381,22 +385,30 @@ impl Writer {
         Ok(())
     }
 
-    /// Writes the superblock's copies at 64 MiB and 256 GiB that fit on the
-    /// device: each with its own address and checksum, after the blocks
-    /// they lead to are durable, and durable at the next flush, as Linux
-    /// writes them.
-    fn write_mirrors(volume: &Volume, sb: &[u8]) -> Result<()> {
+    /// Writes the superblock `sb`, and its copies at 64 MiB and 256 GiB
+    /// that fit on the device, each with its own address and checksum,
+    /// after the blocks they lead to are durable, as Linux writes them:
+    /// all at once, the superblock durable when this returns and its
+    /// copies at the next flush.
+    fn write_supers(volume: &Volume, sb: &[u8]) -> Result<()> {
         let csum = volume.superblock().csum_type;
-        for mirror in [64u64 << 20, 256 << 30] {
+        let mut copies = [None, None];
+        for (copy, mirror) in copies.iter_mut().zip([64u64 << 20, 256 << 30]) {
             if mirror + superblock::SIZE as u64 > volume.device_bytes() {
                 break;
             }
-            let mut copy = mem::copy(sb)?;
-            put_u64(&mut copy, at::BYTENR, mirror);
-            let sum = csum.sum(&copy[crate::csum::CSUM_SIZE..]);
-            copy[..crate::csum::CSUM_SIZE].copy_from_slice(&sum);
-            volume.cache().write_out(mirror, &copy)?;
+            let mut bytes = mem::copy(sb)?;
+            put_u64(&mut bytes, at::BYTENR, mirror);
+            let sum = csum.sum(&bytes[crate::csum::CSUM_SIZE..]);
+            bytes[..crate::csum::CSUM_SIZE].copy_from_slice(&sum);
+            *copy = Some((mirror, bytes));
         }
-        Ok(())
+        let mut pieces = [(superblock::OFFSET, sb, true); 3];
+        let mut n = 1;
+        for (mirror, bytes) in copies.iter().flatten() {
+            pieces[n] = (*mirror, bytes, false);
+            n += 1;
+        }
+        Ok(volume.cache().write_now_all(&pieces[..n])?)
     }
 }

@@ -244,6 +244,34 @@ impl Space {
         Err(Error::NoSpace)
     }
 
+    /// Keeps `[start, start + len)` from use while this mount lasts, with
+    /// no change the free-space tree records: the blocks of a log being
+    /// replayed, which no tree counts (ADR 0151).
+    pub(crate) fn keep_from_use(&mut self, start: u64, len: u64) -> Result<()> {
+        let group = self.group_mut(start)?;
+        let end = start + len;
+        let free: u64 =
+            group.free.iter().map(|&(s, e)| e.min(end).saturating_sub(s.max(start))).sum();
+        remove(&mut group.free, start, end)?;
+        group.free_bytes -= free;
+        Ok(())
+    }
+
+    /// Takes `[start, start + len)`, which must be free: data that a log
+    /// being replayed names, which no commit took (ADR 0151).
+    pub(crate) fn claim(&mut self, start: u64, len: u64) -> Result<()> {
+        let group = self.group_mut(start)?;
+        let end = start.checked_add(len).ok_or(Error::Corrupt)?;
+        if !group.free.iter().any(|&(s, e)| s <= start && end <= e) {
+            return Err(Error::Corrupt);
+        }
+        remove(&mut group.free, start, end)?;
+        mem::push(&mut group.log, (start, end, false))?;
+        group.free_bytes -= len;
+        group.used_delta += len as i64;
+        Ok(())
+    }
+
     /// Frees `[start, start + len)`, which no tree on the disk uses: it
     /// may be taken again at once.
     pub(crate) fn free_now(&mut self, start: u64, len: u64) -> Result<()> {

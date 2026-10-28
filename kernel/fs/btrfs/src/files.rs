@@ -86,7 +86,7 @@ pub(crate) mod compression {
 }
 
 /// The kinds of file extent item.
-mod extent_type {
+pub(crate) mod extent_type {
     pub const INLINE: u8 = 0;
     pub const REGULAR: u8 = 1;
 }
@@ -146,7 +146,7 @@ pub(crate) fn file_type(kind: Kind) -> u8 {
 
 /// Where the entry named `name` is in the `DIR_ITEM` `data`: its start
 /// and length.
-fn dir_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>> {
+pub(crate) fn dir_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>> {
     let mut at = 0;
     while at < data.len() {
         let b = &data[at..];
@@ -210,17 +210,17 @@ fn ref_entry(data: &[u8], name: &[u8]) -> Result<Option<(usize, usize, u64)>> {
 
 /// A file extent item's fields.
 #[derive(Clone, Copy)]
-struct FileExtent {
-    kind: u8,
-    disk_bytenr: u64,
-    disk_num_bytes: u64,
-    offset: u64,
+pub(crate) struct FileExtent {
+    pub(crate) kind: u8,
+    pub(crate) disk_bytenr: u64,
+    pub(crate) disk_num_bytes: u64,
+    pub(crate) offset: u64,
     /// The file's bytes it covers.
-    len: u64,
+    pub(crate) len: u64,
 }
 
 impl FileExtent {
-    fn read(data: &[u8]) -> Result<FileExtent> {
+    pub(crate) fn read(data: &[u8]) -> Result<FileExtent> {
         if data.len() < 21 {
             return Err(Error::Corrupt);
         }
@@ -451,6 +451,39 @@ impl Files<'_> {
         })?;
         self.note_inode(ino, inode);
         Ok(result)
+    }
+
+    /// Makes inode `ino`'s item `data`, whether it has one or not.
+    pub(crate) fn put_inode(&mut self, ino: u64, data: &[u8]) -> Result<()> {
+        let key = Key::new(ino, item::INODE_ITEM, 0);
+        match self.w.insert(self.volume, self.subvol, &key, data) {
+            Err(Error::Exists) => {
+                self.w.update(self.volume, self.subvol, &key, |d| d.copy_from_slice(data))?;
+            }
+            made => made?,
+        }
+        self.note_inode(ino, Inode::read(data).ok());
+        Ok(())
+    }
+
+    /// Takes the name `name` in directory `dir` out of inode `ino`'s
+    /// references, plain or extended; returns its index, if it had it.
+    pub(crate) fn cut_reference(&mut self, ino: u64, dir: u64, name: &[u8]) -> Result<Option<u64>> {
+        let key = Key::new(ino, item::INODE_REF, dir);
+        if let Some(refs) = self.get(self.subvol, &key)?
+            && let Some((start, len, index)) = ref_entry(&refs, name)?
+        {
+            self.cut(self.subvol, &key, refs.len(), start, len)?;
+            return Ok(Some(index));
+        }
+        let key = Key::new(ino, item::INODE_EXTREF, extref_hash(dir, name));
+        if let Some(refs) = self.get(self.subvol, &key)?
+            && let Some((start, len, index)) = extref_entry(&refs, dir, name)?
+        {
+            self.cut(self.subvol, &key, refs.len(), start, len)?;
+            return Ok(Some(index));
+        }
+        Ok(None)
     }
 
     /// Adds `bytes` to the end of item `key` of tree `tree`, made if it is
@@ -953,7 +986,13 @@ impl Files<'_> {
 
     /// Makes the item of the data extent `[bytenr, bytenr + len)`, which
     /// file `ino` names from byte `pos` on.
-    fn new_data_extent(&mut self, bytenr: u64, len: u64, ino: u64, pos: u64) -> Result<()> {
+    pub(crate) fn new_data_extent(
+        &mut self,
+        bytenr: u64,
+        len: u64,
+        ino: u64,
+        pos: u64,
+    ) -> Result<()> {
         let (generation, root) = (self.w.generation, self.subvol);
         let key = Key::new(bytenr, item::EXTENT_ITEM, len);
         self.w.insert_with(self.volume, tree::EXTENT, &key, EXTENT_HEADER + 1 + DATA_REF, |d| {
@@ -970,7 +1009,13 @@ impl Files<'_> {
 
     /// Adds one to file `ino`'s count of names for the data extent
     /// `[bytenr, bytenr + len)` with `offset`: a cut made it two items.
-    fn add_data_ref(&mut self, bytenr: u64, len: u64, ino: u64, offset: u64) -> Result<()> {
+    pub(crate) fn add_data_ref(
+        &mut self,
+        bytenr: u64,
+        len: u64,
+        ino: u64,
+        offset: u64,
+    ) -> Result<()> {
         let key = Key::new(bytenr, item::EXTENT_ITEM, len);
         self.w.add_ref(self.volume, &key, Backref::Data { root: self.subvol, ino, offset }, 1)
     }
@@ -1005,7 +1050,7 @@ impl Files<'_> {
 
     /// Adds `sums`, the checksums of the data sectors from `bytenr` on, to
     /// the checksum tree, in items no larger than Linux makes them.
-    fn add_sums(&mut self, bytenr: u64, sums: &[u8]) -> Result<()> {
+    pub(crate) fn add_sums(&mut self, bytenr: u64, sums: &[u8]) -> Result<()> {
         let sb = self.volume.superblock();
         let size = sb.csum_type.size();
         let sector = u64::from(sb.sectorsize);
@@ -1019,7 +1064,7 @@ impl Files<'_> {
 
     /// Deletes the checksums of the data sectors in `[bytenr, bytenr +
     /// len)`, cutting the items that cross either end.
-    fn delete_sums(&mut self, bytenr: u64, len: u64) -> Result<()> {
+    pub(crate) fn delete_sums(&mut self, bytenr: u64, len: u64) -> Result<()> {
         let sb = self.volume.superblock();
         let size = sb.csum_type.size() as u64;
         let sector = u64::from(sb.sectorsize);

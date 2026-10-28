@@ -464,8 +464,8 @@ fn disks_with_4k_sectors_take_whole_blocks() {
     cache.fill(8192, 4096, 1).unwrap();
     let requests = disk.requests();
     cache.sync().unwrap();
-    // Two blocks written, and the flush.
-    assert_eq!(disk.requests(), requests + 3);
+    // Two blocks written, side by side in one request, and the flush.
+    assert_eq!(disk.requests(), requests + 2);
     let mut raw = [0u8; 15];
     disk.dump(5120, &mut raw);
     assert_eq!(&raw, b"tenth sectabc\0\0");
@@ -539,6 +539,111 @@ fn block_cache_reads_writes_and_syncs() {
     cache.read(19 * 512, &mut tail).unwrap();
     assert_eq!(cache.read(20 * 512, &mut tail), Err(Error::OutOfRange));
     assert_eq!(cache.write(20 * 512 - 1, b"xy"), Err(Error::OutOfRange));
+}
+
+#[test]
+fn sync_writes_runs_that_follow_one_another_in_one_request() {
+    let (disk, device) = shared(RamDisk::new(1024, false));
+    let cache = BlockCache::new(device);
+    // 20 pages side by side, ending in half a page, then a gap, then a
+    // sector of a page alone, and two runs in one page, with a gap.
+    cache.fill(0, 20 * 4096 + 2048, 1).unwrap();
+    cache.fill(40 * 4096, 512, 2).unwrap();
+    cache.fill(60 * 4096, 1024, 3).unwrap();
+    cache.fill(60 * 4096 + 2048, 1024, 4).unwrap();
+    let requests = disk.requests();
+    cache.sync().unwrap();
+    // 21 runs side by side: 16 in one request, 5 in the next; then the
+    // lone sector, and the two runs of one page; and the flush.
+    assert_eq!(disk.requests(), requests + 2 + 1 + 2 + 1);
+    assert!(!cache.is_dirty());
+    let mut raw = [0u8; 4096];
+    disk.dump(19 * 4096, &mut raw);
+    assert!(raw.iter().all(|&b| b == 1));
+    disk.dump(20 * 4096, &mut raw);
+    assert!(raw[..2048].iter().all(|&b| b == 1) && raw[2048..].iter().all(|&b| b == 0));
+    disk.dump(60 * 4096, &mut raw);
+    assert!(raw[..1024].iter().all(|&b| b == 3) && raw[1024..2048].iter().all(|&b| b == 0));
+    assert!(raw[2048..3072].iter().all(|&b| b == 4));
+    // A failed request leaves its runs dirty, and the next sync writes
+    // them.
+    cache.fill(4096, 8192, 5).unwrap();
+    disk.fail_after(0);
+    assert_eq!(cache.sync(), Err(Error::Io));
+    assert!(cache.is_dirty());
+    disk.fail_after(u32::MAX);
+    cache.sync().unwrap();
+    assert!(!cache.is_dirty());
+    disk.dump(8192, &mut raw);
+    assert!(raw.iter().all(|&b| b == 5));
+    // A page written out alone, then changed again, is written once.
+    cache.fill(4096, 512, 6).unwrap();
+    cache.write_out(4096, &[7u8; 512]).unwrap();
+    cache.fill(4096, 512, 8).unwrap();
+    let requests = disk.requests();
+    cache.sync().unwrap();
+    assert_eq!(disk.requests(), requests + 2);
+    disk.dump(4096, &mut raw);
+    assert!(raw[..512].iter().all(|&b| b == 8));
+}
+
+/// A disk that notes how many writes each [`BlockDevice::write_all`] it is
+/// asked for has, and which are to be durable.
+struct Batches {
+    disk: Arc<RamDisk>,
+    calls: std::sync::Mutex<Vec<Vec<bool>>>,
+}
+
+impl BlockDevice for Batches {
+    fn info(&self) -> crate::Info {
+        self.disk.info()
+    }
+
+    fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
+        self.disk.read(sector, segments)
+    }
+
+    fn write(&self, sector: u64, segments: &[crate::Segment<'_>]) -> Result<(), Error> {
+        self.disk.write(sector, segments)
+    }
+
+    fn flush(&self) -> Result<(), Error> {
+        self.disk.flush()
+    }
+
+    fn write_all(&self, writes: &[crate::Write<'_>]) -> Result<(), Error> {
+        self.calls.lock().unwrap().push(writes.iter().map(|w| w.through).collect());
+        self.disk.write_all(writes)
+    }
+}
+
+#[test]
+fn a_sync_and_writes_now_go_to_the_disk_at_once() {
+    let disk = Arc::new(RamDisk::new(1024, false));
+    let batches = Arc::new(Batches { disk: disk.clone(), calls: std::sync::Mutex::default() });
+    let device: DeviceRef = batches.clone();
+    let cache = BlockCache::new(device);
+    // Three runs apart, and two side by side: four requests, given at once.
+    cache.fill(0, 512, 1).unwrap();
+    cache.fill(40 * 4096, 4096, 2).unwrap();
+    cache.fill(41 * 4096, 4096, 3).unwrap();
+    cache.fill(80 * 4096, 1024, 4).unwrap();
+    cache.fill(90 * 4096, 512, 5).unwrap();
+    cache.sync().unwrap();
+    assert_eq!(batches.calls.lock().unwrap().as_slice(), [vec![false; 4]]);
+    // A superblock and its copies: the first durable, all at once.
+    let flushes = disk.flushes();
+    cache.write(8 * 4096, &[6u8; 512]).unwrap();
+    let copy = [7u8; 4096];
+    let pieces = [(16 * 4096, &copy[..], true), (50 * 4096, &copy[..], false)];
+    cache.write_now_all(&pieces).unwrap();
+    assert_eq!(batches.calls.lock().unwrap()[1], [true, false]);
+    assert_eq!(disk.flushes(), flushes + 1);
+    let mut raw = [0u8; 4096];
+    disk.dump(50 * 4096, &mut raw);
+    assert_eq!(raw, copy);
+    // What else was dirty stays dirty.
+    assert!(cache.is_dirty());
 }
 
 #[test]

@@ -296,7 +296,8 @@ or its medium reported a failure, for Btrfs when it uses a feature
 Radix does not write yet (named holes, without *no-holes*, or quotas),
 and for ext4 (and ext2 and ext3) when it does: no extents, quotas,
 inline data, encryption, case folding, MMP, fast commits or a journal on
-another device. A mount replays the journal Linux left. A device with
+another device. A mount replays the journal Linux left on ext4, and the
+log of fsyncs it left on Btrfs. A device with
 none of them is left alone. Disks are found once, at boot. Removable media, mounted by label at _/volumes/_*label*
 with safe eject, come with *volumed* in Phase 11.
 

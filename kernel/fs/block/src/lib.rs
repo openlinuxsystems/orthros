@@ -148,6 +148,17 @@ pub struct SegmentMut<'a> {
     pub len: usize,
 }
 
+/// One write of several the device has at once ([`BlockDevice::write_all`]).
+#[derive(Clone, Copy)]
+pub struct Write<'a> {
+    /// Its first sector.
+    pub sector: u64,
+    /// What it writes, in order.
+    pub segments: &'a [Segment<'a>],
+    /// Durable once done, as [`BlockDevice::write_through`] has it.
+    pub through: bool,
+}
+
 /// A disk, or part of one.
 pub trait BlockDevice: Send + Sync {
     /// What it is.
@@ -174,6 +185,29 @@ pub trait BlockDevice: Send + Sync {
     fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
         self.write(sector, segments)?;
         self.flush()
+    }
+
+    /// Carries out every one of `writes`, as [`write`] and
+    /// [`write_through`] do, and returns once each is done, with the first
+    /// error if any failed. A disk driver has them in flight at once, the
+    /// device told of them together, so that they cost one wait rather
+    /// than one each; the default writes them one after another.
+    ///
+    /// [`write`]: BlockDevice::write
+    /// [`write_through`]: BlockDevice::write_through
+    fn write_all(&self, writes: &[Write<'_>]) -> Result<(), Error> {
+        let mut result = Ok(());
+        for write in writes {
+            let done = if write.through {
+                self.write_through(write.sector, write.segments)
+            } else {
+                self.write(write.sector, write.segments)
+            };
+            if result.is_ok() {
+                result = done;
+            }
+        }
+        result
     }
 
     /// Reads the sectors from `sector` straight into `frames` (physical
@@ -383,6 +417,19 @@ impl BlockDevice for Slice {
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.write_through(self.first + sector, segments)
+    }
+
+    fn write_all(&self, writes: &[Write<'_>]) -> Result<(), Error> {
+        let mut moved = mem::vec();
+        moved.try_reserve(writes.len()).map_err(|_| Error::NoMemory)?;
+        for write in writes {
+            let lengths = write.segments.iter().map(|s| (s.offset, s.len));
+            check(self.sectors, self.unit, usize::MAX, write.sector, lengths)?;
+            // Room was made above.
+            let _ =
+                moved.push_within_capacity(Write { sector: self.first + write.sector, ..*write });
+        }
+        self.device.write_all(&moved)
     }
 
     fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
