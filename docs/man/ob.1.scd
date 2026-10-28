@@ -323,6 +323,16 @@ _target/userspace/_).
 		then pets it for twice its timeout without a restart, and the
 		power button powers the machine off (*spark*(8)'s *WATCHDOG*).
 
+	*machine-check*
+		Boot with *mce-poll=1 panic=0* and fill the CPUs'
+		machine-check banks with QEMU's _mce_ monitor command, as a
+		CPU would: a corrected cache error on CPU 1, which the kernel
+		must log, decoded, within a second, then an uncorrected memory
+		error on CPU 0 with the processor's state corrupt, which must
+		panic with the decoded error. The machine restarts, the next
+		boot must find the error in its bank, and the power button
+		powers the machine off (*dukovo-boot*(7)'s *MACHINE CHECKS*).
+
 	*spark-oom*
 		Boot with 256 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its

@@ -12,9 +12,10 @@
 //! handler continues into the interrupted code.
 //!
 //! Exceptions in the kernel are fatal except breakpoints, which call the
-//! registered breakpoint handler and resume, and NMIs, which the panic path
-//! uses to stop the other CPUs. A fatal exception records a [`Fault`] for
-//! the panic report and panics with a description of what went wrong.
+//! registered breakpoint handler and resume, NMIs, which the panic path
+//! uses to stop the other CPUs, and machine checks the CPU can go on after
+//! (`mce`). A fatal exception records a [`Fault`] for the panic report and
+//! panics with a description of what went wrong.
 //!
 //! Interrupts (vectors 32 and up) count the CPU's interrupt depth. On the
 //! way out of one that came in from thread context with interrupts on and
@@ -486,6 +487,7 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             Some(resume) => frame.rip = resume,
             None => fatal_exception(frame),
         },
+        18 if crate::mce::recovered() => {}
         0..32 => fatal_exception(frame),
         v => {
             radix_klog::tracepoint!("irq.unexpected", v);
@@ -563,6 +565,7 @@ fn fatal_exception(frame: &TrapFrame) -> ! {
                 ", probably after a kernel stack overflow or a fault in a fault handler"
             );
         }
+        18 => crate::mce::describe(&mut detail),
         _ => {}
     }
     if frame.cs & 3 != 0 {

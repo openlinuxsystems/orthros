@@ -75,6 +75,12 @@ impl Cpu for Arch {
     fn breakpoint() {}
 
     fn flush_to_memory(_bytes: &[u8]) {}
+
+    fn machine_check_banks() -> usize {
+        0
+    }
+
+    fn poll_machine_checks(_found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display)) {}
 }
 
 impl CpuLocal for Arch {

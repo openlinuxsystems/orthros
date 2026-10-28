@@ -43,7 +43,7 @@ frame. On return it restores the registers and executes `iretq`.
 
 | Vector | Source | Handling |
 | --- | --- | --- |
-| 0-31 | CPU exceptions | fatal, see below; #BP and NMI are special |
+| 0-31 | CPU exceptions | fatal, see below; #BP and NMI are special, and a machine check the CPU can go on after is ended (`mce.rs`, ADR 0145) |
 | 0x20-0x2F | the 8259 PICs, remapped | spurious only (all masked); counted as a trace point |
 | 0x30 | local APIC timer | counts a tick on this CPU, EOI |
 | 0x40 | ping IPI | counts a ping, EOI |

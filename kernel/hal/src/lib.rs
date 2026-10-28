@@ -109,6 +109,17 @@ pub trait Cpu {
     /// Writes the cache lines holding `bytes` back to memory, so that they
     /// survive a reset that discards the caches.
     fn flush_to_memory(bytes: &[u8]);
+
+    /// How many banks each CPU reports hardware errors in, through its
+    /// machine-check architecture (Phase 11, ADR 0145): 0 when it has none
+    /// or reporting was turned off.
+    fn machine_check_banks() -> usize;
+
+    /// Reads the errors this CPU's machine-check banks hold and clears
+    /// them, calling `found` with each: its bank, whether the hardware
+    /// corrected it, and what it was. Runs in thread context on the CPU
+    /// whose banks it reads.
+    fn poll_machine_checks(found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display));
 }
 
 /// Data and identity of the current CPU.

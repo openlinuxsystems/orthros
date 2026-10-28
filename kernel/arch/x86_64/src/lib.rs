@@ -40,6 +40,7 @@ mod interrupts;
 mod io;
 mod kaslr;
 mod kvm;
+mod mce;
 mod memory;
 mod microcode;
 mod paging;
@@ -179,6 +180,14 @@ impl Cpu for Arch {
         } else {
             cpu::wbinvd();
         }
+    }
+
+    fn machine_check_banks() -> usize {
+        mce::banks()
+    }
+
+    fn poll_machine_checks(found: &mut dyn FnMut(usize, bool, &dyn fmt::Display)) {
+        mce::poll(found);
     }
 }
 
@@ -802,6 +811,7 @@ impl Platform for Arch {
     fn init(params: &BootParams) {
         let flags = CommandLine::new(params.command_line);
         log_cpu();
+        mce::init_boot_cpu(flags.value("mce") == Some("off"));
         let acpi = match acpi::init(entry::RSDP_COPY.get().copied()) {
             Ok(acpi) => Some(acpi),
             Err(err) => {

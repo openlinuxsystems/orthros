@@ -20,7 +20,7 @@ use crate::fpu;
 use crate::memory::{self, PAGE};
 use crate::paging;
 use crate::percpu::{self, IST_STACKS};
-use crate::{acpi, apic, cpu, interrupts, kvm, microcode, time};
+use crate::{acpi, apic, cpu, interrupts, kvm, mce, microcode, time};
 
 core::arch::global_asm!(
     r#"
@@ -402,6 +402,7 @@ extern "C" fn ap_entry(index: usize) -> ! {
     paging::init_cpu();
     fpu::init_cpu();
     microcode::load(false);
+    mce::init_cpu();
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
     apic::init_cpu(madt, acpi_uid(index));
     kvm::init_cpu();
