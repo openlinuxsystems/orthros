@@ -1125,6 +1125,17 @@ pub fn sleep_until(deadline_ns: u64) {
     }
 }
 
+/// Sleeps until [`wake`] is called for the running thread or the kernel's
+/// clock reaches `deadline_ns`, whichever is first; like [`block`], it may
+/// also return without cause. Before the scheduler runs, waits briefly
+/// instead.
+pub fn block_until(deadline_ns: u64, reason: &'static str) {
+    match current() {
+        Some(me) => sleep_until_inner(&me, deadline_ns, reason),
+        None => Arch::delay_us(10),
+    }
+}
+
 /// Sleeps for `ns` nanoseconds.
 pub fn sleep_ns(ns: u64) {
     sleep_until(Arch::now_ns().saturating_add(ns));

@@ -446,6 +446,10 @@ them to *init*, and the kernel does not read them.
 	Read the CPUs' machine-check banks this often for errors the
 	hardware corrected, instead of every 300 seconds. *ob test* uses 1.
 
+*usb*=off
+	Leave the USB controllers as the firmware left them: none is reset
+	or driven, and no USB device is found. See *USB*.
+
 *font*=_size_
 	Draw the framebuffer console with the Spleen font of this size:
 	*8x16*, *12x24* or *16x32*.
@@ -518,6 +522,28 @@ panics with the bank's error: see *radix-debug*(7). Linux decodes the
 same status with *mcelog* or *rasdaemon*. Memory error counts by DIMM and
 error recovery that ends only the program that read bad memory come later
 (ADR 0145).
+
+# USB
+
+The PCI scan hands each xHCI controller to the USB driver, unless
+*usb=off*, which gives it a kernel thread, _usb1_, _usb2_ and on. The
+thread takes the controller from the firmware, resets and starts it, and
+logs what it is, its ports (USB 3 and USB 2 ones apart) and its interrupt:
+
+	USB: bus 1 is the xHCI 1.0 controller at 00:02.0: 8 ports (USB 3 on
+	1-4, USB 2 on 5-8), 64 device slots, MSI-X vector 0x31
+
+Each device plugged into a root port, at boot or later, is reset,
+addressed and named with its bus and port, as Linux names them: its
+product, vendor and product IDs, maker, class and speed. Unplugging it is
+logged too:
+
+	USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed
+	USB: 1-6: QEMU USB Keyboard was unplugged
+
+A device that cannot be set up twice is left alone until it is unplugged.
+Before the machine is powered off or restarted, every controller is
+halted. Hubs, keyboards and mice, and USB storage come later (ADR 0146).
 
 # REAL HARDWARE
 

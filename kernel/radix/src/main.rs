@@ -65,6 +65,7 @@ mod sched;
 mod schedtest;
 mod selftest;
 mod symbols;
+mod usb;
 mod user;
 mod usertest;
 mod watchdog;
@@ -230,6 +231,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     work::start();
     join::start();
     oom::start();
+    usb::init(flags.value("usb") == Some("off"));
     fs::disk::init();
     fs::writeback::start();
     fs::kmsg::start();

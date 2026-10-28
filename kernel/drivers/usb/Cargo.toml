@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-usb"
+description = "USB for the Radix kernel: speeds, the standard requests and the descriptors of USB 2.0 and 3.2's chapter 9"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

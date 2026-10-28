@@ -54,6 +54,11 @@ pub const FLAGS: &[Flag] = &[
     },
     Flag { name: "mce", value: Some("off"), summary: "do not turn machine-check reporting on" },
     Flag {
+        name: "usb",
+        value: Some("off"),
+        summary: "leave the USB controllers as the firmware left them",
+    },
+    Flag {
         name: "mce-poll",
         value: Some("seconds"),
         summary: "read the CPUs' machine-check banks this often (300 by default)",

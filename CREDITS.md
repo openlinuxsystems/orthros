@@ -235,6 +235,14 @@ We implement these from their published descriptions. No code is copied.
   ["exFAT File System Specification"](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification)
   (2019), from which `radix-exfat` implements exFAT
   ([ADR 0140](docs/adr/0140-exfat-from-the-specification.md)).
+- Intel's
+  ["eXtensible Host Controller Interface for Universal Serial Bus (xHCI)"](https://www.intel.com/content/www/us/en/products/docs/io/universal-serial-bus/extensible-host-controler-interface-usb-xhci.html),
+  revision 1.2 (2019), and the USB-IF's Universal Serial Bus 2.0 and 3.2
+  specifications, from which `radix-xhci` and `radix-usb` drive USB host
+  controllers and read devices' descriptors
+  ([ADR 0146](docs/adr/0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md)).
+  We use no code of Linux's or the BSDs' USB stacks, or of QEMU's
+  controller, which the boot tests run against.
 - Howard Hinnant's
   ["chrono-Compatible Low-Level Date Algorithms"](https://howardhinnant.github.io/date_algorithms.html),
   which FAT's dates are converted with.

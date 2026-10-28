@@ -182,6 +182,8 @@ pub fn init() {
                 }
             } else if function.class() == radix_nvme::PCI_CLASS {
                 nvme::bind(&function, &mut controllers);
+            } else if function.class() == radix_xhci::PCI_CLASS {
+                crate::usb::bind(&function);
             }
         });
     }

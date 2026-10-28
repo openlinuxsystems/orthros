@@ -42,8 +42,10 @@ radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-sync = { path = "../lib/sync" }
 radix-tty = { path = "../lib/tty" }
+radix-usb = { path = "../drivers/usb" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
+radix-xhci = { path = "../drivers/xhci" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 radix-arch-x86_64 = { path = "../arch/x86_64" }

@@ -321,6 +321,15 @@ _target/userspace/_).
 		services and power the machine off, and QEMU end on ACPI's S5
 		(*radix-power*(2), *spark*(8)).
 
+	*usb-devices*
+		Boot normally under UEFI with the lock checker on, with QEMU's
+		USB keyboard and mouse on the xHCI controller's second and third
+		ports beside the boot stick. The kernel must name the controller
+		and each device on its port; a USB tablet plugged in on the
+		fourth port with QEMU's _device_add_ must be named too, and
+		pulling it out with _device_del_ logged. The power button ends
+		the test (*dukovo-boot*(7)'s *USB*).
+
 	*watchdog*, *watchdog-tco*
 		Boot with *--watchdog 12 --test-hang* for Spark, with QEMU's
 		i6300esb under BIOS (*watchdog*) or with the TCO timer of q35's
