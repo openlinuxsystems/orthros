@@ -750,11 +750,12 @@ the lock checker's graph searches use bit sets instead of queues.
 
 A frame budget does not bound the sum. Btrfs goes deepest: a writable
 mount reads every block group's free space under the mount call, and a
-sync commits under `fsync`, or writes the log of fsyncs. Each filesystem's mount has a frame of its
-own outside `fs::make`, a Btrfs volume lives on the heap, and the reads
-of a Btrfs mount (the trees the writer checks, the block groups, their
-free space) each have a frame of their own, which the frames that build
-the filesystem wait beside, not under. With the lock checker on (every
+sync commits under `fsync`, or writes the log of fsyncs. Each
+filesystem's mount has a frame of its own outside `fs::make`, a Btrfs
+volume lives on the heap, and the reads of a Btrfs mount (the trees the
+writer checks, the block groups, their free space) each have a frame of
+their own, which the frames that build the filesystem wait beside, not
+under. With the lock checker on (every
 boot test) the scheduler warns, once and with a backtrace, when a thread
 goes to sleep with less than 4 KiB of its stack left, which the boot
 tests take as a failure: deep calls end waiting for the disk.

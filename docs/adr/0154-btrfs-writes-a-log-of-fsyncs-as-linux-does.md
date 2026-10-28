@@ -69,6 +69,12 @@ disk about five times. Where the disk is slower, the bytes are what cost.
   disk may name it. A crash leaves free space the commit has as free,
   and the replay (ADR 0151) keeps the log's blocks from use and takes
   its data.
+- **A file's sync is its node's.** The file method `sync` (POSIX's
+  `fsync`) synced the node and then its whole filesystem, so on Btrfs a
+  log was followed by a commit. It now syncs the node alone. FAT, exFAT
+  and ext4 write all their changes there already, Btrfs writes the log
+  of a regular file and commits for a directory, and the directory
+  method `sync` (POSIX's `syncfs`) still syncs the whole filesystem.
 - **The replay drops a hole's range** on a filesystem without hole items
   (`no-holes`, which every disk Radix writes has), as Linux's replay
   does, rather than inserting the hole item.
