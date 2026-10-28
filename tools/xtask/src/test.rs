@@ -3471,7 +3471,11 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(" KiB with ")?;
     vm.expect(" files at 0x")?;
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    // Spark's line and hello's first come in either order: hello may run
+    // on another CPU before Spark logs that it started it.
+    let from = vm.cursor;
     let number = program_line(vm, "spark: started /system/tests/hello as process ")?;
+    vm.cursor = from;
     let args = program_line(vm, "hello: process ")?;
     if args != format!("{number}, arguments: /system/tests/hello one two") {
         return Err(format!("hello got `{args}`, not process {number} with its arguments"));
