@@ -61,6 +61,21 @@ pub enum PageEdit {
     Clear,
 }
 
+/// What [`UserMode::scan`] finds at a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scanned {
+    /// The page maps a frame.
+    Frame {
+        /// Where the frame is.
+        phys: u64,
+        /// Whether a CPU used it through the entry since the last scan
+        /// that forgot its use.
+        used: bool,
+    },
+    /// The page is swapped out, to this slot.
+    Swapped(u64),
+}
+
 /// A signal handler's frame: what [`UserMode::push_signal_frame`] writes on
 /// a program's stack, so that its thread runs `handler(signal, &info,
 /// &context)` and returns through `restorer`, which calls the kernel to
@@ -288,6 +303,37 @@ pub trait UserMode: crate::Threads {
             Option<UserAccess>,
         ) -> (PageEdit, Option<Option<UserAccess>>),
     ) -> Result<(), u64>;
+
+    /// Calls `each` with every page from `start` to `end` that maps a
+    /// frame of its own (not part of a large page) or is swapped out, in
+    /// order, until it returns `false`: one walk with the page tables
+    /// locked, so `each` must not sleep. If `forget`, whether a frame was
+    /// used is forgotten as it is read, so the next scan says whether it
+    /// was used since this one (ADR 0152).
+    fn scan(
+        space: &Self::Space,
+        start: u64,
+        end: u64,
+        forget: bool,
+        each: &mut dyn FnMut(u64, Scanned) -> bool,
+    );
+
+    /// Swaps the page at `virt` out to swap slot `slot` (below 2^40): if it
+    /// still maps the frame at `phys`, unused since [`UserMode::scan`] last
+    /// looked, the page holds the slot instead, and `true` says so once no
+    /// CPU can reach the frame.
+    fn swap_out(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool;
+
+    /// Gives the page at `virt`, where nothing is mapped, of `space`, which
+    /// no thread runs yet (a fork's copy), the swap slot `slot`.
+    fn set_swapped(space: &Self::Space, virt: u64, slot: u64) -> Result<(), MapPageError>;
+
+    /// The swap slot of the page at `virt`, if it is swapped out.
+    fn swapped(space: &Self::Space, virt: u64) -> Option<u64>;
+
+    /// Takes every swapped-out page from `start` to `end` out of `space`,
+    /// giving `each` its slot; `each` must not sleep.
+    fn clear_swapped(space: &Self::Space, start: u64, end: u64, each: &mut dyn FnMut(u64));
 
     /// Frees the page tables of `space` that map nothing: all of them
     /// once every page is cleared. Their memory goes back from the CPU

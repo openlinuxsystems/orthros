@@ -539,6 +539,9 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
         "fat" | "exfat" | "btrfs" | "ext4" => {
             let node = source.ok_or(Error::NotBlockDevice)?;
             let device = node.block_device().ok_or(Error::NotBlockDevice)?;
+            if radix_block::swap::is_on(&*device) {
+                return Err(Error::InUse);
+            }
             let _ = match disk::name_of(&device) {
                 Some(disk) => name.write_str(disk.as_str()),
                 None => name.write_str(kind),

@@ -64,6 +64,7 @@ mod report;
 mod sched;
 mod schedtest;
 mod selftest;
+mod swap;
 mod symbols;
 mod usb;
 mod user;

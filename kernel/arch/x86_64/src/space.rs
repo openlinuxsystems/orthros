@@ -36,7 +36,7 @@
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
-use radix_hal::{MAX_CPUS, MapPageError, UserAccess};
+use radix_hal::{MAX_CPUS, MapPageError, Scanned, UserAccess};
 use radix_mm::{AllocError, Owner, Pcids};
 use radix_sync::SpinLock;
 
@@ -54,6 +54,12 @@ const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 /// anonymous memory under `PROT_NONE`). The CPU ignores every other bit
 /// of an entry that is not present.
 const HELD: u64 = 1 << 9;
+/// A software bit of a leaf entry that is not present: the page is
+/// swapped out, and the entry's address bits hold its swap slot rather
+/// than a frame (ADR 0152).
+const SWAPPED: u64 = 1 << 10;
+/// The bit the CPU sets in an entry it reads a page through.
+const ACCESSED: u64 = 1 << 5;
 /// A large page (in a page-directory or page-directory-pointer entry).
 const LARGE: u64 = 1 << 7;
 /// What a page directory's entry for a large page maps.
@@ -314,6 +320,97 @@ impl AddressSpace {
             Some((entry & ADDRESS, None))
         } else {
             None
+        }
+    }
+
+    /// Calls `each` with every page from `start` to `end` that maps a
+    /// frame of its own (not a large page's) or is swapped out, in order,
+    /// until it returns `false`, with the tables' lock held. If `forget`,
+    /// a frame's entry has its accessed bit cleared as it is read, with no
+    /// flush, as Linux's `ptep_clear_flush_young` leaves x86's: a CPU that
+    /// still caches it only makes the page look older than it is.
+    pub fn scan(
+        &self,
+        start: u64,
+        end: u64,
+        forget: bool,
+        each: &mut dyn FnMut(u64, Scanned) -> bool,
+    ) {
+        let _guard = self.lock.lock();
+        let end = end.min(USER_END);
+        if start < end {
+            leaves_of(self.pml4, 4, 0, start, end, &mut |virt, slot| {
+                let entry = slot.load(Ordering::Relaxed);
+                if entry & PRESENT != 0 {
+                    let used = entry & ACCESSED != 0;
+                    if used && forget {
+                        slot.fetch_and(!ACCESSED, Ordering::Relaxed);
+                    }
+                    each(virt, Scanned::Frame { phys: entry & ADDRESS, used })
+                } else {
+                    each(virt, Scanned::Swapped((entry & ADDRESS) >> 12))
+                }
+            });
+        }
+    }
+
+    /// Swaps the page at `virt` out to `slot`: if its entry still maps
+    /// `phys` and no CPU read it through the entry since [`scan`] cleared
+    /// its accessed bit, the entry holds the slot instead, and `true` says
+    /// so once no CPU can reach the frame.
+    ///
+    /// [`scan`]: AddressSpace::scan
+    pub fn swap_out(&self, virt: u64, phys: u64, slot: u64) -> bool {
+        let guard = self.lock.lock();
+        let Some((entries, 1)) = mapping(self.pml4, virt) else { return false };
+        let entry_slot = &entries[index(virt, 1)];
+        let entry = entry_slot.load(Ordering::Relaxed);
+        if entry & PRESENT == 0 || entry & ADDRESS != phys || entry & ACCESSED != 0 {
+            return false;
+        }
+        let swapped = swap_entry(slot);
+        if entry_slot
+            .compare_exchange(entry, swapped, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        drop(guard);
+        self.flush(virt);
+        true
+    }
+
+    /// Gives the page at `virt` the swap slot `slot`, in a space no CPU
+    /// runs (a fork's copy), where nothing is mapped.
+    pub fn set_swapped(&self, virt: u64, slot: u64) -> Result<(), MapPageError> {
+        assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
+        let _guard = self.lock.lock();
+        let entry = paging::entry(self.pml4, virt, 1, true).map_err(|_| MapPageError::NoMemory)?;
+        entry.store(swap_entry(slot), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The swap slot of the page at `virt`, if it is swapped out.
+    pub fn swapped(&self, virt: u64) -> Option<u64> {
+        let _guard = self.lock.lock();
+        let entry = page_entry(self.pml4, virt)?;
+        (entry & (PRESENT | SWAPPED) == SWAPPED).then_some((entry & ADDRESS) >> 12)
+    }
+
+    /// Takes every swapped-out page from `start` to `end` out of the
+    /// tables, giving `each` its slot, with the tables' lock held.
+    pub fn clear_swapped(&self, start: u64, end: u64, each: &mut dyn FnMut(u64)) {
+        let _guard = self.lock.lock();
+        let end = end.min(USER_END);
+        if start < end {
+            leaves_of(self.pml4, 4, 0, start, end, &mut |_, slot| {
+                let entry = slot.load(Ordering::Relaxed);
+                if entry & PRESENT == 0 {
+                    slot.store(0, Ordering::Relaxed);
+                    each((entry & ADDRESS) >> 12);
+                }
+                true
+            });
         }
     }
 
@@ -591,6 +688,49 @@ fn leaf_entry(frame: u64, access: Option<Access>) -> u64 {
         Some(access) => frame | paging::user_flags(access),
         None => frame | HELD,
     }
+}
+
+/// The entry of a page swapped out to `slot`.
+fn swap_entry(slot: u64) -> u64 {
+    assert!(slot < 1 << 40, "swap slot {slot:#x} does not fit an entry");
+    slot << 12 | SWAPPED
+}
+
+/// Calls `each` with the address and entry of every leaf of the table at
+/// `phys`, of `level` (4 for the PML4), mapping from `base`, from `start`
+/// to `end`, that is present (a 4 KiB page's) or swapped out, in order,
+/// until it returns `false`, which this returns then too. The caller
+/// holds the space's lock.
+fn leaves_of(
+    phys: u64,
+    level: u32,
+    base: u64,
+    start: u64,
+    end: u64,
+    each: &mut dyn FnMut(u64, &AtomicU64) -> bool,
+) -> bool {
+    let span = 1u64 << (12 + 9 * (level - 1));
+    let first = ((start.max(base) - base) / span) as usize;
+    let last = ((end - 1 - base) / span).min(511) as usize;
+    let entries = paging::table(phys);
+    for indices in in_use(paging::lines(phys).0, first, last) {
+        for index in indices {
+            let entry = entries[index].load(Ordering::Relaxed);
+            let at = base + index as u64 * span;
+            let go_on = if level > 1 {
+                entry & (PRESENT | LARGE) != PRESENT
+                    || leaves_of(entry & ADDRESS, level - 1, at, start, end, each)
+            } else if entry & PRESENT != 0 || entry & (SWAPPED | HELD) == SWAPPED {
+                each(at, &entries[index])
+            } else {
+                true
+            };
+            if !go_on {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The entry of a large page that maps the frames from `frame` on.

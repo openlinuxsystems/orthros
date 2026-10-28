@@ -301,6 +301,28 @@ Each CPU counts how long its shootdowns waited and how many targets they
 left to the hypervisor; the benchmarks report both (`BENCHCOUNT`
 `shootdown_wait_ns` and `shootdowns_left`).
 
+### Swap
+
+Swap (ADR 0152, `kernel/radix/src/swap.rs`) moves programs' private
+anonymous memory to Linux's swap areas when memory runs short. An area
+is turned on by radix-block(2)'s `SWAP_ON` on a disk or partition
+`mkswap` made; each page after its header is a slot, numbered
+`area << 32 | page`, with a byte that counts the entries holding it. A
+swapped-out page's entry is not present, has bit 10 set, and keeps the
+slot in bits 12 to 51 (`UserMode::swap_out`, `set_swapped`).
+
+The `swap` thread wakes every second while an area is on, and when the
+out-of-memory policy asks. While free memory is under 1/32 of RAM it
+swaps out until it is over 1/16, going round the address spaces with a
+second chance: `UserMode::scan` clears each page's accessed bit, and a
+page still unused at the next look is written, in runs of up to 16
+slots, after its entry was exchanged for the slot's (failing if the
+bit was set meanwhile) and the TLBs flushed. Only pages one space
+alone maps, lent to no device, in spaces a thread has run in, go; a
+space whose regions are locked is passed over. A fault at a swapped-out
+page reads it back; a fork shares its slot; unmapping frees it; swapoff
+reads back every page of the area first.
+
 ## KASLR
 
 The kernel is linked at one address, `0xFFFF_FFFF_8000_0000` plus its
@@ -392,14 +414,19 @@ and every normal boot checks the KASLR layout, W^X and the zones.
 ## Limits
 
 - Address spaces carry the programs of Phase 5 (`docs/design/ipc.md`)
-  and the `tlb` self-test. Nothing reads the accessed and dirty bits of
-  page-table entries yet, and the kernel changes entries with plain
-  stores, which may lose a bit the MMU set meanwhile; whatever comes to
-  use them (writing pages back, swapping) must clear entries with an
-  exchange instead.
+  and the `tlb` self-test. Only swapping reads the accessed bit of
+  page-table entries (ADR 0152), and it takes an entry with an exchange
+  that fails if the bit was set meanwhile; elsewhere the kernel changes
+  entries with plain stores, which may lose a bit the MMU set, at worst
+  making a page look unused. The dirty bit is not read: a page swapped
+  out is always written.
 - Reclaim drains the heap's caches, and for callers that may sleep the
-  out-of-memory policy then stops a resource domain (Phase 4,
-  `docs/design/scheduler.md`). Swapping comes with Phase 10.
+  out-of-memory policy then drops clean pages of the page cache, swaps
+  programs' anonymous memory out if a swap area is on (ADR 0152), and
+  only then stops a resource domain (Phase 4,
+  `docs/design/scheduler.md`). Pages swapped out stay charged to their
+  domain, and come back one at a time, with no read-ahead; there are no
+  swap files yet.
 - NUMA has been tested only on QEMU's emulated nodes. Memory hot-plug is
   not supported; the frame records are sized for the memory map at boot.
 - The kernel image's slide has about 9 bits of entropy, which is typical

@@ -698,6 +698,7 @@ pub fn spawn(
     if let Some(user) = options.user {
         // Before its first switch, which loads the space.
         Arch::attach_space(&thread.context, user.space().arch());
+        user.space().set_running();
         let _ = thread.user.set(user);
     }
     if !options.held {

@@ -191,6 +191,15 @@ and the rest with Linux's `ioctl` requests (radix-block(2)). A device
 written by mistake loses what was on it, as on any system, so write to
 one only with a tool made for it.
 
+A disk or partition can also be swap, as on Linux: `mkswap /devices/vdb`
+makes a swap area of it (one Linux made works too), `swapon
+/devices/vdb` turns it on, and `swapoff` turns it off again, reading
+back what was swapped out first. While it is on, programs' memory moves
+out to it when memory runs short, and `free` and `swapon --show` show how
+much is there; the disk itself cannot be written or mounted then.
+Dukovo does not turn swap on at boot yet: the installer's swap partition
+(Phase 14) brings that.
+
 ## Trying it in QEMU
 
 Make a FAT disk image with a file on it, on Linux Mint or Ubuntu:

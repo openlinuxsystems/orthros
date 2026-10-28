@@ -376,7 +376,11 @@ one (ADR 0116).
 size in bytes and in sectors, the logical and physical sector sizes, the
 minimum and optimal I/O sizes, the alignment offset, whether it is
 read-only and whether it spins, whether discarded sectors read as zeros
-(never promised), and, with the write right, BLKDISCARD and BLKFLSBUF.
+(never promised), and, with the write right, BLKDISCARD and BLKFLSBUF,
+and Dukovo's own `SWAP_ON` and `SWAP_OFF`, which turn the swap area
+`mkswap` made on it on and off (ADR 0152, `docs/design/memory.md`).
+While an area is on, its device's raw writes and mounts fail with
+`in_use` (`radix_block::swap::claim`).
 
 ## FAT
 
@@ -652,7 +656,9 @@ fall below 1/64 of memory at a wake-up, it also drops clean cached pages,
 and the out-of-memory policy asks it to (`writeback::reclaim`) before it
 stops a resource domain (ADR 0029). Dropping pages takes the caches'
 locks, so it only ever happens in this thread, which holds none, and
-never inside an allocation.
+never inside an allocation. Programs' anonymous memory is not cached
+data: with a swap area on, the swap thread writes it out, after the
+page cache has given back what it can (ADR 0152).
 
 ## The hierarchy
 

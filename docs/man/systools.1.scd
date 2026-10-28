@@ -70,6 +70,8 @@ error that starts with the tool's name.
 :  what each process holds open
 |  *lspci*(8)
 :  the PCI functions
+|  *mkswap*(8)
+:  make a swap area on a disk or partition
 |  *pgrep*(1), *pkill*(1)
 :  find or signal processes by name
 |  *pidstat*(1)
@@ -90,6 +92,8 @@ error that starts with the tool's name.
 :  read and check every block of a Btrfs filesystem
 |  *subvolume*(8)
 :  make, snapshot and remove Btrfs subvolumes
+|  *swapon*(8), *swapoff*(8)
+:  turn swap areas on and off, and list them
 |  *taskset*(1)
 :  the CPUs a process may run on
 |  *top*(1)

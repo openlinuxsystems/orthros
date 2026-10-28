@@ -177,7 +177,8 @@ _/processes/meminfo_
 	*page_tables*, *heap_slabs*, *large_heap_blocks*, *mapped_areas*,
 	*per_cpu_caches*, *memory_objects* and *page_cache*. The page cache
 	is the files' data in memory (*radix-files*(7)), which the kernel
-	gives back when memory runs low.
+	gives back when memory runs low. Then *swap_total* and *swap_free*,
+	the room of the swap areas on and how much of it is free (*swapon*(8)).
 
 _/processes/stat_
 	A line per online CPU, *cpu*_n_*:* then the fields *user_ns*,
@@ -191,8 +192,16 @@ _/processes/stat_
 	512-byte sectors; *timer_writes*, *ipis*, *halts* and *polls*, the
 	events that cost an exit to the host under a hypervisor (writes of
 	the timer hardware, interrupts sent to other CPUs, idle periods that
-	halted and idle periods a wake-up ended while the CPU polled); and
-	*boot_time_ns*, when the kernel started, in nanoseconds since 1970.
+	halted and idle periods a wake-up ended while the CPU polled);
+	*swap_ins* and *swap_outs*, the pages read back from swap and
+	written to it since boot; and *boot_time_ns*, when the kernel
+	started, in nanoseconds since 1970.
+
+_/processes/swaps_
+	The swap areas on, as Linux's _/proc/swaps_ lists them: a line of
+	headings, then a line per area with its device
+	(_/devices/_*name*), *partition*, its size and what is in use, in
+	KiB, and its priority.
 
 _/processes/loadavg_
 	*load_1*, *load_5* and *load_15*: the load averages over 1, 5 and

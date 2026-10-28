@@ -403,7 +403,8 @@ pub fn for_each(mut f: impl FnMut(&Entry)) {
 /// radix-block(2)'s `control` requests on `device`: `argument` is the
 /// caller's address of the value a request writes or reads, and
 /// `may_write` whether the caller's capability has the write right, which
-/// DISCARD and FLUSH need. Any other request is not one of a block device.
+/// DISCARD, FLUSH, SWAP_ON and SWAP_OFF need. Any other request is not
+/// one of a block device.
 pub fn control(
     device: &DeviceRef,
     request: u32,
@@ -430,7 +431,9 @@ pub fn control(
         }
         request::GET_READ_ONLY => put(&u32::from(info.read_only).to_le_bytes()),
         request::GET_ROTATIONAL => put(&u16::from(info.rotational).to_le_bytes()),
-        request::DISCARD | request::FLUSH if !may_write => Err(Kernel::MissingRights.status(0)),
+        request::DISCARD | request::FLUSH | request::SWAP_ON | request::SWAP_OFF if !may_write => {
+            Err(Kernel::MissingRights.status(0))
+        }
         request::DISCARD => {
             let mut range = [0u8; 16];
             if !<Arch as UserMode>::copy_from_user(&mut range, argument) {
@@ -450,6 +453,14 @@ pub fn control(
             device.discard(start / sector, len / sector).map_err(block_status)
         }
         request::FLUSH => device.flush().map_err(block_status),
+        request::SWAP_ON => {
+            let mut flags = [0u8; 4];
+            if !<Arch as UserMode>::copy_from_user(&mut flags, argument) {
+                return Err(Kernel::BadAddress.status(0));
+            }
+            crate::swap::on(device, u32::from_le_bytes(flags))
+        }
+        request::SWAP_OFF => crate::swap::off(device),
         _ => Err(Kernel::NotTerminal.status(0)),
     }
 }

@@ -10,8 +10,9 @@
 //! log every time:
 //!
 //! 0. It asks the writeback thread to drop clean pages of the page cache,
-//!    which their disks hold (`fs::writeback`), and has the allocation
-//!    tried again if any went.
+//!    which their disks hold (`fs::writeback`), and then, if a swap area
+//!    is on, the swap thread to swap programs' memory out (`swap`, ADR
+//!    0152), and has the allocation tried again if any went.
 //! 1. It picks the domain to stop among those with threads of their own:
 //!    the lowest out-of-memory class first (apps, then services), and
 //!    within a class the one using the most memory, with the domains below
@@ -113,6 +114,10 @@ fn on_out_of_memory(order: u32) -> bool {
     // Clean cached pages can be read again from their disks: they go
     // before any domain is stopped.
     if crate::fs::writeback::reclaim(RECLAIM_WAIT_NS) {
+        return true;
+    }
+    // Then programs' memory goes out to a swap area, if one is on.
+    if crate::swap::reclaim(RECLAIM_WAIT_NS) {
         return true;
     }
     let seen = STOPS.load(Ordering::Acquire);

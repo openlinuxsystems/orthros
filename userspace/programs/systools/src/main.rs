@@ -36,6 +36,7 @@ mod scrub;
 mod sessions;
 mod signals;
 mod subvolume;
+mod swap;
 mod sys;
 mod top;
 mod tree;
@@ -74,6 +75,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsmem", lsmem::main),
     ("lsof", lsof::main),
     ("lspci", lspci::main),
+    ("mkswap", swap::mkswap),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
@@ -87,6 +89,8 @@ const TOOLS: &[(&str, Tool)] = &[
     ("service", power::service),
     ("shutdown", power::shutdown),
     ("subvolume", subvolume::main),
+    ("swapoff", swap::swapoff),
+    ("swapon", swap::swapon),
     ("taskset", priority::taskset),
     ("top", top::main),
     ("tree", tree::main),

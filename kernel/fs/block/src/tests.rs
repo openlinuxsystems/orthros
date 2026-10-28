@@ -780,3 +780,74 @@ proptest! {
         }
     }
 }
+
+/// A swap area's first page as util-linux's `mkswap` writes it for a
+/// device of `pages` pages, with `bad` listed and the label `label`.
+fn swap_page(pages: u32, bad: &[u32], label: &[u8]) -> std::vec::Vec<u8> {
+    let mut page = std::vec![0u8; 4096];
+    let mut put = |at: usize, word: u32| page[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    put(1024, 1);
+    put(1028, pages - 1);
+    put(1032, bad.len() as u32);
+    for (i, &number) in bad.iter().enumerate() {
+        put(1536 + 4 * i, number);
+    }
+    page[1036..1052].copy_from_slice(&[0x5a; 16]);
+    page[1052..1052 + label.len()].copy_from_slice(label);
+    page[4086..].copy_from_slice(b"SWAPSPACE2");
+    page
+}
+
+#[test]
+fn swap_headers_read_as_linux_reads_them() {
+    use crate::swap::{Header, HeaderError, MAX_BAD};
+    let page = swap_page(16384, &[7, 9, 20000, 0], b"SWAPTEST");
+    let header = Header::read(&page, 16384).unwrap();
+    assert_eq!(header.last_page, 16383);
+    assert_eq!(header.bad_pages, 4);
+    assert_eq!(header.uuid, [0x5a; 16]);
+    assert_eq!(header.label(), Some("SWAPTEST"));
+    // A bad page past the end, or the header's own, is no page to skip.
+    assert_eq!(header.bad(&page).collect::<std::vec::Vec<_>>(), [7, 9]);
+    // A device smaller than the header says ends the area.
+    assert_eq!(Header::read(&page, 100).unwrap().last_page, 99);
+    assert_eq!(Header::read(&page, 1), Err(HeaderError::Corrupt));
+    let mut other = page.clone();
+    other[4086..].copy_from_slice(b"SWAP-SPACE");
+    assert_eq!(Header::read(&other, 16384), Err(HeaderError::NotSwap));
+    let mut other = page.clone();
+    other[1024..1028].copy_from_slice(&1u32.to_be_bytes());
+    assert_eq!(Header::read(&other, 16384), Err(HeaderError::Version));
+    let mut other = page.clone();
+    other[1032..1036].copy_from_slice(&(MAX_BAD + 1).to_le_bytes());
+    assert_eq!(Header::read(&other, 16384), Err(HeaderError::Corrupt));
+    assert_eq!(MAX_BAD, 637, "Linux's MAX_SWAP_BADPAGES for 4 KiB pages");
+    assert_eq!(Header::read(&page[..4000], 16384), Err(HeaderError::NotSwap));
+}
+
+/// What util-linux's own `mkswap` writes, where the host has it.
+#[test]
+fn swap_headers_that_mkswap_makes_read() {
+    use crate::swap::Header;
+    let Some(tool) = ["/usr/sbin/mkswap", "/sbin/mkswap"]
+        .into_iter()
+        .find(|tool| std::path::Path::new(tool).exists())
+    else {
+        return;
+    };
+    let path = std::env::temp_dir().join(std::format!("radix-swap-{}.img", std::process::id()));
+    std::fs::File::create(&path).unwrap().set_len(8 << 20).unwrap();
+    let made = std::process::Command::new(tool)
+        .args(["-L", "RADIXSWAP", "-U", "5a5a5a5a-5a5a-5a5a-5a5a-5a5a5a5a5a5a"])
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let image = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(made.status.success(), "{}", std::string::String::from_utf8_lossy(&made.stderr));
+    let header = Header::read(&image[..4096], 2048).unwrap();
+    assert_eq!((header.last_page, header.bad_pages), (2047, 0));
+    assert_eq!(header.uuid, [0x5a; 16]);
+    assert_eq!(header.label(), Some("RADIXSWAP"));
+}
