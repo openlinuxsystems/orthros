@@ -74,6 +74,8 @@ enum FilesystemKind: u8 {
     pipe = 6;
     /// Btrfs on a disk: `btrfs`.
     btrfs = 7;
+    /// exFAT on a disk: `exfat`.
+    exfat = 8;
 }
 
 /// How `open` opens.
@@ -183,11 +185,11 @@ interface directory = 0x000b version 4 {
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
                 corrupt, too_many_links];
     /// Mounts a filesystem of kind `filesystem` (its name, as
-    /// FilesystemKind lists them) on the directory at `path`: `fat` and
-    /// `btrfs` on the block device whose file capability is in slot
-    /// `source`, the others with `source` 0. A second mount on a directory
-    /// stacks on the first. Needs the control right, and the read right on
-    /// `source` (and for `fat` the write right unless `flags` has
+    /// FilesystemKind lists them) on the directory at `path`: `fat`,
+    /// `exfat` and `btrfs` on the block device whose file capability is in
+    /// slot `source`, the others with `source` 0. A second mount on a
+    /// directory stacks on the first. Needs the control right, and the read
+    /// right on `source` (and the write right unless `flags` has
     /// read_only). A Btrfs that Radix cannot write yet fails with
     /// invalid_argument unless `flags` has read_only, as on Linux.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()

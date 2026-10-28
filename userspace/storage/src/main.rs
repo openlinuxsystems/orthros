@@ -3,7 +3,7 @@
 
 //! storage: the test program of the `storage` boot test, from
 //! `/system/tests/storage` in the boot archive. Spark starts it with the
-//! root directory, after mounting each FAT or Btrfs disk at
+//! root directory, after mounting each FAT, exFAT or Btrfs disk at
 //! `/volumes/<name>`.
 //!
 //! - `storage write` writes a set of files to every volume (short and long
@@ -13,7 +13,8 @@
 //!   `/processes` and `/kernel`;
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
-//!   (with mtools, from `ob test`), then checks `/processes` again;
+//!   (with mtools, from `ob test`; none on exFAT), then checks
+//!   `/processes` again;
 //! - `storage raw <disk>...` reads and writes each disk in `/devices` raw at
 //!   odd offsets, discards part of it, flushes it, and asks it Linux's
 //!   block requests (the `disk-raw` boot test, [`disk::raw`]);
@@ -483,7 +484,12 @@ fn check_volume(root: &Dir, name: &str) {
         }
     };
     same("hello.txt", HELLO);
-    same(FROM_HOST, FROM_HOST_TEXT);
+    // No tool on Linux writes a file to exFAT without mounting it, which
+    // takes the administrator, so the host writes none there; the exFAT
+    // driver's tests read a volume exfat-fuse wrote instead.
+    if !dir.info().is_ok_and(|info| info.kind == FilesystemKind::Exfat) {
+        same(FROM_HOST, FROM_HOST_TEXT);
+    }
     same(&format!("notes/{LONG_NAME}"), format!("Saved on {name}.\n").as_bytes());
     same("notes/final.txt", b"final\n");
     same("log.txt", b"one\ntwo\n");

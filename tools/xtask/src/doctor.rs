@@ -306,6 +306,28 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "exfatprogs",
+            purpose: "makes and checks the exFAT disks of the exFAT tests",
+            // In /usr/sbin, as dosfstools is.
+            found: |_| {
+                ["/usr/sbin/mkfs.exfat", "/sbin/mkfs.exfat"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkfs.exfat"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: all("exfatprogs"),
+            fallback: None,
+        },
+        Requirement {
+            name: "The Sleuth Kit",
+            purpose: "reads back what the exFAT tests wrote, as an exFAT reader of its own",
+            found: |_| program_version("fls", "-V"),
+            packages: all("sleuthkit"),
+            fallback: None,
+        },
+        Requirement {
             name: "Clang",
             purpose: "compiles the C library and the ports (version 20 or later)",
             found: |_| ports::find_clang().map(|(_, version)| version),

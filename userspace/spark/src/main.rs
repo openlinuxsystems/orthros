@@ -436,8 +436,8 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
     }
 }
 
-/// Mounts the FAT or Btrfs filesystem of each disk partition, or of each
-/// disk with no partitions, at `/volumes/<name>`.
+/// Mounts the FAT, exFAT or Btrfs filesystem of each disk partition, or of
+/// each disk with no partitions, at `/volumes/<name>`.
 fn mount_disks(root: &Dir) {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
@@ -466,12 +466,14 @@ fn mount_disks(root: &Dir) {
     }
 }
 
-/// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT
-/// or Btrfs, read-only if the disk is. A Btrfs that the disk or Radix
-/// cannot write (yet) mounts read-only, as Linux's `mount` does with a
-/// disk that refuses writes. FAT is tried first: `mkfs.btrfs` clears where
-/// FAT keeps its boot sector, but `mkfs.fat` can leave an older Btrfs
-/// superblock behind, so the FAT one is the newer.
+/// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
+/// exFAT or Btrfs, read-only if the disk is. A filesystem that the disk
+/// or Radix cannot write (yet) mounts read-only, as Linux's `mount` does
+/// with a disk that refuses writes. FAT and exFAT are tried first:
+/// `mkfs.btrfs` clears where they keep their boot sectors, but `mkfs.fat`
+/// and `mkfs.exfat` can leave an older Btrfs superblock behind, so theirs
+/// is the newer. FAT and exFAT each take the other's boot sector for
+/// none of theirs.
 fn mount_disk(root: &Dir, name: &str) {
     let rw = Rights::READ.union(Rights::WRITE);
     let (device, flags) = match root.open(&alloc::format!("devices/{name}"), OpenFlags::NONE, rw) {
@@ -488,27 +490,26 @@ fn mount_disk(root: &Dir, name: &str) {
     if let Err(err) = root.make_dir(&at) {
         return println!("spark: cannot make /{at}: {err}");
     }
-    let mounted = match root.mount(&at, FilesystemKind::Fat, Some(&device), flags) {
-        Err(err) if err.is(FileError::UnknownFilesystem) => {
-            match root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags) {
-                // A disk that refuses writes fails with read_only, and what
-                // Radix does not write yet is an argument it does not take,
-                // as on Linux (EROFS, EINVAL).
-                Err(radix_rt::fs::Error::Status(status))
-                    if !flags.contains(MountFlags::READ_ONLY)
-                        && (FileError::from_status(status) == Some(FileError::ReadOnly)
-                            || KernelError::from_status(status)
-                                == Some(KernelError::InvalidArgument)) =>
-                {
-                    let flags = MountFlags::READ_ONLY;
-                    root.mount(&at, FilesystemKind::Btrfs, Some(&device), flags)
-                        .map(|()| ("Btrfs", flags))
-                }
-                done => done.map(|()| ("Btrfs", flags)),
-            }
+    let mount = |kind, said| match root.mount(&at, kind, Some(&device), flags) {
+        // A disk that refuses writes fails with read_only, and what Radix
+        // does not write yet is an argument it does not take, as on Linux
+        // (EROFS, EINVAL).
+        Err(radix_rt::fs::Error::Status(status))
+            if !flags.contains(MountFlags::READ_ONLY)
+                && (FileError::from_status(status) == Some(FileError::ReadOnly)
+                    || KernelError::from_status(status) == Some(KernelError::InvalidArgument)) =>
+        {
+            let flags = MountFlags::READ_ONLY;
+            root.mount(&at, kind, Some(&device), flags).map(|()| (said, flags))
         }
-        done => done.map(|()| ("FAT", flags)),
+        done => done.map(|()| (said, flags)),
     };
+    let mut mounted = mount(FilesystemKind::Fat, "FAT");
+    for (kind, said) in [(FilesystemKind::Exfat, "exFAT"), (FilesystemKind::Btrfs, "Btrfs")] {
+        if matches!(mounted, Err(err) if err.is(FileError::UnknownFilesystem)) {
+            mounted = mount(kind, said);
+        }
+    }
     match mounted {
         Ok((kind, flags)) => {
             let ro = if flags.contains(MountFlags::READ_ONLY) { ", read-only" } else { "" };
@@ -517,7 +518,7 @@ fn mount_disk(root: &Dir, name: &str) {
         Err(err) => {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
-                println!("spark: {name} holds no FAT or Btrfs filesystem; left alone");
+                println!("spark: {name} holds no FAT, exFAT or Btrfs filesystem; left alone");
             } else {
                 println!("spark: cannot mount {name}: {err}");
             }

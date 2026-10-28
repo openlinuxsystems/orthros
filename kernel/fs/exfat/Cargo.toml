@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-exfat"
+description = "exFAT for Radix, read-write, from Microsoft's specification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# Host memory instead of the kernel's, for tests on the host.
+host = ["radix-vfs/host", "radix-block/host", "radix-fat/host"]
+
+[dependencies]
+radix-block = { path = "../block" }
+# Its cluster chains, timestamps and name buffers, which exFAT shares.
+radix-fat = { path = "../fat" }
+radix-hw = { path = "../../lib/hw" }
+radix-sync = { path = "../../lib/sync" }
+radix-vfs = { path = "../vfs" }
+
+[dev-dependencies]
+radix-block = { path = "../block", features = ["host"] }
+radix-fat = { path = "../fat", features = ["host"] }
+radix-vfs = { path = "../vfs", features = ["host"] }
+# Host-side property tests (ADR 0019). Without default features it needs
+# neither forking nor timeouts.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
