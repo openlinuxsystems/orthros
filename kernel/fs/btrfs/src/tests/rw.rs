@@ -34,17 +34,17 @@ use crate::tree::find;
 
 /// What a path of a filesystem holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Thing {
+pub(super) enum Thing {
     File(Vec<u8>),
     Dir,
     Link(String),
 }
 
 /// Every path under a directory, and what it holds.
-type Model = BTreeMap<String, Thing>;
+pub(super) type Model = BTreeMap<String, Thing>;
 
 /// The filesystem on `disk`, mounted to write.
-fn mount_rw(disk: &KArc<RamDisk>) -> KArc<BtrfsFs> {
+pub(super) fn mount_rw(disk: &KArc<RamDisk>) -> KArc<BtrfsFs> {
     let device: DeviceRef = disk.clone();
     BtrfsFs::mount_writable(device).unwrap()
 }
@@ -86,7 +86,7 @@ fn parent<'p>(root: &NodeRef, path: &'p str) -> (NodeRef, &'p str) {
 }
 
 /// What every path under `root` holds.
-fn snapshot(root: &NodeRef) -> Model {
+pub(super) fn snapshot(root: &NodeRef) -> Model {
     let mut out = Model::new();
     walk(root, "", &mut out);
     out
@@ -128,7 +128,7 @@ fn walk(dir: &NodeRef, prefix: &str, out: &mut Model) {
 }
 
 /// Writes `data` at `offset` of `file`.
-fn put(file: &NodeRef, offset: u64, data: &[u8]) {
+pub(super) fn put(file: &NodeRef, offset: u64, data: &[u8]) {
     assert_eq!(file.write(offset, &Slice(data)).unwrap(), data.len());
 }
 
@@ -144,7 +144,7 @@ fn put_model(model: &mut Model, path: &str, offset: u64, data: &[u8]) {
 
 /// Syncs `fs` on `disk`, checks it with `btrfs check`, and checks a
 /// read-only mount of it reads `model`.
-fn synced(fs: &BtrfsFs, disk: &RamDisk, model: &Model, what: &str) {
+pub(super) fn synced(fs: &BtrfsFs, disk: &RamDisk, model: &Model, what: &str) {
     fs.sync().unwrap_or_else(|e| panic!("{what}: sync: {e:?}"));
     let image = image_of(disk, (disk.info().sectors * radix_block::SECTOR) as usize);
     let (whole, text) = btrfs_check(&image);

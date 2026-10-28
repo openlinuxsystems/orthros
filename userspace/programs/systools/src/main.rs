@@ -34,6 +34,7 @@ mod rtrace;
 mod script;
 mod sessions;
 mod signals;
+mod subvolume;
 mod sys;
 mod top;
 mod tree;
@@ -83,6 +84,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("script", script::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
+    ("subvolume", subvolume::main),
     ("taskset", priority::taskset),
     ("top", top::main),
     ("tree", tree::main),

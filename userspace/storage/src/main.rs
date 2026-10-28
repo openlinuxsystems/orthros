@@ -297,6 +297,65 @@ fn check_root(root: &Dir, after: bool) {
             }
         }
     }
+    check_snapshots(root, after);
+}
+
+/// The read-only snapshot of `/users` that `storage root` makes in the
+/// root's `@snapshots`, and the file in it that changes after it.
+const SNAPSHOT: &str = "users-before";
+const SNAPPED: &str = "storage-root/snapped.txt";
+
+/// Snapshots on Dukovo's root (ADR 0138): before the reboot, a read-only
+/// snapshot of `/users` keeps a file as it was while `/users` changes it,
+/// and a new subvolume is filled and removed; after it, the snapshot
+/// still holds the file as it was, and is removed.
+fn check_snapshots(root: &Dir, after: bool) {
+    let rw = Rights::READ.union(Rights::WRITE);
+    let top = volumes(root).ok().and_then(|names| {
+        names.into_iter().find_map(|name| {
+            root.open_dir(&format!("volumes/{name}"), rw)
+                .ok()
+                .filter(|top| top.open_dir("@snapshots", rw).is_ok())
+        })
+    });
+    let Some(top) = top else { return fail("no volume holds @snapshots") };
+    let made = || -> radix_rt::fs::Result<()> {
+        let users = root.open_dir("users", rw)?;
+        let snapshots = top.open_dir("@snapshots", rw)?;
+        if after {
+            let held = snapshots.read_file(&format!("{SNAPSHOT}/{SNAPPED}"))?;
+            check(held == b"before\n", || "the snapshot does not hold the file as it was".into());
+            let now = users.read_file(SNAPPED)?;
+            check(now == b"after\n", || "/users does not hold the file as changed".into());
+            snapshots.remove_subvolume(SNAPSHOT)?;
+            check(snapshots.open_dir(SNAPSHOT, Rights::READ).is_err(), || {
+                "the snapshot is still there".into()
+            });
+            return snapshots.sync();
+        }
+        users.write_file(SNAPPED, b"before\n")?;
+        users.snapshot(".", &snapshots, SNAPSHOT, true)?;
+        users.write_file(SNAPPED, b"after\n")?;
+        let held = snapshots.read_file(&format!("{SNAPSHOT}/{SNAPPED}"))?;
+        check(held == b"before\n", || "the snapshot did not keep the file as it was".into());
+        match snapshots.write_file(&format!("{SNAPSHOT}/{SNAPPED}"), b"no\n") {
+            Err(err) if err.is(FileError::ReadOnly) => {}
+            other => fail(&format!("a write to the read-only snapshot gave {other:?}")),
+        }
+        snapshots.make_subvolume("scratch")?;
+        snapshots.write_file("scratch/file", &alloc::vec![7; 100_000])?;
+        match snapshots.remove("scratch") {
+            Err(err) if err.is(FileError::NotEmpty) => {}
+            other => fail(&format!("removing a subvolume with a file in it gave {other:?}")),
+        }
+        snapshots.remove_subvolume("scratch")?;
+        snapshots.sync()
+    };
+    match made() {
+        Ok(()) if after => println!("storage: the snapshot of /users kept its file, and went"),
+        Ok(()) => println!("storage: a snapshot of /users keeps its file as /users changes it"),
+        Err(err) => fail(&format!("snapshots: {err}")),
+    }
 }
 
 /// The names under `/volumes`.

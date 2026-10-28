@@ -474,6 +474,33 @@ pub fn directory_method(
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
+        directory::MAKE_SUBVOLUME => {
+            let a = directory::MakeSubvolumeArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            vfs()?.make_subvolume(&dir.at, path.as_str()?).map_err(fs::status)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::SNAPSHOT => {
+            let a = directory::SnapshotArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
+            let (mut from, mut to) = (Path::Empty, Path::Empty);
+            let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
+            vfs()?
+                .snapshot(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?, a.read_only)
+                .map_err(fs::status)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::REMOVE_SUBVOLUME => {
+            let a = directory::RemoveSubvolumeArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            vfs()?.remove_subvolume(&dir.at, path.as_str()?).map_err(fs::status)?;
+            answer(label, 0, [0; 8])
+        }
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;

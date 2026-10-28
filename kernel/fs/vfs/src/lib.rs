@@ -478,6 +478,24 @@ pub trait Node: Send + Sync + Any {
         Err(Error::NotDirectory)
     }
 
+    /// Makes `name` in this directory a new, empty subvolume, as Btrfs
+    /// has them; a filesystem with none refuses.
+    fn make_subvolume(&self, _name: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Makes `name` in this directory a snapshot of the subvolume whose
+    /// top directory is `source`, read-only if `read_only`.
+    fn snapshot(&self, _name: &str, _source: &NodeRef, _read_only: bool) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Removes the subvolume `name` in this directory, with everything in
+    /// it.
+    fn remove_subvolume(&self, _name: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
     /// Moves entry `from` of this directory to `to` in `to_dir`, on the
     /// same filesystem, replacing a file (or empty directory, for a
     /// directory) of that name.
@@ -680,6 +698,33 @@ pub fn set_clock(now: fn() -> u64) {
 /// The time now, in nanoseconds since 1970, or 0 before a clock is set.
 pub fn now() -> u64 {
     CLOCK.get().map_or(0, |now| now())
+}
+
+static RANDOM: radix_sync::Once<fn(&mut [u8])> = radix_sync::Once::new();
+
+/// Registers the kernel's random bytes, for what a filesystem makes
+/// unique, such as a new subvolume's UUID.
+pub fn set_random(fill: fn(&mut [u8])) {
+    let _ = RANDOM.set(fill);
+}
+
+/// Fills `out` with random bytes: the kernel's once they are set, and
+/// before that, as in host tests, bytes from the clock and a count,
+/// unlike each other but not unpredictable.
+pub fn random(out: &mut [u8]) {
+    if let Some(fill) = RANDOM.get() {
+        return fill(out);
+    }
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    for chunk in out.chunks_mut(8) {
+        // SplitMix64's step.
+        let n = COUNT.fetch_add(1, Ordering::Relaxed);
+        let mut x = now().wrapping_add(n.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^= x >> 31;
+        chunk.copy_from_slice(&x.to_le_bytes()[..chunk.len()]);
+    }
 }
 
 /// A kernel's [`join`]: runs its first argument on the caller's CPU and

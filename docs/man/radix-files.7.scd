@@ -183,6 +183,15 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	(*spark*(8)). A directory of a read-only Btrfs subvolume refuses
 	every change with EROFS, as on Linux, however it is mounted.
 
+On Btrfs, a directory's *make_subvolume* makes a new, empty subvolume;
+*snapshot* makes a snapshot of the subvolume that holds a directory in
+another directory of the same filesystem, read-only if asked; and
+*remove_subvolume* removes a subvolume with everything in it, in one
+transaction, freeing what no snapshot shares (*subvolume*(8)). *remove*
+takes an empty subvolume too, as Linux's *rmdir*(2) does. A subvolume
+that is the default, holds another, or has something in it open fails
+to go (*in_use*, *not_empty*).
+
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
 or anything holds a capability to a place in it. A rename never moves a
@@ -361,4 +370,4 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 *radix-directory*(2), *radix-file*(2), *radix-block*(2), *radix-ring*(2),
 *radix-errors*(2),
 *radix-proc*(5), *radix-sysfs*(5), *radix-capabilities*(7),
-*radix-processes*(7), *spark*(8)
+*radix-processes*(7), *spark*(8), *subvolume*(8)

@@ -13,6 +13,7 @@ use radix_vfs::{Error, Result};
 
 use crate::cow::{Change, Writer};
 use crate::format::{Key, item, tree, u64_at};
+use crate::refs::Backref;
 use crate::space::{self, Ranges};
 use crate::superblock;
 use crate::tree::Cursor;
@@ -152,10 +153,10 @@ impl Writer {
                     }
                     None => return Err(Error::Corrupt),
                 };
-                // A block with other references is shared with a snapshot
-                // (10c.2).
-                if !alone {
-                    return Err(Error::NotSupported);
+                // The tree that freed it had its last reference, which
+                // may be an item of its own.
+                if !alone && self.drop_ref(volume, &key, Backref::Tree(owner))? != 0 {
+                    return Err(Error::Corrupt);
                 }
                 self.delete(volume, tree::EXTENT, &key)
             }

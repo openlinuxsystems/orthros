@@ -12,6 +12,15 @@
 //! durable ([`crate::space`]), and every block made or freed is a change
 //! the extent tree gets at the commit ([`crate::commit`]).
 //!
+//! A subvolume's blocks from before its last snapshot may be shared with
+//! other trees. Copying one of those keeps the references of the blocks
+//! below it right, as Linux's `update_ref_for_cow` does
+//! ([`Writer::share`]): the copy refers to them by its tree, and a block
+//! that other trees still hold refers to them by its address from then
+//! on ([`FULL_BACKREF`]). Those changes wait until the change that made
+//! the copy is done ([`Delayed`]), as Linux's delayed references do: a
+//! walk down one tree never changes another.
+//!
 //! Inserting splits a full node on the way down, so the block above
 //! always has room for a split below it, and splits the leaf if the new
 //! item does not fit. Deleting frees a block left empty, and a root node
@@ -25,6 +34,7 @@ use radix_vfs::{Error, Result};
 use crate::chunk::kind;
 use crate::format::{Key, item, tree};
 use crate::grow::Grown;
+use crate::refs::{Backref, FULL_BACKREF, refs_flags};
 use crate::space::Space;
 use crate::superblock::{compat_ro, incompat};
 use crate::tree::{Block, Bounds, Cursor, HEADER_SIZE, ITEM_SIZE, MAX_LEVEL, Root, read_block};
@@ -38,6 +48,35 @@ pub(crate) enum Change {
     Made { bytenr: u64, level: u8, owner: u64 },
     /// The block at `bytenr` was freed.
     Freed { bytenr: u64, level: u8, owner: u64 },
+}
+
+/// The extent item key of what slot `slot` of `block` refers to, and its
+/// reference from it `via` its tree or address: a child block, or the
+/// data extent of a file extent item; `None` for other items and for
+/// file extents with no extent (inline, or a hole).
+pub(crate) fn below(block: &Block, slot: usize, via: Via) -> Result<Option<(Key, Backref)>> {
+    if block.is_leaf() {
+        let key = block.key(slot);
+        if key.kind != item::EXTENT_DATA {
+            return Ok(None);
+        }
+        let Some((bytenr, len, offset)) = crate::files::disk_extent(block.item(slot))? else {
+            return Ok(None);
+        };
+        let r = match via {
+            Via::Tree(root) => {
+                Backref::Data { root, ino: key.objectid, offset: key.offset.wrapping_sub(offset) }
+            }
+            Via::Address(parent) => Backref::SharedData(parent),
+        };
+        return Ok(Some((Key::new(bytenr, item::EXTENT_ITEM, len), r)));
+    }
+    let child = block.child(slot);
+    let r = match via {
+        Via::Tree(root) => Backref::Tree(root),
+        Via::Address(parent) => Backref::Shared(parent),
+    };
+    Ok(Some((Writer::block_key(child.bytenr, child.level), r)))
 }
 
 /// What a walk down a tree is for.
@@ -83,8 +122,34 @@ pub struct Writer {
     /// The incompatible features its changes use, which the commit sets
     /// in the superblock: zstd, once it writes an extent so.
     pub(crate) incompat: u64,
+    /// Each subvolume's last snapshot, as read from its root item: its
+    /// blocks from up to then may be shared.
+    pub(crate) snapshots: KVec<(u64, u64)>,
+    /// The reference changes copies of shared blocks left, in order.
+    delayed: KVec<Delayed>,
     /// Whether a change failed half made.
     broken: bool,
+}
+
+/// A reference change a copy of a shared block calls for, made once the
+/// change that copied it is done.
+#[derive(Clone, Copy)]
+struct Delayed {
+    /// The extent's item.
+    key: Key,
+    /// The reference added or taken, or `None` to mark the block
+    /// [`FULL_BACKREF`].
+    r: Option<Backref>,
+    add: bool,
+}
+
+/// How the blocks or data below a tree block refer to it.
+#[derive(Clone, Copy)]
+pub(crate) enum Via {
+    /// By the block's tree.
+    Tree(u64),
+    /// By the block's address.
+    Address(u64),
 }
 
 impl Writer {
@@ -127,32 +192,129 @@ impl Writer {
             bytes_used: 0,
             grown: Grown::new(),
             incompat: 0,
+            snapshots: mem::vec(),
+            delayed: mem::vec(),
             broken: false,
         })
     }
 
     /// Fails with [`Error::NotSupported`] if the root tree names a tree
-    /// whose blocks may be shared or counted elsewhere: a subvolume that
-    /// was ever snapshotted, quotas, or a relocation under way (10c.2 and
-    /// later). A frame of its own, as each of a mount's reads has.
+    /// whose blocks are counted elsewhere or moving: quotas, or a
+    /// relocation under way (later). A frame of its own, as each of a
+    /// mount's reads has.
     #[inline(never)]
     fn check_trees(volume: &Volume) -> Result<()> {
         /// A tree relocation copies blocks into, for a balance.
         const TREE_RELOC: u64 = (-8i64) as u64;
         let mut cursor = Cursor::seek(volume, &volume.root_tree(), &Key::new(0, 0, 0))?;
-        while let Some((key, data)) = cursor.get() {
-            if key.kind == item::ROOT_ITEM {
-                // last_snapshot, after generation, root_dirid, bytenr,
-                // byte_limit and bytes_used, is set on a snapshot's source;
-                // a snapshot's key has the transaction that made it.
-                let snapshotted = crate::format::u64_at(data, 200) != 0 || key.offset != 0;
-                if snapshotted || key.objectid == tree::QUOTA || key.objectid == TREE_RELOC {
-                    return Err(Error::NotSupported);
-                }
+        while let Some((key, _)) = cursor.get() {
+            if key.kind == item::ROOT_ITEM
+                && (key.objectid == tree::QUOTA || key.objectid == TREE_RELOC)
+            {
+                return Err(Error::NotSupported);
             }
             cursor.advance()?;
         }
         Ok(())
+    }
+
+    /// Whether tree `tree` is a subvolume, whose blocks snapshots share.
+    pub(crate) fn is_subvolume(tree: u64) -> bool {
+        tree == tree::FS || (tree::FIRST_FREE..crate::files::object::LAST_FREE).contains(&tree)
+    }
+
+    /// The transaction of subvolume `tree`'s last snapshot: 0 if it has
+    /// none.
+    pub(crate) fn last_snapshot(&mut self, volume: &Volume, tree: u64) -> Result<u64> {
+        if let Some(&(_, last)) = self.snapshots.iter().find(|e| e.0 == tree) {
+            return Ok(last);
+        }
+        let key = Writer::root_item_key(volume, tree)?;
+        let data = crate::tree::find(volume, &volume.root_tree(), &key)?.ok_or(Error::Corrupt)?;
+        // last_snapshot, after generation, root_dirid, bytenr, byte_limit
+        // and bytes_used.
+        let last = crate::format::u64_at(data.get(..208).ok_or(Error::Corrupt)?, 200);
+        mem::push(&mut self.snapshots, (tree, last))?;
+        Ok(last)
+    }
+
+    /// Notes that subvolume `tree`'s last snapshot is now at transaction
+    /// `generation`, as its root item says.
+    pub(crate) fn note_snapshot(&mut self, tree: u64, generation: u64) -> Result<()> {
+        match self.snapshots.iter_mut().find(|e| e.0 == tree) {
+            Some(entry) => entry.1 = generation,
+            None => mem::push(&mut self.snapshots, (tree, generation))?,
+        }
+        Ok(())
+    }
+
+    /// Forgets tree `tree`, dropped: what the commit would note in its
+    /// root item, which is gone.
+    pub(crate) fn forget_tree(&mut self, tree: u64) {
+        self.tree_used.retain(|e| e.0 != tree);
+        self.snapshots.retain(|e| e.0 != tree);
+    }
+
+    /// The number for a new tree, as Linux's
+    /// `btrfs_init_root_free_objectid` finds it: one past the highest
+    /// object number of the root tree's items below the last free one.
+    pub(crate) fn next_tree(volume: &Volume) -> Result<u64> {
+        let last = crate::files::object::LAST_FREE;
+        let below = Key::new(last - 1, u8::MAX, u64::MAX);
+        let highest = match Cursor::seek_last(volume, &volume.root_tree(), &below)? {
+            Some(cursor) => cursor.key().map_or(0, |key| key.objectid),
+            None => 0,
+        };
+        let next = highest.max(tree::FIRST_FREE - 1) + 1;
+        if next >= last { Err(Error::NoSpace) } else { Ok(next) }
+    }
+
+    /// A copy of the root block `from` as the root of a new tree `owner`,
+    /// as Linux's `btrfs_copy_root` makes a snapshot's: what is below it
+    /// gains the new tree's references.
+    pub(crate) fn copy_root(&mut self, volume: &Volume, from: &Root, owner: u64) -> Result<Root> {
+        let old = read_block(volume, from, &Bounds::default())?;
+        let bytes = mem::copy(old.bytes())?;
+        drop(old);
+        let blocks = volume.blocks();
+        blocks.reserve_dirty(1)?;
+        let bytenr = self.alloc_block(volume, owner, from.level)?;
+        let mut block = Block::from_bytes(bytenr, bytes);
+        block.set_header(bytenr, self.generation, owner, from.level);
+        self.refer_below(volume, &block, Via::Tree(owner), true)?;
+        blocks.put_dirty(mem::arc(block)?)?;
+        Ok(Root { bytenr, level: from.level, generation: self.generation })
+    }
+
+    /// A new, empty leaf as the root of a new tree `owner`, with the
+    /// UUIDs of the header of the block `like`.
+    pub(crate) fn new_root_leaf(
+        &mut self,
+        volume: &Volume,
+        owner: u64,
+        like: &Root,
+    ) -> Result<Root> {
+        let mut bytes = crate::zeroed(volume.superblock().nodesize as usize)?;
+        let old = read_block(volume, like, &Bounds::default())?;
+        bytes[..HEADER_SIZE].copy_from_slice(&old.bytes()[..HEADER_SIZE]);
+        drop(old);
+        let blocks = volume.blocks();
+        blocks.reserve_dirty(1)?;
+        let bytenr = self.alloc_block(volume, owner, 0)?;
+        let mut block = Block::from_bytes(bytenr, bytes);
+        block.set_header(bytenr, self.generation, owner, 0);
+        block.clear();
+        blocks.put_dirty(mem::arc(block)?)?;
+        Ok(Root { bytenr, level: 0, generation: self.generation })
+    }
+
+    /// Frees the block at `bytenr`, of a tree being dropped, whose extent
+    /// item is already gone: after the commit, as every block on the disk.
+    pub(crate) fn free_dropped(&mut self, volume: &Volume, bytenr: u64) -> Result<()> {
+        let nodesize = u64::from(volume.superblock().nodesize);
+        self.bytes_used -= nodesize as i64;
+        mem::push(&mut self.pinned, (bytenr, nodesize))?;
+        self.space.free_pinned(bytenr, nodesize)
     }
 
     /// Whether the transaction has anything to commit.
@@ -160,13 +322,20 @@ impl Writer {
         !self.changes.is_empty() || !self.pinned.is_empty() || self.bytes_used != 0
     }
 
-    /// Runs a change, and refuses every later one if it fails half made:
+    /// Runs a change, then the reference changes its copies of shared
+    /// blocks left, and refuses every later change if it fails half made:
     /// anything but the item being there, or not, when it should not.
-    fn guard<R>(&mut self, f: impl FnOnce(&mut Writer) -> Result<R>) -> Result<R> {
+    fn guard<R>(&mut self, volume: &Volume, f: impl FnOnce(&mut Writer) -> Result<R>) -> Result<R> {
         if self.broken {
             return Err(Error::ReadOnly);
         }
-        let result = f(self);
+        let mut result = f(self);
+        if !self.delayed.is_empty()
+            && !matches!(result, Err(e) if !matches!(e, Error::Exists | Error::NotFound | Error::TooBig))
+            && let Err(e) = self.run_delayed(volume)
+        {
+            result = Err(e);
+        }
         if let Err(e) = result
             && !matches!(e, Error::Exists | Error::NotFound | Error::TooBig)
         {
@@ -200,7 +369,7 @@ impl Writer {
         if size > Block::max_item(volume.superblock().nodesize) {
             return Err(Error::TooBig);
         }
-        self.guard(|w| {
+        self.guard(volume, |w| {
             let path = w.search(volume, tree, key, Want::Insert(size))?;
             let (leaf, slot) = path.at(0)?;
             let blocks = volume.blocks();
@@ -229,7 +398,7 @@ impl Writer {
         key: &Key,
         change: impl FnOnce(&mut [u8]) -> R,
     ) -> Result<R> {
-        self.guard(|w| {
+        self.guard(volume, |w| {
             let path = w.search(volume, tree, key, Want::Change)?;
             let (leaf, slot) = path.at(0)?;
             let blocks = volume.blocks();
@@ -243,7 +412,7 @@ impl Writer {
     /// Deletes item `key` of tree `tree`. Fails with [`Error::NotFound`]
     /// if there is no such item.
     pub fn delete(&mut self, volume: &Volume, tree: u64, key: &Key) -> Result<()> {
-        self.guard(|w| {
+        self.guard(volume, |w| {
             let mut path = w.search(volume, tree, key, Want::Delete)?;
             let (leaf, slot) = path.at(0)?;
             let blocks = volume.blocks();
@@ -261,7 +430,7 @@ impl Writer {
         if size > Block::max_item(volume.superblock().nodesize) {
             return Err(Error::TooBig);
         }
-        let fits = self.guard(|w| {
+        let fits = self.guard(volume, |w| {
             let path = w.search(volume, tree, key, Want::Change)?;
             let (leaf, slot) = path.at(0)?;
             let blocks = volume.blocks();
@@ -298,7 +467,7 @@ impl Writer {
     }
 
     /// The key of tree `tree`'s root item in the root tree.
-    fn root_item_key(volume: &Volume, tree: u64) -> Result<Key> {
+    pub(crate) fn root_item_key(volume: &Volume, tree: u64) -> Result<Key> {
         let cursor = Cursor::seek(volume, &volume.root_tree(), &Key::first(tree, item::ROOT_ITEM))?;
         match cursor.key() {
             Some(key) if key.is(tree, item::ROOT_ITEM) => Ok(key),
@@ -333,6 +502,11 @@ impl Writer {
     /// Adds `delta` bytes to tree `tree`'s count of its blocks.
     fn count(&mut self, tree: u64, delta: i64) -> Result<()> {
         self.bytes_used += delta;
+        self.count_tree(tree, delta)
+    }
+
+    /// Adds `delta` bytes to tree `tree`'s count of its blocks alone.
+    fn count_tree(&mut self, tree: u64, delta: i64) -> Result<()> {
         match self.tree_used.iter_mut().find(|e| e.0 == tree) {
             Some(entry) => entry.1 += delta,
             None => mem::push(&mut self.tree_used, (tree, delta))?,
@@ -457,9 +631,19 @@ impl Writer {
             return Ok(root.bytenr);
         }
         let old = read_block(volume, root, bounds)?;
-        // A block another tree owns is shared with a snapshot (10c.2).
-        if old.owner() != tree {
-            return Err(Error::NotSupported);
+        let owner = old.owner();
+        // A tree's root block is its own; below it, a subvolume's blocks
+        // from up to its last snapshot may be shared.
+        let shared = if parent.is_some()
+            && Writer::is_subvolume(tree)
+            && root.generation <= self.last_snapshot(volume, tree)?
+        {
+            Some(self.refs_of(volume, &Writer::block_key(root.bytenr, root.level))?)
+        } else {
+            None
+        };
+        if shared.is_none() && owner != tree {
+            return Err(Error::Corrupt);
         }
         let bytes = mem::copy(old.bytes())?;
         drop(old);
@@ -467,14 +651,139 @@ impl Writer {
         let bytenr = self.alloc_block(volume, tree, root.level)?;
         let mut block = Block::from_bytes(bytenr, bytes);
         block.set_header(bytenr, self.generation, tree, root.level);
+        let last = match shared {
+            Some((refs, flags)) => self.share(tree, root, owner, &block, refs, flags)?,
+            None => true,
+        };
         blocks.put_dirty(mem::arc(block)?)?;
-        self.free_block(volume, tree, root)?;
+        if last {
+            self.free_block(volume, tree, root)?;
+        } else {
+            // Other trees keep it: only this one stops counting it.
+            self.count_tree(tree, -i64::from(volume.superblock().nodesize))?;
+        }
         let copy = Root { bytenr, level: root.level, generation: self.generation };
         match parent {
             Some((node, slot)) => blocks.edit(node, |b| b.set_child(slot, &copy))?,
             None => self.set_tree_root(volume, tree, copy)?,
         }
         Ok(bytenr)
+    }
+
+    /// Keeps the references below the block `old` of tree `tree`, owned
+    /// by `owner`, with `refs` references and `flags`, right as tree
+    /// `tree` takes `copy` of it in its place; returns whether `old` lost
+    /// its last reference. As Linux's `update_ref_for_cow`: a block other
+    /// trees keep that its own tree copies refers to what is below it by
+    /// its address from then on, so the copy refers to them by the tree,
+    /// as `old` did; one copied by another tree leaves them as they are,
+    /// and the copy adds the tree's references; and the last copy of a
+    /// block that referred by address moves its references to the tree.
+    /// Each block keeps others' references, so only the tree's own goes.
+    fn share(
+        &mut self,
+        tree: u64,
+        old: &Root,
+        owner: u64,
+        copy: &Block,
+        refs: u64,
+        flags: u64,
+    ) -> Result<bool> {
+        let full = flags & FULL_BACKREF != 0;
+        let key = Writer::block_key(old.bytenr, old.level);
+        if refs > 1 {
+            if owner == tree && !full {
+                self.delay_below(copy, Via::Address(old.bytenr), true)?;
+                self.delay(key, None, true)?;
+            } else {
+                self.delay_below(copy, Via::Tree(tree), true)?;
+            }
+            self.delay(key, Some(Backref::Tree(tree)), false)?;
+            return Ok(false);
+        }
+        if full {
+            self.delay_below(copy, Via::Tree(tree), true)?;
+            self.delay_below(copy, Via::Address(old.bytenr), false)?;
+        } else if owner != tree {
+            // Only its owner refers to what is below a block by its tree.
+            return Err(Error::Corrupt);
+        }
+        Ok(true)
+    }
+
+    /// The references and flags of the extent item `key`, with the
+    /// changes waiting for the change under way.
+    #[inline(never)]
+    fn refs_of(&self, volume: &Volume, key: &Key) -> Result<(u64, u64)> {
+        let data = Writer::extent_item(volume, key)?.ok_or(Error::Corrupt)?;
+        let (mut refs, mut flags) = refs_flags(&data)?;
+        for d in self.delayed.iter().filter(|d| d.key == *key) {
+            match d.r {
+                None => flags |= FULL_BACKREF,
+                Some(_) if d.add => refs += 1,
+                Some(_) => refs = refs.checked_sub(1).ok_or(Error::Corrupt)?,
+            }
+        }
+        Ok((refs, flags))
+    }
+
+    /// Leaves for after the change the reference change `r` to the extent
+    /// of item `key`: added, or taken; `None` marks it [`FULL_BACKREF`].
+    fn delay(&mut self, key: Key, r: Option<Backref>, add: bool) -> Result<()> {
+        Ok(mem::push(&mut self.delayed, Delayed { key, r, add })?)
+    }
+
+    /// Leaves for after the change the references `block`'s children or
+    /// file extents gain, or lose, from it `via` its tree or address.
+    fn delay_below(&mut self, block: &Block, via: Via, add: bool) -> Result<()> {
+        for slot in 0..block.nritems() {
+            if let Some((key, r)) = below(block, slot, via)? {
+                self.delay(key, Some(r), add)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the reference changes copies of shared blocks left, in
+    /// order. Their own changes, to the extent tree, leave none.
+    pub(crate) fn run_delayed(&mut self, volume: &Volume) -> Result<()> {
+        let delayed = core::mem::replace(&mut self.delayed, mem::vec());
+        for d in &delayed {
+            match d.r {
+                None => self.set_extent_flags(volume, &d.key, FULL_BACKREF)?,
+                Some(r) if d.add => self.add_ref(volume, &d.key, r, 1)?,
+                // What a copy above refers to keeps a reference.
+                Some(r) => {
+                    if self.drop_ref(volume, &d.key, r)? == 0 {
+                        return Err(Error::Corrupt);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds, or takes away, the references `block`'s children or file
+    /// extents have from it `via` its tree or its address, as Linux's
+    /// `btrfs_inc_ref` and `btrfs_dec_ref` do. What loses a reference
+    /// keeps the one from the copy above.
+    pub(crate) fn refer_below(
+        &mut self,
+        volume: &Volume,
+        block: &Block,
+        via: Via,
+        add: bool,
+    ) -> Result<()> {
+        for slot in 0..block.nritems() {
+            let Some((key, r)) = below(block, slot, via)? else { continue };
+            if add {
+                self.add_ref(volume, &key, r, 1)?;
+            } else if self.drop_ref(volume, &key, r)? == 0 {
+                // What a copy above refers to keeps a reference.
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
     }
 
     /// Walks down tree `tree` to where `key` is or would be, making every

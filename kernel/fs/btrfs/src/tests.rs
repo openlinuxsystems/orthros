@@ -548,4 +548,5 @@ mod compressed;
 mod files;
 mod links;
 mod rw;
+mod snapshots;
 mod write;

@@ -329,25 +329,6 @@ fn a_block_group_kept_as_bitmaps_stays_bitmaps_and_whole() {
 }
 
 #[test]
-fn a_filesystem_with_a_snapshot_is_not_written_yet() {
-    // A snapshot made the way `btrfs subvolume snapshot` keys it: by the
-    // transaction that made it. Its blocks are shared (10c.2).
-    let image = mkfs_empty(&[]);
-    let disk = writable(&image);
-    let volume = open(&disk);
-    let mut w = Writer::new(&volume).unwrap();
-    let fs_key = Key::new(tree::FS, item::ROOT_ITEM, 0);
-    let root_tree = volume.root_tree();
-    let fs_item = crate::tree::find(&volume, &root_tree, &fs_key).unwrap().unwrap();
-    let mut item = fs_item.clone();
-    item[200..208].copy_from_slice(&5u64.to_le_bytes());
-    w.update(&volume, tree::ROOT, &fs_key, |data| data.copy_from_slice(&item)).unwrap();
-    w.commit(&volume).unwrap();
-    let volume = open(&disk);
-    assert_eq!(Writer::new(&volume).err(), Some(Error::NotSupported));
-}
-
-#[test]
 fn thousands_of_files_split_every_level_and_deleting_them_frees_their_blocks() {
     // Blocks of 4 KiB hold 121 key pointers: the tree soon has nodes
     // above nodes.
