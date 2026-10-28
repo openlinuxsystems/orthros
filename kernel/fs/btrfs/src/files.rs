@@ -90,8 +90,27 @@ mod extent_type {
     pub const REGULAR: u8 = 1;
 }
 
-/// The most sectors one request writes, so its segments fit on the stack.
-const MAX_SEGMENTS: usize = 16;
+/// The most sectors one request writes, so its segments fit on the stack:
+/// 128 KiB, an extent written as it is.
+const MAX_SEGMENTS: usize = 32;
+
+/// An extent of [`Files::add_extents`]: `pages` of the data written, which
+/// hold the file's `len` bytes from `pos` on; the file is at least `size`
+/// bytes long after it.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Packed {
+    pub pos: u64,
+    pub pages: usize,
+    pub len: u64,
+    pub size: u64,
+}
+
+/// Data [`Files::put_data`] wrote: where it starts, and the checksums of
+/// its sectors, if it has them.
+pub(crate) struct Put {
+    bytenr: u64,
+    checksums: KVec<u8>,
+}
 
 pub(crate) fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
     bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
@@ -652,24 +671,6 @@ impl Files<'_> {
         self.write_extent(ino, pos, pages, (len, compression::NONE), sums, size)
     }
 
-    /// [`Files::write_data`] for an extent whose `pages` hold file
-    /// `ino`'s `len` bytes from `pos` on compressed as `kind` says
-    /// ([`compression`]), with the checksums of their sectors.
-    pub(crate) fn write_packed(
-        &mut self,
-        ino: u64,
-        pos: u64,
-        pages: &[&Page],
-        (len, kind): (u64, u8),
-        size: u64,
-    ) -> Result<()> {
-        self.write_extent(ino, pos, pages, (len, kind), true, size)?;
-        if kind == compression::ZSTD {
-            self.w.incompat |= incompat::COMPRESS_ZSTD;
-        }
-        Ok(())
-    }
-
     fn write_extent(
         &mut self,
         ino: u64,
@@ -679,12 +680,21 @@ impl Files<'_> {
         sums: bool,
         size: u64,
     ) -> Result<()> {
+        let put = self.put_data(pages, sums)?;
+        self.add_extents(ino, &put, &[Packed { pos, pages: pages.len(), len, size }], kind)
+    }
+
+    /// Writes `pages` to one new run of the disk, with the checksums of
+    /// their sectors unless `sums` is false, for [`Files::add_extents`];
+    /// nothing else may be allocated in between. Its own frame, so the
+    /// pages' segments are off the stack while the trees change.
+    #[inline(never)]
+    pub(crate) fn put_data(&mut self, pages: &[&Page], sums: bool) -> Result<Put> {
         let disk = pages.len() as u64 * PAGE;
-        let sb = self.volume.superblock();
-        let csum = sb.csum_type;
+        let csum = self.volume.superblock().csum_type;
+        let size = csum.size();
         let mut checksums = mem::vec();
         if sums {
-            let size = csum.size();
             checksums = crate::zeroed(pages.len() * size)?;
             for (page, out) in pages.iter().zip(checksums.chunks_exact_mut(size)) {
                 out.copy_from_slice(&csum.sum(page.bytes())[..size]);
@@ -695,32 +705,56 @@ impl Files<'_> {
             self.w.free_data(bytenr, disk, true)?;
             return Err(e);
         }
-        let generation = self.w.generation;
+        Ok(Put { bytenr, checksums })
+    }
+
+    /// Makes `extents` of the data [`Files::put_data`] wrote, each of its
+    /// pages in turn, compressed as `kind` says ([`compression`]), and
+    /// points file `ino` at them. The file's inode gets their bytes and
+    /// grows to their sizes.
+    pub(crate) fn add_extents(
+        &mut self,
+        ino: u64,
+        put: &Put,
+        extents: &[Packed],
+        kind: u8,
+    ) -> Result<()> {
+        let size = self.volume.superblock().csum_type.size();
+        let (sums, generation) = (!put.checksums.is_empty(), self.w.generation);
         self.whole(|f| {
-            let lost = f.drop_extents(ino, pos, pos + len)?;
-            let key = Key::new(ino, item::EXTENT_DATA, pos);
-            f.w.insert_with(f.volume, f.subvol, &key, FILE_EXTENT, |d| {
-                d.fill(0);
-                put_u64(d, 0, generation);
-                put_u64(d, 8, len);
-                d[16] = kind;
-                d[20] = extent_type::REGULAR;
-                put_u64(d, 21, bytenr);
-                put_u64(d, 29, disk);
-                put_u64(d, 45, len);
-            })?;
-            f.new_data_extent(bytenr, disk, ino, pos)?;
-            if sums {
-                f.add_sums(bytenr, &checksums)?;
+            let (mut at, mut lost, mut len, mut end) = (0, 0, 0, 0);
+            for e in extents {
+                let (start, disk) = (put.bytenr + at as u64 * PAGE, e.pages as u64 * PAGE);
+                lost += f.drop_extents(ino, e.pos, e.pos + e.len)?;
+                let key = Key::new(ino, item::EXTENT_DATA, e.pos);
+                f.w.insert_with(f.volume, f.subvol, &key, FILE_EXTENT, |d| {
+                    d.fill(0);
+                    put_u64(d, 0, generation);
+                    put_u64(d, 8, e.len);
+                    d[16] = kind;
+                    d[20] = extent_type::REGULAR;
+                    put_u64(d, 21, start);
+                    put_u64(d, 29, disk);
+                    put_u64(d, 45, e.len);
+                })?;
+                f.new_data_extent(start, disk, ino, e.pos)?;
+                if sums {
+                    f.add_sums(start, &put.checksums[at * size..(at + e.pages) * size])?;
+                }
+                (at, len, end) = (at + e.pages, len + e.len, end.max(e.size));
             }
             f.change_inode(ino, |d| {
                 let nbytes = u64_at(d, at::NBYTES).saturating_sub(lost) + len;
                 put_u64(d, at::NBYTES, nbytes);
-                if u64_at(d, at::SIZE) < size {
-                    put_u64(d, at::SIZE, size);
+                if u64_at(d, at::SIZE) < end {
+                    put_u64(d, at::SIZE, end);
                 }
             })
-        })
+        })?;
+        if kind == compression::ZSTD {
+            self.w.incompat |= incompat::COMPRESS_ZSTD;
+        }
+        Ok(())
     }
 
     /// Makes the item of the data extent `[bytenr, bytenr + len)`, which
@@ -894,6 +928,7 @@ impl Files<'_> {
 }
 
 /// Writes `pages` to the data at logical address `bytenr`, on every copy.
+#[inline(never)]
 fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
     let device = volume.device();
     let max = device.info().max_segments.clamp(1, MAX_SEGMENTS);

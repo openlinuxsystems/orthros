@@ -30,7 +30,7 @@ use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBindi
 
 use crate::dir::Entries;
 use crate::extent::{self, Compression, Extent, Regular};
-use crate::files::{Files, at, compression, file_type, put_time, put_u32, put_u64};
+use crate::files::{Files, Packed, Put, at, compression, file_type, put_time, put_u32, put_u64};
 use crate::format::{Key, item, name_hash, tree};
 use crate::fs::{Inner, Txn};
 use crate::inode::{self, Inode};
@@ -797,7 +797,8 @@ impl BtrfsNode {
     }
 
     /// Writes `chunks`, the file's pages from `index` on, each compressed
-    /// into its packer when its frame's length is given, in one change.
+    /// into its packer when its frame's length is given, in one change,
+    /// the frames to the disk in one request.
     #[inline(never)]
     fn write_chunks(
         &self,
@@ -810,27 +811,19 @@ impl BtrfsNode {
             if index != 0 {
                 self.convert_inline(&mut files)?;
             }
+            // The chunks that did not shrink first: nothing may be
+            // allocated between the frames' write and their extents.
             let mut pos = index * PAGE;
-            for (pages, made, packer) in chunks {
+            for (pages, made, _) in chunks {
                 let len = pages.len() as u64 * PAGE;
-                let size = end.min(pos + len);
-                match made {
-                    Some(made) => {
-                        let mut disk: [&Page; CHUNK] = [pages[0]; CHUNK];
-                        let mut n = 0;
-                        for (slot, page) in disk.iter_mut().zip(packer.pages(made)) {
-                            *slot = page;
-                            n += 1;
-                        }
-                        let kind = (len, compression::ZSTD);
-                        files.write_packed(self.ino, pos, &disk[..n], kind, size)?;
-                    }
-                    None if !pages.is_empty() => {
-                        write_split(&mut files, self.ino, pos, pages, true, size)?;
-                    }
-                    None => {}
+                if made.is_none() && !pages.is_empty() {
+                    write_split(&mut files, self.ino, pos, pages, true, end.min(pos + len))?;
                 }
                 pos += len;
+            }
+            let mut packed = [Packed::default(); 2];
+            if let Some((put, n)) = put_frames(&mut files, index, &chunks, end, &mut packed)? {
+                files.add_extents(self.ino, &put, &packed[..n], compression::ZSTD)?;
             }
             self.reload(&files)
         })
@@ -980,6 +973,40 @@ impl BtrfsNode {
         }
         node.reload(files)
     }
+}
+
+/// Writes the frames of `chunks`, the file's pages from `index` on, that
+/// were compressed, to the disk in one request, and fills `packed` with
+/// their extents: how many, if any. Its own frame, so their pages are off
+/// the stack while the trees change.
+#[inline(never)]
+fn put_frames(
+    files: &mut Files<'_>,
+    index: u64,
+    chunks: &[(&[&Page], Option<usize>, &Packer); 2],
+    end: u64,
+    packed: &mut [Packed; 2],
+) -> Result<Option<(Put, usize)>> {
+    let mut disk: [&Page; 2 * CHUNK] = [chunks[0].0[0]; 2 * CHUNK];
+    let (mut n, mut e) = (0, 0);
+    let mut pos = index * PAGE;
+    for &(pages, made, packer) in chunks {
+        let len = pages.len() as u64 * PAGE;
+        if let Some(made) = made {
+            let first = n;
+            for (slot, page) in disk[n..].iter_mut().zip(packer.pages(made)) {
+                *slot = page;
+                n += 1;
+            }
+            packed[e] = Packed { pos, pages: n - first, len, size: end.min(pos + len) };
+            e += 1;
+        }
+        pos += len;
+    }
+    if e == 0 {
+        return Ok(None);
+    }
+    Ok(Some((files.put_data(&disk[..n], true)?, e)))
 }
 
 /// Writes `pages` with [`Files::write_data`], in halves when there is no
