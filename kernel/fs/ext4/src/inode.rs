@@ -306,6 +306,24 @@ impl Inode {
         kind_of(self.mode).ok_or(Error::Corrupt)
     }
 
+    /// The device a character or block device inode stands for, as
+    /// Linux's `ext4_iget` reads it from `i_block`: an old 16-bit number
+    /// in its first word, else a new 32-bit one in its second; as
+    /// [`radix_vfs::device_number`] holds it. 0 for any other inode.
+    pub fn device(&self) -> u64 {
+        if !matches!(self.mode & mode::TYPE, mode::CHAR | mode::BLOCK) {
+            return 0;
+        }
+        let old = le32(&self.block, 0);
+        let (major, minor) = if old != 0 {
+            ((old >> 8) & 0xff, old & 0xff)
+        } else {
+            let new = le32(&self.block, 4);
+            ((new & 0xf_ff00) >> 8, (new & 0xff) | ((new >> 12) & 0xf_ff00))
+        };
+        radix_vfs::device_number(major, minor)
+    }
+
     /// Whether its blocks are in an extent tree.
     pub fn has_extents(&self) -> bool {
         self.flags & flags::EXTENTS != 0

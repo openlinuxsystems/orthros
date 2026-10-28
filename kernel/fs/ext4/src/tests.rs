@@ -1238,13 +1238,41 @@ fn hard_links_linux_made_keep_their_count() {
     let volume = Volume::new(&image);
     let root = volume.root();
     assert_eq!(walk(&root, "one").unwrap().stat().id, walk(&root, "two").unwrap().stat().id);
+    assert_eq!(walk(&root, "two").unwrap().stat().links, 2);
     root.remove("one").unwrap();
+    assert_eq!(walk(&root, "two").unwrap().stat().links, 1);
     drop(root);
     let image = volume.unmount();
     fsck(&image);
     let tree = debugfs_tree(&image);
     assert_eq!(tree.get("two"), Some(&Thing::File(b"shared".to_vec())));
     assert_eq!(tree.len(), 1);
+}
+
+#[test]
+fn special_files_linux_made_show_their_devices() {
+    let mut image = mkfs(16, &[]);
+    // A number that fits 16 bits is in i_block's first word, as Linux's
+    // old_encode_dev keeps it, and a bigger one in its second, as
+    // new_encode_dev(259, 70000) does.
+    debugfs(&mut image, true, "mknod null c 1 3");
+    debugfs(&mut image, true, "mknod part b 8 1");
+    debugfs(&mut image, true, "sif part block[0] 0");
+    debugfs(&mut image, true, "sif part block[1] 0x11110370");
+    debugfs(&mut image, true, "mknod fifo p");
+    debugfs(&mut image, true, "sif fifo ctime 20200102030405");
+    fsck(&image);
+    let volume = Volume::new(&image);
+    let root = volume.root();
+    let null = walk(&root, "null").unwrap().stat();
+    assert_eq!((null.kind, null.device), (Kind::CharDevice, radix_vfs::device_number(1, 3)));
+    let part = walk(&root, "part").unwrap().stat();
+    assert_eq!((part.kind, part.device), (Kind::BlockDevice, radix_vfs::device_number(259, 70000)));
+    let fifo = walk(&root, "fifo").unwrap().stat();
+    assert_eq!((fifo.kind, fifo.device, fifo.links), (Kind::Pipe, 0, 1));
+    assert_eq!(fifo.changed, 1_577_934_245 * 1_000_000_000);
+    // A directory counts its subdirectories' `..`.
+    assert_eq!(root.stat().links, 3);
 }
 
 #[test]

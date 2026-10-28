@@ -1082,6 +1082,12 @@ impl Node for Ext4Node {
             Some((size, modified, _)) => (size, modified),
             None => (meta.inode.size, meta.inode.mtime),
         };
+        // A write the cache holds changed the file when it was made.
+        let changed = if modified > meta.inode.mtime {
+            meta.inode.ctime.max(modified)
+        } else {
+            meta.inode.ctime
+        };
         Stat {
             kind: self.kind,
             size,
@@ -1090,6 +1096,9 @@ impl Node for Ext4Node {
             created: meta.inode.crtime,
             modified,
             accessed: meta.inode.atime,
+            changed,
+            links: u32::from(meta.inode.links),
+            device: meta.inode.device(),
         }
     }
 
