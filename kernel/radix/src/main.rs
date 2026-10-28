@@ -66,6 +66,7 @@ mod selftest;
 mod symbols;
 mod user;
 mod usertest;
+mod watchdog;
 mod work;
 
 #[cfg(target_arch = "aarch64")]
@@ -233,6 +234,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::kmsg::start();
     fs::keyboard::start();
     user::power::start();
+    watchdog::find();
     check_timers(online);
     check_ipis(online);
 

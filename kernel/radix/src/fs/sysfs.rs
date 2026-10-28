@@ -16,13 +16,19 @@
 //!   `discard_max_bytes` and the rest), and in its `device` the `model`,
 //!   `serial` and `firmware_rev` it gives, for SATA and NVMe disks;
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device` and `class`, in
-//!   hexadecimal, for every PCI function the scan found.
+//!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/class/watchdog/watchdog0`, when the kernel drives a hardware
+//!   watchdog (ADR 0143): its `identity`, its `state` (`active` or
+//!   `inactive`), its `timeout`, `min_timeout` and `max_timeout` in
+//!   seconds, and its `bootstatus`, 32 (Linux's WDIOF_CARDRESET) if it
+//!   restarted the machine at the end of the boot before, else 0.
 //!
 //! Every file ends with a newline. The tree is read-only.
 
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
+use radix_hal::Watchdog;
 use radix_klog::TextBuf;
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, SyntheticFs};
@@ -54,6 +60,24 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    if let Some(found) = crate::watchdog::found() {
+        let class = root.add_dir("class", next_id())?;
+        let dir = class.add_dir("watchdog", next_id())?.add_dir("watchdog0", next_id())?;
+        let Watchdog { name, min_seconds, max_seconds, restarted } = *found;
+        dir.add("identity", value(move |text| writeln!(text, "{name}"))?)?;
+        dir.add(
+            "state",
+            value(|text| {
+                let active = crate::watchdog::state().0;
+                writeln!(text, "{}", if active { "active" } else { "inactive" })
+            })?,
+        )?;
+        dir.add("timeout", value(|text| writeln!(text, "{}", crate::watchdog::state().1))?)?;
+        dir.add("min_timeout", value(move |text| writeln!(text, "{min_seconds}"))?)?;
+        dir.add("max_timeout", value(move |text| writeln!(text, "{max_seconds}"))?)?;
+        let status = if restarted { 32 } else { 0 };
+        dir.add("bootstatus", value(move |text| writeln!(text, "{status}"))?)?;
+    }
     // Another thread may have made one meanwhile; either will do.
     let root = match ROOT.set(root) {
         Ok(root) => root.clone(),

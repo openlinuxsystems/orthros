@@ -9,12 +9,16 @@
 //! [`start`] asks the platform for the button. Its presses come in an
 //! interrupt handler, which counts them and wakes the `power` thread; the
 //! thread signals the notification Spark gave `notify_button`, which
-//! cannot be done with interrupts masked.
+//! cannot be done with interrupts masked. The watchdog's methods go to
+//! [`crate::watchdog`] (ADR 0143).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_abi::errors::Kernel;
-use radix_abi::power::{self as abi, HaltArgs, NotifyButtonArgs, PowerOffArgs, RestartArgs};
+use radix_abi::power::{
+    self as abi, HaltArgs, NotifyButtonArgs, PetWatchdogArgs, PowerOffArgs, RestartArgs,
+    StartWatchdogArgs, StartWatchdogResults, StopWatchdogArgs,
+};
 use radix_cap::{Capability, ObjectKind, Rights};
 use radix_hal::{Cpu, Devices, Platform, Smp};
 use radix_klog::crashlog::Ending;
@@ -26,7 +30,7 @@ use super::notify::NotificationRef;
 use super::objects;
 use super::{Result, UserRef, cap_error, error};
 use crate::sched::{self, Options, Policy, ThreadRef};
-use crate::{Arch, console, crashlog};
+use crate::{Arch, console, crashlog, watchdog};
 
 /// Whether the platform hears the power button.
 static HEARD: AtomicBool = AtomicBool::new(false);
@@ -101,6 +105,32 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
             *BUTTON.lock() = Some((notification, notified.badge()));
             return answer(label, 0, [0; 8]);
         }
+        abi::START_WATCHDOG => {
+            let a = StartWatchdogArgs::decode(args)?;
+            cap.check(ObjectKind::Power, Rights::CONTROL).map_err(cap_error)?;
+            let name = user.process.name();
+            let seconds = watchdog::start(a.seconds, name.as_str())
+                .ok_or_else(|| error(Kernel::NotSupported))?;
+            let restarted = watchdog::found().is_some_and(|found| found.restarted);
+            let results = StartWatchdogResults { seconds, restarted };
+            return answer(label, StartWatchdogResults::WORDS, results.encode());
+        }
+        abi::PET_WATCHDOG => {
+            PetWatchdogArgs::decode(args)?;
+            cap.check(ObjectKind::Power, Rights::CONTROL).map_err(cap_error)?;
+            if !watchdog::pet() {
+                return Err(error(Kernel::NotSupported));
+            }
+            return answer(label, 0, [0; 8]);
+        }
+        abi::STOP_WATCHDOG => {
+            StopWatchdogArgs::decode(args)?;
+            cap.check(ObjectKind::Power, Rights::CONTROL).map_err(cap_error)?;
+            if !watchdog::stop(user.process.name().as_str()) {
+                return Err(error(Kernel::NotSupported));
+            }
+            return answer(label, 0, [0; 8]);
+        }
         abi::POWER_OFF => {
             PowerOffArgs::decode(args)?;
             End::PowerOff
@@ -122,6 +152,7 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
         End::Halt => "halt",
     };
     info!("Power: `{}` asked to {verb} the machine; syncing the filesystems", user.process.name());
+    watchdog::ending(matches!(end, End::Halt));
     if let Some(vfs) = crate::fs::vfs()
         && let Err(err) = vfs.sync_all()
     {

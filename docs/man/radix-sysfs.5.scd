@@ -100,6 +100,22 @@ _/kernel/bus/pci/devices/_*address*_/class_
 	as Linux writes it: _0000:00:03.0_. Every function the kernel's scan
 	found is listed, whether or not a driver uses it.
 
+_/kernel/class/watchdog/watchdog0/identity_
+	The hardware watchdog the kernel drives, if any (*spark*(8)'s
+	*WATCHDOG*): _the Intel 6300ESB watchdog_ or _the Intel ICH9 TCO
+	timer_. Without one, _/kernel/class_ is not there.
+
+_/kernel/class/watchdog/watchdog0/state_
+	*active* while it runs, else *inactive*.
+
+_/kernel/class/watchdog/watchdog0/timeout_, _min_timeout_, _max_timeout_
+	Its timeout in seconds, as last set (0 before it first runs), and the
+	shortest and longest it takes.
+
+_/kernel/class/watchdog/watchdog0/bootstatus_
+	*32*, Linux's WDIOF_CARDRESET, if it restarted the machine at the end
+	of the boot before this one; *0* if not.
+
 # EXAMPLES
 
 In the *storage* boot test (*ob*(1)), the 32 MiB disk _vdb_ has
@@ -109,4 +125,4 @@ virtio function for each of its four disks in _/kernel/bus/pci/devices_.
 # SEE ALSO
 
 *radix-proc*(5), *radix-block*(2), *radix-files*(7), *dukovo-boot*(7), *ob*(1),
-*spark*(8)
+*spark*(8), *watchdog*(8)

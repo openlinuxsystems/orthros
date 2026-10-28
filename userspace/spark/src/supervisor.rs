@@ -31,6 +31,12 @@
 //! the power button, which the kernel tells of through another
 //! notification (`notify_button`), powers the machine off the same way,
 //! at once, as systemd-logind's default HandlePowerKey=poweroff does.
+//!
+//! Once it supervises, Spark starts the hardware watchdog, if the kernel
+//! drives one, with a timeout of WATCHDOG_SECONDS, and pets it each third
+//! of that from its loop (ADR 0143): a Spark that stops responding, or a
+//! kernel that stops running it, restarts the machine, as systemd's
+//! RuntimeWatchdogSec does.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -74,6 +80,9 @@ pub const POSIX_ENV: [&str; 5] =
 
 const MS: u64 = 1_000_000;
 const SECOND: u64 = 1_000 * MS;
+
+/// The hardware watchdog's timeout, unless `--watchdog` gives another.
+pub const WATCHDOG_SECONDS: u32 = 60;
 
 /// A service that ran this long before it ended starts again at once.
 const STEADY: u64 = 10 * SECOND;
@@ -258,6 +267,12 @@ pub struct Supervisor {
     services: Vec<Service>,
     program: Option<Program>,
     shutdown: Option<Shutdown>,
+    /// The watchdog's timeout to ask for, 0 for none, and whether to stop
+    /// responding once it runs (`--test-hang`).
+    watchdog_seconds: u32,
+    hang: bool,
+    /// While the watchdog runs: how often Spark pets it, and when next.
+    pets: Option<(u64, u64)>,
 }
 
 impl Supervisor {
@@ -296,6 +311,51 @@ impl Supervisor {
             services: Vec::new(),
             program: None,
             shutdown: None,
+            watchdog_seconds: WATCHDOG_SECONDS,
+            hang: false,
+            pets: None,
+        }
+    }
+
+    /// Sets the watchdog's timeout, 0 to leave it off, and whether Spark
+    /// stops responding once it runs.
+    pub fn set_watchdog(&mut self, seconds: u32, hang: bool) {
+        self.watchdog_seconds = seconds;
+        self.hang = hang;
+    }
+
+    /// Starts the watchdog, if the kernel drives one. With `--test-hang`,
+    /// Spark then stops responding, unless the watchdog restarted the
+    /// machine at the end of the last boot.
+    fn start_watchdog(&mut self) {
+        let Some(power) = self.power else { return };
+        if self.watchdog_seconds == 0 {
+            return;
+        }
+        // Not supported without a watchdog: the kernel logs that it has
+        // none.
+        let Ok(started) = power::start_watchdog(&SYS, power, self.watchdog_seconds) else {
+            return;
+        };
+        if started.restarted {
+            println!("spark: the watchdog restarted the machine: the last boot stopped responding");
+        }
+        let every = u64::from(started.seconds) * SECOND / 3;
+        self.pets = Some((every, now() + every));
+        if self.hang && !started.restarted {
+            println!("spark: not responding, as --test-hang asks, until the watchdog restarts");
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Pets the watchdog if it is time to.
+    fn pet_watchdog(&mut self, time: u64) {
+        let (Some(power), Some((every, next))) = (self.power, self.pets) else { return };
+        if time >= next {
+            let _ = power::pet_watchdog(&SYS, power);
+            self.pets = Some((every, time + every));
         }
     }
 
@@ -1007,7 +1067,7 @@ impl Supervisor {
     }
 
     /// When the loop must look again without a wake-up: the next restart
-    /// or shutdown step.
+    /// or shutdown step, or the watchdog's next pet.
     fn deadline(&self) -> Option<u64> {
         let restarts = self.services.iter().filter_map(|s| match s.state {
             State::Waiting(at) | State::Draining(_, at) => Some(at),
@@ -1020,11 +1080,13 @@ impl Supervisor {
             None => None,
         };
         let connections = self.connections.iter().map(|c| c.until);
-        restarts.chain(shutdown).chain(connections).min()
+        let pet = self.pets.map(|(_, next)| next);
+        restarts.chain(shutdown).chain(connections).chain(pet).min()
     }
 
     /// Supervises for good.
     pub fn run(&mut self) -> ! {
+        self.start_watchdog();
         loop {
             // The children's notification, the power button's, the
             // control socket, the connections, the services' outputs and
@@ -1126,6 +1188,7 @@ impl Supervisor {
                 }
             }
             self.step_shutdown();
+            self.pet_watchdog(time);
         }
     }
 }

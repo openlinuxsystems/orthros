@@ -36,6 +36,7 @@ mod top;
 mod tree;
 mod util;
 mod watch;
+mod watchdog;
 mod which;
 mod xxd;
 
@@ -84,6 +85,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("vmstat", memory::vmstat),
     ("w", sessions::w),
     ("watch", watch::main),
+    ("watchdog", watchdog::main),
     ("which", which::main),
     ("who", sessions::who),
     ("xxd", xxd::main),

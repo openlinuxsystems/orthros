@@ -724,6 +724,38 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "watchdog",
+        about: "Spark pets QEMU's i6300esb; when it stops responding, the watchdog restarts the machine, and the next boot says so",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "-- --watchdog 12 --test-hang",
+        cpus: 2,
+        memory: "1G",
+        reboot: true,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "i6300esb"],
+        script: watchdog_esb,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "watchdog-tco",
+        about: "as watchdog, under UEFI, with the TCO timer of q35's ICH9",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "-- --watchdog 12 --test-hang",
+        cpus: 2,
+        memory: "1G",
+        reboot: true,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: watchdog_tco,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-oom",
         about: "a service that runs the machine out of memory is stopped, and Spark starts it again",
         firmware: Firmware::Bios,
@@ -2814,6 +2846,56 @@ fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn watchdog_esb(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    watchdog_restarts(vm, case, "the Intel 6300ESB watchdog, with timeouts from 1 to 2082 s")
+}
+
+fn watchdog_tco(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    watchdog_restarts(vm, case, "the Intel ICH9 TCO timer, with timeouts from 4 to 1227 s")
+}
+
+/// Spark, asked to stop responding, leaves the watchdog `found` unpetted,
+/// and it restarts the machine. The next boot says so, Spark pets the
+/// watchdog for twice its timeout, and the power button powers off.
+fn watchdog_restarts(vm: &mut Vm, case: &Case, found: &str) -> Result<(), String> {
+    let name = found.split(", with").next().unwrap_or(found);
+    let started =
+        format!("Watchdog: `spark` started {name}: the machine restarts unless petted every 12 s");
+    for boot in 1..=2 {
+        boot_report(vm, case)?;
+        // Said before the boot report ends.
+        let log = vm.log();
+        if !log.contains(&format!("Watchdog: {found}; Spark starts it")) {
+            return Err(format!("boot {boot}: the kernel did not find {name}"));
+        }
+        vm.expect("Boot complete.")?;
+        vm.expect(&started)?;
+        if boot == 1 {
+            vm.expect("spark: not responding, as --test-hang asks, until the watchdog restarts")?;
+        }
+    }
+    let restarted =
+        format!("Watchdog: {name} restarted the machine: the boot before this one hung");
+    if !vm.log().contains(&restarted) {
+        return Err(format!(
+            "the kernel does not say the watchdog restarted it: no \"{restarted}\""
+        ));
+    }
+    vm.expect("spark: the watchdog restarted the machine: the last boot stopped responding")?;
+    // Petted, it lets the machine run on.
+    std::thread::sleep(Duration::from_secs(24));
+    let log = vm.log();
+    if log.matches("Boot complete.").count() != 2 {
+        return Err("the watchdog restarted a machine whose Spark petted it".into());
+    }
+    if !log.contains("consoled: 6 consoles; tty1 is shown") {
+        return Err("the second boot did not start the consoles".into());
+    }
+    vm.press_power_button()?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

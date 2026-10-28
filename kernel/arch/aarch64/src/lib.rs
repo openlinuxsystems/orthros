@@ -232,6 +232,18 @@ impl Devices for Arch {
     fn start_power_button(_pressed: fn()) -> Option<&'static str> {
         None
     }
+
+    fn find_watchdog() -> Option<radix_hal::Watchdog> {
+        None
+    }
+
+    fn watchdog_start(seconds: u32) -> u32 {
+        seconds
+    }
+
+    fn watchdog_pet() {}
+
+    fn watchdog_stop() {}
 }
 
 /// A placeholder thread context.

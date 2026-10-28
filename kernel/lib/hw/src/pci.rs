@@ -225,6 +225,11 @@ impl Function {
         self.config.read32(offset)
     }
 
+    /// Writes a byte of its configuration space.
+    pub fn write8(&self, offset: usize, value: u8) {
+        self.config.write8(offset, value);
+    }
+
     /// Writes 16 bits of its configuration space.
     pub fn write16(&self, offset: usize, value: u16) {
         self.config.write16(offset, value);
