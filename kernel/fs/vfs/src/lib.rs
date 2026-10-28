@@ -513,6 +513,8 @@ pub enum FsKind {
     Btrfs,
     /// exFAT on a disk.
     Exfat,
+    /// ext4 (or ext2 or ext3) on a disk.
+    Ext4,
     /// The processes (`/processes`).
     Proc,
     /// The kernel's devices and settings (`/kernel`).
@@ -534,6 +536,7 @@ impl FsKind {
             FsKind::Fat => "fat",
             FsKind::Btrfs => "btrfs",
             FsKind::Exfat => "exfat",
+            FsKind::Ext4 => "ext4",
             FsKind::Proc => "proc",
             FsKind::Sys => "sys",
             FsKind::Dev => "dev",

@@ -107,6 +107,8 @@ These run on the build machine or in CI and are never part of an image.
 | [exfatprogs](https://github.com/exfatprogs/exfatprogs) (`mkfs.exfat`, `fsck.exfat`) | Making the exFAT volumes Radix's exFAT tests and the `exfat-write` boot test use, and checking what Radix wrote to them | GPL-2.0-or-later |
 | [The Sleuth Kit](https://www.sleuthkit.org/sleuthkit/) (`fls`, `icat`), by Brian Carrier and contributors | Reading back, as an exFAT reader of its own, what Radix wrote to the exFAT tests' volumes | IPL-1.0, CPL-1.0 and GPL-2.0-or-later (parts) |
 | [exfat-fuse](https://github.com/relan/exfat) 1.4.0, by Andrew Nayenko | Writing, once, the exFAT volume Radix's exFAT tests read (`kernel/fs/exfat/src/fixtures`); none of its code is in the repository | GPL-2.0-or-later |
+| [e2fsprogs](https://e2fsprogs.sourceforge.net/), by Theodore Ts'o and contributors (`mkfs.ext4`, `e2fsck`, `debugfs`, `tune2fs`) | Making the ext4, ext3 and ext2 volumes Radix's ext4 tests and the `ext4-write` and `ext4-power-cut` boot tests use, checking what Radix wrote to them, replaying their journals and reading their files back | GPL-2.0-only (its libraries: LGPL-2.0-only, BSD-3-Clause and MIT) |
+| [Linux](https://kernel.org/)'s ext4, 6.18 | Writing, once, the ext4 volume with transactions left in its journal that Radix's ext4 tests replay (`kernel/fs/ext4/src/fixtures`); none of its code is in the repository | GPL-2.0-only |
 | [btrfs-progs](https://github.com/kdave/btrfs-progs) (`mkfs.btrfs`) | Making the Btrfs filesystems Radix's Btrfs tests read; run as a host tool, the system's or Ubuntu 26.04's package, which `ob test` unpacks into `.cache/btrfs-progs` when the system's is too old, never built into Dukovo | GPL-2.0-only |
 | [Clang, LLD and LLVM](https://llvm.org/) 20 | Building the C library, its ports and C programs for Radix ([ADR 0069](docs/adr/0069-clang-toolchain-and-ports.md)) | Apache-2.0 WITH LLVM-exception |
 | [Meson](https://mesonbuild.com/) and [Ninja](https://ninja-build.org/) | Building mlibc | Apache-2.0 |
@@ -180,6 +182,11 @@ We implement these from their published descriptions. No code is copied.
 - Btrfs's on-disk format, from the
   [Btrfs documentation](https://btrfs.readthedocs.io/) and what Linux's
   `mkfs.btrfs` writes.
+- ext4's on-disk format and its journal's (jbd2), as Linux's
+  ["ext4 Data Structures and Algorithms"](https://docs.kernel.org/filesystems/ext4/)
+  describes them, and what Linux's `mkfs.ext4` writes: `radix-ext4`
+  ([ADR 0141](docs/adr/0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md)).
+  We use no code of Linux's ext4 or of e2fsprogs.
 - Daniel J. Bernstein's
   ["Fast-key-erasure random-number generators"](https://blog.cr.yp.to/20170723-random.html),
   the design of the kernel's random number generator and its per-CPU

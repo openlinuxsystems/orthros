@@ -74,3 +74,10 @@ SPDX-License-Identifier = "Apache-2.0 OR MIT"
 path = "kernel/fs/exfat/src/fixtures/*.sectors"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# The sectors of an ext4 volume Linux's ext4 wrote, its journal not yet
+# replayed, which the ext4 driver's tests read (kernel/fs/ext4/src/tests.rs).
+[[annotations]]
+path = "kernel/fs/ext4/src/fixtures/*.sectors"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

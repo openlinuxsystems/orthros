@@ -3,7 +3,7 @@
 
 //! storage: the test program of the `storage` boot test, from
 //! `/system/tests/storage` in the boot archive. Spark starts it with the
-//! root directory, after mounting each FAT, exFAT or Btrfs disk at
+//! root directory, after mounting each FAT, exFAT, Btrfs or ext4 disk at
 //! `/volumes/<name>`.
 //!
 //! - `storage write` writes a set of files to every volume (short and long
@@ -13,8 +13,8 @@
 //!   `/processes` and `/kernel`;
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
-//!   (with mtools, from `ob test`; none on exFAT), then checks
-//!   `/processes` again;
+//!   (with mtools, from `ob test`; on Btrfs and ext4 its `mkfs` wrote it
+//!   before the first; none on exFAT), then checks `/processes` again;
 //! - `storage raw <disk>...` reads and writes each disk in `/devices` raw at
 //!   odd offsets, discards part of it, flushes it, and asks it Linux's
 //!   block requests (the `disk-raw` boot test, [`disk::raw`]);
@@ -25,9 +25,10 @@
 //!   refuse writes: the `btrfs` boot test's host compares what it prints
 //!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]);
 //! - `storage churn` writes, syncs and renames a file at a time on the one
-//!   volume, removing older ones, until the `btrfs-power-cut` boot test
-//!   cuts the power ([`churn`]); `storage churned`, after the reboot,
-//!   checks what the cut left and writes the volume again ([`churned`]).
+//!   volume, removing older ones, until the `btrfs-power-cut` or
+//!   `ext4-power-cut` boot test cuts the power ([`churn`]); `storage
+//!   churned`, after the reboot, checks what the cut left and writes the
+//!   volume again ([`churned`]).
 //!
 //! It prints a line per step, `storage: FAILED: ...` for each check that
 //! fails, and exits with 0 only if none did.
@@ -642,6 +643,10 @@ fn churned(root: &Dir, name: &str) {
     };
     let (mut whole, mut unfinished) = (0, 0);
     for entry in entries {
+        // `mkfs.ext4` makes it, for `e2fsck` to put lost files in.
+        if entry.name == "lost+found" && entry.kind == FileKind::Directory {
+            continue;
+        }
         let data = match dir.read_file(&entry.name) {
             Ok(data) => data,
             Err(err) => {

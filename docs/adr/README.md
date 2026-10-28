@@ -147,3 +147,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0133](0133-btrfs-uncompresses-a-runs-extents-on-two-cpus-through-the-kernels-join.md) | Btrfs uncompresses a run's extents on two CPUs, through the kernel's `join` | Accepted |
 | [0134](0134-btrfs-compresses-writes-with-zstd-level-1-on-the-disks-that-ask-for-it.md) | Btrfs compresses writes with zstd level 1 on the disks that ask for it | Accepted |
 | [0140](0140-exfat-from-the-specification.md) | exFAT is our own implementation from Microsoft's specification, and ships though its patents run to 2027 | Accepted |
+| [0141](0141-ext4-from-its-documentation-with-a-journal-of-whole-blocks.md) | ext4 is our own implementation from its documentation, journaling whole blocks at each sync | Accepted |

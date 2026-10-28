@@ -321,6 +321,21 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "e2fsprogs",
+            purpose: "makes, checks and reads back the ext4 disks of the ext4 tests",
+            // In /usr/sbin, as dosfstools is.
+            found: |_| {
+                ["/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkfs.ext4"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: all("e2fsprogs"),
+            fallback: None,
+        },
+        Requirement {
             name: "The Sleuth Kit",
             purpose: "reads back what the exFAT tests wrote, as an exFAT reader of its own",
             found: |_| program_version("fls", "-V"),

@@ -21,6 +21,7 @@ members = [
     "fs/block",
     "fs/btrfs",
     "fs/exfat",
+    "fs/ext4",
     "fs/fat",
     "fs/vfs",
     "ipc",
