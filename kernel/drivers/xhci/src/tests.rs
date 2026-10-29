@@ -20,6 +20,7 @@ use crate::ring::{RING_TRBS, TRB_SIZE, kind};
 use crate::*;
 
 mod dbc;
+mod streams;
 
 /// Where the simulated controller's register blocks are.
 const CAPLENGTH: usize = 0x40;
@@ -52,6 +53,14 @@ struct SimDevice {
     stall_next: bool,
     /// How many endpoints its slot had when SET_CONFIGURATION came.
     endpoints_when_configured: Option<usize>,
+    /// What its bulk IN endpoints send next on each stream, by device
+    /// context index and stream, a transfer each.
+    stream_reports: HashMap<(u8, u16), VecDeque<Vec<u8>>>,
+    /// What came to its OUT endpoints on streams: the device context
+    /// index, the stream, the data.
+    received_on: Vec<(u8, u16, Vec<u8>)>,
+    /// The alternate setting SET_INTERFACE put its interface in.
+    alternate: u8,
 }
 
 /// A keyboard at `speed_id`, with a packet size of `max_packet0` (the
@@ -98,6 +107,9 @@ fn keyboard(speed_id: u8, max_packet0: u8) -> SimDevice {
         received: Vec::new(),
         stall_next: false,
         endpoints_when_configured: None,
+        stream_reports: HashMap::new(),
+        received_on: Vec::new(),
+        alternate: 0,
     }
 }
 
@@ -122,6 +134,39 @@ fn bulk(speed_id: u8) -> SimDevice {
     device.config.extend([7, 5, 0x02, 2, 0x00, 0x02, 0]);
     device.config.extend([7, 5, 0x83, 3, 0x40, 0x00, 4]);
     device
+}
+
+/// A SuperSpeed USB Attached SCSI device as QEMU's `usb-uas` is: its
+/// command pipe without streams, and its status, data-in and data-out
+/// pipes with 16 streams each, behind a Bulk-Only setting 0 whose two
+/// pipes are endpoints 1 and 2, as a USB disk with both has them.
+fn uas() -> SimDevice {
+    let mut device = keyboard(4, 9);
+    device.device[2..4].copy_from_slice(&[0x00, 0x03]);
+    let mut config = std::vec![9, 2, 0, 0, 1, 1, 0, 0xc0, 0];
+    config.extend([9, 4, 0, 0, 2, 8, 6, 0x50, 0]);
+    config.extend([7, 5, 0x81, 2, 0x00, 0x04, 0, 6, 0x30, 15, 0, 0, 0]);
+    config.extend([7, 5, 0x02, 2, 0x00, 0x04, 0, 6, 0x30, 15, 0, 0, 0]);
+    config.extend([9, 4, 0, 1, 4, 8, 6, 0x62, 0]);
+    for (address, streams, pipe) in [(0x01, 0, 1), (0x82, 4, 2), (0x83, 4, 3), (0x04, 4, 4)] {
+        config.extend([7, 5, address, 2, 0x00, 0x04, 0, 6, 0x30, 15, streams, 0, 0]);
+        config.extend([4, 0x24, pipe, 0]);
+    }
+    let total = config.len() as u16;
+    config[2..4].copy_from_slice(&total.to_le_bytes());
+    device.config = config;
+    device
+}
+
+/// The endpoints of alternate setting `alternate` of `device`'s
+/// configuration.
+fn setting_of(device: &SimDevice, alternate: u8) -> Vec<radix_usb::EndpointDescriptor> {
+    let config = radix_usb::Configuration::parse(&device.config).unwrap();
+    config
+        .interfaces()
+        .filter(|i| i.descriptor.alternate == alternate)
+        .flat_map(|i| i.endpoints().collect::<Vec<_>>())
+        .collect()
 }
 
 /// The endpoints of `device`'s configuration.
@@ -154,10 +199,23 @@ impl SimRing {
     }
 }
 
+/// An endpoint's streams, as Configure Endpoint gave them.
+#[derive(Clone, Debug)]
+struct SimStreams {
+    /// The Stream Context Array, and its entries.
+    array: u64,
+    entries: usize,
+    /// Each stream's ring once the doorbell named it, read from its
+    /// context then.
+    rings: HashMap<u16, SimRing>,
+}
+
 /// An endpoint other than 0, as Configure Endpoint gave it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct SimEndpoint {
+    /// Its ring, or with streams, its state alone.
     ring: SimRing,
+    streams: Option<SimStreams>,
     /// Its endpoint context's fields.
     kind: u32,
     max_packet: u16,
@@ -268,6 +326,15 @@ struct State {
 
     /// Its Debug Capability, and the debug host on its cable.
     dbc: Option<dbc::SimDbc>,
+    /// HCCPARAMS1's MaxPSASize: its Stream Context Arrays have up to 2 to
+    /// its power plus one entries.
+    max_psa_size: u32,
+    /// The streams Set TR Dequeue Pointer moved: slot, device context
+    /// index, stream, and where to.
+    stream_dequeues: Vec<(u8, u8, u16, u64)>,
+    /// The doorbells rung for endpoints: slot, device context index and
+    /// stream.
+    doorbells: Vec<(u8, u8, u16)>,
 }
 
 impl State {
@@ -321,6 +388,9 @@ impl State {
             td_sizes: Vec::new(),
             links_in_tds: Vec::new(),
             dbc: None,
+            max_psa_size: 7,
+            stream_dequeues: Vec::new(),
+            doorbells: Vec::new(),
         }
     }
 
@@ -366,7 +436,29 @@ impl State {
         for (slot, index) in waiting {
             self.slots.get_mut(&slot).unwrap().endpoints.get_mut(&index).unwrap().ring.pending =
                 None;
-            self.run_endpoint(slot, index);
+            self.run_endpoint(slot, index, 0);
+        }
+    }
+
+    /// Gives the device at `port` and `route` something to send on stream
+    /// `stream` of its endpoint at device context index `index`, and
+    /// sends it if a transfer waits on that stream.
+    fn stream_report(&mut self, port: u8, route: u32, (index, stream): (u8, u16), report: &[u8]) {
+        let mut device = self.device(port, route).unwrap();
+        device.stream_reports.entry((index, stream)).or_default().push_back(report.to_vec());
+        self.put_device(port, route, device);
+        let slots: Vec<u8> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.port == port && slot.route == route)
+            .map(|(&id, _)| id)
+            .collect();
+        for slot in slots {
+            let Some(mut ring) = self.ring_of(slot, index, stream) else { continue };
+            if ring.pending.take().is_some() {
+                self.set_ring(slot, index, stream, ring);
+                self.run_endpoint(slot, index, stream);
+            }
         }
     }
 
@@ -481,7 +573,7 @@ impl State {
         }
         loop {
             let at = self.cmd_dequeue;
-            let (parameter, _status, control) = State::read_trb(at);
+            let (parameter, status, control) = State::read_trb(at);
             if (control & 1 != 0) != self.cmd_cycle {
                 break;
             }
@@ -496,7 +588,7 @@ impl State {
             let slot = (control >> 24) as u8;
             let endpoint = ((control >> 16) & 0x1f) as u8;
             self.commands.push((kind, slot));
-            let (code, slot) = self.command(kind, slot, endpoint, parameter, control);
+            let (code, slot) = self.command(kind, (slot, endpoint), parameter, status, control);
             self.cmd_dequeue += TRB_SIZE as u64;
             self.post(
                 at,
@@ -509,9 +601,9 @@ impl State {
     fn command(
         &mut self,
         kind: u32,
-        slot: u8,
-        endpoint: u8,
+        (slot, endpoint): (u8, u8),
         parameter: u64,
+        status: u32,
         control: u32,
     ) -> (u8, u8) {
         let csz = self.context_size as u64;
@@ -615,13 +707,27 @@ impl State {
                     let dequeue = State::read64(at + 8);
                     let d4 = State::read32(at + 16);
                     let kind = (d1 >> 3) & 7;
+                    // With streams, the dequeue pointer is the Stream
+                    // Context Array's, a linear one, of 2 to MaxPStreams
+                    // plus one entries.
+                    let max_pstreams = (d0 >> 10) & 0x1f;
+                    let streams = (max_pstreams > 0).then(|| SimStreams {
+                        array: dequeue & !0xf,
+                        entries: 2 << max_pstreams,
+                        rings: HashMap::new(),
+                    });
+                    if max_pstreams > 0
+                        && (d0 & 1 << 15 == 0 || dequeue & 0xf != 0 || kind != 2 && kind != 6)
+                    {
+                        return (code::PARAMETER, slot);
+                    }
                     // A ring just made starts with its cycle state set; one
                     // dropped and added again goes on from where it is.
                     let fresh = drop & 1 << index == 0;
                     if kind == 0
                         || kind == 4
                         || d1 >> 16 == 0
-                        || (fresh && dequeue & 1 == 0)
+                        || (fresh && streams.is_none() && dequeue & 1 == 0)
                         || index > entries
                     {
                         return (code::PARAMETER, slot);
@@ -635,6 +741,7 @@ impl State {
                                 state: EpState::Running,
                                 pending: None,
                             },
+                            streams,
                             kind,
                             max_packet: (d1 >> 16) as u16,
                             interval: (d0 >> 16) as u8,
@@ -661,36 +768,78 @@ impl State {
                 (code::SUCCESS, slot)
             }
             kind::RESET_ENDPOINT | kind::STOP_ENDPOINT | kind::SET_TR_DEQUEUE => {
+                let stream = (status >> 16) as u16;
                 let Some(entry) = self.slots.get_mut(&slot) else {
                     return (code::SLOT_NOT_ENABLED, slot);
                 };
-                let ring = match endpoint {
-                    1 => &mut entry.ep0,
+                let (ring, streams) = match endpoint {
+                    1 => (&mut entry.ep0, None),
                     other => match entry.endpoints.get_mut(&other) {
-                        Some(endpoint) => &mut endpoint.ring,
+                        Some(endpoint) => (&mut endpoint.ring, endpoint.streams.as_mut()),
                         None => return (code::ENDPOINT_NOT_ENABLED, slot),
                     },
                 };
+                let mut stopped = Vec::new();
                 match (kind, ring.state) {
                     (kind::RESET_ENDPOINT, EpState::Halted) => ring.state = EpState::Stopped,
                     (kind::STOP_ENDPOINT, EpState::Running) => {
                         ring.state = EpState::Stopped;
-                        if let Some(trb) = ring.pending.take() {
-                            self.post(
-                                trb,
-                                u32::from(code::STOPPED) << 24,
-                                kind::TRANSFER_EVENT << 10
-                                    | u32::from(endpoint) << 16
-                                    | u32::from(slot) << 24,
+                        stopped.extend(ring.pending.take());
+                        // Every stream stops; a TD that waited is read
+                        // again from where it starts when its doorbell is
+                        // rung.
+                        if let Some(streams) = streams {
+                            stopped.extend(
+                                streams.rings.values_mut().filter_map(|r| r.pending.take()),
                             );
                         }
                     }
-                    (kind::SET_TR_DEQUEUE, EpState::Stopped | EpState::Halted) => {
-                        ring.dequeue = parameter & !0xf;
-                        ring.cycle = parameter & 1 != 0;
-                    }
+                    (kind::SET_TR_DEQUEUE, EpState::Stopped | EpState::Halted) => match streams {
+                        Some(streams) => {
+                            let valid = (1..streams.entries).contains(&usize::from(stream));
+                            if !valid || (parameter >> 1) & 7 != 1 {
+                                return (code::PARAMETER, slot);
+                            }
+                            let ring = SimRing {
+                                dequeue: parameter & !0xf,
+                                cycle: parameter & 1 != 0,
+                                state: EpState::Stopped,
+                                pending: None,
+                            };
+                            streams.rings.insert(stream, ring);
+                            self.stream_dequeues.push((slot, endpoint, stream, parameter & !0xf));
+                        }
+                        None => {
+                            ring.dequeue = parameter & !0xf;
+                            ring.cycle = parameter & 1 != 0;
+                        }
+                    },
                     _ => return (code::CONTEXT_STATE, slot),
                 }
+                for trb in stopped {
+                    self.post(
+                        trb,
+                        u32::from(code::STOPPED) << 24,
+                        kind::TRANSFER_EVENT << 10
+                            | u32::from(endpoint) << 16
+                            | u32::from(slot) << 24,
+                    );
+                }
+                (code::SUCCESS, slot)
+            }
+            kind::RESET_DEVICE => {
+                let Some(entry) = self.slots.get_mut(&slot) else {
+                    return (code::SLOT_NOT_ENABLED, slot);
+                };
+                if !entry.addressed {
+                    return (code::CONTEXT_STATE, slot);
+                }
+                // The default state: endpoint 0 alone, no address.
+                entry.addressed = false;
+                entry.endpoints.clear();
+                entry.entries = 1;
+                let output = State::read64(self.dcbaap + 8 * u64::from(slot));
+                fake_memory_write(output + 12, &(1u32 << 27).to_le_bytes());
                 (code::SUCCESS, slot)
             }
             _ => (code::TRB, slot),
@@ -788,6 +937,10 @@ impl State {
                         }
                         // CLEAR_FEATURE(ENDPOINT_HALT).
                         (1, _) if setup.request_type == 2 => Some(Vec::new()),
+                        (11, _) if setup.request_type == 1 => {
+                            device.alternate = setup.value as u8;
+                            Some(Vec::new())
+                        }
                         _ => None,
                     }
                 };
@@ -819,17 +972,41 @@ impl State {
         }
     }
 
-    /// Runs the transfers on endpoint `index` of slot `slot`: each a TD
-    /// of Normal TRBs, chained. An IN transfer takes the device's next
-    /// report, or waits for one, and ends at the TRB where the report
-    /// does; an OUT one's data is kept, as one transfer. Events come for
-    /// the TRBs that ask for them.
-    fn run_endpoint(&mut self, slot: u8, index: u8) {
+    /// The ring of stream `stream` of endpoint `index` of slot `slot`, or
+    /// its ring if `stream` is 0; a stream's is read from its context the
+    /// first time. `None` if there is no such ring.
+    fn ring_of(&mut self, slot: u8, index: u8, stream: u16) -> Option<SimRing> {
+        let endpoint = self.slots.get_mut(&slot)?.endpoints.get_mut(&index)?;
+        let state = endpoint.ring.state;
+        match (&mut endpoint.streams, stream) {
+            (None, 0) => Some(endpoint.ring),
+            (Some(streams), 1..) if usize::from(stream) < streams.entries => {
+                let context = State::read64(streams.array + 16 * u64::from(stream));
+                // A Primary Transfer Ring's Stream Context Type.
+                let ring = streams.rings.entry(stream).or_insert(SimRing {
+                    dequeue: context & !0xf,
+                    cycle: context & 1 != 0,
+                    state,
+                    pending: None,
+                });
+                ((context >> 1) & 7 == 1).then_some(SimRing { state, ..*ring })
+            }
+            _ => None,
+        }
+    }
+
+    /// Runs the transfers on stream `stream` of endpoint `index` of slot
+    /// `slot` (its ring, if 0): each a TD of Normal TRBs, chained. An IN
+    /// transfer takes the device's next report (on that stream), or
+    /// waits for one, and ends at the TRB where the report does; an OUT
+    /// one's data is kept, as one transfer. Events come for the TRBs that
+    /// ask for them.
+    fn run_endpoint(&mut self, slot: u8, index: u8, stream: u16) {
+        self.doorbells.push((slot, index, stream));
         loop {
             let Some(entry) = self.slots.get(&slot) else { return };
             let (port, route) = (entry.port, entry.route);
-            let Some(endpoint) = entry.endpoints.get(&index) else { return };
-            let mut ring = endpoint.ring;
+            let Some(mut ring) = self.ring_of(slot, index, stream) else { return };
             if ring.state == EpState::Halted || ring.pending.is_some() {
                 return;
             }
@@ -844,7 +1021,7 @@ impl State {
                     if trbs.is_empty() {
                         (ring.dequeue, ring.cycle) = (at, cycle);
                     }
-                    self.set_ring(slot, index, ring);
+                    self.set_ring(slot, index, stream, ring);
                     return;
                 }
                 if (control >> 10) & 0x3f == kind::LINK {
@@ -873,7 +1050,7 @@ impl State {
             };
             let Some(mut device) = self.device(port, route) else {
                 ring.state = EpState::Halted;
-                self.set_ring(slot, index, ring);
+                self.set_ring(slot, index, stream, ring);
                 let (status, control) = event(code::TRANSACTION, 0);
                 self.post(first, status, control);
                 return;
@@ -881,7 +1058,7 @@ impl State {
             if device.stall_next {
                 device.stall_next = false;
                 ring.state = EpState::Halted;
-                self.set_ring(slot, index, ring);
+                self.set_ring(slot, index, stream, ring);
                 self.put_device(port, route, device);
                 let (status, control) = event(code::STALL, 0);
                 self.post(first, status, control);
@@ -889,9 +1066,14 @@ impl State {
             }
             let mut ending = None;
             if index & 1 != 0 {
-                let Some(report) = device.reports.pop_front() else {
+                let next = if stream == 0 {
+                    device.reports.pop_front()
+                } else {
+                    device.stream_reports.get_mut(&(index, stream)).and_then(VecDeque::pop_front)
+                };
+                let Some(report) = next else {
                     ring.pending = Some(first);
-                    self.set_ring(slot, index, ring);
+                    self.set_ring(slot, index, stream, ring);
                     return;
                 };
                 let mut offset = 0;
@@ -921,6 +1103,9 @@ impl State {
                     fake_memory(parameter, &mut part);
                     data.extend(part);
                 }
+                if stream > 0 {
+                    device.received_on.push((index, stream, data.clone()));
+                }
                 device.received.push(data);
                 let &(trb, _, _, control) = trbs.last().unwrap();
                 if control & control::IOC != 0 {
@@ -929,7 +1114,7 @@ impl State {
             }
             self.td_sizes.push((index, trbs.iter().map(|t| (t.2 >> 17) & 0x1f).collect()));
             (ring.dequeue, ring.cycle) = (at, cycle);
-            self.set_ring(slot, index, ring);
+            self.set_ring(slot, index, stream, ring);
             self.put_device(port, route, device);
             if let Some((trb, (status, control))) = ending {
                 self.post(trb, status, control);
@@ -937,8 +1122,16 @@ impl State {
         }
     }
 
-    fn set_ring(&mut self, slot: u8, index: u8, ring: SimRing) {
-        self.slots.get_mut(&slot).unwrap().endpoints.get_mut(&index).unwrap().ring = ring;
+    fn set_ring(&mut self, slot: u8, index: u8, stream: u16, ring: SimRing) {
+        let endpoint = self.slots.get_mut(&slot).unwrap().endpoints.get_mut(&index).unwrap();
+        // The endpoint's state is its, whatever stream ran.
+        endpoint.ring.state = ring.state;
+        match endpoint.streams.as_mut() {
+            Some(streams) if stream > 0 => {
+                streams.rings.insert(stream, ring);
+            }
+            _ => endpoint.ring = ring,
+        }
     }
 
     fn write_port(&mut self, port: u8, value: u32) {
@@ -1013,7 +1206,7 @@ impl Registers for Sim {
                 let csz = if s.context_size == 64 { cap::CSZ } else { 0 };
                 let ac64 = if s.ac64 { cap::AC64 } else { 0 };
                 let ppc = if s.port_power { cap::PPC } else { 0 };
-                ((XCAPS / 4) as u32) << 16 | csz | ac64 | ppc
+                ((XCAPS / 4) as u32) << 16 | s.max_psa_size << 12 | csz | ac64 | ppc
             }
             0x14 => DOORBELLS as u32,
             0x18 => RUNTIME as u32,
@@ -1201,7 +1394,7 @@ impl Registers for Sim {
                 } else if value == 1 {
                     s.run_transfers(index);
                 } else {
-                    s.run_endpoint(index, value as u8);
+                    s.run_endpoint(index, value as u8, (value >> 16) as u16);
                 }
             }
             _ => {}
@@ -1801,7 +1994,7 @@ fn endpoints_are_given_to_the_controller_before_the_configuration_is_set() {
     let s = sim.state();
     let slot = &s.slots[&device.slot()];
     assert_eq!(slot.entries, 3);
-    let endpoint = slot.endpoints[&3];
+    let endpoint = &slot.endpoints[&3];
     // Interrupt IN, 8 bytes every 2^6 microframes (bInterval 7 at high
     // speed), three retries, an interval's worth on average.
     assert_eq!((endpoint.kind, endpoint.max_packet, endpoint.interval), (7, 8, 6));
@@ -1864,7 +2057,7 @@ fn bulk_transfers_carry_their_data_both_ways() {
     {
         let s = sim.state();
         let endpoints = &s.slots[&slot].endpoints;
-        let (bulk_in, bulk_out, status) = (endpoints[&3], endpoints[&4], endpoints[&7]);
+        let (bulk_in, bulk_out, status) = (&endpoints[&3], &endpoints[&4], &endpoints[&7]);
         assert_eq!((bulk_in.kind, bulk_in.max_packet, bulk_in.interval), (6, 512, 0));
         assert_eq!((bulk_in.esit, bulk_in.average), (0, 3072));
         assert_eq!((bulk_out.kind, status.kind, status.interval), (2, 7, 3));
@@ -2110,7 +2303,7 @@ fn a_hub_says_so_in_its_slot() {
     {
         let s = sim.state();
         // Full speed, polled every 255 ms: 2^10 microframes.
-        let status = s.slots[&slot].endpoints[&3];
+        let status = &s.slots[&slot].endpoints[&3];
         assert_eq!((status.kind, status.max_packet, status.interval), (7, 2, 10));
         assert_eq!(s.slots[&slot].hub, None);
     }

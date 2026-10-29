@@ -37,6 +37,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
+use core::mem::MaybeUninit;
 
 use radix_hal::Devices;
 use radix_hw::Dma;
@@ -75,7 +76,7 @@ const PORT_WORDS: usize = 4;
 /// What the driver waits with: the thread's sleep, and the events kept
 /// meanwhile.
 pub(super) struct KernelHost {
-    kept: Vec<Event, Kmalloc>,
+    pub(super) kept: Vec<Event, Kmalloc>,
     /// Events that did not fit.
     lost: u64,
 }
@@ -547,7 +548,7 @@ impl Controller {
     }
 
     /// Resets root port `port` (warm for a USB 3 one) and waits for it.
-    fn reset_port(&mut self, port: u8, warm: bool) -> Result<(), Why> {
+    pub(super) fn reset_port(&mut self, port: u8, warm: bool) -> Result<(), Why> {
         self.xhci.reset_port(port, warm);
         let deadline = self.host.now_us() + RESET_US;
         loop {
@@ -596,8 +597,7 @@ impl Controller {
         let (Ok(home), Ok(())) = (Box::try_new_uninit_in(heap), self.devices.try_reserve(1)) else {
             return Err(Why::Device("out of memory"));
         };
-        let mut device =
-            Box::write(home, Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?);
+        let mut device = self.address(home, place)?;
         let result = self.identify(&mut device, path, name).inspect_err(|_| name.clear());
         let result = result.and_then(|plan| {
             let endpoints = &plan.endpoints[..plan.count];
@@ -645,6 +645,19 @@ impl Controller {
             );
         }
         Ok(())
+    }
+
+    /// Gives the device at `place` a slot and its address, in `home`. Kept
+    /// out of [`Controller::set_up`]'s frame, which the device would not
+    /// fit in with the rest.
+    #[inline(never)]
+    fn address(
+        &mut self,
+        home: Box<MaybeUninit<Device>, Kmalloc>,
+        place: Place,
+    ) -> Result<Box<Device, Kmalloc>, Why> {
+        let device = Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?;
+        Ok(Box::write(home, device))
     }
 
     /// Reads what the device is, gives the controller its packet size, and
@@ -728,8 +741,13 @@ impl Controller {
                 count += 1;
             }
             if d.class == class::MASS_STORAGE && plan.storage.is_none() {
+                // Its other settings too: one may be UAS's.
+                let others = config
+                    .interfaces()
+                    .filter(|i| i.descriptor.number == d.number && i.descriptor.alternate != 0);
+                let settings = core::iter::once(interface.clone()).chain(others);
                 let strings = (found.serial_string, language);
-                plan.storage = Some(StoragePlan::of(d, interface.endpoints(), strings));
+                plan.storage = StoragePlan::of(settings, config.value, strings);
             }
             if d.class == class::HID && plan.hid_count < MAX_HIDS {
                 let descriptor = interface
