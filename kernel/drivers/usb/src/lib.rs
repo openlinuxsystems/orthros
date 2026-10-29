@@ -22,8 +22,9 @@
 //!   requests that drive them (Phase 11a, ADR 0147).
 //! - [`hid`]: what a HID interface says of itself, and the class's
 //!   requests (Phase 11a, ADR 0148).
-//! - [`storage`]: mass storage interfaces, and the Bulk-Only Transport
-//!   that carries SCSI commands to USB sticks (Phase 11b, ADR 0161).
+//! - [`storage`]: mass storage interfaces, the Bulk-Only Transport that
+//!   carries SCSI commands to USB sticks (Phase 11b, ADR 0161), and USB
+//!   Attached SCSI, which carries many at once to USB 3 disks (ADR 0162).
 //!
 //! The crate knows nothing of the kernel or of a controller, so its tests
 //! run on the host.
@@ -267,6 +268,18 @@ impl Setup {
             request: request::SET_CONFIGURATION,
             value: u16::from(value),
             index: 0,
+            length: 0,
+        }
+    }
+
+    /// SET_INTERFACE: puts interface `interface` in its alternate setting
+    /// `alternate`.
+    pub fn set_interface(interface: u8, alternate: u8) -> Setup {
+        Setup {
+            request_type: STANDARD | TO_INTERFACE,
+            request: request::SET_INTERFACE,
+            value: u16::from(alternate),
+            index: u16::from(interface),
             length: 0,
         }
     }
@@ -638,6 +651,16 @@ impl EndpointDescriptor {
     /// microframe after the first (0 to 2).
     pub fn extra_transactions(&self) -> u8 {
         ((self.max_packet_raw >> 11) & 3) as u8
+    }
+
+    /// For a SuperSpeed bulk endpoint, the streams it has (USB 3.2,
+    /// 9.6.7: 2 to the power its companion's MaxStreams says), or 0 if
+    /// it has none.
+    pub fn max_streams(&self) -> u32 {
+        match (self.transfer_type(), self.companion_attributes & 0x1f) {
+            (TransferType::Bulk, n) if n > 0 => 1 << n,
+            _ => 0,
+        }
     }
 }
 

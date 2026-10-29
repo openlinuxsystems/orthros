@@ -21,6 +21,9 @@
 //! "USBS" is taken if every status has the same one, and a stick that
 //! says data did not move when all of it did, for an INQUIRY or a READ
 //! CAPACITY, has what it says of that ignored from then on.
+//!
+//! USB 3 disks and their bridges speak USB Attached SCSI as well, which
+//! has many commands in flight at once ([`uas`], ADR 0162).
 
 use radix_scsi::{Cdb, Data, Reply, SENSE_LENGTH, Sense, Transport, TransportError};
 
@@ -28,6 +31,7 @@ use crate::{CLASS, DEVICE_TO_HOST, Setup, TO_INTERFACE};
 
 #[cfg(test)]
 mod tests;
+pub mod uas;
 
 /// The mass storage class's SCSI subclass: the commands are SCSI's.
 pub const SUBCLASS_SCSI: u8 = 0x06;

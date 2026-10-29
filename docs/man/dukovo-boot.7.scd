@@ -34,7 +34,11 @@ Btrfs holds the system and what changes (*spark*(8)). The files GRUB
 reads are:
 
 _/boot/radix_
-	The kernel, an ELF executable.
+	The kernel, an ELF executable, without its debug information: GRUB
+	loads every section of the file into memory, and the debug
+	information would be most of it. Backtraces need only the kernel's
+	own symbol table; *ob*(1) keeps the debug information in
+	_out/sysroot/boot/radix_, for *gdb*(1).
 
 _/boot/grub/grub.cfg_
 	The menu, generated from _image/grub/grub.cfg.in_.
@@ -583,8 +587,21 @@ Unplugged, a stick's disks go:
 	USB: 1-2: QEMU USB HARDDRIVE was unplugged
 	Disk: sdb is gone with its USB device
 
-A device that speaks only USB Attached SCSI (UAS) is logged as one that
-cannot be used yet.
+A USB 3 disk that speaks USB Attached SCSI (UAS) is driven over it, many
+commands at once, when it is at SuperSpeed on a controller with streams,
+or below SuperSpeed (ADR 0162). Its thread finds its logical units with
+REPORT LUNS; its disks' lines end in _USB Attached SCSI_, and when it has
+more than one unit each is named after its place:
+
+	Disk: sdb is a USB disk of 1.4 MiB on 1-2 LUN 0: QEMU QEMU HARDDISK 2.5+, 512 bytes a block, write cache, USB Attached SCSI
+	Disk: sdc is a USB disk of 32.0 MiB on 1-2 LUN 1: QEMU QEMU HARDDISK 2.5+, 512 bytes a block, write cache, USB Attached SCSI
+
+A device that speaks both is driven over the Bulk-Only Transport when its
+controller has no streams, which the log says; one that speaks UAS alone
+is then not used. A UAS device that does not answer a request in 30 s,
+or breaks the protocol, is reset, and its requests in flight go again:
+
+	Disk: USB 1-2: it did not answer in time; it is reset
 
 With the *dbc* flag the first controller with a Debug Capability turns
 it on, and the console goes there as well (ADR 0160); each controller

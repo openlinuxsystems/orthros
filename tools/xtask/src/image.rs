@@ -292,7 +292,7 @@ pub fn build(ctx: &Ctx, spec: &ImageSpec<'_>) -> Result<()> {
         std::fs::remove_dir_all(&spec.staging)
             .context(|| format!("removing {}", spec.staging.display()))?;
     }
-    process::copy(spec.kernel, &spec.staging.join("boot/radix"))?;
+    kernel::copy_for_image(ctx, spec.kernel, &spec.staging.join("boot/radix"))?;
     let manifest = licenses::install(
         ctx,
         &spec.staging,

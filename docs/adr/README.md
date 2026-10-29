@@ -171,3 +171,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0157](0157-a-disks-health-is-read-through-a-request-of-its-own.md) | A disk's health is read through a request of its own | Accepted |
 | [0160](0160-the-console-over-the-xhci-debug-capability.md) | The console goes over the xHCI Debug Capability to a second computer, with the `dbc` flag | Accepted |
 | [0161](0161-usb-sticks-are-disks-over-the-bulk-only-transport.md) | USB sticks are disks over the Bulk-Only Transport, served by a thread each | Accepted |
+| [0162](0162-usb-attached-scsi-queues-commands-on-usb-3-disks.md) | USB Attached SCSI queues commands on USB 3 disks | Accepted |

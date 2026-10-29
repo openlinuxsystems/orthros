@@ -386,10 +386,10 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 # LIMITS
 
 - virtio block devices, SATA disks on AHCI controllers, NVMe namespaces
-  and USB disks of the Bulk-Only Transport have drivers; USB Attached
-  SCSI (UAS) comes later in Phase 11. Port
-  multipliers, optical drives, disks with logical sectors larger than
-  4096 bytes and NVMe namespaces with metadata are not supported.
+  and USB disks, over the Bulk-Only Transport or USB Attached SCSI
+  (UAS), have drivers. Port multipliers, optical drives, disks with
+  logical sectors larger than 4096 bytes and NVMe namespaces with
+  metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
 - There is no name cache, disks other than USB ones are not plugged in

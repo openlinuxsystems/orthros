@@ -16,6 +16,8 @@
 //!   state (TC). The driver writes a TRB's control word last, after a
 //!   barrier, so the controller never sees half of one, and a TD's first
 //!   TRB's last of all, so it never sees half of a TD.
+//! - [`StreamRings`] are the rings of an endpoint's streams, 2 KiB each,
+//!   and the Stream Context Array that lists them (4.12).
 //! - [`EventRing`] is the ring the controller fills and the driver reads:
 //!   one segment of a page, 256 events, listed in a one-entry Event Ring
 //!   Segment Table. The controller wraps from the last event to the first
@@ -167,12 +169,120 @@ impl Trb {
     }
 }
 
+/// Where the driver puts a ring's next TRB, and the cycle state it marks
+/// TRBs with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cursor {
+    enqueue: u8,
+    cycle: bool,
+}
+
+impl Cursor {
+    const START: Cursor = Cursor { enqueue: 0, cycle: true };
+}
+
+/// A ring of `trbs` TRBs at `offset` in `memory`, the last of them a Link
+/// TRB back to its start, as its driver fills it from `cursor`.
+struct Span<'a> {
+    memory: &'a Dma,
+    offset: usize,
+    trbs: usize,
+    cursor: &'a mut Cursor,
+}
+
+impl Span<'_> {
+    /// The physical address of its start.
+    fn phys(&self) -> u64 {
+        self.memory.phys() + self.offset as u64
+    }
+
+    /// Empties it, as new.
+    fn reset(&mut self) {
+        let (offset, link) = (self.offset, self.offset + (self.trbs - 1) * TRB_SIZE);
+        for at in (offset..link + TRB_SIZE).step_by(8) {
+            self.memory.write64(at, 0);
+        }
+        self.memory.write64(link, self.phys());
+        // Not handed over yet: its cycle bit is not the ring's state.
+        self.memory.write32(link + 12, control::kind(kind::LINK) | control::TOGGLE_CYCLE);
+        *self.cursor = Cursor::START;
+    }
+
+    /// Where the next TRB goes, in bytes from the start of `memory`.
+    fn at(&self) -> usize {
+        self.offset + usize::from(self.cursor.enqueue) * TRB_SIZE
+    }
+
+    /// Moves to the next TRB; at the Link TRB, hands it over, with Chain
+    /// set if `chain`, and goes on from the start in the other state.
+    fn advance(&mut self, chain: u32) {
+        self.cursor.enqueue += 1;
+        if usize::from(self.cursor.enqueue) == self.trbs - 1 {
+            let link = self.at();
+            device_barrier();
+            self.memory.write32(
+                link + 12,
+                control::kind(kind::LINK)
+                    | control::TOGGLE_CYCLE
+                    | chain
+                    | u32::from(self.cursor.cycle),
+            );
+            self.cursor.enqueue = 0;
+            self.cursor.cycle = !self.cursor.cycle;
+        }
+    }
+
+    fn push(&mut self, trb: Trb) -> u64 {
+        let at = self.at();
+        self.memory.write64(at, trb.parameter);
+        self.memory.write32(at + 8, trb.status);
+        device_barrier();
+        self.memory
+            .write32(at + 12, (trb.control & !control::CYCLE) | u32::from(self.cursor.cycle));
+        let phys = self.memory.phys() + at as u64;
+        self.advance(0);
+        phys
+    }
+
+    fn push_td(&mut self, count: usize, trb: impl Fn(usize) -> Trb) -> (u64, u64) {
+        let first_at = self.at();
+        let first_cycle = self.cursor.cycle;
+        let chain = |i: usize| if i + 1 < count { control::CHAIN } else { 0 };
+        let mut last = 0;
+        for i in 0..count {
+            let this = trb(i);
+            let at = self.at();
+            self.memory.write64(at, this.parameter);
+            self.memory.write32(at + 8, this.status);
+            // The first stays the controller's until the rest are written.
+            let cycle = if i == 0 { !self.cursor.cycle } else { self.cursor.cycle };
+            device_barrier();
+            self.memory
+                .write32(at + 12, (this.control & !control::CYCLE) | chain(i) | u32::from(cycle));
+            last = self.memory.phys() + at as u64;
+            self.advance(chain(i));
+        }
+        if count > 0 {
+            device_barrier();
+            let control = (trb(0).control & !control::CYCLE) | chain(0) | u32::from(first_cycle);
+            self.memory.write32(first_at + 12, control);
+        }
+        (self.memory.phys() + first_at as u64, last)
+    }
+}
+
+/// The dequeue pointer of the ring at `offset` in `memory` that `cursor`
+/// fills: where the controller should read next, with the cycle state in
+/// bit 0.
+fn dequeue_pointer(memory: &Dma, offset: usize, cursor: Cursor) -> u64 {
+    (memory.phys() + (offset + usize::from(cursor.enqueue) * TRB_SIZE) as u64)
+        | u64::from(cursor.cycle)
+}
+
 /// A ring the driver fills: the command ring or a transfer ring.
 pub struct Ring {
     memory: Dma,
-    /// Where the next TRB goes, and the cycle state it is marked with.
-    enqueue: usize,
-    cycle: bool,
+    cursor: Cursor,
 }
 
 impl Ring {
@@ -183,23 +293,19 @@ impl Ring {
             return None;
         }
         memory.zero();
-        let mut ring = Ring { memory, enqueue: 0, cycle: true };
+        let mut ring = Ring { memory, cursor: Cursor::START };
         ring.reset();
         Some(ring)
+    }
+
+    fn span(&mut self) -> Span<'_> {
+        Span { memory: &self.memory, offset: 0, trbs: RING_TRBS, cursor: &mut self.cursor }
     }
 
     /// Empties it, as new: for a ring the controller has let go of, which
     /// it starts reading again from the start.
     pub fn reset(&mut self) {
-        for at in (0..PAGE_SIZE).step_by(8) {
-            self.memory.write64(at, 0);
-        }
-        let link = (RING_TRBS - 1) * TRB_SIZE;
-        self.memory.write64(link, self.memory.phys());
-        // Not handed over yet: its cycle bit is not the ring's state.
-        self.memory.write32(link + 12, control::kind(kind::LINK) | control::TOGGLE_CYCLE);
-        self.enqueue = 0;
-        self.cycle = true;
+        self.span().reset();
     }
 
     /// The physical address of its start.
@@ -215,7 +321,7 @@ impl Ring {
     /// Where the controller should read next, with the cycle state in bit
     /// 0: what CRCR and an endpoint's TR Dequeue Pointer take.
     pub fn dequeue_pointer(&self) -> u64 {
-        (self.memory.phys() + (self.enqueue * TRB_SIZE) as u64) | u64::from(self.cycle)
+        dequeue_pointer(&self.memory, 0, self.cursor)
     }
 
     /// Hands `trb` to the controller (once its doorbell is rung), marked
@@ -223,24 +329,7 @@ impl Ring {
     /// which the controller's events name. Moves through the Link TRB
     /// when it is reached, handing it over and toggling the state.
     pub fn push(&mut self, trb: Trb) -> u64 {
-        let at = self.enqueue * TRB_SIZE;
-        self.memory.write64(at, trb.parameter);
-        self.memory.write32(at + 8, trb.status);
-        device_barrier();
-        self.memory.write32(at + 12, (trb.control & !control::CYCLE) | u32::from(self.cycle));
-        let phys = self.memory.phys() + at as u64;
-        self.enqueue += 1;
-        if self.enqueue == RING_TRBS - 1 {
-            let link = self.enqueue * TRB_SIZE;
-            device_barrier();
-            self.memory.write32(
-                link + 12,
-                control::kind(kind::LINK) | control::TOGGLE_CYCLE | u32::from(self.cycle),
-            );
-            self.enqueue = 0;
-            self.cycle = !self.cycle;
-        }
-        phys
+        self.span().push(trb)
     }
 
     /// Hands a TD of `count` TRBs, the `i`th `trb(i)`, to the controller
@@ -250,42 +339,7 @@ impl Ring {
     /// ring never starts on half of it. Returns the physical addresses of
     /// its first and last TRBs.
     pub fn push_td(&mut self, count: usize, trb: impl Fn(usize) -> Trb) -> (u64, u64) {
-        let first_at = self.enqueue * TRB_SIZE;
-        let first_cycle = self.cycle;
-        let chain = |i: usize| if i + 1 < count { control::CHAIN } else { 0 };
-        let mut last = 0;
-        for i in 0..count {
-            let this = trb(i);
-            let at = self.enqueue * TRB_SIZE;
-            self.memory.write64(at, this.parameter);
-            self.memory.write32(at + 8, this.status);
-            // The first stays the controller's until the rest are written.
-            let cycle = if i == 0 { !self.cycle } else { self.cycle };
-            device_barrier();
-            self.memory
-                .write32(at + 12, (this.control & !control::CYCLE) | chain(i) | u32::from(cycle));
-            last = self.memory.phys() + at as u64;
-            self.enqueue += 1;
-            if self.enqueue == RING_TRBS - 1 {
-                let link = self.enqueue * TRB_SIZE;
-                device_barrier();
-                self.memory.write32(
-                    link + 12,
-                    control::kind(kind::LINK)
-                        | control::TOGGLE_CYCLE
-                        | chain(i)
-                        | u32::from(self.cycle),
-                );
-                self.enqueue = 0;
-                self.cycle = !self.cycle;
-            }
-        }
-        if count > 0 {
-            device_barrier();
-            let control = (trb(0).control & !control::CYCLE) | chain(0) | u32::from(first_cycle);
-            self.memory.write32(first_at + 12, control);
-        }
-        (self.memory.phys() + first_at as u64, last)
+        self.span().push_td(count, trb)
     }
 
     /// Whether `phys` is the address of one of its TRBs.
@@ -293,6 +347,117 @@ impl Ring {
         phys >= self.memory.phys()
             && phys < self.memory.phys() + PAGE_SIZE as u64
             && (phys - self.memory.phys()).is_multiple_of(TRB_SIZE as u64)
+    }
+}
+
+/// The bytes of a stream's ring.
+pub const STREAM_RING_SIZE: usize = 2048;
+/// TRBs in a stream's ring, the Link TRB included.
+pub const STREAM_RING_TRBS: usize = STREAM_RING_SIZE / TRB_SIZE;
+/// The most streams an endpoint is given: as many as fit, after the Stream
+/// Context Array, in 64 KiB.
+pub const MAX_STREAMS: usize = 31;
+/// The bytes of a Stream Context.
+const STREAM_CONTEXT_SIZE: usize = 16;
+/// A Stream Context's type: a Primary Transfer Ring (6.2.4.1).
+const SCT_PRIMARY: u64 = 1 << 1;
+
+/// The rings of an endpoint's streams (xHCI 4.12), which a USB Attached
+/// SCSI device moves each command's status and data on, and its Stream
+/// Context Array, which the controller finds them through: the array in
+/// the first 2 KiB of the memory, and each stream's ring after it, stream
+/// `s`'s at `s` times 2 KiB. A stream carries one TD at a time, so a
+/// ring of 128 TRBs is plenty.
+pub struct StreamRings {
+    memory: Dma,
+    /// The streams, numbered from 1.
+    count: u8,
+    cursors: [Cursor; MAX_STREAMS + 1],
+}
+
+impl StreamRings {
+    /// The bytes `count` streams take.
+    pub fn bytes(count: usize) -> usize {
+        (count + 1) * STREAM_RING_SIZE
+    }
+
+    /// `count` streams (at most [`MAX_STREAMS`]) in `memory`, at least
+    /// [`StreamRings::bytes`] of it, each ring empty and in its context.
+    pub fn new(memory: Dma, count: usize) -> Option<StreamRings> {
+        if count == 0 || count > MAX_STREAMS || memory.len() < StreamRings::bytes(count) {
+            return None;
+        }
+        let mut rings =
+            StreamRings { memory, count: count as u8, cursors: [Cursor::START; MAX_STREAMS + 1] };
+        rings.reset();
+        Some(rings)
+    }
+
+    /// How many streams it has, numbered from 1.
+    pub fn count(&self) -> usize {
+        usize::from(self.count)
+    }
+
+    /// The entries of its Stream Context Array: a power of two, stream 0
+    /// (which the controller keeps) among them.
+    pub fn entries(&self) -> usize {
+        (self.count() + 1).next_power_of_two()
+    }
+
+    /// The Stream Context Array's physical address, for the endpoint's
+    /// context.
+    pub fn context_array(&self) -> u64 {
+        self.memory.phys()
+    }
+
+    fn span(&mut self, stream: usize) -> Span<'_> {
+        Span {
+            memory: &self.memory,
+            offset: stream * STREAM_RING_SIZE,
+            trbs: STREAM_RING_TRBS,
+            cursor: &mut self.cursors[stream],
+        }
+    }
+
+    /// Empties every ring, as new, and points each stream's context at
+    /// its ring's start: for streams the controller has let go of.
+    pub fn reset(&mut self) {
+        for at in (0..STREAM_RING_SIZE).step_by(8) {
+            self.memory.write64(at, 0);
+        }
+        for stream in 1..=self.count() {
+            self.span(stream).reset();
+            let pointer = self.dequeue_pointer(stream).unwrap_or(0);
+            self.memory.write64(stream * STREAM_CONTEXT_SIZE, pointer | SCT_PRIMARY);
+        }
+    }
+
+    /// Where the controller should read stream `stream`'s ring next, with
+    /// the cycle state in bit 0, as Set TR Dequeue Pointer takes it; `None`
+    /// if it has no such stream.
+    pub fn dequeue_pointer(&self, stream: usize) -> Option<u64> {
+        (1..=self.count())
+            .contains(&stream)
+            .then(|| dequeue_pointer(&self.memory, stream * STREAM_RING_SIZE, self.cursors[stream]))
+    }
+
+    /// The physical address of the start of stream `stream`'s ring.
+    pub fn ring_phys(&self, stream: usize) -> u64 {
+        self.memory.phys() + (stream * STREAM_RING_SIZE) as u64
+    }
+
+    /// Hands a TD to the controller on stream `stream`'s ring, as
+    /// [`Ring::push_td`] does; `None` if it has no such stream.
+    pub fn push_td(
+        &mut self,
+        stream: usize,
+        count: usize,
+        trb: impl Fn(usize) -> Trb,
+    ) -> Option<(u64, u64)> {
+        if !(1..=self.count()).contains(&stream) {
+            return None;
+        }
+        Some(self.span(stream).push_td(count, trb))
     }
 }
 

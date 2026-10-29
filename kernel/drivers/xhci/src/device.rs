@@ -29,6 +29,15 @@
 //! the driver does not wait for it, and its event comes with the others.
 //! [`Device::submit_frames`] moves data straight to or from memory the
 //! kernel names, as a TD of a TRB for each buffer (ADR 0161).
+//! An endpoint may be given streams ([`Device::alloc_streams`], 4.12):
+//! a ring for each, which [`Device::submit_stream`] puts a TD on and rings
+//! the doorbell with the stream's number, as a USB Attached SCSI device
+//! moves each command's status and data on its own stream (ADR 0162).
+//! [`Device::cancel_stream`] takes back a TD on one stream while the
+//! others go on. [`Device::set_interface`] changes an interface's
+//! alternate setting, its endpoints with it, and [`Device::reset`] brings
+//! a device whose port was reset back as it was (Reset Device, Address
+//! Device, its endpoints and streams again, empty).
 //! A hub's slot says it is a hub, and how many ports it has
 //! ([`Device::set_hub`]); a low- or full-speed device behind a high-speed
 //! hub names the hub's slot and port, whose Transaction Translator talks
@@ -37,7 +46,7 @@
 use radix_hw::{Dma, PAGE_SIZE};
 use radix_usb::{EndpointDescriptor, Setup, Speed, TransferType};
 
-use crate::ring::{Ring, Trb, control, kind};
+use crate::ring::{RING_TRBS, Ring, STREAM_RING_TRBS, StreamRings, Trb, control, kind};
 use crate::{Command, Error, Event, Host, POLL_US, Xhci, code};
 
 /// The most bytes a control transfer moves: one page.
@@ -69,6 +78,11 @@ const SLOT_MULTI_TT: u32 = 1 << 25;
 
 /// The most endpoints a device is given besides endpoint 0.
 pub const MAX_ENDPOINTS: usize = 8;
+/// The most endpoints of a device with streams: a USB Attached SCSI
+/// interface's status, data-in and data-out pipes.
+pub const MAX_STREAM_ENDPOINTS: usize = 3;
+/// An endpoint context's Linear Stream Array flag (6.2.3).
+const LSA: u32 = 1 << 15;
 
 /// The device context index of the endpoint at `address`
 /// (bEndpointAddress): twice its number, plus one for IN (4.5.1);
@@ -122,6 +136,17 @@ struct Endpoint {
 /// The most buffers a transfer of [`Device::submit_frames`] has, a TRB
 /// each: half a ring, so that a TD always fits behind the one before.
 pub const MAX_TD_BUFFERS: usize = 128;
+/// The most buffers a transfer of [`Device::submit_stream`] has: a
+/// stream's ring, less its Link TRB, since a stream carries one TD at a
+/// time.
+pub const MAX_STREAM_TD_BUFFERS: usize = STREAM_RING_TRBS - 1;
+
+/// An endpoint's streams.
+struct EndpointStreams {
+    /// The endpoint's device context index.
+    index: u8,
+    rings: StreamRings,
+}
 
 /// Where a transfer of [`Device::submit_frames`] is on its ring, for its
 /// events.
@@ -133,6 +158,8 @@ pub struct Td {
     pub last: u64,
     /// The ring's start.
     ring: u64,
+    /// How many TRBs the ring has, its Link TRB among them.
+    size: usize,
     /// How many TRBs it has.
     trbs: usize,
 }
@@ -142,7 +169,7 @@ impl Td {
     /// it names. `None` if it is not one of them.
     pub fn position(&self, trb: u64) -> Option<usize> {
         let offset = trb.checked_sub(self.ring)?;
-        let usable = crate::ring::RING_TRBS - 1;
+        let usable = self.size - 1;
         if !offset.is_multiple_of(crate::ring::TRB_SIZE as u64) {
             return None;
         }
@@ -205,6 +232,8 @@ pub struct Device {
     max_packet: u16,
     /// The endpoints it was configured with.
     endpoints: [Option<Endpoint>; MAX_ENDPOINTS],
+    /// Those given streams.
+    streams: [Option<EndpointStreams>; MAX_STREAM_ENDPOINTS],
     /// The last valid endpoint context's index (Context Entries).
     entries: u8,
     /// What its slot says if it is a hub.
@@ -242,6 +271,7 @@ impl Device {
             ep0,
             max_packet: place.speed.default_max_packet(),
             endpoints: [const { None }; MAX_ENDPOINTS],
+            streams: [const { None }; MAX_STREAM_ENDPOINTS],
             entries: EP0,
             hub: None,
         };
@@ -352,9 +382,22 @@ impl Device {
         // Isochronous endpoints get no retries; the rest three.
         let retries =
             if endpoint.transfer_type() == TransferType::Isochronous { 0 } else { RETRIES };
-        self.memory.write32(at, u32::from(interval(&endpoint, speed)) << 16 | (esit >> 16) << 24);
+        // With streams, the ring is each stream's, found through the Stream
+        // Context Array; MaxPStreams says its entries, 2 to its power plus
+        // one (6.2.3).
+        let (streams, dequeue) = match self.stream_rings(index) {
+            Some(rings) => {
+                let max_pstreams = rings.entries().ilog2() - 1;
+                (max_pstreams << 10 | LSA, rings.context_array())
+            }
+            None => (0, ring.dequeue_pointer()),
+        };
+        self.memory.write32(
+            at,
+            u32::from(interval(&endpoint, speed)) << 16 | (esit >> 16) << 24 | streams,
+        );
         self.memory.write32(at + 4, retries | kind << 3 | burst << 8 | max_packet << 16);
-        self.memory.write64(at + 8, ring.dequeue_pointer());
+        self.memory.write64(at + 8, dequeue);
         // The average TRB length (4.14.1.1): a periodic endpoint's
         // interval's worth; 3 KiB for bulk.
         let average = if periodic { esit.max(1) } else { 3072 };
@@ -534,19 +577,32 @@ impl Device {
         index: u8,
         frames: &[(u64, u32)],
     ) -> Result<Td, Error> {
+        self.submit_stream(xhci, index, 0, frames)
+    }
+
+    /// Starts a transfer as [`Device::submit_frames`] does, on stream
+    /// `stream` of an endpoint given streams (at most
+    /// [`MAX_STREAM_TD_BUFFERS`] buffers then), or on its ring if
+    /// `stream` is 0.
+    pub fn submit_stream(
+        &mut self,
+        xhci: &Xhci,
+        index: u8,
+        stream: usize,
+        frames: &[(u64, u32)],
+    ) -> Result<Td, Error> {
         let crosses = |&(phys, len): &(u64, u32)| {
             len == 0 || len > 0x1_0000 || (phys & 0xffff) + u64::from(len) > 0x1_0000
         };
-        if index == EP0
-            || frames.is_empty()
-            || frames.len() > MAX_TD_BUFFERS
-            || frames.iter().any(crosses)
-        {
+        let most = if stream == 0 { MAX_TD_BUFFERS } else { MAX_STREAM_TD_BUFFERS };
+        if index == EP0 || frames.is_empty() || frames.len() > most || frames.iter().any(crosses) {
             return Err(Error::BadRequest);
         }
         let version = xhci.info().version;
         let slot = self.slot;
-        let endpoint = self.endpoint(index).ok_or(Error::BadRequest)?;
+        let Device { endpoints, streams, .. } = self;
+        let endpoint =
+            endpoints.iter_mut().flatten().find(|e| e.index == index).ok_or(Error::BadRequest)?;
         let into_host = index & 1 != 0;
         let max_packet = u64::from(endpoint.descriptor.max_packet().max(1));
         let total: u64 = frames.iter().map(|&(_, len)| u64::from(len)).sum();
@@ -573,10 +629,287 @@ impl Device {
                     | if last { control::IOC } else { 0 },
             }
         };
-        let ring = endpoint.ring.phys();
-        let (first, last) = endpoint.ring.push_td(frames.len(), trb);
-        xhci.ring(slot, u32::from(index));
-        Ok(Td { first, last, ring, trbs: frames.len() })
+        let (first, last, ring, size) = if stream == 0 {
+            let (first, last) = endpoint.ring.push_td(frames.len(), trb);
+            (first, last, endpoint.ring.phys(), RING_TRBS)
+        } else {
+            let rings = streams
+                .iter_mut()
+                .flatten()
+                .find(|s| s.index == index)
+                .map(|s| &mut s.rings)
+                .ok_or(Error::BadRequest)?;
+            let (first, last) =
+                rings.push_td(stream, frames.len(), trb).ok_or(Error::BadRequest)?;
+            (first, last, rings.ring_phys(stream), STREAM_RING_TRBS)
+        };
+        // The doorbell's target names the stream in its high half.
+        xhci.ring(slot, u32::from(index) | (stream as u32) << 16);
+        Ok(Td { first, last, ring, size, trbs: frames.len() })
+    }
+
+    /// The rings of the streams of the endpoint at device context index
+    /// `index`, if it was given streams.
+    fn stream_rings(&self, index: u8) -> Option<&StreamRings> {
+        self.streams.iter().flatten().find(|s| s.index == index).map(|s| &s.rings)
+    }
+
+    /// How many streams the endpoint at device context index `index` has
+    /// (numbered from 1), or 0.
+    pub fn streams(&self, index: u8) -> usize {
+        self.stream_rings(index).map_or(0, StreamRings::count)
+    }
+
+    /// Gives the bulk endpoints at device context indexes `indexes` (at
+    /// most [`MAX_STREAM_ENDPOINTS`]) as many streams each as `wanted`, or
+    /// as each of them, the controller or [`crate::ring::MAX_STREAMS`]
+    /// takes, whichever is fewest, as Linux's `usb_alloc_streams` does:
+    /// a ring for each stream, in memory from `alloc`, and Configure
+    /// Endpoint dropping each endpoint and adding it again with its
+    /// Stream Context Array. Whatever was on their rings is dropped.
+    /// Returns how many streams each has, numbered from 1.
+    #[inline(never)]
+    pub fn alloc_streams(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        alloc: &mut dyn FnMut(usize, bool) -> Option<Dma>,
+        indexes: &[u8],
+        wanted: usize,
+    ) -> Result<usize, Error> {
+        let contexts = xhci.info().stream_contexts;
+        if contexts == 0 {
+            return Err(Error::Unsupported("it takes no streams"));
+        }
+        let mut count = wanted.min(crate::ring::MAX_STREAMS).min(contexts - 1);
+        if indexes.is_empty() || indexes.len() > MAX_STREAM_ENDPOINTS {
+            return Err(Error::BadRequest);
+        }
+        for (i, &index) in indexes.iter().enumerate() {
+            let endpoint = self.endpoints.iter().flatten().find(|e| e.index == index);
+            let Some(endpoint) = endpoint else { return Err(Error::BadRequest) };
+            if indexes[..i].contains(&index) || self.stream_rings(index).is_some() {
+                return Err(Error::BadRequest);
+            }
+            count = count.min(endpoint.descriptor.max_streams() as usize);
+        }
+        if count == 0 {
+            return Err(Error::Unsupported("its endpoints have no streams"));
+        }
+        if self.streams.iter().filter(|s| s.is_none()).count() < indexes.len() {
+            return Err(Error::BadRequest);
+        }
+        let pages = StreamRings::bytes(count).div_ceil(PAGE_SIZE);
+        let below_4g = xhci.below_4g();
+        for &index in indexes {
+            let rings = alloc(pages, below_4g).and_then(|memory| StreamRings::new(memory, count));
+            let Some(rings) = rings else {
+                self.drop_streams(indexes);
+                return Err(Error::NoMemory);
+            };
+            if let Some(free) = self.streams.iter_mut().find(|s| s.is_none()) {
+                *free = Some(EndpointStreams { index, rings });
+            }
+        }
+        self.clear_input();
+        let mut flags = 0;
+        for endpoint in self.endpoints.iter().flatten().filter(|e| indexes.contains(&e.index)) {
+            self.write_endpoint_context(endpoint.index, endpoint.descriptor, &endpoint.ring);
+            flags |= 1 << endpoint.index;
+        }
+        self.memory.write32(INPUT, flags);
+        self.memory.write32(INPUT + 4, ADD_SLOT | flags);
+        self.write_slot_context();
+        let input = self.memory.phys() + INPUT as u64;
+        let slot = self.slot;
+        let configured =
+            xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host);
+        if let Err(err) = configured {
+            // Refused: the endpoints go on without streams.
+            self.drop_streams(indexes);
+            return Err(err);
+        }
+        Ok(count)
+    }
+
+    /// Forgets the streams of the endpoints at `indexes`, which the
+    /// controller does not have.
+    fn drop_streams(&mut self, indexes: &[u8]) {
+        for streams in &mut self.streams {
+            if streams.as_ref().is_some_and(|s| indexes.contains(&s.index)) {
+                *streams = None;
+            }
+        }
+    }
+
+    /// Takes back the TD on stream `stream` of the endpoint at device
+    /// context index `index`, which has not ended (a USB Attached SCSI
+    /// command that failed before its data moved), as Linux does: the
+    /// endpoint is stopped, the stream's ring is pointed past the TD (Set
+    /// TR Dequeue Pointer), and the doorbell is rung again for each other
+    /// stream `pending` says has a TD, which goes on where it stopped.
+    /// The controller may say the stopped TDs stopped
+    /// ([`code::STOPPED`]); they are not done.
+    pub fn cancel_stream(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        index: u8,
+        stream: usize,
+        pending: &dyn Fn(usize) -> bool,
+    ) -> Result<(), Error> {
+        let (pointer, count) = match self.stream_rings(index) {
+            Some(rings) => (rings.dequeue_pointer(stream).ok_or(Error::BadRequest)?, rings.count()),
+            None => return Err(Error::BadRequest),
+        };
+        let slot = self.slot;
+        let endpoint = index;
+        let tolerate = |result: Result<_, Error>| match result {
+            Err(Error::Completion(code::CONTEXT_STATE)) | Ok(_) => Ok(()),
+            Err(err) => Err(err),
+        };
+        if let Err(Error::Completion(code::CONTEXT_STATE)) =
+            xhci.command(Command::StopEndpoint { slot, endpoint }, host)
+        {
+            // Halted, or stopped already.
+            tolerate(xhci.command(Command::ResetEndpoint { slot, endpoint }, host))?;
+        }
+        let stream_id = stream as u16;
+        let dequeue = Command::SetStreamDequeue { slot, endpoint, stream: stream_id, pointer };
+        match xhci.command(dequeue, host) {
+            Err(Error::Completion(code::CONTEXT_STATE)) => {
+                tolerate(xhci.command(Command::StopEndpoint { slot, endpoint }, host))?;
+                xhci.command(dequeue, host)?;
+            }
+            other => {
+                other?;
+            }
+        }
+        for other in (1..=count).filter(|&s| s != stream && pending(s)) {
+            xhci.ring(slot, u32::from(index) | (other as u32) << 16);
+        }
+        Ok(())
+    }
+
+    /// Puts interface `interface` in its alternate setting `alternate`,
+    /// whose endpoints are `add`: the endpoints at device context indexes
+    /// `drop` (the setting's before) are dropped, with their streams, and
+    /// `add`'s added, each with a ring from `alloc` (Configure Endpoint),
+    /// then the device is told (SET_INTERFACE).
+    #[inline(never)]
+    pub fn set_interface(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        alloc: &mut dyn FnMut(usize, bool) -> Option<Dma>,
+        (interface, alternate): (u8, u8),
+        drop: &[u8],
+        add: &[EndpointDescriptor],
+    ) -> Result<(), Error> {
+        let kept = self.endpoints.iter().flatten().filter(|e| !drop.contains(&e.index)).count();
+        let known = |index: u8| self.endpoints.iter().flatten().any(|e| e.index == index);
+        let mut adding = 0u32;
+        for endpoint in add {
+            let index = endpoint_index(endpoint.address);
+            let taken = known(index) && !drop.contains(&index);
+            if endpoint.number() == 0 || endpoint.max_packet() == 0 || taken {
+                return Err(Error::BadRequest);
+            }
+            if adding & 1 << index != 0 {
+                return Err(Error::BadRequest);
+            }
+            adding |= 1 << index;
+        }
+        if drop.iter().any(|&index| !known(index)) || kept + add.len() > MAX_ENDPOINTS {
+            return Err(Error::BadRequest);
+        }
+        // The rings first, so that nothing changes if memory runs out.
+        let below_4g = xhci.below_4g();
+        let mut rings: [Option<Ring>; MAX_ENDPOINTS] = [const { None }; MAX_ENDPOINTS];
+        for ring in rings.iter_mut().take(add.len()) {
+            *ring = Some(alloc(2, below_4g).and_then(Ring::new).ok_or(Error::NoMemory)?);
+        }
+        self.drop_streams(drop);
+        let dropping = drop.iter().fold(0u32, |flags, &index| flags | 1 << index);
+        self.clear_input();
+        for (endpoint, ring) in add.iter().zip(rings.iter().flatten()) {
+            self.write_endpoint_context(endpoint_index(endpoint.address), *endpoint, ring);
+        }
+        let entries = self
+            .endpoints
+            .iter()
+            .flatten()
+            .map(|e| e.index)
+            .filter(|index| !drop.contains(index))
+            .chain(add.iter().map(|e| endpoint_index(e.address)))
+            .fold(EP0, u8::max);
+        self.memory.write32(INPUT, dropping & !adding);
+        self.memory.write32(INPUT + 4, ADD_SLOT | adding);
+        let before = core::mem::replace(&mut self.entries, entries);
+        self.write_slot_context();
+        let input = self.memory.phys() + INPUT as u64;
+        let slot = self.slot;
+        if let Err(err) =
+            xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host)
+        {
+            self.entries = before;
+            return Err(err);
+        }
+        for endpoint in &mut self.endpoints {
+            if endpoint.as_ref().is_some_and(|e| drop.contains(&e.index)) {
+                *endpoint = None;
+            }
+        }
+        let mut free = self.endpoints.iter_mut().filter(|e| e.is_none());
+        for (descriptor, ring) in add.iter().zip(rings.iter_mut()) {
+            let (Some(place), Some(ring)) = (free.next(), ring.take()) else { break };
+            let index = endpoint_index(descriptor.address);
+            *place = Some(Endpoint { index, descriptor: *descriptor, ring });
+        }
+        self.control_out(xhci, host, Setup::set_interface(interface, alternate), &[])
+    }
+
+    /// Brings the device back after its port was reset, as Linux's
+    /// `usb_reset_device` does: Reset Device puts the slot back in the
+    /// default state with endpoint 0 alone, Address Device gives the
+    /// device its address again, its endpoints come back as they were,
+    /// with their streams, each ring empty (Configure Endpoint), and the
+    /// device is put in configuration `value` again. An interface in an
+    /// alternate setting other than 0 is the caller's to set again.
+    #[inline(never)]
+    pub fn reset(&mut self, xhci: &mut Xhci, host: &mut dyn Host, value: u8) -> Result<(), Error> {
+        let slot = self.slot;
+        match xhci.command(Command::ResetDevice { slot }, host) {
+            // Already in the default state.
+            Ok(_) | Err(Error::Completion(code::CONTEXT_STATE)) => {}
+            Err(err) => return Err(err),
+        }
+        let entries = core::mem::replace(&mut self.entries, EP0);
+        self.clear_input();
+        self.memory.write32(INPUT + 4, ADD_SLOT | ADD_EP0);
+        self.write_slot_context();
+        self.write_ep0_context();
+        self.entries = entries;
+        let input = self.memory.phys() + INPUT as u64;
+        xhci.command(Command::AddressDevice { slot, input, block: false }, host)?;
+        self.clear_input();
+        let mut add = 0;
+        for endpoint in self.endpoints.iter_mut().flatten() {
+            endpoint.ring.reset();
+            add |= 1 << endpoint.index;
+        }
+        for streams in self.streams.iter_mut().flatten() {
+            streams.rings.reset();
+        }
+        for endpoint in self.endpoints.iter().flatten() {
+            self.write_endpoint_context(endpoint.index, endpoint.descriptor, &endpoint.ring);
+        }
+        if add != 0 {
+            self.memory.write32(INPUT + 4, ADD_SLOT | add);
+            self.write_slot_context();
+            xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host)?;
+        }
+        self.control_out(xhci, host, Setup::set_configuration(value), &[])
     }
 
     /// Copies what the last transfer on the IN endpoint at device context
@@ -601,7 +934,7 @@ impl Device {
         index: u8,
         failed: u8,
     ) -> Result<(), Error> {
-        if index == EP0 || self.endpoint(index).is_none() {
+        if index == EP0 || self.endpoint(index).is_none() || self.streams(index) > 0 {
             return Err(Error::BadRequest);
         }
         self.skip(xhci, host, index, failed)?;
@@ -627,7 +960,7 @@ impl Device {
         host: &mut dyn Host,
         index: u8,
     ) -> Result<(), Error> {
-        if index == EP0 || self.endpoint(index).is_none() {
+        if index == EP0 || self.endpoint(index).is_none() || self.streams(index) > 0 {
             return Err(Error::BadRequest);
         }
         self.skip(xhci, host, index, code::STOPPED)?;

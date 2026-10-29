@@ -61,6 +61,8 @@ pub mod op {
     pub const SERVICE_ACTION_IN_16: u8 = 0x9e;
     /// READ CAPACITY(16)'s service action.
     pub const READ_CAPACITY_16: u8 = 0x10;
+    /// REPORT LUNS: the logical units a target has.
+    pub const REPORT_LUNS: u8 = 0xa0;
 }
 
 /// Peripheral device types, of an [`Inquiry`].
@@ -228,6 +230,30 @@ impl Cdb {
     pub fn synchronize_cache() -> Cdb {
         Cdb::new(&[op::SYNCHRONIZE_CACHE_10, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
+
+    /// REPORT LUNS of every logical unit, `length` bytes (SPC-6, 6.35).
+    pub fn report_luns(length: u32) -> Cdb {
+        let mut bytes = [0; 12];
+        bytes[0] = op::REPORT_LUNS;
+        bytes[6..10].copy_from_slice(&length.to_be_bytes());
+        Cdb::new(&bytes)
+    }
+}
+
+/// The logical units a REPORT LUNS answer `bytes` lists that are numbered
+/// below 256 in SAM's single level format (peripheral device addressing,
+/// bus 0), as Linux's `scsilun_to_int` reads them: those a USB device's
+/// IUs can name. Others are left out.
+pub fn reported_luns(bytes: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    let listed = bytes.get(0..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let end = bytes.len().min(8usize.saturating_add(listed as usize));
+    bytes
+        .get(8..end)
+        .unwrap_or(&[])
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter_map(|lun| (lun[0] == 0 && lun[2..].iter().all(|&b| b == 0)).then_some(lun[1]))
 }
 
 /// Text a device gave: ASCII padded with spaces, without the padding;

@@ -67,8 +67,8 @@ mod tests;
 use core::fmt;
 
 pub use device::{
-    BUFFER_SIZE, Device, HubSlot, MAX_ENDPOINTS, MAX_TD_BUFFERS, Place, Td, endpoint_index,
-    interval,
+    BUFFER_SIZE, Device, HubSlot, MAX_ENDPOINTS, MAX_STREAM_ENDPOINTS, MAX_STREAM_TD_BUFFERS,
+    MAX_TD_BUFFERS, Place, Td, endpoint_index, interval,
 };
 use radix_hw::{Dma, Mmio, PAGE_SIZE};
 use radix_usb::Speed;
@@ -280,6 +280,8 @@ pub mod code {
     pub const STOPPED: u8 = 26;
     /// Stopped, Length Invalid.
     pub const STOPPED_LENGTH_INVALID: u8 = 27;
+    /// Stopped, Short Packet (xHCI 1.1).
+    pub const STOPPED_SHORT_PACKET: u8 = 28;
     /// Split Transaction Error.
     pub const SPLIT_TRANSACTION: u8 = 36;
 
@@ -304,7 +306,7 @@ pub mod code {
             INCOMPATIBLE => "incompatible device",
             COMMAND_RING_STOPPED => "command ring stopped",
             COMMAND_ABORTED => "command aborted",
-            STOPPED | STOPPED_LENGTH_INVALID => "stopped",
+            STOPPED | STOPPED_LENGTH_INVALID | STOPPED_SHORT_PACKET => "stopped",
             SPLIT_TRANSACTION => "split transaction error",
             _ => "error",
         }
@@ -528,6 +530,24 @@ pub enum Command {
         /// The new dequeue pointer and cycle state.
         pointer: u64,
     },
+    /// Set TR Dequeue Pointer for stream `stream` of an endpoint with
+    /// streams, whose ring is a Primary Transfer Ring.
+    SetStreamDequeue {
+        /// The slot.
+        slot: u8,
+        /// The endpoint's device context index.
+        endpoint: u8,
+        /// The stream.
+        stream: u16,
+        /// The new dequeue pointer and cycle state.
+        pointer: u64,
+    },
+    /// Reset Device: after its port was reset, the slot goes back to the
+    /// default state, with endpoint 0 alone (4.6.11).
+    ResetDevice {
+        /// The slot.
+        slot: u8,
+    },
 }
 
 impl Command {
@@ -573,6 +593,18 @@ impl Command {
                     | control::slot(slot)
                     | control::endpoint(endpoint),
             ),
+            Command::SetStreamDequeue { slot, endpoint, stream, pointer } => {
+                let control = control::kind(kind::SET_TR_DEQUEUE)
+                    | control::slot(slot)
+                    | control::endpoint(endpoint);
+                // A Primary Transfer Ring's Stream Context Type, and the
+                // stream in the status's high half (6.4.3.9).
+                let parameter = pointer | 1 << 1;
+                return Trb { parameter, status: u32::from(stream) << 16, control };
+            }
+            Command::ResetDevice { slot } => {
+                (0, control::kind(kind::RESET_DEVICE) | control::slot(slot))
+            }
         };
         Trb { parameter, status: 0, control }
     }
@@ -621,6 +653,10 @@ pub struct Info {
     pub handoff: Handoff,
     /// Where its Debug Capability's registers start, if it has one.
     pub debug_capability: Option<usize>,
+    /// The entries a Stream Context Array of its may have, or 0 if it
+    /// does not take streams: as Linux, those that take fewer than 32 are
+    /// taken not to.
+    pub stream_contexts: usize,
 }
 
 /// The most Supported Protocol capabilities read.
@@ -824,6 +860,10 @@ impl Xhci {
             port_power: cparams1 & cap::PPC != 0,
             handoff: Handoff::None,
             debug_capability: None,
+            stream_contexts: match (cparams1 >> 12) & 0xf {
+                size @ 4.. => 1 << (size + 1),
+                _ => 0,
+            },
         };
         let mut protocols: [Protocol; MAX_PROTOCOLS] = Default::default();
         let mut protocol_count = 0;
