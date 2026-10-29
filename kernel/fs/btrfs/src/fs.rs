@@ -545,6 +545,18 @@ impl Inner {
         }
     }
 
+    /// Makes file `ino` of subvolume `subvol` durable, with the log of
+    /// fsyncs when it can, with a commit otherwise (ADR 0154).
+    pub(crate) fn sync_file(&self, subvol: u64, ino: u64) -> Result<()> {
+        let Some(tx) = &self.tx else { return Ok(()) };
+        let mut txn = tx.lock();
+        match txn.writer.log_file(&self.volume, subvol, ino) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(Error::NoSpace | Error::NoMemory) => self.commit_locked(&mut txn),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Commits the running transaction.
     pub(crate) fn commit(&self) -> Result<()> {
         let Some(tx) = &self.tx else { return Ok(()) };

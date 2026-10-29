@@ -21,12 +21,10 @@ use crate::files::{FileExtent, Files, at, extent_type, file_type};
 use crate::format::{Key, item, name_hash, tree, u16_at, u64_at};
 use crate::fs::Txn;
 use crate::inode::Inode;
+use crate::log::TREE_LOG;
+use crate::superblock::incompat;
 use crate::tree::{Bounds, Cursor, Root, read_block};
 use crate::volume::Volume;
-
-/// The objectid of the log root tree's root items, and the owner of every
-/// log tree's blocks (`BTRFS_TREE_LOG_OBJECTID`).
-const TREE_LOG: u64 = (-6i64) as u64;
 
 /// A logged directory's range of indexes the log holds whole: from the
 /// key's offset to the item's end (`BTRFS_DIR_LOG_INDEX_KEY`).
@@ -400,6 +398,15 @@ impl Replay<'_, '_> {
         let extent = FileExtent::read(&logged.data)?;
         let sector = u64::from(self.f.volume.superblock().sectorsize);
         let end = pos.checked_add(extent.len).ok_or(Error::Corrupt)?.next_multiple_of(sector);
+        // A hole, on a filesystem that keeps no hole items, only drops what
+        // the file had there, as Linux replays it.
+        if extent.kind == extent_type::REGULAR
+            && extent.disk_bytenr == 0
+            && self.f.volume.superblock().has(incompat::NO_HOLES)
+        {
+            self.f.drop_extents(ino, pos, end)?;
+            return self.touch(ino);
+        }
         let data = (extent.kind != extent_type::INLINE && extent.disk_bytenr != 0)
             .then(|| Key::new(extent.disk_bytenr, item::EXTENT_ITEM, extent.disk_num_bytes));
         // The reference first, so that dropping what the file named there

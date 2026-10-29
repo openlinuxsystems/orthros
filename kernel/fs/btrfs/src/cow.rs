@@ -28,12 +28,13 @@
 //! begun leaves the transaction half made: the writer then refuses every
 //! change and commit, so the disk keeps the last commit whole.
 
-use radix_vfs::mem::{self, KVec};
+use radix_vfs::mem::{self, KBox, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::chunk::kind;
 use crate::format::{Key, item, tree};
 use crate::grow::Grown;
+use crate::log::Logging;
 use crate::refs::{Backref, FULL_BACKREF, refs_flags};
 use crate::space::Space;
 use crate::superblock::{compat_ro, incompat};
@@ -127,6 +128,9 @@ pub struct Writer {
     pub(crate) snapshots: KVec<(u64, u64)>,
     /// The reference changes copies of shared blocks left, in order.
     delayed: KVec<Delayed>,
+    /// What the log of fsyncs keeps (ADR 0154), boxed so that a writer
+    /// moved by value on the mount's path stays small.
+    pub(crate) logging: KBox<Logging>,
     /// Whether a change failed half made.
     broken: bool,
 }
@@ -192,6 +196,7 @@ impl Writer {
             incompat: 0,
             snapshots: mem::vec(),
             delayed: mem::vec(),
+            logging: mem::boxed(Logging::new())?,
             broken: false,
         })
     }
@@ -317,7 +322,10 @@ impl Writer {
 
     /// Whether the transaction has anything to commit.
     pub fn is_dirty(&self) -> bool {
-        !self.changes.is_empty() || !self.pinned.is_empty() || self.bytes_used != 0
+        !self.changes.is_empty()
+            || !self.pinned.is_empty()
+            || self.bytes_used != 0
+            || self.logging.written()
     }
 
     /// Runs a change, then the reference changes its copies of shared
@@ -602,10 +610,10 @@ impl Writer {
 
     /// Frees the data extent `[start, start + len)`: at once if this
     /// transaction wrote it (`made`), so no tree on the disk names it,
-    /// after the commit otherwise.
+    /// unless a log of fsyncs on the disk may; after the commit otherwise.
     pub(crate) fn free_data(&mut self, start: u64, len: u64, made: bool) -> Result<()> {
         self.bytes_used -= len as i64;
-        if made {
+        if made && !self.logging.written() {
             return self.space.free_now(start, len);
         }
         mem::push(&mut self.pinned, (start, len))?;

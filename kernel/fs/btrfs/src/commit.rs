@@ -77,11 +77,14 @@ impl Writer {
         let sb = self.write_blocks(volume)?;
         // The blocks are durable before the superblock that leads to them.
         volume.cache().sync()?;
-        Self::write_supers(volume, &sb)?;
+        Self::write_supers(volume, &sb, true)?;
         volume.set_superblock_bytes(sb);
         for (start, len) in core::mem::replace(&mut self.pinned, mem::vec()) {
             self.space.unpin(start, len)?;
         }
+        // The superblock names no log now.
+        let nodesize = u64::from(volume.superblock().nodesize);
+        self.logging.committed(&mut self.space, nodesize)?;
         self.grown_committed();
         self.generation += 1;
         self.bytes_used = 0;
@@ -334,7 +337,8 @@ impl Writer {
         put_u64(&mut sb, at::CHUNK_ROOT, chunk.bytenr);
         sb[at::CHUNK_ROOT_LEVEL] = chunk.level;
         put_u64(&mut sb, at::CHUNK_ROOT_GENERATION, chunk.generation);
-        // Radix keeps no log of fsyncs; one a mount replayed is gone.
+        // The log of the transaction's fsyncs, or one a mount replayed,
+        // is gone.
         put_u64(&mut sb, at::LOG_ROOT, 0);
         sb[at::LOG_ROOT_LEVEL] = 0;
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
@@ -385,16 +389,17 @@ impl Writer {
         Ok(())
     }
 
-    /// Writes the superblock `sb`, and its copies at 64 MiB and 256 GiB
-    /// that fit on the device, each with its own address and checksum,
-    /// after the blocks they lead to are durable, as Linux writes them:
-    /// all at once, the superblock durable when this returns and its
-    /// copies at the next flush.
-    fn write_supers(volume: &Volume, sb: &[u8]) -> Result<()> {
+    /// Writes the superblock `sb`, and with `mirrors` its copies at 64 MiB
+    /// and 256 GiB that fit on the device, each with its own address and
+    /// checksum, after the blocks they lead to are durable, as Linux
+    /// writes them: all at once, the superblock durable when this returns
+    /// and its copies at the next flush. An fsync's log writes the
+    /// superblock alone, as Linux's does.
+    pub(crate) fn write_supers(volume: &Volume, sb: &[u8], mirrors: bool) -> Result<()> {
         let csum = volume.superblock().csum_type;
         let mut copies = [None, None];
         for (copy, mirror) in copies.iter_mut().zip([64u64 << 20, 256 << 30]) {
-            if mirror + superblock::SIZE as u64 > volume.device_bytes() {
+            if !mirrors || mirror + superblock::SIZE as u64 > volume.device_bytes() {
                 break;
             }
             let mut bytes = mem::copy(sb)?;

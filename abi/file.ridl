@@ -155,9 +155,10 @@ interface file = 0x000c version 5 {
     method set_size = 4 (size: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 is_directory, read_only, no_space, too_big, io, corrupt];
-    /// Writes the file's filesystem's changes to its disk, and returns once
-    /// the disk has them. Needs no right: as POSIX's fsync, it works on a
-    /// file opened only for reading.
+    /// Makes the file's changes durable, and returns once the disk has
+    /// them; a filesystem may write more of its changes with them, as FAT,
+    /// exFAT and ext4 write all. Needs no right: as POSIX's fsync, it works
+    /// on a file opened only for reading.
     method sync = 5 () -> ()
         raises [no_such_slot, empty_slot, io, corrupt];
     /// Moves the description's offset to `offset` bytes from where

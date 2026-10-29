@@ -556,6 +556,7 @@ fn a_cache_full_of_blocks_still_reads() {
 mod clones;
 mod compressed;
 mod files;
+mod fsync;
 mod links;
 mod log;
 mod rw;

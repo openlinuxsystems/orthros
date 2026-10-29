@@ -108,3 +108,5 @@ Linux's log on the same `fsync`.
 - A rename into another directory followed by an `fsync` commits on
   Linux 6.8, so the fixture cannot hold one; the replay links and
   unlinks such names as it does any other.
+- ADR 0154 replaced "`fsync` stays a commit": the bench row lost on CI's
+  AMD EPYC 9V74 runners, so Radix writes the log too.
