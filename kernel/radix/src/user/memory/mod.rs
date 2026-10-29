@@ -168,7 +168,8 @@ pub struct SpaceObject {
     /// named by the space alone, with no look at its regions.
     may_share: AtomicBool,
     /// How many lendings of its memory to devices are under way
-    /// ([`SpaceObject::lend`]), which a fork waits for.
+    /// ([`SpaceObject::lend`]), which a fork waits for, with the top bit
+    /// set while one does.
     lending: AtomicU64,
     /// How many of its pages of anonymous memory are swapped out: counted
     /// in `anon_pages` and charged still.

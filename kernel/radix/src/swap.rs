@@ -67,6 +67,12 @@ const INTERVAL_NS: u64 = 1_000_000_000;
 /// The fewest pages an ask of the out-of-memory policy gets out.
 const RECLAIM_MIN: u64 = 256;
 
+/// How long [`make_room`] waits for each pass of the thread.
+const ROOM_WAIT_NS: u64 = 200_000_000;
+
+/// The most passes [`make_room`] asks for.
+const ROOM_PASSES: u32 = 16;
+
 /// One area.
 struct Area {
     device: DeviceRef,
@@ -463,6 +469,19 @@ fn run(_: usize) {
         }
         DONE.store(asked, Ordering::Release);
         wait::wake_all(done_key());
+    }
+}
+
+/// Has the swap thread swap pages out until `pages` are free, for a
+/// caller about to allocate them with locks held under which the thread
+/// would pass its memory over: a fork, which copies its space's tables
+/// with the space's regions locked. Stops at a pass that swaps nothing
+/// out; nothing to do with no area on.
+pub fn make_room(pages: u64) {
+    for _ in 0..ROOM_PASSES {
+        if !on_any() || FRAMES.free_pages() >= pages || !reclaim(ROOM_WAIT_NS) {
+            return;
+        }
     }
 }
 

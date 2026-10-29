@@ -11,6 +11,8 @@
 //! the page ends with `SWAPSPACE2`. Page 0 is the header; pages 1 to the
 //! last hold what is swapped out, a page each, but for the bad ones.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use radix_sync::SpinLock;
 
 use crate::{BlockDevice, PAGE_SIZE};
@@ -35,6 +37,10 @@ pub const MAX_AREAS: usize = 8;
 /// raw writes and mounts fail, as they hold what the kernel swapped out.
 static ON: SpinLock<[usize; MAX_AREAS]> = SpinLock::new([0; MAX_AREAS]);
 
+/// How many of [`ON`] are taken: with none, [`is_on`] answers without the
+/// lock, as every raw write asks.
+static AREAS: AtomicUsize = AtomicUsize::new(0);
+
 fn address(device: &dyn BlockDevice) -> usize {
     core::ptr::from_ref(device).cast::<()>() as usize
 }
@@ -49,6 +55,7 @@ pub fn claim(device: &dyn BlockDevice) -> bool {
     }
     let Some(free) = on.iter_mut().find(|slot| **slot == 0) else { return false };
     *free = at;
+    AREAS.fetch_add(1, Ordering::Release);
     true
 }
 
@@ -57,12 +64,13 @@ pub fn release(device: &dyn BlockDevice) {
     let at = address(device);
     for slot in ON.lock().iter_mut().filter(|slot| **slot == at) {
         *slot = 0;
+        AREAS.fetch_sub(1, Ordering::Release);
     }
 }
 
 /// Whether `device`'s swap area is on.
 pub fn is_on(device: &dyn BlockDevice) -> bool {
-    ON.lock().contains(&address(device))
+    AREAS.load(Ordering::Acquire) > 0 && ON.lock().contains(&address(device))
 }
 
 /// The header of a swap area.
