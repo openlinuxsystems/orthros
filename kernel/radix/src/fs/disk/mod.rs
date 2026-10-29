@@ -6,19 +6,24 @@
 //! [`init`] walks every PCI segment the firmware describes (`radix_hw::pci`),
 //! logs each function it finds, and binds the disks' controllers: virtio
 //! block devices ([`virtio`], named `vda`, `vdb` and on), AHCI controllers
-//! ([`ahci`], whose disks are named `sda`, `sdb` and on) and NVMe
-//! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on). A
+//! ([`ahci`], whose disks are named `sda`, `sdb` and on), NVMe
+//! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on),
+//! and xHCI controllers (`crate::usb`), whose sticks and USB disks
+//! ([`usb`]) are named `sda` and on too: each `sd` disk takes the first
+//! letter free, as on Linux, the SATA disks found at boot first, and a
+//! USB disk's goes back when it is unplugged. A
 //! disk's partitions are named after it (`vda1`, `sda2`, and with a `p`
 //! after a name that ends in a digit, `nvme0n1p1`), read from its MBR or
 //! GPT (`radix_block::partition`); every one appears in `/devices` and
-//! `/kernel/block`. Requests to every disk go through the same queue
+//! `/kernel/block`, and leaves them with its disk ([`unregister`]).
+//! Requests to every disk go through the same queue
 //! ([`queue`]), whatever drives it. Before the machine is powered off,
 //! [`shutdown`] empties every disk's write cache and shuts the NVMe
 //! controllers down.
 
 use alloc::sync::Arc;
 use core::fmt::Write;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::Status;
 use radix_abi::block as request;
@@ -36,6 +41,7 @@ use crate::Arch;
 mod ahci;
 mod nvme;
 mod queue;
+pub mod usb;
 mod virtio;
 
 /// A disk's name: `vda`, `vda1`.
@@ -67,6 +73,51 @@ pub struct PciFunction {
     pub subsystem: (u16, u16),
 }
 
+/// The `sd` letters taken, a bit each from `sda`'s: SATA and USB disks
+/// share them.
+static SD_LETTERS: AtomicU32 = AtomicU32::new(0);
+/// The PCI scan is done: the SATA disks it found have their names.
+static SCANNED: AtomicBool = AtomicBool::new(false);
+
+/// Takes the first `sd` letter free; returns it and the disk's name, or
+/// `None` once all 26 are taken.
+fn take_sd_name() -> Option<(u32, Name)> {
+    let mut taken = SD_LETTERS.load(Ordering::Acquire);
+    loop {
+        let letter = (!taken).trailing_zeros();
+        if letter >= 26 {
+            return None;
+        }
+        match SD_LETTERS.compare_exchange_weak(
+            taken,
+            taken | 1 << letter,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                let mut name = Name::new();
+                let _ = write!(name, "sd{}", (b'a' + letter as u8) as char);
+                return Some((letter, name));
+            }
+            Err(now) => taken = now,
+        }
+    }
+}
+
+/// Gives back an `sd` letter [`take_sd_name`] took.
+fn give_back_sd_letter(letter: u32) {
+    SD_LETTERS.fetch_and(!(1 << letter), Ordering::AcqRel);
+}
+
+/// Waits until the PCI scan is done, so that the disks it found are named
+/// before one that comes after: a USB disk's thread, before it takes a
+/// name.
+fn wait_for_scan() {
+    while !SCANNED.load(Ordering::Acquire) {
+        crate::sched::sleep_ns(10_000_000);
+    }
+}
+
 /// The most functions [`pci_functions`] lists.
 const MAX_FUNCTIONS: usize = 128;
 
@@ -90,6 +141,8 @@ pub struct Place {
     pub number: u32,
     /// Its first sector on the disk.
     pub first: u64,
+    /// What kind its table says it is.
+    pub kind: partition::Kind,
 }
 
 /// What a disk says it is, as its controller identifies it: text padded
@@ -98,8 +151,9 @@ pub struct Place {
 pub struct Ident {
     /// Its model.
     pub model: [u8; 40],
-    /// Its serial number.
-    pub serial: [u8; 20],
+    /// Its serial number: a SATA or NVMe disk's 20 bytes, or a USB
+    /// device's string, up to [`SERIAL`] bytes of it.
+    pub serial: [u8; SERIAL],
     /// Its firmware's revision.
     pub firmware: [u8; 8],
 }
@@ -119,6 +173,18 @@ impl Ident {
     pub fn firmware(&self) -> &str {
         unpadded(&self.firmware)
     }
+}
+
+/// The most bytes of a disk's serial number kept: more than any USB
+/// stick's has been seen to use.
+pub const SERIAL: usize = 64;
+
+/// `text`, padded with spaces to `N` bytes, or cut to them.
+pub fn padded<const N: usize>(text: &[u8]) -> [u8; N] {
+    let mut out = [b' '; N];
+    let n = text.len().min(N);
+    out[..n].copy_from_slice(&text[..n]);
+    out
 }
 
 /// Text a disk gave, without the spaces and NULs around it; empty if it
@@ -153,6 +219,7 @@ pub fn init() {
     });
     if count == 0 {
         info!("PCI: the firmware describes no PCI Express configuration space; no disks");
+        SCANNED.store(true, Ordering::Release);
         return;
     }
     let mut functions = 0;
@@ -196,6 +263,7 @@ pub fn init() {
         plural(sata, "disk", "disks"),
         plural(controllers, "controller", "controllers")
     );
+    SCANNED.store(true, Ordering::Release);
 }
 
 /// Logs a function: where it is, its IDs and what its class says it is.
@@ -266,11 +334,17 @@ fn sector_note(info: &Info) -> TextBuf<24> {
 /// Reads the partition table of the disk `name` and registers each
 /// partition.
 fn partitions(name: &Name, device: &DeviceRef) {
-    let info = device.info();
     let mut read = |sector: u64, out: &mut [u8; 512]| {
         radix_block::read_sector(&**device, sector, out).map_err(|_| partition::Error::Io)
     };
-    let (scheme, found) = match partition::read(info.sectors, info.unit(), &mut read) {
+    partitions_read(name, device, &mut read);
+}
+
+/// [`partitions`], with the table's sectors read by `read`: a USB disk's
+/// thread reads them itself.
+fn partitions_read(name: &Name, device: &DeviceRef, read: partition::ReadSector<'_>) {
+    let info = device.info();
+    let (scheme, found) = match partition::read(info.sectors, info.unit(), read) {
         Ok(read) => read,
         Err(err) => {
             warn!("Disk: {name}: {err}");
@@ -297,44 +371,47 @@ fn partitions(name: &Name, device: &DeviceRef) {
         if count == 1 { "partition" } else { "partitions" }
     );
     for part in &found {
-        let Some(slice) = radix_block::Slice::new(device.clone(), part.first, part.sectors) else {
-            continue;
-        };
-        let Ok(slice) = radix_vfs::mem::arc(slice) else { continue };
-        let mut part_name = Name::new();
-        let digit = name.as_str().ends_with(|c: char| c.is_ascii_digit());
-        let _ = write!(part_name, "{name}{}{}", if digit { "p" } else { "" }, part.number);
-        let mut kind = TextBuf::<48>::new();
-        match part.kind {
-            partition::Kind::Mbr(byte) => {
-                let _ = write!(kind, "type {byte:#04x}");
-            }
-            partition::Kind::Gpt(_) => {
-                let _ = kind.write_str("GPT");
-                let mut label = part.name().peekable();
-                if label.peek().is_some() {
-                    let _ = kind.write_str(" \"");
-                    for c in label {
-                        let _ = kind.write_char(c);
-                    }
-                    let _ = kind.write_char('"');
+        add_partition(name, device, part);
+    }
+}
+
+/// Registers partition `part` of the disk `name`, whose block device is
+/// `device`, and logs it.
+#[inline(never)]
+fn add_partition(name: &Name, device: &DeviceRef, part: &partition::Partition) {
+    let Some(slice) = radix_block::Slice::new(device.clone(), part.first, part.sectors) else {
+        return;
+    };
+    let Ok(slice) = radix_vfs::mem::arc(slice) else { return };
+    let mut part_name = Name::new();
+    let digit = name.as_str().ends_with(|c: char| c.is_ascii_digit());
+    let _ = write!(part_name, "{name}{}{}", if digit { "p" } else { "" }, part.number);
+    let mut kind = TextBuf::<48>::new();
+    match part.kind {
+        partition::Kind::Mbr(byte) => {
+            let _ = write!(kind, "type {byte:#04x}");
+        }
+        partition::Kind::Gpt(_) => {
+            let _ = kind.write_str("GPT");
+            let mut label = part.name().peekable();
+            if label.peek().is_some() {
+                let _ = kind.write_str(" \"");
+                for c in label {
+                    let _ = kind.write_char(c);
                 }
+                let _ = kind.write_char('"');
             }
         }
-        info!(
-            "Disk: {part_name}: {} from sector {}, {kind}{}",
-            Size(part.sectors * radix_block::SECTOR),
-            part.first,
-            if part.truncated {
-                ", cut to the disk's end (its table has it reach past)"
-            } else {
-                ""
-            }
-        );
-        let device: DeviceRef = slice;
-        let place = Place { number: part.number, first: part.first };
-        register(Entry { name: part_name, device, place: Some(place), ident: None });
     }
+    info!(
+        "Disk: {part_name}: {} from sector {}, {kind}{}",
+        Size(part.sectors * radix_block::SECTOR),
+        part.first,
+        if part.truncated { ", cut to the disk's end (its table has it reach past)" } else { "" }
+    );
+    let device: DeviceRef = slice;
+    let place = Place { number: part.number, first: part.first, kind: part.kind };
+    register(Entry { name: part_name, device, place: Some(place), ident: None });
 }
 
 /// A size for the log, in the largest binary unit it reaches, with a
@@ -371,6 +448,38 @@ fn register(entry: Entry) {
         let _ = disks.push_within_capacity(entry);
     }
     super::devfs::add_block(name.as_str(), device);
+}
+
+/// Takes the disk `name` and its partitions out of the kernel's list,
+/// `/devices` and `/kernel/block`: it is gone. Those who opened them keep
+/// them, and their requests fail.
+fn unregister(name: &str) {
+    let ours = |entry: &Entry| {
+        let rest = entry.name.as_str().strip_prefix(name);
+        let rest = rest.map(|rest| rest.strip_prefix('p').unwrap_or(rest));
+        rest.is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut names = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    {
+        let mut disks = DISKS.lock();
+        let Some(disks) = disks.as_mut() else { return };
+        // The entries go after the lock is let go: a block device's last
+        // reference may go with them.
+        let mut at = 0;
+        while at < disks.len() {
+            if ours(&disks[at]) {
+                if names.try_reserve(1).is_err() {
+                    break;
+                }
+                let _ = names.push_within_capacity(disks.remove(at));
+            } else {
+                at += 1;
+            }
+        }
+    }
+    for entry in &names {
+        super::devfs::remove_block(entry.name.as_str());
+    }
 }
 
 /// Readies every disk for the power to go: empties each one's write

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-scsi"
+description = "SCSI for the Radix kernel: the commands of a block device (SPC and SBC), what it answers, and finding out what a disk behind a transport is"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

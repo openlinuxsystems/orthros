@@ -3,7 +3,7 @@
 
 [package]
 name = "radix-usb"
-description = "USB for the Radix kernel: speeds, the standard requests and the descriptors of USB 2.0 and 3.2's chapter 9"
+description = "USB for the Radix kernel: speeds, the standard requests and the descriptors of USB 2.0 and 3.2's chapter 9, and the classes' own"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,9 @@ publish.workspace = true
 
 [lib]
 bench = false
+
+[dependencies]
+radix-scsi = { path = "../scsi" }
 
 [dev-dependencies]
 proptest = { version = "1.7", default-features = false, features = ["std"] }

@@ -279,6 +279,7 @@ fn mbr_primary_and_logical_partitions() {
     // The extended one shows its first two sectors only.
     assert_eq!(numbers, [(1, 2048, 1024), (2, 3072, 2), (5, 3135, 100), (6, 3335, 200)]);
     assert_eq!(found[0].kind, Kind::Mbr(0x0c));
+    assert_eq!(std::format!("{} {}", found[0].kind, found[2].kind), "0x0c 0x83");
     assert!(found.iter().all(|p| !p.truncated));
 }
 
@@ -388,6 +389,9 @@ fn gpt_partitions_and_the_backup_header() {
         assert_eq!(found.len(), 2);
         assert_eq!((found[0].number, found[0].first, found[0].sectors), (1, 2048, 2048));
         assert_eq!(found[1].name().collect::<std::string::String>(), "data");
+        // Its type, as lsblk gives it.
+        let kind = std::format!("{}", found[1].kind);
+        assert_eq!(kind, "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7");
     }
     // An entry past the disk's end, or ending before it starts, is
     // skipped; one outside the usable sectors but on the disk is shown,

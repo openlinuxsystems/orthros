@@ -102,7 +102,11 @@ Init: /system/commands/spark is process 1
   once, from the first of them found; the kernel refuses the others with
   *in_use*, and they are left alone (ADR 0153). A
   device that holds none of them is left alone, and so is every device
-  with *--no-volumes*.
+  with *--no-volumes*. So is an EFI system partition, whose
+  _/kernel/block/_*name*_/parttype_ is *0xef* in an MBR or
+  *c12a7328-f81f-11d2-ba4b-00a0c93ec93b* in a GPT: what boots the
+  machine is not one of the user's volumes, as on Windows and macOS and
+  with Linux's udisks (ADR 0161).
 . The first Btrfs mounted read-write whose top holds the subvolumes
   _@system.a_, _@settings_, _@state_, _@applications_, _@users_ and
   _@shared_ is Dukovo's root, as *./ob image* makes it on its Dukovo root

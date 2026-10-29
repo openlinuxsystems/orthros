@@ -27,6 +27,8 @@
 //! A transfer on one of them, [`Device::submit_in`] or
 //! [`Device::submit_out`], is one Normal TRB that interrupts when done:
 //! the driver does not wait for it, and its event comes with the others.
+//! [`Device::submit_frames`] moves data straight to or from memory the
+//! kernel names, as a TD of a TRB for each buffer (ADR 0161).
 //! A hub's slot says it is a hub, and how many ports it has
 //! ([`Device::set_hub`]); a low- or full-speed device behind a high-speed
 //! hub names the hub's slot and port, whose Transaction Translator talks
@@ -110,9 +112,59 @@ pub struct HubSlot {
 struct Endpoint {
     /// Its device context index.
     index: u8,
+    /// What the device says of it.
+    descriptor: EndpointDescriptor,
     /// Its ring, in the first page of its memory; the second page holds
     /// its transfers' data.
     ring: Ring,
+}
+
+/// The most buffers a transfer of [`Device::submit_frames`] has, a TRB
+/// each: half a ring, so that a TD always fits behind the one before.
+pub const MAX_TD_BUFFERS: usize = 128;
+
+/// Where a transfer of [`Device::submit_frames`] is on its ring, for its
+/// events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Td {
+    /// Its first TRB's physical address.
+    pub first: u64,
+    /// Its last TRB's, whose event says it is done.
+    pub last: u64,
+    /// The ring's start.
+    ring: u64,
+    /// How many TRBs it has.
+    trbs: usize,
+}
+
+impl Td {
+    /// Which of its TRBs, from 0, the one at `trb` is: what an event for
+    /// it names. `None` if it is not one of them.
+    pub fn position(&self, trb: u64) -> Option<usize> {
+        let offset = trb.checked_sub(self.ring)?;
+        let usable = crate::ring::RING_TRBS - 1;
+        if !offset.is_multiple_of(crate::ring::TRB_SIZE as u64) {
+            return None;
+        }
+        let slot = (offset / crate::ring::TRB_SIZE as u64) as usize;
+        let start = ((self.first - self.ring) / crate::ring::TRB_SIZE as u64) as usize;
+        if slot >= usable {
+            return None;
+        }
+        let position = (slot + usable - start) % usable;
+        (position < self.trbs).then_some(position)
+    }
+
+    /// How many bytes of its buffers `frames` moved when an event for its
+    /// TRB at `trb` said `residual` were left: all of the buffers before
+    /// that TRB's, and that one's but the residual. `None` if `trb` is
+    /// not one of its.
+    pub fn moved(&self, frames: &[(u64, u32)], trb: u64, residual: u32) -> Option<usize> {
+        let position = self.position(trb)?;
+        let before: usize = frames.iter().take(position).map(|&(_, len)| len as usize).sum();
+        let this = frames.get(position).map_or(0, |&(_, len)| len);
+        Some(before + this.saturating_sub(residual) as usize)
+    }
 }
 
 /// Where a device is.
@@ -376,7 +428,7 @@ impl Device {
             self.write_endpoint_context(index, *endpoint, &ring);
             add |= 1 << index;
             entries = entries.max(index);
-            self.endpoints[i] = Some(Endpoint { index, ring });
+            self.endpoints[i] = Some(Endpoint { index, descriptor: *endpoint, ring });
         }
         self.memory.write32(INPUT + 4, add);
         let before = self.entries;
@@ -469,6 +521,64 @@ impl Device {
         Ok(at)
     }
 
+    /// Starts a transfer to or from the buffers `frames` (physical address
+    /// and length, each within 64 KiB of memory that no 64 KiB boundary
+    /// crosses, at most [`MAX_TD_BUFFERS`]) on the bulk or interrupt
+    /// endpoint at device context index `index`, IN if it is odd: one TD
+    /// of chained Normal TRBs, a TRB each (4.11.2.1). The last interrupts
+    /// when done, and on IN every one does on a short packet, which ends
+    /// the TD early. Returns where it is, for its events.
+    pub fn submit_frames(
+        &mut self,
+        xhci: &Xhci,
+        index: u8,
+        frames: &[(u64, u32)],
+    ) -> Result<Td, Error> {
+        let crosses = |&(phys, len): &(u64, u32)| {
+            len == 0 || len > 0x1_0000 || (phys & 0xffff) + u64::from(len) > 0x1_0000
+        };
+        if index == EP0
+            || frames.is_empty()
+            || frames.len() > MAX_TD_BUFFERS
+            || frames.iter().any(crosses)
+        {
+            return Err(Error::BadRequest);
+        }
+        let version = xhci.info().version;
+        let slot = self.slot;
+        let endpoint = self.endpoint(index).ok_or(Error::BadRequest)?;
+        let into_host = index & 1 != 0;
+        let max_packet = u64::from(endpoint.descriptor.max_packet().max(1));
+        let total: u64 = frames.iter().map(|&(_, len)| u64::from(len)).sum();
+        let packets = total.div_ceil(max_packet);
+        // How many bytes the buffers before the `i`th hold.
+        let before = |i: usize| frames[..i].iter().map(|&(_, len)| u64::from(len)).sum::<u64>();
+        let trb = |i: usize| {
+            let (phys, len) = frames[i];
+            let last = i + 1 == frames.len();
+            // TD Size (4.11.2.4): the packets left after this TRB, or on a
+            // controller before 1.0, the bytes left after it in KiB.
+            let left = if last {
+                0
+            } else if version < 0x0100 {
+                (total - before(i)) >> 10
+            } else {
+                packets - (before(i) + u64::from(len)) / max_packet
+            };
+            Trb {
+                parameter: phys,
+                status: len | (left.min(31) as u32) << 17,
+                control: control::kind(kind::NORMAL)
+                    | if into_host { control::ISP } else { 0 }
+                    | if last { control::IOC } else { 0 },
+            }
+        };
+        let ring = endpoint.ring.phys();
+        let (first, last) = endpoint.ring.push_td(frames.len(), trb);
+        xhci.ring(slot, u32::from(index));
+        Ok(Td { first, last, ring, trbs: frames.len() })
+    }
+
     /// Copies what the last transfer on the IN endpoint at device context
     /// index `index` brought, `out.len()` bytes, into `out`.
     pub fn received(&mut self, index: u8, out: &mut [u8]) -> Result<(), Error> {
@@ -501,6 +611,39 @@ impl Device {
             self.control_out(xhci, host, Setup::clear_halt(address), &[])?;
         }
         Ok(())
+    }
+
+    /// Clears a halt of the bulk or interrupt endpoint at device context
+    /// index `index` on both sides, and starts its data toggle or sequence
+    /// number over on both, whatever state it is in: what a Bulk-Only
+    /// device's reset recovery asks of its pipes (ADR 0161). Whatever was
+    /// on its ring is skipped. Reset Endpoint starts the controller's
+    /// side over only for an endpoint that halted, so the endpoint is
+    /// stopped, then dropped and added again (Configure Endpoint, 4.6.6),
+    /// as Linux does; the device's side starts over with CLEAR_FEATURE.
+    pub fn clear_halt(
+        &mut self,
+        xhci: &mut Xhci,
+        host: &mut dyn Host,
+        index: u8,
+    ) -> Result<(), Error> {
+        if index == EP0 || self.endpoint(index).is_none() {
+            return Err(Error::BadRequest);
+        }
+        self.skip(xhci, host, index, code::STOPPED)?;
+        let Some(endpoint) = self.endpoints.iter().flatten().find(|e| e.index == index) else {
+            return Err(Error::BadRequest);
+        };
+        self.clear_input();
+        self.memory.write32(INPUT, 1 << index);
+        self.memory.write32(INPUT + 4, ADD_SLOT | 1 << index);
+        self.write_slot_context();
+        self.write_endpoint_context(index, endpoint.descriptor, &endpoint.ring);
+        let input = self.memory.phys() + INPUT as u64;
+        let slot = self.slot;
+        xhci.command(Command::ConfigureEndpoint { slot, input, deconfigure: false }, host)?;
+        let address = endpoint.descriptor.address;
+        self.control_out(xhci, host, Setup::clear_halt(address), &[])
     }
 
     /// A control transfer that reads up to `setup.length` bytes into

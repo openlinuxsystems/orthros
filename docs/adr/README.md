@@ -169,3 +169,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0155](0155-btrfs-replaces-a-disk-by-rebuilding-onto-it-with-a-scrub.md) | Btrfs replaces a disk by rebuilding onto it with a scrub | Accepted |
 | [0156](0156-a-disk-requests-thread-is-woken-from-its-slot.md) | A disk request's thread is woken from its slot, and a lending takes nothing from the heap | Accepted |
 | [0160](0160-the-console-over-the-xhci-debug-capability.md) | The console goes over the xHCI Debug Capability to a second computer, with the `dbc` flag | Accepted |
+| [0161](0161-usb-sticks-are-disks-over-the-bulk-only-transport.md) | USB sticks are disks over the Bulk-Only Transport, served by a thread each | Accepted |

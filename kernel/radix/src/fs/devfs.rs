@@ -10,8 +10,9 @@
 //! and `pts/N`, since Phase 9 the kernel log (`kmsg`), the keyboards
 //! (`kbd`, from `keyboard`) and the screen (`fb0`, from `framebuffer`), and
 //! since Phase 11a the pointers (`mouse`, from `mouse`). Programs make and
-//! remove nothing in it; only the kernel adds devices, and
-//! `pts/N` comes and goes with its pseudo-terminal.
+//! remove nothing in it; only the kernel adds devices, `pts/N` comes and
+//! goes with its pseudo-terminal, and a USB disk and its partitions with
+//! the disk (Phase 11b).
 
 use radix_block::DeviceRef;
 use radix_klog::{error, warn};
@@ -82,6 +83,13 @@ pub fn add_block(name: &str, device: DeviceRef) {
     let Some(root) = ROOT.get() else { return };
     if let Err(err) = BlockNode::make(next_id(), device).and_then(|node| root.add(name, node)) {
         warn!("Files: could not add /devices/{name}: {err}");
+    }
+}
+
+/// Takes the block device `name` away: its disk is gone.
+pub fn remove_block(name: &str) {
+    if let Some(root) = ROOT.get() {
+        root.remove_entry(name);
     }
 }
 

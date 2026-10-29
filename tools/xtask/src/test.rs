@@ -76,6 +76,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-random",
     "radix-relocs",
     "radix-sched",
+    "radix-scsi",
     "radix-sync",
     "radix-tty",
     "radix-usb",
@@ -223,6 +224,13 @@ enum Bus {
     /// A namespace of NVMe controller `n` of the case's own, numbered as
     /// they come: `nvme<n>n1`, `nvme<n>n2` and on.
     Nvme(u8),
+    /// A USB stick (QEMU's `usb-storage`) on the xHCI controller of a case
+    /// that boots from USB, at this QEMU port: a root port (`2`), where it
+    /// runs at SuperSpeed, or a port of a hub of the case's own on one
+    /// (`4.1`), at the hub's full speed. Named `sd` and a letter after the
+    /// SATA disks and the boot stick, in the order the controller finds
+    /// them: the root ports in order, then the hubs' ports.
+    Usb(&'static str),
 }
 
 impl Disk {
@@ -303,10 +311,12 @@ pub struct DiskImage {
 }
 
 /// The names the kernel gives a case's disks: `vda`, `vdb` and on for
-/// virtio ones, `sda`, `sdb` and on for SATA ones, each in their order,
-/// and `nvme<n>n1` and on for each NVMe controller's namespaces.
+/// virtio ones, `sda`, `sdb` and on for SATA ones, then USB ones after
+/// the boot stick's, each in their order, and `nvme<n>n1` and on for
+/// each NVMe controller's namespaces.
 fn disk_names(disks: &[Disk]) -> Vec<String> {
-    let (mut virtio, mut sata) = (b'a', b'a');
+    let sata_disks = disks.iter().filter(|disk| disk.bus == Bus::Sata).count() as u8;
+    let (mut virtio, mut sata, mut usb) = (b'a', b'a', b'a' + sata_disks + 1);
     let mut namespaces = [0u32; 256];
     disks
         .iter()
@@ -314,6 +324,7 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
             let (prefix, letter) = match disk.bus {
                 Bus::Virtio => ("vd", &mut virtio),
                 Bus::Sata => ("sd", &mut sata),
+                Bus::Usb(_) => ("sd", &mut usb),
                 Bus::Nvme(n) => {
                     namespaces[usize::from(n)] += 1;
                     return format!("nvme{n}n{}", namespaces[usize::from(n)]);
@@ -323,6 +334,19 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
             format!("{prefix}{}", char::from(*letter - 1))
         })
         .collect()
+}
+
+/// Where the kernel says a USB disk at QEMU port `port` is: QEMU puts a
+/// SuperSpeed device on its controller's USB 3 root port of that number,
+/// 1 to 4, and a full-speed hub on its USB 2 one, 5 to 8.
+fn usb_place(port: &str) -> String {
+    match port.split_once('.') {
+        Some((root, below)) => {
+            let root: u8 = root.parse().expect("a root port's number");
+            format!("1-{}.{below}", root + 4)
+        }
+        None => format!("1-{port}"),
+    }
 }
 
 /// The volumes Spark mounts from a case's FAT and Btrfs disks: each
@@ -389,6 +413,19 @@ const SATA_DISKS: &[Disk] = &[
         ..fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Sata)
     },
 ];
+
+/// The same disks as USB sticks: two at SuperSpeed on root ports, `sdb`
+/// and `sdc` after the boot stick's `sda`, and two at full speed behind
+/// a hub ([`USB_HUB`]), `sdd` and `sde1`, the partition in a GPT.
+const USB_DISKS: &[Disk] = &[
+    fat_disk(1440, 12, "RADIX12", Table::None, Bus::Usb("2")),
+    fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Usb("3")),
+    fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Usb("4.1")),
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Usb("4.2")),
+];
+
+/// The hub [`USB_DISKS`] has two of its sticks behind, at QEMU port 4.
+const USB_HUB: &[&str] = &["-device", "usb-hub,bus=xhci.0,port=4"];
 
 /// The same disks as NVMe namespaces, two on each of two controllers:
 /// `nvme0n1`, `nvme0n2`, `nvme1n1` and `nvme1n2p1`, the partition in a
@@ -1366,6 +1403,26 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "storage-usb",
+        about: "The storage test on four USB sticks, two at SuperSpeed and two at full speed behind a hub, one partitioned with a GPT; then one is pulled out and plugged in again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: USB_HUB,
+        script: storage_write,
+        disks: USB_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_usb_check,
+        }),
+    },
+    Case {
         name: "storage-nvme",
         about: "The storage test on four NVMe namespaces of two controllers, each with a queue and an interrupt for each of four CPUs, one partitioned with a GPT",
         firmware: Firmware::Uefi,
@@ -1975,6 +2032,9 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
+    if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_))) && case.media != Media::Usb {
+        return Err("a case with USB disks boots from USB, whose controller they are on".into());
+    }
     // Each controller before its namespaces, in order, so that the
     // kernel finds them in that order.
     for n in nvme_controllers(case.disks) {
@@ -2007,6 +2067,9 @@ fn run_case(
                 namespaces[usize::from(n)] += 1;
                 let nsid = namespaces[usize::from(n)];
                 format!("nvme-ns,drive=disk{i},bus=nvme{n},nsid={nsid}{device}")
+            }
+            Bus::Usb(port) => {
+                format!("usb-storage,drive=disk{i},bus=xhci.0,port={port},id=stick{i}{device}")
             }
         });
     }
@@ -2753,6 +2816,24 @@ impl Vm {
             std::thread::sleep(Duration::from_millis(40));
         }
         Ok(())
+    }
+
+    /// Gives QEMU the raw disk image `file` as the block node `node`, for
+    /// a device plugged in with it: QMP's `blockdev-add`. The file is not
+    /// locked: QEMU lets go of a device's file a while after it is
+    /// unplugged, and the same file may be plugged in again before.
+    pub fn add_disk_file(&mut self, node: &str, file: &Path) -> Result<(), String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        Qmp::connect(&socket)?.execute(&format!(
+            r#"{{"execute":"blockdev-add","arguments":{{"driver":"raw","node-name":{},"file":{{"driver":"file","filename":{},"locking":"off"}}}}}}"#,
+            crate::bench::json_string(node),
+            crate::bench::json_string(&file.display().to_string())
+        ))
+    }
+
+    /// The directory of the run's logs, and of its cases' disks.
+    pub fn dir(&self) -> &Path {
+        self.stderr_log.parent().unwrap_or(Path::new("."))
     }
 
     /// Presses the machine's power button: QMP's `system_powerdown`, which
@@ -3959,6 +4040,13 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                 line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
                 format!("{} bytes a block{sectors}{ro}, write cache, deallocates", disk.sector),
             ),
+            Bus::Usb(port) => (
+                line_of(&format!(
+                    "Disk: {name} is a USB disk of {size} on {}: QEMU QEMU HARDDISK ",
+                    usb_place(port)
+                ))?,
+                format!("{} bytes a block{sectors}{ro}, write cache", disk.sector),
+            ),
         };
         // Only a SATA disk's line says whether it is solid state.
         let says_solid = disk.bus == Bus::Sata && disk.solid();
@@ -4056,6 +4144,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
         let model = match disk.bus {
             Bus::Sata => "QEMU HARDDISK",
             Bus::Nvme(_) => "QEMU NVMe Ctrl",
+            Bus::Usb(_) => "QEMU QEMU HARDDISK",
             Bus::Virtio => "",
         };
         if disk.table == Table::None && !model.is_empty() {
@@ -4338,6 +4427,29 @@ fn storage_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     vm.expect("storage: /processes lists ")?;
     storage_end(vm, "check")
+}
+
+/// The second boot of `storage-usb`: the storage test's check, then the
+/// first stick is pulled out, its filesystem still mounted, and plugged
+/// in again: it goes, with its name, and comes back under the same name,
+/// the lowest free.
+fn storage_usb_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_check(vm, case)?;
+    let (disk, name) = (&case.disks[0], &disk_names(case.disks)[0]);
+    let Bus::Usb(port) = disk.bus else { return Err("the first disk is not a USB one".into()) };
+    let place = usb_place(port);
+    vm.monitor("device_del stick0")?;
+    vm.expect(&format!("USB: {place}: QEMU USB HARDDRIVE was unplugged"))?;
+    vm.expect(&format!("Disk: {name} is gone with its USB device"))?;
+    let file = vm.dir().join(format!("{}-disk0.img", case.name));
+    vm.add_disk_file("again", &file)?;
+    vm.monitor(&format!("device_add usb-storage,drive=again,bus=xhci.0,port={port},id=again"))?;
+    vm.expect(&format!(
+        "Disk: {name} is a USB disk of {} on {place}: QEMU QEMU HARDDISK ",
+        disk_size(disk.kib)
+    ))?;
+    vm.expect(&format!("Disk: {name} has no partition table; it is used whole"))?;
+    Ok(())
 }
 
 /// The `disk-raw` test: the program reads, writes and discards each disk
@@ -4718,7 +4830,11 @@ fn root_read(vm: &mut Vm, _: &Case) -> Result<(), String> {
 /// adds the default settings the `first` boot only, and starts the
 /// program.
 fn root_boot(vm: &mut Vm, first: bool) -> Result<(), String> {
-    let disk = partition_name(&disk_names(ROOT_DISKS)[0], 5);
+    let name = &disk_names(ROOT_DISKS)[0];
+    // The image's EFI system partition is no volume.
+    let efi = partition_name(name, 2);
+    vm.expect(&format!("spark: {efi} is an EFI system partition; left alone"))?;
+    let disk = partition_name(name, 5);
     let mounted = format!("spark: mounted the Btrfs filesystem of {disk} at /volumes/{disk}");
     vm.expect(&mounted)?;
     vm.expect(&format!("{mounted}, compressed (zstd)"))?;

@@ -245,6 +245,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     mce::start(flags.value("mce-poll"));
     check_timers(online);
     check_ipis(online);
+    usb::wait_for_disks();
 
     if let Some(name) = settings.selftest {
         selftest::run(name);

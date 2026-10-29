@@ -66,7 +66,10 @@ mod tests;
 
 use core::fmt;
 
-pub use device::{BUFFER_SIZE, Device, HubSlot, MAX_ENDPOINTS, Place, endpoint_index, interval};
+pub use device::{
+    BUFFER_SIZE, Device, HubSlot, MAX_ENDPOINTS, MAX_TD_BUFFERS, Place, Td, endpoint_index,
+    interval,
+};
 use radix_hw::{Dma, Mmio, PAGE_SIZE};
 use radix_usb::Speed;
 use ring::{EventRing, Ring, Trb, control, kind};

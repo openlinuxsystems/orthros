@@ -10,8 +10,10 @@
 //! starts a kernel thread for it, `usb1`, `usb2` and on ([`controller`]).
 //! The thread takes the controller from the firmware and then runs it
 //! alone: the interrupt only wakes it. It sets up every device it finds,
-//! on the root ports and behind hubs ([`hub`], ADR 0147), and reads the
-//! keyboards, mice and tablets among them ([`hid`], ADR 0148). With the
+//! on the root ports and behind hubs ([`hub`], ADR 0147), reads the
+//! keyboards, mice and tablets among them ([`hid`], ADR 0148), and
+//! carries the transfers of the sticks and disks among them for their
+//! own threads ([`storage`], ADR 0161). With the
 //! `dbc` flag, the first controller with a Debug Capability carries the
 //! console to a second computer ([`dbc`], ADR 0160). Bus numbers
 //! count controllers from 1, and a device is named as Linux names one, by
@@ -36,6 +38,7 @@ mod controller;
 pub mod dbc;
 mod hid;
 mod hub;
+pub mod storage;
 
 /// The most controllers driven.
 const MAX_CONTROLLERS: usize = 8;
@@ -44,6 +47,12 @@ const MAX_CONTROLLERS: usize = 8;
 static OFF: AtomicBool = AtomicBool::new(false);
 /// Controllers bound so far.
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Controllers that have looked at what was plugged into them at boot,
+/// or could not start.
+static LOOKED: AtomicUsize = AtomicUsize::new(0);
+/// How long the end of boot waits for the disks plugged in at boot, at
+/// most.
+const DISKS_NS: u64 = 5_000_000_000;
 
 /// What a controller's thread starts from.
 struct Start {
@@ -129,6 +138,32 @@ pub fn bind(function: &Function) {
             function.address()
         ),
     }
+}
+
+/// A controller has looked at what was plugged into it at boot: the
+/// devices on its ports, and behind their hubs.
+fn looked() {
+    LOOKED.fetch_add(1, Ordering::AcqRel);
+}
+
+/// At the end of boot, before the first program: waits until every
+/// controller has looked at what was plugged into it, and every stick
+/// found then has found its disks, for at most [`DISKS_NS`], so that the
+/// disks plugged in at boot are there for it (ADR 0161).
+pub fn wait_for_disks() {
+    let deadline = <Arch as Timer>::now_ns().saturating_add(DISKS_NS);
+    let settled = || {
+        LOOKED.load(Ordering::Acquire) >= COUNT.load(Ordering::Acquire)
+            && storage::PROBING.load(Ordering::Acquire) == 0
+    };
+    while !settled() {
+        if <Arch as Timer>::now_ns() >= deadline {
+            info!("USB: the devices plugged in at boot are not all set up yet; going on");
+            break;
+        }
+        sched::sleep_ns(10_000_000);
+    }
+    storage::BOOTED.store(true, Ordering::Release);
 }
 
 /// The keyboards' lock lights are to change: wakes every controller's

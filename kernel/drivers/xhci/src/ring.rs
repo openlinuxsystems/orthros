@@ -14,7 +14,8 @@
 //!   command ring, and a transfer ring for each endpoint. It is one page,
 //!   255 TRBs and a Link TRB back to the start that toggles the cycle
 //!   state (TC). The driver writes a TRB's control word last, after a
-//!   barrier, so the controller never sees half of one.
+//!   barrier, so the controller never sees half of one, and a TD's first
+//!   TRB's last of all, so it never sees half of a TD.
 //! - [`EventRing`] is the ring the controller fills and the driver reads:
 //!   one segment of a page, 256 events, listed in a one-entry Event Ring
 //!   Segment Table. The controller wraps from the last event to the first
@@ -240,6 +241,51 @@ impl Ring {
             self.cycle = !self.cycle;
         }
         phys
+    }
+
+    /// Hands a TD of `count` TRBs, the `i`th `trb(i)`, to the controller
+    /// as [`Ring::push`] does each TRB, chained: Chain on every TRB but the
+    /// last, and on a Link TRB the TD goes through (4.11.5.1). Its first
+    /// TRB's cycle bit is written last, so that a controller reading the
+    /// ring never starts on half of it. Returns the physical addresses of
+    /// its first and last TRBs.
+    pub fn push_td(&mut self, count: usize, trb: impl Fn(usize) -> Trb) -> (u64, u64) {
+        let first_at = self.enqueue * TRB_SIZE;
+        let first_cycle = self.cycle;
+        let chain = |i: usize| if i + 1 < count { control::CHAIN } else { 0 };
+        let mut last = 0;
+        for i in 0..count {
+            let this = trb(i);
+            let at = self.enqueue * TRB_SIZE;
+            self.memory.write64(at, this.parameter);
+            self.memory.write32(at + 8, this.status);
+            // The first stays the controller's until the rest are written.
+            let cycle = if i == 0 { !self.cycle } else { self.cycle };
+            device_barrier();
+            self.memory
+                .write32(at + 12, (this.control & !control::CYCLE) | chain(i) | u32::from(cycle));
+            last = self.memory.phys() + at as u64;
+            self.enqueue += 1;
+            if self.enqueue == RING_TRBS - 1 {
+                let link = self.enqueue * TRB_SIZE;
+                device_barrier();
+                self.memory.write32(
+                    link + 12,
+                    control::kind(kind::LINK)
+                        | control::TOGGLE_CYCLE
+                        | chain(i)
+                        | u32::from(self.cycle),
+                );
+                self.enqueue = 0;
+                self.cycle = !self.cycle;
+            }
+        }
+        if count > 0 {
+            device_barrier();
+            let control = (trb(0).control & !control::CYCLE) | chain(0) | u32::from(first_cycle);
+            self.memory.write32(first_at + 12, control);
+        }
+        (self.memory.phys() + first_at as u64, last)
     }
 
     /// Whether `phys` is the address of one of its TRBs.

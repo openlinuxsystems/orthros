@@ -22,6 +22,8 @@
 //!   requests that drive them (Phase 11a, ADR 0147).
 //! - [`hid`]: what a HID interface says of itself, and the class's
 //!   requests (Phase 11a, ADR 0148).
+//! - [`storage`]: mass storage interfaces, and the Bulk-Only Transport
+//!   that carries SCSI commands to USB sticks (Phase 11b, ADR 0161).
 //!
 //! The crate knows nothing of the kernel or of a controller, so its tests
 //! run on the host.
@@ -33,6 +35,7 @@ use core::fmt;
 
 pub mod hid;
 pub mod hub;
+pub mod storage;
 #[cfg(test)]
 mod tests;
 

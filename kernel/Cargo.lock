@@ -126,6 +126,7 @@ dependencies = [
  "radix-posix",
  "radix-random",
  "radix-sched",
+ "radix-scsi",
  "radix-sync",
  "radix-tty",
  "radix-usb",
@@ -370,6 +371,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-scsi"
+version = "0.10.3"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "radix-sync"
 version = "0.10.3"
 
@@ -386,6 +394,7 @@ name = "radix-usb"
 version = "0.10.3"
 dependencies = [
  "proptest",
+ "radix-scsi",
 ]
 
 [[package]]
