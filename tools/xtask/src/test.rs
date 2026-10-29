@@ -2921,10 +2921,15 @@ impl Vm {
     /// Waits until the framebuffer console shows each of `needles`. The
     /// serial port gets every message before the screen does, and drawing
     /// is slow under emulation, so this takes screenshots until the screen
-    /// catches up or 15 seconds pass.
+    /// catches up or 15 seconds pass. It waits as long for the console's
+    /// size in the log, which a line of another service's may come before.
     pub fn expect_screen(&mut self, needles: &[&str]) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
+            if screen::Geometry::from_log(&self.log()).is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             let screen = self.screen()?;
             match screen_shows(&screen, needles) {
                 Ok(()) => return Ok(()),
