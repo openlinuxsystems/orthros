@@ -34,7 +34,11 @@ Btrfs holds the system and what changes (*spark*(8)). The files GRUB
 reads are:
 
 _/boot/radix_
-	The kernel, an ELF executable.
+	The kernel, an ELF executable, without its debug information: GRUB
+	loads every section of the file into memory, and the debug
+	information would be most of it. Backtraces need only the kernel's
+	own symbol table; *ob*(1) keeps the debug information in
+	_out/sysroot/boot/radix_, for *gdb*(1).
 
 _/boot/grub/grub.cfg_
 	The menu, generated from _image/grub/grub.cfg.in_.
