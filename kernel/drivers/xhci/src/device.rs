@@ -610,6 +610,13 @@ impl Device {
                 }
             }
             xhci.events_read();
+            // A controller may end a transfer to a device pulled out of
+            // its root port with no event (QEMU's does), so the port is
+            // asked rather than the deadline waited for.
+            if !xhci.port_status(self.place.root_port).connected() {
+                let _ = self.skip(xhci, host, EP0, code::STOPPED);
+                return Err(Error::Gone);
+            }
             if host.now_us() >= deadline {
                 self.skip(xhci, host, EP0, code::STOPPED)?;
                 return Err(Error::TimedOut);

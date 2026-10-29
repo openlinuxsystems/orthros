@@ -20,7 +20,7 @@
 //! the port, and, at low or full speed behind a high-speed hub, that
 //! hub's slot and port, whose Transaction Translator talks to it.
 
-use radix_klog::{info, warn};
+use radix_klog::{TextBuf, info, warn};
 use radix_usb::hub::{HubDescriptor, PortStatus, feature};
 use radix_usb::{EndpointDescriptor, Setup, Speed};
 use radix_xhci::{Host, HubSlot, Place, code, endpoint_index};
@@ -267,19 +267,30 @@ impl Controller {
     fn attach_behind(&mut self, slot: u8, port: u8, path: Path, usb3: bool) {
         sched::sleep_ns(DEBOUNCE_NS);
         for attempt in 0..2 {
-            let Err(why) = self.try_attach_behind(slot, port, path, usb3) else { return };
-            let connected = self.port_status(slot, port, usb3).is_ok_and(|s| s.connected());
-            if attempt == 1 || !connected {
-                if connected {
-                    warn!("USB: {}: the device could not be set up: {why}", Name(self.bus, path));
-                    self.set_hub_failed(slot, port, true);
-                }
+            let mut name = TextBuf::<64>::new();
+            let Err(why) = self.try_attach_behind(slot, port, path, usb3, &mut name) else {
+                return;
+            };
+            if !self.port_status(slot, port, usb3).is_ok_and(|s| s.connected()) {
+                self.pulled_out(path, &name);
+                return;
+            }
+            if attempt == 1 {
+                warn!("USB: {}: the device could not be set up: {why}", Name(self.bus, path));
+                self.set_hub_failed(slot, port, true);
                 return;
             }
         }
     }
 
-    fn try_attach_behind(&mut self, slot: u8, port: u8, path: Path, usb3: bool) -> Result<(), Why> {
+    fn try_attach_behind(
+        &mut self,
+        slot: u8,
+        port: u8,
+        path: Path,
+        usb3: bool,
+        name: &mut TextBuf<64>,
+    ) -> Result<(), Why> {
         let status = self.hub_reset(slot, port, usb3)?;
         sched::sleep_ns(RECOVERY_NS);
         let speed = status.speed();
@@ -304,7 +315,7 @@ impl Controller {
             tt_slot,
             tt_port,
         };
-        self.set_up(place)
+        self.set_up(place, name)
     }
 
     /// Resets port `port` of the hub in slot `slot` and waits for it;

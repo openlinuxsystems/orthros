@@ -495,21 +495,27 @@ impl Controller {
 
     /// Sets up the device on root port `port`, trying twice.
     fn attach(&mut self, port: u8) {
+        let path = Path { root_port: port, route: 0 };
         for attempt in 0..2 {
-            match self.try_attach(port, attempt > 0) {
-                Ok(()) => return,
-                Err(why) => {
-                    if attempt == 1 || !self.xhci.port_status(port).connected() {
-                        let path = Path { root_port: port, route: 0 };
-                        warn!(
-                            "USB: {}: the device could not be set up: {why}",
-                            Name(self.bus, path)
-                        );
-                        self.set_failed(port, true);
-                        return;
-                    }
-                }
+            let mut name = TextBuf::<64>::new();
+            let Err(why) = self.try_attach(port, attempt > 0, &mut name) else { return };
+            if !self.xhci.port_status(port).connected() {
+                self.pulled_out(path, &name);
+                return;
             }
+            if attempt == 1 {
+                warn!("USB: {}: the device could not be set up: {why}", Name(self.bus, path));
+                self.set_failed(port, true);
+                return;
+            }
+        }
+    }
+
+    /// The device at `path` was pulled out while it was set up: says so,
+    /// as [`Self::detach`] would, if the log had named it.
+    pub(super) fn pulled_out(&self, path: Path, name: &TextBuf<64>) {
+        if !name.is_empty() {
+            info!("USB: {}: {name} was unplugged", Name(self.bus, path));
         }
     }
 
@@ -533,7 +539,7 @@ impl Controller {
         }
     }
 
-    fn try_attach(&mut self, port: u8, again: bool) -> Result<(), Why> {
+    fn try_attach(&mut self, port: u8, again: bool, name: &mut TextBuf<64>) -> Result<(), Why> {
         let usb3 = self.xhci.port_protocol(port).is_some_and(|p| p.major == 3);
         if again || !self.xhci.port_status(port).enabled() {
             self.reset_port(port, usb3)?;
@@ -547,14 +553,15 @@ impl Controller {
             .xhci
             .port_speed(port, status)
             .ok_or(Why::Device("its port says a speed it does not name"))?;
-        self.set_up(Place::root(port, speed, status.speed_id()))
+        self.set_up(Place::root(port, speed, status.speed_id()), name)
     }
 
     /// Gives the device at `place`, its port reset, a slot and an
     /// address, reads what it is, and configures it; a hub is then
-    /// started.
+    /// started. Its name goes in `name` once the log has it, so that a
+    /// device that fails after is said to be unplugged if it was.
     #[inline(never)]
-    pub(super) fn set_up(&mut self, place: Place) -> Result<(), Why> {
+    pub(super) fn set_up(&mut self, place: Place, name: &mut TextBuf<64>) -> Result<(), Why> {
         let path = Path { root_port: place.root_port, route: place.route };
         // The memory first, so that a device given a slot always has a
         // home, and a place in the list.
@@ -564,8 +571,8 @@ impl Controller {
         };
         let mut device =
             Box::write(home, Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?);
-        let mut name = TextBuf::<64>::new();
-        let result = self.identify(&mut device, path, &mut name).and_then(|plan| {
+        let result = self.identify(&mut device, path, name).inspect_err(|_| name.clear());
+        let result = result.and_then(|plan| {
             let endpoints = &plan.endpoints[..plan.count];
             device.configure(&mut self.xhci, &mut self.host, &mut alloc, plan.value, endpoints)?;
             Ok(plan)
@@ -578,7 +585,7 @@ impl Controller {
             }
         };
         let slot = device.slot();
-        let attached = Attached { path, device, name, hub: None, hids: hid::none() };
+        let attached = Attached { path, device, name: name.clone(), hub: None, hids: hid::none() };
         let _ = self.devices.push_within_capacity(attached);
         if let Some(status) = plan.hub
             && let Err(why) = self.start_hub(slot, status)
