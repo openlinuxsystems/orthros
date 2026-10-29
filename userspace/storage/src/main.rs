@@ -208,6 +208,27 @@ fn main(_: &Startup) -> u64 {
             for name in &volumes {
                 check_volume(&root, name, host);
             }
+            // Then `--replace <devid> <disk>`: a new disk in the place of
+            // one of the filesystem's (ADR 0155), and every file read
+            // again.
+            let rest: Vec<&str> = args().skip(2).collect();
+            if let Some(at) = rest.iter().position(|&arg| arg == "--replace") {
+                let devid = rest.get(at + 1).and_then(|devid| devid.parse().ok());
+                let (Some(devid), Some(disk)) = (devid, rest.get(at + 2)) else {
+                    fail("`--replace` takes a device ID and the name of a disk in /devices");
+                    return 1;
+                };
+                for name in &volumes {
+                    replace_disk(&root, name, devid, disk);
+                    check_volume(&root, name, host);
+                }
+            }
+            // And `--scrub`: a disk that missed changes is caught up.
+            if rest.contains(&"--scrub") {
+                for name in &volumes {
+                    scrub_volume(&root, name);
+                }
+            }
         }
         "list" | "replayed" => {
             for name in &volumes {
@@ -307,6 +328,47 @@ fn check_root(root: &Dir, after: bool) {
         check_scrub(root);
     } else {
         check_clones(root);
+    }
+}
+
+/// Puts `/devices/<disk>` in the place of disk `devid` of the Btrfs at
+/// `/volumes/<name>`, and rebuilds onto it (ADR 0155): every copy must
+/// be mended.
+fn replace_disk(root: &Dir, name: &str, devid: u64, disk: &str) {
+    let rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
+    let volume = match root.open_dir(&format!("volumes/{name}"), rights) {
+        Ok(volume) => volume,
+        Err(err) => return fail(&format!("/volumes/{name}: {err}")),
+    };
+    let Some(device) = disk::open(root, disk) else { return };
+    match volume.replace_disk(devid, &device) {
+        Ok(rebuilt) if rebuilt.uncorrectable == 0 => println!(
+            "storage: /volumes/{name}: disk {devid} replaced by {disk}, rebuilt from {} bytes",
+            rebuilt.bytes
+        ),
+        Ok(rebuilt) => fail(&format!(
+            "/volumes/{name}: replacing disk {devid}: {} sectors no copy mends",
+            rebuilt.uncorrectable
+        )),
+        Err(err) => fail(&format!("/volumes/{name}: replacing disk {devid} by {disk}: {err}")),
+    }
+}
+
+/// Scrubs the Btrfs at `/volumes/<name>`, mending what it finds, as a
+/// disk that missed changes needs (ADR 0153): nothing may be left that no
+/// copy mends.
+fn scrub_volume(root: &Dir, name: &str) {
+    let rw = Rights::READ.union(Rights::WRITE);
+    match root.open_dir(&format!("volumes/{name}"), rw).and_then(|volume| volume.scrub(true)) {
+        Ok(scrub) if scrub.uncorrectable == 0 => println!(
+            "storage: /volumes/{name}: a scrub read {} bytes and mended {} errors",
+            scrub.bytes, scrub.corrected
+        ),
+        Ok(scrub) => fail(&format!(
+            "/volumes/{name}: a scrub left {} errors no copy mends",
+            scrub.uncorrectable
+        )),
+        Err(err) => fail(&format!("/volumes/{name}: scrub: {err}")),
     }
 }
 

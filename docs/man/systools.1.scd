@@ -82,6 +82,8 @@ error that starts with the tool's name.
 :  the processes
 |  *renice*(1)
 :  a process's nice level
+|  *replace*(8)
+:  put a new disk in the place of one of a Btrfs filesystem's
 |  *rtrace*(1)
 :  trace a process's system calls
 |  *script*(1)

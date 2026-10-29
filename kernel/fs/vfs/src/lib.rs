@@ -723,6 +723,15 @@ pub trait FileSystem: Send + Sync {
     fn scrub(&self, _repair: bool) -> Result<Scrub> {
         Err(Error::NotSupported)
     }
+    /// Puts `device` in the place of its disk of device ID `devid`, there
+    /// or missing, and rebuilds onto it from the copies on its other
+    /// disks, as Linux's `btrfs replace start -B` does; returns what the
+    /// rebuild read and found, as [`FileSystem::scrub`] counts it. A
+    /// filesystem that keeps no copies on other disks fails with
+    /// [`Error::NotSupported`].
+    fn replace_disk(&self, _devid: u64, _device: radix_block::DeviceRef) -> Result<Scrub> {
+        Err(Error::NotSupported)
+    }
     /// Drops up to `max` pages it can read again from the disk; returns
     /// how many it dropped.
     fn shrink(&self, _max: usize) -> usize {

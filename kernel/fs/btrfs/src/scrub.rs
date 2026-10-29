@@ -52,7 +52,7 @@ const PAGE: u64 = PAGE_SIZE as u64;
 const TREE_BLOCK: u64 = 1 << 1;
 
 /// Where the superblock's copies are on a device.
-const SUPERS: [u64; 3] = [superblock::OFFSET, 64 << 20, 256 << 30];
+pub(crate) const SUPERS: [u64; 3] = [superblock::OFFSET, 64 << 20, 256 << 30];
 
 /// Scrubs the filesystem `inner` is, writing a good copy over a bad one
 /// if `repair`, which a read-only mount refuses.

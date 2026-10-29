@@ -209,6 +209,18 @@ impl BtrfsFs {
         (volume.disks().len(), volume.missing())
     }
 
+    /// How many of its disks there missed changes, and are read last
+    /// until a scrub has caught them up (ADR 0153).
+    pub fn behind(&self) -> usize {
+        self.inner.volume.disks().iter().filter(|d| d.present() && d.behind()).count()
+    }
+
+    /// Whether `device` is one of its disks, there now.
+    pub fn has_disk(&self, device: &DeviceRef) -> bool {
+        let disks = self.inner.volume.disks().iter();
+        disks.filter_map(|d| d.device()).any(|d| DeviceRef::ptr_eq(d, device))
+    }
+
     /// Whether it was mounted to write.
     pub fn writable(&self) -> bool {
         self.inner.tx.is_some()
@@ -808,6 +820,10 @@ impl FileSystem for BtrfsFs {
 
     fn scrub(&self, repair: bool) -> Result<radix_vfs::Scrub> {
         crate::scrub::scrub(&self.inner, repair)
+    }
+
+    fn replace_disk(&self, devid: u64, device: DeviceRef) -> Result<radix_vfs::Scrub> {
+        crate::replace::replace(&self.inner, devid, &device)
     }
 
     /// Whether a commit is due: the oldest change the disk lacks is

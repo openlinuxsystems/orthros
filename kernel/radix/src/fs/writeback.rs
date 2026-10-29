@@ -87,6 +87,7 @@ fn run(_: usize) {
                     warn!("Files: writing back to a disk failed: {err}; changes stay in memory");
                 }
             }
+            super::warn_failed_disks();
             next_sync = sched::now_ns().saturating_add(INTERVAL_NS);
         }
     }

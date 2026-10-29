@@ -672,14 +672,33 @@ _target/userspace/_).
 
 	*btrfs-raid*
 		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
-		Btrfs RAID1 *mkfs.btrfs* made. Spark must mount it once, from
-		_vda_, and leave _vdb_ alone as in use; _/system/tests/storage
-		write_ writes its files. Between the boots the host wipes _vdb_'s
-		superblock, as if it were pulled out. The second boot must mount
-		_vda_ alone, with the kernel's warning of a disk missing, and
-		_/system/tests/storage check --no-host-file_ must read every byte
-		back. After each boot *btrfs check* must find nothing wrong, given
-		every disk still there.
+		Btrfs RAID1 *mkfs.btrfs* made, and a third of raw bytes. Spark
+		must mount it once, from _vda_, leave _vdb_ alone as in use and
+		_vdc_ as holding nothing; _/system/tests/storage write_ writes
+		its files. Between the boots the host wipes _vdb_'s superblock,
+		as if it were pulled out. The second boot must mount _vda_ alone,
+		with the kernel's warning of a disk missing, and
+		_/system/tests/storage check --no-host-file --replace 2 vdc_ must
+		read every byte back, put _vdc_ in the place of _vdb_ (device 2),
+		which the kernel rebuilds from _vda_'s copies with none left
+		unmended, and read every byte back again. After each boot *btrfs
+		check* must find nothing wrong, given every disk still there, and
+		given each of them alone.
+
+	*btrfs-raid-pull*
+		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
+		Btrfs RAID1 *mkfs.btrfs* made, one of which QEMU's blkdebug
+		fails, as if pulled out, at a random write: every read, write and
+		flush from then on fails with EIO. _/system/tests/storage write_
+		must write its files without an error, and the kernel must warn
+		that a disk failed and was left out. *btrfs check* must then find
+		nothing wrong from each disk alone. The second boot has the disk
+		back: the kernel must warn that it missed changes, and
+		_/system/tests/storage check --no-host-file --scrub_ must read
+		every byte back and scrub, leaving nothing no copy mends. After
+		it *btrfs check* must find nothing wrong from both disks, and
+		from each alone. A failure names the disk pulled and after how
+		many writes.
 
 	*ext4-write*
 		The *storage* test on two ext4 disks *mkfs.ext4* made holding

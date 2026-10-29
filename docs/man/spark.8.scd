@@ -141,7 +141,8 @@ Init: /system/commands/spark is process 1
 . With a program, it reads it from _/system_ and passes it the arguments
   after it. It starts the program in a process made for Spark, with 2
   MiB of memory from its pool, the capabilities every program gets, the
-  root directory with the read and write rights in *SLOT_ROOT*, and an
+  root directory with the read, write and control rights in
+  *SLOT_ROOT*, and an
   exit notification for itself (radix-rt's *spawn*); waits for it to
   exit and logs the exit code; then reaps it by deleting its
   capabilities, and checks that every page of the memory it gave came

@@ -289,7 +289,9 @@ back on the host and after a reboot, `btrfs-power-cut` cuts the
 power while a disk is being written, `btrfs-log` mounts a disk Linux
 left with changes in its log of fsyncs alone, which the mount replays as
 Linux does, and `btrfs-raid` writes a RAID1 of two disks, then pulls one
-out and reads everything back from the other. Dukovo writes the log of
+out, reads everything back from the other, and puts a third disk in its
+place with `replace`; `btrfs-raid-pull` fails a disk at a random write
+while it is written, then brings it back and scrubs. Dukovo writes the log of
 fsyncs too: an `fsync` of a file writes only what changed of it, as
 Linux does, and Linux replays Dukovo's log after a power cut.
 
@@ -299,6 +301,20 @@ others hold a copy of all of it, and the kernel log warns:
 
 ```text
 Btrfs: vda: 1 of its 2 disks missing; mounted from the copies on the others. Replace the missing, or a disk more lost may lose data
+```
+
+A disk that fails while the filesystem is mounted is left out, and the
+log says so within seconds. When it comes back, the mount warns that it
+missed changes; it is read only after the others until `scrub start
+/volumes/vda` catches it up.
+
+`replace`(8) puts a new disk in the place of a missing one, or of one
+that is failing, and rebuilds onto it from the copies on the others, as
+Linux's `btrfs replace start -B` does. A missing disk is named by its
+device ID, 2 here for the second disk:
+
+```sh
+replace start 2 /devices/vdc /volumes/vda
 ```
 
 An ext4 disk, the kind most Linux machines use, is made the same way:

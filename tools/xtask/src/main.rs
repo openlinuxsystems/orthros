@@ -259,7 +259,10 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   btrfs-log        a Btrfs disk Linux left with a log of fsyncs: the mount
                    replays it, and every file lists as after Linux's replay
   btrfs-raid       a Btrfs RAID1 of two disks: written, then read back with one
-                   pulled out; btrfs check passes after each boot
+                   pulled out, which a third replaces; btrfs check passes
+                   after each boot, from each disk alone too
+  btrfs-raid-pull  a disk of a Btrfs RAID1 fails at a random write while it
+                   is written; back after a reboot, a scrub catches it up
   ext4-write       the storage test on two ext4 disks Linux made; the host
                    checks them with e2fsck and debugfs, the journal replayed
   ext4-power-cut   the power is cut while ext4 files are synced: e2fsck

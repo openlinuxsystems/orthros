@@ -160,7 +160,7 @@ pub struct Disk {
     device: &'static str,
     /// Errors for QEMU's blkdebug driver to inject, as its configuration
     /// file.
-    errors: Option<&'static str>,
+    errors: Option<fn(usize) -> String>,
     /// Attached read-only (QEMU's `readonly=on`), so that the kernel takes
     /// it for a disk that refuses writes.
     read_only: bool,
@@ -471,9 +471,14 @@ const CHECK_DISKS: &[Disk] =
 /// so does a write of sector 12000. The program (userspace/storage) reads
 /// and writes those sectors.
 const ERROR_DISKS: &[Disk] = &[
-    Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Sata, raw_unchanged) },
-    Disk { errors: Some(ERROR_RULES), ..raw_disk(Bus::Nvme(0), raw_unchanged) },
+    Disk { errors: Some(error_rules), ..raw_disk(Bus::Sata, raw_unchanged) },
+    Disk { errors: Some(error_rules), ..raw_disk(Bus::Nvme(0), raw_unchanged) },
 ];
+
+/// [`ERROR_RULES`], for each of [`ERROR_DISKS`].
+fn error_rules(_: usize) -> String {
+    ERROR_RULES.into()
+}
 
 /// The size of the `btrfs` test's disks.
 const BTRFS_KIB: u64 = 128 * 1024;
@@ -534,8 +539,9 @@ const LOG_DISKS: &[Disk] =
     &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
 
 /// The `btrfs-raid` test's disks: two virtio disks of 512 MiB, `vda` and
-/// `vdb`, of one Btrfs RAID1.
-const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK];
+/// `vdb`, of one Btrfs RAID1, and a third, `vdc`, that the second boot
+/// puts in the place of `vdb`, pulled out (ADR 0155).
+const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK, RAID_NEW];
 
 /// A disk of the `btrfs-raid` test.
 const RAID_DISK: Disk = Disk {
@@ -543,6 +549,26 @@ const RAID_DISK: Disk = Disk {
     label: "RAIDTEST",
     ..btrfs_disk(Bus::Virtio, 512, BTRFS_RAID, raid_checked)
 };
+
+/// The `btrfs-raid-pull` test's disks: two virtio disks of 512 MiB, `vda`
+/// and `vdb`, of one Btrfs RAID1, one of which QEMU fails at a random
+/// write ([`pull_rules`]).
+const RAID_PULL_DISKS: &[Disk] = &[RAID_PULLED, RAID_PULLED];
+
+/// A disk of the `btrfs-raid-pull` test.
+const RAID_PULLED: Disk = Disk { label: "RAIDPULL", errors: Some(pull_rules), ..RAID_DISK };
+
+/// The writes to a disk of the `btrfs-raid-pull` test before the one it
+/// fails at: [`PULL_FIRST`] and fewer than [`PULL_SPAN`] more. The first
+/// boot writes each disk some 150 times (QEMU's `virtio_blk_handle_write`
+/// trace), so the disk fails in the first third, and commits come after
+/// that leave it behind.
+const PULL_FIRST: u32 = 1;
+const PULL_SPAN: u32 = 48;
+
+/// The disk of the `btrfs-raid` test that replaces the one pulled out:
+/// raw bytes, of no filesystem, until the second boot rebuilds onto it.
+const RAID_NEW: Disk = Disk { fat: 0, label: "", ..RAID_DISK };
 
 /// The `swap` test's disk: a 1 GiB swap area on a virtio disk, `vda`.
 const SWAP_DISKS: &[Disk] = &[Disk {
@@ -1539,7 +1565,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-raid",
-        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back: Linux's btrfs check passes after each boot",
+        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second and reads it all again: Linux's btrfs check passes after each boot, from every disk alone too",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1552,9 +1578,29 @@ pub const CASES: &[Case] = &[
         script: raid_write,
         disks: RAID_DISKS,
         second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage check --no-host-file",
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc",
             before: raid_pull,
             script: raid_check,
+        }),
+    },
+    Case {
+        name: "btrfs-raid-pull",
+        about: "One disk of a Btrfs RAID1 of two fails at a random write, as if pulled out, while the storage test writes it: the writes go on to the other, and the kernel warns; back after a reboot, the disk is read last until a scrub catches it up, and every byte reads back. Linux's btrfs check passes from each disk alone after the first boot, and from both after the second",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: raid_pulled,
+        disks: RAID_PULL_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file --scrub",
+            before: raid_back,
+            script: raid_caught_up,
         }),
     },
     Case {
@@ -2047,7 +2093,8 @@ fn make_disks(
         };
         if let Some(rules) = disk.errors {
             let at = image.path.with_extension("blkdebug");
-            std::fs::write(&at, rules).map_err(|err| format!("writing {}: {err}", at.display()))?;
+            std::fs::write(&at, rules(i))
+                .map_err(|err| format!("writing {}: {err}", at.display()))?;
         }
         if disk.fat == 0 {
             std::fs::write(&image.path, raw_bytes(image.bytes))
@@ -5059,11 +5106,13 @@ fn btrfs_id(path: &Path) -> Option<[u8; 16]> {
 
 /// Checks the Btrfs RAID1 of the `btrfs-raid` test with Linux's `btrfs
 /// check`, the data's checksums too, from its first disk still there,
-/// given each of its disks still there in a blkid cache (`BLKID_FILE`),
-/// where `btrfs check` finds a filesystem's other disks. A disk pulled
-/// out is passed over.
-fn raid_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
-    use std::fmt::Write as _;
+/// given each of its disks still there; then from each of them alone, as
+/// Linux reads a RAID1 with the others missing, so that every disk must
+/// hold a copy of everything. A disk pulled out is passed over. After a
+/// boot that lost a disk while it ran ([`PULL_WARNING`]), the disks are
+/// checked alone only: the one lost holds the filesystem as it was then,
+/// which the other has moved on from.
+fn raid_checked(disk: &DiskImage, log: &str) -> Result<(), String> {
     let Some(id) = btrfs_id(&disk.path) else { return Ok(()) };
     let image = disk.path.display().to_string();
     let prefix = image.rsplit_once("-disk").map_or(image.as_str(), |(prefix, _)| prefix);
@@ -5074,6 +5123,24 @@ fn raid_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
     if disks.first() != Some(&disk.path) {
         return Ok(());
     }
+    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    let lost = log.contains(PULL_WARNING);
+    let mut sets = if lost { Vec::new() } else { vec![&disks[..]] };
+    if disks.len() > 1 {
+        sets.extend(disks.iter().map(std::slice::from_ref));
+    }
+    for set in sets {
+        btrfs_check_of(tool, &id, set, &disk.path.with_extension("blkid"))?;
+    }
+    Ok(())
+}
+
+/// Runs Linux's `btrfs check`, the data's checksums too, on the Btrfs
+/// `id` from the first of the images `disks`, given them all in a blkid
+/// cache written to `tab` (`BLKID_FILE`), where `btrfs check` finds a
+/// filesystem's other disks.
+fn btrfs_check_of(tool: &Path, id: &[u8; 16], disks: &[PathBuf], tab: &Path) -> Result<(), String> {
+    use std::fmt::Write as _;
     let uuid = id.iter().fold(String::new(), |mut out, b| {
         let _ = write!(out, "{b:02x}");
         out
@@ -5094,16 +5161,99 @@ fn raid_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
         );
         out
     });
-    let tab = disk.path.with_extension("blkid");
-    std::fs::write(&tab, cache).map_err(|err| format!("writing {}: {err}", tab.display()))?;
-    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    std::fs::write(tab, cache).map_err(|err| format!("writing {}: {err}", tab.display()))?;
+    let first = disks.first().ok_or("no disk to check")?;
     let mut cmd = std::process::Command::new(tool);
-    cmd.args(["check", "--readonly", "--check-data-csum"]).arg(&disk.path);
-    let checked = host_tool(cmd.env("BLKID_FILE", &tab).stdin(Stdio::null()));
-    let _ = std::fs::remove_file(&tab);
+    cmd.args(["check", "--readonly", "--check-data-csum"]).arg(first);
+    let checked = host_tool(cmd.env("BLKID_FILE", tab).stdin(Stdio::null()));
+    // libblkid keeps the cache it rewrote as `<file>.old`.
+    let _ = std::fs::remove_file(tab);
+    let _ = std::fs::remove_file(format!("{}.old", tab.display()));
     checked.map(drop).map_err(|err| {
-        format!("the RAID1 of {} disks from {image} fails Linux's btrfs check: {err}", disks.len())
+        let names: Vec<String> = disks.iter().map(|path| path.display().to_string()).collect();
+        format!("the RAID1 of {} fails Linux's btrfs check: {err}", names.join(", "))
     })
+}
+
+/// What the kernel says once a disk of a Btrfs fails while it runs.
+const PULL_WARNING: &str = "a disk failed and was left out; 1 of its 2 disks missing now";
+
+/// Which disk the `btrfs-raid-pull` test pulls out, and after how many of
+/// its writes: picked once a run, from the clock.
+fn pull_at() -> (usize, u32) {
+    static AT: std::sync::OnceLock<(usize, u32)> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        ((nanos & 1) as usize, PULL_FIRST + (nanos >> 1) % PULL_SPAN)
+    })
+}
+
+/// QEMU's blkdebug rules for disk `i` of the `btrfs-raid-pull` test: the
+/// disk [`pull_at`] picks counts its writes, from state 1 up, and from
+/// the last fails every read, write and flush with `EIO`, as a disk
+/// pulled out fails them; the other, none.
+fn pull_rules(i: usize) -> String {
+    use std::fmt::Write as _;
+    let (disk, writes) = pull_at();
+    let mut rules = String::new();
+    if i != disk {
+        return rules;
+    }
+    for state in 1..=writes {
+        let _ = write!(
+            rules,
+            "[set-state]\nevent = \"write_aio\"\nstate = \"{state}\"\nnew_state = \"{}\"\n\n",
+            state + 1
+        );
+    }
+    for event in ["read_aio", "write_aio", "flush_to_disk"] {
+        let _ = write!(
+            rules,
+            "[inject-error]\nevent = \"{event}\"\nstate = \"{}\"\nerrno = \"5\"\n\n",
+            writes + 1
+        );
+    }
+    rules
+}
+
+/// Between the boots of the `btrfs-raid-pull` test: the disk pulled out
+/// is back, failing nothing.
+fn raid_back(_: &Case, disks: &[DiskImage]) -> Result<(), String> {
+    for disk in disks {
+        let at = disk.path.with_extension("blkdebug");
+        std::fs::write(&at, "").map_err(|err| format!("writing {}: {err}", at.display()))?;
+    }
+    Ok(())
+}
+
+/// The `btrfs-raid-pull` test's first boot: the program writes its files
+/// to the RAID1 while one of its disks fails, which the kernel leaves out
+/// and warns of.
+fn raid_pulled(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    let (disk, writes) = pull_at();
+    let names = disk_names(case.disks);
+    let pulled = || format!("with {} pulled out after {writes} writes", names[disk]);
+    raid_boot(vm, case, false, false).map_err(|err| format!("{err}, {}", pulled()))?;
+    let first = &names[0];
+    let written = vm
+        .expect(&format!("storage: /volumes/{first}: wrote "))
+        .and_then(|()| storage_end(vm, "write"))
+        .and_then(|()| vm.expect_anywhere(&format!("Btrfs: {first}: {PULL_WARNING}")));
+    written.map_err(|err| format!("{err}, {}", pulled()))
+}
+
+/// The `btrfs-raid-pull` test's second boot, with the disk pulled out
+/// back: the kernel warns that it missed changes, the program reads every
+/// file back, and its scrub catches the disk up.
+fn raid_caught_up(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    raid_boot(vm, case, false, true)?;
+    let first = &disk_names(case.disks)[0];
+    vm.expect(&format!("storage: /volumes/{first}: "))?;
+    vm.expect(" files read back after the reboot, every byte as written")?;
+    vm.expect(&format!("storage: /volumes/{first}: a scrub read "))?;
+    storage_end(vm, "check")
 }
 
 /// Between the boots of the `btrfs-raid` test: its second disk is pulled
@@ -5122,8 +5272,9 @@ fn raid_pull(_: &Case, disks: &[DiskImage]) -> Result<(), String> {
 /// What the kernel and Spark say of the `btrfs-raid` test's disks: Spark
 /// mounts the RAID1 from the first, and leaves the second alone, as in
 /// use, or once `pulled` as holding nothing, when the kernel warns that
-/// the first mounted without it.
-fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool) -> Result<(), String> {
+/// the first mounted without it; and a third, raw, alone. A disk
+/// `behind`, back after it was lost, has the kernel warn too.
+fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(), String> {
     disks_found(vm, case)?;
     let names = disk_names(case.disks);
     let (first, second) = (&names[0], &names[1]);
@@ -5132,7 +5283,13 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool) -> Result<(), String> {
             "Btrfs: {first}: 1 of its 2 disks missing; mounted from the copies on the others"
         ))?;
     }
-    let label = RAID_DISK.label;
+    if behind {
+        vm.expect(&format!(
+            "Btrfs: {first}: 1 of its 2 disks missed changes; read from the others until a scrub \
+             catches them up"
+        ))?;
+    }
+    let label = case.disks[0].label;
     vm.expect(&format!("Files: mounted btrfs from {first} on /volumes/{first}, labelled {label}"))?;
     vm.expect(&format!("spark: mounted the Btrfs filesystem of {first} at /volumes/{first}"))?;
     if pulled {
@@ -5142,6 +5299,11 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool) -> Result<(), String> {
     } else {
         vm.expect(&format!("spark: {second} is in use already; left alone"))?;
     }
+    if let Some(third) = names.get(2) {
+        vm.expect(&format!(
+            "spark: {third} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+        ))?;
+    }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
     vm.expect("spark: started /system/tests/storage as process ")?;
     Ok(())
@@ -5150,7 +5312,7 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool) -> Result<(), String> {
 /// The `btrfs-raid` test's first boot: the program writes its files to
 /// the RAID1.
 fn raid_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    raid_boot(vm, case, false)?;
+    raid_boot(vm, case, false, false)?;
     let first = &disk_names(case.disks)[0];
     vm.expect(&format!("storage: /volumes/{first}: btrfs, "))?;
     vm.expect(&format!("storage: /volumes/{first}: wrote "))?;
@@ -5158,10 +5320,20 @@ fn raid_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// The `btrfs-raid` test's second boot, with the second disk pulled out:
-/// the program reads every file back from the first.
+/// the program reads every file back from the first, puts the third disk
+/// in the place of the second (device 2), which the kernel rebuilds from
+/// the first's copies, and reads every file back again.
 fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    raid_boot(vm, case, true)?;
-    let first = &disk_names(case.disks)[0];
+    raid_boot(vm, case, true, false)?;
+    let names = disk_names(case.disks);
+    let (first, third) = (&names[0], &names[2]);
+    vm.expect(&format!("storage: /volumes/{first}: "))?;
+    vm.expect(" files read back after the reboot, every byte as written")?;
+    vm.expect(&format!(
+        "Btrfs: disk 2 replaced by {third}, and rebuilt from the other disks' copies; 0 errors \
+         no copy mends"
+    ))?;
+    vm.expect(&format!("storage: /volumes/{first}: disk 2 replaced by {third}, rebuilt from "))?;
     vm.expect(&format!("storage: /volumes/{first}: "))?;
     vm.expect(" files read back after the reboot, every byte as written")?;
     storage_end(vm, "check")

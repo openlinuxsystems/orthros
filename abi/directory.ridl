@@ -428,4 +428,22 @@ interface directory = 0x000b version 5 {
     method scrub = 22 (repair: bool, buffer: out bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_supported, read_only, io, corrupt];
+    /// Puts the block device whose file capability is in slot `device` in
+    /// the place of the disk of device ID `devid` of the directory's Btrfs
+    /// filesystem, there or missing, and rebuilds onto it from the copies
+    /// on its other disks, as btrfs-replace(8)'s `start -B` does (ADR
+    /// 0155): the new disk takes the old one's ID and UUID, and the old
+    /// one, if it is there, has its superblocks wiped once the new one
+    /// holds every copy. Writes what the rebuild read and found into
+    /// `buffer`, as a ScrubProgress. Fails with not_found if no disk has
+    /// that ID, in_use if the device is a disk of a mounted Btrfs, holds a
+    /// mount or is a swap area, no_space if it is smaller than the disk it
+    /// replaces, not_supported on other filesystems and when the other
+    /// disks lack a copy of a chunk on it, read_only on a read-only mount,
+    /// and io if the new disk fails, which then is left out. Needs the
+    /// control right, and the read and write rights on `device`.
+    method replace_disk = 23 (devid: u64, device: u32, buffer: out bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, not_found, not_supported, read_only, in_use,
+                no_space, not_block_device, io, corrupt];
 }
