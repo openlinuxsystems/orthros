@@ -1051,7 +1051,14 @@ impl Writer {
                 path.top = 0;
                 path.steps[0] = Some((leaf_root.bytenr, 0));
             } else if level > 0 && n == 1 {
-                let child = blocks.view(block, |b| b.child(0))?;
+                // The child is copied first, as Linux's `balance_level`
+                // does: a root is the transaction's, its root item names
+                // the transaction's generation, and a child the change
+                // never reached is older.
+                let (child, bounds) =
+                    blocks.view(block, |b| (b.child(0), Bounds::of_child(b, 0)))?;
+                let copy = self.cow(volume, path.tree, &child, &bounds, Some((block, 0)))?;
+                let child = blocks.view(copy, Block::root)?;
                 self.set_tree_root(volume, path.tree, child)?;
                 self.free_block(volume, path.tree, &root)?;
                 path.steps[level] = None;

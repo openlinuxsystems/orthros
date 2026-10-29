@@ -295,7 +295,10 @@ left with changes in its log of fsyncs alone, which the mount replays as
 Linux does, and `btrfs-raid` writes a RAID1 of two disks, then pulls one
 out, reads everything back from the other, and puts a third disk in its
 place with `replace`; `btrfs-raid-pull` fails a disk at a random write
-while it is written, then brings it back and scrubs. Dukovo writes the log of
+while it is written, then brings it back and scrubs; and `btrfs-stress`,
+the long stress run, has four workers make random changes to two disks at
+once for two minutes, then checks the disks with `btrfs check` and every
+file after a reboot. Dukovo writes the log of
 fsyncs too: an `fsync` of a file writes only what changed of it, as
 Linux does, and Linux replays Dukovo's log after a power cut.
 

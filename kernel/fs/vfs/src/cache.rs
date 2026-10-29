@@ -248,6 +248,12 @@ impl FileCache {
         self.state.lock().dirty
     }
 
+    /// [`Self::dirty_pages`], read without the lock, by the cache's owner
+    /// as it goes: any lock may be held then.
+    pub fn dirty_pages_mut(&mut self) -> usize {
+        self.state.get_mut().dirty
+    }
+
     /// Whether some pages wait to be written back.
     pub fn is_dirty(&self) -> bool {
         self.state.lock().dirty > 0

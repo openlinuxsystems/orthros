@@ -403,6 +403,36 @@ fn inserting_a_key_already_in_a_full_leaf_fails_and_splits_nothing() {
 }
 
 #[test]
+fn a_root_left_one_older_child_gives_way_to_a_copy_of_it() {
+    // An item over half a leaf has a leaf of its own, and never merges:
+    // emptying the second of two leaves a commit wrote leaves the root
+    // node a child the change never reached, as checksums of files
+    // written and then removed do.
+    let image = mkfs_empty(&[]);
+    let disk = writable(&image);
+    let volume = open(&disk);
+    let mut w = Writer::new(&volume).unwrap();
+    let half = crate::tree::Block::max_item(volume.superblock().nodesize) / 2;
+    let key = |n: u64| Key::new(tree::EXTENT_CSUM, item::EXTENT_CSUM, n << 20);
+    let mut n = 0;
+    while volume.tree(tree::CSUM).unwrap().unwrap().level == 0 {
+        w.insert(&volume, tree::CSUM, &key(n), &vec![7; half]).unwrap();
+        n += 1;
+    }
+    w.commit(&volume).unwrap();
+    while n > 0 {
+        n -= 1;
+        w.delete(&volume, tree::CSUM, &key(n)).unwrap();
+        // A read checks the root block's generation against its root
+        // item's, and each block's below against its parent's.
+        let csums = volume.tree(tree::CSUM).unwrap().unwrap();
+        assert_eq!(super::count(&volume, &csums).unwrap(), n as usize);
+    }
+    w.commit(&volume).unwrap();
+    assert_checks(&image_of(&disk, image.len()));
+}
+
+#[test]
 fn every_checksum_and_node_size_writes_what_btrfs_check_passes() {
     for args in [
         &["--csum", "xxhash"][..],
