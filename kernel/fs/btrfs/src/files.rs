@@ -989,7 +989,8 @@ impl Files<'_> {
     }
 
     /// Makes the item of the data extent `[bytenr, bytenr + len)`, which
-    /// file `ino` names from byte `pos` on.
+    /// file `ino` names from byte `pos` on: this subvolume's, to simple
+    /// quotas (ADR 0170).
     pub(crate) fn new_data_extent(
         &mut self,
         bytenr: u64,
@@ -997,18 +998,42 @@ impl Files<'_> {
         ino: u64,
         pos: u64,
     ) -> Result<()> {
+        let owner = crate::quota::simple(self.volume).then_some(self.subvol);
+        self.new_owned_extent(bytenr, len, ino, pos, owner)
+    }
+
+    /// As [`Files::new_data_extent`], the extent counted to `owner`, if
+    /// it names one: its inline reference comes first, as Linux's
+    /// `EXTENT_OWNER_REF`.
+    pub(crate) fn new_owned_extent(
+        &mut self,
+        bytenr: u64,
+        len: u64,
+        ino: u64,
+        pos: u64,
+        owner: Option<u64>,
+    ) -> Result<()> {
         let (generation, root) = (self.w.generation, self.subvol);
         let key = Key::new(bytenr, item::EXTENT_ITEM, len);
-        self.w.insert_with(self.volume, tree::EXTENT, &key, EXTENT_HEADER + 1 + DATA_REF, |d| {
+        let first = EXTENT_HEADER + if owner.is_some() { 9 } else { 0 };
+        self.w.insert_with(self.volume, tree::EXTENT, &key, first + 1 + DATA_REF, |d| {
             put_u64(d, 0, 1);
             put_u64(d, 8, generation);
             put_u64(d, 16, EXTENT_FLAG_DATA);
-            d[24] = item::EXTENT_DATA_REF;
-            put_u64(d, 25, root);
-            put_u64(d, 33, ino);
-            put_u64(d, 41, pos);
-            put_u32(d, 49, 1);
-        })
+            if let Some(owner) = owner {
+                d[EXTENT_HEADER] = crate::refs::OWNER_REF;
+                put_u64(d, EXTENT_HEADER + 1, owner);
+            }
+            d[first] = item::EXTENT_DATA_REF;
+            put_u64(d, first + 1, root);
+            put_u64(d, first + 9, ino);
+            put_u64(d, first + 17, pos);
+            put_u32(d, first + 25, 1);
+        })?;
+        match owner {
+            Some(owner) => Writer::account(self.volume, owner, generation, len as i64),
+            None => Ok(()),
+        }
     }
 
     /// Adds one to file `ino`'s count of names for the data extent
@@ -1042,6 +1067,9 @@ impl Files<'_> {
         }
         self.w.delete(self.volume, tree::EXTENT, key)?;
         self.delete_sums(key.objectid, key.offset)?;
+        if let Some(owner) = crate::quota::owner_of(&data) {
+            Writer::account(self.volume, owner, u64_at(&data, 8), -(key.offset as i64))?;
+        }
         // An extent this transaction wrote is named by no tree on the disk.
         let made = u64_at(&data, 8) == self.w.generation;
         self.w.free_data(key.objectid, key.offset, made)

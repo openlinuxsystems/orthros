@@ -309,6 +309,9 @@ impl Inner {
     fn start(volume: KBox<Volume>, writable: bool) -> Result<KArc<Inner>> {
         let log = volume.superblock().log_root != 0;
         let mut txn = if writable || log { Some(Inner::txn(&volume)?) } else { None };
+        if txn.is_some() {
+            Inner::quotas(&volume)?;
+        }
         if log && let Some(txn) = txn.as_mut() {
             Inner::replay(&volume, txn)?;
         }
@@ -323,6 +326,13 @@ impl Inner {
             return Err(Error::NotSupported);
         }
         Ok(mem::boxed(Txn { writer: Writer::new(volume)?, next_ino: mem::vec() })?)
+    }
+
+    /// Loads the quotas of `volume`, which the replay and a writable
+    /// mount's changes count, in a frame of its own (ADR 0170).
+    #[inline(never)]
+    fn quotas(volume: &Volume) -> Result<()> {
+        crate::quota::start(volume)
     }
 
     /// Replays the log of fsyncs `volume` holds in `txn`, and commits it,
@@ -438,12 +448,15 @@ impl Inner {
         }
     }
 
-    /// Takes room for `bytes` of data that dirty pages will need when they
-    /// are written back; fails with [`Error::NoSpace`] when data has no
-    /// room for them, as Linux's `write` does. Read-only mounts write
-    /// nothing back.
-    pub(crate) fn reserve_data(&self, bytes: u64) -> Result<()> {
+    /// Takes room for `bytes` of data that dirty pages of subvolume
+    /// `subvol` will need when they are written back; fails with
+    /// [`Error::NoSpace`] when data has no room for them, as Linux's
+    /// `write` does, and with [`Error::QuotaExceeded`] when they would
+    /// take the subvolume's quota group past a limit (ADR 0170).
+    /// Read-only mounts write nothing back.
+    pub(crate) fn reserve_data(&self, subvol: u64, bytes: u64) -> Result<()> {
         let Some(tx) = &self.tx else { return Ok(()) };
+        crate::quota::reserve(&self.volume, subvol, bytes)?;
         let total = self.data_reserved.fetch_add(bytes, Ordering::AcqRel) + bytes;
         if total <= self.data_room.load(Ordering::Acquire) {
             return Ok(());
@@ -454,11 +467,14 @@ impl Inner {
             return Ok(());
         }
         self.data_reserved.fetch_sub(bytes, Ordering::AcqRel);
+        crate::quota::release(&self.volume, subvol, bytes);
         Err(Error::NoSpace)
     }
 
-    /// Gives back the room [`Inner::reserve_data`] took for `bytes`.
-    pub(crate) fn release_data(&self, bytes: u64) {
+    /// Gives back the room [`Inner::reserve_data`] took for `bytes` of
+    /// subvolume `subvol`.
+    pub(crate) fn release_data(&self, subvol: u64, bytes: u64) {
+        crate::quota::release(&self.volume, subvol, bytes);
         let _ = self
             .data_reserved
             .try_update(Ordering::AcqRel, Ordering::Acquire, |r| Some(r.saturating_sub(bytes)));
@@ -845,6 +861,27 @@ impl FileSystem for BtrfsFs {
 
     fn balance(&self, plan: &radix_vfs::Balance) -> Result<radix_vfs::Balanced> {
         crate::balance::balance(&self.inner, plan)
+    }
+
+    fn quota(&self, enable: bool) -> Result<()> {
+        let volume = &*self.inner.volume;
+        // Off, the quota tree goes: room is made, never taken.
+        self.inner.alone(!enable, |txn| {
+            if enable {
+                txn.writer.enable_quotas(volume)
+            } else {
+                txn.writer.disable_quotas(volume)
+            }
+        })
+    }
+
+    fn qgroups(&self) -> Result<KVec<radix_vfs::Qgroup>> {
+        crate::quota::qgroups(&self.inner.volume, self.inner.writable())
+    }
+
+    fn limit_qgroup(&self, id: u64, max_referenced: u64, max_exclusive: u64) -> Result<()> {
+        let volume = &*self.inner.volume;
+        self.inner.change(|txn| txn.writer.limit_qgroup(volume, id, max_referenced, max_exclusive))
     }
 
     /// Whether a commit is due: the oldest change the disk lacks is

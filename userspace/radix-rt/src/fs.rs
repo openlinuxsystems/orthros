@@ -396,6 +396,30 @@ impl Dir {
         Ok((done.considered, done.moved))
     }
 
+    /// Turns the simple quotas of the directory's Btrfs filesystem on or
+    /// off (ADR 0170).
+    pub fn quota(&self, enable: bool) -> Result<()> {
+        Ok(directory::quota(&SYS, self.held.slot, enable)?)
+    }
+
+    /// The quota groups of the directory's Btrfs filesystem (ADR 0170),
+    /// by ID: each one's ID and the bytes it counts.
+    pub fn qgroups(&self) -> Result<Vec<(u64, u64)>> {
+        use directory::Qgroup as Q;
+        let mut buffer = alloc::vec![0u8; 64 * Q::SIZE];
+        let count = directory::qgroups(&SYS, self.held.slot, &mut buffer)?.count;
+        let field = |record: &[u8], at: usize| {
+            u64::from_le_bytes(record[at..at + 8].try_into().unwrap_or([0; 8]))
+        };
+        Ok(buffer
+            .as_chunks::<{ Q::SIZE }>()
+            .0
+            .iter()
+            .take(usize::try_from(count).unwrap_or(usize::MAX))
+            .map(|r| (field(r, Q::OFFSET_ID), field(r, Q::OFFSET_REFERENCED)))
+            .collect())
+    }
+
     /// Where the symbolic link at `path` points.
     pub fn read_link(&self, path: &str) -> Result<Vec<u8>> {
         let mut target = alloc::vec![0u8; 256];

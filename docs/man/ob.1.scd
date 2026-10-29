@@ -745,15 +745,17 @@ _target/userspace/_).
 		_/system/tests/storage write_ writes its files. Between the boots
 		the host wipes _vdb_'s superblock, as if it were pulled out. The
 		second boot must mount _vda_ alone, with the kernel's warning of
-		a disk missing, and _/system/tests/storage check --no-host-file --replace
-		2 vdc --add vdd --balance --remove 1_ must read every
-		byte back, put _vdc_ in the place of _vdb_ (device 2), which the
+		a disk missing, and _/system/tests/storage
+		check --no-host-file --quota --replace 2 vdc --add vdd --balance --remove
+		1_ must read every byte back, turn simple quotas on (ADR 0170), put
+		_vdc_ in the place of _vdb_ (device 2), which the
 		kernel rebuilds from _vda_'s copies with none left unmended, add
 		_vdd_ (device 3), move every chunk, and take _vda_ out (device 1),
 		its chunks moved to the others (ADR 0159), reading every byte
-		back after each. After each boot *btrfs check* must find nothing
-		wrong, given every disk still there, and given each of them
-		alone.
+		back after each, and show what the top subvolume's quota group
+		counts. After each boot *btrfs check* must find nothing wrong,
+		its quota groups' counts among it, given every disk still there,
+		and given each of them alone.
 
 	*btrfs-raid-pull*
 		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
