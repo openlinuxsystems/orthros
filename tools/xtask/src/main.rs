@@ -236,6 +236,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    partition in a GPT
   storage-usb      the same on four USB sticks, two behind a full-speed hub;
                    then one is pulled out and plugged in again
+  storage-uas      the same on four disks of three USB devices that speak
+                   UAS, at SuperSpeed and high speed; then one is pulled out
   storage-nvme     the same on four NVMe namespaces of two controllers,
                    with a queue for each of 4 CPUs, the partition in a GPT
   storage-4k       the same on two virtio disks and two NVMe namespaces of

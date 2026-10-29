@@ -552,6 +552,18 @@ _target/userspace/_).
 		first stick is pulled out, which takes _sdb_ away, and plugged
 		in again, which gives it _sdb_ again.
 
+	*storage-uas*
+		The *storage* test with the same four disks on three USB devices
+		that speak USB Attached SCSI (QEMU's *usb-uas*, with a *scsi-hd*
+		for each logical unit), on the boot stick's controller with two
+		SuperSpeed root ports: two logical units of one at SuperSpeed,
+		whose commands go on streams, and one unit each of two at high
+		speed, which have none, the partition in a GPT. The kernel must
+		find the first device's units with REPORT LUNS, name them _sdb_
+		and _sdc_, and the others _sdd_ and _sde_, and say each is driven
+		over UAS. After the second boot's check, the device with two
+		units is pulled out, which takes _sdb_ and _sdc_ away.
+
 	*storage-nvme*
 		The *storage* test with the same four disks as NVMe namespaces,
 		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on

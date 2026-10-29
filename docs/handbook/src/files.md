@@ -177,9 +177,12 @@ and the next mount, on Dukovo or Linux, replays it.
 
 Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
 two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
-NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks need the USB drivers
-(Phase 11), which also bring mounting by label, `/volumes/<label>`, and
-safe eject.
+NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks, card readers and
+USB disks are disks too, named after the SATA ones (`sdc` and on, on the
+Dell), whether they speak the Bulk-Only Transport or, as USB 3 disks do,
+USB Attached SCSI. Those plugged in at boot are mounted as the others
+are; mounting one plugged in later by its label, `/volumes/<label>`, and
+safe eject come with `volumed`, later in Phase 11.
 
 When the machine is turned off or restarted, every disk's cache is
 written out first, and each NVMe drive is told to shut down, as Linux

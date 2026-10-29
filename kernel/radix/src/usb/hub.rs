@@ -320,7 +320,7 @@ impl Controller {
 
     /// Resets port `port` of the hub in slot `slot` and waits for it;
     /// returns its status after.
-    fn hub_reset(&mut self, slot: u8, port: u8, usb3: bool) -> Result<PortStatus, Why> {
+    pub(super) fn hub_reset(&mut self, slot: u8, port: u8, usb3: bool) -> Result<PortStatus, Why> {
         // A USB 3 port whose link is not up takes a warm reset.
         let before = self.port_status(slot, port, usb3)?;
         let warm = usb3 && !before.enabled();

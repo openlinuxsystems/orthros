@@ -428,3 +428,21 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn report_luns_lists_the_units_an_iu_can_name() {
+    assert_eq!(Cdb::report_luns(512).bytes(), [op::REPORT_LUNS, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]);
+    // Units 0 and 3, one in flat space addressing (past 255), one with a
+    // second level, and a list cut short.
+    let mut bytes = std::vec![0, 0, 0, 40, 0, 0, 0, 0];
+    bytes.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+    bytes.extend([0, 3, 0, 0, 0, 0, 0, 0]);
+    bytes.extend([0x41, 0x02, 0, 0, 0, 0, 0, 0]);
+    bytes.extend([0, 4, 0, 1, 0, 0, 0, 0]);
+    bytes.extend([0, 5, 0, 0]);
+    assert_eq!(reported_luns(&bytes).collect::<std::vec::Vec<u8>>(), [0, 3]);
+    // Only as many as the list says it has.
+    bytes[3] = 8;
+    assert_eq!(reported_luns(&bytes).collect::<std::vec::Vec<u8>>(), [0]);
+    assert_eq!(reported_luns(&[0, 0]).count(), 0);
+}

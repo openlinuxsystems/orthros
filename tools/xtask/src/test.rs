@@ -231,6 +231,12 @@ enum Bus {
     /// SATA disks and the boot stick, in the order the controller finds
     /// them: the root ports in order, then the hubs' ports.
     Usb(&'static str),
+    /// Logical unit `n` of a USB disk that speaks USB Attached SCSI
+    /// (QEMU's `usb-uas`, with a `scsi-hd` for each unit), at this QEMU
+    /// port of a case with [`UAS_PORTS`]: port `1` or `2` at SuperSpeed,
+    /// with streams, `3` or `4` at high speed, without. Named as a stick
+    /// is, its units in order.
+    Uas(&'static str, u8),
 }
 
 impl Disk {
@@ -274,6 +280,20 @@ impl Disk {
 fn partition_name(disk: &str, number: u32) -> String {
     let p = if disk.ends_with(|c: char| c.is_ascii_digit()) { "p" } else { "" };
     format!("{disk}{p}{number}")
+}
+
+/// The QEMU ports of a case's UAS disks, in order: one `usb-uas` each.
+fn uas_devices(disks: &[Disk]) -> Vec<&'static str> {
+    let mut ports: Vec<&str> = disks
+        .iter()
+        .filter_map(|disk| match disk.bus {
+            Bus::Uas(port, _) => Some(port),
+            _ => None,
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 /// The NVMe controllers a case's disks are on, in order.
@@ -324,7 +344,7 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
             let (prefix, letter) = match disk.bus {
                 Bus::Virtio => ("vd", &mut virtio),
                 Bus::Sata => ("sd", &mut sata),
-                Bus::Usb(_) => ("sd", &mut usb),
+                Bus::Usb(_) | Bus::Uas(..) => ("sd", &mut usb),
                 Bus::Nvme(n) => {
                     namespaces[usize::from(n)] += 1;
                     return format!("nvme{n}n{}", namespaces[usize::from(n)]);
@@ -347,6 +367,21 @@ fn usb_place(port: &str) -> String {
         }
         None => format!("1-{port}"),
     }
+}
+
+/// QEMU's `xhci` with [`UAS_PORTS`]: SuperSpeed root ports 1 and 2 of 2,
+/// so that QEMU puts a USB 3 device on its ports 3 and 4 at high speed,
+/// on the controller's USB 2 root ports 5 and 6.
+const UAS_PORTS: &[&str] = &["-global", "qemu-xhci.p3=2"];
+
+/// Where the kernel says the UAS disk at QEMU port `port` and logical
+/// unit `lun` of a case with [`UAS_PORTS`] is: its device's place, and
+/// the unit if the device has more than one ([`Bus::Uas`]).
+fn uas_place(disks: &[Disk], port: &str, lun: u8) -> String {
+    let root: u8 = port.parse().expect("a root port's number");
+    let place = if root <= 2 { format!("1-{root}") } else { format!("1-{}", root + 2) };
+    let units = disks.iter().filter(|disk| matches!(disk.bus, Bus::Uas(p, _) if p == port));
+    if units.count() > 1 { format!("{place} LUN {lun}") } else { place }
 }
 
 /// The volumes Spark mounts from a case's FAT and Btrfs disks: each
@@ -422,6 +457,17 @@ const USB_DISKS: &[Disk] = &[
     fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Usb("3")),
     fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Usb("4.1")),
     fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Usb("4.2")),
+];
+
+/// The same disks as USB disks that speak UAS, after the boot stick's
+/// `sda`: two logical units of one at SuperSpeed (`sdb` and `sdc`), and
+/// two at high speed (`sdd` and `sde1`, the partition in a GPT), with
+/// [`UAS_PORTS`].
+const UAS_DISKS: &[Disk] = &[
+    fat_disk(1440, 12, "RADIX12", Table::None, Bus::Uas("2", 0)),
+    fat_disk(32 * 1024, 16, "RADIX16", Table::None, Bus::Uas("2", 1)),
+    fat_disk(64 * 1024, 32, "RADIX32", Table::None, Bus::Uas("3", 0)),
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Uas("4", 0)),
 ];
 
 /// The hub [`USB_DISKS`] has two of its sticks behind, at QEMU port 4.
@@ -1423,6 +1469,26 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "storage-uas",
+        about: "The storage test on four disks of three USB devices that speak USB Attached SCSI: two logical units of one at SuperSpeed, with streams, and two at high speed, without, one partitioned with a GPT; then the one with two units is pulled out",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: UAS_PORTS,
+        script: storage_write,
+        disks: UAS_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check",
+            before: storage_host,
+            script: storage_uas_check,
+        }),
+    },
+    Case {
         name: "storage-nvme",
         about: "The storage test on four NVMe namespaces of two controllers, each with a queue and an interrupt for each of four CPUs, one partitioned with a GPT",
         firmware: Firmware::Uefi,
@@ -2032,8 +2098,13 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
-    if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_))) && case.media != Media::Usb {
+    if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_) | Bus::Uas(..)))
+        && case.media != Media::Usb
+    {
         return Err("a case with USB disks boots from USB, whose controller they are on".into());
+    }
+    for port in uas_devices(case.disks) {
+        extra.extend(["-device".into(), format!("usb-uas,bus=xhci.0,port={port},id=uas{port}")]);
     }
     // Each controller before its namespaces, in order, so that the
     // kernel finds them in that order.
@@ -2070,6 +2141,9 @@ fn run_case(
             }
             Bus::Usb(port) => {
                 format!("usb-storage,drive=disk{i},bus=xhci.0,port={port},id=stick{i}{device}")
+            }
+            Bus::Uas(port, lun) => {
+                format!("scsi-hd,drive=disk{i},bus=uas{port}.0,scsi-id=0,lun={lun}{device}")
             }
         });
     }
@@ -4047,6 +4121,16 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                 ))?,
                 format!("{} bytes a block{sectors}{ro}, write cache", disk.sector),
             ),
+            Bus::Uas(port, lun) => (
+                line_of(&format!(
+                    "Disk: {name} is a USB disk of {size} on {}: QEMU QEMU HARDDISK ",
+                    uas_place(case.disks, port, lun)
+                ))?,
+                format!(
+                    "{} bytes a block{sectors}{ro}, write cache, USB Attached SCSI",
+                    disk.sector
+                ),
+            ),
         };
         // Only a SATA disk's line says whether it is solid state.
         let says_solid = disk.bus == Bus::Sata && disk.solid();
@@ -4144,7 +4228,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
         let model = match disk.bus {
             Bus::Sata => "QEMU HARDDISK",
             Bus::Nvme(_) => "QEMU NVMe Ctrl",
-            Bus::Usb(_) => "QEMU QEMU HARDDISK",
+            Bus::Usb(_) | Bus::Uas(..) => "QEMU QEMU HARDDISK",
             Bus::Virtio => "",
         };
         if disk.table == Table::None && !model.is_empty() {
@@ -4449,6 +4533,25 @@ fn storage_usb_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         disk_size(disk.kib)
     ))?;
     vm.expect(&format!("Disk: {name} has no partition table; it is used whole"))?;
+    Ok(())
+}
+
+/// The second boot of `storage-uas`: the storage test's check, then the
+/// device with two logical units is pulled out, their filesystems still
+/// mounted: both disks go.
+fn storage_uas_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    storage_check(vm, case)?;
+    let Bus::Uas(port, _) = case.disks[0].bus else {
+        return Err("the first disk is not a UAS one".into());
+    };
+    let names = disk_names(case.disks);
+    vm.monitor(&format!("device_del uas{port}"))?;
+    vm.expect(&format!("USB: 1-{port}: USB Attached SCSI HBA was unplugged"))?;
+    for (disk, name) in case.disks.iter().zip(&names) {
+        if matches!(disk.bus, Bus::Uas(p, _) if p == port) {
+            vm.expect(&format!("Disk: {name} is gone with its USB device"))?;
+        }
+    }
     Ok(())
 }
 
