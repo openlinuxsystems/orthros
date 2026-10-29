@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "consoled"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "keymap",
  "libc",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "keymap"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "radix-abi",
 ]
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "nukesh"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "indexmap",
  "libc",
@@ -391,14 +391,14 @@ dependencies = [
 
 [[package]]
 name = "radix-abi"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "ridlc",
 ]
 
 [[package]]
 name = "radix-fbcon"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "radix-hal",
  "radix-klog",
@@ -406,25 +406,25 @@ dependencies = [
 
 [[package]]
 name = "radix-hal"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-hw"
-version = "0.10.2"
+version = "0.10.3"
 
 [[package]]
 name = "radix-klog"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "radix-sync",
 ]
 
 [[package]]
 name = "radix-sync"
-version = "0.10.2"
+version = "0.10.3"
 
 [[package]]
 name = "redox_syscall"
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "ridlc"
-version = "0.10.2"
+version = "0.10.3"
 
 [[package]]
 name = "rustc_version"
@@ -575,7 +575,7 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 
 [[package]]
 name = "std-test"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "libc",
 ]
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "systools"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "keymap",
  "libc",

@@ -14,7 +14,7 @@ members = ["consoled", "keymap", "nukesh", "std-test", "systools"]
 
 [workspace.package]
 # Keep in step with the root Cargo.toml (a unit test of ob checks it).
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/openlinuxsystems/orthros"
