@@ -279,7 +279,7 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
         ));
     };
     match command.as_str() {
-        "start" | "stop" | "restart" => {
+        "start" | "stop" | "restart" | "reload" => {
             ask(&format!("{command} {name}"))?;
             Ok(0)
         }

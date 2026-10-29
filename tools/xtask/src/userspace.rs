@@ -94,6 +94,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/halt", "systools"),
     ("system/commands/hexdump", "systools"),
     ("system/commands/ionice", "systools"),
+    ("system/commands/keymap", "systools"),
     ("system/commands/kill", "systools"),
     ("system/commands/lscpu", "systools"),
     ("system/commands/lsmem", "systools"),
@@ -201,7 +202,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] = &["consoled", "nukesh", "systools"];
+pub const HOST_TESTED: &[&str] = &["consoled", "keymap", "nukesh", "systools"];
 
 /// The Cargo.lock of the host builds of the programs on Rust's standard
 /// library. They take the crates the ports patch for Radix from

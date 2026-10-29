@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# nl: Dutch, made by generate.py from xkeyboard-config
+# 2.48's `nl` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Dutch
+rightalt = altgr
+
+1           1        !        ¹        ¡
+2           2        "        ²        ⅛
+3           3        #        ³        £
+4           4        $        ¼        $
+5           5        %        ½        ⅜
+6           6        &        ¾        ⅝
+7           7        _        £        ⅞
+8           8        (        {        [
+9           9        )        }        ]
+0           0        '        °        ™
+minus       /        ?        \        ¿
+equal       °        dead:tilde dead:cedilla dead:ogonek
+q           q        Q        @        Ω
+w           w        W        ſ        §
+e           e        E        €        ¢
+r           r        R        ¶        ®
+t           t        T        þ        Þ
+y           y        Y        ÿ        ¥
+u           u        U        ü        Ü
+i           i        I        ï        Ï
+o           o        O        ò        Ò
+p           p        P        ¶        Þ
+leftbrace   dead:diaeresis dead:circumflex ~        ^
+rightbrace  *        |        dead:tilde dead:macron
+a           a        A        á        Á
+s           s        S        ß        ẞ
+d           d        D        ð        Ð
+f           f        F        ª        ª
+g           g        G        ŋ        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        dead:hook dead:horn
+k           k        K        ĸ        &
+l           l        L        ł        Ł
+semicolon   +        ±        dead:acute dead:doubleacute
+apostrophe  dead:acute dead:grave '        `
+grave       @        §        ¬        ¬
+backslash   <        >        dead:grave dead:breve
+z           z        Z        «        <
+x           x        X        »        >
+c           c        C        ¢        ©
+v           v        V        “        ‘
+b           b        B        ”        ’
+n           n        N        ñ        Ñ
+m           m        M        μ        º
+comma       ,        ;        ¸        «
+dot         .        :        ·        »
+slash       U+002D   =        U+00AD   dead:abovedot
+space       U+0020
+102nd       ]        [        |        ¦
+kpdot       .

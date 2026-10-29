@@ -1,0 +1,48 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The layouts Dukovo has, made by generate.py: each name, and its file.
+
+/// Every layout, by name, in the order `keymap --list` shows them.
+pub const LAYOUTS: &[(&str, &str)] = &[
+    ("us", include_str!("../keymaps/us.keymap")),
+    ("us-intl", include_str!("../keymaps/us-intl.keymap")),
+    ("us-altgr-intl", include_str!("../keymaps/us-altgr-intl.keymap")),
+    ("us-dvorak", include_str!("../keymaps/us-dvorak.keymap")),
+    ("us-colemak", include_str!("../keymaps/us-colemak.keymap")),
+    ("gb", include_str!("../keymaps/gb.keymap")),
+    ("ie", include_str!("../keymaps/ie.keymap")),
+    ("de", include_str!("../keymaps/de.keymap")),
+    ("at", include_str!("../keymaps/at.keymap")),
+    ("ch", include_str!("../keymaps/ch.keymap")),
+    ("ch-fr", include_str!("../keymaps/ch-fr.keymap")),
+    ("fr", include_str!("../keymaps/fr.keymap")),
+    ("be", include_str!("../keymaps/be.keymap")),
+    ("nl", include_str!("../keymaps/nl.keymap")),
+    ("es", include_str!("../keymaps/es.keymap")),
+    ("latam", include_str!("../keymaps/latam.keymap")),
+    ("pt", include_str!("../keymaps/pt.keymap")),
+    ("br", include_str!("../keymaps/br.keymap")),
+    ("it", include_str!("../keymaps/it.keymap")),
+    ("dk", include_str!("../keymaps/dk.keymap")),
+    ("no", include_str!("../keymaps/no.keymap")),
+    ("se", include_str!("../keymaps/se.keymap")),
+    ("fi", include_str!("../keymaps/fi.keymap")),
+    ("is", include_str!("../keymaps/is.keymap")),
+    ("fo", include_str!("../keymaps/fo.keymap")),
+    ("ee", include_str!("../keymaps/ee.keymap")),
+    ("lv", include_str!("../keymaps/lv.keymap")),
+    ("lt", include_str!("../keymaps/lt.keymap")),
+    ("pl", include_str!("../keymaps/pl.keymap")),
+    ("cz", include_str!("../keymaps/cz.keymap")),
+    ("sk", include_str!("../keymaps/sk.keymap")),
+    ("hu", include_str!("../keymaps/hu.keymap")),
+    ("si", include_str!("../keymaps/si.keymap")),
+    ("hr", include_str!("../keymaps/hr.keymap")),
+    ("ro", include_str!("../keymaps/ro.keymap")),
+    ("tr", include_str!("../keymaps/tr.keymap")),
+    ("mt", include_str!("../keymaps/mt.keymap")),
+    ("al", include_str!("../keymaps/al.keymap")),
+    ("ca", include_str!("../keymaps/ca.keymap")),
+    ("jp", include_str!("../keymaps/jp.keymap")),
+];

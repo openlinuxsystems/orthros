@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Turning keys into what a terminal sends, as Linux's console does with
-//! its default (US) key map: characters, control characters with Ctrl,
-//! ESC before them with Alt, and the escape sequences of terminfo's
-//! `linux` entry for the cursor, editing, function and keypad keys. The
-//! keys consoled keeps for itself: Alt+F1 to Alt+F6 (with or without Ctrl)
-//! and Alt+Left and Alt+Right switch consoles, Shift+Page Up and Shift+Page
-//! Down look back, and Ctrl+Alt+Delete restarts the machine.
+//! Turning keys into what a terminal sends, as Linux's console does: the
+//! characters of the keyboard layout (ADR 0149), with AltGr and dead keys
+//! where it has them, control characters with Ctrl, ESC before them with
+//! Alt, and the escape sequences of terminfo's `linux` entry for the
+//! cursor, editing, function and keypad keys. The keys consoled keeps for
+//! itself: Alt+F1 to Alt+F6 (with or without Ctrl) and Alt+Left and
+//! Alt+Right switch consoles, Shift+Page Up and Shift+Page Down look back,
+//! and Ctrl+Alt+Delete restarts the machine.
 
+use keymap::{Dead, Keymap, Sym, compose};
 use radix_abi::input::*;
 
 use crate::term::Modes;
@@ -32,61 +34,26 @@ pub enum Action {
     Lights,
 }
 
-/// The state of the modifier and lock keys.
-#[derive(Clone, Copy, Debug, Default)]
+/// The layout, and the state of the modifier, lock and dead keys.
+#[derive(Clone, Debug)]
 pub struct Keyboard {
+    keymap: Keymap,
+    /// The US layout, for Ctrl with a key whose character has no control
+    /// character, as on Linux.
+    us: Keymap,
     shift: [bool; 2],
     ctrl: [bool; 2],
     alt: [bool; 2],
+    /// Right Alt, in a layout where it is AltGr.
+    altgr: bool,
+    /// The dead key pressed last, waiting for its letter.
+    dead: Option<Dead>,
     /// Caps Lock.
     pub caps: bool,
     /// Num Lock.
     pub num: bool,
     /// Scroll Lock: the console's output is held while it is on.
     pub scroll: bool,
-}
-
-/// The character the key `code` types in the US layout, and with Shift.
-fn us(code: u16) -> Option<(char, char)> {
-    let pair = match code {
-        KEY_1 => ('1', '!'),
-        KEY_2 => ('2', '@'),
-        KEY_3 => ('3', '#'),
-        KEY_4 => ('4', '$'),
-        KEY_5 => ('5', '%'),
-        KEY_6 => ('6', '^'),
-        KEY_7 => ('7', '&'),
-        KEY_8 => ('8', '*'),
-        KEY_9 => ('9', '('),
-        KEY_0 => ('0', ')'),
-        KEY_MINUS => ('-', '_'),
-        KEY_EQUAL => ('=', '+'),
-        KEY_LEFTBRACE => ('[', '{'),
-        KEY_RIGHTBRACE => (']', '}'),
-        KEY_SEMICOLON => (';', ':'),
-        KEY_APOSTROPHE => ('\'', '"'),
-        KEY_GRAVE => ('`', '~'),
-        KEY_BACKSLASH | KEY_102ND => ('\\', '|'),
-        KEY_COMMA => (',', '<'),
-        KEY_DOT => ('.', '>'),
-        KEY_SLASH => ('/', '?'),
-        KEY_SPACE => (' ', ' '),
-        _ => {
-            let letter = letter(code)?;
-            (letter, letter.to_ascii_uppercase())
-        }
-    };
-    Some(pair)
-}
-
-/// The letter of the key `code`, if it is one.
-fn letter(code: u16) -> Option<char> {
-    const ROWS: [(u16, &str); 3] =
-        [(KEY_Q, "qwertyuiop"), (KEY_A, "asdfghjkl"), (KEY_Z, "zxcvbnm")];
-    ROWS.iter().find_map(|&(first, letters)| {
-        let at = usize::from(code.checked_sub(first)?);
-        letters.as_bytes().get(at).map(|&b| char::from(b))
-    })
 }
 
 /// The control character Ctrl and `c` type, as on a VT100.
@@ -135,9 +102,30 @@ fn function_number(code: u16) -> Option<u16> {
 }
 
 impl Keyboard {
-    /// A keyboard with Num Lock on, so the keypad types digits.
-    pub fn new() -> Keyboard {
-        Keyboard { num: true, ..Keyboard::default() }
+    /// A keyboard of `keymap`'s layout with Num Lock on, so the keypad
+    /// types digits.
+    pub fn new(keymap: Keymap) -> Keyboard {
+        Keyboard {
+            keymap,
+            us: Keymap::us(),
+            shift: [false; 2],
+            ctrl: [false; 2],
+            alt: [false; 2],
+            altgr: false,
+            dead: None,
+            caps: false,
+            num: true,
+            scroll: false,
+        }
+    }
+
+    /// Types in `keymap` from now; Right Alt and a dead key waiting start
+    /// afresh.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+        self.alt[1] = false;
+        self.altgr = false;
+        self.dead = None;
     }
 
     fn shift(&self) -> bool {
@@ -177,6 +165,7 @@ impl Keyboard {
             KEY_LEFTCTRL => self.ctrl[0] = down,
             KEY_RIGHTCTRL => self.ctrl[1] = down,
             KEY_LEFTALT => self.alt[0] = down,
+            KEY_RIGHTALT if self.keymap.altgr => self.altgr = down,
             KEY_RIGHTALT => self.alt[1] = down,
             KEY_CAPSLOCK | KEY_NUMLOCK | KEY_SCROLLLOCK if value == PRESSED => {
                 let lock = match code {
@@ -187,14 +176,22 @@ impl Keyboard {
                 *lock = !*lock;
                 return Action::Lights;
             }
+            // A dead key does not repeat: held, it waits for its letter.
+            _ if value == REPEATED
+                && matches!(
+                    self.keymap.sym(code, self.shift(), self.altgr, self.caps),
+                    Sym::Dead(_)
+                ) => {}
             _ if down => return self.pressed(code, modes),
             _ => {}
         }
         Action::None
     }
 
-    fn pressed(&self, code: u16, modes: Modes) -> Action {
+    fn pressed(&mut self, code: u16, modes: Modes) -> Action {
         let (shift, ctrl, alt) = (self.shift(), self.ctrl(), self.alt());
+        // Any other key than a layout's lets go of a dead key.
+        let dead = self.dead.take();
         if let Some(n) = function_number(code) {
             if alt {
                 return Action::Switch(usize::from(n - 1));
@@ -207,11 +204,11 @@ impl Keyboard {
         };
         let applic = modes.app_keypad && !shift;
         // The keypad: digits with Num Lock, the editing keys without.
-        let keypad = |digit: u8, applic_letter: u8, without: Action| {
+        let keypad = |digit: char, applic_letter: u8, without: Action| {
             if applic {
                 Action::Send(vec![0x1b, b'O', applic_letter])
             } else if self.num != shift {
-                Action::Send(vec![digit])
+                Action::Send(utf8(digit))
             } else {
                 without
             }
@@ -249,18 +246,18 @@ impl Keyboard {
             KEY_PAGEDOWN if shift => Action::Page(-1),
             KEY_PAGEUP => send(b"\x1b[5~"),
             KEY_PAGEDOWN => send(b"\x1b[6~"),
-            KEY_KP0 => keypad(b'0', b'p', send(b"\x1b[2~")),
-            KEY_KP1 => keypad(b'1', b'q', send(b"\x1b[4~")),
-            KEY_KP2 => keypad(b'2', b'r', cursor(b'B')),
-            KEY_KP3 => keypad(b'3', b's', send(b"\x1b[6~")),
-            KEY_KP4 => keypad(b'4', b't', cursor(b'D')),
-            KEY_KP5 => keypad(b'5', b'u', send(b"\x1b[G")),
-            KEY_KP6 => keypad(b'6', b'v', cursor(b'C')),
-            KEY_KP7 => keypad(b'7', b'w', send(b"\x1b[1~")),
-            KEY_KP8 => keypad(b'8', b'x', cursor(b'A')),
-            KEY_KP9 => keypad(b'9', b'y', send(b"\x1b[5~")),
+            KEY_KP0 => keypad('0', b'p', send(b"\x1b[2~")),
+            KEY_KP1 => keypad('1', b'q', send(b"\x1b[4~")),
+            KEY_KP2 => keypad('2', b'r', cursor(b'B')),
+            KEY_KP3 => keypad('3', b's', send(b"\x1b[6~")),
+            KEY_KP4 => keypad('4', b't', cursor(b'D')),
+            KEY_KP5 => keypad('5', b'u', send(b"\x1b[G")),
+            KEY_KP6 => keypad('6', b'v', cursor(b'C')),
+            KEY_KP7 => keypad('7', b'w', send(b"\x1b[1~")),
+            KEY_KP8 => keypad('8', b'x', cursor(b'A')),
+            KEY_KP9 => keypad('9', b'y', send(b"\x1b[5~")),
             KEY_KPDOT if ctrl && alt => Action::Reboot,
-            KEY_KPDOT => keypad(b'.', b'n', send(b"\x1b[3~")),
+            KEY_KPDOT => keypad(self.keymap.keypad_decimal(), b'n', send(b"\x1b[3~")),
             KEY_KPSLASH if applic => send(b"\x1bOo"),
             KEY_KPASTERISK if applic => send(b"\x1bOj"),
             KEY_KPMINUS if applic => send(b"\x1bOm"),
@@ -271,22 +268,63 @@ impl Keyboard {
             KEY_KPPLUS => send(b"+"),
             KEY_KPEQUAL => send(b"="),
             KEY_KPCOMMA => send(b","),
-            _ => {
-                let Some((plain, shifted)) = us(code) else { return Action::None };
-                let upper = shift != (self.caps && letter(code).is_some());
-                let c = if upper { shifted } else { plain };
-                let mut bytes = Vec::with_capacity(2);
-                if alt {
-                    bytes.push(0x1b);
-                }
-                match ctrl.then(|| control(c)).flatten() {
-                    Some(byte) => bytes.push(byte),
-                    None => bytes.push(c as u8),
-                }
-                Action::Send(bytes)
-            }
+            _ => self.typed(code, dead),
         }
     }
+
+    /// What a key of the layout types, after the dead key `dead` if one
+    /// was pressed: a letter it goes on takes its accent, a space or the
+    /// dead key again types the accent alone, and anything else types the
+    /// accent and then itself, as Linux's console does.
+    fn typed(&mut self, code: u16, dead: Option<Dead>) -> Action {
+        let (shift, ctrl, alt) = (self.shift(), self.ctrl(), self.alt());
+        let c = match self.keymap.sym(code, shift, self.altgr, self.caps) {
+            Sym::None => {
+                self.dead = dead;
+                return Action::None;
+            }
+            Sym::Dead(pressed) => match dead {
+                Some(dead) if dead == pressed => return Action::Send(utf8(dead.spacing())),
+                Some(dead) => {
+                    self.dead = Some(pressed);
+                    return Action::Send(utf8(dead.spacing()));
+                }
+                None => {
+                    self.dead = Some(pressed);
+                    return Action::None;
+                }
+            },
+            Sym::Char(c) => c,
+        };
+        let mut bytes = Vec::with_capacity(8);
+        if alt {
+            bytes.push(0x1b);
+        }
+        if ctrl {
+            let us = || match self.us.sym(code, shift, false, false) {
+                Sym::Char(c) => control(c),
+                _ => None,
+            };
+            if let Some(byte) = control(c).or_else(us) {
+                bytes.push(byte);
+                return Action::Send(bytes);
+            }
+        }
+        match dead.map(|dead| (dead, compose(dead, c))) {
+            Some((_, Some(composed))) => bytes.extend(utf8(composed)),
+            Some((dead, None)) => {
+                bytes.extend(utf8(dead.spacing()));
+                bytes.extend(utf8(c));
+            }
+            None => bytes.extend(utf8(c)),
+        }
+        Action::Send(bytes)
+    }
+}
+
+/// `c` in UTF-8.
+fn utf8(c: char) -> Vec<u8> {
+    c.encode_utf8(&mut [0; 4]).as_bytes().to_vec()
 }
 
 fn send(bytes: &[u8]) -> Action {
@@ -321,7 +359,7 @@ mod tests {
 
     #[test]
     fn letters_shift_and_caps_lock() {
-        let mut keyboard = Keyboard::new();
+        let mut keyboard = Keyboard::new(Keymap::us());
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_H])[0]), b"h");
         keyboard.key(KEY_LEFTSHIFT, PRESSED, PLAIN);
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_H])[0]), b"H");
@@ -339,7 +377,7 @@ mod tests {
 
     #[test]
     fn control_and_alt() {
-        let mut keyboard = Keyboard::new();
+        let mut keyboard = Keyboard::new(Keymap::us());
         keyboard.key(KEY_LEFTCTRL, PRESSED, PLAIN);
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_C])[0]), [3]);
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_LEFTBRACE])[0]), [0x1b]);
@@ -356,7 +394,7 @@ mod tests {
 
     #[test]
     fn editing_and_function_keys() {
-        let mut keyboard = Keyboard::new();
+        let mut keyboard = Keyboard::new(Keymap::us());
         let keys = [KEY_UP, KEY_HOME, KEY_DELETE, KEY_F1, KEY_F12, KEY_BACKSPACE, KEY_ENTER];
         let sent: Vec<Vec<u8>> =
             typed(&mut keyboard, &keys).iter().map(|a| bytes(a).to_vec()).collect();
@@ -371,9 +409,70 @@ mod tests {
         assert_eq!(bytes(&keyboard.key(KEY_TAB, PRESSED, PLAIN)), b"\x1b[Z");
     }
 
+    fn layout(name: &str) -> Keyboard {
+        Keyboard::new(Keymap::builtin(name).unwrap())
+    }
+
+    /// What pressing `code` with `held` down sends.
+    fn with(keyboard: &mut Keyboard, held: &[u16], code: u16) -> Action {
+        for &key in held {
+            keyboard.key(key, PRESSED, PLAIN);
+        }
+        let action = keyboard.key(code, PRESSED, PLAIN);
+        for &key in held {
+            keyboard.key(key, RELEASED, PLAIN);
+        }
+        action
+    }
+
+    #[test]
+    fn a_layout_with_altgr_and_dead_keys() {
+        let mut de = layout("de");
+        assert_eq!(bytes(&typed(&mut de, &[KEY_Y])[0]), b"z");
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTSHIFT], KEY_SEMICOLON)), "Ö".as_bytes());
+        assert_eq!(bytes(&with(&mut de, &[KEY_RIGHTALT], KEY_Q)), b"@");
+        assert_eq!(bytes(&with(&mut de, &[KEY_RIGHTALT], KEY_8)), b"[");
+        // Dead keys: a letter takes the accent; a space, or the dead key
+        // again, types it alone; another key types both.
+        assert_eq!(typed(&mut de, &[KEY_EQUAL])[0], Action::None);
+        assert_eq!(bytes(&typed(&mut de, &[KEY_E])[0]), "é".as_bytes());
+        assert_eq!(bytes(&typed(&mut de, &[KEY_EQUAL, KEY_SPACE])[1]), "´".as_bytes());
+        assert_eq!(bytes(&typed(&mut de, &[KEY_GRAVE, KEY_GRAVE])[1]), b"^");
+        assert_eq!(bytes(&typed(&mut de, &[KEY_GRAVE, KEY_X])[1]), "^x".as_bytes());
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTSHIFT], KEY_EQUAL)), b"");
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTSHIFT], KEY_A)), "À".as_bytes());
+        // A dead key then another: the first's accent, the second waits.
+        assert_eq!(bytes(&typed(&mut de, &[KEY_EQUAL, KEY_GRAVE])[1]), "´".as_bytes());
+        assert_eq!(bytes(&typed(&mut de, &[KEY_O])[0]), "ô".as_bytes());
+        // Another key lets go of it; a held one does not repeat.
+        assert_eq!(typed(&mut de, &[KEY_EQUAL, KEY_LEFT, KEY_E])[2], Action::Send(b"e".to_vec()));
+        de.key(KEY_EQUAL, PRESSED, PLAIN);
+        assert_eq!(de.key(KEY_EQUAL, REPEATED, PLAIN), Action::None);
+        assert_eq!(bytes(&typed(&mut de, &[KEY_U])[0]), "ú".as_bytes());
+        // Ctrl with a letter of the layout, and with one that has no
+        // control character: the key's US one.
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTCTRL], KEY_Y)), [0x1a]);
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTCTRL], KEY_LEFTBRACE)), [0x1b]);
+        assert_eq!(bytes(&with(&mut de, &[KEY_LEFTALT], KEY_SEMICOLON)), "\x1bö".as_bytes());
+        assert_eq!(bytes(&typed(&mut de, &[KEY_KPDOT])[0]), b",");
+    }
+
+    #[test]
+    fn right_alt_is_alt_where_the_layout_has_no_altgr() {
+        let mut us = Keyboard::new(Keymap::us());
+        assert_eq!(bytes(&with(&mut us, &[KEY_RIGHTALT], KEY_B)), b"\x1bb");
+        assert_eq!(with(&mut us, &[KEY_RIGHTALT], KEY_F2), Action::Switch(1));
+        // Switching layouts with Right Alt held lets go of it.
+        let mut keyboard = Keyboard::new(Keymap::us());
+        keyboard.key(KEY_RIGHTALT, PRESSED, PLAIN);
+        keyboard.set_keymap(Keymap::builtin("de").unwrap());
+        assert_eq!(bytes(&typed(&mut keyboard, &[KEY_B])[0]), b"b");
+        assert_eq!(keyboard.keymap.name, "German");
+    }
+
     #[test]
     fn the_keypad_follows_num_lock() {
-        let mut keyboard = Keyboard::new();
+        let mut keyboard = Keyboard::new(Keymap::us());
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_KP7])[0]), b"7");
         keyboard.key(KEY_NUMLOCK, PRESSED, PLAIN);
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_KP7])[0]), b"\x1b[1~");

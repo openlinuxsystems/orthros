@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "keymap"
+description = "The consoles' keyboard layouts: keymap(5) files, and what a key types in one"
+version.workspace = true
+edition.workspace = true
+# The code is the project's; the layouts it builds in are made from
+# xkeyboard-config's, under its MIT-style notices.
+license = "(Apache-2.0 OR MIT) AND MIT"
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.dukovo]
+notices = ["keymaps/COPYING-xkeyboard-config"]
+
+[dependencies]
+# The key codes, generated from abi/input.ridl.
+radix-abi = { path = "../../../kernel/abi" }
+
+[lints]
+workspace = true

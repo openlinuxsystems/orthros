@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# hu: Hungarian, made by generate.py from xkeyboard-config
+# 2.48's `hu` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Hungarian
+rightalt = altgr
+
+1           1        '        ~        dead:tilde
+2           2        "        dead:caron ˇ
+3           3        +        ^        dead:circumflex
+4           4        !        dead:breve ˘
+5           5        %        dead:abovering °
+6           6        /        dead:ogonek ˛
+7           7        =        `        dead:grave
+8           8        (        dead:abovedot ˙
+9           9        )        dead:acute ´
+0           ö        Ö        dead:doubleacute ˝
+minus       ü        Ü        dead:diaeresis ¨
+equal       ó        Ó        dead:cedilla ¸
+q           q        Q        \        Ω
+w           w        W        |        §
+e           e        E        Ä        E
+r           r        R        ¶        ®
+t           t        T        ŧ        Ŧ
+y           z        Z        –        ¥
+u           u        U        €        ↑
+i           i        I        Í        í
+o           o        O        „        Ø
+p           p        P        ”        Þ
+leftbrace   ő        Ő        ÷        dead:abovering
+rightbrace  ú        Ú        ×        dead:macron
+a           a        A        ä        Ä
+s           s        S        đ        ẞ
+d           d        D        Đ        Ð
+f           f        F        [        ª
+g           g        G        ]        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        í        Í
+k           k        K        ł        &
+l           l        L        Ł        Ł
+semicolon   é        É        $        ¢
+apostrophe  á        Á        ß        ẞ
+grave       0        §        ¬        ¬
+backslash   ű        Ű        ¤        dead:breve
+z           y        Y        >        <
+x           x        X        #        >
+c           c        C        &        ©
+v           v        V        @        ‚
+b           b        B        {        ‘
+n           n        N        }        ’
+m           m        M        <        º
+comma       ,        ?        ;        ×
+dot         .        :        >        ÷
+slash       U+002D   _        *        dead:abovedot
+space       U+0020
+102nd       í        Í        <        >
+kpdot       ,

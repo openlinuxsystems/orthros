@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# lv: Latvian, made by generate.py from xkeyboard-config
+# 2.48's `lv` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Latvian
+rightalt = altgr
+
+1           1        !        ¹        ¡
+2           2        @        ²        ⅛
+3           3        #        ³        £
+4           4        $        €        ¢
+5           5        %        ½        ⅜
+6           6        ^        ¾        ⅝
+7           7        &        {        ⅞
+8           8        *        [        ™
+9           9        (        ]        ±
+0           0        )        }        °
+minus       U+002D   _        \        ¿
+equal       =        +        –        —
+q           q        Q        q        Q
+w           w        W        w        W
+e           e        E        ē        Ē
+r           r        R        ŗ        Ŗ
+t           t        T        t        T
+y           y        Y        y        Y
+u           u        U        ū        Ū
+i           i        I        ī        Ī
+o           o        O        ō        Ō
+p           p        P        p        P
+leftbrace   [        {        «        “
+rightbrace  ]        }        »        ”
+a           a        A        ā        Ā
+s           s        S        š        Š
+d           d        D        d        D
+f           f        F        f        F
+g           g        G        ģ        Ģ
+h           h        H        h        H
+j           j        J        j        J
+k           k        K        ķ        Ķ
+l           l        L        ļ        Ļ
+semicolon   ;        :        ;        :
+apostrophe  '        "        “        „
+grave       `        ~        ´        ~
+backslash   \        |        `        ˘
+z           z        Z        ž        Ž
+x           x        X        x        X
+c           c        C        č        Č
+v           v        V        v        V
+b           b        B        b        B
+n           n        N        ņ        Ņ
+m           m        M        m        M
+comma       ,        <        •        ×
+dot         .        >        ·        ÷
+slash       /        ?        /        ˙
+space       U+0020   U+0020   U+0020   U+0020
+102nd       <        >        |        ¦
+kpdot       .

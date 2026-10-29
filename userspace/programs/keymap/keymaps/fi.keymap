@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# fi: Finnish, made by generate.py from xkeyboard-config
+# 2.48's `fi` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Finnish
+rightalt = altgr
+
+1           1        !        -        ¡
+2           2        "        @        ”
+3           3        #        £        »
+4           4        ¤        $        «
+5           5        %        ‰        “
+6           6        &        ‚        „
+7           7        /        {
+8           8        (        [        <
+9           9        )        ]        >
+0           0        =        }        °
+minus       +        ?        \        ¿
+equal       dead:acute dead:grave dead:cedilla dead:ogonek
+q           q        Q        q        Q
+w           w        W        w        W
+e           e        E        €
+r           r        R        r        R
+t           t        T        þ        Þ
+y           y        Y        y        Y
+u           u        U        u        U
+i           i        I        ı        |
+o           o        O        œ        Œ
+p           p        P        dead:horn dead:hook
+leftbrace   å        Å        dead:doubleacute dead:abovering
+rightbrace  dead:diaeresis dead:circumflex dead:tilde dead:macron
+a           a        A        ə        Ə
+s           s        S        ß        ẞ
+d           d        D        ð        Ð
+f           f        F        f        F
+g           g        G        g        G
+h           h        H        h        H
+j           j        J        j        J
+k           k        K        ĸ
+l           l        L
+semicolon   ö        Ö        ø        Ø
+apostrophe  ä        Ä        æ        Æ
+grave       §        ½
+backslash   '        *        dead:caron dead:breve
+z           z        Z        ʒ        Ʒ
+x           x        X        ×        ·
+c           c        C        c        C
+v           v        V        v        V
+b           b        B        b        B
+n           n        N        ŋ        Ŋ
+m           m        M        µ        —
+comma       ,        ;        ’        ‘
+dot         .        :        dead:belowdot dead:abovedot
+slash       U+002D   _        –        dead:belowcomma
+space       U+0020   U+0020   U+0020   U+202F
+102nd       <        >        |        ¦
+kpdot       ,

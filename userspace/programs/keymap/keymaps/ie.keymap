@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# ie: Irish, made by generate.py from xkeyboard-config
+# 2.48's `ie` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Irish
+rightalt = altgr
+
+1           1        !        ¡        ¹
+2           2        "        ™        ²
+3           3        £        ©        ³
+4           4        $        €        ¢
+5           5        %        §        †
+6           6        ^        dead:circumflex ‰
+7           7        &        ¶        ⁊
+8           8        *        dead:diaeresis •
+9           9        (        ª        ·
+0           0        )        º        °
+minus       U+002D   _        –        —
+equal       =        +        ≠        ±
+q           q        Q        œ        Œ
+w           w        W        dead:abovedot dead:abovedot
+e           e        E        é        É
+r           r        R        ®        ‰
+t           t        T        þ        Þ
+y           y        Y        ¥        µ
+u           u        U        ú        Ú
+i           i        I        í        Í
+o           o        O        ó        Ó
+p           p        P        ‚
+leftbrace   [        {        “        ”
+rightbrace  ]        }        ‘        ’
+a           a        A        á        Á
+s           s        S        ß        ẞ
+d           d        D        ð        Ð
+f           f        F        ƒ
+g           g        G        ©
+h           h        H        dead:abovedot dead:abovedot
+j           j        J        ı        ¼
+k           k        K        dead:abovering ½
+l           l        L        ´        ¾
+semicolon   ;        :        …        ‡
+apostrophe  '        @        æ        Æ
+grave       `        ¬        ¦
+backslash   #        ~        «        »
+z           z        Z        ⟨        ⟩
+x           x        X        ×        ∼
+c           c        C        dead:cedilla ¸
+v           v        V        dead:caron
+b           b        B        ¨
+n           n        N        dead:tilde
+m           m        M        ¯
+comma       ,        <        ≤        „
+dot         .        >        ≥        ‚
+slash       /        ?        ÷        ¿
+space       U+0020   U+0020   U+00A0   U+00A0
+102nd       \        |        dead:grave dead:acute
+kpdot       .

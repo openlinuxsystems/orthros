@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# ca: French (Canada), made by generate.py from xkeyboard-config
+# 2.48's `ca` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = French (Canada)
+rightalt = altgr
+
+1           1        !        ±
+2           2        "        @
+3           3        /        £
+4           4        $        ¢
+5           5        %        ¤
+6           6        ?        ¬
+7           7        &        ¦
+8           8        *        ²
+9           9        (        ³
+0           0        )        ¼
+minus       U+002D   _        ½
+equal       =        +        ¾
+q           q        Q
+w           w        W
+e           e        E        €
+r           r        R
+t           t        T
+y           y        Y        ¥
+u           u        U
+i           i        I
+o           o        O        §
+p           p        P        ¶
+leftbrace   dead:circumflex dead:circumflex [
+rightbrace  dead:cedilla dead:diaeresis ]
+a           a        A
+s           s        S
+d           d        D
+f           f        F
+g           g        G
+h           h        H
+j           j        J
+k           k        K
+l           l        L
+semicolon   ;        :        ~
+apostrophe  dead:grave dead:grave {
+grave       #        |        \
+backslash   <        >        }
+z           z        Z
+x           x        X
+c           c        C
+v           v        V
+b           b        B
+n           n        N
+m           m        M        µ
+comma       ,        '        ¯
+dot         .        .        U+00AD
+slash       é        É        dead:acute
+space       U+0020   U+0020   U+00A0
+102nd       «        »        °        ¦
+kpdot       .

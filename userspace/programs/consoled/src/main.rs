@@ -10,8 +10,11 @@
 //! _/devices/kbd_ (radix-input(2)) into what the terminal sends (`keys`).
 //! Alt+F1 to Alt+F6 show a console, starting its session the first time;
 //! Shift+Page Up looks back; Scroll Lock holds the shown console's output;
-//! Ctrl+Alt+Delete runs reboot(8). When consoled ends, the screen is the
-//! kernel log's again. Spark starts it as a service (spark(8)).
+//! Ctrl+Alt+Delete runs reboot(8). The keys type in the layout
+//! _/system/settings/keyboard_ names (keymap(1), ADR 0149), read again on
+//! SIGHUP, which `service consoled reload` sends. When consoled ends, the
+//! screen is the kernel log's again. Spark starts it as a service
+//! (spark(8)).
 
 mod keys;
 mod screen;
@@ -24,9 +27,10 @@ use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Instant;
 
+use keymap::Keymap;
 use keys::{Action, Keyboard};
 use radix_abi::input::{Event, SET_LEDS};
 use screen::Screen;
@@ -49,10 +53,33 @@ const REBOOT: &str = "/system/commands/reboot";
 /// The write end of the pipe the SIGCHLD handler wakes the loop with.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 
+/// Set by SIGHUP: read the keyboard layout's setting again.
+static RELOAD: AtomicBool = AtomicBool::new(false);
+
 extern "C" fn on_child(_: libc::c_int) {
     let fd = WAKE.load(Ordering::Relaxed);
     // SAFETY: write(2) is async-signal-safe; a full pipe already wakes.
     unsafe { libc::write(fd, [0u8].as_ptr().cast(), 1) };
+}
+
+extern "C" fn on_hangup(signal: libc::c_int) {
+    RELOAD.store(true, Ordering::Relaxed);
+    on_child(signal);
+}
+
+/// The layout the setting names, saying which; US when it cannot be had.
+fn chosen_keymap() -> Keymap {
+    let loaded = keymap::chosen().and_then(|name| Ok((keymap::load(&name)?, name)));
+    match loaded {
+        Ok((keymap, name)) => {
+            eprintln!("consoled: the keys type in {} ({name})", keymap.name);
+            keymap
+        }
+        Err(err) => {
+            eprintln!("consoled: {err}; the keys type in English (US)");
+            Keymap::us()
+        }
+    }
 }
 
 /// The options.
@@ -124,8 +151,8 @@ fn session_env(shell: &str, home: &str) -> Vec<String> {
     env
 }
 
-/// The SIGCHLD handler and the pipe it writes to; returns the pipe's read
-/// end.
+/// The SIGCHLD and SIGHUP handlers and the pipe they write to; returns the
+/// pipe's read end.
 fn watch_children() -> io::Result<File> {
     let mut fds = [0; 2];
     // SAFETY: pipe2 writes two descriptors.
@@ -140,6 +167,9 @@ fn watch_children() -> io::Result<File> {
         action.sa_sigaction = on_child as *const () as usize;
         action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
         libc::sigaction(libc::SIGCHLD, &raw const action, std::ptr::null_mut());
+        action.sa_sigaction = on_hangup as *const () as usize;
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGHUP, &raw const action, std::ptr::null_mut());
         Ok(File::from_raw_fd(fds[0]))
     }
 }
@@ -281,6 +311,9 @@ impl Consoled {
                 let mut drain = [0u8; 64];
                 while matches!(wake.read(&mut drain), Ok(n) if n > 0) {}
             }
+            if RELOAD.swap(false, Ordering::Relaxed) {
+                self.keyboard.set_keymap(chosen_keymap());
+            }
             self.reap();
             if fds[1].revents != 0
                 && let Some(kbd) = self.kbd.as_mut()
@@ -356,8 +389,8 @@ fn main() -> ExitCode {
     };
     let (cols, rows) = (screen.cols(), screen.rows());
     let consoles = (1..=options.consoles).map(|n| Console::new(n, cols, rows)).collect();
-    let mut consoled =
-        Consoled { screen, consoles, active: 0, keyboard: Keyboard::new(), kbd, shell };
+    let keyboard = Keyboard::new(chosen_keymap());
+    let mut consoled = Consoled { screen, consoles, active: 0, keyboard, kbd, shell };
     consoled.lights();
     consoled.switch(0);
     eprintln!("consoled: {} consoles; tty1 is shown", options.consoles);

@@ -301,6 +301,11 @@ with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
 	later has its domain stopped, as systemd sends SIGKILL after
 	TimeoutStopSec.
 
+*reload* _name_
+	Send a running service SIGHUP, which asks a service that reads
+	its settings to read them again (consoled reads its keyboard
+	layout's, *consoled*(8)), as systemd's ExecReload does.
+
 # SHUTTING DOWN
 
 When a shutdown is due, Spark stops the services in groups by *order*,

@@ -76,8 +76,14 @@ roadmap; until then each session is root's, with no password asked.
 	As on any keyboard; every keyboard's lights follow them. The keypad
 	types digits while Num Lock is on, which it is from the start.
 
-The keyboard layout is US English. The other keys send what the Linux
-console sends: *F1* to *F5* as *ESC [ [ A* to *ESC [ [ E*, *F6* to *F12*
+The keys type in the layout _/system/settings/keyboard_ names, US
+English unless it names another (*keymap*(1)), which every keyboard
+shares: consoled reads it when it starts and when it is sent SIGHUP,
+which *service consoled reload* does. In a layout that has them, Right
+Alt is AltGr, and a dead key puts its accent on the letter typed after
+it (*keymap*(5)). Ctrl with a key whose character has no control
+character sends the control character of the key's US one. The other
+keys send what the Linux console sends: *F1* to *F5* as *ESC [ [ A* to *ESC [ [ E*, *F6* to *F12*
 as *ESC [ 17 ~* to *ESC [ 24 ~*, *Home* to *Page Down* as *ESC [ 1 ~* to
 *ESC [ 6 ~*, the arrows as *ESC [ A* to *ESC [ D* (*ESC O A* in
 application cursor mode); *Alt* with a key sends *ESC* before it.
@@ -117,10 +123,16 @@ _/system/settings/issue_
 	What each console shows before its session. Its default is in
 	_/system/resources/default-settings/issue_.
 
+_/system/settings/keyboard_
+	The keyboard layout's setting (*keymap*(1)).
+
+_/system/settings/keymaps/name.keymap_
+	One's own layouts (*keymap*(5)).
+
 _/system/settings/spark/services/consoled.service_
 	The service.
 
 # SEE ALSO
 
-*spark*(8), *reboot*(8), *nukesh*(1), *dmesg*(1), *radix-framebuffer*(2),
-*radix-input*(2), *radix-files*(7)
+*spark*(8), *reboot*(8), *keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
+*radix-framebuffer*(2), *radix-input*(2), *radix-files*(7)

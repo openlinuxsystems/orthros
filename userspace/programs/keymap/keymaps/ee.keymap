@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# ee: Estonian, made by generate.py from xkeyboard-config
+# 2.48's `ee` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Estonian
+rightalt = altgr
+
+1           1        !        ¹        ¡
+2           2        "        @        ⅛
+3           3        #        £        £
+4           4        ¤        $        $
+5           5        %        €        ⅜
+6           6        &        ¬        ⅝
+7           7        /        {        ⅞
+8           8        (        [        ™
+9           9        )        ]        ±
+0           0        =        }        °
+minus       +        ?        \        ¿
+equal       dead:acute dead:grave `        dead:cedilla
+q           q        Q        @        Ω
+w           w        W        ß        Σ
+e           e        E        €        ¢
+r           r        R        ¶        ®
+t           t        T        ŧ        Ŧ
+y           y        Y        ←        ¥
+u           u        U        ↓        ↑
+i           i        I        →        ı
+o           o        O        ø        Ø
+p           p        P        þ        Þ
+leftbrace   ü        Ü        dead:diaeresis dead:abovering
+rightbrace  õ        Õ        §        dead:macron
+a           a        A        æ        Æ
+s           s        S        š        Š
+d           d        D        ð        Ð
+f           f        F        đ        ª
+g           g        G        ŋ        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        dead:hook dead:horn
+k           k        K        ĸ        &
+l           l        L        ł        Ł
+semicolon   ö        Ö        dead:acute dead:doubleacute
+apostrophe  ä        Ä        ^        dead:circumflex
+grave       dead:caron dead:tilde •        ·
+backslash   '        *        ½        dead:breve
+z           z        Z        ž        Ž
+x           x        X        »        «
+c           c        C        ¢        ©
+v           v        V        „        ‚
+b           b        B        “        ‘
+n           n        N        ”        ’
+m           m        M        µ        º
+comma       ,        ;        <        ×
+dot         .        :        >        ÷
+slash       U+002D   _        |        dead:abovedot
+space       U+0020
+102nd       <        >        |        ¦
+kpdot       .

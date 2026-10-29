@@ -60,6 +60,8 @@ error that starts with the tool's name.
 :  a file's bytes, in hexadecimal or other formats
 |  *ionice*(1)
 :  a process's I/O class and level
+|  *keymap*(1)
+:  the keyboard layout the consoles type in
 |  *kill*(1)
 :  send a signal
 |  *lscpu*(1)

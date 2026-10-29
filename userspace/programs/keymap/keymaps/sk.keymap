@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# sk: Slovak, made by generate.py from xkeyboard-config
+# 2.48's `sk` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Slovak
+rightalt = altgr
+
+1           +        1        !        dead:tilde
+2           ľ        2        @        dead:caron
+3           š        3        #        dead:circumflex
+4           č        4        $        dead:breve
+5           ť        5        %        dead:abovering
+6           ž        6        ^        dead:ogonek
+7           ý        7        &        dead:grave
+8           á        8        *        dead:abovedot
+9           í        9        {        dead:acute
+0           é        0        }        dead:doubleacute
+minus       =        %        \        dead:diaeresis
+equal       dead:acute dead:caron dead:macron dead:cedilla
+q           q        Q        \        Ω
+w           w        W        |        §
+e           e        E        €        E
+r           r        R        ¶        ®
+t           t        T        ŧ        Ŧ
+y           z        Z        ←        ¥
+u           u        U        ↓        ↑
+i           i        I        →        ı
+o           o        O        ø        Ø
+p           p        P        þ        Þ
+leftbrace   ú        /        [        ÷
+rightbrace  ä        (        ]        ×
+a           a        A        ~        Æ
+s           s        S        đ        ẞ
+d           d        D        Đ        Ð
+f           f        F        [        ª
+g           g        G        ]        Ŋ
+h           h        H        `        Ħ
+j           j        J        '        dead:horn
+k           k        K        ł        &
+l           l        L        Ł        Ł
+semicolon   ô        "        $        dead:doubleacute
+apostrophe  §        !        '        ß
+grave       ;        dead:abovering `        ~
+backslash   ň        )        \        |
+z           y        Y        °        <
+x           x        X        #        >
+c           c        C        &        ©
+v           v        V        @        ‚
+b           b        B        {        ‘
+n           n        N        }        ’
+m           m        M        ^        º
+comma       ,        ?        <        ×
+dot         .        :        >        ÷
+slash       U+002D   _        *        dead:abovedot
+space       U+0020   U+0020   U+00A0   U+00A0
+102nd       \        |        /        ¦
+kpdot       .

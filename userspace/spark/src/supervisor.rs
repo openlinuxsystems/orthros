@@ -13,6 +13,8 @@
 //! the out-of-memory policy stopped ends as if killed, and is started
 //! again the same way.
 //!
+//! `service reload` sends a running service SIGHUP, as systemd's
+//! ExecReload does for a daemon that reads its settings again on it.
 //! `service stop` and `restart` send SIGTERM, and stop the service's
 //! domain if it has not ended after STOP_WAIT, as systemd sends SIGKILL
 //! after TimeoutStopSec. Once a service's process ends, the processes it
@@ -860,6 +862,20 @@ impl Supervisor {
                     text.push_str(&format!("#\tshutdown\t{}\t{left}\n", end.words()));
                 }
                 text
+            }
+            "reload" => {
+                let Some(&name) = rest.first() else {
+                    return "error: reload needs a service's name\n".into();
+                };
+                let Some(service) = self.services.iter().find(|s| s.spec.name == name) else {
+                    return format!("error: no service is called {name}\n");
+                };
+                let State::Running(pid) = service.state else {
+                    return format!("error: {name} is not running\n");
+                };
+                let _ = process::kill(&SYS, SLOT_PROCESS, pid as i64, signal::SIGHUP);
+                println!("spark: asked {name} to reload");
+                format!("ok: asked {name} to reload\n")
             }
             "start" | "stop" | "restart" => {
                 let Some(&name) = rest.first() else {

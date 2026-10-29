@@ -47,6 +47,14 @@ path = "ports/mlibc/musl/COPYRIGHT"
 SPDX-FileCopyrightText = "2005-2020 Rich Felker, et al."
 SPDX-License-Identifier = "MIT"
 
+# xkeyboard-config 2.48's COPYING file, https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config,
+# verbatim: the notices of the layouts the consoles' keymaps are made from
+# (ADR 0149). Its notices are MIT's and others like it.
+[[annotations]]
+path = "userspace/programs/keymap/keymaps/COPYING-xkeyboard-config"
+SPDX-FileCopyrightText = "1996-2025 The xkeyboard-config contributors"
+SPDX-License-Identifier = "MIT"
+
 # What the shell's test scripts must write: bash's and dash's output,
 # compared byte for byte, which a header would change.
 [[annotations]]
