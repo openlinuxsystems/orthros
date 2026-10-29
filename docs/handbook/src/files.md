@@ -288,7 +288,9 @@ such disks, then checks them with Linux's `btrfs check` and reads them
 back on the host and after a reboot, `btrfs-power-cut` cuts the
 power while a disk is being written, and `btrfs-log` mounts a disk Linux
 left with changes in its log of fsyncs alone, which the mount replays as
-Linux does.
+Linux does. Dukovo writes that log too: an `fsync` of a file writes only
+what changed of it, as Linux does, and Linux replays Dukovo's log after
+a power cut.
 
 An ext4 disk, the kind most Linux machines use, is made the same way:
 

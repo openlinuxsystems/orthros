@@ -853,7 +853,7 @@ _target/userspace/_).
 	*--debug*, *--release*
 		As for *build*.
 
-*fixture* *btrfs-log* [*--linux-kernel* _file_]
+*fixture* *btrfs-log*|*btrfs-radix-log* [*--linux-kernel* _file_]
 	Make test data that only Linux makes, for the host tests of Radix's
 	filesystems. *btrfs-log* makes a 128 MiB Btrfs disk with
 	*mkfs.btrfs*, boots Linux in a virtual machine on it with
@@ -867,6 +867,15 @@ _target/userspace/_).
 	Btrfs host tests check Radix's replay against (ADR 0151). The
 	fixtures are checked in; make them again only to change what the
 	log holds.
+
+	*btrfs-radix-log* checks the other way round (ADR 0154): a Btrfs host
+	test writes files on a disk *mkfs.btrfs* made, changes them with an
+	*fsync*(2) after each change and cuts the power after the last, so
+	the changes are in the log Radix wrote alone; Linux boots on a copy
+	(*--btrfs-log list*) to list it before and after replaying that
+	log, and *btrfs check* checks what the replay left. The disk and the
+	lists go to the fixtures, which the host tests check Radix's own
+	replay against.
 
 	*--linux-kernel* _file_
 		As for *bench*; the kernel needs Btrfs, built in or as a module

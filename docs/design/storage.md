@@ -548,6 +548,16 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   checksums and extended attributes go in, and the links, sizes and
   bytes of what it touched are counted again. The log's blocks are kept
   from use for the mount's life, and the data it names is taken first.
+- `log` writes that log (ADR 0154): an `fsync` of a regular file the last
+  commit has, with the same names, writes its inode item, names,
+  extended attributes, its extents in the ranges the transaction changed
+  (holes as hole items) and the checksums of the data the transaction
+  wrote, for every file fsynced since the commit, as a log tree per
+  subvolume under a log root tree, in new blocks no tree counts; the
+  disk's cache is flushed and the primary superblock, naming the log, is
+  written through. The log before is free again then, and the commit
+  drops the log. Anything else (a new or renamed file, a directory, a
+  log past four leaves) commits.
 - `space::Space` reads every block group and its free ranges from the
   free-space tree at the first write, kept as extents or bitmaps; the
   ranges around the superblock's copies are never taken. A tree block is
@@ -585,7 +595,8 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   the last two inode items it changed, which their nodes read back from
   it rather than from the tree. A commit is due 30
   seconds after the first change the disk lacks, or once more than
-  16384 pages wait; `fsync` is a sync.
+  16384 pages wait; `fsync` of a directory is a commit, and of a file
+  writes the log of fsyncs, or commits when it cannot (ADR 0154).
 - `zstd::encode` compresses (ADR 0134), modelled on zstd's level 1:
   a table of 2^14 positions hashed on six bytes, the last two offsets
   tried as the reference does, one block a frame, Huffman-coded literals
@@ -739,11 +750,12 @@ the lock checker's graph searches use bit sets instead of queues.
 
 A frame budget does not bound the sum. Btrfs goes deepest: a writable
 mount reads every block group's free space under the mount call, and a
-sync commits under `fsync`. Each filesystem's mount has a frame of its
-own outside `fs::make`, a Btrfs volume lives on the heap, and the reads
-of a Btrfs mount (the trees the writer checks, the block groups, their
-free space) each have a frame of their own, which the frames that build
-the filesystem wait beside, not under. With the lock checker on (every
+sync commits under `fsync`, or writes the log of fsyncs. Each
+filesystem's mount has a frame of its own outside `fs::make`, a Btrfs
+volume lives on the heap, and the reads of a Btrfs mount (the trees the
+writer checks, the block groups, their free space) each have a frame of
+their own, which the frames that build the filesystem wait beside, not
+under. With the lock checker on (every
 boot test) the scheduler warns, once and with a backtrace, when a thread
 goes to sleep with less than 4 KiB of its stack left, which the boot
 tests take as a failure: deep calls end waiting for the disk.
@@ -805,8 +817,9 @@ host, and reads everything back after a second boot.
 - Btrfs is on one device (10e), with 4 KiB sectors, and written only
   with `no-holes`, without quotas, removes a
   subvolume in one transaction rather than in the background, scrubs
-  in the caller's call rather than in a thread of its own, replays
-  Linux's log of fsyncs but writes none (`fsync` is a commit), and
+  in the caller's call rather than in a thread of its own, writes its
+  log of fsyncs whole at each fsync rather than a path at a time, and
+  commits rather than log a new or renamed file or a directory, and
   compresses only with zstd, never small files inline, with literals of
   bytes above 127 left raw. Its compressed reads take one workspace in
   turn, where Linux keeps one per CPU at most. Empty block groups stay, where Linux removes

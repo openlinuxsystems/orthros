@@ -40,8 +40,13 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     args.finish()?;
     match name.as_deref() {
         Some("btrfs-log") => btrfs_log(ctx, kernel),
-        Some(other) => crate::bail!("there is no fixture {other}: the one there is is btrfs-log"),
-        None => crate::bail!("name the fixture to make: btrfs-log"),
+        Some("btrfs-radix-log") => btrfs_radix_log(ctx, kernel),
+        Some(other) => {
+            crate::bail!(
+                "there is no fixture {other}: those there are are btrfs-log, btrfs-radix-log"
+            )
+        }
+        None => crate::bail!("name the fixture to make: btrfs-log or btrfs-radix-log"),
     }
 }
 
@@ -89,6 +94,59 @@ fn btrfs_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     process::create_dir(&at)?;
     write(&at.join("btrfs-log.sparse"), &sparse(&image))?;
     write(&at.join("btrfs-log.txt"), lists.as_bytes())?;
+    println!("\nFixtures ready in {}", ctx.display(&at));
+    Ok(())
+}
+
+/// `ob fixture btrfs-radix-log`: the log of fsyncs Radix writes, which
+/// Linux must replay as Radix does (ADR 0154). A Btrfs host test writes
+/// files, changes them with an fsync after each change and cuts the power
+/// after the last; Linux lists the disk as its last commit has it and as
+/// it replays the log, and `btrfs check` checks what its replay left.
+fn btrfs_radix_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
+    qemu::require_qemu()?;
+    let Some(kernel) = bench::linux_kernel(kernel)? else {
+        crate::bail!(
+            "no Linux kernel to boot: give one with --linux-kernel or OB_LINUX_KERNEL, or let \
+             this user read /boot/vmlinuz-$(uname -r)"
+        );
+    };
+    let dir = ctx.out.join("fixture");
+    process::create_dir(&dir)?;
+    let initrd = bench::linux_init(ctx, &dir, None, &kernel)?;
+    let disk = dir.join("btrfs-radix-log.img");
+    step("Writing a log of fsyncs with Radix's Btrfs, in a host test");
+    let mkfs = crate::btrfs::mkfs(ctx)?;
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.current_dir(ctx.root.join("kernel"))
+        .args(["test", "-q", "-p", "radix-btrfs", "--features", "host", "--lib", "--"])
+        .args(["--exact", "--ignored", "tests::fsync::a_log_for_linux_to_replay"])
+        .env("RADIX_BTRFS_LOG_OUT", &disk);
+    if let Some(sbin) = mkfs.parent() {
+        cmd.env("RADIX_BTRFS_PROGS", sbin);
+    }
+    process::run(ctx, &mut cmd)?;
+    let image = std::fs::read(&disk).context(|| format!("reading {}", disk.display()))?;
+    let copy = dir.join("btrfs-radix-log.replayed.img");
+    std::fs::copy(&disk, &copy).context(|| format!("writing {}", copy.display()))?;
+    step("Booting Linux to list the disk before and after it replays Radix's log");
+    let log = boot(ctx, &dir, (&kernel, &initrd), &copy, "list", "LIST end")?;
+    let mut cmd = std::process::Command::new(crate::btrfs::tool(ctx)?);
+    cmd.args(["check", "--readonly", "--check-data-csum"]).arg(&copy);
+    process::run(ctx, &mut cmd)?;
+    let release = bench::release_of(&kernel)?;
+    let mut lists = format!(
+        "# Made by `ob fixture btrfs-radix-log` with Linux {release}: the disk Radix left \
+         with its log, as its last commit has it, and as Linux replays the log.\n"
+    );
+    for line in log.lines().filter(|line| line.starts_with("LIST ")) {
+        lists.push_str(line.trim_end());
+        lists.push('\n');
+    }
+    let at = ctx.root.join(FIXTURES);
+    process::create_dir(&at)?;
+    write(&at.join("btrfs-radix-log.sparse"), &sparse(&image))?;
+    write(&at.join("btrfs-radix-log.txt"), lists.as_bytes())?;
     println!("\nFixtures ready in {}", ctx.display(&at));
     Ok(())
 }

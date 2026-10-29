@@ -1548,10 +1548,11 @@ fn set_times(at: &Location, accessed: u64, modified: u64) -> Result<()> {
     })
 }
 
-/// Writes `file`'s filesystem's changes to its disk.
+/// Makes `file`'s changes durable, as its node's filesystem does: FAT,
+/// exFAT and ext4 write all their changes, Btrfs a regular file's alone,
+/// with its log of fsyncs (ADR 0154).
 pub fn sync(file: &FileRef) -> Result<()> {
-    file.at.node.sync().map_err(fs::status)?;
-    file.at.mount.fs.sync().map_err(fs::status)
+    file.at.node.sync().map_err(fs::status)
 }
 
 /// The ring's read operation: `args` are the offset, address and length.

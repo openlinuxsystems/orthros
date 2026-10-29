@@ -1434,9 +1434,12 @@ impl Node for BtrfsNode {
         if !self.fs.writable() {
             return Ok(());
         }
-        // Until the log tree (10c.2), a file is durable with a commit.
         self.flush()?;
-        self.fs.commit()
+        if self.kind == Kind::File {
+            self.fs.sync_file(self.subvol, self.ino)
+        } else {
+            self.fs.commit()
+        }
     }
 
     fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {

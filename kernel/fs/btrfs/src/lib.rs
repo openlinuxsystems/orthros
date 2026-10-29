@@ -52,6 +52,7 @@ pub mod fs;
 mod grow;
 pub mod inflate;
 pub mod inode;
+mod log;
 pub mod lzo;
 pub mod node;
 mod pack;
