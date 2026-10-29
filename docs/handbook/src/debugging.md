@@ -16,7 +16,7 @@ When the kernel panics, the screen turns into a report under a red
 
 ```text
 Radix panic on CPU 0 at 0.327298 s: Page fault (#PF) at 0xffffffffa031416e while writing 0xdead0000: the page is not mapped
-  Radix 0.10.3 on x86_64, boot 1; 1 of 1 other CPUs stopped
+  Radix 0.10.4 on x86_64, boot 1; 1 of 1 other CPUs stopped
 Registers:
      rax 00000000dead0000     rbx 0000000000000000     rcx 00000000f6d8320b     rdx 000000001fcbfbfd
      ...
