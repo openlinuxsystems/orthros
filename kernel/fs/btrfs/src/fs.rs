@@ -203,10 +203,11 @@ impl BtrfsFs {
     }
 
     /// How many disks the filesystem has, and how many of them are not
-    /// there: missing at the mount, or failed since (ADR 0153).
+    /// there: missing at the mount, or failed since (ADR 0153). Disks
+    /// added and removed since the mount count as they are now.
     pub fn disks(&self) -> (usize, usize) {
         let volume = &self.inner.volume;
-        (volume.disks().len(), volume.missing())
+        (volume.disks().iter().filter(|d| !d.gone()).count(), volume.missing())
     }
 
     /// How many of its disks there missed changes, and are read last
@@ -804,7 +805,7 @@ impl FileSystem for BtrfsFs {
         };
         FsInfo {
             block_size: sb.sectorsize,
-            blocks: sb.total_bytes / sector,
+            blocks: volume.total_bytes() / sector,
             free: free / sector,
             ..FsInfo::default()
         }
@@ -828,6 +829,18 @@ impl FileSystem for BtrfsFs {
 
     fn trim(&self, minimum: u64) -> Result<u64> {
         crate::trim::trim(&self.inner, minimum)
+    }
+
+    fn add_disk(&self, device: DeviceRef) -> Result<u64> {
+        crate::balance::add_disk(&self.inner, &device)
+    }
+
+    fn remove_disk(&self, devid: u64) -> Result<()> {
+        crate::balance::remove_disk(&self.inner, devid)
+    }
+
+    fn balance(&self, plan: &radix_vfs::Balance) -> Result<radix_vfs::Balanced> {
+        crate::balance::balance(&self.inner, plan)
     }
 
     /// Whether a commit is due: the oldest change the disk lacks is

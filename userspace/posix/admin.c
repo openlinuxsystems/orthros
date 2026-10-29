@@ -224,10 +224,11 @@ static void memory(void) {
 	STATUS(1, "/bin/df", "/nowhere");
 }
 
-// subvolume, scrub and replace on a filesystem that is not Btrfs, which
-// refuses each action, and with an unknown action or none; the root boot
-// test makes, snapshots, removes and scrubs subvolumes through the same
-// calls, and btrfs-raid replaces a disk through the call replace makes.
+// subvolume, scrub, replace, device and balance on a filesystem that is
+// not Btrfs, which refuses each action, and with an unknown action or
+// none; the root boot test makes, snapshots, removes and scrubs
+// subvolumes through the same calls, and btrfs-raid replaces, adds and
+// removes disks and balances through the calls the tools make.
 static void subvolumes(void) {
 	STATUS(0, "/bin/mkdir", "-p", DIR);
 	STATUS(1, "/bin/subvolume", "create", DIR "/sub");
@@ -244,6 +245,18 @@ static void subvolumes(void) {
 	STATUS(1, "/bin/replace", "start", DIR "/disk", DIR "/disk", DIR);
 	STATUS(1, "/bin/replace", "stop", DIR);
 	STATUS(1, "/bin/replace");
+	STATUS(1, "/bin/device", "add", DIR "/disk", DIR);
+	STATUS(1, "/bin/device", "remove", "2", DIR);
+	STATUS(1, "/bin/device", "remove", "missing", DIR);
+	STATUS(1, "/bin/device", "usage", DIR);
+	STATUS(1, "/bin/device");
+	STATUS(1, "/bin/balance", "start", "--full-balance", DIR);
+	STATUS(1, "/bin/balance", "start", "-dconvert=raid1,soft", "-m", DIR);
+	STATUS(1, "/bin/balance", "start", "-dconvert=raid9", DIR);
+	STATUS(1, "/bin/balance", "start", "-dusage=50", DIR);
+	STATUS(1, "/bin/balance", "start", "-s", DIR);
+	STATUS(1, "/bin/balance", "status", DIR);
+	STATUS(1, "/bin/balance");
 }
 
 // mkswap, swapon and swapoff on a file in tmpfs, which takes a swap

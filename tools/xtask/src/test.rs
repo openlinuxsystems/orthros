@@ -639,9 +639,10 @@ const LOG_DISKS: &[Disk] =
     &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
 
 /// The `btrfs-raid` test's disks: two virtio disks of 512 MiB, `vda` and
-/// `vdb`, of one Btrfs RAID1, and a third, `vdc`, that the second boot
-/// puts in the place of `vdb`, pulled out (ADR 0155).
-const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK, RAID_NEW];
+/// `vdb`, of one Btrfs RAID1, a third, `vdc`, that the second boot puts
+/// in the place of `vdb`, pulled out (ADR 0155), and a fourth, `vdd`,
+/// that it adds before it balances and takes `vda` out (ADR 0159).
+const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK, RAID_NEW, RAID_NEW];
 
 /// A disk of the `btrfs-raid` test.
 const RAID_DISK: Disk = Disk {
@@ -1761,7 +1762,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-raid",
-        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second and reads it all again: Linux's btrfs check passes after each boot, from every disk alone too",
+        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second, adds a fourth, balances, and takes the first out, reading it all again after each: Linux's btrfs check passes after each boot, from every disk alone too",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1774,7 +1775,8 @@ pub const CASES: &[Case] = &[
         script: raid_write,
         disks: RAID_DISKS,
         second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc",
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc --add \
+                      vdd --balance --remove 1",
             before: raid_pull,
             script: raid_check,
         }),
@@ -5551,21 +5553,22 @@ fn btrfs_id(path: &Path) -> Option<[u8; 16]> {
 /// check`, the data's checksums too, from its first disk still there,
 /// given each of its disks still there; then from each of them alone, as
 /// Linux reads a RAID1 with the others missing, so that every disk must
-/// hold a copy of everything. A disk pulled out is passed over. After a
-/// boot that lost a disk while it ran ([`PULL_WARNING`]), the disks are
-/// checked alone only: the one lost holds the filesystem as it was then,
-/// which the other has moved on from.
+/// hold a copy of everything. A disk pulled out, or taken out and wiped,
+/// is passed over; the case's first disk, which `mkfs.btrfs` made, checks
+/// them even then. After a boot that lost a disk while it ran
+/// ([`PULL_WARNING`]), the disks are checked alone only: the one lost
+/// holds the filesystem as it was then, which the other has moved on
+/// from.
 fn raid_checked(disk: &DiskImage, log: &str) -> Result<(), String> {
-    let Some(id) = btrfs_id(&disk.path) else { return Ok(()) };
     let image = disk.path.display().to_string();
     let prefix = image.rsplit_once("-disk").map_or(image.as_str(), |(prefix, _)| prefix);
-    let disks: Vec<PathBuf> = (0..RAID_DISKS.len())
-        .map(|i| PathBuf::from(format!("{prefix}-disk{i}.img")))
-        .filter(|path| btrfs_id(path) == Some(id))
-        .collect();
-    if disks.first() != Some(&disk.path) {
+    let paths: Vec<PathBuf> =
+        (0..RAID_DISKS.len()).map(|i| PathBuf::from(format!("{prefix}-disk{i}.img"))).collect();
+    if paths.first() != Some(&disk.path) {
         return Ok(());
     }
+    let Some(id) = paths.iter().find_map(|path| btrfs_id(path)) else { return Ok(()) };
+    let disks: Vec<PathBuf> = paths.into_iter().filter(|path| btrfs_id(path) == Some(id)).collect();
     let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
     let lost = log.contains(PULL_WARNING);
     let mut sets = if lost { Vec::new() } else { vec![&disks[..]] };
@@ -5742,9 +5745,9 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
     } else {
         vm.expect(&format!("spark: {second} is in use already; left alone"))?;
     }
-    if let Some(third) = names.get(2) {
+    for other in names.iter().skip(2) {
         vm.expect(&format!(
-            "spark: {third} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+            "spark: {other} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
@@ -5765,20 +5768,31 @@ fn raid_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `btrfs-raid` test's second boot, with the second disk pulled out:
 /// the program reads every file back from the first, puts the third disk
 /// in the place of the second (device 2), which the kernel rebuilds from
-/// the first's copies, and reads every file back again.
+/// the first's copies, adds the fourth (device 3), moves every chunk,
+/// and takes the first out (device 1), its chunks moved to the others,
+/// reading every file back after each.
 fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     raid_boot(vm, case, true, false)?;
     let names = disk_names(case.disks);
-    let (first, third) = (&names[0], &names[2]);
-    vm.expect(&format!("storage: /volumes/{first}: "))?;
-    vm.expect(" files read back after the reboot, every byte as written")?;
+    let (first, third, fourth) = (&names[0], &names[2], &names[3]);
+    let read_back = |vm: &mut Vm| {
+        vm.expect(&format!("storage: /volumes/{first}: "))?;
+        vm.expect(" files read back after the reboot, every byte as written")
+    };
+    read_back(vm)?;
     vm.expect(&format!(
         "Btrfs: disk 2 replaced by {third}, and rebuilt from the other disks' copies; 0 errors \
          no copy mends"
     ))?;
     vm.expect(&format!("storage: /volumes/{first}: disk 2 replaced by {third}, rebuilt from "))?;
-    vm.expect(&format!("storage: /volumes/{first}: "))?;
-    vm.expect(" files read back after the reboot, every byte as written")?;
+    read_back(vm)?;
+    vm.expect(&format!("Btrfs: {fourth} added as disk 3"))?;
+    vm.expect(&format!("storage: /volumes/{first}: {fourth} added as disk 3"))?;
+    read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: a balance moved "))?;
+    read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: disk 1 removed"))?;
+    read_back(vm)?;
     storage_end(vm, "check")
 }
 

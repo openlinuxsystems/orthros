@@ -379,6 +379,15 @@ impl ChunkMap {
         Ok(map)
     }
 
+    /// A copy of the map, without the chunk at `start` (ADR 0159).
+    pub fn without(&self, start: u64) -> Result<ChunkMap> {
+        let mut map = ChunkMap { chunks: mem::vec_with_capacity(self.chunks.len())? };
+        for c in self.chunks.iter().filter(|c| c.start != start) {
+            mem::push(&mut map.chunks, c.copy()?)?;
+        }
+        Ok(map)
+    }
+
     /// The first logical address after every chunk.
     pub fn end(&self) -> u64 {
         self.chunks.iter().map(|c| c.start + c.length).max().unwrap_or(0)

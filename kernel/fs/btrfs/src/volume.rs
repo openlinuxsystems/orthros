@@ -9,7 +9,7 @@
 //! device item for each. The disks found are matched to those items; one
 //! not found is missing, and its copies are left out of every [`Place`].
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use radix_block::DeviceRef;
 use radix_block::cache::BlockCache;
@@ -57,12 +57,14 @@ pub struct Disk {
     behind: AtomicBool,
     /// It failed a write while mounted, and is left out from then on.
     failed: AtomicBool,
+    /// It was removed from the filesystem while mounted (ADR 0159).
+    gone: AtomicBool,
 }
 
 impl Disk {
     /// The disk, through its cache of sectors, if it is there.
     pub fn cache(&self) -> Option<&BlockCache> {
-        if self.failed.load(Ordering::Relaxed) {
+        if self.failed.load(Ordering::Relaxed) || self.gone() {
             return None;
         }
         self.replacement.get().or(self.cache.as_ref())
@@ -81,6 +83,11 @@ impl Disk {
     /// Whether it is there: found at the mount, and not failed since.
     pub fn present(&self) -> bool {
         self.cache().is_some()
+    }
+
+    /// Whether it was removed from the filesystem while mounted.
+    pub fn gone(&self) -> bool {
+        self.gone.load(Ordering::Relaxed)
     }
 
     /// Whether it missed commits while it was away.
@@ -103,8 +110,11 @@ impl Disk {
 /// An opened Btrfs filesystem's disks.
 pub struct Volume {
     sb: Superblock,
-    /// Every disk the chunk tree names, by device ID.
+    /// Every disk the chunk tree names, then [`MAX_DISKS`] in all with
+    /// places for disks added while mounted (ADR 0159), each with its
+    /// device ID and UUID: the first `shown` are the filesystem's.
     disks: KVec<Disk>,
+    shown: AtomicUsize,
     /// Read without a lock; a new chunk replaces the map whole.
     chunks: RcuCell<ChunkMap, Alloc>,
     blocks: Blocks,
@@ -187,7 +197,8 @@ impl Volume {
         });
         // On the heap at once: a volume is large, and the mount's frames
         // above this one need not each hold a copy.
-        Ok(mem::boxed(Volume { sb, disks, chunks, blocks, current })?)
+        let shown = AtomicUsize::new(disks.len());
+        Ok(mem::boxed(Volume { sb, disks, shown, chunks, blocks, current })?)
     }
 
     /// Adds to `disks` those of `devices` that hold the filesystem of the
@@ -263,6 +274,18 @@ impl Volume {
         for disk in &mut self.disks {
             *disk.behind.get_mut() = disk.generation < self.sb.generation;
         }
+        *self.shown.get_mut() = self.disks.len();
+        // Places for disks added while mounted, past every device ID.
+        let mut next = self.disks.iter().map(|d| d.devid).max().unwrap_or(0);
+        while self.disks.len() < MAX_DISKS {
+            next += 1;
+            let mut uuid = [0; 16];
+            radix_vfs::random(&mut uuid);
+            // A random UUID, version 4, as Linux makes a disk's.
+            uuid[6] = (uuid[6] & 0x0f) | 0x40;
+            uuid[8] = (uuid[8] & 0x3f) | 0x80;
+            mem::push(&mut self.disks, Disk::missing(next, uuid))?;
+        }
         // The system chunk array's chunks are in the tree too.
         let bootstrap = core::mem::replace(self.chunks.get_mut(), ChunkMap::empty());
         for chunk in bootstrap.into_chunks() {
@@ -274,26 +297,55 @@ impl Volume {
         Ok(())
     }
 
-    /// The disks, the first the one the mount named.
+    /// The disks, the first the one the mount named; one removed while
+    /// mounted is among them still, [`Disk::gone`].
     pub fn disks(&self) -> &[Disk] {
-        &self.disks
+        &self.disks[..self.shown.load(Ordering::Acquire).min(self.disks.len())]
     }
 
     /// The disk at `index` among [`Volume::disks`].
     pub fn disk(&self, index: usize) -> Result<&Disk> {
-        self.disks.get(index).ok_or(Error::Corrupt)
+        self.disks().get(index).ok_or(Error::Corrupt)
     }
 
     /// How many of the filesystem's disks are not there: missing at the
     /// mount, or failed since.
     pub fn missing(&self) -> usize {
-        self.disks.iter().filter(|d| !d.present()).count()
+        self.disks().iter().filter(|d| !d.present() && !d.gone()).count()
+    }
+
+    /// Adds `device` as a new disk of the filesystem, in the next place
+    /// kept for one (ADR 0159), and returns its place, device ID and UUID.
+    /// It holds nothing yet: the caller, which holds the transaction,
+    /// adds its device item, and the commit writes it its superblock.
+    ///
+    /// Fails with [`Error::NotSupported`] once the filesystem has
+    /// [`MAX_DISKS`] disks, counting those removed since the mount.
+    pub(crate) fn add_disk(&self, device: &DeviceRef) -> Result<(usize, u64, [u8; 16])> {
+        let index = self.shown.load(Ordering::Acquire);
+        let disk = self.disks.get(index).ok_or(Error::NotSupported)?;
+        let size = device.info().sectors * radix_block::SECTOR;
+        let _ = disk.replacement.set(BlockCache::new(device.clone()));
+        disk.bytes.store(size, Ordering::Relaxed);
+        self.shown.store(index + 1, Ordering::Release);
+        Ok((index, disk.devid, disk.uuid))
+    }
+
+    /// Marks disk `index` removed from the filesystem: no chunk is on it
+    /// any more, and its superblock is not written again (ADR 0159). The
+    /// caller holds the transaction. Returns the disk, through its cache,
+    /// if it is there, for its superblocks to be wiped.
+    pub(crate) fn remove_disk(&self, index: usize) -> Option<&BlockCache> {
+        let disk = self.disks().get(index)?;
+        let cache = disk.cache();
+        disk.gone.store(true, Ordering::Relaxed);
+        cache
     }
 
     /// Whether every chunk has a copy of each of its bytes on the disks
     /// that are there.
     pub fn readable(&self) -> bool {
-        let present = |devid| self.disks.iter().any(|d| d.devid == devid && d.present());
+        let present = |devid| self.disks().iter().any(|d| d.devid == devid && d.present());
         self.chunks.read(|map| map.chunks().iter().all(|c| c.readable(present)))
     }
 
@@ -304,7 +356,7 @@ impl Volume {
     /// one disk, the write fails with `error`, and the disk stays.
     pub(crate) fn write_failed(&self, index: usize, error: Error) -> Result<()> {
         let disk = self.disk(index)?;
-        if self.disks.len() == 1 {
+        if self.disks().iter().filter(|d| !d.gone()).count() == 1 {
             return Err(error);
         }
         disk.failed.store(true, Ordering::Relaxed);
@@ -339,7 +391,7 @@ impl Volume {
     /// Marks every disk as up to date, after a scrub found every copy good
     /// or wrote it over.
     pub(crate) fn caught_up(&self) {
-        for disk in &self.disks {
+        for disk in self.disks() {
             disk.behind.store(false, Ordering::Relaxed);
         }
     }
@@ -362,6 +414,14 @@ impl Volume {
         Ok(())
     }
 
+    /// Drops the chunk at `start`, which a balance emptied (ADR 0159). It
+    /// waits until no reader sees the old map, so it sleeps.
+    pub(crate) fn remove_chunk(&self, start: u64) -> Result<()> {
+        let map = self.chunks.read(|map| map.without(start))?;
+        self.chunks.replace(map).map_err(|_| Error::NoMemory)?;
+        Ok(())
+    }
+
     /// The tree blocks read so far.
     pub fn blocks(&self) -> &Blocks {
         &self.blocks
@@ -370,9 +430,9 @@ impl Volume {
     /// Where `logical` is on the disks that are there; copies on disks
     /// that missed commits come last.
     pub fn place(&self, logical: u64) -> Result<Place> {
-        let disk_of = |devid| self.disks.iter().position(|d| d.devid == devid && d.present());
+        let disk_of = |devid| self.disks().iter().position(|d| d.devid == devid && d.present());
         let mut place = self.chunks.read(|map| map.place(logical, disk_of))?;
-        let behind = |site: &Site| self.disks[site.disk].behind();
+        let behind = |site: &Site| self.disks()[site.disk].behind();
         let copies = &mut place.copies[..place.count];
         for i in 1..copies.len() {
             let mut j = i;
@@ -396,7 +456,13 @@ impl Volume {
 
     /// Whether any disk that is there is read-only.
     pub fn read_only(&self) -> bool {
-        self.disks.iter().filter_map(Disk::device).any(|d| d.info().read_only)
+        self.disks().iter().filter_map(Disk::device).any(|d| d.info().read_only)
+    }
+
+    /// The bytes of its disks, as the last commit counts them: disks
+    /// added and removed while mounted change it (ADR 0159).
+    pub fn total_bytes(&self) -> u64 {
+        u64_at(&self.current.lock().superblock, 0x70)
     }
 
     /// The chunk tree's root block.
@@ -489,7 +555,7 @@ impl Volume {
     /// returns how many.
     pub fn shrink(&self, max: usize) -> usize {
         let mut dropped = self.blocks.shrink(max);
-        for cache in self.disks.iter().filter_map(Disk::cache) {
+        for cache in self.disks().iter().filter_map(Disk::cache) {
             dropped += cache.shrink(max.saturating_sub(dropped));
         }
         dropped
@@ -515,6 +581,7 @@ impl Disk {
             generation: sb.generation,
             behind: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
         })
     }
 
@@ -529,6 +596,7 @@ impl Disk {
             generation: 0,
             behind: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
         }
     }
 }

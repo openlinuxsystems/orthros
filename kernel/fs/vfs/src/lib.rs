@@ -118,6 +118,8 @@ pub enum Error {
     NotLink,
     /// The file has as many names as its filesystem keeps for one.
     TooManyNames,
+    /// The change would take its quota group past its limit.
+    QuotaExceeded,
     /// Out of memory.
     NoMemory,
     /// A buffer of the caller's is not mapped for the access.
@@ -152,6 +154,7 @@ impl fmt::Display for Error {
             Error::Loop => "too many levels of symbolic links",
             Error::NotLink => "not a symbolic link",
             Error::TooManyNames => "too many names",
+            Error::QuotaExceeded => "disk quota exceeded",
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
             Error::InvalidArgument => "invalid argument",
@@ -692,6 +695,63 @@ pub struct Scrub {
     pub fsid: [u8; 16],
 }
 
+/// Linux's mark for a balance's convert to one copy of each block,
+/// `BTRFS_AVAIL_ALLOC_BIT_SINGLE`; the other profiles are their block
+/// group flags.
+pub const BALANCE_SINGLE: u64 = 1 << 48;
+
+/// What a balance does with one kind of chunk, as btrfs-balance(8)'s
+/// `-d`, `-m` and `-s` say (ADR 0159).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BalanceArgs {
+    /// Whether chunks of this kind move.
+    pub on: bool,
+    /// The profile they are converted to: [`BALANCE_SINGLE`] or a block
+    /// group profile flag; 0 keeps each chunk's.
+    pub convert: u64,
+    /// Leaves alone the chunks already of the profile `convert` names, as
+    /// the `soft` filter does.
+    pub soft: bool,
+}
+
+/// The chunks a balance moves: of data, of metadata, and of the chunk
+/// tree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Balance {
+    /// Data chunks.
+    pub data: BalanceArgs,
+    /// Metadata chunks.
+    pub metadata: BalanceArgs,
+    /// Chunks of the chunk tree.
+    pub system: BalanceArgs,
+}
+
+/// What a balance did, as Linux's `btrfs_balance_progress` counts it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Balanced {
+    /// The chunks it looked at.
+    pub considered: u64,
+    /// The chunks it moved.
+    pub moved: u64,
+}
+
+/// A quota group of a Btrfs filesystem with simple quotas, as `btrfs
+/// qgroup show` lists it (ADR 0170): its subvolume's, with its limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Qgroup {
+    /// Its ID: the level in the high 16 bits, 0 for a subvolume's, and the
+    /// subvolume's ID below.
+    pub id: u64,
+    /// The bytes of the extents its subvolume wrote.
+    pub referenced: u64,
+    /// The same bytes, as simple quotas count each extent once.
+    pub exclusive: u64,
+    /// The most `referenced` may grow to; `u64::MAX` for no limit.
+    pub max_referenced: u64,
+    /// The most `exclusive` may grow to; `u64::MAX` for no limit.
+    pub max_exclusive: u64,
+}
+
 /// A filesystem.
 pub trait FileSystem: Send + Sync {
     /// What kind it is.
@@ -737,6 +797,42 @@ pub trait FileSystem: Send + Sync {
     /// bytes it discarded. A filesystem that cannot fails with
     /// [`Error::NotSupported`], as does one on disks that discard nothing.
     fn trim(&self, _minimum: u64) -> Result<u64> {
+        Err(Error::NotSupported)
+    }
+    /// Adds `device` to its disks, as Linux's `btrfs device add` does;
+    /// returns the device ID it takes. It holds nothing until a balance
+    /// moves chunks onto it, or new ones go there. A filesystem that
+    /// cannot fails with [`Error::NotSupported`].
+    fn add_disk(&self, _device: radix_block::DeviceRef) -> Result<u64> {
+        Err(Error::NotSupported)
+    }
+    /// Moves every chunk off its disk of device ID `devid`, there or
+    /// missing, then takes the disk out, as Linux's `btrfs device remove`
+    /// does. A filesystem that cannot fails with [`Error::NotSupported`].
+    fn remove_disk(&self, _devid: u64) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+    /// Moves the chunks `plan` names to new ones, converting them to
+    /// another profile if it says so, as Linux's `btrfs balance start`
+    /// does. A filesystem that cannot fails with [`Error::NotSupported`].
+    fn balance(&self, _plan: &Balance) -> Result<Balanced> {
+        Err(Error::NotSupported)
+    }
+    /// Turns simple quotas on, with `enable`, or off, as Linux's `btrfs
+    /// quota enable --simple` and `btrfs quota disable` do. A filesystem
+    /// that cannot fails with [`Error::NotSupported`].
+    fn quota(&self, _enable: bool) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+    /// Its quota groups, in order of their IDs. A filesystem that keeps
+    /// none fails with [`Error::NotSupported`].
+    fn qgroups(&self) -> Result<KVec<Qgroup>> {
+        Err(Error::NotSupported)
+    }
+    /// Sets the limits of quota group `id`; `u64::MAX` is none. A
+    /// filesystem that keeps no quota groups fails with
+    /// [`Error::NotSupported`].
+    fn limit_qgroup(&self, _id: u64, _max_referenced: u64, _max_exclusive: u64) -> Result<()> {
         Err(Error::NotSupported)
     }
     /// Drops up to `max` pages it can read again from the disk; returns

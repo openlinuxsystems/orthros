@@ -372,6 +372,30 @@ impl Dir {
         Ok(Scrubbed::of(&progress))
     }
 
+    /// Adds the block device `device` to the disks of the directory's
+    /// Btrfs filesystem (ADR 0159); returns the device ID it takes.
+    pub fn add_disk(&self, device: &File) -> Result<u64> {
+        Ok(directory::add_disk(&SYS, self.held.slot, device.held.slot)?.devid)
+    }
+
+    /// Moves every chunk off the disk of device ID `devid` of the
+    /// directory's Btrfs filesystem, then takes it out (ADR 0159).
+    pub fn remove_disk(&self, devid: u64) -> Result<()> {
+        Ok(directory::remove_disk(&SYS, self.held.slot, devid)?)
+    }
+
+    /// Moves every chunk of the directory's Btrfs filesystem to a new one
+    /// (ADR 0159), converting each to the profile `convert` names, a Btrfs
+    /// block group profile flag, unless it is 0; returns how many chunks
+    /// it looked at and how many it moved.
+    pub fn balance(&self, convert: u64) -> Result<(u64, u64)> {
+        let kinds = directory::BalanceKinds::DATA
+            .union(directory::BalanceKinds::METADATA)
+            .union(directory::BalanceKinds::SYSTEM);
+        let done = directory::balance(&SYS, self.held.slot, kinds, convert, convert, convert)?;
+        Ok((done.considered, done.moved))
+    }
+
     /// Where the symbolic link at `path` points.
     pub fn read_link(&self, path: &str) -> Result<Vec<u8>> {
         let mut target = alloc::vec![0u8; 256];

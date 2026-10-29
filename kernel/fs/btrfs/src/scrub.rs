@@ -42,7 +42,7 @@ use crate::volume::{Disk, Volume};
 const RUN_BYTES: u64 = 16 << 20;
 
 /// The data sectors read at once.
-const SECTORS: usize = 32;
+pub(crate) const SECTORS: usize = 32;
 
 /// A page, as a `u64`.
 const PAGE: u64 = PAGE_SIZE as u64;
@@ -355,7 +355,7 @@ fn data_extent(
 }
 
 /// Reads the disk from `site` on into `pages`, around every cache.
-fn read_pages(volume: &Volume, site: Site, pages: &mut [CachePage]) -> Result<()> {
+pub(crate) fn read_pages(volume: &Volume, site: Site, pages: &mut [CachePage]) -> Result<()> {
     let disk = volume.disk(site.disk)?;
     let device = disk.device().ok_or(Error::NoDevice)?;
     if !disk.holds(site.at, pages.len() as u64 * PAGE) {

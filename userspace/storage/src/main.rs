@@ -223,6 +223,36 @@ fn main(_: &Startup) -> u64 {
                     check_volume(&root, name, host);
                 }
             }
+            // Then `--add <disk>`, `--balance` and `--remove <devid>`: a
+            // disk added, every chunk moved, and a disk taken out once its
+            // chunks are moved off it (ADR 0159), every file read again
+            // after each.
+            if let Some(at) = rest.iter().position(|&arg| arg == "--add") {
+                let Some(disk) = rest.get(at + 1) else {
+                    fail("`--add` takes the name of a disk in /devices");
+                    return 1;
+                };
+                for name in &volumes {
+                    add_disk(&root, name, disk);
+                    check_volume(&root, name, host);
+                }
+            }
+            if rest.contains(&"--balance") {
+                for name in &volumes {
+                    balance(&root, name);
+                    check_volume(&root, name, host);
+                }
+            }
+            if let Some(at) = rest.iter().position(|&arg| arg == "--remove") {
+                let Some(devid) = rest.get(at + 1).and_then(|devid| devid.parse().ok()) else {
+                    fail("`--remove` takes a device ID");
+                    return 1;
+                };
+                for name in &volumes {
+                    remove_disk(&root, name, devid);
+                    check_volume(&root, name, host);
+                }
+            }
             // And `--scrub`: a disk that missed changes is caught up.
             if rest.contains(&"--scrub") {
                 for name in &volumes {
@@ -351,6 +381,55 @@ fn replace_disk(root: &Dir, name: &str, devid: u64, disk: &str) {
             rebuilt.uncorrectable
         )),
         Err(err) => fail(&format!("/volumes/{name}: replacing disk {devid} by {disk}: {err}")),
+    }
+}
+
+/// The directory of the Btrfs at `/volumes/<name>`, with the control
+/// right its disks need.
+fn controlled(root: &Dir, name: &str) -> Option<Dir> {
+    let rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
+    match root.open_dir(&format!("volumes/{name}"), rights) {
+        Ok(volume) => Some(volume),
+        Err(err) => {
+            fail(&format!("/volumes/{name}: {err}"));
+            None
+        }
+    }
+}
+
+/// Adds `/devices/<disk>` to the disks of the Btrfs at `/volumes/<name>`
+/// (ADR 0159).
+fn add_disk(root: &Dir, name: &str, disk: &str) {
+    let Some(volume) = controlled(root, name) else { return };
+    let Some(device) = disk::open(root, disk) else { return };
+    match volume.add_disk(&device) {
+        Ok(devid) => println!("storage: /volumes/{name}: {disk} added as disk {devid}"),
+        Err(err) => fail(&format!("/volumes/{name}: adding {disk}: {err}")),
+    }
+}
+
+/// Moves every chunk of the Btrfs at `/volumes/<name>` to a new one
+/// (ADR 0159): every one must move.
+fn balance(root: &Dir, name: &str) {
+    let Some(volume) = controlled(root, name) else { return };
+    match volume.balance(0) {
+        Ok((considered, moved)) if moved == considered => {
+            println!("storage: /volumes/{name}: a balance moved {moved} chunks of {considered}");
+        }
+        Ok((considered, moved)) => {
+            fail(&format!("/volumes/{name}: a balance moved {moved} chunks of {considered}"));
+        }
+        Err(err) => fail(&format!("/volumes/{name}: a balance: {err}")),
+    }
+}
+
+/// Takes the disk of device ID `devid` out of the Btrfs at
+/// `/volumes/<name>`, its chunks moved off it first (ADR 0159).
+fn remove_disk(root: &Dir, name: &str, devid: u64) {
+    let Some(volume) = controlled(root, name) else { return };
+    match volume.remove_disk(devid) {
+        Ok(()) => println!("storage: /volumes/{name}: disk {devid} removed"),
+        Err(err) => fail(&format!("/volumes/{name}: removing disk {devid}: {err}")),
     }
 }
 

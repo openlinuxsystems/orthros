@@ -38,6 +38,7 @@
 
 extern crate alloc;
 
+mod balance;
 mod blake2b;
 pub mod chunk;
 mod commit;
