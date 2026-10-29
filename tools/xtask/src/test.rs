@@ -2802,91 +2802,10 @@ impl Vm {
                 ));
             }
             if Instant::now() >= self.deadline {
-                let stacks = self.debug_stacks();
-                return Err(format!("no \"{needle}\" within {} s{stacks}", self.timeout.as_secs()));
+                return Err(format!("no \"{needle}\" within {} s", self.timeout.as_secs()));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-    }
-
-    /// DEBUG (temporary): where each CPU is, sampled three times, with its
-    /// frame-pointer chain, named from the kernel's symbols.
-    fn debug_stacks(&mut self) -> String {
-        let Some(socket) = self.qmp.clone() else { return String::new() };
-        let log = self.log();
-        let slide = log
-            .find("KASLR: kernel moved by 0x")
-            .and_then(|at| {
-                let rest = &log[at + "KASLR: kernel moved by 0x".len()..];
-                let hex: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
-                u64::from_str_radix(&hex, 16).ok()
-            })
-            .unwrap_or(0);
-        let bytes =
-            std::fs::read("target/kernel/x86_64-radix-kernel/release/radix").unwrap_or_default();
-        let functions = crate::elf::Elf::parse(&bytes)
-            .and_then(|elf| crate::ksyms::functions(&elf, 0xffff_ffff_8000_0000).ok())
-            .unwrap_or_default();
-        let name = |address: u64| {
-            let linked = address.wrapping_sub(slide);
-            functions
-                .iter()
-                .find(|(start, size, _)| (*start..start + size).contains(&linked))
-                .map_or_else(
-                    || format!("{address:#x}"),
-                    |(start, _, name)| format!("{name}+{:#x}", linked - start),
-                )
-        };
-        let hex_after = |text: &str, key: &str| {
-            let at = text.find(key)? + key.len();
-            let hex: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
-            u64::from_str_radix(&hex, 16).ok()
-        };
-        let mut out = format!("\n          CPU stacks (slide {slide:#x}):");
-        for sample in 0..3 {
-            for cpu in 0..8 {
-                let Ok(mut qmp) = Qmp::connect(&socket) else { return out };
-                let hmp = |qmp: &mut Qmp, command: &str| {
-                    qmp.execute_reply(&format!(
-                        r#"{{"execute":"human-monitor-command","arguments":{{"command-line":{},"cpu-index":{cpu}}}}}"#,
-                        crate::bench::json_string(command)
-                    ))
-                };
-                let Ok(regs) = hmp(&mut qmp, "info registers") else { break };
-                let (Some(rip), Some(mut rbp)) =
-                    (hex_after(&regs, "RIP="), hex_after(&regs, "RBP="))
-                else {
-                    continue;
-                };
-                let rflags = hex_after(&regs, "RFL=").unwrap_or(0);
-                let halted = regs.contains("HLT=1");
-                out += &format!(
-                    "\n          | sample {sample} cpu{cpu} rfl={rflags:#x}{} {}",
-                    if halted { " HLT" } else { "" },
-                    name(rip)
-                );
-                for _ in 0..14 {
-                    if rbp < 0xffff_8000_0000_0000 {
-                        break;
-                    }
-                    let Ok(words) = hmp(&mut qmp, &format!("x /2gx {rbp:#x}")) else { break };
-                    let values: Vec<u64> = words
-                        .split("0x")
-                        .skip(1)
-                        .filter_map(|w| {
-                            let hex: String =
-                                w.chars().take_while(char::is_ascii_hexdigit).collect();
-                            u64::from_str_radix(&hex, 16).ok()
-                        })
-                        .collect();
-                    let [next, ret, ..] = values[..] else { break };
-                    out += &format!(" < {}", name(ret));
-                    rbp = next;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        out
     }
 
     /// Waits until `needle` appears anywhere in the log, for what a thread
