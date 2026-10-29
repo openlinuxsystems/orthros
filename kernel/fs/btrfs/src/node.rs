@@ -223,11 +223,6 @@ impl BtrfsNode {
         if self.pin() { Ok(()) } else { self.flush() }
     }
 
-    /// How many of its pages wait to be written.
-    pub(crate) fn dirty_pages(&self) -> usize {
-        self.cache.as_ref().map_or(0, FileCache::dirty_pages)
-    }
-
     /// Writes its data, then its size and times to its inode item.
     pub(crate) fn flush(&self) -> Result<()> {
         let Some(cache) = &self.cache else { return Ok(()) };
@@ -1799,7 +1794,10 @@ impl Drop for BtrfsNode {
     fn drop(&mut self) {
         if *self.removed.get_mut() {
             // Its dirty pages are never written: their room goes back.
-            let pages = self.dirty_pages();
+            // Counted without the cache's lock: a change may drop the
+            // node holding the transaction, which a sync of another file
+            // takes holding that file's cache lock.
+            let pages = self.cache.as_mut().map_or(0, FileCache::dirty_pages_mut);
             self.fs.release_data(pages as u64 * PAGE);
             if !*self.freed.get_mut() {
                 self.fs.reaped(self.subvol, self.ino);

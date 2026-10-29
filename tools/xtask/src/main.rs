@@ -255,18 +255,25 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    EIO
   disk-health      Spark's diskhealth service logs that a SATA disk and an
                    NVMe drive pass; diskhealth shows them at the console
+  storage-tools    lsblk, blkid and findmnt name a FAT partition in a GPT
+                   and a Btrfs disk, their labels and their mounts; fstrim
+                   trims the Btrfs, iostat counts its discards
   btrfs            two Btrfs disks Linux made, compressed, mounted
                    read-only: every file reads as the host wrote it, a
                    damaged one fails
   btrfs-write      the storage test on two Btrfs disks Linux made, past
                    their first data chunk; Linux's btrfs check passes
+  btrfs-stress     torture changes files on two Btrfs disks for two
+                   minutes, one compressing, checking every byte; after a
+                   reboot they hold what was synced, btrfs check passes
   btrfs-power-cut  the power is cut while Btrfs files are synced: btrfs
                    check passes, every synced file is whole
   btrfs-log        a Btrfs disk Linux left with a log of fsyncs: the mount
                    replays it, and every file lists as after Linux's replay
   btrfs-raid       a Btrfs RAID1 of two disks: written, then read back with one
-                   pulled out, which a third replaces; btrfs check passes
-                   after each boot, from each disk alone too
+                   pulled out, which a third replaces; a fourth is added,
+                   every chunk moved, and the first taken out; btrfs check
+                   passes after each boot, from each disk alone too
   btrfs-raid-pull  a disk of a Btrfs RAID1 fails at a random write while it
                    is written; back after a reboot, a scrub catches it up
   ext4-write       the storage test on two ext4 disks Linux made; the host

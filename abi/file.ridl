@@ -145,7 +145,7 @@ interface file = 0x000c version 5 {
     /// right.
     method write = 2 (offset: u64, data: in bytes) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, no_memory,
-                is_directory, read_only, no_space, too_big, io, corrupt];
+                is_directory, read_only, no_space, quota_exceeded, too_big, io, corrupt];
     /// Writes what the file is into `buffer`, as radix-directory(2)'s
     /// `stat` does.
     method stat = 3 (buffer: out bytes) -> ()
@@ -153,8 +153,8 @@ interface file = 0x000c version 5 {
     /// Makes the file `size` bytes long: cut, or grown with zeros. Needs
     /// the write right.
     method set_size = 4 (size: u64) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                is_directory, read_only, no_space, too_big, io, corrupt];
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, is_directory,
+                read_only, no_space, quota_exceeded, too_big, io, corrupt];
     /// Makes the file's changes durable, and returns once the disk has
     /// them; a filesystem may write more of its changes with them, as FAT,
     /// exFAT and ext4 write all. Needs no right: as POSIX's fsync, it works
@@ -179,8 +179,8 @@ interface file = 0x000c version 5 {
     /// not_terminal.
     method control = 8 (request: u32, argument: u64, buffer: addr, size: u64) -> (result: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
-                not_terminal, not_permitted, interrupted, io, read_only, not_supported,
-                no_memory, cross_mount, is_directory, no_space];
+                not_terminal, not_permitted, interrupted, io, read_only, not_supported, no_memory,
+                cross_mount, is_directory, no_space, quota_exceeded];
     /// Takes, changes or lets go of (`kind` none) a lock of `owner`'s on
     /// the `length` bytes from `start` (0: all those past it, however the
     /// file grows); a description lock always covers the whole file. A

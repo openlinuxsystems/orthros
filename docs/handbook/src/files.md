@@ -295,7 +295,10 @@ left with changes in its log of fsyncs alone, which the mount replays as
 Linux does, and `btrfs-raid` writes a RAID1 of two disks, then pulls one
 out, reads everything back from the other, and puts a third disk in its
 place with `replace`; `btrfs-raid-pull` fails a disk at a random write
-while it is written, then brings it back and scrubs. Dukovo writes the log of
+while it is written, then brings it back and scrubs; and `btrfs-stress`,
+the long stress run, has four workers make random changes to two disks at
+once for two minutes, then checks the disks with `btrfs check` and every
+file after a reboot. Dukovo writes the log of
 fsyncs too: an `fsync` of a file writes only what changed of it, as
 Linux does, and Linux replays Dukovo's log after a power cut.
 
@@ -320,6 +323,19 @@ device ID, 2 here for the second disk:
 ```sh
 replace start 2 /devices/vdc /volumes/vda
 ```
+
+`device`(8) adds a disk to the filesystem or takes one out, and
+`balance`(8) moves its chunks, as Linux's `btrfs device` and `btrfs
+balance` do. A filesystem of one disk becomes a RAID1 of two with:
+
+```sh
+device add /devices/vdb /volumes/vda
+balance start -dconvert=raid1 -mconvert=raid1 /volumes/vda
+```
+
+A disk is taken out, its chunks moved to the others first, with
+`device remove 2 /volumes/vda`. Unlike Linux, a balance gives each
+snapshot its own copy of the blocks it moves (ADR 0159).
 
 An ext4 disk, the kind most Linux machines use, is made the same way:
 

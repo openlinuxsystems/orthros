@@ -97,7 +97,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radix"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-abi",
  "radix-ahci",
@@ -137,32 +137,32 @@ dependencies = [
 
 [[package]]
 name = "radix-abi"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "ridlc",
 ]
 
 [[package]]
 name = "radix-acpi"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-ahci"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-arch-aarch64"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hal",
 ]
 
 [[package]]
 name = "radix-arch-x86_64"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-acpi",
  "radix-bootinfo",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "radix-block"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-hw",
@@ -189,18 +189,18 @@ dependencies = [
 
 [[package]]
 name = "radix-bootfs"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "radix-bootinfo"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-btrfs"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-block",
  "radix-hw",
@@ -210,21 +210,21 @@ dependencies = [
 
 [[package]]
 name = "radix-cap"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "radix-elf"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "radix-exfat"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-block",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "radix-ext4"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-block",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "radix-fat"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-block",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "radix-fbcon"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hal",
  "radix-klog",
@@ -266,14 +266,14 @@ dependencies = [
 
 [[package]]
 name = "radix-hal"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-hid"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
@@ -281,18 +281,18 @@ dependencies = [
 
 [[package]]
 name = "radix-hw"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-input"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-abi",
 ]
 
 [[package]]
 name = "radix-ipc"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
@@ -300,37 +300,37 @@ dependencies = [
 
 [[package]]
 name = "radix-kdb"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-klog"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-sync",
 ]
 
 [[package]]
 name = "radix-ksyms"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-lockdep"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-sync",
 ]
 
 [[package]]
 name = "radix-mca"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-microcode"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-mm"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-sync",
@@ -338,14 +338,14 @@ dependencies = [
 
 [[package]]
 name = "radix-nvme"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-posix"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "radix-random"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-sync",
@@ -361,29 +361,29 @@ dependencies = [
 
 [[package]]
 name = "radix-relocs"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-sched"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "radix-scsi"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "radix-sync"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "radix-tty"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "radix-usb"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-scsi",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "radix-vfs"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-block",
@@ -410,14 +410,14 @@ dependencies = [
 
 [[package]]
 name = "radix-virtio"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-xhci"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "radix-hw",
  "radix-usb",
@@ -456,7 +456,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "ridlc"
-version = "0.10.3"
+version = "0.10.4"
 
 [[package]]
 name = "unarray"

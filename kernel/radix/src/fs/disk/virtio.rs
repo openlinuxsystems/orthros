@@ -186,7 +186,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         if found.flush { ", write cache" } else { "" },
         if info.discard_sectors > 0 { ", discards" } else { "" },
     );
-    let volume = Volume::new(disk, 0, info);
+    let volume = Volume::new(disk, 0, info).ok_or("out of memory")?;
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     register(Entry { name: name.clone(), device: device.clone(), place: None, ident: None });

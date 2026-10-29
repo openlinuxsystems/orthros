@@ -89,6 +89,8 @@ enum Want {
     Delete,
     /// To change an item's data in place.
     Change,
+    /// To copy the blocks down to the one at this level, and no further.
+    Reach(u8),
 }
 
 /// A walk down a tree, every block on it the transaction's: each level's
@@ -427,6 +429,47 @@ impl Writer {
             blocks.edit(leaf, |b| b.delete_items(slot, 1))?;
             w.after_delete(volume, &mut path, 0)
         })
+    }
+
+    /// Copies the block at `bytenr`, at `level` of tree `tree`, and the
+    /// blocks above it, as a change below it would, if the tree's walk
+    /// down to `key` reaches it there; returns whether it did. A balance
+    /// moves a block group's tree blocks so (ADR 0159).
+    pub(crate) fn copy_block(
+        &mut self,
+        volume: &Volume,
+        tree: u64,
+        key: &Key,
+        level: u8,
+        bytenr: u64,
+    ) -> Result<bool> {
+        let mut at = Self::tree_root(volume, tree)?;
+        let mut bounds = Bounds::default();
+        while at.level > level {
+            let block = read_block(volume, &at, &bounds)?;
+            let slot = block.lower_bound(key);
+            let slot = if slot < block.nritems() && block.key(slot) == *key {
+                slot
+            } else {
+                slot.saturating_sub(1)
+            };
+            if block.nritems() == 0 {
+                return Err(Error::Corrupt);
+            }
+            bounds = Bounds::of_child(&block, slot);
+            at = block.child(slot);
+        }
+        if at.level != level || at.bytenr != bytenr {
+            return Ok(false);
+        }
+        self.guard(volume, |w| w.search(volume, tree, key, Want::Reach(level)).map(|_| ()))?;
+        Ok(true)
+    }
+
+    /// Whether the transaction freed the tree block at `bytenr`, which its
+    /// commit takes out of the extent tree.
+    pub(crate) fn freed(&self, bytenr: u64) -> bool {
+        self.changes.iter().any(|c| matches!(*c, Change::Freed { bytenr: b, .. } if b == bytenr))
     }
 
     /// Changes the size of item `key` of tree `tree` to `size`, keeping
@@ -819,6 +862,10 @@ impl Writer {
         let mut bytenr = self.cow(volume, tree, &root, &Bounds::default(), None)?;
         let mut level = path.top;
         loop {
+            if want == Want::Reach(level as u8) {
+                path.steps[level] = Some((bytenr, 0));
+                return Ok(path);
+            }
             let (leaf, n) = blocks.view(bytenr, |b| (b.is_leaf(), b.nritems()))?;
             if leaf {
                 let (slot, there) = blocks.view(bytenr, |b| {
@@ -841,7 +888,7 @@ impl Writer {
                 return Ok(path);
             }
             path.steps[level] = Some((bytenr, 0));
-            if want != Want::Delete && want != Want::Change && n + 2 > Block::max_ptrs(nodesize) {
+            if matches!(want, Want::Insert(_)) && n + 2 > Block::max_ptrs(nodesize) {
                 if level == path.top {
                     self.grow(volume, &mut path)?;
                 }
@@ -1051,7 +1098,14 @@ impl Writer {
                 path.top = 0;
                 path.steps[0] = Some((leaf_root.bytenr, 0));
             } else if level > 0 && n == 1 {
-                let child = blocks.view(block, |b| b.child(0))?;
+                // The child is copied first, as Linux's `balance_level`
+                // does: a root is the transaction's, its root item names
+                // the transaction's generation, and a child the change
+                // never reached is older.
+                let (child, bounds) =
+                    blocks.view(block, |b| (b.child(0), Bounds::of_child(b, 0)))?;
+                let copy = self.cow(volume, path.tree, &child, &bounds, Some((block, 0)))?;
+                let child = blocks.view(copy, Block::root)?;
                 self.set_tree_root(volume, path.tree, child)?;
                 self.free_block(volume, path.tree, &root)?;
                 path.steps[level] = None;

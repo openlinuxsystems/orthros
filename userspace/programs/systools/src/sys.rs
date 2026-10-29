@@ -9,6 +9,12 @@
 //! Built for another system (the unit tests run on the build machine),
 //! every call fails with no_such_syscall.
 
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+use radix_abi::capability::{self, Rights};
+use radix_abi::directory::{self, OpenFlags};
 use radix_abi::errors::{File, Kernel};
 use radix_abi::{Status, Syscalls, startup};
 
@@ -114,4 +120,25 @@ pub fn errno_of(status: Status) -> i32 {
 /// A status as an I/O error.
 pub fn io_error(status: Status) -> std::io::Error {
     std::io::Error::from_raw_os_error(errno_of(status))
+}
+
+/// Opens the directory `path` with the control right, which the C
+/// library's `open` never asks for and trimming a filesystem or replacing
+/// one of its disks needs (radix-directory(2)): it opens `path` again from
+/// the root, into the slot of a descriptor the C library opened, which
+/// then closes it. Fails with permission denied when the root has no such
+/// right to hand on.
+pub fn open_control(path: &Path) -> std::io::Result<std::fs::File> {
+    let absolute = std::fs::canonicalize(path)?;
+    let dir = std::fs::File::open(&absolute)?;
+    let slot = slot_of(dir.as_raw_fd());
+    let text = match absolute.as_os_str().as_bytes().strip_prefix(b"/") {
+        Some([]) | None => b".".as_slice(),
+        Some(rest) => rest,
+    };
+    let _ = capability::delete(&SYS, slot);
+    let rights = Rights::READ.union(Rights::CONTROL);
+    directory::open(&SYS, startup::SLOT_ROOT, text, OpenFlags::DIRECTORY, rights, slot)
+        .map_err(io_error)?;
+    Ok(dir)
 }

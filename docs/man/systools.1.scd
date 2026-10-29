@@ -44,16 +44,26 @@ error that starts with the tool's name.
 
 [[ *Tool*
 :- *What it does*
+|  *balance*(8)
+:  move a Btrfs filesystem's chunks, converting them to another profile
+|  *blkid*(8)
+:  what each disk and partition holds: filesystems, labels and UUIDs
 |  *chgrp*(1), *chmod*(1), *chown*(1)
 :  change a file's group, mode or owner
 |  *column*(1)
 :  put lines in columns, or a table
 |  *df*(1)
 :  the space of each filesystem
+|  *device*(8)
+:  add disks to a Btrfs filesystem and remove them
 |  *diskhealth*(8)
 :  what each disk says of its health: SMART and the NVMe health log
 |  *dmesg*(1)
 :  the kernel's log
+|  *findmnt*(8)
+:  the mounts, as a tree, or the one sought
+|  *fstrim*(8)
+:  discard what a mounted filesystem does not use
 |  *free*(1)
 :  memory in use and free
 |  *halt*(8), *poweroff*(8), *reboot*(8)
@@ -62,10 +72,14 @@ error that starts with the tool's name.
 :  a file's bytes, in hexadecimal or other formats
 |  *ionice*(1)
 :  a process's I/O class and level
+|  *iostat*(1)
+:  what the CPUs and the disks have done, per second
 |  *keymap*(1)
 :  the keyboard layout the consoles type in
 |  *kill*(1)
 :  send a signal
+|  *lsblk*(8)
+:  the disks and their partitions, as a tree
 |  *lscpu*(1)
 :  what the processor is
 |  *lsmem*(1)

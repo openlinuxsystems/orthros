@@ -650,6 +650,20 @@ _target/userspace/_).
 		with exit status 0, and *diskhealth -a* the SATA disk's
 		attributes and the NVMe drive's health log (ADR 0157).
 
+	*storage-tools*
+		Boot 2 CPUs under UEFI with a 48 MiB virtio disk holding FAT32 in
+		a GPT partition and a 128 MiB virtio disk of Btrfs, as on a
+		normal boot. At the console, *lsblk* must list the partition and
+		the Btrfs disk with their kinds, labels and where Spark mounted
+		them; *blkid* their labels and kinds, the GPT and the disk with
+		the Btrfs label; and *findmnt* the Btrfs mount's source, kind and
+		options and the FAT mount's target, and nothing for a kind no
+		mount has, with exit status 1. *fstrim -v* must trim the Btrfs and
+		say how much, and refuse the FAT, which does not discard;
+		*iostat* must show the Btrfs disk, and its _stat_ count the
+		discards. On the host, *btrfs check* must pass on the trimmed
+		disk.
+
 	*btrfs*
 		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
 		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB
@@ -679,6 +693,27 @@ _target/userspace/_).
 		between the boots, *btrfs restore* must copy out every file as
 		written, and none of those renamed or removed.
 
+	*btrfs-stress*
+		The long filesystem stress run of Phase 10. Boot 4 CPUs under
+		UEFI with the *btrfs-write* test's two disks, the NVMe one
+		compressing with zstd. _/system/tests/posix/torture_ starts two
+		workers on each volume, all at once, which for two minutes make
+		random changes, each in a directory of its own: files written
+		whole, in part, past their end and appended to, cut and grown,
+		saved through a temporary file and a rename, renamed over each
+		other and between directories, linked and removed, symbolic
+		links made and renamed over each other, and directories of small
+		files made and removed, with *fsync*(2) of files and directories
+		between. Each worker keeps in memory what its files should hold,
+		reads one back now and then, checks everything at the end and
+		syncs it. *btrfs check --check-data-csum* must then find nothing
+		wrong. Booted again, _torture --check_ works out each worker's
+		changes again from the same seed, as many as it made, and every
+		file's bytes, size and link count, every symbolic link and every
+		directory's entries must be as they leave them; then it removes
+		it all, and *btrfs check* must pass once more. The program runs
+		on Linux too, where its answers were checked.
+
 	*btrfs-power-cut*
 		Boot 2 CPUs under UEFI with a 128 MiB Btrfs disk as *mkfs.btrfs*
 		makes one by default. _/system/tests/storage churn_ writes a file,
@@ -704,18 +739,21 @@ _target/userspace/_).
 
 	*btrfs-raid*
 		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
-		Btrfs RAID1 *mkfs.btrfs* made, and a third of raw bytes. Spark
-		must mount it once, from _vda_, leave _vdb_ alone as in use and
-		_vdc_ as holding nothing; _/system/tests/storage write_ writes
-		its files. Between the boots the host wipes _vdb_'s superblock,
-		as if it were pulled out. The second boot must mount _vda_ alone,
-		with the kernel's warning of a disk missing, and
-		_/system/tests/storage check --no-host-file --replace 2 vdc_ must
-		read every byte back, put _vdc_ in the place of _vdb_ (device 2),
-		which the kernel rebuilds from _vda_'s copies with none left
-		unmended, and read every byte back again. After each boot *btrfs
-		check* must find nothing wrong, given every disk still there, and
-		given each of them alone.
+		Btrfs RAID1 *mkfs.btrfs* made, and a third and a fourth of raw
+		bytes. Spark must mount it once, from _vda_, leave _vdb_ alone as
+		in use and _vdc_ and _vdd_ as holding nothing;
+		_/system/tests/storage write_ writes its files. Between the boots
+		the host wipes _vdb_'s superblock, as if it were pulled out. The
+		second boot must mount _vda_ alone, with the kernel's warning of
+		a disk missing, and _/system/tests/storage check --no-host-file --replace
+		2 vdc --add vdd --balance --remove 1_ must read every
+		byte back, put _vdc_ in the place of _vdb_ (device 2), which the
+		kernel rebuilds from _vda_'s copies with none left unmended, add
+		_vdd_ (device 3), move every chunk, and take _vda_ out (device 1),
+		its chunks moved to the others (ADR 0159), reading every byte
+		back after each. After each boot *btrfs check* must find nothing
+		wrong, given every disk still there, and given each of them
+		alone.
 
 	*btrfs-raid-pull*
 		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
@@ -1266,7 +1304,7 @@ Build the image and write it to a USB stick. Check the device name with
 ```
 ./ob image
 lsblk -d -o NAME,SIZE,MODEL,TRAN
-sudo dd if=out/dukovo-0.10.3-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo dd if=out/dukovo-0.10.4-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 Graphical alternatives that write the same image are balenaEtcher, GNOME

@@ -42,7 +42,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || {
         util::usage("say start, the disk to replace or its devid, the new disk and a path".into())
     };
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     if action != "start" {
         return Err(usage());
     }
@@ -70,7 +70,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             u64::from_le_bytes(bytes[DEVID_AT..DEVID_AT + 8].try_into().unwrap_or([0; 8]))
         }
     };
-    let dir = File::open(&path).map_err(|e| util::failed(&path.display(), e))?;
+    let dir = sys::open_control(&path).map_err(|e| util::failed(&path.display(), e))?;
     let disk = OpenOptions::new()
         .read(true)
         .write(true)

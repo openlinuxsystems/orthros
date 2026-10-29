@@ -567,6 +567,14 @@ const HEALTH_DISKS: &[Disk] = &[
     raw_disk(Bus::Virtio, raw_unchanged),
 ];
 
+/// The `storage-tools` test's disks: FAT32 in a GPT partition, `vda1`,
+/// and a Btrfs disk to write, `vdb`, which Spark mounts at
+/// `/volumes/vda1` and `/volumes/vdb`.
+const TOOLS_DISKS: &[Disk] = &[
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Virtio),
+    btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_checked),
+];
+
 /// [`ERROR_RULES`], for each of [`ERROR_DISKS`].
 fn error_rules(_: usize) -> String {
     ERROR_RULES.into()
@@ -631,9 +639,10 @@ const LOG_DISKS: &[Disk] =
     &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
 
 /// The `btrfs-raid` test's disks: two virtio disks of 512 MiB, `vda` and
-/// `vdb`, of one Btrfs RAID1, and a third, `vdc`, that the second boot
-/// puts in the place of `vdb`, pulled out (ADR 0155).
-const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK, RAID_NEW];
+/// `vdb`, of one Btrfs RAID1, a third, `vdc`, that the second boot puts
+/// in the place of `vdb`, pulled out (ADR 0155), and a fourth, `vdd`,
+/// that it adds before it balances and takes `vda` out (ADR 0159).
+const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK, RAID_NEW, RAID_NEW];
 
 /// A disk of the `btrfs-raid` test.
 const RAID_DISK: Disk = Disk {
@@ -1641,6 +1650,23 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "storage-tools",
+        about: "lsblk, blkid and findmnt at the console name a FAT32 partition in a GPT and a Btrfs disk, their labels and kinds, and where Spark mounted them; fstrim trims the Btrfs, which btrfs check then passes, and iostat shows the disk's requests, its discards counted",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark mounts the disks, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_tools,
+        disks: TOOLS_DISKS,
+        second: None,
+    },
+    Case {
         name: "btrfs",
         about: "Spark mounts two Btrfs disks Linux's mkfs.btrfs made, compressed with zstd and zlib, read-only, one as the disk is and one as Radix does not write its holes; every file, link and subvolume reads as the host wrote it, and a damaged sector fails",
         firmware: Firmware::Uefi,
@@ -1674,6 +1700,28 @@ pub const CASES: &[Case] = &[
             cmdline: "lockdep -- --compress nvme0n1 /system/tests/storage check",
             before: storage_host,
             script: storage_check,
+        }),
+    },
+    Case {
+        name: "btrfs-stress",
+        about: "The long filesystem stress run: torture's four workers make random changes for two minutes, at once, on two Btrfs disks Linux's mkfs.btrfs made, one compressing with zstd, each checking what it did; Linux's btrfs check passes, and after a reboot every file, link and directory is as torture works out again, and goes, and btrfs check passes once more",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --compress nvme0n1 --posix /system/tests/posix/torture 0x5eed 120 \
+                  /volumes/nvme0n1 /volumes/vda",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: torture_run,
+        disks: BTRFS_WRITE_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- --compress nvme0n1 --posix /system/tests/posix/torture --check \
+                      0x5eed /volumes/nvme0n1 /volumes/vda",
+            before: nothing_between,
+            script: torture_check,
         }),
     },
     Case {
@@ -1714,7 +1762,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-raid",
-        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second and reads it all again: Linux's btrfs check passes after each boot, from every disk alone too",
+        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second, adds a fourth, balances, and takes the first out, reading it all again after each: Linux's btrfs check passes after each boot, from every disk alone too",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1727,7 +1775,8 @@ pub const CASES: &[Case] = &[
         script: raid_write,
         disks: RAID_DISKS,
         second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc",
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc --add \
+                      vdd --balance --remove 1",
             before: raid_pull,
             script: raid_check,
         }),
@@ -3454,6 +3503,70 @@ fn disk_health(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
+/// A normal boot with [`TOOLS_DISKS`]: at the console, lsblk(8),
+/// blkid(8) and findmnt(8) name the disks, the partition table, the
+/// filesystems and their mounts; fstrim(8) trims the Btrfs (ADR 0158),
+/// not the FAT, and iostat(1) shows the Btrfs disk, whose `stat` has
+/// counted the discards. Each command names the test's disks, so that the
+/// boot stick does not change the columns. The host's `btrfs check` then
+/// checks the trimmed disk.
+fn storage_tools(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // The sum, so that the needle is not in the typed line.
+    vm.type_text(
+        "lsblk -l -o NAME,TYPE,FSTYPE,LABEL,MOUNTPOINTS vda vdb; echo \"status $(( $? + 100 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "NAME TYPE FSTYPE LABEL      MOUNTPOINTS",
+        "vda1 part vfat   RADIXPART  /volumes/vda1",
+        "vdb  disk btrfs  RADIXBTRFS /volumes/vdb",
+        "status 100",
+    ])?;
+    vm.type_text(
+        "clear; blkid -s LABEL -s TYPE vda1 vdb; blkid -o value -s PTTYPE vda; blkid -L RADIXBTRFS; echo \"status $(( $? + 101 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "/devices/vda1: LABEL=\"RADIXPART\" TYPE=\"vfat\"",
+        "/devices/vdb: LABEL=\"RADIXBTRFS\" TYPE=\"btrfs\"",
+        "gpt",
+        "/devices/vdb",
+        "status 101",
+    ])?;
+    vm.type_text(
+        "clear; findmnt -n -o SOURCE,FSTYPE,OPTIONS /volumes/vdb; findmnt -n -o TARGET -S vda1; findmnt -t xfs; echo \"status $(( $? + 102 ))\"\n",
+    )?;
+    vm.expect_screen(&["/devices/vdb btrfs rw", "/volumes/vda1", "status 103"])?;
+    vm.type_text(
+        "clear; fstrim -v /volumes/vdb; fstrim /volumes/vda1; echo \"status $(( $? + 104 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "/volumes/vdb: ",
+        " bytes) trimmed",
+        "fstrim: /volumes/vda1: the discard operation is not supported",
+        "status 105",
+    ])?;
+    // replace(8) takes the control right too, as fstrim does: the kernel
+    // gets as far as refusing a disk that is mounted.
+    vm.type_text(
+        "clear; replace start 1 /devices/vda1 /volumes/vdb; echo \"status $(( $? + 105 ))\"\n",
+    )?;
+    vm.expect_screen(&["replace: /devices/vda1 is mounted", "status 106"])?;
+    vm.type_text(
+        "clear; iostat -d vdb; set -- $(cat /kernel/block/vdb/stat); echo \"discards $(( ${12} > 0 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "Device             tps    kB_read/s    kB_wrtn/s",
+        "vdb           ",
+        "discards 1",
+    ])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
 fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     // Said before the boot report ends.
@@ -4228,6 +4341,13 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The kernel's and Spark's lines for the storage test's disks, up to
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/storage as process ")
+}
+
+/// The disks found, and Spark mounting each one's filesystem at
+/// `/volumes/<name>`.
+fn volumes_mounted(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     // Spark mounts the disks while it builds the hierarchy, to find
     // Dukovo's root among them (ADR 0137).
@@ -4239,8 +4359,7 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
-    vm.expect("spark: started /system/tests/storage as process ")
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")
 }
 
 /// The end of the storage program: no failed checks, and exit code 0.
@@ -4266,6 +4385,55 @@ fn disk_size(kib: u64) -> String {
     let (unit, shift) = if kib >= 1 << 20 { ("GiB", 20) } else { ("MiB", 10) };
     let (whole, tenths) = (kib >> shift, ((kib & ((1 << shift) - 1)) * 10) >> shift);
     if tenths == 0 { format!("{whole} {unit}") } else { format!("{whole}.{tenths} {unit}") }
+}
+
+/// The first boot of `btrfs-stress`: torture (userspace/posix/torture.c)
+/// has two workers on each volume make random changes for two minutes,
+/// all four at once, each checking what it did and syncing it.
+fn torture_run(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    vm.expect("torture: 4 workers making changes for 120 s, seed 0x5eed")?;
+    vm.expect("torture: done in ")?;
+    torture_end(vm, case, "everything checked and synced")
+}
+
+/// The second boot of `btrfs-stress`: torture works out each worker's
+/// changes again, checks that the volumes hold what they left, and
+/// removes it all.
+fn torture_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    torture_end(vm, case, "removed")
+}
+
+/// The end of torture: each worker's last line, which ends with `done`,
+/// whatever order the workers ended in; no failed checks, and exit code
+/// 0.
+fn torture_end(vm: &mut Vm, case: &Case, done: &str) -> Result<(), String> {
+    let code = program_line(vm, "(/system/tests/posix/torture) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> = log.lines().filter(|line| line.contains("torture: FAILED: ")).collect();
+    if !failed.is_empty() {
+        return Err(format!("torture failed: {}", failed.join("; ")));
+    }
+    for name in volume_names(case.disks) {
+        for worker in 0..2 {
+            let start = format!("torture: /volumes/{name}/torture/w{worker}: ");
+            if !log.lines().any(|line| line.contains(&start) && line.trim_end().ends_with(done)) {
+                return Err(format!("torture's worker did not say \"{start}...{done}\""));
+            }
+        }
+    }
+    if code != "0x0" || !log.contains("torture: every check passed") {
+        return Err(format!("torture exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// Nothing to do between the boots.
+fn nothing_between(_: &Case, _: &[DiskImage]) -> Result<(), String> {
+    Ok(())
 }
 
 /// The first boot: the program writes its files to every volume.
@@ -5385,21 +5553,22 @@ fn btrfs_id(path: &Path) -> Option<[u8; 16]> {
 /// check`, the data's checksums too, from its first disk still there,
 /// given each of its disks still there; then from each of them alone, as
 /// Linux reads a RAID1 with the others missing, so that every disk must
-/// hold a copy of everything. A disk pulled out is passed over. After a
-/// boot that lost a disk while it ran ([`PULL_WARNING`]), the disks are
-/// checked alone only: the one lost holds the filesystem as it was then,
-/// which the other has moved on from.
+/// hold a copy of everything. A disk pulled out, or taken out and wiped,
+/// is passed over; the case's first disk, which `mkfs.btrfs` made, checks
+/// them even then. After a boot that lost a disk while it ran
+/// ([`PULL_WARNING`]), the disks are checked alone only: the one lost
+/// holds the filesystem as it was then, which the other has moved on
+/// from.
 fn raid_checked(disk: &DiskImage, log: &str) -> Result<(), String> {
-    let Some(id) = btrfs_id(&disk.path) else { return Ok(()) };
     let image = disk.path.display().to_string();
     let prefix = image.rsplit_once("-disk").map_or(image.as_str(), |(prefix, _)| prefix);
-    let disks: Vec<PathBuf> = (0..RAID_DISKS.len())
-        .map(|i| PathBuf::from(format!("{prefix}-disk{i}.img")))
-        .filter(|path| btrfs_id(path) == Some(id))
-        .collect();
-    if disks.first() != Some(&disk.path) {
+    let paths: Vec<PathBuf> =
+        (0..RAID_DISKS.len()).map(|i| PathBuf::from(format!("{prefix}-disk{i}.img"))).collect();
+    if paths.first() != Some(&disk.path) {
         return Ok(());
     }
+    let Some(id) = paths.iter().find_map(|path| btrfs_id(path)) else { return Ok(()) };
+    let disks: Vec<PathBuf> = paths.into_iter().filter(|path| btrfs_id(path) == Some(id)).collect();
     let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
     let lost = log.contains(PULL_WARNING);
     let mut sets = if lost { Vec::new() } else { vec![&disks[..]] };
@@ -5576,9 +5745,9 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
     } else {
         vm.expect(&format!("spark: {second} is in use already; left alone"))?;
     }
-    if let Some(third) = names.get(2) {
+    for other in names.iter().skip(2) {
         vm.expect(&format!(
-            "spark: {third} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+            "spark: {other} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
@@ -5599,20 +5768,31 @@ fn raid_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `btrfs-raid` test's second boot, with the second disk pulled out:
 /// the program reads every file back from the first, puts the third disk
 /// in the place of the second (device 2), which the kernel rebuilds from
-/// the first's copies, and reads every file back again.
+/// the first's copies, adds the fourth (device 3), moves every chunk,
+/// and takes the first out (device 1), its chunks moved to the others,
+/// reading every file back after each.
 fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     raid_boot(vm, case, true, false)?;
     let names = disk_names(case.disks);
-    let (first, third) = (&names[0], &names[2]);
-    vm.expect(&format!("storage: /volumes/{first}: "))?;
-    vm.expect(" files read back after the reboot, every byte as written")?;
+    let (first, third, fourth) = (&names[0], &names[2], &names[3]);
+    let read_back = |vm: &mut Vm| {
+        vm.expect(&format!("storage: /volumes/{first}: "))?;
+        vm.expect(" files read back after the reboot, every byte as written")
+    };
+    read_back(vm)?;
     vm.expect(&format!(
         "Btrfs: disk 2 replaced by {third}, and rebuilt from the other disks' copies; 0 errors \
          no copy mends"
     ))?;
     vm.expect(&format!("storage: /volumes/{first}: disk 2 replaced by {third}, rebuilt from "))?;
-    vm.expect(&format!("storage: /volumes/{first}: "))?;
-    vm.expect(" files read back after the reboot, every byte as written")?;
+    read_back(vm)?;
+    vm.expect(&format!("Btrfs: {fourth} added as disk 3"))?;
+    vm.expect(&format!("storage: /volumes/{first}: {fourth} added as disk 3"))?;
+    read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: a balance moved "))?;
+    read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: disk 1 removed"))?;
+    read_back(vm)?;
     storage_end(vm, "check")
 }
 

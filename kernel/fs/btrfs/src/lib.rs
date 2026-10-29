@@ -38,6 +38,7 @@
 
 extern crate alloc;
 
+mod balance;
 mod blake2b;
 pub mod chunk;
 mod commit;
@@ -65,6 +66,7 @@ pub mod space;
 mod subvol;
 pub mod superblock;
 pub mod tree;
+mod trim;
 pub mod unpack;
 pub mod volume;
 pub mod zstd;

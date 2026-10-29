@@ -203,10 +203,11 @@ impl BtrfsFs {
     }
 
     /// How many disks the filesystem has, and how many of them are not
-    /// there: missing at the mount, or failed since (ADR 0153).
+    /// there: missing at the mount, or failed since (ADR 0153). Disks
+    /// added and removed since the mount count as they are now.
     pub fn disks(&self) -> (usize, usize) {
         let volume = &self.inner.volume;
-        (volume.disks().len(), volume.missing())
+        (volume.disks().iter().filter(|d| !d.gone()).count(), volume.missing())
     }
 
     /// How many of its disks there missed changes, and are read last
@@ -301,7 +302,7 @@ impl Inner {
     }
 
     /// What [`Inner::open`] makes of `volume`, once open: in a frame of
-    /// its own, with nothing but the transaction on it, so that the
+    /// its own, with nothing but the transaction's box on it, so that the
     /// volume's reads beneath it stay shallow. The checksum tree is found
     /// after the replay, which changes it.
     #[inline(never)]
@@ -315,13 +316,13 @@ impl Inner {
         Inner::of(volume, csums, if writable { txn } else { None })
     }
 
-    /// A transaction of `volume`, in a frame of its own.
+    /// A transaction of `volume`, in a frame of its own, on the heap.
     #[inline(never)]
-    fn txn(volume: &Volume) -> Result<Txn> {
+    fn txn(volume: &Volume) -> Result<KBox<Txn>> {
         if !volume.superblock().has(incompat::NO_HOLES) {
             return Err(Error::NotSupported);
         }
-        Ok(Txn { writer: Writer::new(volume)?, next_ino: mem::vec() })
+        Ok(mem::boxed(Txn { writer: Writer::new(volume)?, next_ino: mem::vec() })?)
     }
 
     /// Replays the log of fsyncs `volume` holds in `txn`, and commits it,
@@ -345,8 +346,12 @@ impl Inner {
     /// own, with its checksum tree `csums`; `txn` writes it on a writable
     /// mount.
     #[inline(never)]
-    fn of(volume: KBox<Volume>, csums: Option<Root>, txn: Option<Txn>) -> Result<KArc<Inner>> {
-        let tx = txn.map(Mutex::new);
+    fn of(
+        volume: KBox<Volume>,
+        csums: Option<Root>,
+        txn: Option<KBox<Txn>>,
+    ) -> Result<KArc<Inner>> {
+        let tx = txn.map(|txn| Mutex::new(*txn));
         Ok(mem::arc(Inner {
             volume,
             csums,
@@ -804,7 +809,7 @@ impl FileSystem for BtrfsFs {
         };
         FsInfo {
             block_size: sb.sectorsize,
-            blocks: sb.total_bytes / sector,
+            blocks: volume.total_bytes() / sector,
             free: free / sector,
             ..FsInfo::default()
         }
@@ -824,6 +829,22 @@ impl FileSystem for BtrfsFs {
 
     fn replace_disk(&self, devid: u64, device: DeviceRef) -> Result<radix_vfs::Scrub> {
         crate::replace::replace(&self.inner, devid, &device)
+    }
+
+    fn trim(&self, minimum: u64) -> Result<u64> {
+        crate::trim::trim(&self.inner, minimum)
+    }
+
+    fn add_disk(&self, device: DeviceRef) -> Result<u64> {
+        crate::balance::add_disk(&self.inner, &device)
+    }
+
+    fn remove_disk(&self, devid: u64) -> Result<()> {
+        crate::balance::remove_disk(&self.inner, devid)
+    }
+
+    fn balance(&self, plan: &radix_vfs::Balance) -> Result<radix_vfs::Balanced> {
+        crate::balance::balance(&self.inner, plan)
     }
 
     /// Whether a commit is due: the oldest change the disk lacks is

@@ -30,7 +30,7 @@ add devices and settings, and settings that can be changed.
 
 _/kernel/version_
 	The kernel's name and version, and the Dukovo release it is part
-	of: *Radix 0.10.3 (Dukovo Server 0.10.3)*. The C library gives the
+	of: *Radix 0.10.4 (Dukovo Server 0.10.4)*. The C library gives the
 	second word as the release, and the whole line as the version, in
 	uname(3)'s *struct utsname*.
 
@@ -88,6 +88,17 @@ _/kernel/block/_*name*_/queue/rotational_
 _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
 	Its logical block size, and the most bytes one discard (TRIM)
 	covers, if the device discards; *0* and *0* if not.
+
+_/kernel/block/_*name*_/stat_
+	For a disk: what it has done since it was found, as the 17 numbers
+	of Linux's _/sys/block/_*name*_/stat_, in its order and widths:
+	reads, reads merged, sectors read, milliseconds reading; the same
+	four of writes; requests in flight, milliseconds with one or more in
+	flight, and milliseconds of every request added up; the same four of
+	discards; flushes and milliseconds flushing. Sectors are of 512
+	bytes. Radix merges no requests, so those numbers are *0*; a call
+	that moves many buffers at once counts as one request. *iostat*(1)
+	reads it.
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
 	virtio disks, _sda_, _sdb_ for SATA and USB disks, _nvme0n1_ for the first

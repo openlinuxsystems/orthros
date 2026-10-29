@@ -574,6 +574,129 @@ pub fn directory_method(
             put_scrub(&counts, UserOut { address, len })?;
             answer(label, 0, [0; 8])
         }
+        directory::TRIM => {
+            let a = directory::TrimArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let trimmed = dir.at.mount.fs.trim(a.minimum).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            let results = directory::TrimResults { trimmed };
+            answer(label, directory::TrimResults::WORDS, results.encode())
+        }
+        directory::ADD_DISK => {
+            let a = directory::AddDiskArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (_, file) = objects::file(cspace, a.device, Rights::READ.union(Rights::WRITE))?;
+            let device = file
+                .at
+                .node
+                .block_device()
+                .ok_or_else(|| fs::status(radix_vfs::Error::NotBlockDevice))?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            let devid = fs::add_disk(&mount.fs, device).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            let results = directory::AddDiskResults { devid };
+            answer(label, directory::AddDiskResults::WORDS, results.encode())
+        }
+        directory::REMOVE_DISK => {
+            let a = directory::RemoveDiskArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            mount.fs.remove_disk(a.devid).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            answer(label, 0, [0; 8])
+        }
+        directory::BALANCE => {
+            let a = directory::BalanceArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            let kinds = a.kinds;
+            let args = |on, soft, convert| radix_vfs::BalanceArgs {
+                on: kinds.contains(on),
+                convert,
+                soft: kinds.contains(soft),
+            };
+            use directory::BalanceKinds as K;
+            let plan = radix_vfs::Balance {
+                data: args(K::DATA, K::SOFT_DATA, a.convert_data),
+                metadata: args(K::METADATA, K::SOFT_METADATA, a.convert_metadata),
+                system: args(K::SYSTEM, K::SOFT_SYSTEM, a.convert_system),
+            };
+            let done = mount.fs.balance(&plan).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            let results =
+                directory::BalanceResults { considered: done.considered, moved: done.moved };
+            answer(label, directory::BalanceResults::WORDS, results.encode())
+        }
+        directory::QUOTA => {
+            let a = directory::QuotaArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            mount.fs.quota(a.enable).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            answer(label, 0, [0; 8])
+        }
+        directory::QGROUPS => {
+            let a = directory::QgroupsArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let (address, len) = user_range(a.buffer)?;
+            let groups = dir.at.mount.fs.qgroups().map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            use directory::Qgroup as Q;
+            let mut out = UserOut { address, len };
+            for (n, group) in groups.iter().take(len / Q::SIZE).enumerate() {
+                let mut bytes = [0u8; Q::SIZE];
+                for (at, value) in [
+                    (Q::OFFSET_ID, group.id),
+                    (Q::OFFSET_REFERENCED, group.referenced),
+                    (Q::OFFSET_EXCLUSIVE, group.exclusive),
+                    (Q::OFFSET_MAX_REFERENCED, group.max_referenced),
+                    (Q::OFFSET_MAX_EXCLUSIVE, group.max_exclusive),
+                ] {
+                    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                out.put(n * Q::SIZE, &bytes).map_err(fs::status)?;
+            }
+            let results = directory::QgroupsResults { count: groups.len() as u64 };
+            answer(label, directory::QgroupsResults::WORDS, results.encode())
+        }
+        directory::LIMIT_QGROUP => {
+            let a = directory::LimitQgroupArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            let limit = mount.fs.limit_qgroup(a.id, a.max_referenced, a.max_exclusive);
+            limit.map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            answer(label, 0, [0; 8])
+        }
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;

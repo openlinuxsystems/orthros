@@ -940,7 +940,7 @@ fn add_named(
         if found.read_only { ", write-protected" } else { "" },
         if found.write_cache { ", write cache" } else { "" },
     );
-    let volume = Volume::new(disk.clone(), 0, info);
+    let volume = Volume::new(disk.clone(), 0, info).ok_or("out of memory")?;
     let device: DeviceRef = Arc::try_new_in(volume, heap).map_err(|_| "out of memory")?;
     let ident = Some(ident(link, &found));
     register(Entry { name: name.clone(), device: device.clone(), place: None, ident });

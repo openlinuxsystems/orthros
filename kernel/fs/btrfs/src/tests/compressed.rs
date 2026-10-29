@@ -441,7 +441,7 @@ fn extents(image: &[u8]) -> Vec<Found> {
 /// A tree of files that compress: text of each size around the inline
 /// and sector limits and of many extents, files of noise and of noise
 /// and text by turns, a sparse file and many small ones.
-fn compressible_tree() -> PathBuf {
+pub(super) fn compressible_tree() -> PathBuf {
     let dir = scratch("compressible");
     let write = |path: &str, bytes: &[u8]| {
         let path = dir.join(path);

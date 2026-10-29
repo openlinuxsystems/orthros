@@ -412,7 +412,7 @@ fn add(
         ..*template
     };
     let volume = Volume::new(disk.clone(), id, info);
-    let Ok(volume) = Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)) else {
+    let Some(Ok(volume)) = volume.map(|v| Arc::try_new_in(v, HEAP.with(Flags::MAY_SLEEP))) else {
         warn!("Disk: out of memory adding {name}");
         return;
     };

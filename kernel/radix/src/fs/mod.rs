@@ -663,24 +663,7 @@ pub fn replace_disk(
     device: radix_block::DeviceRef,
 ) -> radix_vfs::Result<radix_vfs::Scrub> {
     let mounted = BTRFS.lock();
-    let mut name = None;
-    disk::for_each(|entry| {
-        if radix_vfs::KArc::ptr_eq(&entry.device, &device) {
-            name = Some(entry.name.clone());
-        }
-    });
-    let mut holds_mount = false;
-    if let (Some(name), Some(vfs)) = (&name, vfs()) {
-        vfs.mounts(|mount| holds_mount |= mount.source() == name.as_str());
-    }
-    let btrfs_disk = mounted
-        .iter()
-        .flatten()
-        .filter_map(|m| m.fs.upgrade())
-        .any(|other| other.has_disk(&device));
-    if holds_mount || btrfs_disk || radix_block::swap::is_on(&*device) {
-        return Err(Error::InUse);
-    }
+    let name = free_disk(&mounted, &device)?;
     let counts = fs.replace_disk(devid, device)?;
     let name = name.as_ref().map_or("?", |n| n.as_str());
     info!(
@@ -689,6 +672,43 @@ pub fn replace_disk(
         counts.uncorrectable_errors
     );
     Ok(counts)
+}
+
+/// Adds `device` to the disks of the Btrfs `fs` (ADR 0159), and returns
+/// its device ID. Fails with `InUse` as [`replace_disk`] does, and as
+/// [`radix_vfs::FileSystem::add_disk`] does. Btrfs mounts wait meanwhile,
+/// so that none takes the disk.
+pub fn add_disk(fs: &FsRef, device: radix_block::DeviceRef) -> radix_vfs::Result<u64> {
+    let mounted = BTRFS.lock();
+    let name = free_disk(&mounted, &device)?;
+    let devid = fs.add_disk(device)?;
+    let name = name.as_ref().map_or("?", |n| n.as_str());
+    info!("Btrfs: {name} added as disk {devid}");
+    Ok(devid)
+}
+
+/// The name of `device`, if it has one, when no mount, swap area or
+/// mounted Btrfs uses it; `InUse` otherwise.
+fn free_disk(
+    mounted: &Option<mem::KVec<Mounted>>,
+    device: &radix_block::DeviceRef,
+) -> radix_vfs::Result<Option<disk::Name>> {
+    let mut name = None;
+    disk::for_each(|entry| {
+        if radix_vfs::KArc::ptr_eq(&entry.device, device) {
+            name = Some(entry.name.clone());
+        }
+    });
+    let mut holds_mount = false;
+    if let (Some(name), Some(vfs)) = (&name, vfs()) {
+        vfs.mounts(|mount| holds_mount |= mount.source() == name.as_str());
+    }
+    let btrfs_disk =
+        mounted.iter().flatten().filter_map(|m| m.fs.upgrade()).any(|other| other.has_disk(device));
+    if holds_mount || btrfs_disk || radix_block::swap::is_on(&**device) {
+        return Err(Error::InUse);
+    }
+    Ok(name)
 }
 
 /// Warns when the Btrfs `fs`, mounted from `name`, mounted with disks
@@ -850,6 +870,7 @@ pub fn status(err: Error) -> Status {
         Error::Loop => FileError::TooManyLinks,
         Error::NotLink => FileError::NotLink,
         Error::TooManyNames => FileError::TooManyNames,
+        Error::QuotaExceeded => FileError::QuotaExceeded,
         // What a node does not do is an argument it does not take.
         Error::NotSupported => return Kernel::InvalidArgument.status(0),
         Error::NoMemory => return Kernel::NoMemory.status(0),

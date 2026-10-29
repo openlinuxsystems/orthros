@@ -396,6 +396,16 @@ as it is, and diskhealth(8) judges it; Spark's diskhealth service looks
 at every disk at boot and every half hour and logs a disk's verdict
 when it changes.
 
+### Disk statistics
+
+Each `Volume` counts what it has done (`BlockDevice::stats`): reads,
+writes, discards and flushes, the sectors they moved and the time they
+took, in a cache line of each lane's own, so that CPUs doing I/O at once
+share none; and the time with a request in flight, brought up to date at
+most once a millisecond, as Linux does once a jiffy. `/kernel/block/<disk>/stat`
+shows them as Linux's 17 numbers, which iostat(1) reads. A call that
+moves many buffers at once counts as one request.
+
 ## FAT
 
 `radix-fat` implements FAT12, FAT16 and FAT32 from Microsoft's
@@ -563,6 +573,12 @@ disk missing while the others hold a copy of all of it (ADR 0153).
   without a superblock until a scrub has written it every copy the old
   one held. Then the old disk, if it is there, has its superblocks
   wiped.
+- `trim` discards what the filesystem does not use, as Linux's FITRIM
+  does (ADR 0158): the free space the transaction may take now, on every
+  copy, then each disk's bytes no chunk takes, past its first MiB. It
+  holds the transaction for 128 MiB at a time, so that no change takes
+  what it discards, and never discards a disk's first MiB or 64 KiB at a
+  copy of the superblock.
 - `replay` replays the log of fsyncs Linux leaves when it stops between
   an `fsync` and the next commit (ADR 0151), in the mount's first
   transaction, which commits it with no log: a read-only mount replays
@@ -841,7 +857,9 @@ host, and reads everything back after a second boot.
   and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
-- Btrfs does not replace, add or remove disks yet (10e.1), never has
+- Btrfs does not add or remove disks yet (10e.3), trims only when asked
+  (fstrim(8)), not as blocks are freed (Linux's `discard` mount option),
+  never has
   RAID5 or RAID6, has 4 KiB sectors, and is written only
   with `no-holes`, without quotas, removes a
   subvolume in one transaction rather than in the background, scrubs

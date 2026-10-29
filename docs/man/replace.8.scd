@@ -34,6 +34,10 @@ replace is started again.
 When it is done, replace prints when it started and finished, and how
 many sectors no copy could mend.
 
+Replacing a disk needs the control right on _path_'s directory
+(*radix-directory*(2)), which replace takes from the program's root, as
+*fstrim*(8) does: root's programs have it; others are denied.
+
 # OPTIONS
 
 *-B*
