@@ -166,3 +166,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0152](0152-swap-to-linux-swap-areas-from-a-thread-of-its-own.md) | Swap to Linux's swap areas, from a thread of its own | Accepted |
 | [0154](0154-btrfs-writes-a-log-of-fsyncs-as-linux-does.md) | Btrfs writes a log of fsyncs, as Linux does | Accepted |
 | [0156](0156-a-disk-requests-thread-is-woken-from-its-slot.md) | A disk request's thread is woken from its slot, and a lending takes nothing from the heap | Accepted |
+| [0160](0160-the-console-over-the-xhci-debug-capability.md) | The console goes over the xHCI Debug Capability to a second computer, with the `dbc` flag | Accepted |

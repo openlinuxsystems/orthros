@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `kdb`, the kernel debugger, on the serial port.
+//! `kdb`, the kernel debugger, on the debug console: the serial port, and
+//! the xHCI Debug Capability with the `dbc` flag (ADR 0160).
 //!
 //! With the `kdb` flag the kernel enters it at the end of boot, at every
 //! breakpoint, and after a panic. It reads commands with a small line editor
-//! and answers on the serial port only; the commands are listed in
+//! and answers on the debug console only; the commands are listed in
 //! `radix_kdb::COMMANDS` and described in radix-debug(7). On a machine
-//! without a serial port `kdb` says so in the log and stays out of the way.
+//! without a debug console `kdb` says so in the log and stays out of the
+//! way.
 //!
 //! Only the CPU that entered `kdb` stops; the others keep running (they are
 //! already stopped after a panic).
@@ -21,7 +23,7 @@ use radix_klog::crashlog::Ending;
 use radix_klog::{info, trace, warn};
 
 use crate::symbols::{self, Backtrace};
-use crate::{Arch, caps, crashlog, domains, oom, report, sched};
+use crate::{Arch, caps, crashlog, debug_console, domains, oom, report, sched, usb};
 
 /// Set while a session runs, so a breakpoint inside `kdb` does not nest.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -29,20 +31,20 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Longest command line.
 const LINE: usize = 120;
 
-/// Writes to the serial port.
-struct Serial;
+/// Writes to the debug console.
+struct Console;
 
-impl Write for Serial {
+impl Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        Arch::console_write(s);
+        debug_console::write(s);
         Ok(())
     }
 }
 
-/// Writes one line to the serial port.
+/// Writes one line to the debug console.
 fn say(args: fmt::Arguments<'_>) {
-    let _ = Serial.write_fmt(args);
-    Arch::console_write("\n");
+    let _ = Console.write_fmt(args);
+    debug_console::write("\n");
 }
 
 /// Why `kdb` was entered, and what it can show about that.
@@ -61,19 +63,21 @@ impl Session<'_> {
 
 /// Runs `kdb` at the end of boot.
 pub fn run_at_boot() {
-    if !Arch::has_debug_console() {
-        warn!("kdb: no serial port, so the debugger cannot run; see radix-debug(7)");
+    if !debug_console::present() && !usb::dbc::wait_for_console() {
+        warn!(
+            "kdb: no serial port or Debug Capability console, so the debugger cannot run; see radix-debug(7)"
+        );
         return;
     }
-    info!("kdb: boot complete; waiting for commands on the serial port");
+    info!("kdb: boot complete; waiting for commands on the debug console");
     enter(&Session { fault: None, panic_backtrace: None }, "boot complete");
 }
 
 /// The breakpoint handler: runs `kdb` with the registers the breakpoint
 /// saved, then lets the code carry on.
 pub fn on_breakpoint(fault: &Fault) {
-    if !Arch::has_debug_console() {
-        warn!("kdb: breakpoint at {:#x} skipped: no serial port", fault.pc);
+    if !debug_console::present() {
+        warn!("kdb: breakpoint at {:#x} skipped: no debug console", fault.pc);
         return;
     }
     if ACTIVE.load(Ordering::Acquire) {
@@ -91,7 +95,7 @@ pub fn on_breakpoint(fault: &Fault) {
 /// Runs `kdb` after a panic, with the other CPUs stopped. Returns when the
 /// user leaves, and the panic handler goes on to restart.
 pub fn run_after_panic(fault: Option<&Fault>, backtrace: &Backtrace) {
-    if !Arch::has_debug_console() {
+    if !debug_console::present() {
         return;
     }
     // A panic inside a session (the `panic` command) starts a new one.
@@ -110,10 +114,10 @@ fn enter(session: &Session<'_>, why: &str) {
         <Arch as radix_hal::CpuLocal>::current_cpu()
     ));
     let mut editor = LineEditor::<LINE>::new();
-    Arch::console_write("kdb> ");
+    debug_console::write("kdb> ");
     let mut idle: u32 = 0;
     loop {
-        let Some(byte) = Arch::console_read() else {
+        let Some(byte) = debug_console::read() else {
             Arch::delay_us(100);
             idle = idle.wrapping_add(1);
             // About once a second, so the watchdog leaves the debugger be.
@@ -122,7 +126,7 @@ fn enter(session: &Session<'_>, why: &str) {
             }
             continue;
         };
-        let Some(line) = editor.feed(byte, &mut |echo| Arch::console_write(echo)) else {
+        let Some(line) = editor.feed(byte, &mut |echo| debug_console::write(echo)) else {
             continue;
         };
         match radix_kdb::parse(line) {
@@ -137,7 +141,7 @@ fn enter(session: &Session<'_>, why: &str) {
             Ok(command) => run(session, command),
             Err(error) => say(format_args!("{error}")),
         }
-        Arch::console_write("kdb> ");
+        debug_console::write("kdb> ");
     }
     ACTIVE.store(false, Ordering::Release);
 }
@@ -147,7 +151,7 @@ fn run(session: &Session<'_>, command: Command<'_>) {
     match command {
         Command::Nothing | Command::Continue => {}
         Command::Help => {
-            let _ = radix_kdb::write_help(&mut Serial);
+            let _ = radix_kdb::write_help(&mut Console);
         }
         Command::Log { count } => show_log(count),
         Command::Trace(action) => show_trace(action),
@@ -179,7 +183,7 @@ fn run(session: &Session<'_>, command: Command<'_>) {
             Some(fault) => {
                 for row in fault.registers().chunks(4) {
                     for (name, value) in row {
-                        let _ = write!(Serial, "  {name:>6} {value:016x}");
+                        let _ = write!(Console, "  {name:>6} {value:016x}");
                     }
                     say(format_args!(""));
                 }
@@ -298,7 +302,7 @@ fn examine(address: u64, len: usize) {
             say(format_args!("{at:#x}: not mapped, or not RAM (kdb reads only RAM)"));
             return;
         }
-        let _ = radix_kdb::write_hex_dump(&mut Serial, at, &buf[..n]);
+        let _ = radix_kdb::write_hex_dump(&mut Console, at, &buf[..n]);
         done += n;
     }
 }

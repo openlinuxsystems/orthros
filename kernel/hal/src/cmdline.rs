@@ -29,7 +29,12 @@ pub const FLAGS: &[Flag] = &[
         value: Some("level"),
         summary: "lowest message level shown on the consoles: error, warn, info or debug",
     },
-    Flag { name: "kdb", value: None, summary: "start the kernel debugger on the serial port" },
+    Flag { name: "kdb", value: None, summary: "start the kernel debugger on the debug console" },
+    Flag {
+        name: "dbc",
+        value: None,
+        summary: "put the console on the first USB controller's Debug Capability, for a debug host",
+    },
     Flag { name: "trace", value: None, summary: "record trace points from the start of boot" },
     Flag {
         name: "panic",

@@ -16,7 +16,8 @@
 //! tree (Phase 7, `fs`), starts every other CPU and
 //! checks that each one takes timer interrupts and answers IPIs. A panic
 //! stops the other CPUs and shows a full-screen report with a symbolized
-//! backtrace; `kdb` debugs the kernel over the serial port.
+//! backtrace; `kdb` debugs the kernel over the serial port, or over the
+//! xHCI Debug Capability (`debug_console`).
 //!
 //! Memory comes from `radix_mm::HEAP` with explicit flags: the global
 //! allocator refuses every request (ADR 0017), and `alloc` is built without
@@ -52,6 +53,7 @@ mod caps;
 mod captest;
 mod console;
 mod crashlog;
+mod debug_console;
 mod domains;
 mod fs;
 mod join;
@@ -233,6 +235,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     join::start();
     oom::start();
     usb::init(flags.value("usb") == Some("off"));
+    usb::dbc::init(flags.has("dbc"));
     fs::disk::init();
     fs::writeback::start();
     fs::kmsg::start();

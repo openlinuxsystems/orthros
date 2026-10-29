@@ -190,8 +190,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   power-button     pressing the ACPI power button powers the machine off,
                    after Spark stops the services
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
-                   hubs and the devices behind them, and follows devices
-                   plugged in and pulled out
+                   hubs and the devices behind them, follows devices
+                   plugged in and pulled out, and has no Debug Capability
   usb-input        a USB keyboard types into the console beside the PS/2
                    one, and repeats a held key; /devices/mouse reads a USB
                    mouse and a tablet

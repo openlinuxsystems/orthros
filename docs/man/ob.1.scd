@@ -324,11 +324,12 @@ _target/userspace/_).
 		(*radix-power*(2), *spark*(8)).
 
 	*usb-devices*
-		Boot normally under UEFI with the lock checker on, with QEMU's
-		USB keyboard on the xHCI controller's second port beside the boot
-		stick, and a hub on the third with a mouse behind it and a second
-		hub with a keyboard behind that. The kernel must name the
-		controller, each hub and each device on its port; USB tablets
+		Boot normally under UEFI with the lock checker on and the *dbc*
+		flag, with QEMU's USB keyboard on the xHCI controller's second
+		port beside the boot stick, and a hub on the third with a mouse
+		behind it and a second hub with a keyboard behind that. The kernel
+		must name the controller, say it has no Debug Capability, and name
+		each hub and each device on its port; USB tablets
 		plugged into the fourth port and into the first hub with QEMU's
 		_device_add_ must be named too, and pulling them out with
 		_device_del_ logged; pulling out the second hub must let go of its

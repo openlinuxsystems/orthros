@@ -398,8 +398,15 @@ them to *init*, and the kernel does not read them.
 	the in-memory log always keep every level.
 
 *kdb*
-	Start the kernel debugger on the serial port at the end of boot, at
-	every breakpoint, and after a panic. See *radix-debug*(7).
+	Start the kernel debugger on the debug console (the serial port, and
+	the Debug Capability with *dbc*) at the end of boot, at every
+	breakpoint, and after a panic. See *radix-debug*(7).
+
+*dbc*
+	Put the console on the Debug Capability of the first USB controller
+	that has one, for a second computer joined to one of its USB 3 ports
+	with a debug cable: the log, the panic report and *kdb* go there too.
+	See *USB* and *radix-debug*(7).
 
 *trace*
 	Record trace points from the start of *radix_arch_entry*. See
@@ -552,6 +559,17 @@ A device that cannot be set up twice is left alone until it is unplugged.
 Hub ports past 15 and hubs more than five deep are not used. Before the
 machine is powered off or restarted, every controller is halted.
 Keyboards and mice, and USB storage, come later (ADRs 0146 and 0147).
+
+With the *dbc* flag the first controller with a Debug Capability turns
+it on, and the console goes there as well (ADR 0160); each controller
+says what it did with its own:
+
+	USB: bus 1 has no Debug Capability, so the console is not on it
+	USB: bus 2: the Debug Capability is on, waiting for a debug host
+	USB: bus 2: a debug host is connected
+	USB: bus 2: the debug host on port 3 reads the console
+
+See *DEBUG CAPABILITY CONSOLE* in *radix-debug*(7).
 
 # REAL HARDWARE
 
