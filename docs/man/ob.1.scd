@@ -564,6 +564,17 @@ _target/userspace/_).
 		over UAS. After the second boot's check, the device with two
 		units is pulled out, which takes _sdb_ and _sdc_ away.
 
+	*volumes*
+		A FAT stick labelled _DUKOVOUSB_ on the boot stick's controller,
+		with the default services (Spark's *--services*) and
+		_/system/tests/posix/volumetest DUKOVOUSB_. Spark mounts it at
+		_/volumes/sdb_ at boot, and *volumed*(8) leaves it there. Pulled
+		out, it must be unmounted; plugged in again, mounted at
+		_/volumes/DUKOVOUSB_, where the program writes _ejected.txt_,
+		checks *volumed --list* shows it, ejects it with *eject*(1) and
+		checks it is gone. Pulled out once more, the host reads the file
+		back with mtools.
+
 	*storage-nvme*
 		The *storage* test with the same four disks as NVMe namespaces,
 		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on

@@ -238,6 +238,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    then one is pulled out and plugged in again
   storage-uas      the same on four disks of three USB devices that speak
                    UAS, at SuperSpeed and high speed; then one is pulled out
+  volumes          volumed mounts a stick plugged in again by its label; a
+                   program writes to it and ejects it, the host reads it back
   storage-nvme     the same on four NVMe namespaces of two controllers,
                    with a queue for each of 4 CPUs, the partition in a GPT
   storage-4k       the same on two virtio disks and two NVMe namespaces of

@@ -473,6 +473,13 @@ const UAS_DISKS: &[Disk] = &[
 /// The hub [`USB_DISKS`] has two of its sticks behind, at QEMU port 4.
 const USB_HUB: &[&str] = &["-device", "usb-hub,bus=xhci.0,port=4"];
 
+/// The stick of the `volumes` test, after the boot stick's `sda`: `sdb`,
+/// which volumed(8) mounts by its label once it is plugged in again.
+const VOLUME_DISKS: &[Disk] = &[fat_disk(32 * 1024, 16, "DUKOVOUSB", Table::None, Bus::Usb("2"))];
+
+/// What volumetest writes on the stick before it ejects it.
+const VOLUME_TEXT: &[u8] = b"written on Dukovo, ejected safely\n";
+
 /// The same disks as NVMe namespaces, two on each of two controllers:
 /// `nvme0n1`, `nvme0n2`, `nvme1n1` and `nvme1n2p1`, the partition in a
 /// GPT.
@@ -1505,6 +1512,22 @@ pub const CASES: &[Case] = &[
             before: storage_host,
             script: storage_uas_check,
         }),
+    },
+    Case {
+        name: "volumes",
+        about: "volumed leaves a stick Spark mounted at boot as it is, unmounts it when it is pulled out, and mounts it by its label when it is plugged in again; a program writes a file there and ejects it with eject, and the host reads the file back",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix /system/tests/posix/volumetest DUKOVOUSB",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: volumes,
+        disks: VOLUME_DISKS,
+        second: None,
     },
     Case {
         name: "storage-nvme",
@@ -3428,7 +3451,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 2 services in /system/settings/spark/services, 2 enabled")?;
+    vm.expect("spark: 3 services in /system/settings/spark/services, 3 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -4777,6 +4800,52 @@ fn storage_uas_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         if matches!(disk.bus, Bus::Uas(p, _) if p == port) {
             vm.expect(&format!("Disk: {name} is gone with its USB device"))?;
         }
+    }
+    Ok(())
+}
+
+/// The `volumes` test: volumed(8) takes the stick Spark mounted at boot
+/// as done; pulled out, its volume is unmounted, and plugged in again it
+/// is mounted at its label, where volumetest (userspace/posix/volumetest.c)
+/// writes a file and ejects it with eject(1). The host reads the file
+/// back from the stick's image once it is pulled out again.
+fn volumes(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disks_found(vm, case)?;
+    let (disk, name) = (&case.disks[0], &disk_names(case.disks)[0]);
+    let Bus::Usb(port) = disk.bus else { return Err("the disk is not a USB one".into()) };
+    let (place, label) = (usb_place(port), disk.label);
+    vm.expect(&format!("spark: mounted the FAT filesystem of {name} at /volumes/{name}"))?;
+    // The program may start waiting before volumed has looked.
+    let waiting = format!("volumetest: waiting for /volumes/{label}");
+    vm.expect("volumed: watching for volumes; ")?;
+    if !vm.log().contains(&waiting) {
+        vm.expect(&waiting)?;
+    }
+    vm.monitor("device_del stick0")?;
+    vm.expect(&format!("USB: {place}: QEMU USB HARDDRIVE was unplugged"))?;
+    vm.expect(&format!("volumed: {name} is gone; unmounted /volumes/{name}"))?;
+    let file = vm.dir().join(format!("{}-disk0.img", case.name));
+    vm.add_disk_file("again", &file)?;
+    vm.monitor(&format!("device_add usb-storage,drive=again,bus=xhci.0,port={port},id=again"))?;
+    vm.expect(&format!("volumed: mounted the FAT filesystem of {name} at /volumes/{label}"))?;
+    vm.expect(&format!("volumetest: wrote /volumes/{label}/ejected.txt"))?;
+    vm.expect(&format!("volumetest: ejected /volumes/{label}"))?;
+    vm.expect("volumetest: every check passed")?;
+    let code = program_line(vm, "(/system/tests/posix/volumetest) exited with code ")?;
+    if code != "0x0" {
+        return Err(format!("volumetest exited with code {code}"));
+    }
+    vm.monitor("device_del again")?;
+    vm.expect(&format!("USB: {place}: QEMU USB HARDDRIVE was unplugged"))?;
+    vm.expect(&format!("Disk: {name} is gone with its USB device"))?;
+    let image = file.display().to_string();
+    let read =
+        host_tool(std::process::Command::new("mtype").args(["-i", &image, "::/ejected.txt"]))?;
+    if read != VOLUME_TEXT {
+        return Err(format!(
+            "the stick's ejected.txt holds {:?}, not what was written",
+            String::from_utf8_lossy(&read)
+        ));
     }
     Ok(())
 }

@@ -160,11 +160,12 @@ Its lines in the kernel log start with *spark:*, after the kernel's
 spark: Spark v2 is process 1, moved by 0x10ae4974a000
 spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
 spark: built the hierarchy of 9 directories and mounted 8 filesystems
-spark: added 5 default settings to /system/settings
+spark: added 6 default settings to /system/settings
 spark: listening at /system/live/spark/control
-spark: 2 services in /system/settings/spark/services, 2 enabled
+spark: 3 services in /system/settings/spark/services, 3 enabled
 spark: started consoled (/system/commands/consoled) as process 12
-spark: started diskhealth (/system/commands/diskhealth) as process 13
+spark: started volumed (/system/commands/volumed) as process 13
+spark: started diskhealth (/system/commands/diskhealth) as process 14
 ```
 
 On Dukovo's root, as on a SATA disk written from the image, the
@@ -328,8 +329,9 @@ or halts its processors (*radix-power*(2)):
 
 ```
 spark: asked to power off the machine
-spark: shutting down to power off: stopping 2 services
-spark: diskhealth (process 13) was ended by signal 15
+spark: shutting down to power off: stopping 3 services
+spark: diskhealth (process 14) was ended by signal 15
+spark: volumed (process 13) was ended by signal 15
 spark: consoled (process 12) was ended by signal 15
 spark: every service has stopped
 Power: `spark` asked to power off the machine; syncing the filesystems
@@ -346,7 +348,7 @@ changes nothing:
 ```
 Power: the power button was pressed
 spark: the power button was pressed; powering off the machine
-spark: shutting down to power off: stopping 2 services
+spark: shutting down to power off: stopping 3 services
 ```
 
 Where the kernel cannot hear it, the firmware keeps the button.

@@ -60,6 +60,8 @@ error that starts with the tool's name.
 :  what each disk says of its health: SMART and the NVMe health log
 |  *dmesg*(1)
 :  the kernel's log
+|  *eject*(1)
+:  unmount a volume so that its disk can be pulled out
 |  *findmnt*(8)
 :  the mounts, as a tree, or the one sought
 |  *fstrim*(8)
@@ -126,6 +128,8 @@ error that starts with the tool's name.
 :  who is logged in, and what they are doing
 |  *vmstat*(8)
 :  memory, CPU and disk activity
+|  *volumed*(8)
+:  mount the volumes plugged in after boot by their labels
 |  *watch*(1)
 :  run a command again and again
 |  *watchdog*(8)
