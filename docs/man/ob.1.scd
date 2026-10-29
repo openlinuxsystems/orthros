@@ -669,6 +669,17 @@ _target/userspace/_).
 		disk, then write and sync a file. The superblock must name no
 		log after the boot, and *btrfs check* must find nothing wrong.
 
+	*btrfs-raid*
+		Boot 2 CPUs under UEFI with two 512 MiB virtio disks of one
+		Btrfs RAID1 *mkfs.btrfs* made. Spark must mount it once, from
+		_vda_, and leave _vdb_ alone as in use; _/system/tests/storage
+		write_ writes its files. Between the boots the host wipes _vdb_'s
+		superblock, as if it were pulled out. The second boot must mount
+		_vda_ alone, with the kernel's warning of a disk missing, and
+		_/system/tests/storage check --no-host-file_ must read every byte
+		back. After each boot *btrfs check* must find nothing wrong, given
+		every disk still there.
+
 	*ext4-write*
 		The *storage* test on two ext4 disks *mkfs.ext4* made holding
 		only the file the host writes to FAT disks between the boots: a

@@ -58,7 +58,7 @@ use radix_abi::Status;
 use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::file::DescriptionFlags;
 use radix_hal::{Devices, Timer};
-use radix_klog::{error, info};
+use radix_klog::{error, info, warn};
 use radix_mm::{FRAMES, Kmalloc, PAGE_SIZE};
 use radix_sync::{Mutex, Once, SpinLock};
 use radix_vfs::mount::{Location, OpenFlags, Vfs};
@@ -561,7 +561,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
                 "fat" => mount_fat(device, read_only)?,
                 "exfat" => mount_exfat(device, read_only)?,
                 "ext4" => mount_ext4(device, read_only)?,
-                _ => mount_btrfs(device, read_only, compress)?,
+                _ => mount_btrfs(device, name.as_str(), read_only, compress)?,
             }
         }
         "proc" => procfs::make()?,
@@ -596,20 +596,91 @@ fn mount_ext4(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Res
     fs_ref(radix_ext4::Ext4Fs::mount(device, read_only)?)
 }
 
-/// Mounts the Btrfs filesystem on `device` ([`mount_fat`]).
+/// A Btrfs filesystem mounted: its ID, the disk it was mounted from, and
+/// the filesystem while it lasts.
+struct Mounted {
+    id: [u8; 16],
+    first: radix_block::DeviceRef,
+    fs: alloc::sync::Weak<radix_btrfs::BtrfsFs, mem::Alloc>,
+}
+
+/// The Btrfs filesystems mounted, so that a disk of one is not mounted
+/// again on its own (ADR 0153). It is held through a Btrfs mount, so that
+/// two mounts cannot make one filesystem twice.
+static BTRFS: Mutex<Option<mem::KVec<Mounted>>> = Mutex::new(None);
+
+/// Mounts the Btrfs filesystem on `device`, the disk or partition `name`,
+/// with the disks of it among the others ([`mount_fat`]). With a disk
+/// missing it mounts while the others hold a copy of all of it, and the
+/// log warns (ADR 0153). A disk of a Btrfs mounted already fails with
+/// `InUse`, unless it is the disk that one was mounted from and both
+/// mounts write, or neither does: then this mount gets that filesystem
+/// too, as on Linux.
 #[inline(never)]
 fn mount_btrfs(
     device: radix_block::DeviceRef,
+    name: &str,
     read_only: bool,
     compress: bool,
 ) -> radix_vfs::Result<FsRef> {
-    if read_only {
-        fs_ref(radix_btrfs::BtrfsFs::mount(device)?)
-    } else {
-        let fs = radix_btrfs::BtrfsFs::mount_writable(device)?;
+    let id = radix_btrfs::BtrfsFs::id_of(&device)?;
+    let mut mounted = BTRFS.lock();
+    let mounted = mounted.get_or_insert_with(mem::vec);
+    mounted.retain(|m| m.fs.strong_count() > 0);
+    let fs = match mounted.iter().find(|m| m.id == id) {
+        Some(m) => {
+            let fs = m.fs.upgrade().ok_or(Error::InUse)?;
+            if !radix_vfs::KArc::ptr_eq(&m.first, &device) || fs.writable() == read_only {
+                return Err(Error::InUse);
+            }
+            fs
+        }
+        None => {
+            let fs = mount_btrfs_disks(&device, read_only)?;
+            warn_missing(name, &fs);
+            let first = device;
+            mem::push(mounted, Mounted { id, first, fs: radix_vfs::KArc::downgrade(&fs) })?;
+            fs
+        }
+    };
+    if !read_only {
         fs.set_compress(compress);
-        fs_ref(fs)
     }
+    fs_ref(fs)
+}
+
+/// Warns when the Btrfs `fs`, mounted from `name`, mounted with disks
+/// missing: in a frame of its own, off the mount's deep reads.
+#[inline(never)]
+fn warn_missing(name: &str, fs: &radix_btrfs::BtrfsFs) {
+    let (disks, missing) = fs.disks();
+    if missing > 0 {
+        warn!(
+            "Btrfs: {name}: {missing} of its {disks} disks missing; mounted from the copies on \
+             the others. Replace the missing, or a disk more lost may lose data"
+        );
+    }
+}
+
+/// Mounts the Btrfs filesystem on `device` with the disks of it among the
+/// others the kernel found, but those it swaps to, as with Linux's
+/// `degraded` mount option.
+#[inline(never)]
+fn mount_btrfs_disks(
+    device: &radix_block::DeviceRef,
+    read_only: bool,
+) -> radix_vfs::Result<radix_vfs::KArc<radix_btrfs::BtrfsFs>> {
+    let mut devices = mem::vec();
+    mem::push(&mut devices, device.clone())?;
+    let mut pushed = Ok(());
+    disk::for_each(|entry| {
+        if pushed.is_ok() && !radix_vfs::KArc::ptr_eq(&entry.device, device) {
+            pushed = mem::push(&mut devices, entry.device.clone());
+        }
+    });
+    pushed?;
+    devices.retain(|other| !radix_block::swap::is_on(&**other));
+    radix_btrfs::BtrfsFs::mount_disks(&devices, !read_only, true)
 }
 
 /// The boot archive's `system` directory as a filesystem, for `/system`:

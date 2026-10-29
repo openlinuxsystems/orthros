@@ -286,11 +286,20 @@ The `btrfs` boot test (`./ob test --case btrfs`) reads every file of two
 such disks and checks each byte on the host; `btrfs-write` writes two
 such disks, then checks them with Linux's `btrfs check` and reads them
 back on the host and after a reboot, `btrfs-power-cut` cuts the
-power while a disk is being written, and `btrfs-log` mounts a disk Linux
+power while a disk is being written, `btrfs-log` mounts a disk Linux
 left with changes in its log of fsyncs alone, which the mount replays as
-Linux does. Dukovo writes that log too: an `fsync` of a file writes only
-what changed of it, as Linux does, and Linux replays Dukovo's log after
-a power cut.
+Linux does, and `btrfs-raid` writes a RAID1 of two disks, then pulls one
+out and reads everything back from the other. Dukovo writes the log of
+fsyncs too: an `fsync` of a file writes only what changed of it, as
+Linux does, and Linux replays Dukovo's log after a power cut.
+
+A Btrfs of several disks mounts from any of them, once, at
+`/volumes/<first disk>`. With a disk missing it still mounts if the
+others hold a copy of all of it, and the kernel log warns:
+
+```text
+Btrfs: vda: 1 of its 2 disks missing; mounted from the copies on the others. Replace the missing, or a disk more lost may lose data
+```
 
 An ext4 disk, the kind most Linux machines use, is made the same way:
 

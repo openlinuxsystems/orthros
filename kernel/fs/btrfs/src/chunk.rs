@@ -79,12 +79,21 @@ pub struct Chunk {
     pub stripes: KVec<Stripe>,
 }
 
-/// Where one logical range lies: up to [`MAX_COPIES`] places on this
-/// device, each holding the same bytes.
+/// Where one copy of a logical range is: on which disk, and where on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Site {
+    /// The disk, by its place among the volume's disks.
+    pub disk: usize,
+    /// Where on it, in bytes.
+    pub at: u64,
+}
+
+/// Where one logical range lies: up to [`MAX_COPIES`] places on the
+/// disks that are there, each holding the same bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
-    /// Where each copy is on the device, in bytes.
-    pub copies: [u64; MAX_COPIES],
+    /// Where each copy is.
+    pub copies: [Site; MAX_COPIES],
     /// How many of `copies` there are.
     pub count: usize,
     /// How many bytes from the logical address are contiguous there: up
@@ -94,7 +103,7 @@ pub struct Place {
 
 impl Place {
     /// The copies.
-    pub fn copies(&self) -> &[u64] {
+    pub fn copies(&self) -> &[Site] {
         &self.copies[..self.count]
     }
 }
@@ -141,9 +150,9 @@ impl Chunk {
     }
 
     /// Writes its chunk item to `out`, [`Chunk::item_size`] bytes, as
-    /// Linux writes one: the extent tree owns it, and its stripes are on
-    /// the device `dev_uuid`.
-    pub fn write(&self, out: &mut [u8], sectorsize: u32, dev_uuid: &[u8; 16]) {
+    /// Linux writes one: the extent tree owns it, and each stripe names
+    /// the UUID of its device, which `uuid_of` gives from its ID.
+    pub fn write(&self, out: &mut [u8], sectorsize: u32, uuid_of: impl Fn(u64) -> [u8; 16]) {
         /// The extent tree, which owns every chunk.
         const OWNER: u64 = 2;
         let put_u64 = |out: &mut [u8], at: usize, v: u64| {
@@ -163,7 +172,7 @@ impl Chunk {
             let at = ITEM_SIZE + i * STRIPE_SIZE;
             put_u64(out, at, stripe.devid);
             put_u64(out, at + 8, stripe.offset);
-            out[at + 16..at + 32].copy_from_slice(dev_uuid);
+            out[at + 16..at + 32].copy_from_slice(&uuid_of(stripe.devid));
         }
     }
 
@@ -176,17 +185,19 @@ impl Chunk {
         Ok(Chunk { stripes, ..*self })
     }
 
-    /// Where the logical address `logical`, in the chunk, lies on device
-    /// `devid`; copies on other devices are left out.
+    /// Where the logical address `logical`, in the chunk, lies on the
+    /// disks `disk_of` gives a place among the volume's disks from their
+    /// IDs; copies on disks it gives none for (missing) are left out.
     ///
     /// Fails with [`Error::NotSupported`] for RAID5 and RAID6, which
     /// Radix does not read ([`crate::superblock::incompat::READ`]).
-    pub fn place(&self, logical: u64, devid: u64) -> Result<Place> {
+    pub fn place(&self, logical: u64, disk_of: impl Fn(u64) -> Option<usize>) -> Result<Place> {
         let off = logical - self.start;
-        let mut place = Place { copies: [0; MAX_COPIES], count: 0, len: self.length - off };
+        let mut place =
+            Place { copies: [Site::default(); MAX_COPIES], count: 0, len: self.length - off };
         let mut add = |stripe: &Stripe, at: u64| {
-            if stripe.devid == devid && place.count < MAX_COPIES {
-                place.copies[place.count] = stripe.offset + at;
+            if let Some(disk) = disk_of(stripe.devid).filter(|_| place.count < MAX_COPIES) {
+                place.copies[place.count] = Site { disk, at: stripe.offset + at };
                 place.count += 1;
             }
         };
@@ -214,6 +225,50 @@ impl Chunk {
             }
         }
         Ok(place)
+    }
+
+    /// How many groups of stripes the chunk's bytes are spread over: for
+    /// RAID0 and RAID10, a stripe length at a time; one for the others,
+    /// whose every stripe holds the whole chunk.
+    pub fn groups(&self) -> u64 {
+        match self.kind & kind::PROFILE {
+            kind::RAID0 => self.stripes.len() as u64,
+            kind::RAID10 => self.stripes.len() as u64 / u64::from(self.sub_stripes.max(1)),
+            _ => 1,
+        }
+    }
+
+    /// The bytes each stripe takes on its device.
+    pub fn stripe_bytes(&self) -> u64 {
+        self.length / self.groups().max(1)
+    }
+
+    /// The logical address of byte `physical` of the device that stripe
+    /// `stripe` lies on, or `None` when the stripe does not hold it.
+    pub fn logical_of(&self, stripe: usize, physical: u64) -> Option<u64> {
+        let s = self.stripes.get(stripe)?;
+        let x = physical.checked_sub(s.offset).filter(|&x| x < self.stripe_bytes())?;
+        let groups = self.groups();
+        if groups == 1 {
+            return Some(self.start + x);
+        }
+        let sub = if self.kind & kind::RAID10 != 0 { usize::from(self.sub_stripes) } else { 1 };
+        let group = (stripe / sub) as u64;
+        let unit = x / self.stripe_len;
+        Some(self.start + (unit * groups + group) * self.stripe_len + x % self.stripe_len)
+    }
+
+    /// Whether the disks `present` says are there still hold every byte
+    /// of the chunk: one stripe of each group of copies.
+    pub fn readable(&self, present: impl Fn(u64) -> bool) -> bool {
+        match self.kind & kind::PROFILE {
+            0 | kind::RAID0 => self.stripes.iter().all(|s| present(s.devid)),
+            kind::RAID10 => self
+                .stripes
+                .chunks(usize::from(self.sub_stripes.max(1)))
+                .all(|group| group.iter().any(|s| present(s.devid))),
+            _ => self.stripes.iter().any(|s| present(s.devid)),
+        }
     }
 }
 
@@ -292,12 +347,12 @@ impl ChunkMap {
         (logical - chunk.start < chunk.length).then_some(chunk)
     }
 
-    /// Where `logical` lies on device `devid`.
+    /// Where `logical` lies on the disks that are there ([`Chunk::place`]).
     ///
     /// Fails with [`Error::Corrupt`] when no chunk holds it, and
-    /// [`Error::NoDevice`] when no copy of it is on the device.
-    pub fn place(&self, logical: u64, devid: u64) -> Result<Place> {
-        let place = self.find(logical).ok_or(Error::Corrupt)?.place(logical, devid)?;
+    /// [`Error::NoDevice`] when no copy of it is on a disk that is there.
+    pub fn place(&self, logical: u64, disk_of: impl Fn(u64) -> Option<usize>) -> Result<Place> {
+        let place = self.find(logical).ok_or(Error::Corrupt)?.place(logical, disk_of)?;
         if place.count == 0 {
             return Err(Error::NoDevice);
         }

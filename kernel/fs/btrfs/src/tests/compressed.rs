@@ -422,7 +422,7 @@ fn extents(image: &[u8]) -> Vec<Found> {
                     regular: None,
                 }),
                 Extent::Regular(regular) if regular.disk_bytenr != 0 => {
-                    let at = volume.place(regular.disk_bytenr).unwrap().copies()[0] as usize;
+                    let at = volume.place(regular.disk_bytenr).unwrap().copies()[0].at as usize;
                     found.push(Found {
                         compression: regular.compression,
                         bytes: image[at..at + regular.disk_num_bytes as usize].to_vec(),
@@ -528,7 +528,13 @@ fn damaged_compressed_data_is_read_from_its_other_copy_or_fails() {
         assert_eq!(first.compression, Compression::Zstd);
         assert!(first.disk_num_bytes >= 8192, "{profile}");
         let volume = open(&image).unwrap();
-        let at = volume.place(first.disk_bytenr).unwrap().copies().to_vec();
+        let at = volume
+            .place(first.disk_bytenr)
+            .unwrap()
+            .copies()
+            .iter()
+            .map(|s| s.at)
+            .collect::<Vec<_>>();
         assert_eq!(at.len(), copies, "{profile}");
         // The second sector of the first copy.
         image[at[0] as usize + 4096 + 100] ^= 1;
@@ -567,7 +573,7 @@ fn a_run_of_compressed_extents_ends_before_one_that_fails() {
     // The first run is the first four extents: two in each half.
     for (damaged, extent) in found.iter().enumerate().take(4) {
         let mut image = image.clone();
-        let at = open(&image).unwrap().place(extent.disk_bytenr).unwrap().copies()[0];
+        let at = open(&image).unwrap().place(extent.disk_bytenr).unwrap().copies()[0].at;
         image[at as usize + 100] ^= 1;
         let fs = mount(&image).unwrap();
         let file = fs.root().lookup("text").unwrap();
