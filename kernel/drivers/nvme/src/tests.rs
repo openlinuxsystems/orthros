@@ -319,6 +319,15 @@ impl State {
                 fake_memory_write(prp1, &data);
                 status
             }
+            admin::GET_LOG_PAGE if cdw10 & 0xff == u32::from(command::LOG_HEALTH) => {
+                // A composite temperature of 310 K and 3% of the spare
+                // left, as many dwords as asked for.
+                let mut data = std::vec![0u8; 4 * ((cdw10 >> 16) as usize + 1)];
+                data[1..3].copy_from_slice(&310u16.to_le_bytes());
+                data[3] = 3;
+                fake_memory_write(prp1, &data);
+                0
+            }
             admin::SET_FEATURES if cdw10 == 7 => {
                 let wanted = (cdw11 & 0xffff) as u16 + 1;
                 let granted = wanted.min(self.grants);
@@ -621,6 +630,19 @@ fn takes_the_controller_and_says_what_it_is() {
     assert_eq!(state.enables, 1);
     // 64-byte and 16-byte entries, enabled.
     assert_eq!(state.cc, (6 << 16) | (4 << 20) | 1);
+}
+
+#[test]
+fn reads_the_health_log_for_every_namespace() {
+    let (sim, mut nvme) = setup();
+    let mut log = [0xffu8; command::LOG_HEALTH_SIZE];
+    nvme.health(&mut |_| {}, &mut log).unwrap();
+    assert_eq!(&log[..5], &[0, 0x36, 0x01, 3, 0]);
+    assert!(log[5..].iter().all(|&b| b == 0));
+    let state = sim.state();
+    let &(queue, opcode, namespace, [cdw10, ..]) = state.commands.last().unwrap();
+    assert_eq!((queue, opcode, namespace), (0, admin::GET_LOG_PAGE, u32::MAX));
+    assert_eq!(cdw10, 0x02 | (127 << 16));
 }
 
 #[test]

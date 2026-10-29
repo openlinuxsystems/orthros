@@ -50,6 +50,8 @@ error that starts with the tool's name.
 :  put lines in columns, or a table
 |  *df*(1)
 :  the space of each filesystem
+|  *diskhealth*(8)
+:  what each disk says of its health: SMART and the NVMe health log
 |  *dmesg*(1)
 :  the kernel's log
 |  *free*(1)

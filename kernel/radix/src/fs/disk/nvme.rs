@@ -22,13 +22,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use radix_block::{DeviceRef, Error, Info};
+use radix_block::{DeviceRef, Error, Health, Info, Page};
 use radix_hal::{Devices, Smp};
 use radix_hw::pci::{Bar, Function, MsiX};
 use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_nvme::identify::{self, Unusable};
-use radix_nvme::{Lane, Nvme, Shadow};
+use radix_nvme::{Lane, Nvme, Shadow, command};
 use radix_sync::{Mutex, Once};
 
 use super::queue::{self, Controller, Disk, Op, Outcome, Part, Request, Volume};
@@ -85,6 +85,7 @@ impl Controller for NvmeLane {
             Op::WriteThrough => radix_nvme::Op::WriteThrough,
             Op::Flush => radix_nvme::Op::Flush,
             Op::Discard(count) => radix_nvme::Op::Deallocate(count / request.unit),
+            Op::Smart(_) => return Err(Error::Unsupported),
         };
         // The namespace counts in its own blocks, the request in sectors.
         let Request { target, sector, data, unit, .. } = *request;
@@ -146,6 +147,17 @@ impl Controller for NvmeLane {
             }
         }
         true
+    }
+
+    fn health(disk: &Disk<NvmeLane>, _target: u32, page: &mut Page) -> Result<Health, Error> {
+        let host = disk.controller(|lane| lane.host.clone()).ok_or(Error::Io)?;
+        let mut log = [0u8; command::LOG_HEALTH_SIZE];
+        if let Err(err) = host.nvme.lock().health(&mut queue::delay, &mut log) {
+            warn!("Disk: {}: its health log could not be read: {err}", host.name);
+            return Err(Error::Io);
+        }
+        page.bytes_mut()[..log.len()].copy_from_slice(&log);
+        Ok(Health::Nvme)
     }
 }
 

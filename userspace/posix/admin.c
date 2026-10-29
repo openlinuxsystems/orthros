@@ -614,6 +614,13 @@ static void hardware(void) {
 	STATUS(1, "/bin/lsmem", "--summary=sometimes");
 }
 
+// The storage tools on a disk and a mount that are not there, and on
+// tmpfs; the disk-health and storage-tools boot tests run them on disks.
+static void storage(void) {
+	STATUS(2, "/bin/diskhealth", "nosuch");
+	STATUS(2, "/bin/diskhealth", "/devices/nosuch");
+}
+
 // The program behind the links.
 static void links(void) {
 	CONTAINS("\nxxd\n", "/system/commands/systools", "--list");
@@ -639,6 +646,7 @@ int main(void) {
 	RUN(watching);
 	RUN(power);
 	RUN(hardware);
+	RUN(storage);
 	RUN(links);
 	return check_end();
 }

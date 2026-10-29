@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use radix_abi::Status;
 use radix_abi::block as request;
 use radix_abi::errors::{File as FileError, Kernel};
-use radix_block::{DeviceRef, Info, partition};
+use radix_block::{DeviceRef, Health, Info, partition};
 use radix_hal::{Devices, PciSegment, UserMode};
 use radix_hw::pci::{self, Function};
 use radix_klog::{TextBuf, info, warn};
@@ -570,8 +570,37 @@ pub fn control(
             crate::swap::on(device, u32::from_le_bytes(flags))
         }
         request::SWAP_OFF => crate::swap::off(device),
+        request::GET_HEALTH => health(device, argument),
         _ => Err(Kernel::NotTerminal.status(0)),
     }
+}
+
+const _: () = assert!(request::HEALTH_SIZE == 8 + 1024);
+
+/// GET_HEALTH: writes what `device` says of its health to the caller's
+/// `argument`, its kind and flags, then 1,024 bytes of its record.
+fn health(device: &DeviceRef, argument: u64) -> Result<(), Status> {
+    let mut page = radix_block::mem::CachePage::new().map_err(|_| Kernel::NoMemory.status(0))?;
+    let (kind, flags) = match device.health(&mut page).map_err(block_status)? {
+        Health::Ata => (request::HEALTH_ATA, 0),
+        Health::AtaOff => {
+            page.bytes_mut()[..1024].fill(0);
+            (request::HEALTH_ATA, request::HEALTH_SMART_OFF)
+        }
+        Health::Nvme => {
+            page.bytes_mut()[512..1024].fill(0);
+            (request::HEALTH_NVME, 0)
+        }
+    };
+    let mut head = [0u8; 8];
+    head[..4].copy_from_slice(&kind.to_le_bytes());
+    head[4..].copy_from_slice(&flags.to_le_bytes());
+    let record = argument.checked_add(head.len() as u64);
+    let copied = record.is_some_and(|record| {
+        <Arch as UserMode>::copy_to_user(argument, &head)
+            && <Arch as UserMode>::copy_to_user(record, &page.bytes()[..1024])
+    });
+    if copied { Ok(()) } else { Err(Kernel::BadAddress.status(0)) }
 }
 
 /// The status of a block layer error.
