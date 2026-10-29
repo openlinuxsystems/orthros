@@ -283,9 +283,15 @@ _/users_ and _/shared_ are empty directories of the root's tmpfs.
 
 At boot the kernel finds each disk, reads its partition table (MBR or
 GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
-virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_, _nvme0n2_ for the
+virtio disks, _sda_, _sdb_ for SATA disks and then USB ones (sticks, card
+readers and USB disks, each taking the lowest letter free, at boot in the
+order they were found), _nvme0n1_, _nvme0n2_ for the
 namespaces of the first NVMe controller and _nvme1n1_ for the second's,
 _vda1_ for a partition, and _nvme0n1p1_ after a name that ends in a digit.
+A USB disk plugged in later appears then, and one unplugged leaves
+_/devices_ and _/kernel/block_ with its partitions, its letter free for
+the next; a filesystem mounted from it stays mounted, its requests
+failing (ADR 0161).
 When the machine is powered off or restarted, every disk's write cache is
 emptied and each NVMe controller is shut down. Each
 appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts past
@@ -300,7 +306,10 @@ and for ext4 (and ext2 and ext3) when it does: no extents, quotas,
 inline data, encryption, case folding, MMP, fast commits or a journal on
 another device. A mount replays the journal Linux left on ext4, and the
 log of fsyncs it left on Btrfs. A device with
-none of them is left alone. Disks are found once, at boot. Removable media, mounted by label at _/volumes/_*label*
+none of them is left alone, and so is an EFI system partition, which
+boots the machine and is not one of the user's volumes. Spark mounts the
+disks found at boot, USB sticks plugged in then among them. Removable
+media, mounted by label at _/volumes/_*label* as they are plugged in,
 with safe eject, come with *volumed* in Phase 11.
 
 A disk or partition in _/devices_ is read and written raw, at any offset and
@@ -376,14 +385,16 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 # LIMITS
 
-- virtio block devices, SATA disks on AHCI controllers and NVMe
-  namespaces have drivers; USB storage comes in Phase 11. Port
+- virtio block devices, SATA disks on AHCI controllers, NVMe namespaces
+  and USB disks of the Bulk-Only Transport have drivers; USB Attached
+  SCSI (UAS) comes later in Phase 11. Port
   multipliers, optical drives, disks with logical sectors larger than
   4096 bytes and NVMe namespaces with metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
-- There is no name cache and no hot plug yet, and FAT files are read a
-  page per request (Btrfs reads ahead).
+- There is no name cache, disks other than USB ones are not plugged in
+  or out while the machine runs, and FAT files are read a page per
+  request (Btrfs reads ahead).
 
 # SEE ALSO
 

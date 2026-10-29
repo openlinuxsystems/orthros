@@ -234,6 +234,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    and on the host
   storage-sata     the same on four SATA disks of an AHCI controller, the
                    partition in a GPT
+  storage-usb      the same on four USB sticks, two behind a full-speed hub;
+                   then one is pulled out and plugged in again
   storage-nvme     the same on four NVMe namespaces of two controllers,
                    with a queue for each of 4 CPUs, the partition in a GPT
   storage-4k       the same on two virtio disks and two NVMe namespaces of

@@ -30,7 +30,9 @@
 //! ports it reports changed are queued, and the thread looks at each in
 //! turn, so that a hub found behind a hub is never set up from inside
 //! another's setup. A device's HID interfaces, its keyboards, mice and
-//! tablets, are then read from [`super::hid`].
+//! tablets, are then read from [`super::hid`], and its mass storage
+//! interface gets a thread of its own ([`super::storage`]), whose
+//! transfers this thread carries for it.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -49,6 +51,7 @@ use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place
 use super::STARTS;
 use super::hid::{self, Hid, HidPlan, MAX_HIDS};
 use super::hub::Hub;
+use super::storage::{LinkRef, StoragePlan};
 use crate::Arch;
 use crate::sched;
 
@@ -149,6 +152,8 @@ pub(super) struct Attached {
     pub(super) hub: Option<Hub>,
     /// Its HID interfaces that are read.
     pub(super) hids: Vec<Hid, Kmalloc>,
+    /// Its mass storage interface's link with its thread, if it has one.
+    pub(super) storage: Option<LinkRef>,
 }
 
 /// A controller, as its thread runs it.
@@ -204,6 +209,8 @@ struct Plan {
     /// Its HID interfaces, the first `hid_count`.
     hids: [HidPlan; MAX_HIDS],
     hid_count: usize,
+    /// Its first mass storage interface.
+    storage: Option<StoragePlan>,
 }
 
 /// The thread of controller `index`.
@@ -211,17 +218,32 @@ pub fn run(index: usize) {
     let Some(start) = STARTS.get(index).and_then(radix_sync::Once::get) else { return };
     let controller = Controller::start(index + 1, start);
     super::dbc::looked();
-    let Some(mut controller) = controller else { return };
+    let Some(mut controller) = controller else {
+        super::looked();
+        return;
+    };
     let ports = controller.xhci.info().ports;
     for port in 1..=ports {
         controller.port_changed(port);
     }
+    // The devices behind the hubs found too, before boot goes on.
+    loop {
+        controller.events();
+        if !controller.work() {
+            break;
+        }
+    }
+    super::looked();
     let sleep = if start.interrupt.is_some() && !controller.dbc { IDLE_NS } else { POLL_NS };
     loop {
-        let busy = controller.events() | controller.work() | controller.lights();
+        let busy =
+            controller.events() | controller.work() | controller.lights() | controller.storage();
         if controller.xhci.failed() {
             if controller.dbc {
                 super::dbc::stop();
+            }
+            for link in controller.devices.iter().filter_map(|d| d.storage.as_ref()) {
+                link.gone();
             }
             error!(
                 "USB: bus {}: the controller stopped with an error; its devices are gone",
@@ -429,6 +451,8 @@ impl Controller {
             attached.hids.iter().position(|h| h.endpoint == endpoint && h.pending == trb)
         {
             self.hid_report(at, index, code, residual);
+        } else {
+            self.storage_transfer(at, trb, endpoint, code, residual);
         }
     }
 
@@ -454,6 +478,9 @@ impl Controller {
         {
             let mut gone = self.devices.remove(at);
             hid::gone(&mut gone.hids);
+            if let Some(link) = gone.storage.take() {
+                link.gone();
+            }
             let slot = gone.device.slot();
             info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
             self.give_back(gone.device, gone.path);
@@ -585,7 +612,14 @@ impl Controller {
             }
         };
         let slot = device.slot();
-        let attached = Attached { path, device, name: name.clone(), hub: None, hids: hid::none() };
+        let attached = Attached {
+            path,
+            device,
+            name: name.clone(),
+            hub: None,
+            hids: hid::none(),
+            storage: None,
+        };
         let _ = self.devices.push_within_capacity(attached);
         if let Some(status) = plan.hub
             && let Err(why) = self.start_hub(slot, status)
@@ -600,6 +634,15 @@ impl Controller {
                     interface.interface
                 );
             }
+        }
+        if let Some(storage) = plan.storage
+            && let Err(why) = self.start_storage(slot, storage)
+        {
+            warn!(
+                "USB: {}: interface {}: its disks cannot be used: {why}",
+                Name(self.bus, path),
+                storage.interface
+            );
         }
         Ok(())
     }
@@ -672,6 +715,7 @@ impl Controller {
             hub: None,
             hids: [HidPlan::default(); MAX_HIDS],
             hid_count: 0,
+            storage: None,
         };
         let mut named: [&str; 4] = [""; 4];
         let mut count = 0;
@@ -682,6 +726,10 @@ impl Controller {
             if count < named.len() && !named[..count].contains(&this) {
                 named[count] = this;
                 count += 1;
+            }
+            if d.class == class::MASS_STORAGE && plan.storage.is_none() {
+                let strings = (found.serial_string, language);
+                plan.storage = Some(StoragePlan::of(d, interface.endpoints(), strings));
             }
             if d.class == class::HID && plan.hid_count < MAX_HIDS {
                 let descriptor = interface

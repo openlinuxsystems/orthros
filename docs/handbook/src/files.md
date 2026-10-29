@@ -82,8 +82,9 @@ of the tree that changes is a subvolume of its own:
 | `@shared` | `/shared` |
 | `@snapshots` | not mounted |
 
-When Dukovo boots from a disk it can see, a SATA, NVMe or virtio disk,
-Spark mounts these from it, and settings, files and everything else
+When Dukovo boots from a disk it can see, a SATA, NVMe, virtio or USB
+disk (a USB stick the image was written to, since Phase 11b), Spark
+mounts these from it, and settings, files and everything else
 written there are kept from one boot to the next. `/processes/mounts`
 shows each with its disk:
 
@@ -92,8 +93,8 @@ sda5 /system btrfs ro label=dukovo-root
 sda5 /system/settings btrfs rw label=dukovo-root
 ```
 
-Booted from a USB stick, which Dukovo cannot read until Phase 11, or
-from a CD, `/system` is the system the boot loader loaded and the rest is
+Booted from a CD, or from a disk with no Dukovo root partition,
+`/system` is the system the boot loader loaded and the rest is
 in memory: each boot starts afresh from the default settings, and
 `/applications`, `/users` and `/shared` start empty. An image for
 optical media (`./ob image --iso`) has no Dukovo root partition.

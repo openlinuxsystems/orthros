@@ -17,6 +17,7 @@ members = [
     "cap",
     "drivers/ahci",
     "drivers/nvme",
+    "drivers/scsi",
     "drivers/usb",
     "drivers/virtio",
     "drivers/xhci",

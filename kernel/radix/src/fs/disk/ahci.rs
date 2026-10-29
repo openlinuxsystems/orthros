@@ -3,7 +3,8 @@
 
 //! AHCI controllers (`radix-ahci`) and the SATA disks on them, named
 //! `sda`, `sdb` and on, in the order the controllers and their ports are
-//! found, as Linux names them.
+//! found, as Linux names them (the first `sd` letters free, which USB
+//! disks share).
 //!
 //! [`bind`] maps a controller's registers (BAR 5), takes it over from the
 //! firmware, gives it one MSI for all its ports, and finds its disks. Each
@@ -183,9 +184,8 @@ impl SataPort {
     }
 }
 
-/// Sets up the AHCI controller `function` and the disks on it, the first
-/// named after letter `next`, which moves past them. Kept out of the
-/// frame of `init`'s scan.
+/// Sets up the AHCI controller `function` and the disks on it, counting
+/// them in `next`. Kept out of the frame of `init`'s scan.
 #[inline(never)]
 pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
     let index = HOSTS.iter().position(|host| host.get().is_none()).ok_or("too many controllers")?;
@@ -254,7 +254,7 @@ pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Sets up the disk on port `number` of `host`, named after letter `next`.
+/// Sets up the disk on port `number` of `host`, counted in `next`.
 fn add(
     host: &Host,
     number: usize,
@@ -262,11 +262,21 @@ fn add(
     next: &mut usize,
     interrupt: bool,
 ) -> Result<(), &'static str> {
-    if *next >= 26 {
-        return Err("too many SATA disks");
-    }
-    let mut name = Name::new();
-    let _ = write!(name, "sd{}", (b'a' + *next as u8) as char);
+    let (letter, name) = super::take_sd_name().ok_or("too many SATA and USB disks")?;
+    add_named(host, number, port, interrupt, &name)
+        .inspect_err(|_| super::give_back_sd_letter(letter))?;
+    *next += 1;
+    Ok(())
+}
+
+/// Sets up the disk on port `number` of `host`, named `name`.
+fn add_named(
+    host: &Host,
+    number: usize,
+    port: Port,
+    interrupt: bool,
+    name: &Name,
+) -> Result<(), &'static str> {
     let found = port.info();
     let identity = port.identity().copied();
     // The disk counts in its own sectors, the block layer in 512 bytes.
@@ -294,7 +304,6 @@ fn add(
     .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = host.disks[number].set(disk.clone());
-    *next += 1;
     let model = identity.as_ref().map_or("", |id| trimmed(&id.model));
     let mut queued = TextBuf::<24>::new();
     if found.queued {
@@ -314,9 +323,12 @@ fn add(
     let volume = Volume::new(disk, 0, info);
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
-    let ident =
-        identity.map(|id| Ident { model: id.model, serial: id.serial, firmware: id.firmware });
+    let ident = identity.map(|id| Ident {
+        model: id.model,
+        serial: super::padded(&id.serial),
+        firmware: id.firmware,
+    });
     register(Entry { name: name.clone(), device: device.clone(), place: None, ident });
-    partitions(&name, &device);
+    partitions(name, &device);
     Ok(())
 }

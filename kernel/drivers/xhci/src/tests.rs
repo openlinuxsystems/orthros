@@ -220,6 +220,8 @@ struct State {
     stuck_in_reset: bool,
     /// It never answers commands.
     deaf: bool,
+    /// The xHCI version it implements, in BCD.
+    version: u16,
     now: u64,
     /// A root port whose device is pulled out once the clock passes this
     /// time, as the driver waits.
@@ -246,6 +248,9 @@ struct State {
     er_enqueue: u64,
     er_cycle: bool,
     dropped: u32,
+    /// The endpoints dropped and added again (Configure Endpoint): slot
+    /// and device context index.
+    restarted: Vec<(u8, u8)>,
 
     cmd_dequeue: u64,
     cmd_cycle: bool,
@@ -256,6 +261,10 @@ struct State {
     commands: Vec<(u32, u8)>,
     requests: Vec<(u8, Setup)>,
     port_writes: Vec<(u8, u32)>,
+    /// Each TD's TRBs' TD Size fields, with its endpoint.
+    td_sizes: Vec<(u8, Vec<u32>)>,
+    /// Whether each Link TRB met in the middle of a TD had Chain set.
+    links_in_tds: Vec<bool>,
 
     /// Its Debug Capability, and the debug host on its cable.
     dbc: Option<dbc::SimDbc>,
@@ -277,6 +286,7 @@ impl State {
             legacy: None,
             stuck_in_reset: false,
             deaf: false,
+            version: 0x0100,
             now: 0,
             pull_at: None,
             usbcmd: 0,
@@ -299,6 +309,7 @@ impl State {
             er_enqueue: 0,
             er_cycle: true,
             dropped: 0,
+            restarted: Vec::new(),
             cmd_dequeue: 0,
             cmd_cycle: true,
             cmd_running: false,
@@ -307,6 +318,8 @@ impl State {
             commands: Vec::new(),
             requests: Vec::new(),
             port_writes: Vec::new(),
+            td_sizes: Vec::new(),
+            links_in_tds: Vec::new(),
             dbc: None,
         }
     }
@@ -580,6 +593,7 @@ impl State {
             }
             kind::CONFIGURE_ENDPOINT => {
                 let input = parameter;
+                let drop = State::read32(input);
                 let add = State::read32(input + 4);
                 let slot_ctx = State::read32(input + csz);
                 let ports = State::read32(input + csz + 4) >> 24;
@@ -601,10 +615,13 @@ impl State {
                     let dequeue = State::read64(at + 8);
                     let d4 = State::read32(at + 16);
                     let kind = (d1 >> 3) & 7;
+                    // A ring just made starts with its cycle state set; one
+                    // dropped and added again goes on from where it is.
+                    let fresh = drop & 1 << index == 0;
                     if kind == 0
                         || kind == 4
                         || d1 >> 16 == 0
-                        || dequeue & 1 == 0
+                        || (fresh && dequeue & 1 == 0)
                         || index > entries
                     {
                         return (code::PARAMETER, slot);
@@ -614,7 +631,7 @@ impl State {
                         SimEndpoint {
                             ring: SimRing {
                                 dequeue: dequeue & !0xf,
-                                cycle: true,
+                                cycle: dequeue & 1 != 0,
                                 state: EpState::Running,
                                 pending: None,
                             },
@@ -627,6 +644,12 @@ impl State {
                             average: d4 & 0xffff,
                         },
                     );
+                }
+                for index in 2..32u8 {
+                    if drop & 1 << index != 0 {
+                        entry.endpoints.remove(&index);
+                        self.restarted.push((slot, index));
+                    }
                 }
                 entry.entries = entries;
                 entry.endpoints.extend(added);
@@ -796,9 +819,11 @@ impl State {
         }
     }
 
-    /// Runs the transfers on endpoint `index` of slot `slot`: each a
-    /// Normal TRB. An IN transfer takes the device's next report, or
-    /// waits for one; an OUT one's data is kept.
+    /// Runs the transfers on endpoint `index` of slot `slot`: each a TD
+    /// of Normal TRBs, chained. An IN transfer takes the device's next
+    /// report, or waits for one, and ends at the TRB where the report
+    /// does; an OUT one's data is kept, as one transfer. Events come for
+    /// the TRBs that ask for them.
     fn run_endpoint(&mut self, slot: u8, index: u8) {
         loop {
             let Some(entry) = self.slots.get(&slot) else { return };
@@ -809,33 +834,48 @@ impl State {
                 return;
             }
             ring.state = EpState::Running;
-            let (parameter, status, control) = State::read_trb(ring.dequeue);
-            if (control & 1 != 0) != ring.cycle {
-                self.set_ring(slot, index, ring);
-                return;
-            }
-            if (control >> 10) & 0x3f == kind::LINK {
-                ring.dequeue = parameter;
-                if control & control::TOGGLE_CYCLE != 0 {
-                    ring.cycle = !ring.cycle;
+            // The TD, through Link TRBs: (address, buffer, status, control).
+            let mut trbs = Vec::new();
+            let (mut at, mut cycle) = (ring.dequeue, ring.cycle);
+            loop {
+                let (parameter, status, control) = State::read_trb(at);
+                if (control & 1 != 0) != cycle {
+                    // Not all handed over yet: the doorbell comes again.
+                    if trbs.is_empty() {
+                        (ring.dequeue, ring.cycle) = (at, cycle);
+                    }
+                    self.set_ring(slot, index, ring);
+                    return;
                 }
-                self.set_ring(slot, index, ring);
-                continue;
+                if (control >> 10) & 0x3f == kind::LINK {
+                    if !trbs.is_empty() {
+                        self.links_in_tds.push(control & control::CHAIN != 0);
+                    }
+                    at = parameter;
+                    if control & control::TOGGLE_CYCLE != 0 {
+                        cycle = !cycle;
+                    }
+                    continue;
+                }
+                assert_eq!((control >> 10) & 0x3f, kind::NORMAL);
+                trbs.push((at, parameter, status, control));
+                at += TRB_SIZE as u64;
+                if control & control::CHAIN == 0 {
+                    break;
+                }
             }
-            assert_eq!((control >> 10) & 0x3f, kind::NORMAL);
-            let at = ring.dequeue;
+            let first = trbs[0].0;
             let event = |code: u8, residual: u32| {
                 (
                     u32::from(code) << 24 | residual,
                     kind::TRANSFER_EVENT << 10 | u32::from(index) << 16 | u32::from(slot) << 24,
                 )
             };
-            let length = status & 0x1_ffff;
             let Some(mut device) = self.device(port, route) else {
                 ring.state = EpState::Halted;
                 self.set_ring(slot, index, ring);
                 let (status, control) = event(code::TRANSACTION, 0);
-                self.post(at, status, control);
+                self.post(first, status, control);
                 return;
             };
             if device.stall_next {
@@ -844,33 +884,56 @@ impl State {
                 self.set_ring(slot, index, ring);
                 self.put_device(port, route, device);
                 let (status, control) = event(code::STALL, 0);
-                self.post(at, status, control);
+                self.post(first, status, control);
                 return;
             }
-            let (status, control) = if index & 1 != 0 {
+            let mut ending = None;
+            if index & 1 != 0 {
                 let Some(report) = device.reports.pop_front() else {
-                    ring.pending = Some(at);
+                    ring.pending = Some(first);
                     self.set_ring(slot, index, ring);
                     return;
                 };
-                let moved = report.len().min(length as usize);
-                fake_memory_write(parameter, &report[..moved]);
-                let residual = length - moved as u32;
-                if residual > 0 && control & control::ISP != 0 {
-                    event(code::SHORT_PACKET, residual)
-                } else {
-                    event(code::SUCCESS, 0)
+                let mut offset = 0;
+                for &(trb, parameter, status, control) in &trbs {
+                    let length = (status & 0x1_ffff) as usize;
+                    let moved = length.min(report.len() - offset);
+                    fake_memory_write(parameter, &report[offset..offset + moved]);
+                    offset += moved;
+                    if moved < length {
+                        // Short: the rest of the TD is skipped.
+                        let residual = (length - moved) as u32;
+                        if control & control::ISP != 0 {
+                            ending = Some((trb, event(code::SHORT_PACKET, residual)));
+                        } else if control & control::IOC != 0 {
+                            ending = Some((trb, event(code::SUCCESS, residual)));
+                        }
+                        break;
+                    }
+                    if control & control::IOC != 0 {
+                        ending = Some((trb, event(code::SUCCESS, 0)));
+                    }
                 }
             } else {
-                let mut data = std::vec![0u8; length as usize];
-                fake_memory(parameter, &mut data);
+                let mut data = Vec::new();
+                for &(_, parameter, status, _) in &trbs {
+                    let mut part = std::vec![0u8; (status & 0x1_ffff) as usize];
+                    fake_memory(parameter, &mut part);
+                    data.extend(part);
+                }
                 device.received.push(data);
-                event(code::SUCCESS, 0)
-            };
-            ring.dequeue += TRB_SIZE as u64;
+                let &(trb, _, _, control) = trbs.last().unwrap();
+                if control & control::IOC != 0 {
+                    ending = Some((trb, event(code::SUCCESS, 0)));
+                }
+            }
+            self.td_sizes.push((index, trbs.iter().map(|t| (t.2 >> 17) & 0x1f).collect()));
+            (ring.dequeue, ring.cycle) = (at, cycle);
             self.set_ring(slot, index, ring);
             self.put_device(port, route, device);
-            self.post(at, status, control);
+            if let Some((trb, (status, control))) = ending {
+                self.post(trb, status, control);
+            }
         }
     }
 
@@ -940,7 +1003,7 @@ impl Registers for Sim {
         // The protocols follow the legacy capability, or come first.
         let protocols_at = if s.legacy.is_some() { XCAPS + 8 } else { XCAPS };
         let value = match offset {
-            0x00 => (0x0100 << 16) | CAPLENGTH as u32,
+            0x00 => (u32::from(s.version) << 16) | CAPLENGTH as u32,
             0x04 => u32::from(s.ports) << 24 | 1 << 8 | u32::from(s.slots_max),
             0x08 => {
                 let sp = s.scratchpads;
@@ -1819,6 +1882,188 @@ fn bulk_transfers_carry_their_data_both_ways() {
         transfer(&mut xhci, &mut host),
         Some(Event::Transfer { trb, code: code::SUCCESS, slot, endpoint: 3, residual: 0 })
     );
+}
+
+/// Buffers of `pages` pages of fake memory, `len` bytes of each.
+fn buffers(pages: usize, len: u32) -> (Dma, Vec<(u64, u32)>) {
+    let memory = Dma::fake(pages * 4096);
+    let frames = (0..pages).map(|i| (memory.phys() + (i * 4096) as u64, len)).collect();
+    (memory, frames)
+}
+
+#[test]
+fn a_transfer_of_many_buffers_is_one_td_that_ends_where_the_data_does() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, bulk(3));
+    let slot = device.slot();
+    let (memory, frames) = buffers(3, 4096);
+    let data: Vec<u8> = (0..3 * 4096).map(|i| (i / 7) as u8).collect();
+    sim.state().report(6, 0, &data);
+    let td = device.submit_frames(&xhci, 3, &frames).unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb: td.last, code: code::SUCCESS, slot, endpoint: 3, residual: 0 })
+    );
+    assert_eq!(td.moved(&frames, td.last, 0), Some(3 * 4096));
+    let mut came = std::vec![0u8; 3 * 4096];
+    memory.read(0, &mut came);
+    assert_eq!(came, data);
+    // The packets of 512 bytes left after each TRB.
+    assert_eq!(sim.state().td_sizes.last(), Some(&(3, std::vec![16, 8, 0])));
+    // A short one ends in its second buffer, and says how much of that
+    // did not come; the third is skipped.
+    sim.state().report(6, 0, &data[..5000]);
+    let td = device.submit_frames(&xhci, 3, &frames).unwrap();
+    let Some(Event::Transfer { trb, code, residual, .. }) = transfer(&mut xhci, &mut host) else {
+        panic!("no event");
+    };
+    assert_eq!((code, residual), (code::SHORT_PACKET, 4096 - 904));
+    assert_eq!(td.position(trb), Some(1));
+    assert_eq!(td.moved(&frames, trb, residual), Some(5000));
+    assert_eq!(td.position(td.first), Some(0));
+    assert_eq!(td.position(td.last + 16), None);
+    // Out: the buffers' bytes go as one transfer.
+    let td = device.submit_frames(&xhci, 4, &frames[..2]).unwrap();
+    assert_eq!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb: td.last, code: code::SUCCESS, slot, endpoint: 4, residual: 0 })
+    );
+    let s = sim.state();
+    assert_eq!(s.devices[5].as_ref().unwrap().received.last().unwrap()[..], data[..8192]);
+    assert_eq!(s.td_sizes.last(), Some(&(4, std::vec![8, 0])));
+}
+
+#[test]
+fn a_td_through_the_link_trb_is_chained_across_it() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, bulk(3));
+    let (_memory, frames) = buffers(4, 1024);
+    // 253 of the ring's 255 TRBs, a TD of one each.
+    for i in 0..RING_TRBS - 3 {
+        sim.state().report(6, 0, &[i as u8; 1024]);
+        let td = device.submit_frames(&xhci, 3, &frames[..1]).unwrap();
+        assert!(
+            matches!(transfer(&mut xhci, &mut host), Some(Event::Transfer { trb, .. }) if trb == td.last)
+        );
+    }
+    let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    sim.state().report(6, 0, &data);
+    let td = device.submit_frames(&xhci, 3, &frames).unwrap();
+    assert!(td.last < td.first, "it wrapped");
+    assert_eq!(
+        transfer(&mut xhci, &mut host).map(
+            |e| matches!(e, Event::Transfer { trb, code: code::SUCCESS, .. } if trb == td.last)
+        ),
+        Some(true)
+    );
+    assert_eq!(td.position(td.last), Some(3));
+    assert_eq!(td.moved(&frames, td.last, 0), Some(4096));
+    assert_eq!(sim.state().links_in_tds, [true]);
+    let mut came = std::vec![0u8; 1024];
+    for (i, &(phys, _)) in frames.iter().enumerate() {
+        fake_memory(phys, &mut came);
+        assert_eq!(came[..], data[i * 1024..(i + 1) * 1024]);
+    }
+}
+
+#[test]
+fn td_sizes_are_kilobytes_left_before_xhci_1_0() {
+    let state = State { version: 0x0096, ..State::new() };
+    let sim = Sim::new(state);
+    let (mut xhci, mut host, mut device) = configured(&sim, bulk(3));
+    let (_memory, frames) = buffers(3, 4096);
+    let td = device.submit_frames(&xhci, 4, &frames).unwrap();
+    assert!(
+        matches!(transfer(&mut xhci, &mut host), Some(Event::Transfer { trb, .. }) if trb == td.last)
+    );
+    // This TRB's bytes and the rest's, in KiB.
+    assert_eq!(sim.state().td_sizes.last(), Some(&(4, std::vec![12, 8, 0])));
+}
+
+#[test]
+fn transfers_of_buffers_the_controller_cannot_take_are_refused() {
+    let sim = Sim::new(State::new());
+    let (xhci, _host, mut device) = configured(&sim, bulk(3));
+    let (memory, frames) = buffers(2, 4096);
+    let base = memory.phys();
+    // 16 bytes before a 64 KiB boundary; nothing is read before the
+    // buffers are looked at.
+    let boundary = (base | 0xffff) + 1 - 0x10;
+    for bad in [
+        std::vec![],
+        std::vec![(base, 0)],
+        std::vec![(boundary, 0x20)],
+        std::vec![(base, 0x1_0001)],
+        std::vec![(base, 512); MAX_TD_BUFFERS + 1],
+    ] {
+        assert_eq!(device.submit_frames(&xhci, 3, &bad), Err(Error::BadRequest), "{bad:x?}");
+    }
+    // Endpoint 0, and one it was not configured with.
+    assert_eq!(device.submit_frames(&xhci, 1, &frames), Err(Error::BadRequest));
+    assert_eq!(device.submit_frames(&xhci, 9, &frames), Err(Error::BadRequest));
+}
+
+#[test]
+fn clearing_a_halt_starts_the_pipe_over_on_both_sides_whatever_its_state() {
+    let sim = Sim::new(State::new());
+    let (mut xhci, mut host, mut device) = configured(&sim, bulk(3));
+    let slot = device.slot();
+    let (_memory, frames) = buffers(1, 512);
+    // Running, a transfer waiting on it: stopped, then dropped and added
+    // again, which starts the controller's sequence over.
+    let waiting = device.submit_frames(&xhci, 3, &frames).unwrap();
+    device.clear_halt(&mut xhci, &mut host, 3).unwrap();
+    assert!(host.others.iter().any(|e| matches!(
+        e,
+        Event::Transfer { trb, code: code::STOPPED, endpoint: 3, .. } if *trb == waiting.first
+    )));
+    host.others.clear();
+    {
+        let s = sim.state();
+        let commands: Vec<u32> = s.commands.iter().rev().take(3).map(|&(kind, _)| kind).collect();
+        assert_eq!(commands, [kind::CONFIGURE_ENDPOINT, kind::SET_TR_DEQUEUE, kind::STOP_ENDPOINT]);
+        assert_eq!(s.restarted, [(slot, 3)]);
+        assert_eq!(s.requests.last().unwrap().1, Setup::clear_halt(0x81));
+        assert_eq!(s.slots[&slot].endpoints[&3].max_packet, 512);
+    }
+    // It works after, from where the driver goes on.
+    sim.state().report(6, 0, &[7; 512]);
+    let td = device.submit_frames(&xhci, 3, &frames).unwrap();
+    assert!(matches!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::SUCCESS, .. }) if trb == td.last
+    ));
+    // Halted by a stall: Reset Endpoint first, which Stop Endpoint asks
+    // for.
+    sim.state().devices[5].as_mut().unwrap().stall_next = true;
+    let td = device.submit_frames(&xhci, 4, &frames).unwrap();
+    assert!(matches!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::STALL, .. }) if trb == td.first
+    ));
+    device.clear_halt(&mut xhci, &mut host, 4).unwrap();
+    {
+        let s = sim.state();
+        let commands: Vec<u32> = s.commands.iter().rev().take(4).map(|&(kind, _)| kind).collect();
+        assert_eq!(
+            commands,
+            [
+                kind::CONFIGURE_ENDPOINT,
+                kind::SET_TR_DEQUEUE,
+                kind::RESET_ENDPOINT,
+                kind::STOP_ENDPOINT
+            ]
+        );
+        assert_eq!(s.restarted, [(slot, 3), (slot, 4)]);
+        assert_eq!(s.requests.last().unwrap().1, Setup::clear_halt(0x02));
+    }
+    let td = device.submit_frames(&xhci, 4, &frames).unwrap();
+    assert!(matches!(
+        transfer(&mut xhci, &mut host),
+        Some(Event::Transfer { trb, code: code::SUCCESS, .. }) if trb == td.last
+    ));
+    assert_eq!(device.clear_halt(&mut xhci, &mut host, 1), Err(Error::BadRequest));
+    assert_eq!(device.clear_halt(&mut xhci, &mut host, 9), Err(Error::BadRequest));
 }
 
 #[test]

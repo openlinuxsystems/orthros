@@ -415,8 +415,11 @@ fn add(
         if info.discard_sectors > 0 { ", deallocates" } else { "" },
     );
     let device: DeviceRef = volume;
-    let ident =
-        Ident { model: identity.model, serial: identity.serial, firmware: identity.firmware };
+    let ident = Ident {
+        model: identity.model,
+        serial: super::padded(&identity.serial),
+        firmware: identity.firmware,
+    };
     register(Entry { name: name.clone(), device: device.clone(), place: None, ident: Some(ident) });
     partitions(&name, &device);
 }

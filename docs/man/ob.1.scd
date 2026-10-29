@@ -541,6 +541,17 @@ _target/userspace/_).
 		_sdd1_ with its GPT name. The host checks that both copies of
 		the GPT are as it wrote them.
 
+	*storage-usb*
+		The *storage* test with the same four disks as USB sticks
+		(QEMU's *usb-storage*) on the boot stick's xHCI controller: two
+		at SuperSpeed on root ports, and two at full speed behind a hub,
+		the partition in a GPT. The kernel must name them _sdb_ to
+		_sde_ after the boot stick's _sda_, say where each is, and
+		name the partition _sde1_; Spark leaves the boot stick's EFI
+		system partition alone. After the second boot's check, the
+		first stick is pulled out, which takes _sdb_ away, and plugged
+		in again, which gives it _sdb_ again.
+
 	*storage-nvme*
 		The *storage* test with the same four disks as NVMe namespaces,
 		two on each of two controllers (QEMU's *nvme* and *nvme-ns*), on

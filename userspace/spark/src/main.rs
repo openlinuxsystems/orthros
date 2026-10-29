@@ -500,10 +500,16 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
     }
 }
 
+/// The type of an EFI system partition, as `/kernel/block` gives it: in
+/// a GPT, and in an MBR.
+const EFI_SYSTEM: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
+
 /// Mounts the FAT, exFAT, Btrfs or ext4 filesystem of each disk
 /// partition, or of each disk with no partitions, at `/volumes/<name>`:
-/// a Btrfs of several disks once, at the first of them. Returns the names
-/// of those it mounted Btrfs from, and how.
+/// a Btrfs of several disks once, at the first of them. EFI system
+/// partitions are left alone: what boots the machine is no volume of the
+/// user's, as Windows, macOS and Linux's udisks have it. Returns the
+/// names of those it mounted Btrfs from, and how.
 fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
@@ -527,8 +533,16 @@ fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
     };
+    let efi_system = |name: &str| {
+        root.read_file(&format!("kernel/block/{name}/parttype"))
+            .is_ok_and(|kind| EFI_SYSTEM.contains(&String::from_utf8_lossy(&kind).trim_end()))
+    };
     let mut btrfs = Vec::new();
     for name in devices.iter().filter(|name| !partitioned(name)) {
+        if efi_system(name) {
+            println!("spark: {name} is an EFI system partition; left alone");
+            continue;
+        }
         if let Some(flags) = mount_disk(root, name, compress.contains(&name.as_str())) {
             btrfs.push((name.clone(), flags));
         }

@@ -560,7 +560,31 @@ once it has been named. A device that cannot be set up twice is left
 alone until it is unplugged.
 Hub ports past 15 and hubs more than five deep are not used. Before the
 machine is powered off or restarted, every controller is halted.
-Keyboards and mice, and USB storage, come later (ADRs 0146 and 0147).
+Keyboards, mice and tablets are read through their HID reports (ADR
+0148).
+
+A USB stick, card reader or USB disk speaking the Bulk-Only Transport
+gets a kernel thread, _usb-storage_, which finds the disks behind it and
+serves them (ADR 0161). Each disk takes the lowest _sd_ letter free after
+the SATA disks', and is logged with where it is, its SCSI vendor,
+product and revision, its block size, and whether it is removable,
+write-protected or has a write cache; its partitions follow, as for any
+disk (*radix-files*(7)). The boot waits up to 5 s, before Spark starts,
+for the devices plugged in at boot to be set up, so that their disks
+take letters in the order they were found and Spark mounts them.
+Unplugged, a stick's disks go:
+
+	USB: 1-1: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed
+	USB: 1-2: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed
+	Disk: sda is a USB disk of 151.3 MiB on 1-1: QEMU QEMU HARDDISK 2.5+, 512 bytes a block, removable, write cache
+	Disk: sda has a GPT with 4 partitions
+	Disk: sdb is a USB disk of 1.4 MiB on 1-2: QEMU QEMU HARDDISK 2.5+, 512 bytes a block, write cache
+	Disk: sdb has no partition table; it is used whole
+	USB: 1-2: QEMU USB HARDDRIVE was unplugged
+	Disk: sdb is gone with its USB device
+
+A device that speaks only USB Attached SCSI (UAS) is logged as one that
+cannot be used yet.
 
 With the *dbc* flag the first controller with a Debug Capability turns
 it on, and the console goes there as well (ADR 0160); each controller

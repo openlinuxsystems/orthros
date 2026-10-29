@@ -41,6 +41,7 @@ radix-mm = { path = "../mm" }
 radix-posix = { path = "../lib/posix" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
+radix-scsi = { path = "../drivers/scsi" }
 radix-sync = { path = "../lib/sync" }
 radix-tty = { path = "../lib/tty" }
 radix-usb = { path = "../drivers/usb" }

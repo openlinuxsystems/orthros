@@ -48,6 +48,28 @@ pub enum Kind {
     Gpt([u8; 16]),
 }
 
+impl core::fmt::Display for Kind {
+    /// As lsblk's PARTTYPE and blkid's PART_ENTRY_TYPE give it: the type
+    /// byte in hexadecimal (`0xef`), or the GUID in lowercase, its first
+    /// three fields little-endian on the disk
+    /// (`c12a7328-f81f-11d2-ba4b-00a0c93ec93b`).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let guid = match self {
+            Kind::Mbr(byte) => return write!(f, "{byte:#04x}"),
+            Kind::Gpt(guid) => guid,
+        };
+        for (i, at) in
+            [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15].into_iter().enumerate()
+        {
+            if matches!(i, 4 | 6 | 8 | 10) {
+                f.write_str("-")?;
+            }
+            write!(f, "{:02x}", guid[at])?;
+        }
+        Ok(())
+    }
+}
+
 /// A partition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Partition {
@@ -263,7 +285,10 @@ pub fn read(
 /// `size` blocks: a chain of extended boot records, each with a partition
 /// (relative to it) and the next record (relative to `base`). A record
 /// that cannot be read or is not one, or a link backwards or outside,
-/// ends the chain there, as on Linux, keeping what came before.
+/// ends the chain there, as on Linux, keeping what came before. Kept out
+/// of [`read`], as [`gpt`] is, so that each sector buffer is in a frame
+/// of its own, within the kernel's budget (ADR 0058).
+#[inline(never)]
 fn logical(
     disk: Disk,
     base: u64,
@@ -352,6 +377,7 @@ fn header(sector: &[u8; SECTOR], at: u64, disk: u64) -> Option<Header> {
 
 /// Reads a GPT: the primary header and its entries, or else the backup
 /// header in the disk's last block and its entries.
+#[inline(never)]
 fn gpt(disk: Disk, read: ReadSector<'_>, found: &mut KVec<Partition>) -> Result<Scheme, Error> {
     let mut sector = [0u8; SECTOR];
     for (at, scheme) in [(1, Scheme::Gpt), (disk.blocks - 1, Scheme::GptBackup)] {

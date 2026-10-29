@@ -23,7 +23,7 @@ the link: *lspci* reads _/sys/bus/pci/devices_, *lsblk* reads
 _/sys/block_. The files at the top, _version_, _cmdline_ and _cpus_, are
 Radix's own.
 
-This page describes _/kernel_ as of Phase 10 of the roadmap; later phases
+This page describes _/kernel_ as of Phase 11 of the roadmap; later phases
 add devices and settings, and settings that can be changed.
 
 # FILES
@@ -53,9 +53,19 @@ _/kernel/block/_*name*_/partition_, _start_
 	partition has these instead of a _queue_ directory, as on Linux,
 	whose tools read the queue of the partition's disk.
 
+_/kernel/block/_*name*_/parttype_
+	For a partition: its type, as *lsblk*(8)'s PARTTYPE and *blkid*(8)
+	give it: its MBR type byte in hexadecimal (*0x0c*, *0xef*), or its
+	GPT type's GUID in lowercase
+	(*c12a7328-f81f-11d2-ba4b-00a0c93ec93b* for an EFI system
+	partition). Linux has it only through udev; Radix has it here.
+
 _/kernel/block/_*name*_/device/model_, _serial_, _firmware_rev_
-	For a SATA or NVMe disk: its model, serial number and firmware
-	revision, as it gives them, without the padding. Linux has these for
+	For a SATA, NVMe or USB disk: its model, serial number and firmware
+	revision, as it gives them, without the padding. A USB disk's model
+	is its SCSI vendor and product, its firmware its SCSI revision, and
+	its serial number its USB device's, as udev's *ID_SERIAL_SHORT* has
+	it, up to 64 bytes. Linux has these for
 	an NVMe disk; for a SATA disk it cuts the model to 16 characters and
 	keeps the serial number elsewhere. A tool that must write to one
 	particular disk should find it by its serial number, since disk names
@@ -80,7 +90,7 @@ _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
 	covers, if the device discards; *0* and *0* if not.
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
-	virtio disks, _sda_, _sdb_ for SATA disks, _nvme0n1_ for the first
+	virtio disks, _sda_, _sdb_ for SATA and USB disks, _nvme0n1_ for the first
 	namespace of the first NVMe controller, _vda1_ for the first
 	partition of _vda_ and _nvme0n1p1_ for the first of _nvme0n1_. Linux puts a
 	partition's directory inside its disk's (_/sys/block/vda/vda1_) and

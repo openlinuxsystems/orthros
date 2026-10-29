@@ -10,11 +10,12 @@
 //! - `/kernel/version`, `/kernel/cmdline`, `/kernel/cpus`;
 //! - `/kernel/block/<name>/size` (in 512-byte sectors) and `ro` (0 or 1),
 //!   for every disk and partition; for a partition, its number in its
-//!   disk's table (`partition`) and its first sector (`start`); and for a
+//!   disk's table (`partition`), its first sector (`start`) and its type
+//!   as lsblk gives it (`parttype`, Radix's own); and for a
 //!   disk, in its `queue`, the sizes and flags of radix-block(2)'s
 //!   requests as Linux names them (`rotational`, `logical_block_size`,
 //!   `discard_max_bytes` and the rest), and in its `device` the `model`,
-//!   `serial` and `firmware_rev` it gives, for SATA and NVMe disks;
+//!   `serial` and `firmware_rev` it gives, for SATA, NVMe and USB disks;
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
@@ -143,6 +144,7 @@ impl Listing for Blocks {
         if let Some(place) = place {
             dir.add("partition", value(move |text| writeln!(text, "{}", place.number))?)?;
             dir.add("start", value(move |text| writeln!(text, "{}", place.first))?)?;
+            dir.add("parttype", value(move |text| writeln!(text, "{}", place.kind))?)?;
             return Ok(dir);
         }
         // What the disk says it is, where Linux has an NVMe controller's.
