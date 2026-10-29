@@ -461,6 +461,43 @@ fn files_written_closed_and_removed_before_a_sync_give_their_room_back_at_once()
 }
 
 #[test]
+fn the_writeback_thread_commits_early_once_more_pages_wait_than_the_limit() {
+    // The count is the room the dirty pages reserved, read without the
+    // dirty list's lock (which a sync takes after a file's state): it
+    // follows writes, a removed file's pages and the sync.
+    let disk = writable(&mkfs_sized(256 << 20, &[]));
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    assert!(!fs.is_dirty());
+    let file = root.create("big", Kind::File).unwrap();
+    let data = noise(43, 1 << 20);
+    let limit = (crate::fs::DIRTY_PAGES_MAX * radix_block::PAGE_SIZE) as u64;
+    for at in (0..limit).step_by(data.len()) {
+        put(&file, at, &data);
+    }
+    // Rewriting dirty pages counts nothing more.
+    put(&file, 0, &data);
+    assert!(!fs.is_dirty(), "at the limit");
+    put(&file, limit, &data[..1]);
+    assert!(fs.is_dirty(), "a page past it");
+    drop(file);
+    root.remove("big").unwrap();
+    assert!(!fs.is_dirty(), "a removed file's pages are never written");
+    let file = root.create("again", Kind::File).unwrap();
+    for at in (0..=limit).step_by(data.len()) {
+        put(&file, at, &data);
+    }
+    assert!(fs.is_dirty());
+    fs.sync().unwrap();
+    assert!(!fs.is_dirty(), "synced");
+    put(&file, 0, &data);
+    assert!(!fs.is_dirty(), "one MiB waits");
+    drop(file);
+    fs.sync().unwrap();
+    assert_checks(&image_of(&disk, 256 << 20));
+}
+
+#[test]
 fn a_power_cut_anywhere_keeps_the_last_sync() {
     let image = mkfs_empty(&[]);
     let disk = mem::arc(CrashDisk::new(&image)).unwrap();
