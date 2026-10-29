@@ -146,6 +146,28 @@ pub struct Scrubbed {
     pub uncorrectable: u64,
 }
 
+impl Scrubbed {
+    /// What the ScrubProgress `progress` counts.
+    fn of(progress: &[u8; ScrubProgress::SIZE]) -> Scrubbed {
+        let word =
+            |at: usize| u64::from_le_bytes(progress[at..at + 8].try_into().unwrap_or([0; 8]));
+        Scrubbed {
+            bytes: word(ScrubProgress::OFFSET_DATA_BYTES) + word(ScrubProgress::OFFSET_TREE_BYTES),
+            errors: [
+                ScrubProgress::OFFSET_READ_ERRORS,
+                ScrubProgress::OFFSET_CSUM_ERRORS,
+                ScrubProgress::OFFSET_VERIFY_ERRORS,
+                ScrubProgress::OFFSET_SUPER_ERRORS,
+            ]
+            .into_iter()
+            .map(word)
+            .sum(),
+            corrected: word(ScrubProgress::OFFSET_CORRECTED_ERRORS),
+            uncorrectable: word(ScrubProgress::OFFSET_UNCORRECTABLE_ERRORS),
+        }
+    }
+}
+
 /// What `info` says of a directory's filesystem.
 #[derive(Clone, Copy, Debug)]
 pub struct Info {
@@ -337,22 +359,17 @@ impl Dir {
     pub fn scrub(&self, repair: bool) -> Result<Scrubbed> {
         let mut progress = [0u8; ScrubProgress::SIZE];
         directory::scrub(&SYS, self.held.slot, repair, &mut progress)?;
-        let word =
-            |at: usize| u64::from_le_bytes(progress[at..at + 8].try_into().unwrap_or([0; 8]));
-        Ok(Scrubbed {
-            bytes: word(ScrubProgress::OFFSET_DATA_BYTES) + word(ScrubProgress::OFFSET_TREE_BYTES),
-            errors: [
-                ScrubProgress::OFFSET_READ_ERRORS,
-                ScrubProgress::OFFSET_CSUM_ERRORS,
-                ScrubProgress::OFFSET_VERIFY_ERRORS,
-                ScrubProgress::OFFSET_SUPER_ERRORS,
-            ]
-            .into_iter()
-            .map(word)
-            .sum(),
-            corrected: word(ScrubProgress::OFFSET_CORRECTED_ERRORS),
-            uncorrectable: word(ScrubProgress::OFFSET_UNCORRECTABLE_ERRORS),
-        })
+        Ok(Scrubbed::of(&progress))
+    }
+
+    /// Puts the block device `device` in the place of the disk of device
+    /// ID `devid` of the directory's Btrfs filesystem, and rebuilds onto
+    /// it (ADR 0155).
+    pub fn replace_disk(&self, devid: u64, device: &File) -> Result<Scrubbed> {
+        let mut progress = [0u8; ScrubProgress::SIZE];
+        let (slot, device) = (self.held.slot, device.held.slot);
+        directory::replace_disk(&SYS, slot, devid, device, &mut progress)?;
+        Ok(Scrubbed::of(&progress))
     }
 
     /// Where the symbolic link at `path` points.

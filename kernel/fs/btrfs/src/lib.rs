@@ -57,6 +57,7 @@ pub mod lzo;
 pub mod node;
 mod pack;
 mod refs;
+mod replace;
 mod replay;
 mod scrub;
 mod sha256;

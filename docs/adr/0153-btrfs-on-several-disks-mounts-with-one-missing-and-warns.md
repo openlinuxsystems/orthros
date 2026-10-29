@@ -55,6 +55,9 @@ moment its copies were meant to keep it going. Chase chose on
   disk of several drops that disk from then on, and the write is done if
   the others still hold every chunk. Otherwise it fails with `Io`. On a
   filesystem of one disk, the error is returned as before.
+  - The kernel log warns, as at a mount with a disk missing. The
+    writeback thread looks after each of its rounds, every five seconds,
+    so the warning comes within seconds and is written under no lock.
 - **A disk that comes back is read last.** Its superblock is older than
   the others'. Its copies are read only after theirs until a scrub
   catches it up: the scrub writes the good copy over each block of the
@@ -63,6 +66,8 @@ moment its copies were meant to keep it going. Chase chose on
   commits and logs leave the disk's own superblock as it came back, so
   it is behind at the next mount too. Linux reads such a disk like any
   other, and data without checksums can come back stale.
+  - The kernel log warns at the mount of how many disks missed changes,
+    until a scrub catches them up.
 - **One superblock a disk.** Each disk's superblock has its own device
   item from the chunk tree. A commit first makes the blocks durable on
   every disk, then writes each disk its superblock and the copies it has
@@ -85,6 +90,13 @@ moment its copies were meant to keep it going. Chase chose on
 - `btrfs check` from Linux's btrfs-progs checks every image of each
   profile in the host tests. Each test also mounts with each disk
   missing, and with a disk that fails during writes.
-- Replacing a disk and rebuilding onto it (Linux's `btrfs replace`), and
-  adding and removing disks, come next in 10e.1. They come with a
-  disk-pull test that detaches a disk at random points.
+- The `btrfs-raid-pull` boot test has QEMU fail one disk of a two-disk
+  RAID1 at a random write while the storage test writes it, as a disk
+  pulled out fails: every read, write and flush from then on. The writes
+  go on to the other disk, and the kernel warns. Linux's `btrfs check`
+  then passes from each disk alone: the one lost holds the filesystem as
+  it was when it failed. With the disk back, the mount warns that it
+  missed changes, every byte reads back, and after a scrub `btrfs check`
+  passes from both disks and from each alone.
+- Replacing a disk and rebuilding onto it (Linux's `btrfs replace`) is
+  ADR 0155. Adding and removing disks come later.

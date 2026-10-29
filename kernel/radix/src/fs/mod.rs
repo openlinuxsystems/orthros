@@ -601,6 +601,8 @@ fn mount_ext4(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Res
 struct Mounted {
     id: [u8; 16],
     first: radix_block::DeviceRef,
+    /// How many of its disks were missing when the log last said.
+    missing: usize,
     fs: alloc::sync::Weak<radix_btrfs::BtrfsFs, mem::Alloc>,
 }
 
@@ -638,8 +640,9 @@ fn mount_btrfs(
         None => {
             let fs = mount_btrfs_disks(&device, read_only)?;
             warn_missing(name, &fs);
-            let first = device;
-            mem::push(mounted, Mounted { id, first, fs: radix_vfs::KArc::downgrade(&fs) })?;
+            let (first, missing) = (device, fs.disks().1);
+            let weak = radix_vfs::KArc::downgrade(&fs);
+            mem::push(mounted, Mounted { id, first, missing, fs: weak })?;
             fs
         }
     };
@@ -649,8 +652,48 @@ fn mount_btrfs(
     fs_ref(fs)
 }
 
+/// Puts `device` in the place of disk `devid` of the Btrfs `fs`, and
+/// rebuilds onto it (ADR 0155). Fails with `InUse` while `device` is a
+/// swap area, holds a mount, or is a disk of a mounted Btrfs, and as
+/// [`radix_vfs::FileSystem::replace_disk`] does. Btrfs mounts wait
+/// meanwhile, so that none takes the disk.
+pub fn replace_disk(
+    fs: &FsRef,
+    devid: u64,
+    device: radix_block::DeviceRef,
+) -> radix_vfs::Result<radix_vfs::Scrub> {
+    let mounted = BTRFS.lock();
+    let mut name = None;
+    disk::for_each(|entry| {
+        if radix_vfs::KArc::ptr_eq(&entry.device, &device) {
+            name = Some(entry.name.clone());
+        }
+    });
+    let mut holds_mount = false;
+    if let (Some(name), Some(vfs)) = (&name, vfs()) {
+        vfs.mounts(|mount| holds_mount |= mount.source() == name.as_str());
+    }
+    let btrfs_disk = mounted
+        .iter()
+        .flatten()
+        .filter_map(|m| m.fs.upgrade())
+        .any(|other| other.has_disk(&device));
+    if holds_mount || btrfs_disk || radix_block::swap::is_on(&*device) {
+        return Err(Error::InUse);
+    }
+    let counts = fs.replace_disk(devid, device)?;
+    let name = name.as_ref().map_or("?", |n| n.as_str());
+    info!(
+        "Btrfs: disk {devid} replaced by {name}, and rebuilt from the other disks' copies; {} \
+         errors no copy mends",
+        counts.uncorrectable_errors
+    );
+    Ok(counts)
+}
+
 /// Warns when the Btrfs `fs`, mounted from `name`, mounted with disks
-/// missing: in a frame of its own, off the mount's deep reads.
+/// missing, or with disks that missed changes: in a frame of its own, off
+/// the mount's deep reads.
 #[inline(never)]
 fn warn_missing(name: &str, fs: &radix_btrfs::BtrfsFs) {
     let (disks, missing) = fs.disks();
@@ -658,6 +701,46 @@ fn warn_missing(name: &str, fs: &radix_btrfs::BtrfsFs) {
         warn!(
             "Btrfs: {name}: {missing} of its {disks} disks missing; mounted from the copies on \
              the others. Replace the missing, or a disk more lost may lose data"
+        );
+    }
+    let behind = fs.behind();
+    if behind > 0 {
+        warn!(
+            "Btrfs: {name}: {behind} of its {disks} disks missed changes; read from the others \
+             until a scrub catches them up"
+        );
+    }
+}
+
+/// Warns of each Btrfs mounted that a disk failed and was left out since
+/// the log last said (ADR 0153), as the mount warns of a disk missing.
+/// The writeback thread asks after each of its rounds, so the log says
+/// within seconds of the failure, holding no lock.
+pub fn warn_failed_disks() {
+    let mut failed: mem::KVec<(radix_block::DeviceRef, usize, usize)> = mem::vec();
+    let mut held = mem::vec();
+    {
+        let mut mounted = BTRFS.lock();
+        for m in mounted.iter_mut().flatten() {
+            let Some(fs) = m.fs.upgrade() else { continue };
+            let (disks, missing) = fs.disks();
+            if missing > m.missing {
+                let _ = mem::push(&mut failed, (m.first.clone(), disks, missing));
+            }
+            m.missing = missing;
+            // Dropped once the lock is let go: the last reference
+            // unmounts.
+            let _ = mem::push(&mut held, fs);
+        }
+    }
+    drop(held);
+    for (device, disks, missing) in &failed {
+        let name = disk::name_of(device);
+        let name = name.as_ref().map_or("?", |n| n.as_str());
+        warn!(
+            "Btrfs: {name}: a disk failed and was left out; {missing} of its {disks} disks \
+             missing now, read from the copies on the others. Replace the missing, or a disk \
+             more lost may lose data"
         );
     }
 }

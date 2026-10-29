@@ -9,12 +9,12 @@
 //! device item for each. The disks found are matched to those items; one
 //! not found is missing, and its copies are left out of every [`Place`].
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_block::DeviceRef;
 use radix_block::cache::BlockCache;
-use radix_sync::Mutex;
 use radix_sync::rcu::RcuCell;
+use radix_sync::{Mutex, Once};
 use radix_vfs::mem::{self, Alloc, KBox, KVec};
 use radix_vfs::{Error, Result};
 
@@ -45,8 +45,11 @@ pub struct Disk {
     /// The disk, through a cache of its sectors; `None` when it is
     /// missing.
     cache: Option<BlockCache>,
+    /// The disk that took its place while mounted, which it is from then
+    /// on (ADR 0155).
+    replacement: Once<BlockCache>,
     /// Its size, in bytes.
-    bytes: u64,
+    bytes: AtomicU64,
     /// The generation of its superblock.
     generation: u64,
     /// Its superblock is older than the filesystem's: it missed commits
@@ -59,7 +62,10 @@ pub struct Disk {
 impl Disk {
     /// The disk, through its cache of sectors, if it is there.
     pub fn cache(&self) -> Option<&BlockCache> {
-        self.cache.as_ref().filter(|_| !self.failed.load(Ordering::Relaxed))
+        if self.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.replacement.get().or(self.cache.as_ref())
     }
 
     /// The disk itself, if it is there.
@@ -69,7 +75,7 @@ impl Disk {
 
     /// Its size, in bytes; 0 when it is missing.
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.bytes.load(Ordering::Relaxed)
     }
 
     /// Whether it is there: found at the mount, and not failed since.
@@ -84,7 +90,13 @@ impl Disk {
 
     /// Whether `len` bytes from byte `at` are on the disk.
     pub fn holds(&self, at: u64, len: u64) -> bool {
-        at.checked_add(len).is_some_and(|end| end <= self.bytes)
+        at.checked_add(len).is_some_and(|end| end <= self.bytes())
+    }
+
+    /// The disk it was before [`Volume::replace`] put another in its
+    /// place, if that one was there.
+    pub(crate) fn replaced(&self) -> Option<&BlockCache> {
+        self.replacement.get().and(self.cache.as_ref())
     }
 }
 
@@ -299,6 +311,31 @@ impl Volume {
         if self.readable() { Ok(()) } else { Err(Error::Io) }
     }
 
+    /// Puts `device` in the place of disk `index`, missing or there, as a
+    /// disk that has missed every commit: read last, its superblock left
+    /// alone, until a scrub has written every copy it should hold (ADR
+    /// 0155). The caller holds the transaction, which it committed first.
+    ///
+    /// Fails with [`Error::InUse`] when the disk was replaced already
+    /// since the mount.
+    pub(crate) fn replace(&self, index: usize, device: &DeviceRef) -> Result<()> {
+        let disk = self.disk(index)?;
+        if disk.replacement.get().is_some() {
+            return Err(Error::InUse);
+        }
+        let size = device.info().sectors * radix_block::SECTOR;
+        // Both disks hold what is in the size of the smaller, whichever a
+        // write meanwhile finds.
+        let old = if disk.present() { disk.bytes() } else { size };
+        disk.bytes.store(old.min(size), Ordering::Relaxed);
+        disk.behind.store(true, Ordering::Relaxed);
+        // The transaction held, no other replace runs.
+        let _ = disk.replacement.set(BlockCache::new(device.clone()));
+        disk.bytes.store(size, Ordering::Relaxed);
+        disk.failed.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Marks every disk as up to date, after a scrub found every copy good
     /// or wrote it over.
     pub(crate) fn caught_up(&self) {
@@ -473,7 +510,8 @@ impl Disk {
             devid: sb.devid,
             uuid: sb.dev_uuid,
             cache: Some(BlockCache::new(device.clone())),
-            bytes: size,
+            replacement: Once::new(),
+            bytes: AtomicU64::new(size),
             generation: sb.generation,
             behind: AtomicBool::new(false),
             failed: AtomicBool::new(false),
@@ -486,7 +524,8 @@ impl Disk {
             devid,
             uuid,
             cache: None,
-            bytes: 0,
+            replacement: Once::new(),
+            bytes: AtomicU64::new(0),
             generation: 0,
             behind: AtomicBool::new(false),
             failed: AtomicBool::new(false),

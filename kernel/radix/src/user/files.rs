@@ -550,6 +550,30 @@ pub fn directory_method(
             put_scrub(&counts, UserOut { address, len })?;
             answer(label, 0, [0; 8])
         }
+        directory::REPLACE_DISK => {
+            let a = directory::ReplaceDiskArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (address, len) = user_range(a.buffer)?;
+            if len < directory::ScrubProgress::SIZE {
+                return Err(error(Kernel::InvalidArgument));
+            }
+            let (_, file) = objects::file(cspace, a.device, Rights::READ.union(Rights::WRITE))?;
+            let device = file
+                .at
+                .node
+                .block_device()
+                .ok_or_else(|| fs::status(radix_vfs::Error::NotBlockDevice))?;
+            let mount = &dir.at.mount;
+            if mount.read_only() {
+                return Err(fs::status(radix_vfs::Error::ReadOnly));
+            }
+            let counts = fs::replace_disk(&mount.fs, a.devid, device).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            put_scrub(&counts, UserOut { address, len })?;
+            answer(label, 0, [0; 8])
+        }
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;

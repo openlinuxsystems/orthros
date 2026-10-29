@@ -316,3 +316,96 @@ fn a_disk_that_fails_under_a_mount_is_left_out() {
     write_file(&fs, &mut model, "lost", 3, 1 << 20);
     assert!(fs.sync().is_err());
 }
+
+/// A disk of `len` bytes that holds nothing.
+fn blank(len: u64) -> KArc<RamDisk> {
+    writable(&vec![0; len as usize])
+}
+
+/// Whether `image` holds a Btrfs superblock where the first one goes.
+fn has_superblock(image: &[u8]) -> bool {
+    &image[0x10040..0x10048] == b"_BHRfS_M"
+}
+
+#[test]
+fn a_missing_disk_is_replaced_and_rebuilt_from_the_copies() {
+    let disks = disks_of(&mkfs_disks(2, &["-d", "raid1", "-m", "raid1"]));
+    let fs = mount_all(&disks, true, false).unwrap();
+    let mut model = Model::new();
+    write_file(&fs, &mut model, "first", 1, 600_000);
+    fs.sync().unwrap();
+    drop(fs);
+    // The second disk is lost; the first goes on alone, and is written.
+    let fs = mount_all(&disks[..1], true, true).unwrap();
+    write_file(&fs, &mut model, "alone", 2, 300_000);
+    let new = blank(DISK);
+    let counts = fs.replace_disk(2, new.clone()).unwrap();
+    assert_eq!(counts.uncorrectable_errors, 0, "{counts:?}");
+    assert_eq!(fs.disks(), (2, 0), "the new disk is one of them");
+    assert!(!fs.volume().disks()[1].behind(), "the rebuild caught it up");
+    assert_reads(&fs, &model, "rebuilt");
+    write_file(&fs, &mut model, "after", 3, 200_000);
+    fs.sync().unwrap();
+    drop(fs);
+    let images = images_of(&[disks[0].clone(), new]);
+    assert_checks(&images, "after the replace");
+    // Either disk alone holds everything now.
+    for (i, what) in [(0, "the first disk alone"), (1, "the new disk alone")] {
+        let fs = mount_all(&disks_of(&images[i..=i]), false, true).unwrap();
+        assert_reads(&fs, &model, what);
+    }
+}
+
+#[test]
+fn a_disk_there_is_replaced_and_its_superblocks_wiped() {
+    let disks = disks_of(&mkfs_disks(2, &["-d", "raid1", "-m", "raid1"]));
+    let fs = mount_all(&disks, true, false).unwrap();
+    let mut model = Model::new();
+    write_file(&fs, &mut model, "first", 1, 400_000);
+    fs.sync().unwrap();
+    // The disk the mount named, larger than the one it replaces.
+    let new = blank(DISK + (16 << 20));
+    let counts = fs.replace_disk(1, new.clone()).unwrap();
+    assert_eq!(counts.uncorrectable_errors, 0, "{counts:?}");
+    write_file(&fs, &mut model, "after", 2, 100_000);
+    fs.sync().unwrap();
+    drop(fs);
+    assert!(!has_superblock(&image_of(&disks[0], DISK as usize)), "the old disk was wiped");
+    let images = [image_of(&new, (DISK + (16 << 20)) as usize), image_of(&disks[1], DISK as usize)];
+    assert_checks(&images, "the new disk and the second");
+    let fs = mount_all(&disks_of(&images), false, false).unwrap();
+    assert_reads(&fs, &model, "the new disk and the second");
+}
+
+#[test]
+fn a_replace_that_cannot_be_done_changes_nothing() {
+    let disks = disks_of(&mkfs_disks(2, &["-d", "raid1", "-m", "raid1"]));
+    let fs = mount_all(&disks, true, false).unwrap();
+    assert_eq!(fs.replace_disk(9, blank(DISK)).err(), Some(Error::NotFound));
+    assert_eq!(fs.replace_disk(2, disks[0].clone()).err(), Some(Error::InUse));
+    assert_eq!(fs.replace_disk(2, blank(DISK / 2)).err(), Some(Error::NoSpace));
+    assert_eq!(fs.disks(), (2, 0));
+    drop(fs);
+    let fs = mount_all(&disks, false, false).unwrap();
+    assert_eq!(fs.replace_disk(2, blank(DISK)).err(), Some(Error::ReadOnly));
+    drop(fs);
+    // RAID0 data has no copy elsewhere to rebuild it from.
+    let disks = disks_of(&mkfs_disks(2, &["-d", "raid0", "-m", "raid1"]));
+    let fs = mount_all(&disks, true, false).unwrap();
+    assert_eq!(fs.replace_disk(2, blank(DISK)).err(), Some(Error::NotSupported));
+    // A rebuild onto a disk that fails leaves the one it replaced.
+    let disks = disks_of(&mkfs_disks(2, &["-d", "raid1", "-m", "raid1"]));
+    let fs = mount_all(&disks, true, false).unwrap();
+    let mut model = Model::new();
+    write_file(&fs, &mut model, "first", 1, 400_000);
+    fs.sync().unwrap();
+    let new = blank(DISK);
+    new.fail_after(8);
+    assert_eq!(fs.replace_disk(2, new).err(), Some(Error::Io));
+    assert_eq!(fs.disks(), (2, 1), "the failed new disk is left out");
+    drop(fs);
+    assert!(has_superblock(&image_of(&disks[1], DISK as usize)), "the old disk was kept");
+    let images = images_of(&disks);
+    let fs = mount_all(&disks_of(&images), false, false).unwrap();
+    assert_reads(&fs, &model, "both old disks");
+}

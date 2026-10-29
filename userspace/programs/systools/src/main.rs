@@ -31,6 +31,7 @@ mod power;
 mod priority;
 mod proc;
 mod ps;
+mod replace;
 mod rtrace;
 mod script;
 mod scrub;
@@ -85,6 +86,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("ps", ps::main),
     ("reboot", power::reboot),
     ("renice", priority::renice),
+    ("replace", replace::main),
     ("rtrace", rtrace::main),
     ("script", script::main),
     ("scrub", scrub::main),

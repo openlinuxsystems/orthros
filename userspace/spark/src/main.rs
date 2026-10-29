@@ -276,7 +276,9 @@ fn run_native(root: &Dir, path: &str, args: &[&str]) {
         pool,
         memory_order: PROGRAM_MEMORY_ORDER,
         share: &[],
-        root: Some((root.slot(), Rights::READ.union(Rights::WRITE))),
+        // The command line is the machine owner's: mounting or replacing
+        // a disk needs control, which a POSIX program it names has too.
+        root: Some((root.slot(), Rights::READ.union(Rights::WRITE).union(Rights::CONTROL))),
     };
     let child = match spawn::spawn(&spawn) {
         Ok(child) => child,

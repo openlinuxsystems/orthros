@@ -80,7 +80,7 @@ fn named(status: Status) -> String {
 }
 
 /// Opens `/devices/<name>` for reading and writing.
-fn open(root: &Dir, name: &str) -> Option<File> {
+pub(crate) fn open(root: &Dir, name: &str) -> Option<File> {
     let rw = Rights::READ.union(Rights::WRITE);
     match root.open(&format!("devices/{name}"), OpenFlags::NONE, rw) {
         Ok(disk) => Some(disk),

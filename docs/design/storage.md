@@ -542,6 +542,13 @@ disk missing while the others hold a copy of all of it (ADR 0153).
   the transaction for 16 MiB of extents at a time, writes a good copy
   over a bad one unless it only reads, and counts what it finds as
   Linux's `struct btrfs_scrub_progress`.
+- `replace` puts a new disk in the place of one of a filesystem's,
+  missing or there, with its device ID and UUID, as Linux's `btrfs
+  replace` leaves it (ADR 0155). After a commit, the new disk is a disk
+  that missed every commit: read last, written as the others are, and
+  without a superblock until a scrub has written it every copy the old
+  one held. Then the old disk, if it is there, has its superblocks
+  wiped.
 - `replay` replays the log of fsyncs Linux leaves when it stops between
   an `fsync` and the next commit (ADR 0151), in the mount's first
   transaction, which commits it with no log: a read-only mount replays
