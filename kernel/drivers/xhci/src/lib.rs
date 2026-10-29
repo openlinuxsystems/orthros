@@ -371,6 +371,8 @@ pub enum Error {
     NoMemory,
     /// A command or transfer did not finish in time.
     TimedOut,
+    /// The device was unplugged while a transfer waited for it.
+    Gone,
     /// A command or transfer ended with this completion code.
     Completion(u8),
     /// A request the driver cannot make (too long for its buffer).
@@ -383,6 +385,7 @@ impl fmt::Display for Error {
             Error::Unsupported(why) | Error::Unresponsive(why) => f.write_str(why),
             Error::NoMemory => f.write_str("out of memory"),
             Error::TimedOut => f.write_str("no answer in time"),
+            Error::Gone => f.write_str("it was unplugged"),
             Error::Completion(c) => write!(f, "{} (completion code {c})", code::name(*c)),
             Error::BadRequest => f.write_str("a request too long"),
         }

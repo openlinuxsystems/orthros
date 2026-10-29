@@ -555,7 +555,9 @@ go of everything behind it:
 	USB: 1-7: QEMU USB Hub was unplugged
 	USB: 1-7.1: QEMU USB Mouse was unplugged
 
-A device that cannot be set up twice is left alone until it is unplugged.
+A device pulled out while it is being set up is logged as unplugged too,
+once it has been named. A device that cannot be set up twice is left
+alone until it is unplugged.
 Hub ports past 15 and hubs more than five deep are not used. Before the
 machine is powered off or restarted, every controller is halted.
 Keyboards and mice, and USB storage, come later (ADRs 0146 and 0147).

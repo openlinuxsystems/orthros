@@ -221,6 +221,9 @@ struct State {
     /// It never answers commands.
     deaf: bool,
     now: u64,
+    /// A root port whose device is pulled out once the clock passes this
+    /// time, as the driver waits.
+    pull_at: Option<(u64, u8)>,
 
     usbcmd: u32,
     usbsts: u32,
@@ -275,6 +278,7 @@ impl State {
             stuck_in_reset: false,
             deaf: false,
             now: 0,
+            pull_at: None,
             usbcmd: 0,
             // The firmware left it running.
             usbsts: 0,
@@ -1153,7 +1157,14 @@ struct TestHost {
 impl Host for TestHost {
     fn wait(&mut self, us: u32) {
         self.now += u64::from(us);
-        self.sim.state().now = self.now;
+        let mut s = self.sim.state();
+        s.now = self.now;
+        if let Some((at, port)) = s.pull_at
+            && self.now >= at
+        {
+            s.pull_at = None;
+            s.plug(port, None);
+        }
     }
 
     fn now_us(&mut self) -> u64 {
@@ -1514,6 +1525,32 @@ fn a_device_pulled_out_fails_its_transfers_and_its_port_says_so() {
     device.disable(&mut xhci, &mut host).unwrap();
     // A slot for a port with nothing on it fails, and is given back.
     assert_eq!(attach_error(&mut xhci, &mut host, 5), Some(Error::Completion(code::TRANSACTION)));
+    assert!(sim.state().slots.is_empty());
+}
+
+#[test]
+fn a_device_pulled_out_during_a_transfer_it_never_answered_fails_it_at_once() {
+    let mut state = State::new();
+    state.devices[4] = Some(keyboard(3, 64));
+    let sim = Sim::new(state);
+    let (mut xhci, mut host) = start(&sim);
+    let mut device = attach(&mut xhci, &mut host, 5).unwrap();
+    // It takes the transfer and says nothing, and is pulled out 10 ms on,
+    // which ends the transfer with no event, as QEMU's controller does.
+    sim.state().devices[4].as_mut().unwrap().silent = true;
+    sim.state().pull_at = Some((host.now + 10_000, 5));
+    let mut bytes = [0u8; 18];
+    let setup = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 18);
+    let before = host.now;
+    assert_eq!(device.control_in(&mut xhci, &mut host, setup, &mut bytes), Err(Error::Gone));
+    assert!(host.now - before < 100_000);
+    {
+        let s = sim.state();
+        let kinds: Vec<u32> = s.commands.iter().map(|&(k, _)| k).rev().take(2).collect();
+        assert_eq!(kinds, [kind::SET_TR_DEQUEUE, kind::STOP_ENDPOINT]);
+    }
+    assert!(!xhci.port_status(5).connected());
+    device.disable(&mut xhci, &mut host).unwrap();
     assert!(sim.state().slots.is_empty());
 }
 
