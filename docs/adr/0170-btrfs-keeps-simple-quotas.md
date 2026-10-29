@@ -26,27 +26,33 @@ status item's `enable_gen`) count. `btrfs check` checks the counts.
 
 ## Decision
 
-- Radix keeps simple quotas, and refuses to write to a filesystem with
-  Linux's full quota groups as it is (radix-directory(2)'s `quota`
-  fails with not_supported; a write marks their counts inconsistent, as
-  Linux does when it cannot keep them, so `btrfs quota rescan` mends
-  them).
+- Radix keeps simple quotas, and not Linux's full quota groups:
+  radix-directory(2)'s `quota` fails with not_supported on a filesystem
+  that has those on, and the first commit that changes it marks their
+  counts inconsistent, as Linux does when it cannot keep them, so
+  `btrfs quota rescan` mends them.
 - radix-directory(2) gains `quota(enable)`, `qgroups(buffer) -> count`
   and `limit_qgroup(id, max_referenced, max_exclusive)`, and the file
   error `quota_exceeded`, which is EDQUOT. Turning quotas on makes the
-  quota tree with its status item (on, simple, `enable_gen` the running
-  transaction), a quota group of level 0 for each subvolume, at zero,
-  and sets `SIMPLE_QUOTA`; turning them off removes the quota tree and
-  clears the flag, as Linux does.
+  quota tree with its status item (on, simple, `enable_gen` the next
+  transaction, as Linux's: the running one may hold extents that name
+  no owner), a quota group of level 0 for each subvolume, at zero, and
+  sets `SIMPLE_QUOTA`; turning them off removes the quota tree and
+  clears the flag, and data extents keep naming their owner, as on
+  Linux.
 - While they are on, a data extent's item names its owner first, and
-  each transaction adds the bytes of each data extent and fs-tree block
-  it makes with a generation from `enable_gen` on to its owner's group,
-  and takes away those of each it frees; the commit writes the groups'
-  info items. A new subvolume or snapshot gets its group.
-- A change that would take a group with a limit past it fails with
-  quota_exceeded before it starts, as a change short of room fails
-  with no_space (ADR 0131); removing files never does.
-- A balance (ADR 0159) gives an extent it moves its old owner.
+  each data extent and subvolume tree block made with a generation
+  from `enable_gen` on adds its bytes to its owner's group, and takes
+  them away when it is freed, as Linux's `btrfs_record_squota_delta`
+  does, groups above level 0 that a filesystem has included; the
+  commit writes the changed groups' info items before the extent tree
+  catches up, which changes no subvolume. A new subvolume or snapshot
+  gets its group with its first block.
+- A write whose dirty pages would take a group with a limit past it
+  fails with quota_exceeded as the pages are dirtied, before anything
+  is written, as a write short of room fails with no_space (ADR 0131);
+  removing files never does.
+- A balance (ADR 0159) gives a data extent it moves its old owner.
 - `quota`(8) is the systools front end, with btrfs-progs' `quota
   enable`, `quota disable`, `qgroup show` and `qgroup limit`.
 
@@ -70,4 +76,6 @@ status item's `enable_gen`) count. `btrfs check` checks the counts.
   Linux.
 - The host tests turn quotas on, write, snapshot, clone, remove and
   balance, and check each group's counts against `btrfs check` and the
-  limits against the writes they stop.
+  limits against the writes they stop; the btrfs-raid boot test turns
+  them on before it replaces, adds and removes disks and balances, and
+  `btrfs check` counts every group again after it.

@@ -35,12 +35,14 @@ mod lsof;
 mod lspci;
 mod memory;
 mod modes;
+mod nvme;
 mod pidstat;
 mod power;
 mod priority;
 mod probe;
 mod proc;
 mod ps;
+mod quota;
 mod replace;
 mod rtrace;
 mod script;
@@ -99,11 +101,13 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsof", lsof::main),
     ("lspci", lspci::main),
     ("mkswap", swap::mkswap),
+    ("nvme", nvme::main),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
     ("poweroff", power::poweroff),
     ("ps", ps::main),
+    ("quota", quota::main),
     ("reboot", power::reboot),
     ("renice", priority::renice),
     ("replace", replace::main),

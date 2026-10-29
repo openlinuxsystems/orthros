@@ -1186,11 +1186,11 @@ impl Backing for FileBacking<'_> {
     }
 
     fn reserve_pages(&self, pages: usize) -> Result<()> {
-        self.0.fs.reserve_data(pages as u64 * PAGE)
+        self.0.fs.reserve_data(self.0.subvol, pages as u64 * PAGE)
     }
 
     fn release_pages(&self, pages: usize) {
-        self.0.fs.release_data(pages as u64 * PAGE);
+        self.0.fs.release_data(self.0.subvol, pages as u64 * PAGE);
     }
 
     fn zero(&self, from: u64, to: u64) -> Result<()> {
@@ -1798,7 +1798,7 @@ impl Drop for BtrfsNode {
             // node holding the transaction, which a sync of another file
             // takes holding that file's cache lock.
             let pages = self.cache.as_mut().map_or(0, FileCache::dirty_pages_mut);
-            self.fs.release_data(pages as u64 * PAGE);
+            self.fs.release_data(self.subvol, pages as u64 * PAGE);
             if !*self.freed.get_mut() {
                 self.fs.reaped(self.subvol, self.ino);
             }

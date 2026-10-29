@@ -224,11 +224,12 @@ static void memory(void) {
 	STATUS(1, "/bin/df", "/nowhere");
 }
 
-// subvolume, scrub, replace, device and balance on a filesystem that is
-// not Btrfs, which refuses each action, and with an unknown action or
-// none; the root boot test makes, snapshots, removes and scrubs
-// subvolumes through the same calls, and btrfs-raid replaces, adds and
-// removes disks and balances through the calls the tools make.
+// subvolume, scrub, replace, device, balance and quota on a filesystem
+// that is not Btrfs, which refuses each action, and with an unknown
+// action or none; the root boot test makes, snapshots, removes and
+// scrubs subvolumes through the same calls, and btrfs-raid turns quotas
+// on, replaces, adds and removes disks and balances through the calls
+// the tools make.
 static void subvolumes(void) {
 	STATUS(0, "/bin/mkdir", "-p", DIR);
 	STATUS(1, "/bin/subvolume", "create", DIR "/sub");
@@ -257,6 +258,14 @@ static void subvolumes(void) {
 	STATUS(1, "/bin/balance", "start", "-s", DIR);
 	STATUS(1, "/bin/balance", "status", DIR);
 	STATUS(1, "/bin/balance");
+	STATUS(1, "/bin/quota", "enable", "--simple", DIR);
+	STATUS(1, "/bin/quota", "disable", DIR);
+	STATUS(1, "/bin/quota", "show", "-r", "-e", DIR);
+	STATUS(1, "/bin/quota", "limit", "100m", "0/5", DIR);
+	STATUS(1, "/bin/quota", "limit", "lots", "0/5", DIR);
+	STATUS(1, "/bin/quota", "limit", "100m", "5/a", DIR);
+	STATUS(1, "/bin/quota", "rescan", DIR);
+	STATUS(1, "/bin/quota");
 }
 
 // mkswap, swapon and swapoff on a file in tmpfs, which takes a swap
@@ -632,6 +641,11 @@ static void hardware(void) {
 static void storage(void) {
 	STATUS(2, "/bin/diskhealth", "nosuch");
 	STATUS(2, "/bin/diskhealth", "/devices/nosuch");
+	CONTAINS("Namespace", "/bin/nvme", "list");
+	STATUS(1, "/bin/nvme", "smart-log", "/devices/nosuch");
+	STATUS(1, "/bin/nvme", "smart-log", "/devices/null");
+	STATUS(1, "/bin/nvme", "id-ctrl", "/devices/nosuch");
+	STATUS(1, "/bin/nvme");
 	STATUS(32, "/bin/lsblk", "nosuch");
 	STATUS(32, "/bin/lsblk", "-f", "/devices/nosuch");
 	STATUS(2, "/bin/blkid", "nosuch");

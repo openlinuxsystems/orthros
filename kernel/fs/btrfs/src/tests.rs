@@ -563,6 +563,7 @@ mod files;
 mod fsync;
 mod links;
 mod log;
+mod quota;
 mod raid;
 mod rw;
 mod scrub;

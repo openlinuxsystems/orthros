@@ -57,6 +57,7 @@ mod log;
 pub mod lzo;
 pub mod node;
 mod pack;
+mod quota;
 mod refs;
 mod replace;
 mod replay;

@@ -55,7 +55,7 @@ impl Verdict {
 /// value and the worst it was, the threshold at or below which it fails,
 /// and its raw 48 bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Attribute {
+pub(crate) struct Attribute {
     id: u8,
     prefail: bool,
     value: u8,
@@ -67,27 +67,27 @@ struct Attribute {
 /// The fields of an NVMe controller's SMART / Health Information log
 /// (NVMe 2.0, 5.16.1.3) that diskhealth shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct NvmeLog {
-    critical: u8,
-    kelvin: u16,
-    spare: u8,
-    spare_threshold: u8,
-    used: u8,
+pub(crate) struct NvmeLog {
+    pub(crate) critical: u8,
+    pub(crate) kelvin: u16,
+    pub(crate) spare: u8,
+    pub(crate) spare_threshold: u8,
+    pub(crate) used: u8,
     /// Thousands of 512-byte units.
-    units_read: u128,
-    units_written: u128,
-    power_cycles: u128,
-    hours: u128,
-    unsafe_shutdowns: u128,
-    media_errors: u128,
-    error_entries: u128,
+    pub(crate) units_read: u128,
+    pub(crate) units_written: u128,
+    pub(crate) power_cycles: u128,
+    pub(crate) hours: u128,
+    pub(crate) unsafe_shutdowns: u128,
+    pub(crate) media_errors: u128,
+    pub(crate) error_entries: u128,
     /// Minutes above the warning and the critical temperature.
-    warning_minutes: u32,
-    critical_minutes: u32,
+    pub(crate) warning_minutes: u32,
+    pub(crate) critical_minutes: u32,
 }
 
 /// What a disk said of its health.
-enum Record {
+pub(crate) enum Record {
     Ata(Vec<Attribute>),
     /// A SATA disk whose SMART is off.
     AtaOff,
@@ -288,7 +288,7 @@ fn nvme_report(log: &NvmeLog) -> Report {
 
 /// The whole disks the kernel has, by name, in order: the entries of
 /// `/kernel/block` that are not partitions.
-fn disks() -> io::Result<Vec<String>> {
+pub(crate) fn disks() -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(BLOCKS)? {
         let entry = entry?;
@@ -301,13 +301,13 @@ fn disks() -> io::Result<Vec<String>> {
 }
 
 /// A line of what the kernel shows of disk `name`'s device.
-fn device_text(name: &str, what: &str) -> String {
+pub(crate) fn device_text(name: &str, what: &str) -> String {
     let path = format!("{BLOCKS}/{name}/device/{what}");
     fs::read_to_string(path).map_or_default(|text| text.trim().to_string())
 }
 
 /// Asks disk `name` of its health; `None` if it keeps no record.
-fn read(name: &str) -> Result<Option<Record>, Fail> {
+pub(crate) fn read(name: &str) -> Result<Option<Record>, Fail> {
     let path = format!("/devices/{name}");
     let device = File::open(&path).map_err(|e| util::failed(&path, e))?;
     let mut value = [0u8; block::HEALTH_SIZE as usize];
@@ -345,7 +345,7 @@ fn report(record: &Record) -> (&'static str, Report) {
 }
 
 /// A count with commas between its thousands.
-fn grouped(n: u128) -> String {
+pub(crate) fn grouped(n: u128) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {

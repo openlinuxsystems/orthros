@@ -345,6 +345,16 @@ A disk is taken out, its chunks moved to the others first, with
 `device remove 2 /volumes/vda`. Unlike Linux, a balance gives each
 snapshot its own copy of the blocks it moves (ADR 0159).
 
+`quota`(8) keeps Btrfs's simple quotas, as Linux's `btrfs quota enable
+--simple` does (ADR 0170): each subvolume's quota group counts what it
+wrote, and a limit stops writes past it with `EDQUOT`:
+
+```sh
+quota enable /volumes/vda
+quota limit 10g 0/256 /volumes/vda
+quota show -r /volumes/vda
+```
+
 An ext4 disk, the kind most Linux machines use, is made the same way:
 
 ```sh
