@@ -182,11 +182,23 @@ impl Ring {
             return None;
         }
         memory.zero();
+        let mut ring = Ring { memory, enqueue: 0, cycle: true };
+        ring.reset();
+        Some(ring)
+    }
+
+    /// Empties it, as new: for a ring the controller has let go of, which
+    /// it starts reading again from the start.
+    pub fn reset(&mut self) {
+        for at in (0..PAGE_SIZE).step_by(8) {
+            self.memory.write64(at, 0);
+        }
         let link = (RING_TRBS - 1) * TRB_SIZE;
-        memory.write64(link, memory.phys());
+        self.memory.write64(link, self.memory.phys());
         // Not handed over yet: its cycle bit is not the ring's state.
-        memory.write32(link + 12, control::kind(kind::LINK) | control::TOGGLE_CYCLE);
-        Some(Ring { memory, enqueue: 0, cycle: true })
+        self.memory.write32(link + 12, control::kind(kind::LINK) | control::TOGGLE_CYCLE);
+        self.enqueue = 0;
+        self.cycle = true;
     }
 
     /// The physical address of its start.
@@ -254,11 +266,20 @@ impl EventRing {
         if segment.len() < PAGE_SIZE || table.len() < 16 {
             return None;
         }
-        segment.zero();
         table.zero();
         table.write64(0, segment.phys());
         table.write32(8, EVENT_TRBS as u32);
-        Some(EventRing { segment, table, dequeue: 0, cycle: true })
+        let mut ring = EventRing { segment, table, dequeue: 0, cycle: true };
+        ring.reset();
+        Some(ring)
+    }
+
+    /// Empties it, as new: for a ring the controller writes again from
+    /// the start once it is given the table.
+    pub fn reset(&mut self) {
+        self.segment.zero();
+        self.dequeue = 0;
+        self.cycle = true;
     }
 
     /// The table's physical address, for ERSTBA.

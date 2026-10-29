@@ -10,7 +10,9 @@
 //! behind it, if it is a hub). Root ports with a device on them when the
 //! controller starts raise no event, so each is looked at once first. The
 //! thread sleeps until the interrupt wakes it, or for 10 ms when there is
-//! none (and at most a second either way).
+//! none (and at most a second either way). The controller whose Debug
+//! Capability carries the console ([`super::dbc`]) is looked at every
+//! 10 ms, since the capability raises no interrupt.
 //!
 //! Setting up a device: a USB 2 port is reset, which enables it (a USB 3
 //! port enables itself once its link is up, or after a warm reset); after
@@ -164,6 +166,8 @@ pub(super) struct Controller {
     pub(super) work: Vec<(u8, u8), Kmalloc>,
     /// The keyboards' lock lights when the thread last lit them.
     lights: u32,
+    /// Whether its Debug Capability carries the console.
+    dbc: bool,
 }
 
 /// Why a device could not be set up.
@@ -205,20 +209,28 @@ struct Plan {
 /// The thread of controller `index`.
 pub fn run(index: usize) {
     let Some(start) = STARTS.get(index).and_then(radix_sync::Once::get) else { return };
-    let Some(mut controller) = Controller::start(index + 1, start) else { return };
+    let controller = Controller::start(index + 1, start);
+    super::dbc::looked();
+    let Some(mut controller) = controller else { return };
     let ports = controller.xhci.info().ports;
     for port in 1..=ports {
         controller.port_changed(port);
     }
-    let sleep = if start.interrupt.is_some() { IDLE_NS } else { POLL_NS };
+    let sleep = if start.interrupt.is_some() && !controller.dbc { IDLE_NS } else { POLL_NS };
     loop {
         let busy = controller.events() | controller.work() | controller.lights();
         if controller.xhci.failed() {
+            if controller.dbc {
+                super::dbc::stop();
+            }
             error!(
                 "USB: bus {}: the controller stopped with an error; its devices are gone",
                 controller.bus
             );
             return;
+        }
+        if controller.dbc {
+            super::dbc::poll(controller.bus);
         }
         if !busy {
             sched::block_until(sched::now_ns().saturating_add(sleep), "usb");
@@ -300,6 +312,7 @@ impl Controller {
             error!("USB: out of memory for the controller at {}", start.address);
             return None;
         };
+        let dbc = super::dbc::claim(bus, &xhci);
         let controller = Controller {
             bus,
             xhci,
@@ -309,8 +322,13 @@ impl Controller {
             buffer,
             work,
             lights: crate::fs::keyboard::lights(),
+            dbc,
         };
-        Box::try_new_in(controller, heap).ok()
+        let controller = Box::try_new_in(controller, heap).ok();
+        if controller.is_none() && dbc {
+            super::dbc::stop();
+        }
+        controller
     }
 
     /// Handles the events that came, and those kept meanwhile; says

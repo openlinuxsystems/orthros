@@ -8,7 +8,8 @@
 //! a symbolized backtrace, and where each other CPU was when it stopped.
 //! On the framebuffer the report fills the screen, with the most recent
 //! log messages below it, because on a laptop without a serial port the
-//! screen is all there is. The crash log keeps
+//! screen is all there is (or a Debug Capability console, which is given
+//! up to 2 s to send the report). The crash log keeps
 //! the report for the next boot. Then the kernel debugger runs if it was
 //! asked for, and finally the machine restarts after a key press, or after
 //! the delay given with `panic=seconds`.
@@ -22,7 +23,7 @@ use radix_klog::crashlog::Ending;
 use radix_klog::{Style, TextBuf};
 
 use crate::symbols::Backtrace;
-use crate::{Arch, console, crashlog, kdb, settings};
+use crate::{Arch, console, crashlog, debug_console, kdb, settings, usb};
 
 /// The CPU that is panicking, plus one; 0 while none is.
 static PANICKING: AtomicUsize = AtomicUsize::new(0);
@@ -179,7 +180,7 @@ fn draw_screen(report: &Report<'_>) {
     });
 }
 
-/// Waits for a key on the keyboard or the serial port, or for the restart
+/// Waits for a key on the keyboard or the debug console, or for the restart
 /// delay, counting down on the screen.
 fn wait_then_restart() -> ! {
     match settings().panic_restart {
@@ -199,8 +200,8 @@ fn wait_then_restart() -> ! {
         None => {
             // Drop keys typed before the panic.
             let _ = Arch::key_pressed();
-            while Arch::console_read().is_some() {}
-            while !Arch::key_pressed() && Arch::console_read().is_none() {
+            while debug_console::read().is_some() {}
+            while !Arch::key_pressed() && debug_console::read().is_none() {
                 Arch::delay_us(10_000);
             }
         }
@@ -270,6 +271,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         draw_screen(&report);
     }
     crashlog::set_ending(Ending::Panicked);
+    usb::dbc::flush();
 
     let settings = settings();
     let planned_crash = settings.selftest == Some("crash-reboot");

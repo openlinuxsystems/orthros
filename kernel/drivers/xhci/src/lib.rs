@@ -42,6 +42,9 @@
 //!   answer. [`Device::configure`] sets up its other endpoints, whose
 //!   transfers the kernel starts and whose events it reads with the rest;
 //!   a hub's slot says so ([`Device::set_hub`]).
+//! - [`dbc::Dbc`] runs the controller's Debug Capability, if it has one: a
+//!   USB 3 device inside the controller, which a second computer reads the
+//!   kernel's console from (ADR 0160).
 //!
 //! The crate is a compartment: it has no `unsafe` code, and reaches the
 //! controller only through the [`Mmio`] window and the [`Dma`] memory that
@@ -54,6 +57,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod dbc;
 mod device;
 pub mod ring;
 

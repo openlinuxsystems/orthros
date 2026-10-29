@@ -774,12 +774,12 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "usb-devices",
-        about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, and follows devices plugged in and pulled out",
+        about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, follows devices plugged in and pulled out, and has no Debug Capability for dbc",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, and the power button ends
-        // the test.
-        cmdline: "lockdep",
+        // the test. QEMU's controller has no Debug Capability for `dbc`.
+        cmdline: "lockdep dbc",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -3179,6 +3179,7 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     for line in [
         "USB: bus 1 is the xHCI 1.0 controller at 0000:00:02.0: 8 ports (USB 3 on 1-4, USB 2 on 5-8), 64 device slots, MSI",
+        "USB: bus 1 has no Debug Capability, so the console is not on it",
         "USB: 1-1: QEMU USB HARDDRIVE (46f4:0001, QEMU), mass storage, SuperSpeed",
         "USB: 1-6: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
         "USB: 1-7: QEMU USB Hub (0409:55aa, QEMU), hub, full speed",

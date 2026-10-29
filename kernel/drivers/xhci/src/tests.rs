@@ -19,12 +19,16 @@ use radix_usb::{DeviceDescriptor, Setup, Speed, descriptor};
 use crate::ring::{RING_TRBS, TRB_SIZE, kind};
 use crate::*;
 
+mod dbc;
+
 /// Where the simulated controller's register blocks are.
 const CAPLENGTH: usize = 0x40;
 const RUNTIME: usize = 0x1000;
 const XCAPS: usize = 0x2000;
 const DOORBELLS: usize = 0x3000;
 const REGS: usize = 0x4000;
+/// Where its Debug Capability's registers are, when it has one.
+const DBC: usize = XCAPS + 0x100;
 
 /// A device of the simulated controller.
 #[derive(Clone)]
@@ -249,6 +253,9 @@ struct State {
     commands: Vec<(u32, u8)>,
     requests: Vec<(u8, Setup)>,
     port_writes: Vec<(u8, u32)>,
+
+    /// Its Debug Capability, and the debug host on its cable.
+    dbc: Option<dbc::SimDbc>,
 }
 
 impl State {
@@ -296,6 +303,7 @@ impl State {
             commands: Vec::new(),
             requests: Vec::new(),
             port_writes: Vec::new(),
+            dbc: None,
         }
     }
 
@@ -420,6 +428,9 @@ impl State {
         }
         if self.stuck_in_reset {
             self.usbsts |= op::NOT_READY;
+        }
+        if let Some(dbc) = self.dbc.as_mut() {
+            dbc.turn_off();
         }
     }
 
@@ -991,7 +1002,13 @@ impl Registers for Sim {
                 for (i, p) in s.protocols.iter().enumerate() {
                     let size = 16 + 4 * p.psi.len();
                     if (at..at + size).contains(&o) {
-                        let next = if i + 1 < count { (size / 4) as u32 } else { 0 };
+                        let next = if i + 1 < count {
+                            (size / 4) as u32
+                        } else if s.dbc.is_some() {
+                            ((DBC - at) / 4) as u32
+                        } else {
+                            0
+                        };
                         value = match o - at {
                             0 => xcap::PROTOCOL | next << 8 | u32::from(p.major) << 24,
                             4 => u32::from_le_bytes(*b"USB "),
@@ -1007,6 +1024,9 @@ impl Registers for Sim {
                     at += size;
                 }
                 value
+            }
+            o if (DBC..DBC + 0x40).contains(&o) && s.dbc.is_some() => {
+                s.dbc.as_ref().unwrap().read(o - DBC)
             }
             _ => 0,
         };
@@ -1100,6 +1120,9 @@ impl Registers for Sim {
             o if o == XCAPS + 4 && s.legacy.is_some() => {
                 let legacy = s.legacy.as_mut().unwrap();
                 legacy.smi = (value & !xcap::SMI_EVENTS) & !(legacy.smi & value & xcap::SMI_EVENTS);
+            }
+            o if (DBC..DBC + 0x40).contains(&o) && s.dbc.is_some() => {
+                s.dbc.as_mut().unwrap().write(o - DBC, value);
             }
             o if (DOORBELLS..DOORBELLS + 4 * 256).contains(&o) => {
                 let index = ((o - DOORBELLS) / 4) as u8;

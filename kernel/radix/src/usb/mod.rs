@@ -11,7 +11,9 @@
 //! The thread takes the controller from the firmware and then runs it
 //! alone: the interrupt only wakes it. It sets up every device it finds,
 //! on the root ports and behind hubs ([`hub`], ADR 0147), and reads the
-//! keyboards, mice and tablets among them ([`hid`], ADR 0148). Bus numbers
+//! keyboards, mice and tablets among them ([`hid`], ADR 0148). With the
+//! `dbc` flag, the first controller with a Debug Capability carries the
+//! console to a second computer ([`dbc`], ADR 0160). Bus numbers
 //! count controllers from 1, and a device is named as Linux names one, by
 //! its bus, the root port and the hub ports it is behind: `1-3.2`.
 //!
@@ -31,6 +33,7 @@ use crate::Arch;
 use crate::sched::{self, Options, Policy, ThreadRef};
 
 mod controller;
+pub mod dbc;
 mod hid;
 mod hub;
 
@@ -139,6 +142,7 @@ pub fn lights_changed() {
 /// Halts every controller, before the machine is powered off, restarted
 /// or halted.
 pub fn shutdown() {
+    dbc::stop();
     for regs in REGISTERS.iter().filter_map(Once::get) {
         if !radix_xhci::stop(regs, &mut |us| Arch::delay_us(u64::from(us))) {
             warn!("USB: a controller did not halt");

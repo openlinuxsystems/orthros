@@ -14,7 +14,9 @@ Radix has to be debuggable on its reference laptop, which has no serial
 port. So a panic fills the screen with its report, and the console output
 is also kept in memory that survives a warm restart, where the next boot
 finds it. With a serial port, or under QEMU, there is also *kdb*, a small
-kernel debugger, and GDB through QEMU's GDB stub. Trace points record
+kernel debugger, and GDB through QEMU's GDB stub. Without one, a second
+computer can read the console and talk to *kdb* over the USB controller's
+Debug Capability (see *DEBUG CAPABILITY CONSOLE*). Trace points record
 frequent events cheaply, from the first Rust function on. The lock
 checker reports locking bugs the first time the code that has them runs,
 long before they deadlock.
@@ -31,14 +33,15 @@ finds one of its objects damaged (see *HEAP CORRUPTION*). The panicking
 CPU then:
 
 . stops the other CPUs with a non-maskable interrupt;
-. writes the report to the serial port, the VGA text screen if in use, and
-  the crash log;
+. writes the report to the serial port, the VGA text screen if in use, the
+  Debug Capability console with the *dbc* flag (giving it up to 2 s to go
+  out), and the crash log;
 . fills the framebuffer with the report under a red *RADIX KERNEL PANIC*
   banner, followed by as many recent log messages as fit;
 . records in the crash log that this boot ended with a panic;
 . under QEMU with the *qemu-exit* flag, exits QEMU with status 35;
-. with the *kdb* flag, runs the kernel debugger on the serial port;
-. waits for a key on the built-in keyboard or the serial port, or for the
+. with the *kdb* flag, runs the kernel debugger on the debug console;
+. waits for a key on the built-in keyboard or the debug console, or for the
   delay given by *panic*=_seconds_, and restarts the machine.
 
 A report looks like this:
@@ -174,18 +177,20 @@ A slot whose magic, version, ring size or hash does not match is ignored.
 
 # KERNEL DEBUGGER
 
-*kdb* is a command line on the serial port, for use under QEMU (where
-*ob run* connects the serial port to the terminal) or on machines with a
-serial port. Boot with the *kdb* flag, for example *./ob run --cmdline
-kdb*. The kernel then enters *kdb*:
+*kdb* is a command line on the debug console: the serial port, for use
+under QEMU (where *ob run* connects the serial port to the terminal) or
+on machines with one, and with the *dbc* flag the Debug Capability
+console too (see *DEBUG CAPABILITY CONSOLE*). Boot with the *kdb* flag,
+for example *./ob run --cmdline kdb*. The kernel then enters *kdb*:
 
 - at the end of boot, after *Boot complete.*;
 - at a breakpoint instruction (*int3*), with the registers it saved;
 - after a panic, with the panic's registers and backtrace.
 
 Only the CPU that entered *kdb* stops; the others keep running, except
-after a panic. Without a serial port *kdb* says so in the log and does not
-run. While it waits for a command, *kdb* pets a running hardware watchdog
+after a panic. Without a debug console *kdb* says so in the log and does
+not run; with the *dbc* flag it first waits up to 5 s at the end of boot
+for the USB controllers to look for a Debug Capability. While it waits for a command, *kdb* pets a running hardware watchdog
 (*watchdog*(8)) about once a second, so that the machine does not restart
 under it.
 
@@ -296,6 +301,30 @@ ffffffff8010c020  55 48 89 e5 41 57 41 56  41 55 41 54 53 48 81 ec  |UH..AWAVAUA
 kdb> continue
 kdb: continuing
 ```
+
+# DEBUG CAPABILITY CONSOLE
+
+Most xHCI USB controllers of the last decade, Intel's and AMD's, have a
+Debug Capability: switched on, it makes the controller a USB device on
+the first of its USB 3 ports that a second computer, the *debug host*, is
+plugged into (ADR 0160). With the *dbc* flag the first controller that
+has one switches it on, and the console goes there as well as to the
+serial port and the screen: the kernel log (the last 64 KiB of it once
+the controller runs, then everything after), a panic report, and *kdb*.
+
+It needs a USB 3 A-to-A *debug cable*, whose data lines cross and whose
+power line is cut: a plain A-to-A cable joins the two computers' power,
+which neither expects. Plug it into a USB 3 port of each. A Linux
+debug host sees a serial port, as it does for Linux's own Debug
+Capability (vendor and product 1d6b:0010):
+
+	# modprobe usb_debug
+	# screen /dev/ttyUSB0
+
+The log says when a debug host connects, configures the device, goes
+away or resets its port; one that has not configured it within 5 s has
+it switched off and on again. Under QEMU, whose xHCI controller has no
+Debug Capability, the flag only logs that there is none.
 
 # LOCK CHECKER
 
