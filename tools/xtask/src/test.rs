@@ -138,8 +138,9 @@ pub struct Disk {
     kib: u64,
     /// 12, 16 or 32; [`EXFAT`] for exFAT; [`BTRFS`] for Btrfs of
     /// [`btrfs_files`], [`BTRFS_NEW`] for Btrfs to write, or [`BTRFS_LOG`]
-    /// for Btrfs Linux left with a log; [`EXT4`] for ext4; [`SWAP`] for a
-    /// swap area; or 0 for no filesystem, the disk holding
+    /// for Btrfs Linux left with a log; [`BTRFS_RAID`] for a disk of a
+    /// Btrfs RAID1; [`EXT4`] for ext4; [`SWAP`] for a swap area; or 0 for
+    /// no filesystem, the disk holding
     /// [`storage_big_byte`]'s bytes.
     fat: u8,
     /// The size of an exFAT disk's clusters, or an ext4 disk's blocks, in
@@ -193,6 +194,10 @@ const BTRFS_LOG: u8 = 6;
 /// [`Disk::fat`] for a swap area the host's `mkswap` makes (ADR 0152).
 const SWAP: u8 = 7;
 
+/// [`Disk::fat`] for a disk of the Btrfs RAID1 the host's `mkfs.btrfs`
+/// makes across each such disk of a case ([`make_btrfs_raid`], ADR 0153).
+const BTRFS_RAID: u8 = 8;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -223,7 +228,7 @@ enum Bus {
 impl Disk {
     /// Whether it holds Btrfs.
     fn btrfs(&self) -> bool {
-        matches!(self.fat, BTRFS | BTRFS_NEW | ROOT | BTRFS_LOG)
+        matches!(self.fat, BTRFS | BTRFS_NEW | ROOT | BTRFS_LOG | BTRFS_RAID)
     }
 
     /// Whether it holds exFAT.
@@ -527,6 +532,17 @@ const POWER_CUT_DISKS: &[Disk] = &[btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs
 /// with a log of fsyncs to replay.
 const LOG_DISKS: &[Disk] =
     &[Disk { label: "LOG", ..btrfs_disk(Bus::Virtio, 512, BTRFS_LOG, btrfs_replayed) }];
+
+/// The `btrfs-raid` test's disks: two virtio disks of 512 MiB, `vda` and
+/// `vdb`, of one Btrfs RAID1.
+const RAID_DISKS: &[Disk] = &[RAID_DISK, RAID_DISK];
+
+/// A disk of the `btrfs-raid` test.
+const RAID_DISK: Disk = Disk {
+    kib: 512 * 1024,
+    label: "RAIDTEST",
+    ..btrfs_disk(Bus::Virtio, 512, BTRFS_RAID, raid_checked)
+};
 
 /// The `swap` test's disk: a 1 GiB swap area on a virtio disk, `vda`.
 const SWAP_DISKS: &[Disk] = &[Disk {
@@ -1522,6 +1538,26 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "btrfs-raid",
+        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back: Linux's btrfs check passes after each boot",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- /system/tests/storage write",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: raid_write,
+        disks: RAID_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file",
+            before: raid_pull,
+            script: raid_check,
+        }),
+    },
+    Case {
         name: "ext4-write",
         about: "The storage test on two ext4 disks Linux's mkfs.ext4 made, with blocks of 4 KiB and 1 KiB: e2fsck passes after each boot, with the journal as Radix left it and replayed, and debugfs reads back what was written",
         firmware: Firmware::Uefi,
@@ -1997,6 +2033,7 @@ fn make_disks(
     root: Option<&Path>,
 ) -> Result<Vec<DiskImage>, String> {
     let mut made = Vec::new();
+    let mut raid = Vec::new();
     for (i, disk) in case.disks.iter().enumerate() {
         let path = dir.join(format!("{}-disk{i}.img", case.name));
         let _ = std::fs::remove_file(&path);
@@ -2047,6 +2084,15 @@ fn make_disks(
                     .map_err(|err| {
                     format!("writing {} from {}: {err}", image.path.display(), kept.display())
                 })?;
+                made.push(image);
+                continue;
+            }
+            if disk.fat == BTRFS_RAID {
+                // Made with the case's others, below.
+                std::fs::File::create(&image.path)
+                    .and_then(|file| file.set_len(image.bytes))
+                    .map_err(|err| format!("making {}: {err}", image.path.display()))?;
+                raid.push(image.path.clone());
                 made.push(image);
                 continue;
             }
@@ -2101,6 +2147,9 @@ fn make_disks(
         };
         host_tool(&mut mkfs)?;
         made.push(DiskImage { offset, ..image });
+    }
+    if let Some(first) = case.disks.iter().find(|disk| disk.fat == BTRFS_RAID) {
+        make_btrfs_raid(ctx, first.label, &raid)?;
     }
     Ok(made)
 }
@@ -4985,6 +5034,137 @@ fn btrfs_log(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     storage_end(vm, "replayed")
+}
+
+/// Makes a Btrfs RAID1 of data and metadata across the images at `paths`,
+/// labelled `label`. It holds no file of the host's: `mkfs.btrfs` fills
+/// a filesystem of one disk only.
+fn make_btrfs_raid(ctx: &Ctx, label: &str, paths: &[PathBuf]) -> Result<(), String> {
+    let mkfs = btrfs::mkfs(ctx).map_err(|err| err.to_string())?;
+    let mut cmd = std::process::Command::new(mkfs);
+    cmd.args(["-q", "-f", "-L", label, "-d", "raid1", "-m", "raid1"]);
+    host_tool(cmd.args(paths).stdin(Stdio::null())).map(drop)
+}
+
+/// Where a Btrfs disk's superblock is.
+const BTRFS_SUPERBLOCK: u64 = 0x10000;
+
+/// The ID of the Btrfs whose superblock the image at `path` holds.
+fn btrfs_id(path: &Path) -> Option<[u8; 16]> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 72];
+    std::os::unix::fs::FileExt::read_exact_at(&file, &mut head, BTRFS_SUPERBLOCK).ok()?;
+    (&head[64..] == b"_BHRfS_M").then(|| head[32..48].try_into().unwrap_or_default())
+}
+
+/// Checks the Btrfs RAID1 of the `btrfs-raid` test with Linux's `btrfs
+/// check`, the data's checksums too, from its first disk still there,
+/// given each of its disks still there in a blkid cache (`BLKID_FILE`),
+/// where `btrfs check` finds a filesystem's other disks. A disk pulled
+/// out is passed over.
+fn raid_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+    use std::fmt::Write as _;
+    let Some(id) = btrfs_id(&disk.path) else { return Ok(()) };
+    let image = disk.path.display().to_string();
+    let prefix = image.rsplit_once("-disk").map_or(image.as_str(), |(prefix, _)| prefix);
+    let disks: Vec<PathBuf> = (0..RAID_DISKS.len())
+        .map(|i| PathBuf::from(format!("{prefix}-disk{i}.img")))
+        .filter(|path| btrfs_id(path) == Some(id))
+        .collect();
+    if disks.first() != Some(&disk.path) {
+        return Ok(());
+    }
+    let uuid = id.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    });
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        &uuid[..8],
+        &uuid[8..12],
+        &uuid[12..16],
+        &uuid[16..20],
+        &uuid[20..]
+    );
+    let cache = disks.iter().enumerate().fold(String::new(), |mut out, (n, path)| {
+        let _ = writeln!(
+            out,
+            "<device DEVNO=\"0x07{n:02x}\" TIME=\"1.1\" TYPE=\"btrfs\" UUID=\"{uuid}\">{}</device>",
+            path.display()
+        );
+        out
+    });
+    let tab = disk.path.with_extension("blkid");
+    std::fs::write(&tab, cache).map_err(|err| format!("writing {}: {err}", tab.display()))?;
+    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    let mut cmd = std::process::Command::new(tool);
+    cmd.args(["check", "--readonly", "--check-data-csum"]).arg(&disk.path);
+    let checked = host_tool(cmd.env("BLKID_FILE", &tab).stdin(Stdio::null()));
+    let _ = std::fs::remove_file(&tab);
+    checked.map(drop).map_err(|err| {
+        format!("the RAID1 of {} disks from {image} fails Linux's btrfs check: {err}", disks.len())
+    })
+}
+
+/// Between the boots of the `btrfs-raid` test: its second disk is pulled
+/// out, as Btrfs sees it, its superblock wiped.
+fn raid_pull(_: &Case, disks: &[DiskImage]) -> Result<(), String> {
+    let disk = disks.get(1).ok_or("the case has one disk")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&disk.path)
+        .and_then(|file| {
+            std::os::unix::fs::FileExt::write_all_at(&file, &[0; 4096], BTRFS_SUPERBLOCK)
+        })
+        .map_err(|err| format!("wiping {}: {err}", disk.path.display()))
+}
+
+/// What the kernel and Spark say of the `btrfs-raid` test's disks: Spark
+/// mounts the RAID1 from the first, and leaves the second alone, as in
+/// use, or once `pulled` as holding nothing, when the kernel warns that
+/// the first mounted without it.
+fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool) -> Result<(), String> {
+    disks_found(vm, case)?;
+    let names = disk_names(case.disks);
+    let (first, second) = (&names[0], &names[1]);
+    if pulled {
+        vm.expect(&format!(
+            "Btrfs: {first}: 1 of its 2 disks missing; mounted from the copies on the others"
+        ))?;
+    }
+    let label = RAID_DISK.label;
+    vm.expect(&format!("Files: mounted btrfs from {first} on /volumes/{first}, labelled {label}"))?;
+    vm.expect(&format!("spark: mounted the Btrfs filesystem of {first} at /volumes/{first}"))?;
+    if pulled {
+        vm.expect(&format!(
+            "spark: {second} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+        ))?;
+    } else {
+        vm.expect(&format!("spark: {second} is in use already; left alone"))?;
+    }
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    vm.expect("spark: started /system/tests/storage as process ")?;
+    Ok(())
+}
+
+/// The `btrfs-raid` test's first boot: the program writes its files to
+/// the RAID1.
+fn raid_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    raid_boot(vm, case, false)?;
+    let first = &disk_names(case.disks)[0];
+    vm.expect(&format!("storage: /volumes/{first}: btrfs, "))?;
+    vm.expect(&format!("storage: /volumes/{first}: wrote "))?;
+    storage_end(vm, "write")
+}
+
+/// The `btrfs-raid` test's second boot, with the second disk pulled out:
+/// the program reads every file back from the first.
+fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    raid_boot(vm, case, true)?;
+    let first = &disk_names(case.disks)[0];
+    vm.expect(&format!("storage: /volumes/{first}: "))?;
+    vm.expect(" files read back after the reboot, every byte as written")?;
+    storage_end(vm, "check")
 }
 
 /// The `swap` test: swaptest (userspace/posix/swaptest.c) turns on the

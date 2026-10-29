@@ -15,20 +15,28 @@
 //! mount it holds the transaction for a run of extents at a time
 //! ([`RUN_BYTES`]), so no commit comes between finding an extent and
 //! reading it, and a change waits no longer than a run takes.
+//!
+//! On a filesystem of several disks it reads the copies on each, and the
+//! superblocks of each (ADR 0153). A disk that missed commits while it
+//! was away has old copies: a checksum or a header finds them, as any
+//! other bad copy, and a scrub that writes the good copies over them
+//! brings it up to date; data without checksums is written over from a
+//! disk that did not miss them.
 
 use radix_block::mem::CachePage;
 use radix_block::{PAGE_SIZE, SECTOR, Segment, SegmentMut};
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result, Scrub};
 
-use crate::chunk::MAX_COPIES;
+use crate::chunk::{MAX_COPIES, Site};
+use crate::cow::Writer;
 use crate::csum::CSUM_SIZE;
 use crate::extent;
 use crate::format::{Key, RootItem, item, tree, u64_at, uuid_at};
 use crate::fs::Inner;
 use crate::superblock::{self, Superblock};
 use crate::tree::{self as trees, Cursor, Fault, Root};
-use crate::volume::Volume;
+use crate::volume::{Disk, Volume};
 
 /// The bytes of extents a run reads while it holds the transaction.
 const RUN_BYTES: u64 = 16 << 20;
@@ -69,22 +77,40 @@ pub(crate) fn scrub(inner: &Inner, repair: bool) -> Result<Scrub> {
             break;
         }
     }
-    if repair && counts.corrected_errors > 0 {
-        volume.device().flush()?;
+    if repair {
+        for device in volume.disks().iter().filter_map(|d| d.device()) {
+            device.flush()?;
+        }
+        if counts.uncorrectable_errors == 0 && volume.disks().iter().any(Disk::behind) {
+            // Their superblocks still name the commits they missed, as
+            // commits leave a disk behind alone: caught up, they are
+            // written. A log of fsyncs is in no superblock the commit
+            // wrote, so a commit writes them then, and drops the log (ADR
+            // 0154).
+            let mut txn = inner.reading();
+            volume.caught_up();
+            match txn.as_deref_mut() {
+                Some(txn) if txn.writer.logging.written() => inner.commit_locked(txn)?,
+                _ => Writer::write_superblocks(volume, &volume.superblock_bytes()?, true)?,
+            }
+        }
     }
     Ok(counts)
 }
 
-/// Checks each copy of the superblock that fits on the device: its
+/// Checks each copy of the superblock that fits on each disk: its
 /// checksum, its address, and that it is the last commit's.
 #[inline(never)]
 fn supers(volume: &Volume, counts: &mut Scrub) -> Result<()> {
     let generation = Superblock::read(&volume.superblock_bytes()?)?.generation;
     let (csum, fsid) = (volume.superblock().csum_type, volume.superblock().fsid);
     let mut page = CachePage::new()?;
-    for at in SUPERS {
-        if at + superblock::SIZE as u64 > volume.device_bytes() {
-            break;
+    let disks = volume.disks().iter().enumerate().filter(|(_, d)| d.present());
+    for (at, disk) in
+        disks.flat_map(|(i, d)| SUPERS.iter().map(move |&at| (Site { disk: i, at }, d)))
+    {
+        if !disk.holds(at.at, superblock::SIZE as u64) {
+            continue;
         }
         let read = read_pages(volume, at, core::slice::from_mut(&mut page));
         // As Linux's: its checksum, magic, address, filesystem and
@@ -93,7 +119,7 @@ fn supers(volume: &Volume, counts: &mut Scrub) -> Result<()> {
             let bytes = &page.bytes()[..superblock::SIZE];
             csum.matches(&bytes[CSUM_SIZE..], &bytes[..CSUM_SIZE])
                 && u64_at(bytes, 0x40) == superblock::MAGIC
-                && u64_at(bytes, 0x30) == at
+                && u64_at(bytes, 0x30) == at.at
                 && uuid_at(bytes, 0x20) == fsid
                 && u64_at(bytes, 0x48) == generation
         };
@@ -183,12 +209,12 @@ fn tree_block(volume: &Volume, want: &Root, repair: bool, counts: &mut Scrub) ->
     }
     let mut good = None;
     let mut bad = [false; MAX_COPIES];
-    for (copy, &physical) in place.copies().iter().enumerate() {
+    for (copy, &site) in place.copies().iter().enumerate() {
         counts.tree_extents += 1;
         counts.tree_bytes += nodesize as u64;
-        counts.last_physical = counts.last_physical.max(physical + nodesize as u64);
+        counts.last_physical = counts.last_physical.max(site.at + nodesize as u64);
         let mut bytes = crate::zeroed(nodesize)?;
-        if let Err(err) = read_bytes(volume, physical, &mut bytes) {
+        if let Err(err) = read_bytes(volume, site, &mut bytes) {
             if err == Error::NoMemory {
                 return Err(err);
             }
@@ -209,14 +235,15 @@ fn tree_block(volume: &Volume, want: &Root, repair: bool, counts: &mut Scrub) ->
             }
         }
     }
-    for (copy, &physical) in place.copies().iter().enumerate() {
+    for (copy, &site) in place.copies().iter().enumerate() {
         if !bad[copy] {
             continue;
         }
         match &good {
             Some(bytes) => {
                 if repair {
-                    volume.cache().write_out(physical, bytes)?;
+                    let cache = volume.disk(site.disk)?.cache().ok_or(Error::NoDevice)?;
+                    cache.write_out(site.at, bytes)?;
                 }
                 counts.corrected_errors += sectors;
             }
@@ -253,15 +280,15 @@ fn data_extent(
         }
         // Each copy's sectors that the disk failed to read, a bit each.
         let mut failed = [0u32; MAX_COPIES];
-        for (copy, &physical) in copies.iter().enumerate() {
+        for (copy, &site) in copies.iter().enumerate() {
             counts.data_extents += u64::from(at == 0);
             counts.data_bytes += n as u64 * PAGE;
-            counts.last_physical = counts.last_physical.max(physical + n as u64 * PAGE);
+            counts.last_physical = counts.last_physical.max(site.at + n as u64 * PAGE);
             let run = &mut pages[copy * SECTORS..copy * SECTORS + n];
-            if read_pages(volume, physical, run).is_err() {
+            if read_pages(volume, site, run).is_err() {
                 // Each sector alone, to find which fail.
                 for (sector, page) in run.iter_mut().enumerate() {
-                    let spot = physical + sector as u64 * PAGE;
+                    let spot = Site { at: site.at + sector as u64 * PAGE, ..site };
                     if read_pages(volume, spot, core::slice::from_mut(page)).is_err() {
                         failed[copy] |= 1 << sector;
                     }
@@ -270,8 +297,10 @@ fn data_extent(
         }
         let csum = volume.superblock().csum_type;
         let mut wrote = Ok(());
+        let behind = |copy: usize| volume.disks()[copies[copy].disk].behind();
         let mut check = |sector: usize, sum: Option<&[u8]>| {
             let read = |copy: usize| failed[copy] & (1 << sector) == 0;
+            let page = |copy: usize| &pages[copy * SECTORS + sector];
             let Some(sum) = sum else {
                 for copy in 0..copies.len() {
                     if read(copy) {
@@ -280,12 +309,22 @@ fn data_extent(
                         counts.read_errors += 1;
                     }
                 }
+                // With no checksum to tell, a disk that missed commits
+                // takes the copy of one that did not.
+                let good = (0..copies.len()).find(|&copy| read(copy) && !behind(copy));
+                let Some(good) = good.filter(|_| repair) else { return };
+                for copy in (0..copies.len()).filter(|&copy| behind(copy)) {
+                    if wrote.is_ok() && page(copy).bytes() != page(good).bytes() {
+                        let spot =
+                            Site { at: copies[copy].at + sector as u64 * PAGE, ..copies[copy] };
+                        wrote = write_page(volume, spot, page(good));
+                    }
+                }
                 return;
             };
-            let page = |copy: usize| &pages[copy * SECTORS + sector];
             let ok = |copy: usize| read(copy) && csum.matches(page(copy).bytes(), sum);
             let good = (0..copies.len()).find(|&copy| ok(copy));
-            for (copy, &physical) in copies.iter().enumerate() {
+            for (copy, &site) in copies.iter().enumerate() {
                 if ok(copy) {
                     continue;
                 }
@@ -299,7 +338,7 @@ fn data_extent(
                     continue;
                 };
                 if repair && wrote.is_ok() {
-                    let spot = physical + sector as u64 * PAGE;
+                    let spot = Site { at: site.at + sector as u64 * PAGE, ..site };
                     wrote = write_page(volume, spot, page(good));
                 }
                 counts.corrected_errors += 1;
@@ -315,11 +354,11 @@ fn data_extent(
     Ok(())
 }
 
-/// Reads the device from byte `physical` into `pages`, around every
-/// cache.
-fn read_pages(volume: &Volume, physical: u64, pages: &mut [CachePage]) -> Result<()> {
-    let len = pages.len() as u64 * PAGE;
-    if physical.checked_add(len).is_none_or(|end| end > volume.device_bytes()) {
+/// Reads the disk from `site` on into `pages`, around every cache.
+fn read_pages(volume: &Volume, site: Site, pages: &mut [CachePage]) -> Result<()> {
+    let disk = volume.disk(site.disk)?;
+    let device = disk.device().ok_or(Error::NoDevice)?;
+    if !disk.holds(site.at, pages.len() as u64 * PAGE) {
         return Err(Error::Corrupt);
     }
     let mut segments = mem::vec_with_capacity(pages.len())?;
@@ -329,7 +368,7 @@ fn read_pages(volume: &Volume, physical: u64, pages: &mut [CachePage]) -> Result
             return Err(Error::NoMemory);
         }
     }
-    volume.device().read(physical / SECTOR, &mut segments)?;
+    device.read(site.at / SECTOR, &mut segments)?;
     drop(segments);
     for page in pages.iter_mut() {
         radix_hw::device_wrote(page.bytes_mut());
@@ -337,23 +376,24 @@ fn read_pages(volume: &Volume, physical: u64, pages: &mut [CachePage]) -> Result
     Ok(())
 }
 
-/// Reads `out.len()` bytes, whole pages, from byte `physical` of the
-/// device, around every cache.
-fn read_bytes(volume: &Volume, physical: u64, out: &mut [u8]) -> Result<()> {
+/// Reads `out.len()` bytes, whole pages, from `site` on, around every
+/// cache.
+fn read_bytes(volume: &Volume, site: Site, out: &mut [u8]) -> Result<()> {
     let count = out.len().div_ceil(PAGE_SIZE);
     let mut pages = mem::vec_with_capacity(count)?;
     while pages.len() < count {
         mem::push(&mut pages, CachePage::new()?)?;
     }
-    read_pages(volume, physical, &mut pages)?;
+    read_pages(volume, site, &mut pages)?;
     for (chunk, page) in out.chunks_mut(PAGE_SIZE).zip(&pages) {
         chunk.copy_from_slice(&page.bytes()[..chunk.len()]);
     }
     Ok(())
 }
 
-/// Writes `page` at byte `physical` of the device.
-fn write_page(volume: &Volume, physical: u64, page: &CachePage) -> Result<()> {
+/// Writes `page` at `site`.
+fn write_page(volume: &Volume, site: Site, page: &CachePage) -> Result<()> {
+    let device = volume.disk(site.disk)?.device().ok_or(Error::NoDevice)?;
     let segment = Segment { page, offset: 0, len: PAGE_SIZE };
-    Ok(volume.device().write(physical / SECTOR, &[segment])?)
+    Ok(device.write(site.at / SECTOR, &[segment])?)
 }

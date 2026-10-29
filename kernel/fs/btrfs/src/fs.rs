@@ -173,6 +173,47 @@ impl BtrfsFs {
         BtrfsFs::mount_with(device, true)
     }
 
+    /// Mounts the Btrfs filesystem on `devices[0]` and those of the others
+    /// that hold the rest of it ([`Volume::open_disks`]), to read and
+    /// write if `writable`, as [`BtrfsFs::mount_writable`] does.
+    ///
+    /// Fails as [`BtrfsFs::mount`] does, and with [`Error::NoDevice`] when
+    /// a disk of it is missing and the others lack a copy of a chunk, or
+    /// `degraded` is not set: Linux's `degraded` mount option, which
+    /// allows a mount with a disk missing. The kernel always sets it, and
+    /// warns (ADR 0153).
+    pub fn mount_disks(
+        devices: &[DeviceRef],
+        writable: bool,
+        degraded: bool,
+    ) -> Result<KArc<BtrfsFs>> {
+        let logical_block =
+            devices.iter().map(|d| d.info().logical_block).max().ok_or(Error::NotFound)?;
+        let inner = Inner::open(devices, writable, degraded)?;
+        BtrfsFs::with_root(inner, logical_block, writable)
+    }
+
+    /// The ID of the Btrfs filesystem on `device`, which each of its disks
+    /// has in its superblock (its `fsid`).
+    ///
+    /// Fails with [`Error::UnknownFilesystem`] when `device` holds no
+    /// Btrfs, and as reading it fails.
+    pub fn id_of(device: &DeviceRef) -> Result<[u8; 16]> {
+        Ok(crate::volume::read_superblock(device)?.0.fsid)
+    }
+
+    /// How many disks the filesystem has, and how many of them are not
+    /// there: missing at the mount, or failed since (ADR 0153).
+    pub fn disks(&self) -> (usize, usize) {
+        let volume = &self.inner.volume;
+        (volume.disks().len(), volume.missing())
+    }
+
+    /// Whether it was mounted to write.
+    pub fn writable(&self) -> bool {
+        self.inner.tx.is_some()
+    }
+
     /// Has the data written from now on compressed with zstd, or not:
     /// Linux's `compress=zstd:1` mount option (ADR 0134). Files without
     /// checksums, or marked not to be compressed, are written as they
@@ -182,9 +223,7 @@ impl BtrfsFs {
     }
 
     fn mount_with(device: DeviceRef, writable: bool) -> Result<KArc<BtrfsFs>> {
-        let logical_block = device.info().logical_block;
-        let inner = Inner::open(device, writable)?;
-        BtrfsFs::with_root(inner, logical_block, writable)
+        BtrfsFs::mount_disks(&[device], writable, false)
     }
 
     /// The filesystem of `inner`, at its default subvolume. A frame of its
@@ -241,39 +280,61 @@ impl Inner {
     /// A log of fsyncs Linux left is replayed and committed first, on a
     /// read-only mount too, as Linux's mount does (ADR 0151).
     #[inline(never)]
-    fn open(device: DeviceRef, writable: bool) -> Result<KArc<Inner>> {
-        let volume = Volume::open(device)?;
-        let log = volume.superblock().log_root != 0;
-        let mut writer = if writable || log {
-            if !volume.superblock().has(incompat::NO_HOLES) {
-                return Err(Error::NotSupported);
-            }
-            Some(Writer::new(&volume)?)
-        } else {
-            None
-        };
-        if log && let Some(w) = writer.take() {
-            writer = Some(Inner::replay(&volume, w)?);
+    fn open(devices: &[DeviceRef], writable: bool, degraded: bool) -> Result<KArc<Inner>> {
+        let volume = Volume::open_disks(devices)?;
+        if volume.missing() > 0 && !(degraded && volume.readable()) {
+            return Err(Error::NoDevice);
         }
-        Inner::of(volume, writer.filter(|_| writable))
+        Inner::start(volume, writable)
     }
 
-    /// Replays the log of fsyncs `volume` holds with `writer`, and commits
-    /// it, in a frame of its own.
+    /// What [`Inner::open`] makes of `volume`, once open: in a frame of
+    /// its own, with nothing but the transaction on it, so that the
+    /// volume's reads beneath it stay shallow. The checksum tree is found
+    /// after the replay, which changes it.
     #[inline(never)]
-    fn replay(volume: &Volume, writer: Writer) -> Result<Writer> {
-        let mut txn = Txn { writer, next_ino: mem::vec() };
-        crate::replay::replay(volume, &mut txn)?;
+    fn start(volume: KBox<Volume>, writable: bool) -> Result<KArc<Inner>> {
+        let log = volume.superblock().log_root != 0;
+        let mut txn = if writable || log { Some(Inner::txn(&volume)?) } else { None };
+        if log && let Some(txn) = txn.as_mut() {
+            Inner::replay(&volume, txn)?;
+        }
+        let csums = Inner::checksums(&volume)?;
+        Inner::of(volume, csums, if writable { txn } else { None })
+    }
+
+    /// A transaction of `volume`, in a frame of its own.
+    #[inline(never)]
+    fn txn(volume: &Volume) -> Result<Txn> {
+        if !volume.superblock().has(incompat::NO_HOLES) {
+            return Err(Error::NotSupported);
+        }
+        Ok(Txn { writer: Writer::new(volume)?, next_ino: mem::vec() })
+    }
+
+    /// Replays the log of fsyncs `volume` holds in `txn`, and commits it,
+    /// in a frame of its own.
+    #[inline(never)]
+    fn replay(volume: &Volume, txn: &mut Txn) -> Result<()> {
+        crate::replay::replay(volume, txn)?;
         txn.writer.commit(volume)?;
-        Ok(txn.writer)
+        // The mount's changes look their inode numbers up afresh.
+        txn.next_ino = mem::vec();
+        Ok(())
+    }
+
+    /// The root of `volume`'s checksum tree, in a frame of its own.
+    #[inline(never)]
+    fn checksums(volume: &Volume) -> Result<Option<Root>> {
+        volume.tree(tree::CSUM)
     }
 
     /// What the nodes of `volume` share, on the heap, in a frame of its
-    /// own; `writer` writes it on a writable mount.
+    /// own, with its checksum tree `csums`; `txn` writes it on a writable
+    /// mount.
     #[inline(never)]
-    fn of(volume: KBox<Volume>, writer: Option<Writer>) -> Result<KArc<Inner>> {
-        let csums = volume.tree(tree::CSUM)?;
-        let tx = writer.map(|writer| Mutex::new(Txn { writer, next_ino: mem::vec() }));
+    fn of(volume: KBox<Volume>, csums: Option<Root>, txn: Option<Txn>) -> Result<KArc<Inner>> {
+        let tx = txn.map(Mutex::new);
         Ok(mem::arc(Inner {
             volume,
             csums,
@@ -563,7 +624,7 @@ impl Inner {
         self.commit_locked(&mut tx.lock())
     }
 
-    fn commit_locked(&self, txn: &mut Txn) -> Result<()> {
+    pub(crate) fn commit_locked(&self, txn: &mut Txn) -> Result<()> {
         txn.writer.commit(&self.volume)?;
         // What waits for the next sync keeps the commit due.
         let waiting = !self.dirty.lock().is_empty() || !self.reap.lock().is_empty();
@@ -745,12 +806,12 @@ impl FileSystem for BtrfsFs {
         self.inner.sync()
     }
 
-    /// Whether a commit is due: the oldest change the disk lacks is
-    /// [`COMMIT_NS`] old, or more than [`DIRTY_PAGES_MAX`] pages wait.
     fn scrub(&self, repair: bool) -> Result<radix_vfs::Scrub> {
         crate::scrub::scrub(&self.inner, repair)
     }
 
+    /// Whether a commit is due: the oldest change the disk lacks is
+    /// [`COMMIT_NS`] old, or more than [`DIRTY_PAGES_MAX`] pages wait.
     fn is_dirty(&self) -> bool {
         let since = self.inner.since.load(Ordering::Acquire);
         if since == 0 {

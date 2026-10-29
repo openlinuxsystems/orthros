@@ -360,16 +360,12 @@ impl Writer {
         drop(like);
         let mut made = mem::vec();
         let written = self.write_trees(volume, &header, &mut made).and_then(|root| {
-            let csum = volume.superblock().csum_type;
             let mut sb = mem::copy(committed)?;
             sb[at::LOG_ROOT..at::LOG_ROOT + 8].copy_from_slice(&root.bytenr.to_le_bytes());
             sb[at::LOG_ROOT_LEVEL] = root.level;
-            let sum = csum.sum(&sb[crate::csum::CSUM_SIZE..]);
-            sb[..crate::csum::CSUM_SIZE].copy_from_slice(&sum);
-            // The log's blocks are durable before the superblock that
-            // leads to them.
-            volume.cache().sync()?;
-            Writer::write_supers(volume, &sb, false)
+            // Each disk's, after the log's blocks are durable on every
+            // disk.
+            Writer::write_superblocks(volume, &sb, false)
         });
         let nodesize = u64::from(volume.superblock().nodesize);
         match written {
@@ -621,8 +617,9 @@ impl Out<'_> {
     fn write(&mut self, mut block: Block) -> Result<u64> {
         block.seal(self.volume.superblock().csum_type);
         let bytenr = block.bytenr();
-        for &physical in self.volume.place(bytenr)?.copies() {
-            self.volume.cache().write(physical, block.bytes())?;
+        for site in self.volume.place(bytenr)?.copies() {
+            let cache = self.volume.disk(site.disk)?.cache().ok_or(Error::NoDevice)?;
+            cache.write(site.at, block.bytes())?;
         }
         Ok(bytenr)
     }

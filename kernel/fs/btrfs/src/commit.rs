@@ -8,6 +8,7 @@
 //! superblock that leads to the new trees is written through to the
 //! disk; and only then may the places the transaction freed be taken.
 
+use radix_block::cache::BlockCache;
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
@@ -17,7 +18,7 @@ use crate::refs::Backref;
 use crate::space::{self, Ranges};
 use crate::superblock;
 use crate::tree::Cursor;
-use crate::volume::Volume;
+use crate::volume::{DEV_ITEM_AT, DEV_ITEM_SIZE, DEV_ITEMS, Disk, Volume};
 
 /// The extent item flag of a tree block.
 const EXTENT_FLAG_TREE_BLOCK: u64 = 1 << 1;
@@ -75,9 +76,7 @@ impl Writer {
     fn commit_inner(&mut self, volume: &Volume) -> Result<()> {
         self.catch_up(volume)?;
         let sb = self.write_blocks(volume)?;
-        // The blocks are durable before the superblock that leads to them.
-        volume.cache().sync()?;
-        Self::write_supers(volume, &sb, true)?;
+        Self::write_superblocks(volume, &sb, true)?;
         volume.set_superblock_bytes(sb);
         for (start, len) in core::mem::replace(&mut self.pinned, mem::vec()) {
             self.space.unpin(start, len)?;
@@ -323,8 +322,9 @@ impl Writer {
         for (bytenr, mut block) in blocks {
             let b = mem::KArc::get_mut(&mut block).ok_or(Error::InUse)?;
             b.seal(csum);
-            for &physical in volume.place(bytenr)?.copies() {
-                volume.cache().write(physical, b.bytes())?;
+            for site in volume.place(bytenr)?.copies() {
+                let cache = volume.disk(site.disk)?.cache().ok_or(Error::NoDevice)?;
+                cache.write(site.at, b.bytes())?;
             }
             volume.blocks().put_clean(&block);
         }
@@ -389,17 +389,57 @@ impl Writer {
         Ok(())
     }
 
-    /// Writes the superblock `sb`, and with `mirrors` its copies at 64 MiB
-    /// and 256 GiB that fit on the device, each with its own address and
-    /// checksum, after the blocks they lead to are durable, as Linux
-    /// writes them: all at once, the superblock durable when this returns
-    /// and its copies at the next flush. An fsync's log writes the
-    /// superblock alone, as Linux's does.
-    pub(crate) fn write_supers(volume: &Volume, sb: &[u8], mirrors: bool) -> Result<()> {
+    /// Makes the blocks written durable on every disk, then writes each
+    /// disk its superblock `sb`, with the disk's own device item from the
+    /// chunk tree. A disk that fails is left out, while the others still
+    /// hold every chunk ([`Volume::write_failed`]). Without `mirrors`, each
+    /// disk gets its superblock alone, as Linux's log of fsyncs writes it.
+    #[inline(never)]
+    pub(crate) fn write_superblocks(volume: &Volume, sb: &[u8], mirrors: bool) -> Result<()> {
+        for (i, disk) in volume.disks().iter().enumerate() {
+            if let Some(Err(e)) = disk.cache().map(BlockCache::sync) {
+                volume.write_failed(i, e.into())?;
+            }
+        }
         let csum = volume.superblock().csum_type;
+        let chunk_root = volume.chunk_root();
+        for (i, disk) in volume.disks().iter().enumerate() {
+            // A disk behind keeps the superblock it came back with, which
+            // marks it behind at the next mount too, until a scrub has
+            // caught it up (ADR 0153).
+            if !disk.present() || disk.behind() {
+                continue;
+            }
+            let mut copy = mem::copy(sb)?;
+            let key = Key::new(DEV_ITEMS, item::DEV_ITEM, disk.devid);
+            let cursor = Cursor::seek(volume, &chunk_root, &key)?;
+            match cursor.get() {
+                Some((found, data)) if found == key && data.len() >= DEV_ITEM_SIZE => {
+                    copy[DEV_ITEM_AT..DEV_ITEM_AT + DEV_ITEM_SIZE]
+                        .copy_from_slice(&data[..DEV_ITEM_SIZE]);
+                }
+                _ => return Err(Error::Corrupt),
+            }
+            let sum = csum.sum(&copy[crate::csum::CSUM_SIZE..]);
+            copy[..crate::csum::CSUM_SIZE].copy_from_slice(&sum);
+            if let Err(e) = Self::write_supers(volume, disk, &copy, mirrors) {
+                volume.write_failed(i, e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the superblock `sb` to `disk`, and its copies at 64 MiB and
+    /// 256 GiB that fit on it, each with its own address and checksum,
+    /// after the blocks they lead to are durable, as Linux writes them:
+    /// all at once, the superblock durable when this returns and its
+    /// copies at the next flush. Without `mirrors`, the superblock alone.
+    fn write_supers(volume: &Volume, disk: &Disk, sb: &[u8], mirrors: bool) -> Result<()> {
+        let csum = volume.superblock().csum_type;
+        let cache = disk.cache().ok_or(Error::NoDevice)?;
         let mut copies = [None, None];
         for (copy, mirror) in copies.iter_mut().zip([64u64 << 20, 256 << 30]) {
-            if !mirrors || mirror + superblock::SIZE as u64 > volume.device_bytes() {
+            if !mirrors || !disk.holds(mirror, superblock::SIZE as u64) {
                 break;
             }
             let mut bytes = mem::copy(sb)?;
@@ -414,6 +454,6 @@ impl Writer {
             pieces[n] = (*mirror, bytes, false);
             n += 1;
         }
-        Ok(volume.cache().write_now_all(&pieces[..n])?)
+        Ok(cache.write_now_all(&pieces[..n])?)
     }
 }

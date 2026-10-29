@@ -422,7 +422,8 @@ copying on write, in transactions (ADR 0129), and 10c.1b its files
 through them (ADR 0130); 10c.1c makes chunks as it fills and reserves
 room before a change (ADR 0131), and the kernel mounts it writable;
 10c.2b compresses what it writes with zstd on the mounts that ask
-(ADR 0134).
+(ADR 0134). 10e.1 spreads it across several disks, and mounts it with a
+disk missing while the others hold a copy of all of it (ADR 0153).
 
 - `csum` has the four checksums, each the crate's own code: CRC-32C by
   slicing eight bytes at a time, xxHash64, SHA-256 (`sha256`) and
@@ -440,8 +441,11 @@ room before a change (ADR 0131), and the kernel mounts it writable;
   blocks stay in a cache of 8 MiB, by address, dropped by a clock. A
   `Cursor` holds a block at each level of a tree: it seeks the first item
   at a key or after it, and advances through the leaves in order.
-- `volume::Volume` is an opened device: its superblock, its chunk map, a
-  block cache of its sectors, and the roots of its trees, the chunk tree
+- `volume::Volume` is an opened filesystem: its disks, found by the
+  filesystem's ID and matched to the chunk tree's device items, each
+  with a block cache of its sectors (a disk missing has none, and one
+  that missed commits is read last until a scrub catches it up); its
+  superblock, its chunk map, and the roots of its trees, the chunk tree
   and the root tree from the superblock, every other tree from its root
   item, and each subvolume's tree with its top directory.
 - `inode`, `dir` and `extent` read the items a subvolume's tree keeps
@@ -685,7 +689,9 @@ The kernel makes only the root, an empty tmpfs, and gives it to Spark in
 trees on `/devices`, `/processes` and `/kernel`; mounts the FAT, exFAT
 or Btrfs filesystem of each disk or partition in `/devices` at
 `/volumes/<name>`, read-only when the device is (or when it uses a
-feature Radix does not write yet), and for Btrfs compressing what is
+feature Radix does not write yet), a Btrfs of several disks once, from
+the first (the kernel refuses its other disks with `in_use`, ADR 0153),
+and for Btrfs compressing what is
 written when `--compress` names the disk (ADR 0134), a disk with a
 partition table not whole; then mounts `/system`. On Dukovo's root, the
 first Btrfs mounted to write that holds its subvolumes (ADR 0137), it
@@ -814,7 +820,8 @@ host, and reads everything back after a second boot.
   and its partition) are not kept apart.
 - FAT has no exFAT, no TRIM, and no journalling (as on every system: a
   power cut mid-write can leave lost clusters, which `fsck.fat` finds).
-- Btrfs is on one device (10e), with 4 KiB sectors, and written only
+- Btrfs does not replace, add or remove disks yet (10e.1), never has
+  RAID5 or RAID6, has 4 KiB sectors, and is written only
   with `no-holes`, without quotas, removes a
   subvolume in one transaction rather than in the background, scrubs
   in the caller's call rather than in a thread of its own, writes its

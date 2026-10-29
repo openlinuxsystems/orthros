@@ -501,8 +501,9 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
 }
 
 /// Mounts the FAT, exFAT, Btrfs or ext4 filesystem of each disk
-/// partition, or of each disk with no partitions, at `/volumes/<name>`.
-/// Returns the names of those it mounted Btrfs from, and how.
+/// partition, or of each disk with no partitions, at `/volumes/<name>`:
+/// a Btrfs of several disks once, at the first of them. Returns the names
+/// of those it mounted Btrfs from, and how.
 fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
     let devices: Vec<String> =
         match root.open_dir("devices", Rights::READ).and_then(|dev| dev.entries()) {
@@ -606,6 +607,10 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
                 println!("spark: {name} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone");
+            } else if err.is(FileError::InUse) {
+                // A disk of a Btrfs mounted from another (ADR 0153), or
+                // swapped to.
+                println!("spark: {name} is in use already; left alone");
             } else {
                 println!("spark: cannot mount {name}: {err}");
             }

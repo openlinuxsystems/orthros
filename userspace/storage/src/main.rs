@@ -14,7 +14,8 @@
 //! - `storage check`, after a reboot, reads every volume's files back and
 //!   checks each byte, and the file the host wrote between the boots
 //!   (with mtools, from `ob test`; on Btrfs and ext4 its `mkfs` wrote it
-//!   before the first; none on exFAT), then checks `/processes` again;
+//!   before the first; none on exFAT, nor after `--no-host-file`, on a
+//!   Btrfs of several disks), then checks `/processes` again;
 //! - `storage raw <disk>...` reads and writes each disk in `/devices` raw at
 //!   odd offsets, discards part of it, flushes it, and asks it Linux's
 //!   block requests (the `disk-raw` boot test, [`disk::raw`]);
@@ -203,8 +204,9 @@ fn main(_: &Startup) -> u64 {
             check_sys(&root, &volumes);
         }
         "check" => {
+            let host = args().nth(2) != Some("--no-host-file");
             for name in &volumes {
-                check_volume(&root, name);
+                check_volume(&root, name, host);
             }
         }
         "list" | "replayed" => {
@@ -722,8 +724,9 @@ fn write_volume(root: &Dir, name: &str) {
     }
 }
 
-/// Checks the files `write_volume` wrote to `/volumes/<name>`.
-fn check_volume(root: &Dir, name: &str) {
+/// Checks the files `write_volume` wrote to `/volumes/<name>`, and the
+/// host's file if `host`.
+fn check_volume(root: &Dir, name: &str, host: bool) {
     let dir = match root.open_dir(&format!("volumes/{name}"), Rights::READ) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
@@ -754,7 +757,7 @@ fn check_volume(root: &Dir, name: &str) {
     // No tool on Linux writes a file to exFAT without mounting it, which
     // takes the administrator, so the host writes none there; the exFAT
     // driver's tests read a volume exfat-fuse wrote instead.
-    if !dir.info().is_ok_and(|info| info.kind == FilesystemKind::Exfat) {
+    if host && !dir.info().is_ok_and(|info| info.kind == FilesystemKind::Exfat) {
         same(FROM_HOST, FROM_HOST_TEXT);
     }
     same(&format!("notes/{LONG_NAME}"), format!("Saved on {name}.\n").as_bytes());

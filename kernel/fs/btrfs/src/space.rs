@@ -17,11 +17,11 @@
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
-use crate::chunk::{MAX_COPIES, kind};
+use crate::chunk::kind;
 use crate::format::{Key, item, tree, u32_at, u64_at};
 use crate::superblock::compat_ro;
 use crate::tree::{Cursor, Root};
-use crate::volume::Volume;
+use crate::volume::{MAX_DISKS, Volume};
 
 /// What a block group's item and its chunk say it holds.
 const TYPE: u64 = kind::DATA | kind::METADATA | kind::SYSTEM;
@@ -422,29 +422,33 @@ pub(crate) fn read_free(
 }
 
 /// Keeps the ranges around the superblock's copies that lie in `group`
-/// from use.
+/// from use, on each of its disks.
 #[inline(never)]
 fn exclude_mirrors(volume: &Volume, group: &mut Group) -> Result<()> {
-    let devid = volume.superblock().devid;
     // Found under the chunk map's read lock, which allows no allocation.
-    let mut ranges = [(0, 0); MIRRORS.len() * MAX_COPIES];
+    let mut ranges = [(0, 0); MIRRORS.len() * MAX_DISKS];
     let mut n = 0;
     volume.with_chunks(|map| {
         let Some(chunk) = map.find(group.start) else { return Err(Error::Corrupt) };
         for mirror in MIRRORS {
-            for stripe in chunk.stripes.iter().filter(|s| s.devid == devid) {
-                let first = mirror;
+            for (i, stripe) in chunk.stripes.iter().enumerate() {
                 let end = mirror + MIRROR_GUARD;
-                if end <= stripe.offset || first >= stripe.offset + chunk.length {
+                if end <= stripe.offset || mirror >= stripe.offset + chunk.stripe_bytes() {
                     continue;
                 }
-                // Single and DUP keep the chunk whole on each stripe.
-                let lo = chunk.start + first.saturating_sub(stripe.offset);
-                let hi = chunk.start + (end - stripe.offset).min(chunk.length);
-                if let Some(slot) = ranges.get_mut(n) {
-                    *slot = (lo, hi);
-                    n += 1;
-                }
+                // The guard lies within one stripe length of a striped
+                // chunk, as both are aligned to it: its first and last
+                // bytes give the logical range.
+                let first = mirror.max(stripe.offset);
+                let last = (end - 1).min(stripe.offset + chunk.stripe_bytes() - 1);
+                let (Some(lo), Some(hi)) = (chunk.logical_of(i, first), chunk.logical_of(i, last))
+                else {
+                    continue;
+                };
+                // More stripes than Radix makes: not written here.
+                let slot = ranges.get_mut(n).ok_or(Error::NotSupported)?;
+                *slot = (lo.min(hi), lo.max(hi) + 1);
+                n += 1;
             }
         }
         Ok(())
