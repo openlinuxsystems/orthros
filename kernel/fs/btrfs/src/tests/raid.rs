@@ -33,7 +33,7 @@ const DISK: u64 = 128 << 20;
 
 /// A filesystem `mkfs.btrfs args` makes across `n` disks of [`DISK`]
 /// bytes: each disk's image.
-fn mkfs_disks(n: usize, args: &[&str]) -> Vec<Vec<u8>> {
+pub(super) fn mkfs_disks(n: usize, args: &[&str]) -> Vec<Vec<u8>> {
     let paths: Vec<PathBuf> = (0..n).map(|_| scratch("disk")).collect();
     for path in &paths {
         std::fs::File::create(path).unwrap().set_len(DISK).unwrap();
@@ -57,17 +57,17 @@ fn mkfs_disks(n: usize, args: &[&str]) -> Vec<Vec<u8>> {
 }
 
 /// A disk that can be written for each image.
-fn disks_of(images: &[Vec<u8>]) -> Vec<KArc<RamDisk>> {
+pub(super) fn disks_of(images: &[Vec<u8>]) -> Vec<KArc<RamDisk>> {
     images.iter().map(|image| writable(image)).collect()
 }
 
 /// What each disk holds.
-fn images_of(disks: &[KArc<RamDisk>]) -> Vec<Vec<u8>> {
+pub(super) fn images_of(disks: &[KArc<RamDisk>]) -> Vec<Vec<u8>> {
     disks.iter().map(|disk| image_of(disk, DISK as usize)).collect()
 }
 
 /// The filesystem on `disks`, the first named to the mount.
-fn mount_all(
+pub(super) fn mount_all(
     disks: &[KArc<RamDisk>],
     writable: bool,
     degraded: bool,
@@ -118,13 +118,13 @@ fn check_disks(images: &[Vec<u8>]) -> (bool, String) {
     (whole, text)
 }
 
-fn assert_checks(images: &[Vec<u8>], what: &str) {
+pub(super) fn assert_checks(images: &[Vec<u8>], what: &str) {
     let (whole, text) = check_disks(images);
     assert!(whole, "{what}: btrfs check failed:\n{text}");
 }
 
 /// Checks the filesystem `fs` reads `model`.
-fn assert_reads(fs: &BtrfsFs, model: &Model, what: &str) {
+pub(super) fn assert_reads(fs: &BtrfsFs, model: &Model, what: &str) {
     let read = snapshot(&fs.root());
     assert_eq!(read.keys().collect::<Vec<_>>(), model.keys().collect::<Vec<_>>(), "{what}");
     for (path, thing) in model {
@@ -134,7 +134,7 @@ fn assert_reads(fs: &BtrfsFs, model: &Model, what: &str) {
 
 /// Writes a file of `len` bytes of noise from `seed` at `name` in the top
 /// directory of `fs`, and notes it in `model`.
-fn write_file(fs: &BtrfsFs, model: &mut Model, name: &str, seed: u64, len: usize) {
+pub(super) fn write_file(fs: &BtrfsFs, model: &mut Model, name: &str, seed: u64, len: usize) {
     let data = noise(seed, len);
     let file = fs.root().create(name, Kind::File).unwrap();
     put(&file, 0, &data);

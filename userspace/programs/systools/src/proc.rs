@@ -479,6 +479,9 @@ pub struct Mount {
     pub source: String,
     pub path: OsString,
     pub kind: String,
+    pub read_only: bool,
+    /// The filesystem's label, if it has one.
+    pub label: Option<String>,
 }
 
 /// The mounts.
@@ -487,11 +490,14 @@ pub fn mounts() -> io::Result<Vec<Mount>> {
     let mut mounts = Vec::new();
     for line in text.split(|&b| b == b'\n').filter(|line| !line.is_empty()) {
         let parts: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
-        let [source, path, kind, ..] = parts.as_slice() else { continue };
+        let [source, path, kind, access, rest @ ..] = parts.as_slice() else { continue };
+        let label = rest.iter().find_map(|field| field.strip_prefix(b"label="));
         mounts.push(Mount {
             source: String::from_utf8_lossy(&unescape(source)).into_owned(),
             path: OsString::from_vec(unescape(path)),
             kind: String::from_utf8_lossy(kind).into_owned(),
+            read_only: *access == b"ro",
+            label: label.map(|label| String::from_utf8_lossy(&unescape(label)).into_owned()),
         });
     }
     Ok(mounts)

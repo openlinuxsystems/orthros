@@ -70,7 +70,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             u64::from_le_bytes(bytes[DEVID_AT..DEVID_AT + 8].try_into().unwrap_or([0; 8]))
         }
     };
-    let dir = File::open(&path).map_err(|e| util::failed(&path.display(), e))?;
+    let dir = sys::open_control(&path).map_err(|e| util::failed(&path.display(), e))?;
     let disk = OpenOptions::new()
         .read(true)
         .write(true)

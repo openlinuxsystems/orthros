@@ -826,6 +826,10 @@ impl FileSystem for BtrfsFs {
         crate::replace::replace(&self.inner, devid, &device)
     }
 
+    fn trim(&self, minimum: u64) -> Result<u64> {
+        crate::trim::trim(&self.inner, minimum)
+    }
+
     /// Whether a commit is due: the oldest change the disk lacks is
     /// [`COMMIT_NS`] old, or more than [`DIRTY_PAGES_MAX`] pages wait.
     fn is_dirty(&self) -> bool {

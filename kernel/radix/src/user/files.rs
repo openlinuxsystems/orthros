@@ -574,6 +574,16 @@ pub fn directory_method(
             put_scrub(&counts, UserOut { address, len })?;
             answer(label, 0, [0; 8])
         }
+        directory::TRIM => {
+            let a = directory::TrimArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let trimmed = dir.at.mount.fs.trim(a.minimum).map_err(|err| match err {
+                radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+                err => fs::status(err),
+            })?;
+            let results = directory::TrimResults { trimmed };
+            answer(label, directory::TrimResults::WORDS, results.encode())
+        }
         directory::READ_LINK => {
             let a = directory::ReadLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;

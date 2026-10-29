@@ -619,6 +619,18 @@ static void hardware(void) {
 static void storage(void) {
 	STATUS(2, "/bin/diskhealth", "nosuch");
 	STATUS(2, "/bin/diskhealth", "/devices/nosuch");
+	STATUS(32, "/bin/lsblk", "nosuch");
+	STATUS(32, "/bin/lsblk", "-f", "/devices/nosuch");
+	STATUS(2, "/bin/blkid", "nosuch");
+	STATUS(2, "/bin/blkid", "-L", "NOSUCHLABEL");
+	OUTPUT("", "tmpfs\n", "/bin/findmnt", "-n", "-o", "FSTYPE", "/tmp");
+	CONTAINS("TARGET", "/bin/findmnt");
+	STATUS(1, "/bin/findmnt", "-t", "xfs");
+	CONTAINS("/tmp ", "/bin/findmnt", "-l", "-t", "nobtrfs");
+	STATUS(1, "/bin/fstrim", "/tmp");
+	STATUS(1, "/bin/fstrim");
+	CONTAINS("avg-cpu:  %user   %nice %system %iowait  %steal   %idle\n", "/bin/iostat", "-c");
+	STATUS(0, "/bin/iostat", "-d", "-z");
 }
 
 // The program behind the links.

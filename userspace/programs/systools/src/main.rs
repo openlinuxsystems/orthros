@@ -15,12 +15,17 @@
 //! (Phase 13), so the user columns all say root.
 
 mod args;
+mod blkid;
 mod column;
 mod df;
 mod diskhealth;
 mod dmesg;
+mod findmnt;
+mod fstrim;
 mod hexdump;
+mod iostat;
 mod keymaps;
+mod lsblk;
 mod lscpu;
 mod lsmem;
 mod lsof;
@@ -30,6 +35,7 @@ mod modes;
 mod pidstat;
 mod power;
 mod priority;
+mod probe;
 mod proc;
 mod ps;
 mod replace;
@@ -62,6 +68,7 @@ type Tool = fn(&mut Args) -> Result<i32, Fail>;
 
 /// The tools, by name, in order.
 const TOOLS: &[(&str, Tool)] = &[
+    ("blkid", blkid::main),
     ("chgrp", modes::chgrp),
     ("chmod", modes::chmod),
     ("chown", modes::chown),
@@ -69,13 +76,17 @@ const TOOLS: &[(&str, Tool)] = &[
     ("df", df::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
+    ("findmnt", findmnt::main),
+    ("fstrim", fstrim::main),
     ("free", memory::free),
     ("halt", power::halt),
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
     ("ionice", priority::ionice),
+    ("iostat", iostat::main),
     ("keymap", keymaps::main),
     ("kill", signals::kill),
+    ("lsblk", lsblk::main),
     ("lscpu", lscpu::main),
     ("lsmem", lsmem::main),
     ("lsof", lsof::main),

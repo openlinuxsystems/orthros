@@ -64,7 +64,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::process::{IO_LEVELS, IoClass};
-use radix_block::{BlockDevice, Error, Health, Info, Page, Segment, SegmentMut, Write};
+use radix_block::{BlockDevice, Error, Health, Info, Page, Segment, SegmentMut, Stats, Write};
 use radix_hal::{CpuLocal, Timer};
 use radix_klog::{TextBuf, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -863,19 +863,136 @@ pub struct Volume<C> {
     /// Its ID in the requests.
     target: u32,
     info: Info,
+    counters: Counters,
+}
+
+/// What a volume has done ([`Stats`]), counted as its calls end: a call
+/// that moves many buffers at once is one request, or one for each write
+/// of [`BlockDevice::write_all`]. Each of the disk's lanes counts what
+/// its CPU starts and ends on a cache line of its own, as Linux's
+/// per-CPU counts do, so that CPUs doing I/O at once never share one.
+struct Counters {
+    lanes: Vec<LaneCounts, Kmalloc>,
+    busy_ns: AtomicU64,
+    /// When `busy_ns` was last brought up to date.
+    stamp: AtomicU64,
+}
+
+/// One lane's counts. `in_flight` goes up where a request starts and down
+/// where it ends, which may be another CPU's lane: only the sum counts.
+#[repr(align(64))]
+struct LaneCounts {
+    requests: [AtomicU64; 4],
+    sectors: [AtomicU64; 4],
+    ns: [AtomicU64; 4],
+    in_flight: AtomicU64,
+}
+
+/// How long `busy_ns` goes before it is brought up to date again: a
+/// millisecond, as Linux's jiffy at 1000 Hz.
+const BUSY_TICK_NS: u64 = 1_000_000;
+
+impl Counters {
+    /// Counts for `lanes` lanes; `None` when memory runs out.
+    fn new(lanes: usize) -> Option<Counters> {
+        let mut counts = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        counts.try_reserve_exact(lanes).ok()?;
+        for _ in 0..lanes {
+            let lane = LaneCounts {
+                requests: [const { AtomicU64::new(0) }; 4],
+                sectors: [const { AtomicU64::new(0) }; 4],
+                ns: [const { AtomicU64::new(0) }; 4],
+                in_flight: AtomicU64::new(0),
+            };
+            counts.push_within_capacity(lane).ok()?;
+        }
+        Some(Counters { lanes: counts, busy_ns: AtomicU64::new(0), stamp: AtomicU64::new(0) })
+    }
+
+    /// The requests in flight, in every lane.
+    fn in_flight(&self) -> u64 {
+        self.lanes
+            .iter()
+            .fold(0u64, |sum, lane| sum.wrapping_add(lane.in_flight.load(Ordering::Relaxed)))
+    }
+
+    /// Adds the time since the stamp to `busy_ns` if a request is in
+    /// flight, as Linux's `update_io_ticks` does, at most once a
+    /// [`BUSY_TICK_NS`]. The stamp only moves on, so that two CPUs never
+    /// count the same time.
+    fn tick(&self, now: u64) {
+        if now < self.stamp.load(Ordering::Relaxed).saturating_add(BUSY_TICK_NS) {
+            return;
+        }
+        let stamp = self.stamp.fetch_max(now, Ordering::Relaxed);
+        if now > stamp && self.in_flight() > 0 {
+            self.busy_ns.fetch_add(now - stamp, Ordering::Relaxed);
+        }
+    }
+
+    /// Runs `f` from `lane`, counted as `requests` of `kind` ([`Stats::READ`]
+    /// and the rest) moving `sectors` sectors.
+    fn count<R>(
+        &self,
+        lane: usize,
+        kind: usize,
+        requests: u64,
+        sectors: u64,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let started = sched::now_ns();
+        self.tick(started);
+        let here = &self.lanes[lane % self.lanes.len()];
+        here.in_flight.fetch_add(1, Ordering::Relaxed);
+        let result = f();
+        let now = sched::now_ns();
+        self.tick(now);
+        here.in_flight.fetch_sub(1, Ordering::Relaxed);
+        here.requests[kind].fetch_add(requests, Ordering::Relaxed);
+        here.sectors[kind].fetch_add(sectors, Ordering::Relaxed);
+        let took = now.saturating_sub(started).saturating_mul(requests);
+        here.ns[kind].fetch_add(took, Ordering::Relaxed);
+        result
+    }
+
+    fn stats(&self) -> Stats {
+        // The time of what is in flight now counts too, as on Linux.
+        self.tick(sched::now_ns());
+        let mut stats = Stats { in_flight: self.in_flight(), ..Stats::default() };
+        for lane in &self.lanes {
+            for kind in 0..4 {
+                stats.requests[kind] += lane.requests[kind].load(Ordering::Relaxed);
+                stats.sectors[kind] += lane.sectors[kind].load(Ordering::Relaxed);
+                stats.ns[kind] += lane.ns[kind].load(Ordering::Relaxed);
+            }
+        }
+        stats.busy_ns = self.busy_ns.load(Ordering::Relaxed);
+        stats
+    }
+}
+
+/// The 512-byte sectors of `buffers`.
+fn sectors_of(buffers: impl Iterator<Item = u64>) -> u64 {
+    buffers.sum::<u64>() / radix_block::SECTOR
 }
 
 impl<C: Controller> Volume<C> {
     /// The block device for volume `target` of `disk`: its whole for a
     /// disk with one (target 0), or one of an NVMe controller's
     /// namespaces, which `info` says what it is. Its requests take as many
-    /// segments as the disk's do.
-    pub fn new(disk: Arc<Disk<C>, Kmalloc>, target: u32, info: Info) -> Self {
+    /// segments as the disk's do. `None` when memory runs out.
+    pub fn new(disk: Arc<Disk<C>, Kmalloc>, target: u32, info: Info) -> Option<Self> {
         // A discard of the most sectors is whole blocks too.
         let unit = info.unit();
         let discard_sectors = info.discard_sectors / unit * unit;
         let info = Info { max_segments: disk.info.max_segments, discard_sectors, ..info };
-        Volume { disk, target, info }
+        let counters = Counters::new(disk.lanes.len())?;
+        Some(Volume { disk, target, info, counters })
+    }
+
+    /// Runs `f`, counted ([`Counters::count`]) in this CPU's lane.
+    fn counted<R>(&self, kind: usize, requests: u64, sectors: u64, f: impl FnOnce() -> R) -> R {
+        self.counters.count(self.disk.here(), kind, requests, sectors, f)
     }
 
     /// Flushes after `writes`, done with `result`, if one of them was to
@@ -904,7 +1021,8 @@ impl<C: Controller> Volume<C> {
         radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
         radix_hw::device_barrier();
         let buffers = segments.iter().map(|s| (s.page.phys() + s.offset as u64, s.len as u32));
-        self.transfer(op, sector, buffers)
+        let moved = sectors_of(segments.iter().map(|s| s.len as u64));
+        self.counted(Stats::WRITE, 1, moved, || self.transfer(op, sector, buffers))
     }
 
     /// Carries out `op` from `sector` with `buffers`: as one request when
@@ -915,15 +1033,17 @@ impl<C: Controller> Volume<C> {
         &self,
         op: Op,
         sector: u64,
-        buffers: impl ExactSizeIterator<Item = (u64, u32)>,
+        mut buffers: impl ExactSizeIterator<Item = (u64, u32)>,
     ) -> Result<(), Error> {
         let count = buffers.len();
+        if count == 1 {
+            // A page, as the block cache reads, without the array below on
+            // the stack: a mount reads its trees this deep in the kernel's.
+            let buffer = buffers.next().unwrap_or_default();
+            return self.request(op, sector, &[buffer]);
+        }
         if count <= MAX_SEGMENTS {
-            let mut data = [(0u64, 0u32); MAX_SEGMENTS];
-            for (slot, buffer) in data.iter_mut().zip(buffers) {
-                *slot = buffer;
-            }
-            return self.request(op, sector, &data[..count]);
+            return self.request_few(op, sector, buffers);
         }
         let mut data = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
         data.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
@@ -933,6 +1053,23 @@ impl<C: Controller> Volume<C> {
         }
         let unit = self.info.unit();
         self.disk.request_all(&Request { op, target: self.target, sector, data: &data, unit })
+    }
+
+    /// [`Self::transfer`] of up to [`MAX_SEGMENTS`] `buffers`, as one
+    /// request, with their array in a frame of its own.
+    #[inline(never)]
+    fn request_few(
+        &self,
+        op: Op,
+        sector: u64,
+        buffers: impl ExactSizeIterator<Item = (u64, u32)>,
+    ) -> Result<(), Error> {
+        let count = buffers.len();
+        let mut data = [(0u64, 0u32); MAX_SEGMENTS];
+        for (slot, buffer) in data.iter_mut().zip(buffers) {
+            *slot = buffer;
+        }
+        self.request(op, sector, &data[..count])
     }
 }
 
@@ -946,7 +1083,8 @@ impl<C: Controller> BlockDevice for Volume<C> {
         let Info { sectors, max_segments, .. } = self.info;
         radix_block::check(sectors, self.info.unit(), max_segments, sector, lengths)?;
         let buffers = segments.iter().map(|s| (s.page.phys() + s.offset as u64, s.len as u32));
-        self.transfer(Op::Read, sector, buffers)?;
+        let moved = sectors_of(segments.iter().map(|s| s.len as u64));
+        self.counted(Stats::READ, 1, moved, || self.transfer(Op::Read, sector, buffers))?;
         for segment in segments.iter_mut() {
             let (offset, len) = (segment.offset, segment.len);
             radix_hw::device_wrote(&mut segment.page.bytes_mut()[offset..offset + len]);
@@ -970,7 +1108,8 @@ impl<C: Controller> BlockDevice for Volume<C> {
         let unit = self.info.unit();
         radix_block::check_frames(self.info.sectors, unit, sector, frames)?;
         let request = Request { op: Op::Read, target: self.target, sector, data: frames, unit };
-        self.disk.request_all(&request)?;
+        let moved = sectors_of(frames.iter().map(|f| u64::from(f.1)));
+        self.counted(Stats::READ, 1, moved, || self.disk.request_all(&request))?;
         radix_hw::device_barrier();
         Ok(())
     }
@@ -983,7 +1122,8 @@ impl<C: Controller> BlockDevice for Volume<C> {
         radix_block::check_frames(self.info.sectors, unit, sector, frames)?;
         radix_hw::device_barrier();
         let request = Request { op: Op::Write, target: self.target, sector, data: frames, unit };
-        self.disk.request_all(&request)
+        let moved = sectors_of(frames.iter().map(|f| u64::from(f.1)));
+        self.counted(Stats::WRITE, 1, moved, || self.disk.request_all(&request))
     }
 
     /// Has every write in flight at once ([`Disk::request_many`]); one of
@@ -1034,7 +1174,10 @@ impl<C: Controller> BlockDevice for Volume<C> {
                 Request { op, target: self.target, sector: write.sector, data: part, unit };
             let _ = requests.push_within_capacity(request);
         }
-        let result = self.disk.request_many(&requests);
+        let moved = sectors_of(writes.iter().flat_map(|w| w.segments).map(|s| s.len as u64));
+        let result = self.counted(Stats::WRITE, writes.len() as u64, moved, || {
+            self.disk.request_many(&requests)
+        });
         self.flush_after(writes, result)
     }
 
@@ -1043,7 +1186,7 @@ impl<C: Controller> BlockDevice for Volume<C> {
             // Without a write cache, a write that returned is durable.
             return Ok(());
         }
-        self.request(Op::Flush, 0, &[])
+        self.counted(Stats::FLUSH, 1, 0, || self.request(Op::Flush, 0, &[]))
     }
 
     fn health(&self, page: &mut Page) -> Result<Health, Error> {
@@ -1058,12 +1201,18 @@ impl<C: Controller> BlockDevice for Volume<C> {
         if self.info.discard_sectors == 0 {
             return Err(Error::Unsupported);
         }
-        let (mut at, end) = (sector, sector + count);
-        while at < end {
-            let n = (end - at).min(self.info.discard_sectors);
-            self.request(Op::Discard(n), at, &[])?;
-            at += n;
-        }
-        Ok(())
+        self.counted(Stats::DISCARD, 1, count, || {
+            let (mut at, end) = (sector, sector + count);
+            while at < end {
+                let n = (end - at).min(self.info.discard_sectors);
+                self.request(Op::Discard(n), at, &[])?;
+                at += n;
+            }
+            Ok(())
+        })
+    }
+
+    fn stats(&self) -> Option<Stats> {
+        Some(self.counters.stats())
     }
 }

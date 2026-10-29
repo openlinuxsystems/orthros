@@ -16,6 +16,8 @@
 //!   requests as Linux names them (`rotational`, `logical_block_size`,
 //!   `discard_max_bytes` and the rest), and in its `device` the `model`,
 //!   `serial` and `firmware_rev` it gives, for SATA, NVMe and USB disks;
+//!   and its `stat`, what it has done, in the 17 numbers of Linux's
+//!   `/sys/block/<disk>/stat` (block/stat.rst), which iostat(1) reads;
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
@@ -155,6 +157,10 @@ impl Listing for Blocks {
             let firmware = value(move |text| writeln!(text, "{}", ident.firmware()))?;
             device.add("firmware_rev", firmware)?;
         }
+        if device.stats().is_some() {
+            let device = device.clone();
+            dir.add("stat", value(move |text| stat(text, &device.stats().unwrap_or_default()))?)?;
+        }
         let queue = dir.add_dir("queue", next_id())?;
         let (sector, logical) = (radix_block::SECTOR, u64::from(info.logical_block));
         for (name, number) in [
@@ -170,6 +176,41 @@ impl Listing for Blocks {
         }
         Ok(dir)
     }
+}
+
+/// A disk's `stat`, as Linux writes it: reads, reads merged, sectors
+/// read and milliseconds reading; the same of writes; requests in
+/// flight, milliseconds busy and milliseconds of every request; the same
+/// four of discards; flushes and milliseconds flushing. Radix merges no
+/// requests, so those are 0.
+fn stat(text: &mut Text, stats: &radix_block::Stats) -> fmt::Result {
+    use radix_block::Stats;
+    let ms = |ns: u64| ns / 1_000_000;
+    let all_ns: u64 = stats.ns.iter().sum();
+    let fields = [
+        stats.requests[Stats::READ],
+        0,
+        stats.sectors[Stats::READ],
+        ms(stats.ns[Stats::READ]),
+        stats.requests[Stats::WRITE],
+        0,
+        stats.sectors[Stats::WRITE],
+        ms(stats.ns[Stats::WRITE]),
+        stats.in_flight,
+        ms(stats.busy_ns),
+        ms(all_ns),
+        stats.requests[Stats::DISCARD],
+        0,
+        stats.sectors[Stats::DISCARD],
+        ms(stats.ns[Stats::DISCARD]),
+        stats.requests[Stats::FLUSH],
+        ms(stats.ns[Stats::FLUSH]),
+    ];
+    for (i, field) in fields.iter().enumerate() {
+        let gap = if i == 0 { "" } else { " " };
+        write!(text, "{gap}{field:>8}")?;
+    }
+    text.write_char('\n')
 }
 
 /// `/kernel/firmware/memmap`: a directory per range of the firmware's

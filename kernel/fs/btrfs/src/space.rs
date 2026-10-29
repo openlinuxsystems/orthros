@@ -329,6 +329,39 @@ impl Space {
         Ok(())
     }
 
+    /// The free ranges that may be taken now from logical address `from`
+    /// on, in order, of at least `minimum` bytes, up to `limit` bytes in
+    /// all, for a trim (ADR 0158): the ranges, and where the next batch
+    /// starts, or `None` at the end. A range cut at the limit goes on in
+    /// the next batch, whatever its length there.
+    pub(crate) fn free_from(
+        &self,
+        from: u64,
+        minimum: u64,
+        limit: u64,
+    ) -> Result<(Ranges, Option<u64>)> {
+        let mut out = mem::vec();
+        let mut bytes = 0;
+        for group in self.groups.iter().filter(|g| g.start + g.len > from) {
+            let first = group.free.partition_point(|r| r.1 <= from);
+            for &(s, e) in &group.free[first..] {
+                // What a batch cut short of the limit goes on with.
+                let going_on = s < from;
+                let s = s.max(from);
+                if e <= s || (!going_on && e - s < minimum) {
+                    continue;
+                }
+                let end = e.min(s + (limit - bytes));
+                mem::push(&mut out, (s, end))?;
+                bytes += end - s;
+                if bytes >= limit {
+                    return Ok((out, Some(end)));
+                }
+            }
+        }
+        Ok((out, None))
+    }
+
     /// The block groups whose items or free space trail what was taken
     /// and freed: their starts.
     pub(crate) fn changed(&self) -> Result<KVec<u64>> {

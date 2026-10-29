@@ -14,8 +14,9 @@
 //!   for virtio-blk, a command list for AHCI), so many threads have
 //!   requests in flight at once. Besides reads, writes and flushes, a
 //!   device writes through its cache ([`BlockDevice::write_through`]),
-//!   forgets sectors ([`BlockDevice::discard`]) as well as it can, and
-//!   says what it knows of its health ([`BlockDevice::health`]).
+//!   forgets sectors ([`BlockDevice::discard`]) as well as it can,
+//!   says what it knows of its health ([`BlockDevice::health`]), and
+//!   counts what it has done ([`BlockDevice::stats`]).
 //! - [`partition`] reads MBR and GPT partition tables, and [`Slice`] is a
 //!   partition as a block device of its own.
 //! - [`cache::BlockCache`] keeps a device's blocks in pages, for the
@@ -254,6 +255,43 @@ pub trait BlockDevice: Send + Sync {
     fn health(&self, _page: &mut Page) -> Result<Health, Error> {
         Err(Error::Unsupported)
     }
+
+    /// What it has done since it was found, as Linux counts it in
+    /// `/sys/block/<disk>/stat`; `None` for a device that does not count,
+    /// which the default is.
+    fn stats(&self) -> Option<Stats> {
+        None
+    }
+}
+
+/// What a disk has done ([`BlockDevice::stats`]): for each kind of
+/// request, how many ended, the 512-byte sectors they moved and the
+/// nanoseconds they took, added up; and how many are in flight and for
+/// how long one was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// The requests that ended, by kind: reads, writes, discards and
+    /// flushes, in that order ([`Stats::READ`] and the rest).
+    pub requests: [u64; 4],
+    /// The 512-byte sectors they moved, by kind.
+    pub sectors: [u64; 4],
+    /// The nanoseconds they took, added up, by kind.
+    pub ns: [u64; 4],
+    /// The requests in flight now.
+    pub in_flight: u64,
+    /// The nanoseconds during which at least one request was in flight.
+    pub busy_ns: u64,
+}
+
+impl Stats {
+    /// Where reads are counted.
+    pub const READ: usize = 0;
+    /// Where writes are counted.
+    pub const WRITE: usize = 1;
+    /// Where discards are counted.
+    pub const DISCARD: usize = 2;
+    /// Where flushes are counted.
+    pub const FLUSH: usize = 3;
 }
 
 /// Which record of its health a disk gave ([`BlockDevice::health`]).

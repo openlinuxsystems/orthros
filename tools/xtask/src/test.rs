@@ -567,6 +567,14 @@ const HEALTH_DISKS: &[Disk] = &[
     raw_disk(Bus::Virtio, raw_unchanged),
 ];
 
+/// The `storage-tools` test's disks: FAT32 in a GPT partition, `vda1`,
+/// and a Btrfs disk to write, `vdb`, which Spark mounts at
+/// `/volumes/vda1` and `/volumes/vdb`.
+const TOOLS_DISKS: &[Disk] = &[
+    fat_disk(48 * 1024, 32, "RADIXPART", Table::Gpt, Bus::Virtio),
+    btrfs_disk(Bus::Virtio, 512, BTRFS_NEW, btrfs_checked),
+];
+
 /// [`ERROR_RULES`], for each of [`ERROR_DISKS`].
 fn error_rules(_: usize) -> String {
     ERROR_RULES.into()
@@ -1638,6 +1646,23 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: disk_health,
         disks: HEALTH_DISKS,
+        second: None,
+    },
+    Case {
+        name: "storage-tools",
+        about: "lsblk, blkid and findmnt at the console name a FAT32 partition in a GPT and a Btrfs disk, their labels and kinds, and where Spark mounted them; fstrim trims the Btrfs, which btrfs check then passes, and iostat shows the disk's requests, its discards counted",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark mounts the disks, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: storage_tools,
+        disks: TOOLS_DISKS,
         second: None,
     },
     Case {
@@ -3449,6 +3474,70 @@ fn disk_health(vm: &mut Vm, case: &Case) -> Result<(), String> {
     ])?;
     vm.type_text("clear; diskhealth -a sda nvme0n1 | head -8; diskhealth -a nvme0n1 | tail -14\n")?;
     vm.expect_screen(&["Health: PASSED", "Raw read error rate", "Percentage used:"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// A normal boot with [`TOOLS_DISKS`]: at the console, lsblk(8),
+/// blkid(8) and findmnt(8) name the disks, the partition table, the
+/// filesystems and their mounts; fstrim(8) trims the Btrfs (ADR 0158),
+/// not the FAT, and iostat(1) shows the Btrfs disk, whose `stat` has
+/// counted the discards. Each command names the test's disks, so that the
+/// boot stick does not change the columns. The host's `btrfs check` then
+/// checks the trimmed disk.
+fn storage_tools(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // The sum, so that the needle is not in the typed line.
+    vm.type_text(
+        "lsblk -l -o NAME,TYPE,FSTYPE,LABEL,MOUNTPOINTS vda vdb; echo \"status $(( $? + 100 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "NAME TYPE FSTYPE LABEL      MOUNTPOINTS",
+        "vda1 part vfat   RADIXPART  /volumes/vda1",
+        "vdb  disk btrfs  RADIXBTRFS /volumes/vdb",
+        "status 100",
+    ])?;
+    vm.type_text(
+        "clear; blkid -s LABEL -s TYPE vda1 vdb; blkid -o value -s PTTYPE vda; blkid -L RADIXBTRFS; echo \"status $(( $? + 101 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "/devices/vda1: LABEL=\"RADIXPART\" TYPE=\"vfat\"",
+        "/devices/vdb: LABEL=\"RADIXBTRFS\" TYPE=\"btrfs\"",
+        "gpt",
+        "/devices/vdb",
+        "status 101",
+    ])?;
+    vm.type_text(
+        "clear; findmnt -n -o SOURCE,FSTYPE,OPTIONS /volumes/vdb; findmnt -n -o TARGET -S vda1; findmnt -t xfs; echo \"status $(( $? + 102 ))\"\n",
+    )?;
+    vm.expect_screen(&["/devices/vdb btrfs rw", "/volumes/vda1", "status 103"])?;
+    vm.type_text(
+        "clear; fstrim -v /volumes/vdb; fstrim /volumes/vda1; echo \"status $(( $? + 104 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "/volumes/vdb: ",
+        " bytes) trimmed",
+        "fstrim: /volumes/vda1: the discard operation is not supported",
+        "status 105",
+    ])?;
+    // replace(8) takes the control right too, as fstrim does: the kernel
+    // gets as far as refusing a disk that is mounted.
+    vm.type_text(
+        "clear; replace start 1 /devices/vda1 /volumes/vdb; echo \"status $(( $? + 105 ))\"\n",
+    )?;
+    vm.expect_screen(&["replace: /devices/vda1 is mounted", "status 106"])?;
+    vm.type_text(
+        "clear; iostat -d vdb; set -- $(cat /kernel/block/vdb/stat); echo \"discards $(( ${12} > 0 ))\"\n",
+    )?;
+    vm.expect_screen(&[
+        "Device             tps    kB_read/s    kB_wrtn/s",
+        "vdb           ",
+        "discards 1",
+    ])?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: every service has stopped")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)

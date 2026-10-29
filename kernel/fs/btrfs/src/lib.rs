@@ -65,6 +65,7 @@ pub mod space;
 mod subvol;
 pub mod superblock;
 pub mod tree;
+mod trim;
 pub mod unpack;
 pub mod volume;
 pub mod zstd;

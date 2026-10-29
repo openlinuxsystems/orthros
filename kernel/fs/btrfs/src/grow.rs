@@ -425,6 +425,33 @@ impl Writer {
     }
 }
 
+impl Writer {
+    /// The ranges of each disk that may take chunks and that no chunk
+    /// takes, past the [`RESERVED`] start: its device ID, and where each
+    /// starts and ends, for a trim (ADR 0158). The chunks made since the
+    /// mount count, so that a trim never reaches one.
+    pub(crate) fn unallocated(&mut self, volume: &Volume) -> Result<KVec<(u64, u64, u64)>> {
+        if self.grown.devices.is_none() {
+            self.grown.devices = Some(read_devices(volume)?);
+        }
+        let devices = self.grown.devices.as_ref().ok_or(Error::Corrupt)?;
+        let mut out = mem::vec();
+        for device in devices.list.iter().filter(|d| d.usable) {
+            let mut from = RESERVED;
+            let ends =
+                device.used.iter().copied().chain(core::iter::once((device.total, device.total)));
+            for (s, e) in ends {
+                let end = s.min(device.total);
+                if end > from {
+                    mem::push(&mut out, (device.devid, from, end))?;
+                }
+                from = from.max(e);
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Reads each disk's size, from its device item, and the ranges its
 /// device extents take.
 #[inline(never)]

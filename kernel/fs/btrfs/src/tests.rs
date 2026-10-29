@@ -566,4 +566,5 @@ mod raid;
 mod rw;
 mod scrub;
 mod snapshots;
+mod trim;
 mod write;

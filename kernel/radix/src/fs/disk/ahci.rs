@@ -287,6 +287,24 @@ fn add(
     Ok(())
 }
 
+/// The disk of `controller`, on the heap. Kept out of the frame of
+/// [`add_named`], which the scan's runs in: the disk is built on the
+/// stack before it moves.
+#[inline(never)]
+fn new_disk(
+    controller: SataPort,
+    info: Info,
+    write_cache: bool,
+    fua: bool,
+    interrupt: bool,
+) -> Result<Arc<Disk<SataPort>, Kmalloc>, &'static str> {
+    let name = controller.name.clone();
+    let controller = queue::part(controller).ok_or("out of memory")?;
+    let once = core::iter::once(controller);
+    let disk = Disk::new(once, info, write_cache, fua, interrupt, name).ok_or("out of memory")?;
+    Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")
+}
+
 /// Sets up the disk on port `number` of `host`, named `name`.
 fn add_named(
     host: &Host,
@@ -310,17 +328,7 @@ fn add_named(
         rotational: found.rotational.unwrap_or(true),
     };
     let controller = SataPort { port, owner: [0; PORTS], name: name.clone() };
-    let controller = queue::part(controller).ok_or("out of memory")?;
-    let disk = Disk::new(
-        core::iter::once(controller),
-        info,
-        found.write_cache,
-        found.fua,
-        interrupt,
-        name.clone(),
-    )
-    .ok_or("out of memory")?;
-    let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
+    let disk = new_disk(controller, info, found.write_cache, found.fua, interrupt)?;
     let _ = host.disks[number].set(disk.clone());
     let model = identity.as_ref().map_or("", |id| trimmed(&id.model));
     let mut queued = TextBuf::<24>::new();
@@ -338,7 +346,7 @@ fn add_named(
         if info.discard_sectors > 0 { ", TRIM" } else { "" },
         if info.rotational { "" } else { ", solid state" },
     );
-    let volume = Volume::new(disk, 0, info);
+    let volume = Volume::new(disk, 0, info).ok_or("out of memory")?;
     let device: DeviceRef =
         Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let ident = identity.map(|id| Ident {
