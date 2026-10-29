@@ -829,6 +829,13 @@ impl SpaceObject {
         Ok(())
     }
 
+    /// About how many pages [`fork_into`](Self::fork_into) takes for the
+    /// child's tables: one for each 512 of this space's pages, and as
+    /// many again for the levels above, the regions and the rest.
+    pub fn fork_room(&self) -> u64 {
+        self.anon_pages.load(Ordering::Relaxed) / 512 + 64
+    }
+
     /// Gives `child`, a new space no thread runs in, what this one maps:
     /// its anonymous memory shared (private pages read-only in both until
     /// written), its frames mapped as they are; rings are left out. The

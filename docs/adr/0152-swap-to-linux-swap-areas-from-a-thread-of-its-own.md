@@ -60,7 +60,12 @@ Btrfs.
   lets go of the lock, asks the thread, and tries again, up to 16 times,
   the last waiting as any allocation does. Linux's faults do as much
   with `VM_FAULT_RETRY`. So a program that fills memory by itself has
-  its own pages swapped out, instead of its domain stopped.
+  its own pages swapped out, instead of its domain stopped. A fork
+  copies its space's tables with the regions locked too, so with an area
+  on it first has the thread make room for the child's tables: a page
+  for each 512 of the space's pages, and 64 more. Without it, a fork
+  that found memory short had nothing swapped out and failed with
+  `no_memory` (seen in CI on 2026-10-28).
 - **Coming back.** The next fault at a swapped-out page reads it back,
   one page at a time, and counts a major fault. Freeing a page frees its
   slot, and swapoff reads back every page of the area before it lets it
