@@ -745,8 +745,8 @@ _target/userspace/_).
 		_/system/tests/storage write_ writes its files. Between the boots
 		the host wipes _vdb_'s superblock, as if it were pulled out. The
 		second boot must mount _vda_ alone, with the kernel's warning of
-		a disk missing, and _/system/tests/storage check --no-host-file
-		--replace 2 vdc --add vdd --balance --remove 1_ must read every
+		a disk missing, and _/system/tests/storage check --no-host-file --replace
+		2 vdc --add vdd --balance --remove 1_ must read every
 		byte back, put _vdc_ in the place of _vdb_ (device 2), which the
 		kernel rebuilds from _vda_'s copies with none left unmended, add
 		_vdd_ (device 3), move every chunk, and take _vda_ out (device 1),
