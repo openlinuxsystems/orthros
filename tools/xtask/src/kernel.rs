@@ -116,6 +116,16 @@ fn install(ctx: &Ctx, built: &Path, installed: &Path, profile: Profile) -> Resul
     Ok(())
 }
 
+/// Copies the installed kernel `from` to `to` in an image, without its
+/// debug information. GRUB loads every section of the file into memory,
+/// and the DWARF is most of it: some 40 MiB that left a 256 MiB machine
+/// too little for the boot archive. Backtraces need only .ksyms, and
+/// `ob run --gdb` reads the installed kernel, which keeps it.
+pub fn copy_for_image(ctx: &Ctx, from: &Path, to: &Path) -> Result<()> {
+    process::copy(from, to)?;
+    process::run(ctx, std::process::Command::new(objcopy(ctx)?).arg("--strip-debug").arg(to))
+}
+
 /// The pinned toolchain's `llvm-objcopy`, from its `llvm-tools` component.
 fn objcopy(ctx: &Ctx) -> Result<PathBuf> {
     let Some(sysroot) = doctor::sysroot(ctx) else {
