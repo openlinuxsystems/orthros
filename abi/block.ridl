@@ -57,6 +57,25 @@ const DISCARD: u32 = 0x1277;
 /// (BLKFLSBUF). Needs the write right.
 const FLUSH: u32 = 0x1261;
 
+/// What the disk says of its health (diskhealth(8), ADR 0157): Dukovo's
+/// own request, as Linux leaves it to commands passed through raw. It
+/// writes HEALTH_SIZE bytes: a u32 kind, HEALTH_ATA or HEALTH_NVME; a u32
+/// of flags; 512 bytes, a SATA disk's SMART data (SMART READ DATA) or an
+/// NVMe controller's SMART / Health Information log; then 512 bytes, a
+/// SATA disk's SMART thresholds, or zeros. A partition answers for its
+/// disk. Fails with not_supported on a device that keeps no such record,
+/// such as a virtio disk, and io if the disk does not answer.
+const GET_HEALTH: u32 = 0x84085203;
+/// The bytes GET_HEALTH writes.
+const HEALTH_SIZE: u32 = 1032;
+/// GET_HEALTH's kind for a SATA disk's SMART data and thresholds.
+const HEALTH_ATA: u32 = 1;
+/// GET_HEALTH's kind for an NVMe controller's health log.
+const HEALTH_NVME: u32 = 2;
+/// GET_HEALTH's flag for a SATA disk whose SMART is off: its 1024 bytes
+/// are zeros.
+const HEALTH_SMART_OFF: u32 = 1;
+
 /// Turns on the swap area mkswap(8) made on the device (swapon(8), ADR
 /// 0152): Dukovo's own request, as Linux has the swapon(2) system call
 /// for it, whose flags it reads as a u32. With SWAP_PREFER set, the low

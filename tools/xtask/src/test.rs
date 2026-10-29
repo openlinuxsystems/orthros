@@ -512,6 +512,15 @@ const ERROR_DISKS: &[Disk] = &[
     Disk { errors: Some(error_rules), ..raw_disk(Bus::Nvme(0), raw_unchanged) },
 ];
 
+/// The `disk-health` test's disks, raw: a SATA disk, which keeps SMART,
+/// an NVMe namespace, whose controller keeps a health log, and a virtio
+/// disk, which keeps neither: `sda`, `nvme0n1` and `vda`.
+const HEALTH_DISKS: &[Disk] = &[
+    raw_disk(Bus::Sata, raw_unchanged),
+    raw_disk(Bus::Nvme(0), raw_unchanged),
+    raw_disk(Bus::Virtio, raw_unchanged),
+];
+
 /// [`ERROR_RULES`], for each of [`ERROR_DISKS`].
 fn error_rules(_: usize) -> String {
     ERROR_RULES.into()
@@ -1546,6 +1555,23 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: disk_errors,
         disks: ERROR_DISKS,
+        second: None,
+    },
+    Case {
+        name: "disk-health",
+        about: "on a normal boot Spark's diskhealth service logs that QEMU's SATA disk and NVMe drive pass; diskhealth at the console shows them, and the virtio disk keeping no record",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // No program: Spark starts the services, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: disk_health,
+        disks: HEALTH_DISKS,
         second: None,
     },
     Case {
@@ -2895,10 +2921,15 @@ impl Vm {
     /// Waits until the framebuffer console shows each of `needles`. The
     /// serial port gets every message before the screen does, and drawing
     /// is slow under emulation, so this takes screenshots until the screen
-    /// catches up or 15 seconds pass.
+    /// catches up or 15 seconds pass. It waits as long for the console's
+    /// size in the log, which a line of another service's may come before.
     pub fn expect_screen(&mut self, needles: &[&str]) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
+            if screen::Geometry::from_log(&self.log()).is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             let screen = self.screen()?;
             match screen_shows(&screen, needles) {
                 Ok(()) => return Ok(()),
@@ -3274,7 +3305,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 1 services in /system/settings/spark/services, 1 enabled")?;
+    vm.expect("spark: 2 services in /system/settings/spark/services, 2 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -3319,6 +3350,33 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// A normal boot with [`HEALTH_DISKS`]: Spark starts diskhealth(8) as a
+/// service, after consoled, and it logs each disk's verdict, in the
+/// order of their names; at the console, diskhealth shows them in a
+/// table, then the attributes of the SATA disk (ADR 0157).
+fn disk_health(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect("spark: started diskhealth (/system/commands/diskhealth) as process ")?;
+    vm.expect("diskhealth: nvme0n1: PASSED")?;
+    vm.expect("diskhealth: sda: PASSED")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // The sum, so that the needle is not in the typed line.
+    vm.type_text("diskhealth; echo \"status $(( $? + 100 ))\"\n")?;
+    vm.expect_screen(&[
+        "nvme0n1    NVMe  PASSED",
+        "sda        SATA  PASSED",
+        "vda        -",
+        "status 100",
+    ])?;
+    vm.type_text("clear; diskhealth -a sda nvme0n1 | head -8; diskhealth -a nvme0n1 | tail -14\n")?;
+    vm.expect_screen(&["Health: PASSED", "Raw read error rate", "Percentage used:"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: every service has stopped")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

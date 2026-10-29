@@ -19,9 +19,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use radix_ahci::ata::trimmed;
+use radix_ahci::ata::{smart, trimmed};
 use radix_ahci::{Absent, Hba, Port};
-use radix_block::{DeviceRef, Error, Info};
+use radix_block::{DeviceRef, Error, Health, Info, Page};
 use radix_hal::Devices;
 use radix_hw::pci::{Bar, Function, Msi};
 use radix_klog::{TextBuf, info, warn};
@@ -79,6 +79,7 @@ fn port_op(op: Op) -> radix_ahci::Op {
         Op::WriteThrough => radix_ahci::Op::WriteThrough,
         Op::Flush => radix_ahci::Op::Flush,
         Op::Discard(count) => radix_ahci::Op::Trim(count),
+        Op::Smart(feature) => radix_ahci::Op::Smart(feature),
     }
 }
 
@@ -137,6 +138,23 @@ impl Controller for SataPort {
             lane.reset_link();
         }
         true
+    }
+
+    fn health(disk: &Disk<SataPort>, _target: u32, page: &mut Page) -> Result<Health, Error> {
+        let on = disk.controller(|lane| lane.port.identity().and_then(|id| id.smart));
+        match on.ok_or(Error::Io)? {
+            None => return Err(Error::Unsupported),
+            Some(false) => return Ok(Health::AtaOff),
+            Some(true) => {}
+        }
+        // The data, then the thresholds, each 512 bytes, alone.
+        for (feature, at) in [(smart::READ_DATA, 0), (smart::READ_THRESHOLDS, 512)] {
+            let data = [(page.phys() + at, 512)];
+            let op = Op::Smart(feature);
+            disk.request(&Request { op, target: 0, sector: 0, data: &data, unit: 1 })?;
+        }
+        radix_hw::device_wrote(&mut page.bytes_mut()[..1024]);
+        Ok(Health::Ata)
     }
 }
 

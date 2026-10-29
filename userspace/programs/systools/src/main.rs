@@ -17,6 +17,7 @@
 mod args;
 mod column;
 mod df;
+mod diskhealth;
 mod dmesg;
 mod hexdump;
 mod keymaps;
@@ -66,6 +67,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("chown", modes::chown),
     ("column", column::main),
     ("df", df::main),
+    ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
     ("free", memory::free),
     ("halt", power::halt),

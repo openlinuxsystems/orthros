@@ -57,6 +57,7 @@ impl Controller for Virtio {
             Op::Discard(count) => {
                 blk::Op::Discard(u32::try_from(count).map_err(|_| Error::OutOfRange)?)
             }
+            Op::Smart(_) => return Err(Error::Unsupported),
         };
         let head = self.blk.submit_held(op, sector, data).map_err(|err| match err {
             radix_virtio::Error::BadRequest => Error::OutOfRange,

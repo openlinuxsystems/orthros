@@ -30,12 +30,22 @@ const LAST_SEGMENT: u64 = 0x3;
 /// list (and metadata, which no command here has, in one buffer).
 const PSDT_SGL: u32 = 1 << 14;
 
+/// The namespace ID that names all of them.
+pub const ALL_NAMESPACES: u32 = u32::MAX;
+/// The SMART / Health Information log (5.16.1.3): the controller's
+/// temperature, spare capacity, wear and error counts, 512 bytes.
+pub const LOG_HEALTH: u8 = 0x02;
+/// The bytes of [`LOG_HEALTH`].
+pub const LOG_HEALTH_SIZE: usize = 512;
+
 /// Admin command opcodes (5).
 pub mod admin {
     /// Delete I/O Submission Queue.
     pub const DELETE_SQ: u8 = 0x00;
     /// Create I/O Submission Queue.
     pub const CREATE_SQ: u8 = 0x01;
+    /// Get Log Page.
+    pub const GET_LOG_PAGE: u8 = 0x02;
     /// Delete I/O Completion Queue.
     pub const DELETE_CQ: u8 = 0x04;
     /// Create I/O Completion Queue.
@@ -126,6 +136,21 @@ impl Command {
         let mut dwords = [0; 6];
         dwords[0] = u32::from(cns);
         Command { opcode: admin::IDENTIFY, namespace, prp1: buffer, dwords, ..Command::default() }
+    }
+
+    /// Get Log Page: the first `bytes` bytes (a multiple of 4, at most a
+    /// page) of log `log` for every namespace, into the page at `buffer`.
+    pub fn log_page(log: u8, bytes: u32, buffer: u64) -> Command {
+        let mut dwords = [0; 6];
+        // The count of dwords less one; its low 16 bits.
+        dwords[0] = u32::from(log) | ((bytes / 4 - 1) << 16);
+        Command {
+            opcode: admin::GET_LOG_PAGE,
+            namespace: ALL_NAMESPACES,
+            prp1: buffer,
+            dwords,
+            ..Command::default()
+        }
     }
 
     /// Set Features, Number of Queues: asks for `count` submission and as

@@ -13,8 +13,9 @@
 //!   the device is done; the driver below keeps its own queue (a virtqueue
 //!   for virtio-blk, a command list for AHCI), so many threads have
 //!   requests in flight at once. Besides reads, writes and flushes, a
-//!   device writes through its cache ([`BlockDevice::write_through`]) and
-//!   forgets sectors ([`BlockDevice::discard`]) as well as it can.
+//!   device writes through its cache ([`BlockDevice::write_through`]),
+//!   forgets sectors ([`BlockDevice::discard`]) as well as it can, and
+//!   says what it knows of its health ([`BlockDevice::health`]).
 //! - [`partition`] reads MBR and GPT partition tables, and [`Slice`] is a
 //!   partition as a block device of its own.
 //! - [`cache::BlockCache`] keeps a device's blocks in pages, for the
@@ -243,6 +244,27 @@ pub trait BlockDevice: Send + Sync {
     fn discard(&self, _sector: u64, _count: u64) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
+
+    /// Reads what the disk says of its health into `page`: in its first
+    /// 512 bytes the record a SATA disk keeps (SMART READ DATA) or an
+    /// NVMe controller's SMART / Health Information log, and for a SATA
+    /// disk its SMART thresholds in the next 512. A partition answers for
+    /// its disk. Fails with [`Error::Unsupported`] on a device that keeps
+    /// no such record, which the default does.
+    fn health(&self, _page: &mut Page) -> Result<Health, Error> {
+        Err(Error::Unsupported)
+    }
+}
+
+/// Which record of its health a disk gave ([`BlockDevice::health`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Health {
+    /// A SATA disk's SMART data and thresholds.
+    Ata,
+    /// Nothing: the SATA disk has SMART, and it is off.
+    AtaOff,
+    /// An NVMe controller's SMART / Health Information log.
+    Nvme,
 }
 
 /// A block device, shared.
@@ -447,6 +469,10 @@ impl BlockDevice for Slice {
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
         check_discard(self.sectors, self.unit, sector, count)?;
         self.device.discard(self.first + sector, count)
+    }
+
+    fn health(&self, page: &mut Page) -> Result<Health, Error> {
+        self.device.health(page)
     }
 }
 

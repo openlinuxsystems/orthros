@@ -318,6 +318,7 @@ impl<'a> Stick<'a> {
                 return self.judge(number, reply, true);
             }
             Op::Discard(_) => return (Outcome::Failed, Some("it does not discard")),
+            Op::Smart(_) => return (Outcome::Failed, Some("it keeps no SMART record")),
         };
         let block = u64::from(found.capacity.block_length);
         let unit = block / SECTOR;

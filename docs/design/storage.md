@@ -382,6 +382,20 @@ and Dukovo's own `SWAP_ON` and `SWAP_OFF`, which turn the swap area
 While an area is on, its device's raw writes and mounts fail with
 `in_use` (`radix_block::swap::claim`).
 
+### Disk health
+
+Dukovo's own `GET_HEALTH` request (ADR 0157) reads what a disk keeps of
+its health (`BlockDevice::health`, which a partition passes to its
+disk): a SATA disk's SMART data and thresholds, two 512-byte pages that
+the AHCI driver reads as commands that go out alone through the disk's
+queue (`Op::Smart`), or an NVMe controller's SMART / Health Information
+log, which the NVMe driver reads on the admin queue under the
+controller's lock (`Controller::health`). Only those commands are sent;
+there is no pass-through of raw ones. The kernel hands the record over
+as it is, and diskhealth(8) judges it; Spark's diskhealth service looks
+at every disk at boot and every half hour and logs a disk's verdict
+when it changes.
+
 ## FAT
 
 `radix-fat` implements FAT12, FAT16 and FAT32 from Microsoft's

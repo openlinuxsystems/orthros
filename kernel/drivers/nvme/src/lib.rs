@@ -368,6 +368,22 @@ impl Nvme {
         self.deallocate_blocks
     }
 
+    /// Reads the SMART / Health Information log ([`command::LOG_HEALTH`])
+    /// into `out`: what the controller says of its temperature, spare
+    /// capacity, wear and errors. An admin command, polled.
+    pub fn health(
+        &mut self,
+        delay: &mut dyn FnMut(u32),
+        out: &mut [u8; command::LOG_HEALTH_SIZE],
+    ) -> Result<(), Error> {
+        let buffer = self.admin.phys() + BUFFER as u64;
+        let size = command::LOG_HEALTH_SIZE as u32;
+        self.command(Command::log_page(command::LOG_HEALTH, size, buffer), delay)?;
+        device_barrier();
+        self.admin.read(BUFFER, out);
+        Ok(())
+    }
+
     /// Whether it says it failed, or is gone: its registers read all ones
     /// once a device has left the bus.
     pub fn failed(&self) -> bool {

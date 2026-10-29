@@ -135,10 +135,11 @@ found and ends like this:
 [    1.583622] Init: /system/commands/spark is process 1
 ...
 [    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 8 filesystems
-[    1.994464] cpu1: spark[1]: spark: added 5 default settings to /system/settings
+[    1.994464] cpu1: spark[1]: spark: added 6 default settings to /system/settings
 [    2.025364] cpu1: spark[1]: spark: listening at /system/live/spark/control
-[    2.059082] cpu1: spark[1]: spark: 1 services in /system/settings/spark/services, 1 enabled
+[    2.059082] cpu1: spark[1]: spark: 2 services in /system/settings/spark/services, 2 enabled
 [    2.162156] cpu1: spark[1]: spark: started consoled (/system/commands/consoled) as process 12
+[    2.171904] cpu1: spark[1]: spark: started diskhealth (/system/commands/diskhealth) as process 13
 [    2.207236] Framebuffer: a program took the screen; the log stays off it
 ```
 
