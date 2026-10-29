@@ -11,6 +11,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# keymap(1)'s layouts and their setting (ADR 0149).
+keymap = { path = "../keymap" }
 libc = "0.2.191"
 # The system call interface, generated from abi/*.ridl, for what the C
 # library does not wrap: affinity, I/O priority, tracing.

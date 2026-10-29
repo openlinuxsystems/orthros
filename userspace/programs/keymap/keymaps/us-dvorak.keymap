@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# us-dvorak: English (Dvorak), made by generate.py from xkeyboard-config
+# 2.48's `us(dvorak)` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = English (Dvorak)
+
+1           1        !
+2           2        @
+3           3        #
+4           4        $
+5           5        %
+6           6        ^        dead:circumflex dead:circumflex
+7           7        &
+8           8        *
+9           9        (        dead:grave dead:breve
+0           0        )
+minus       [        {
+equal       ]        }        dead:tilde
+q           '        "        dead:acute dead:diaeresis
+w           ,        <        dead:cedilla dead:caron
+e           .        >        dead:abovedot ·
+r           p        P
+t           y        Y
+y           f        F
+u           g        G
+i           c        C
+o           r        R
+p           l        L
+leftbrace   /        ?
+rightbrace  =        +
+a           a        A
+s           o        O
+d           e        E
+f           u        U
+g           i        I
+h           d        D
+j           h        H
+k           t        T
+l           n        N
+semicolon   s        S
+apostrophe  U+002D   _
+grave       `        ~        dead:grave dead:tilde
+backslash   \        |
+z           ;        :        dead:ogonek dead:doubleacute
+x           q        Q
+c           j        J
+v           k        K
+b           x        X
+n           b        B
+m           m        M
+comma       w        W
+dot         v        V
+slash       z        Z
+space       U+0020
+102nd       <        >        |        ¦
+kpdot       .

@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The keyboard layout the consoles type in: a name `keymap --list` shows
+# (keymap(1)).
+layout = us

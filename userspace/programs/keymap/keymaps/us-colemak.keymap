@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# us-colemak: English (Colemak), made by generate.py from xkeyboard-config
+# 2.48's `us(colemak)` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = English (Colemak)
+rightalt = altgr
+
+1           1        !        ¡        ¹
+2           2        @        º        ²
+3           3        #        ª        ³
+4           4        $        ¢        £
+5           5        %        €        ¥
+6           6        ^        ħ        Ħ
+7           7        &        ð        Ð
+8           8        *        þ        Þ
+9           9        (        ‘        “
+0           0        )        ’        ”
+minus       U+002D   _        –        —
+equal       =        +        ×        ÷
+q           q        Q        ä        Ä
+w           w        W        å        Å
+e           f        F        ã        Ã
+r           p        P        ø        Ø
+t           g        G        dead:ogonek ~
+y           j        J        đ        Đ
+u           l        L        ł        Ł
+i           u        U        ú        Ú
+o           y        Y        ü        Ü
+p           ;        :        ö        Ö
+leftbrace   [        {        «        ‹
+rightbrace  ]        }        »        ›
+a           a        A        á        Á
+s           r        R        dead:grave ~
+d           s        S        ß        ẞ
+f           t        T        dead:acute dead:doubleacute
+g           d        D        dead:diaeresis ~
+h           h        H        dead:caron ~
+j           n        N        ñ        Ñ
+k           e        E        é        É
+l           i        I        í        Í
+semicolon   o        O        ó        Ó
+apostrophe  '        "        õ        Õ
+grave       `        ~        dead:tilde ~
+backslash   \        |        ~        ~
+z           z        Z        æ        Æ
+x           x        X        dead:circumflex ~
+c           c        C        ç        Ç
+v           v        V        œ        Œ
+b           b        B        dead:breve ~
+n           k        K        dead:abovering ~
+m           m        M        dead:macron ~
+comma       ,        <        dead:cedilla ~
+dot         .        >        dead:abovedot ~
+slash       /        ?        ¿        ~
+space       U+0020   U+0020   U+0020   U+00A0
+102nd       U+002D   _        –        —
+kpdot       .

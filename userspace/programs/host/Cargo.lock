@@ -64,6 +64,7 @@ dependencies = [
 name = "consoled"
 version = "0.10.2"
 dependencies = [
+ "keymap",
  "libc",
  "radix-abi",
  "radix-fbcon",
@@ -256,6 +257,13 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keymap"
+version = "0.10.2"
+dependencies = [
+ "radix-abi",
 ]
 
 [[package]]
@@ -638,6 +646,7 @@ dependencies = [
 name = "systools"
 version = "0.10.2"
 dependencies = [
+ "keymap",
  "libc",
  "radix-abi",
 ]

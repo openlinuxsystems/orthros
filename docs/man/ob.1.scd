@@ -309,9 +309,11 @@ _target/userspace/_).
 		Boot normally, with no program on the command line, so Spark
 		starts its services: read Nukesh's prompt off consoled's tty1,
 		type a command on QEMU's PS/2 keyboard and read its answer back,
-		switch to tty2 with Alt+F2, restart consoled with *service*(8),
-		and power the machine off with *poweroff*(8) (*consoled*(8),
-		*spark*(8)).
+		switch to tty2 with Alt+F2, switch the keyboard to the German
+		layout with *keymap*(1) and type a Z, an E with a dead acute and
+		an @ with AltGr, restart consoled with *service*(8), which must
+		keep the layout, switch back to US, and power the machine off
+		with *poweroff*(8) (*consoled*(8), *spark*(8)).
 
 	*power-button*
 		Boot normally under BIOS, and once consoled has started, press

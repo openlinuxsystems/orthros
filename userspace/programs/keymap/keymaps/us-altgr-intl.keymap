@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# us-altgr-intl: English (intl., with AltGr dead keys), made by generate.py from xkeyboard-config
+# 2.48's `us(altgr-intl)` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = English (intl., with AltGr dead keys)
+rightalt = altgr
+
+1           1        !        ¹        ¡
+2           2        @        ²        dead:doubleacute
+3           3        #        ³        dead:macron
+4           4        $        ¤        £
+5           5        %        €        dead:cedilla
+6           6        ^        dead:circumflex ¼
+7           7        &        dead:horn ½
+8           8        *        dead:ogonek ¾
+9           9        (        ‘        dead:breve
+0           0        )        ’        dead:abovering
+minus       U+002D   _        ¥        dead:belowdot
+equal       =        +        ×        ÷
+q           q        Q        ä        Ä
+w           w        W        å        Å
+e           e        E        é        É
+r           r        R        ë        Ë
+t           t        T        þ        Þ
+y           y        Y        ü        Ü
+u           u        U        ú        Ú
+i           i        I        í        Í
+o           o        O        ó        Ó
+p           p        P        ö        Ö
+leftbrace   [        {        «        “
+rightbrace  ]        }        »        ”
+a           a        A        á        Á
+s           s        S        ß        §
+d           d        D        ð        Ð
+f           f        F        f        F
+g           g        G        g        G
+h           h        H        h        H
+j           j        J        ï        Ï
+k           k        K        œ        Œ
+l           l        L        ø        Ø
+semicolon   ;        :        ¶        °
+apostrophe  '        "        dead:acute dead:diaeresis
+grave       `        ~        dead:grave dead:tilde
+backslash   \        |        ¬        ¦
+z           z        Z        æ        Æ
+x           x        X        œ        Œ
+c           c        C        ©        ¢
+v           v        V        ®        ™
+b           b        B        ·
+n           n        N        ñ        Ñ
+m           m        M        µ        ±
+comma       ,        <        ç        Ç
+dot         .        >        dead:abovedot dead:caron
+slash       /        ?        ¿        dead:hook
+space       U+0020
+102nd       \        |        \        |
+kpdot       .

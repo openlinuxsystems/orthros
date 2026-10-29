@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# ro: Romanian, made by generate.py from xkeyboard-config
+# 2.48's `ro` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Romanian
+rightalt = altgr
+
+1           1        !        dead:tilde
+2           2        @        dead:caron
+3           3        #        dead:circumflex
+4           4        $        dead:breve
+5           5        %        dead:abovering
+6           6        ^        dead:ogonek
+7           7        &        dead:grave
+8           8        *        dead:abovedot
+9           9        (        dead:acute
+0           0        )        dead:doubleacute
+minus       U+002D   _        dead:diaeresis –
+equal       =        +        dead:cedilla ±
+q           q        Q        â        Â
+w           w        W        ß        ẞ
+e           e        E        €
+r           r        R
+t           t        T        ț        Ț
+y           y        Y
+u           u        U
+i           i        I        î        Î
+o           o        O
+p           p        P        §
+leftbrace   [        {        „
+rightbrace  ]        }        ”
+a           a        A        ă        Ă
+s           s        S        ș        Ș
+d           d        D        đ        Đ
+f           f        F
+g           g        G
+h           h        H
+j           j        J
+k           k        K
+l           l        L        ł        Ł
+semicolon   ;        :
+apostrophe  '        "
+grave       `        ~
+backslash   \        |
+z           z        Z
+x           x        X
+c           c        C        ©
+v           v        V
+b           b        B
+n           n        N
+m           m        M
+comma       ,        <        «
+dot         .        >        »
+slash       /        ?
+space       U+0020
+102nd       \        |        |        ¦
+kpdot       .

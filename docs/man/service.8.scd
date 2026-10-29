@@ -9,7 +9,7 @@ service - start, stop and look at the services
 
 # SYNOPSIS
 
-*service* _name_ *start* | *stop* | *restart* | *--full-restart* | *status*
+*service* _name_ *start* | *stop* | *restart* | *--full-restart* | *reload* | *status*
 
 *service --status-all*
 
@@ -22,8 +22,9 @@ _/system/settings/spark/services_ describes, a file each.
 *start* starts a service that is stopped or disabled, *stop* stops one
 and keeps it stopped until it is started again or the system restarts,
 and *restart* stops it and starts it again; Spark stops the domain of
-one that has not ended 5 seconds after SIGTERM. *status* shows what
-Spark knows of it:
+one that has not ended 5 seconds after SIGTERM. *reload* sends a running
+service SIGHUP, which has consoled read its keyboard layout's setting
+again (*consoled*(8)). *status* shows what Spark knows of it:
 
 ```
 consoled - Virtual consoles

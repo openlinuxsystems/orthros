@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# at: German (Austria), made by generate.py from xkeyboard-config
+# 2.48's `at` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = German (Austria)
+rightalt = altgr
+
+1           1        !        ¹        ¡
+2           2        "        ²        ⅛
+3           3        §        ³        £
+4           4        $        ¼        ¤
+5           5        %        ½        ⅜
+6           6        &        ¬        ⅝
+7           7        /        {        ⅞
+8           8        (        [        ™
+9           9        )        ]        ±
+0           0        =        }        °
+minus       ß        ?        \        ¿
+equal       dead:acute dead:grave dead:cedilla dead:ogonek
+q           q        Q        @        Ω
+w           w        W        ſ        §
+e           e        E        €        €
+r           r        R        ¶        ®
+t           t        T        ŧ        Ŧ
+y           z        Z        ←        ¥
+u           u        U        ↓        ↑
+i           i        I        →        ı
+o           o        O        ø        Ø
+p           p        P        þ        Þ
+leftbrace   ü        Ü        dead:diaeresis dead:abovering
+rightbrace  +        *        ~        ¯
+a           a        A        æ        Æ
+s           s        S        ſ        ẞ
+d           d        D        ð        Ð
+f           f        F        đ        ª
+g           g        G        ŋ        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        dead:belowdot dead:abovedot
+k           k        K        ĸ        &
+l           l        L        ł        Ł
+semicolon   ö        Ö        dead:doubleacute dead:belowdot
+apostrophe  ä        Ä        dead:circumflex dead:caron
+grave       dead:circumflex °        ′        ″
+backslash   #        '        ’        dead:breve
+z           y        Y        »        ›
+x           x        X        «        ‹
+c           c        C        ¢        ©
+v           v        V        „        ‚
+b           b        B        “        ‘
+n           n        N        ”        ’
+m           m        M        µ        º
+comma       ,        ;        ·        ×
+dot         .        :        …        ÷
+slash       U+002D   _        –        —
+space       U+0020
+102nd       <        >        |        dead:belowmacron
+kpdot       ,

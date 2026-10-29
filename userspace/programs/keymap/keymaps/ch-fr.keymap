@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# ch-fr: French (Switzerland), made by generate.py from xkeyboard-config
+# 2.48's `ch(fr)` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = French (Switzerland)
+rightalt = altgr
+
+1           1        +        |        ¡
+2           2        "        @        ⅛
+3           3        *        #        £
+4           4        ç        ¼        $
+5           5        %        ½        ⅜
+6           6        &        ¬        ⅝
+7           7        /        |        ⅞
+8           8        (        ¢        ™
+9           9        )        ]        ±
+0           0        =        }        °
+minus       '        ?        dead:acute ¿
+equal       dead:circumflex dead:grave dead:tilde dead:ogonek
+q           q        Q        @        Ω
+w           w        W        ſ        §
+e           e        E        €        E
+r           r        R        ¶        ®
+t           t        T        ŧ        Ŧ
+y           z        Z        ←        ¥
+u           u        U        ↓        ↑
+i           i        I        →        ı
+o           o        O        œ        Œ
+p           p        P        þ        Þ
+leftbrace   è        ü        [        dead:abovering
+rightbrace  dead:diaeresis !        ]        dead:macron
+a           a        A        æ        Æ
+s           s        S        ß        ẞ
+d           d        D        ð        Ð
+f           f        F        đ        ª
+g           g        G        ŋ        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        dead:hook dead:horn
+k           k        K        ĸ        &
+l           l        L        ł        Ł
+semicolon   é        ö        dead:acute dead:doubleacute
+apostrophe  à        ä        {        dead:caron
+grave       §        °        ¬        ¬
+backslash   $        £        }        dead:breve
+z           y        Y        «        <
+x           x        X        »        >
+c           c        C        ¢        ©
+v           v        V        „        ‚
+b           b        B        “        ‘
+n           n        N        ”        ’
+m           m        M        µ        º
+comma       ,        ;        •        ×
+dot         .        :        ·        ÷
+slash       U+002D   _        dead:belowdot dead:abovedot
+space       U+0020
+102nd       <        >        \        ¦
+kpdot       .

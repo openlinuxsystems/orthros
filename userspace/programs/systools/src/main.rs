@@ -19,6 +19,7 @@ mod column;
 mod df;
 mod dmesg;
 mod hexdump;
+mod keymaps;
 mod lscpu;
 mod lsmem;
 mod lsof;
@@ -70,6 +71,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
     ("ionice", priority::ionice),
+    ("keymap", keymaps::main),
     ("kill", signals::kill),
     ("lscpu", lscpu::main),
     ("lsmem", lsmem::main),

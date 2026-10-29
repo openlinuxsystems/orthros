@@ -186,7 +186,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    without KASLR and PCIDs)
   screen           the boot log on the UEFI framebuffer
   consoles         a shell on consoled's virtual consoles: typing, Alt+F2,
-                   poweroff
+                   a German keyboard layout, poweroff
   power-button     pressing the ACPI power button powers the machine off,
                    after Spark stops the services
   usb-devices      the xHCI controller names the boot stick, a keyboard, two

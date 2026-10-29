@@ -740,7 +740,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "consoles",
-        about: "a normal boot shows a shell on consoled's virtual consoles; typing, Alt+F2, poweroff",
+        about: "a normal boot shows a shell on consoled's virtual consoles; typing, Alt+F2, a German keyboard layout, poweroff",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
@@ -3114,15 +3114,29 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "consoled - Virtual consoles",
         "Active: active (running)",
     ])?;
-    // Its shells end with it, and Spark starts it again.
+    // The German layout (ADR 0149), at once: Y and Z swap places, a dead
+    // acute goes on the E after it, and AltGr+Q is @. The line is typed
+    // before it takes effect.
+    vm.type_text("keymap de; read -r line; printf '%s\\n' \"$line\" | xxd -p\n")?;
+    vm.expect("spark: asked consoled to reload")?;
+    vm.expect("consoled: the keys type in German (de)")?;
+    vm.expect_screen(&["The consoles type in German (de) now."])?;
+    vm.press(&["y", "equal", "e", "alt_r-q", "ret"])?;
+    vm.expect_screen(&["7ac3a9400a"])?;
+    // Its shells end with it, and Spark starts it again, in the layout
+    // the setting names; this line has no Y or Z.
     vm.type_text("service consoled restart\n")?;
     vm.expect("spark: asked to restart consoled")?;
     vm.expect("spark: consoled (process ")?;
     vm.expect(" was ended by signal 15")?;
     vm.expect("spark: starting consoled again in ")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect("consoled: the keys type in German (de)")?;
     vm.expect("consoled: 6 consoles; tty1 is shown")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `keymap us`, typed on the German layout.
+    vm.press(&["k", "e", "z", "m", "a", "p", "spc", "u", "s", "ret"])?;
+    vm.expect("consoled: the keys type in English (US) (us)")?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: asked to power off the machine")?;
     vm.expect("spark: every service has stopped")?;

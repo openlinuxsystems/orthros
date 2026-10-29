@@ -17,6 +17,7 @@
 static const char *const ELSEWHERE[][2] = {
 		{"spark", "the first program, which every boot test starts"},
 		{"consoled", "the consoles boot test's service: another would take the screen and keyboard"},
+		{"keymap", "the consoles boot test's: the layout it sets is the one consoled types in"},
 };
 
 enum { ELSEWHERE_COUNT = sizeof(ELSEWHERE) / sizeof(ELSEWHERE[0]) };

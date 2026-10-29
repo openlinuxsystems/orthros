@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# no: Norwegian, made by generate.py from xkeyboard-config
+# 2.48's `no` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Norwegian
+rightalt = altgr
+
+1           1        !        ¡        ¹
+2           2        "        @        ²
+3           3        #        £        ³
+4           4        ¤        $        ¼
+5           5        %        ½        ‰
+6           6        &        ¥        ⅝
+7           7        /        {        ÷
+8           8        (        [        «
+9           9        )        ]        »
+0           0        =        }        °
+minus       +        ?        ±        ¿
+equal       \        dead:grave dead:acute ¬
+q           q        Q        @        Ω
+w           w        W        ſ        §
+e           e        E        €        ¢
+r           r        R        ®        ™
+t           t        T        þ        Þ
+y           y        Y        ←        ¥
+u           u        U        ↓        ↑
+i           i        I        →        ı
+o           o        O        œ        Œ
+p           p        P        π        Π
+leftbrace   å        Å        dead:diaeresis dead:abovering
+rightbrace  dead:diaeresis dead:circumflex dead:tilde dead:caron
+a           a        A        ª        º
+s           s        S        ß        ẞ
+d           d        D        ð        Ð
+f           f        F        đ        ª
+g           g        G        ŋ        Ŋ
+h           h        H        ħ        Ħ
+j           j        J        dead:hook dead:horn
+k           k        K        ĸ        &
+l           l        L        ł        Ł
+semicolon   ø        Ø        dead:acute dead:doubleacute
+apostrophe  æ        Æ        dead:circumflex dead:caron
+grave       |        §        ¦        ¶
+backslash   '        *        dead:doubleacute ×
+z           z        Z        «        <
+x           x        X        »        >
+c           c        C        ©        ©
+v           v        V        „        ‚
+b           b        B        “        ‘
+n           n        N        ”        ’
+m           m        M        µ        º
+comma       ,        ;        dead:cedilla dead:ogonek
+dot         .        :        …        ·
+slash       U+002D   _        –        —
+space       U+0020   U+0020   U+00A0   U+202F
+102nd       <        >        ½        ¾
+kpdot       ,

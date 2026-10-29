@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-FileCopyrightText: The xkeyboard-config contributors
+# SPDX-License-Identifier: MIT
+#
+# tr: Turkish, made by generate.py from xkeyboard-config
+# 2.48's `tr` layout (keymaps/COPYING-xkeyboard-config).
+# keymap(5) describes the format: a key's Linux name, then what it types
+# alone, with Shift, with AltGr and with Shift and AltGr.
+
+name = Turkish
+rightalt = altgr
+
+1           1        !        >        ¡
+2           2        '        £        ²
+3           3        ^        #        ³
+4           4        +        $        ¼
+5           5        %        ½        ⅜
+6           6        &        ¾
+7           7        /        {
+8           8        (        [
+9           9        )        ]        ±
+0           0        =        }        °
+minus       *        ?        \        ¿
+equal       U+002D   _        |
+q           q        Q        @        Ω
+w           w        W
+e           e        E        €
+r           r        R        ¶        ®
+t           t        T        ₺
+y           y        Y        ←        ¥
+u           u        U        û        Û
+i           ı        I        î        Î
+o           o        O        ô        Ô
+p           p        P
+leftbrace   ğ        Ğ        dead:diaeresis dead:abovering
+rightbrace  ü        Ü        ~        dead:macron
+a           a        A        â        Â
+s           s        S        ß
+d           d        D
+f           f        F        ª
+g           g        G
+h           h        H
+j           j        J        dead:hook dead:horn
+k           k        K
+l           l        L
+semicolon   ş        Ş        ´        dead:acute
+apostrophe  i        İ        '        dead:caron
+grave       "        é        <        °
+backslash   ,        ;        `        dead:grave
+z           z        Z        «        <
+x           x        X        »        >
+c           c        C        ¢        ©
+v           v        V        „        ‚
+b           b        B        “        ‘
+n           n        N        ”        ’
+m           m        M        µ        º
+comma       ö        Ö        ×
+dot         ç        Ç        ·        ÷
+slash       .        :        dead:abovedot dead:abovedot
+space       U+0020
+102nd       <        >        |        ¦
+kpdot       ,
