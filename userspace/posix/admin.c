@@ -4,7 +4,7 @@
 // The native administration tools (systools, ADR 0096) as an
 // administrator's commands and scripts use them, each through its link
 // in /bin: the process tools and their signals, sessions, memory and
-// disks, subvolumes and scrubs, swap areas, priorities, CPU affinity and I/O
+// disks, subvolumes, scrubs and replaced disks, swap areas, priorities, CPU affinity and I/O
 // classes, held files, traces, the kernel log, the dump and layout tools,
 // script, watch and pidstat, shutdown and service through Spark, and the
 // hardware tools. With them, what the kernel tells them: /processes
@@ -224,9 +224,10 @@ static void memory(void) {
 	STATUS(1, "/bin/df", "/nowhere");
 }
 
-// subvolume and scrub on a filesystem that is not Btrfs, which refuses
-// each action, and with an unknown action or none; the root boot test
-// makes, snapshots, removes and scrubs subvolumes through the same calls.
+// subvolume, scrub and replace on a filesystem that is not Btrfs, which
+// refuses each action, and with an unknown action or none; the root boot
+// test makes, snapshots, removes and scrubs subvolumes through the same
+// calls, and btrfs-raid replaces a disk through the call replace makes.
 static void subvolumes(void) {
 	STATUS(0, "/bin/mkdir", "-p", DIR);
 	STATUS(1, "/bin/subvolume", "create", DIR "/sub");
@@ -238,6 +239,11 @@ static void subvolumes(void) {
 	STATUS(1, "/bin/scrub", "start", "-r", DIR);
 	STATUS(1, "/bin/scrub", "status", DIR);
 	STATUS(1, "/bin/scrub");
+	STATUS(0, "/bin/truncate", "-s", "1M", DIR "/disk");
+	STATUS(1, "/bin/replace", "start", "1", DIR "/disk", DIR);
+	STATUS(1, "/bin/replace", "start", DIR "/disk", DIR "/disk", DIR);
+	STATUS(1, "/bin/replace", "stop", DIR);
+	STATUS(1, "/bin/replace");
 }
 
 // mkswap, swapon and swapoff on a file in tmpfs, which takes a swap
