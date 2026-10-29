@@ -581,7 +581,11 @@ fn switch(
     if *made {
         files.w.add_ref(volume, &Key::new(new, item::EXTENT_ITEM, len), r, 1)?;
     } else {
-        files.new_data_extent(new, len, key.objectid, offset)?;
+        // The copy keeps the owner simple quotas count the extent to.
+        let old = Writer::extent_item(volume, &Key::new(bytenr, item::EXTENT_ITEM, len))?
+            .ok_or(Error::Corrupt)?;
+        let owner = crate::quota::owner_of(&old).filter(|_| crate::quota::simple(volume));
+        files.new_owned_extent(new, len, key.objectid, offset, owner)?;
         files.add_sums(new, sums)?;
         *made = true;
     }

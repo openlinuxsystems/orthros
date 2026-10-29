@@ -212,6 +212,15 @@ fn main(_: &Startup) -> u64 {
             // one of the filesystem's (ADR 0155), and every file read
             // again.
             let rest: Vec<&str> = args().skip(2).collect();
+            // `--quota` first: simple quotas on (ADR 0170), so that what
+            // the rest changes is counted, for Linux's `btrfs check` to
+            // count again.
+            let quota = rest.contains(&"--quota");
+            if quota {
+                for name in &volumes {
+                    quota_on(&root, name);
+                }
+            }
             if let Some(at) = rest.iter().position(|&arg| arg == "--replace") {
                 let devid = rest.get(at + 1).and_then(|devid| devid.parse().ok());
                 let (Some(devid), Some(disk)) = (devid, rest.get(at + 2)) else {
@@ -251,6 +260,11 @@ fn main(_: &Startup) -> u64 {
                 for name in &volumes {
                     remove_disk(&root, name, devid);
                     check_volume(&root, name, host);
+                }
+            }
+            if quota {
+                for name in &volumes {
+                    quota_shown(&root, name);
                 }
             }
             // And `--scrub`: a disk that missed changes is caught up.
@@ -420,6 +434,34 @@ fn balance(root: &Dir, name: &str) {
             fail(&format!("/volumes/{name}: a balance moved {moved} chunks of {considered}"));
         }
         Err(err) => fail(&format!("/volumes/{name}: a balance: {err}")),
+    }
+}
+
+/// Turns the simple quotas of the Btrfs at `/volumes/<name>` on (ADR
+/// 0170): its top subvolume gets a quota group, at zero.
+fn quota_on(root: &Dir, name: &str) {
+    let Some(volume) = controlled(root, name) else { return };
+    match volume.quota(true).and_then(|()| volume.qgroups()) {
+        Ok(groups) if groups.first() == Some(&(5, 0)) => {
+            println!("storage: /volumes/{name}: simple quotas on");
+        }
+        Ok(groups) => fail(&format!("/volumes/{name}: quota groups at first: {groups:?}")),
+        Err(err) => fail(&format!("/volumes/{name}: turning quotas on: {err}")),
+    }
+}
+
+/// Shows what the top subvolume's quota group of the Btrfs at
+/// `/volumes/<name>` counts: what was written since quotas went on.
+fn quota_shown(root: &Dir, name: &str) {
+    let Some(volume) = controlled(root, name) else { return };
+    match volume.qgroups() {
+        Ok(groups) => match groups.iter().find(|g| g.0 == 5) {
+            Some(&(_, bytes)) if bytes > 0 => {
+                println!("storage: /volumes/{name}: quota group 0/5 counts {bytes} bytes");
+            }
+            _ => fail(&format!("/volumes/{name}: quota groups: {groups:?}")),
+        },
+        Err(err) => fail(&format!("/volumes/{name}: quota groups: {err}")),
     }
 }
 

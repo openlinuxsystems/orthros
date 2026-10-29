@@ -125,6 +125,9 @@ pub struct Writer {
     /// The incompatible features its changes use, which the commit sets
     /// in the superblock: zstd, once it writes an extent so.
     pub(crate) incompat: u64,
+    /// The incompatible features it stops using, which the commit
+    /// clears: simple quotas, turned off.
+    pub(crate) incompat_off: u64,
     /// Each subvolume's last snapshot, as read from its root item: its
     /// blocks from up to then may be shared.
     pub(crate) snapshots: KVec<(u64, u64)>,
@@ -172,8 +175,7 @@ impl Writer {
         const REFUSED: u64 = incompat::RAID56
             | incompat::ZONED
             | incompat::EXTENT_TREE_V2
-            | incompat::RAID_STRIPE_TREE
-            | incompat::SIMPLE_QUOTA;
+            | incompat::RAID_STRIPE_TREE;
         let sb = volume.superblock();
         if volume.read_only() {
             return Err(Error::ReadOnly);
@@ -195,6 +197,7 @@ impl Writer {
             bytes_used: 0,
             grown: Grown::new(),
             incompat: 0,
+            incompat_off: 0,
             snapshots: mem::vec(),
             delayed: mem::vec(),
             logging: mem::boxed(Logging::new())?,
@@ -212,9 +215,7 @@ impl Writer {
         const TREE_RELOC: u64 = (-8i64) as u64;
         let mut cursor = Cursor::seek(volume, &volume.root_tree(), &Key::new(0, 0, 0))?;
         while let Some((key, _)) = cursor.get() {
-            if key.kind == item::ROOT_ITEM
-                && (key.objectid == tree::QUOTA || key.objectid == TREE_RELOC)
-            {
+            if key.kind == item::ROOT_ITEM && key.objectid == TREE_RELOC {
                 return Err(Error::NotSupported);
             }
             cursor.advance()?;
@@ -313,10 +314,19 @@ impl Writer {
     }
 
     /// Frees the block at `bytenr`, of a tree being dropped, whose extent
-    /// item is already gone: after the commit, as every block on the disk.
-    pub(crate) fn free_dropped(&mut self, volume: &Volume, bytenr: u64) -> Result<()> {
+    /// item is already gone, and whose header names `owner` and
+    /// transaction `generation`: after the commit, as every block on the
+    /// disk.
+    pub(crate) fn free_dropped(
+        &mut self,
+        volume: &Volume,
+        bytenr: u64,
+        owner: u64,
+        generation: u64,
+    ) -> Result<()> {
         let nodesize = u64::from(volume.superblock().nodesize);
         self.bytes_used -= nodesize as i64;
+        Writer::account(volume, owner, generation, -(nodesize as i64))?;
         mem::push(&mut self.pinned, (bytenr, nodesize))?;
         self.space.free_pinned(bytenr, nodesize)
     }
@@ -579,14 +589,16 @@ impl Writer {
             *at = bytenr;
         }
         self.count(tree, nodesize as i64)?;
+        Writer::account(volume, tree, self.generation, nodesize as i64)?;
         Ok(bytenr)
     }
 
-    /// Frees the block `root` of tree `tree`: at once if the transaction
-    /// made it, after the commit otherwise.
-    fn free_block(&mut self, volume: &Volume, tree: u64, root: &Root) -> Result<()> {
+    /// Frees the block `root` of tree `tree`, whose header names `owner`:
+    /// at once if the transaction made it, after the commit otherwise.
+    fn free_block(&mut self, volume: &Volume, tree: u64, root: &Root, owner: u64) -> Result<()> {
         let nodesize = u64::from(volume.superblock().nodesize);
         self.count(tree, -(nodesize as i64))?;
+        Writer::account(volume, owner, root.generation, -(nodesize as i64))?;
         if root.generation == self.generation && volume.blocks().take_dirty(root.bytenr).is_some() {
             let made = Change::Made { bytenr: root.bytenr, level: root.level, owner: tree };
             match self.changes.iter().position(|c| *c == made) {
@@ -719,7 +731,7 @@ impl Writer {
         };
         blocks.put_dirty(mem::arc(block)?)?;
         if last {
-            self.free_block(volume, tree, root)?;
+            self.free_block(volume, tree, root, owner)?;
         } else {
             // Other trees keep it: only this one stops counting it.
             self.count_tree(tree, -i64::from(volume.superblock().nodesize))?;
@@ -1093,7 +1105,7 @@ impl Writer {
                 let leaf_root = leaf.root();
                 blocks.put_dirty(mem::arc(leaf)?)?;
                 self.set_tree_root(volume, path.tree, leaf_root)?;
-                self.free_block(volume, path.tree, &root)?;
+                self.free_block(volume, path.tree, &root, path.tree)?;
                 path.steps[level] = None;
                 path.top = 0;
                 path.steps[0] = Some((leaf_root.bytenr, 0));
@@ -1107,7 +1119,7 @@ impl Writer {
                 let copy = self.cow(volume, path.tree, &child, &bounds, Some((block, 0)))?;
                 let child = blocks.view(copy, Block::root)?;
                 self.set_tree_root(volume, path.tree, child)?;
-                self.free_block(volume, path.tree, &root)?;
+                self.free_block(volume, path.tree, &root, path.tree)?;
                 path.steps[level] = None;
                 path.top -= 1;
             }
@@ -1116,7 +1128,7 @@ impl Writer {
         let (parent, pslot) = path.at(level + 1)?;
         let Some(first) = first else {
             blocks.edit(parent, |b| b.delete_ptrs(pslot, 1))?;
-            self.free_block(volume, path.tree, &root)?;
+            self.free_block(volume, path.tree, &root, path.tree)?;
             path.steps[level] = None;
             return self.after_delete(volume, path, level + 1);
         };
@@ -1167,7 +1179,7 @@ impl Writer {
             let into = self.cow(volume, path.tree, &left, &bounds, Some((parent, pslot - 1)))?;
             Self::move_all(volume, block, into)?;
             blocks.edit(parent, |p| p.delete_ptrs(pslot, 1))?;
-            self.free_block(volume, path.tree, &me)?;
+            self.free_block(volume, path.tree, &me, path.tree)?;
             path.steps[level] = None;
             return Ok(Some(pslot));
         }
@@ -1179,7 +1191,7 @@ impl Writer {
                 let gone = blocks.view(from, Block::root)?;
                 Self::move_all(volume, from, block)?;
                 blocks.edit(parent, |p| p.delete_ptrs(pslot + 1, 1))?;
-                self.free_block(volume, path.tree, &gone)?;
+                self.free_block(volume, path.tree, &gone, path.tree)?;
                 return Ok(Some(pslot + 1));
             }
         }

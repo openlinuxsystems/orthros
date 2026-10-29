@@ -119,6 +119,11 @@ pub struct Volume {
     chunks: RcuCell<ChunkMap, Alloc>,
     blocks: Blocks,
     current: Mutex<Current>,
+    /// Its quotas, while a writable mount keeps them (ADR 0170), under a
+    /// lock taken last.
+    quotas: Mutex<Option<crate::quota::Quotas>>,
+    /// Whether a quota group has a limit, which writes keep to.
+    quota_limited: AtomicBool,
 }
 
 /// What changes as transactions commit: the roots of the two trees the
@@ -198,7 +203,8 @@ impl Volume {
         // On the heap at once: a volume is large, and the mount's frames
         // above this one need not each hold a copy.
         let shown = AtomicUsize::new(disks.len());
-        Ok(mem::boxed(Volume { sb, disks, shown, chunks, blocks, current })?)
+        let (quotas, quota_limited) = (Mutex::new(None), AtomicBool::new(false));
+        Ok(mem::boxed(Volume { sb, disks, shown, chunks, blocks, current, quotas, quota_limited })?)
     }
 
     /// Adds to `disks` those of `devices` that hold the filesystem of the
@@ -425,6 +431,16 @@ impl Volume {
     /// The tree blocks read so far.
     pub fn blocks(&self) -> &Blocks {
         &self.blocks
+    }
+
+    /// Its quotas, as [`crate::quota`] keeps them.
+    pub(crate) fn quotas(&self) -> &Mutex<Option<crate::quota::Quotas>> {
+        &self.quotas
+    }
+
+    /// Whether a quota group has a limit.
+    pub(crate) fn quota_limited(&self) -> &AtomicBool {
+        &self.quota_limited
     }
 
     /// Where `logical` is on the disks that are there; copies on disks

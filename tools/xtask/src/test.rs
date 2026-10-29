@@ -1762,7 +1762,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-raid",
-        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then puts a third disk in the place of the second, adds a fourth, balances, and takes the first out, reading it all again after each: Linux's btrfs check passes after each boot, from every disk alone too",
+        about: "Spark mounts a Btrfs RAID1 of two disks Linux's mkfs.btrfs made once, from the first, and the storage test writes it; with the second pulled out it mounts from the first alone, warns, and reads every byte back, then turns simple quotas on, puts a third disk in the place of the second, adds a fourth, balances, and takes the first out, reading it all again after each: Linux's btrfs check passes after each boot, from every disk alone too, and counts every quota group again",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1775,8 +1775,8 @@ pub const CASES: &[Case] = &[
         script: raid_write,
         disks: RAID_DISKS,
         second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage check --no-host-file --replace 2 vdc --add \
-                      vdd --balance --remove 1",
+            cmdline: "lockdep -- /system/tests/storage check --no-host-file --quota --replace 2 \
+                      vdc --add vdd --balance --remove 1",
             before: raid_pull,
             script: raid_check,
         }),
@@ -5780,6 +5780,7 @@ fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(" files read back after the reboot, every byte as written")
     };
     read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: simple quotas on"))?;
     vm.expect(&format!(
         "Btrfs: disk 2 replaced by {third}, and rebuilt from the other disks' copies; 0 errors \
          no copy mends"
@@ -5793,6 +5794,7 @@ fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     read_back(vm)?;
     vm.expect(&format!("storage: /volumes/{first}: disk 1 removed"))?;
     read_back(vm)?;
+    vm.expect(&format!("storage: /volumes/{first}: quota group 0/5 counts "))?;
     storage_end(vm, "check")
 }
 

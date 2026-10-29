@@ -402,7 +402,7 @@ impl Files<'_> {
             return Err(Error::Corrupt);
         }
         self.w.delete(self.volume, tree::EXTENT, &key)?;
-        self.w.free_dropped(self.volume, block.bytenr())
+        self.w.free_dropped(self.volume, block.bytenr(), block.owner(), block.generation())
     }
 
     /// Makes the block `root`, if tree `id` owns it, and every block below

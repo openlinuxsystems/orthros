@@ -35,7 +35,7 @@ pub(crate) const EXTENT_HEADER: usize = 24;
 pub(crate) const FULL_BACKREF: u64 = 1 << 8;
 
 /// The inline reference of simple quotas, which comes first.
-const OWNER_REF: u8 = 172;
+pub(crate) const OWNER_REF: u8 = 172;
 
 /// Who refers to an extent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

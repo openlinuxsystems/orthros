@@ -74,6 +74,7 @@ impl Writer {
     }
 
     fn commit_inner(&mut self, volume: &Volume) -> Result<()> {
+        self.write_quotas(volume)?;
         self.catch_up(volume)?;
         let sb = self.write_blocks(volume)?;
         Self::write_superblocks(volume, &sb, true)?;
@@ -343,7 +344,7 @@ impl Writer {
         sb[at::LOG_ROOT_LEVEL] = 0;
         let used = add_i64(u64_at(&sb, at::BYTES_USED), self.bytes_used)?;
         put_u64(&mut sb, at::BYTES_USED, used);
-        let features = u64_at(&sb, at::INCOMPAT) | self.incompat;
+        let features = (u64_at(&sb, at::INCOMPAT) | self.incompat) & !self.incompat_off;
         put_u64(&mut sb, at::INCOMPAT, features);
         self.grow_superblock(&mut sb)?;
         Self::write_backup(volume, &mut sb)?;

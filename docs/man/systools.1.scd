@@ -90,12 +90,16 @@ error that starts with the tool's name.
 :  the PCI functions
 |  *mkswap*(8)
 :  make a swap area on a disk or partition
+|  *nvme*(8)
+:  the NVMe namespaces, and a drive's SMART / Health Information log
 |  *pgrep*(1), *pkill*(1)
 :  find or signal processes by name
 |  *pidstat*(1)
 :  what each process uses
 |  *ps*(1)
 :  the processes
+|  *quota*(8)
+:  turn a Btrfs filesystem's simple quotas on and off, show and limit them
 |  *renice*(1)
 :  a process's nice level
 |  *replace*(8)
