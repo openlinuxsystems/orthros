@@ -836,8 +836,12 @@ impl FileSystem for BtrfsFs {
         if radix_vfs::now().saturating_sub(since) >= COMMIT_NS {
             return true;
         }
-        let dirty = self.inner.dirty.lock();
-        dirty.iter().map(|node| node.dirty_pages()).sum::<usize>() > DIRTY_PAGES_MAX
+        // Each dirty page holds the room it reserved, so the room counts
+        // them without a lock: summing the files' counts under the dirty
+        // list's lock took each file's state after the list, which a sync
+        // takes in the other order (the file's state, the transaction,
+        // then the list).
+        self.inner.data_reserved.load(Ordering::Acquire) > (DIRTY_PAGES_MAX * PAGE_SIZE) as u64
     }
 
     fn label(&self, out: &mut dyn fmt::Write) -> fmt::Result {

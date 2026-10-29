@@ -69,9 +69,12 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
         let from = parent.space().ok_or(error(Kernel::Gone))?;
         let to = child.space().ok_or(error(Kernel::Gone))?;
         // The copy allocates the child's tables with this space's regions
-        // locked, where the swap thread passes the space over: with an
-        // area on, room is made first (ADR 0152).
-        crate::swap::make_room(from.fork_room());
+        // locked, where the swap thread passes the space over; and until
+        // the child execs or one of them writes, the pages they share
+        // cannot be swapped out, while exec fills the new program's space
+        // before it lets go of the old. So with an area on, room is made
+        // first for the tables and for the swap thread's mark (ADR 0152).
+        crate::swap::make_room(from.fork_room() + crate::swap::mark());
         from.fork_into(&to)?;
         {
             let parent = parent.posix.lock();

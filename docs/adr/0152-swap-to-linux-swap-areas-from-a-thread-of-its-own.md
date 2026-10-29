@@ -65,7 +65,13 @@ Btrfs.
   on it first has the thread make room for the child's tables: a page
   for each 512 of the space's pages, and 64 more. Without it, a fork
   that found memory short had nothing swapped out and failed with
-  `no_memory` (seen in CI on 2026-10-28).
+  `no_memory` (seen in CI on 2026-10-28). It makes room for 1/16 of RAM
+  more, the thread's mark: until the child execs or one of them writes
+  a page, the pages they share cannot be swapped out, and exec fills the
+  new program's space before it lets go of the old one. Without that, a
+  program whose pages filled memory forked to run another, and the
+  child's exec found nothing to swap out and was stopped (seen in CI on
+  2026-10-29).
 - **Coming back.** The next fault at a swapped-out page reads it back,
   one page at a time, and counts a major fault. Freeing a page frees its
   slot, and swapoff reads back every page of the area before it lets it
