@@ -263,6 +263,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    damaged one fails
   btrfs-write      the storage test on two Btrfs disks Linux made, past
                    their first data chunk; Linux's btrfs check passes
+  btrfs-stress     torture changes files on two Btrfs disks for two
+                   minutes, one compressing, checking every byte; after a
+                   reboot they hold what was synced, btrfs check passes
   btrfs-power-cut  the power is cut while Btrfs files are synced: btrfs
                    check passes, every synced file is whole
   btrfs-log        a Btrfs disk Linux left with a log of fsyncs: the mount

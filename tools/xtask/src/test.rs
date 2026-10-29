@@ -1702,6 +1702,28 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
+        name: "btrfs-stress",
+        about: "The long filesystem stress run: torture's four workers make random changes for two minutes, at once, on two Btrfs disks Linux's mkfs.btrfs made, one compressing with zstd, each checking what it did; Linux's btrfs check passes, and after a reboot every file, link and directory is as torture works out again, and goes, and btrfs check passes once more",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --compress nvme0n1 --posix /system/tests/posix/torture 0x5eed 120 \
+                  /volumes/nvme0n1 /volumes/vda",
+        cpus: 4,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: torture_run,
+        disks: BTRFS_WRITE_DISKS,
+        second: Some(SecondBoot {
+            cmdline: "lockdep -- --compress nvme0n1 --posix /system/tests/posix/torture --check \
+                      0x5eed /volumes/nvme0n1 /volumes/vda",
+            before: nothing_between,
+            script: torture_check,
+        }),
+    },
+    Case {
         name: "btrfs-power-cut",
         about: "The power is cut while files are written, synced, renamed and removed on Btrfs: Linux's btrfs check passes, every synced file is whole, and the disk mounts and is written again",
         firmware: Firmware::Uefi,
@@ -4317,6 +4339,13 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The kernel's and Spark's lines for the storage test's disks, up to
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/storage as process ")
+}
+
+/// The disks found, and Spark mounting each one's filesystem at
+/// `/volumes/<name>`.
+fn volumes_mounted(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
     // Spark mounts the disks while it builds the hierarchy, to find
     // Dukovo's root among them (ADR 0137).
@@ -4328,8 +4357,7 @@ fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
-    vm.expect("spark: started /system/tests/storage as process ")
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")
 }
 
 /// The end of the storage program: no failed checks, and exit code 0.
@@ -4355,6 +4383,55 @@ fn disk_size(kib: u64) -> String {
     let (unit, shift) = if kib >= 1 << 20 { ("GiB", 20) } else { ("MiB", 10) };
     let (whole, tenths) = (kib >> shift, ((kib & ((1 << shift) - 1)) * 10) >> shift);
     if tenths == 0 { format!("{whole} {unit}") } else { format!("{whole}.{tenths} {unit}") }
+}
+
+/// The first boot of `btrfs-stress`: torture (userspace/posix/torture.c)
+/// has two workers on each volume make random changes for two minutes,
+/// all four at once, each checking what it did and syncing it.
+fn torture_run(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    vm.expect("torture: 4 workers making changes for 120 s, seed 0x5eed")?;
+    vm.expect("torture: done in ")?;
+    torture_end(vm, case, "everything checked and synced")
+}
+
+/// The second boot of `btrfs-stress`: torture works out each worker's
+/// changes again, checks that the volumes hold what they left, and
+/// removes it all.
+fn torture_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    volumes_mounted(vm, case)?;
+    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    torture_end(vm, case, "removed")
+}
+
+/// The end of torture: each worker's last line, which ends with `done`,
+/// whatever order the workers ended in; no failed checks, and exit code
+/// 0.
+fn torture_end(vm: &mut Vm, case: &Case, done: &str) -> Result<(), String> {
+    let code = program_line(vm, "(/system/tests/posix/torture) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> = log.lines().filter(|line| line.contains("torture: FAILED: ")).collect();
+    if !failed.is_empty() {
+        return Err(format!("torture failed: {}", failed.join("; ")));
+    }
+    for name in volume_names(case.disks) {
+        for worker in 0..2 {
+            let start = format!("torture: /volumes/{name}/torture/w{worker}: ");
+            if !log.lines().any(|line| line.contains(&start) && line.trim_end().ends_with(done)) {
+                return Err(format!("torture's worker did not say \"{start}...{done}\""));
+            }
+        }
+    }
+    if code != "0x0" || !log.contains("torture: every check passed") {
+        return Err(format!("torture exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// Nothing to do between the boots.
+fn nothing_between(_: &Case, _: &[DiskImage]) -> Result<(), String> {
+    Ok(())
 }
 
 /// The first boot: the program writes its files to every volume.

@@ -693,6 +693,27 @@ _target/userspace/_).
 		between the boots, *btrfs restore* must copy out every file as
 		written, and none of those renamed or removed.
 
+	*btrfs-stress*
+		The long filesystem stress run of Phase 10. Boot 4 CPUs under
+		UEFI with the *btrfs-write* test's two disks, the NVMe one
+		compressing with zstd. _/system/tests/posix/torture_ starts two
+		workers on each volume, all at once, which for two minutes make
+		random changes, each in a directory of its own: files written
+		whole, in part, past their end and appended to, cut and grown,
+		saved through a temporary file and a rename, renamed over each
+		other and between directories, linked and removed, symbolic
+		links made and renamed over each other, and directories of small
+		files made and removed, with *fsync*(2) of files and directories
+		between. Each worker keeps in memory what its files should hold,
+		reads one back now and then, checks everything at the end and
+		syncs it. *btrfs check --check-data-csum* must then find nothing
+		wrong. Booted again, _torture --check_ works out each worker's
+		changes again from the same seed, as many as it made, and every
+		file's bytes, size and link count, every symbolic link and every
+		directory's entries must be as they leave them; then it removes
+		it all, and *btrfs check* must pass once more. The program runs
+		on Linux too, where its answers were checked.
+
 	*btrfs-power-cut*
 		Boot 2 CPUs under UEFI with a 128 MiB Btrfs disk as *mkfs.btrfs*
 		makes one by default. _/system/tests/storage churn_ writes a file,
