@@ -1,8 +1,15 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! A Btrfs filesystem's device, opened: its superblock, its chunks and
+//! A Btrfs filesystem's disks, opened: its superblock, its chunks and
 //! its root tree, from which every other tree is found.
+//!
+//! A filesystem may span several disks (ADR 0153). Each has a superblock
+//! of its own, the same but for its device item, and the chunk tree has a
+//! device item for each. The disks found are matched to those items; one
+//! not found is missing, and its copies are left out of every [`Place`].
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_block::DeviceRef;
 use radix_block::cache::BlockCache;
@@ -11,21 +18,81 @@ use radix_sync::rcu::RcuCell;
 use radix_vfs::mem::{self, Alloc, KBox, KVec};
 use radix_vfs::{Error, Result};
 
-use crate::chunk::{Chunk, ChunkMap, Place};
-use crate::format::{Key, RootItem, item, tree, u64_at};
+use crate::chunk::{Chunk, ChunkMap, Place, Site};
+use crate::format::{Key, RootItem, item, tree, u64_at, uuid_at};
 use crate::superblock::{self, Superblock};
 use crate::tree::{Blocks, Cursor, Root};
 
 /// The object ID of every device item in the chunk tree.
-const DEV_ITEMS: u64 = 1;
+pub(crate) const DEV_ITEMS: u64 = 1;
 
-/// An opened Btrfs device.
+/// Where a superblock keeps its disk's device item.
+pub(crate) const DEV_ITEM_AT: usize = 0xc9;
+
+/// A device item's size, and where in it the UUID is.
+pub(crate) const DEV_ITEM_SIZE: usize = 98;
+const DEV_UUID_AT: usize = 66;
+
+/// The most disks a filesystem may span here.
+pub const MAX_DISKS: usize = 16;
+
+/// One of a filesystem's disks.
+pub struct Disk {
+    /// Its ID within the filesystem.
+    pub devid: u64,
+    /// Its UUID.
+    pub uuid: [u8; 16],
+    /// The disk, through a cache of its sectors; `None` when it is
+    /// missing.
+    cache: Option<BlockCache>,
+    /// Its size, in bytes.
+    bytes: u64,
+    /// The generation of its superblock.
+    generation: u64,
+    /// Its superblock is older than the filesystem's: it missed commits
+    /// while it was away, so its copies are read last.
+    behind: AtomicBool,
+    /// It failed a write while mounted, and is left out from then on.
+    failed: AtomicBool,
+}
+
+impl Disk {
+    /// The disk, through its cache of sectors, if it is there.
+    pub fn cache(&self) -> Option<&BlockCache> {
+        self.cache.as_ref().filter(|_| !self.failed.load(Ordering::Relaxed))
+    }
+
+    /// The disk itself, if it is there.
+    pub fn device(&self) -> Option<&DeviceRef> {
+        self.cache().map(BlockCache::device)
+    }
+
+    /// Its size, in bytes; 0 when it is missing.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Whether it is there: found at the mount, and not failed since.
+    pub fn present(&self) -> bool {
+        self.cache().is_some()
+    }
+
+    /// Whether it missed commits while it was away.
+    pub fn behind(&self) -> bool {
+        self.behind.load(Ordering::Relaxed)
+    }
+
+    /// Whether `len` bytes from byte `at` are on the disk.
+    pub fn holds(&self, at: u64, len: u64) -> bool {
+        at.checked_add(len).is_some_and(|end| end <= self.bytes)
+    }
+}
+
+/// An opened Btrfs filesystem's disks.
 pub struct Volume {
     sb: Superblock,
-    /// The device, through a cache of its sectors.
-    cache: BlockCache,
-    /// Its size, in bytes.
-    device_bytes: u64,
+    /// Every disk the chunk tree names, by device ID.
+    disks: KVec<Disk>,
     /// Read without a lock; a new chunk replaces the map whole.
     chunks: RcuCell<ChunkMap, Alloc>,
     blocks: Blocks,
@@ -50,34 +117,48 @@ struct Current {
 const TREES: usize = 4;
 
 impl Volume {
-    /// Opens the Btrfs filesystem on `device`: reads its superblock and
-    /// its chunks.
-    ///
-    /// Fails with [`Error::UnknownFilesystem`] when the device holds no
-    /// Btrfs, [`Error::Corrupt`] when what it holds is damaged, and
-    /// [`Error::NotSupported`] for what Radix cannot read yet: a
-    /// filesystem on more than one device (Phase 10e). A log of fsyncs
-    /// is the mount's to replay (ADR 0151).
-    #[inline(never)]
+    /// Opens the Btrfs filesystem on `device`, alone ([`Volume::open_disks`]).
     pub fn open(device: DeviceRef) -> Result<KBox<Volume>> {
-        let info = device.info();
-        let device_bytes = info.sectors * radix_block::SECTOR;
-        if device_bytes < superblock::OFFSET + superblock::SIZE as u64 {
-            return Err(Error::UnknownFilesystem);
-        }
-        let cache = BlockCache::new(device);
-        // On the heap: kernel stack frames are small.
-        let mut bytes = crate::zeroed(superblock::SIZE)?;
-        cache.read(superblock::OFFSET, &mut bytes)?;
-        let sb = Superblock::read(&bytes)?;
-        if sb.num_devices != 1 {
+        Volume::open_disks(&[device])
+    }
+
+    /// Opens the Btrfs filesystem on `devices[0]`, and on those of the
+    /// others that hold the rest of it: reads their superblocks and its
+    /// chunks. Its disks not among them are missing; [`Volume::missing`]
+    /// says how many, and [`Volume::readable`] whether every chunk still
+    /// has a copy.
+    ///
+    /// Fails with [`Error::UnknownFilesystem`] when `devices[0]` holds no
+    /// Btrfs, [`Error::Corrupt`] when what it holds is damaged, and
+    /// [`Error::NotSupported`] for a filesystem on more than
+    /// [`MAX_DISKS`] disks. A log of fsyncs is the mount's to replay (ADR
+    /// 0151).
+    pub fn open_disks(devices: &[DeviceRef]) -> Result<KBox<Volume>> {
+        // The chunk tree's reads sleep on the disk: this frame, below
+        // them, holds only the box.
+        let mut volume = Volume::boxed(devices)?;
+        volume.read_chunk_tree()?;
+        Ok(volume)
+    }
+
+    /// The volume of the disks among `devices` that hold the filesystem
+    /// on `devices[0]`, on the heap, its chunks those of its superblock's
+    /// system chunk array ([`Volume::open_disks`]).
+    #[inline(never)]
+    fn boxed(devices: &[DeviceRef]) -> Result<KBox<Volume>> {
+        let first = devices.first().ok_or(Error::NotFound)?;
+        let (sb, bytes) = read_superblock(first)?;
+        if sb.num_devices == 0 || sb.num_devices > MAX_DISKS as u64 {
             return Err(Error::NotSupported);
         }
-        // The device item's size: a device smaller than the filesystem
-        // says has lost its end.
-        if u64_at(&bytes, 0xc9 + 8) > device_bytes {
-            return Err(Error::Corrupt);
+        let mut disks = mem::vec_with_capacity(sb.num_devices as usize)?;
+        mem::push(&mut disks, Disk::found(first, &sb, &bytes)?)?;
+        let mut newest = (sb, bytes);
+        // A filesystem of one disk needs no other read.
+        if newest.0.num_devices > 1 {
+            Volume::find_disks(&devices[1..], &mut disks, &mut newest)?;
         }
+        let (sb, bytes) = newest;
         let chunks =
             RcuCell::new_in(ChunkMap::bootstrap(sb.sys_chunks(), sb.sectorsize)?, mem::alloc())
                 .map_err(|_| Error::NoMemory)?;
@@ -94,33 +175,81 @@ impl Volume {
         });
         // On the heap at once: a volume is large, and the mount's frames
         // above this one need not each hold a copy.
-        let mut volume = mem::boxed(Volume { sb, cache, device_bytes, chunks, blocks, current })?;
-        volume.read_chunk_tree()?;
-        Ok(volume)
+        Ok(mem::boxed(Volume { sb, disks, chunks, blocks, current })?)
+    }
+
+    /// Adds to `disks` those of `devices` that hold the filesystem of the
+    /// superblock `newest`, and makes it the newest of theirs. A frame of
+    /// its own: the mount's stack is small.
+    #[inline(never)]
+    fn find_disks(
+        devices: &[DeviceRef],
+        disks: &mut KVec<Disk>,
+        newest: &mut (Superblock, KVec<u8>),
+    ) -> Result<()> {
+        for device in devices {
+            // A disk of another filesystem, or of none, is not one of ours.
+            let Ok((other, bytes)) = read_superblock(device) else { continue };
+            if other.fsid != newest.0.fsid || disks.len() == MAX_DISKS {
+                continue;
+            }
+            let Ok(disk) = Disk::found(device, &other, &bytes) else { continue };
+            match disks.iter_mut().find(|d| d.devid == disk.devid) {
+                // Two disks of one ID, as a copy of one makes: the newer.
+                Some(same) if same.generation >= disk.generation => continue,
+                Some(same) => *same = disk,
+                None => mem::push(disks, disk)?,
+            }
+            if other.generation > newest.0.generation {
+                *newest = (other, bytes);
+            }
+        }
+        Ok(())
     }
 
     /// Reads every chunk in the chunk tree, which the system chunk array
-    /// only starts.
+    /// only starts, and matches the disks found to its device items: a
+    /// disk it has no item for is not one of the filesystem's any more,
+    /// and an item no disk was found for is a missing disk.
     #[inline(never)]
     fn read_chunk_tree(&mut self) -> Result<()> {
         let mut chunks = ChunkMap::empty();
-        let mut devices = 0;
-        let mut ours = false;
+        let mut items: KVec<(u64, [u8; 16])> = mem::vec();
         {
             let root = self.chunk_root();
             let mut cursor = Cursor::seek(self, &root, &Key::new(0, 0, 0))?;
             while let Some((key, data)) = cursor.get() {
                 if key.is(DEV_ITEMS, item::DEV_ITEM) {
-                    devices += 1;
-                    ours |= key.offset == self.sb.devid;
+                    if data.len() < DEV_ITEM_SIZE || items.len() >= MAX_DISKS {
+                        return Err(Error::Corrupt);
+                    }
+                    mem::push(&mut items, (key.offset, uuid_at(data, DEV_UUID_AT)))?;
                 } else if key.is(tree::FIRST_CHUNK, item::CHUNK_ITEM) {
-                    chunks.insert(Chunk::read(key.offset, data, self.sb.sectorsize)?)?;
+                    insert_chunk(&mut chunks, key.offset, data, self.sb.sectorsize)?;
                 }
                 cursor.advance()?;
             }
         }
-        if devices != self.sb.num_devices || !ours {
+        self.adopt(chunks, &items)
+    }
+
+    /// Takes the chunks and device items `read_chunk_tree` read: in a
+    /// frame of its own, apart from the reads, as disks and chunks are
+    /// large.
+    #[inline(never)]
+    fn adopt(&mut self, mut chunks: ChunkMap, items: &[(u64, [u8; 16])]) -> Result<()> {
+        let first = (self.disks[0].devid, self.disks[0].uuid);
+        if items.len() as u64 != self.sb.num_devices || !items.contains(&first) {
             return Err(Error::Corrupt);
+        }
+        self.disks.retain(|d| items.contains(&(d.devid, d.uuid)));
+        for &(devid, uuid) in items {
+            if !self.disks.iter().any(|d| d.devid == devid) {
+                mem::push(&mut self.disks, Disk::missing(devid, uuid))?;
+            }
+        }
+        for disk in &mut self.disks {
+            *disk.behind.get_mut() = disk.generation < self.sb.generation;
         }
         // The system chunk array's chunks are in the tree too.
         let bootstrap = core::mem::replace(self.chunks.get_mut(), ChunkMap::empty());
@@ -131,6 +260,51 @@ impl Volume {
         // Its blocks were checked against the bootstrap chunks; they are
         // the same blocks.
         Ok(())
+    }
+
+    /// The disks, the first the one the mount named.
+    pub fn disks(&self) -> &[Disk] {
+        &self.disks
+    }
+
+    /// The disk at `index` among [`Volume::disks`].
+    pub fn disk(&self, index: usize) -> Result<&Disk> {
+        self.disks.get(index).ok_or(Error::Corrupt)
+    }
+
+    /// How many of the filesystem's disks are not there: missing at the
+    /// mount, or failed since.
+    pub fn missing(&self) -> usize {
+        self.disks.iter().filter(|d| !d.present()).count()
+    }
+
+    /// Whether every chunk has a copy of each of its bytes on the disks
+    /// that are there.
+    pub fn readable(&self) -> bool {
+        let present = |devid| self.disks.iter().any(|d| d.devid == devid && d.present());
+        self.chunks.read(|map| map.chunks().iter().all(|c| c.readable(present)))
+    }
+
+    /// Takes a write to disk `index` failing with `error`. On a filesystem
+    /// of several disks the disk is left out from then on, as the others
+    /// hold copies of what it held, and the write is done if they still
+    /// hold every chunk; it fails with [`Error::Io`] when they do not. On
+    /// one disk, the write fails with `error`, and the disk stays.
+    pub(crate) fn write_failed(&self, index: usize, error: Error) -> Result<()> {
+        let disk = self.disk(index)?;
+        if self.disks.len() == 1 {
+            return Err(error);
+        }
+        disk.failed.store(true, Ordering::Relaxed);
+        if self.readable() { Ok(()) } else { Err(Error::Io) }
+    }
+
+    /// Marks every disk as up to date, after a scrub found every copy good
+    /// or wrote it over.
+    pub(crate) fn caught_up(&self) {
+        for disk in &self.disks {
+            disk.behind.store(false, Ordering::Relaxed);
+        }
     }
 
     /// The superblock.
@@ -156,23 +330,36 @@ impl Volume {
         &self.blocks
     }
 
-    /// The device's size, in bytes.
-    pub fn device_bytes(&self) -> u64 {
-        self.device_bytes
-    }
-
-    /// Where `logical` is on the device.
+    /// Where `logical` is on the disks that are there; copies on disks
+    /// that missed commits come last.
     pub fn place(&self, logical: u64) -> Result<Place> {
-        self.chunks.read(|map| map.place(logical, self.sb.devid))
+        let disk_of = |devid| self.disks.iter().position(|d| d.devid == devid && d.present());
+        let mut place = self.chunks.read(|map| map.place(logical, disk_of))?;
+        let behind = |site: &Site| self.disks[site.disk].behind();
+        let copies = &mut place.copies[..place.count];
+        for i in 1..copies.len() {
+            let mut j = i;
+            while j > 0 && behind(&copies[j - 1]) && !behind(&copies[j]) {
+                copies.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        Ok(place)
     }
 
-    /// Reads `out.len()` bytes from byte `physical` of the device.
-    pub fn read_device(&self, physical: u64, out: &mut [u8]) -> Result<()> {
-        let end = physical.checked_add(out.len() as u64).ok_or(Error::Corrupt)?;
-        if end > self.device_bytes {
+    /// Reads `out.len()` bytes at `site`, through its disk's cache.
+    pub fn read_site(&self, site: Site, out: &mut [u8]) -> Result<()> {
+        let disk = self.disk(site.disk)?;
+        let cache = disk.cache().ok_or(Error::NoDevice)?;
+        if !disk.holds(site.at, out.len() as u64) {
             return Err(Error::Corrupt);
         }
-        Ok(self.cache.read(physical, out)?)
+        Ok(cache.read(site.at, out)?)
+    }
+
+    /// Whether any disk that is there is read-only.
+    pub fn read_only(&self) -> bool {
+        self.disks.iter().filter_map(Disk::device).any(|d| d.info().read_only)
     }
 
     /// The chunk tree's root block.
@@ -203,11 +390,6 @@ impl Volume {
     /// Records the superblock a commit wrote.
     pub(crate) fn set_superblock_bytes(&self, bytes: KVec<u8>) {
         self.current.lock().superblock = bytes;
-    }
-
-    /// The device, through its cache of sectors: writes go there.
-    pub(crate) fn cache(&self) -> &BlockCache {
-        &self.cache
     }
 
     /// The root block of tree `id` (a [`tree`] number, or a subvolume's),
@@ -260,11 +442,6 @@ impl Volume {
         Ok(Some((tree, root.root_dirid, root.flags & RootItem::READ_ONLY != 0)))
     }
 
-    /// The device.
-    pub fn device(&self) -> &DeviceRef {
-        self.cache.device()
-    }
-
     /// Keeps up to `limit` tree blocks read, for tests of a full cache.
     #[cfg(test)]
     pub fn limit_blocks(&mut self, limit: usize) {
@@ -274,7 +451,65 @@ impl Volume {
     /// Drops up to `max` tree blocks and cached sectors nobody holds;
     /// returns how many.
     pub fn shrink(&self, max: usize) -> usize {
-        let blocks = self.blocks.shrink(max);
-        blocks + self.cache.shrink(max.saturating_sub(blocks))
+        let mut dropped = self.blocks.shrink(max);
+        for cache in self.disks.iter().filter_map(Disk::cache) {
+            dropped += cache.shrink(max.saturating_sub(dropped));
+        }
+        dropped
     }
+}
+
+impl Disk {
+    /// The disk `device`, whose superblock `bytes` read as `sb`.
+    ///
+    /// Fails with [`Error::Corrupt`] when the device is smaller than its
+    /// device item says: it has lost its end.
+    fn found(device: &DeviceRef, sb: &Superblock, bytes: &[u8]) -> Result<Disk> {
+        let size = device.info().sectors * radix_block::SECTOR;
+        if u64_at(bytes, DEV_ITEM_AT + 8) > size {
+            return Err(Error::Corrupt);
+        }
+        Ok(Disk {
+            devid: sb.devid,
+            uuid: sb.dev_uuid,
+            cache: Some(BlockCache::new(device.clone())),
+            bytes: size,
+            generation: sb.generation,
+            behind: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+        })
+    }
+
+    /// Disk `devid`, not found.
+    fn missing(devid: u64, uuid: [u8; 16]) -> Disk {
+        Disk {
+            devid,
+            uuid,
+            cache: None,
+            bytes: 0,
+            generation: 0,
+            behind: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Adds the chunk at `logical` that the chunk item `data` describes to
+/// `chunks`: in a frame of its own, apart from the chunk tree's reads, as
+/// a chunk is large.
+#[inline(never)]
+fn insert_chunk(chunks: &mut ChunkMap, logical: u64, data: &[u8], sectorsize: u32) -> Result<()> {
+    chunks.insert(Chunk::read(logical, data, sectorsize)?)
+}
+
+/// Reads the superblock of `device`, and its bytes.
+pub(crate) fn read_superblock(device: &DeviceRef) -> Result<(Superblock, KVec<u8>)> {
+    let size = device.info().sectors * radix_block::SECTOR;
+    if size < superblock::OFFSET + superblock::SIZE as u64 {
+        return Err(Error::UnknownFilesystem);
+    }
+    // On the heap: kernel stack frames are small.
+    let mut bytes = crate::zeroed(superblock::SIZE)?;
+    BlockCache::new(device.clone()).read(superblock::OFFSET, &mut bytes)?;
+    Ok((Superblock::read(&bytes)?, bytes))
 }

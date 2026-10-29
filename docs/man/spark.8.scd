@@ -98,7 +98,9 @@ Init: /system/commands/spark is process 1
   *--compress* compresses what is written to it. FAT and exFAT are tried
   first, in that order, as *mkfs.btrfs* and *mkfs.ext4* clear the
   sectors they start in while *mkfs.fat* and *mkfs.exfat* may leave an
-  older Btrfs or ext4 superblock. A
+  older Btrfs or ext4 superblock. A Btrfs of several disks is mounted
+  once, from the first of them found; the kernel refuses the others with
+  *in_use*, and they are left alone (ADR 0153). A
   device that holds none of them is left alone, and so is every device
   with *--no-volumes*.
 . The first Btrfs mounted read-write whose top holds the subvolumes

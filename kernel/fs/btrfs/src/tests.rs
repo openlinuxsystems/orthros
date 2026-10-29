@@ -391,11 +391,11 @@ fn reads_the_other_copy_of_a_damaged_block() {
     let place = open(&image).unwrap().place(root.bytenr).unwrap();
     assert_eq!(place.copies().len(), 2);
     // A damaged first copy: the second is read.
-    let first = place.copies()[0] as usize;
+    let first = place.copies()[0].at as usize;
     image[first + HEADER_SIZE + 3] ^= 0x40;
     assert_eq!(listing(&open(&image).unwrap()).unwrap(), names_of(10));
     // A block from another transaction (a lost write) is no better.
-    let second = place.copies()[1] as usize;
+    let second = place.copies()[1].at as usize;
     image[first + HEADER_SIZE + 3] ^= 0x40;
     image[first + 0x50] ^= 1;
     let sum = CsumType::Crc32c.sum(&image[first + 32..first + 16384]);
@@ -441,7 +441,10 @@ fn refuses_what_it_cannot_read() {
     assert_eq!(with(&resealed(0xbc, flags | incompat::ZONED)), Some(Error::NotSupported));
     assert_eq!(with(&resealed(0xbc, flags | incompat::RAID56)), Some(Error::NotSupported));
     assert_eq!(with(&resealed(0xbc, flags | 1 << 20)), Some(Error::NotSupported));
-    assert_eq!(with(&resealed(0x88, 2)), Some(Error::NotSupported), "two devices");
+    // Two disks, but the chunk tree names one; more disks than Radix
+    // mounts.
+    assert_eq!(with(&resealed(0x88, 2)), Some(Error::Corrupt), "two devices");
+    assert_eq!(with(&resealed(0x88, 17)), Some(Error::NotSupported), "17 devices");
     // A log of fsyncs is replayed (ADR 0151), but its root has a level.
     assert_eq!(
         with(&|i| {
@@ -559,6 +562,7 @@ mod files;
 mod fsync;
 mod links;
 mod log;
+mod raid;
 mod rw;
 mod scrub;
 mod snapshots;

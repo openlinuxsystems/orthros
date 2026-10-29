@@ -1113,10 +1113,10 @@ impl Files<'_> {
 }
 
 /// Writes `pages` to the data at logical address `bytenr`, on every copy.
+/// A disk that fails is left out, while the others hold every chunk
+/// ([`Volume::write_failed`]).
 #[inline(never)]
 fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
-    let device = volume.device();
-    let max = device.info().max_segments.clamp(1, MAX_SEGMENTS);
     let mut done = 0;
     while done < pages.len() {
         let logical = bytenr + done as u64 * PAGE;
@@ -1124,7 +1124,7 @@ fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
         let n = usize::try_from(place.len / PAGE)
             .unwrap_or(usize::MAX)
             .min(pages.len() - done)
-            .min(max);
+            .min(MAX_SEGMENTS);
         if n == 0 {
             return Err(Error::Corrupt);
         }
@@ -1133,11 +1133,20 @@ fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
             offset: 0,
             len: PAGE_SIZE,
         });
-        for &physical in place.copies() {
-            if physical.checked_add(n as u64 * PAGE).is_none_or(|e| e > volume.device_bytes()) {
+        for site in place.copies() {
+            let disk = volume.disk(site.disk)?;
+            if !disk.holds(site.at, n as u64 * PAGE) {
                 return Err(Error::Corrupt);
             }
-            device.write(physical / SECTOR, &segments[..n])?;
+            let device = disk.device().ok_or(Error::NoDevice)?;
+            let max = device.info().max_segments.clamp(1, MAX_SEGMENTS);
+            let written = (site.at..)
+                .step_by(max * PAGE_SIZE)
+                .zip(segments[..n].chunks(max))
+                .try_for_each(|(at, part)| device.write(at / SECTOR, part));
+            if let Err(e) = written {
+                volume.write_failed(site.disk, e.into())?;
+            }
         }
         done += n;
     }

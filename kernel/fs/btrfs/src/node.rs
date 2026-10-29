@@ -662,14 +662,13 @@ impl BtrfsNode {
         let volume = &self.fs.volume;
         let bytes = segments.len() as u64 * PAGE;
         let place = volume.place(logical)?;
-        let read = match place.copies().first() {
-            Some(&physical)
-                if place.len >= bytes
-                    && physical
-                        .checked_add(bytes)
-                        .is_some_and(|end| end <= volume.device_bytes()) =>
-            {
-                let device = volume.device();
+        let first = place.copies().first().and_then(|site| {
+            let disk = volume.disk(site.disk).ok()?;
+            let device = disk.device()?;
+            disk.holds(site.at, bytes).then_some((site.at, device))
+        });
+        let read = match first {
+            Some((physical, device)) if place.len >= bytes => {
                 let most = device.info().max_segments.max(1);
                 (physical..).step_by(most * PAGE_SIZE).zip(segments.chunks_mut(most)).all(
                     |(physical, part)| device.read(physical / radix_block::SECTOR, part).is_ok(),
@@ -730,16 +729,17 @@ impl BtrfsNode {
         if place.len < PAGE {
             return Err(Error::Corrupt);
         }
-        let device = volume.device();
         let csum = volume.superblock().csum_type;
         let mut failed = Error::Io;
-        for &physical in place.copies() {
-            if physical.checked_add(PAGE).is_none_or(|end| end > volume.device_bytes()) {
+        for site in place.copies() {
+            let disk = volume.disk(site.disk)?;
+            let Some(device) = disk.device() else { continue };
+            if !disk.holds(site.at, PAGE) {
                 failed = Error::Corrupt;
                 continue;
             }
             let read = device.read(
-                physical / radix_block::SECTOR,
+                site.at / radix_block::SECTOR,
                 &mut [SegmentMut { page: &mut *page, offset: 0, len: PAGE_SIZE }],
             );
             if let Err(e) = read {

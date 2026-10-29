@@ -4,19 +4,27 @@
 //! New chunks: more of the device for data, metadata or the chunk tree,
 //! when every block group of that kind is full (ADR 0131).
 //!
-//! A chunk is made in memory first: the free ranges of the device it lies
+//! A chunk is made in memory first: the free ranges of the disks it lies
 //! on, its logical addresses after every other chunk, and its block
 //! group's free space, so that its space may be taken at once, even by
 //! the changes that record it. The commit records it, as Linux does at
 //! the end of the transaction that made it: its chunk item, and for a
 //! chunk of the chunk tree its copy in the superblock's system chunk
-//! array; a device extent for each stripe; the device's bytes used; its
+//! array; a device extent for each stripe; each disk's bytes used; its
 //! block group item; and its free-space info.
 //!
 //! Its size is Linux's: 1 GiB for data, 256 MiB for metadata (1 GiB on a
-//! device over 50 GiB) and 32 MiB for the chunk tree, but at most a tenth
-//! of the device, rounded up to 16 MiB; and less when no free range of
-//! the device is that large.
+//! filesystem over 50 GiB) and 32 MiB for the chunk tree, but at most a
+//! tenth of the filesystem's disks, rounded up to 16 MiB; and less when
+//! no free range of the disks is that large.
+//!
+//! Its stripes go on the disks with the largest free ranges, as Linux's
+//! `gather_device_info` picks them (ADR 0153): one for single, two on one
+//! disk for DUP, one on each of two, three or four disks for RAID1,
+//! RAID1C3 and RAID1C4, and on as many disks as have room for RAID0 and,
+//! in pairs, RAID10. Missing disks get none: on a filesystem that lacks
+//! one, a profile that needs it makes no chunk, rather than one with
+//! fewer copies than asked for.
 
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
@@ -26,10 +34,7 @@ use crate::cow::Writer;
 use crate::format::{Key, item, tree, u64_at};
 use crate::space::{self, Ranges};
 use crate::tree::{Cursor, MAX_LEVEL};
-use crate::volume::Volume;
-
-/// The object ID of the device items in the chunk tree.
-const DEV_ITEMS: u64 = 1;
+use crate::volume::{DEV_ITEMS, MAX_DISKS, Volume};
 
 /// The start of every device, never allocated, as on Linux: room for a
 /// boot loader and the first superblock.
@@ -51,9 +56,9 @@ const SYS_ARRAY_SIZE_AT: usize = 0xa0;
 const SYS_ARRAY_AT: usize = 0x32b;
 const SYS_ARRAY_MAX: usize = 2048;
 
-/// The superblock's copy of its device item: its total and used bytes.
-const DEV_TOTAL_AT: usize = 0xc9 + 8;
-const DEV_USED_AT: usize = 0xc9 + 16;
+/// Where a device item keeps its total and used bytes.
+const DEV_TOTAL_AT: usize = 8;
+const DEV_USED_AT: usize = 16;
 
 /// A device extent item: the chunk tree, the chunk's object ID, its
 /// logical start, its length, and the chunk tree's UUID.
@@ -80,12 +85,28 @@ fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
     bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-/// The device as chunks use it.
+/// A disk as chunks use it.
 pub(crate) struct Device {
+    devid: u64,
+    /// Whether chunks may go on it: it is there, and writable.
+    usable: bool,
     /// Its size, as its device item says.
     total: u64,
     /// The ranges its device extents take, and those of chunks made.
     used: Ranges,
+}
+
+impl Device {
+    /// Its bytes no chunk takes.
+    fn unallocated(&self) -> u64 {
+        let used: u64 = self.used.iter().map(|&(s, e)| e - s).sum();
+        self.total.saturating_sub(RESERVED).saturating_sub(used)
+    }
+}
+
+/// The disks as chunks use them, read at the first chunk made.
+pub(crate) struct Devices {
+    list: KVec<Device>,
     /// The chunk tree's UUID, which every device extent names.
     chunk_tree_uuid: [u8; 16],
 }
@@ -95,11 +116,8 @@ pub(crate) struct Device {
 pub(crate) struct Grown {
     /// Chunks made that the trees do not record yet.
     pub made: KVec<Chunk>,
-    /// The device, read at the first chunk made.
-    pub device: Option<Device>,
-    /// Bytes of the device the recorded chunks take, for the superblock's
-    /// device item.
-    pub dev_bytes: u64,
+    /// The disks, read at the first chunk made.
+    pub devices: Option<Devices>,
     /// Entries for the system chunk array: a key and a chunk item each.
     pub sys_chunks: KVec<u8>,
 }
@@ -107,77 +125,143 @@ pub(crate) struct Grown {
 impl Grown {
     /// No chunks made.
     pub(crate) fn new() -> Grown {
-        Grown { made: mem::vec(), device: None, dev_bytes: 0, sys_chunks: mem::vec() }
+        Grown { made: mem::vec(), devices: None, sys_chunks: mem::vec() }
+    }
+}
+
+/// How a profile lays a chunk's stripes out: on how few and how many
+/// disks, with how many copies of each byte, and how many stripes on
+/// each disk.
+#[derive(Clone, Copy)]
+struct Layout {
+    min: usize,
+    max: usize,
+    /// Copies of each byte, on distinct disks but for DUP.
+    copies: usize,
+    /// The stripes of one disk: two for DUP.
+    per_disk: usize,
+}
+
+impl Layout {
+    /// The layout of `profile` ([`kind`]), or `None` for RAID5 and RAID6,
+    /// which Radix does not write.
+    fn of(profile: u64) -> Option<Layout> {
+        let (min, max, copies, per_disk) = match profile {
+            0 => (1, 1, 1, 1),
+            kind::DUP => (1, 1, 2, 2),
+            kind::RAID1 => (2, 2, 2, 1),
+            kind::RAID1C3 => (3, 3, 3, 1),
+            kind::RAID1C4 => (4, 4, 4, 1),
+            kind::RAID0 => (1, MAX_DISKS, 1, 1),
+            kind::RAID10 => (2, MAX_DISKS, 2, 1),
+            _ => return None,
+        };
+        Some(Layout { min, max, copies, per_disk })
+    }
+
+    /// Whether its stripes go in pairs of copies on as many disks as
+    /// have room: RAID10.
+    fn paired(&self) -> bool {
+        self.copies == 2 && self.per_disk == 1 && self.max > 2
+    }
+
+    /// How many stripes' worth of a chunk's bytes `disks` disks hold: the
+    /// stripes that are not copies.
+    fn data_stripes(&self, disks: usize) -> u64 {
+        (disks * self.per_disk / self.copies).max(1) as u64
+    }
+
+    /// The bytes chunks of this layout could still hold on disks with
+    /// `free` bytes each, its copies of each byte on distinct disks: the
+    /// least, over `j` below `copies`, of the sum without the `j` largest
+    /// over `copies - j`, as Linux's `btrfs_calc_avail_data_space`
+    /// reckons it.
+    fn room(&self, free: &mut [u64]) -> u64 {
+        let sum: u64 = free.iter().sum();
+        if self.per_disk > 1 {
+            return sum / self.per_disk as u64;
+        }
+        free.sort_unstable_by(|a, b| b.cmp(a));
+        let mut room = sum / self.copies as u64;
+        let mut top = 0;
+        for (j, &largest) in free.iter().enumerate().take(self.copies - 1) {
+            top += largest;
+            room = room.min((sum - top) / (self.copies - j - 1) as u64);
+        }
+        room
     }
 }
 
 impl Writer {
     /// Makes a chunk that holds `want` ([`kind`]), with room for `size`
-    /// bytes, from the device's free ranges.
+    /// bytes, from the disks' free ranges.
     ///
     /// Fails with [`Error::NoSpace`], changing nothing, when no free range
-    /// of the device is large enough, or there is no group of `want` to
-    /// take a profile from, or its profile needs more than one device.
+    /// is large enough on as many disks as its profile needs, or there is
+    /// no group of `want` to take a profile from.
+    #[inline(never)]
     pub(crate) fn new_chunk(&mut self, volume: &Volume, want: u64, size: u64) -> Result<()> {
         let flags = self.space.flags_for(want).ok_or(Error::NoSpace)?;
-        let copies: u64 = match flags & kind::PROFILE {
-            0 => 1,
-            kind::DUP => 2,
-            _ => return Err(Error::NoSpace),
-        };
-        if self.grown.device.is_none() {
-            self.grown.device = Some(read_device(volume)?);
+        let layout = Layout::of(flags & kind::PROFILE).ok_or(Error::NoSpace)?;
+        if self.grown.devices.is_none() {
+            self.grown.devices = Some(read_devices(volume)?);
         }
-        let device = self.grown.device.as_ref().ok_or(Error::Corrupt)?;
+        let devices = self.grown.devices.as_ref().ok_or(Error::Corrupt)?;
+        let usable = devices.list.iter().filter(|d| d.usable).count();
         if flags & kind::SYSTEM != 0 {
             let written = crate::format::u32_at(&volume.superblock_bytes()?, SYS_ARRAY_SIZE_AT);
             let array = written as usize + self.grown.sys_chunks.len();
-            let entry = Key::SIZE + Chunk::item_size(copies as usize);
+            let stripes = usable.min(layout.max) * layout.per_disk;
+            let entry = Key::SIZE + Chunk::item_size(stripes);
             let pending = self.grown.made.iter().filter(|c| c.kind & kind::SYSTEM != 0).count();
             if array + entry * (pending + 1) > SYS_ARRAY_MAX {
                 return Err(Error::NoSpace);
             }
         }
+        let total: u64 = devices.list.iter().filter(|d| d.usable).map(|d| d.total).sum();
         let usual: u64 = if flags & kind::DATA != 0 {
             1 << 30
         } else if flags & kind::METADATA != 0 {
-            if device.total > 50 << 30 { 1 << 30 } else { 256 << 20 }
+            if total > 50 << 30 { 1 << 30 } else { 256 << 20 }
         } else {
             32 << 20
         };
-        let least = size.next_multiple_of(STRIPE_LEN).max(MIN_STRIPE);
-        let stripe = usual.min((device.total / 10).next_multiple_of(ROUND)).max(least);
-        let (at, stripe) = find_room(&device.used, device.total, stripe, least, copies)?;
+        let length = usual.min((total / 10).next_multiple_of(ROUND));
+        let (picked, stripe, disks) = pick_disks(devices, layout, length, size)?;
         let start = volume.with_chunks(crate::chunk::ChunkMap::end);
-        let devid = volume.superblock().devid;
         // From here on only memory runs short, and a half made chunk
         // leaves the writer refusing changes.
-        let made = self.add_chunk(volume, start, stripe, flags, devid, at, copies);
+        let made = self.add_chunk(volume, start, flags, layout, &picked[..disks], stripe);
         if made.is_err() {
             self.break_off();
         }
         made
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Adds the chunk of `layout` at `start`, its stripes of `stripe`
+    /// bytes from where `picked` says on each disk.
     fn add_chunk(
         &mut self,
         volume: &Volume,
         start: u64,
-        length: u64,
         flags: u64,
-        devid: u64,
-        at: u64,
-        copies: u64,
+        layout: Layout,
+        picked: &[(usize, u64)],
+        stripe: u64,
     ) -> Result<()> {
-        let mut stripes = mem::vec_with_capacity(copies as usize)?;
-        for i in 0..copies {
-            mem::push(&mut stripes, Stripe { devid, offset: at + i * length })?;
+        let devices = self.grown.devices.as_mut().ok_or(Error::Corrupt)?;
+        let mut stripes = mem::vec_with_capacity(picked.len() * layout.per_disk)?;
+        for &(device, at) in picked {
+            let device = devices.list.get_mut(device).ok_or(Error::Corrupt)?;
+            for i in 0..layout.per_disk as u64 {
+                mem::push(&mut stripes, Stripe { devid: device.devid, offset: at + i * stripe })?;
+            }
+            space::add(&mut device.used, at, at + layout.per_disk as u64 * stripe)?;
         }
+        let sub_stripes = if flags & kind::RAID10 != 0 { 2 } else { 1 };
+        let length = stripe * layout.data_stripes(picked.len());
         let chunk =
-            Chunk { start, length, stripe_len: STRIPE_LEN, kind: flags, sub_stripes: 1, stripes };
-        let device = self.grown.device.as_mut().ok_or(Error::Corrupt)?;
-        space::add(&mut device.used, at, at + copies * length)?;
+            Chunk { start, length, stripe_len: STRIPE_LEN, kind: flags, sub_stripes, stripes };
         mem::push(&mut self.grown.made, chunk.copy()?)?;
         volume.add_chunk(chunk)?;
         self.space.add_group(volume, start, length, flags)
@@ -235,18 +319,18 @@ impl Writer {
     pub(crate) fn room(&mut self, volume: &Volume, want: u64) -> Result<u64> {
         let room = self.space.free_bytes(want) + self.space.pinned_bytes(want);
         let flags = self.space.flags_for(want).unwrap_or(0);
-        let copies = match flags & kind::PROFILE {
-            0 => 1,
-            kind::DUP => 2,
-            _ => return Ok(room),
-        };
-        if self.grown.device.is_none() {
-            self.grown.device = Some(read_device(volume)?);
+        let Some(layout) = Layout::of(flags & kind::PROFILE) else { return Ok(room) };
+        if self.grown.devices.is_none() {
+            self.grown.devices = Some(read_devices(volume)?);
         }
-        let device = self.grown.device.as_ref().ok_or(Error::Corrupt)?;
-        let used: u64 = device.used.iter().map(|&(s, e)| e - s).sum();
-        let unallocated = device.total.saturating_sub(RESERVED).saturating_sub(used);
-        let room = room + unallocated / copies;
+        let devices = self.grown.devices.as_ref().ok_or(Error::Corrupt)?;
+        let mut free = [0; MAX_DISKS];
+        let mut n = 0;
+        for device in devices.list.iter().filter(|d| d.usable) {
+            free[n] = device.unallocated();
+            n += 1;
+        }
+        let room = room + if n >= layout.min { layout.room(&mut free[..n]) } else { 0 };
         if want == kind::DATA && flags & kind::METADATA != 0 {
             let kept = 2 * self.room_needed(volume, false) + room / 32;
             return Ok(room.saturating_sub(kept));
@@ -273,36 +357,39 @@ impl Writer {
     }
 
     fn record(&mut self, volume: &Volume, chunk: &Chunk) -> Result<()> {
-        let sb = volume.superblock();
-        let (sectorsize, devid, dev_uuid) = (sb.sectorsize, sb.devid, sb.dev_uuid);
+        let sectorsize = volume.superblock().sectorsize;
+        let uuid_of =
+            |devid| volume.disks().iter().find(|d| d.devid == devid).map_or([0; 16], |d| d.uuid);
         let size = Chunk::item_size(chunk.stripes.len());
         let key = Key::new(tree::FIRST_CHUNK, item::CHUNK_ITEM, chunk.start);
         self.insert_with(volume, tree::CHUNK, &key, size, |d| {
-            chunk.write(d, sectorsize, &dev_uuid);
+            chunk.write(d, sectorsize, uuid_of);
         })?;
         if chunk.kind & kind::SYSTEM != 0 {
             let mut entry = crate::zeroed(Key::SIZE + size)?;
             put_u64(&mut entry, 0, key.objectid);
             entry[8] = key.kind;
             put_u64(&mut entry, 9, key.offset);
-            chunk.write(&mut entry[Key::SIZE..], sectorsize, &dev_uuid);
+            chunk.write(&mut entry[Key::SIZE..], sectorsize, uuid_of);
             mem::extend(&mut self.grown.sys_chunks, &entry)?;
         }
-        let uuid = self.grown.device.as_ref().ok_or(Error::Corrupt)?.chunk_tree_uuid;
+        let uuid = self.grown.devices.as_ref().ok_or(Error::Corrupt)?.chunk_tree_uuid;
+        let bytes = chunk.stripe_bytes();
         for stripe in &chunk.stripes {
             let key = Key::new(stripe.devid, item::DEV_EXTENT, stripe.offset);
             self.insert_with(volume, tree::DEV, &key, DEV_EXTENT_SIZE, |d| {
                 put_u64(d, 0, tree::CHUNK);
                 put_u64(d, 8, tree::FIRST_CHUNK);
                 put_u64(d, 16, chunk.start);
-                put_u64(d, 24, chunk.length);
+                put_u64(d, 24, bytes);
                 d[32..48].copy_from_slice(&uuid);
             })?;
+            // The commit copies each disk's item to its superblock.
+            let dev = Key::new(DEV_ITEMS, item::DEV_ITEM, stripe.devid);
+            self.update(volume, tree::CHUNK, &dev, |d| {
+                put_u64(d, DEV_USED_AT, u64_at(d, DEV_USED_AT) + bytes);
+            })?;
         }
-        let bytes = chunk.length * chunk.stripes.len() as u64;
-        let dev = Key::new(DEV_ITEMS, item::DEV_ITEM, devid);
-        self.update(volume, tree::CHUNK, &dev, |d| put_u64(d, 16, u64_at(d, 16) + bytes))?;
-        self.grown.dev_bytes += bytes;
         let group = Key::new(chunk.start, item::BLOCK_GROUP_ITEM, chunk.length);
         let group_tree = self.space.group_tree();
         self.insert_with(volume, group_tree, &group, GROUP_ITEM_SIZE, |d| {
@@ -315,9 +402,8 @@ impl Writer {
     }
 
     /// Writes what the chunks recorded change to the superblock `sb`: its
-    /// device item's bytes used, and its system chunk array.
+    /// system chunk array.
     pub(crate) fn grow_superblock(&self, sb: &mut [u8]) -> Result<()> {
-        put_u64(sb, DEV_USED_AT, u64_at(sb, DEV_USED_AT) + self.grown.dev_bytes);
         let entries = &self.grown.sys_chunks;
         if !entries.is_empty() {
             let size = crate::format::u32_at(sb, SYS_ARRAY_SIZE_AT) as usize;
@@ -335,34 +421,98 @@ impl Writer {
     /// Forgets what [`Writer::grow_superblock`] wrote, its commit being
     /// durable.
     pub(crate) fn grown_committed(&mut self) {
-        self.grown.dev_bytes = 0;
         self.grown.sys_chunks.clear();
     }
 }
 
-/// Reads the device's size and the ranges its device extents take.
-fn read_device(volume: &Volume) -> Result<Device> {
-    let devid = volume.superblock().devid;
-    let total = u64_at(&volume.superblock_bytes()?, DEV_TOTAL_AT);
-    let root = Writer::tree_root(volume, tree::DEV)?;
-    let mut cursor = Cursor::seek(volume, &root, &Key::first(devid, item::DEV_EXTENT))?;
-    let mut used = mem::vec();
+/// Reads each disk's size, from its device item, and the ranges its
+/// device extents take.
+#[inline(never)]
+fn read_devices(volume: &Volume) -> Result<Devices> {
+    let mut list = mem::vec_with_capacity(volume.disks().len())?;
     let mut chunk_tree_uuid = None;
-    while let Some((key, data)) = cursor.get() {
-        if !key.is(devid, item::DEV_EXTENT) {
-            break;
+    let read_only = volume.read_only();
+    let chunk_root = volume.chunk_root();
+    let dev_root = Writer::tree_root(volume, tree::DEV)?;
+    for disk in volume.disks() {
+        let key = Key::new(DEV_ITEMS, item::DEV_ITEM, disk.devid);
+        let cursor = Cursor::seek(volume, &chunk_root, &key)?;
+        let total = match cursor.get() {
+            Some((found, data)) if found == key && data.len() >= DEV_TOTAL_AT + 8 => {
+                u64_at(data, DEV_TOTAL_AT)
+            }
+            _ => return Err(Error::Corrupt),
+        };
+        let first = Key::first(disk.devid, item::DEV_EXTENT);
+        let mut cursor = Cursor::seek(volume, &dev_root, &first)?;
+        let mut used = mem::vec();
+        while let Some((key, data)) = cursor.get() {
+            if !key.is(disk.devid, item::DEV_EXTENT) {
+                break;
+            }
+            if data.len() < DEV_EXTENT_SIZE {
+                return Err(Error::Corrupt);
+            }
+            let len = u64_at(data, 24);
+            let end = key.offset.checked_add(len).ok_or(Error::Corrupt)?;
+            space::add(&mut used, key.offset, end)?;
+            chunk_tree_uuid.get_or_insert_with(|| crate::format::uuid_at(data, 32));
+            cursor.advance()?;
         }
-        if data.len() < DEV_EXTENT_SIZE {
-            return Err(Error::Corrupt);
-        }
-        let len = u64_at(data, 24);
-        let end = key.offset.checked_add(len).ok_or(Error::Corrupt)?;
-        space::add(&mut used, key.offset, end)?;
-        chunk_tree_uuid.get_or_insert_with(|| crate::format::uuid_at(data, 32));
-        cursor.advance()?;
+        let usable = disk.present() && !read_only;
+        mem::push(&mut list, Device { devid: disk.devid, usable, total, used })?;
     }
     let chunk_tree_uuid = chunk_tree_uuid.ok_or(Error::Corrupt)?;
-    Ok(Device { total, used, chunk_tree_uuid })
+    Ok(Devices { list, chunk_tree_uuid })
+}
+
+/// What [`pick_disks`] picks: each disk's place among the devices and
+/// where its stripes start; the length of each stripe; and how many disks.
+type Picked = ([(usize, u64); MAX_DISKS], u64, usize);
+
+/// The disks a chunk of `layout` goes on, with room for at least `size`
+/// bytes and, where they have it, `length`. The disks with the largest
+/// free ranges come first, as Linux's `gather_device_info` sorts them.
+fn pick_disks(devices: &Devices, layout: Layout, length: u64, size: u64) -> Result<Picked> {
+    let pairs = |n: usize| if layout.paired() { n - n % 2 } else { n };
+    let mut disks = pairs(devices.list.iter().filter(|d| d.usable).count().min(layout.max));
+    while disks >= layout.min {
+        let data = layout.data_stripes(disks);
+        let least = size.div_ceil(data).next_multiple_of(STRIPE_LEN).max(MIN_STRIPE);
+        let want = length.div_ceil(data).next_multiple_of(STRIPE_LEN).max(least);
+        let per = layout.per_disk as u64;
+        let mut found = [(0, 0, 0); MAX_DISKS];
+        let mut n = 0;
+        for (i, device) in devices.list.iter().enumerate().filter(|(_, d)| d.usable) {
+            if let Ok((at, len)) = find_room(&device.used, device.total, want, least, per) {
+                found[n] = (i, at, len);
+                n += 1;
+            }
+        }
+        // The largest first; the disks' own order else.
+        let found = &mut found[..n];
+        for i in 1..found.len() {
+            let mut j = i;
+            while j > 0 && found[j - 1].2 < found[j].2 {
+                found.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        if n >= disks {
+            let stripe = found[..disks].iter().map(|f| f.2).min().unwrap_or(0);
+            let mut picked = [(0, 0); MAX_DISKS];
+            for (slot, &(i, at, _)) in picked.iter_mut().zip(&found[..disks]) {
+                *slot = (i, at);
+            }
+            return Ok((picked, stripe, disks));
+        }
+        // Fewer disks have room: a profile that may, tries with those.
+        if layout.min == layout.max {
+            break;
+        }
+        disks = pairs(n);
+    }
+    Err(Error::NoSpace)
 }
 
 /// Where on a device of `total` bytes, whose ranges `used` are taken,

@@ -53,7 +53,7 @@ fn scrub_finds_damaged_copies_and_mends_them_from_good_ones() {
     let len = (disk.info().sectors * radix_block::SECTOR) as usize;
     let image = image_of(&disk, len);
     let root = fs.volume().root_tree();
-    let tree_copy = fs.volume().place(root.bytenr).unwrap().copies()[1];
+    let tree_copy = fs.volume().place(root.bytenr).unwrap().copies()[1].at;
     let data_copies = places_of(&image, &data[8192..12288]);
     assert_eq!(data_copies.len(), 2);
     let damage = |at: u64| {
@@ -104,7 +104,8 @@ fn scrub_counts_what_no_copy_mends() {
     let data_copies = places_of(&image, &data[4096..8192]);
     assert_eq!(data_copies.len(), 1);
     let top = fs.volume().tree(5).unwrap().unwrap();
-    let tree_copies = fs.volume().place(top.bytenr).unwrap().copies().to_vec();
+    let tree_copies =
+        fs.volume().place(top.bytenr).unwrap().copies().iter().map(|s| s.at).collect::<Vec<_>>();
     assert_eq!(tree_copies.len(), 2);
     let damage = |at: u64| {
         let mut byte = [0];

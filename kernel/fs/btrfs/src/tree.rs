@@ -404,9 +404,9 @@ pub fn read_block(volume: &Volume, want: &Root, bounds: &Bounds) -> Result<KArc<
         return Err(Error::Corrupt);
     }
     let mut failed = Error::Corrupt;
-    for &physical in place.copies() {
+    for &site in place.copies() {
         let mut bytes = crate::zeroed(nodesize)?;
-        if let Err(e) = volume.read_device(physical, &mut bytes) {
+        if let Err(e) = volume.read_site(site, &mut bytes) {
             failed = e;
             continue;
         }

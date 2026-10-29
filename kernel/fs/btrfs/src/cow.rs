@@ -159,11 +159,11 @@ pub(crate) enum Via {
 impl Writer {
     /// Starts writing `volume`.
     ///
-    /// Fails with [`Error::ReadOnly`] for a device that cannot be written,
+    /// Fails with [`Error::ReadOnly`] for a disk that cannot be written,
     /// and [`Error::NotSupported`] for a filesystem Radix cannot write
-    /// yet: one with features it does not write, on more than one device
-    /// (Phase 10e), or without the free-space tree or the skinny extent
-    /// items every `mkfs.btrfs` since 2013 makes.
+    /// yet: one with features it does not write (RAID5 and RAID6 among
+    /// them), or without the free-space tree or the skinny extent items
+    /// every `mkfs.btrfs` since 2013 makes.
     #[inline(never)]
     pub fn new(volume: &Volume) -> Result<Writer> {
         /// What the writer does not keep up yet.
@@ -173,13 +173,12 @@ impl Writer {
             | incompat::RAID_STRIPE_TREE
             | incompat::SIMPLE_QUOTA;
         let sb = volume.superblock();
-        if volume.device().info().read_only {
+        if volume.read_only() {
             return Err(Error::ReadOnly);
         }
         if sb.compat_ro_flags & !compat_ro::WRITE != 0
             || !sb.has(incompat::SKINNY_METADATA)
             || sb.incompat_flags & REFUSED != 0
-            || sb.num_devices != 1
         {
             return Err(Error::NotSupported);
         }
