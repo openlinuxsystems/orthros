@@ -3,7 +3,10 @@
 
 //! ATA commands as an AHCI port sends them (ATA Command Set, ACS-4; Serial
 //! ATA 3.x for the frames): the register frame a command travels in, and
-//! what a disk says of itself in answer to IDENTIFY DEVICE.
+//! what a disk says of itself in answer to IDENTIFY DEVICE. A disk's own
+//! record of its health, SMART, is read with the commands of ATA/ATAPI-8
+//! (ACS-4 keeps SMART READ DATA, and the thresholds are in ATA/ATAPI-8);
+//! what its bytes mean is left to the program that asks.
 
 /// ATA command codes.
 pub mod command {
@@ -23,8 +26,24 @@ pub mod command {
     pub const WRITE_FPDMA_QUEUED: u8 = 0x61;
     /// FLUSH CACHE EXT: makes every completed write durable.
     pub const FLUSH_CACHE_EXT: u8 = 0xea;
+    /// SMART: with a feature code ([`super::smart`]), the disk's own
+    /// record of its health.
+    pub const SMART: u8 = 0xb0;
     /// IDENTIFY DEVICE: 512 bytes of what the disk is.
     pub const IDENTIFY_DEVICE: u8 = 0xec;
+}
+
+/// SMART's feature codes, for the features register.
+pub mod smart {
+    /// SMART READ DATA: 512 bytes, the disk's attributes and their values.
+    pub const READ_DATA: u8 = 0xd0;
+    /// SMART READ ATTRIBUTE THRESHOLDS: 512 bytes, the value at or below
+    /// which each attribute says the disk is failing. Obsolete since
+    /// ACS-1, yet disks still answer it, and smartctl reads it.
+    pub const READ_THRESHOLDS: u8 = 0xd1;
+    /// What every SMART command carries in the LBA mid and high
+    /// registers, 4Fh and C2h, as the block address's bytes 1 and 2.
+    pub const SIGNATURE: u64 = 0xc2_4f00;
 }
 
 /// The log page that names the command an NCQ error was for (NCQ Command
@@ -162,6 +181,17 @@ impl Taskfile {
     pub fn identify() -> Taskfile {
         Taskfile { command: command::IDENTIFY_DEVICE, ..Taskfile::default() }
     }
+
+    /// SMART with feature `feature`, which reads one 512-byte page.
+    pub fn smart(feature: u8) -> Taskfile {
+        Taskfile {
+            command: command::SMART,
+            features: u16::from(feature),
+            lba: smart::SIGNATURE,
+            count: 1,
+            device: 0,
+        }
+    }
 }
 
 /// One TRIM range entry: `sectors` sectors (1 to [`TRIM_RANGE_MAX`]) from
@@ -225,6 +255,9 @@ pub struct Identity {
     /// Whether it spins: `Some(false)` for solid state, `None` if it
     /// does not say.
     pub rotational: Option<bool>,
+    /// Whether it keeps SMART: `Some(true)` if it does and SMART is on,
+    /// `Some(false)` if it is off, `None` if the disk has none.
+    pub smart: Option<bool>,
     /// Its model, serial number and firmware revision, in ASCII, padded
     /// with spaces.
     pub model: [u8; 40],
@@ -327,6 +360,7 @@ pub fn identify(id: &[u16; 256]) -> Result<Identity, Unsupported> {
         fua: extended && bit(id, 84, 6),
         trim_blocks: if bit(id, 169, 0) { id[105].max(1) } else { 0 },
         rotational,
+        smart: (supported && bit(id, 82, 0)).then(|| enabled && bit(id, 85, 0)),
         model: string(id, 27),
         serial: string(id, 10),
         firmware: string(id, 23),

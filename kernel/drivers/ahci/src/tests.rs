@@ -95,10 +95,10 @@ fn identify_words(sectors: u64, depth: u16, trim: bool) -> [u16; 256] {
     } else {
         id[76] = 1 << 2;
     }
-    id[82] = 1 << 5;
+    id[82] = (1 << 5) | 1;
     id[83] = 0x4000 | (1 << 10) | (1 << 13);
     id[84] = 0x4000 | (1 << 6);
-    id[85] = 1 << 5;
+    id[85] = (1 << 5) | 1;
     id[86] = (1 << 10) | (1 << 13);
     id[87] = 0x4000;
     id[100] = sectors as u16;
@@ -294,6 +294,14 @@ impl PortRegs {
                 }
             }
             command::FLUSH_CACHE_EXT => disk.flushes += 1,
+            command::SMART => {
+                assert_eq!(lba, ata::smart::SIGNATURE);
+                assert_eq!(flags & (1 << 6), 0, "SMART reads");
+                // The page's version, then the feature it answers.
+                let mut page = [0u8; 512];
+                (page[0], page[2]) = (0x10, features as u8);
+                fake_memory_write(buffers[0].0, &page);
+            }
             command::DATA_SET_MANAGEMENT => {
                 assert_eq!(features, ata::DSM_TRIM);
                 let page = read_mem(buffers[0].0, 512 * usize::from(count));
@@ -580,6 +588,7 @@ fn identify_data_say_what_the_disk_is() {
     assert!(identity.write_cache && identity.flush && identity.fua);
     assert_eq!(identity.trim_blocks, 1);
     assert_eq!(identity.rotational, Some(false));
+    assert_eq!(identity.smart, Some(true));
     assert_eq!(ata::trimmed(&identity.model), "Simulated SSD");
     assert_eq!(ata::trimmed(&identity.serial), "SIM0001");
     assert_eq!(ata::trimmed(&identity.firmware), "1.0");
@@ -784,6 +793,50 @@ fn flushes_and_trims_go_out_alone() {
         assert_eq!(d.flushes, 1);
         assert_eq!(d.trims, [(16, 0xffff), (16 + 0xffff, 0x11)]);
     });
+}
+
+#[test]
+fn smart_pages_are_read_alone() {
+    let mut disk = Disk::new();
+    disk.hold = true;
+    let sim = Sim::new(std::vec![(0, disk)]);
+    let (_, mut port) = one_port(&sim);
+    let (memory, list) = buffers(1);
+    let page = [(list[0].0, 512)];
+    port.submit(Op::Read, 0, &list).unwrap();
+    assert!(!port.room(Op::Smart(ata::smart::READ_DATA)));
+    sim.finish(0, None);
+    wait_all(&mut port);
+    for feature in [ata::smart::READ_DATA, ata::smart::READ_THRESHOLDS] {
+        let slot = port.submit(Op::Smart(feature), 0, &page).unwrap();
+        assert!(!port.room(Op::Read));
+        sim.finish(0, None);
+        assert_eq!(wait_all(&mut port), [(slot, Outcome::Done)]);
+        let mut read = [0u8; 4];
+        memory.read(0, &mut read);
+        assert_eq!(read, [0x10, 0, feature, 0]);
+    }
+    // One whole page, and nothing else.
+    for wrong in [&[][..], &list[..], &[(list[0].0, 256)][..]] {
+        assert_eq!(port.submit(Op::Smart(ata::smart::READ_DATA), 0, wrong), Err(Error::BadRequest));
+    }
+}
+
+#[test]
+fn smart_turned_off_is_not_read() {
+    let mut disk = Disk::new();
+    disk.identify[85] &= !1;
+    checksum(&mut disk.identify);
+    let sim = Sim::new(std::vec![(0, disk)]);
+    let (_, mut port) = one_port(&sim);
+    assert_eq!(port.identity().unwrap().smart, Some(false));
+    let (_memory, list) = buffers(1);
+    let page = [(list[0].0, 512)];
+    assert_eq!(port.submit(Op::Smart(ata::smart::READ_DATA), 0, &page), Err(Error::BadRequest));
+    let mut id = identify_words(SECTORS, 32, true);
+    id[82] &= !1;
+    checksum(&mut id);
+    assert_eq!(ata::identify(&id).unwrap().smart, None);
 }
 
 #[test]

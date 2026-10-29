@@ -641,6 +641,15 @@ _target/userspace/_).
 		The kernel must log each recovery of the port, 16 in all, and
 		the disk must hold on the host what it held before.
 
+	*disk-health*
+		Boot 2 CPUs under UEFI with an 8 MiB SATA disk, NVMe namespace
+		and virtio disk, as on a normal boot. Spark must start the
+		*diskhealth* service after *consoled*, and it must log that the
+		NVMe drive and the SATA disk pass. At the console, *diskhealth*
+		must show both passing and the virtio disk keeping no record,
+		with exit status 0, and *diskhealth -a* the SATA disk's
+		attributes and the NVMe drive's health log (ADR 0157).
+
 	*btrfs*
 		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
 		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB

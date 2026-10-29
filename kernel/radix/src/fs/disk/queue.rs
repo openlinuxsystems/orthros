@@ -64,7 +64,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::process::{IO_LEVELS, IoClass};
-use radix_block::{BlockDevice, Error, Info, Segment, SegmentMut, Write};
+use radix_block::{BlockDevice, Error, Health, Info, Page, Segment, SegmentMut, Write};
 use radix_hal::{CpuLocal, Timer};
 use radix_klog::{TextBuf, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -125,6 +125,10 @@ pub enum Op {
     Flush,
     /// Discards this many sectors, at most [`Info::discard_sectors`].
     Discard(u64),
+    /// Reads a 512-byte page of a SATA disk's SMART record into the one
+    /// buffer: SMART with this feature code. Only the AHCI driver's
+    /// [`Controller::health`] asks for it.
+    Smart(u8),
 }
 
 /// A request: what it does, to which of the disk's volumes, and the
@@ -202,6 +206,13 @@ pub trait Controller: Send + Sized {
     /// It may sleep.
     fn reset(_lanes: &mut [Part<Self>]) -> bool {
         false
+    }
+
+    /// Reads what `disk`'s device says of its health into `page`, for
+    /// its volume `target`, as [`BlockDevice::health`] does. It may
+    /// sleep: it runs without the lanes' locks.
+    fn health(_disk: &Disk<Self>, _target: u32, _page: &mut Page) -> Result<Health, Error> {
+        Err(Error::Unsupported)
     }
 }
 
@@ -663,10 +674,17 @@ impl<C: Controller> Disk<C> {
         self.wake(lane);
     }
 
+    /// Calls `f` with the driver's part in the first lane, under its
+    /// lock: for what the device answers as a whole. `None` while a
+    /// thread recovers or resets it.
+    pub(super) fn controller<R>(&self, f: impl FnOnce(&C) -> R) -> Option<R> {
+        self.lanes.first()?.queue.lock_irq().as_deref().map(f)
+    }
+
     /// Carries out `request` in this CPU's lane and waits for it, again
     /// as long as the device hands it back to go again, up to [`TRIES`]
     /// times.
-    fn request(&self, request: &Request<'_>) -> Result<(), Error> {
+    pub(super) fn request(&self, request: &Request<'_>) -> Result<(), Error> {
         let (lane, rank) = (self.here(), running_rank());
         let slot = self.issue(lane, rank, None, request, false)?;
         self.settle(lane, rank, slot, request)
@@ -828,6 +846,7 @@ impl<C: Controller> Disk<C> {
                 write!(what, "a {op} of {count} sectors from sector {}", request.sector)
             }
             Op::Flush => what.write_str("a flush"),
+            Op::Smart(_) => what.write_str("a read of its SMART record"),
         };
         let mut after = TextBuf::<16>::new();
         if tries > 1 {
@@ -1025,6 +1044,10 @@ impl<C: Controller> BlockDevice for Volume<C> {
             return Ok(());
         }
         self.request(Op::Flush, 0, &[])
+    }
+
+    fn health(&self, page: &mut Page) -> Result<Health, Error> {
+        C::health(&self.disk, self.target, page)
     }
 
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {

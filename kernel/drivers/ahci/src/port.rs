@@ -14,7 +14,7 @@
 //! number is its command's tag, its bit is set in the port's SActive
 //! register and then in Command Issue, and the disk finishes queued
 //! commands in any order, clearing their SActive bits. Other commands
-//! (flushes, TRIM, and every command to a disk that does not queue) go out
+//! (flushes, TRIM, SMART, and every command to a disk that does not queue) go out
 //! alone: they wait until nothing is in flight, and nothing goes out
 //! while they are. A finished command's bits are clear in both registers.
 //!
@@ -178,6 +178,10 @@ pub enum Op {
     Flush,
     /// Trims this many sectors: the disk may forget what they hold.
     Trim(u64),
+    /// Reads a 512-byte page of the disk's SMART record into the one
+    /// buffer: SMART with this feature code ([`ata::smart`]). Only for a
+    /// disk whose SMART is on ([`Identity::smart`]).
+    Smart(u8),
 }
 
 /// How a request ended.
@@ -501,7 +505,7 @@ impl Port {
     /// Whether `op` goes out as a command alone: only while nothing else
     /// is in flight.
     pub fn alone(&self, op: Op) -> bool {
-        !self.info.queued || matches!(op, Op::Flush | Op::Trim(_))
+        !self.info.queued || matches!(op, Op::Flush | Op::Trim(_) | Op::Smart(_))
     }
 
     /// Starts a request: `op` on the disk's logical sectors from `sector`,
@@ -540,6 +544,7 @@ impl Port {
                 self.fill(slot, taskfile, data, write);
             }
             Op::Flush => self.fill(slot, Taskfile::flush(), &[], false),
+            Op::Smart(feature) => self.fill(slot, Taskfile::smart(feature), data, false),
             Op::Trim(length) => {
                 let memory = self.mem();
                 let mut entries = [0u8; BUFFER_SIZE];
@@ -597,6 +602,15 @@ impl Port {
                     Ok(0)
                 } else {
                     Err(Error::BadRequest)
+                }
+            }
+            Op::Smart(_) => {
+                let on = self.identity.as_ref().and_then(|id| id.smart) == Some(true);
+                match data {
+                    &[(phys, len)] if on && len == BUFFER_SIZE as u32 && phys.is_multiple_of(2) => {
+                        Ok(0)
+                    }
+                    _ => Err(Error::BadRequest),
                 }
             }
             Op::Trim(sectors) => {

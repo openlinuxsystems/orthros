@@ -253,6 +253,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    by its serial number; Linux's side checks it on the host
   disk-errors      QEMU fails SATA and NVMe reads and writes: retried, then
                    EIO
+  disk-health      Spark's diskhealth service logs that a SATA disk and an
+                   NVMe drive pass; diskhealth shows them at the console
   btrfs            two Btrfs disks Linux made, compressed, mounted
                    read-only: every file reads as the host wrote it, a
                    damaged one fails
