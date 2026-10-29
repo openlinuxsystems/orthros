@@ -77,7 +77,7 @@ fn delete(path: &Path) -> Result<(), Fail> {
 /// subvolume(8).
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || util::usage("say create, snapshot or delete, and the paths".into());
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     let mut read_only = false;
     let mut paths = Vec::new();
     while let Some(arg) = args.next()? {

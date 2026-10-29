@@ -89,7 +89,7 @@ fn remove(dir: &File, disk: &OsString, path: &str) -> Result<(), Fail> {
 /// device(8).
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || util::usage("say add or remove, the disks and a path".into());
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     let adding = match action.to_str() {
         Some("add") => true,
         Some("remove" | "delete") => false,

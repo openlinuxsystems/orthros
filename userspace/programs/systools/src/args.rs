@@ -57,6 +57,17 @@ impl Args {
         }
     }
 
+    /// The subcommand of a tool that has them, `start` of `scrub start
+    /// -B /`: the first argument, unless it is an option. It is read
+    /// before any other, since [`Args::next`] gives the options first.
+    pub fn subcommand(&mut self) -> Option<OsString> {
+        let item =
+            self.items.get(self.next).filter(|item| item.as_bytes().first() != Some(&b'-'))?;
+        let item = item.clone();
+        self.next += 1;
+        Some(item)
+    }
+
     /// Ends the options at the first operand, as POSIX getopt does: what
     /// follows a command's name is the command's.
     pub fn stop_at_operand(&mut self) {
@@ -215,6 +226,17 @@ mod tests {
 
     fn args(items: &[&str]) -> Args {
         Args::new("test", items.iter().map(OsString::from).collect())
+    }
+
+    #[test]
+    fn a_subcommand_comes_before_its_options() {
+        let mut a = args(&["start", "-B", "/"]);
+        assert_eq!(a.subcommand(), Some(OsString::from("start")));
+        assert_eq!(a.next().unwrap(), Some(Arg::Short('B')));
+        assert_eq!(a.next().unwrap(), Some(Arg::Operand("/".into())));
+        assert_eq!(a.next().unwrap(), None);
+        assert_eq!(args(&["-B", "start"]).subcommand(), None);
+        assert_eq!(args(&[]).subcommand(), None);
     }
 
     #[test]

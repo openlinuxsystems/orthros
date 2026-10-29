@@ -45,7 +45,7 @@ fn uuid(bytes: &[u8]) -> String {
 /// scrub(8).
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || util::usage("say start, and the path of a Btrfs filesystem".into());
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     if action != "start" {
         return Err(usage());
     }

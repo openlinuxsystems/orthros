@@ -69,7 +69,7 @@ fn filter(value: Option<std::ffi::OsString>) -> Result<Filter, Fail> {
 /// balance(8).
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || util::usage("say start, any filters and a path".into());
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     if action != "start" {
         return Err(usage());
     }
