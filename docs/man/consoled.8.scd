@@ -23,7 +23,9 @@ The Radix kernel shows its log on the screen while the machine starts.
 When consoled takes the screen (_/devices/fb0_, *radix-framebuffer*(2)) the
 kernel stops drawing on it, and when consoled ends the screen is the
 log's again; *dmesg*(1) shows the kernel's messages meanwhile. The keys
-come from _/devices/kbd_ (*radix-input*(2)), the PS/2 keyboard's events.
+come from _/devices/kbd_ (*radix-input*(2)): the PS/2 keyboard's events
+and every USB keyboard's, which can be plugged in and pulled out at any
+time.
 
 Spark starts consoled at boot as the *consoled* service
 (_/system/settings/spark/services/consoled.service_, *spark*(8)), first and
@@ -71,7 +73,7 @@ roadmap; until then each session is root's, with no password asked.
 	Run *reboot*(8).
 
 *Caps Lock*, *Num Lock*
-	As on any keyboard; the keyboard's lights follow them. The keypad
+	As on any keyboard; every keyboard's lights follow them. The keypad
 	types digits while Num Lock is on, which it is from the start.
 
 The keyboard layout is US English. The other keys send what the Linux
@@ -109,7 +111,7 @@ _/devices/fb0_
 	The screen.
 
 _/devices/kbd_
-	The keyboard's events.
+	The keyboards' events.
 
 _/system/settings/issue_
 	What each console shows before its session. Its default is in

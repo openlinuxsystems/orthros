@@ -1,27 +1,36 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Keyboards (Phase 9, ADR 0097): the keys pressed on them, as events.
+//! Keyboards and pointers (Phase 9, ADR 0097; Phase 11a, ADR 0148): the
+//! keys pressed on them, and how pointers move, as events.
 //!
 //! _/devices/kbd_ (radix-files(7)) is every keyboard of the machine as one:
-//! since Phase 9 the built-in PS/2 one behind the i8042 controller, which
-//! is QEMU's default keyboard and how laptops such as the reference Dell
-//! connect theirs, and from Phase 11 USB keyboards too. A read returns
-//! whole Event structures, as many as fit, the oldest the reader has not
-//! read: each description keeps its own place, so two readers each see
-//! every event, and a new description starts with the events after it was
-//! opened, never the keys typed before. A read waits for an event unless
-//! the file is non-blocking, and fails with invalid_argument if the buffer
-//! cannot hold one; one that falls more than EVENTS_KEPT events behind
-//! fails with gone once, then goes on with the oldest kept. `poll` finds
-//! it readable while an event waits.
+//! the built-in PS/2 one behind the i8042 controller, which is QEMU's
+//! default keyboard and how laptops such as the reference Dell connect
+//! theirs, and since Phase 11a USB keyboards, with their media keys. A read
+//! returns whole Event structures, as many as fit, the oldest the reader
+//! has not read: each description keeps its own place, so two readers each
+//! see every event, and a new description starts with the events after it
+//! was opened, never the keys typed before. A read waits for an event
+//! unless the file is non-blocking, and fails with invalid_argument if the
+//! buffer cannot hold one; one that falls more than EVENTS_KEPT events
+//! behind fails with gone once, then goes on with the oldest kept. `poll`
+//! finds it readable while an event waits.
 //!
 //! The kernel turns no key into text: consoled(8) does, with its key map,
 //! and handles the virtual terminal keys (Alt+F1 to Alt+F6). Key codes are
 //! Linux's (<linux/input-event-codes.h>), so that key maps and programs
 //! made for Linux's evdev read them as they would there. A key held down
-//! repeats, as the keyboard sends it again: the events after the first
-//! are REPEATED.
+//! repeats: the events after the first are REPEATED. A PS/2 keyboard
+//! repeats a key itself; a USB keyboard does not, so the kernel repeats the
+//! last key one pressed while it is held, 250 ms after it went down and
+//! then every 33 ms, as Linux does.
+//!
+//! _/devices/mouse_ is every pointer as one: USB mice, and tablets such as
+//! QEMU's `usb-tablet`, which say where they point rather than how far they
+//! moved. It is read as _/devices/kbd_ is, in whole Motion structures, each
+//! what one report of one pointer changed; a reader that falls more than
+//! MOTIONS_KEPT behind fails with gone once.
 
 module input;
 
@@ -36,7 +45,7 @@ const PRESSED: u16 = 1;
 const REPEATED: u16 = 2;
 
 /// radix-file(2)'s `control` request on _/devices/kbd_ that lights the
-/// keyboard's lock lights: `argument` holds LED_* bits, and the lights
+/// lock lights of every keyboard: `argument` holds LED_* bits, and the lights
 /// whose bits are clear go out. Needs the write right.
 const SET_LEDS: u32 = 0x4b420001;
 /// The Scroll Lock light.
@@ -57,6 +66,50 @@ struct Event {
     value: u16;
     /// Always 0.
     reserved: u32;
+}
+
+/// How many motions _/devices/mouse_ keeps for readers that fall behind.
+const MOTIONS_KEPT: u32 = 512;
+
+/// The left button, in Motion's `buttons`.
+const BUTTON_LEFT: u32 = 1;
+/// The right button.
+const BUTTON_RIGHT: u32 = 2;
+/// The middle button, or the wheel pressed.
+const BUTTON_MIDDLE: u32 = 4;
+/// The side button nearer the user: back, in a browser.
+const BUTTON_SIDE: u32 = 8;
+/// The side button farther from the user: forward.
+const BUTTON_EXTRA: u32 = 16;
+
+/// The most of Motion's `x` and `y`.
+const POSITION_MAX: u32 = 65535;
+
+/// Motion's `flags`: `x` and `y` say where the pointer points.
+const MOTION_ABSOLUTE: u32 = 1;
+
+/// What one report of a pointer changed.
+struct Motion {
+    /// When: nanoseconds since boot, as Event's.
+    time_ns: u64;
+    /// How far it moved, in the device's counts: right is more.
+    dx: i32;
+    /// Down is more.
+    dy: i32;
+    /// The wheel's detents: away from the user is more.
+    wheel: i32;
+    /// The horizontal wheel's: right is more.
+    pan: i32;
+    /// Where it points, with MOTION_ABSOLUTE: from 0 at the screen's left
+    /// edge to POSITION_MAX at its right.
+    x: u32;
+    /// From 0 at its top to POSITION_MAX at its bottom.
+    y: u32;
+    /// The buttons down after it: BUTTON_* bits, then a bit for each
+    /// further button.
+    buttons: u32;
+    /// MOTION_ABSOLUTE, or 0.
+    flags: u32;
 }
 
 /// Escape.
@@ -225,6 +278,8 @@ const KEY_KP3: u16 = 81;
 const KEY_KP0: u16 = 82;
 /// The keypad's full stop (Delete).
 const KEY_KPDOT: u16 = 83;
+/// Zenkaku/Hankaku, on Japanese keyboards.
+const KEY_ZENKAKUHANKAKU: u16 = 85;
 /// The key between the left Shift and Z on ISO keyboards.
 const KEY_102ND: u16 = 86;
 /// F11.
@@ -233,12 +288,18 @@ const KEY_F11: u16 = 87;
 const KEY_F12: u16 = 88;
 /// The Japanese Ro key.
 const KEY_RO: u16 = 89;
+/// Katakana.
+const KEY_KATAKANA: u16 = 90;
+/// Hiragana.
+const KEY_HIRAGANA: u16 = 91;
 /// The Japanese Henkan key.
 const KEY_HENKAN: u16 = 92;
 /// The Japanese Katakana/Hiragana key.
 const KEY_KATAKANAHIRAGANA: u16 = 93;
 /// The Japanese Muhenkan key.
 const KEY_MUHENKAN: u16 = 94;
+/// The keypad's comma on Japanese keyboards.
+const KEY_KPJPCOMMA: u16 = 95;
 /// The keypad's Enter.
 const KEY_KPENTER: u16 = 96;
 /// The right Ctrl.
@@ -283,6 +344,10 @@ const KEY_KPEQUAL: u16 = 117;
 const KEY_PAUSE: u16 = 119;
 /// The keypad's comma.
 const KEY_KPCOMMA: u16 = 121;
+/// Hangeul, on Korean keyboards.
+const KEY_HANGEUL: u16 = 122;
+/// Hanja, on Korean keyboards.
+const KEY_HANJA: u16 = 123;
 /// The Japanese Yen key.
 const KEY_YEN: u16 = 124;
 /// The left Windows (Super) key.
@@ -293,12 +358,38 @@ const KEY_RIGHTMETA: u16 = 126;
 const KEY_COMPOSE: u16 = 127;
 /// Stop.
 const KEY_STOP: u16 = 128;
+/// Again.
+const KEY_AGAIN: u16 = 129;
+/// Properties: HID's Menu key.
+const KEY_PROPS: u16 = 130;
+/// Undo.
+const KEY_UNDO: u16 = 131;
+/// Front: HID's Select key.
+const KEY_FRONT: u16 = 132;
+/// Copy.
+const KEY_COPY: u16 = 133;
+/// Open: HID's Execute key.
+const KEY_OPEN: u16 = 134;
+/// Paste.
+const KEY_PASTE: u16 = 135;
+/// Find.
+const KEY_FIND: u16 = 136;
+/// Cut.
+const KEY_CUT: u16 = 137;
+/// Help.
+const KEY_HELP: u16 = 138;
 /// Calculator.
 const KEY_CALC: u16 = 140;
 /// Sleep.
 const KEY_SLEEP: u16 = 142;
 /// Wake up.
 const KEY_WAKEUP: u16 = 143;
+/// The file manager.
+const KEY_FILE: u16 = 144;
+/// The web browser.
+const KEY_WWW: u16 = 150;
+/// Lock the screen.
+const KEY_SCREENLOCK: u16 = 152;
 /// Mail.
 const KEY_MAIL: u16 = 155;
 /// Bookmarks.
@@ -309,6 +400,8 @@ const KEY_COMPUTER: u16 = 157;
 const KEY_BACK: u16 = 158;
 /// Forward.
 const KEY_FORWARD: u16 = 159;
+/// Eject.
+const KEY_EJECTCD: u16 = 161;
 /// Next track.
 const KEY_NEXTSONG: u16 = 163;
 /// Play or pause.
@@ -317,6 +410,12 @@ const KEY_PLAYPAUSE: u16 = 164;
 const KEY_PREVIOUSSONG: u16 = 165;
 /// Stop playing.
 const KEY_STOPCD: u16 = 166;
+/// Record.
+const KEY_RECORD: u16 = 167;
+/// Rewind.
+const KEY_REWIND: u16 = 168;
+/// The media player.
+const KEY_CONFIG: u16 = 171;
 /// Home page.
 const KEY_HOMEPAGE: u16 = 172;
 /// Refresh.
@@ -325,7 +424,17 @@ const KEY_REFRESH: u16 = 173;
 const KEY_F13: u16 = 183;
 /// F24.
 const KEY_F24: u16 = 194;
+/// Play.
+const KEY_PLAYCD: u16 = 200;
+/// Pause playing.
+const KEY_PAUSECD: u16 = 201;
+/// Fast forward.
+const KEY_FASTFORWARD: u16 = 208;
 /// Search.
 const KEY_SEARCH: u16 = 217;
+/// Dim the screen.
+const KEY_BRIGHTNESSDOWN: u16 = 224;
+/// Brighten the screen.
+const KEY_BRIGHTNESSUP: u16 = 225;
 /// Media.
 const KEY_MEDIA: u16 = 226;

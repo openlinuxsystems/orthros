@@ -38,10 +38,12 @@
 
 pub mod devfs;
 pub mod disk;
+mod events;
 pub mod framebuffer;
 pub mod keyboard;
 pub mod kmsg;
 pub mod locks;
+pub mod mouse;
 pub mod pipe;
 pub mod procfs;
 pub mod socket;
@@ -114,6 +116,8 @@ enum Special {
     Kmsg,
     /// `/devices/kbd`.
     Keyboard,
+    /// `/devices/mouse`.
+    Mouse,
     /// `/devices/fb0`.
     Framebuffer,
 }
@@ -282,6 +286,7 @@ impl FileObject {
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
             Kind::CharDevice if kmsg::is_kmsg(&at.node) => Special::Kmsg,
             Kind::CharDevice if keyboard::is_keyboard(&at.node) => Special::Keyboard,
+            Kind::CharDevice if mouse::is_mouse(&at.node) => Special::Mouse,
             Kind::CharDevice if framebuffer::is_framebuffer(&at.node) => Special::Framebuffer,
             _ => Special::No,
         };
@@ -354,6 +359,11 @@ impl FileObject {
         self.special == Special::Keyboard
     }
 
+    /// Whether it is of `/devices/mouse`.
+    pub fn is_mouse(&self) -> bool {
+        self.special == Special::Mouse
+    }
+
     /// Whether it is of `/devices/fb0`.
     pub fn is_framebuffer(&self) -> bool {
         self.special == Special::Framebuffer
@@ -376,6 +386,7 @@ fn device_opened(special: Special) -> u64 {
             0
         }
         Special::Keyboard => keyboard::opened(),
+        Special::Mouse => mouse::opened(),
         _ => 0,
     }
 }

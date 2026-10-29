@@ -169,7 +169,9 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	the terminals: _ptmx_, _tty_ and _pts/_*N* (*radix-posix*(7)), and
 	from Phase 9 the screen and the keyboard: _fb0_, the framebuffer
 	the firmware set up (*radix-framebuffer*(2)), and _kbd_, the PS/2
-	keyboard's key events (*radix-input*(2)), which *consoled*(8) uses.
+	keyboard's key events (*radix-input*(2)), which *consoled*(8) uses;
+	from Phase 11a _kbd_ has every USB keyboard's keys too, and _mouse_
+	has what USB mice and tablets do.
 
 *bootfs*
 	The boot archive (*radix-processes*(7)), read-only, with the

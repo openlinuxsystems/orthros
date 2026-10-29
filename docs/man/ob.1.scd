@@ -333,6 +333,19 @@ _target/userspace/_).
 		keyboard. The power button ends the test (*dukovo-boot*(7)'s
 		*USB*).
 
+	*usb-input*
+		Boot normally under UEFI with the lock checker on, with QEMU's
+		USB keyboard and mouse on the xHCI controller's second and
+		third ports, the keyboard taking QEMU's input from the screen.
+		The kernel must say what each is read into. On the console,
+		typing on the USB keyboard and on the PS/2 one must reach the
+		same shell; holding a key on the USB keyboard must repeat it;
+		_/devices/mouse_ must read the mouse moving and its button
+		going down and up, then where a USB tablet plugged into the
+		fourth port with _device_add_ points; and pulling out the
+		keyboard with a key held must stop its repeat
+		(*radix-input*(2)).
+
 	*watchdog*, *watchdog-tco*
 		Boot with *--watchdog 12 --test-hang* for Spark, with QEMU's
 		i6300esb under BIOS (*watchdog*) or with the TCO timer of q35's

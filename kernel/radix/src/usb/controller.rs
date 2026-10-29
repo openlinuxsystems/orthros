@@ -27,7 +27,8 @@
 //! A hub is set up the same way, then driven from [`super::hub`]: the
 //! ports it reports changed are queued, and the thread looks at each in
 //! turn, so that a hub found behind a hub is never set up from inside
-//! another's setup.
+//! another's setup. A device's HID interfaces, its keyboards, mice and
+//! tablets, are then read from [`super::hid`].
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -38,12 +39,13 @@ use radix_hw::Dma;
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_usb::{
-    Configuration, DeviceDescriptor, EndpointDescriptor, Setup, Speed, class, class_name,
-    descriptor, hub,
+    Configuration, DeviceDescriptor, EndpointDescriptor, Setup, Speed, TransferType, class,
+    class_name, descriptor, hub,
 };
 use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place, Xhci, code};
 
 use super::STARTS;
+use super::hid::{self, Hid, HidPlan, MAX_HIDS};
 use super::hub::Hub;
 use crate::Arch;
 use crate::sched;
@@ -143,6 +145,8 @@ pub(super) struct Attached {
     pub(super) name: TextBuf<64>,
     /// What the thread keeps of it if it is a hub.
     pub(super) hub: Option<Hub>,
+    /// Its HID interfaces that are read.
+    pub(super) hids: Vec<Hid, Kmalloc>,
 }
 
 /// A controller, as its thread runs it.
@@ -158,6 +162,8 @@ pub(super) struct Controller {
     pub(super) buffer: Vec<u8, Kmalloc>,
     /// Hub ports to look at: the hub's slot and the port.
     pub(super) work: Vec<(u8, u8), Kmalloc>,
+    /// The keyboards' lock lights when the thread last lit them.
+    lights: u32,
 }
 
 /// Why a device could not be set up.
@@ -191,6 +197,9 @@ struct Plan {
     count: usize,
     /// A hub's endpoint that reports its changes.
     hub: Option<EndpointDescriptor>,
+    /// Its HID interfaces, the first `hid_count`.
+    hids: [HidPlan; MAX_HIDS],
+    hid_count: usize,
 }
 
 /// The thread of controller `index`.
@@ -203,7 +212,7 @@ pub fn run(index: usize) {
     }
     let sleep = if start.interrupt.is_some() { IDLE_NS } else { POLL_NS };
     loop {
-        let busy = controller.events() | controller.work();
+        let busy = controller.events() | controller.work() | controller.lights();
         if controller.xhci.failed() {
             error!(
                 "USB: bus {}: the controller stopped with an error; its devices are gone",
@@ -299,6 +308,7 @@ impl Controller {
             failed: [0; PORT_WORDS],
             buffer,
             work,
+            lights: crate::fs::keyboard::lights(),
         };
         Box::try_new_in(controller, heap).ok()
     }
@@ -363,6 +373,20 @@ impl Controller {
         true
     }
 
+    /// Lights every keyboard's lock lights as consoled(8) last asked, if
+    /// that changed; says whether it did.
+    fn lights(&mut self) -> bool {
+        let lights = crate::fs::keyboard::lights();
+        if lights == self.lights {
+            return false;
+        }
+        self.lights = lights;
+        for at in 0..self.devices.len() {
+            self.hid_lights(at);
+        }
+        true
+    }
+
     /// Queues port `port` of the hub in slot `slot` to be looked at.
     pub(super) fn queue(&mut self, slot: u8, port: u8) {
         if !self.work.contains(&(slot, port))
@@ -380,9 +404,13 @@ impl Controller {
     /// The transfer at `trb` on an endpoint other than 0 finished.
     fn transfer(&mut self, trb: u64, slot: u8, endpoint: u8, code: u8, residual: u32) {
         let Some(at) = self.find(slot) else { return };
-        let hub = self.devices[at].hub.as_ref();
-        if hub.is_some_and(|hub| hub.status == endpoint && hub.pending == trb) {
+        let attached = &self.devices[at];
+        if attached.hub.as_ref().is_some_and(|hub| hub.status == endpoint && hub.pending == trb) {
             self.hub_status(at, code, residual);
+        } else if let Some(index) =
+            attached.hids.iter().position(|h| h.endpoint == endpoint && h.pending == trb)
+        {
+            self.hid_report(at, index, code, residual);
         }
     }
 
@@ -406,7 +434,8 @@ impl Controller {
         while let Some(at) =
             self.devices.iter().position(|d| d.path == path || d.path.is_below(path))
         {
-            let gone = self.devices.remove(at);
+            let mut gone = self.devices.remove(at);
+            hid::gone(&mut gone.hids);
             let slot = gone.device.slot();
             info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
             self.give_back(gone.device, gone.path);
@@ -531,11 +560,21 @@ impl Controller {
             }
         };
         let slot = device.slot();
-        let _ = self.devices.push_within_capacity(Attached { path, device, name, hub: None });
+        let attached = Attached { path, device, name, hub: None, hids: hid::none() };
+        let _ = self.devices.push_within_capacity(attached);
         if let Some(status) = plan.hub
             && let Err(why) = self.start_hub(slot, status)
         {
             warn!("USB: {}: the hub could not be started: {why}", Name(self.bus, path));
+        }
+        for &interface in &plan.hids[..plan.hid_count] {
+            if let Err(why) = self.start_hid(slot, interface) {
+                warn!(
+                    "USB: {}: interface {} could not be read: {why}",
+                    Name(self.bus, path),
+                    interface.interface
+                );
+            }
         }
         Ok(())
     }
@@ -606,6 +645,8 @@ impl Controller {
             endpoints: [EndpointDescriptor::default(); MAX_ENDPOINTS],
             count: 0,
             hub: None,
+            hids: [HidPlan::default(); MAX_HIDS],
+            hid_count: 0,
         };
         let mut named: [&str; 4] = [""; 4];
         let mut count = 0;
@@ -616,6 +657,20 @@ impl Controller {
             if count < named.len() && !named[..count].contains(&this) {
                 named[count] = this;
                 count += 1;
+            }
+            if d.class == class::HID && plan.hid_count < MAX_HIDS {
+                let descriptor = interface
+                    .descriptors()
+                    .find(|&(kind, _)| kind == descriptor::HID)
+                    .map(|(_, bytes)| bytes);
+                let input = interface
+                    .endpoints()
+                    .find(|e| e.is_in() && e.transfer_type() == TransferType::Interrupt)
+                    .map(|e| e.address);
+                if let Some(hid) = HidPlan::of(d, descriptor, input) {
+                    plan.hids[plan.hid_count] = hid;
+                    plan.hid_count += 1;
+                }
             }
             for endpoint in interface.endpoints() {
                 if found.class == class::HUB

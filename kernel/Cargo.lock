@@ -113,6 +113,7 @@ dependencies = [
  "radix-fat",
  "radix-fbcon",
  "radix-hal",
+ "radix-hid",
  "radix-hw",
  "radix-input",
  "radix-ipc",
@@ -267,6 +268,14 @@ name = "radix-hal"
 version = "0.10.2"
 dependencies = [
  "radix-hw",
+]
+
+[[package]]
+name = "radix-hid"
+version = "0.10.2"
+dependencies = [
+ "proptest",
+ "radix-abi",
 ]
 
 [[package]]

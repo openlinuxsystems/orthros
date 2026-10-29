@@ -159,6 +159,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0145](0145-machine-checks-are-reported-and-the-unrecoverable-ones-panic.md) | Machine checks are reported, and the ones the CPU cannot go on after panic | Accepted |
 | [0146](0146-xhci-controllers-are-driven-by-a-kernel-thread-each.md) | xHCI controllers are driven by a kernel thread each, from Intel's specification | Accepted |
 | [0147](0147-usb-hubs-and-every-device-configured-by-its-controllers-thread.md) | USB hubs are driven by their controller's thread, which configures every device | Accepted |
+| [0148](0148-usb-keyboards-and-mice-are-read-through-their-hid-reports.md) | USB keyboards and mice are read through their HID reports, and their keys repeat in software | Accepted |
 | [0150](0150-btrfs-scrubs-the-last-commit-a-run-of-extents-at-a-time.md) | Btrfs scrubs the last commit, a run of extents at a time | Accepted |
 | [0151](0151-btrfs-replays-the-log-of-fsyncs-linux-leaves-at-mount.md) | Btrfs replays the log of fsyncs Linux leaves, at mount | Accepted |
 | [0152](0152-swap-to-linux-swap-areas-from-a-thread-of-its-own.md) | Swap to Linux's swap areas, from a thread of its own | Accepted |

@@ -1252,6 +1252,8 @@ enum Target<'a> {
     Kmsg,
     /// `/devices/kbd`.
     Keyboard,
+    /// `/devices/mouse`.
+    Mouse,
     /// `/devices/fb0`.
     Framebuffer,
     /// A file of the tree, through its node.
@@ -1269,6 +1271,8 @@ fn target(file: &FileObject) -> Target<'_> {
         Target::Kmsg
     } else if file.is_keyboard() {
         Target::Keyboard
+    } else if file.is_mouse() {
+        Target::Mouse
     } else if file.is_framebuffer() {
         Target::Framebuffer
     } else {
@@ -1327,6 +1331,7 @@ fn read_special(
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::read(file, out, non_blocking).map(|n| n as u64),
         Target::Keyboard => fs::keyboard::read(file, out, non_blocking).map(|n| n as u64),
+        Target::Mouse => fs::mouse::read(file, out, non_blocking).map(|n| n as u64),
         Target::Framebuffer | Target::Node => Ok(0),
     }
 }
@@ -1393,7 +1398,7 @@ fn write_special(
             Ok(written)
         }
         Target::Framebuffer => fs::framebuffer::write(file, offset, data).map(|n| n as u64),
-        Target::Keyboard => Err(error(Kernel::InvalidArgument)),
+        Target::Keyboard | Target::Mouse => Err(error(Kernel::InvalidArgument)),
         Target::Node => Ok(0),
     }
 }

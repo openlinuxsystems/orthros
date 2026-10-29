@@ -7,9 +7,10 @@
 //! `zero`, `random` and `urandom` (both the kernel's generator, which
 //! never blocks once seeded at boot), a block device for each disk and
 //! partition `disk` finds, the terminals (Phase 8, `tty`): `ptmx`, `tty`
-//! and `pts/N`, and since Phase 9 the kernel log (`kmsg`), the keyboards
-//! (`kbd`, from `keyboard`) and the screen (`fb0`, from `framebuffer`). Programs
-//! make and remove nothing in it; only the kernel adds devices, and
+//! and `pts/N`, since Phase 9 the kernel log (`kmsg`), the keyboards
+//! (`kbd`, from `keyboard`) and the screen (`fb0`, from `framebuffer`), and
+//! since Phase 11a the pointers (`mouse`, from `mouse`). Programs make and
+//! remove nothing in it; only the kernel adds devices, and
 //! `pts/N` comes and goes with its pseudo-terminal.
 
 use radix_block::DeviceRef;
@@ -37,6 +38,8 @@ pub fn init() {
         root.add("kmsg", kmsg)?;
         let kbd: NodeRef = mem::arc(super::keyboard::Keyboard(next_id()))?;
         root.add("kbd", kbd)?;
+        let mouse: NodeRef = mem::arc(super::mouse::Mouse(next_id()))?;
+        root.add("mouse", mouse)?;
         let fb0: NodeRef = mem::arc(super::framebuffer::Framebuffer(next_id()))?;
         root.add("fb0", fb0)?;
         super::tty::init(&root)?;
