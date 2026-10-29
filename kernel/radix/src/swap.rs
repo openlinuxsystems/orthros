@@ -460,9 +460,9 @@ fn run(_: usize) {
         }
         let asked = ASKED.load(Ordering::Acquire);
         let (free, managed) = (FRAMES.free_pages(), FRAMES.managed_pages());
-        let mut want = if free < managed / 32 { managed / 16 - free } else { 0 };
+        let mut want = if free < managed / 32 { mark() - free } else { 0 };
         if asked != DONE.load(Ordering::Acquire) {
-            want = (managed / 16).saturating_sub(free).max(RECLAIM_MIN);
+            want = mark().saturating_sub(free).max(RECLAIM_MIN);
         }
         if want > 0 && on_any() {
             crate::user::memory::swap_out(want);
@@ -470,6 +470,11 @@ fn run(_: usize) {
         DONE.store(asked, Ordering::Release);
         wait::wake_all(done_key());
     }
+}
+
+/// The free memory the swap thread swaps out to: 1/16 of RAM.
+pub fn mark() -> u64 {
+    FRAMES.managed_pages() / 16
 }
 
 /// Has the swap thread swap pages out until `pages` are free, for a
