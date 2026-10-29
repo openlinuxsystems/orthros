@@ -15,8 +15,10 @@
 //! (Phase 13), so the user columns all say root.
 
 mod args;
+mod balance;
 mod blkid;
 mod column;
+mod device;
 mod df;
 mod diskhealth;
 mod dmesg;
@@ -68,12 +70,14 @@ type Tool = fn(&mut Args) -> Result<i32, Fail>;
 
 /// The tools, by name, in order.
 const TOOLS: &[(&str, Tool)] = &[
+    ("balance", balance::main),
     ("blkid", blkid::main),
     ("chgrp", modes::chgrp),
     ("chmod", modes::chmod),
     ("chown", modes::chown),
     ("column", column::main),
     ("df", df::main),
+    ("device", device::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
     ("findmnt", findmnt::main),

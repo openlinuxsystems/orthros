@@ -130,6 +130,46 @@ flags MountFlags: u32 {
     compress = 1;
 }
 
+/// Which chunks a balance moves (ADR 0159): those of data, of metadata,
+/// and of the chunk tree; and, of each kind, whether chunks already of
+/// the profile it converts to stay, as btrfs-balance(8)'s `soft` filter
+/// has it.
+flags BalanceKinds: u32 {
+    /// Move the chunks of data.
+    data = 0;
+    /// Move the chunks of metadata.
+    metadata = 1;
+    /// Move the chunks of the chunk tree.
+    system = 2;
+    /// Leave the data chunks already of the profile `convert_data` names.
+    soft_data = 3;
+    /// Leave the metadata chunks already of the profile
+    /// `convert_metadata` names.
+    soft_metadata = 4;
+    /// Leave the chunk tree's chunks already of the profile
+    /// `convert_system` names.
+    soft_system = 5;
+}
+
+/// A quota group `qgroups` writes (ADR 0170): one for each subvolume of
+/// a Btrfs filesystem with simple quotas, as `btrfs qgroup show` lists
+/// them.
+struct Qgroup {
+    /// Its ID, as Linux's: the level in the high 16 bits, 0 for a
+    /// subvolume's, and the subvolume's ID below.
+    id: u64;
+    /// The bytes of the extents its subvolume made, data and tree
+    /// blocks, as simple quotas count them: each extent to the subvolume
+    /// that wrote it, whoever shares it since.
+    referenced: u64;
+    /// The same bytes: simple quotas count each extent once.
+    exclusive: u64;
+    /// The most `referenced` may grow to; all ones for no limit.
+    max_referenced: u64;
+    /// The most `exclusive` may grow to; all ones for no limit.
+    max_exclusive: u64;
+}
+
 /// An entry `list` writes: this header, then the name's bytes, then
 /// zeros up to a multiple of 8 bytes.
 struct DirEntry {
@@ -228,11 +268,12 @@ interface directory = 0x000b version 5 {
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
-                name_too_long, bad_name, outside, io, corrupt, no_device, too_many_links];
+                quota_exceeded, name_too_long, bad_name, outside, io, corrupt, no_device,
+                too_many_links];
     /// Makes an empty directory at `path`. Needs the write right.
     method make_directory = 2 (path: in bytes) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
+                not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, too_many_links];
     /// Removes the file, symbolic link or empty directory, an empty Btrfs
     /// subvolume too, at `path`. A file still open lives on until its last
@@ -246,10 +287,10 @@ interface directory = 0x000b version 5 {
     /// file (or an empty directory, for a directory) there. Needs the
     /// write right on both.
     method rename = 4 (from: in bytes, to_dir: slot, to: in bytes) -> ()
-        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
-                no_memory, bad_address, not_found, not_directory, is_directory, not_empty,
-                read_only, no_space, name_too_long, bad_name, outside, cross_mount, in_use, io,
-                corrupt, too_many_links];
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, is_directory, not_empty, read_only, no_space,
+                quota_exceeded, name_too_long, bad_name, outside, cross_mount, in_use, io, corrupt,
+                too_many_links];
     /// Writes the directory's entries from `cursor` (0 for the first) into
     /// `buffer` as DirEntry records, other than `.` and `..`; returns how
     /// many it wrote (0 at the end), the bytes they take, and the cursor
@@ -311,8 +352,8 @@ interface directory = 0x000b version 5 {
     /// that has no links, as FAT has none, refuses with not_permitted.
     /// Needs the write right.
     method make_link = 12 (path: in bytes, target: in bytes) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
+                not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
     /// Reads where the symbolic link at `path` points into `buffer`;
     /// returns the target's length, which is more than `buffer` holds if
@@ -342,8 +383,8 @@ interface directory = 0x000b version 5 {
     /// with no_device. FAT has no such files (not_permitted). Needs the
     /// write right, and the write right on the socket.
     method bind_socket = 15 (path: in bytes, socket: slot, name: in bytes) -> ()
-        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
-                no_memory, bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links,
                 not_socket, busy];
     /// Connects the socket in slot `socket`, which must be neither
@@ -369,10 +410,10 @@ interface directory = 0x000b version 5 {
     /// with as many names as it keeps fails with too_many_names. Needs
     /// the write right on `to_dir`.
     method link = 17 (path: in bytes, flags: LinkFlags, to_dir: slot, to: in bytes) -> ()
-        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
-                no_memory, bad_address, not_found, exists, not_directory, is_directory,
-                read_only, no_space, name_too_long, bad_name, outside, cross_mount, io,
-                corrupt, not_permitted, too_many_links, too_many_names];
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
+                quota_exceeded, name_too_long, bad_name, outside, cross_mount, io, corrupt,
+                not_permitted, too_many_links, too_many_names];
     /// Makes a file of `kind` at `path`: a named pipe (pipe), which
     /// opening reads or writes as a pipe; a device node (char_device or
     /// block_device) that stands for device number `device`, as
@@ -382,8 +423,8 @@ interface directory = 0x000b version 5 {
     /// invalid_argument. A filesystem that keeps none, as FAT keeps
     /// none, refuses with not_permitted. Needs the write right.
     method make_node = 18 (path: in bytes, kind: FileKind, device: u64) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
+                not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
     /// Makes a new, empty Btrfs subvolume at `path`, as
     /// btrfs-subvolume(8)'s `create` does: a directory whose files are a
@@ -391,8 +432,8 @@ interface directory = 0x000b version 5 {
     /// Other filesystems fail with invalid_argument. Needs the write
     /// right.
     method make_subvolume = 19 (path: in bytes) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
+                not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, too_many_links];
     /// Makes `to` beneath the directory in slot `to_dir` a snapshot of
     /// the Btrfs subvolume that holds `path`, read-only if `read_only`, as
@@ -403,8 +444,8 @@ interface directory = 0x000b version 5 {
     /// filesystem, or cross_mount; other filesystems fail with
     /// invalid_argument. Needs the write right on `to_dir`.
     method snapshot = 20 (path: in bytes, to_dir: slot, to: in bytes, read_only: bool) -> ()
-        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
-                no_memory, bad_address, not_found, exists, not_directory, read_only, no_space,
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, cross_mount, io, corrupt, too_many_links];
     /// Removes the Btrfs subvolume at `path` with everything in it, as
     /// btrfs-subvolume(8)'s `delete` does, freeing what no snapshot
@@ -458,4 +499,75 @@ interface directory = 0x000b version 5 {
     method trim = 24 (minimum: u64) -> (trimmed: u64)
         raises [no_such_slot, empty_slot, missing_rights, no_memory, not_supported,
                 read_only, io, corrupt];
+    /// Adds the block device whose file capability is in slot `device` to
+    /// the disks of the directory's Btrfs filesystem, as btrfs-device(8)'s
+    /// `add` does (ADR 0159), and returns the device ID it takes. Its old
+    /// superblocks are wiped first; it holds nothing until new chunks go
+    /// on it or a balance moves some there. Fails with in_use if the
+    /// device is a disk of a mounted Btrfs, holds a mount or is a swap
+    /// area, no_space if it is smaller than 64 MiB, not_supported on other
+    /// filesystems, when its blocks are larger than the filesystem's
+    /// sectors, and once 16 disks have been the filesystem's since the
+    /// mount, and read_only on a read-only mount. Needs the control right,
+    /// and the read and write rights on `device`.
+    method add_disk = 25 (device: u32) -> (devid: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, no_memory,
+                not_supported, read_only, in_use, no_space, not_block_device, io, corrupt];
+    /// Moves every chunk off the disk of device ID `devid` of the
+    /// directory's Btrfs filesystem, there or missing, then takes the disk
+    /// out, as btrfs-device(8)'s `remove` does (ADR 0159); a disk that is
+    /// there has its superblocks wiped. Fails with not_found if no disk
+    /// has that ID, invalid_argument if the disks left would be too few
+    /// for a profile the filesystem uses, no_space if they lack room for
+    /// its chunks, not_supported on other filesystems, read_only on a
+    /// read-only mount, and io if a block has no copy that reads. Needs
+    /// the control right.
+    method remove_disk = 26 (devid: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                not_found, not_supported, read_only, no_space, io, corrupt];
+    /// Moves the chunks of the directory's Btrfs filesystem that `kinds`
+    /// names to new chunks, as btrfs-balance(8)'s `start` does (ADR 0159),
+    /// converting those of each kind to the profile its `convert_` names
+    /// unless that is 0: a Btrfs block group profile flag, or 1 << 48 for
+    /// single, as Linux's balance arguments have them. Returns how many
+    /// chunks it looked at and how many it moved; a balance that fails
+    /// part way leaves those it moved moved. Fails with invalid_argument
+    /// for a profile Btrfs does not have or one that needs more disks than
+    /// are there, not_supported for RAID5 and RAID6, for a convert of
+    /// chunks that mix data and metadata, and on other filesystems,
+    /// no_space when there is no room to move a chunk, read_only on a
+    /// read-only mount, and io if a block has no copy that reads. Needs
+    /// the control right.
+    method balance = 27 (kinds: BalanceKinds, convert_data: u64, convert_metadata: u64,
+                         convert_system: u64) -> (considered: u64, moved: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                not_supported, read_only, no_space, io, corrupt];
+    /// Turns simple quotas on for the directory's Btrfs filesystem, with
+    /// `enable`, or off, as btrfs-quota(8)'s `enable --simple` and
+    /// `disable` do (ADR 0170). On, each subvolume has a quota group that
+    /// counts the bytes of the extents it writes from then on, and may be
+    /// given a limit; off, the counts and limits go. Turning on what is on
+    /// already, or off what is off, does nothing. Fails with not_supported
+    /// on other filesystems and on a Btrfs with Linux's full quota groups,
+    /// and read_only on a read-only mount. Needs the control right.
+    method quota = 28 (enable: bool) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, no_memory, not_supported, read_only,
+                no_space, io, corrupt];
+    /// Writes the quota groups of the directory's Btrfs filesystem into
+    /// `buffer` as Qgroup records, in order of their IDs, as many as fit;
+    /// returns how many there are (ADR 0170). Fails with not_supported on
+    /// other filesystems and when quotas are off. Needs the read right.
+    method qgroups = 29 (buffer: out bytes) -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, no_memory, bad_address,
+                not_supported, io, corrupt];
+    /// Sets the limits of quota group `id` of the directory's Btrfs
+    /// filesystem, as btrfs-qgroup(8)'s `limit` does (ADR 0170): a change
+    /// that would take its `referenced` past `max_referenced`, or its
+    /// `exclusive` past `max_exclusive`, fails with quota_exceeded; all
+    /// ones is no limit. Fails with not_found if no quota group has that
+    /// ID, not_supported on other filesystems and when quotas are off, and
+    /// read_only on a read-only mount. Needs the control right.
+    method limit_qgroup = 30 (id: u64, max_referenced: u64, max_exclusive: u64) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, no_memory, not_found, not_supported,
+                read_only, no_space, io, corrupt];
 }

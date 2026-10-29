@@ -79,13 +79,15 @@ pub(crate) fn replace(inner: &Inner, devid: u64, device: &DeviceRef) -> Result<S
             return Err(e);
         }
     };
-    // Wiped once the new disk has it all, as Linux's replace does; a
-    // disk failing may refuse it.
-    if disk.present()
-        && !disk.behind()
-        && let Some(old) = disk.replaced()
-    {
-        let _ = wipe(old);
+    if disk.present() && !disk.behind() {
+        if let Some(mut txn) = inner.reading() {
+            txn.writer.disk_rebuilt(volume, devid);
+        }
+        // Wiped once the new disk has it all, as Linux's replace does; a
+        // disk failing may refuse it.
+        if let Some(old) = disk.replaced() {
+            let _ = wipe(old);
+        }
     }
     Ok(counts)
 }
@@ -102,7 +104,7 @@ fn total_bytes(volume: &Volume, devid: u64) -> Result<u64> {
 
 /// Writes zeros over each copy of a superblock that fits on `cache`'s
 /// disk, and has the disk keep them.
-fn wipe(cache: &BlockCache) -> Result<()> {
+pub(crate) fn wipe(cache: &BlockCache) -> Result<()> {
     let size = cache.device().info().sectors * radix_block::SECTOR;
     for at in SUPERS.into_iter().filter(|&at| at + superblock::SIZE as u64 <= size) {
         cache.fill(at, superblock::SIZE, 0)?;

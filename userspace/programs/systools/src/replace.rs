@@ -42,7 +42,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let usage = || {
         util::usage("say start, the disk to replace or its devid, the new disk and a path".into())
     };
-    let Some(Arg::Operand(action)) = args.next()? else { return Err(usage()) };
+    let Some(action) = args.subcommand() else { return Err(usage()) };
     if action != "start" {
         return Err(usage());
     }

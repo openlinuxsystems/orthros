@@ -490,6 +490,7 @@ pub const ERRNOS: &[(&str, i32)] = &[
     ("ETIMEDOUT", 110),
     ("ECONNREFUSED", 111),
     ("EUCLEAN", 117),
+    ("EDQUOT", 122),
 ];
 
 /// The number of an errno name.

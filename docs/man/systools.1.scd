@@ -44,6 +44,8 @@ error that starts with the tool's name.
 
 [[ *Tool*
 :- *What it does*
+|  *balance*(8)
+:  move a Btrfs filesystem's chunks, converting them to another profile
 |  *blkid*(8)
 :  what each disk and partition holds: filesystems, labels and UUIDs
 |  *chgrp*(1), *chmod*(1), *chown*(1)
@@ -52,6 +54,8 @@ error that starts with the tool's name.
 :  put lines in columns, or a table
 |  *df*(1)
 :  the space of each filesystem
+|  *device*(8)
+:  add disks to a Btrfs filesystem and remove them
 |  *diskhealth*(8)
 :  what each disk says of its health: SMART and the NVMe health log
 |  *dmesg*(1)

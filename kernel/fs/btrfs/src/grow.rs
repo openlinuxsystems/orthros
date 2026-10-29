@@ -56,6 +56,10 @@ const SYS_ARRAY_SIZE_AT: usize = 0xa0;
 const SYS_ARRAY_AT: usize = 0x32b;
 const SYS_ARRAY_MAX: usize = 2048;
 
+/// Where the superblock keeps its total bytes and its count of disks.
+const TOTAL_BYTES_AT: usize = 0x70;
+const NUM_DEVICES_AT: usize = 0x88;
+
 /// Where a device item keeps its total and used bytes.
 const DEV_TOTAL_AT: usize = 8;
 const DEV_USED_AT: usize = 16;
@@ -120,13 +124,47 @@ pub(crate) struct Grown {
     pub devices: Option<Devices>,
     /// Entries for the system chunk array: a key and a chunk item each.
     pub sys_chunks: KVec<u8>,
+    /// The chunks a balance removed that the system chunk array names, by
+    /// their start, for the commit to take out (ADR 0159).
+    pub sys_dropped: KVec<u64>,
+    /// The flags new chunks of data, metadata and the chunk tree take
+    /// while a balance converts them to another profile.
+    pub targets: [Option<u64>; 3],
+    /// Disks added less disks removed since the last commit, and their
+    /// bytes, for the superblock's count and total.
+    pub disks: (i64, i64),
 }
 
 impl Grown {
     /// No chunks made.
     pub(crate) fn new() -> Grown {
-        Grown { made: mem::vec(), devices: None, sys_chunks: mem::vec() }
+        Grown {
+            made: mem::vec(),
+            devices: None,
+            sys_chunks: mem::vec(),
+            sys_dropped: mem::vec(),
+            targets: [None; 3],
+            disks: (0, 0),
+        }
     }
+
+    /// Where `targets` keeps the target of `want`: data, metadata, or
+    /// the chunk tree.
+    pub(crate) fn target_at(want: u64) -> usize {
+        if want & kind::DATA != 0 {
+            0
+        } else if want & kind::METADATA != 0 {
+            1
+        } else {
+            2
+        }
+    }
+}
+
+/// How many disks chunks of `profile` ([`kind`]) need, at least; `None`
+/// for a profile Radix does not write.
+pub(crate) fn disks_needed(profile: u64) -> Option<usize> {
+    Layout::of(profile).map(|l| l.min)
 }
 
 /// How a profile lays a chunk's stripes out: on how few and how many
@@ -201,7 +239,10 @@ impl Writer {
     /// no group of `want` to take a profile from.
     #[inline(never)]
     pub(crate) fn new_chunk(&mut self, volume: &Volume, want: u64, size: u64) -> Result<()> {
-        let flags = self.space.flags_for(want).ok_or(Error::NoSpace)?;
+        let flags = match self.grown.targets[Grown::target_at(want)] {
+            Some(flags) => flags,
+            None => self.space.flags_for(want).ok_or(Error::NoSpace)?,
+        };
         let layout = Layout::of(flags & kind::PROFILE).ok_or(Error::NoSpace)?;
         if self.grown.devices.is_none() {
             self.grown.devices = Some(read_devices(volume)?);
@@ -295,6 +336,21 @@ impl Writer {
             self.commit(volume)?;
         }
         if self.space.free_bytes(kind::METADATA) >= need { Ok(()) } else { Err(Error::NoSpace) }
+    }
+
+    /// Makes sure, before a change to the chunk tree, that the system
+    /// chunks have room for a path of it copied and split, making one if
+    /// they must, as [`Writer::make_room`] does for metadata; a balance
+    /// moving the system chunk needs it (ADR 0159).
+    pub(crate) fn make_system_room(&mut self, volume: &Volume) -> Result<()> {
+        let need = u64::from(volume.superblock().nodesize) * 2 * u64::from(MAX_LEVEL);
+        if self.space.free_bytes(kind::SYSTEM) < need {
+            match self.new_chunk(volume, kind::SYSTEM, 0) {
+                Ok(()) | Err(Error::NoSpace) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if self.space.free_bytes(kind::SYSTEM) >= need { Ok(()) } else { Err(Error::NoSpace) }
     }
 
     /// The metadata a change needs free before it starts: room for each
@@ -402,8 +458,18 @@ impl Writer {
     }
 
     /// Writes what the chunks recorded change to the superblock `sb`: its
-    /// system chunk array.
+    /// system chunk array, and its count of disks and their bytes.
     pub(crate) fn grow_superblock(&self, sb: &mut [u8]) -> Result<()> {
+        for &start in &self.grown.sys_dropped {
+            drop_sys_chunk(sb, start)?;
+        }
+        let (count, bytes) = self.grown.disks;
+        if count != 0 || bytes != 0 {
+            let devices = u64_at(sb, NUM_DEVICES_AT).checked_add_signed(count);
+            let total = u64_at(sb, TOTAL_BYTES_AT).checked_add_signed(bytes);
+            put_u64(sb, NUM_DEVICES_AT, devices.ok_or(Error::Corrupt)?);
+            put_u64(sb, TOTAL_BYTES_AT, total.ok_or(Error::Corrupt)?);
+        }
         let entries = &self.grown.sys_chunks;
         if !entries.is_empty() {
             let size = crate::format::u32_at(sb, SYS_ARRAY_SIZE_AT) as usize;
@@ -422,6 +488,8 @@ impl Writer {
     /// durable.
     pub(crate) fn grown_committed(&mut self) {
         self.grown.sys_chunks.clear();
+        self.grown.sys_dropped.clear();
+        self.grown.disks = (0, 0);
     }
 }
 
@@ -452,6 +520,136 @@ impl Writer {
     }
 }
 
+impl Writer {
+    /// Removes the chunk of block group `start`, which a balance emptied
+    /// and a commit settled (ADR 0159): its chunk item and, for a chunk of
+    /// the chunk tree, its entry in the system chunk array; its device
+    /// extents, and the bytes each disk's item counts used; its block
+    /// group item and its free-space items. Its range of each disk may
+    /// take a chunk at once: it holds nothing the last commit needs.
+    #[inline(never)]
+    pub(crate) fn remove_chunk(&mut self, volume: &Volume, start: u64) -> Result<()> {
+        let chunk = volume
+            .with_chunks(|map| map.find(start).filter(|c| c.start == start).map(Chunk::copy))
+            .ok_or(Error::Corrupt)??;
+        let bytes = chunk.stripe_bytes();
+        self.delete(volume, tree::CHUNK, &Key::new(tree::FIRST_CHUNK, item::CHUNK_ITEM, start))?;
+        if chunk.kind & kind::SYSTEM != 0 {
+            mem::push(&mut self.grown.sys_dropped, start)?;
+        }
+        for stripe in &chunk.stripes {
+            self.delete(
+                volume,
+                tree::DEV,
+                &Key::new(stripe.devid, item::DEV_EXTENT, stripe.offset),
+            )?;
+            let dev = Key::new(DEV_ITEMS, item::DEV_ITEM, stripe.devid);
+            self.update(volume, tree::CHUNK, &dev, |d| {
+                put_u64(d, DEV_USED_AT, u64_at(d, DEV_USED_AT).saturating_sub(bytes));
+            })?;
+            let device = self.grown.devices.as_mut().and_then(|devices| {
+                devices.list.iter_mut().find(|device| device.devid == stripe.devid)
+            });
+            if let Some(device) = device {
+                space::remove(&mut device.used, stripe.offset, stripe.offset + bytes)?;
+            }
+        }
+        let group_tree = self.space.group_tree();
+        self.delete(volume, group_tree, &Key::new(start, item::BLOCK_GROUP_ITEM, chunk.length))?;
+        let end = start + chunk.length;
+        let mut free = mem::vec();
+        {
+            let root = Writer::tree_root(volume, tree::FREE_SPACE)?;
+            let mut cursor = Cursor::seek(volume, &root, &Key::new(start, 0, 0))?;
+            while let Some(key) = cursor.key() {
+                if key.objectid >= end {
+                    break;
+                }
+                if (item::FREE_SPACE_INFO..=item::FREE_SPACE_BITMAP).contains(&key.kind) {
+                    mem::push(&mut free, key)?;
+                }
+                cursor.advance()?;
+            }
+        }
+        for key in free {
+            self.delete(volume, tree::FREE_SPACE, &key)?;
+        }
+        self.space.remove_group(start)?;
+        volume.remove_chunk(start)
+    }
+
+    /// Lets no new chunk go on disk `devid`, or lets them again, as a
+    /// removal of the disk moves its chunks off it (ADR 0159).
+    pub(crate) fn keep_chunks_off(&mut self, volume: &Volume, devid: u64, off: bool) -> Result<()> {
+        if self.grown.devices.is_none() {
+            self.grown.devices = Some(read_devices(volume)?);
+        }
+        let devices = self.grown.devices.as_mut().ok_or(Error::Corrupt)?;
+        let device = devices.list.iter_mut().find(|d| d.devid == devid).ok_or(Error::NotFound)?;
+        device.usable = !off && !volume.read_only();
+        Ok(())
+    }
+
+    /// Lets new chunks go on disk `devid`, put in the place of a missing
+    /// one and rebuilt (ADR 0155): the disks may have been counted while
+    /// it was missing.
+    pub(crate) fn disk_rebuilt(&mut self, volume: &Volume, devid: u64) {
+        let devices = self.grown.devices.as_mut();
+        if let Some(device) = devices.and_then(|d| d.list.iter_mut().find(|d| d.devid == devid)) {
+            device.usable = !volume.read_only();
+        }
+    }
+
+    /// Notes disk `devid`, of `total` bytes, added with no chunk on it yet.
+    pub(crate) fn device_added(&mut self, devid: u64, total: u64) -> Result<()> {
+        if let Some(devices) = self.grown.devices.as_mut() {
+            mem::push(&mut devices.list, Device { devid, usable: true, total, used: mem::vec() })?;
+        }
+        self.grown.disks.0 += 1;
+        self.grown.disks.1 += total as i64;
+        Ok(())
+    }
+
+    /// Notes disk `devid`, of `total` bytes, removed, with no chunk left
+    /// on it.
+    pub(crate) fn device_removed(&mut self, devid: u64, total: u64) {
+        if let Some(devices) = self.grown.devices.as_mut() {
+            devices.list.retain(|d| d.devid != devid);
+        }
+        self.grown.disks.0 -= 1;
+        self.grown.disks.1 -= total as i64;
+    }
+}
+
+/// Takes the entry of the chunk at `start` out of the superblock `sb`'s
+/// system chunk array.
+fn drop_sys_chunk(sb: &mut [u8], start: u64) -> Result<()> {
+    let size = crate::format::u32_at(sb, SYS_ARRAY_SIZE_AT) as usize;
+    if size > SYS_ARRAY_MAX {
+        return Err(Error::Corrupt);
+    }
+    let mut at = 0;
+    while at < size {
+        let key = Key::read(&sb[SYS_ARRAY_AT..], at);
+        let stripes_at = SYS_ARRAY_AT + at + Key::SIZE + 44;
+        let stripes = crate::format::u16_at(sb, stripes_at) as usize;
+        let entry = Key::SIZE + Chunk::item_size(stripes);
+        if at + entry > size {
+            return Err(Error::Corrupt);
+        }
+        if key.kind == item::CHUNK_ITEM && key.offset == start {
+            let from = SYS_ARRAY_AT + at;
+            sb.copy_within(from + entry..SYS_ARRAY_AT + size, from);
+            sb[SYS_ARRAY_AT + size - entry..SYS_ARRAY_AT + size].fill(0);
+            let size = (size - entry) as u32;
+            sb[SYS_ARRAY_SIZE_AT..SYS_ARRAY_SIZE_AT + 4].copy_from_slice(&size.to_le_bytes());
+            return Ok(());
+        }
+        at += entry;
+    }
+    Ok(())
+}
+
 /// Reads each disk's size, from its device item, and the ranges its
 /// device extents take.
 #[inline(never)]
@@ -461,7 +659,7 @@ fn read_devices(volume: &Volume) -> Result<Devices> {
     let read_only = volume.read_only();
     let chunk_root = volume.chunk_root();
     let dev_root = Writer::tree_root(volume, tree::DEV)?;
-    for disk in volume.disks() {
+    for disk in volume.disks().iter().filter(|d| !d.gone()) {
         let key = Key::new(DEV_ITEMS, item::DEV_ITEM, disk.devid);
         let cursor = Cursor::seek(volume, &chunk_root, &key)?;
         let total = match cursor.get() {

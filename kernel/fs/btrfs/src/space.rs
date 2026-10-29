@@ -114,6 +114,9 @@ pub(crate) struct Group {
     free_bytes: u64,
     /// The bytes freed that may be taken once the commit is durable.
     pinned: u64,
+    /// Nothing more may be taken from it: a balance is moving what it
+    /// holds elsewhere (ADR 0159).
+    closed: bool,
 }
 
 /// Every block group's space.
@@ -173,6 +176,7 @@ impl Space {
             hint: start,
             free_bytes: 0,
             pinned: 0,
+            closed: false,
         };
         add(&mut group.free, start, start + len)?;
         exclude_mirrors(volume, &mut group)?;
@@ -185,20 +189,57 @@ impl Space {
         Ok(())
     }
 
-    /// The bytes that may be taken now for `want`.
+    /// The bytes that may be taken now for `want`; a group a balance
+    /// closed has none.
     pub(crate) fn free_bytes(&self, want: u64) -> u64 {
-        self.groups.iter().filter(|g| g.flags & TYPE & want != 0).map(|g| g.free_bytes).sum()
+        let open = |g: &&Group| g.flags & TYPE & want != 0 && !g.closed;
+        self.groups.iter().filter(open).map(|g| g.free_bytes).sum()
     }
 
     /// The bytes for `want` that may be taken once the commit is durable.
     pub(crate) fn pinned_bytes(&self, want: u64) -> u64 {
-        self.groups.iter().filter(|g| g.flags & TYPE & want != 0).map(|g| g.pinned).sum()
+        let open = |g: &&Group| g.flags & TYPE & want != 0 && !g.closed;
+        self.groups.iter().filter(open).map(|g| g.pinned).sum()
     }
 
     /// The flags of the first block group that holds `want`, which a new
-    /// one for `want` takes; `None` if there is none.
+    /// one for `want` takes; `None` if there is none. A group a balance
+    /// closed counts last: it is going.
     pub(crate) fn flags_for(&self, want: u64) -> Option<u64> {
-        self.groups.iter().find(|g| g.flags & TYPE & want != 0).map(|g| g.flags)
+        let holds = |g: &&Group| g.flags & TYPE & want != 0;
+        let open = self.groups.iter().filter(holds).find(|g| !g.closed);
+        open.or_else(|| self.groups.iter().find(holds)).map(|g| g.flags)
+    }
+
+    /// Every block group: its start, length and flags, in order.
+    pub(crate) fn groups(&self) -> Result<KVec<(u64, u64, u64)>> {
+        let mut out = mem::vec_with_capacity(self.groups.len())?;
+        for g in &self.groups {
+            mem::push(&mut out, (g.start, g.len, g.flags))?;
+        }
+        Ok(out)
+    }
+
+    /// Lets nothing more be taken from block group `start`, or lets it be
+    /// again (ADR 0159).
+    pub(crate) fn close(&mut self, start: u64, closed: bool) -> Result<()> {
+        self.group_mut(start)?.closed = closed;
+        Ok(())
+    }
+
+    /// Whether block group `start` has bytes freed that wait for the
+    /// commit, or changes its items lack.
+    pub(crate) fn settled(&mut self, start: u64) -> Result<bool> {
+        let group = self.group_mut(start)?;
+        Ok(group.pinned == 0 && group.log.is_empty() && group.used_delta == 0)
+    }
+
+    /// Forgets block group `start`, whose chunk a balance emptied and
+    /// removed (ADR 0159).
+    pub(crate) fn remove_group(&mut self, start: u64) -> Result<()> {
+        let at = self.groups.iter().position(|g| g.start == start).ok_or(Error::Corrupt)?;
+        self.groups.remove(at);
+        Ok(())
     }
 
     /// The tree that holds block group items.
@@ -246,7 +287,7 @@ impl Space {
     /// block group that holds `want`: the group, and where they start.
     fn find(&mut self, want: u64, size: u64, align: u64) -> Result<(&mut Group, u64)> {
         for group in &mut self.groups {
-            if group.flags & TYPE & want == 0 {
+            if group.flags & TYPE & want == 0 || group.closed {
                 continue;
             }
             let found = group.free.iter().find_map(|&(s, e)| {
@@ -406,6 +447,7 @@ fn read_groups(volume: &Volume, group_tree: u64) -> Result<KVec<Group>> {
                 hint: key.objectid,
                 free_bytes: 0,
                 pinned: 0,
+                closed: false,
             };
             mem::push(&mut groups, group)?;
         }

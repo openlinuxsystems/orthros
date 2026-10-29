@@ -17,6 +17,7 @@
 //! kept by type, and within a type from the highest key down, where
 //! Linux looks for them.
 
+use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::cow::Writer;
@@ -211,6 +212,58 @@ pub(crate) fn refs_flags(data: &[u8]) -> Result<(u64, u64)> {
         return Err(Error::Corrupt);
     }
     Ok((u64_at(data, 0), u64_at(data, 16)))
+}
+
+/// Every reference to the extent of item `key`, whose data is `data`, and
+/// its count: those inline, then those that are items of their own. A
+/// balance follows them to what refers to the extent (ADR 0159).
+pub(crate) fn backrefs(volume: &Volume, key: &Key, data: &[u8]) -> Result<KVec<(Backref, u32)>> {
+    let mut refs = mem::vec();
+    for at in inline_refs(data)? {
+        let b = data.get(at..).ok_or(Error::Corrupt)?;
+        let r = match b[0] {
+            item::TREE_BLOCK_REF => (Backref::Tree(u64_at(b, 1)), 1),
+            item::SHARED_BLOCK_REF => (Backref::Shared(u64_at(b, 1)), 1),
+            item::EXTENT_DATA_REF => {
+                let r =
+                    Backref::Data { root: u64_at(b, 1), ino: u64_at(b, 9), offset: u64_at(b, 17) };
+                (r, u32_at(b, 25))
+            }
+            item::SHARED_DATA_REF => (Backref::SharedData(u64_at(b, 1)), u32_at(b, 9)),
+            _ => continue,
+        };
+        mem::push(&mut refs, r)?;
+    }
+    let root = Writer::tree_root(volume, tree::EXTENT)?;
+    let mut cursor = Cursor::seek(volume, &root, &Key::new(key.objectid, item::TREE_BLOCK_REF, 0))?;
+    while let Some((found, data)) = cursor.get() {
+        if found.objectid != key.objectid {
+            break;
+        }
+        let r = match found.kind {
+            item::TREE_BLOCK_REF => (Backref::Tree(found.offset), 1),
+            item::SHARED_BLOCK_REF => (Backref::Shared(found.offset), 1),
+            item::EXTENT_DATA_REF if data.len() >= 28 => {
+                let r = Backref::Data {
+                    root: u64_at(data, 0),
+                    ino: u64_at(data, 8),
+                    offset: u64_at(data, 16),
+                };
+                (r, u32_at(data, 24))
+            }
+            item::SHARED_DATA_REF if data.len() >= 4 => {
+                (Backref::SharedData(found.offset), u32_at(data, 0))
+            }
+            item::EXTENT_DATA_REF | item::SHARED_DATA_REF => return Err(Error::Corrupt),
+            _ => {
+                cursor.advance()?;
+                continue;
+            }
+        };
+        mem::push(&mut refs, r)?;
+        cursor.advance()?;
+    }
+    Ok(refs)
 }
 
 /// Where a reference is: inline at this byte of its extent's item, or an

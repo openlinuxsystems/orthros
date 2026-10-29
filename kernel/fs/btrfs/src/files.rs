@@ -1116,7 +1116,7 @@ impl Files<'_> {
 /// A disk that fails is left out, while the others hold every chunk
 /// ([`Volume::write_failed`]).
 #[inline(never)]
-fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
+pub(crate) fn write_pages(volume: &Volume, bytenr: u64, pages: &[&Page]) -> Result<()> {
     let mut done = 0;
     while done < pages.len() {
         let logical = bytenr + done as u64 * PAGE;
