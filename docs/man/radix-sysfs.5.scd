@@ -89,6 +89,17 @@ _/kernel/block/_*name*_/queue/discard_granularity_, _discard_max_bytes_
 	Its logical block size, and the most bytes one discard (TRIM)
 	covers, if the device discards; *0* and *0* if not.
 
+_/kernel/block/_*name*_/stat_
+	For a disk: what it has done since it was found, as the 17 numbers
+	of Linux's _/sys/block/_*name*_/stat_, in its order and widths:
+	reads, reads merged, sectors read, milliseconds reading; the same
+	four of writes; requests in flight, milliseconds with one or more in
+	flight, and milliseconds of every request added up; the same four of
+	discards; flushes and milliseconds flushing. Sectors are of 512
+	bytes. Radix merges no requests, so those numbers are *0*; a call
+	that moves many buffers at once counts as one request. *iostat*(1)
+	reads it.
+
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
 	virtio disks, _sda_, _sdb_ for SATA and USB disks, _nvme0n1_ for the first
 	namespace of the first NVMe controller, _vda1_ for the first

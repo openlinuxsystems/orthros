@@ -16,15 +16,15 @@ use crate::util::{self, Fail, usage};
 
 /// What statvfs says of a filesystem, in bytes and files.
 #[derive(Clone, Copy, Default)]
-struct Space {
-    size: u64,
-    free: u64,
-    available: u64,
-    files: u64,
-    files_free: u64,
+pub struct Space {
+    pub size: u64,
+    pub free: u64,
+    pub available: u64,
+    pub files: u64,
+    pub files_free: u64,
 }
 
-fn statvfs(path: &OsStr) -> io::Result<Space> {
+pub fn statvfs(path: &OsStr) -> io::Result<Space> {
     let path =
         CString::new(path.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: all zeros is a valid statvfs: numbers.
@@ -206,7 +206,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 }
 
 /// The path a mount is at, from the root.
-fn mount_path(m: &Mount) -> PathBuf {
+pub fn mount_path(m: &Mount) -> PathBuf {
     let path = m.path.as_bytes();
     if path.starts_with(b"/") { PathBuf::from(&m.path) } else { Path::new("/").join(&m.path) }
 }
@@ -407,7 +407,13 @@ mod tests {
 
     #[test]
     fn files_are_on_their_longest_mount() {
-        let m = |path: &str| Mount { source: path.into(), path: path.into(), kind: "tmpfs".into() };
+        let m = |path: &str| Mount {
+            source: path.into(),
+            path: path.into(),
+            kind: "tmpfs".into(),
+            read_only: false,
+            label: None,
+        };
         let mounts = vec![m("/"), m("tmp"), m("/tmp/deep")];
         assert_eq!(mount_of(&mounts, Path::new("/tmp/x")).unwrap().source, "tmp");
         assert_eq!(mount_of(&mounts, Path::new("/tmp/deep/y")).unwrap().source, "/tmp/deep");

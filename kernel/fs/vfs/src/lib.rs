@@ -732,6 +732,13 @@ pub trait FileSystem: Send + Sync {
     fn replace_disk(&self, _devid: u64, _device: radix_block::DeviceRef) -> Result<Scrub> {
         Err(Error::NotSupported)
     }
+    /// Discards on its disks the bytes it does not use, in ranges of at
+    /// least `minimum` bytes, as Linux's FITRIM does; returns how many
+    /// bytes it discarded. A filesystem that cannot fails with
+    /// [`Error::NotSupported`], as does one on disks that discard nothing.
+    fn trim(&self, _minimum: u64) -> Result<u64> {
+        Err(Error::NotSupported)
+    }
     /// Drops up to `max` pages it can read again from the disk; returns
     /// how many it dropped.
     fn shrink(&self, _max: usize) -> usize {

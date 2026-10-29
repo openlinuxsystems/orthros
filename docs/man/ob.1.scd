@@ -638,6 +638,20 @@ _target/userspace/_).
 		with exit status 0, and *diskhealth -a* the SATA disk's
 		attributes and the NVMe drive's health log (ADR 0157).
 
+	*storage-tools*
+		Boot 2 CPUs under UEFI with a 48 MiB virtio disk holding FAT32 in
+		a GPT partition and a 128 MiB virtio disk of Btrfs, as on a
+		normal boot. At the console, *lsblk* must list the partition and
+		the Btrfs disk with their kinds, labels and where Spark mounted
+		them; *blkid* their labels and kinds, the GPT and the disk with
+		the Btrfs label; and *findmnt* the Btrfs mount's source, kind and
+		options and the FAT mount's target, and nothing for a kind no
+		mount has, with exit status 1. *fstrim -v* must trim the Btrfs and
+		say how much, and refuse the FAT, which does not discard;
+		*iostat* must show the Btrfs disk, and its _stat_ count the
+		discards. On the host, *btrfs check* must pass on the trimmed
+		disk.
+
 	*btrfs*
 		Boot 2 CPUs under UEFI with two 128 MiB Btrfs disks that
 		*mkfs.btrfs* made of the same files: an NVMe namespace of 4 KiB

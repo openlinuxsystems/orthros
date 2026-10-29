@@ -253,6 +253,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    EIO
   disk-health      Spark's diskhealth service logs that a SATA disk and an
                    NVMe drive pass; diskhealth shows them at the console
+  storage-tools    lsblk, blkid and findmnt name a FAT partition in a GPT
+                   and a Btrfs disk, their labels and their mounts; fstrim
+                   trims the Btrfs, iostat counts its discards
   btrfs            two Btrfs disks Linux made, compressed, mounted
                    read-only: every file reads as the host wrote it, a
                    damaged one fails

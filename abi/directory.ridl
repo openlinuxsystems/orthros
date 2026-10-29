@@ -446,4 +446,16 @@ interface directory = 0x000b version 5 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_supported, read_only, in_use,
                 no_space, not_block_device, io, corrupt];
+    /// Discards on the disks of the directory's filesystem the bytes it
+    /// does not use, in ranges of at least `minimum` bytes, as Linux's
+    /// FITRIM does for fstrim(8) (ADR 0158): on Btrfs, the free space of
+    /// each block group on every copy, and each disk's bytes no chunk
+    /// takes, never a superblock. Returns how many bytes were discarded,
+    /// each copy counted. Fails with not_supported on other filesystems
+    /// and when no disk discards, read_only on a read-only mount, and io
+    /// if a disk fails a discard, after the others are done. Needs the
+    /// control right.
+    method trim = 24 (minimum: u64) -> (trimmed: u64)
+        raises [no_such_slot, empty_slot, missing_rights, no_memory, not_supported,
+                read_only, io, corrupt];
 }
