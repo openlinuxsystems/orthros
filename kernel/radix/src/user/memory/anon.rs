@@ -275,6 +275,13 @@ fn unpin(phys: u64) {
     }
 }
 
+/// The most pages a lending lists on the stack ([`SpaceObject::lend`]).
+const SHORT_LENDING: usize = 16;
+
+/// The bit of a space's count of lendings ([`SpaceObject::lend`]) that a
+/// fork waiting for them sets.
+const FORK_WAITS: u64 = 1 << 63;
+
 /// What [`SpaceObject::pin_pages`] did.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pins {
@@ -725,48 +732,60 @@ impl SpaceObject {
             return None;
         }
         let pages = (end - (address & !(PAGE_SIZE - 1))).div_ceil(PAGE_SIZE) as usize;
-        let mut frames = Vec::new_in(super::kmalloc());
-        frames.try_reserve_exact(pages).ok()?;
+        // A part for each page: on the stack for a short lending, as a
+        // disk's 4 KiB and 64 KiB transfers are, so that it takes nothing
+        // from the heap; on the heap for a longer one.
+        let mut short = [(0, 0); SHORT_LENDING];
+        let mut long = Vec::new_in(super::kmalloc());
+        let frames = if pages <= SHORT_LENDING {
+            &mut short[..pages]
+        } else {
+            long.try_reserve_exact(pages).ok()?;
+            for _ in 0..pages {
+                let _ = long.push_within_capacity((0, 0));
+            }
+            &mut long[..]
+        };
         // Pages the program has touched are pinned in one walk of the page
         // tables; if one is not there yet, they are made as faults would
         // make them, with the regions unlocked, and pinned once more.
-        match self.pin_pages(address, end, write, &mut frames) {
+        match self.pin_pages(address, end, write, frames) {
             Pins::All => {}
             Pins::NotReady
                 if self.fault_in(address, len, write)
-                    && self.pin_pages(address, end, write, &mut frames) == Pins::All => {}
+                    && self.pin_pages(address, end, write, frames) == Pins::All => {}
             _ => return None,
         }
-        let result = with(&frames);
-        for &(phys, _) in &frames {
+        let result = with(frames);
+        for &(phys, _) in frames.iter() {
             unpin(phys & !(PAGE_SIZE - 1));
         }
-        if self.lending.fetch_sub(1, Ordering::AcqRel) == 1 {
+        // The last lending to end wakes a fork that waits for it; with no
+        // fork waiting, nothing is woken.
+        if self.lending.fetch_sub(1, Ordering::AcqRel) == FORK_WAITS | 1 {
             wait::wake_all(self.lending_key());
         }
         Some(result)
     }
 
     /// Pins the pages of the bytes from `address` to `end`, as they are,
-    /// into `frames`, and counts a lending, for [`SpaceObject::lend`]. A
-    /// page that is not there, or is read-only for a `write`, or is not
-    /// anonymous memory pins nothing.
-    fn pin_pages(
-        &self,
-        address: u64,
-        end: u64,
-        write: bool,
-        frames: &mut Vec<(u64, u32), Kmalloc>,
-    ) -> Pins {
+    /// into `frames`, a part for each page, and counts a lending, for
+    /// [`SpaceObject::lend`]. A page that is not there, or is read-only
+    /// for a `write`, or is not anonymous memory pins nothing.
+    fn pin_pages(&self, address: u64, end: u64, write: bool, frames: &mut [(u64, u32)]) -> Pins {
         // With the regions locked no page of this space is made or let go
         // of, nor does a fork start.
         let _regions = self.regions.lock();
         // One walk of the page tables pins them in order; it stops at a
         // page that is not there (or is read-only for a `write`), or that
         // cannot be pinned.
-        let mut at = address;
+        let (mut at, mut pinned) = (address, 0);
         let mut refused = false;
         Arch::frames(&self.arch, address, end, write, &mut |phys| {
+            let Some(part) = frames.get_mut(pinned) else {
+                refused = true;
+                return false;
+            };
             match FRAMES.info(phys) {
                 Some(info) if info.owner() == Owner::Anon && info.pin() => {}
                 _ => {
@@ -775,15 +794,15 @@ impl SpaceObject {
                 }
             }
             let n = ((at & !(PAGE_SIZE - 1)) + PAGE_SIZE).min(end) - at;
-            let _ = frames.push_within_capacity((phys + at % PAGE_SIZE, n as u32));
+            *part = (phys + at % PAGE_SIZE, n as u32);
+            pinned += 1;
             at += n;
             at < end
         });
         if at < end {
-            for &(phys, _) in frames.iter() {
+            for &(phys, _) in &frames[..pinned] {
                 unpin(phys & !(PAGE_SIZE - 1));
             }
-            frames.clear();
             return if refused { Pins::Refused } else { Pins::NotReady };
         }
         self.lending.fetch_add(1, Ordering::AcqRel);
@@ -846,9 +865,12 @@ impl SpaceObject {
             let regions = self.regions.lock();
             // No lending starts with the regions locked; those under way
             // finish without them.
+            // Marked first, so that the last to end wakes it.
+            self.lending.fetch_or(FORK_WAITS, Ordering::AcqRel);
             wait::wait_until(self.lending_key(), "fork", || {
-                self.lending.load(Ordering::Acquire) == 0
+                self.lending.load(Ordering::Acquire) == FORK_WAITS
             });
+            self.lending.fetch_and(!FORK_WAITS, Ordering::AcqRel);
             let mut copied = child.regions.lock_nested(1);
             copied.try_reserve(regions.len()).map_err(|_| error(Kernel::NoMemory))?;
             frames.try_reserve(regions.len()).map_err(|_| error(Kernel::NoMemory))?;

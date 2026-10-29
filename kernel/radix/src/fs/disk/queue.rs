@@ -13,9 +13,11 @@
 //! another CPU. A request takes one of the lane's [`SLOTS`] slots, whose
 //! state is set when the driver hands the request back ([`Disk::collect`],
 //! in the lane's interrupt handler, or in the waiting threads of a device
-//! with no interrupt); the thread then frees the slot. A thread waits on
-//! its slot alone, so a completion wakes only the thread whose request it
-//! ends. A [`Controller`] is
+//! with no interrupt); the thread then frees the slot. A thread waiting
+//! for its request is named in its slot, so a completion wakes that thread
+//! alone, at once, with no look through the scheduler's table of waiters;
+//! threads waiting for room are woken only if there are some. A
+//! [`Controller`] is
 //! the driver's part in a lane: it numbers what it has in flight its own
 //! way (descriptor chains, command slots) and says which slot each
 //! finished request was.
@@ -70,7 +72,7 @@ use radix_sync::SpinLock;
 
 use super::{Name, READ_SECTORS, READS, WRITES, WRITTEN_SECTORS};
 use crate::Arch;
-use crate::sched::{self, wait};
+use crate::sched::{self, ThreadRef, wait};
 use crate::user::posix::priority;
 
 /// Requests in flight or waiting to be collected, per lane.
@@ -265,15 +267,20 @@ struct Lane<C> {
     /// Each request slot's state.
     requests: [AtomicU8; SLOTS],
     /// Moves on every completion and every slot freed: what threads
-    /// waiting for room wait on (the lane's key). A thread waiting for its
-    /// request waits on its slot's key instead ([`Disk::slot_key`]).
+    /// waiting for room wait on (the lane's key).
     events: AtomicU64,
+    /// How many threads wait for room: with none, a completion or a slot
+    /// freed wakes no one.
+    room_waiters: AtomicU32,
 }
 
 /// A disk: the device's driver, in one lane or one for each CPU, and the
 /// requests waiting for it.
 pub struct Disk<C> {
     lanes: Vec<Lane<C>, Kmalloc>,
+    /// The thread waiting for each slot's request, which its completion
+    /// wakes ([`Disk::wait_for`]): each lane's [`SLOTS`] in turn.
+    sleepers: Vec<SpinLock<Option<ThreadRef>>, Kmalloc>,
     /// Room for every lane's part while a thread recovers or resets the
     /// controller, with no lock held: taken out, then put back.
     spare: SpinLock<Vec<Part<C>, Kmalloc>>,
@@ -325,16 +332,23 @@ impl<C: Controller> Disk<C> {
                 queue: SpinLock::new(Some(controller)),
                 requests: [const { AtomicU8::new(FREE) }; SLOTS],
                 events: AtomicU64::new(0),
+                room_waiters: AtomicU32::new(0),
             };
             built.push_within_capacity(lane).ok()?;
         }
         if built.is_empty() {
             return None;
         }
+        let mut sleepers = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        sleepers.try_reserve_exact(built.len() * SLOTS).ok()?;
+        for _ in 0..built.len() * SLOTS {
+            sleepers.push_within_capacity(SpinLock::new(None)).ok()?;
+        }
         let mut spare = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
         spare.try_reserve_exact(count).ok()?;
         Some(Disk {
             lanes: built,
+            sleepers,
             spare: SpinLock::new(spare),
             waiting: [const { AtomicU32::new(0) }; RANKS],
             lone: [const { AtomicU32::new(0) }; RANKS],
@@ -359,16 +373,24 @@ impl<C: Controller> Disk<C> {
         core::ptr::from_ref::<Lane<C>>(&self.lanes[lane]) as usize
     }
 
-    /// What the thread waiting for the request in `slot` of `lane` waits
-    /// on: the slot's state, which no other key shares.
-    fn slot_key(&self, lane: usize, slot: usize) -> usize {
-        core::ptr::from_ref::<AtomicU8>(&self.lanes[lane].requests[slot]) as usize
+    /// Wakes every thread waiting for room in `lane`, if one does.
+    fn wake(&self, lane: usize) {
+        let this = &self.lanes[lane];
+        // Both sequentially consistent, as the waiter's count and its look
+        // at `events` are: either it sees the move, or this sees it count.
+        this.events.fetch_add(1, Ordering::SeqCst);
+        if this.room_waiters.load(Ordering::SeqCst) > 0 {
+            wait::wake_all(self.key(lane));
+        }
     }
 
-    /// Wakes every thread waiting for room in `lane`.
-    fn wake(&self, lane: usize) {
-        self.lanes[lane].events.fetch_add(1, Ordering::Release);
-        wait::wake_all(self.key(lane));
+    /// Wakes the thread waiting for the request in `slot` of `lane`, if
+    /// one is named there.
+    fn wake_slot(&self, lane: usize, slot: usize) {
+        let sleeper = self.sleepers[lane * SLOTS + slot].lock_irq().clone();
+        if let Some(thread) = sleeper {
+            sched::wake(&thread);
+        }
     }
 
     /// Wakes the threads waiting in every lane, for room or for their
@@ -378,7 +400,7 @@ impl<C: Controller> Disk<C> {
             self.wake(lane);
             for (slot, request) in this.requests.iter().enumerate() {
                 if request.load(Ordering::Acquire) != FREE {
-                    wait::wake_all(self.slot_key(lane, slot));
+                    self.wake_slot(lane, slot);
                 }
             }
         }
@@ -419,7 +441,7 @@ impl<C: Controller> Disk<C> {
             while left != 0 {
                 let slot = left.trailing_zeros() as usize;
                 left &= left - 1;
-                wait::wake_all(self.slot_key(lane, slot));
+                self.wake_slot(lane, slot);
             }
             // The device has room again.
             self.wake(lane);
@@ -497,6 +519,32 @@ impl<C: Controller> Disk<C> {
         condition()
     }
 
+    /// Waits until the request in `slot` of `lane` is handed back, as
+    /// [`Disk::wait`] does: asleep, named in the slot for the completion
+    /// to wake, when the device raises an interrupt. Returns whether it
+    /// was handed back.
+    fn wait_for(&self, lane: usize, slot: usize, deadline_ns: u64) -> bool {
+        let this = &self.lanes[lane];
+        let request = &this.requests[slot];
+        let ended = || request.load(Ordering::Acquire) != PENDING;
+        let me = if self.interrupt { sched::current() } else { None };
+        let Some(me) = me else {
+            return self.wait(lane, self.key(lane), deadline_ns, ended);
+        };
+        sched::DISK_WAITERS.fetch_add(1, Ordering::Relaxed);
+        let _counted = Counted;
+        // Named under the lock that the completion takes once it has set
+        // the slot, and the slot looked at after: either the completion
+        // finds this thread named, or this finds the slot set.
+        let sleeper = &self.sleepers[lane * SLOTS + slot];
+        *sleeper.lock_irq() = Some(me);
+        while !ended() && !self.attention.load(Ordering::Acquire) && sched::now_ns() < deadline_ns {
+            sched::block_until(deadline_ns, "disk");
+        }
+        *sleeper.lock_irq() = None;
+        ended()
+    }
+
     /// Whether a request of rank `rank` may take room now: no more urgent
     /// one waits for it, and for the idle class, no other request waits or
     /// is in flight in any lane, as Linux's idle class is served only when
@@ -569,8 +617,10 @@ impl<C: Controller> Disk<C> {
             // slot freed, once the device knows of what was held back
             // for it.
             self.kick(lane);
-            let room = || this.events.load(Ordering::Acquire) != seen;
+            let room = || this.events.load(Ordering::SeqCst) != seen;
+            this.room_waiters.fetch_add(1, Ordering::SeqCst);
             self.wait(lane, self.key(lane), u64::MAX, room);
+            this.room_waiters.fetch_sub(1, Ordering::Relaxed);
         };
         drop(lone);
         drop(waiting);
@@ -586,11 +636,9 @@ impl<C: Controller> Disk<C> {
     /// recovers the controller if an error stops it meanwhile, and resets
     /// it if the request goes unanswered too long.
     fn finish(&self, lane: usize, slot: usize) {
-        let request = &self.lanes[lane].requests[slot];
-        let key = self.slot_key(lane, slot);
         let mut deadline = sched::now_ns().saturating_add(TIMEOUT_NS);
         loop {
-            if self.wait(lane, key, deadline, || request.load(Ordering::Acquire) != PENDING) {
+            if self.wait_for(lane, slot, deadline) {
                 return;
             }
             if self.attention.load(Ordering::Acquire) {
