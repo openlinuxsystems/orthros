@@ -187,6 +187,7 @@ dependencies = [
  "radix-relocs",
  "radix-sync",
  "radix-vtd",
+ "radix-watchdog",
 ]
 
 [[package]]
@@ -441,6 +442,13 @@ dependencies = [
  "proptest",
  "radix-hw",
  "radix-iopt",
+]
+
+[[package]]
+name = "radix-watchdog"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]

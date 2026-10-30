@@ -356,8 +356,9 @@ Where the kernel cannot hear it, the firmware keeps the button.
 # WATCHDOG
 
 Once it supervises, Spark starts the machine's hardware watchdog, where
-the kernel drives one (QEMU's i6300esb, or the TCO timer of an Intel ICH9
-or ICH10; *radix-power*(2)'s *start_watchdog*), with a timeout of 60
+the kernel drives one (QEMU's i6300esb, the TCO timer of an Intel
+chipset from the ICH9 on, or the watchdog of an AMD FCH;
+*radix-power*(2)'s *start_watchdog*), with a timeout of 60
 seconds, and pets it every third of that from its loop. If Spark stops
 responding, or the kernel stops running it, the watchdog restarts the
 machine, as systemd's *RuntimeWatchdogSec* does; the next boot says so:

@@ -140,8 +140,9 @@ _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 
 _/kernel/class/watchdog/watchdog0/identity_
 	The hardware watchdog the kernel drives, if any (*spark*(8)'s
-	*WATCHDOG*): _the Intel 6300ESB watchdog_ or _the Intel ICH9 TCO
-	timer_. Without one, _/kernel/class_ is not there.
+	*WATCHDOG*): _the Intel 6300ESB watchdog_, _the Intel ICH9 TCO
+	timer_, _the Intel ICH10 TCO timer_, _the Intel PCH TCO timer_ or _the
+	AMD FCH watchdog_. Without one, _/kernel/class_ is not there.
 
 _/kernel/class/watchdog/watchdog0/state_
 	*active* while it runs, else *inactive*.
