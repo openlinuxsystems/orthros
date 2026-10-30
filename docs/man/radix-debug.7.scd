@@ -570,14 +570,15 @@ boots.
 	passed*.
 
 *iommu*
-	Needs QEMU's VT-d unit and its *edu* test device, which the *iommu*
-	case of *ob test* adds (see *IOMMU* in *dukovo-boot*(7)). Has the
-	*edu* device copy by DMA from a page of DMA memory allocated for it,
-	which must arrive; into a page never given to it, which must stay
-	zero, with the stopped write logged; into the same page once mapped
-	for it with *map_dma*, which must arrive; and again once taken back
-	with *unmap_dma*, which must stay zero. Reports *selftest iommu:
-	passed*.
+	Needs QEMU's VT-d unit or AMD IOMMU and its *edu* test device, which
+	the *iommu* and *iommu-amd* cases of *ob test* add (see *IOMMU* in
+	*dukovo-boot*(7)). Has the *edu* device copy by DMA from a page of
+	DMA memory allocated for it, which must arrive; into a page never
+	given to it, which must stay zero, with the stopped write logged
+	where the IOMMU reports it (QEMU's AMD IOMMU does not); into the same
+	page once mapped for it with *map_dma*, which must arrive; and again
+	once taken back with *unmap_dma*, which must stay zero. Reports
+	*selftest iommu: passed*.
 
 # TRACE POINTS
 

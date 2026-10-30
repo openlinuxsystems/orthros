@@ -154,6 +154,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-amdvi"
+version = "0.10.4"
+dependencies = [
+ "proptest",
+ "radix-hw",
+ "radix-iopt",
+]
+
+[[package]]
 name = "radix-arch-aarch64"
 version = "0.10.4"
 dependencies = [
@@ -165,9 +174,11 @@ name = "radix-arch-x86_64"
 version = "0.10.4"
 dependencies = [
  "radix-acpi",
+ "radix-amdvi",
  "radix-bootinfo",
  "radix-hal",
  "radix-hw",
+ "radix-iopt",
  "radix-klog",
  "radix-mca",
  "radix-microcode",
@@ -289,6 +300,13 @@ name = "radix-input"
 version = "0.10.4"
 dependencies = [
  "radix-abi",
+]
+
+[[package]]
+name = "radix-iopt"
+version = "0.10.4"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
@@ -422,6 +440,7 @@ version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-hw",
+ "radix-iopt",
 ]
 
 [[package]]

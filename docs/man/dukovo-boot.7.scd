@@ -112,7 +112,8 @@ _/system/resources/licenses/_
   order of preference. The periodic timer interrupt then runs at
   100 Hz, and the kernel reports the frame allocator's zones. Last,
   before any driver starts a device, it takes over the IOMMU's DMA
-  remapping units that the ACPI DMAR table lists (see *IOMMU* below).
+  remapping units that the ACPI DMAR table lists, or the AMD IOMMUs the
+  IVRS table lists (see *IOMMU* below).
 . The kernel sets up the root resource domain, *system*, and the
   scheduler: from here on the boot code runs as the thread *kmain*, and
   the *Scheduler:* line names the classes, the timer, how idle CPUs wait
@@ -567,10 +568,24 @@ unit records a fault; the kernel logs at most 10 of them in each 5 s:
 
 	IOMMU: 0000:00:03.0 was stopped writing to 0x3f89e000: the page is not mapped for it to write
 
-Devices behind a PCIe-to-PCI bridge, interrupt remapping and AMD's IOMMU
-come later in Phase 11d. Devices behind a unit left off, and every
-device with *iommu=off*, reach all memory. The *iommu* boot case of
-*ob*(1) tests it under QEMU's VT-d unit.
+On AMD machines the IOMMU (AMD-Vi) does the same (ADR 0165). It is a PCI
+function of its own, which the ACPI IVRS table names along with the
+device IDs it translates and the memory the firmware keeps for devices
+(IVMD blocks). The kernel takes each one over, every device blocked
+until its domain is made, maps each IVMD block's memory for the devices
+it names, and turns translation on:
+
+	IOMMU: AMD-Vi unit 0 at 0xfed80000 translates 11 device IDs: 4-level page tables, 65536 domains, command buffer invalidation, caching absent entries
+
+A device whose requests carry another's ID, as behind a PCIe-to-PCI
+bridge, shares that device's domain, and the log says so. The IOMMU logs
+a stopped access in its event log, whose interrupt the kernel points at
+a handler of its own, and the kernel logs it as above.
+
+Interrupt remapping, and VT-d devices behind a PCIe-to-PCI bridge, come
+later in Phase 11d. Devices behind a unit left off, and every device
+with *iommu=off*, reach all memory. The *iommu* and *iommu-amd* boot
+cases of *ob*(1) test it under QEMU's VT-d unit and AMD IOMMU.
 
 # USB
 
@@ -674,3 +689,5 @@ The ACPI specification, version 6.5: https://uefi.org/specifications
 The Intel Virtualization Technology for Directed I/O Architecture
 Specification, revision 4.1:
 https://www.intel.com/content/www/us/en/content-details/774206/intel-virtualization-technology-for-directed-i-o-architecture-specification.html
+and the AMD I/O Virtualization Technology (IOMMU) Specification, 48882,
+revision 3.10: https://www.amd.com/content/dam/amd/en/documents/processor-tech-docs/specifications/48882_IOMMU.pdf

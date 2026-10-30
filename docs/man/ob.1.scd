@@ -635,6 +635,14 @@ _target/userspace/_).
 		(*radix-debug*(7)) must pass, its two stopped writes logged (ADR
 		0164).
 
+	*iommu-amd*
+		The *iommu* test behind QEMU's AMD IOMMU (*amd-iommu*), which the
+		ACPI IVRS table describes: the IOMMU must translate with 4-level
+		page tables and 65536 domains, every disk and the stick must work
+		with each device reaching only what is mapped for it, and
+		*selftest=iommu* must pass. QEMU's AMD IOMMU logs no event for a
+		page that is not mapped, so the test counts none (ADR 0165).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real

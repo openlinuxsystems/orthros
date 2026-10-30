@@ -19,13 +19,11 @@
 //!   on where it has one, and then translation. It attaches domains to
 //!   devices, invalidates what it caches after a change ([`Unit::flush`]),
 //!   and reads and clears its fault records ([`Unit::faults`]).
-//! - [`Domain`] is a device's page table. Radix maps each page at its own
-//!   physical address: a page's device address *is* its physical address,
-//!   so drivers hand devices physical addresses whether or not there is a
-//!   unit. A domain maps only the pages it is given, counts each page's
-//!   mappings in bits of its entry that the unit ignores, so that two
-//!   requests on one page do not take it from each other, and frees a
-//!   table once nothing in it is mapped.
+//! - [`Domain`] is a device's page table, `radix-iopt`'s in the
+//!   second-level format ([`SecondLevel`]), each page mapped at its own
+//!   physical address. Its entries count their mappings, and its tables'
+//!   entries the entries in use below, in bits 52 to 61, which the unit
+//!   ignores. [`Unit`] invalidates for it ([`Invalidate`]).
 //!
 //! Interrupt remapping, the unit's other half, is not used yet: a device
 //! may still send any interrupt message.
@@ -38,36 +36,51 @@
 //! specification says hardware does.
 
 #![cfg_attr(not(test), no_std)]
-#![feature(vec_push_within_capacity)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
-mod domain;
 #[cfg(test)]
 mod tests;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
-pub use domain::{Domain, MapError, PAGE, blocks};
 use radix_hw::{Mmio, device_barrier};
+pub use radix_iopt::{Format, Invalidate, MapError, Memory, PAGE, blocks};
 
-/// What the kernel lends the engine.
-pub trait Memory {
-    /// A zeroed 4 KiB page for a table, by its physical address; `None`
-    /// when memory runs out.
-    fn alloc_page(&self) -> Option<u64>;
-    /// Gives back a page [`Memory::alloc_page`] gave.
-    fn free_page(&self, phys: u64);
-    /// The page at `phys`, as the CPU reads and writes its 512 entries.
-    fn entries(&self, phys: u64) -> &[AtomicU64; 512];
-    /// Writes the cache line of `entry` back to memory: for a unit whose
-    /// table walks do not look in the CPU's caches.
-    fn flush(&self, entry: &AtomicU64);
-    /// Waits about `us` microseconds.
-    fn delay_us(&self, us: u32);
+/// Second-level page table entries (VT-d 4.1, section 9.8): read and
+/// write in bits 0 and 1, the counts of a domain in bits 52 to 61.
+#[derive(Debug)]
+pub struct SecondLevel;
+
+impl Format for SecondLevel {
+    const COUNT_MAX: u64 = 0x3ff;
+    const COUNTS_TABLES: bool = true;
+
+    fn table(child: u64, _level: u8) -> u64 {
+        child | 3
+    }
+
+    fn page(address: u64) -> u64 {
+        address | 3
+    }
+
+    fn present(entry: u64) -> bool {
+        entry & 1 != 0
+    }
+
+    fn count(entry: u64) -> u64 {
+        (entry >> 52) & Self::COUNT_MAX
+    }
+
+    fn with_count(entry: u64, count: u64) -> u64 {
+        (entry & !(Self::COUNT_MAX << 52)) | (count << 52)
+    }
 }
+
+/// A device's page table, in the second-level format.
+pub type Domain = radix_iopt::Domain<SecondLevel>;
 
 /// The registers (VT-d 4.1, chapter 11).
 mod reg {
@@ -762,6 +775,40 @@ impl<M: Memory> Unit<M> {
     /// not wait for a change to the tables.
     pub fn fault_records(&self) -> FaultRecords {
         FaultRecords { regs: self.regs.clone(), caps: self.caps }
+    }
+}
+
+impl<M: Memory> Invalidate for Unit<M> {
+    type Error = Refused;
+
+    fn forget_pages(
+        &mut self,
+        domain: u16,
+        blocks: &[(u64, u8)],
+        leaf: bool,
+    ) -> Result<(), Refused> {
+        let mut batch = [Flush::All; 32];
+        for chunk in blocks.chunks(batch.len()) {
+            for (flush, &(address, order)) in batch.iter_mut().zip(chunk) {
+                *flush = Flush::Pages { domain, address, order, leaf };
+            }
+            self.flush(&batch[..chunk.len()])?;
+        }
+        Ok(())
+    }
+
+    fn forget_domain(&mut self, domain: u16) -> Result<(), Refused> {
+        self.flush(&[Flush::Domain(domain)])
+    }
+
+    fn caches_absent(&self) -> bool {
+        // Such a unit caches what is not mapped too (VT-d 4.1, 6.1).
+        self.caps.caching_mode()
+    }
+
+    fn mapped(&mut self) -> Result<(), Refused> {
+        // The write buffer, on a unit that has one.
+        self.flush(&[])
     }
 }
 

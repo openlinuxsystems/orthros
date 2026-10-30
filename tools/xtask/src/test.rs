@@ -49,6 +49,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-abi",
     "radix-acpi",
     "radix-ahci",
+    "radix-amdvi",
     "radix-bootfs",
     "radix-block",
     "radix-bootinfo",
@@ -63,6 +64,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-hid",
     "radix-hw",
     "radix-input",
+    "radix-iopt",
     "radix-ipc",
     "radix-kdb",
     "radix-klog",
@@ -1628,6 +1630,23 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &["-device", "intel-iommu,intremap=off", "-device", "edu,dma_mask=0xffffffff"],
         script: iommu,
+        disks: IOMMU_DISKS,
+        second: None,
+    },
+    Case {
+        name: "iommu-amd",
+        about: "Behind QEMU's AMD IOMMU each device reaches only what it is given: the disk-raw checks pass, and edu's DMA to a page never given or taken back is stopped",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep selftest=iommu init-after-selftest -- /system/tests/storage raw vda sda \
+                  nvme0n1",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "amd-iommu,intremap=off", "-device", "edu,dma_mask=0xffffffff"],
+        script: iommu_amd,
         disks: IOMMU_DISKS,
         second: None,
     },
@@ -4937,6 +4956,29 @@ fn iommu(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let stopped = log.matches(" was stopped writing to 0x").count();
     if stopped != 2 {
         return Err(format!("the IOMMU stopped {stopped} writes, not edu's 2"));
+    }
+    Ok(())
+}
+
+/// The `iommu-amd` test (ADR 0165): the `iommu` test behind QEMU's AMD-Vi
+/// IOMMU. QEMU's IOMMU logs no event for a page that is not mapped, so the
+/// stopped copies show only in edu's self-test, which reads the page back.
+fn iommu_amd(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disk_raw(vm, case)?;
+    let log = vm.log();
+    let unit = log
+        .lines()
+        .find_map(|line| line.find("IOMMU: AMD-Vi ").map(|at| &line[at..]))
+        .ok_or("the kernel never said it took over the IOMMU")?;
+    let described = unit.starts_with("IOMMU: AMD-Vi unit 0 at 0xfed80000 translates ")
+        && unit.contains(" device IDs: 4-level page tables, 65536 domains, command buffer ");
+    if !described {
+        return Err(format!("the kernel described the IOMMU as \"{unit}\""));
+    }
+    for needle in ["selftest iommu: passed", " reaches only what is mapped for it (domain "] {
+        if !log.contains(needle) {
+            return Err(format!("the kernel never said \"{needle}\""));
+        }
     }
     Ok(())
 }

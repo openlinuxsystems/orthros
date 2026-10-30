@@ -106,10 +106,10 @@ impl Machine {
     pub fn args(&self) -> Vec<String> {
         let mut args: Vec<String> = vec!["-M".into(), "q35".into()];
         // An IOMMU translates only the devices made after it.
-        let iommu = self
-            .extra
-            .windows(2)
-            .position(|pair| pair[0] == "-device" && pair[1].starts_with("intel-iommu"));
+        let iommu = self.extra.windows(2).position(|pair| {
+            pair[0] == "-device"
+                && (pair[1].starts_with("intel-iommu") || pair[1].starts_with("amd-iommu"))
+        });
         if let Some(at) = iommu {
             args.extend(self.extra[at..at + 2].iter().cloned());
         }

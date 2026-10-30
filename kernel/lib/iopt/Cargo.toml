@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-iopt"
+description = "I/O page tables for the Radix kernel's IOMMU engines: each device's domain of pages, mapped at their physical addresses, and what to invalidate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
