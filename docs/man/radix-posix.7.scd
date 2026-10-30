@@ -249,8 +249,10 @@ There is no *epoll*, *eventfd*, *signalfd* or *timerfd*.
 
 # SOCKETS
 
-Sockets are *AF_UNIX* stream sockets, as *socket*, *socketpair* and
-*accept* make them, with *SOCK_NONBLOCK* and *SOCK_CLOEXEC* if asked.
+Sockets are *AF_UNIX* stream sockets and *AF_INET* stream (TCP) and
+datagram (UDP) sockets (*NETWORK SOCKETS*, below), as *socket*,
+*socketpair* and *accept* make them, with *SOCK_NONBLOCK* and
+*SOCK_CLOEXEC* if asked.
 Each connection is a pipe's buffer each way (*radix-process*(2)'s
 *socket_pair*). *read*, *write*, *send*, *recv*, *sendto*, *recvfrom*,
 *sendmsg* and *recvmsg* move bytes, with *MSG_DONTWAIT*, *MSG_NOSIGNAL*
@@ -280,12 +282,49 @@ descriptors, closed by exec with *MSG_CMSG_CLOEXEC*. *recvmsg* closes
 those its control buffer has no room for and says so with
 *MSG_CTRUNC*; *read* and *recv* close them all. At most 1,024
 descriptors are on their way each way at once (ETOOMANYREFS). Sockets
-are not passed (EOPNOTSUPP), so none can keep itself open (ADR 0091).
+of the *AF_UNIX* family are not passed (EOPNOTSUPP), so none can keep
+itself open (ADR 0091); network sockets are.
 
-Datagram and sequenced-packet sockets fail with ESOCKTNOSUPPORT,
-Linux's abstract names and *MSG_PEEK* and *MSG_OOB* with EOPNOTSUPP,
-and control messages other than *SCM_RIGHTS* with EINVAL. Other
-families fail with EAFNOSUPPORT until networking comes in Phase 12.
+*AF_UNIX* datagram and sequenced-packet sockets fail with
+ESOCKTNOSUPPORT, Linux's abstract names and *MSG_PEEK* and *MSG_OOB*
+with EOPNOTSUPP, and control messages other than *SCM_RIGHTS* with
+EINVAL. *AF_INET6* fails with EAFNOSUPPORT until IPv6 (Phase 12c), and
+other families with EAFNOSUPPORT.
+
+## NETWORK SOCKETS
+
+*AF_INET* sockets are the kernel's TCP and UDP (ADR 0183). A program
+reaches the network only through the network capabilities it was given
+(*radix-network*(2)), in the eight slots from *SLOT_NETWORK*, which last
+through *fork* and *exec*; Spark gives a service those its file asks for
+(*spark*(8)). *socket*, *bind*, *connect*, *sendto* and *sendmsg* to an
+address try each capability in turn, and fail with EACCES when none
+allows the call: one with the send right connects out to any address
+and sends datagrams anywhere, one with the receive right binds to the
+ports of its range and listens there. A program given none fails to
+make a network socket at all. A socket that connects or sends unbound
+is bound to a port the kernel picks, from 49152 to 65535; one that
+listens unbound is bound to such a port through a capability with the
+receive right first, as Linux binds it.
+
+*connect* waits for the connection, or on a non-blocking socket fails
+with EINPROGRESS, after which *poll* says the socket is writable once
+it is made and *SO_ERROR* says how it went; connecting again says
+EALREADY until then, and EISCONN once connected. A connection to a port
+no one listens on fails with ECONNREFUSED. A listening socket takes up
+to four handshakes at once on each interface, whatever its backlog.
+Each TCP socket has 64 KiB each way, and each UDP socket 32 KiB and 16
+datagrams each way. A datagram is sent and received whole: *sendmsg*
+gathers its buffers into one, *recvmsg* spreads one over its buffers,
+and what has no room is lost. *recvfrom* and *recvmsg* give a datagram's
+sender, and no address for a stream.
+
+*getsockopt* and *setsockopt* take *SO_REUSEADDR* (kept, changing
+nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
+(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY* and *IP_TTL*;
+*getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+*SO_ERROR* and *SO_ACCEPTCONN*. *SOCK_RAW* fails with EPERM, and control
+messages with EOPNOTSUPP.
 
 # TERMINALS
 
@@ -459,14 +498,19 @@ login records, so *getlogin* fails and *logname* finds no login name.
 
 # TESTS
 
-The *posix* boot test (*ob*(1)) boots with *--posix /system/tests/posix/run*:
-Spark runs the test runner on a pseudo-terminal, which makes a session
-of its own with it as the controlling terminal and runs each test as a
-shell runs a job, in a process group of its own, in the foreground. The
-tests are:
+The *posix* boot test (*ob*(1)) boots with *--posix --network
+/system/tests/posix/run*: Spark runs the test runner on a
+pseudo-terminal, with Spark's own network capability. The runner makes
+a session of its own with the terminal as the controlling one and runs
+each test as a shell runs a job, in a process group of its own, in the
+foreground. The tests are:
 
-*hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *cancel*, *spawn*, *limits*, *format*
-	C programs in _userspace/posix_, one per area. *format* holds
+*hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *inet*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *cancel*, *spawn*, *limits*, *format*
+	C programs in _userspace/posix_, one per area. *inet* runs TCP and
+	UDP over the loopback interface, and checks that a child with no
+	network capability cannot make a network socket (EACCES), one that
+	may only connect out cannot bind or listen, and one that may only
+	listen on a range of ports cannot connect out. *format* holds
 	*printf*, *strtod*, *scanf*, *strftime* and the time conversions to
 	1,461 answers generated with glibc 2.39.
 
@@ -539,8 +583,9 @@ passed*; the boot test fails on any failure.
 
 # LIMITS
 
-- Only *AF_UNIX* stream sockets until networking (Phase 12), and no
-  sockets passed over them. Hard links, named pipes (*mkfifo*), device
+- *AF_UNIX* sockets are streams only, and are not passed over each
+  other; *AF_INET* sockets are TCP and UDP over IPv4 only, without
+  *MSG_PEEK* or *MSG_OOB*. Hard links, named pipes (*mkfifo*), device
   nodes (*mknod*) and socket names work on tmpfs and Btrfs, not on FAT
   or exFAT (EPERM); a device node opens only the devices with fixed
   Linux numbers (*radix-files*(7)). Symbolic links work on tmpfs, Btrfs

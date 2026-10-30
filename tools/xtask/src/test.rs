@@ -1158,6 +1158,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "spark-network",
+        about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --service-dir /system/tests/services/network",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: spark_network,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "page-fault",
         about: "a page fault panics with registers and a symbolized backtrace, on screen too",
         firmware: Firmware::Bios,
@@ -2001,7 +2017,7 @@ pub const CASES: &[Case] = &[
         about: "C programs on mlibc, a Rust std one and the ported utilities: fork, exec, signals, pipes, terminals, files, threads",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- --posix /system/tests/posix/run",
+        cmdline: "lockdep -- --posix --network /system/tests/posix/run",
         cpus: 4,
         memory: "1G",
         reboot: false,
@@ -6565,6 +6581,49 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     if !vm.log().contains("hog: taking memory") {
         return Err("the log does not show hog's own line, \"hog: taking memory\"".into());
+    }
+    Ok(())
+}
+
+/// Spark starts two services that check the network capabilities they
+/// got (userspace/spark/tests/services/network), both netgrant
+/// (userspace/posix/netgrant.c): `granted` asks to connect out and to
+/// listen on ports 8000 to 8009 and 9000, `none` for nothing.
+fn spark_network(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("spark: 2 services in /system/tests/services/network, 2 enabled")?;
+    // The two run at once, so their lines are read from the whole log.
+    for (name, said) in [
+        (
+            "granted",
+            "netgrant: Spark gave it the network to connect out and to listen on ports \
+             8000-8009 and 9000",
+        ),
+        ("none", "netgrant: Spark gave it no network"),
+    ] {
+        vm.expect_ahead(&format!("{name}: netgrant: done"))?;
+        vm.expect_ahead(&format!("spark: {name} (process "))?;
+        let log = vm.log();
+        let lines: Vec<&str> =
+            log.lines().filter(|line| line.contains(&format!("{name}: netgrant: "))).collect();
+        if let Some(failed) = lines.iter().find(|line| line.contains("FAILED")) {
+            return Err(format!("the {name} service failed: {}", failed.trim()));
+        }
+        for needle in [said, "netgrant: every check passed"] {
+            if !lines.iter().any(|line| line.contains(needle)) {
+                return Err(format!("the {name} service never said \"{needle}\""));
+            }
+        }
+    }
+    let log = vm.log();
+    for name in ["granted", "none"] {
+        let ended = log
+            .lines()
+            .find_map(|line| line.split(&format!("spark: {name} (process ")).nth(1))
+            .unwrap_or_default();
+        if !ended.contains(") exited with code 0x0") {
+            return Err(format!("the {name} service ended: {ended}"));
+        }
     }
     Ok(())
 }

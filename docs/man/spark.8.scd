@@ -236,6 +236,15 @@ that start with *#* are left out. The keys:
 	Whether Spark starts it at boot; *yes* by default. *service* _name_
 	*start* starts a disabled one.
 
+*network.outbound* = *yes* | *no*
+	Whether it may connect out, to any address and port, and send
+	datagrams; *no* by default (see *THE NETWORK*).
+
+*network.listen* = _port_ | _first_*-*_last_ ...
+	The ports it may bind to and listen on, with commas or blanks
+	between, such as *22, 8000-8009*; none by default. Ranges may not
+	overlap, and with *network.outbound* there are at most eight.
+
 A file Spark cannot read, or with a key it does not know, is logged and
 left out. For example, _consoled.service_:
 
@@ -409,7 +418,15 @@ with or without *--posix*, Spark gives the program it starts that
 capability too, in _SLOT_NETWORK_ (*radix-startup*(2)); a program
 started without it cannot use the network at all. The *sockets* boot
 test (*ob*(1)) boots with *-- --network /system/tests/sockets virtio*.
-Services get the network as their manifests ask, from Phase 12a.2c.
+
+A service gets only what its file asks for, derived from that
+capability: with *network.outbound*, one with the send right for every
+port, and for each range of *network.listen*, one with the receive
+right for those ports, in the slots from _SLOT_NETWORK_, in that order.
+Each keeps the copy and transfer rights, so the service's children get
+them through *fork* and *exec*. A service that asks for neither cannot
+use the network at all; the C library's calls fail with EACCES
+(*radix-posix*(7)).
 
 # EXAMPLES
 
