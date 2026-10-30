@@ -163,6 +163,7 @@ dependencies = [
  "radix-net",
  "radix-nvme",
  "radix-posix",
+ "radix-pstate",
  "radix-random",
  "radix-sched",
  "radix-scsi",
@@ -207,6 +208,7 @@ name = "radix-arch-aarch64"
 version = "0.10.4"
 dependencies = [
  "radix-hal",
+ "radix-pstate",
 ]
 
 [[package]]
@@ -223,6 +225,7 @@ dependencies = [
  "radix-mca",
  "radix-microcode",
  "radix-mm",
+ "radix-pstate",
  "radix-random",
  "radix-relocs",
  "radix-sync",
@@ -322,6 +325,7 @@ name = "radix-hal"
 version = "0.10.4"
 dependencies = [
  "radix-hw",
+ "radix-pstate",
 ]
 
 [[package]]
@@ -418,6 +422,10 @@ dependencies = [
  "proptest",
  "radix-abi",
 ]
+
+[[package]]
+name = "radix-pstate"
+version = "0.10.4"
 
 [[package]]
 name = "radix-random"

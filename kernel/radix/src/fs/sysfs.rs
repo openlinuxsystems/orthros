@@ -41,6 +41,11 @@
 //!   `model_name`, `manufacturer` and `serial_number`. A value the
 //!   battery does not know, as the rest while its bay is empty, fails to
 //!   read (EIO), as Linux's do (ENODEV);
+//! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
+//!   CPUs as Linux's lists (`0-7`), and where the CPUs pick their own
+//!   speed (ADR 0202), each CPU's `cpufreq/policy<n>`, as Linux's
+//!   `intel_pstate` and `amd-pstate-epp` drivers have them, with
+//!   `cpu<n>/cpufreq` a link to it ([`crate::pstate::files`]);
 //! - `/kernel/devices/system/edac/mc/mc0`, while the machine-check banks
 //!   are read (ADR 0169): Linux's EDAC counts of the memory errors they
 //!   reported, `ce_count` and `ue_count`, `ce_noinfo_count` and
@@ -53,14 +58,15 @@
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
-use radix_hal::{MemoryKind, MemoryRegion, Watchdog};
+use radix_hal::{MemoryKind, MemoryRegion, Smp, Watchdog};
 use radix_klog::TextBuf;
 use radix_sync::Once;
-use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, SyntheticFs};
+use radix_vfs::synthetic::{FixedDir, Generated, Generator, Link, ListedDir, Listing, SyntheticFs};
 use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem, next_id};
 
 use super::disk;
 use crate::acpi::devices;
+use crate::{Arch, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -117,10 +123,10 @@ pub fn make() -> Result<FsRef> {
     if power && let Some(class) = &class {
         power_supply(class)?;
     }
+    let system = root.add_dir("devices", next_id())?.add_dir("system", next_id())?;
+    cpu(&system)?;
     if crate::mce::on() {
-        let devices = root.add_dir("devices", next_id())?;
-        let mc = devices.add_dir("system", next_id())?.add_dir("edac", next_id())?;
-        let mc = mc.add_dir("mc", next_id())?;
+        let mc = system.add_dir("edac", next_id())?.add_dir("mc", next_id())?;
         let mc0: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryController)?;
         mc.add("mc0", ListedDir::make(next_id(), mc0)?)?;
     }
@@ -161,6 +167,43 @@ fn power_supply(class: &FixedDir) -> Result<()> {
             "online",
             value(move |text| writeln!(text, "{}", u8::from(adapter.online().ok_or(fmt::Error)?)))?,
         )?;
+    }
+    Ok(())
+}
+
+/// `/kernel/devices/system/cpu`: the CPUs' lists, and each CPU's
+/// frequency's policy where they pick their own speed (ADR 0202).
+fn cpu(system: &FixedDir) -> Result<()> {
+    let dir = system.add_dir("cpu", next_id())?;
+    let present = |text: &mut Text| match Arch::cpu_count() {
+        0 | 1 => writeln!(text, "0"),
+        count => writeln!(text, "0-{}", count - 1),
+    };
+    dir.add("possible", value(present)?)?;
+    dir.add("present", value(present)?)?;
+    dir.add("online", value(|text| writeln!(text, "{}", crate::sched::online()))?)?;
+    let driver = pstate::driver();
+    let cpufreq = match driver {
+        Some(_) => Some(dir.add_dir("cpufreq", next_id())?),
+        None => None,
+    };
+    for cpu in 0..Arch::cpu_count() {
+        let mut name = TextBuf::<16>::new();
+        let _ = write!(name, "cpu{cpu}");
+        let cpu_dir = dir.add_dir(name.as_str(), next_id())?;
+        let (Some(driver), Some(cpufreq)) = (driver, &cpufreq) else { continue };
+        if !pstate::cpus().any(|on| on == cpu) {
+            continue;
+        }
+        let mut name = TextBuf::<16>::new();
+        let _ = write!(name, "policy{cpu}");
+        let policy = cpufreq.add_dir(name.as_str(), next_id())?;
+        for &(file_name, file) in pstate::files(driver) {
+            policy.add(file_name, value(move |text| pstate::write_file(cpu, file, text))?)?;
+        }
+        let mut target = TextBuf::<32>::new();
+        let _ = write!(target, "../cpufreq/policy{cpu}");
+        cpu_dir.add("cpufreq", Link::make(next_id(), target.as_str())?)?;
     }
     Ok(())
 }

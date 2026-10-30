@@ -134,6 +134,27 @@ pub trait Cpu {
     /// Masks this CPU's interrupt for corrected errors, or unmasks it: off
     /// during a storm of them.
     fn mask_corrected_errors(masked: bool);
+
+    /// The running CPU's control of its own speed (ADR 0202), Intel's HWP
+    /// or AMD's CPPC, if CPUID says it has one.
+    fn performance_driver() -> Option<radix_pstate::Driver>;
+
+    /// Turns the running CPU's control on, if it has one, and returns its
+    /// levels and the request the firmware left.
+    fn start_performance() -> Option<(radix_pstate::Levels, radix_pstate::Request)>;
+
+    /// Asks the running CPU for `request`, if it has a control.
+    fn request_performance(request: radix_pstate::Request);
+
+    /// The running CPU's APERF and MPERF counts, if it has the counters,
+    /// which count at its own frequency and at the cycle counter's while
+    /// it runs.
+    fn performance_counts() -> Option<(u64, u64)>;
+
+    /// The frequencies of the running CPU's `levels`, and the level its
+    /// highest frequency is that of where the CPUs rank their cores
+    /// (AMD's), whose highest levels are then ranks.
+    fn performance_scale(levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)>;
 }
 
 /// An error a machine-check bank held, as [`Cpu::poll_machine_checks`]

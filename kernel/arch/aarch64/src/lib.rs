@@ -89,6 +89,24 @@ impl Cpu for Arch {
     fn set_corrected_error_handler(_handler: fn()) {}
 
     fn mask_corrected_errors(_masked: bool) {}
+
+    fn performance_driver() -> Option<radix_pstate::Driver> {
+        None
+    }
+
+    fn start_performance() -> Option<(radix_pstate::Levels, radix_pstate::Request)> {
+        None
+    }
+
+    fn request_performance(_request: radix_pstate::Request) {}
+
+    fn performance_counts() -> Option<(u64, u64)> {
+        None
+    }
+
+    fn performance_scale(_levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)> {
+        None
+    }
 }
 
 impl CpuLocal for Arch {

@@ -49,6 +49,7 @@ mod microcode;
 mod paging;
 mod percpu;
 mod power;
+mod pstate;
 mod random;
 mod rtc;
 mod sci;
@@ -203,6 +204,26 @@ impl Cpu for Arch {
 
     fn mask_corrected_errors(masked: bool) {
         mce::mask_corrected(masked);
+    }
+
+    fn performance_driver() -> Option<radix_pstate::Driver> {
+        pstate::driver()
+    }
+
+    fn start_performance() -> Option<(radix_pstate::Levels, radix_pstate::Request)> {
+        pstate::start()
+    }
+
+    fn request_performance(request: radix_pstate::Request) {
+        pstate::request(request);
+    }
+
+    fn performance_counts() -> Option<(u64, u64)> {
+        pstate::counts()
+    }
+
+    fn performance_scale(levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)> {
+        pstate::scale(levels)
     }
 }
 

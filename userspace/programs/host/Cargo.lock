@@ -417,6 +417,7 @@ name = "radix-hal"
 version = "0.10.4"
 dependencies = [
  "radix-hw",
+ "radix-pstate",
 ]
 
 [[package]]
@@ -429,6 +430,10 @@ version = "0.10.4"
 dependencies = [
  "radix-sync",
 ]
+
+[[package]]
+name = "radix-pstate"
+version = "0.10.4"
 
 [[package]]
 name = "radix-sync"

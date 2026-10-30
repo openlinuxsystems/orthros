@@ -17,7 +17,7 @@ use crate::bootfs::BootFs;
 use crate::cache::{Backing, FileCache};
 use crate::mount::{Location, OpenFlags, Vfs};
 use crate::path::{self, Component};
-use crate::synthetic::{FixedDir, Generated, Null, SyntheticFs, Zero};
+use crate::synthetic::{FixedDir, Generated, Link, Null, SyntheticFs, Zero};
 use crate::tmpfs::Tmpfs;
 use crate::{
     APPEND, Error, FileSystem, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem,
@@ -642,6 +642,33 @@ fn generated_files_are_snapshots() {
     assert_eq!(null.node.read(0, &mut SliceMut(&mut out[..])).unwrap(), 0);
     assert_eq!(null.node.write(0, &Slice(&out)).unwrap(), 300);
     assert_eq!(names(&vfs, &root).len(), 3);
+}
+
+#[test]
+fn synthetic_links_lead_to_their_targets() {
+    let root = FixedDir::new(1).unwrap();
+    let cpu = root.add_dir("cpu", 2).unwrap();
+    let policy = cpu.add_dir("cpufreq", 3).unwrap().add_dir("policy0", 4).unwrap();
+    let generate: crate::synthetic::Generator =
+        mem::boxed(|text: &mut crate::Text| core::fmt::Write::write_str(text, "800000\n")).unwrap();
+    policy.add("scaling_min_freq", Generated::make(5, generate).unwrap()).unwrap();
+    cpu.add_dir("cpu0", 6)
+        .unwrap()
+        .add("cpufreq", Link::make(7, "../cpufreq/policy0").unwrap())
+        .unwrap();
+    let fs = SyntheticFs::make(FsKind::Sys, root.clone()).unwrap();
+    let vfs = Vfs::new(fs, "sys").unwrap();
+    let top = vfs.root();
+    let link = vfs.stat_link(&top, "cpu/cpu0/cpufreq").unwrap();
+    assert_eq!((link.kind, link.size), (Kind::Symlink, 18));
+    assert_eq!(link_text(&vfs, &top, "cpu/cpu0/cpufreq").unwrap(), "../cpufreq/policy0");
+    assert_eq!(vfs.stat(&top, "cpu/cpu0/cpufreq").unwrap().kind, Kind::Directory);
+    let file = vfs.open(&top, "cpu/cpu0/cpufreq/scaling_min_freq", OpenFlags::default()).unwrap();
+    assert_eq!(read_all(&file.node), b"800000\n");
+    assert!(
+        names(&vfs, &vfs.resolve(&top, "cpu/cpu0").unwrap())
+            .contains(&(String::from("cpufreq"), Kind::Symlink))
+    );
 }
 
 #[test]

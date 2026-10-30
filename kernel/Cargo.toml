@@ -51,6 +51,7 @@ members = [
     "lib/ksyms",
     "lib/microcode",
     "lib/posix",
+    "lib/pstate",
     "lib/random",
     "lib/relocs",
     "lib/sync",

@@ -70,6 +70,17 @@ pub const FLAGS: &[Flag] = &[
                   button itself",
     },
     Flag {
+        name: "pstate",
+        value: Some("off"),
+        summary: "leave the CPUs' speed to the firmware, though they have Intel's HWP or AMD's CPPC",
+    },
+    Flag {
+        name: "epp",
+        value: Some("preference"),
+        summary: "the energy preference the CPUs are asked for: performance, balance_performance, \
+                  balance_power or power",
+    },
+    Flag {
         name: "iommu",
         value: Some("off"),
         summary: "leave the IOMMU's DMA remapping off, so that every device reaches all memory",

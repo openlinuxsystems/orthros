@@ -65,6 +65,7 @@ mod net;
 mod oom;
 mod panic;
 mod percpu;
+mod pstate;
 mod report;
 mod sched;
 mod schedtest;
@@ -251,6 +252,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     acpi::finish_events();
     watchdog::find();
     mce::start(flags.value("mce-poll"));
+    pstate::start(flags.value("pstate") == Some("off"), flags.value("epp"));
     check_timers(online);
     check_ipis(online);
     usb::wait_for_disks();

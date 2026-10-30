@@ -337,6 +337,17 @@ We implement these from their published descriptions. No code is copied.
   controller has for each step are theirs
   ([ADR 0201](docs/adr/0201-batteries-adapters-and-lids-through-uacpi.md)).
   No code is taken from them.
+- Intel's hardware P-states and AMD's CPPC registers are those of
+  Intel's SDM, volume 3, section 15.4, and AMD's Processor Programming
+  Reference for family 19h (MSRC001_02B0 to MSRC001_02B3). How
+  `radix-pstate` asks for levels at boot, its energy preferences' names
+  and values, its frequencies (100 MHz a level on Intel, the ranked AMD
+  cores' levels 166 and 196) and the files of
+  `/kernel/devices/system/cpu/cpufreq` follow Linux's
+  `drivers/cpufreq/intel_pstate.c` and `amd-pstate.c` (GPL-2.0) and its
+  `Documentation/admin-guide/pm/intel_pstate.rst` and `amd-pstate.rst`
+  ([ADR 0202](docs/adr/0202-cpu-frequency-through-hwp-and-cppc.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

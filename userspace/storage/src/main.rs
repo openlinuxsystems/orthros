@@ -1307,6 +1307,36 @@ fn check_sys(root: &Dir, volumes: &[String]) {
         }
         Err(err) => fail(&format!("/kernel/bus/pci/devices: {err}")),
     }
+    // The CPUs' lists, as Linux's, and their frequency's policies, which
+    // only CPUs that pick their own speed have (ADR 0202).
+    let list = |name: &str| match root.read_file(&format!("kernel/devices/system/cpu/{name}")) {
+        Ok(text) => String::from_utf8_lossy(&text).trim_end().into(),
+        Err(err) => {
+            fail(&format!("/kernel/devices/system/cpu/{name}: {err}"));
+            String::new()
+        }
+    };
+    let (possible, present, online) = (list("possible"), list("present"), list("online"));
+    println!(
+        "storage: /kernel/devices/system/cpu: possible {possible}, present {present}, online {online}"
+    );
+    match root
+        .open_dir("kernel/devices/system/cpu/cpufreq", Rights::READ)
+        .and_then(|dir| dir.entries())
+    {
+        Ok(policies) => {
+            for policy in &policies {
+                let file =
+                    format!("kernel/devices/system/cpu/cpufreq/{}/scaling_driver", policy.name);
+                check(root.read_file(&file).is_ok(), || format!("/{file} cannot be read"));
+            }
+            println!("storage: /kernel/devices/system/cpu/cpufreq: {} policies", policies.len());
+        }
+        Err(err) if err.is(FileError::NotFound) => {
+            println!("storage: /kernel/devices/system/cpu/cpufreq: 0 policies");
+        }
+        Err(err) => fail(&format!("/kernel/devices/system/cpu/cpufreq: {err}")),
+    }
 }
 
 /// Lists the processes in `/processes`, which must include this one and

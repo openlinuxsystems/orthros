@@ -12,6 +12,8 @@
 //!   each time (procfs's one directory per process).
 //! - [`Null`], [`Zero`] and [`Random`] are the character devices of
 //!   `/devices`, and [`BlockNode`] a block device, which `mount` takes.
+//! - [`Link`] is a symbolic link, as sysfs's from each CPU to its
+//!   frequency's policy.
 //! - [`SyntheticFs`] makes a tree of them a read-only filesystem.
 //!
 //! Text formats follow radix-proc(5): one `key: value` per line, so that
@@ -319,6 +321,35 @@ fn device_stat(id: u64, kind: Kind, size: u64) -> Stat {
         changed: 0,
         links: 1,
         device: 0,
+    }
+}
+
+/// A symbolic link.
+pub struct Link {
+    id: u64,
+    target: KVec<u8>,
+}
+
+impl Link {
+    /// A link to `target`, numbered `id`.
+    pub fn make(id: u64, target: &str) -> Result<NodeRef> {
+        Ok(mem::arc(Link { id, target: mem::copy(target.as_bytes())? })?)
+    }
+}
+
+impl Node for Link {
+    fn stat(&self) -> Stat {
+        device_stat(self.id, Kind::Symlink, self.target.len() as u64)
+    }
+
+    fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
+        let room = out.len().min(self.target.len());
+        out.put(0, &self.target[..room])?;
+        Ok(self.target.len())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
