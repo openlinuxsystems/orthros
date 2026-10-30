@@ -1044,6 +1044,23 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "machine-check-program",
+        about: "a page QEMU says went bad ends only the program that read it, with SIGBUS, and leaves its memory and the frame allocator for good; a bad page no one read goes too",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "mce-poll=1 -- --posix /system/tests/posix/memfail",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        // Intel's, whose software error recovery QEMU emulates.
+        cpu_model: Some(MICROCODE_CPU),
+        qemu: &[],
+        script: machine_check_program,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-oom",
         about: "a service that runs the machine out of memory is stopped, and Spark starts it again",
         firmware: Firmware::Bios,
@@ -3086,6 +3103,18 @@ impl Vm {
         }
     }
 
+    /// Runs a human monitor command with `cpu` as the monitor's CPU, and
+    /// returns what it printed.
+    pub fn monitor_output(&mut self, command: &str, cpu: u32) -> Result<String, String> {
+        let socket = self.qmp.clone().ok_or("no QMP socket")?;
+        let reply = Qmp::connect(&socket)?.execute_reply(&format!(
+            r#"{{"execute":"human-monitor-command","arguments":{{"command-line":{},"cpu-index":{cpu}}}}}"#,
+            crate::bench::json_string(command)
+        ))?;
+        returned_string(&reply)
+            .ok_or_else(|| format!("QEMU's monitor, asked to `{command}`: {}", reply.trim()))
+    }
+
     /// Types `text` on the PS/2 keyboard, a key at a time on a US layout.
     pub fn type_text(&mut self, text: &str) -> Result<(), String> {
         let combos = text.chars().map(key_combo).collect::<Result<Vec<_>, _>>()?;
@@ -3233,6 +3262,30 @@ impl Qmp {
             }
         }
     }
+}
+
+/// The string a QMP reply returns, unescaped: `{"return": "..."}`.
+fn returned_string(reply: &str) -> Option<String> {
+    let (_, rest) = reply.split_once(r#""return": ""#)?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'u' => {
+                    let code: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&code, 16).ok()?)?);
+                }
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
 }
 
 /// The QEMU key codes (`send-key`'s qcodes) that type `c` on a US
@@ -3843,6 +3896,90 @@ fn machine_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press_power_button()?;
     vm.expect("spark: the power button was pressed; powering off the machine")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The `machine-check-program` test (ADR 0168): memfail
+/// (userspace/posix/memfail.c) reads a page of its own in a loop. With
+/// the machine stopped where a CPU runs it in user mode, QEMU puts an
+/// uncorrected data load error naming that page's physical address in a
+/// bank of that CPU, as software error recovery reports one that requires
+/// an action (SRAR), and raises #MC. The kernel logs the error, retires
+/// the page, takes it out of memfail's memory and sends memfail SIGBUS
+/// with BUS_MCEERR_AR; memfail's handler reads the page again, which
+/// faults without another machine check, and memfail ends. A memory
+/// scrubbing error the CPU went on after (SRAO), polled from its bank, has
+/// its page retired too.
+fn machine_check_program(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started /system/tests/posix/memfail as process ")?;
+    vm.expect("memfail: hardware_corrupted: 0 KiB")?;
+    let reading = program_line(vm, "memfail: reading ")?;
+    let (virt, main) = reading.split_once(" from ").ok_or(format!("memfail: reading {reading}"))?;
+    let hex = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
+    let (page, main) =
+        hex(virt).zip(hex(main)).ok_or(format!("memfail: reading {reading}: not two addresses"))?;
+    // An SRAO on CPU 0, bank 2: VAL, UC, EN, MISCV, ADDRV and S, a memory
+    // scrubbing error, at a physical address valid to the cache line.
+    vm.monitor("mce 0 2 0xbd000000000000cf 0x5 0x30000000 0x86")?;
+    vm.expect(
+        "Machine check: CPU 0 bank 2: uncorrected memory scrubbing error, address 0x30000000; \
+         the CPU went on (status 0xbd000000000000cf, misc 0x86)",
+    )?;
+    let retired = program_line(vm, "Machine check: the page at 0x30000000 ")?;
+    if retired != "is out of use for good" && retired != "leaves use for good once freed" {
+        return Err(format!("the scrubbed page: {retired}"));
+    }
+    let cpu = stop_in(vm, case.cpus, main..main + 0x1000)?;
+    let gpa = vm.monitor_output(&format!("gva2gpa {page:#x}"), cpu)?;
+    let phys = gpa
+        .trim()
+        .strip_prefix("gpa: ")
+        .and_then(hex)
+        .ok_or(format!("QEMU's gva2gpa {page:#x}: {}", gpa.trim()))?;
+    // VAL, UC, EN, MISCV, ADDRV, S and AR: a data load in the level 0
+    // data cache, with EIPV and MCIP: the instruction met it.
+    vm.monitor(&format!("mce {cpu} 1 0xbd80000000000134 0x6 {phys:#x} 0x86"))?;
+    vm.monitor("cont")?;
+    vm.expect(&format!(
+        "Machine check: CPU {cpu} bank 1: uncorrected data read error in the level 0 data \
+         cache, address {phys:#x}; the code that met it must not go on (status \
+         0xbd80000000000134, misc 0x86)"
+    ))?;
+    vm.expect(&format!("Machine check: the page at {phys:#x} leaves use for good once freed"))?;
+    // As memfail prints the page's address.
+    let virt = virt.trim();
+    vm.expect(&format!("memfail: SIGBUS, code 4, address {virt}, lsb 12"))?;
+    vm.expect(&format!("memfail: SIGBUS again, code 4, address {virt}"))?;
+    vm.expect("memfail: hardware_corrupted: 8 KiB")?;
+    let code = program_line(vm, "(/system/tests/posix/memfail) exited with code ")?;
+    if code != "0x0" {
+        return Err(format!("memfail exited with code {code}"));
+    }
+    if vm.log().contains("Radix panic") {
+        return Err("the kernel panicked".into());
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// Stops the machine where one of its `cpus` runs code at `pc` in user
+/// mode (code selector 0x2b), trying for up to a minute: that CPU.
+fn stop_in(vm: &mut Vm, cpus: u32, pc: std::ops::Range<u64>) -> Result<u32, String> {
+    for _ in 0..600 {
+        vm.monitor("stop")?;
+        for cpu in 0..cpus {
+            let registers = vm.monitor_output("info registers", cpu)?;
+            let rip = registers
+                .split_once("RIP=")
+                .and_then(|(_, rest)| u64::from_str_radix(rest.get(..16)?, 16).ok());
+            if registers.contains("CS =002b") && rip.is_some_and(|rip| pc.contains(&rip)) {
+                return Ok(cpu);
+            }
+        }
+        vm.monitor("cont")?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("no CPU ran the code at {:#x} in user mode", pc.start))
 }
 
 fn watchdog_esb(vm: &mut Vm, case: &Case) -> Result<(), String> {

@@ -535,11 +535,22 @@ for one it did not but the CPU went on after. For example:
 	Machine check: CPU 1 bank 2: corrected data read error in the level 0
 	data cache, address 0x12345000 (status 0x9c00000000000134, misc 0x86)
 
-An error the CPU cannot go on after raises a machine check, and the kernel
-panics with the bank's error: see *radix-debug*(7). Linux decodes the
-same status with *mcelog* or *rasdaemon*. Memory error counts by DIMM and
-error recovery that ends only the program that read bad memory come later
-(ADR 0145).
+An uncorrected error raises a machine check. On a CPU that recovers from
+them (Intel's Xeons, with software error recovery, and AMD's Zen, with
+SUCCOR), bad memory that a program reads ends only that program, with
+SIGBUS (*radix-posix*(7)); the error is logged at once. Any other error
+the CPU cannot go on after, in the kernel above all, makes the kernel
+panic with the bank's error: see *radix-debug*(7). Linux decodes the same
+status with *mcelog* or *rasdaemon*.
+
+The page of memory an uncorrected error names leaves use for good: at
+once if it is free, or else when it is freed, and the program that read
+it no longer maps it. The log says so:
+
+	Machine check: the page at 0x7000000 is out of use for good
+
+and _/processes/meminfo_ counts it (*radix-proc*(5)). Memory error counts
+by DIMM come later (ADR 0145, ADR 0168).
 
 # IOMMU
 

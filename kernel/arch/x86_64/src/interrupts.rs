@@ -14,8 +14,10 @@
 //! Exceptions in the kernel are fatal except breakpoints, which call the
 //! registered breakpoint handler and resume, NMIs, which the panic path
 //! uses to stop the other CPUs, and machine checks the CPU can go on after
-//! (`mce`). A fatal exception records a [`Fault`] for the panic report and
-//! panics with a description of what went wrong.
+//! (`mce`). A machine check in user mode that the program must not go on
+//! after moves to the thread's stack and ends only the program
+//! (`crate::user::machine_check`). A fatal exception records a [`Fault`]
+//! for the panic report and panics with a description of what went wrong.
 //!
 //! Interrupts (vectors 32 and up) count the CPU's interrupt depth. On the
 //! way out of one that came in from thread context with interrupts on and
@@ -165,6 +167,7 @@ radix_isr_common:
     movq %rsp, %rbp
     leaq 16(%rsp), %rdi
     call radix_trap_dispatch
+radix_isr_return:
     addq $16, %rsp
     testl %ebx, %ebx
     jz 5f
@@ -187,6 +190,22 @@ radix_isr_common:
     popq %rax
     addq $16, %rsp
     iretq
+
+    /* A machine check in user mode that ends the program
+       (`user::machine_check`): RDI is its frame, moved from the
+       machine-check stack to the top of the thread's kernel stack, where
+       an exception from user mode leaves its frame, and RSI the bad page.
+       It goes on there as the stub above does, GS base swapped. */
+    .global radix_isr_user_machine_check
+radix_isr_user_machine_check:
+    movq %rdi, %rsp
+    movl $1, %ebx
+    pushq 17*8(%rsp)
+    pushq 11*8(%rsp)
+    movq %rsp, %rbp
+    leaq 16(%rsp), %rdi
+    call radix_trap_user_machine_check
+    jmp radix_isr_return
     "#,
     smap = sym crate::paging::SMAP,
     user_gs = const USER_GS_IN_KERNEL,
@@ -487,7 +506,11 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             Some(resume) => frame.rip = resume,
             None => fatal_exception(frame),
         },
-        18 if crate::mce::recovered() => {}
+        18 => match crate::mce::triage(frame.cs & 3 != 0) {
+            radix_mca::Verdict::GoOn => {}
+            radix_mca::Verdict::EndProgram(page) => crate::user::machine_check(frame, page),
+            radix_mca::Verdict::Fatal => fatal_exception(frame),
+        },
         0..32 => fatal_exception(frame),
         v => {
             radix_klog::tracepoint!("irq.unexpected", v);

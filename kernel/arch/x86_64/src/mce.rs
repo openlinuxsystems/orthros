@@ -13,20 +13,23 @@
 //! kernel polls every CPU's banks (`radix::mce`), as Linux does where
 //! there is no interrupt for corrected errors, and logs what it finds.
 //!
-//! An uncorrected error raises #MC. [`recovered`] decides whether the CPU
-//! can go on; if so it ends the machine check (clearing MCG_STATUS.MCIP,
-//! so that the next one is taken rather than shutting the CPU down) and
-//! leaves the error in its bank for the next poll, since the handler may
-//! not log. Otherwise the exception is fatal and the panic gives
-//! [`describe`]'s account of it.
+//! An uncorrected error raises #MC. [`triage`] decides what it leaves to
+//! do ([`radix_mca::triage`]): the code goes on, or the program that met
+//! bad memory ends (ADR 0168), or the machine stops. Unless it stops, the
+//! machine check ends (clearing MCG_STATUS.MCIP, so that the next one is
+//! taken rather than shutting the CPU down) and the errors stay in their
+//! banks for the next poll, since the handler may not log; the program's
+//! end polls first. A fatal one panics with [`describe`]'s account of it.
+//! The poll names the page of an uncorrected error the CPU went on after,
+//! which the kernel retires.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use radix_klog::TextBuf;
 use radix_mca::{
-    ADDRESS_VALID, BankError, CAP_COUNT, CAP_CTL, CAP_RECOVERY, MISC_VALID, RIPV, UNCORRECTED,
-    VALID, fatal,
+    ADDRESS_VALID, BankError, CAP_COUNT, CAP_CTL, CAP_RECOVERY, MISC_VALID, Mca, RIPV, UNCORRECTED,
+    VALID, Verdict, bad_page, fatal,
 };
 use radix_sync::SpinLock;
 
@@ -48,8 +51,11 @@ const CR4_MCE: u64 = 1 << 6;
 
 /// How many banks every CPU reports in; 0 while reporting is off.
 static BANKS: AtomicUsize = AtomicUsize::new(0);
-/// IA32_MCG_CAP's software error recovery.
+/// The CPU recovers from uncorrected errors: IA32_MCG_CAP's software
+/// error recovery, or AMD's SUCCOR.
 static RECOVERY: AtomicBool = AtomicBool::new(false);
+/// The machine-check architecture is AMD's.
+static AMD: AtomicBool = AtomicBool::new(false);
 /// IA32_MCG_CAP's IA32_MCG_CTL.
 static HAS_CTL: AtomicBool = AtomicBool::new(false);
 /// Bank 0's control belongs to the firmware.
@@ -72,7 +78,12 @@ pub fn init_boot_cpu(off: bool) {
     // SAFETY: CPUID says the machine-check architecture's MSRs exist.
     let cap = unsafe { rdmsr(MCG_CAP) };
     let (family, model, _) = cpu::family_model_stepping();
-    RECOVERY.store(cap & CAP_RECOVERY != 0, Ordering::Relaxed);
+    let amd = matches!(&cpu::vendor(), b"AuthenticAMD" | b"HygonGenuine");
+    // SUCCOR: CPUID 0x80000007's EBX bit 1.
+    let succor =
+        cpu::max_extended_leaf() >= 0x8000_0007 && cpu::cpuid(0x8000_0007, 0).ebx & (1 << 1) != 0;
+    AMD.store(amd, Ordering::Relaxed);
+    RECOVERY.store(if amd { succor } else { cap & CAP_RECOVERY != 0 }, Ordering::Relaxed);
     HAS_CTL.store(cap & CAP_CTL != 0, Ordering::Relaxed);
     SKIP_BANK0.store(cpu::is_intel() && family == 6 && model < 0x1a, Ordering::Relaxed);
     BANKS.store(((cap & CAP_COUNT) as usize).min(MAX_BANKS), Ordering::Release);
@@ -106,6 +117,10 @@ pub fn banks() -> usize {
     BANKS.load(Ordering::Relaxed)
 }
 
+fn mca() -> Mca {
+    Mca { amd: AMD.load(Ordering::Relaxed), recovery: RECOVERY.load(Ordering::Relaxed) }
+}
+
 /// Bank `bank`'s error, if it holds one.
 fn read(bank: usize) -> Option<BankError> {
     // SAFETY: `bank` is below IA32_MCG_CAP's count, so its registers
@@ -122,8 +137,8 @@ fn read(bank: usize) -> Option<BankError> {
 }
 
 /// Reads and clears this CPU's banks, then calls `found` with each error
-/// (not under the lock, so that it may log).
-pub fn poll(found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display)) {
+/// and the page it says went bad (not under the lock, so that it may log).
+pub fn poll(found: &mut radix_hal::MachineCheckFound<'_>) {
     let banks = banks();
     let mut errors = [None; MAX_BANKS];
     {
@@ -136,31 +151,31 @@ pub fn poll(found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display)) {
             }
         }
     }
+    let mca = mca();
     for (bank, error) in errors.iter().enumerate() {
         if let Some(error) = error {
-            found(bank, error.corrected(), error);
+            found(bank, error.corrected(), bad_page(error, mca), error);
         }
     }
 }
 
-/// In the #MC handler: whether the CPU can go on, which ends the machine
-/// check. It can when the interrupted code can restart (MCG_STATUS.RIPV)
-/// and no bank holds an error it cannot go on after.
-pub fn recovered() -> bool {
+/// In the #MC handler: what the machine check leaves to do, `user` if it
+/// came in user mode. Unless that is to stop the machine, it ends the
+/// machine check.
+pub fn triage(user: bool) -> Verdict {
     let banks = banks();
     if banks == 0 {
-        return false;
+        return Verdict::Fatal;
     }
     // SAFETY: reporting is on, so the registers exist.
     let status = unsafe { rdmsr(MCG_STATUS) };
-    let recovery = RECOVERY.load(Ordering::Relaxed);
-    if status & RIPV == 0 || (0..banks).filter_map(read).any(|e| fatal(e.status, recovery)) {
-        return false;
+    let verdict = radix_mca::triage(status, mca(), user, (0..banks).filter_map(read));
+    if verdict != Verdict::Fatal {
+        // SAFETY: clearing MCG_STATUS ends the machine check.
+        unsafe { wrmsr(MCG_STATUS, 0) };
+        radix_klog::tracepoint!("mce.recovered", status);
     }
-    // SAFETY: clearing MCG_STATUS ends the machine check.
-    unsafe { wrmsr(MCG_STATUS, 0) };
-    radix_klog::tracepoint!("mce.recovered", status);
-    true
+    verdict
 }
 
 /// For the panic after a machine check the CPU cannot go on after: the

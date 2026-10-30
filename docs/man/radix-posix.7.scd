@@ -159,7 +159,10 @@ again only when no handler ran, as on Linux.
 
 Faults are signals for the thread that faulted: SIGSEGV for memory it may
 not touch, SIGBUS for a misaligned access or a file page that cannot be
-read, SIGILL, SIGFPE and SIGTRAP. A fault whose signal has no handler or
+read, SIGILL, SIGFPE and SIGTRAP. A read of memory that went bad, which
+a machine check reports, is SIGBUS with *si_code* *BUS_MCEERR_AR*,
+*si_addr* the page and *si_addr_lsb* 12, as on Linux; the page has left
+the program's memory, so reading it again is SIGBUS once more. A fault whose signal has no handler or
 is blocked ends the process, killed by that signal. A page that finds no
 memory ends the process as SIGKILL would.
 

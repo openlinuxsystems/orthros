@@ -914,6 +914,49 @@ fn fault(fault: UserFault) {
     }
 }
 
+unsafe extern "C" {
+    /// Goes on from a machine check in user mode on the thread's kernel
+    /// stack, with its frame there and the bad page; see the entry stubs.
+    fn radix_isr_user_machine_check(frame: *mut TrapFrame, page: u64) -> !;
+}
+
+/// No bad page, for the entry stub.
+const NO_PAGE: u64 = u64::MAX;
+
+/// A machine check in user mode that the program must not go on after
+/// (`mce`). The CPU saved the program's registers on the machine-check
+/// stack, where nothing may sleep; they move to the top of the thread's
+/// kernel stack, where any other exception in user mode leaves them, and
+/// the thread goes on there as after one: the fault handler hears of
+/// [`UserFaultKind::Memory`] with the bad page, and the way back to user
+/// mode runs the program's SIGBUS handler, or never comes.
+pub fn machine_check(frame: &TrapFrame, page: Option<u64>) -> ! {
+    let top = percpu::current().kernel_stack_top();
+    let copy = (top - core::mem::size_of::<TrapFrame>() as u64) as *mut TrapFrame;
+    // SAFETY: the CPU was in user mode, so nothing of the thread's is on
+    // its kernel stack, and the frame goes where an exception's from user
+    // mode would. The machine-check stack is left for good, holding only
+    // the entry's dispatch frames, which own nothing; the stub goes on as
+    // the entry stub would have.
+    unsafe {
+        copy.write(*frame);
+        radix_isr_user_machine_check(copy, page.unwrap_or(NO_PAGE))
+    }
+}
+
+/// Called by the stub with the machine check's frame at the top of the
+/// thread's kernel stack.
+#[unsafe(no_mangle)]
+extern "C" fn radix_trap_user_machine_check(frame: *mut TrapFrame, page: u64) {
+    thread::set_user_entry(UserEntry::Trap);
+    // SAFETY: the frame was just written there; borrowed for the call, as
+    // the return handler reads and writes it too.
+    let (pc, sp) = unsafe { ((*frame).rip, (*frame).rsp) };
+    let kind = UserFaultKind::Memory((page != NO_PAGE).then_some(page));
+    fault(UserFault { kind, pc, sp, code: 0 });
+    on_return();
+}
+
 /// Handles exception `vector` from user mode: the fault handler resolves
 /// it or raises a signal, which the return handler then delivers.
 pub fn exception(vector: u8, frame: &TrapFrame) {

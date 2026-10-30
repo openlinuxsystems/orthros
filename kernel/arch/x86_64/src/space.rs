@@ -355,17 +355,17 @@ impl AddressSpace {
     }
 
     /// Swaps the page at `virt` out to `slot`: if its entry still maps
-    /// `phys` and no CPU read it through the entry since [`scan`] cleared
-    /// its accessed bit, the entry holds the slot instead, and `true` says
-    /// so once no CPU can reach the frame.
+    /// `phys` and, if `unused`, no CPU read it through the entry since
+    /// [`scan`] cleared its accessed bit, the entry holds the slot instead,
+    /// and `true` says so once no CPU can reach the frame.
     ///
     /// [`scan`]: AddressSpace::scan
-    pub fn swap_out(&self, virt: u64, phys: u64, slot: u64) -> bool {
+    pub fn swap_out(&self, virt: u64, phys: u64, slot: u64, unused: bool) -> bool {
         let guard = self.lock.lock();
         let Some((entries, 1)) = mapping(self.pml4, virt) else { return false };
         let entry_slot = &entries[index(virt, 1)];
         let entry = entry_slot.load(Ordering::Relaxed);
-        if entry & PRESENT == 0 || entry & ADDRESS != phys || entry & ACCESSED != 0 {
+        if entry & PRESENT == 0 || entry & ADDRESS != phys || unused && entry & ACCESSED != 0 {
             return false;
         }
         let swapped = swap_entry(slot);

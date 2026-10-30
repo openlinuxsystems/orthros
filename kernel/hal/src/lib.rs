@@ -118,10 +118,16 @@ pub trait Cpu {
 
     /// Reads the errors this CPU's machine-check banks hold and clears
     /// them, calling `found` with each: its bank, whether the hardware
-    /// corrected it, and what it was. Runs in thread context on the CPU
-    /// whose banks it reads.
-    fn poll_machine_checks(found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display));
+    /// corrected it, the physical address of the page whose memory it says
+    /// went bad, to be retired, and what it was. Runs in thread context on
+    /// the CPU whose banks it reads.
+    fn poll_machine_checks(found: &mut MachineCheckFound<'_>);
 }
+
+/// What [`Cpu::poll_machine_checks`] calls with each error a bank held:
+/// its bank, whether the hardware corrected it, the page it says went bad,
+/// and what it was.
+pub type MachineCheckFound<'a> = dyn FnMut(usize, bool, Option<u64>, &dyn core::fmt::Display) + 'a;
 
 /// Data and identity of the current CPU.
 pub trait CpuLocal {

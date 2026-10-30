@@ -306,6 +306,12 @@ We implement these from their published descriptions. No code is copied.
   of their patches to Linux
   ([ADR 0167](docs/adr/0167-newer-intel-chipsets-and-amds-fch-have-their-watchdog-too.md)).
   No code is taken from any of them.
+- The rules by which `radix-mca` grades machine checks, and which end
+  only a program, follow those of Linux's
+  `arch/x86/kernel/cpu/mce/severity.c` (GPL-2.0), with the status bits
+  of Intel's SDM, volume 3, chapter 17, and AMD's APM, volume 2, chapter 9
+  ([ADR 0168](docs/adr/0168-bad-memory-ends-only-the-program-that-read-it.md)).
+  No code is taken from it.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

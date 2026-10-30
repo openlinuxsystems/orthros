@@ -11,11 +11,18 @@
 //! Linux polls where the CPU has no interrupt for corrected errors. Each
 //! error is logged with its CPU and bank: a warning for one the hardware
 //! corrected, an error for one it did not but the CPU went on after.
+//!
+//! The page of memory an uncorrected error names leaves use for good (ADR
+//! 0168): out of the frame allocator at once if it is free, or when it is
+//! freed ([`radix_mm::Frames::retire`]). A program that read it has ended
+//! by then, or its SIGBUS handler runs (`user::on_fault`, which reads the
+//! banks first).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_hal::{Cpu, CpuLocal};
 use radix_klog::{error, info, warn};
+use radix_mm::{FRAMES, Retired};
 
 use crate::Arch;
 use crate::sched::{self, Options, Policy};
@@ -60,15 +67,27 @@ fn run(seconds: usize) {
     }
 }
 
-/// Reads this CPU's banks and logs what they held.
-fn read() {
+/// Reads this CPU's banks, logs what they held, and retires the pages
+/// they name.
+pub(crate) fn read() {
     let cpu = Arch::current_cpu();
     let when = if AT_BOOT.load(Ordering::Relaxed) { ", at boot" } else { "" };
-    Arch::poll_machine_checks(&mut |bank, corrected, what| {
+    Arch::poll_machine_checks(&mut |bank, corrected, page, what| {
         if corrected {
             warn!("Machine check: CPU {cpu} bank {bank}{when}: {what}");
         } else {
             error!("Machine check: CPU {cpu} bank {bank}{when}: {what}");
+        }
+        let Some(page) = page else { return };
+        match FRAMES.retire(page) {
+            Retired::Now => warn!("Machine check: the page at {page:#x} is out of use for good"),
+            Retired::WhenFreed => {
+                warn!("Machine check: the page at {page:#x} leaves use for good once freed");
+            }
+            Retired::NotManaged => {}
+            Retired::TooMany => {
+                error!("Machine check: the page at {page:#x} cannot be retired: too many are");
+            }
         }
     });
 }

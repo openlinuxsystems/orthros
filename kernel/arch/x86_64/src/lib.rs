@@ -188,7 +188,7 @@ impl Cpu for Arch {
         mce::banks()
     }
 
-    fn poll_machine_checks(found: &mut dyn FnMut(usize, bool, &dyn fmt::Display)) {
+    fn poll_machine_checks(found: &mut radix_hal::MachineCheckFound<'_>) {
         mce::poll(found);
     }
 }
@@ -617,7 +617,11 @@ impl UserMode for Arch {
     }
 
     fn swap_out(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool {
-        virt < user::USER_TOP && space.space().swap_out(virt, phys, slot)
+        virt < user::USER_TOP && space.space().swap_out(virt, phys, slot, true)
+    }
+
+    fn retire_page(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool {
+        virt < user::USER_TOP && space.space().swap_out(virt, phys, slot, false)
     }
 
     fn set_swapped(space: &Self::Space, virt: u64, slot: u64) -> Result<(), MapPageError> {
