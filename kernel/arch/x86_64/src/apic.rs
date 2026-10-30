@@ -42,6 +42,7 @@ mod reg {
     pub const EOI: u32 = 0xb0;
     pub const SVR: u32 = 0xf0;
     pub const ESR: u32 = 0x280;
+    pub const LVT_CMCI: u32 = 0x2f0;
     pub const ICR_LOW: u32 = 0x300;
     pub const ICR_HIGH: u32 = 0x310;
     pub const LVT_TIMER: u32 = 0x320;
@@ -51,6 +52,9 @@ mod reg {
     pub const TIMER_INITIAL: u32 = 0x380;
     pub const TIMER_CURRENT: u32 = 0x390;
     pub const TIMER_DIVIDE: u32 = 0x3e0;
+    /// AMD's extended registers: which there are, and the extended LVT.
+    pub const EXTENDED_FEATURES: u32 = 0x400;
+    pub const EXTENDED_LVT0: u32 = 0x500;
 }
 
 /// IA32_APIC_BASE: x2APIC mode (EXTD).
@@ -259,6 +263,35 @@ pub fn init_cpu(madt: Option<&Madt<'_>>, uid: Option<u32>) {
 pub fn version() -> (u32, u32) {
     let value = read(reg::VERSION);
     (value & 0xff, (value >> 16) & 0xff)
+}
+
+/// The LVT entry of corrected machine-check interrupts (CMCI), the
+/// seventh: whether this APIC has it.
+pub fn has_cmci() -> bool {
+    version().1 >= 6
+}
+
+/// Points the CMCI entry at `vector`, masked or not.
+pub fn set_cmci(vector: u8, masked: bool) {
+    write(reg::LVT_CMCI, u32::from(vector) | if masked { MASKED } else { 0 });
+}
+
+/// AMD: how many extended LVT entries the APIC has, 0 if it has no
+/// extended registers (the version register's bit 31 says).
+pub fn extended_lvts() -> u8 {
+    if !cpu::is_amd() || read(reg::VERSION) & (1 << 31) == 0 {
+        return 0;
+    }
+    ((read(reg::EXTENDED_FEATURES) >> 16) & 0xff) as u8
+}
+
+/// AMD: points extended LVT entry `entry` at `vector` (fixed delivery),
+/// masked or not. Entries past [`extended_lvts`] are left alone.
+pub fn set_extended_lvt(entry: u8, vector: u8, masked: bool) {
+    if entry < extended_lvts() {
+        let value = u32::from(vector) | if masked { MASKED } else { 0 };
+        write(reg::EXTENDED_LVT0 + 0x10 * u32::from(entry), value);
+    }
 }
 
 /// Physical address of the registers.

@@ -314,6 +314,17 @@ We implement these from their published descriptions. No code is copied.
   of Intel's SDM, volume 3, chapter 17, and AMD's APM, volume 2, chapter 9
   ([ADR 0168](docs/adr/0168-bad-memory-ends-only-the-program-that-read-it.md)).
   No code is taken from it.
+- How `radix-mca` claims banks for Intel's CMCI, starts AMD's error
+  counters and stops their interrupts in a storm follows Linux's
+  `arch/x86/kernel/cpu/mce/intel.c` and `amd.c` (GPL-2.0): the threshold
+  of 1, the limit of 4095, 15 interrupts a second and vector 0xF9 are
+  theirs. The registers are those of Intel's SDM, volume 3, chapter 17,
+  and of AMD's BIOS and Kernel Developer's Guides and Processor
+  Programming References (MCA_MISC0). The EDAC files under
+  `/kernel/devices/system/edac` are laid out as Linux's
+  (`Documentation/ABI/testing/sysfs-devices-edac`)
+  ([ADR 0169](docs/adr/0169-corrected-errors-interrupt-and-memory-errors-are-counted.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

@@ -546,6 +546,16 @@ for one it did not but the CPU went on after. For example:
 	Machine check: CPU 1 bank 2: corrected data read error in the level 0
 	data cache, address 0x12345000 (status 0x9c00000000000134, misc 0x86)
 
+Where the CPU interrupts for corrected errors, the banks are also read as
+soon as it does, and the log's line about the banks says through what:
+Intel's CMCI, from the first corrected error, or AMD's error thresholds,
+once a bank's counter has counted 4095. Where the bank counts its
+corrected errors (both do), its line ends with how many there were since
+it was last read, such as *; 12 of them since the bank was read*. More than
+15 such interrupts in a second are a storm: the kernel says so, masks
+them, and reads the banks every second until 30 seconds go by without a
+corrected error, then unmasks them.
+
 An uncorrected error raises a machine check. On a CPU that recovers from
 them (Intel's Xeons, with software error recovery, and AMD's Zen, with
 SUCCOR), bad memory that a program reads ends only that program, with
@@ -560,8 +570,12 @@ it no longer maps it. The log says so:
 
 	Machine check: the page at 0x7000000 is out of use for good
 
-and _/processes/meminfo_ counts it (*radix-proc*(5)). Memory error counts
-by DIMM come later (ADR 0145, ADR 0168).
+and _/processes/meminfo_ counts it (*radix-proc*(5)).
+
+The memory controllers' errors are counted by the bank and channel they
+were on, in Linux's EDAC files under _/kernel/devices/system/edac_
+(*radix-sysfs*(5)). Counts by DIMM, which need each chipset's map of
+addresses to DIMMs, come later (ADR 0169).
 
 # IOMMU
 

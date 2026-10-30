@@ -155,6 +155,28 @@ _/kernel/class/watchdog/watchdog0/bootstatus_
 	*32*, Linux's WDIOF_CARDRESET, if it restarted the machine at the end
 	of the boot before this one; *0* if not.
 
+_/kernel/devices/system/edac/mc/mc0/ce_count_, _ue_count_
+	While the CPUs' machine-check banks are read (*dukovo-boot*(7)'s
+	*MACHINE CHECKS*): how many memory errors the memory controllers
+	corrected, and how many they did not, since boot, as Linux's EDAC
+	counts them. Radix shows them as one memory controller, whose DIMMs
+	are the banks' channels.
+
+_/kernel/devices/system/edac/mc/mc0/ce_noinfo_count_, _ue_noinfo_count_
+	Those whose bank said no channel.
+
+_/kernel/devices/system/edac/mc/mc0/mc_name_, _seconds_since_reset_
+	*Machine check banks*, and the seconds since the counts began: since
+	boot.
+
+_/kernel/devices/system/edac/mc/mc0/dimm_*n*_/dimm_label_, _dimm_location_
+	A bank and channel that had an error, such as _bank 7 channel 1_,
+	numbered from 0 in the order they first did. Linux's
+	*ras-mc-ctl --error-count* and *edac-util* read these.
+
+_/kernel/devices/system/edac/mc/mc0/dimm_*n*_/dimm_ce_count_, _dimm_ue_count_
+	Its corrected and uncorrected errors.
+
 # EXAMPLES
 
 In the *storage* boot test (*ob*(1)), the 32 MiB disk _vdb_ has

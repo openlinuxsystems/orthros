@@ -117,17 +117,48 @@ pub trait Cpu {
     fn machine_check_banks() -> usize;
 
     /// Reads the errors this CPU's machine-check banks hold and clears
-    /// them, calling `found` with each: its bank, whether the hardware
-    /// corrected it, the physical address of the page whose memory it says
-    /// went bad, to be retired, and what it was. Runs in thread context on
-    /// the CPU whose banks it reads.
+    /// them, calling `found` with each ([`MachineCheck`]). Runs in thread
+    /// context on the CPU whose banks it reads.
     fn poll_machine_checks(found: &mut MachineCheckFound<'_>);
+
+    /// What interrupts a CPU when its banks corrected errors (ADR 0169),
+    /// for the log: Intel's CMCI or AMD's thresholds; `None` if the banks
+    /// are only polled.
+    fn corrected_error_interrupt() -> Option<&'static str>;
+
+    /// Calls `handler`, in an interrupt handler with interrupts masked,
+    /// when a CPU's banks say they corrected errors, for the kernel to
+    /// read them soon.
+    fn set_corrected_error_handler(handler: fn());
+
+    /// Masks this CPU's interrupt for corrected errors, or unmasks it: off
+    /// during a storm of them.
+    fn mask_corrected_errors(masked: bool);
 }
 
-/// What [`Cpu::poll_machine_checks`] calls with each error a bank held:
-/// its bank, whether the hardware corrected it, the page it says went bad,
-/// and what it was.
-pub type MachineCheckFound<'a> = dyn FnMut(usize, bool, Option<u64>, &dyn core::fmt::Display) + 'a;
+/// An error a machine-check bank held, as [`Cpu::poll_machine_checks`]
+/// found it.
+pub struct MachineCheck<'a> {
+    /// Its bank.
+    pub bank: usize,
+    /// Whether the hardware corrected it.
+    pub corrected: bool,
+    /// How many errors it stands for: the bank's count of the corrected
+    /// errors since it was read, where it keeps one (CMCI, AMD's
+    /// thresholds), else 1.
+    pub count: u64,
+    /// For a memory controller's error, `Some` with the channel it was
+    /// on, if the bank says.
+    pub memory: Option<Option<u8>>,
+    /// The physical address of the page whose memory it says went bad, to
+    /// be retired.
+    pub page: Option<u64>,
+    /// What it was.
+    pub what: &'a dyn core::fmt::Display,
+}
+
+/// What [`Cpu::poll_machine_checks`] calls with each error a bank held.
+pub type MachineCheckFound<'a> = dyn FnMut(&MachineCheck<'_>) + 'a;
 
 /// Data and identity of the current CPU.
 pub trait CpuLocal {

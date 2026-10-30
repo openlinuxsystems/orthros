@@ -67,6 +67,11 @@ pub fn is_intel() -> bool {
     &vendor() == b"GenuineIntel"
 }
 
+/// Whether this is an AMD processor, or a Hygon one (AMD's design).
+pub fn is_amd() -> bool {
+    matches!(&vendor(), b"AuthenticAMD" | b"HygonGenuine")
+}
+
 /// The processor brand string, if the CPU reports one, trimmed.
 pub fn brand(out: &mut [u8; 48]) -> &str {
     if max_extended_leaf() < 0x8000_0004 {

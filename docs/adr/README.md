@@ -180,6 +180,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0166](0166-each-device-raises-only-its-own-interrupts.md) | Each device raises only its own interrupts | Accepted |
 | [0167](0167-newer-intel-chipsets-and-amds-fch-have-their-watchdog-too.md) | Newer Intel chipsets and AMD's FCH have their watchdog too | Accepted |
 | [0168](0168-bad-memory-ends-only-the-program-that-read-it.md) | Bad memory ends only the program that read it, and its page leaves use | Accepted |
+| [0169](0169-corrected-errors-interrupt-and-memory-errors-are-counted.md) | Corrected errors interrupt where the CPU can, and memory errors are counted | Accepted |
 | [0170](0170-btrfs-keeps-simple-quotas.md) | Btrfs keeps simple quotas, each extent counted to the subvolume that wrote it | Accepted |
 | [0180](0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md) | The TCP/IP stack runs in the kernel, on smoltcp | Accepted |
 | [0181](0181-virtio-net-copies-frames-through-slots-of-its-own.md) | The virtio network card copies frames through slots of its own | Accepted |

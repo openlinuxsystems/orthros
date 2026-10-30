@@ -29,7 +29,13 @@
 //!   watchdog (ADR 0143): its `identity`, its `state` (`active` or
 //!   `inactive`), its `timeout`, `min_timeout` and `max_timeout` in
 //!   seconds, and its `bootstatus`, 32 (Linux's WDIOF_CARDRESET) if it
-//!   restarted the machine at the end of the boot before, else 0.
+//!   restarted the machine at the end of the boot before, else 0;
+//! - `/kernel/devices/system/edac/mc/mc0`, while the machine-check banks
+//!   are read (ADR 0169): Linux's EDAC counts of the memory errors they
+//!   reported, `ce_count` and `ue_count`, `ce_noinfo_count` and
+//!   `ue_noinfo_count` for those without a channel, and a `dimm<n>` for
+//!   each bank and channel that had one (`dimm_label`, `dimm_location`,
+//!   `dimm_ce_count`, `dimm_ue_count`), in the order they first did.
 //!
 //! Every file ends with a newline. The tree is read-only.
 
@@ -88,6 +94,13 @@ pub fn make() -> Result<FsRef> {
         dir.add("max_timeout", value(move |text| writeln!(text, "{max_seconds}"))?)?;
         let status = if restarted { 32 } else { 0 };
         dir.add("bootstatus", value(move |text| writeln!(text, "{status}"))?)?;
+    }
+    if crate::mce::on() {
+        let devices = root.add_dir("devices", next_id())?;
+        let mc = devices.add_dir("system", next_id())?.add_dir("edac", next_id())?;
+        let mc = mc.add_dir("mc", next_id())?;
+        let mc0: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryController)?;
+        mc.add("mc0", ListedDir::make(next_id(), mc0)?)?;
     }
     // Another thread may have made one meanwhile; either will do.
     let root = match ROOT.set(root) {
@@ -296,5 +309,83 @@ impl Listing for PciDevices {
         dir.add("subsystem_vendor", value(move |text| writeln!(text, "{vendor:#06x}"))?)?;
         dir.add("subsystem_device", value(move |text| writeln!(text, "{device:#06x}"))?)?;
         Ok(dir)
+    }
+}
+
+/// `/kernel/devices/system/edac/mc/mc0`: the memory errors the
+/// machine-check banks reported since boot (`crate::mce`), as one memory
+/// controller whose DIMMs are the banks' channels.
+struct MemoryController;
+
+/// mc0's files, besides the `dimm<n>` directories.
+const MC_FILES: [&str; 6] = [
+    "mc_name",
+    "seconds_since_reset",
+    "ce_count",
+    "ce_noinfo_count",
+    "ue_count",
+    "ue_noinfo_count",
+];
+
+/// The channel `dimm<n>` names: `n` without leading zeros.
+fn dimm_index(name: &str) -> Option<usize> {
+    let digits = name.strip_prefix("dimm")?;
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+impl Listing for MemoryController {
+    fn list(&self, f: &mut dyn FnMut(&str, Kind) -> bool) {
+        for name in MC_FILES {
+            if !f(name, Kind::File) {
+                return;
+            }
+        }
+        for index in 0..crate::mce::memory_errors().channels().len() {
+            let mut name = TextBuf::<16>::new();
+            let _ = write!(name, "dimm{index}");
+            if !f(name.as_str(), Kind::Directory) {
+                return;
+            }
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Result<NodeRef> {
+        use crate::mce::memory_errors;
+        let count = |pick: fn(&crate::mce::MemoryErrors) -> u64| {
+            value(move |text| writeln!(text, "{}", pick(&memory_errors())))
+        };
+        match name {
+            "mc_name" => value(|text| writeln!(text, "Machine check banks")),
+            "seconds_since_reset" => {
+                value(|text| writeln!(text, "{}", crate::sched::now_ns() / 1_000_000_000))
+            }
+            "ce_count" => count(|errors| errors.corrected),
+            "ce_noinfo_count" => count(|errors| errors.corrected_unplaced),
+            "ue_count" => count(|errors| errors.uncorrected),
+            "ue_noinfo_count" => count(|errors| errors.uncorrected_unplaced),
+            _ => {
+                let index = dimm_index(name).ok_or(Error::NotFound)?;
+                let place = *memory_errors().channels().get(index).ok_or(Error::NotFound)?;
+                let (bank, channel) = (place.bank, place.channel);
+                let dir = FixedDir::new(next_id())?;
+                let label = move |text: &mut Text| writeln!(text, "bank {bank} channel {channel}");
+                dir.add("dimm_label", value(label)?)?;
+                dir.add("dimm_location", value(label)?)?;
+                let counter = move |corrected: bool| {
+                    value(move |text| {
+                        let errors = memory_errors();
+                        let place = errors.channels().get(index).copied().unwrap_or_default();
+                        let count = if corrected { place.corrected } else { place.uncorrected };
+                        writeln!(text, "{count}")
+                    })
+                };
+                dir.add("dimm_ce_count", counter(true)?)?;
+                dir.add("dimm_ue_count", counter(false)?)?;
+                Ok(dir)
+            }
+        }
     }
 }

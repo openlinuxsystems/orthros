@@ -405,6 +405,7 @@ extern "C" fn ap_entry(index: usize) -> ! {
     mce::init_cpu();
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
     apic::init_cpu(madt, acpi_uid(index));
+    mce::init_cpu_interrupt();
     kvm::init_cpu();
     time::start_tick();
     radix_klog::tracepoint!("smp.online", index, apic::id());

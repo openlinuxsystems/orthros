@@ -191,6 +191,18 @@ impl Cpu for Arch {
     fn poll_machine_checks(found: &mut radix_hal::MachineCheckFound<'_>) {
         mce::poll(found);
     }
+
+    fn corrected_error_interrupt() -> Option<&'static str> {
+        mce::corrected_interrupt()
+    }
+
+    fn set_corrected_error_handler(handler: fn()) {
+        mce::set_corrected_handler(handler);
+    }
+
+    fn mask_corrected_errors(masked: bool) {
+        mce::mask_corrected(masked);
+    }
 }
 
 impl CpuLocal for Arch {
@@ -906,6 +918,7 @@ impl Platform for Arch {
             }
         }
         apic::init_cpu(madt, smp::acpi_uid(0));
+        mce::init_cpu_interrupt();
         kvm::init_cpu();
         if let Some(madt) = madt {
             apic::init_ioapics(madt);

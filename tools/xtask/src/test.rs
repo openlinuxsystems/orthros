@@ -1034,7 +1034,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "machine-check",
-        about: "a corrected error QEMU puts in a machine-check bank is logged at the next read; an uncorrected one panics, and the next boot finds it in its bank",
+        about: "a corrected error QEMU puts in a machine-check bank is logged at the next read, and a memory controller's counted by channel in Linux's EDAC files; an uncorrected one panics, and the next boot finds it in its bank",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "mce-poll=1 panic=0",
@@ -3903,6 +3903,27 @@ fn machine_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "Machine check: CPU 1 bank 2: corrected data read error in the level 0 data cache, \
          address 0x12345000 (status 0x9c00000000000134, misc 0x86)",
     )?;
+    // Memory controllers' errors are counted (ADR 0169): a corrected read
+    // error on channel 1 of bank 3 from each CPU, and one of bank 4 that
+    // names no channel.
+    for cpu in [0, 1] {
+        vm.monitor(&format!("mce {cpu} 3 0x9c00000000000091 0 0x20000000 0x86"))?;
+        vm.expect(&format!(
+            "Machine check: CPU {cpu} bank 3: corrected memory read error on channel 1, address \
+             0x20000000 (status 0x9c00000000000091, misc 0x86)"
+        ))?;
+    }
+    vm.monitor("mce 0 4 0x9c0000000000009f 0 0x20001000 0x86")?;
+    vm.expect(
+        "Machine check: CPU 0 bank 4: corrected memory read error, address 0x20001000 (status \
+         0x9c0000000000009f, misc 0x86)",
+    )?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    vm.type_text(
+        "cd /kernel/devices/system/edac/mc/mc0; echo edac $(cat ce_count ce_noinfo_count \
+         ue_count dimm0/dimm_ce_count dimm0/dimm_label) $(ls | wc -l) $(ls -d dimm*)\n",
+    )?;
+    vm.expect_screen(&["edac 3 1 0 2 bank 3 channel 1 7 dimm0"])?;
     // CPU 0, bank 1: VAL, UC, EN, ADDRV and PCC, a memory read error, with
     // only MCIP in MCG_STATUS: the interrupted code cannot restart.
     let fatal = "bank 1: uncorrected memory read error, address 0x9876000; the processor's \
