@@ -40,6 +40,9 @@
 #![deny(unsafe_code)]
 // `AllocatorClone`, which `Arc`s in the heap need to be cloned.
 #![cfg_attr(not(kani), feature(allocator_ext))]
+// Kani's own, older nightly has the allocator API, which leases use,
+// unstable still.
+#![cfg_attr(kani, feature(allocator_api))]
 
 extern crate alloc;
 
