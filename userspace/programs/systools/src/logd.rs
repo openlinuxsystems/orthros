@@ -479,7 +479,9 @@ impl Writer {
     /// if `dry_run`, never the ones being written. A removal is a security
     /// event, saying `why`.
     fn trim(&mut self, policy: &Policy, dry_run: bool, why: &str) -> Trimmed {
-        self.since_trim = 0;
+        if !dry_run {
+            self.since_trim = 0;
+        }
         let audit_dir = self.dir.join(AUDIT);
         let list = |dir: &Path| -> Vec<(String, u64)> {
             day_files(dir)
@@ -534,9 +536,10 @@ struct TrimAsk {
 /// The policy `limits` set for the log in `dir`.
 fn settings_policy(limits: &Limits, dir: &Path) -> Policy {
     let size = df::statvfs(dir.as_os_str()).map_or(0, |space| space.size);
+    let days = |days: u64| (days > 0).then_some(days);
     Policy {
-        days: limits.keep_days,
-        audit_days: limits.audit_keep_days,
+        days: days(limits.keep_days),
+        audit_days: days(limits.audit_keep_days),
         cap: limits.cap(size),
         log_cap: 0,
     }
@@ -1126,7 +1129,7 @@ fn trim(
     answering: &Answering,
 ) -> Result<(), Answer> {
     let policy = (request.keep_days.is_some() || request.keep_bytes.is_some()).then(|| Policy {
-        days: request.keep_days.unwrap_or(0),
+        days: request.keep_days,
         log_cap: request.keep_bytes.unwrap_or(0),
         ..Policy::default()
     });

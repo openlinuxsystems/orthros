@@ -38,7 +38,8 @@ process that asked for it.
 	and so on), or *KB*, *MB*, *GB*, *TB* (powers of 1000).
 
 *-d*, *--days* _days_
-	Remove the log's day files older than _days_ days.
+	Remove the log's day files older than _days_ days; with 0, all of
+	them but today's.
 
 # EXIT STATUS
 

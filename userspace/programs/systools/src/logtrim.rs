@@ -107,10 +107,10 @@ impl Limits {
 /// What one trim goes by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Policy {
-    /// Days the log keeps; 0 for no limit.
-    pub days: u64,
-    /// Days the audit log keeps; 0 for no limit.
-    pub audit_days: u64,
+    /// Days the log keeps: of 0, today's alone; None for no limit.
+    pub days: Option<u64>,
+    /// Days the audit log keeps; None for no limit.
+    pub audit_days: Option<u64>,
     /// The most bytes both take; 0 for no limit.
     pub cap: u64,
     /// The most bytes the log takes, without the audit log; 0 for no
@@ -151,8 +151,10 @@ pub fn plan(
 ) -> Vec<(String, u64)> {
     let today_name = logd::day_file(today as u64 * 86_400 * 1_000_000_000);
     let kept = |name: &str| name == today_name || writing.contains(&name);
-    let old = |name: &str, days: u64| {
-        days > 0 && !kept(name) && day_of(name).is_some_and(|day| day < today - days as i64)
+    let old = |name: &str, days: Option<u64>| {
+        days.is_some_and(|days| {
+            !kept(name) && day_of(name).is_some_and(|day| day < today.saturating_sub_unsigned(days))
+        })
     };
     let mut doomed: Vec<(String, u64)> = Vec::new();
     let mut log_left: Vec<&(String, u64)> = Vec::new();
@@ -293,7 +295,7 @@ mod tests {
             doomed.into_iter().map(|f| f.0).collect()
         };
         // By days: the log's of July, and the audit log's of a year ago.
-        let policy = Policy { days: 90, audit_days: 365, ..Policy::default() };
+        let policy = Policy { days: Some(90), audit_days: Some(365), ..Policy::default() };
         assert_eq!(
             names(plan(&log, &audit, today, &policy, &[])),
             ["2026-07-01.jsonl", "audit/2025-10-01.jsonl"]
@@ -318,5 +320,11 @@ mod tests {
             ["2026-07-01.jsonl", "2026-08-01.jsonl"]
         );
         assert!(plan(&log, &audit, today, &Policy::default(), &[]).is_empty());
+        // Days of 0: every day file of the log but today's.
+        let policy = Policy { days: Some(0), ..Policy::default() };
+        assert_eq!(
+            names(plan(&log, &audit, today, &policy, &[])),
+            ["2026-07-01.jsonl", "2026-08-01.jsonl", "2026-10-29.jsonl"]
+        );
     }
 }
