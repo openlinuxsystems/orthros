@@ -121,6 +121,7 @@ dependencies = [
  "radix-klog",
  "radix-ksyms",
  "radix-lockdep",
+ "radix-mca",
  "radix-mm",
  "radix-nvme",
  "radix-posix",

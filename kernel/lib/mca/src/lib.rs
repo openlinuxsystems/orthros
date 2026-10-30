@@ -24,6 +24,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod corrected;
+
 use core::fmt;
 
 /// IA32_MCG_CAP: how many banks there are, in its low 8 bits.

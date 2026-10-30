@@ -22,18 +22,32 @@
 //! end polls first. A fatal one panics with [`describe`]'s account of it.
 //! The poll names the page of an uncorrected error the CPU went on after,
 //! which the kernel retires.
+//!
+//! Corrected errors interrupt where the CPU can (ADR 0169,
+//! [`radix_mca::corrected`]): through the local APIC's CMCI entry on
+//! Intel, from the banks each CPU claims, and through the extended LVT
+//! entry the firmware named on AMD, from the banks whose error counter can
+//! interrupt. Both use [`VECTOR_CORRECTED_ERROR`], whose handler only asks
+//! the kernel to read the banks; the poll gives each error's count, from
+//! the status's on Intel and the bank's counter on AMD, which it starts
+//! again.
+//!
+//! [`VECTOR_CORRECTED_ERROR`]: crate::interrupts::VECTOR_CORRECTED_ERROR
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use radix_klog::TextBuf;
+use radix_mca::corrected::{self, CAP_CMCI, Msrs};
 use radix_mca::{
     ADDRESS_VALID, BankError, CAP_COUNT, CAP_CTL, CAP_RECOVERY, MISC_VALID, Mca, RIPV, UNCORRECTED,
     VALID, Verdict, bad_page, fatal,
 };
-use radix_sync::SpinLock;
+use radix_sync::{Once, SpinLock};
 
+use crate::apic;
 use crate::cpu::{self, rdmsr, wrmsr};
+use crate::interrupts::VECTOR_CORRECTED_ERROR;
 
 /// IA32_MCG_CAP, IA32_MCG_STATUS and IA32_MCG_CTL.
 const MCG_CAP: u32 = 0x179;
@@ -60,6 +74,16 @@ static AMD: AtomicBool = AtomicBool::new(false);
 static HAS_CTL: AtomicBool = AtomicBool::new(false);
 /// Bank 0's control belongs to the firmware.
 static SKIP_BANK0: AtomicBool = AtomicBool::new(false);
+/// Intel's CMCI: IA32_MCG_CAP has it, and the local APIC its LVT entry.
+static CMCI: AtomicBool = AtomicBool::new(false);
+/// The banks some CPU claimed for CMCI, or whose AMD counter interrupts,
+/// one bit each; 0 if none does.
+static INTERRUPTING: AtomicU32 = AtomicU32::new(0);
+/// AMD: the extended LVT entry the counters raise; [`NO_LVT`] if none.
+static THRESHOLD_LVT: AtomicU8 = AtomicU8::new(NO_LVT);
+const NO_LVT: u8 = u8::MAX;
+/// The kernel's handler for [`VECTOR_CORRECTED_ERROR`].
+static CORRECTED_HANDLER: Once<fn()> = Once::new();
 /// Held while a CPU reads and clears its banks, so that a bank several
 /// CPUs share is read by one of them.
 static POLLING: SpinLock<()> = SpinLock::new(());
@@ -78,7 +102,7 @@ pub fn init_boot_cpu(off: bool) {
     // SAFETY: CPUID says the machine-check architecture's MSRs exist.
     let cap = unsafe { rdmsr(MCG_CAP) };
     let (family, model, _) = cpu::family_model_stepping();
-    let amd = matches!(&cpu::vendor(), b"AuthenticAMD" | b"HygonGenuine");
+    let amd = cpu::is_amd();
     // SUCCOR: CPUID 0x80000007's EBX bit 1.
     let succor =
         cpu::max_extended_leaf() >= 0x8000_0007 && cpu::cpuid(0x8000_0007, 0).ebx & (1 << 1) != 0;
@@ -86,6 +110,7 @@ pub fn init_boot_cpu(off: bool) {
     RECOVERY.store(if amd { succor } else { cap & CAP_RECOVERY != 0 }, Ordering::Relaxed);
     HAS_CTL.store(cap & CAP_CTL != 0, Ordering::Relaxed);
     SKIP_BANK0.store(cpu::is_intel() && family == 6 && model < 0x1a, Ordering::Relaxed);
+    CMCI.store(!amd && cap & CAP_CMCI != 0, Ordering::Relaxed);
     BANKS.store(((cap & CAP_COUNT) as usize).min(MAX_BANKS), Ordering::Release);
     init_cpu();
 }
@@ -109,6 +134,86 @@ pub fn init_cpu() {
             wrmsr(register(bank, 0), u64::MAX);
         }
         cpu::write_cr4(cpu::cr4() | CR4_MCE);
+    }
+}
+
+/// The running CPU's machine-check registers, for [`radix_mca::corrected`],
+/// which reads and writes only the banks' IA32_MCi_CTL2 and MCi_MISC.
+struct Registers;
+
+impl Msrs for Registers {
+    fn read(&mut self, msr: u32) -> u64 {
+        // SAFETY: `corrected` reads only the registers of banks below
+        // IA32_MCG_CAP's count, IA32_MCi_CTL2 where it says CMCI exists.
+        unsafe { rdmsr(msr) }
+    }
+
+    fn write(&mut self, msr: u32, value: u64) {
+        // SAFETY: as in `read`; the values only set up CMCI and the error
+        // counters.
+        unsafe { wrmsr(msr, value) }
+    }
+}
+
+/// Sets up this CPU's interrupt for corrected errors, once its local APIC
+/// is: claims its banks for CMCI on Intel, or starts its banks' error
+/// counters on AMD, and points the APIC's entry at
+/// [`VECTOR_CORRECTED_ERROR`] if any bank interrupts. The CPU's banks are
+/// polled either way.
+pub fn init_cpu_interrupt() {
+    let banks = BANKS.load(Ordering::Acquire);
+    if banks == 0 {
+        return;
+    }
+    if AMD.load(Ordering::Relaxed) {
+        let found = corrected::arm_thresholds(&mut Registers, 0..banks, apic::extended_lvts());
+        if let Some(lvt) = found.lvt.filter(|_| found.interrupting != 0) {
+            THRESHOLD_LVT.store(lvt, Ordering::Relaxed);
+            apic::set_extended_lvt(lvt, VECTOR_CORRECTED_ERROR, false);
+            INTERRUPTING.fetch_or(found.interrupting, Ordering::Relaxed);
+        }
+    } else if CMCI.load(Ordering::Relaxed) && apic::has_cmci() {
+        let first = usize::from(SKIP_BANK0.load(Ordering::Relaxed));
+        let claimed = corrected::claim_cmci(&mut Registers, first..banks);
+        if claimed != 0 {
+            apic::set_cmci(VECTOR_CORRECTED_ERROR, false);
+            INTERRUPTING.fetch_or(claimed, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What interrupts for corrected errors, for the log.
+pub fn corrected_interrupt() -> Option<&'static str> {
+    if INTERRUPTING.load(Ordering::Relaxed) == 0 {
+        None
+    } else if AMD.load(Ordering::Relaxed) {
+        Some("AMD's error thresholds")
+    } else {
+        Some("CMCI")
+    }
+}
+
+/// Sets the kernel's handler for corrected errors.
+pub fn set_corrected_handler(handler: fn()) {
+    let _ = CORRECTED_HANDLER.set(handler);
+}
+
+/// [`VECTOR_CORRECTED_ERROR`]'s handler.
+pub fn on_corrected_interrupt() {
+    radix_klog::tracepoint!("mce.corrected", crate::percpu::current_index());
+    if let Some(handler) = CORRECTED_HANDLER.get() {
+        handler();
+    }
+}
+
+/// Masks this CPU's interrupt for corrected errors, or unmasks it.
+pub fn mask_corrected(masked: bool) {
+    let lvt = THRESHOLD_LVT.load(Ordering::Relaxed);
+    if lvt != NO_LVT {
+        apic::set_extended_lvt(lvt, VECTOR_CORRECTED_ERROR, masked);
+    } else if INTERRUPTING.load(Ordering::Relaxed) != 0 {
+        // A CPU that claimed no bank never gets one; masking it is harmless.
+        apic::set_cmci(VECTOR_CORRECTED_ERROR, masked);
     }
 }
 
@@ -136,11 +241,14 @@ fn read(bank: usize) -> Option<BankError> {
     }
 }
 
-/// Reads and clears this CPU's banks, then calls `found` with each error
-/// and the page it says went bad (not under the lock, so that it may log).
+/// Reads and clears this CPU's banks, then calls `found` with each error,
+/// how many it stands for, and the page it says went bad (not under the
+/// lock, so that it may log). On AMD each bank's counter starts again.
 pub fn poll(found: &mut radix_hal::MachineCheckFound<'_>) {
     let banks = banks();
     let mut errors = [None; MAX_BANKS];
+    let mut counted = [0; MAX_BANKS];
+    let amd = AMD.load(Ordering::Relaxed);
     {
         let _one = POLLING.lock();
         for (bank, slot) in errors.iter_mut().enumerate().take(banks) {
@@ -149,12 +257,24 @@ pub fn poll(found: &mut radix_hal::MachineCheckFound<'_>) {
                 // SAFETY: writing 0 to a status register clears it.
                 unsafe { wrmsr(register(bank, 1), 0) };
             }
+            if amd {
+                counted[bank] = corrected::take_threshold(&mut Registers, bank);
+            }
         }
     }
     let mca = mca();
+    let cmci = CMCI.load(Ordering::Relaxed);
     for (bank, error) in errors.iter().enumerate() {
         if let Some(error) = error {
-            found(bank, error.corrected(), bad_page(error, mca), error);
+            let count = corrected::errors(error, cmci);
+            found(&radix_hal::MachineCheck {
+                bank,
+                corrected: error.corrected(),
+                count: if error.corrected() { count.max(counted[bank]) } else { count },
+                memory: corrected::memory_error(error.status).map(|memory| memory.channel),
+                page: bad_page(error, mca),
+                what: error,
+            });
         }
     }
 }

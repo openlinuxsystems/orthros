@@ -81,6 +81,14 @@ impl Cpu for Arch {
     }
 
     fn poll_machine_checks(_found: &mut radix_hal::MachineCheckFound<'_>) {}
+
+    fn corrected_error_interrupt() -> Option<&'static str> {
+        None
+    }
+
+    fn set_corrected_error_handler(_handler: fn()) {}
+
+    fn mask_corrected_errors(_masked: bool) {}
 }
 
 impl CpuLocal for Arch {

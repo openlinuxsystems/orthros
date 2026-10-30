@@ -64,6 +64,9 @@ pub const VECTOR_TLB: u8 = 0x41;
 pub const VECTOR_RESCHEDULE: u8 = 0x42;
 /// First vector the legacy PICs are remapped to (they stay masked).
 pub const VECTOR_PIC_BASE: u8 = 0x20;
+/// Vector of the interrupts for corrected machine-check errors: Intel's
+/// CMCI and AMD's thresholds (ADR 0169), Linux's vector for both.
+pub const VECTOR_CORRECTED_ERROR: u8 = 0xf9;
 /// Vector of local APIC errors.
 pub const VECTOR_APIC_ERROR: u8 = 0xfe;
 /// The local APIC's spurious-interrupt vector.
@@ -485,6 +488,10 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             // virtual machine.
             crate::apic::end_of_interrupt();
             crate::paging::serve_shootdown();
+        }
+        VECTOR_CORRECTED_ERROR => {
+            crate::mce::on_corrected_interrupt();
+            crate::apic::end_of_interrupt();
         }
         VECTOR_APIC_ERROR => {
             let status = crate::apic::read_error_status();

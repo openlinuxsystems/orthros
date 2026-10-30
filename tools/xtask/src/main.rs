@@ -199,8 +199,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    watchdog unpetted, and it restarts the machine (QEMU's
                    i6300esb under BIOS, q35's TCO timer under UEFI)
   machine-check    QEMU puts errors in the CPUs' machine-check banks: a
-                   corrected one is logged, an uncorrected one panics and
-                   the next boot finds it
+                   corrected one is logged, memory errors are counted by
+                   channel, an uncorrected one panics and the next boot
+                   finds it
   machine-check-program   bad memory a program reads ends only it, with
                    SIGBUS, and its page leaves use for good
   spark-oom        a service that runs the machine out of memory is stopped
