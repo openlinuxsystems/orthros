@@ -191,6 +191,52 @@ _/kernel/class/power_supply/_*name*_/model_name_, _manufacturer_, _serial_number
 	while its bay is empty, fails to read with EIO, as Linux's fail with
 	ENODEV.
 
+_/kernel/devices/system/cpu/possible_, _present_, _online_
+	The CPUs the machine has, and those that run threads, as Linux's
+	lists: *0-7*, which util-linux's lscpu reads.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/scaling_driver_
+	Where CPU _n_ picks its own speed (*dukovo-boot*(7)'s *CPU
+	FREQUENCY*): the Linux driver for its control, *intel_pstate* for
+	Intel's HWP or *amd-pstate-epp* for AMD's CPPC. Each CPU has a
+	policy, as with those drivers, and _/kernel/devices/system/cpu/cpu_*n*_/cpufreq_
+	is a link to it. Linux's cpupower and powertop read these.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/affected_cpus_, _related_cpus_
+	The CPU, *n*.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/cpuinfo_min_freq_, _cpuinfo_max_freq_
+	Its lowest and highest frequency, in kHz.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/scaling_min_freq_, _scaling_max_freq_
+	Those it is asked to stay between, in kHz: by default, all of them.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/scaling_cur_freq_
+	The frequency it runs at, in kHz, measured over 10 ms when the file
+	is read (or in the last 100 ms), from its APERF and MPERF counters;
+	the base frequency if it slept throughout.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/scaling_governor_, _scaling_available_governors_
+	*powersave*: the CPU picks its speed within the range itself, which
+	Linux's drivers call so.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/energy_performance_preference_
+	Where the CPU takes one, the energy preference it is asked for:
+	*performance*, *balance_performance*, *balance_power* or *power*, or
+	the number from 0 to 255 for another (*dukovo-boot*(7)'s *epp*).
+	_energy_performance_available_preferences_ lists the names, and
+	*default*, as Linux's.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/base_frequency_
+	Intel's: the frequency it can keep up, in kHz.
+
+_/kernel/devices/system/cpu/cpufreq/policy_*n*_/amd_pstate_highest_perf_, _amd_pstate_max_freq_, _amd_pstate_lowest_nonlinear_freq_
+	AMD's: its highest level, its highest frequency, and its most
+	efficient frequency (kHz).
+
+	The files are read-only: the range and the preference are set at
+	boot.
+
 _/kernel/devices/system/edac/mc/mc0/ce_count_, _ue_count_
 	While the CPUs' machine-check banks are read (*dukovo-boot*(7)'s
 	*MACHINE CHECKS*): how many memory errors the memory controllers

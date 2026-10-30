@@ -148,6 +148,7 @@ _/system/resources/licenses/_
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*.
+. Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -477,6 +478,16 @@ them to *init*, and the kernel does not read them.
 	itself, as before Phase 11c. For firmware whose AML misbehaves. See
 	*ACPI*.
 
+*pstate*=off
+	Leave the CPUs' speed to the firmware, though they have Intel's HWP
+	or AMD's CPPC, as Linux's *intel_pstate=disable* and
+	*amd_pstate=disable* do. See *CPU FREQUENCY*.
+
+*epp*=_preference_
+	Ask the CPUs for this energy preference, by Linux's names:
+	*performance*, *balance_performance*, *balance_power* or *power*.
+	By default the firmware's stays. See *CPU FREQUENCY*.
+
 *iommu*=off
 	Leave the IOMMU's DMA remapping off, so that every device reaches
 	all memory, as before Phase 11d. See *IOMMU*.
@@ -645,6 +656,25 @@ With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
 runs; the kernel hears a fixed power button by itself and powers off
 with the sleep types of the DSDT's _\_S5_ (ADR 0142), and no battery,
 adapter or lid is found.
+
+# CPU FREQUENCY
+
+Intel's CPUs from Skylake on and most of AMD's from Zen 3 on pick their
+own speed, within a range of performance levels and an energy preference
+the kernel asks for: Intel's hardware P-states (HWP) and AMD's CPPC
+(ADR 0202). Once the machine checks are on, unless *pstate=off*, each
+CPU's work thread turns its control on and asks for every level from its
+lowest to its highest, at the CPU's own choice, with the firmware's
+energy preference or the one *epp* names, as Linux's _intel_pstate_ and
+_amd-pstate-epp_ drivers do. The log says what the CPUs can do:
+
+	CPU frequency: Intel's HWP on 8 CPUs, 400 to 3400 MHz, base 1800 MHz, energy preference balance_performance
+
+Each CPU's policy is in _/kernel/devices/system/cpu/cpufreq_, as on Linux
+(*radix-sysfs*(5)). CPUs with neither control, as QEMU's even under KVM,
+keep the firmware's setting:
+
+	CPU frequency: left to the firmware: the CPUs have neither Intel's HWP nor AMD's CPPC
 
 # IOMMU
 

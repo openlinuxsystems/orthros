@@ -41,6 +41,7 @@ radix-mca = { path = "../lib/mca" }
 radix-mm = { path = "../mm" }
 radix-net = { path = "../net" }
 radix-posix = { path = "../lib/posix" }
+radix-pstate = { path = "../lib/pstate" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-scsi = { path = "../drivers/scsi" }

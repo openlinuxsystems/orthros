@@ -25,6 +25,7 @@ radix-klog = { path = "../../lib/klog" }
 radix-mca = { path = "../../lib/mca" }
 radix-microcode = { path = "../../lib/microcode" }
 radix-mm = { path = "../../mm" }
+radix-pstate = { path = "../../lib/pstate" }
 radix-random = { path = "../../lib/random" }
 radix-relocs = { path = "../../lib/relocs" }
 radix-sync = { path = "../../lib/sync" }

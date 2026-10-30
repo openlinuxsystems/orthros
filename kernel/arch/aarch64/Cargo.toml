@@ -16,6 +16,7 @@ bench = false
 
 [dependencies]
 radix-hal = { path = "../../hal" }
+radix-pstate = { path = "../../lib/pstate" }
 
 [lints]
 workspace = true

@@ -81,6 +81,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-net",
     "radix-nvme",
     "radix-posix",
+    "radix-pstate",
     "radix-random",
     "radix-relocs",
     "radix-sched",
@@ -3570,6 +3571,10 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("ACPI: uACPI 7.0.0 runs the firmware's AML")?;
     }
+    // QEMU's CPUs pick no speed of their own, even under KVM (ADR 0202).
+    vm.expect(
+        "CPU frequency: left to the firmware: the CPUs have neither Intel's HWP nor AMD's CPPC",
+    )?;
     vm.expect(&format!("Timer: all {cpus} CPUs take timer interrupts at 100 Hz"))?;
     if cpus > 1 {
         vm.expect(&format!("IPI: all {} other CPUs answered a ping", cpus - 1))?;
@@ -4889,6 +4894,12 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     vm.expect(&format!("storage: /kernel/version: Radix {VERSION} ({RELEASE} {VERSION})"))?;
     vm.expect("storage: /kernel/bus/pci/devices: ")?;
+    let cpus = if case.cpus > 1 { format!("0-{}", case.cpus - 1) } else { "0".into() };
+    vm.expect(&format!(
+        "storage: /kernel/devices/system/cpu: possible {cpus}, present {cpus}, online {cpus}"
+    ))?;
+    // QEMU's CPUs pick no speed of their own, even under KVM.
+    vm.expect("storage: /kernel/devices/system/cpu/cpufreq: 0 policies")?;
     vm.expect("storage: /processes lists ")?;
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
