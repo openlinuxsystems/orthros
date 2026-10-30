@@ -661,6 +661,15 @@ _target/userspace/_).
 		event for a page that is not mapped, so the test counts none (ADR
 		0165, 0166).
 
+	*net*
+		Boot 2 CPUs under UEFI from the USB stick with a virtio network
+		card on QEMU's user network, behind QEMU's VT-d unit, and
+		*selftest=net* with *ip=10.0.2.15/24* and *gateway=10.0.2.2*: the
+		card must be found with the MAC address QEMU gives it and 256
+		slots each way, take the address and router of the flags, and
+		QEMU's router must answer all four pings (*radix-debug*(7), ADR
+		0180, 0181).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real

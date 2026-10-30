@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-net"
+description = "The Radix kernel's TCP/IP stack, on smoltcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+# Without `alloc`: every buffer is lent to it (ADR 0180). A neighbour
+# cache of 64 entries, as each one is looked for in turn.
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-icmp",
+    "auto-icmp-echo-reply",
+    "iface-neighbor-cache-count-64",
+] }
+
+[lints]
+workspace = true

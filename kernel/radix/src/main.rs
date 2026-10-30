@@ -60,6 +60,7 @@ mod iommutest;
 mod join;
 mod kdb;
 mod mce;
+mod net;
 mod oom;
 mod panic;
 mod percpu;
@@ -237,6 +238,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     oom::start();
     usb::init(flags.value("usb") == Some("off"));
     usb::dbc::init(flags.has("dbc"));
+    net::init(flags.value("ip"), flags.value("gateway"));
     fs::disk::init();
     fs::writeback::start();
     fs::kmsg::start();

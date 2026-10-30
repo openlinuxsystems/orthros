@@ -468,6 +468,16 @@ them to *init*, and the kernel does not read them.
 	Leave the IOMMU's DMA remapping off, so that every device reaches
 	all memory, as before Phase 11d. See *IOMMU*.
 
+*ip*=_address_/_prefix_
+	Give the first network card this IPv4 address, such as
+	*10.0.2.15/24*; without a prefix it is a /32. Until *netd* configures
+	the network (Phase 12a), this is the only way a card gets an
+	address. See *NETWORK*.
+
+*gateway*=_address_
+	Send the first network card's IPv4 packets for other networks
+	through this router, such as *10.0.2.2*. See *NETWORK*.
+
 *font*=_size_
 	Draw the framebuffer console with the Spleen font of this size:
 	*8x16*, *12x24* or *16x32*.
@@ -479,7 +489,8 @@ them to *init*, and the kernel does not read them.
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
 	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
-	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz* or *bench*.
+	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz*, *iommu*, *net* or
+	*bench*.
 	See *radix-debug*(7). *ob test* uses these. The first program does
 	not start after a self-test, unless *init-after-selftest* is given.
 
@@ -693,6 +704,31 @@ says what it did with its own:
 	USB: bus 2: the debug host on port 3 reads the console
 
 See *DEBUG CAPABILITY CONSOLE* in *radix-debug*(7).
+
+# NETWORK
+
+The PCI scan hands each virtio network card to its driver, which gives
+it a kernel thread, _net0_, _net1_ and on, up to eight cards. Each card
+has a TCP/IP stack of its own in the kernel, on smoltcp (ADR 0180). The
+driver copies each frame between the stack and slots of DMA memory that
+belong to the card, 256 for receiving and 256 for sending, and asks for
+no offloads (ADR 0181). The card's queues raise one MSI-X interrupt,
+which wakes the thread; the thread also wakes when the stack has a timer
+due, and every 10 ms otherwise.
+
+	Net: net0 is a virtio network card at 0000:00:03.0, MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector 0x52
+	Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2
+
+So far the stack answers ARP and pings, and the kernel's own code pings
+with it: there are no sockets for programs yet (Phase 12a). The first
+card takes the address of the *ip* and *gateway* flags, and the others
+none. *selftest=net* pings the router four times from the first card,
+giving it QEMU's user-network address, 10.0.2.15/24 through 10.0.2.2,
+when the flags gave it none. The *net* boot case of *ob*(1) runs it
+behind QEMU's VT-d unit:
+
+	Net: 10.0.2.2 answered ping 1 in 7.792 ms
+	selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
 
 # REAL HARDWARE
 

@@ -14,11 +14,11 @@ use radix_hw::{Dma, Mmio, Registers, fake_memory, fake_memory_write};
 use crate::blk::{Blk, Op, Outcome, SECTOR, feature};
 use crate::{Error, Transport, device_type, feature as common_feature, status};
 
-const BAR_SIZE: usize = 0x4000;
+pub(crate) const BAR_SIZE: usize = 0x4000;
 const SECTORS: u64 = 64;
 
 /// Configuration space bytes, with BAR 4 a 16 KiB 64-bit memory BAR.
-struct Config(Mutex<Vec<u8>>);
+pub(crate) struct Config(Mutex<Vec<u8>>);
 
 impl Registers for Config {
     fn read(&self, offset: usize, size: usize) -> u64 {
@@ -40,7 +40,7 @@ impl Registers for Config {
     }
 }
 
-fn config_space(subsystem: u16, device: u16) -> Arc<Config> {
+pub(crate) fn config_space(subsystem: u16, device: u16) -> Arc<Config> {
     let mut b = std::vec![0u8; pci::CONFIG_SIZE];
     let mut put = |offset: usize, data: &[u8]| b[offset..offset + data.len()].copy_from_slice(data);
     put(0x00, &0x1af4u16.to_le_bytes());
@@ -305,12 +305,12 @@ const FEATURES: u64 = common_feature::VERSION_1
 /// The most requests the tests have in flight, a table each.
 const REQUESTS: usize = 64;
 
-fn function(subsystem: u16, device_id: u16) -> Function {
+pub(crate) fn function(subsystem: u16, device_id: u16) -> Function {
     let config = Mmio::fake(config_space(subsystem, device_id), pci::CONFIG_SIZE);
     Function::probe(Address { segment: 0, bus: 0, device: 3, function: 0 }, config).unwrap()
 }
 
-fn alloc(pages: usize) -> Option<Dma> {
+pub(crate) fn alloc(pages: usize) -> Option<Dma> {
     Some(Dma::fake(pages * 4096))
 }
 

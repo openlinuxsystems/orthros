@@ -31,6 +31,10 @@ const ALLOWED: &[(&str, &str)] = &[
     ("radix::user::loader::start", "starts Spark, once, on the boot CPU's 64 KiB stack"),
     ("radix::fs::disk::virtio::bind", "sets up a disk at boot, on the boot CPU's 64 KiB stack"),
     (
+        "radix::net::bind",
+        "sets up a network card and its stack at boot, on the boot CPU's 64 KiB stack",
+    ),
+    (
         "radix::fs::disk::nvme::bind",
         "sets up a controller and its disks at boot, on the boot CPU's 64 KiB stack",
     ),

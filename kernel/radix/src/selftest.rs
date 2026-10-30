@@ -67,6 +67,7 @@ pub fn run(name: &str) {
         "fuzz" => usertest::fuzz(),
         "bench" => usertest::bench(),
         "iommu" => iommutest::run(),
+        "net" => crate::net::selftest(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

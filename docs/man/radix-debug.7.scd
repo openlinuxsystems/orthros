@@ -584,6 +584,16 @@ boots.
 	segment, which must not arrive within 50 ms. Reports *selftest
 	iommu: passed*.
 
+*net*
+	Needs a virtio network card on QEMU's user network, which the *net*
+	case of *ob test* adds behind QEMU's VT-d unit (see *NETWORK* in
+	*dukovo-boot*(7)). Gives the first card QEMU's address,
+	10.0.2.15/24 through the router 10.0.2.2, unless the *ip* and
+	*gateway* flags gave it one, then sends the router four echo
+	requests, one at a time, each of which must be answered within 2
+	seconds. Logs each round trip, and reports *selftest net: passed*
+	with the fastest.
+
 # TRACE POINTS
 
 A trace point is a named place in the kernel code that records an event
