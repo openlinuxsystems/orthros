@@ -207,6 +207,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   acpi-power       a battery, AC adapter, lid and power button of an ACPI
                    table of the test's, in /sys/class/power_supply and
                    /proc/acpi/button/lid
+  acpi-thermal     a thermal zone of an ACPI table of the test's, in
+                   /sys/class/thermal, warms past its trip points to the
+                   critical one, which powers the machine off
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
                    hubs and the devices behind them, follows devices
                    plugged in and pulled out, and has no Debug Capability

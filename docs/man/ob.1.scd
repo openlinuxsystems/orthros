@@ -355,6 +355,17 @@ _target/userspace/_).
 		and the fixed power button must still power the machine off
 		(*radix-sysfs*(5), *radix-proc*(5), *dukovo-boot*(7)'s *ACPI*).
 
+	*acpi-thermal*
+		Boot normally under BIOS with an SSDT of the test's
+		(_tools/xtask/src/acpi/thermal.asl_), as QEMU has no thermal
+		zone: the kernel must say what its zone is, and at the console
+		the zone's files in _/sys/class/thermal_ must read as the table
+		says. Once the console has read its temperature twice, the zone
+		warms 5 °C a read: the kernel must say it cannot slow QEMU's
+		CPUs at each step past the passive trip point, warn at the hot
+		one, and at the critical one Spark must power the machine off
+		(*radix-sysfs*(5), *dukovo-boot*(7)'s *ACPI*).
+
 	*usb-devices*
 		Boot normally under UEFI with the lock checker on and the *dbc*
 		flag, with QEMU's USB keyboard on the xHCI controller's second

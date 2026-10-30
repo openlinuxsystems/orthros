@@ -26,9 +26,10 @@
 //!   batteries and lids through, go through the controller's ports, and
 //!   its events run their `_Qxx` methods (`ec`, ADR 0201).
 //!
-//! The kernel finds devices with [`find_devices`] and evaluates their
-//! objects through [`Node`]; [`power`] reads a battery's packages as
-//! Linux does.
+//! The kernel finds devices with [`find_devices`], and thermal zones with
+//! [`find_thermal_zones`], and evaluates their objects through [`Node`];
+//! [`power`] reads a battery's packages as Linux does, and [`thermal`] a
+//! thermal zone's trip points and the passive cooling they call for.
 //! This crate is part of the kernel's trusted computing base, as the C it
 //! links is (docs/coding-standard.md): `unsafe` is allowed only in `ffi`,
 //! where the C is called and calls back. The crate's tests run uACPI on
@@ -48,6 +49,7 @@ pub mod power;
 mod sync;
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests;
+pub mod thermal;
 mod work;
 
 use core::alloc::Allocator;
@@ -58,7 +60,8 @@ use radix_sync::Once;
 pub use ec::{Found as EmbeddedController, found as embedded_controller};
 pub use ffi::{
     Error, Node, NodeName, NodePath, Package, StartError, eval_integer, find_devices,
-    finish_events, interrupt, on_power_button, prepare_sleep, run_work, sleep, start,
+    find_thermal_zones, finish_events, interrupt, on_power_button, prepare_sleep, run_work, sleep,
+    start,
 };
 
 /// The version of uACPI in `vendor/`.

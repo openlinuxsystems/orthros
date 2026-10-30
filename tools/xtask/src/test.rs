@@ -41,6 +41,9 @@ const QEMU_EXIT_POWER_OFF: i32 = 0;
 /// argument `run_case` replaces with the file it writes it to.
 const POWER_AML: &[u8] = include_bytes!("acpi/power.aml");
 const POWER_TABLE: &str = "file=power.aml";
+/// The SSDT `acpi-thermal` gives QEMU (`src/acpi/thermal.asl`), likewise.
+const THERMAL_AML: &[u8] = include_bytes!("acpi/thermal.aml");
+const THERMAL_TABLE: &str = "file=thermal.aml";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
 /// begins with (userspace/defaults/issue).
@@ -981,6 +984,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &["-acpitable", POWER_TABLE],
         script: acpi_power,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "acpi-thermal",
+        about: "QEMU with an ACPI table of the test's: uACPI finds its thermal zone, Linux's /sys/class/thermal shows it at the console, and as it warms past its passive, hot and critical trip points the kernel says so and Spark powers the machine off",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-acpitable", THERMAL_TABLE],
+        script: acpi_thermal,
         disks: &[],
         second: None,
     },
@@ -2349,11 +2368,14 @@ fn run_case(
     let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     for arg in &mut extra {
-        if arg == POWER_TABLE {
-            let path = dir.join("power.aml");
-            std::fs::write(&path, POWER_AML).map_err(|e| format!("{}: {e}", path.display()))?;
-            *arg = format!("file={}", qemu::option_value(&path));
-        }
+        let (name, aml) = match arg.as_str() {
+            POWER_TABLE => ("power.aml", POWER_AML),
+            THERMAL_TABLE => ("thermal.aml", THERMAL_AML),
+            _ => continue,
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, aml).map_err(|e| format!("{}: {e}", path.display()))?;
+        *arg = format!("file={}", qemu::option_value(&path));
     }
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
@@ -3863,6 +3885,66 @@ fn acpi_power(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press_power_button()?;
     vm.expect("spark: the power button was pressed; powering off the machine")?;
     vm.expect("Power: powering off (ACPI S5, through uACPI)")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// QEMU with [`THERMAL_AML`] (ADR 0203): the kernel logs the zone, Linux's
+/// `/sys/class/thermal` shows it at the console, and once the console has
+/// read its temperature twice it warms 5 °C a read: past its passive trip
+/// point, where QEMU's CPUs cannot be slowed, its hot one, and to its
+/// critical one, where Spark powers the machine off.
+fn acpi_thermal(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere(
+        "Thermal: TZ00 is at 45 °C; critical at 80 °C; hot at 70 °C; passive at 60 °C; \
+         looked at when the firmware says it changed",
+    )?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text(
+        "cd /sys/class/thermal/thermal_zone0; for f in type temp mode policy \
+         trip_point_0_type trip_point_0_temp trip_point_1_type trip_point_1_temp \
+         trip_point_2_type trip_point_2_temp trip_point_2_hyst; do echo \"$f is $(cat $f)\"; \
+         done\n",
+    )?;
+    vm.expect_screen(&[
+        "type is acpitz",
+        "temp is 45000",
+        "mode is enabled",
+        "policy is step_wise",
+        "trip_point_0_type is critical",
+        "trip_point_0_temp is 80000",
+        "trip_point_1_type is hot",
+        "trip_point_1_temp is 70000",
+        "trip_point_2_type is passive",
+        "trip_point_2_temp is 60000",
+        "trip_point_2_hyst is 0",
+    ])?;
+    // The zone's fourth read: it says it changed, and warms from there, so
+    // fast that the machine may be off before a screenshot.
+    vm.type_text("clear; cat temp\n")?;
+    let slow = "the firmware picks the CPUs' speed, so the kernel cannot slow them";
+    for line in [
+        format!(
+            "Thermal: TZ00 is at 60 °C, at or past its passive trip point, 60 °C: {slow} (1 of 3)"
+        ),
+        format!(
+            "Thermal: TZ00 is at 65 °C, at or past its passive trip point, 60 °C: {slow} (2 of 3)"
+        ),
+        "Thermal: TZ00 is at 70 °C, at or past its hot trip point, 70 °C".into(),
+        format!(
+            "Thermal: TZ00 is at 70 °C, at or past its passive trip point, 60 °C: {slow} (3 of 3)"
+        ),
+        "Thermal: TZ00 is at 80 °C, at or past its critical trip point, 80 °C: powering off".into(),
+        "Power: TZ00 is too hot; asking Spark to power the machine off".into(),
+        "spark: the power button was pressed; powering off the machine".into(),
+        "Power: `spark` asked to power off the machine; syncing the filesystems".into(),
+        "Power: powering off (ACPI S5, through uACPI)".into(),
+    ] {
+        vm.expect(&line)?;
+    }
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

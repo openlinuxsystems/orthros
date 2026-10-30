@@ -149,6 +149,7 @@ _/system/resources/licenses/_
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
+  The firmware's thermal zones are watched from then on; see *ACPI*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -652,10 +653,31 @@ closed*). The batteries and adapters are in _/kernel/class/power_supply_
 and the lids in _/processes/acpi/button/lid_, as on Linux
 (*radix-sysfs*(5), *radix-proc*(5)); nothing yet acts on a closed lid.
 
+It then finds the thermal zones (ADR 0203), up to eight, and says what
+each is: its temperature, its trip points, and how often it is looked at
+(_\_TZP_), or that it is looked at when the firmware notifies a change:
+
+	Thermal: TZ00 is at 45 °C; critical at 80 °C; hot at 70 °C; passive at 60 °C; looked at every 1.0 s
+
+Once the CPUs' speed is set, the _thermal_ thread watches them, as
+Linux's step-wise governor does. At or past the passive trip point and
+warming, each look caps every CPU's highest level a fifth lower, up to
+three steps; below it and cooling, a step is undone at each look, which
+comes every _\_TSP_ meanwhile. Where the firmware picks the CPUs' speed,
+which the kernel cannot lower, the log says so. At the hot trip point
+the kernel warns, having no hibernation. At the critical one Spark is
+asked to power the machine off, as for a press of the power button, and
+the kernel powers it off itself if it is still on 30 seconds later:
+
+	Thermal: TZ00 is at 80 °C, at or past its critical trip point, 80 °C: powering off
+	Power: TZ00 is too hot; asking Spark to power the machine off
+
+The zones are in _/kernel/class/thermal_, as on Linux (*radix-sysfs*(5)).
+
 With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
 runs; the kernel hears a fixed power button by itself and powers off
 with the sleep types of the DSDT's _\_S5_ (ADR 0142), and no battery,
-adapter or lid is found.
+adapter, lid or thermal zone is found.
 
 # CPU FREQUENCY
 

@@ -12,6 +12,10 @@
 //! thread signals the notification Spark gave `notify_button`, which
 //! cannot be done with interrupts masked. The watchdog's methods go to
 //! [`crate::watchdog`] (ADR 0143).
+//!
+//! A thermal zone past its critical trip point ([`overheated`], ADR 0203)
+//! reaches Spark as a press of the button, and the thread powers the
+//! machine off itself if it is still on [`OVERHEAT_GRACE_NS`] later.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,7 +26,7 @@ use radix_abi::power::{
     StartWatchdogArgs, StartWatchdogResults, StopWatchdogArgs,
 };
 use radix_cap::{Capability, ObjectKind, Rights};
-use radix_hal::{Cpu, Devices, Platform, Smp};
+use radix_hal::{Cpu, Devices, Platform, Smp, Timer};
 use radix_klog::crashlog::Ending;
 use radix_klog::{error as log_error, info, warn};
 use radix_sync::{Once, SpinLock};
@@ -34,8 +38,16 @@ use super::{Result, UserRef, cap_error, error};
 use crate::sched::{self, Options, Policy, ThreadRef};
 use crate::{Arch, console, crashlog, watchdog};
 
+/// How long Spark has to power the machine off once a thermal zone is past
+/// its critical trip point, before the kernel does, as Linux's
+/// `hw_protection_shutdown` waits.
+pub const OVERHEAT_GRACE_NS: u64 = 30_000_000_000;
+
 /// Whether the platform hears the power button.
 static HEARD: AtomicBool = AtomicBool::new(false);
+/// When the kernel powers an overheated machine off itself; 0 while none
+/// is.
+static OVERHEAT_DEADLINE: AtomicU64 = AtomicU64::new(0);
 /// Presses of the button so far, and those passed on.
 static PRESSES: AtomicU64 = AtomicU64::new(0);
 static PASSED: AtomicU64 = AtomicU64::new(0);
@@ -82,18 +94,90 @@ fn pressed() {
     }
 }
 
+/// A thermal zone, `zone`, is past its critical trip point: Spark is asked
+/// to power the machine off, as for the power button, and the `power`
+/// thread does it if Spark has not within [`OVERHEAT_GRACE_NS`].
+pub fn overheated(zone: &str) {
+    let deadline = Arch::now_ns().saturating_add(OVERHEAT_GRACE_NS).max(1);
+    if OVERHEAT_DEADLINE.compare_exchange(0, deadline, Ordering::AcqRel, Ordering::Acquire).is_err()
+    {
+        return;
+    }
+    info!("Power: {zone} is too hot; asking Spark to power the machine off");
+    if let Some(thread) = THREAD.get() {
+        sched::wake(thread);
+    }
+}
+
+/// Tells Spark of a press of the button. Returns whether it listens.
+fn tell_spark() -> bool {
+    let listener = BUTTON.lock().clone();
+    match listener {
+        Some((notification, badge)) => {
+            notification.notify(badge);
+            true
+        }
+        None => false,
+    }
+}
+
 fn run(_: usize) {
+    let mut overheat_told = false;
     loop {
         let presses = PRESSES.load(Ordering::Acquire);
         if PASSED.swap(presses, Ordering::AcqRel) != presses {
             info!("Power: the power button was pressed");
-            match BUTTON.lock().clone() {
-                Some((notification, badge)) => notification.notify(badge),
-                None => warn!("Power: nothing listens for the power button"),
+            if !tell_spark() {
+                warn!("Power: nothing listens for the power button");
             }
         }
-        sched::block("power");
+        let deadline = OVERHEAT_DEADLINE.load(Ordering::Acquire);
+        if deadline == 0 {
+            sched::block("power");
+            continue;
+        }
+        if !overheat_told {
+            overheat_told = true;
+            if !tell_spark() {
+                log_error!("Power: nothing listens for the power button; powering off at once");
+                overheat_power_off();
+            }
+        } else if Arch::now_ns() >= deadline {
+            log_error!(
+                "Power: the machine is still on {} s after it overheated; powering it off",
+                OVERHEAT_GRACE_NS / 1_000_000_000
+            );
+            overheat_power_off();
+        }
+        sched::block_until(deadline, "power");
     }
+}
+
+/// Powers an overheated machine off without Spark, as the method does
+/// once Spark has stopped everything; halts it if the firmware cannot.
+fn overheat_power_off() -> ! {
+    watchdog::ending(false);
+    wind_down();
+    crate::acpi::power_off();
+    Arch::power_off();
+    log_error!("Power: this machine cannot be powered off by the kernel; halting it to cool");
+    Arch::stop_other_cpus();
+    Arch::halt()
+}
+
+/// Writes the filesystems back and quiets the disks and USB, before the
+/// machine ends.
+fn wind_down() {
+    if let Some(vfs) = crate::fs::vfs()
+        && let Err(err) = vfs.sync_all()
+    {
+        warn!("Power: a filesystem could not write back its changes: {err}");
+    }
+    crate::fs::disk::shutdown();
+    crate::usb::shutdown();
+    // The screen is the log's again, whatever program held it, so the last
+    // lines show.
+    console::give_back();
 }
 
 /// What a method does to the machine.
@@ -166,16 +250,7 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
     };
     info!("Power: `{}` asked to {verb} the machine; syncing the filesystems", user.process.name());
     watchdog::ending(matches!(end, End::Halt));
-    if let Some(vfs) = crate::fs::vfs()
-        && let Err(err) = vfs.sync_all()
-    {
-        warn!("Power: a filesystem could not write back its changes: {err}");
-    }
-    crate::fs::disk::shutdown();
-    crate::usb::shutdown();
-    // The screen is the log's again, whatever program held it, so the last
-    // lines show.
-    console::give_back();
+    wind_down();
     match end {
         End::PowerOff => {
             crate::acpi::power_off();

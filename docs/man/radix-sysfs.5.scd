@@ -191,6 +191,28 @@ _/kernel/class/power_supply/_*name*_/model_name_, _manufacturer_, _serial_number
 	while its bay is empty, fails to read with EIO, as Linux's fail with
 	ENODEV.
 
+_/kernel/class/thermal/thermal_zone_*n*_/type_, _temp_
+	For each thermal zone of the firmware's (*dukovo-boot*(7)'s *ACPI*),
+	in the order the namespace has them, as Linux's ACPI thermal driver
+	shows it: *acpitz*, and its temperature in thousandths of a degree
+	Celsius, read from the zone's _\_TMP_ when the file is opened. It
+	fails to read with EIO if _\_TMP_ fails. The sensors program of
+	lm-sensors and the desktops' widgets read these.
+
+_/kernel/class/thermal/thermal_zone_*n*_/mode_, _policy_, _available_policies_
+	*enabled*, and *step_wise*, the only governor of the passive
+	cooling.
+
+_/kernel/class/thermal/thermal_zone_*n*_/trip_point_*k*_type_, _trip_point_*k*_temp_, _trip_point_*k*_hyst_
+	Its trip points, in Linux's order: *critical*, *hot* and *passive*,
+	each where the zone has one; its temperature, in thousandths of a
+	degree Celsius, as the firmware last said it; and *0*.
+
+_/kernel/class/thermal/cooling_device_*n*_/type_, _max_state_, _cur_state_
+	Where the CPUs pick their own speed (*dukovo-boot*(7)'s *CPU
+	FREQUENCY*), one for each: *Processor*; *3*; and how many steps,
+	each a fifth of their highest level, passive cooling slows them by.
+
 _/kernel/devices/system/cpu/possible_, _present_, _online_
 	The CPUs the machine has, and those that run threads, as Linux's
 	lists: *0-7*, which util-linux's lscpu reads.
