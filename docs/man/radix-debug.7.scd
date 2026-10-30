@@ -546,6 +546,15 @@ boots.
 	is not running. Every CPU must always see the right frame, with and
 	without PCIDs. Reports *selftest tlb: passed*.
 
+*msr*
+	Reads EFER, which every x86-64 processor has and which must say long
+	mode is active, then MSR 2FFF_FFFFh, which no processor has: its #GP
+	must only make the read fail, as for the temperature sensors' reads
+	of registers a processor may lack. Reports *selftest msr: passed*.
+	QEMU without KVM reads MSRs it does not know as 0, and there the
+	test is skipped with a warning that says what it read; on aarch64,
+	which has no MSRs, it is skipped too.
+
 *caps*
 	Runs the capability store's test suite in spaces of its own (see
 	*radix-capabilities*(7)). It tries to use or copy capabilities it

@@ -89,6 +89,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-relocs",
     "radix-sched",
     "radix-scsi",
+    "radix-sensors",
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
@@ -1288,6 +1289,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: tlb,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "msr",
+        about: "a read of an MSR the CPU lacks faults and goes on",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=msr",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: msr,
         disks: &[],
         second: None,
     },
@@ -3938,9 +3955,15 @@ fn acpi_thermal(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "trip_point_2_temp is 60000",
         "trip_point_2_hyst is 0",
     ])?;
-    // The zone's fourth read: it says it changed, and warms from there, so
+    // The zone as hwmon's `acpitz` shows it: its fourth read.
+    vm.type_text(
+        "clear; cd /sys/class/hwmon/hwmon0; for f in name temp1_input temp1_crit; do \
+         echo \"$f is $(cat $f)\"; done\n",
+    )?;
+    vm.expect_screen(&["name is acpitz", "temp1_input is 45000", "temp1_crit is 80000"])?;
+    // The zone's fifth read: it says it changed, and warms from there, so
     // fast that the machine may be off before a screenshot.
-    vm.type_text("clear; cat temp\n")?;
+    vm.type_text("clear; cat /sys/class/thermal/thermal_zone0/temp\n")?;
     let slow = "the firmware picks the CPUs' speed, so the kernel cannot slow them";
     for line in [
         format!(
@@ -4368,6 +4391,19 @@ fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     selftest_passed(vm, "tlb")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn msr(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    if vm.kvm {
+        selftest_passed(vm, "msr")?;
+    } else {
+        // QEMU's emulation reads MSRs it does not know as 0, so only KVM,
+        // as on CI, makes the read fault.
+        vm.expect("selftest msr: skipped; MSR 2FFF_FFFFh, which no processor has, read as 0x0")?;
+        vm.expect("Boot complete.")?;
+    }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

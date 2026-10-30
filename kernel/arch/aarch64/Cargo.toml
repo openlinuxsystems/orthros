@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 radix-hal = { path = "../../hal" }
 radix-pstate = { path = "../../lib/pstate" }
+radix-sensors = { path = "../../lib/sensors" }
 
 [lints]
 workspace = true

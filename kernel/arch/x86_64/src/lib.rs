@@ -53,6 +53,7 @@ mod pstate;
 mod random;
 mod rtc;
 mod sci;
+mod sensors;
 mod serial;
 mod smp;
 mod space;
@@ -228,6 +229,18 @@ impl Cpu for Arch {
 
     fn performance_scale(levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)> {
         pstate::scale(levels)
+    }
+
+    fn chipset_temperatures(found: &mut dyn FnMut(radix_sensors::k10temp::Sensor)) {
+        sensors::chipset_sensors(found);
+    }
+
+    fn read_chipset_temperature(sensor: radix_sensors::k10temp::Sensor) -> Option<i32> {
+        sensors::read_chipset(sensor)
+    }
+
+    fn core_temperature() -> Option<radix_sensors::coretemp::Sample> {
+        sensors::core_sample()
     }
 }
 
@@ -1105,6 +1118,12 @@ impl Platform for Arch {
         }
     }
 
+    #[inline(never)]
+    fn self_test_msr() -> Option<Result<Option<u64>, &'static str>> {
+        Some(cpu::self_test_rdmsr_safe())
+    }
+
+    // Not inlined, so that the fault's backtrace names it.
     #[inline(never)]
     fn self_test_fault(test: FaultTest) -> &'static str {
         radix_klog::tracepoint!("selftest.fault");

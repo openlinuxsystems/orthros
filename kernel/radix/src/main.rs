@@ -57,6 +57,7 @@ mod crashlog;
 mod debug_console;
 mod domains;
 mod fs;
+mod hwmon;
 mod iommutest;
 mod join;
 mod kdb;
@@ -254,6 +255,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     mce::start(flags.value("mce-poll"));
     pstate::start(flags.value("pstate") == Some("off"), flags.value("epp"));
     acpi::thermal::start();
+    hwmon::find();
     check_timers(online);
     check_ipis(online);
     usb::wait_for_disks();

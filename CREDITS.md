@@ -367,6 +367,18 @@ We implement these from their published descriptions. No code is copied.
   its `Documentation/driver-api/thermal/sysfs-api.rst`
   ([ADR 0203](docs/adr/0203-thermal-zones-through-uacpi.md)).
   No code is taken from them.
+- The CPUs' temperature sensors: AMD's System Management Network and the
+  SMU's thermal block, from AMD's Processor Programming Reference for
+  families 17h, 19h and 1Ah, and Intel's digital thermal sensors, from
+  Intel's SDM (volume 3, section 15.8). Which of AMD's models have which
+  die registers, the data fabric devices to look for, the root
+  complex's SMN index and data registers, TjMax's default and the files
+  of `/kernel/class/hwmon` follow Linux's `drivers/hwmon/k10temp.c`,
+  `drivers/hwmon/coretemp.c` and `arch/x86/kernel/amd_node.c` (GPL-2.0)
+  and its `Documentation/hwmon/sysfs-interface.rst`; `k10temp`'s die
+  registers come from the zenpower project's experiments
+  ([ADR 0205](docs/adr/0205-the-cpus-temperature-sensors.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

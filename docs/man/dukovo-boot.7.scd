@@ -150,6 +150,8 @@ _/system/resources/licenses/_
   hears the power button through it; see *ACPI*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
+  The kernel then looks for the CPUs' temperature sensors; see
+  *SENSORS*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -513,7 +515,7 @@ them to *init*, and the kernel does not read them.
 *selftest*=_name_
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
-	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
+	*msr*, *caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
 	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz*, *iommu*, *net* or
 	*bench*.
 	See *radix-debug*(7). *ob test* uses these. The first program does
@@ -711,6 +713,27 @@ Each CPU's policy is in _/kernel/devices/system/cpu/cpufreq_, as on Linux
 keep the firmware's setting:
 
 	CPU frequency: left to the firmware: the CPUs have neither Intel's HWP nor AMD's CPPC
+
+# SENSORS
+
+The CPUs' own temperature sensors are read as Linux's _k10temp_ and
+_coretemp_ drivers read them (ADR 0205). AMD's Zen processors keep their
+control temperature, Tctl, and on most desktop and server models each
+core complex die's, in their System Management Unit, which the kernel
+reaches through the root complex; Intel's count each core's and each
+package's in registers every CPU reads for itself. The log says which:
+
+```
+Sensors: AMD's processor sensors (k10temp) read Tctl, Tccd1 and Tccd2
+Sensors: Intel's digital thermal sensors (coretemp) read 1 package and 4 cores, up to 100 °C
+```
+
+QEMU's CPUs have neither, even under KVM:
+
+	Sensors: the CPUs have no temperature sensor the kernel reads
+
+The sensors, and the thermal zones of *ACPI*, are in
+_/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
 
 # IOMMU
 

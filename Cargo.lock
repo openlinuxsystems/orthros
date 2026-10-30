@@ -73,6 +73,7 @@ version = "0.10.4"
 dependencies = [
  "radix-hw",
  "radix-pstate",
+ "radix-sensors",
 ]
 
 [[package]]
@@ -105,6 +106,13 @@ version = "0.10.4"
 [[package]]
 name = "radix-relocs"
 version = "0.10.4"
+
+[[package]]
+name = "radix-sensors"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
+]
 
 [[package]]
 name = "radix-sync"

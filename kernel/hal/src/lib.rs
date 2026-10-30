@@ -160,6 +160,18 @@ pub trait Cpu {
     /// highest frequency is that of where the CPUs rank their cores
     /// (AMD's), whose highest levels are then ranks.
     fn performance_scale(levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)>;
+
+    /// Calls `found` with each of the processor's temperature sensors that
+    /// its chipset reaches (ADR 0205): AMD's, which Linux's `k10temp`
+    /// shows. They are looked for at the first call.
+    fn chipset_temperatures(found: &mut dyn FnMut(radix_sensors::k10temp::Sensor));
+
+    /// Reads one of them, in thousandths of a degree Celsius.
+    fn read_chipset_temperature(sensor: radix_sensors::k10temp::Sensor) -> Option<i32>;
+
+    /// What the running CPU's own temperature sensors say (ADR 0205):
+    /// Intel's digital thermal sensors, which Linux's `coretemp` shows.
+    fn core_temperature() -> Option<radix_sensors::coretemp::Sample>;
 }
 
 /// An error a machine-check bank held, as [`Cpu::poll_machine_checks`]
@@ -732,6 +744,12 @@ pub trait Platform {
     /// panics with a full report. Returns, with the reason, only when this
     /// machine cannot run the test (no SMEP or SMAP).
     fn self_test_fault(test: FaultTest) -> &'static str;
+
+    /// Reads a model-specific register every processor has, which must
+    /// read, and one none has, which must fault and go on: what that read
+    /// gave where it did not fault (as under QEMU without KVM), or what
+    /// went wrong. `None` where the architecture has no such registers.
+    fn self_test_msr() -> Option<Result<Option<u64>, &'static str>>;
 }
 
 /// Signature of the kernel's entry point, `radix_kernel_main`, which the
