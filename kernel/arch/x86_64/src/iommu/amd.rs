@@ -12,6 +12,11 @@
 //! the firmware keeps for devices (IVMD blocks) is mapped for each device
 //! it names when the device's domain is made, and the domains of the
 //! devices a block names by ID are made right after the takeover.
+//!
+//! Interrupts are remapped (ADR 0166) if every I/O APIC is one an IVHD
+//! block names: every device's interrupts are then blocked from the
+//! takeover until it is given some, and the IOMMU's own interrupt gets
+//! an entry of the IOMMU function's, should the IOMMU remap it.
 
 use core::sync::atomic::AtomicU32;
 
@@ -22,7 +27,7 @@ use radix_hw::pci::Address;
 use radix_sync::{Once, SpinLock};
 
 use super::{Engine, Faults, MAX_UNITS, Remapper, Tables, UNITS, config, requester, requester_id};
-use crate::devices;
+use crate::{apic, devices};
 
 /// The bytes of an IOMMU's registers, its ring pointers among them.
 const REGISTER_BYTES: usize = 0x4000;
@@ -59,6 +64,15 @@ impl Covers {
         self.iommu.translates(id).unwrap_or(id)
     }
 
+    /// The device ID the interrupts of the I/O APIC `id` carry, if its
+    /// IVHD block names that I/O APIC.
+    pub(super) fn ioapic(&self, id: u8) -> Option<u16> {
+        self.iommu.devices().find_map(|devices| match devices {
+            IvrsDevices::Special { variety: 1, handle, id: device } if handle == id => Some(device),
+            _ => None,
+        })
+    }
+
     /// How many device IDs it names.
     fn count(&self) -> u32 {
         self.iommu
@@ -81,6 +95,7 @@ pub(super) fn init(sdt: &Sdt<'static>) -> bool {
         return false;
     };
     let ivrs = *IVRS.call_once(|| ivrs);
+    let interrupts = ioapics_named(&ivrs);
     let mut count = 0;
     for found in ivrs.iommus() {
         if count == MAX_UNITS {
@@ -90,7 +105,7 @@ pub(super) fn init(sdt: &Sdt<'static>) -> bool {
             );
             continue;
         }
-        if take(found, count) {
+        if take(found, count, interrupts.is_ok()) {
             count += 1;
         }
     }
@@ -99,18 +114,38 @@ pub(super) fn init(sdt: &Sdt<'static>) -> bool {
     for (index, slot) in UNITS.iter().enumerate() {
         let Some(remapper) = slot.get() else { break };
         let Some(Engine::Amd(unit)) = &remapper.engine else { continue };
-        let (found_on, caches_absent) = {
+        let (found_on, caches_absent, remapping) = {
             let unit = unit.lock_irq();
-            (unit.found_on(), unit.caches_absent())
+            (unit.found_on(), unit.caches_absent(), unit.remapping())
         };
         on = true;
-        log_unit(index, remapper, found_on, caches_absent);
+        log_unit(index, remapper, found_on, caches_absent, remapping);
+    }
+    if let (true, Err(id)) = (on, interrupts) {
+        radix_klog::info!(
+            "IOMMU: no IVHD block names I/O APIC {id}, so interrupts are not remapped; a device \
+             can raise any interrupt"
+        );
     }
     on
 }
 
-/// Takes over the IOMMU `found` as unit `index`; false if it was not used.
-fn take(found: IvrsIommu<'static>, index: usize) -> bool {
+/// Whether every I/O APIC is one an IVHD block of `ivrs` names; else the
+/// ID of one that is not.
+fn ioapics_named(ivrs: &Ivrs<'static>) -> Result<(), u8> {
+    let mut missing = None;
+    apic::ioapics(|io| {
+        let named = ivrs.iommus().any(|iommu| Covers { iommu }.ioapic(io.id).is_some());
+        if !named && missing.is_none() {
+            missing = Some(io.id);
+        }
+    });
+    missing.map_or(Ok(()), Err)
+}
+
+/// Takes over the IOMMU `found` as unit `index`, remapping interrupts if
+/// `interrupts`; false if it was not used.
+fn take(found: IvrsIommu<'static>, index: usize, interrupts: bool) -> bool {
     let Some(regs) = devices::map(found.registers, REGISTER_BYTES) else {
         radix_klog::warn!(
             "IOMMU: the registers of the IOMMU at {:#x} could not be mapped",
@@ -127,6 +162,7 @@ fn take(found: IvrsIommu<'static>, index: usize) -> bool {
                 flags: found.flags,
                 last_device: found.last_device(),
                 caches_absent: header & NP_CACHE != 0,
+                remap_interrupts: interrupts,
             };
             match Unit::new(regs, Tables, setup) {
                 Ok(unit) => Some(unit),
@@ -151,9 +187,15 @@ fn take(found: IvrsIommu<'static>, index: usize) -> bool {
     let engine = unit.map(|mut unit| {
         let msi = config.as_ref().and_then(|config| Some((config, msi(config).next()?)));
         if let Some((config, _)) = msi
-            && let Some((_, message)) = devices::allocate(0, super::on_fault, index)
+            && let Some((_, message)) = devices::allocate(None, 0, super::on_fault, index)
             && point_msi(config, message.address, message.data)
         {
+            // Its own interrupt, if the IOMMU remaps it, has an entry; the
+            // message picks it as any device's does.
+            if unit.remapping() {
+                let destination = ((message.address >> 12) & 0xff) as u8;
+                let _ = unit.remap(requester_id(own), message.data as u8, destination);
+            }
             unit.interrupt_on_events();
         }
         Engine::Amd(SpinLock::new(unit))
@@ -248,14 +290,21 @@ pub(super) fn reserve_for(source: Address) {
 }
 
 /// Logs what unit `index` does, now that it translates.
-fn log_unit(index: usize, remapper: &Remapper, found_on: bool, caches_absent: bool) {
+fn log_unit(
+    index: usize,
+    remapper: &Remapper,
+    found_on: bool,
+    caches_absent: bool,
+    remapping: bool,
+) {
     let super::Covers::Amd(covers) = &remapper.covers else { return };
     radix_klog::info!(
         "IOMMU: AMD-Vi unit {index} at {:#x} translates {} device IDs: {LEVELS}-level page \
-         tables, {DOMAINS} domains, command buffer invalidation{}{}",
+         tables, {DOMAINS} domains, command buffer invalidation{}{}{}",
         remapper.registers,
         covers.count(),
         if caches_absent { ", caching absent entries" } else { "" },
+        if remapping { ", interrupt remapping" } else { "" },
         if found_on { "; the firmware had left it on" } else { "" }
     );
 }

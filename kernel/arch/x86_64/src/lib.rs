@@ -376,16 +376,21 @@ impl Devices for Arch {
         devices::alloc_cache_page()
     }
 
-    fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hal::MsiMessage)> {
-        devices::allocate(0, handler, arg)
+    fn allocate_interrupt(
+        source: radix_hal::PciAddress,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<(u32, radix_hal::MsiMessage)> {
+        devices::allocate(Some(source), 0, handler, arg)
     }
 
     fn allocate_interrupt_at(
+        source: radix_hal::PciAddress,
         cpu: usize,
         handler: fn(usize),
         arg: usize,
     ) -> Option<(u32, radix_hal::MsiMessage)> {
-        devices::allocate(cpu, handler, arg)
+        devices::allocate(Some(source), cpu, handler, arg)
     }
 
     fn free_interrupt(vector: u32) {

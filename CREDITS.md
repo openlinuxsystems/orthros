@@ -282,14 +282,17 @@ We implement these from their published descriptions. No code is copied.
   `radix-vtd` and `radix-acpi` drive VT-d remapping units: root and
   context tables, second-level page tables, queued and register-based
   invalidation and fault recording
-  ([ADR 0164](docs/adr/0164-each-device-reaches-only-its-own-memory-behind-vt-d.md)).
+  ([ADR 0164](docs/adr/0164-each-device-reaches-only-its-own-memory-behind-vt-d.md)),
+  and interrupt remapping
+  ([ADR 0166](docs/adr/0166-each-device-raises-only-its-own-interrupts.md)).
   We use no code of Linux's or the BSDs' IOMMU drivers, or of QEMU's
   unit, which the `iommu` boot test runs against.
 - AMD's "AMD I/O Virtualization Technology (IOMMU) Specification",
   48882, revision 3.10, and the IVRS table it defines, from which
   `radix-amdvi` and `radix-acpi` drive AMD IOMMUs: the device table, the
   host page tables, the command buffer and the event log
-  ([ADR 0165](docs/adr/0165-each-device-reaches-only-its-own-memory-behind-amd-vi.md)).
+  ([ADR 0165](docs/adr/0165-each-device-reaches-only-its-own-memory-behind-amd-vi.md)),
+  and interrupt remapping (ADR 0166).
   `radix-iopt` holds the page-table code both IOMMUs share. The register
   offsets were checked against FreeBSD's `sys/x86/iommu/amd_reg.h`
   (BSD-2-Clause), from which no code is taken; nor is any from Linux's

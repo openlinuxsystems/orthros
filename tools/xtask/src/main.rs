@@ -252,8 +252,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   disk-raw-4k      the same on a virtio disk and an NVMe namespace of 4 KiB
                    sectors
   iommu            disk-raw behind QEMU's VT-d unit, each device reaching
-                   only what is mapped for it; QEMU's edu device is stopped
-                   writing where it was not given memory
+                   only what is mapped for it and raising only its own
+                   interrupts; QEMU's edu device is stopped writing where
+                   it was not given memory and raising another's interrupt
   iommu-amd        the same behind QEMU's AMD IOMMU
   disk-check       the disk check of a real machine, on an NVMe disk found
                    by its serial number; Linux's side checks it on the host

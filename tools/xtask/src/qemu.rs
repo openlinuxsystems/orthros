@@ -112,6 +112,11 @@ impl Machine {
         });
         if let Some(at) = iommu {
             args.extend(self.extra[at..at + 2].iter().cloned());
+            // KVM's own interrupt controllers cannot have an IOMMU remap
+            // their interrupts; QEMU's I/O APIC, with KVM's local APICs, can.
+            if self.kvm && self.extra[at + 1].contains("intremap=on") {
+                args.extend(["-machine".into(), "kernel-irqchip=split".into()]);
+            }
         }
         args.extend(["-m".into(), self.memory.clone(), "-smp".into(), self.cpus.to_string()]);
         let (accel, default_cpu) = if self.kvm { ("kvm", "host") } else { ("tcg", "max") };

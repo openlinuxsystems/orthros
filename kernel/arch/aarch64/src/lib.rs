@@ -215,11 +215,16 @@ impl Devices for Arch {
         None
     }
 
-    fn allocate_interrupt(_handler: fn(usize), _arg: usize) -> Option<(u32, MsiMessage)> {
+    fn allocate_interrupt(
+        _source: radix_hal::PciAddress,
+        _handler: fn(usize),
+        _arg: usize,
+    ) -> Option<(u32, MsiMessage)> {
         None
     }
 
     fn allocate_interrupt_at(
+        _source: radix_hal::PciAddress,
         _cpu: usize,
         _handler: fn(usize),
         _arg: usize,

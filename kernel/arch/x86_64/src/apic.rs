@@ -31,7 +31,7 @@ use crate::cpu::{self, msr};
 use crate::interrupts::{VECTOR_APIC_ERROR, VECTOR_PIC_BASE, VECTOR_SPURIOUS};
 use crate::io::{io_delay, outb};
 use crate::paging::{self, Access, Cache};
-use crate::{kvm, percpu};
+use crate::{iommu, kvm, percpu};
 
 /// Register offsets, as in the xAPIC memory layout. In x2APIC mode the MSR
 /// is `0x800 + offset / 16`.
@@ -441,8 +441,10 @@ const LEVEL: u32 = 1 << 15;
 /// `destination`, as fixed, physical delivery: through the global system
 /// interrupt and with the polarity and trigger mode the MADT's interrupt
 /// source overrides give it, or else ISA's own (the same number, edge
-/// triggered and active high). Returns the global system interrupt, or
-/// `None` if no I/O APIC has it.
+/// triggered and active high). Behind an IOMMU that remaps interrupts the
+/// input gets an interrupt entry for `vector` (ADR 0166). Returns the
+/// global system interrupt, or `None` if no I/O APIC has it or its IOMMU
+/// could not give it an entry.
 pub fn route_isa(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32) -> Option<u32> {
     route(madt, irq, vector, destination, false)
 }
@@ -478,12 +480,20 @@ fn route(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32, sci: bo
     if (flags >> 2) & 3 == 3 || (sci && (flags >> 2) & 3 == 0) {
         low |= LEVEL;
     }
+    let has = |io: &&IoApic| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi);
+    let id = IOAPICS.lock_irq().0.iter().flatten().find(has)?.id;
+    // The boot CPU's, should the entry not name `destination`.
+    let fallback = crate::smp::info(0).map_or(0, |cpu| cpu.hardware_id);
+    let high = match iommu::remap_ioapic(id, vector, destination, fallback, low & LEVEL != 0) {
+        iommu::IoApicEntry::Plain => (destination & 0xff) << 24,
+        iommu::IoApicEntry::Remapped(high) => high,
+        iommu::IoApicEntry::Failed => return None,
+    };
     let list = IOAPICS.lock_irq();
-    let io =
-        list.0.iter().flatten().find(|io| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi))?;
+    let io = list.0.iter().flatten().find(has)?;
     let input = gsi - io.gsi_base;
     io.write(0x10 + 2 * input, low | MASKED);
-    io.write(0x11 + 2 * input, (destination & 0xff) << 24);
+    io.write(0x11 + 2 * input, high);
     io.write(0x10 + 2 * input, low);
     Some(gsi)
 }

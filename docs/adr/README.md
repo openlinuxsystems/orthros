@@ -177,4 +177,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0163](0163-volumed-mounts-volumes-plugged-in-after-boot-by-label.md) | volumed mounts the volumes plugged in after boot by their labels, and eject unmounts one | Accepted |
 | [0164](0164-each-device-reaches-only-its-own-memory-behind-vt-d.md) | Each device reaches only its own memory behind Intel VT-d | Accepted |
 | [0165](0165-each-device-reaches-only-its-own-memory-behind-amd-vi.md) | Each device reaches only its own memory behind AMD-Vi | Accepted |
+| [0166](0166-each-device-raises-only-its-own-interrupts.md) | Each device raises only its own interrupts | Accepted |
 | [0170](0170-btrfs-keeps-simple-quotas.md) | Btrfs keeps simple quotas, each extent counted to the subvolume that wrote it | Accepted |

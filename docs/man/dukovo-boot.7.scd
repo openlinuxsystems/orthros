@@ -582,9 +582,25 @@ bridge, shares that device's domain, and the log says so. The IOMMU logs
 a stopped access in its event log, whose interrupt the kernel points at
 a handler of its own, and the kernel logs it as above.
 
-Interrupt remapping, and VT-d devices behind a PCIe-to-PCI bridge, come
-later in Phase 11d. Devices behind a unit left off, and every device
-with *iommu=off*, reach all memory. The *iommu* and *iommu-amd* boot
+Both remap interrupts too (ADR 0166): each interrupt vector a device or
+an I/O APIC input is given gets an interrupt entry that only that
+device's requests match, and every other interrupt is blocked, so a
+device raises only its own interrupts, at the CPU the kernel chose. On
+VT-d every unit must be able to, with queued invalidation, and every I/O
+APIC must be one a unit names; on AMD-Vi every I/O APIC must be one an
+IVHD block names. The unit's line then ends in *interrupt remapping*
+(*to 32-bit APIC IDs* on VT-d in x2APIC mode, when any CPU can be
+named); otherwise the kernel says why not:
+
+	IOMMU: interrupts are not remapped; a device can raise any interrupt
+
+An interrupt the IOMMU blocks is logged as a stopped access is:
+
+	IOMMU: 0000:00:05.0 was stopped raising an interrupt: the interrupt is not one given to it
+
+VT-d devices behind a PCIe-to-PCI bridge come later in Phase 11d.
+Devices behind a unit left off, and every device with *iommu=off*, reach
+all memory and raise any interrupt. The *iommu* and *iommu-amd* boot
 cases of *ob*(1) test it under QEMU's VT-d unit and AMD IOMMU.
 
 # USB

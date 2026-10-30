@@ -129,7 +129,8 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         let (bar, offset) = msix.table_location();
         let Some(Bar::Memory { address, .. }) = function.bar(bar) else { return None };
         let table = <Arch as Devices>::map_device(address + offset, msix.table_len())?;
-        let (vector, message) = <Arch as Devices>::allocate_interrupt(on_interrupt, index)?;
+        let (vector, message) =
+            <Arch as Devices>::allocate_interrupt(function.address(), on_interrupt, index)?;
         msix.enable_masked(function);
         msix.set_entry(&table, 0, message);
         msix.unmask_all(function);

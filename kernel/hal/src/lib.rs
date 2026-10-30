@@ -358,22 +358,30 @@ pub trait Devices {
     fn alloc_cache_page() -> Option<radix_hw::Page>;
 
     /// Allocates an interrupt vector whose interrupts call `handler(arg)`,
-    /// with interrupts masked, on the CPU they arrive at. Returns the
-    /// vector's number and the message a device writes to raise it.
-    /// `None` when no vector is free.
-    fn allocate_interrupt(handler: fn(usize), arg: usize) -> Option<(u32, radix_hw::MsiMessage)>;
+    /// with interrupts masked, on the CPU they arrive at, for the PCI
+    /// function `source` to raise. Returns the vector's number and the
+    /// message `source` writes to raise it. Behind an IOMMU that remaps
+    /// interrupts only `source` can raise it (ADR 0166). `None` when no
+    /// vector is free, or the IOMMU could not give it an entry.
+    fn allocate_interrupt(
+        source: PciAddress,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<(u32, radix_hw::MsiMessage)>;
 
     /// As [`Devices::allocate_interrupt`], with the interrupts sent to CPU
     /// `cpu` rather than the boot CPU: for a device with a queue for each
     /// CPU. A CPU the message cannot name gets the boot CPU's.
     fn allocate_interrupt_at(
+        source: PciAddress,
         cpu: usize,
         handler: fn(usize),
         arg: usize,
     ) -> Option<(u32, radix_hw::MsiMessage)>;
 
     /// Frees a vector from [`Devices::allocate_interrupt`]; the device
-    /// must no longer send its message.
+    /// must no longer send its message. Behind an IOMMU that remaps
+    /// interrupts, it can no longer raise it when this returns.
     fn free_interrupt(vector: u32);
 
     /// How many interrupts vector `vector` has delivered.

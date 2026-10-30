@@ -232,7 +232,7 @@ pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
     // One MSI for every port, if the controller and the kernel have one;
     // otherwise its disks are polled.
     let interrupt = Msi::find(function).and_then(|msi| {
-        let (vector, message) = <Arch as Devices>::allocate_interrupt(on_interrupt, index)?;
+        let (vector, message) = <Arch as Devices>::allocate_interrupt(source, on_interrupt, index)?;
         msi.enable(function, message);
         Some(vector)
     });
