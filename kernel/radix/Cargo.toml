@@ -38,6 +38,7 @@ radix-klog = { path = "../lib/klog" }
 radix-lockdep = { path = "../lib/lockdep" }
 radix-ksyms = { path = "../lib/ksyms" }
 radix-mm = { path = "../mm" }
+radix-net = { path = "../net" }
 radix-posix = { path = "../lib/posix" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }

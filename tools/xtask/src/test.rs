@@ -558,6 +558,11 @@ const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 
+/// The `net` test's network card: virtio 1.0 only, behind the IOMMU, with
+/// the MAC address the test looks for.
+const NET_CARD: &str = "virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on,\
+                        mac=52:54:00:12:34:56";
+
 /// The size of the `disk-check` test's disk: the smallest disktest takes.
 const CHECK_KIB: u64 = 128 * 1024;
 
@@ -1959,6 +1964,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: oom,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "net",
+        about: "behind QEMU's Intel IOMMU, a virtio network card takes the address of the ip= and gateway= flags, and QEMU's router answers its pings",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=net ip=10.0.2.15/24 gateway=10.0.2.2",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "intel-iommu,intremap=on", "-netdev", "user,id=n0", "-device", NET_CARD],
+        script: net,
         disks: &[],
         second: None,
     },
@@ -3944,6 +3965,19 @@ fn caps(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(" forgeries and ")?;
     vm.expect(" derivations by 3 other CPUs during a ")?;
     selftest_passed(vm, "caps")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Net: net0 is a virtio network card at ")?;
+    vm.expect(", MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector ")?;
+    vm.expect("Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2")?;
+    for seq in 1..=4 {
+        vm.expect(&format!("Net: 10.0.2.2 answered ping {seq} in "))?;
+    }
+    vm.expect("selftest net: passed; the router answered 4 pings, the fastest in ")?;
+    selftest_passed(vm, "net")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

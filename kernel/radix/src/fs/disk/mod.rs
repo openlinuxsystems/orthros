@@ -240,6 +240,8 @@ pub fn init() {
                     Ok(()) => disks += 1,
                     Err(why) => warn!("Disk: could not set up a virtio block device: {why}"),
                 }
+            } else if device_type(&function) == Some(radix_virtio::device_type::NET) {
+                crate::net::bind(&function);
             } else if function.class() == radix_ahci::PCI_CLASS {
                 if let Err(why) = ahci::bind(&function, &mut sata) {
                     warn!(

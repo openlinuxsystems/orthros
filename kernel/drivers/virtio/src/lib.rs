@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Virtio over PCI: the transport, virtqueues and the block driver.
+//! Virtio over PCI: the transport, virtqueues and the block and network
+//! drivers.
 //!
 //! Virtio (OASIS Virtual I/O Device specification, version 1.2) is how a
 //! virtual machine's devices talk to their hypervisor: a device and its
@@ -20,6 +21,8 @@
 //!   of buffers available to the device and a ring of buffers it used.
 //! - [`blk::Blk`] is the block device (virtio-blk) on one queue, with one
 //!   MSI-X interrupt for its completions.
+//! - [`net::Net`] is the network card (virtio-net) on its first pair of
+//!   queues, with one MSI-X interrupt for both.
 //!
 //! Nothing here waits: drivers submit requests and collect completions,
 //! and the kernel decides how threads wait for them (in `radix`, which
@@ -30,8 +33,11 @@
 #![forbid(unsafe_code)]
 
 pub mod blk;
+pub mod net;
 pub mod queue;
 
+#[cfg(test)]
+mod net_tests;
 #[cfg(test)]
 mod tests;
 
