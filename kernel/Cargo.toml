@@ -22,6 +22,7 @@ members = [
     "drivers/usb",
     "drivers/virtio",
     "drivers/vtd",
+    "drivers/watchdog",
     "drivers/xhci",
     "fs/block",
     "fs/btrfs",

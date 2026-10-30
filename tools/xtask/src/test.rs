@@ -85,6 +85,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-vfs",
     "radix-virtio",
     "radix-vtd",
+    "radix-watchdog",
     "radix-xhci",
 ];
 

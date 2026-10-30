@@ -297,6 +297,15 @@ We implement these from their published descriptions. No code is copied.
   offsets were checked against FreeBSD's `sys/x86/iommu/amd_reg.h`
   (BSD-2-Clause), from which no code is taken; nor is any from Linux's
   driver or QEMU's IOMMU, which the `iommu-amd` boot test runs against.
+- The Intel 6300ESB I/O Controller Hub and ICH9 datasheets, from which
+  `radix-watchdog` drives the i6300esb and the TCO timer
+  ([ADR 0143](docs/adr/0143-spark-pets-the-chipsets-hardware-watchdog.md)).
+  Where newer Intel chipsets moved the TCO timer and its NO_REBOOT bit,
+  and the registers of AMD's FCH watchdog, come from FreeBSD's ichwd(4)
+  and amdsbwd(4) (BSD-2-Clause) and from Intel's and AMD's descriptions
+  of their patches to Linux
+  ([ADR 0167](docs/adr/0167-newer-intel-chipsets-and-amds-fch-have-their-watchdog-too.md)).
+  No code is taken from any of them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

@@ -239,6 +239,17 @@ pub fn is_ram(range: Range<u64>) -> bool {
     position >= range.end
 }
 
+/// Whether any of `range` is RAM, as [`is_ram`] counts it.
+pub fn overlaps_ram(range: Range<u64>) -> bool {
+    memory_map().iter().any(|region| {
+        matches!(
+            region.kind,
+            MemoryKind::Usable | MemoryKind::AcpiReclaimable | MemoryKind::AcpiNvs
+        ) && region.start < range.end
+            && range.start < region.end
+    })
+}
+
 struct Reservations {
     list: [Reservation; MAX_RESERVATIONS],
     len: usize,
