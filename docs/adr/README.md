@@ -179,4 +179,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0165](0165-each-device-reaches-only-its-own-memory-behind-amd-vi.md) | Each device reaches only its own memory behind AMD-Vi | Accepted |
 | [0166](0166-each-device-raises-only-its-own-interrupts.md) | Each device raises only its own interrupts | Accepted |
 | [0167](0167-newer-intel-chipsets-and-amds-fch-have-their-watchdog-too.md) | Newer Intel chipsets and AMD's FCH have their watchdog too | Accepted |
+| [0168](0168-bad-memory-ends-only-the-program-that-read-it.md) | Bad memory ends only the program that read it, and its page leaves use | Accepted |
 | [0170](0170-btrfs-keeps-simple-quotas.md) | Btrfs keeps simple quotas, each extent counted to the subvolume that wrote it | Accepted |

@@ -63,7 +63,10 @@ mod proofs;
 pub use asid::Pcids;
 pub use buddy::{FreeError, MAX_ORDER};
 pub use context::{AllocError, Context, Flags, NodePolicy, ZoneLimit};
-pub use frames::{Frames, MAX_NODES, OOM_MAX_ORDER, RUN_FRAMES, SetupError, ZoneKind, ZoneStats};
+pub use frames::{
+    Frames, MAX_NODES, MAX_RETIRED, OOM_MAX_ORDER, RUN_FRAMES, Retired, SetupError, ZoneKind,
+    ZoneStats,
+};
 pub use heap::{ClassStats, ExplicitOnly, Heap, HeapStats, Kmalloc};
 pub use page::{Owner, PAGE_SHIFT, PAGE_SIZE, PageInfo, Region, State};
 pub use platform::{MAX_CPUS, Platform};

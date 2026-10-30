@@ -276,7 +276,9 @@ pub fn off(device: &DeviceRef) -> Result<(), Status> {
         }
     }
     let failed = match back {
-        Err(crate::user::memory::Fault::Io) => Some(FileError::Io.status(0)),
+        Err(crate::user::memory::Fault::Io | crate::user::memory::Fault::Poisoned) => {
+            Some(FileError::Io.status(0))
+        }
         Err(_) => Some(Kernel::NoMemory.status(0)),
         Ok(()) => (area.map.lock().used != 0).then(|| Kernel::NoMemory.status(0)),
     };
@@ -352,8 +354,15 @@ pub fn take(want: usize) -> Option<(u64, usize)> {
     None
 }
 
+/// The slot a page whose frame's memory went bad holds instead (ADR
+/// 0168): in no area, so it is never read, written or counted.
+pub const POISONED: u64 = (1 << 40) - 1;
+
 /// Lets go of one entry's hold on `slot`: the last frees it.
 pub fn free(slot: u64) {
+    if slot == POISONED {
+        return;
+    }
     let Some((area, page)) = area_of(slot) else { return };
     let mut map = area.map.lock();
     match map.counts.get(page).copied() {
@@ -372,6 +381,9 @@ pub fn free(slot: u64) {
 /// One more entry holds `slot` (a fork's): `false` if it is held by as
 /// many as it counts.
 pub fn share(slot: u64) -> bool {
+    if slot == POISONED {
+        return true;
+    }
     let Some((area, page)) = area_of(slot) else { return false };
     let mut map = area.map.lock();
     match map.counts.get(page).copied() {

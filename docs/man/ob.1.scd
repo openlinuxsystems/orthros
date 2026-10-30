@@ -370,6 +370,19 @@ _target/userspace/_).
 		boot must find the error in its bank, and the power button
 		powers the machine off (*dukovo-boot*(7)'s *MACHINE CHECKS*).
 
+	*machine-check-program*
+		Boot 2 CPUs of an emulated Intel Skylake, whose software error
+		recovery QEMU emulates, with *mce-poll=1*, and point Spark at
+		_/system/tests/posix/memfail_, which reads a page of its own in a
+		loop. A memory scrubbing error the CPU goes on after, on CPU 0,
+		must be logged and its page retired. With the machine stopped
+		where a CPU runs memfail in user mode, an uncorrected data load
+		error naming its page's physical address (QEMU's _gva2gpa_) must
+		end only memfail, with SIGBUS (*BUS_MCEERR_AR*, the page's
+		address, *si_addr_lsb* 12); its handler's next read of the page
+		must fault without a machine check, and _/processes/meminfo_
+		must count 8 KiB of bad memory (ADR 0168).
+
 	*spark-oom*
 		Boot with 256 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its

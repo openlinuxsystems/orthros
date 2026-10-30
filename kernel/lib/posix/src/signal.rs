@@ -271,6 +271,10 @@ pub const BUS_ADRALN: i32 = 1;
 /// SIGBUS's `si_code`: an address with nothing behind it (a file mapping
 /// past its file's end, or one that could not be read).
 pub const BUS_ADRERR: i32 = 2;
+/// SIGBUS's `si_code`: memory that went bad, read by the code that gets
+/// the signal (`si_addr` is its page, `si_addr_lsb` its least significant
+/// bit, 12).
+pub const BUS_MCEERR_AR: i32 = 4;
 /// SIGTRAP's `si_code`: a breakpoint.
 pub const TRAP_BRKPT: i32 = 1;
 

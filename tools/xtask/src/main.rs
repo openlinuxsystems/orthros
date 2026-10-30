@@ -201,6 +201,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   machine-check    QEMU puts errors in the CPUs' machine-check banks: a
                    corrected one is logged, an uncorrected one panics and
                    the next boot finds it
+  machine-check-program   bad memory a program reads ends only it, with
+                   SIGBUS, and its page leaves use for good
   spark-oom        a service that runs the machine out of memory is stopped
                    and started again
   swap             a program fills more memory than the machine has, with a

@@ -138,6 +138,10 @@ pub enum UserFaultKind {
     FloatingPoint,
     /// An alignment check.
     Alignment,
+    /// A read of memory that went bad, which the program must not go on
+    /// after (a machine check): the physical address of its page, if the
+    /// CPU says.
+    Memory(Option<u64>),
     /// Any other exception, by its vector.
     Other(u8),
 }
@@ -175,6 +179,10 @@ impl fmt::Display for UserFault {
             UserFaultKind::Divide => f.write_str("division error")?,
             UserFaultKind::FloatingPoint => f.write_str("floating-point exception")?,
             UserFaultKind::Alignment => f.write_str("alignment check")?,
+            UserFaultKind::Memory(Some(page)) => {
+                write!(f, "read of bad memory (the page at physical address {page:#x})")?;
+            }
+            UserFaultKind::Memory(None) => f.write_str("read of bad memory")?,
             UserFaultKind::Other(vector) => write!(f, "exception {vector}")?,
         }
         write!(f, " at pc {:#x}, sp {:#x}", self.pc, self.sp)
@@ -323,6 +331,12 @@ pub trait UserMode: crate::Threads {
     /// looked, the page holds the slot instead, and `true` says so once no
     /// CPU can reach the frame.
     fn swap_out(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool;
+
+    /// Takes the frame at `phys`, whose memory went bad, out of the page at
+    /// `virt`: if the page still maps it, used or not, the page holds swap
+    /// slot `slot` instead, and `true` says so once no CPU can reach the
+    /// frame.
+    fn retire_page(space: &Self::Space, virt: u64, phys: u64, slot: u64) -> bool;
 
     /// Gives the page at `virt`, where nothing is mapped, of `space`, which
     /// no thread runs yet (a fork's copy), the swap slot `slot`.

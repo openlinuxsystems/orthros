@@ -80,7 +80,7 @@ impl Cpu for Arch {
         0
     }
 
-    fn poll_machine_checks(_found: &mut dyn FnMut(usize, bool, &dyn core::fmt::Display)) {}
+    fn poll_machine_checks(_found: &mut radix_hal::MachineCheckFound<'_>) {}
 }
 
 impl CpuLocal for Arch {
@@ -325,6 +325,10 @@ impl UserMode for Arch {
     fn scan(_: &Space, _: u64, _: u64, _: bool, _: &mut dyn FnMut(u64, Scanned) -> bool) {}
 
     fn swap_out(_: &Space, _: u64, _: u64, _: u64) -> bool {
+        false
+    }
+
+    fn retire_page(_: &Space, _: u64, _: u64, _: u64) -> bool {
         false
     }
 

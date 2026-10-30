@@ -178,7 +178,10 @@ _/processes/meminfo_
 	*per_cpu_caches*, *memory_objects* and *page_cache*. The page cache
 	is the files' data in memory (*radix-files*(7)), which the kernel
 	gives back when memory runs low. Then *swap_total* and *swap_free*,
-	the room of the swap areas on and how much of it is free (*swapon*(8)).
+	the room of the swap areas on and how much of it is free (*swapon*(8)),
+	and *hardware_corrupted*, the memory a machine check said went bad,
+	which is out of use for good or leaves use when freed (Linux's
+	*HardwareCorrupted*; *dukovo-boot*(7)).
 
 _/processes/stat_
 	A line per online CPU, *cpu*_n_*:* then the fields *user_ns*,

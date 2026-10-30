@@ -487,7 +487,9 @@ fn meminfo(text: &mut Text) -> fmt::Result {
     // The swap areas on (ADR 0152): the pages they hold, and those free.
     let (slots, used) = crate::swap::totals();
     writeln!(text, "swap_total: {} KiB", kib(slots))?;
-    writeln!(text, "swap_free: {} KiB", kib(slots.saturating_sub(used)))
+    writeln!(text, "swap_free: {} KiB", kib(slots.saturating_sub(used)))?;
+    // Memory that went bad (ADR 0168), as Linux's HardwareCorrupted.
+    writeln!(text, "hardware_corrupted: {} KiB", kib(FRAMES.retired_pages()))
 }
 
 /// `/processes/swaps`: the swap areas on, as Linux's `/proc/swaps`.

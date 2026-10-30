@@ -14,6 +14,11 @@
 //! 17 ("Interpreting the MCA Error Codes"), and the AMD64 Architecture
 //! Programmer's Manual, volume 2, chapter 9.
 //!
+//! [`triage`] decides what a machine check leaves the kernel to do: go
+//! on, end the program that met bad memory, or stop the machine. It
+//! follows Linux's rules (`arch/x86/kernel/cpu/mce/severity.c`), cut to
+//! what the kernel does about an error.
+//!
 //! The architecture reads and writes the registers; this crate only reads
 //! their values, so its tests run on the host.
 
@@ -31,6 +36,9 @@ pub const CAP_RECOVERY: u64 = 1 << 24;
 
 /// IA32_MCG_STATUS: the interrupted code can restart where it was.
 pub const RIPV: u64 = 1 << 0;
+/// IA32_MCG_STATUS: the instruction the error is about is the one the
+/// interrupted code was at.
+pub const EIPV: u64 = 1 << 1;
 /// IA32_MCG_STATUS: a machine check is in progress; another one now shuts
 /// the CPU down.
 pub const MCIP: u64 = 1 << 2;
@@ -54,18 +62,183 @@ pub const SIGNALLED: u64 = 1 << 56;
 /// With software error recovery: the interrupted code must not go on
 /// until something is done about the error.
 pub const ACTION_REQUIRED: u64 = 1 << 55;
+/// AMD's MCA_STATUS: the error is poisoned data that the code consumed,
+/// and IA32_MCi_ADDR holds its physical address. (Intel counts corrected
+/// errors in these bits.)
+pub const AMD_POISON: u64 = 1 << 43;
+/// AMD's MCA_STATUS: an uncorrected error the hardware deferred, not yet
+/// consumed.
+pub const AMD_DEFERRED: u64 = 1 << 44;
 
-/// Whether the CPU cannot go on after an error with this status: the
-/// processor's state is corrupt, or the error is uncorrected and was
-/// signalled, and either the CPU has no software error recovery or the
-/// error needs an action the kernel does not take yet (such as ending the
-/// program that read poisoned memory). `recovery` is IA32_MCG_CAP's
-/// [`CAP_RECOVERY`].
+/// The error codes of a data load and of an instruction fetch that met an
+/// uncorrected error in the level 0 cache: the ones Intel's software error
+/// recovery requires an action for that ending a program is.
+const DATA_LOAD: u16 = 0x0134;
+const INSTRUCTION_FETCH: u16 = 0x0150;
+/// A page: 2^12 bytes.
+const PAGE_SHIFT: u64 = 12;
+
+/// Whether the CPU cannot go on after an error with this status by
+/// itself: the processor's state is corrupt, or the error is uncorrected
+/// and was signalled, and either the CPU has no software error recovery or
+/// the error needs an action (which [`triage`] says whether the kernel can
+/// take). `recovery` is IA32_MCG_CAP's [`CAP_RECOVERY`].
 pub fn fatal(status: u64, recovery: bool) -> bool {
     status & VALID != 0
         && status & UNCORRECTED != 0
         && (status & CONTEXT_CORRUPT != 0
             || status & ENABLED != 0 && (!recovery || status & ACTION_REQUIRED != 0))
+}
+
+/// Whose machine-check architecture a CPU has, and whether it recovers
+/// from uncorrected errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mca {
+    /// AMD's (or Hygon's), whose status registers have bits of their own;
+    /// Intel's otherwise.
+    pub amd: bool,
+    /// Whether an uncorrected error that leaves the processor's state whole
+    /// need not stop the machine: Intel's software error recovery
+    /// (IA32_MCG_CAP's [`CAP_RECOVERY`]) or AMD's SUCCOR (CPUID
+    /// 0x80000007's EBX bit 1).
+    pub recovery: bool,
+}
+
+/// What a machine check leaves to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The interrupted code goes on.
+    GoOn,
+    /// The program that was running in user mode met bad memory and must
+    /// not go on; the page it met, by physical address, if the CPU says.
+    EndProgram(Option<u64>),
+    /// The machine cannot go on.
+    Fatal,
+}
+
+/// What one error asks for.
+enum Asks {
+    Nothing,
+    EndProgram(Option<u64>),
+    Fatal,
+}
+
+/// Decides what a machine check leaves to do, from IA32_MCG_STATUS, the
+/// CPU's [`Mca`], whether the CPU was in user mode, and the errors its
+/// banks hold:
+///
+/// - A corrupt processor state stops the machine.
+/// - With Intel's software error recovery, an error that requires an
+///   action ends the program that met it: a data load or instruction
+///   fetch in user mode, with the address and more about the error valid
+///   and no error lost. Any other that requires an action stops the
+///   machine, unless the CPU says the interrupted code can restart and the
+///   error was not about it (another thread's). An optional action (SRAO)
+///   or an unsignalled error (UCNA) is left for the poll, which retires
+///   its page ([`bad_page`]).
+/// - With AMD's SUCCOR, an uncorrected error ends the program that met it
+///   in user mode, and stops the machine in the kernel.
+/// - Without recovery, an uncorrected error in the kernel, or one with an
+///   error lost, stops the machine.
+/// - Then, if no error asked for more, the code goes on if the CPU says it
+///   can restart; if not, the program ends, or in the kernel the machine
+///   stops.
+pub fn triage(
+    mcg_status: u64,
+    mca: Mca,
+    user: bool,
+    errors: impl IntoIterator<Item = BankError>,
+) -> Verdict {
+    let mut end: Option<Option<u64>> = None;
+    for error in errors {
+        match asks(&error, mcg_status, mca, user) {
+            Asks::Nothing => {}
+            Asks::EndProgram(page) => {
+                if end.flatten().is_none() {
+                    end = Some(page);
+                }
+            }
+            Asks::Fatal => return Verdict::Fatal,
+        }
+    }
+    match end {
+        Some(page) => Verdict::EndProgram(page),
+        None if mcg_status & RIPV != 0 => Verdict::GoOn,
+        None if user => Verdict::EndProgram(None),
+        None => Verdict::Fatal,
+    }
+}
+
+fn asks(error: &BankError, mcg_status: u64, mca: Mca, user: bool) -> Asks {
+    let status = error.status;
+    if status & VALID == 0 || status & UNCORRECTED == 0 {
+        return Asks::Nothing;
+    }
+    if status & CONTEXT_CORRUPT != 0 {
+        return Asks::Fatal;
+    }
+    match mca {
+        Mca { amd: false, recovery: true } => {
+            if status & SIGNALLED == 0 {
+                // UCNA; one that requires an action is a contradiction.
+                return if status & ACTION_REQUIRED != 0 { Asks::Fatal } else { Asks::Nothing };
+            }
+            if status & ACTION_REQUIRED == 0 {
+                return Asks::Nothing;
+            }
+            if status & OVERFLOW != 0 {
+                return Asks::Fatal;
+            }
+            if mcg_status & (RIPV | EIPV) == RIPV {
+                return Asks::Nothing;
+            }
+            let code = status as u16 & !0x1000;
+            let described = status & (ADDRESS_VALID | MISC_VALID) == ADDRESS_VALID | MISC_VALID;
+            if user && described && (code == DATA_LOAD || code == INSTRUCTION_FETCH) {
+                Asks::EndProgram(bad_page(error, mca))
+            } else {
+                Asks::Fatal
+            }
+        }
+        Mca { amd: true, recovery: true } if status & ENABLED != 0 => {
+            if user {
+                Asks::EndProgram(bad_page(error, mca))
+            } else {
+                Asks::Fatal
+            }
+        }
+        _ if status & ENABLED == 0 => Asks::Nothing,
+        _ if !user || status & OVERFLOW != 0 => Asks::Fatal,
+        _ => Asks::Nothing,
+    }
+}
+
+/// The page whose memory went bad, by physical address, that an error
+/// names, if it is one the hardware did not correct (or AMD deferred) and
+/// the CPU says where it is to within a page: Intel's IA32_MCi_MISC gives
+/// the address's kind (physical) and its least significant valid bit;
+/// AMD's names poisoned data, and its IA32_MCi_ADDR the bit.
+pub fn bad_page(error: &BankError, mca: Mca) -> Option<u64> {
+    let status = error.status;
+    let bad = status & UNCORRECTED != 0 || mca.amd && status & AMD_DEFERRED != 0;
+    if status & VALID == 0 || !bad {
+        return None;
+    }
+    let address = error.address?;
+    let (address, lsb) = if mca.amd {
+        if status & (AMD_POISON | AMD_DEFERRED) == 0 {
+            return None;
+        }
+        (address & ((1 << 56) - 1), (address >> 56) & 0x3f)
+    } else {
+        let misc = error.misc?;
+        // Bits 8:6, the address mode: 2 is a physical address.
+        if (misc >> 6) & 7 != 2 {
+            return None;
+        }
+        (address, misc & 0x3f)
+    };
+    (lsb <= PAGE_SHIFT).then_some(address & !((1 << PAGE_SHIFT) - 1))
 }
 
 /// The error a bank holds.
@@ -302,5 +475,116 @@ mod tests {
             "uncorrected data read error in the level 0 data cache, address 0x1000; the \
              code that met it must not go on (status 0xbd80000000000134, misc 0x86)"
         );
+    }
+
+    const INTEL: Mca = Mca { amd: false, recovery: true };
+    const AMD: Mca = Mca { amd: true, recovery: true };
+
+    fn error(status: u64, address: Option<u64>, misc: Option<u64>) -> BankError {
+        BankError { status, address, misc }
+    }
+
+    /// An SRAR data load at 0x12345678, with a physical address valid to
+    /// its cache line.
+    const SRAR: u64 = 0xbd80_0000_0000_0134;
+
+    #[test]
+    fn a_program_that_read_bad_memory_ends_and_its_page_is_known() {
+        let load = error(SRAR, Some(0x1234_5678), Some(0x86));
+        let mcg = EIPV | MCIP;
+        assert_eq!(triage(mcg, INTEL, true, [load]), Verdict::EndProgram(Some(0x1234_5000)));
+        // Fetching an instruction too, with other banks quiet or corrected.
+        let fetch = error(SRAR & !0xffff | 0x150, Some(0x8000), Some(0x8c));
+        let corrected = error(0x9c00_0000_0000_0134, Some(0x1000), Some(0x86));
+        assert_eq!(triage(mcg, INTEL, true, [corrected, fetch]), Verdict::EndProgram(Some(0x8000)));
+        // A page it cannot name: not a physical address, or coarser than
+        // a page. The program ends all the same.
+        let virtual_address = error(SRAR, Some(0x1234_5678), Some(0x46));
+        assert_eq!(triage(mcg, INTEL, true, [virtual_address]), Verdict::EndProgram(None));
+        let coarse = error(SRAR, Some(0x1234_5678), Some(0x8d));
+        assert_eq!(triage(mcg, INTEL, true, [coarse]), Verdict::EndProgram(None));
+        assert_eq!(
+            triage(mcg, INTEL, true, [coarse, load]),
+            Verdict::EndProgram(Some(0x1234_5000))
+        );
+        // In the kernel, the machine stops.
+        assert_eq!(triage(mcg, INTEL, false, [load]), Verdict::Fatal);
+    }
+
+    #[test]
+    fn an_action_required_the_kernel_cannot_take_stops_the_machine() {
+        let mcg = EIPV | MCIP;
+        // Another kind of access, an address not given, an error lost.
+        for status in [SRAR & !0xffff | 0x9f, SRAR & !ADDRESS_VALID, SRAR | OVERFLOW] {
+            assert_eq!(
+                triage(mcg, INTEL, true, [error(status, Some(0x1000), Some(0x86))]),
+                Verdict::Fatal,
+                "{status:#x}"
+            );
+        }
+        // A corrupt processor state, in any mode, with any recovery.
+        let corrupt = error(0xb200_0000_0000_0005, None, None);
+        for mca in [INTEL, AMD, Mca { amd: false, recovery: false }] {
+            assert_eq!(triage(RIPV | MCIP, mca, true, [corrupt]), Verdict::Fatal);
+        }
+        // UCNA that requires an action is a contradiction.
+        let contradiction = error(SRAR & !SIGNALLED, Some(0x1000), Some(0x86));
+        assert_eq!(triage(RIPV | MCIP, INTEL, true, [contradiction]), Verdict::Fatal);
+    }
+
+    #[test]
+    fn errors_that_need_no_action_now_let_the_code_go_on() {
+        let load = error(SRAR, Some(0x1234_5678), Some(0x86));
+        // Another thread's error: this one can restart, and was not at it.
+        assert_eq!(triage(RIPV | MCIP, INTEL, false, [load]), Verdict::GoOn);
+        // SRAO (a scrubbing error) and UCNA: the poll retires their page.
+        let scrub = error(0xbd00_0000_0000_00cf, Some(0x7_7000), Some(0x86));
+        let ucna = error(0xac00_0000_0000_009f, Some(0x9_9123), Some(0x86));
+        assert_eq!(triage(RIPV | MCIP, INTEL, false, [scrub, ucna]), Verdict::GoOn);
+        assert_eq!(bad_page(&scrub, INTEL), Some(0x7_7000));
+        assert_eq!(bad_page(&ucna, INTEL), Some(0x9_9000));
+        assert_eq!(bad_page(&error(0x9c00_0000_0000_0134, Some(0x1000), Some(0x86)), INTEL), None);
+        // Nothing to say, where the code can restart or not.
+        assert_eq!(triage(RIPV | MCIP, INTEL, false, []), Verdict::GoOn);
+        assert_eq!(triage(MCIP, INTEL, false, []), Verdict::Fatal);
+        assert_eq!(triage(MCIP, INTEL, true, []), Verdict::EndProgram(None));
+    }
+
+    #[test]
+    fn without_recovery_an_uncorrected_error_stops_the_machine_unless_a_program_can_go_on() {
+        let none = Mca { amd: false, recovery: false };
+        let uncorrected = error(0xb000_0000_0000_009f, Some(0x1000), Some(0x86));
+        assert_eq!(triage(RIPV | MCIP, none, false, [uncorrected]), Verdict::Fatal);
+        assert_eq!(triage(RIPV | MCIP, none, true, [uncorrected]), Verdict::GoOn);
+        assert_eq!(triage(MCIP, none, true, [uncorrected]), Verdict::EndProgram(None));
+        let lost = error(0xf000_0000_0000_009f, None, None);
+        assert_eq!(triage(RIPV | MCIP, none, true, [lost]), Verdict::Fatal);
+        assert_eq!(bad_page(&uncorrected, none), Some(0x1000));
+    }
+
+    #[test]
+    fn amd_ends_the_program_that_consumed_poison() {
+        // Valid, uncorrected, enabled, address valid, task context
+        // corrupt, poison; the address valid from bit 6.
+        let status = VALID | UNCORRECTED | ENABLED | ADDRESS_VALID | (1 << 55) | AMD_POISON | 0x135;
+        let poison = error(status, Some(6 << 56 | 0x4_5678), None);
+        assert_eq!(triage(MCIP, AMD, true, [poison]), Verdict::EndProgram(Some(0x4_5000)));
+        assert_eq!(triage(MCIP, AMD, false, [poison]), Verdict::Fatal);
+        let unnamed = error(status & !AMD_POISON, Some(0x4_5678), None);
+        assert_eq!(triage(MCIP, AMD, true, [unnamed]), Verdict::EndProgram(None));
+        assert_eq!(
+            triage(MCIP, AMD, true, [error(status | CONTEXT_CORRUPT, None, None)]),
+            Verdict::Fatal
+        );
+        // A deferred error is not consumed yet: the poll retires its page.
+        let deferred = error(VALID | ADDRESS_VALID | AMD_DEFERRED | 0x9f, Some(0x8_8000), None);
+        assert_eq!(triage(RIPV | MCIP, AMD, false, [deferred]), Verdict::GoOn);
+        assert_eq!(bad_page(&deferred, AMD), Some(0x8_8000));
+        // Intel counts corrected errors in those bits.
+        assert_eq!(bad_page(&error(deferred.status, Some(0x8_8000), Some(0x86)), INTEL), None);
+        // Without SUCCOR, as without recovery.
+        let older = Mca { amd: true, recovery: false };
+        assert_eq!(triage(RIPV | MCIP, older, true, [poison]), Verdict::GoOn);
+        assert_eq!(triage(RIPV | MCIP, older, false, [poison]), Verdict::Fatal);
     }
 }

@@ -49,6 +49,10 @@
 //! freed last. A device takes such a buffer in fewer, longer pieces, and a
 //! hypervisor copies it faster. The frames of a run not yet handed out
 //! count as cached.
+//!
+//! A frame whose memory went bad, which a machine check reports, is
+//! retired ([`Frames::retire`]): taken out of its zone at once if it is
+//! free, or else when its block is freed, and never handed out again.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -89,6 +93,26 @@ const CACHE_MOST: u32 = 512;
 const RUN_ORDER: u32 = 5;
 /// Frames in a run: 128 KiB.
 pub const RUN_FRAMES: u32 = 1 << RUN_ORDER;
+/// Most frames [`Frames::retire`] takes out of use: 2 MiB of bad memory,
+/// well past where a machine's memory wants replacing.
+pub const MAX_RETIRED: usize = 512;
+/// Times [`Frames::retire`] empties the CPUs' caches to find a free frame
+/// in them before it leaves the frame to be withheld when freed.
+const RETIRE_ATTEMPTS: u32 = 4;
+
+/// What [`Frames::retire`] did with a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retired {
+    /// It is out of use for good: it was free and left its zone, or the
+    /// allocator never handed it out.
+    Now,
+    /// It is in use. It leaves its zone when its block is freed.
+    WhenFreed,
+    /// The allocator does not manage it.
+    NotManaged,
+    /// [`MAX_RETIRED`] frames are retired already.
+    TooMany,
+}
 
 /// What memory a zone holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +308,13 @@ pub struct Frames {
     /// Whether any `Normal` zone has memory.
     has_normal: AtomicBool,
     cpus: [CpuFrames; MAX_CPUS],
+    /// The frames retired, in order: the first `retired_len` are set, and
+    /// none is ever removed. Read without a lock: a frame is listed before
+    /// its zone's lock or a CPU's cache lock is taken to look for it.
+    retired: [AtomicU64; MAX_RETIRED],
+    retired_len: AtomicUsize,
+    /// Held to list a frame, with how many are listed.
+    retiring: RawSpinLock<usize>,
 }
 
 impl Frames {
@@ -307,6 +338,9 @@ impl Frames {
             oom_calls: AtomicU64::new(0),
             has_normal: AtomicBool::new(false),
             cpus: [const { CpuFrames::new() }; MAX_CPUS],
+            retired: [const { AtomicU64::new(0) }; MAX_RETIRED],
+            retired_len: AtomicUsize::new(0),
+            retiring: RawSpinLock::new(0),
         }
     }
 
@@ -612,7 +646,7 @@ impl Frames {
                 if buddy.free_pages() < floor + (1 << order) {
                     continue;
                 }
-                if let Some(pfn) = buddy.alloc(order, owner, tag) {
+                if let Some(pfn) = self.alloc_sound(&mut buddy, order, owner, tag) {
                     return Some(pfn);
                 }
             }
@@ -677,7 +711,7 @@ impl Frames {
                 if buddy.free_pages() < floor + u64::from(RUN_FRAMES) {
                     return None;
                 }
-                buddy.alloc(RUN_ORDER, Owner::PerCpu, 0)?
+                self.alloc_sound(&mut buddy, RUN_ORDER, Owner::PerCpu, 0)?
             };
             // The block's frames become single cached frames.
             for pfn in block..block + u64::from(RUN_FRAMES) {
@@ -725,7 +759,7 @@ impl Frames {
         let mut buddy = zone.buddy.lock();
         let room = buddy.free_pages().saturating_sub(floor).min(u64::from(CACHE_BATCH));
         for _ in 0..room {
-            let Some(pfn) = buddy.alloc(0, Owner::PerCpu, 0) else { break };
+            let Some(pfn) = self.alloc_sound(&mut buddy, 0, Owner::PerCpu, 0) else { break };
             let Some(info) = self.record(pfn) else { break };
             info.set_state(State::Cached);
             self.push(cache, pfn, info);
@@ -763,7 +797,7 @@ impl Frames {
             zone.cached.fetch_sub(1, Ordering::Relaxed);
             info.set(State::Allocated, 0, Owner::PerCpu, 0);
             // Cannot fail: the frame was just marked allocated.
-            let _ = buddy.free(pfn, 0, Owner::PerCpu);
+            let _ = buddy.free_failed(pfn, 0, Owner::PerCpu, |f| self.is_retired(f));
         }
     }
 
@@ -779,7 +813,8 @@ impl Frames {
             return false;
         }
         let Some(info) = self.record(pfn) else { return false };
-        if !info.cache(owner) {
+        // A retired frame goes to its zone, which withholds it.
+        if self.is_retired(pfn) || !info.cache(owner) {
             return false;
         }
         self.push(&mut cache, pfn, info);
@@ -805,7 +840,7 @@ impl Frames {
                 let Some(info) = self.record(pfn) else { continue };
                 info.set(State::Allocated, 0, Owner::PerCpu, 0);
                 // Cannot fail: the frame was just marked allocated.
-                let _ = buddy.free(pfn, 0, Owner::PerCpu);
+                let _ = buddy.free_failed(pfn, 0, Owner::PerCpu, |f| self.is_retired(f));
                 zone.cached.fetch_sub(1, Ordering::Relaxed);
             }
             cache.run = cache.run_end;
@@ -855,9 +890,101 @@ impl Frames {
             return Ok(());
         }
         let _irqs = NoInterrupts::new(self.platform());
-        self.zones[entry.zone].buddy.lock().free(pfn, order, owner)?;
+        let mut buddy = self.zones[entry.zone].buddy.lock();
+        if self.any_retired(pfn, order) {
+            buddy.free_failed(pfn, order, owner, |f| self.is_retired(f))?;
+        } else {
+            buddy.free(pfn, order, owner)?;
+        }
+        drop(buddy);
         self.owner_pages[owner as usize].fetch_sub(1 << order, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Takes the frame at physical address `phys`, whose memory went bad,
+    /// out of use for good: out of its zone now if it is free, a CPU's
+    /// cache included, or else when its block is freed. Takes the zones'
+    /// and the caches' locks, so not under either.
+    pub fn retire(&self, phys: u64) -> Retired {
+        let pfn = phys >> PAGE_SHIFT;
+        let Some(entry) = self.entry(pfn) else { return Retired::NotManaged };
+        if !self.list(pfn) {
+            return Retired::TooMany;
+        }
+        // A frame in a CPU's cache goes back to its zone, which withholds
+        // it; one taken into a cache again meanwhile is looked for again.
+        for _ in 0..RETIRE_ATTEMPTS {
+            self.drain_caches();
+            let _irqs = NoInterrupts::new(self.platform());
+            let mut buddy = self.zones[entry.zone].buddy.lock();
+            if buddy.take(pfn) {
+                return Retired::Now;
+            }
+            match self.record(pfn).map(PageInfo::state) {
+                Some(State::Reserved) => return Retired::Now,
+                Some(State::Cached) => {}
+                _ => return Retired::WhenFreed,
+            }
+        }
+        Retired::WhenFreed
+    }
+
+    /// Lists frame `pfn` as retired, if it is not yet; false if the list is
+    /// full.
+    fn list(&self, pfn: u64) -> bool {
+        let _irqs = NoInterrupts::new(self.platform());
+        let mut len = self.retiring.lock();
+        if self.retired[..*len].iter().any(|f| f.load(Ordering::Relaxed) == pfn) {
+            return true;
+        }
+        let Some(slot) = self.retired.get(*len) else { return false };
+        slot.store(pfn, Ordering::Relaxed);
+        *len += 1;
+        self.retired_len.store(*len, Ordering::Release);
+        true
+    }
+
+    /// Frames retired, in use or not: Linux's `HardwareCorrupted`.
+    pub fn retired_pages(&self) -> u64 {
+        self.retired_len.load(Ordering::Acquire) as u64
+    }
+
+    /// Whether frame `pfn` is retired.
+    #[inline]
+    fn is_retired(&self, pfn: u64) -> bool {
+        self.any_retired(pfn, 0)
+    }
+
+    /// Whether any frame of the block of `order` at `pfn` is retired: one
+    /// load when none is, as on a machine whose memory is sound.
+    #[inline]
+    fn any_retired(&self, pfn: u64, order: u32) -> bool {
+        let len = self.retired_len.load(Ordering::Acquire);
+        len > 0
+            && self.retired[..len]
+                .iter()
+                .any(|f| (pfn..pfn + (1 << order)).contains(&f.load(Ordering::Relaxed)))
+    }
+
+    /// Takes a block from `buddy` as [`Buddy::alloc`] does, but never one
+    /// holding a retired frame: such a block goes back without it, for
+    /// good, and another is taken.
+    fn alloc_sound(
+        &self,
+        buddy: &mut Buddy<'static>,
+        order: u32,
+        owner: Owner,
+        tag: u8,
+    ) -> Option<u64> {
+        loop {
+            let pfn = buddy.alloc(order, owner, tag)?;
+            if !self.any_retired(pfn, order) {
+                return Some(pfn);
+            }
+            // Cannot fail: the block was just allocated. It loses a frame
+            // for good, so the loop ends.
+            let _ = buddy.free_failed(pfn, order, owner, |f| self.is_retired(f));
+        }
     }
 
     /// The record of the frame at physical address `phys`.
@@ -1263,5 +1390,103 @@ mod tests {
         let fresh = Frames::new();
         let crossing = Region { base: DMA32_END_PFN - 1, pages: records(2) };
         assert_eq!(fresh.add_region(0, crossing), Err(SetupError::InvalidRegion));
+    }
+
+    #[test]
+    fn a_retired_frame_is_never_handed_out_again() {
+        let frames = frames_with(&[(0, 256, 2048)]);
+        let page = PAGE_SIZE as u64;
+        // A free frame leaves at once, from this CPU's cache, from its run
+        // or from the zone.
+        let cached = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        frames.free(cached, 0, Owner::Kernel).unwrap();
+        assert_eq!(frames.retire(cached), Retired::Now);
+        let run = frames.alloc_sequential(Flags::MAY_SLEEP, Owner::Anon).unwrap();
+        assert_eq!(frames.retire(run + 3 * page), Retired::Now);
+        let last = (256 + 2047) << PAGE_SHIFT;
+        assert!(matches!(frames.info(last).unwrap().state(), State::Free | State::Tail));
+        assert_eq!(frames.retire(last), Retired::Now);
+        // One in use leaves when its block is freed, through the cache or
+        // not.
+        let block = frames.alloc(2, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        let single = frames.alloc(0, Flags::MAY_SLEEP, Owner::Anon).unwrap();
+        assert_eq!(frames.retire(block + 2 * page), Retired::WhenFreed);
+        assert_eq!(frames.retire(single), Retired::WhenFreed);
+        assert_eq!(frames.managed_pages(), 2048 - 3);
+        frames.free(block, 2, Owner::Kernel).unwrap();
+        frames.free(single, 0, Owner::Anon).unwrap();
+        // The frame freed last is not this CPU's to hand out again.
+        let next = frames.alloc(0, Flags::MAY_SLEEP, Owner::Anon).unwrap();
+        assert_ne!(next, single);
+        frames.free(next, 0, Owner::Anon).unwrap();
+        frames.free(run, 0, Owner::Anon).unwrap();
+        assert_eq!(frames.owner_pages(Owner::Kernel) + frames.owner_pages(Owner::Anon), 0);
+        // Once each, and only what the allocator manages.
+        assert_eq!(frames.retire(cached), Retired::Now);
+        assert_eq!(frames.retire(0), Retired::NotManaged);
+        assert_eq!(frames.retired_pages(), 5);
+        frames.drain_caches();
+        assert_eq!(frames.managed_pages(), 2048 - 5);
+        assert_eq!(frames.free_pages(), 2048 - 5);
+        frames.check().unwrap();
+        let retired = [cached, run + 3 * page, last, block + 2 * page, single];
+        for order in [0, 2, 5] {
+            let all: Vec<u64> =
+                core::iter::from_fn(|| frames.alloc(order, Flags::ATOMIC, Owner::Kernel).ok())
+                    .collect();
+            for &phys in &all {
+                for bad in retired {
+                    assert!(!(phys..phys + (page << order)).contains(&bad), "{order}: {phys:#x}");
+                }
+            }
+            for phys in all {
+                frames.free(phys, order, Owner::Kernel).unwrap();
+            }
+            frames.drain_caches();
+            assert_eq!(frames.free_pages(), 2048 - 5);
+            frames.check().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_retired_frame_another_cpu_takes_first_is_withheld_from_it() {
+        let frames = frames_with(&[(0, 256, 2048)]);
+        // Listed, but taken by no one yet: as when an allocation reaches
+        // the zone between the listing and the zone's lock.
+        let bad = 256 + 100;
+        assert!(frames.list(bad));
+        let all: Vec<u64> =
+            core::iter::from_fn(|| frames.alloc(0, Flags::ATOMIC, Owner::Kernel).ok()).collect();
+        assert_eq!(all.len(), 2047);
+        assert!(!all.contains(&(bad << PAGE_SHIFT)));
+        for phys in all {
+            frames.free(phys, 0, Owner::Kernel).unwrap();
+        }
+        frames.drain_caches();
+        assert_eq!(frames.free_pages(), 2047);
+        assert_eq!(frames.managed_pages(), 2047);
+        assert_eq!(frames.info(bad << PAGE_SHIFT).unwrap().state(), State::Reserved);
+        frames.check().unwrap();
+        // So is one a CPU's cache held when it was listed.
+        let cached = frames.alloc(0, Flags::MAY_SLEEP, Owner::Kernel).unwrap();
+        frames.free(cached, 0, Owner::Kernel).unwrap();
+        assert!(frames.list(cached >> PAGE_SHIFT));
+        frames.drain_caches();
+        assert_eq!(frames.info(cached).unwrap().state(), State::Reserved);
+        assert_eq!(frames.free_pages(), 2046);
+        frames.check().unwrap();
+    }
+
+    #[test]
+    fn retiring_stops_at_its_limit() {
+        let frames = frames_with(&[(0, 256, 2048)]);
+        for frame in 0..MAX_RETIRED as u64 {
+            assert_eq!(frames.retire((256 + 2 * frame) << PAGE_SHIFT), Retired::Now);
+        }
+        assert_eq!(frames.retire((256 + 1) << PAGE_SHIFT), Retired::TooMany);
+        assert_eq!(frames.retire(256 << PAGE_SHIFT), Retired::Now);
+        assert_eq!(frames.retired_pages(), MAX_RETIRED as u64);
+        assert_eq!(frames.free_pages(), 2048 - MAX_RETIRED as u64);
+        frames.check().unwrap();
     }
 }

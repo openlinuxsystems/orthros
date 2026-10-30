@@ -231,16 +231,28 @@ fn exit_current(user: UserRef, status: u64, how: Ending) -> ! {
 /// memory, a copy of a page shared since `fork`), or else a signal for the
 /// thread (`posix::signal::fault`), or the end of its process.
 fn on_fault(fault: &UserFault) {
+    if let UserFaultKind::Memory(_) = fault.kind {
+        // The banks of this CPU's machine check, read before the thread can
+        // move to another CPU: logged, and their pages retired.
+        crate::mce::read();
+    }
     Arch::enable_interrupts();
     let Some((thread, user)) = current() else {
         panic!("User mode: {fault} in a thread that is not a program's");
     };
-    let mut bus = false;
+    let mut bus = None;
+    if let UserFaultKind::Memory(page) = fault.kind {
+        // Its page leaves the space, so that the program's handler, if it
+        // goes on, faults on it rather than meeting it again (ADR 0168).
+        let at = page.and_then(|phys| user.space.retire_frame(phys));
+        bus = Some((radix_posix::signal::BUS_MCEERR_AR, at.unwrap_or(0)));
+    }
     if let UserFaultKind::Page { address, write, execute, .. } = fault.kind {
         match user.space.resolve(address, write, execute) {
             Fault::Resolved => return,
             Fault::Refused => {}
-            Fault::Io => bus = true,
+            Fault::Io => bus = Some((radix_posix::signal::BUS_ADRERR, address)),
+            Fault::Poisoned => bus = Some((radix_posix::signal::BUS_MCEERR_AR, address)),
             Fault::NoMemory | Fault::Short => {
                 warn!(
                     "User: thread {} ({}) ended: no memory for a page at {address:#x}",

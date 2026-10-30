@@ -221,6 +221,9 @@ pub enum Fault {
     Refused,
     /// The page could not be filled from its file (SIGBUS).
     Io,
+    /// The page's memory went bad, and it was taken out (SIGBUS, with
+    /// `BUS_MCEERR_AR`).
+    Poisoned,
     /// The space's domain has no room for another page, or memory ran out.
     NoMemory,
     /// Memory ran short with the space's regions locked, and the fault did
@@ -825,7 +828,7 @@ impl SpaceObject {
         }
         match self.resolve(page, false, false) {
             Fault::Resolved => {}
-            Fault::Io => return Err(radix_abi::errors::File::Io.status(0)),
+            Fault::Io | Fault::Poisoned => return Err(radix_abi::errors::File::Io.status(0)),
             Fault::NoMemory | Fault::Short => return Err(error(Kernel::NoMemory)),
             Fault::Refused => return Err(error(Kernel::BadAddress)),
         }
@@ -1011,6 +1014,41 @@ impl SpaceObject {
         Ok(given)
     }
 
+    /// Takes the frame at `phys`, whose memory went bad (ADR 0168), out of
+    /// the pages of this space's private anonymous memory that map it,
+    /// which hold [`swap::POISONED`] instead and fault with
+    /// [`Fault::Poisoned`] from then on: the first page of any region that
+    /// mapped it, if one did. Other pages keep it (shared or file memory, or
+    /// memory lent to a device), and meet it again on their next read.
+    pub fn retire_frame(&self, phys: u64) -> Option<u64> {
+        let regions = self.regions.lock();
+        let mut first = None;
+        for region in regions.iter() {
+            let private = matches!(&region.backing, Backing::Anon(anon) if anon.shared.is_none());
+            let mut at = region.start;
+            while at < region.end() {
+                let (found, n, next) =
+                    self.find(at, region.end(), false, |scanned| match scanned {
+                        Scanned::Frame { phys: frame, .. } if frame == phys => Some(frame),
+                        _ => None,
+                    });
+                for &(virt, _) in &found[..n] {
+                    first.get_or_insert(virt);
+                    let anon = FRAMES
+                        .info(phys)
+                        .is_some_and(|info| info.owner() == Owner::Anon && info.pins() == 0);
+                    if private && anon && Arch::retire_page(&self.arch, virt, phys, swap::POISONED)
+                    {
+                        unshare(phys);
+                        self.swapped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                at = next;
+            }
+        }
+        first
+    }
+
     /// Up to [`swap::BATCH`] pages from `start` to `end` that `pick` takes,
     /// forgetting their use if `forget`: where each is and what `pick`
     /// gave, how many, and where to look on.
@@ -1135,6 +1173,9 @@ impl SpaceObject {
     /// held without access), with the regions locked: [`Fault::Short`] if
     /// memory is short and not `wait`.
     fn swap_in(&self, page: u64, slot: u64, access: Option<UserAccess>, wait: bool) -> Fault {
+        if slot == swap::POISONED {
+            return Fault::Poisoned;
+        }
         let phys = match fault_frame(Flags::MAY_SLEEP, false, wait) {
             Ok(phys) => phys,
             Err(fault) => return fault,

@@ -255,6 +255,68 @@ impl<'a> Buddy<'a> {
         Ok(())
     }
 
+    /// Frees the block of `order` at `pfn` as [`Buddy::free`] does, but for
+    /// the frames `failed` names, whose memory went bad: those leave the
+    /// zone for good, reserved, and the others are freed one by one, to
+    /// merge as they can. Returns how many frames left the zone.
+    pub fn free_failed(
+        &mut self,
+        pfn: u64,
+        order: u32,
+        owner: Owner,
+        failed: impl Fn(u64) -> bool,
+    ) -> Result<u64, FreeError> {
+        if !(pfn..pfn + (1 << order)).any(&failed) {
+            return self.free(pfn, order, owner).map(|()| 0);
+        }
+        self.check_free(pfn, order, owner)?;
+        let mut gone = 0;
+        for frame in pfn..pfn + (1 << order) {
+            let Some(info) = self.info(frame) else { continue };
+            if failed(frame) {
+                info.set(State::Reserved, 0, Owner::Kernel, 0);
+                self.managed -= 1;
+                gone += 1;
+            } else {
+                info.set(State::Allocated, 0, owner, 0);
+                // Cannot fail: the frame was just marked allocated.
+                let _ = self.free(frame, 0, owner);
+            }
+        }
+        Ok(gone)
+    }
+
+    /// Takes frame `pfn` out of the zone for good, its memory having gone
+    /// bad, if it is free: the free block that holds it is split, its other
+    /// frames stay free, and it is left reserved. `false` if it is not free.
+    pub fn take(&mut self, pfn: u64) -> bool {
+        for order in 0..=MAX_ORDER {
+            let head = pfn & !((1 << order) - 1);
+            let Some(info) = self.info(head) else { return false };
+            if info.state() != State::Free || info.order() != order {
+                continue;
+            }
+            self.remove(head, order);
+            let (mut start, mut current) = (head, order);
+            while current > 0 {
+                current -= 1;
+                let upper = start + (1 << current);
+                if pfn < upper {
+                    self.push(upper, current);
+                } else {
+                    self.push(start, current);
+                    start = upper;
+                }
+            }
+            if let Some(frame) = self.info(pfn) {
+                frame.set(State::Reserved, 0, Owner::Kernel, 0);
+            }
+            self.managed -= 1;
+            return true;
+        }
+        false
+    }
+
     /// Whether [`Buddy::free`] would accept freeing the block of `order` at
     /// `pfn` for `owner`: only if exactly that block is allocated, to that
     /// owner.
@@ -469,11 +531,18 @@ mod tests {
     enum Op {
         Alloc(u32),
         Free(usize),
+        /// A frame's memory goes bad: taken now if free, else when its
+        /// block is freed.
+        Fail(u64),
     }
 
     fn ops() -> impl Strategy<Value = Vec<Op>> {
         prop::collection::vec(
-            prop_oneof![(0u32..=MAX_ORDER).prop_map(Op::Alloc), any::<usize>().prop_map(Op::Free)],
+            prop_oneof![
+                8 => (0u32..=MAX_ORDER).prop_map(Op::Alloc),
+                8 => any::<usize>().prop_map(Op::Free),
+                1 => (0u64..3000).prop_map(Op::Fail),
+            ],
             1..200,
         )
     }
@@ -493,8 +562,9 @@ mod tests {
                 }
             }
             buddy.check().unwrap();
-            let managed = buddy.managed_pages();
+            let mut managed = buddy.managed_pages();
             let mut live: BTreeMap<u64, u32> = BTreeMap::new();
+            let mut failed: Vec<u64> = Vec::new();
             for op in ops {
                 match op {
                     Op::Alloc(order) => {
@@ -503,6 +573,7 @@ mod tests {
                         prop_assert!(pfn + (1 << order) <= 3000);
                         for f in pfn..pfn + (1 << order) {
                             prop_assert!(!holes.contains(&f), "handed out a reserved frame");
+                            prop_assert!(!failed.contains(&f), "handed out a frame that failed");
                         }
                         let overlaps = live.range(..pfn + (1 << order)).next_back()
                             .is_some_and(|(&p, &o)| p + (1 << o) > pfn);
@@ -512,19 +583,40 @@ mod tests {
                     Op::Free(index) if !live.is_empty() => {
                         let pfn = *live.keys().nth(index % live.len()).unwrap();
                         let order = live.remove(&pfn).unwrap();
-                        buddy.free(pfn, order, Owner::Kernel).unwrap();
+                        let gone = buddy
+                            .free_failed(pfn, order, Owner::Kernel, |f| failed.contains(&f))
+                            .unwrap();
+                        let inside = failed.iter().filter(|&&f| f >= pfn && f < pfn + (1 << order));
+                        prop_assert_eq!(gone, inside.count() as u64);
+                        managed -= gone;
                     }
                     Op::Free(_) => {}
+                    Op::Fail(frame) if holes.contains(&frame) || failed.contains(&frame) => {}
+                    Op::Fail(frame) => {
+                        failed.push(frame);
+                        let held = live.range(..=frame).next_back()
+                            .is_some_and(|(&p, &o)| p + (1 << o) > frame);
+                        prop_assert_eq!(buddy.take(frame), !held);
+                        if !held {
+                            managed -= 1;
+                        }
+                    }
                 }
                 let held: u64 = live.values().map(|&o| 1u64 << o).sum();
                 prop_assert_eq!(buddy.free_pages() + held, managed);
             }
             buddy.check().unwrap();
             for (pfn, order) in live {
-                buddy.free(pfn, order, Owner::Kernel).unwrap();
+                managed -= buddy
+                    .free_failed(pfn, order, Owner::Kernel, |f| failed.contains(&f))
+                    .unwrap();
             }
             buddy.check().unwrap();
             prop_assert_eq!(buddy.free_pages(), managed);
+            prop_assert_eq!(buddy.managed_pages(), managed);
+            for frame in failed {
+                prop_assert_eq!(buddy.info(frame).unwrap().state(), State::Reserved);
+            }
         }
     }
 }

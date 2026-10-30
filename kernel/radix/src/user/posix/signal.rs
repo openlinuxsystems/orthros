@@ -502,6 +502,7 @@ fn fault_signal(fault: &UserFault) -> (u32, i32, u64) {
         UserFaultKind::Divide => (SIGFPE, rules::FPE_INTDIV, fault.pc),
         UserFaultKind::FloatingPoint => (SIGFPE, rules::SI_KERNEL, fault.pc),
         UserFaultKind::Alignment => (SIGBUS, rules::BUS_ADRALN, fault.pc),
+        UserFaultKind::Memory(_) => (SIGBUS, rules::BUS_MCEERR_AR, 0),
         UserFaultKind::Other(_) => (SIGSEGV, rules::SI_KERNEL, 0),
     }
 }
@@ -516,6 +517,7 @@ fn vector_of(fault: &UserFault) -> u64 {
         UserFaultKind::Page { .. } => 14,
         UserFaultKind::FloatingPoint => 16,
         UserFaultKind::Alignment => 17,
+        UserFaultKind::Memory(_) => 18,
         UserFaultKind::Other(vector) => u64::from(vector),
     }
 }
@@ -523,17 +525,20 @@ fn vector_of(fault: &UserFault) -> u64 {
 /// A fault in user mode that no page resolves, by `user`'s thread:
 /// raises its signal for the thread, if a handler of its will run;
 /// otherwise the process ends, killed by it. Returns whether the thread
-/// goes on (to its handler).
-pub fn fault(me: &ThreadRef, user: &UserThread, fault: &UserFault, bus: bool) -> bool {
-    let (signal, code, address) = if bus {
-        let address = match fault.kind {
-            UserFaultKind::Page { address, .. } => address,
-            _ => 0,
-        };
-        (SIGBUS, rules::BUS_ADRERR, address)
-    } else {
-        fault_signal(fault)
+/// goes on (to its handler). `bus` makes it SIGBUS, with that `si_code`
+/// and address.
+pub fn fault(
+    me: &ThreadRef,
+    user: &UserThread,
+    fault: &UserFault,
+    bus: Option<(i32, u64)>,
+) -> bool {
+    let (signal, code, address) = match bus {
+        Some((code, address)) => (SIGBUS, code, address),
+        None => fault_signal(fault),
     };
+    // Memory that went bad is named to the page (`si_addr_lsb`).
+    let lsb = if code == rules::BUS_MCEERR_AR { 12 } else { 0 };
     let process = &user.process;
     let handled = {
         let posix = process.posix.lock();
@@ -541,7 +546,7 @@ pub fn fault(me: &ThreadRef, user: &UserThread, fault: &UserFault, bus: bool) ->
         let blocked = signals.mask & bit(signal) != 0;
         let handler = matches!(posix.actions.disposition(signal), Disposition::Handle(_));
         if handler && !blocked {
-            signals.pending.add(signal, Info { code, pid: address, status: 0 });
+            signals.pending.add(signal, Info { code, pid: address, status: lsb });
             signals.trap = Some((signal, vector_of(fault), fault.code, address));
             me.set_signalled(true);
             true
