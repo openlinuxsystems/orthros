@@ -9,12 +9,17 @@
 //! `/system/resources/default-settings/spark/services`, which Spark copies
 //! in when they are missing, so an administrator turns one off with
 //! `enabled = no` rather than by removing it.
+//!
+//! A service reaches the network only as its file says (ADR 0183):
+//! `network.outbound = yes` lets it connect out, and `network.listen`
+//! names the ports it may listen on.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libradix::abi::resource_domain::{NAME_MAX, OomClass, WEIGHT_DEFAULT, WEIGHT_MAX};
+use libradix::abi::startup::NETWORK_SLOTS;
 
 /// When a service that ended is started again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +63,50 @@ pub struct Spec {
     /// More of the environment, as `NAME=value`.
     pub environment: Vec<String>,
     pub enabled: bool,
+    /// Whether it may connect out, to any address and port.
+    pub outbound: bool,
+    /// The ranges of ports it may listen on, as (first, count).
+    pub listen: Vec<(u32, u32)>,
+}
+
+impl Spec {
+    /// How many network capabilities it gets: one to connect out, and one
+    /// for each range of ports it listens on.
+    pub fn network_grants(&self) -> usize {
+        usize::from(self.outbound) + self.listen.len()
+    }
+}
+
+/// The ports `value` names, as `network.listen` takes them: ports and
+/// ranges of ports (`8000-8009`), with commas or blanks between, as
+/// (first, count), each range once.
+fn ports(value: &str) -> Result<Vec<(u32, u32)>, String> {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let port = |text: &str| -> Result<u32, String> {
+        match text.trim().parse::<u32>() {
+            Ok(port) if (1..=65_535).contains(&port) => Ok(port),
+            _ => Err(format!("`{text}` is not a port from 1 to 65535")),
+        }
+    };
+    for item in value.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
+        if item.is_empty() {
+            continue;
+        }
+        let (first, last) = match item.split_once('-') {
+            Some((first, last)) => (port(first)?, port(last)?),
+            None => (port(item)?, port(item)?),
+        };
+        if last < first {
+            return Err(format!("the range `{item}` ends before it starts"));
+        }
+        let range = (first, last - first + 1);
+        let overlaps = ranges.iter().any(|&(at, count)| first < at + count && at <= last);
+        if overlaps {
+            return Err(format!("`{item}` overlaps another range"));
+        }
+        ranges.push(range);
+    }
+    Ok(ranges)
 }
 
 /// Splits `text` into words at blanks, a pair of double quotes keeping
@@ -137,6 +186,8 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         oom: OomClass::Service,
         environment: Vec::new(),
         enabled: true,
+        outbound: false,
+        listen: Vec::new(),
     };
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -191,11 +242,20 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
                 }
             }
             "enabled" => spec.enabled = yes_no(value).map_err(at)?,
+            "network.outbound" => spec.outbound = yes_no(value).map_err(at)?,
+            "network.listen" => spec.listen = ports(value).map_err(at)?,
             _ => return Err(at(format!("unknown key `{key}`"))),
         }
     }
     if spec.program.is_empty() {
         return Err("it names no program".into());
+    }
+    if spec.network_grants() > NETWORK_SLOTS as usize {
+        return Err(format!(
+            "it asks for {} network capabilities, one to connect out and one for each range \
+             of ports; a program gets at most {NETWORK_SLOTS}",
+            spec.network_grants()
+        ));
     }
     Ok(spec)
 }

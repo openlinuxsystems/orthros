@@ -443,6 +443,16 @@ _target/userspace/_).
 		process in its domain, which Spark stops; _driver_ makes the
 		requests and powers the machine off (*spark*(8)).
 
+	*spark-network*
+		Boot 2 CPUs under UEFI from USB and point Spark at two test
+		services that run _/system/tests/posix/netgrant_: _granted_ asks
+		to connect out and to listen on ports 8000 to 8009 and 9000, and
+		checks that it holds exactly those three network capabilities,
+		that the C library's sockets listen on ports 8005 and 9000 and
+		connect out, and that binding port 8010 fails with EACCES; _none_
+		asks for nothing, and checks that it holds no network capability
+		and cannot make a socket (*spark*(8)).
+
 	*page-fault*
 		Boot with *selftest=page-fault* and check the panic report on the
 		serial port and on the screen, with its symbolized backtrace.

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# A service of the spark-network boot test: it checks that Spark gave it
+# a capability to connect out and one for each range of ports it listens
+# on, and nothing more.
+
+description = Asks for the network
+program = /system/tests/posix/netgrant
+arguments = granted
+restart = never
+network.outbound = yes
+network.listen = 8000-8009, 9000
