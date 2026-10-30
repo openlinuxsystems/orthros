@@ -478,12 +478,14 @@ impl Controller {
             self.devices.iter().position(|d| d.path == path || d.path.is_below(path))
         {
             let mut gone = self.devices.remove(at);
+            // Said before its drivers hear: a stick's thread tells of its
+            // disks going at once, from another CPU.
+            info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
             hid::gone(&mut gone.hids);
             if let Some(link) = gone.storage.take() {
                 link.gone();
             }
             let slot = gone.device.slot();
-            info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
             self.give_back(gone.device, gone.path);
             // A hub's queued ports are not looked at: its slot may be
             // given to another device.

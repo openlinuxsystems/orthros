@@ -2153,13 +2153,20 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
             TestImage::Microcode => microcode.as_ref().expect("built when a case needs it"),
         };
         let started = Instant::now();
-        let log = dir.join(format!("boot-{}.log", case.name));
         let outcome = run_case(ctx, case, base, root.as_deref(), &dir, kvm, timeout);
         let secs = started.elapsed().as_secs_f32();
         match outcome {
             Ok(()) => eprintln!("    PASS  {:<15} {} ({secs:.1} s)", case.name, case.about),
             Err(reason) => {
                 failures += 1;
+                // A case that failed after its reboot failed in the second
+                // boot, whose log is its own.
+                let name = if reason.starts_with(AFTER_THE_REBOOT) {
+                    format!("{}-reboot", case.name)
+                } else {
+                    case.name.to_string()
+                };
+                let log = dir.join(format!("boot-{name}.log"));
                 eprintln!("    FAIL  {:<15} {} ({secs:.1} s)", case.name, case.about);
                 eprintln!("          {reason}");
                 eprintln!("          serial log: {}", ctx.display(&log));
@@ -2179,6 +2186,9 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
     step(&format!("All {} boot tests passed", cases.len()));
     Ok(())
 }
+
+/// How the reason a case's second boot failed starts.
+const AFTER_THE_REBOOT: &str = "after the reboot";
 
 fn run_case(
     ctx: &Ctx,
@@ -2286,7 +2296,7 @@ fn run_case(
             .and_then(|()| boot(&name, second.cmdline, second.script))
             .map_err(|err| {
                 let log = dir.join(format!("boot-{name}.log"));
-                format!("after the reboot: {err} (serial log: {})", ctx.display(&log))
+                format!("{AFTER_THE_REBOOT}: {err} (serial log: {})", ctx.display(&log))
             });
     }
     let _ = std::fs::remove_file(&image);
