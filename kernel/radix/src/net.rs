@@ -17,7 +17,7 @@
 //! network answers at 10.0.2.2, which is what it uses without flags).
 
 use alloc::vec::Vec;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use radix_hal::Devices;
@@ -163,7 +163,29 @@ pub fn bind(function: &Function) {
     }
 }
 
-fn start(function: &Function, index: usize) -> Result<(), &'static str> {
+/// Why a card could not be set up.
+enum Failure {
+    /// The card's driver refused it.
+    Card(radix_virtio::Error),
+    Other(&'static str),
+}
+
+impl From<&'static str> for Failure {
+    fn from(why: &'static str) -> Failure {
+        Failure::Other(why)
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Card(err) => write!(f, "{err}"),
+            Failure::Other(why) => f.write_str(why),
+        }
+    }
+}
+
+fn start(function: &Function, index: usize) -> Result<(), Failure> {
     function.enable_memory_and_dma();
     let mut map_bar = |_: usize, bar: Bar| match bar {
         Bar::Memory { address, size, .. } => {
@@ -171,7 +193,7 @@ fn start(function: &Function, index: usize) -> Result<(), &'static str> {
         }
         Bar::Io { .. } => None,
     };
-    let transport = Transport::find(function, &mut map_bar).map_err(|_| "no modern transport")?;
+    let transport = Transport::find(function, &mut map_bar).map_err(Failure::Card)?;
     // One MSI-X entry, for both queues, if the card and the kernel have
     // them; otherwise the card is polled.
     let interrupt = MsiX::find(function).and_then(|msix| {
@@ -192,15 +214,12 @@ fn start(function: &Function, index: usize) -> Result<(), &'static str> {
     radix_random::fill(&mut fallback);
     fallback[0] = (fallback[0] & !0x01) | 0x02;
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(function.address(), pages, false);
-    let net = match Net::new(transport, entry, fallback, &mut alloc) {
-        Ok(net) => net,
-        Err(_) => {
-            if let Some(vector) = interrupt {
-                <Arch as Devices>::free_interrupt(vector);
-            }
-            return Err("the card refused to be set up");
+    let net = Net::new(transport, entry, fallback, &mut alloc).map_err(|err| {
+        if let Some(vector) = interrupt {
+            <Arch as Devices>::free_interrupt(vector);
         }
-    };
+        Failure::Card(err)
+    })?;
     // From here a failure drops the card, which stops it.
     let card = Card { net, vector: interrupt };
     let memory = Memory {
@@ -220,10 +239,12 @@ fn start(function: &Function, index: usize) -> Result<(), &'static str> {
     let _ = write!(name, "net{index}");
     let interface = Interface { name: name.clone(), stack: Mutex::new(stack), thread: Once::new() };
     if INTERFACES[index].set(interface).is_err() {
-        return Err("its slot is taken");
+        return Err(Failure::Other("its slot is taken"));
     }
     COUNT.store(index + 1, Ordering::Release);
-    let Some(interface) = INTERFACES[index].get() else { return Err("its slot is empty") };
+    let Some(interface) = INTERFACES[index].get() else {
+        return Err(Failure::Other("its slot is empty"));
+    };
     let mac = info.mac;
     let mut how = TextBuf::<24>::new();
     let _ = match interrupt {
@@ -246,7 +267,7 @@ fn start(function: &Function, index: usize) -> Result<(), &'static str> {
     if let Some(address) = interface.stack.lock().ipv4() {
         match flags.1 {
             Some(gateway) if index == 0 => {
-                info!("Net: {name} has the address {address}, through the router {gateway}")
+                info!("Net: {name} has the address {address}, through the router {gateway}");
             }
             _ => info!("Net: {name} has the address {address}"),
         }
@@ -258,7 +279,7 @@ fn start(function: &Function, index: usize) -> Result<(), &'static str> {
             sched::release(&thread);
             Ok(())
         }
-        Err(_) => Err("its thread could not start"),
+        Err(_) => Err(Failure::Other("its thread could not start")),
     }
 }
 

@@ -50,10 +50,10 @@ by itself, hands out 10.0.2.15 and routes through 10.0.2.2. To try it:
 The log shows the card, its address and four pings to the router:
 
 ```
-Net: net0 is a virtio network card at 00:03.0, MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector 0x31
+Net: net0 is a virtio network card at 0000:00:03.0, MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector 0x52
 Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2
-Net: 10.0.2.2 answered ping 1 in 0.412 ms
-selftest net: passed; the router answered 4 pings, the fastest in 0.198 ms
+Net: 10.0.2.2 answered ping 1 in 7.792 ms
+selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
 ```
 
 `ob test --case net` runs the same test behind QEMU's IOMMU, as CI

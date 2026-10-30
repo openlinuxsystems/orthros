@@ -3970,14 +3970,33 @@ fn caps(vm: &mut Vm, case: &Case) -> Result<(), String> {
 
 fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
-    vm.expect("Net: net0 is a virtio network card at ")?;
-    vm.expect(", MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector ")?;
-    vm.expect("Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2")?;
-    for seq in 1..=4 {
-        vm.expect(&format!("Net: 10.0.2.2 answered ping {seq} in "))?;
-    }
-    vm.expect("selftest net: passed; the router answered 4 pings, the fastest in ")?;
     selftest_passed(vm, "net")?;
+    // The card is found during the PCI scan, among lines boot_report
+    // reads past.
+    let log = vm.log();
+    let card = log
+        .lines()
+        .find_map(|line| line.find("Net: net0 is a virtio network card at ").map(|at| &line[at..]))
+        .ok_or("the kernel never found the network card")?;
+    let described =
+        card.contains(", MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector ");
+    if !described {
+        return Err(format!("the kernel described the card as \"{card}\""));
+    }
+    // Behind the IOMMU, as ACCESS_PLATFORM lets it be.
+    let address = card.split(" at ").nth(1).and_then(|rest| rest.split(',').next());
+    let confined = address.map(|address| format!("IOMMU: {address} reaches only what is mapped"));
+    let mut needles = vec![
+        confined.ok_or("the card's line names no address")?,
+        "Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2".to_string(),
+    ];
+    needles.extend((1..=4).map(|seq| format!("Net: 10.0.2.2 answered ping {seq} in ")));
+    needles.push("selftest net: passed; the router answered 4 pings, the fastest in ".into());
+    for needle in &needles {
+        if !log.contains(needle.as_str()) {
+            return Err(format!("the kernel never said \"{needle}\""));
+        }
+    }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

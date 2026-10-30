@@ -63,9 +63,11 @@ pub trait Link {
 
 /// The memory a stack works in, lent to it for as long as it lives.
 pub struct Memory {
-    /// A frame received, while the stack reads it: [`FRAME`] bytes.
+    /// A frame received, while the stack reads it: [`FRAME`] bytes, as
+    /// longer frames are cut to it.
     pub receive: &'static mut [u8],
-    /// A frame to send, while the stack writes it: [`FRAME`] bytes.
+    /// A frame to send, while the stack writes it: [`FRAME`] bytes, or
+    /// fewer for a smaller MTU.
     pub transmit: &'static mut [u8],
     /// A slot for each socket the stack can have.
     pub sockets: &'static mut [SocketStorage<'static>],
@@ -107,10 +109,11 @@ impl phy::RxToken for Received<'_> {
 impl<L: Link> phy::TxToken for Sending<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
         // smoltcp asks for no more than the capabilities' largest frame,
-        // which the buffer holds; a frame cut short would be wrong, so a
-        // longer one is written, but not sent.
-        let fits = len <= self.buffer.len();
-        let frame = &mut self.buffer[..len.min(FRAME)];
+        // which is no longer than the buffer. Were it to ask for more, a
+        // frame cut short would be wrong: it is written, but not sent.
+        let room = self.buffer.len();
+        let fits = len <= room;
+        let frame = &mut self.buffer[..len.min(room)];
         let result = f(frame);
         if fits {
             self.link.send(frame);
@@ -146,7 +149,9 @@ impl<L: Link> phy::Device for Phy<'_, L> {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = FRAME;
+        // The largest frame, with its Ethernet header: one the transmit
+        // buffer holds.
+        caps.max_transmission_unit = self.transmit.len().min(FRAME);
         // Every checksum is made and checked here, in software: the card
         // is asked for no offloads.
         let mut checksum = ChecksumCapabilities::default();
@@ -206,9 +211,10 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// The interface's IPv4 address, if it has one.
-    pub fn ipv4(&self) -> Option<Ipv4Address> {
-        self.iface.ipv4_addr()
+    /// The interface's IPv4 address, with its prefix, if it has one.
+    pub fn ipv4(&self) -> Option<Ipv4Cidr> {
+        // IPv4 is the stack's only protocol (until IPv6, in 12c).
+        self.iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| cidr)
     }
 
     /// The card under the stack.

@@ -705,7 +705,7 @@ no offloads (ADR 0181). The card's queues raise one MSI-X interrupt,
 which wakes the thread; the thread also wakes when the stack has a timer
 due, and every 10 ms otherwise.
 
-	Net: net0 is a virtio network card at 00:03.0, MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector 0x31
+	Net: net0 is a virtio network card at 0000:00:03.0, MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector 0x52
 	Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2
 
 So far the stack answers ARP and pings, and the kernel's own code pings
@@ -716,8 +716,8 @@ giving it QEMU's user-network address, 10.0.2.15/24 through 10.0.2.2,
 when the flags gave it none. The *net* boot case of *ob*(1) runs it
 behind QEMU's VT-d unit:
 
-	Net: 10.0.2.2 answered ping 1 in 0.412 ms
-	selftest net: passed; the router answered 4 pings, the fastest in 0.198 ms
+	Net: 10.0.2.2 answered ping 1 in 7.792 ms
+	selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
 
 # REAL HARDWARE
 
