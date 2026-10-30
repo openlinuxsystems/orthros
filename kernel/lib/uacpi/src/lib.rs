@@ -21,8 +21,14 @@
 //! - its deferred work goes on two queues, for the kernel's two threads to
 //!   run ([`run_work`]): the methods of general-purpose events, on the boot
 //!   CPU as uACPI asks, and `Notify`'s handlers;
-//! - its memory comes from the kernel's heap, through [`Host::heap`].
+//! - its memory comes from the kernel's heap, through [`Host::heap`];
+//! - the embedded controller's regions, which laptops' AML reads their
+//!   batteries and lids through, go through the controller's ports, and
+//!   its events run their `_Qxx` methods (`ec`, ADR 0201).
 //!
+//! The kernel finds devices with [`find_devices`] and evaluates their
+//! objects through [`Node`]; [`power`] reads a battery's packages as
+//! Linux does.
 //! This crate is part of the kernel's trusted computing base, as the C it
 //! links is (docs/coding-standard.md): `unsafe` is allowed only in `ffi`,
 //! where the C is called and calls back. The crate's tests run uACPI on
@@ -36,7 +42,9 @@
 
 extern crate alloc;
 
+mod ec;
 mod ffi;
+pub mod power;
 mod sync;
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests;
@@ -47,9 +55,10 @@ use core::fmt;
 
 use radix_sync::Once;
 
+pub use ec::{Found as EmbeddedController, found as embedded_controller};
 pub use ffi::{
-    Error, StartError, eval_integer, finish_events, interrupt, on_power_button, prepare_sleep,
-    run_work, sleep, start,
+    Error, Node, NodeName, NodePath, Package, StartError, eval_integer, find_devices,
+    finish_events, interrupt, on_power_button, prepare_sleep, run_work, sleep, start,
 };
 
 /// The version of uACPI in `vendor/`.

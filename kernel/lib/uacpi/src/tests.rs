@@ -3,16 +3,18 @@
 
 //! uACPI on a simulated machine: tables in memory of the test's, I/O ports
 //! that keep what is written and clear status bits as ACPI's do, one PCI
-//! host bridge, a device register, and a clock that waits take no time on.
-//! The DSDT is `tests/dsdt.aml`, made from `tests/dsdt.asl`.
+//! host bridge, a device register, an embedded controller, and a clock
+//! that waits take no time on. The DSDT is `tests/dsdt.aml`, made from
+//! `tests/dsdt.asl`.
 //!
 //! uACPI's state is global and starts once, so one test takes it through
 //! a whole life: start, AML that uses each of the kernel's services, the
-//! power button, a general-purpose event, and powering off.
+//! power button, a general-purpose event, the embedded controller's
+//! battery, AC adapter and lid and its events, and powering off.
 
 use std::alloc::Global;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -21,6 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::power::{Info, State};
 use crate::sync::{FOREVER_MS, Semaphore};
 
 const DSDT: &[u8] = include_bytes!("tests/dsdt.aml");
@@ -50,6 +53,61 @@ const INIT_PORT: u16 = 0x700;
 const PTS_PORT: u16 = 0x701;
 const GPE_PORT: u16 = 0x702;
 
+/// The embedded controller's ports and general-purpose event.
+const EC_DATA: u16 = 0x62;
+const EC_COMMAND: u16 = 0x66;
+const EC_GPE: u8 = 1;
+
+/// An embedded controller that answers at once: its status never shows
+/// the input buffer full.
+#[derive(Default)]
+struct Controller {
+    space: Vec<u8>,
+    /// What the data port takes next.
+    expects: Expect,
+    output: Option<u8>,
+    events: VecDeque<u8>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    #[default]
+    Nothing,
+    ReadAddress,
+    WriteAddress,
+    WriteValue(u8),
+}
+
+impl Controller {
+    fn status(&self) -> u8 {
+        u8::from(self.output.is_some()) | if self.events.is_empty() { 0 } else { 1 << 5 }
+    }
+
+    fn command(&mut self, command: u8) {
+        match command {
+            0x80 => self.expects = Expect::ReadAddress,
+            0x81 => self.expects = Expect::WriteAddress,
+            0x84 => self.output = Some(self.events.pop_front().unwrap_or(0)),
+            _ => panic!("the embedded controller got command {command:#x}"),
+        }
+    }
+
+    fn data(&mut self, byte: u8) {
+        self.expects = match self.expects {
+            Expect::ReadAddress => {
+                self.output = Some(self.space[usize::from(byte)]);
+                Expect::Nothing
+            }
+            Expect::WriteAddress => Expect::WriteValue(byte),
+            Expect::WriteValue(address) => {
+                self.space[usize::from(address)] = byte;
+                Expect::Nothing
+            }
+            Expect::Nothing => panic!("the embedded controller got {byte:#x} unasked"),
+        };
+    }
+}
+
 struct Machine {
     /// The machine's memory and its device register, as addresses.
     memory: usize,
@@ -64,6 +122,7 @@ struct Machine {
     wakes: (Mutex<u64>, Condvar),
     irq: Mutex<Option<u32>>,
     queued: Mutex<Vec<Queue>>,
+    ec: Mutex<Controller>,
 }
 
 thread_local! {
@@ -163,6 +222,7 @@ impl Machine {
             wakes: (Mutex::new(0), Condvar::new()),
             irq: Mutex::new(None),
             queued: Mutex::new(Vec::new()),
+            ec: Mutex::new(Controller { space: vec![0; 256], ..Controller::default() }),
         }
     }
 
@@ -236,11 +296,23 @@ impl Host for Machine {
         if port == PM_TIMER {
             return (self.now_ns() / 279) as u32 & 0xff_ffff;
         }
+        if port == EC_COMMAND {
+            return u32::from(self.ec.lock().unwrap().status());
+        }
+        if port == EC_DATA {
+            let output = self.ec.lock().unwrap().output.take();
+            return u32::from(output.expect("the embedded controller's output was read empty"));
+        }
         (0..u16::from(width)).map(|i| u32::from(self.port(port + i)) << (8 * i)).sum()
     }
 
     fn port_write(&self, port: u16, width: u8, value: u32) {
         self.writes.lock().unwrap().push((port, width, value));
+        match port {
+            EC_COMMAND => return self.ec.lock().unwrap().command(value as u8),
+            EC_DATA => return self.ec.lock().unwrap().data(value as u8),
+            _ => {}
+        }
         for i in 0..u16::from(width) {
             let byte = (value >> (8 * i)) as u8;
             let at = port + i;
@@ -320,6 +392,20 @@ fn eval(path: &CStr) -> u64 {
     eval_integer(path).unwrap_or_else(|err| panic!("{path:?}: {err}"))
 }
 
+static NOTIFIED: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+fn notified(node: Node, value: u64) {
+    NOTIFIED.lock().unwrap().push((node.name_text().to_string(), value));
+}
+
+/// The one device present with `hid`.
+fn device(hid: &CStr) -> Node {
+    let mut found = Vec::new();
+    find_devices(hid, &mut |node| found.push(node));
+    assert_eq!(found.len(), 1, "{hid:?}");
+    found[0]
+}
+
 #[test]
 fn a_machine_runs_its_firmwares_aml_from_start_to_power_off() {
     let machine: &'static Machine = Box::leak(Box::new(Machine::new()));
@@ -377,6 +463,64 @@ fn a_machine_runs_its_firmwares_aml_from_start_to_power_off() {
     assert_eq!(machine.port(GPE0 + 1) & 1, 1, "GPE 0 enabled again");
     // Nothing raised the interrupt now.
     assert!(!interrupt());
+
+    // The embedded controller was found before `_REG` and `_INI` ran, and
+    // its event is on.
+    assert_eq!(
+        embedded_controller(),
+        Some(EmbeddedController {
+            data: EC_DATA,
+            command: EC_COMMAND,
+            gpe: Some(u16::from(EC_GPE)),
+            global_lock: false
+        })
+    );
+    assert_eq!(eval(c"\\_SB.EC0.REGD"), 1, "_REG(3, 1)");
+    assert_eq!(machine.port(GPE0 + 1) & 1 << EC_GPE, 1 << EC_GPE, "the EC's GPE enabled");
+    // The battery, the adapter and the lid read the controller: charging
+    // at 20 W, half full; plugged in; open.
+    {
+        let mut ec = machine.ec.lock().unwrap();
+        ec.space[0x10] = 0b11;
+        ec.space[0x11] = 2;
+        ec.space[0x12..0x18].copy_from_slice(&[0x20, 0x4e, 0xc0, 0x5d, 0x44, 0x2f]);
+    }
+    let battery = device(c"PNP0C0A");
+    assert_eq!(battery.name_text().as_str(), "BAT0");
+    assert_eq!(battery.path().to_string(), "\\_SB_.BAT0");
+    let info = battery.package(c"_BIX", |p| Info::from_bix(p)).unwrap().unwrap();
+    assert_eq!((info.full_capacity, info.model.as_str()), (Some(48_000), "TEST 0001"));
+    let state = battery.package(c"_BST", |p| State::from_bst(p)).unwrap().unwrap();
+    assert_eq!(
+        (state.charging, state.rate, state.remaining, state.voltage),
+        (true, Some(20_000), Some(24_000), Some(12_100))
+    );
+    assert_eq!((state.status(&info), state.percent(&info)), ("Charging", Some(50)));
+    assert_eq!(device(c"ACPI0003").integer(c"_PSR"), Ok(1));
+    let lid = device(c"PNP0C0D");
+    assert_eq!(lid.integer(c"_LID"), Ok(1));
+    // A write goes through the controller too.
+    assert_eq!(eval(c"\\_SB.EC0.STOP"), 0);
+    assert_eq!(machine.ec.lock().unwrap().space[0x11], 0);
+    assert_eq!(battery.integer(c"_NONE").map_err(Error::is_not_found), Err(true));
+
+    // Its events: two queued, its GPE raised. The interrupt queues the
+    // queries, which run each event's `_Qxx`; their `Notify`s reach the
+    // handlers on the notify queue, and the GPE is on again.
+    battery.on_notify(notified).unwrap();
+    lid.on_notify(notified).unwrap();
+    machine.ec.lock().unwrap().events.extend([1, 2]);
+    machine.queued.lock().unwrap().clear();
+    machine.set_port(GPE0, 1 << EC_GPE);
+    assert!(interrupt());
+    assert_eq!(*machine.queued.lock().unwrap(), [Queue::Events]);
+    assert!(run_work(Queue::Events));
+    assert!(!run_work(Queue::Events));
+    assert!(machine.ec.lock().unwrap().events.is_empty());
+    while run_work(Queue::Notify) {}
+    assert_eq!(*NOTIFIED.lock().unwrap(), [("BAT0".to_string(), 0x80), ("LID0".to_string(), 0x80)]);
+    assert_eq!(machine.port(GPE0) & 1 << EC_GPE, 0, "the EC's GPE status cleared");
+    assert_eq!(machine.port(GPE0 + 1) & 1 << EC_GPE, 1 << EC_GPE, "the EC's GPE on again");
 
     // Powering off runs `_PTS(5)`, then writes S5's SLP_TYP and SLP_EN; this
     // machine stays on, which uACPI reports after waiting.

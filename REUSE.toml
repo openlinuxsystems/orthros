@@ -109,8 +109,9 @@ SPDX-FileCopyrightText = "2022-2026 Daniil Tatianin"
 SPDX-License-Identifier = "MIT"
 
 # The ACPI tables iasl compiles from src/tests/*.asl, which radix-uacpi's
-# tests run (kernel/lib/uacpi/src/tests.rs).
+# tests run (kernel/lib/uacpi/src/tests.rs), and from
+# tools/xtask/src/acpi/*.asl, which boot tests give QEMU.
 [[annotations]]
-path = "kernel/lib/uacpi/src/tests/*.aml"
+path = ["kernel/lib/uacpi/src/tests/*.aml", "tools/xtask/src/acpi/*.aml"]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"

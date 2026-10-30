@@ -13,6 +13,7 @@
 //! cannot be done with interrupts masked. The watchdog's methods go to
 //! [`crate::watchdog`] (ADR 0143).
 
+use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_abi::errors::Kernel;
@@ -58,12 +59,16 @@ pub fn start() {
     let button = if crate::acpi::running() {
         crate::acpi::power_button(pressed)
     } else {
-        Arch::start_power_button(pressed)
+        Arch::start_power_button(pressed).map(|name| {
+            let mut line = crate::acpi::devices::Line::new();
+            let _ = line.write_str(name);
+            line
+        })
     };
     match button {
         Some(name) => {
             HEARD.store(true, Ordering::Release);
-            info!("Power: {name} asks Spark to power the machine off");
+            info!("Power: {} asks Spark to power the machine off", name.as_str());
         }
         None => info!("Power: no power button the kernel can hear; the firmware keeps it"),
     }

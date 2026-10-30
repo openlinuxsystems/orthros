@@ -25,7 +25,9 @@
 //! - `/processes/stat`: what each CPU has done, the threads ready to run and
 //!   waiting for a disk, and what the disks have read and written;
 //! - `/processes/loadavg`: the load averages;
-//! - `/processes/uptime`: nanoseconds since boot.
+//! - `/processes/uptime`: nanoseconds since boot;
+//! - `/processes/acpi/button/lid/<name>/state`, Linux's, for each lid of
+//!   the firmware's (ADR 0201): `state:      open`, or `closed`.
 //!
 //! A newline or a backslash in a name or a path is written the same way,
 //! so that it cannot end its line early.
@@ -37,10 +39,12 @@ use radix_abi::process::{IoClass, ProcessState};
 use radix_cap::{Capability, ObjectKind, Rights, SlotRef};
 use radix_klog::TextBuf;
 use radix_mm::{FRAMES, Kmalloc, Owner, PAGE_SIZE};
-use radix_vfs::synthetic::{Generated, Generator, ListedDir, Listing, SyntheticFs};
-use radix_vfs::{Error, FsKind, FsRef, Kind, NodeRef, Result, Text, mem};
+use radix_sync::Once;
+use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, SyntheticFs};
+use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem};
 
 use super::FileRef;
+use crate::acpi::devices::{self, MAX_LIDS};
 use crate::sched::{self, Run, ThreadRef};
 use crate::user::UserRef;
 use crate::user::objects::{self, Object};
@@ -93,6 +97,12 @@ const PROCESS_FILES: [&str; 4] = ["cmdline", "files", "status", "threads"];
 const ROOT_ID: u64 = 1;
 const PROCESS_ID_BASE: u64 = 16;
 const PER_PROCESS: u64 = 1 + PROCESS_FILES.len() as u64;
+/// `/processes/acpi`, its `button` and `lid`, then each lid's directory
+/// and its `state`, between the root's files and the processes.
+const ACPI_ID: u64 = 8;
+const _: () = assert!(ACPI_ID + 3 + 2 * MAX_LIDS as u64 <= PROCESS_ID_BASE);
+
+static ACPI: Once<KArc<FixedDir>> = Once::new();
 
 fn file_id(name: &str) -> u64 {
     FILES.iter().position(|f| *f == name).map_or(0, |i| 2 + i as u64)
@@ -118,6 +128,9 @@ impl Listing for Root {
                 return;
             }
         }
+        if devices::lids().next().is_some() && !f("acpi", Kind::Directory) {
+            return;
+        }
         let mut numbers = objects::process_numbers();
         posix::zombie_numbers(&mut numbers);
         numbers.sort_unstable();
@@ -139,6 +152,7 @@ impl Listing for Root {
             "stat" => stat,
             "swaps" => swaps,
             "uptime" => uptime,
+            "acpi" if devices::lids().next().is_some() => return acpi(),
             _ => {
                 let number: u64 = name.parse().map_err(|_| Error::NotFound)?;
                 if name.starts_with('0') || process_by_number(number).is_none() {
@@ -150,6 +164,35 @@ impl Listing for Root {
         };
         Generated::from_fn(file_id(name), generate)
     }
+}
+
+/// `/processes/acpi`, made the first time it is looked up.
+fn acpi() -> Result<NodeRef> {
+    if let Some(dir) = ACPI.get() {
+        let dir: NodeRef = dir.clone();
+        return Ok(dir);
+    }
+    let dir = FixedDir::new(ACPI_ID)?;
+    let lids = dir.add_dir("button", ACPI_ID + 1)?.add_dir("lid", ACPI_ID + 2)?;
+    for (i, lid) in devices::lids().enumerate() {
+        let i = i as u64;
+        let generate: Generator = mem::boxed(move |text: &mut Text| {
+            let state = match lid.open() {
+                Some(true) => "open",
+                Some(false) => "closed",
+                None => "unsupported",
+            };
+            writeln!(text, "state:      {state}")
+        })?;
+        let state = Generated::make(ACPI_ID + 3 + MAX_LIDS as u64 + i, generate)?;
+        lids.add_dir(lid.name(), ACPI_ID + 3 + i)?.add("state", state)?;
+    }
+    // Another thread may have made it meanwhile; either will do.
+    let dir: NodeRef = match ACPI.set(dir) {
+        Ok(dir) => dir.clone(),
+        Err(dir) => dir,
+    };
+    Ok(dir)
 }
 
 /// A process's directory.

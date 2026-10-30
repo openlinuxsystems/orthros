@@ -7,7 +7,8 @@
  *
  *     iasl -p dsdt dsdt.asl
  *
- * Its methods write what they did to I/O ports the test reads back.
+ * Its methods write what they did to I/O ports the test reads back. Its
+ * embedded controller keeps a battery, an AC adapter and a lid.
  */
 DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
 {
@@ -75,6 +76,111 @@ DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
                 {
                     Return (VID)
                 }
+            }
+        }
+
+        // The embedded controller, at Linux's usual ports, raising GPE 1.
+        Device (EC0)
+        {
+            Name (_HID, EisaId ("PNP0C09"))
+            Name (_GPE, 1)
+            Name (_CRS, ResourceTemplate ()
+            {
+                IO (Decode16, 0x62, 0x62, 0, 1)
+                IO (Decode16, 0x66, 0x66, 0, 1)
+            })
+
+            // _REG(3, 1) once the kernel serves its region.
+            Name (REGD, 0)
+            Method (_REG, 2)
+            {
+                If (Arg0 == 3)
+                {
+                    REGD = Arg1
+                }
+            }
+
+            OperationRegion (ECR, EmbeddedControl, 0, 0x100)
+            Field (ECR, ByteAcc, NoLock, Preserve)
+            {
+                Offset (0x10),
+                ACON, 1,    // the AC adapter is plugged in
+                LIDO, 1,    // the lid is open
+                    , 6,
+                BSTA, 8,    // the battery's state bits
+                BRTE, 16,   // its rate
+                BREM, 16,   // what it has left
+                BVOL, 16,   // its voltage
+            }
+
+            Method (_Q01)
+            {
+                Notify (\_SB.BAT0, 0x80)
+            }
+
+            Method (_Q02)
+            {
+                Notify (\_SB.LID0, 0x80)
+            }
+
+            // Stops charging: a write through the controller.
+            Method (STOP)
+            {
+                BSTA = 0
+                Return (BSTA)
+            }
+        }
+
+        Device (BAT0)
+        {
+            Name (_HID, EisaId ("PNP0C0A"))
+            Name (_UID, 0)
+
+            Method (_STA)
+            {
+                Return (0x1F)
+            }
+
+            Name (BIXP, Package ()
+            {
+                1, 0, 50000, 48000, 1, 11400, 5000, 2000, 42, 95000,
+                0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 10, 10,
+                "TEST 0001", "1234", "LION", "DUKOVO", 1
+            })
+
+            Method (_BIX)
+            {
+                Return (BIXP)
+            }
+
+            Method (_BST, 0, Serialized)
+            {
+                Name (PKG, Package (4) { 0, 0, 0, 0 })
+                PKG [0] = \_SB.EC0.BSTA
+                PKG [1] = \_SB.EC0.BRTE
+                PKG [2] = \_SB.EC0.BREM
+                PKG [3] = \_SB.EC0.BVOL
+                Return (PKG)
+            }
+        }
+
+        Device (ADP1)
+        {
+            Name (_HID, "ACPI0003")
+
+            Method (_PSR)
+            {
+                Return (\_SB.EC0.ACON)
+            }
+        }
+
+        Device (LID0)
+        {
+            Name (_HID, EisaId ("PNP0C0D"))
+
+            Method (_LID)
+            {
+                Return (\_SB.EC0.LIDO)
             }
         }
 
