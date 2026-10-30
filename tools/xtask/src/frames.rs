@@ -35,6 +35,10 @@ const ALLOWED: &[(&str, &str)] = &[
         "sets up a network card and its stack at boot, on the boot CPU's 64 KiB stack",
     ),
     (
+        "radix::net::start_loopback",
+        "sets up the loopback interface and its stack at boot, on the boot CPU's 64 KiB stack",
+    ),
+    (
         "radix::fs::disk::nvme::bind",
         "sets up a controller and its disks at boot, on the boot CPU's 64 KiB stack",
     ),

@@ -705,6 +705,22 @@ _target/userspace/_).
 		QEMU's router must answer all four pings (*radix-debug*(7), ADR
 		0180, 0181).
 
+	*sockets*
+		Boot 2 CPUs under UEFI from the USB stick with a virtio network
+		card on QEMU's user network, which runs *cat* for each connection
+		to 10.0.2.100 port 7, and *ip=10.0.2.15/24* and
+		*gateway=10.0.2.2*. Spark starts _/system/tests/sockets virtio_
+		with its network capability (*--network*): the program derives a
+		capability that may only connect out and one that may only listen
+		on ports 8000 to 8009; connects, listens and takes connections
+		over TCP on the loopback interface, sends a line each way and a
+		mebibyte one way, and shuts each end down in turn; sends UDP
+		datagrams each way; checks that each method refuses what the
+		capability it is given does not allow; and connects through the
+		card to QEMU's *cat*, which must send back what it sent. Every
+		socket's memory must come back to the kernel (*radix-network*(2),
+		ADR 0183).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real

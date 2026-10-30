@@ -52,6 +52,9 @@ enum ObjectKind: u8 {
     /// The machine's power: turning it off or restarting it
     /// (radix-power(2)).
     power = 17;
+    /// A range of the network's ports, to connect out through and listen
+    /// on (radix-network(2)).
+    network = 18;
 }
 
 /// What a capability lets its holder do.

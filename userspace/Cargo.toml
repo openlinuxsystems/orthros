@@ -9,7 +9,7 @@
 
 [workspace]
 resolver = "3"
-members = ["hello", "libradix", "radix-rt", "spark", "storage", "usertests"]
+members = ["hello", "libradix", "radix-rt", "sockets", "spark", "storage", "usertests"]
 
 [workspace.package]
 # Keep in step with the root Cargo.toml (a unit test of ob checks it).

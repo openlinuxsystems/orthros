@@ -241,7 +241,7 @@ const KERNEL_PROGRAM: Program = Program {
 };
 
 /// The user programs are /system code too: permissive licenses only.
-const USER_PROGRAMS: [Program; 4] = [
+const USER_PROGRAMS: [Program; 5] = [
     Program {
         what: "the user test programs",
         workspace: "userspace",
@@ -258,6 +258,12 @@ const USER_PROGRAMS: [Program; 4] = [
         what: "the hello test program",
         workspace: "userspace",
         package: "hello",
+        target: userspace::TARGET_SPEC,
+    },
+    Program {
+        what: "the sockets test program",
+        workspace: "userspace",
+        package: "sockets",
         target: userspace::TARGET_SPEC,
     },
     Program {

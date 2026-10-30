@@ -53,6 +53,7 @@ pub mod launch;
 mod loader;
 pub(crate) mod memory;
 mod methods;
+mod network;
 mod notify;
 pub mod objects;
 pub(crate) mod posix;
