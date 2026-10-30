@@ -918,9 +918,9 @@ fn add_named(
     let shared = Shared { jobs: SpinLock::new(jobs), thread, link: link.clone() };
     let shared = Arc::try_new_in(shared, heap).map_err(|_| "out of memory")?;
     let part = queue::part(UsbLun { shared: shared.clone() }).ok_or("out of memory")?;
-    let disk =
-        Disk::new(core::iter::once(part), info, found.write_cache, false, true, name.clone())
-            .ok_or("out of memory")?;
+    let once = core::iter::once(part);
+    let disk = Disk::new(once, info, found.write_cache, false, true, name.clone(), link.source)
+        .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, heap).map_err(|_| "out of memory")?;
     let inquiry = found.inquiry;
     let how = match link.protocol {

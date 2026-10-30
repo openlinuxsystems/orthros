@@ -201,9 +201,15 @@ impl Devices for Arch {
         None
     }
 
-    fn alloc_dma(_pages: usize, _below_4g: bool) -> Option<Dma> {
+    fn alloc_dma(_source: radix_hal::PciAddress, _pages: usize, _below_4g: bool) -> Option<Dma> {
         None
     }
+
+    fn map_dma(_source: radix_hal::PciAddress, _frames: &[(u64, u32)]) -> bool {
+        true
+    }
+
+    fn unmap_dma(_source: radix_hal::PciAddress, _frames: &[(u64, u32)]) {}
 
     fn alloc_cache_page() -> Option<radix_hal::Page> {
         None

@@ -244,6 +244,8 @@ pub struct Link {
     uas: SpinLock<UasMail>,
     /// The controller's thread, which an ask wakes.
     controller: ThreadRef,
+    /// The controller's place on PCI, which an IOMMU knows its DMA by.
+    pub source: radix_hw::pci::Address,
     /// The stick's thread, which an answer wakes, once it runs.
     stick: SpinLock<Option<ThreadRef>>,
     /// The transfer waited for is to be stopped: the disk's queue gave up
@@ -432,6 +434,7 @@ impl Controller {
             mail: SpinLock::new(mail),
             uas: SpinLock::new(uas),
             controller,
+            source: self.source,
             stick: SpinLock::new(None),
             aborted: AtomicBool::new(false),
             ticket: TICKETS.fetch_add(1, Ordering::AcqRel),
@@ -525,7 +528,8 @@ impl Controller {
         alternate: u8,
         pipes: &[EndpointDescriptor; 4],
     ) -> Result<(Protocol, u8), Why> {
-        let Controller { xhci, host, devices, .. } = self;
+        let Controller { xhci, host, devices, source, .. } = self;
+        let mut alloc = alloc(*source);
         let device = &mut devices[at].device;
         if alternate != 0 {
             let mut drop = [0u8; MAX_SETTING_ENDPOINTS];
@@ -881,7 +885,7 @@ impl<'a> StickPipes<'a> {
     /// The pipes of the stick whose link is `link`; `None` when memory
     /// runs out.
     pub fn new(link: &'a Link) -> Option<StickPipes<'a>> {
-        let page = <crate::Arch as radix_hal::Devices>::alloc_dma(1, false)?;
+        let page = <crate::Arch as radix_hal::Devices>::alloc_dma(link.source, 1, false)?;
         Some(StickPipes { link, page })
     }
 
@@ -1030,7 +1034,7 @@ impl<'a> UasPipes<'a> {
     /// The pipes of the UAS stick whose link is `link`; `None` when memory
     /// runs out.
     pub fn new(link: &'a Link) -> Option<UasPipes<'a>> {
-        let page = || <crate::Arch as radix_hal::Devices>::alloc_dma(1, false);
+        let page = || <crate::Arch as radix_hal::Devices>::alloc_dma(link.source, 1, false);
         Some(UasPipes { link, ius: page()?, statuses: page()?, bounce: page()? })
     }
 

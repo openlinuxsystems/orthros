@@ -175,6 +175,7 @@ dependencies = [
  "radix-random",
  "radix-relocs",
  "radix-sync",
+ "radix-vtd",
 ]
 
 [[package]]
@@ -412,6 +413,14 @@ dependencies = [
 name = "radix-virtio"
 version = "0.10.4"
 dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-vtd"
+version = "0.10.4"
+dependencies = [
+ "proptest",
  "radix-hw",
 ]
 

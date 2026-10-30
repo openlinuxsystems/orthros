@@ -64,6 +64,11 @@ pub const FLAGS: &[Flag] = &[
         summary: "leave the USB controllers as the firmware left them",
     },
     Flag {
+        name: "iommu",
+        value: Some("off"),
+        summary: "leave the IOMMU's DMA remapping off, so that every device reaches all memory",
+    },
+    Flag {
         name: "mce-poll",
         value: Some("seconds"),
         summary: "read the CPUs' machine-check banks this often (300 by default)",
@@ -83,7 +88,7 @@ pub const FLAGS: &[Flag] = &[
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
                   mm-stress, stack-overflow, smep, smap, tlb, caps, fpu, sched-fair, sched-rt, \
-                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz or bench",
+                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz, bench or iommu",
     },
     Flag {
         name: "fuzz-seed",
@@ -132,6 +137,7 @@ pub const SELFTESTS: &[&str] = &[
     "ipc",
     "fuzz",
     "bench",
+    "iommu",
 ];
 
 /// A parsed view of the command line.

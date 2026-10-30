@@ -136,6 +136,12 @@ pub mod feature {
     pub const EVENT_IDX: u64 = 1 << 29;
     /// The device follows virtio 1.0 or later.
     pub const VERSION_1: u64 = 1 << 32;
+    /// The device's DMA goes through the platform's IOMMU like any other
+    /// device's, at the addresses the driver gives. A driver must accept it
+    /// when it is offered, or the device refuses to run (virtio 1.2,
+    /// section 6.1). Radix gives physical addresses, which are a device's
+    /// addresses behind an IOMMU too, so it always accepts.
+    pub const ACCESS_PLATFORM: u64 = 1 << 33;
 }
 
 /// Offsets in the common configuration structure (virtio 1.2, 4.1.4.3).

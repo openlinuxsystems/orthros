@@ -23,7 +23,7 @@ use radix_ahci::ata::{smart, trimmed};
 use radix_ahci::{Absent, Hba, Port};
 use radix_block::{DeviceRef, Error, Health, Info, Page};
 use radix_hal::Devices;
-use radix_hw::pci::{Bar, Function, Msi};
+use radix_hw::pci::{Address, Bar, Function, Msi};
 use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::Once;
@@ -41,6 +41,8 @@ const PORTS: usize = 32;
 struct Host {
     hba: Hba,
     disks: [Once<Arc<Disk<SataPort>, Kmalloc>>; PORTS],
+    /// Where it is on PCI.
+    source: Address,
 }
 
 /// The controllers, for their interrupt handlers: set once each.
@@ -223,7 +225,8 @@ pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
     }
     let (major, minor) = hba.version();
     let (ports, slots, ncq) = (hba.implemented().count_ones(), hba.slots(), hba.ncq());
-    let host = Host { hba, disks: [const { Once::new() }; PORTS] };
+    let source = function.address();
+    let host = Host { hba, disks: [const { Once::new() }; PORTS], source };
     let host = Arc::try_new_in(host, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = HOSTS[index].set(host.clone());
     // One MSI for every port, if the controller and the kernel have one;
@@ -254,7 +257,7 @@ pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
     while ports.len() < PORTS {
         let _ = ports.push_within_capacity(None);
     }
-    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(pages, false);
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
     host.hba.probe(&mut ports, &mut alloc, &mut queue::delay, &mut |number, found| match found {
         Ok(port) => {
             if let Err(why) = add(&host, number, port, next, interrupt.is_some()) {
@@ -294,14 +297,15 @@ fn add(
 fn new_disk(
     controller: SataPort,
     info: Info,
-    write_cache: bool,
-    fua: bool,
+    (write_cache, fua): (bool, bool),
     interrupt: bool,
+    source: Address,
 ) -> Result<Arc<Disk<SataPort>, Kmalloc>, &'static str> {
     let name = controller.name.clone();
     let controller = queue::part(controller).ok_or("out of memory")?;
     let once = core::iter::once(controller);
-    let disk = Disk::new(once, info, write_cache, fua, interrupt, name).ok_or("out of memory")?;
+    let disk =
+        Disk::new(once, info, write_cache, fua, interrupt, name, source).ok_or("out of memory")?;
     Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")
 }
 
@@ -328,7 +332,8 @@ fn add_named(
         rotational: found.rotational.unwrap_or(true),
     };
     let controller = SataPort { port, owner: [0; PORTS], name: name.clone() };
-    let disk = new_disk(controller, info, found.write_cache, found.fua, interrupt)?;
+    let caching = (found.write_cache, found.fua);
+    let disk = new_disk(controller, info, caching, interrupt, host.source)?;
     let _ = host.disks[number].set(disk.clone());
     let model = identity.as_ref().map_or("", |id| trimmed(&id.model));
     let mut queued = TextBuf::<24>::new();

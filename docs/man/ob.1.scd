@@ -625,6 +625,16 @@ _target/userspace/_).
 		kernel reads the whole sectors around it and writes them back,
 		and a discard must cover whole 4 KiB sectors.
 
+	*iommu*
+		The *disk-raw* test behind QEMU's Intel VT-d unit (*intel-iommu*),
+		with the virtio disk told to go through it and QEMU's *edu* test
+		device added, on 2 CPUs under UEFI booted from the USB stick: the
+		unit must translate with 3-level page tables and queued
+		invalidation, every disk and the stick must work with each device
+		reaching only what is mapped for it, and *selftest=iommu*
+		(*radix-debug*(7)) must pass, its two stopped writes logged (ADR
+		0164).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real

@@ -228,9 +228,9 @@ impl Mmio {
     }
 }
 
-/// Gives back DMA memory: called with its kernel address, physical address
-/// and length when a [`Dma`] is dropped.
-pub type Release = fn(virt: usize, phys: u64, len: usize);
+/// Gives back DMA memory: called with its kernel address, physical address,
+/// length and tag ([`Dma::new`]) when a [`Dma`] is dropped.
+pub type Release = fn(virt: usize, phys: u64, len: usize, tag: u32);
 
 /// Physically contiguous memory that a device reads and writes by itself.
 ///
@@ -244,7 +244,9 @@ pub type Release = fn(virt: usize, phys: u64, len: usize);
 pub struct Dma {
     virt: usize,
     phys: u64,
-    len: usize,
+    // Below 4 GiB, which leaves room for the tag in the word.
+    len: u32,
+    tag: u32,
     release: Release,
 }
 
@@ -256,7 +258,13 @@ impl fmt::Debug for Dma {
 
 impl Dma {
     /// The memory at kernel address `virt` and physical address `phys`,
-    /// `len` bytes, given back with `release`.
+    /// `len` bytes (below 4 GiB), given back with `release`, which is
+    /// passed `tag`: what else the kernel needs to give it back, such as
+    /// the device whose IOMMU domain maps it.
+    ///
+    /// # Panics
+    ///
+    /// If `len` is 4 GiB or more.
     ///
     /// # Safety
     ///
@@ -264,8 +272,9 @@ impl Dma {
     /// physically contiguous from `phys`, and belong to the new value
     /// alone until `release` gives it back.
     #[allow(unsafe_code)]
-    pub unsafe fn new(virt: usize, phys: u64, len: usize, release: Release) -> Dma {
-        Dma { virt, phys, len, release }
+    pub unsafe fn new(virt: usize, phys: u64, len: usize, tag: u32, release: Release) -> Dma {
+        let len = u32::try_from(len).expect("DMA memory of 4 GiB or more");
+        Dma { virt, phys, len, tag, release }
     }
 
     /// `len` zeroed bytes of host memory, whose physical address is its
@@ -278,14 +287,14 @@ impl Dma {
         let memory =
             std::boxed::Box::leak(std::vec![FakePage([0; 4096]); pages].into_boxed_slice());
         let virt = memory.as_mut_ptr() as usize;
-        fn release(virt: usize, _phys: u64, len: usize) {
+        fn release(virt: usize, _phys: u64, len: usize, _tag: u32) {
             let pages = len.div_ceil(4096).max(1);
             let memory = core::ptr::slice_from_raw_parts_mut(virt as *mut FakePage, pages);
             // SAFETY: `fake` leaked exactly this boxed slice.
             #[allow(unsafe_code)]
             drop(unsafe { std::boxed::Box::from_raw(memory) });
         }
-        Dma { virt, phys: virt as u64, len, release }
+        Dma { virt, phys: virt as u64, len: len as u32, tag: 0, release }
     }
 
     /// The physical address of its first byte, which the device uses.
@@ -295,7 +304,7 @@ impl Dma {
 
     /// Its length in bytes.
     pub fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     /// Whether it is empty.
@@ -305,7 +314,7 @@ impl Dma {
 
     fn at(&self, offset: usize, size: usize) -> usize {
         assert!(
-            offset.checked_add(size).is_some_and(|end| end <= self.len),
+            offset.checked_add(size).is_some_and(|end| end <= self.len()),
             "DMA access of {size} bytes at {offset:#x} outside {self:?}"
         );
         self.virt + offset
@@ -392,10 +401,11 @@ impl Dma {
 
     /// Zeroes all of it.
     pub fn zero(&self) {
-        for offset in (0..self.len & !7).step_by(8) {
+        let len = self.len();
+        for offset in (0..len & !7).step_by(8) {
             self.write64(offset, 0);
         }
-        for offset in self.len & !7..self.len {
+        for offset in len & !7..len {
             self.write8(offset, 0);
         }
     }
@@ -403,7 +413,7 @@ impl Dma {
 
 impl Drop for Dma {
     fn drop(&mut self) {
-        (self.release)(self.virt, self.phys, self.len);
+        (self.release)(self.virt, self.phys, self.len(), self.tag);
     }
 }
 

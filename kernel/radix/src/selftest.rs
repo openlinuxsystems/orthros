@@ -40,7 +40,7 @@ use radix_mm::stress::{self, StressReport};
 use radix_mm::{FRAMES, HEAP, Owner};
 
 use crate::panic::SELFTEST_MARKER;
-use crate::{Arch, captest, crashlog, schedtest, usertest, work};
+use crate::{Arch, captest, crashlog, iommutest, schedtest, usertest, work};
 
 /// Runs the self-test called `name`.
 pub fn run(name: &str) {
@@ -66,6 +66,7 @@ pub fn run(name: &str) {
         "ipc" => usertest::ipc(),
         "fuzz" => usertest::fuzz(),
         "bench" => usertest::bench(),
+        "iommu" => iommutest::run(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

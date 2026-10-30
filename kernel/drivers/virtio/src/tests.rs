@@ -387,6 +387,14 @@ fn sets_up_with_the_features_it_wants() {
 }
 
 #[test]
+fn accepts_dma_through_the_iommu_when_offered() {
+    let (device, _blk) = setup(FEATURES | common_feature::ACCESS_PLATFORM);
+    let s = device.state.lock().unwrap();
+    assert_ne!(s.driver_features & common_feature::ACCESS_PLATFORM, 0);
+    assert_ne!(s.status & status::DRIVER_OK, 0);
+}
+
+#[test]
 fn held_requests_wait_for_the_doorbell() {
     let (_device, mut blk) = setup(FEATURES);
     let buffer = Dma::fake(8192);

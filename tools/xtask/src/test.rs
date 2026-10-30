@@ -82,6 +82,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-usb",
     "radix-vfs",
     "radix-virtio",
+    "radix-vtd",
     "radix-xhci",
 ];
 
@@ -526,6 +527,14 @@ const fn raw_disk(bus: Bus, check: DiskCheck) -> Disk {
 /// an NVMe namespace.
 const RAW_DISKS: &[Disk] = &[
     raw_disk(Bus::Virtio, raw_check),
+    Disk { device: ",rotation_rate=1", ..raw_disk(Bus::Sata, raw_check) },
+    raw_disk(Bus::Nvme(0), raw_check),
+];
+
+/// The `iommu` test's disks: [`RAW_DISKS`], the virtio disk's DMA going
+/// through the IOMMU as every other device's does.
+const IOMMU_DISKS: &[Disk] = &[
+    Disk { device: ",disable-legacy=on,iommu_platform=on", ..raw_disk(Bus::Virtio, raw_check) },
     Disk { device: ",rotation_rate=1", ..raw_disk(Bus::Sata, raw_check) },
     raw_disk(Bus::Nvme(0), raw_check),
 ];
@@ -1603,6 +1612,23 @@ pub const CASES: &[Case] = &[
         qemu: &[],
         script: disk_raw,
         disks: RAW_DISKS,
+        second: None,
+    },
+    Case {
+        name: "iommu",
+        about: "Behind QEMU's Intel IOMMU each device reaches only what it is given: the disk-raw checks pass, and edu's DMA to a page never given or taken back is stopped",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep selftest=iommu init-after-selftest -- /system/tests/storage raw vda sda \
+                  nvme0n1",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "intel-iommu,intremap=off", "-device", "edu,dma_mask=0xffffffff"],
+        script: iommu,
+        disks: IOMMU_DISKS,
         second: None,
     },
     Case {
@@ -4885,6 +4911,34 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: /devices/{name}: discards, flushes and refusals work"))?;
     }
     storage_end(vm, "raw")
+}
+
+/// The `iommu` test (ADR 0164): the `disk-raw` checks, every disk's and
+/// the boot stick's DMA going through QEMU's VT-d unit, then what the
+/// kernel said of the unit and of the edu device's self-test, whose two
+/// copies to a page it was not given the unit stopped.
+fn iommu(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    disk_raw(vm, case)?;
+    let log = vm.log();
+    let unit = log
+        .lines()
+        .find_map(|line| line.find("IOMMU: VT-d ").map(|at| &line[at..]))
+        .ok_or("the kernel never said it took over the IOMMU")?;
+    // QEMU's DMAR names each device the unit translates.
+    let described = unit.contains(" devices: 3-level page tables, ");
+    if !described || !unit.ends_with(", queued invalidation") {
+        return Err(format!("the kernel described the IOMMU as \"{unit}\""));
+    }
+    for needle in ["selftest iommu: passed", " reaches only what is mapped for it (domain "] {
+        if !log.contains(needle) {
+            return Err(format!("the kernel never said \"{needle}\""));
+        }
+    }
+    let stopped = log.matches(" was stopped writing to 0x").count();
+    if stopped != 2 {
+        return Err(format!("the IOMMU stopped {stopped} writes, not edu's 2"));
+    }
+    Ok(())
 }
 
 /// The `disk-check` test: after the kernel's benchmarks, with no disk

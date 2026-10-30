@@ -20,7 +20,8 @@
 //! restarts the machine, and [`cpu`] and [`io`] wrap single instructions.
 //! [`devices`] maps device registers, allocates DMA memory and hands out
 //! interrupt vectors for message-signalled interrupts, and [`rtc`] reads
-//! the real-time clock (Phase 7).
+//! the real-time clock (Phase 7). [`iommu`] has each device reach only
+//! the memory given to it, behind Intel VT-d (Phase 11).
 //!
 //! It is part of the trusted computing base, so it may use `unsafe`, and
 //! every `unsafe` block states why it is sound. docs/design/boot.md and
@@ -38,6 +39,7 @@ mod fpu;
 mod i8042;
 mod interrupts;
 mod io;
+mod iommu;
 mod kaslr;
 mod kvm;
 mod mce;
@@ -354,8 +356,20 @@ impl Devices for Arch {
         devices::map(phys, len)
     }
 
-    fn alloc_dma(pages: usize, below_4g: bool) -> Option<radix_hal::Dma> {
-        devices::alloc_dma(pages, below_4g)
+    fn alloc_dma(
+        source: radix_hal::PciAddress,
+        pages: usize,
+        below_4g: bool,
+    ) -> Option<radix_hal::Dma> {
+        devices::alloc_dma(source, pages, below_4g)
+    }
+
+    fn map_dma(source: radix_hal::PciAddress, frames: &[(u64, u32)]) -> bool {
+        iommu::map(source, frames)
+    }
+
+    fn unmap_dma(source: radix_hal::PciAddress, frames: &[(u64, u32)]) {
+        iommu::unmap(source, frames);
     }
 
     fn alloc_cache_page() -> Option<radix_hal::Page> {
@@ -943,6 +957,8 @@ impl Platform for Arch {
         // Under a hypervisor MWAIT is usually not passed through, and when
         // it is emulated it may spin; HLT lets the host run something else.
         IDLE_MWAIT.store(cpu::feature::monitor() && !cpu::feature::hypervisor(), Ordering::Relaxed);
+        // Before any driver starts a device.
+        iommu::init(flags.value("iommu") == Some("off"));
     }
 
     fn current_fault() -> Option<Fault> {

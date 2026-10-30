@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Device support for drivers (`radix_hal::Devices`): mapping registers,
-//! DMA memory, the page cache's pages and message-signalled interrupts.
+//! DMA memory (mapped for its device behind an IOMMU, [`iommu`]), the
+//! page cache's pages and message-signalled interrupts.
 //!
 //! Vectors [`FIRST`] to [`LAST`] are for devices. [`allocate`] hands one
 //! out with the function it calls; a device raises it by writing the
@@ -20,12 +21,13 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use radix_hw::pci::Address;
 use radix_hw::{Dma, Mmio, MsiMessage, Page};
 use radix_mm::{FRAMES, Flags, Owner};
 use radix_sync::SpinLock;
 
 use crate::memory::{self, PAGE};
-use crate::{apic, paging, smp};
+use crate::{apic, iommu, paging, smp};
 
 /// The first vector for devices.
 pub const FIRST: u8 = 0x50;
@@ -108,19 +110,34 @@ pub fn map(phys: u64, len: usize) -> Option<Mmio> {
     Some(unsafe { Mmio::new(virt, len) })
 }
 
-fn release(_virt: usize, phys: u64, len: usize) {
+fn release(_virt: usize, phys: u64, len: usize, tag: u32) {
+    // The device lets go of them before anything else can have them.
+    if let Some(source) = iommu::untag(tag) {
+        iommu::unmap(source, &[(phys, len as u32)]);
+    }
     memory::free_pages(phys, (len as u64).div_ceil(PAGE), Owner::Kernel);
 }
 
-/// Allocates zeroed, physically contiguous memory for DMA.
-pub fn alloc_dma(pages: usize, below_4g: bool) -> Option<Dma> {
+/// Allocates zeroed, physically contiguous memory for DMA by `source`,
+/// which reaches it behind an IOMMU until it is given back.
+pub fn alloc_dma(source: Address, pages: usize, below_4g: bool) -> Option<Dma> {
     let pages = pages.max(1) as u64;
     let phys = memory::alloc_pages(pages, below_4g, Owner::Kernel)?;
+    let len = pages * PAGE;
+    let tag = if iommu::active() {
+        if !iommu::map_range(source, phys, len) {
+            memory::free_pages(phys, pages, Owner::Kernel);
+            return None;
+        }
+        iommu::tag(source)
+    } else {
+        0
+    };
     let virt = memory::phys_to_virt(phys);
     // SAFETY: the frame allocator gave these pages to us alone, zeroed;
     // the direct map maps all RAM writable at `phys_to_virt`, and the
     // block is contiguous. `release` gives them back exactly once.
-    Some(unsafe { Dma::new(virt, phys, (pages * PAGE) as usize, release) })
+    Some(unsafe { Dma::new(virt, phys, len as usize, tag, release) })
 }
 
 fn release_cache_page(_virt: usize, phys: u64) {

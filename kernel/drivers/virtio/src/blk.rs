@@ -157,8 +157,10 @@ impl Blk {
             | feature::FLUSH
             | feature::TOPOLOGY
             | feature::DISCARD;
-        let features = common_feature::VERSION_1
-            | (offered & (wanted | common_feature::INDIRECT_DESC | common_feature::EVENT_IDX));
+        let common = common_feature::INDIRECT_DESC
+            | common_feature::EVENT_IDX
+            | common_feature::ACCESS_PLATFORM;
+        let features = common_feature::VERSION_1 | (offered & (wanted | common));
         if let Err(err) = transport.set_driver_features(features) {
             transport.add_status(status::FAILED);
             return Err(err);

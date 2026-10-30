@@ -40,6 +40,7 @@ pub use boot::{
     BootModule, BootParams, Channel, Firmware, Framebuffer, MemoryKind, MemoryRegion, PixelFormat,
     Reservation,
 };
+pub use radix_hw::pci::Address as PciAddress;
 pub use radix_hw::{Dma, Mmio, MsiMessage, Page};
 pub use user::{
     MapPageError, PageEdit, Scanned, SignalFrame, SyscallRegs, UserAccess, UserFault,
@@ -329,9 +330,25 @@ pub trait Devices {
     fn map_device(phys: u64, len: usize) -> Option<radix_hw::Mmio>;
 
     /// Allocates `pages` pages of zeroed, physically contiguous memory for
-    /// a device to read and write, below 4 GiB if `below_4g`. It is given
-    /// back when the [`radix_hw::Dma`] is dropped.
-    fn alloc_dma(pages: usize, below_4g: bool) -> Option<radix_hw::Dma>;
+    /// the PCI function `source` to read and write, below 4 GiB if
+    /// `below_4g`. Behind an IOMMU, `source` reaches it, at its physical
+    /// address, until it is given back, when the [`radix_hw::Dma`] is
+    /// dropped (ADR 0164).
+    fn alloc_dma(source: PciAddress, pages: usize, below_4g: bool) -> Option<radix_hw::Dma>;
+
+    /// Lets the PCI function `source` reach the pages of `frames`
+    /// (physical address, length) at their physical addresses, for one
+    /// request, until [`Devices::unmap_dma`] takes them back: behind an
+    /// IOMMU a device reaches only its DMA memory and what is mapped for
+    /// it. A page mapped twice stays until it is unmapped twice. Returns
+    /// false, mapping nothing, when memory for the IOMMU's tables runs out
+    /// or a page is past what they reach. Without an IOMMU it does nothing.
+    fn map_dma(source: PciAddress, frames: &[(u64, u32)]) -> bool;
+
+    /// Takes back what [`Devices::map_dma`] gave `source` for `frames`,
+    /// once the device is done with them: when it returns, the device can
+    /// no longer reach them.
+    fn unmap_dma(source: PciAddress, frames: &[(u64, u32)]);
 
     /// Allocates a zeroed page of ordinary RAM for the page cache, which
     /// disks read into and write from by DMA. It may sleep, and never takes
