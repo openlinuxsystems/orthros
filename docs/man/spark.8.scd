@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [*--network*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -399,6 +399,17 @@ A POSIX program and its children may *fork* and *exec* freely; Spark
 waits only for the one it started. The *posix* boot test (*ob*(1))
 boots with *-- --posix /system/tests/posix/run*. A shutdown sends the
 program SIGTERM along with the first group of services.
+
+# THE NETWORK
+
+The kernel gives Spark a network capability for all of the network's
+65,536 ports, with the rights to connect out and to listen
+(*radix-network*(2), ADR 0183). With *--network* before the program,
+with or without *--posix*, Spark gives the program it starts that
+capability too, in _SLOT_NETWORK_ (*radix-startup*(2)); a program
+started without it cannot use the network at all. The *sockets* boot
+test (*ob*(1)) boots with *-- --network /system/tests/sockets virtio*.
+Services get the network as their manifests ask, from Phase 12a.2c.
 
 # EXAMPLES
 

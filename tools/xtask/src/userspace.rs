@@ -47,6 +47,7 @@ pub const BOOTFS_WORD: &str = "bootfs";
 pub const ARCHIVE: &[(&str, &str)] = &[
     ("system/commands/spark", "spark"),
     ("system/tests/hello", "hello"),
+    ("system/tests/sockets", "sockets"),
     ("system/tests/storage", "storage"),
 ];
 
@@ -654,6 +655,7 @@ mod tests {
                 "system/state",
                 "system/tests",
                 "system/tests/hello",
+                "system/tests/sockets",
                 "system/tests/storage"
             ]
         );

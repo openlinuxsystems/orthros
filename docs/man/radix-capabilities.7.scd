@@ -87,6 +87,24 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	Permission to write lines to the kernel log (see
 	*radix-kernel-log*(2)). Rights: *write*.
 
+*file*
+	An open file description: a file, a pipe's end, a socket or a
+	device (see *radix-file*(2)). Rights: *read*, *write*.
+
+*directory*
+	A place in the file tree, beneath which paths are resolved (see
+	*radix-directory*(2)). Rights: *read*, *write*, *control*.
+
+*power*
+	The machine's power, which Spark turns off or restarts (see
+	*radix-power*(2)). Rights: *control*.
+
+*network*
+	A range of the network's ports (at most 65,536), to connect out
+	through and to listen on (see *radix-network*(2)). Rights: *send*,
+	to connect out to any address and send datagrams; *receive*, to bind
+	to and listen on the ports in the range.
+
 # RIGHTS
 
 The twelve rights are *read*, *write*, *execute*, *send*, *receive*,
@@ -226,7 +244,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 15 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 19 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by

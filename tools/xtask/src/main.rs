@@ -318,6 +318,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   oom              out of memory stops an app, then a restarted service
   net              a virtio network card behind QEMU's VT-d unit takes the
                    ip= and gateway= address; QEMU's router answers 4 pings
+  sockets          a program connects and listens over TCP and UDP on lo and
+                   a virtio card, only as far as its network capabilities
+                   allow
 
   --case <name>         Run only this boot test; repeat for more
   --timeout <seconds>   Limit for each boot test (default 300)"

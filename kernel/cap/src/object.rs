@@ -9,10 +9,12 @@
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
 //! are charged to, after Linux's cgroups), and from Phase 5 the kernel's
 //! random number generator, rings and the kernel log, files and
-//! directories, and from Phase 9 the machine's power. Three kinds are
-//! ranges of hardware resources, named by the range itself: interrupt
-//! lines, I/O ports and device registers (MMIO). The kernel creates the
-//! first capability to each; every other capability is derived from one.
+//! directories, and from Phase 9 the machine's power. Four kinds are
+//! ranges, named by the range itself: three of hardware resources,
+//! interrupt lines, I/O ports and device registers (MMIO), and from
+//! Phase 12 the network's ports, which programs connect and listen
+//! through (ADR 0183). The kernel creates the first capability to each;
+//! every other capability is derived from one.
 
 use core::fmt;
 
@@ -60,10 +62,13 @@ pub enum ObjectKind {
     Directory = 16,
     /// The machine's power: turning it off, restarting it or halting it.
     Power = 17,
+    /// A range of the network's ports: connecting out through them, and
+    /// listening on those in the range.
+    Network = 18,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 18;
+pub const KINDS: usize = 19;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -86,6 +91,7 @@ impl ObjectKind {
         ObjectKind::File,
         ObjectKind::Directory,
         ObjectKind::Power,
+        ObjectKind::Network,
     ];
 
     /// The kind numbered `n`.
@@ -127,6 +133,9 @@ impl ObjectKind {
             ObjectKind::File => Rights::READ.union(Rights::WRITE),
             ObjectKind::Directory => Rights::READ.union(Rights::WRITE).union(Rights::CONTROL),
             ObjectKind::Power => Rights::CONTROL,
+            // Sending is connecting out, to any port; receiving is taking
+            // what comes to the ports in the range.
+            ObjectKind::Network => Rights::SEND.union(Rights::RECEIVE),
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -138,10 +147,13 @@ impl ObjectKind {
         matches!(self, ObjectKind::Endpoint | ObjectKind::Notification)
     }
 
-    /// Whether this kind is a range of hardware resources rather than a
-    /// kernel object.
+    /// Whether this kind is a range, of hardware resources or of ports,
+    /// rather than a kernel object.
     pub const fn is_range(self) -> bool {
-        matches!(self, ObjectKind::Irq | ObjectKind::IoPorts | ObjectKind::Mmio)
+        matches!(
+            self,
+            ObjectKind::Irq | ObjectKind::IoPorts | ObjectKind::Mmio | ObjectKind::Network
+        )
     }
 
     /// Whether memory can be retyped into this kind.
@@ -150,12 +162,12 @@ impl ObjectKind {
     }
 
     /// The largest range of this kind, if it is a range kind: 256
-    /// interrupt lines, 65,536 I/O ports, and 2^40 pages (the 52-bit
-    /// physical address space).
+    /// interrupt lines, 65,536 I/O ports, 2^40 pages (the 52-bit physical
+    /// address space), and 65,536 network ports.
     pub const fn range_limit(self) -> Option<u64> {
         match self {
             ObjectKind::Irq => Some(256),
-            ObjectKind::IoPorts => Some(1 << 16),
+            ObjectKind::IoPorts | ObjectKind::Network => Some(1 << 16),
             ObjectKind::Mmio => Some(1 << 40),
             _ => None,
         }
@@ -182,6 +194,7 @@ impl ObjectKind {
             ObjectKind::File => "file",
             ObjectKind::Directory => "directory",
             ObjectKind::Power => "power",
+            ObjectKind::Network => "network",
         }
     }
 }
@@ -264,6 +277,7 @@ impl fmt::Display for Object {
                 ObjectKind::Mmio => {
                     write!(f, "MMIO {:#x}-{:#x}", base << 12, ((base + len) << 12) - 1)
                 }
+                ObjectKind::Network => write!(f, "network ports {base}-{}", base + len - 1),
                 _ => write!(f, "{} {base}-{}", self.kind, base + len - 1),
             },
         }
@@ -291,6 +305,8 @@ mod tests {
         }
         assert!(!ObjectKind::Frame.rights().contains(Rights::CONTROL));
         assert!(ObjectKind::Process.rights().contains(Rights::SIGNAL));
+        assert!(ObjectKind::Network.rights().contains(Rights::SEND | Rights::RECEIVE));
+        assert!(!ObjectKind::Network.rights().contains(Rights::CONTROL));
     }
 
     #[test]
@@ -304,5 +320,10 @@ mod tests {
         let irq = Object { kind: ObjectKind::Irq, target: Target::Range { base: 0x60, len: 5 } };
         assert!(!irq.within(&ports(0, 0x100)));
         assert_eq!(ports(0x60, 5).to_string(), "I/O ports 0x0060-0x0064");
+        let network =
+            Object { kind: ObjectKind::Network, target: Target::Range { base: 80, len: 1 } };
+        assert!(!network.within(&ports(0, 0x100)));
+        assert_eq!(network.to_string(), "network ports 80-80");
+        assert_eq!(ObjectKind::Network.range_limit(), Some(65_536));
     }
 }

@@ -28,6 +28,14 @@
 //! `receive_files`; `shutdown`; `socket_name` and `socket_state`. Each
 //! end of a connection reads what the other writes, as through two pipes,
 //! one each way.
+//!
+//! Since Phase 12 network sockets are too (radix-network(2)'s `socket`,
+//! ADR 0183): TCP's stream sockets and UDP's datagram sockets, which
+//! `bind_address` binds and `connect_address` connects, through the
+//! network capability whose slot they take, and which `send_to`,
+//! `receive_from` and `socket_option` are for. `send`, `receive`,
+//! `shutdown`, `listen`, `accept`, `socket_name` and `socket_state` work
+//! on them as on the others; `send_files` and `receive_files` do not.
 
 module file;
 
@@ -121,6 +129,42 @@ flags SocketFlags: u32 {
     close_on_exec = 2;
 }
 
+/// A network socket's option, which `socket_option` reads and sets, as
+/// POSIX's `getsockopt` and `setsockopt` name them. A boolean is 0 or 1.
+enum SocketOption: u32 {
+    /// SO_REUSEADDR, a boolean. A port is free once the socket bound to
+    /// it is closed, so it changes nothing, but it is kept.
+    reuse_address = 1;
+    /// SO_KEEPALIVE, a boolean: a stream socket's connection is probed
+    /// after two hours without traffic, and reset if the other end has
+    /// gone.
+    keep_alive = 2;
+    /// TCP_NODELAY, a boolean: a stream socket sends small writes at once
+    /// rather than gathering them (Nagle's algorithm).
+    no_delay = 3;
+    /// SO_RCVBUF: the bytes the socket holds as they come. Setting it is
+    /// taken, and changes nothing.
+    receive_buffer = 4;
+    /// SO_SNDBUF: the bytes it holds as they go. Setting it is taken, and
+    /// changes nothing.
+    send_buffer = 5;
+    /// SO_ERROR, read only: why the last connection the socket tried
+    /// failed, as a status word (0 for none), which reading clears.
+    error = 6;
+    /// IP_TTL: how many routers its packets may pass, 1 to 255.
+    time_to_live = 7;
+    /// SO_BROADCAST, a boolean, kept for datagram sockets.
+    broadcast = 8;
+    /// SO_TYPE, read only: the socket's SocketType (radix-network(2)).
+    kind = 9;
+    /// SO_RCVTIMEO: the most nanoseconds a receive or an accept waits, 0
+    /// for no limit; one that waits longer fails with would_block.
+    receive_timeout = 10;
+    /// SO_SNDTIMEO: likewise for a send, and for a stream socket's
+    /// connect, which then fails with in_progress.
+    send_timeout = 11;
+}
+
 /// The most files one `send_files` sends, as Linux's SCM_MAX_FD.
 const SEND_FILES_MAX: u64 = 253;
 /// The most files on their way through one direction of a connection,
@@ -133,7 +177,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 5 {
+interface file = 0x000c version 6 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -212,17 +256,19 @@ interface file = 0x000c version 5 {
     /// Sends `data` to a socket's other end, as `write` does but with
     /// `flags`; returns how many bytes went. Sending to an end that is
     /// gone, or shut for reading, raises SIGPIPE (unless no_signal) and
-    /// fails with gone. Needs the write right.
+    /// fails with gone. A datagram socket sends `data` as one datagram to
+    /// the address it is connected to. Needs the write right.
     method send = 12 (data: in bytes, flags: SocketFlags) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
-                gone, interrupted, not_connected];
+                gone, interrupted, not_connected, reset, message_too_long, unreachable];
     /// Receives what a socket's other end sent into `buffer`, as `read`
     /// does but with `flags`; returns how many bytes came, 0 once the
     /// other end is gone or shut for writing and all it sent has been
-    /// read. Needs the read right.
+    /// read. A datagram socket receives the next datagram, of which what
+    /// `buffer` has no room for is lost. Needs the read right.
     method receive = 13 (buffer: out bytes, flags: SocketFlags) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
-                interrupted, not_connected];
+                interrupted, not_connected, reset];
     /// Shuts a socket's end for reading (what the other end sends then
     /// fails with gone), for writing (the other end then receives the
     /// end), or both, for every description of the end: POSIX's
@@ -234,10 +280,14 @@ interface file = 0x000c version 5 {
     /// connections: at most `backlog` wait for `accept` at once (1 at
     /// least, BACKLOG_MAX at most; 0 means 1). A socket that listens
     /// already takes the new number. A socket with no name, or connected,
-    /// fails with invalid_argument. Needs the write right.
+    /// fails with invalid_argument. A network stream socket must be bound
+    /// (`bind_address`) through a network capability with the receive
+    /// right for its port, else missing_rights; the kernel keeps up to 4
+    /// of its connections being made at once, on each interface, and
+    /// `backlog` once they are made. Needs the write right.
     method listen = 15 (backlog: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                not_socket, busy];
+                not_socket, busy, no_buffers, not_supported];
     /// Takes a connection that waits at a listening socket, waiting for
     /// one unless the description is non_blocking, and puts a
     /// description of its end in slot `to` with `flags`: a socket of its
@@ -251,7 +301,9 @@ interface file = 0x000c version 5 {
     /// `buffer`, as the path the binding was asked for; returns its
     /// length, 0 for none, which is more than `buffer` holds if it was
     /// cut short. A connection that `accept` took has the listening
-    /// socket's name.
+    /// socket's name. For a network socket it is an Address
+    /// (radix-network(2)): where it is bound, all zero if it is not, or
+    /// where it is connected.
     method socket_name = 17 (peer: bool, buffer: out bytes) -> (len: u64)
         raises [no_such_slot, empty_slot, bad_address, not_socket, not_connected];
     /// What a socket is: whether it listens (SO_ACCEPTCONN), whether it
@@ -259,7 +311,7 @@ interface file = 0x000c version 5 {
     /// the other end (SO_PEERCRED's `pid`): the one that connected, or for
     /// the connecting end, the one that listened, as each was when the
     /// connection was made; for a pair's ends, the process that made the
-    /// pair.
+    /// pair; for a network socket, 0.
     method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64)
         raises [no_such_slot, empty_slot, not_socket];
     /// Sends `data` as `send` does, with the files whose slots `slots`
@@ -287,4 +339,59 @@ interface file = 0x000c version 5 {
         -> (count: u64, files: u32, lost: u32)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, no_memory, not_socket,
                 not_connected, would_block, interrupted];
+    /// Binds a network socket (radix-network(2)'s `socket`) to `address`,
+    /// an Address: to one of the machine's addresses, or to any (all
+    /// zero), and to a port, or with port 0 to one the kernel picks from
+    /// EPHEMERAL_FIRST up. A port of its own needs the receive right on
+    /// the network capability in slot `network`, and a port in its range,
+    /// else missing_rights or out_of_range; port 0 needs only the
+    /// capability, and a socket bound so can listen if the capability
+    /// has the receive right for the port picked. A socket bound already
+    /// fails with invalid_argument, and one of another family with
+    /// not_supported.
+    method bind_address = 21 (network: slot, address: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, out_of_range, not_socket, not_supported, address_in_use,
+                address_not_available, busy];
+    /// Connects a network socket to `address`, an Address, through the
+    /// network capability in slot `network`, which needs the send right.
+    /// A stream socket makes a connection over the interface with a route
+    /// to it, waiting until it is made unless the description is
+    /// non_blocking (in_progress; `poll` finds the socket writable once it
+    /// is made or has failed); one that listens fails with
+    /// invalid_argument. A datagram socket takes `address` as where its
+    /// datagrams go and the only place they come from. A socket that is
+    /// not bound is first bound to any address and a port the kernel
+    /// picks.
+    method connect_address = 22 (network: slot, address: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, not_socket, not_supported, address_in_use, no_buffers,
+                no_memory, unreachable, refused, reset, timed_out, in_progress, already,
+                connected, interrupted, busy];
+    /// Sends `data` as one datagram to `address`, an Address, from a
+    /// datagram socket, through the network capability in slot
+    /// `network`, which needs the send right; returns how many bytes
+    /// went. A socket that is not bound is bound first, as by
+    /// `connect_address`. A stream socket sends as `send` does, and
+    /// takes neither the capability nor the address. Needs the write
+    /// right.
+    method send_to = 23 (network: slot, address: in bytes, data: in bytes, flags: SocketFlags)
+        -> (count: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, not_socket, not_supported, address_in_use, no_buffers, no_memory,
+                unreachable, would_block, interrupted, message_too_long, not_connected, gone,
+                reset];
+    /// Receives as `receive` does, and writes where what came is from
+    /// into `address`, as an Address, if it has room for one; returns how
+    /// many bytes came. Needs the read right.
+    method receive_from = 24 (buffer: out bytes, address: out bytes, flags: SocketFlags)
+        -> (count: u64)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket,
+                not_connected, would_block, interrupted, reset];
+    /// Reads, and with `set` changes to `value`, one of a network
+    /// socket's options, and returns it as it was. A read-only option
+    /// fails with invalid_argument when set, and a socket that is not a
+    /// network one with not_supported.
+    method socket_option = 25 (option: SocketOption, set: bool, value: u64) -> (value: u64)
+        raises [no_such_slot, empty_slot, invalid_argument, not_socket, not_supported];
 }

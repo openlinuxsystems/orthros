@@ -40,6 +40,7 @@ pub mod devfs;
 pub mod disk;
 mod events;
 pub mod framebuffer;
+pub mod inet;
 pub mod keyboard;
 pub mod kmsg;
 pub mod locks;
@@ -108,8 +109,10 @@ enum Special {
     No,
     /// An end of a pipe.
     Pipe,
-    /// A socket.
+    /// A socket of the Unix family.
     Socket,
+    /// A network socket.
+    Inet,
     /// A side of a terminal.
     Tty,
     /// `/devices/kmsg`.
@@ -283,6 +286,7 @@ impl FileObject {
         let special = match at.node.kind() {
             Kind::Pipe if pipe::end_of(&at.node).is_some() => Special::Pipe,
             Kind::Socket if socket::socket_of(&at.node).is_some() => Special::Socket,
+            Kind::Socket if inet::socket_of(&at.node).is_some() => Special::Inet,
             Kind::CharDevice if tty::handle_of(&at.node).is_some() => Special::Tty,
             Kind::CharDevice if kmsg::is_kmsg(&at.node) => Special::Kmsg,
             Kind::CharDevice if keyboard::is_keyboard(&at.node) => Special::Keyboard,
@@ -342,6 +346,11 @@ impl FileObject {
     /// The socket it is of, if it is of one.
     pub fn socket(&self) -> Option<&socket::Socket> {
         if self.special == Special::Socket { socket::socket_of(&self.at.node) } else { None }
+    }
+
+    /// The network socket it is of, if it is of one.
+    pub fn inet(&self) -> Option<&inet::InetSocket> {
+        if self.special == Special::Inet { inet::socket_of(&self.at.node) } else { None }
     }
 
     /// The side of a terminal it is of, if it is of one.

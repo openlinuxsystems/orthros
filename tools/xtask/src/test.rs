@@ -570,6 +570,10 @@ const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 const NET_CARD: &str = "virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on,\
                         mac=52:54:00:12:34:56";
 
+/// The `sockets` test's network: QEMU's user network, which runs `cat`
+/// for each connection to 10.0.2.100 port 7, the test's echo server.
+const ECHO_NETDEV: &str = "user,id=n0,guestfwd=tcp:10.0.2.100:7-cmd:cat";
+
 /// The size of the `disk-check` test's disk: the smallest disktest takes.
 const CHECK_KIB: u64 = 128 * 1024;
 
@@ -2037,6 +2041,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &["-device", "intel-iommu,intremap=on", "-netdev", "user,id=n0", "-device", NET_CARD],
         script: net,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "sockets",
+        about: "a program connects and listens over TCP and UDP on the loopback interface and a virtio network card, as far as its network capabilities allow",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep ip=10.0.2.15/24 gateway=10.0.2.2 -- --network /system/tests/sockets virtio",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-netdev", ECHO_NETDEV, "-device", "virtio-net-pci,netdev=n0"],
+        script: sockets,
         disks: &[],
         second: None,
     },
@@ -3553,7 +3573,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 18 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 19 object kinds, 12 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -4287,6 +4307,53 @@ fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+/// The `sockets` test (userspace/sockets): its program's steps over lo,
+/// through the card and refused, and every network socket's memory back
+/// in the kernel's.
+fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    // Both come during the PCI scan, among lines boot_report reads past.
+    let log = vm.log();
+    for needle in [
+        "Net: lo is the loopback interface, at 127.0.0.1/8 and every card's address",
+        "Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2",
+    ] {
+        if !log.contains(needle) {
+            return Err(format!("no \"{needle}\" in the boot log"));
+        }
+    }
+    vm.expect("sockets: the network capability covers 65536 ports from 0")?;
+    vm.expect(
+        "sockets: derived one capability to connect out and one to listen on ports 8000-8009",
+    )?;
+    vm.expect("sockets: tcp: connected from port ")?;
+    vm.expect(" to port 7000 over lo, and the connection taken")?;
+    vm.expect(&format!("sockets: tcp: {} bytes went one way and came in order", 1 << 20))?;
+    vm.expect("sockets: tcp: each end shut down in turn, and each read the end")?;
+    vm.expect("sockets: tcp: a socket that does not wait connected, and said when it had")?;
+    vm.expect("sockets: udp: datagrams went each way over lo, kept their bounds, and said where they came from")?;
+    vm.expect("sockets: rights: each method refused what its capability does not allow")?;
+    vm.expect(
+        "sockets: virtio: a connection to 10.0.2.100 port 7 echoed what went through the card",
+    )?;
+    let verdict = program_line(vm, "sockets: ")?;
+    let log = vm.log();
+    let failed: Vec<&str> = log.lines().filter(|line| line.contains("sockets: FAILED: ")).collect();
+    if !failed.is_empty() {
+        return Err(format!("the sockets program failed: {}", failed.join("; ")));
+    }
+    if verdict != "every check passed" {
+        return Err(format!("the sockets program did not pass: {verdict}"));
+    }
+    vm.expect("(/system/tests/sockets) exited with code 0x0")?;
+    vm.expect("spark: nothing more to do; waiting")?;
+    if let Some(line) = vm.log().lines().find(|line| line.contains("memory did not come back")) {
+        return Err(format!("the kernel lost a socket's memory: {line}"));
+    }
+    Ok(())
 }
 
 fn stack_overflow(vm: &mut Vm, _case: &Case) -> Result<(), String> {

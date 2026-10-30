@@ -23,20 +23,31 @@
 //! the kernel's own checks of a link (`selftest=net`). The stack itself
 //! answers echo requests to its addresses.
 //!
-//! The tests run two stacks on the host, joined by a simulated wire.
+//! Programs' TCP and UDP sockets (ADR 0183) are smoltcp's, made from the
+//! memory of a [`TcpMemory`] or [`UdpMemory`], which comes back when they
+//! are taken out with [`Stack::remove_tcp`] or [`Stack::remove_udp`]. A
+//! [`Loopback`] is the link of the loopback interface, whose packets come
+//! back to it.
+//!
+//! The tests run two stacks on the host, joined by a simulated wire, and
+//! one on a loopback link.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+mod loopback;
+mod sockets;
 #[cfg(test)]
 mod tests;
 
+pub use loopback::Loopback;
 pub use smoltcp;
 pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
+pub use sockets::{ConnectError, TcpMemory, UdpMemory};
 
 use managed::ManagedSlice;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
-use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
+use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities};
 use smoltcp::socket::{AnySocket, Socket, icmp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr};
@@ -46,9 +57,30 @@ use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr
 /// sequence, which the card adds and removes.
 pub const FRAME: usize = 1514;
 
+/// The bytes of an Ethernet frame's header.
+const ETHERNET_HEADER: usize = 14;
+
+/// What a link's frames are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Medium {
+    /// Ethernet frames, with their MAC addresses: a network card's.
+    Ethernet,
+    /// IP packets alone: the loopback interface's.
+    Ip,
+}
+
 /// A network card, as the stack sees it: something that takes and gives
-/// Ethernet frames.
+/// Ethernet frames, or for the loopback interface IP packets.
 pub trait Link {
+    /// What its frames are: Ethernet's, unless it says otherwise.
+    fn medium(&self) -> Medium {
+        Medium::Ethernet
+    }
+    /// Whether a frame waits to be received that the stack has not been
+    /// told of: the loopback link's, which come from the stack itself.
+    fn pending(&self) -> bool {
+        false
+    }
     /// The card's MAC address.
     fn mac(&self) -> [u8; 6];
     /// Copies the next frame the card received into `frame`, and returns
@@ -67,10 +99,10 @@ pub trait Link {
 /// The memory a stack works in, lent to it for as long as it lives.
 pub struct Memory {
     /// A frame received, while the stack reads it: [`FRAME`] bytes, as
-    /// longer frames are cut to it.
+    /// longer frames are cut to it; on an IP link, the longest packet.
     pub receive: &'static mut [u8],
     /// A frame to send, while the stack writes it: [`FRAME`] bytes, or
-    /// fewer for a smaller MTU.
+    /// fewer for a smaller MTU; on an IP link, its MTU.
     pub transmit: &'static mut [u8],
     /// A slot for each socket the stack can have.
     pub sockets: &'static mut [SocketStorage<'static>],
@@ -83,6 +115,8 @@ pub struct Stack<L: Link> {
     sockets: SocketSet<'static>,
     receive: &'static mut [u8],
     transmit: &'static mut [u8],
+    /// The default route, which [`Stack::set_ipv4`] set.
+    gateway: Option<Ipv4Address>,
 }
 
 /// The card as smoltcp's device, while the stack polls.
@@ -149,10 +183,18 @@ impl<L: Link> phy::Device for Phy<'_, L> {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
         // The largest frame, with its Ethernet header: one the transmit
-        // buffer holds.
-        caps.max_transmission_unit = self.transmit.len().min(FRAME);
+        // buffer holds; on an IP link, the largest packet.
+        match self.link.medium() {
+            Medium::Ethernet => {
+                caps.medium = phy::Medium::Ethernet;
+                caps.max_transmission_unit = self.transmit.len().min(FRAME);
+            }
+            Medium::Ip => {
+                caps.medium = phy::Medium::Ip;
+                caps.max_transmission_unit = self.transmit.len();
+            }
+        }
         // Every checksum is made and checked here, in software: the card
         // is asked for no offloads.
         let mut checksum = ChecksumCapabilities::default();
@@ -187,17 +229,21 @@ impl<L: Link> Stack<L> {
     /// sequence numbers and ports.
     pub fn new(mut link: L, memory: Memory, seed: u64, now_ns: u64) -> Stack<L> {
         let Memory { receive, transmit, sockets } = memory;
-        let mac = EthernetAddress(link.mac());
-        let mut config = Config::new(HardwareAddress::Ethernet(mac));
+        let hardware = match link.medium() {
+            Medium::Ethernet => HardwareAddress::Ethernet(EthernetAddress(link.mac())),
+            Medium::Ip => HardwareAddress::Ip,
+        };
+        let mut config = Config::new(hardware);
         config.random_seed = seed;
         let mut phy = Phy { link: &mut link, receive: &mut *receive, transmit: &mut *transmit };
         let iface = Interface::new(config, &mut phy, instant(now_ns));
-        Stack { link, iface, sockets: SocketSet::new(sockets), receive, transmit }
+        Stack { link, iface, sockets: SocketSet::new(sockets), receive, transmit, gateway: None }
     }
 
     /// Gives the interface `address` (with its prefix) as its only IPv4
     /// address, and `gateway` as its default route, or none.
     pub fn set_ipv4(&mut self, address: Ipv4Cidr, gateway: Option<Ipv4Address>) {
+        self.gateway = gateway;
         self.iface.update_ip_addrs(|addrs| {
             addrs.clear();
             // One address fits: there is room for at least one.
@@ -217,6 +263,46 @@ impl<L: Link> Stack<L> {
         self.iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| cidr)
     }
 
+    /// Gives the interface `addresses` as its IPv4 addresses, as many as
+    /// fit (8), the first first, and no default route: the loopback
+    /// interface's, which has the cards' addresses too.
+    pub fn set_ipv4_addresses(&mut self, addresses: &[Ipv4Cidr]) {
+        self.gateway = None;
+        self.iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            for &address in addresses {
+                if addrs.push(IpCidr::Ipv4(address)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.iface.routes_mut().remove_default_ipv4_route();
+    }
+
+    /// Whether `address` is one of the interface's own.
+    pub fn has_address(&self, address: Ipv4Address) -> bool {
+        self.iface.has_ip_addr(IpAddress::Ipv4(address))
+    }
+
+    /// Whether `to` is on one of the interface's networks.
+    pub fn reaches(&self, to: Ipv4Address) -> bool {
+        self.iface.ip_addrs().iter().any(|&IpCidr::Ipv4(cidr)| cidr.contains_addr(&to))
+    }
+
+    /// Whether the interface can send to `to`: it has an address, and
+    /// `to` is on its network or it has a router.
+    pub fn routes_to(&self, to: Ipv4Address) -> bool {
+        self.reaches(to) || (self.ipv4().is_some() && self.gateway.is_some())
+    }
+
+    /// The longest IP packet the interface sends, its MTU.
+    pub fn mtu(&self) -> usize {
+        match self.link.medium() {
+            Medium::Ethernet => self.transmit.len().min(FRAME).saturating_sub(ETHERNET_HEADER),
+            Medium::Ip => self.transmit.len(),
+        }
+    }
+
     /// The card under the stack.
     pub fn link(&mut self) -> &mut L {
         &mut self.link
@@ -225,22 +311,35 @@ impl<L: Link> Stack<L> {
     /// Does what is due: takes the frames the card received, answers and
     /// passes them on to sockets, sends what sockets have to send and
     /// what timers call for. Returns whether a socket's state may have
-    /// changed.
+    /// changed. On a link whose frames come from the stack itself, it goes
+    /// on while they do, a few rounds at most, so that a packet and its
+    /// answer go through in one call.
     pub fn poll(&mut self, now_ns: u64) -> bool {
-        let mut phy = Phy {
-            link: &mut self.link,
-            receive: &mut *self.receive,
-            transmit: &mut *self.transmit,
-        };
-        let result = self.iface.poll(instant(now_ns), &mut phy, &mut self.sockets);
-        self.link.flush();
-        result == PollResult::SocketStateChanged
+        let mut changed = false;
+        for _ in 0..POLL_ROUNDS {
+            let mut phy = Phy {
+                link: &mut self.link,
+                receive: &mut *self.receive,
+                transmit: &mut *self.transmit,
+            };
+            let result = self.iface.poll(instant(now_ns), &mut phy, &mut self.sockets);
+            self.link.flush();
+            changed |= result == PollResult::SocketStateChanged;
+            if !self.link.pending() {
+                break;
+            }
+        }
+        changed
     }
 
     /// How long until [`Stack::poll`] has something to do even if no
     /// frame comes, in nanoseconds: `None` when only a frame can give it
-    /// work, 0 when it has some now.
+    /// work, 0 when it has some now, as when the link has frames of the
+    /// stack's own to receive.
     pub fn poll_delay(&mut self, now_ns: u64) -> Option<u64> {
+        if self.link.pending() {
+            return Some(0);
+        }
         self.iface
             .poll_delay(instant(now_ns), &self.sockets)
             .map(|delay| delay.total_micros().saturating_mul(1_000))
@@ -269,6 +368,10 @@ impl<L: Link> Stack<L> {
         self.sockets.try_remove(handle)
     }
 }
+
+/// The most rounds one [`Stack::poll`] goes on for the link's own
+/// frames.
+const POLL_ROUNDS: usize = 8;
 
 /// The slice a buffer was lent, given back. smoltcp is built without
 /// `alloc`, so a buffer has no other kind of storage.
@@ -369,8 +472,7 @@ impl Pinger {
         }
         match stack.remove_socket(self.handle) {
             Some(Socket::Icmp(socket)) => Ok(PingMemory::of(socket)),
-            // ICMP is the only kind of socket until UDP and TCP (12a.2b).
-            #[allow(unreachable_patterns)]
+            // The slot held an ICMP socket, looked at above.
             _ => Err(self),
         }
     }

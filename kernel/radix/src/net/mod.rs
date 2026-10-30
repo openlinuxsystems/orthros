@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Networking: the network cards and the TCP/IP stack on each (ADR 0180).
+//! Networking: the network cards and the TCP/IP stack on each (ADR 0180),
+//! and the loopback interface (ADR 0183).
 //!
 //! The PCI scan hands each virtio network card to [`bind`], which sets
 //! it up (`radix-virtio`), puts a stack on it (`radix-net`) and starts
@@ -9,70 +10,139 @@
 //! work: it polls the stack when the card's interrupt wakes it and when
 //! the stack's next timer is due, and otherwise sleeps. Others reach the
 //! stack through its lock, and wake the thread when they gave it work.
+//! The loopback interface, `lo`, is one too, on a link that hands back
+//! what is sent on it, at 127.0.0.1/8 and every card's own address: what
+//! a program sends to the machine itself goes through it.
 //!
 //! Until `netd` configures interfaces (12a.4), the first card takes the
 //! IPv4 address and router of the `ip=` and `gateway=` flags.
+//!
+//! When a poll may have changed what a socket can do, the thread bumps
+//! one count for all of networking and wakes those who wait on it, and
+//! the pollers of every network socket: they look again
+//! ([`generation`], [`changed`]).
 //!
 //! `selftest=net` pings the router from the first card (QEMU's user
 //! network answers at 10.0.2.2, which is what it uses without flags).
 //!
 //! A stack's own buffers live as long as it does. A socket's are lent to
 //! it through leases (`radix_mm::lease`), and come back when the socket
-//! is taken apart (ADR 0182).
+//! is taken apart (ADR 0182). A TCP socket a program closes before its
+//! connection has ended is an [`Orphan`] of its interface, which the
+//! thread takes apart once the connection has gone.
+
+pub mod memory;
+pub mod ports;
 
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::Devices;
 use radix_hw::pci::{Bar, Function, MsiX};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
-use radix_net::smoltcp::iface::SocketStorage;
-use radix_net::smoltcp::socket::icmp;
-use radix_net::{FRAME, Ipv4Address, Ipv4Cidr, Link, Memory, PingMemory, Pinger, Stack};
+use radix_net::smoltcp::iface::{SocketHandle, SocketStorage};
+use radix_net::smoltcp::socket::{icmp, tcp};
+use radix_net::{
+    FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingMemory, Pinger, Stack,
+};
 use radix_sync::{Mutex, Once};
 use radix_virtio::net::{MAX_FRAME, Net};
 use radix_virtio::{NO_VECTOR, Transport};
 
 use crate::Arch;
-use crate::sched::{self, Options, Policy, ThreadRef};
+use crate::sched::{self, Options, Policy, ThreadRef, wait};
+use crate::user::posix::poll::Polled;
 
 /// The most network cards.
 const MAX_CARDS: usize = 8;
-/// The most sockets on one interface, until sockets come to programs.
-const SOCKETS: usize = 16;
+/// The most interfaces: the loopback one, and the cards.
+pub const MAX_INTERFACES: usize = MAX_CARDS + 1;
+/// The most sockets on one interface.
+const SOCKETS: usize = 128;
 /// How long the thread sleeps when nothing is due: an interrupt wakes
 /// it sooner, and a card without one is polled this often.
 const IDLE_NS: u64 = 10_000_000;
+/// The loopback interface's MTU, as the longest packet a program's TCP
+/// sends to itself at once.
+const LOOPBACK_MTU: usize = 16_384;
+/// The bytes of packets the loopback interface holds until its stack
+/// takes them back.
+const LOOPBACK_RING: usize = 65_536;
+/// The loopback interface's own address.
+pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+/// How long an orphan has to finish closing before it is reset.
+pub const ORPHAN_NS: u64 = 60_000_000_000;
 
-/// A virtio network card, as the stack's link.
-pub struct Card {
-    net: Net,
-    vector: Option<u32>,
+/// What an interface's stack sends and receives through: a virtio network
+/// card, or the loopback link.
+#[expect(clippy::large_enum_variant, reason = "each is made once, in its interface's place")]
+pub enum Card {
+    Virtio { net: Net, vector: Option<u32> },
+    Loopback(Loopback),
+}
+
+impl Card {
+    /// Whether the card stopped with an error.
+    fn failed(&self) -> bool {
+        match self {
+            Card::Virtio { net, .. } => net.failed(),
+            Card::Loopback(_) => false,
+        }
+    }
 }
 
 impl Link for Card {
+    fn medium(&self) -> Medium {
+        match self {
+            Card::Virtio { .. } => Medium::Ethernet,
+            Card::Loopback(link) => link.medium(),
+        }
+    }
+
+    fn pending(&self) -> bool {
+        match self {
+            Card::Virtio { .. } => false,
+            Card::Loopback(link) => link.pending(),
+        }
+    }
+
     fn mac(&self) -> [u8; 6] {
-        self.net.info().mac
+        match self {
+            Card::Virtio { net, .. } => net.info().mac,
+            Card::Loopback(link) => link.mac(),
+        }
     }
 
     fn receive(&mut self, frame: &mut [u8]) -> Option<usize> {
-        self.net.receive(frame)
+        match self {
+            Card::Virtio { net, .. } => net.receive(frame),
+            Card::Loopback(link) => link.receive(frame),
+        }
     }
 
     fn can_send(&mut self) -> bool {
-        self.net.can_send()
+        match self {
+            Card::Virtio { net, .. } => net.can_send(),
+            Card::Loopback(link) => link.can_send(),
+        }
     }
 
     fn send(&mut self, frame: &[u8]) -> bool {
-        frame.len() <= MAX_FRAME && self.net.send(frame).is_ok()
+        match self {
+            Card::Virtio { net, .. } => frame.len() <= MAX_FRAME && net.send(frame).is_ok(),
+            Card::Loopback(link) => link.send(frame),
+        }
     }
 
     fn flush(&mut self) {
-        self.net.notify();
+        match self {
+            Card::Virtio { net, .. } => net.notify(),
+            Card::Loopback(link) => link.flush(),
+        }
     }
 }
 
@@ -80,38 +150,165 @@ impl Link for Card {
 /// interrupt is let go.
 impl Drop for Card {
     fn drop(&mut self) {
-        self.net.reset();
-        if let Some(vector) = self.vector {
-            <Arch as Devices>::free_interrupt(vector);
+        if let Card::Virtio { net, vector } = self {
+            net.reset();
+            if let Some(vector) = *vector {
+                <Arch as Devices>::free_interrupt(vector);
+            }
         }
     }
 }
 
+/// A TCP socket a program closed while its connection was still ending:
+/// its interface's thread takes it out of the stack, and its memory
+/// back, once the connection has gone, or resets it at `deadline_ns`.
+pub struct Orphan {
+    pub handle: SocketHandle,
+    pub leases: memory::TcpLeases,
+    /// The port the kernel picked for it, held until it goes.
+    #[expect(dead_code, reason = "held only to keep the port taken")]
+    pub port: Option<ports::Held>,
+    pub deadline_ns: u64,
+}
+
 /// One interface: its stack and the thread that runs it.
 pub struct Interface {
-    /// `net0`, `net1` and on.
+    /// `lo`, `net0`, `net1` and on.
     pub name: TextBuf<8>,
-    stack: Mutex<Stack<Card>>,
+    /// Its place among the interfaces: 0 for `lo`, then the cards in the
+    /// order they were found.
+    pub number: usize,
+    pub stack: Mutex<Stack<Card>>,
+    /// Its orphans, with room for as many as it has socket slots. Taken
+    /// with the stack's lock held.
+    orphans: Mutex<Vec<Orphan, Kmalloc>>,
     thread: Once<ThreadRef>,
 }
 
 impl Interface {
     /// Wakes the interface's thread, to poll its stack.
-    fn kick(&self) {
+    pub fn kick(&self) {
         if let Some(thread) = self.thread.get() {
             sched::wake(thread);
         }
     }
+
+    /// Whether it is the loopback interface.
+    pub fn is_loopback(&self) -> bool {
+        self.number == 0
+    }
+
+    /// Takes `orphan`, on `stack`, its own, locked, to finish closing.
+    pub fn adopt(&self, _stack: &mut Stack<Card>, orphan: Orphan) {
+        let mut orphans = self.orphans.lock();
+        // There is room for every socket slot, and the orphan has one.
+        if let Err(lost) = orphans.push_within_capacity(orphan) {
+            drop(orphans);
+            warn!("Net: {}: no room for an orphan; its memory stays lent", self.name);
+            core::mem::forget(lost);
+        }
+    }
+
+    /// Takes the orphans whose connections have gone out of `stack`, and
+    /// their memory back; resets those past their deadline. Returns the
+    /// next deadline of those left.
+    fn reap(&self, stack: &mut Stack<Card>, now_ns: u64) -> Option<u64> {
+        let mut orphans = self.orphans.lock();
+        let mut next: Option<u64> = None;
+        let mut index = 0;
+        while index < orphans.len() {
+            let orphan = &orphans[index];
+            let state = stack.socket_mut::<tcp::Socket<'static>>(orphan.handle).map(|s| s.state());
+            match state {
+                Some(tcp::State::Closed) | None => {
+                    let orphan = orphans.swap_remove(index);
+                    memory::end_tcp(stack, orphan.handle, orphan.leases, self.name.as_str());
+                }
+                Some(_) => {
+                    if now_ns >= orphan.deadline_ns {
+                        // Closed now; the stack sends the reset, and the
+                        // next look takes it apart.
+                        if let Some(socket) =
+                            stack.socket_mut::<tcp::Socket<'static>>(orphan.handle)
+                        {
+                            socket.abort();
+                        }
+                    } else {
+                        next =
+                            Some(next.map_or(orphan.deadline_ns, |at| at.min(orphan.deadline_ns)));
+                    }
+                    index += 1;
+                }
+            }
+        }
+        next
+    }
 }
 
-/// The interfaces, in the order their cards were found.
+/// The loopback interface, made by [`init`].
+static LO: Once<Interface> = Once::new();
+/// The cards' interfaces, in the order the cards were found.
 static INTERFACES: [Once<Interface>; MAX_CARDS] = [const { Once::new() }; MAX_CARDS];
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Every interface: `lo` first, then the cards.
+pub fn interfaces() -> impl Iterator<Item = &'static Interface> {
+    let cards = COUNT.load(Ordering::Acquire).min(MAX_CARDS);
+    LO.get().into_iter().chain(INTERFACES[..cards].iter().filter_map(Once::get))
+}
+
+/// The interface a packet to `to` goes out through: `lo` for the
+/// machine's own addresses, else the first card on `to`'s network, else
+/// the first with a router.
+pub fn route(to: Ipv4Address) -> Option<&'static Interface> {
+    if let Some(lo) = LO.get()
+        && lo.stack.lock().reaches(to)
+    {
+        return Some(lo);
+    }
+    let mut cards = interfaces().filter(|interface| !interface.is_loopback());
+    let mut routed = None;
+    for interface in cards.by_ref() {
+        let stack = interface.stack.lock();
+        if stack.reaches(to) {
+            return Some(interface);
+        }
+        if routed.is_none() && stack.routes_to(to) {
+            routed = Some(interface);
+        }
+    }
+    routed
+}
+
+/// What networking has done so far, counted: what socket calls wait on.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The pollers of every network socket.
+pub static POLLED: Polled = Polled::new();
+
+/// The key socket calls wait on.
+pub fn key() -> usize {
+    ptr::from_ref(&GENERATION) as usize
+}
+
+/// The count of changes so far: a socket call that finds it cannot go on
+/// waits until it moves.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+/// What a socket can do may have changed: those who wait look again, and
+/// so do the pollers.
+pub fn changed() {
+    GENERATION.fetch_add(1, Ordering::AcqRel);
+    wait::wake_all(key());
+    POLLED.changed();
+}
 
 /// The address and router of the `ip=` and `gateway=` flags.
 static FLAGS: Once<(Option<Ipv4Cidr>, Option<Ipv4Address>)> = Once::new();
 
-/// Reads the `ip=` and `gateway=` flags, before the PCI scan.
+/// Reads the `ip=` and `gateway=` flags, before the PCI scan, and starts
+/// the loopback interface.
 pub fn init(ip: Option<&str>, gateway: Option<&str>) {
     let address = ip.and_then(|text| {
         let parsed = radix_net::parse_cidr(text);
@@ -128,6 +325,71 @@ pub fn init(ip: Option<&str>, gateway: Option<&str>) {
         parsed
     });
     let _ = FLAGS.set((address, router));
+    if let Err(why) = start_loopback() {
+        error!("Net: the loopback interface could not start: {why}");
+    }
+}
+
+/// Starts `lo`.
+fn start_loopback() -> Result<(), &'static str> {
+    let ring = forever(LOOPBACK_RING).ok_or("out of memory")?;
+    let card = Card::Loopback(Loopback::new(ring, LOOPBACK_MTU));
+    let memory = Memory {
+        receive: forever(LOOPBACK_MTU).ok_or("out of memory")?,
+        transmit: forever(LOOPBACK_MTU).ok_or("out of memory")?,
+        sockets: forever_of(|| SocketStorage::EMPTY, SOCKETS).ok_or("out of memory")?,
+    };
+    let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
+    stack.set_ipv4_addresses(&[Ipv4Cidr::new(LOOPBACK, 8)]);
+    let mut name = TextBuf::<8>::new();
+    let _ = name.write_str("lo");
+    let interface = interface(name, 0, stack).ok_or("out of memory")?;
+    if LO.set(interface).is_err() {
+        return Err("it was started already");
+    }
+    let lo = LO.get().ok_or("it is not there")?;
+    info!("Net: lo is the loopback interface, at {LOOPBACK}/8 and every card's address");
+    run_thread(lo)
+}
+
+/// An interface named `name`, numbered `number`, of `stack`.
+fn interface(name: TextBuf<8>, number: usize, stack: Stack<Card>) -> Option<Interface> {
+    let mut orphans = Vec::new_in(kmalloc());
+    orphans.try_reserve_exact(SOCKETS).ok()?;
+    Some(Interface {
+        name,
+        number,
+        stack: Mutex::new(stack),
+        orphans: Mutex::new(orphans),
+        thread: Once::new(),
+    })
+}
+
+/// Starts `interface`'s thread.
+fn run_thread(interface: &'static Interface) -> Result<(), &'static str> {
+    let options = Options::new().held().policy(Policy::Fair { nice: -5 });
+    match sched::spawn(interface.name.as_str(), run, interface.number, options) {
+        Ok(thread) => {
+            let _ = interface.thread.set(thread.clone());
+            sched::release(&thread);
+            Ok(())
+        }
+        Err(_) => Err("its thread could not start"),
+    }
+}
+
+/// Gives `lo` the cards' addresses with its own, after a card's changed.
+fn addresses_changed() {
+    let Some(lo) = LO.get() else { return };
+    let mut addresses = [Ipv4Cidr::new(LOOPBACK, 8); MAX_INTERFACES];
+    let mut count = 1;
+    for interface in interfaces().filter(|interface| !interface.is_loopback()) {
+        if let Some(cidr) = interface.stack.lock().ipv4() {
+            addresses[count] = Ipv4Cidr::new(cidr.address(), 32);
+            count += 1;
+        }
+    }
+    lo.stack.lock().set_ipv4_addresses(&addresses[..count]);
 }
 
 fn kmalloc() -> Kmalloc {
@@ -304,13 +566,13 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
         Failure::Card(err)
     })?;
     // From here a failure drops the card, which stops it.
-    let card = Card { net, vector: interrupt };
+    let info = net.info();
+    let card = Card::Virtio { net, vector: interrupt };
     let memory = Memory {
         receive: forever(FRAME).ok_or("out of memory")?,
         transmit: forever(FRAME).ok_or("out of memory")?,
         sockets: forever_of(|| SocketStorage::EMPTY, SOCKETS).ok_or("out of memory")?,
     };
-    let info = card.net.info();
     let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
     let flags = FLAGS.get().copied().unwrap_or((None, None));
     if index == 0
@@ -320,7 +582,8 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     }
     let mut name = TextBuf::<8>::new();
     let _ = write!(name, "net{index}");
-    let interface = Interface { name: name.clone(), stack: Mutex::new(stack), thread: Once::new() };
+    let interface =
+        interface(name.clone(), index + 1, stack).ok_or(Failure::Other("out of memory"))?;
     if INTERFACES[index].set(interface).is_err() {
         return Err(Failure::Other("its slot is taken"));
     }
@@ -347,43 +610,56 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
         info.receive_slots,
         info.transmit_slots,
     );
-    if let Some(address) = interface.stack.lock().ipv4() {
+    let address = interface.stack.lock().ipv4();
+    if let Some(address) = address {
         match flags.1 {
             Some(gateway) if index == 0 => {
                 info!("Net: {name} has the address {address}, through the router {gateway}");
             }
             _ => info!("Net: {name} has the address {address}"),
         }
+        addresses_changed();
     }
-    let options = Options::new().held().policy(Policy::Fair { nice: -5 });
-    match sched::spawn(name.as_str(), run, index, options) {
-        Ok(thread) => {
-            let _ = interface.thread.set(thread.clone());
-            sched::release(&thread);
-            Ok(())
-        }
-        Err(_) => Err(Failure::Other("its thread could not start")),
+    run_thread(interface).map_err(Failure::Other)
+}
+
+/// The interface numbered `number`: `lo`, or a card's.
+fn numbered(number: usize) -> Option<&'static Interface> {
+    match number {
+        0 => LO.get(),
+        n => INTERFACES.get(n - 1).and_then(Once::get),
     }
 }
 
-/// An interface's thread: polls its stack whenever there may be work.
-fn run(index: usize) {
-    let Some(interface) = INTERFACES.get(index).and_then(Once::get) else { return };
+/// An interface's thread: polls its stack whenever there may be work,
+/// and tells socket calls when that may have changed what they can do.
+fn run(number: usize) {
+    let Some(interface) = numbered(number) else { return };
+    // A card is looked at this often even when nothing is due, in case
+    // it has no interrupt; the loopback interface is kicked whenever a
+    // packet goes on it, so it sleeps until then.
+    let idle = (!interface.is_loopback()).then_some(IDLE_NS);
     loop {
-        let delay = {
+        let (delay, orphans, changed) = {
             let mut stack = interface.stack.lock();
-            stack.poll(sched::now_ns());
-            if stack.link().net.failed() {
+            let now = sched::now_ns();
+            let changed = stack.poll(now);
+            if stack.link().failed() {
                 error!("Net: {}: the card stopped with an error", interface.name);
                 return;
             }
-            stack.poll_delay(sched::now_ns())
+            let orphans = interface.reap(&mut stack, now);
+            (stack.poll_delay(sched::now_ns()), orphans, changed)
         };
+        if changed {
+            self::changed();
+        }
         let now = sched::now_ns();
-        match delay {
+        let orphans = orphans.map(|at| at.saturating_sub(now));
+        match [delay, orphans, idle].into_iter().flatten().min() {
             Some(0) => sched::yield_now(),
-            Some(delay) => sched::block_until(now.saturating_add(delay.min(IDLE_NS)), "net"),
-            None => sched::block_until(now.saturating_add(IDLE_NS), "net"),
+            Some(delay) => sched::block_until(now.saturating_add(delay), "net"),
+            None => sched::block("net"),
         }
     }
 }
@@ -431,6 +707,7 @@ fn ping_router() -> Result<u64, &'static str> {
         }
         Pinger::new(&mut stack, memory, 0x5254)
     };
+    addresses_changed();
     let (result, back) = match made {
         Ok(pinger) => {
             let result = pings(interface, &pinger, gateway);

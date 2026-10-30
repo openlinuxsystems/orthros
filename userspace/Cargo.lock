@@ -47,6 +47,14 @@ name = "ridlc"
 version = "0.10.4"
 
 [[package]]
+name = "sockets"
+version = "0.10.4"
+dependencies = [
+ "libradix",
+ "radix-rt",
+]
+
+[[package]]
 name = "spark"
 version = "0.10.4"
 dependencies = [

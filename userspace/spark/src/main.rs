@@ -6,8 +6,9 @@
 //! The kernel starts Spark from the boot archive with the archive mapped
 //! read-only, the root of the system's tree in `SLOT_ROOT` (an empty
 //! tmpfs), and from `SLOT_FIRST_EXTRA` on a memory object for the programs
-//! it starts, a capability to the `services` resource domain and the
-//! power capability. Spark v2:
+//! it starts, a capability to the `services` resource domain, the power
+//! capability and a network capability for all of the network's ports
+//! (radix-network(2)). Spark v2:
 //!
 //! 1. builds the directory hierarchy on the root (the plan's spec 7.1,
 //!    with plain names, ADR 0113): `/system`, `/applications`, `/users`,
@@ -36,7 +37,9 @@
 //!    of its memory came back. With `--posix` before the program, it is a
 //!    POSIX one (Phase 8, radix-posix(7)): Spark runs it with `exec`, as
 //!    its child, with a pseudo-terminal as its standard input, output and
-//!    error, and copies what it writes there to the kernel log.
+//!    error, and copies what it writes there to the kernel log. With
+//!    `--network` before those, the program gets Spark's network
+//!    capability too, in `SLOT_NETWORK`.
 //!
 //! Then it supervises: it starts services again when they end, answers
 //! the control socket and shuts the machine down when asked. Spark must
@@ -61,7 +64,8 @@ use libradix::abi::errors::File as FileError;
 use libradix::abi::errors::Kernel as KernelError;
 use libradix::abi::notification::WaitFlags;
 use libradix::abi::startup::{
-    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT, Startup,
+    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
+    Startup,
 };
 use libradix::abi::{file, memory, process, syscalls, terminal};
 use radix_rt::bootfs::BootFs;
@@ -77,6 +81,10 @@ const PROGRAM_MEMORY_ORDER: u32 = 9;
 
 /// The most arguments it passes on.
 const ARGS_MAX: usize = 16;
+
+/// Where the kernel gave Spark its network capability, after the memory
+/// for programs, the services' domain and the power capability.
+const NETWORK: u32 = SLOT_FIRST_EXTRA + 3;
 
 /// The directories of the root, every one a mount point or a place for
 /// one (the plan's spec 7.1), named so that they need no explaining
@@ -230,7 +238,16 @@ fn run() -> Option<Supervisor> {
             break;
         }
     }
-    let posix = words.next_if_eq(&"--posix").is_some();
+    let (mut posix, mut network) = (false, None);
+    loop {
+        if words.next_if_eq(&"--posix").is_some() {
+            posix = true;
+        } else if words.next_if_eq(&"--network").is_some() {
+            network = Some(NETWORK);
+        } else {
+            break;
+        }
+    }
     let path = words.next();
     if with_services || path.is_none() {
         supervisor.start_services(services);
@@ -243,19 +260,20 @@ fn run() -> Option<Supervisor> {
         count += 1;
     }
     if posix {
-        match run_posix(&root, path, &rest[..count]) {
+        match run_posix(&root, path, &rest[..count], network) {
             Ok(program) => supervisor.watch_program(program),
             Err(what) => println!("spark: could not start {path}: {what}"),
         }
         return Some(supervisor);
     }
-    run_native(&root, path, &rest[..count]);
+    run_native(&root, path, &rest[..count], network);
     supervisor.note_idle();
     Some(supervisor)
 }
 
-/// Runs the native program at `path` with `args` and waits for it to end.
-fn run_native(root: &Dir, path: &str, args: &[&str]) {
+/// Runs the native program at `path` with `args`, with the network
+/// capability in `network` if there is one, and waits for it to end.
+fn run_native(root: &Dir, path: &str, args: &[&str], network: Option<u32>) {
     let image = match root.read_file(path.trim_start_matches('/')) {
         Ok(image) => image,
         Err(err) => {
@@ -279,6 +297,7 @@ fn run_native(root: &Dir, path: &str, args: &[&str]) {
         // The command line is the machine owner's: mounting or replacing
         // a disk needs control, which a POSIX program it names has too.
         root: Some((root.slot(), Rights::READ.union(Rights::WRITE).union(Rights::CONTROL))),
+        network: network.map(|slot| (slot, Rights::ALL)),
     };
     let child = match spawn::spawn(&spawn) {
         Ok(child) => child,
@@ -309,8 +328,13 @@ fn run_native(root: &Dir, path: &str, args: &[&str]) {
 
 /// Starts the POSIX program at `path` with `args` (radix-posix(7)) as
 /// Spark's child, on a new pseudo-terminal whose output goes to the
-/// kernel log.
-fn run_posix(root: &Dir, path: &str, args: &[&str]) -> Result<Program, String> {
+/// kernel log, with the network capability in `network` if there is one.
+fn run_posix(
+    root: &Dir,
+    path: &str,
+    args: &[&str],
+    network: Option<u32>,
+) -> Result<Program, String> {
     let (master, terminal) =
         open_pty(root).map_err(|what| format!("cannot make a pseudo-terminal: {what}"))?;
     let program = root
@@ -328,6 +352,7 @@ fn run_posix(root: &Dir, path: &str, args: &[&str]) -> Result<Program, String> {
     let mut shares = [root.slot(), SLOT_RANDOM, SLOT_LOG]
         .into_iter()
         .zip([SLOT_ROOT, SLOT_RANDOM, SLOT_LOG])
+        .chain(network.map(|slot| (slot, SLOT_NETWORK)))
         .chain((0..3).map(|fd| (terminal.slot(), SLOT_FD_BASE + fd)));
     let shared = shares.try_for_each(|(from, to)| {
         process::share(&SYS, child, from, to, Rights::ALL, 0).map_err(|status| (to, status))
