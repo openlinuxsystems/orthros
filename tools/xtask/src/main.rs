@@ -231,6 +231,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    swap area Linux's mkswap made on, and gets it all back
   spark-stop       Spark stops a service that ignores SIGTERM, and what a
                    service leaves behind
+  spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
   crash-log-bios   the same under BIOS
