@@ -84,9 +84,11 @@ impl Geometry {
     /// Finds the kernel's line
     /// `Framebuffer: console of 160x50 cells with font 8x16 at (0, 0)`,
     /// or consoled's `consoled: console of ...` once it has taken the
-    /// screen over: the last of them.
+    /// screen over: the last of them. A line the serial port has not yet
+    /// ended is not read, as it may be only part of one.
     pub fn from_log(log: &str) -> Option<Geometry> {
-        let line = log.lines().rev().find_map(|l| {
+        let ended = log.rfind('\n').map_or("", |end| &log[..end]);
+        let line = ended.lines().rev().find_map(|l| {
             ["Framebuffer: console of ", "consoled: console of "]
                 .iter()
                 .find_map(|prefix| l.split(prefix).nth(1))
@@ -210,6 +212,10 @@ mod tests {
             "{log}[    2.5 cpu1] consoled: console of 128x48 cells with font 8x16 at (0, 0)\n"
         );
         let geometry = Geometry::from_log(&log).unwrap();
+        assert_eq!((geometry.cols, geometry.rows), (128, 48));
+        // A line the serial port is part way through is not read.
+        let part = format!("{log}[    3.1 cpu1] consoled: console of 160x50 cells with font 8x1");
+        let geometry = Geometry::from_log(&part).unwrap();
         assert_eq!((geometry.cols, geometry.rows), (128, 48));
     }
 
