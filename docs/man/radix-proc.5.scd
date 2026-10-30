@@ -215,6 +215,12 @@ _/processes/loadavg_
 _/processes/uptime_
 	*uptime_ns*: nanoseconds since the kernel started.
 
+_/processes/acpi/button/lid/_*name*_/state_
+	For each lid of the firmware's (_PNP0C0D_, through uACPI), by its
+	name in the ACPI namespace, as *LID0*, Linux's line: *state:* and six
+	spaces, then *open* or *closed*. Without a lid, _/processes/acpi_ is
+	not there.
+
 # EXAMPLES
 
 A process's status:

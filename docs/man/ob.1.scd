@@ -344,6 +344,17 @@ _target/userspace/_).
 		the kernel must hear the button and power the machine off by
 		itself.
 
+	*acpi-power*
+		Boot normally under BIOS with an SSDT of the test's
+		(_tools/xtask/src/acpi/power.asl_, through QEMU's _-acpitable_),
+		as QEMU has no battery, AC adapter, lid or power button of the
+		ACPI namespace: the kernel must say what each is, through uACPI.
+		At the console, the battery's and the adapter's files in
+		_/sys/class/power_supply_ and the lid's
+		_/proc/acpi/button/lid/LID0/state_ must read as the table says,
+		and the fixed power button must still power the machine off
+		(*radix-sysfs*(5), *radix-proc*(5), *dukovo-boot*(7)'s *ACPI*).
+
 	*usb-devices*
 		Boot normally under UEFI with the lock checker on and the *dbc*
 		flag, with QEMU's USB keyboard on the xHCI controller's second

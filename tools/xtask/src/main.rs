@@ -204,6 +204,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   power-button     pressing the ACPI power button powers the machine off,
                    after Spark stops the services, both through uACPI
   aml-off          the same with aml=off, without uACPI, under UEFI
+  acpi-power       a battery, AC adapter, lid and power button of an ACPI
+                   table of the test's, in /sys/class/power_supply and
+                   /proc/acpi/button/lid
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
                    hubs and the devices behind them, follows devices
                    plugged in and pulled out, and has no Debug Capability

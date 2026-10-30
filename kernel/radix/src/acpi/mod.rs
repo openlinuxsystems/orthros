@@ -14,11 +14,18 @@
 //! method. Powering off goes through uACPI's S5, which runs `_PTS` first
 //! ([`power_off`]).
 //!
+//! Once uACPI runs, `devices` finds the firmware's batteries, AC
+//! adapters, lids and power buttons of the namespace (ADR 0201); laptops
+//! reach them through the embedded controller, which uACPI's side serves
+//! before the namespace's `_INI` methods run.
+//!
 //! With `aml=off`, or if uACPI cannot start, no AML runs, and the kernel
 //! hears the fixed power button by itself as before (ADR 0142).
 
+pub mod devices;
+
 use core::alloc::Allocator;
-use core::fmt;
+use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_hal::{Aml, Cpu, Devices, PciSegment, Timer};
@@ -84,28 +91,46 @@ pub fn start(off: bool) {
     match radix_uacpi::start(&KERNEL) {
         Ok(()) => {
             RUNNING.store(true, Ordering::Release);
+            if let Some(controller) = radix_uacpi::embedded_controller() {
+                info!("ACPI: an embedded controller, at {controller}");
+            }
             info!("ACPI: uACPI {} runs the firmware's AML", radix_uacpi::VERSION);
+            devices::find();
         }
         Err(err) => error!("ACPI: uACPI {err}; no AML runs"),
     }
 }
 
-/// Hears the fixed power button through uACPI: `pressed` is called, in an
-/// interrupt handler, at each press. Returns what the button is, or
-/// `None` if uACPI does not run or cannot.
-pub fn power_button(pressed: fn()) -> Option<&'static str> {
+/// Hears the power buttons through uACPI: the fixed one, whose presses
+/// call `pressed` in an interrupt handler, and those of the namespace
+/// (`PNP0C0C`), whose call it in the notify thread. Returns what they are,
+/// or `None` if uACPI does not run or hears none.
+pub fn power_button(pressed: fn()) -> Option<devices::Line> {
     if !running() {
         return None;
     }
-    match radix_uacpi::on_power_button(pressed) {
-        Ok(()) => Some("the ACPI power button (through uACPI)"),
+    let fixed = match radix_uacpi::on_power_button(pressed) {
+        Ok(()) => true,
         Err(err) => {
-            // A hardware-reduced machine, or one whose button is a device
-            // of the namespace (Phase 11c's next part).
+            // A hardware-reduced machine, or one whose button is only a
+            // device of the namespace.
             debug!("ACPI: uACPI does not hear a fixed power button: {err}");
-            None
+            false
         }
-    }
+    };
+    let namespace = devices::power_buttons(pressed);
+    let mut what = devices::Line::new();
+    let _ = match (fixed, namespace) {
+        (true, None) => write!(what, "the ACPI power button (through uACPI)"),
+        (true, Some(names)) => {
+            write!(what, "the ACPI power button and {} (through uACPI)", names.as_str())
+        }
+        (false, Some(names)) => {
+            write!(what, "the ACPI power button {} (through uACPI)", names.as_str())
+        }
+        (false, None) => return None,
+    };
+    Some(what)
 }
 
 /// Turns on the general-purpose events that have methods, once the

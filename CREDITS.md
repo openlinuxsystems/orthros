@@ -326,6 +326,17 @@ We implement these from their published descriptions. No code is copied.
   (`Documentation/ABI/testing/sysfs-devices-edac`)
   ([ADR 0169](docs/adr/0169-corrected-errors-interrupt-and-memory-errors-are-counted.md)).
   No code is taken from them.
+- The embedded controller's protocol, the battery's `_BIX`, `_BIF` and
+  `_BST`, the AC adapter's `_PSR` and the lid's `_LID` are those of the
+  ACPI specification 6.5 (chapters 10 and 12). How `radix-uacpi` reads a
+  battery's status, capacity and level, and the files of
+  `/kernel/class/power_supply` and `/processes/acpi/button/lid`, follow
+  Linux's `drivers/acpi/battery.c`, `ac.c`, `button.c` and `ec.c`
+  (GPL-2.0) and its `Documentation/ABI/testing/sysfs-class-power`: the
+  one-second cache of a battery's state and the 500 ms an embedded
+  controller has for each step are theirs
+  ([ADR 0201](docs/adr/0201-batteries-adapters-and-lids-through-uacpi.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

@@ -616,10 +616,35 @@ and the kernel's own way is tried if that fails:
 
 	Power: powering off (ACPI S5, through uACPI)
 
+Once the namespace is loaded, and before its _\_STA_ and _\_INI_ methods
+run, which often read it, the kernel takes over the laptop's embedded
+controller (_PNP0C09_), through which the AML reaches the battery, the
+AC adapter and the lid: each access goes through its two ports, one at a
+time, and its events run their _\_Qxx_ methods in _acpi-events_
+(ADR 0201). The log says where it is:
+
+	ACPI: an embedded controller, at ports 0x62 and 0x66, GPE 0x17
+
+The kernel then finds the batteries (_PNP0C0A_), AC adapters
+(_ACPI0003_), lids (_PNP0C0D_) and power buttons of the namespace
+(_PNP0C0C_), and says what each is:
+
+	Power: BAT0: a Li-ion battery of 48000 mWh (50000 mWh new), 75 % charged, discharging
+	Power: ADP1: an AC adapter, unplugged
+	Lid: LID0 is open
+	Power: the ACPI power button and PWRB (through uACPI) asks Spark to power the machine off
+
+A press of a namespace button is a press of the power button. Plugging
+the adapter in or out and opening or closing the lid are logged when the
+firmware notifies them (*Power: ADP1 is plugged in*, *Lid: LID0
+closed*). The batteries and adapters are in _/kernel/class/power_supply_
+and the lids in _/processes/acpi/button/lid_, as on Linux
+(*radix-sysfs*(5), *radix-proc*(5)); nothing yet acts on a closed lid.
+
 With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
 runs; the kernel hears a fixed power button by itself and powers off
-with the sleep types of the DSDT's _\_S5_ (ADR 0142). Batteries, the AC
-adapter, lids and namespace buttons come later in Phase 11c.
+with the sleep types of the DSDT's _\_S5_ (ADR 0142), and no battery,
+adapter or lid is found.
 
 # IOMMU
 

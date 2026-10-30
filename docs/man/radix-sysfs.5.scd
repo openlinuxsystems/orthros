@@ -142,7 +142,8 @@ _/kernel/class/watchdog/watchdog0/identity_
 	The hardware watchdog the kernel drives, if any (*spark*(8)'s
 	*WATCHDOG*): _the Intel 6300ESB watchdog_, _the Intel ICH9 TCO
 	timer_, _the Intel ICH10 TCO timer_, _the Intel PCH TCO timer_ or _the
-	AMD FCH watchdog_. Without one, _/kernel/class_ is not there.
+	AMD FCH watchdog_. Without one, or a battery or AC adapter,
+	_/kernel/class_ is not there.
 
 _/kernel/class/watchdog/watchdog0/state_
 	*active* while it runs, else *inactive*.
@@ -154,6 +155,41 @@ _/kernel/class/watchdog/watchdog0/timeout_, _min_timeout_, _max_timeout_
 _/kernel/class/watchdog/watchdog0/bootstatus_
 	*32*, Linux's WDIOF_CARDRESET, if it restarted the machine at the end
 	of the boot before this one; *0* if not.
+
+_/kernel/class/power_supply/_*name*_/type_, _online_
+	For each AC adapter of the firmware's (_ACPI0003_, through uACPI;
+	*dukovo-boot*(7)'s *ACPI*), by its name in the ACPI namespace, as
+	*ADP1*: *Mains*, and *1* while it is plugged in, else *0*.
+
+_/kernel/class/power_supply/_*name*_/type_, _present_, _status_
+	For each battery of the firmware's (_PNP0C0A_), by its name, as
+	*BAT0*, as Linux's ACPI battery shows it: *Battery*; *1* while it is
+	in its bay, else *0*; and *Charging*, *Discharging*, *Full* or *Not
+	charging*. Its state is read again when a file is read a second
+	after the last read, or after the firmware notifies a change.
+
+_/kernel/class/power_supply/_*name*_/capacity_, _capacity_level_
+	What it has left, in percent of its last full charge (or, without
+	one, of its design capacity), and *Critical*, *Low*, *Full* or
+	*Normal*.
+
+_/kernel/class/power_supply/_*name*_/energy_full_design_, _energy_full_, _energy_now_, _power_now_
+	For a battery that counts in watts: its design capacity, its last
+	full charge and what it has left, in µWh, and the rate it charges or
+	discharges at, in µW. A battery that counts in amperes has
+	_charge_full_design_, _charge_full_ and _charge_now_ (µAh) and
+	_current_now_ (µA) instead.
+
+_/kernel/class/power_supply/_*name*_/voltage_min_design_, _voltage_now_, _cycle_count_, _technology_
+	Its design and present voltage, in µV; how many times it has been
+	charged; and *Li-ion*, *Li-poly*, *NiMH*, *NiCd* or *Unknown*.
+
+_/kernel/class/power_supply/_*name*_/model_name_, _manufacturer_, _serial_number_
+	What the battery says it is.
+
+	A value the battery does not know, and any but _type_ and _present_
+	while its bay is empty, fails to read with EIO, as Linux's fail with
+	ENODEV.
 
 _/kernel/devices/system/edac/mc/mc0/ce_count_, _ue_count_
 	While the CPUs' machine-check banks are read (*dukovo-boot*(7)'s

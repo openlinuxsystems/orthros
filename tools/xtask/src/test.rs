@@ -36,6 +36,11 @@ const QEMU_EXIT_PANIC: i32 = 35;
 const QEMU_EXIT_RESET: i32 = 0;
 /// QEMU's exit status when the guest powers the machine off.
 const QEMU_EXIT_POWER_OFF: i32 = 0;
+
+/// The SSDT `acpi-power` gives QEMU (`src/acpi/power.asl`), and the
+/// argument `run_case` replaces with the file it writes it to.
+const POWER_AML: &[u8] = include_bytes!("acpi/power.aml");
+const POWER_TABLE: &str = "file=power.aml";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
 /// begins with (userspace/defaults/issue).
@@ -954,6 +959,23 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: power_button,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "acpi-power",
+        about: "QEMU with an ACPI table of the test's: uACPI finds its battery, AC adapter, lid and power button, Linux's /sys/class/power_supply and /proc/acpi/button/lid show them at the console, and the power button powers off",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        // No program: Spark starts the console, as on a normal boot.
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-acpitable", POWER_TABLE],
+        script: acpi_power,
         disks: &[],
         second: None,
     },
@@ -2305,6 +2327,13 @@ fn run_case(
     let qmp = dir.join(format!("{}.qmp", case.name));
     let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
+    for arg in &mut extra {
+        if arg == POWER_TABLE {
+            let path = dir.join("power.aml");
+            std::fs::write(&path, POWER_AML).map_err(|e| format!("{}: {e}", path.display()))?;
+            *arg = format!("file={}", qemu::option_value(&path));
+        }
+    }
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
@@ -3754,6 +3783,61 @@ fn storage_tools(vm: &mut Vm, case: &Case) -> Result<(), String> {
     ])?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// QEMU with [`POWER_AML`] (ADR 0201): the kernel logs the battery, the
+/// adapter, the lid and both power buttons; at the console, Linux's
+/// `/sys/class/power_supply` and `/proc/acpi/button/lid` show them; the
+/// fixed power button still powers off.
+fn acpi_power(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said after uACPI's line, before the boot report ends.
+    for line in [
+        "Power: BAT0: a Li-ion battery of 48000 mWh (50000 mWh new), 75 % charged, discharging",
+        "Power: ADP1: an AC adapter, unplugged",
+        "Lid: LID0 is open",
+        "Power: the ACPI power button and PWRB (through uACPI) asks Spark to power the machine off",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text(
+        "cd /sys/class/power_supply; for f in BAT0/status BAT0/capacity BAT0/energy_now \
+         BAT0/power_now ADP1/type ADP1/online; do echo \"$f is $(cat $f)\"; done\n",
+    )?;
+    vm.expect_screen(&[
+        "BAT0/status is Discharging",
+        "BAT0/capacity is 75",
+        "BAT0/energy_now is 36000000",
+        "BAT0/power_now is 9000000",
+        "ADP1/type is Mains",
+        "ADP1/online is 0",
+    ])?;
+    vm.type_text(
+        "clear; for f in type technology cycle_count model_name manufacturer serial_number \
+         voltage_now capacity_level energy_full energy_full_design; do \
+         echo \"$f is $(cat BAT0/$f)\"; done; cat /proc/acpi/button/lid/LID0/state\n",
+    )?;
+    vm.expect_screen(&[
+        "type is Battery",
+        "technology is Li-ion",
+        "cycle_count is 42",
+        "model_name is DUKOVO TEST",
+        "manufacturer is Dukovo",
+        "serial_number is 0042",
+        "voltage_now is 12100000",
+        "capacity_level is Normal",
+        "energy_full is 48000000",
+        "energy_full_design is 50000000",
+        "state:      open",
+    ])?;
+    vm.press_power_button()?;
+    vm.expect("spark: the power button was pressed; powering off the machine")?;
+    vm.expect("Power: powering off (ACPI S5, through uACPI)")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

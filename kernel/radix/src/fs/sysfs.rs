@@ -30,6 +30,17 @@
 //!   `inactive`), its `timeout`, `min_timeout` and `max_timeout` in
 //!   seconds, and its `bootstatus`, 32 (Linux's WDIOF_CARDRESET) if it
 //!   restarted the machine at the end of the boot before, else 0;
+//! - `/kernel/class/power_supply/<name>`, for each battery and AC adapter
+//!   of the firmware's (ADR 0201), as Linux's ACPI drivers show them: an
+//!   adapter's `type` (`Mains`) and `online`; a battery's `type`
+//!   (`Battery`), `present`, `status`, `capacity` (percent),
+//!   `capacity_level`, `technology`, `cycle_count`, `voltage_min_design`
+//!   and `voltage_now` (µV), `energy_full_design`, `energy_full`,
+//!   `energy_now` (µWh) and `power_now` (µW), or for a battery that
+//!   counts in amperes `charge_*` (µAh) and `current_now` (µA), and
+//!   `model_name`, `manufacturer` and `serial_number`. A value the
+//!   battery does not know, as the rest while its bay is empty, fails to
+//!   read (EIO), as Linux's do (ENODEV);
 //! - `/kernel/devices/system/edac/mc/mc0`, while the machine-check banks
 //!   are read (ADR 0169): Linux's EDAC counts of the memory errors they
 //!   reported, `ce_count` and `ue_count`, `ce_noinfo_count` and
@@ -49,6 +60,7 @@ use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, S
 use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem, next_id};
 
 use super::disk;
+use crate::acpi::devices;
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -77,8 +89,15 @@ pub fn make() -> Result<FsRef> {
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
-    if let Some(found) = crate::watchdog::found() {
-        let class = root.add_dir("class", next_id())?;
+    let power = devices::batteries().next().is_some() || devices::adapters().next().is_some();
+    let class = if crate::watchdog::found().is_some() || power {
+        Some(root.add_dir("class", next_id())?)
+    } else {
+        None
+    };
+    if let Some(found) = crate::watchdog::found()
+        && let Some(class) = &class
+    {
         let dir = class.add_dir("watchdog", next_id())?.add_dir("watchdog0", next_id())?;
         let Watchdog { name, min_seconds, max_seconds, restarted } = *found;
         dir.add("identity", value(move |text| writeln!(text, "{name}"))?)?;
@@ -94,6 +113,9 @@ pub fn make() -> Result<FsRef> {
         dir.add("max_timeout", value(move |text| writeln!(text, "{max_seconds}"))?)?;
         let status = if restarted { 32 } else { 0 };
         dir.add("bootstatus", value(move |text| writeln!(text, "{status}"))?)?;
+    }
+    if power && let Some(class) = &class {
+        power_supply(class)?;
     }
     if crate::mce::on() {
         let devices = root.add_dir("devices", next_id())?;
@@ -121,6 +143,26 @@ fn cmdline(text: &mut Text) -> fmt::Result {
 
 fn cpus(text: &mut Text) -> fmt::Result {
     writeln!(text, "{}", crate::sched::online().len())
+}
+
+/// `/kernel/class/power_supply`: the firmware's batteries and AC adapters.
+fn power_supply(class: &FixedDir) -> Result<()> {
+    let supplies = class.add_dir("power_supply", next_id())?;
+    for battery in devices::batteries() {
+        let dir = supplies.add_dir(battery.name(), next_id())?;
+        for &(name, file) in devices::battery_files(battery) {
+            dir.add(name, value(move |text| devices::write_battery_file(battery, file, text))?)?;
+        }
+    }
+    for adapter in devices::adapters() {
+        let dir = supplies.add_dir(adapter.name(), next_id())?;
+        dir.add("type", value(|text| writeln!(text, "Mains"))?)?;
+        dir.add(
+            "online",
+            value(move |text| writeln!(text, "{}", u8::from(adapter.online().ok_or(fmt::Error)?)))?,
+        )?;
+    }
+    Ok(())
 }
 
 /// A file of one value, written when it is opened.
