@@ -9,7 +9,9 @@
 //! asks for every level from its lowest to its highest, at its own
 //! choice, with the firmware's energy preference or the one `epp=` names,
 //! as Linux's `intel_pstate` and `amd-pstate-epp` drivers do in their
-//! active mode. `pstate=off` leaves the CPUs to the firmware.
+//! active mode. `pstate=off` leaves the CPUs to the firmware. The thermal
+//! zones' passive cooling caps every CPU's highest level ([`cool`], ADR
+//! 0203).
 //!
 //! `/kernel/devices/system/cpu/cpufreq` shows each CPU's levels and
 //! request as frequencies ([`write_file`]), and the frequency it runs at,
@@ -17,7 +19,7 @@
 //! file asks and kept for [`MEASURE_LIFE_NS`].
 
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use radix_hal::{Cpu, CpuLocal, MAX_CPUS, Timer, UserMode};
 use radix_klog::{error, info, warn};
@@ -84,6 +86,14 @@ static RUNNING_KHZ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CP
 static MEASURED_NS: AtomicU64 = AtomicU64::new(0);
 /// One measurement at a time.
 static MEASURING: Mutex<()> = Mutex::new(());
+
+/// Each thermal zone's step of passive cooling.
+static ZONE_STEPS: [AtomicU8; crate::acpi::thermal::MAX_ZONES] =
+    [const { AtomicU8::new(0) }; crate::acpi::thermal::MAX_ZONES];
+/// The step every CPU is cooled at: the most any zone asks for.
+static STEP: AtomicU8 = AtomicU8::new(0);
+/// One change of the step at a time.
+static COOLING: Mutex<()> = Mutex::new(());
 
 /// Turns every CPU's control on, unless `off` (`pstate=off`), with the
 /// energy preference `epp` names (`epp=`). Called once, at the end of
@@ -312,6 +322,41 @@ pub fn write_file(cpu: usize, file: File, out: &mut dyn Write) -> fmt::Result {
         }
         File::AmdMaxFreq => writeln!(out, "{}", control.khz(control.levels.highest)),
     }
+}
+
+/// Sets thermal zone `zone`'s step of passive cooling (ADR 0203): every
+/// CPU's highest level is capped at the most any zone asks for
+/// ([`radix_pstate::cooled`]). Returns false where the CPUs' speed is the
+/// firmware's, which nothing here lowers.
+pub fn cool(zone: usize, step: u8) -> bool {
+    if let Some(slot) = ZONE_STEPS.get(zone) {
+        slot.store(step, Ordering::Relaxed);
+    }
+    if driver().is_none() {
+        return false;
+    }
+    let _one = COOLING.lock();
+    let wanted = ZONE_STEPS.iter().map(|step| step.load(Ordering::Relaxed)).max().unwrap_or(0);
+    if STEP.swap(wanted, Ordering::Relaxed) != wanted {
+        on_every_cpu(cool_here);
+    }
+    true
+}
+
+/// The step every CPU is cooled at.
+pub fn step() -> u8 {
+    STEP.load(Ordering::Relaxed)
+}
+
+/// On each CPU, from [`cool`]: asks for its highest level at the step.
+fn cool_here() {
+    let cpu = Arch::current_cpu();
+    let Some(control) = CONTROLS[cpu].get() else { return };
+    let current = request(cpu);
+    let max = radix_pstate::cooled(control.levels, STEP.load(Ordering::Relaxed)).max(current.min);
+    let request = Request { max, ..current };
+    Arch::request_performance(request);
+    REQUESTS[cpu].store(pack(request), Ordering::Relaxed);
 }
 
 /// Measures the frequency every CPU runs at, unless the last measurement

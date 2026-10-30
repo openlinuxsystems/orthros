@@ -348,6 +348,17 @@ We implement these from their published descriptions. No code is copied.
   `Documentation/admin-guide/pm/intel_pstate.rst` and `amd-pstate.rst`
   ([ADR 0202](docs/adr/0202-cpu-frequency-through-hwp-and-cppc.md)).
   No code is taken from them.
+- Thermal zones, their trip points and the passive cooling's trend are
+  those of the ACPI specification 6.5 (chapter 11). How `radix-uacpi`
+  reads a zone, which trip points it leaves out as nonsense, the
+  step-wise steps of passive cooling, the fifth of the CPUs' highest
+  level each step takes off, the hardware protection's 30 seconds before
+  a forced power-off, and the files of `/kernel/class/thermal` follow
+  Linux's `drivers/acpi/thermal.c`, `drivers/thermal/gov_step_wise.c`,
+  `drivers/acpi/processor_thermal.c` and `kernel/reboot.c` (GPL-2.0) and
+  its `Documentation/driver-api/thermal/sysfs-api.rst`
+  ([ADR 0203](docs/adr/0203-thermal-zones-through-uacpi.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,
