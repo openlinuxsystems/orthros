@@ -465,6 +465,46 @@ pub trait Devices {
     fn watchdog_stop();
 }
 
+/// What the interpreter of the firmware's AML needs from the machine
+/// (Phase 11c, ADR 0200): on a PC, where the ACPI tables start, physical
+/// memory, I/O ports and the System Control Interrupt.
+///
+/// AML reaches whatever the firmware's code names, so these do what they
+/// are asked without knowing why. Only the interpreter calls them, for
+/// the firmware's AML, which the kernel trusts as it trusts the firmware.
+pub trait Aml {
+    /// The physical address of the ACPI RSDP, or of a copy of it that
+    /// stays in RAM; `None` on a machine without ACPI.
+    fn acpi_rsdp() -> Option<u64>;
+
+    /// Maps `len` bytes of physical memory from `phys`, readable and
+    /// writable, until [`Aml::unmap_firmware`]: RAM as RAM, anything
+    /// else uncached, as it may be device registers. Returns the address
+    /// of `phys`; `None` when the mapping window or memory for page tables
+    /// runs out, or for more than 256 MiB of what is not RAM.
+    fn map_firmware(phys: u64, len: usize) -> Option<usize>;
+
+    /// Undoes the [`Aml::map_firmware`] that returned `virt` for `len`
+    /// bytes. Panics if nothing is mapped there.
+    fn unmap_firmware(virt: usize, len: usize);
+
+    /// Reads `width` bytes (1, 2 or 4) from I/O port `port`.
+    fn read_port(port: u16, width: u8) -> u32;
+
+    /// Writes `width` bytes (1, 2 or 4) of `value` to I/O port `port`.
+    fn write_port(port: u16, width: u8, value: u32);
+
+    /// Routes the firmware's interrupt `irq` (on a PC, the FADT's SCI, an
+    /// ISA interrupt) so that each one calls `handler`, in an interrupt
+    /// handler with interrupts masked, on the boot CPU: level-triggered and
+    /// active low unless the firmware's tables say otherwise. Once only;
+    /// returns false if it cannot, or did before.
+    fn start_firmware_interrupt(irq: u32, handler: fn()) -> bool;
+
+    /// Stops the interrupt [`Aml::start_firmware_interrupt`] routed.
+    fn stop_firmware_interrupt();
+}
+
 /// Kernel threads: their saved contexts and switching between them.
 ///
 /// A context is what a thread leaves behind while another runs on its CPU:

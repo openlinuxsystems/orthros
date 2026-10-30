@@ -81,6 +81,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-scsi",
     "radix-sync",
     "radix-tty",
+    "radix-uacpi",
     "radix-usb",
     "radix-vfs",
     "radix-virtio",
@@ -929,6 +930,22 @@ pub const CASES: &[Case] = &[
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
         cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: power_button,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "aml-off",
+        about: "with aml=off no AML runs, under UEFI: the kernel hears the ACPI power button and powers the machine off by itself",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "aml=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -3011,6 +3028,18 @@ impl Vm {
         found
     }
 
+    /// Waits until `needle` appears after the previous match, but leaves
+    /// the place [`Vm::expect`] reads from where it was: for a line that
+    /// may come after what another CPU printed meanwhile, which the next
+    /// expectations read. Spark says it started a program once the program
+    /// runs, and on another CPU the program may have printed lines by then.
+    pub fn expect_ahead(&mut self, needle: &str) -> Result<(), String> {
+        let cursor = self.cursor;
+        let found = self.expect(needle);
+        self.cursor = cursor;
+        found
+    }
+
     /// Types `text` on the serial port.
     pub fn send(&mut self, text: &str) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or("QEMU's input is closed")?;
@@ -3505,6 +3534,12 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("cpu{cpu}: APIC ID "))?;
     }
     vm.expect(&format!("Scheduler: {cpus} CPUs run threads, on "))?;
+    // After the PCI scan (ADR 0200).
+    if flags.contains(&"aml=off") {
+        vm.expect("ACPI: the firmware's AML is not run (`aml=off`)")?;
+    } else {
+        vm.expect("ACPI: uACPI 7.0.0 runs the firmware's AML")?;
+    }
     vm.expect(&format!("Timer: all {cpus} CPUs take timer interrupts at 100 Hz"))?;
     if cpus > 1 {
         vm.expect(&format!("IPI: all {} other CPUs answered a ping", cpus - 1))?;
@@ -3513,8 +3548,8 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// Fails if the kernel logged a problem no case looks for: a lock-checker
-/// report (but in the case that seeds them) or a thread that slept where
-/// it must not.
+/// report (but in the case that seeds them), a thread that slept where
+/// it must not, or an error of uACPI's.
 fn kernel_complaints(vm: &Vm, case: &Case) -> Result<(), String> {
     let log = vm.log();
     let complaint = log.lines().find(|line| {
@@ -3524,6 +3559,7 @@ fn kernel_complaints(vm: &Vm, case: &Case) -> Result<(), String> {
         (checker && case.name != "lockdep")
             || line.contains("with preemption held off")
             || line.contains("KiB kernel stack left")
+            || line.contains("ACPI: error: ")
     });
     match complaint {
         Some(line) => Err(format!("the kernel complained: {}", line.trim())),
@@ -3720,11 +3756,20 @@ fn storage_tools(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
+/// Spark powers the machine off when the ACPI power button is pressed:
+/// heard through uACPI, which then powers off (ADR 0200), or with
+/// `aml=off` by the kernel itself (ADR 0142).
 fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    let uacpi = !case.cmdline.split_ascii_whitespace().any(|flag| flag == "aml=off");
     boot_report(vm, case)?;
     // Said before the boot report ends.
-    if !vm.log().contains("Power: the ACPI power button asks Spark to power the machine off") {
-        return Err("the kernel does not say it hears the ACPI power button".into());
+    let (button, off) = if uacpi {
+        ("the ACPI power button (through uACPI)", "Power: powering off (ACPI S5, through uACPI)")
+    } else {
+        ("the ACPI power button", "Power: powering off (ACPI S5, sleep types ")
+    };
+    if !vm.log().contains(&format!("Power: {button} asks Spark to power the machine off")) {
+        return Err(format!("the kernel does not say it hears {button}"));
     }
     vm.expect("Boot complete.")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
@@ -3735,6 +3780,7 @@ fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: the power button was pressed; powering off the machine")?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    vm.expect(off)?;
     // QEMU ends when the guest enters ACPI's S5.
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
@@ -3954,7 +4000,7 @@ fn machine_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn machine_check_program(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect("spark: started /system/tests/posix/memfail as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/memfail as process ")?;
     vm.expect("memfail: hardware_corrupted: 0 KiB")?;
     let reading = program_line(vm, "memfail: reading ")?;
     let (virt, main) = reading.split_once(" from ").ok_or(format!("memfail: reading {reading}"))?;
@@ -4493,7 +4539,7 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn posix(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect("spark: started /system/tests/posix/run as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/run as process ")?;
     vm.expect(", on a pseudo-terminal")?;
     let code = program_line(vm, "(/system/tests/posix/run) exited with code ")?;
     let log = vm.log();
@@ -4632,7 +4678,7 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// the start of the program.
 fn storage_boot(vm: &mut Vm, case: &Case) -> Result<(), String> {
     volumes_mounted(vm, case)?;
-    vm.expect("spark: started /system/tests/storage as process ")
+    vm.expect_ahead("spark: started /system/tests/storage as process ")
 }
 
 /// The disks found, and Spark mounting each one's filesystem at
@@ -4682,7 +4728,7 @@ fn disk_size(kib: u64) -> String {
 /// all four at once, each checking what it did and syncing it.
 fn torture_run(vm: &mut Vm, case: &Case) -> Result<(), String> {
     volumes_mounted(vm, case)?;
-    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/torture as process ")?;
     vm.expect("torture: 4 workers making changes for 120 s, seed 0x5eed")?;
     vm.expect("torture: done in ")?;
     torture_end(vm, case, "everything checked and synced")
@@ -4693,7 +4739,7 @@ fn torture_run(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// removes it all.
 fn torture_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     volumes_mounted(vm, case)?;
-    vm.expect("spark: started /system/tests/posix/torture as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/torture as process ")?;
     torture_end(vm, case, "removed")
 }
 
@@ -5122,7 +5168,7 @@ fn volumes(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// bytes ([`raw_check`]).
 fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: started /system/tests/storage as process ")?;
+    vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let (rotational, sector) = (u8::from(!disk.solid()), disk.sector);
         vm.expect(&format!(
@@ -5231,7 +5277,7 @@ fn disk_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err("the kernel's benchmarks did not pass".into());
     }
     vm.expect("spark: leaving every disk's filesystems unmounted")?;
-    vm.expect("spark: started /system/tests/posix/disktest as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/disktest as process ")?;
     vm.expect(&format!(
         "disktest: /devices/nvme0n1 on Dukovo: QEMU NVMe Ctrl, serial dukovo-test-0, {} bytes, \
          512-byte sectors, 512-byte blocks, solid state",
@@ -5582,7 +5628,7 @@ fn root_boot(vm: &mut Vm, first: bool) -> Result<(), String> {
     if (added == "0 default settings to /system/settings") == first {
         return Err(format!("Spark added {added}"));
     }
-    vm.expect("spark: started /system/tests/storage as process ")
+    vm.expect_ahead("spark: started /system/tests/storage as process ")
 }
 
 /// Copies the files of a Btrfs disk's top subvolume out with Linux's
@@ -5871,7 +5917,7 @@ fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
-    vm.expect("spark: started /system/tests/storage as process ")?;
+    vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     // The program lists the volumes in name order.
     let mut sorted = volumes.clone();
     sorted.sort();
@@ -6160,7 +6206,7 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
-    vm.expect("spark: started /system/tests/storage as process ")?;
+    vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     Ok(())
 }
 
@@ -6216,7 +6262,7 @@ fn swap(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
     vm.expect("spark: vda holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone")?;
-    vm.expect("spark: started /system/tests/posix/swaptest as process ")?;
+    vm.expect_ahead("spark: started /system/tests/posix/swaptest as process ")?;
     let slots = SWAP_KIB / 4 - 1;
     vm.expect(&format!("Swap: vda: {} MiB in {slots} slots, priority -2", slots * 4 / 1024))?;
     vm.expect(&format!("swaptest: swap is on, {} KiB", slots * 4))?;
@@ -6279,7 +6325,7 @@ fn btrfs_replayed(disk: &DiskImage, log: &str) -> Result<(), String> {
 /// fails as a media error without Do Not Retry.
 fn disk_errors(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disks_found(vm, case)?;
-    vm.expect("spark: started /system/tests/storage as process ")?;
+    vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     for name in disk_names(case.disks) {
         for line in [
             "a read of sector 6000, which fails once, reads what it holds",

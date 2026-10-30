@@ -46,6 +46,7 @@ radix-sched = { path = "../sched" }
 radix-scsi = { path = "../drivers/scsi" }
 radix-sync = { path = "../lib/sync" }
 radix-tty = { path = "../lib/tty" }
+radix-uacpi = { path = "../lib/uacpi" }
 radix-usb = { path = "../drivers/usb" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }

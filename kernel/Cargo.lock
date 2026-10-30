@@ -168,6 +168,7 @@ dependencies = [
  "radix-scsi",
  "radix-sync",
  "radix-tty",
+ "radix-uacpi",
  "radix-usb",
  "radix-vfs",
  "radix-virtio",
@@ -453,6 +454,13 @@ version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
+]
+
+[[package]]
+name = "radix-uacpi"
+version = "0.10.4"
+dependencies = [
+ "radix-sync",
 ]
 
 [[package]]

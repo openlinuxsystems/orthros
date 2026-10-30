@@ -531,6 +531,17 @@ fn route(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32, sci: bo
     Some(gsi)
 }
 
+/// Masks the I/O APIC input of global system interrupt `gsi`, if one has
+/// it.
+pub fn mask_gsi(gsi: u32) {
+    let list = IOAPICS.lock_irq();
+    let has = |io: &&IoApic| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi);
+    if let Some(io) = list.0.iter().flatten().find(has) {
+        // A masked entry's other bits do not matter.
+        io.write(0x10 + 2 * (gsi - io.gsi_base), MASKED);
+    }
+}
+
 static IOAPICS: SpinLock<([Option<IoApic>; 8], usize)> = SpinLock::new(([None; 8], 0));
 
 /// Masks every input of every I/O APIC in the MADT.

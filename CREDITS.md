@@ -28,6 +28,7 @@ project's design, it adds the project here (see
 | Project | What we use | License |
 | --- | --- | --- |
 | [Rust](https://www.rust-lang.org/) standard library | `core`, `alloc` and `compiler_builtins`, built from rust-src into the kernel and the user programs | MIT OR Apache-2.0 |
+| [uACPI](https://github.com/uACPI/uACPI) 7.0.0 by Daniil Tatianin and its contributors | The interpreter of the firmware's AML, compiled into the kernel from `kernel/lib/uacpi/vendor/`, unmodified ([ADR 0200](docs/adr/0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md)) | MIT |
 | [GNU GRUB](https://www.gnu.org/software/grub/) 2 | The boot loader, as a separate program that loads the kernel | GPL-3.0-or-later |
 | [Intel microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) | CPU microcode, only in local builds that ask for it ([ADR 0007](docs/adr/0007-closed-firmware-separate-package.md)) | Intel's redistribution license |
 | [mlibc](https://github.com/managarm/mlibc) 7.0.0 by the Managarm project | The C library and dynamic linker (`/system/libraries/libc.so`, `ld.so` and the static `libc.a`), with Radix's system calls added in `ports/mlibc/sysdeps/radix` and the fixes in `ports/mlibc/patches` ([ADR 0068](docs/adr/0068-mlibc-is-the-c-library.md)); its own tests run in the `posix` boot test | MIT |

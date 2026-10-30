@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Profile;
 use crate::process::{self, step};
-use crate::{Context, Ctx, Result, bail, doctor, frames, krelocs, ksyms};
+use crate::{Context, Ctx, Result, bail, doctor, frames, krelocs, ksyms, ports};
 
 /// The kernel's target specification, relative to the repository root.
 /// docs/adr/0011-kernel-target-and-build-std.md explains why the kernel has
@@ -52,6 +52,13 @@ pub fn cargo(ctx: &Ctx, subcommand: &str) -> std::process::Command {
         // Building `core` for a soft-float target makes Cargo print a
         // future-incompatibility notice about `core` itself on every build.
         .env("CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY", "never");
+    // radix-uacpi compiles uACPI's C with the ports' Clang (ADR 0200).
+    if let Some((clang, _)) = ports::find_clang() {
+        cmd.env("RADIX_CLANG", clang);
+    }
+    if let Some(ar) = ports::find_llvm("llvm-ar") {
+        cmd.env("RADIX_AR", ar);
+    }
     cmd
 }
 

@@ -58,6 +58,10 @@ Only the trusted computing base may use `unsafe`. Today that is:
   accesses, the slab free-object pattern, the heap's `free`, its
   `Platform` trait and the stress test); its allocators' logic is safe
   code, checked on the host and by Kani;
+- `kernel/lib/uacpi`, which links uACPI's C, the interpreter of the
+  firmware's AML (ADR 0200): it is `#![deny(unsafe_code)]` and allows it
+  only in its `ffi` module, where the C is called and calls the kernel
+  back through a safe trait;
 - the kernel crate `kernel/radix`, which is `#![deny(unsafe_code)]` and
   allows it only at marked sites: exporting its entry point, putting the
   locks into panic mode, the context switch and borrowing the running
@@ -72,7 +76,8 @@ particular every parser of data from outside the kernel
 (boot information, ACPI tables, microcode, fonts, the symbol table, the
 crash log) is safe code, and so are the capability core `kernel/cap`, which
 decides who may use what, the scheduling policy `kernel/sched`, and the
-lock checker `kernel/lib/lockdep`.
+lock checker `kernel/lib/lockdep`. The one exception is the firmware's
+AML, which uACPI's C interprets.
 
 In user space, `unsafe` is for calls into the kernel and the C library:
 `libradix`'s system call stubs, the runtime `radix-rt` (its start-up and

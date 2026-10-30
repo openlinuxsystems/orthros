@@ -188,7 +188,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   consoles         a shell on consoled's virtual consoles: typing, Alt+F2,
                    a German keyboard layout, poweroff
   power-button     pressing the ACPI power button powers the machine off,
-                   after Spark stops the services
+                   after Spark stops the services, both through uACPI
+  aml-off          the same with aml=off, without uACPI, under UEFI
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
                    hubs and the devices behind them, follows devices
                    plugged in and pulled out, and has no Debug Capability

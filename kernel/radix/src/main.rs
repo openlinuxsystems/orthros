@@ -49,6 +49,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod caps;
 mod captest;
 mod console;
@@ -243,7 +244,11 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     fs::writeback::start();
     fs::kmsg::start();
     fs::keyboard::start();
+    // After the PCI scan, which the AML's PCI regions reach through, and
+    // before the power button.
+    acpi::start(flags.value("aml") == Some("off"));
     user::power::start();
+    acpi::finish_events();
     watchdog::find();
     mce::start(flags.value("mce-poll"));
     check_timers(online);

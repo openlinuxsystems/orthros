@@ -567,6 +567,32 @@ pub fn try_map_physical(phys: u64, len: u64, access: Access, cache: Cache) -> Op
     Some((virt + (phys - first)) as usize)
 }
 
+/// Unmaps what [`try_map_physical`] mapped for `len` bytes at `virt`,
+/// flushes it from every CPU's TLB and gives its place in the window back;
+/// the memory it maps is not the kernel's to free. For mappings that do
+/// not last, as the firmware's AML makes them (ADR 0200). Panics if a page
+/// of it is not mapped.
+pub fn unmap_physical(virt: usize, len: usize) {
+    let first = virt as u64 & !(PAGE - 1);
+    let last = (virt as u64 + len.max(1) as u64).next_multiple_of(PAGE);
+    {
+        let state = STATE.lock();
+        for page in (first..last).step_by(PAGE as usize) {
+            match leaf(state.pml4, page) {
+                Some(slot) if slot.load(Ordering::Relaxed) & PRESENT != 0 => {
+                    slot.store(0, Ordering::Relaxed);
+                }
+                _ => panic!("unmapping {page:#x}: not a mapping of physical memory"),
+            }
+        }
+    }
+    shootdown(first..last);
+    // The guard page below goes back with it, as `window_alloc` took it.
+    if let Err(err) = STATE.lock().window.release(first - PAGE, last - first + PAGE) {
+        panic!("unmapping {first:#x}: {err:?}");
+    }
+}
+
 /// Allocates a stack of `pages` pages in the mapping window, with an
 /// unmapped guard page below it. Returns (guard, stack).
 pub fn allocate_stack(pages: u64) -> (Range<usize>, Range<usize>) {
