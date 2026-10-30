@@ -16,7 +16,7 @@
 //! take while threads take it around other locks.
 
 use core::any::Any;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::Status;
@@ -228,7 +228,6 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
         text = rest;
     }
     let (level, text) = level_of(text);
-    let text = core::str::from_utf8(text).unwrap_or("<not UTF-8>");
     let me = sched::running();
     let process = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.number());
     let name = me.as_ref().map(|me| me.name());
@@ -236,8 +235,32 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     // Saturating, so that no process passes for another (logd trusts
     // Spark's, ADR 0210).
     let process = u32::try_from(process).unwrap_or(u32::MAX);
-    radix_klog::log_from(level, process, format_args!("{name}: {text}"));
+    radix_klog::log_from(
+        level,
+        process,
+        format_args!("{}: {}", Shown(name.as_bytes()), Shown(text)),
+    );
     Ok(len)
+}
+
+/// Text from a program as the log shows it: UTF-8 kept, control
+/// characters and bytes that are not UTF-8 shown as `?`, so that no line
+/// of the log moves a terminal's cursor, changes its colors or sends it
+/// anything else when shown, and no program splits its line in two.
+pub struct Shown<'a>(pub &'a [u8]);
+
+impl fmt::Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                f.write_char(if c.is_control() { '?' } else { c })?;
+            }
+            if !chunk.invalid().is_empty() {
+                f.write_char('?')?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Moves the reader: to the oldest record kept since the last clear for

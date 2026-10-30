@@ -245,7 +245,7 @@ pub fn parse_rfc3339(text: &str) -> Option<u64> {
     let m: u64 = time.next()?.parse().ok()?;
     let s: u64 = time.next()?.parse().ok()?;
     let digits = fraction.len().min(9);
-    let fraction: u64 = fraction[..digits].parse().ok()?;
+    let fraction: u64 = fraction.get(..digits)?.parse().ok()?;
     let ns = fraction * 10u64.pow(9 - digits as u32);
     let days = u64::try_from(days(year, month, day)).ok()?;
     Some(((days * 86_400 + h * 3600 + m * 60 + s) * 1_000_000_000) + ns)
@@ -949,6 +949,7 @@ mod tests {
         assert_eq!(rfc3339(ns), "2026-10-30T21:25:01.123456Z");
         assert_eq!(parse_rfc3339(&rfc3339(ns)), Some(ns));
         assert_eq!(parse_rfc3339("2000-02-29T12:00:00Z"), Some(951_825_600_000_000_000));
+        assert_eq!(parse_rfc3339("2000-02-29T12:00:00.12345678éZ"), None);
         assert_eq!(day_file(ns), "2026-10-30.jsonl");
         for day in [-1, 0, 59, 365, 11_016, 20_756, 100_000] {
             let (y, m, d) = civil(day);

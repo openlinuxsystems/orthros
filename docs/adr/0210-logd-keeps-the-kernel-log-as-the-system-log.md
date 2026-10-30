@@ -44,7 +44,11 @@ kernel log read exactly like volumed.
   `,process=N` after the flags, as Linux's `caller=` field does: Linux
   readers skip fields they do not know. `debug_log` and `/devices/kmsg`
   both take a leading `<N>` as the record's level, so Spark passes on a
-  service's `<3>` for an error.
+  service's `<3>` for an error. Both show the control characters of a
+  program's line and of its thread's name as `?`, as `debug_log`
+  already did for the text: a line shown by `log` or `dmesg` cannot
+  send a terminal escape sequences, and a program cannot split its
+  line into records that look like someone else's.
 - **Services by Spark's word.** A record of process 1, Spark, whose text
   (after the kernel's `spark[thread]:` stamp) starts with a name and
   `: ` is that service's line; any other program's record is that

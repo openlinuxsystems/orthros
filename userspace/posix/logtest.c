@@ -94,6 +94,15 @@ static void own_lines(void) {
 			"cat", "-g", "first line|nothing");
 	OUTPUT("", "-- No entries --\n", LOG, "logtest", "-p", "err", "-o", "cat", "-g", "first");
 	OUTPUT("", "", LOG, "logtest", "-p", "err", "-o", "json", "-g", "first");
+	// Control characters, in the text or the thread's name, are shown as
+	// `?`: no line of the log sends a terminal an escape sequence, or
+	// splits in two.
+	CHECK(pthread_setname_np(pthread_self(), "lt\x1b[7m") == 0);
+	kmsg("<6>escape \x1b[31m and\nvolumed: a second line\n");
+	CHECK(pthread_setname_np(pthread_self(), "logtest") == 0);
+	const char *const escaped[] = {LOG, "-g", "escape", "-o", "cat", NULL};
+	CHECK(wait_for("escape ?[31m and?volumed: a second line\n", escaped, 30));
+	CONTAINS("lt?[7m[", LOG, "-g", "escape", "--no-hostname");
 }
 
 // A service's lines are the ones Spark wrote for it: a program that

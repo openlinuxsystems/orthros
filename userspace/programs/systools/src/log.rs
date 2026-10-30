@@ -423,7 +423,7 @@ fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
             let (year, month, day) = local_date(noon).ok_or_else(bad)?;
             local_seconds(year, month, day, 0, 0, 0).ok_or_else(bad)?
         };
-        u64::try_from(start).map(|s| s * 1_000_000_000).map_err(|_| bad())
+        seconds_ns(start).ok_or_else(bad)
     };
     match text {
         "now" => return Ok(now),
@@ -433,7 +433,7 @@ fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
         _ => {}
     }
     if let Some(offset) = relative(text) {
-        let ns = i128::from(now) + offset;
+        let ns = i128::from(now).checked_add(offset).ok_or_else(bad)?;
         return u64::try_from(ns.max(0)).map_err(|_| bad());
     }
     let (text, utc) = match text.strip_suffix(" UTC").or_else(|| text.strip_suffix('Z')) {
@@ -465,6 +465,10 @@ fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
                 parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())
             };
             let (year, month, day) = (part()?, part()?, part()?);
+            // Years whose days count without overflowing.
+            if !(0..=9999).contains(&year) {
+                return Err(bad());
+            }
             let month =
                 u32::try_from(month).ok().filter(|m| (1..=12).contains(m)).ok_or_else(bad)?;
             let day = u32::try_from(day).ok().filter(|d| (1..=31).contains(d)).ok_or_else(bad)?;
@@ -487,7 +491,13 @@ fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
     } else {
         local_seconds(year, month, day, hour, minute, second).ok_or_else(bad)?
     };
-    u64::try_from(seconds).map(|s| s * 1_000_000_000).map_err(|_| bad())
+    seconds_ns(seconds).ok_or_else(bad)
+}
+
+/// `seconds` since the epoch in nanoseconds, if it is after the epoch and
+/// before 2554, when nanoseconds overflow.
+fn seconds_ns(seconds: i64) -> Option<u64> {
+    u64::try_from(seconds).ok()?.checked_mul(1_000_000_000)
 }
 
 /// A time relative to now, in nanoseconds: `-1h`, `+30min`, `2 days ago`;
@@ -511,7 +521,7 @@ fn relative(text: &str) -> Option<i128> {
         "w" | "week" | "weeks" => 7 * 86_400,
         _ => return None,
     };
-    Some(sign * number * seconds * 1_000_000_000)
+    number.checked_mul(seconds * 1_000_000_000).map(|ns| sign * ns)
 }
 
 /// The local date of `seconds` since the epoch.
@@ -570,7 +580,9 @@ mod tests {
         assert_eq!(at("2026-10-30 21:25"), 1_793_395_500_000_000_000);
         assert_eq!(at("2026-10-30T21:25:01Z"), 1_793_395_501_000_000_000);
         assert_eq!(parse_time("2026-10-30 21:25:01 UTC", NOW, false).unwrap(), at("21:25:01"));
-        for bad in ["soon", "2026-13-01", "25:00", "-1fortnight", "2026-10"] {
+        // Past what nanoseconds since the epoch hold, refused.
+        let huge = "99999999999999999999999999999999999 days ago";
+        for bad in ["soon", "2026-13-01", "25:00", "-1fortnight", "2026-10", "2600-01-01", huge] {
             assert!(parse_time(bad, NOW, true).is_err(), "{bad}");
         }
     }
