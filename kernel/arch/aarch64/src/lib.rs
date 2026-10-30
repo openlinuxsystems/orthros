@@ -80,6 +80,10 @@ impl Cpu for Arch {
         0
     }
 
+    fn scalable_machine_checks() -> bool {
+        false
+    }
+
     fn poll_machine_checks(_found: &mut radix_hal::MachineCheckFound<'_>) {}
 
     fn corrected_error_interrupt() -> Option<&'static str> {

@@ -116,6 +116,11 @@ pub trait Cpu {
     /// or reporting was turned off.
     fn machine_check_banks() -> usize;
 
+    /// Whether those banks are of AMD's scalable machine-check
+    /// architecture (Zen, ADR 0204), whose errors name the block of the
+    /// chip they come from.
+    fn scalable_machine_checks() -> bool;
+
     /// Reads the errors this CPU's machine-check banks hold and clears
     /// them, calling `found` with each ([`MachineCheck`]). Runs in thread
     /// context on the CPU whose banks it reads.

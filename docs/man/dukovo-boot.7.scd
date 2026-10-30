@@ -581,6 +581,19 @@ it was last read, such as *; 12 of them since the bank was read*. More than
 them, and reads the banks every second until 30 seconds go by without a
 corrected error, then unmasks them.
 
+AMD's Zen has banks of a scalable kind, which the log's line about the
+banks names (ADR 0204): each belongs to one block of the chip, which its
+errors name, with the block's extended code, its MCA_IPID and its
+MCA_SYND:
+
+	Machine check: CPU 0 bank 15: corrected error without an error code in
+	the unified memory controller on channel 1, a DRAM ECC error, address
+	0x12340 (status 0x8420000000000000, ipid 0x9600150f00, synd 0x5a00000000000001)
+
+An error that Zen could not correct but that nothing has used yet is
+logged as *deferred*. A memory controller's address is its own, not a
+physical one, so its errors retire no page.
+
 An uncorrected error raises a machine check. On a CPU that recovers from
 them (Intel's Xeons, with software error recovery, and AMD's Zen, with
 SUCCOR), bad memory that a program reads ends only that program, with
@@ -598,7 +611,8 @@ it no longer maps it. The log says so:
 and _/processes/meminfo_ counts it (*radix-proc*(5)).
 
 The memory controllers' errors are counted by the bank and channel they
-were on, in Linux's EDAC files under _/kernel/devices/system/edac_
+were on (on Zen, the channel a memory controller's bank serves), in
+Linux's EDAC files under _/kernel/devices/system/edac_
 (*radix-sysfs*(5)). Counts by DIMM, which need each chipset's map of
 addresses to DIMMs, come later (ADR 0169).
 

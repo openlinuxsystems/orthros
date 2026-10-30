@@ -190,6 +190,10 @@ impl Cpu for Arch {
         mce::banks()
     }
 
+    fn scalable_machine_checks() -> bool {
+        mce::scalable_banks()
+    }
+
     fn poll_machine_checks(found: &mut radix_hal::MachineCheckFound<'_>) {
         mce::poll(found);
     }

@@ -348,6 +348,14 @@ We implement these from their published descriptions. No code is copied.
   `Documentation/admin-guide/pm/intel_pstate.rst` and `amd-pstate.rst`
   ([ADR 0202](docs/adr/0202-cpu-frequency-through-hwp-and-cppc.md)).
   No code is taken from them.
+- Zen's scalable machine-check registers (MCA_CONFIG, MCA_IPID,
+  MCA_SYND, MCA_DESTAT and MCA_DEADDR) and the hardware IDs and types of
+  its banks' blocks are those of AMD's Processor Programming Reference
+  for family 19h and 1Ah. Setting `McaX`, reading a memory controller's
+  channel from its instance ID and clearing MCA_DESTAT follow Linux's
+  `arch/x86/kernel/cpu/mce/amd.c` and `drivers/edac/amd64_edac.c`
+  (GPL-2.0) ([ADR 0204](docs/adr/0204-zens-scalable-machine-check-banks.md)).
+  No code is taken from them.
 - Thermal zones, their trip points and the passive cooling's trend are
   those of the ACPI specification 6.5 (chapter 11). How `radix-uacpi`
   reads a zone, which trip points it leaves out as nonsense, the
