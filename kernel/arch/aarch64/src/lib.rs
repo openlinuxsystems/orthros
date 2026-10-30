@@ -19,7 +19,7 @@ use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
+    Aml, BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Dma, Fault, FaultTest,
     InterruptController, Ipi, MapPageError, Mmio, MsiMessage, PageEdit, PageTable, PciSegment,
     Platform, Scanned, Shootdowns, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess,
     UserFault, UserMode,
@@ -282,6 +282,30 @@ pub struct Space;
 /// A placeholder shared area.
 #[derive(Debug)]
 pub struct Shared;
+
+impl Aml for Arch {
+    fn acpi_rsdp() -> Option<u64> {
+        None
+    }
+
+    fn map_firmware(_phys: u64, _len: usize) -> Option<usize> {
+        None
+    }
+
+    fn unmap_firmware(_virt: usize, _len: usize) {}
+
+    fn read_port(_port: u16, _width: u8) -> u32 {
+        u32::MAX
+    }
+
+    fn write_port(_port: u16, _width: u8, _value: u32) {}
+
+    fn start_firmware_interrupt(_irq: u32, _handler: fn()) -> bool {
+        false
+    }
+
+    fn stop_firmware_interrupt() {}
+}
 
 impl UserMode for Arch {
     type Space = Space;

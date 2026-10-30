@@ -344,7 +344,7 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "Clang",
-            purpose: "compiles the C library and the ports (version 20 or later)",
+            purpose: "compiles the kernel's AML interpreter, the C library and the ports (version 20 or later)",
             found: |_| ports::find_clang().map(|(_, version)| version),
             packages: Packages { apt: Some("clang-20"), dnf: Some("clang"), pacman: Some("clang") },
             fallback: None,
@@ -372,7 +372,7 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "LLVM tools",
-            purpose: "llvm-ar, llvm-nm and the other tools the ports' toolchain wraps",
+            purpose: "llvm-ar, which archives the kernel's AML interpreter, llvm-nm and the other tools the ports' toolchain wraps",
             found: |_| {
                 let mut found = ports::TOOLS.iter().map(|(_, program)| ports::find_llvm(program));
                 let first = found.next()??;

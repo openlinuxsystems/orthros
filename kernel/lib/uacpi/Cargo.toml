@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-uacpi"
+description = "uACPI, the interpreter of the firmware's AML, built into the Radix kernel"
+version.workspace = true
+edition.workspace = true
+# The Rust is the project's; the C in vendor/ is uACPI 7.0.0 by Daniil
+# Tatianin and its other authors, MIT; see vendor/LICENSE and
+# docs/adr/0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md.
+license = "(Apache-2.0 OR MIT) AND MIT"
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+links = "uacpi"
+
+# `ob image` copies these into /system/resources/licenses (ADR 0021).
+[package.metadata.dukovo]
+notices = ["vendor/LICENSE"]
+
+[dependencies]
+radix-sync = { path = "../sync" }
+
+[lints]
+workspace = true

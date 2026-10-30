@@ -185,3 +185,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0180](0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md) | The TCP/IP stack runs in the kernel, on smoltcp | Accepted |
 | [0181](0181-virtio-net-copies-frames-through-slots-of-its-own.md) | The virtio network card copies frames through slots of its own | Accepted |
 | [0182](0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md) | The kernel patches smoltcp, so that a socket's memory comes back | Accepted |
+| [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |

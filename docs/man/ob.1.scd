@@ -334,9 +334,15 @@ _target/userspace/_).
 		Boot normally under BIOS, and once consoled has started, press
 		the machine's power button with QMP's _system_powerdown_, which
 		raises ACPI's power button event. The kernel must say it hears
-		the button, then that it was pressed; Spark must stop the
-		services and power the machine off, and QEMU end on ACPI's S5
-		(*radix-power*(2), *spark*(8)).
+		the button through uACPI, then that it was pressed; Spark must
+		stop the services and the kernel power the machine off through
+		uACPI, and QEMU end on ACPI's S5 (*radix-power*(2), *spark*(8),
+		*dukovo-boot*(7)'s *ACPI*).
+
+	*aml-off*
+		As *power-button*, under UEFI and with *aml=off*: no AML runs, so
+		the kernel must hear the button and power the machine off by
+		itself.
 
 	*usb-devices*
 		Boot normally under UEFI with the lock checker on and the *dbc*

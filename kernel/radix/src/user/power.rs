@@ -6,8 +6,9 @@
 //! restart it or halt it, and how it hears the power button (Phase 11,
 //! ADR 0142).
 //!
-//! [`start`] asks the platform for the button. Its presses come in an
-//! interrupt handler, which counts them and wakes the `power` thread; the
+//! [`start`] asks uACPI for the button when it runs the firmware's AML
+//! (ADR 0200), or else the platform. Its presses come in an interrupt
+//! handler, which counts them and wakes the `power` thread; the
 //! thread signals the notification Spark gave `notify_button`, which
 //! cannot be done with interrupts masked. The watchdog's methods go to
 //! [`crate::watchdog`] (ADR 0143).
@@ -52,7 +53,14 @@ pub fn start() {
             return;
         }
     }
-    match Arch::start_power_button(pressed) {
+    // uACPI owns the SCI when it runs, so the platform's own button would
+    // fight it for the interrupt.
+    let button = if crate::acpi::running() {
+        crate::acpi::power_button(pressed)
+    } else {
+        Arch::start_power_button(pressed)
+    };
+    match button {
         Some(name) => {
             HEARD.store(true, Ordering::Release);
             info!("Power: {name} asks Spark to power the machine off");
@@ -165,6 +173,7 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
     console::give_back();
     match end {
         End::PowerOff => {
+            crate::acpi::power_off();
             Arch::power_off();
             // The firmware gave no way to: the caller restarts or halts.
             warn!("Power: this machine cannot be powered off by the kernel");

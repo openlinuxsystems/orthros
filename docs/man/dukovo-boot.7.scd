@@ -146,6 +146,8 @@ _/system/resources/licenses/_
   namespace, ...) and its size, and the next lines its partition table
   and partitions. The functions are listed in
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
+. Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
+  hears the power button through it; see *ACPI*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -187,6 +189,11 @@ seconds since the kernel started; messages before timer calibration show
 [    0.941169] PCI: 0000:00:1f.2 8086:2922 class 010601: SATA controller
 [    0.964452] PCI: 0000:00:1f.3 8086:2930 class 0c0500: SMBus controller
 [    0.985756] PCI: 7 functions on 1 segment; 1 virtio disk
+[    0.998358] ACPI: successfully loaded 1 AML blob, 1712 ops in 46ms (avg 36859/s)
+[    1.000531] ACPI: namespace initialization done in 11ms: 37 devices, 0 thermal zones
+[    1.002013] ACPI: uACPI 7.0.0 runs the firmware's AML
+[    1.004611] Power: the ACPI power button (through uACPI) asks Spark to power the machine off
+[    1.005920] ACPI: enabled 2 GPEs in block _GPE@[0->64]
 [    1.006700] Timer: all 4 CPUs take timer interrupts at 100 Hz (cpu0 27, cpu1 44, cpu2 42, cpu3 41)
 [    1.028489] IPI: all 3 other CPUs answered a ping (xAPIC)
 [    1.049978] Boot complete.
@@ -464,6 +471,12 @@ them to *init*, and the kernel does not read them.
 	Leave the USB controllers as the firmware left them: none is reset
 	or driven, and no USB device is found. See *USB*.
 
+*aml*=off
+	Run none of the firmware's AML: uACPI does not start, and the
+	kernel hears the ACPI power button and powers the machine off by
+	itself, as before Phase 11c. For firmware whose AML misbehaves. See
+	*ACPI*.
+
 *iommu*=off
 	Leave the IOMMU's DMA remapping off, so that every device reaches
 	all memory, as before Phase 11d. See *IOMMU*.
@@ -576,6 +589,37 @@ The memory controllers' errors are counted by the bank and channel they
 were on, in Linux's EDAC files under _/kernel/devices/system/edac_
 (*radix-sysfs*(5)). Counts by DIMM, which need each chipset's map of
 addresses to DIMMs, come later (ADR 0169).
+
+# ACPI
+
+The firmware describes much of a PC only in AML, the bytecode in the
+ACPI DSDT and SSDTs that an operating system runs: batteries, lids,
+thermal zones, buttons of the ACPI namespace, the embedded controller's
+events, and what to do before a sleep state. The kernel runs it with
+uACPI 7.0.0, built into the kernel (ADR 0200). Once the PCI scan is done,
+unless *aml=off*, uACPI reads the tables, takes the machine into ACPI
+mode, routes the System Control Interrupt to the boot CPU, loads the AML
+and runs the devices' _\_STA_ and _\_INI_ methods, and the kernel says
+so after uACPI's own lines:
+
+	ACPI: successfully loaded 1 AML blob, 1712 ops in 46ms (avg 36859/s)
+	ACPI: namespace initialization done in 11ms: 37 devices, 0 thermal zones
+	ACPI: uACPI 7.0.0 runs the firmware's AML
+
+The kernel then hears the power button through uACPI where it is a fixed
+feature, and turns on the general-purpose events the AML has methods
+for, which two kernel threads run: _acpi-events_, on the boot CPU, for
+the events' methods, and _acpi-notify_ for what they notify. uACPI's
+errors and warnings start with *ACPI: error:* and *ACPI: warning:*.
+Powering off goes through uACPI too: it runs _\_PTS(5)_, then enters S5,
+and the kernel's own way is tried if that fails:
+
+	Power: powering off (ACPI S5, through uACPI)
+
+With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
+runs; the kernel hears a fixed power button by itself and powers off
+with the sleep types of the DSDT's _\_S5_ (ADR 0142). Batteries, the AC
+adapter, lids and namespace buttons come later in Phase 11c.
 
 # IOMMU
 

@@ -64,6 +64,12 @@ pub const FLAGS: &[Flag] = &[
         summary: "leave the USB controllers as the firmware left them",
     },
     Flag {
+        name: "aml",
+        value: Some("off"),
+        summary: "run none of the firmware's AML: no uACPI, and the kernel hears the ACPI power \
+                  button itself",
+    },
+    Flag {
         name: "iommu",
         value: Some("off"),
         summary: "leave the IOMMU's DMA remapping off, so that every device reaches all memory",

@@ -35,6 +35,7 @@ mod boot;
 mod cpu;
 mod devices;
 mod entry;
+mod firmware;
 mod fpu;
 mod i8042;
 mod interrupts;
@@ -66,9 +67,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use radix_hal::cmdline::CommandLine;
 use radix_hal::{
-    BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest, InterruptController,
-    Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, Scanned, Shootdowns, SignalFrame,
-    Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
+    Aml, BootParams, Cpu, CpuInfo, CpuLocal, CpuPlace, Devices, Fault, FaultTest,
+    InterruptController, Ipi, MapPageError, PageEdit, PageTable, PciSegment, Platform, Scanned,
+    Shootdowns, SignalFrame, Smp, SyscallRegs, Threads, Timer, UserAccess, UserFault, UserMode,
 };
 
 /// Whether idle CPUs wait with MONITOR and MWAIT.
@@ -439,6 +440,36 @@ impl Devices for Arch {
 
     fn watchdog_stop() {
         watchdog::stop();
+    }
+}
+
+impl Aml for Arch {
+    fn acpi_rsdp() -> Option<u64> {
+        firmware::rsdp()
+    }
+
+    fn map_firmware(phys: u64, len: usize) -> Option<usize> {
+        firmware::map(phys, len)
+    }
+
+    fn unmap_firmware(virt: usize, len: usize) {
+        firmware::unmap(virt, len);
+    }
+
+    fn read_port(port: u16, width: u8) -> u32 {
+        firmware::read_port(port, width)
+    }
+
+    fn write_port(port: u16, width: u8, value: u32) {
+        firmware::write_port(port, width, value);
+    }
+
+    fn start_firmware_interrupt(irq: u32, handler: fn()) -> bool {
+        firmware::start_interrupt(irq, handler)
+    }
+
+    fn stop_firmware_interrupt() {
+        firmware::stop_interrupt();
     }
 }
 

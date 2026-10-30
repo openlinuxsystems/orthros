@@ -55,6 +55,7 @@ members = [
     "lib/relocs",
     "lib/sync",
     "lib/tty",
+    "lib/uacpi",
     "mm",
     "sched",
 ]
