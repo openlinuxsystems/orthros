@@ -59,6 +59,32 @@ pub fn strip_os_error(error: &io::Error) -> String {
     }
 }
 
+/// A size as util-linux's fstrim and journalctl read it: bytes, or with
+/// a suffix of K, M, G, T, P (KiB...) or KB, MB, GB, TB, PB (powers of
+/// 1000).
+pub fn parse_size(text: &str) -> Option<u64> {
+    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, suffix) = text.split_at(digits);
+    let number: u64 = number.parse().ok()?;
+    let suffix = suffix.to_ascii_uppercase();
+    let power = |base: u64, n: u32| number.checked_mul(base.checked_pow(n)?);
+    let (letter, rest) = suffix.split_at(suffix.len().min(1));
+    let n = match letter {
+        "" => return Some(number),
+        "K" => 1,
+        "M" => 2,
+        "G" => 3,
+        "T" => 4,
+        "P" => 5,
+        _ => return None,
+    };
+    match rest {
+        "" | "IB" => power(1024, n),
+        "B" => power(1000, n),
+        _ => None,
+    }
+}
+
 /// `bytes` with a unit, in powers of 1024 (`si`: of 1000), as `ls -h`
 /// and `df -h` print them: rounded up, with one decimal below 10 and
 /// none above, and carried into the next unit when it rounds up to one

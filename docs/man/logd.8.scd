@@ -13,8 +13,8 @@ logd - keep the system's log
 
 # DESCRIPTION
 
-logd keeps the system's log (ADR 0210). Spark runs it as the *logd*
-service, before the others.
+logd keeps the system's log and its audit log (ADRs 0210 and 0211).
+Spark runs it as the *logd* service, before the others.
 
 Everything goes to the kernel log (*radix-kernel-log*(2)): the kernel's
 own records, the lines programs write to it through _/devices/kmsg_ or
@@ -43,7 +43,8 @@ number logd makes at its first start in each boot, 32 hexadecimal
 digits, kept in _/system/live/log/boot_; *level* is *error*,
 *warning*, *info* or *debug*; *from* is *kernel*, *service* or
 *program*, and *name* the service's name, the program's, or *kernel*.
-*process* is the number of the process that wrote a program's record.
+*process* is the number of the process that wrote a program's record,
+and *audit* is there, *true*, for a security event.
 
 Who wrote a record is what the kernel says, not what the record says:
 the kernel puts the number of the writing process on each record a
@@ -52,6 +53,23 @@ starts with a name and *:* is that service's line. A program that
 writes a line with a service's name in front of it is still that
 program. Spark's lines of the program it runs from the kernel command
 line (*--posix*) are named after that program as a service's are.
+
+A security event is a record of the authpriv or auth facility that the
+kernel or Spark wrote: a service writes one with *<86>* in front of a
+line of its output. Spark's answers to requests that change something,
+the power button, the kernel log cleared, records lost and the log
+trimmed are security events now; sign-ins and permissions will be.
+logd keeps each one in the audit log too, the file of its day in
+_/system/state/log/audit_, which it keeps for longer. The same facility
+in a line a program writes itself is only a line of the log.
+
+logd trims the log and the audit log as _/system/settings/log_ says
+(*log*(5)): 90 days of the log, a year of the audit log, and at most
+4 GiB or a tenth of their file system together, removing the oldest day
+files first but never today's or one it is writing. It trims when it
+starts, when a day begins, after each 64 MiB it writes, when it reads
+its settings again (SIGHUP, which *service logd reload* sends) and when
+*logtrim*(8) asks. Each removal is a security event.
 
 logd flushes what it wrote to the disk 5 seconds after the first record
 that is not on it yet, and when it is stopped. Started again, it goes
@@ -78,6 +96,12 @@ them, only administrators can.
 _/system/state/log/YYYY-MM-DD.jsonl_
 	The records of each day, in UTC.
 
+_/system/state/log/audit/YYYY-MM-DD.jsonl_
+	The security events of each day.
+
+_/system/settings/log_
+	How much logd keeps (*log*(5)).
+
 _/system/live/log/query_
 	The socket logd answers on.
 
@@ -94,5 +118,5 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*log*(1), *journalctl*(1), *dmesg*(1), *spark*(8), *service*(8),
-*radix-kernel-log*(2), *systools*(1)
+*log*(1), *journalctl*(1), *logtrim*(8), *log*(5), *dmesg*(1),
+*spark*(8), *service*(8), *radix-kernel-log*(2), *systools*(1)

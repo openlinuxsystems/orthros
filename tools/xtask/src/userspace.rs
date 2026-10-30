@@ -108,6 +108,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/kill", "systools"),
     ("system/commands/log", "systools"),
     ("system/commands/logd", "systools"),
+    ("system/commands/logtrim", "systools"),
     ("system/commands/lsblk", "systools"),
     ("system/commands/lscpu", "systools"),
     ("system/commands/lsmem", "systools"),

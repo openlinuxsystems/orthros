@@ -299,7 +299,11 @@ Spark listens at the Unix socket _/system/live/spark/control_. A request is one
 line; Spark answers it with text and closes the connection. An answer
 that starts with *ok:* or a status table is a success, one that starts
 with *error:* a refusal. *shutdown*(8), *reboot*(8), *poweroff*(8),
-*halt*(8) and *service*(8) are its clients.
+*halt*(8) and *service*(8) are its clients. Spark logs each request
+that changes something as a security event, with the number of the
+process that asked, which the kernel gives (*socket_state*); *logd*(8)
+keeps these in the audit log (ADR 0211), as it does the power button's
+presses.
 
 *poweroff* | *reboot* | *halt* [_seconds_] [*--force*]
 	Shut down to that end, in _seconds_ (now by default). A later
@@ -343,7 +347,7 @@ back to its log, then powers the machine off through ACPI, restarts it,
 or halts its processors (*radix-power*(2)):
 
 ```
-spark: asked to power off the machine
+spark: asked to power off the machine, by process 41
 spark: shutting down to power off: stopping 4 services
 spark: diskhealth (process 15) was ended by signal 15
 spark: volumed (process 14) was ended by signal 15

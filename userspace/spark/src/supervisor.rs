@@ -275,8 +275,16 @@ enum Shutdown {
 /// when it is closed if its request is not whole by then.
 struct Connection {
     file: File,
+    /// The process that connected, as the kernel says (0 if it cannot).
+    peer: u64,
     request: Vec<u8>,
     until: u64,
+}
+
+/// Logs a security event of Spark's: the line with authpriv's `<86>` in
+/// front, which logd(8) keeps in the audit log too (ADR 0211).
+macro_rules! audit {
+    ($($arg:tt)*) => { println!("<86>spark: {}", format_args!($($arg)*)) };
 }
 
 /// Spark's supervision.
@@ -802,7 +810,8 @@ impl Supervisor {
             }
             if let Ok(file) = File::own(slot) {
                 let until = now() + CONNECTION_WAIT;
-                self.connections.push(Connection { file, request: Vec::new(), until });
+                let peer = file_abi::socket_state(&SYS, slot).map_or(0, |state| state.peer);
+                self.connections.push(Connection { file, peer, request: Vec::new(), until });
             }
         }
     }
@@ -827,12 +836,13 @@ impl Supervisor {
         let connection = self.connections.remove(index);
         let request = String::from_utf8_lossy(&connection.request).into_owned();
         let request = request.lines().next().unwrap_or("").trim().to_string();
-        let answer = self.answer(&request);
+        let answer = self.answer(&request, connection.peer);
         let _ = file_abi::write(&SYS, connection.file.slot(), file_abi::CURRENT, answer.as_bytes());
     }
 
-    /// The answer to the control request `request`.
-    fn answer(&mut self, request: &str) -> String {
+    /// The answer to the control request `request` from process `peer`;
+    /// one that changes something is a security event.
+    fn answer(&mut self, request: &str, peer: u64) -> String {
         let mut words = request.split_whitespace();
         let verb = words.next().unwrap_or("");
         let rest: Vec<&str> = words.collect();
@@ -846,24 +856,24 @@ impl Supervisor {
                 let force = rest.contains(&"--force");
                 let delay = rest.iter().find_map(|w| w.parse::<u64>().ok()).unwrap_or(0);
                 if force {
-                    println!("spark: asked to {} the machine at once", end.words());
+                    audit!("asked to {} the machine at once, by process {peer}", end.words());
                     self.power(end);
                 }
                 // A delay of centuries waits for good, not round to soon.
                 let at = now().saturating_add(delay.saturating_mul(SECOND));
                 self.shutdown = Some(Shutdown::Pending { end, at });
                 if delay == 0 {
-                    println!("spark: asked to {} the machine", end.words());
+                    audit!("asked to {} the machine, by process {peer}", end.words());
                     format!("ok: going to {} now\n", end.words())
                 } else {
-                    println!("spark: the machine will {} in {delay} s", end.words());
+                    audit!("the machine will {} in {delay} s, by process {peer}", end.words());
                     format!("ok: going to {} in {delay} seconds\n", end.words())
                 }
             }
             "cancel" => match self.shutdown {
                 Some(Shutdown::Pending { end, .. }) => {
                     self.shutdown = None;
-                    println!("spark: the {} was cancelled", end.words());
+                    audit!("the {} was cancelled, by process {peer}", end.words());
                     "ok: cancelled\n".into()
                 }
                 Some(Shutdown::Stopping { .. }) => "error: shutting down already\n".into(),
@@ -905,7 +915,7 @@ impl Supervisor {
                     return format!("error: {name} is not running\n");
                 };
                 let _ = process::kill(&SYS, SLOT_PROCESS, pid as i64, signal::SIGHUP);
-                println!("spark: asked {name} to reload");
+                audit!("asked {name} to reload, by process {peer}");
                 format!("ok: asked {name} to reload\n")
             }
             "start" | "stop" | "restart" => {
@@ -930,7 +940,7 @@ impl Supervisor {
                     service.quick = 0;
                     service.stop_by.get_or_insert(now() + STOP_WAIT);
                     let _ = process::kill(&SYS, SLOT_PROCESS, pid as i64, signal::SIGTERM);
-                    println!("spark: asked to {verb} {name}");
+                    audit!("asked to {verb} {name}, by process {peer}");
                     return format!("ok: {verb}ping {name}\n");
                 }
                 if let State::Draining(..) = state {
@@ -938,13 +948,14 @@ impl Supervisor {
                     let service = &mut self.services[index];
                     service.held = verb == "stop";
                     service.restarting = verb != "stop";
-                    println!("spark: asked to {verb} {name}");
+                    audit!("asked to {verb} {name}, by process {peer}");
                     return match verb {
                         "stop" => format!("ok: stopping {name}\n"),
                         _ => format!("ok: {name} starts once what it left has ended\n"),
                     };
                 }
                 if verb == "stop" {
+                    audit!("asked to stop {name}, by process {peer}");
                     self.services[index].state = State::Stopped;
                     self.services[index].held = true;
                     return format!("ok: {name} is not running\n");
@@ -953,7 +964,7 @@ impl Supervisor {
                 if matches!(state, State::Running(_)) {
                     return format!("ok: {name} is running\n");
                 }
-                println!("spark: asked to start {name}");
+                audit!("asked to start {name}, by process {peer}");
                 self.start(index);
                 match self.services[index].state {
                     State::Running(pid) => format!("ok: started {name} as process {pid}\n"),
@@ -973,7 +984,7 @@ impl Supervisor {
             println!("spark: the power button was pressed; going to {} already", end.words());
             return;
         }
-        println!("spark: the power button was pressed; powering off the machine");
+        audit!("the power button was pressed; powering off the machine");
         self.shutdown = Some(Shutdown::Pending { end: End::PowerOff, at: now() });
     }
 

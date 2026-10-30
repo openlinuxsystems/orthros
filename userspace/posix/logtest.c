@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// What the logging boot test runs (ADR 0210): logtest waits for logd(8),
-// writes lines to the kernel log as a program does, and checks what
-// log(1), journalctl(1) and dmesg(1) show of them and of the services:
-// their levels, names and process; that a program cannot pass its lines
-// off as a service's; that `log -f` shows a line written after it
-// started; and that logd started again keeps no record twice.
+// What the logging boot test runs (ADRs 0210 and 0211): logtest waits for
+// logd(8), writes lines to the kernel log as a program does, and checks
+// what log(1), journalctl(1) and dmesg(1) show of them and of the
+// services: their levels, names and process; that a program cannot pass
+// its lines off as a service's; that `log -f` shows a line written after
+// it started; that logd started again keeps no record twice; that the
+// audit log holds Spark's and the kernel's security events and no
+// program's; and that logtrim(8) and journalctl's --vacuum-time trim the
+// log.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -20,6 +23,8 @@
 #define LOG "/system/commands/log"
 #define JOURNALCTL "/system/commands/journalctl"
 #define DMESG "/system/commands/dmesg"
+#define LOGTRIM "/system/commands/logtrim"
+#define SERVICE "/system/commands/service"
 
 // Writes `line` to the kernel log, as a program's.
 static void kmsg(const char *line) {
@@ -222,6 +227,79 @@ static void kept(void) {
 	STATUS(1, LOG, "-f", "-r");
 }
 
+// Writes a day file of `name` under `dir` holding one record.
+static void day_file(const char *dir, const char *name) {
+	char path[128];
+	snprintf(path, sizeof path, "%s/%s", dir, name);
+	FILE *file = fopen(path, "w");
+	CHECK(file);
+	if(file) {
+		fputs("{\"time\":\"2020-01-01T00:00:00.000000Z\",\"boot\":\"old\",\"seq\":0,"
+		      "\"level\":\"info\",\"from\":\"kernel\",\"name\":\"kernel\",\"text\":\"old\"}\n",
+				file);
+		fclose(file);
+	}
+}
+
+// Whether `path` is there.
+static int exists(const char *path) {
+	struct stat st;
+	return stat(path, &st) == 0;
+}
+
+// The audit log holds the security events of Spark and the kernel, with
+// who asked, and none that a program wrote itself.
+static void audit(void) {
+	const char *const events[] = {LOG, "--audit", "-o", "json", NULL};
+	CHECK(wait_for("asked to restart logd, by process ", events, 30));
+	CHECK(strstr(output, "\"from\":\"service\",\"name\":\"spark\""));
+	CHECK(strstr(output, "\"audit\":true"));
+	CONTAINS("asked to restart logd", JOURNALCTL, "_TRANSPORT=audit", "-o", "cat");
+	kmsg("<86>forged security event from logtest\n");
+	CHECK(wait_for("forged security event", (const char *const[]){LOG, "logtest", NULL}, 30));
+	run_program(events, "", 0);
+	CHECK(!strstr(output, "forged security event"));
+	// The kernel's: its log cleared, with who cleared it.
+	STATUS(0, DMESG, "-C");
+	CHECK(wait_for("the kernel log was cleared by process ", events, 30));
+	CONTAINS("authpriv:info  : kmsg: the kernel log was cleared", DMESG, "-t", "-x", "-f",
+			"authpriv");
+	CONTAINS(" of it the audit log.", LOG, "--disk-usage");
+}
+
+// logtrim and journalctl's --vacuum-time remove day files past their
+// days, never today's, and each removal is a security event.
+static void trimmed(void) {
+	day_file("/system/state/log", "2020-01-01.jsonl");
+	day_file("/system/state/log/audit", "2020-01-01.jsonl");
+	CONTAINS("Would remove /system/state/log/audit/2020-01-01.jsonl", LOGTRIM, "-n");
+	CHECK(strstr(output, "Would remove /system/state/log/2020-01-01.jsonl"));
+	CHECK(exists("/system/state/log/2020-01-01.jsonl"));
+	CONTAINS("Removed /system/state/log/2020-01-01.jsonl", LOGTRIM);
+	CHECK(!exists("/system/state/log/2020-01-01.jsonl"));
+	CHECK(!exists("/system/state/log/audit/2020-01-01.jsonl"));
+	const char *const events[] = {LOG, "--audit", "-o", "cat", NULL};
+	CHECK(wait_for("trimmed the log as its settings say, asked by process ", events, 30));
+	// Once, to a limit of its own: the log's files, not the audit log's.
+	day_file("/system/state/log", "2026-01-01.jsonl");
+	day_file("/system/state/log/audit", "2026-01-01.jsonl");
+	CONTAINS("Vacuuming done, freed ", JOURNALCTL, "--vacuum-time=1d");
+	CHECK(!exists("/system/state/log/2026-01-01.jsonl"));
+	CHECK(exists("/system/state/log/audit/2026-01-01.jsonl"));
+	CHECK(wait_for("to the limits process ", events, 30));
+	// Settings read again, saying what is wrong.
+	FILE *settings = fopen("/system/settings/log", "w");
+	CHECK(settings);
+	if(settings) {
+		fputs("keep-days = 30\nloud = 1\n", settings);
+		fclose(settings);
+	}
+	STATUS(0, SERVICE, "logd", "reload");
+	const char *const said[] = {LOG, "-s", "logd", "-o", "cat", NULL};
+	CHECK(wait_for("/system/settings/log:2: no setting is called loud", said, 30));
+	STATUS(1, LOGTRIM, "--size", "lots");
+}
+
 int main(void) {
 	check_start("logtest");
 	RUN(logd_answers);
@@ -230,5 +308,7 @@ int main(void) {
 	RUN(follow);
 	RUN(restarted);
 	RUN(kept);
+	RUN(audit);
+	RUN(trimmed);
 	return check_end();
 }

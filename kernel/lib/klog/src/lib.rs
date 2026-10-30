@@ -151,6 +151,8 @@ pub struct Record {
     /// The number of the process whose program wrote it, through the
     /// kernel log capability or _/devices/kmsg_; 0 for the kernel's own.
     pub process: u32,
+    /// Its syslog(3) facility (see [`Origin`]).
+    pub facility: u8,
     len: u8,
     text: [u8; RECORD_TEXT],
 }
@@ -162,6 +164,7 @@ impl Record {
         level: Level::Info,
         cpu: 0,
         process: 0,
+        facility: KERN,
         len: 0,
         text: [0; RECORD_TEXT],
     };
@@ -188,6 +191,7 @@ impl fmt::Debug for Record {
             .field("level", &self.level)
             .field("cpu", &self.cpu)
             .field("process", &self.process)
+            .field("facility", &self.facility)
             .field("text", &self.text())
             .finish_non_exhaustive()
     }
@@ -271,14 +275,46 @@ pub fn add_sink(sink: &'static dyn Sink, replay: bool) -> bool {
     })
 }
 
-/// Logs a message. Multi-line messages become one record per line.
-pub fn log(level: Level, args: fmt::Arguments<'_>) {
-    log_from(level, 0, args);
+/// The kernel's facility, of its own records.
+pub const KERN: u8 = 0;
+/// The facility of a program's records unless it names another.
+pub const USER: u8 = 1;
+/// The facility of security events (LOG_AUTHPRIV), which logd(8) keeps
+/// in the audit log when the kernel or Spark logs them (ADR 0211).
+pub const AUTHPRIV: u8 = 10;
+/// The facilities there are: 0 to 23, local7 the last.
+pub const FACILITIES: u8 = 24;
+
+/// Who a record is from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    /// The number of the process whose program wrote it; 0 for the
+    /// kernel's own.
+    pub process: u32,
+    /// Its syslog(3) facility: [`KERN`] for the kernel's own, [`USER`] for
+    /// a program's unless it names another, and [`AUTHPRIV`] for a
+    /// security event.
+    pub facility: u8,
 }
 
-/// Logs a message a program wrote, as [`log`] does, marking each record
-/// with the number of its process (0: the kernel's own).
-pub fn log_from(level: Level, process: u32, args: fmt::Arguments<'_>) {
+impl Origin {
+    /// The kernel's own records.
+    pub const KERNEL: Origin = Origin { process: 0, facility: KERN };
+}
+
+/// Logs a message. Multi-line messages become one record per line.
+pub fn log(level: Level, args: fmt::Arguments<'_>) {
+    log_from(level, Origin::KERNEL, args);
+}
+
+/// Logs a security event of the kernel's, for the audit log (ADR 0211).
+pub fn audit(args: fmt::Arguments<'_>) {
+    log_from(Level::Info, Origin { process: 0, facility: AUTHPRIV }, args);
+}
+
+/// Logs a message from `origin`, as [`log`] does: a program's, or one of
+/// the kernel's of another facility than its own.
+pub fn log_from(level: Level, origin: Origin, args: fmt::Arguments<'_>) {
     let time_ns = now_ns();
     let cpu = current_cpu();
     let mut message = TextBuf::<512>::new();
@@ -293,7 +329,8 @@ pub fn log_from(level: Level, process: u32, args: fmt::Arguments<'_>) {
             record.time_ns = time_ns;
             record.level = level;
             record.cpu = u16::try_from(cpu).unwrap_or(u16::MAX);
-            record.process = process;
+            record.process = origin.process;
+            record.facility = origin.facility;
             let kept = text::floor_char_boundary(line, RECORD_TEXT);
             record.text[..kept].copy_from_slice(&line.as_bytes()[..kept]);
             record.len = kept as u8;

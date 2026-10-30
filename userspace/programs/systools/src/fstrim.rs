@@ -22,31 +22,6 @@ use crate::util::{self, Fail, usage};
 const ALL_FAILED: i32 = 32;
 const SOME_FAILED: i32 = 64;
 
-/// A size as util-linux's fstrim reads it: bytes, or with a suffix of
-/// K, M, G, T (KiB...) or KB, MB, GB, TB (powers of 1000).
-fn parse_size(text: &str) -> Option<u64> {
-    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
-    let (number, suffix) = text.split_at(digits);
-    let number: u64 = number.parse().ok()?;
-    let suffix = suffix.to_ascii_uppercase();
-    let power = |base: u64, n: u32| number.checked_mul(base.checked_pow(n)?);
-    let (letter, rest) = suffix.split_at(suffix.len().min(1));
-    let n = match letter {
-        "" => return Some(number),
-        "K" => 1,
-        "M" => 2,
-        "G" => 3,
-        "T" => 4,
-        "P" => 5,
-        _ => return None,
-    };
-    match rest {
-        "" | "IB" => power(1024, n),
-        "B" => power(1000, n),
-        _ => None,
-    }
-}
-
 /// `bytes` as util-linux prints a size: `1.2 GiB`, `0 B`.
 fn human(bytes: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
@@ -162,7 +137,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 
 /// `-m`'s size.
 fn minimum_of(text: &str) -> Result<u64, Fail> {
-    parse_size(text).ok_or_else(|| usage(format!("invalid minimum: {text}")))
+    util::parse_size(text).ok_or_else(|| usage(format!("invalid minimum: {text}")))
 }
 
 #[cfg(test)]
@@ -171,11 +146,11 @@ mod tests {
 
     #[test]
     fn sizes_read_and_print_as_util_linux_has_them() {
-        assert_eq!(parse_size("4096"), Some(4096));
-        assert_eq!(parse_size("1M"), Some(1 << 20));
-        assert_eq!(parse_size("2MiB"), Some(2 << 20));
-        assert_eq!(parse_size("1MB"), Some(1_000_000));
-        assert_eq!(parse_size("1X"), None);
+        assert_eq!(util::parse_size("4096"), Some(4096));
+        assert_eq!(util::parse_size("1M"), Some(1 << 20));
+        assert_eq!(util::parse_size("2MiB"), Some(2 << 20));
+        assert_eq!(util::parse_size("1MB"), Some(1_000_000));
+        assert_eq!(util::parse_size("1X"), None);
         assert_eq!(human(0), "0 B");
         assert_eq!(human(27_841_662_976), "25.9 GiB");
         assert_eq!(human(1 << 20), "1 MiB");
