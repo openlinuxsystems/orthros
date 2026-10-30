@@ -105,6 +105,14 @@ impl Machine {
     /// QEMU's arguments for this machine.
     pub fn args(&self) -> Vec<String> {
         let mut args: Vec<String> = vec!["-M".into(), "q35".into()];
+        // An IOMMU translates only the devices made after it.
+        let iommu = self
+            .extra
+            .windows(2)
+            .position(|pair| pair[0] == "-device" && pair[1].starts_with("intel-iommu"));
+        if let Some(at) = iommu {
+            args.extend(self.extra[at..at + 2].iter().cloned());
+        }
         args.extend(["-m".into(), self.memory.clone(), "-smp".into(), self.cpus.to_string()]);
         let (accel, default_cpu) = if self.kvm { ("kvm", "host") } else { ("tcg", "max") };
         let cpu = self.cpu_model.as_deref().unwrap_or(default_cpu);
@@ -140,7 +148,14 @@ impl Machine {
         if !self.display {
             args.extend(["-display".into(), "none".into()]);
         }
-        args.extend(self.extra.iter().cloned());
+        let skip = iommu.map_or(0..0, |at| at..at + 2);
+        args.extend(
+            self.extra
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !skip.contains(i))
+                .map(|(_, a)| a.clone()),
+        );
         args
     }
 

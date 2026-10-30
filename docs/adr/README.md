@@ -175,4 +175,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0161](0161-usb-sticks-are-disks-over-the-bulk-only-transport.md) | USB sticks are disks over the Bulk-Only Transport, served by a thread each | Accepted |
 | [0162](0162-usb-attached-scsi-queues-commands-on-usb-3-disks.md) | USB Attached SCSI queues commands on USB 3 disks | Accepted |
 | [0163](0163-volumed-mounts-volumes-plugged-in-after-boot-by-label.md) | volumed mounts the volumes plugged in after boot by their labels, and eject unmounts one | Accepted |
+| [0164](0164-each-device-reaches-only-its-own-memory-behind-vt-d.md) | Each device reaches only its own memory behind Intel VT-d | Accepted |
 | [0170](0170-btrfs-keeps-simple-quotas.md) | Btrfs keeps simple quotas, each extent counted to the subvolume that wrote it | Accepted |

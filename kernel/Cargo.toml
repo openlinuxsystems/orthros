@@ -20,6 +20,7 @@ members = [
     "drivers/scsi",
     "drivers/usb",
     "drivers/virtio",
+    "drivers/vtd",
     "drivers/xhci",
     "fs/block",
     "fs/btrfs",

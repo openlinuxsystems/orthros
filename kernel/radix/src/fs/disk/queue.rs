@@ -65,7 +65,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::process::{IO_LEVELS, IoClass};
 use radix_block::{BlockDevice, Error, Health, Info, Page, Segment, SegmentMut, Stats, Write};
-use radix_hal::{CpuLocal, Timer};
+use radix_hal::{CpuLocal, Devices, PciAddress, Timer};
 use radix_klog::{TextBuf, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_sync::SpinLock;
@@ -319,13 +319,16 @@ pub struct Disk<C> {
     interrupt: bool,
     /// Its name, for the log.
     name: Name,
+    /// Its controller's place on PCI: behind an IOMMU, the controller
+    /// reaches a request's buffers only while it is in flight.
+    source: PciAddress,
 }
 
 impl<C: Controller> Disk<C> {
     /// The disk `name` that `lanes` drive, one lane each (on the heap,
-    /// [`part`]): what it is,
-    /// whether it has a write cache and writes through it, and whether
-    /// its completions raise an interrupt that calls [`Disk::collect`].
+    /// [`part`]), of the controller at `source`: what it is, whether it
+    /// has a write cache and writes through it, and whether its
+    /// completions raise an interrupt that calls [`Disk::collect`].
     /// `None` when memory runs out.
     pub fn new(
         lanes: impl ExactSizeIterator<Item = Part<C>>,
@@ -334,6 +337,7 @@ impl<C: Controller> Disk<C> {
         fua: bool,
         interrupt: bool,
         name: Name,
+        source: PciAddress,
     ) -> Option<Disk<C>> {
         let count = lanes.len().max(1);
         let mut built = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
@@ -372,6 +376,7 @@ impl<C: Controller> Disk<C> {
             fua,
             interrupt,
             name,
+            source,
         })
     }
 
@@ -685,9 +690,34 @@ impl<C: Controller> Disk<C> {
     /// as long as the device hands it back to go again, up to [`TRIES`]
     /// times.
     pub(super) fn request(&self, request: &Request<'_>) -> Result<(), Error> {
-        let (lane, rank) = (self.here(), running_rank());
-        let slot = self.issue(lane, rank, None, request, false)?;
-        self.settle(lane, rank, slot, request)
+        self.reaching(core::slice::from_ref(request), || {
+            let (lane, rank) = (self.here(), running_rank());
+            let slot = self.issue(lane, rank, None, request, false)?;
+            self.settle(lane, rank, slot, request)
+        })
+    }
+
+    /// Runs `transfer` with the buffers of `requests` mapped for the
+    /// controller, which behind an IOMMU reaches nothing else of memory
+    /// but its own (ADR 0164); they are taken back once it is done.
+    fn reaching(
+        &self,
+        requests: &[Request<'_>],
+        transfer: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        for (at, request) in requests.iter().enumerate() {
+            if !request.data.is_empty() && !<Arch as Devices>::map_dma(self.source, request.data) {
+                for request in &requests[..at] {
+                    <Arch as Devices>::unmap_dma(self.source, request.data);
+                }
+                return Err(Error::NoMemory);
+            }
+        }
+        let result = transfer();
+        for request in requests.iter().filter(|request| !request.data.is_empty()) {
+            <Arch as Devices>::unmap_dma(self.source, request.data);
+        }
+        result
     }
 
     /// Carries out a transfer of any number of buffers as requests of as
@@ -696,6 +726,11 @@ impl<C: Controller> Disk<C> {
     /// as [`Disk::request`] has it. Returns only once the device is done
     /// with every buffer, whatever failed.
     fn request_all(&self, request: &Request<'_>) -> Result<(), Error> {
+        self.reaching(core::slice::from_ref(request), || self.request_parts(request))
+    }
+
+    /// [`Disk::request_all`], with the buffers mapped.
+    fn request_parts(&self, request: &Request<'_>) -> Result<(), Error> {
         let (lane, rank) = (self.here(), running_rank());
         let most = self.raw_segments;
         let mut result = Ok(());
@@ -736,6 +771,11 @@ impl<C: Controller> Disk<C> {
     /// this CPU's lane, the device told of each window of them together,
     /// and waits for every one, as [`Disk::request_all`] does its parts.
     fn request_many(&self, requests: &[Request<'_>]) -> Result<(), Error> {
+        self.reaching(requests, || self.request_windows(requests))
+    }
+
+    /// [`Disk::request_many`], with the buffers mapped.
+    fn request_windows(&self, requests: &[Request<'_>]) -> Result<(), Error> {
         let (lane, rank) = (self.here(), running_rank());
         let mut result = Ok(());
         for window in requests.chunks(PARTS) {

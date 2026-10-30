@@ -8,7 +8,8 @@
 //! the HPET table, the MCFG (PCI Express configuration space) and the FADT
 //! (for the ACPI timer, the reset register and legacy devices). Phase 2
 //! adds the NUMA topology: the SRAT and the SLIT; Phase 9 the sleep types
-//! that powering off needs, from the DSDT's AML. Everything
+//! that powering off needs, from the DSDT's AML; Phase 11 the DMAR,
+//! which describes Intel's DMA remapping units. Everything
 //! here works on byte slices and is unit-tested on the build host; the
 //! kernel supplies a [`Memory`] that maps physical addresses for it. The
 //! AML interpreter, which later phases need, is a separate decision (ADR
@@ -20,11 +21,13 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+mod dmar;
 mod fadt;
 mod madt;
 mod numa;
 mod sleep;
 
+pub use dmar::{DeviceScope, Dmar, Reserved, ScopeKind, Unit as DmarUnit};
 pub use fadt::{Fadt, GenericAddress, RegisterBlock};
 pub use madt::{Madt, MadtEntry};
 pub use numa::{Slit, Srat, SratEntry};

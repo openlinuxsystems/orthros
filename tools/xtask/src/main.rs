@@ -251,6 +251,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    every byte
   disk-raw-4k      the same on a virtio disk and an NVMe namespace of 4 KiB
                    sectors
+  iommu            disk-raw behind QEMU's VT-d unit, each device reaching
+                   only what is mapped for it; QEMU's edu device is stopped
+                   writing where it was not given memory
   disk-check       the disk check of a real machine, on an NVMe disk found
                    by its serial number; Linux's side checks it on the host
   disk-errors      QEMU fails SATA and NVMe reads and writes: retried, then

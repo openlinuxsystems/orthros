@@ -277,6 +277,14 @@ We implement these from their published descriptions. No code is copied.
   (PCI-SIG): configuration space through ECAM and the ACPI MCFG table,
   base address registers, and MSI and MSI-X
   ([ADR 0052](docs/adr/0052-message-signalled-interrupts-only.md)).
+- Intel's "Virtualization Technology for Directed I/O Architecture
+  Specification", revision 4.1, and the DMAR table it defines, from which
+  `radix-vtd` and `radix-acpi` drive VT-d remapping units: root and
+  context tables, second-level page tables, queued and register-based
+  invalidation and fault recording
+  ([ADR 0164](docs/adr/0164-each-device-reaches-only-its-own-memory-behind-vt-d.md)).
+  We use no code of Linux's or the BSDs' IOMMU drivers, or of QEMU's
+  unit, which the `iommu` boot test runs against.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

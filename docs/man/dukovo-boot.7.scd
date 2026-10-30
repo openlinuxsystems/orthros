@@ -110,7 +110,9 @@ _/system/resources/licenses/_
   allocate. It calibrates the time-stamp counter and the local APIC
   timer against the HPET, the ACPI PM timer or the 8254 PIT, in that
   order of preference. The periodic timer interrupt then runs at
-  100 Hz, and the kernel reports the frame allocator's zones.
+  100 Hz, and the kernel reports the frame allocator's zones. Last,
+  before any driver starts a device, it takes over the IOMMU's DMA
+  remapping units that the ACPI DMAR table lists (see *IOMMU* below).
 . The kernel sets up the root resource domain, *system*, and the
   scheduler: from here on the boot code runs as the thread *kmain*, and
   the *Scheduler:* line names the classes, the timer, how idle CPUs wait
@@ -461,6 +463,10 @@ them to *init*, and the kernel does not read them.
 	Leave the USB controllers as the firmware left them: none is reset
 	or driven, and no USB device is found. See *USB*.
 
+*iommu*=off
+	Leave the IOMMU's DMA remapping off, so that every device reaches
+	all memory, as before Phase 11d. See *IOMMU*.
+
 *font*=_size_
 	Draw the framebuffer console with the Spleen font of this size:
 	*8x16*, *12x24* or *16x32*.
@@ -533,6 +539,38 @@ panics with the bank's error: see *radix-debug*(7). Linux decodes the
 same status with *mcelog* or *rasdaemon*. Memory error counts by DIMM and
 error recovery that ends only the program that read bad memory come later
 (ADR 0145).
+
+# IOMMU
+
+An Intel VT-d unit sits between a group of PCI devices and memory and
+translates every address they read or write by DMA. At the end of the
+x86-64 layer's start, unless *iommu=off*, the kernel takes over each
+unit the ACPI DMAR table lists: it switches off what the firmware left
+on, gives the unit empty tables and turns translation on (ADR 0164). From
+then on a device reaches no memory but what its driver gave it: its DMA
+memory, the buffers of its requests in flight, which are taken back
+when the device is done, and what the firmware reserved for it (RMRRs).
+Each unit says what it translates and how:
+
+	IOMMU: VT-d 1.0 unit 0 at 0xfed90000 translates 10 devices: 3-level page tables, 65536 domains, queued invalidation
+
+A unit that translates every device on its PCI segment says so instead
+of a count. A unit that translates only the display controller is left
+off, which the log says, as no graphics driver hands it memory yet.
+Each device gets a domain of its own the first time its driver asks for
+DMA memory, and the kernel logs it:
+
+	IOMMU: 0000:00:04.0 reaches only what is mapped for it (domain 2)
+
+A device that reaches for memory it was not given is stopped, and the
+unit records a fault; the kernel logs at most 10 of them in each 5 s:
+
+	IOMMU: 0000:00:03.0 was stopped writing to 0x3f89e000: the page is not mapped for it to write
+
+Devices behind a PCIe-to-PCI bridge, interrupt remapping and AMD's IOMMU
+come later in Phase 11d. Devices behind a unit left off, and every
+device with *iommu=off*, reach all memory. The *iommu* boot case of
+*ob*(1) tests it under QEMU's VT-d unit.
 
 # USB
 
@@ -632,3 +670,7 @@ The Multiboot2 specification:
 https://www.gnu.org/software/grub/manual/multiboot2/
 
 The ACPI specification, version 6.5: https://uefi.org/specifications
+
+The Intel Virtualization Technology for Directed I/O Architecture
+Specification, revision 4.1:
+https://www.intel.com/content/www/us/en/content-details/774206/intel-virtualization-technology-for-directed-i-o-architecture-specification.html

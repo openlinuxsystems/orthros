@@ -56,6 +56,7 @@ mod crashlog;
 mod debug_console;
 mod domains;
 mod fs;
+mod iommutest;
 mod join;
 mod kdb;
 mod mce;

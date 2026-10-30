@@ -136,7 +136,7 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         Some(vector)
     });
     let entry = if interrupt.is_some() { 0 } else { NO_VECTOR };
-    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(pages, false);
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(function.address(), pages, false);
     let Ok(blk) = Blk::new(transport, entry, super::queue::SLOTS, &mut alloc) else {
         if let Some(vector) = interrupt {
             <Arch as Devices>::free_interrupt(vector);
@@ -167,8 +167,10 @@ pub fn bind(function: &Function, index: usize) -> Result<(), &'static str> {
         rotational: true,
     };
     let lanes = core::iter::once(super::queue::part(controller).ok_or("out of memory")?);
-    let disk = Disk::new(lanes, info, found.flush, false, interrupt.is_some(), name.clone())
-        .ok_or("out of memory")?;
+    let source = function.address();
+    let disk =
+        Disk::new(lanes, info, found.flush, false, interrupt.is_some(), name.clone(), source)
+            .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = DISKS[index].set(disk.clone());
     let size = Size(info.sectors * radix_block::SECTOR);

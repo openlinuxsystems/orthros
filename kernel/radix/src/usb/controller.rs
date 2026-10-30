@@ -41,6 +41,7 @@ use core::mem::MaybeUninit;
 
 use radix_hal::Devices;
 use radix_hw::Dma;
+use radix_hw::pci::Address;
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_usb::{
@@ -97,9 +98,10 @@ impl Host for KernelHost {
     }
 }
 
-/// DMA memory for the controller.
-pub(super) fn alloc(pages: usize, below_4g: bool) -> Option<Dma> {
-    <Arch as Devices>::alloc_dma(pages, below_4g)
+/// DMA memory for the controller at `source`, which reaches it behind
+/// an IOMMU.
+pub(super) fn alloc(source: Address) -> impl FnMut(usize, bool) -> Option<Dma> {
+    move |pages, below_4g| <Arch as Devices>::alloc_dma(source, pages, below_4g)
 }
 
 /// Where a device is: the root port it is on, or its hubs are on, and
@@ -160,6 +162,8 @@ pub(super) struct Attached {
 /// A controller, as its thread runs it.
 pub(super) struct Controller {
     pub(super) bus: usize,
+    /// Where it is on PCI: what an IOMMU knows its DMA by.
+    pub(super) source: Address,
     pub(super) xhci: Box<Xhci, Kmalloc>,
     pub(super) host: KernelHost,
     pub(super) devices: Vec<Attached, Kmalloc>,
@@ -323,7 +327,7 @@ impl Controller {
             return None;
         }
         while buffer.push_within_capacity(0).is_ok() {}
-        let xhci = match Xhci::new(start.regs.clone(), &mut host, &mut alloc) {
+        let xhci = match Xhci::new(start.regs.clone(), &mut host, &mut alloc(start.address)) {
             Ok(xhci) => xhci,
             Err(err) => {
                 warn!("USB: the xHCI controller at {} could not be started: {err}", start.address);
@@ -335,9 +339,10 @@ impl Controller {
             error!("USB: out of memory for the controller at {}", start.address);
             return None;
         };
-        let dbc = super::dbc::claim(bus, &xhci);
+        let dbc = super::dbc::claim(bus, start.address, &xhci);
         let controller = Controller {
             bus,
+            source: start.address,
             xhci,
             host,
             devices: Vec::new_in(heap),
@@ -603,6 +608,7 @@ impl Controller {
         let result = self.identify(&mut device, path, name).inspect_err(|_| name.clear());
         let result = result.and_then(|plan| {
             let endpoints = &plan.endpoints[..plan.count];
+            let mut alloc = alloc(self.source);
             device.configure(&mut self.xhci, &mut self.host, &mut alloc, plan.value, endpoints)?;
             Ok(plan)
         });
@@ -658,6 +664,7 @@ impl Controller {
         home: Box<MaybeUninit<Device>, Kmalloc>,
         place: Place,
     ) -> Result<Box<Device, Kmalloc>, Why> {
+        let mut alloc = alloc(self.source);
         let device = Device::address(&mut self.xhci, &mut self.host, &mut alloc, place)?;
         Ok(Box::write(home, device))
     }

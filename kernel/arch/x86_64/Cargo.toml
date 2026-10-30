@@ -26,6 +26,7 @@ radix-mm = { path = "../../mm" }
 radix-random = { path = "../../lib/random" }
 radix-relocs = { path = "../../lib/relocs" }
 radix-sync = { path = "../../lib/sync" }
+radix-vtd = { path = "../../drivers/vtd" }
 
 [lints]
 workspace = true

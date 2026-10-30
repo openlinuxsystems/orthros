@@ -211,7 +211,8 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
         .ok()
         .and_then(|size| <Arch as Devices>::map_device(address, size))
         .ok_or("its registers could not be mapped")?;
-    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(pages, false);
+    let source = function.address();
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
     let delay = &mut queue::delay;
     let mut nvme = Nvme::new(regs, &mut alloc, delay)?;
     // A lane for each CPU, within the vectors the controller has (one is
@@ -270,9 +271,9 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
         discard_sectors: deallocate,
         rotational: false,
     };
-    let disk =
-        Disk::new(parts.into_iter(), template, identity.write_cache, true, interrupt, name.clone())
-            .ok_or("out of memory")?;
+    let (cache, lanes) = (identity.write_cache, parts.into_iter());
+    let disk = Disk::new(lanes, template, cache, true, interrupt, name.clone(), source)
+        .ok_or("out of memory")?;
     let disk = Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     let _ = host.disk.set(disk.clone());
     let _ = HOSTS[index].set(host.clone());

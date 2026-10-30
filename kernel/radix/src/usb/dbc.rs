@@ -136,11 +136,11 @@ pub fn init(on: bool) {
     ON.store(on, Ordering::Relaxed);
 }
 
-/// Turns on the Debug Capability of `xhci`, bus `bus`, as the console, if
-/// the `dbc` flag asks for one and no other controller's is; says whether
-/// it did, and its thread now polls it.
+/// Turns on the Debug Capability of `xhci`, bus `bus` at `source`, as the
+/// console, if the `dbc` flag asks for one and no other controller's is;
+/// says whether it did, and its thread now polls it.
 #[inline(never)]
-pub(super) fn claim(bus: usize, xhci: &Xhci) -> bool {
+pub(super) fn claim(bus: usize, source: radix_hw::pci::Address, xhci: &Xhci) -> bool {
     if !ON.load(Ordering::Relaxed) {
         return false;
     }
@@ -152,7 +152,7 @@ pub(super) fn claim(bus: usize, xhci: &Xhci) -> bool {
         info!("USB: bus {bus}'s Debug Capability is left off: the console is on another bus");
         return false;
     }
-    let mut dbc = match Dbc::new(xhci, IDENTITY, &mut alloc) {
+    let mut dbc = match Dbc::new(xhci, IDENTITY, &mut alloc(source)) {
         Ok(dbc) => dbc,
         Err(err) => {
             warn!("USB: bus {bus}: the Debug Capability could not be set up: {err}");
