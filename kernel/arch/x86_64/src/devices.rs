@@ -12,8 +12,11 @@
 //! and the vector, edge-triggered with fixed delivery (Intel SDM volume 3,
 //! "Message Signalled Interrupts"). The message has eight bits for the
 //! destination, so a CPU whose APIC ID is above 255 gets the boot CPU's
-//! interrupts instead: naming it would need interrupt remapping. The
-//! dispatcher calls the function, then ends the interrupt. A handler is
+//! interrupts instead. Behind an IOMMU that remaps interrupts, the vector
+//! gets an interrupt entry that only its device matches, and the message
+//! is the one that picks it (ADR 0166); on VT-d with 32-bit APIC IDs the
+//! entry can name any CPU. The dispatcher calls the function, then ends
+//! the interrupt. A handler is
 //! read with acquire ordering after its argument was stored, so a vector
 //! whose message a device already knows never runs a half-registered
 //! handler; freeing waits for nothing, so a driver frees its vector only
@@ -41,8 +44,17 @@ static COUNTS: [AtomicU64; COUNT] = [const { AtomicU64::new(0) }; COUNT];
 /// Which device vectors are taken.
 static TAKEN: SpinLock<[bool; COUNT]> = SpinLock::new([false; COUNT]);
 
-/// Takes a free vector for `handler(arg)`, sent to CPU `cpu`.
-pub fn allocate(cpu: usize, handler: fn(usize), arg: usize) -> Option<(u32, MsiMessage)> {
+/// Takes a free vector for `handler(arg)`, sent to CPU `cpu`, for the PCI
+/// function `source` to raise (behind an IOMMU that remaps interrupts,
+/// only it can), or for an I/O APIC input or the IOMMU's own interrupt
+/// with `None`. `None` when no vector is free, or its IOMMU could not give
+/// it an interrupt entry.
+pub fn allocate(
+    source: Option<Address>,
+    cpu: usize,
+    handler: fn(usize),
+    arg: usize,
+) -> Option<(u32, MsiMessage)> {
     let index = {
         let mut taken = TAKEN.lock_irq();
         let index = taken.iter().position(|taken| !taken)?;
@@ -52,18 +64,32 @@ pub fn allocate(cpu: usize, handler: fn(usize), arg: usize) -> Option<(u32, MsiM
     ARGS[index].store(arg, Ordering::Relaxed);
     HANDLERS[index].store(handler as usize, Ordering::Release);
     let vector = u32::from(FIRST) + index as u32;
-    let destination = smp::info(cpu)
-        .filter(|found| found.online && found.hardware_id <= 0xff)
-        .or_else(|| smp::info(0))
-        .map_or(0, |found| found.hardware_id & 0xff);
-    let destination = u64::from(destination);
-    let message = MsiMessage { address: 0xfee0_0000 | (destination << 12), data: vector };
+    let boot = smp::info(0).map_or(0, |found| found.hardware_id);
+    let wanted =
+        smp::info(cpu).filter(|found| found.online).map_or(boot, |found| found.hardware_id);
+    let remapped = match source {
+        Some(source) => iommu::remap(source, vector as u8, wanted, boot),
+        None => iommu::Remap::Off,
+    };
+    let message = match remapped {
+        iommu::Remap::To(message) => message,
+        iommu::Remap::Off => {
+            let destination = u64::from(if wanted <= 0xff { wanted } else { boot & 0xff });
+            MsiMessage { address: 0xfee0_0000 | (destination << 12), data: vector }
+        }
+        iommu::Remap::Failed => {
+            free(vector);
+            return None;
+        }
+    };
     Some((vector, message))
 }
 
-/// Gives back a vector from [`allocate`].
+/// Gives back a vector from [`allocate`]; behind an IOMMU that remaps
+/// interrupts, its device can no longer raise it when this returns.
 pub fn free(vector: u32) {
     let Some(index) = index_of(vector) else { return };
+    iommu::unremap(vector as u8);
     HANDLERS[index].store(0, Ordering::Release);
     TAKEN.lock_irq()[index] = false;
 }

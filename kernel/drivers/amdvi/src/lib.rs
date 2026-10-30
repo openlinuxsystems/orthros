@@ -25,8 +25,13 @@
 //! - [`EventLog`] reads the events the IOMMU logs, apart from the rest of
 //!   it, for its interrupt.
 //!
-//! Interrupt remapping is not used yet: device table entries leave it off
-//! (IV clear), so the IOMMU passes interrupts through as they are.
+//! - Interrupt remapping: each device's entry can point to a table of
+//!   [`INTERRUPTS`] interrupt entries, which an interrupt the device raises
+//!   picks by the low bits of its message's data, and takes its vector and
+//!   destination from. [`Unit::remap`] writes an entry. With
+//!   [`Setup::remap_interrupts`], every device's interrupts are blocked
+//!   until then; without it, a device whose entry has no table raises
+//!   its interrupts as they are.
 //!
 //! The crate is a compartment: it has no `unsafe` code. It reaches an
 //! IOMMU through its [`Mmio`] registers and its tables through the
@@ -104,6 +109,7 @@ mod command {
     pub const COMPLETION_WAIT: u64 = 1 << 60;
     pub const INVALIDATE_DEVICE: u64 = 2 << 60;
     pub const INVALIDATE_PAGES: u64 = 3 << 60;
+    pub const INVALIDATE_INTERRUPTS: u64 = 5 << 60;
     pub const INVALIDATE_ALL: u64 = 8 << 60;
 }
 
@@ -117,6 +123,25 @@ mod dte {
     /// neither read nor write allowed.
     pub const BLOCKED: u64 = VALID | TRANSLATION_VALID;
 }
+
+/// Bits of a device table entry's third word, its interrupts'.
+mod interrupt {
+    /// The word is valid: its interrupts are not passed through as they
+    /// are.
+    pub const VALID: u64 = 1 << 0;
+    /// A table of 2 to the 8 entries.
+    pub const LENGTH: u64 = 8 << 1;
+    /// The table's address.
+    pub const TABLE: u64 = 0x000f_ffff_ffff_ffc0;
+    /// What happens to fixed and arbitrated interrupts: aborted, or
+    /// remapped through the table.
+    pub const CONTROL: u64 = 3 << 60;
+    pub const REMAPPED: u64 = 2 << 60;
+}
+
+/// The entries of a device's interrupt remapping table: one for each
+/// vector.
+pub const INTERRUPTS: usize = 256;
 
 /// The IOMMU walks 4-level tables: every IOMMU does (HATS 0).
 pub const LEVELS: u8 = 4;
@@ -231,6 +256,9 @@ pub struct Setup {
     /// It caches entries that are not present (the capability block's
     /// NpCache bit), as an emulated IOMMU may.
     pub caches_absent: bool,
+    /// Every device's interrupts are blocked until [`Unit::remap`] gives
+    /// it some.
+    pub remap_interrupts: bool,
 }
 
 /// An event the IOMMU logged.
@@ -257,11 +285,17 @@ impl Event {
         Event { device, address: high, write: flags & (1 << 5) != 0, code, flags }
     }
 
+    /// It is about an interrupt the device raised, not a DMA request.
+    pub fn interrupt(&self) -> bool {
+        self.flags & (1 << 3) != 0
+    }
+
     /// What it means.
     pub fn why(&self) -> &'static str {
         let present = self.flags & (1 << 4) != 0;
         let reserved = self.flags & (1 << 7) != 0;
         match self.code {
+            1 | 2 if self.interrupt() => "the interrupt is not one given to it",
             1 => "its device table entry is invalid",
             2 if reserved => "a page table entry has a reserved bit set",
             2 if !present => "the page is not mapped for it",
@@ -349,9 +383,12 @@ impl<M: Tables> Unit<M> {
             regs.read64(reg::STATUS) & (status::EVENT_LOG_RUNNING | status::COMMANDS_RUNNING) == 0
         };
         unit.wait(stopped, "stop its command buffer and event log")?;
+        let interrupts = if setup.remap_interrupts { interrupt::VALID } else { 0 };
         for page in 0..pages {
-            for entry in unit.memory.entries(table + page as u64 * PAGE).iter().step_by(4) {
-                entry.store(dte::BLOCKED, Ordering::Relaxed);
+            let entries = unit.memory.entries(table + page as u64 * PAGE);
+            for at in (0..entries.len()).step_by(4) {
+                entries[at].store(dte::BLOCKED, Ordering::Relaxed);
+                entries[at + 2].store(interrupts, Ordering::Relaxed);
             }
         }
         device_barrier();
@@ -402,6 +439,12 @@ impl<M: Tables> Unit<M> {
     /// Whether translation is on.
     pub fn translating(&self) -> bool {
         self.regs.read64(reg::CONTROL) & control::ENABLE != 0
+    }
+
+    /// Whether it remaps interrupts: it was set up with
+    /// [`Setup::remap_interrupts`].
+    pub fn remapping(&self) -> bool {
+        self.setup.remap_interrupts
     }
 
     /// The memory it was given.
@@ -485,6 +528,57 @@ impl<M: Tables> Unit<M> {
             [command::INVALIDATE_DEVICE | u64::from(device), 0],
             pages(domain, EVERY_PAGE, true, true),
         ])
+    }
+
+    /// Has an interrupt the device `device` raises with data `vector` (its
+    /// low 11 bits pick the entry) arrive as `vector` at the CPU whose APIC
+    /// ID is `destination`, fixed and edge-triggered, in physical
+    /// destination mode. The device's table is made the first time. The
+    /// message the device writes is the one it would without remapping.
+    pub fn remap(&mut self, device: u16, vector: u8, destination: u8) -> Result<(), Refused> {
+        let entry = 1 | (u64::from(destination) << 8) | (u64::from(vector) << 16);
+        let (table, made) = {
+            let Some((entries, at)) = self.entry(device) else { return Err(Refused::Registers) };
+            let word = entries[at + 2].load(Ordering::Acquire);
+            if word & interrupt::CONTROL == interrupt::REMAPPED {
+                (word & interrupt::TABLE, false)
+            } else {
+                let table = self.memory.alloc_page().ok_or(Refused::NoMemory)?;
+                self.set_interrupt(table, vector, entry);
+                let word = interrupt::VALID | interrupt::LENGTH | table | interrupt::REMAPPED;
+                entries[at + 2].store(word, Ordering::Release);
+                (table, true)
+            }
+        };
+        let forget = [command::INVALIDATE_INTERRUPTS | u64::from(device), 0];
+        if made {
+            return self.submit(&[[command::INVALIDATE_DEVICE | u64::from(device), 0], forget]);
+        }
+        self.set_interrupt(table, vector, entry);
+        self.submit(&[forget])
+    }
+
+    /// Takes away the interrupt entry `vector` of the device `device`: once
+    /// this returns, an interrupt it raises with that data is blocked.
+    pub fn unremap(&mut self, device: u16, vector: u8) -> Result<(), Refused> {
+        let word = match self.entry(device) {
+            Some((entries, at)) => entries[at + 2].load(Ordering::Acquire),
+            None => return Ok(()),
+        };
+        if word & interrupt::CONTROL != interrupt::REMAPPED {
+            return Ok(());
+        }
+        self.set_interrupt(word & interrupt::TABLE, vector, 0);
+        self.submit(&[[command::INVALIDATE_INTERRUPTS | u64::from(device), 0]])
+    }
+
+    /// Writes `entry` as interrupt entry `vector` of the table at `table`.
+    fn set_interrupt(&self, table: u64, vector: u8, entry: u64) {
+        // Two 32-bit entries share each word.
+        let word = &self.memory.entries(table)[usize::from(vector) / 2];
+        let shift = u32::from(vector % 2) * 32;
+        let was = word.load(Ordering::Relaxed);
+        word.store((was & !(0xffff_ffff << shift)) | (entry << shift), Ordering::Release);
     }
 
     /// Has the IOMMU forget every device table entry and every page it

@@ -343,9 +343,12 @@ impl Vectors {
         msix.enable_masked(function);
         for lane in 0..lanes.min(MAX_LANES) {
             let arg = host * MAX_LANES + lane;
-            let Some((vector, message)) =
-                <Arch as Devices>::allocate_interrupt_at(lane, on_interrupt, arg)
-            else {
+            let Some((vector, message)) = <Arch as Devices>::allocate_interrupt_at(
+                function.address(),
+                lane,
+                on_interrupt,
+                arg,
+            ) else {
                 msix.disable(function);
                 drop(vectors);
                 return Vectors { given: [0; MAX_LANES], count: 0 };

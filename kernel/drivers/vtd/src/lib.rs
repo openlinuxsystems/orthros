@@ -25,8 +25,13 @@
 //!   entries the entries in use below, in bits 52 to 61, which the unit
 //!   ignores. [`Unit`] invalidates for it ([`Invalidate`]).
 //!
-//! Interrupt remapping, the unit's other half, is not used yet: a device
-//! may still send any interrupt message.
+//! - Interrupt remapping, the unit's other half: [`Unit::remap_interrupts`]
+//!   gives the unit a table of [`INTERRUPTS`] entries, from which each
+//!   interrupt a device raises in the remappable format takes its vector
+//!   and destination, once the unit has checked the device's requester ID
+//!   against the entry's. [`Unit::remap`] writes an entry and
+//!   [`Unit::unremap`] takes it away; interrupts in the compatibility
+//!   format are blocked.
 //!
 //! The crate is a compartment: it has no `unsafe` code. It reaches a unit
 //! through its [`Mmio`] registers and its tables through the [`Memory`]
@@ -99,6 +104,7 @@ mod reg {
     pub const PROTECTED_MEMORY: usize = 0x64;
     pub const QUEUE_TAIL: usize = 0x88;
     pub const QUEUE_ADDRESS: usize = 0x90;
+    pub const INTERRUPT_TABLE: usize = 0xb8;
     /// The registers the engine reaches lie below this, besides the
     /// fault recording and IOTLB registers, which the capabilities place.
     pub const FIXED_END: usize = 0x100;
@@ -117,6 +123,10 @@ mod global {
     pub const QUEUE: u32 = 1 << 26;
     /// Interrupt remapping is on.
     pub const INTERRUPT_REMAPPING: u32 = 1 << 25;
+    /// Set the interrupt remapping table's pointer; its status.
+    pub const INTERRUPT_TABLE: u32 = 1 << 24;
+    /// Let interrupts in the compatibility format through; its status.
+    pub const COMPATIBILITY: u32 = 1 << 23;
 }
 
 /// Bits of the fault status register.
@@ -251,6 +261,12 @@ impl Caps {
         self.ecap_bits(3, 1) != 0
     }
 
+    /// Its interrupt entries can name 32-bit x2APIC IDs (extended
+    /// interrupt mode).
+    pub fn extended_interrupts(&self) -> bool {
+        self.ecap_bits(4, 1) != 0
+    }
+
     /// Where its IOTLB registers are.
     pub fn iotlb_offset(&self) -> usize {
         self.ecap_bits(8, 10) as usize * 16
@@ -277,6 +293,9 @@ pub enum Refused {
     Stuck(&'static str),
     /// Its invalidation queue refused a descriptor, and stopped.
     QueueError,
+    /// It cannot remap interrupts: it has no interrupt remapping, or no
+    /// invalidation queue to invalidate its entries with.
+    NoInterruptRemapping,
 }
 
 impl fmt::Display for Refused {
@@ -287,6 +306,7 @@ impl fmt::Display for Refused {
             Refused::NoMemory => f.write_str("out of memory for its tables"),
             Refused::Stuck(what) => write!(f, "it did not {what} within a second"),
             Refused::QueueError => f.write_str("its invalidation queue refused a descriptor"),
+            Refused::NoInterruptRemapping => f.write_str("it cannot remap interrupts"),
         }
     }
 }
@@ -336,6 +356,23 @@ pub struct Fault {
     pub reason: u8,
 }
 
+/// The entries of a unit's interrupt remapping table: one for each vector.
+pub const INTERRUPTS: usize = 256;
+
+/// An interrupt entry cache invalidation descriptor, of every entry.
+const INTERRUPT_CACHE: u64 = 4;
+/// It invalidates only the entry its bits 32 to 47 give.
+const INTERRUPT_INDEX: u64 = 1 << 4;
+/// The bit of an interrupt entry for a level-triggered interrupt.
+const IRTE_LEVEL: u32 = 4;
+
+/// The message a device writes to raise the interrupt of entry `index`:
+/// the remappable format, with the handle in the address and no
+/// subhandle (VT-d 4.1, section 5.1.5.2).
+pub fn remappable(index: u8) -> (u64, u32) {
+    (0xfee0_0000 | (u64::from(index) << 5) | (1 << 4), 0)
+}
+
 impl Fault {
     /// The device's bus.
     pub fn bus(&self) -> u8 {
@@ -350,6 +387,11 @@ impl Fault {
     /// Its function.
     pub fn function(&self) -> u8 {
         self.source as u8 & 7
+    }
+
+    /// It is about an interrupt the device raised, not a DMA request.
+    pub fn interrupt(&self) -> bool {
+        (0x20..=0x27).contains(&self.reason)
     }
 
     /// What the reason means (VT-d 4.1, appendix A).
@@ -368,6 +410,12 @@ impl Fault {
             0x0b => "its context entry has a reserved bit set",
             0x0c => "a page table entry has a reserved bit set",
             0x0d => "its context entry does not let requests of that kind through",
+            0x20 => "the interrupt request has a reserved bit set",
+            0x21 => "the interrupt's entry is past the unit's table",
+            0x22 | 0x26 => "the interrupt is not one given to it",
+            0x23 => "the unit could not read its interrupt table",
+            0x24 => "the interrupt's entry has a reserved bit set",
+            0x25 => "the interrupt is in the compatibility format, which is blocked",
             _ => "a fault of another kind",
         }
     }
@@ -397,6 +445,9 @@ pub struct Unit<M: Memory> {
     command: u32,
     root: u64,
     queue: Option<Queue>,
+    /// Its interrupt remapping table, once on, and whether its entries
+    /// name 32-bit APIC IDs.
+    interrupts: Option<(u64, bool)>,
     found_on: bool,
 }
 
@@ -415,7 +466,10 @@ impl<M: Memory> Unit<M> {
         let levels = caps.levels().ok_or(Refused::NoTables)?;
         let version = regs.read32(reg::VERSION);
         let status = regs.read32(reg::GLOBAL_STATUS);
-        let on = global::TRANSLATION | global::INTERRUPT_REMAPPING | global::QUEUE;
+        let on = global::TRANSLATION
+            | global::INTERRUPT_REMAPPING
+            | global::QUEUE
+            | global::COMPATIBILITY;
         let mut unit = Unit {
             regs,
             memory,
@@ -425,9 +479,16 @@ impl<M: Memory> Unit<M> {
             command: status & on,
             root: 0,
             queue: None,
+            interrupts: None,
             found_on: status & global::TRANSLATION != 0,
         };
-        for bit in [global::TRANSLATION, global::INTERRUPT_REMAPPING, global::QUEUE] {
+        let left = [
+            global::TRANSLATION,
+            global::INTERRUPT_REMAPPING,
+            global::QUEUE,
+            global::COMPATIBILITY,
+        ];
+        for bit in left {
             if status & bit != 0 {
                 unit.set(bit, false)?;
             }
@@ -510,6 +571,99 @@ impl<M: Memory> Unit<M> {
     /// Turns translation off: every device reaches all memory again.
     pub fn disable(&mut self) -> Result<(), Refused> {
         self.set(global::TRANSLATION, false)
+    }
+
+    /// Turns interrupt remapping on, with a table of [`INTERRUPTS`]
+    /// entries, none of them present: from then on a device raises only
+    /// the interrupts [`Unit::remap`] gives it, and interrupts in the
+    /// compatibility format are blocked. `x2apic` if the local APICs are in
+    /// x2APIC mode: entries then name 32-bit APIC IDs, where the unit can.
+    pub fn remap_interrupts(&mut self, x2apic: bool) -> Result<(), Refused> {
+        if self.queue.is_none() || !self.caps.interrupt_remapping() {
+            return Err(Refused::NoInterruptRemapping);
+        }
+        if self.interrupts.is_some() {
+            return Ok(());
+        }
+        let table = self.memory.alloc_page().ok_or(Refused::NoMemory)?;
+        let extended = x2apic && self.caps.extended_interrupts();
+        // 2 to the 7 + 1 entries of 128 bits: a page.
+        self.regs.write64(reg::INTERRUPT_TABLE, table | (u64::from(extended) << 11) | 7);
+        if let Err(err) = self.once(global::INTERRUPT_TABLE, true, "take its interrupt table") {
+            self.memory.free_page(table);
+            return Err(err);
+        }
+        self.interrupts = Some((table, extended));
+        self.submit(&[[INTERRUPT_CACHE, 0]])?;
+        self.set(global::INTERRUPT_REMAPPING, true)
+    }
+
+    /// Whether it remaps interrupts.
+    pub fn remapping(&self) -> bool {
+        self.interrupts.is_some()
+    }
+
+    /// Whether its interrupt entries name 32-bit APIC IDs, so that any CPU
+    /// can be named; else IDs up to 255.
+    pub fn names_every_cpu(&self) -> bool {
+        self.interrupts.is_some_and(|(_, extended)| extended)
+    }
+
+    /// Has an interrupt raised with handle `index` by the device `source`
+    /// (its requester ID) arrive as `vector` at the CPU whose APIC ID is
+    /// `destination`, with fixed delivery, level-triggered if `level` (as
+    /// an I/O APIC's input may be) and else edge-triggered; the entry must
+    /// not be present. The device raises it with [`remappable`]'s message,
+    /// and only it can.
+    pub fn remap(
+        &mut self,
+        index: u8,
+        vector: u8,
+        destination: u32,
+        source: u16,
+        level: bool,
+    ) -> Result<(), Refused> {
+        let Some((table, extended)) = self.interrupts else {
+            return Err(Refused::NoInterruptRemapping);
+        };
+        let destination = if extended {
+            u64::from(destination) << 32
+        } else {
+            u64::from(destination & 0xff) << 40
+        };
+        let at = usize::from(index) * 2;
+        {
+            let entries = self.memory.entries(table);
+            // The requester ID, all 16 bits of it, is checked; then the
+            // entry is present.
+            entries[at + 1].store(u64::from(source) | (1 << 18), Ordering::Relaxed);
+            let low = PRESENT
+                | (u64::from(level) << IRTE_LEVEL)
+                | (u64::from(vector) << 16)
+                | destination;
+            entries[at].store(low, Ordering::Release);
+            if !self.caps.coherent() {
+                self.memory.flush(&entries[at]);
+            }
+        }
+        self.submit(&[[INTERRUPT_CACHE | INTERRUPT_INDEX | (u64::from(index) << 32), 0]])
+    }
+
+    /// Takes away the interrupt entry `index`: once this returns, an
+    /// interrupt raised with its handle is blocked.
+    pub fn unremap(&mut self, index: u8) -> Result<(), Refused> {
+        let Some((table, _)) = self.interrupts else { return Ok(()) };
+        let at = usize::from(index) * 2;
+        {
+            let entries = self.memory.entries(table);
+            entries[at].store(0, Ordering::Release);
+            if !self.caps.coherent() {
+                self.memory.flush(&entries[at]);
+            }
+        }
+        self.submit(&[[INTERRUPT_CACHE | INTERRUPT_INDEX | (u64::from(index) << 32), 0]])?;
+        self.memory.entries(table)[at + 1].store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Has the unit raise `data` at `address` when it records a fault.
@@ -739,6 +893,8 @@ impl<M: Memory> Unit<M> {
             global::TRANSLATION => "turn translation off",
             global::QUEUE if on => "turn its invalidation queue on",
             global::QUEUE => "turn its invalidation queue off",
+            global::INTERRUPT_REMAPPING if on => "turn interrupt remapping on",
+            global::COMPATIBILITY => "block interrupts in the compatibility format",
             _ => "turn interrupt remapping off",
         };
         self.wait(|regs| (regs.read32(reg::GLOBAL_STATUS) & bit != 0) == on, what)

@@ -131,6 +131,8 @@ enum Told {
         tables: bool,
     },
     All,
+    /// A device's interrupt entries.
+    Interrupts(u16),
 }
 
 #[derive(Default)]
@@ -150,6 +152,10 @@ struct State {
     entries: HashMap<u16, (u64, u64)>,
     /// What it translated: (domain, page) to page.
     iotlb: BTreeMap<(u16, u64), u64>,
+    /// The third word of each device table entry it read.
+    interrupt_words: HashMap<u16, u64>,
+    /// The interrupt entries it read: (device, index) to entry.
+    interrupt_entries: HashMap<(u16, u16), u64>,
 }
 
 /// A simulated IOMMU.
@@ -196,6 +202,67 @@ impl FakeIommu {
         self.memory.word(at + 8).store(high, Ordering::Release);
         state.event_tail = (state.event_tail + 16) % len;
         state.status |= 2;
+    }
+
+    /// Delivers the interrupt the device `device` raises by writing `data`
+    /// at `address`, as the IOMMU does: the vector and APIC ID it arrives
+    /// as. One it stops is logged as a page fault about an interrupt.
+    fn interrupt(&self, device: u16, address: u64, data: u32) -> Result<(u8, u8), ()> {
+        let mut state = self.state.lock().unwrap();
+        let result = self.remap(&mut state, device, address, data);
+        if result.is_err() {
+            let low = u64::from(device) | (1 << 51) | (1 << 53) | (2 << 60);
+            self.log(&mut state, low, address);
+        }
+        result
+    }
+
+    fn remap(
+        &self,
+        state: &mut State,
+        device: u16,
+        address: u64,
+        data: u32,
+    ) -> Result<(u8, u8), ()> {
+        let compatible = (data as u8, (address >> 12) as u8);
+        if state.control & ENABLE == 0 {
+            return Ok(compatible);
+        }
+        let word = match state.interrupt_words.get(&device) {
+            Some(&word) => word,
+            None => {
+                let at = (state.device_table & ADDRESS) + u64::from(device) * 32 + 16;
+                let word = self.memory.read(at);
+                state.interrupt_words.insert(device, word);
+                word
+            }
+        };
+        if word & 1 == 0 {
+            return Ok(compatible);
+        }
+        match (word >> 60) & 3 {
+            1 => return Ok(compatible),
+            2 => {}
+            _ => return Err(()),
+        }
+        let index = (data & 0x7ff) as u16;
+        if index >= 1 << ((word >> 1) & 0xf) {
+            return Err(());
+        }
+        let entry = match state.interrupt_entries.get(&(device, index)) {
+            Some(&entry) => entry,
+            None => {
+                let at = (word & 0x000f_ffff_ffff_ffc0) + u64::from(index) * 4;
+                let entry = (self.memory.read(at & !7) >> ((at & 4) * 8)) & 0xffff_ffff;
+                state.interrupt_entries.insert((device, index), entry);
+                entry
+            }
+        };
+        if entry & 1 == 0 {
+            return Err(());
+        }
+        assert_eq!(entry & 0xfe, 0, "fixed delivery, physical destination, no guest");
+        Ok(((entry >> 16) as u8, (entry >> 8) as u8))
     }
 
     /// Translates a DMA request of the device `device` to `address`, as
@@ -305,7 +372,14 @@ impl FakeIommu {
                 2 => {
                     let device = low as u16;
                     state.entries.remove(&device);
+                    state.interrupt_words.remove(&device);
                     state.told.push(Told::Device(device));
+                }
+                5 => {
+                    assert_eq!(((low >> 16) & 0xfff_ffff_ffff, high), (0, 0), "reserved bits");
+                    let device = low as u16;
+                    state.interrupt_entries.retain(|&(d, _), _| d != device);
+                    state.told.push(Told::Interrupts(device));
                 }
                 3 => {
                     assert_eq!((low >> 48) & 0xfff, 0, "reserved bits of the command");
@@ -331,6 +405,8 @@ impl FakeIommu {
                 8 => {
                     state.entries.clear();
                     state.iotlb.clear();
+                    state.interrupt_words.clear();
+                    state.interrupt_entries.clear();
                     state.told.push(Told::All);
                 }
                 other => panic!("command {other} the engine does not give"),
@@ -428,7 +504,7 @@ fn unit(features: u64, setup: Setup) -> (Unit<Arc<HostMemory>>, Arc<FakeIommu>, 
 }
 
 fn setup() -> Setup {
-    Setup { flags: 0, last_device: 0xff, caches_absent: false }
+    Setup { flags: 0, last_device: 0xff, caches_absent: false, remap_interrupts: false }
 }
 
 /// Unmaps `frames` from `domain` and has `unit` forget them, as the
@@ -707,4 +783,48 @@ proptest! {
         // The IOMMU's five pages, and the two domains' top tables.
         prop_assert_eq!(memory.live(), 7);
     }
+}
+
+#[test]
+fn a_device_raises_its_interrupts_as_they_are_until_remapped() {
+    let (mut unit, fake, memory) = unit(INVALIDATE_ALL, setup());
+    fake.told();
+    let live = memory.live();
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x60), Ok((0x60, 1)));
+    unit.remap(DISK, 0x60, 2).unwrap();
+    assert_eq!(fake.told(), [Told::Device(DISK), Told::Interrupts(DISK)]);
+    assert_eq!(memory.live(), live + 1, "the device's table is a page");
+    // The same message now arrives where its entry says.
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x60), Ok((0x60, 2)));
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x61), Err(()));
+    // Another device, with no table, still raises any.
+    assert_eq!(fake.interrupt(OTHER, 0xfee0_0000, 0x60), Ok((0x60, 0)));
+    // Taken away, it is blocked, though the IOMMU had cached it.
+    unit.unremap(DISK, 0x60).unwrap();
+    assert_eq!(fake.told(), [Told::Interrupts(DISK)]);
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x60), Err(()));
+    let (found, lost) = events(&unit);
+    assert!(!lost);
+    assert_eq!(found.len(), 2);
+    assert!(found.iter().all(|event| event.interrupt() && event.device == Some(DISK)));
+    assert_eq!(found[0].why(), "the interrupt is not one given to it");
+}
+
+#[test]
+fn with_remapping_every_interrupt_waits_for_its_entry() {
+    let setup = Setup { remap_interrupts: true, ..setup() };
+    let (mut unit, fake, memory) = unit(INVALIDATE_ALL, setup);
+    fake.told();
+    assert_eq!(fake.interrupt(OTHER, 0xfee0_0000, 0x61), Err(()));
+    unit.remap(OTHER, 0x61, 0).unwrap();
+    let live = memory.live();
+    unit.remap(OTHER, 0x62, 1).unwrap();
+    assert_eq!(memory.live(), live, "one table for the device");
+    assert_eq!(
+        fake.told(),
+        [Told::Device(OTHER), Told::Interrupts(OTHER), Told::Interrupts(OTHER)]
+    );
+    assert_eq!(fake.interrupt(OTHER, 0xfee0_0000, 0x61), Ok((0x61, 0)));
+    assert_eq!(fake.interrupt(OTHER, 0xfee0_0000, 0x62), Ok((0x62, 1)));
+    assert_eq!(fake.interrupt(DISK, 0xfee0_0000, 0x61), Err(()));
 }

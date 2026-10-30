@@ -577,8 +577,12 @@ boots.
 	given to it, which must stay zero, with the stopped write logged
 	where the IOMMU reports it (QEMU's AMD IOMMU does not); into the same
 	page once mapped for it with *map_dma*, which must arrive; and again
-	once taken back with *unmap_dma*, which must stay zero. Reports
-	*selftest iommu: passed*.
+	once taken back with *unmap_dma*, which must stay zero. Then, with
+	interrupt remapping (ADR 0166), has *edu* raise its MSI with the
+	message of an interrupt allocated for it, which must arrive within a
+	second, and with that of one allocated for the host bridge of its
+	segment, which must not arrive within 50 ms. Reports *selftest
+	iommu: passed*.
 
 # TRACE POINTS
 

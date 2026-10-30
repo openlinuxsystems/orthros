@@ -129,13 +129,13 @@ pub fn start(pressed: fn()) -> Option<&'static str> {
         pm1.status.write(FIXED_STATUS);
     }
     EVENTS.call_once(|| Events { pm1: [Some(pm1a), pm1b], gpe, pressed });
-    let Some((vector, _)) = devices::allocate(0, interrupt, 0) else {
+    let Some((vector, _)) = devices::allocate(None, 0, interrupt, 0) else {
         radix_klog::warn!("Power: no interrupt vector is free for ACPI's SCI");
         return None;
     };
     let destination = smp::info(0).map_or(0, |cpu| cpu.hardware_id);
     if apic::route_sci(acpi.madt.as_ref(), irq, vector as u8, destination).is_none() {
-        radix_klog::warn!("Power: no I/O APIC has ISA interrupt {irq}, ACPI's SCI");
+        radix_klog::warn!("Power: ACPI's SCI, ISA interrupt {irq}, could not be routed");
         devices::free(vector);
         return None;
     }

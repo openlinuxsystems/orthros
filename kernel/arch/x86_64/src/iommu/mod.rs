@@ -20,6 +20,13 @@
 //! Faults are logged, at most [`FAULTS_LOGGED`] in each
 //! [`FAULT_WINDOW_NS`].
 //!
+//! Interrupts are remapped too (ADR 0166) where every unit can and every
+//! I/O APIC is one a unit names: each interrupt vector a device or an I/O
+//! APIC input is given ([`remap`], [`remap_ioapic`]) gets an interrupt
+//! entry of the same number, which only that device's requests match,
+//! and every other interrupt is blocked. A vector given back loses its
+//! entry ([`unremap`]).
+//!
 //! Locks: a device's domain, then its unit, then the frame allocator's.
 //! The fault interrupt takes only the lock of the unit's fault records or
 //! event log, registers of their own, so it never waits for a change to
@@ -30,12 +37,13 @@ mod vtd;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use radix_hw::MsiMessage;
 use radix_hw::pci::Address;
 use radix_mm::Owner;
 use radix_sync::{Once, SpinLock};
 
 use crate::memory;
-use crate::{acpi, cpu, devices, time};
+use crate::{acpi, apic, cpu, devices, time};
 
 /// The most units used.
 const MAX_UNITS: usize = 8;
@@ -168,6 +176,15 @@ impl Remapper {
             Covers::Amd(covers) => covers.requester(source),
         }
     }
+
+    /// The requester ID the interrupts of the I/O APIC `id` carry, if it
+    /// names that I/O APIC.
+    fn ioapic(&self, id: u8) -> Option<u16> {
+        match &self.covers {
+            Covers::Vtd(covers) => covers.ioapic(id),
+            Covers::Amd(covers) => covers.ioapic(id),
+        }
+    }
 }
 
 /// A function with DMA, and its domain.
@@ -193,6 +210,11 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOGGED: SpinLock<(u64, u32)> = SpinLock::new((0, 0));
 /// A unit stopped invalidating; told of once.
 static STALLED: AtomicBool = AtomicBool::new(false);
+/// The interrupt entries given out, by vector: [`REMAPPED`], the unit's
+/// number from bit 16 and the requester ID in the low 16 bits; 0 for none.
+static REMAPS: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
+/// A vector of [`REMAPS`] has an entry.
+const REMAPPED: u32 = 1 << 31;
 
 /// Whether a unit translates DMA.
 pub fn active() -> bool {
@@ -470,6 +492,168 @@ pub fn unmap(source: Address, frames: &[(u64, u32)]) {
     }
 }
 
+/// Whether every I/O APIC is one a unit with an engine names, so that its
+/// inputs can be remapped; else the ID of one that is not.
+fn ioapics_named() -> Result<(), u8> {
+    let mut missing = None;
+    apic::ioapics(|io| {
+        let named = UNITS
+            .iter()
+            .map_while(Once::get)
+            .any(|remapper| remapper.engine.is_some() && remapper.ioapic(io.id).is_some());
+        if !named && missing.is_none() {
+            missing = Some(io.id);
+        }
+    });
+    missing.map_or(Ok(()), Err)
+}
+
+/// How a device raises an interrupt it is given.
+pub enum Remap {
+    /// As it would with no IOMMU: no unit remaps its interrupts.
+    Off,
+    /// Through its interrupt entry, with this message.
+    To(MsiMessage),
+    /// Its unit remaps interrupts and could not give it an entry, so it
+    /// cannot raise the interrupt at all.
+    Failed,
+}
+
+/// Gives `source` an interrupt entry for `vector`, sent to the CPU whose
+/// APIC ID is `destination`, or to `fallback` if the entry cannot name
+/// it, when its unit remaps interrupts.
+pub fn remap(source: Address, vector: u8, destination: u32, fallback: u32) -> Remap {
+    let Some(index) = remapper_of(source) else { return Remap::Off };
+    let Some(remapper) = UNITS[index].get() else { return Remap::Off };
+    let requester = remapper.requester(source);
+    let result = match &remapper.engine {
+        Some(Engine::Vtd(unit)) => {
+            let mut unit = unit.lock_irq();
+            if !unit.remapping() {
+                return Remap::Off;
+            }
+            let to =
+                if destination <= 0xff || unit.names_every_cpu() { destination } else { fallback };
+            unit.remap(vector, vector, to, requester, false).map_err(Stalled::Vtd).map(|()| {
+                let (address, data) = radix_vtd::remappable(vector);
+                MsiMessage { address, data }
+            })
+        }
+        Some(Engine::Amd(unit)) => {
+            let mut unit = unit.lock_irq();
+            if !unit.remapping() {
+                return Remap::Off;
+            }
+            let to = if destination <= 0xff { destination } else { fallback } as u8;
+            // The message is the one it would send untranslated: its data
+            // picks the entry.
+            unit.remap(requester, vector, to).map_err(Stalled::Amd).map(|()| MsiMessage {
+                address: 0xfee0_0000 | (u64::from(to) << 12),
+                data: u32::from(vector),
+            })
+        }
+        None => return Remap::Off,
+    };
+    match result {
+        Ok(message) => {
+            let given = REMAPPED | ((index as u32) << 16) | u32::from(requester);
+            REMAPS[usize::from(vector)].store(given, Ordering::Release);
+            Remap::To(message)
+        }
+        Err(err) => {
+            radix_klog::warn!("IOMMU: {source} could not be given interrupt {vector:#x}: {err}");
+            Remap::Failed
+        }
+    }
+}
+
+/// How an I/O APIC's redirection entry raises an interrupt it is given.
+pub enum IoApicEntry {
+    /// As it would with no IOMMU, its destination in the high word.
+    Plain,
+    /// Through an interrupt entry, with this high word.
+    Remapped(u32),
+    /// Its unit remaps interrupts and could not give it an entry.
+    Failed,
+}
+
+/// Gives the I/O APIC `id` an interrupt entry for `vector`, sent to the
+/// CPU whose APIC ID is `destination` (else `fallback`, as [`remap`]),
+/// level-triggered if `level`, when its unit remaps interrupts. Its
+/// redirection entry keeps `vector` in its low word: on AMD-Vi that picks
+/// the entry, and on VT-d the entry's handle is the vector too.
+pub fn remap_ioapic(
+    id: u8,
+    vector: u8,
+    destination: u32,
+    fallback: u32,
+    level: bool,
+) -> IoApicEntry {
+    let found = UNITS
+        .iter()
+        .map_while(Once::get)
+        .enumerate()
+        .find_map(|(index, remapper)| Some((index, remapper, remapper.ioapic(id)?)));
+    let Some((index, remapper, requester)) = found else { return IoApicEntry::Plain };
+    let result = match &remapper.engine {
+        Some(Engine::Vtd(unit)) => {
+            let mut unit = unit.lock_irq();
+            if !unit.remapping() {
+                return IoApicEntry::Plain;
+            }
+            let to =
+                if destination <= 0xff || unit.names_every_cpu() { destination } else { fallback };
+            // The remappable format (bit 48) with the handle from bit 49.
+            let high = (1 << 16) | (u32::from(vector) << 17);
+            unit.remap(vector, vector, to, requester, level).map(|()| high).map_err(Stalled::Vtd)
+        }
+        Some(Engine::Amd(unit)) => {
+            let mut unit = unit.lock_irq();
+            if !unit.remapping() {
+                return IoApicEntry::Plain;
+            }
+            let to = if destination <= 0xff { destination } else { fallback } as u8;
+            let high = u32::from(to) << 24;
+            unit.remap(requester, vector, to).map(|()| high).map_err(Stalled::Amd)
+        }
+        None => return IoApicEntry::Plain,
+    };
+    match result {
+        Ok(high) => {
+            let given = REMAPPED | ((index as u32) << 16) | u32::from(requester);
+            REMAPS[usize::from(vector)].store(given, Ordering::Release);
+            IoApicEntry::Remapped(high)
+        }
+        Err(err) => {
+            radix_klog::warn!(
+                "IOMMU: I/O APIC {id} could not be given interrupt {vector:#x}: {err}"
+            );
+            IoApicEntry::Failed
+        }
+    }
+}
+
+/// Takes away the interrupt entry of `vector`, if it has one: once this
+/// returns, the device it was given to can no longer raise it.
+pub fn unremap(vector: u8) {
+    let given = REMAPS[usize::from(vector)].swap(0, Ordering::AcqRel);
+    if given & REMAPPED == 0 {
+        return;
+    }
+    let index = ((given >> 16) & 0xff) as usize;
+    let requester = given as u16;
+    let Some(engine) = UNITS.get(index).and_then(Once::get).and_then(|r| r.engine.as_ref()) else {
+        return;
+    };
+    let result = match engine {
+        Engine::Vtd(unit) => unit.lock_irq().unremap(vector).map_err(Stalled::Vtd),
+        Engine::Amd(unit) => unit.lock_irq().unremap(requester, vector).map_err(Stalled::Amd),
+    };
+    if let Err(err) = result {
+        stalled(&err);
+    }
+}
+
 /// A fault a unit reported: the device, what it tried, and why it was
 /// stopped.
 #[derive(Clone, Copy)]
@@ -477,6 +661,8 @@ struct Fault {
     source: Option<Address>,
     address: u64,
     write: bool,
+    /// It raised an interrupt, rather than reaching memory.
+    interrupt: bool,
     why: &'static str,
 }
 
@@ -497,6 +683,7 @@ fn on_fault(index: usize) {
                 source: Some(requester(remapper.segment, fault.source)),
                 address: fault.address,
                 write: fault.write,
+                interrupt: fault.interrupt(),
                 why: fault.why(),
             });
         }),
@@ -505,6 +692,7 @@ fn on_fault(index: usize) {
                 source: event.device.map(|id| requester(remapper.segment, id)),
                 address: event.address,
                 write: event.write,
+                interrupt: event.interrupt(),
                 why: event.why(),
             });
         }),
@@ -523,6 +711,12 @@ fn on_fault(index: usize) {
             window.1 += 1;
         }
         match fault.source {
+            Some(source) if fault.interrupt => {
+                radix_klog::warn!(
+                    "IOMMU: {source} was stopped raising an interrupt: {}",
+                    fault.why
+                );
+            }
             Some(source) => radix_klog::warn!(
                 "IOMMU: {source} was stopped {} {:#x}: {}",
                 if fault.write { "writing to" } else { "reading from" },

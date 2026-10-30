@@ -153,14 +153,14 @@ pub fn start(byte: fn(u8)) -> Option<&'static str> {
     // Scanning on. A keyboard that does not answer may still send keys.
     let answered = write(DATA, ENABLE_SCANNING) && read_waiting() == Some(ACK);
     BYTE.call_once(|| byte);
-    let Some((vector, _)) = devices::allocate(0, interrupt, 0) else {
+    let Some((vector, _)) = devices::allocate(None, 0, interrupt, 0) else {
         radix_klog::warn!("Keyboard: no interrupt vector is free");
         return None;
     };
     let destination = smp::info(0).map_or(0, |cpu| cpu.hardware_id);
     let madt = acpi::get().and_then(|acpi| acpi.madt.as_ref());
     let Some(gsi) = apic::route_isa(madt, IRQ_KEYBOARD, vector as u8, destination) else {
-        radix_klog::warn!("Keyboard: no I/O APIC has ISA interrupt {IRQ_KEYBOARD}");
+        radix_klog::warn!("Keyboard: ISA interrupt {IRQ_KEYBOARD} could not be routed");
         devices::free(vector);
         return None;
     };

@@ -1618,7 +1618,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "iommu",
-        about: "Behind QEMU's Intel IOMMU each device reaches only what it is given: the disk-raw checks pass, and edu's DMA to a page never given or taken back is stopped",
+        about: "Behind QEMU's Intel IOMMU each device reaches only what it is given and raises only its own interrupts: the disk-raw checks pass, edu's DMA to a page never given or taken back is stopped, edu cannot raise another function's interrupt, and the power button's goes through the I/O APIC's entry",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep selftest=iommu init-after-selftest -- /system/tests/storage raw vda sda \
@@ -1628,14 +1628,14 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &["-device", "intel-iommu,intremap=off", "-device", "edu,dma_mask=0xffffffff"],
+        qemu: &["-device", "intel-iommu,intremap=on", "-device", "edu,dma_mask=0xffffffff"],
         script: iommu,
         disks: IOMMU_DISKS,
         second: None,
     },
     Case {
         name: "iommu-amd",
-        about: "Behind QEMU's AMD IOMMU each device reaches only what it is given: the disk-raw checks pass, and edu's DMA to a page never given or taken back is stopped",
+        about: "Behind QEMU's AMD IOMMU each device reaches only what it is given and raises only its own interrupts: the iommu checks, but for the stopped writes and interrupts, which QEMU's AMD IOMMU does not log",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep selftest=iommu init-after-selftest -- /system/tests/storage raw vda sda \
@@ -1645,7 +1645,7 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &["-device", "amd-iommu,intremap=off", "-device", "edu,dma_mask=0xffffffff"],
+        qemu: &["-device", "amd-iommu,intremap=on", "-device", "edu,dma_mask=0xffffffff"],
         script: iommu_amd,
         disks: IOMMU_DISKS,
         second: None,
@@ -4932,10 +4932,13 @@ fn disk_raw(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_end(vm, "raw")
 }
 
-/// The `iommu` test (ADR 0164): the `disk-raw` checks, every disk's and
-/// the boot stick's DMA going through QEMU's VT-d unit, then what the
-/// kernel said of the unit and of the edu device's self-test, whose two
-/// copies to a page it was not given the unit stopped.
+/// The `iommu` test (ADR 0164, 0166): the `disk-raw` checks, every
+/// disk's and the boot stick's DMA and interrupts going through QEMU's
+/// VT-d unit, then what the kernel said of the unit and of the edu
+/// device's self-test, whose two copies to a page it was not given the
+/// unit stopped, as it did the interrupt edu raised with another
+/// function's message. The power button's interrupt, through the I/O
+/// APIC's entry, powers the machine off.
 fn iommu(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disk_raw(vm, case)?;
     let log = vm.log();
@@ -4943,9 +4946,11 @@ fn iommu(vm: &mut Vm, case: &Case) -> Result<(), String> {
         .lines()
         .find_map(|line| line.find("IOMMU: VT-d ").map(|at| &line[at..]))
         .ok_or("the kernel never said it took over the IOMMU")?;
-    // QEMU's DMAR names each device the unit translates.
-    let described = unit.contains(" devices: 3-level page tables, ");
-    if !described || !unit.ends_with(", queued invalidation") {
+    // QEMU's DMAR names each device the unit translates. Under KVM the
+    // entries name 32-bit APIC IDs.
+    let described = unit.contains(" devices: 3-level page tables, ")
+        && unit.contains(", queued invalidation, interrupt remapping");
+    if !described {
         return Err(format!("the kernel described the IOMMU as \"{unit}\""));
     }
     for needle in ["selftest iommu: passed", " reaches only what is mapped for it (domain "] {
@@ -4957,12 +4962,28 @@ fn iommu(vm: &mut Vm, case: &Case) -> Result<(), String> {
     if stopped != 2 {
         return Err(format!("the IOMMU stopped {stopped} writes, not edu's 2"));
     }
-    Ok(())
+    // edu's interrupt with the host bridge's message: its requester ID is
+    // not the entry's.
+    let blocked = log.matches(" was stopped raising an interrupt: ").count();
+    if blocked != 1 {
+        return Err(format!("the IOMMU stopped {blocked} interrupts, not edu's 1"));
+    }
+    power_off_by_button(vm)
 }
 
-/// The `iommu-amd` test (ADR 0165): the `iommu` test behind QEMU's AMD-Vi
-/// IOMMU. QEMU's IOMMU logs no event for a page that is not mapped, so the
-/// stopped copies show only in edu's self-test, which reads the page back.
+/// Presses the power button, whose interrupt comes through the I/O APIC,
+/// and waits for Spark to power the machine off.
+fn power_off_by_button(vm: &mut Vm) -> Result<(), String> {
+    vm.press_power_button()?;
+    vm.expect("Power: the power button was pressed")?;
+    vm.expect("spark: the power button was pressed; powering off the machine")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The `iommu-amd` test (ADR 0165, 0166): the `iommu` test behind QEMU's
+/// AMD-Vi IOMMU. QEMU's IOMMU logs no event for a page that is not mapped
+/// or an interrupt that is blocked, so those show only in edu's
+/// self-test, which reads the page back and counts the interrupts.
 fn iommu_amd(vm: &mut Vm, case: &Case) -> Result<(), String> {
     disk_raw(vm, case)?;
     let log = vm.log();
@@ -4971,7 +4992,8 @@ fn iommu_amd(vm: &mut Vm, case: &Case) -> Result<(), String> {
         .find_map(|line| line.find("IOMMU: AMD-Vi ").map(|at| &line[at..]))
         .ok_or("the kernel never said it took over the IOMMU")?;
     let described = unit.starts_with("IOMMU: AMD-Vi unit 0 at 0xfed80000 translates ")
-        && unit.contains(" device IDs: 4-level page tables, 65536 domains, command buffer ");
+        && unit.contains(" device IDs: 4-level page tables, 65536 domains, command buffer ")
+        && unit.contains(", interrupt remapping");
     if !described {
         return Err(format!("the kernel described the IOMMU as \"{unit}\""));
     }
@@ -4980,7 +5002,7 @@ fn iommu_amd(vm: &mut Vm, case: &Case) -> Result<(), String> {
             return Err(format!("the kernel never said \"{needle}\""));
         }
     }
-    Ok(())
+    power_off_by_button(vm)
 }
 
 /// The `disk-check` test: after the kernel's benchmarks, with no disk

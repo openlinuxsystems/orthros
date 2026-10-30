@@ -8,6 +8,12 @@
 //! no graphics driver hands it memory yet. The memory the firmware
 //! reserved for devices (RMRRs) is mapped for them before any unit
 //! translates.
+//!
+//! Once every unit translates, interrupts are remapped (ADR 0166) if every
+//! unit can, with queued invalidation, and every I/O APIC is one a unit's
+//! scope names: then the compatibility format is blocked and each
+//! interrupt comes through its entry. With the local APICs in x2APIC mode
+//! entries name 32-bit APIC IDs where the unit can.
 
 use core::fmt::Write as _;
 use core::sync::atomic::AtomicU32;
@@ -19,11 +25,13 @@ use radix_sync::SpinLock;
 use radix_vtd::{Caps, Unit};
 
 use super::{Engine, Faults, MAX_UNITS, Remapper, Tables, UNITS, config};
-use crate::devices;
 use crate::memory::PAGE;
+use crate::{apic, devices};
 
 /// The most devices a unit names in its scopes.
 const MAX_SCOPES: usize = 16;
+/// The most I/O APICs a unit names.
+const MAX_IOAPICS: usize = 8;
 
 /// A device a unit names: one function, or a bridge and the buses below it.
 #[derive(Clone, Copy, Debug)]
@@ -46,12 +54,19 @@ impl Scope {
 pub(super) struct Covers {
     pub(super) include_all: bool,
     scopes: [Option<Scope>; MAX_SCOPES],
+    /// The I/O APICs it names: each one's ID and requester ID.
+    ioapics: [Option<(u8, u16)>; MAX_IOAPICS],
 }
 
 impl Covers {
     pub(super) fn names(&self, source: Address) -> bool {
         let devfn = (source.device << 3) | source.function;
         self.scopes.iter().flatten().any(|scope| scope.names(source.bus, devfn))
+    }
+
+    /// The requester ID of the I/O APIC `id`, if it names it.
+    pub(super) fn ioapic(&self, id: u8) -> Option<u16> {
+        self.ioapics.iter().flatten().find(|(named, _)| *named == id).map(|&(_, source)| source)
     }
 }
 
@@ -99,6 +114,20 @@ fn scopes(unit: &DmarUnit<'_>) -> ([Option<Scope>; MAX_SCOPES], bool) {
     (found, displays && count > 0)
 }
 
+/// The I/O APICs the scopes of `unit` name, with their requester IDs.
+fn ioapics(unit: &DmarUnit<'_>) -> [Option<(u8, u16)>; MAX_IOAPICS] {
+    let mut found = [None; MAX_IOAPICS];
+    let named = unit.scopes().filter(|scope| scope.kind == ScopeKind::IoApic).filter_map(|scope| {
+        let (bus, device, function) = resolve(unit.segment, scope.start_bus, scope.path())?;
+        let source = (u16::from(bus) << 8) | (u16::from(device) << 3) | u16::from(function);
+        Some((scope.enumeration_id, source))
+    });
+    for (slot, ioapic) in found.iter_mut().zip(named) {
+        *slot = Some(ioapic);
+    }
+    found
+}
+
 /// Takes over every unit the DMAR table `sdt` lists and turns translation
 /// on; whether any unit translates.
 pub(super) fn init(sdt: &Sdt<'_>) -> bool {
@@ -121,13 +150,10 @@ pub(super) fn init(sdt: &Sdt<'_>) -> bool {
     }
     reserve(&dmar);
     let mut on = false;
-    for (index, slot) in UNITS.iter().enumerate() {
+    for slot in &UNITS {
         let Some(remapper) = slot.get() else { break };
         let Some(Engine::Vtd(unit)) = &remapper.engine else { continue };
-        let (enabled, version, found_on, caps) = {
-            let mut unit = unit.lock_irq();
-            (unit.enable(), unit.version(), unit.found_on(), unit.caps())
-        };
+        let enabled = unit.lock_irq().enable();
         if let Err(err) = enabled {
             radix_klog::warn!(
                 "IOMMU: the unit at {:#x} would not translate: {err}",
@@ -136,9 +162,73 @@ pub(super) fn init(sdt: &Sdt<'_>) -> bool {
             continue;
         }
         on = true;
-        log_unit(index, remapper, caps, version, found_on);
+    }
+    if on {
+        remap_interrupts();
+    }
+    let mut remapped = false;
+    for (index, slot) in UNITS.iter().enumerate() {
+        let Some(remapper) = slot.get() else { break };
+        let Some(Engine::Vtd(unit)) = &remapper.engine else { continue };
+        let (translating, remapping, every_cpu, version, found_on, caps) = {
+            let unit = unit.lock_irq();
+            (
+                unit.translating(),
+                unit.remapping(),
+                unit.names_every_cpu(),
+                unit.version(),
+                unit.found_on(),
+                unit.caps(),
+            )
+        };
+        if translating {
+            let remaps = remapping.then_some(every_cpu);
+            log_unit(index, remapper, caps, version, found_on, remaps);
+        }
+        remapped |= remapping;
+    }
+    if on && !remapped {
+        radix_klog::info!("IOMMU: interrupts are not remapped; a device can raise any interrupt");
     }
     on
+}
+
+/// Has every unit remap interrupts, if every unit can and every I/O APIC
+/// is one a unit names.
+fn remap_interrupts() {
+    let units = || {
+        UNITS.iter().map_while(|slot| slot.get()).filter_map(|remapper| match &remapper.engine {
+            Some(Engine::Vtd(unit)) => Some((remapper, unit)),
+            _ => None,
+        })
+    };
+    let unable = units().find(|(_, unit)| {
+        let unit = unit.lock_irq();
+        !(unit.caps().interrupt_remapping() && unit.queued())
+    });
+    if let Some((remapper, _)) = unable {
+        radix_klog::info!(
+            "IOMMU: the unit at {:#x} cannot remap interrupts with queued invalidation",
+            remapper.registers
+        );
+        return;
+    }
+    if let Err(id) = super::ioapics_named() {
+        radix_klog::info!(
+            "IOMMU: no unit names I/O APIC {id}, so its interrupts cannot be remapped"
+        );
+        return;
+    }
+    let x2apic = apic::is_x2apic();
+    for (remapper, unit) in units() {
+        let result = unit.lock_irq().remap_interrupts(x2apic);
+        if let Err(err) = result {
+            radix_klog::warn!(
+                "IOMMU: the unit at {:#x} would not remap interrupts: {err}",
+                remapper.registers
+            );
+        }
+    }
 }
 
 /// Takes over the unit `found` as unit `index`; false if it was not used.
@@ -163,6 +253,7 @@ fn take(found: &DmarUnit<'_>, index: usize) -> bool {
         regs
     };
     let (scopes, displays) = scopes(found);
+    let ioapics = ioapics(found);
     let unit = if displays && !found.include_all {
         radix_klog::info!(
             "IOMMU: the unit at {:#x} translates only the display controller; left off, as no \
@@ -181,7 +272,7 @@ fn take(found: &DmarUnit<'_>, index: usize) -> bool {
     };
     let faults = unit.as_ref().map(|unit| Faults::Vtd(SpinLock::new(unit.fault_records())));
     let engine = unit.map(|mut unit| {
-        if let Some((_, message)) = devices::allocate(0, super::on_fault, index) {
+        if let Some((_, message)) = devices::allocate(None, 0, super::on_fault, index) {
             unit.set_fault_interrupt(message.address, message.data);
         }
         Engine::Vtd(SpinLock::new(unit))
@@ -189,7 +280,7 @@ fn take(found: &DmarUnit<'_>, index: usize) -> bool {
     let remapper = Remapper {
         registers: found.registers,
         segment: found.segment,
-        covers: super::Covers::Vtd(Covers { include_all: found.include_all, scopes }),
+        covers: super::Covers::Vtd(Covers { include_all: found.include_all, scopes, ioapics }),
         engine,
         faults,
         domains: caps.domains(),
@@ -213,8 +304,16 @@ fn reserve(dmar: &Dmar<'_>) {
     }
 }
 
-/// Logs what unit `index` does, now that it translates.
-fn log_unit(index: usize, remapper: &Remapper, caps: Caps, version: (u8, u8), found_on: bool) {
+/// Logs what unit `index` does, now that it translates: `remaps` if it
+/// remaps interrupts, true if its entries name 32-bit APIC IDs.
+fn log_unit(
+    index: usize,
+    remapper: &Remapper,
+    caps: Caps,
+    version: (u8, u8),
+    found_on: bool,
+    remaps: Option<bool>,
+) {
     let super::Covers::Vtd(covers) = &remapper.covers else { return };
     let mut what = TextBuf::<48>::new();
     let _ = if covers.include_all {
@@ -224,7 +323,7 @@ fn log_unit(index: usize, remapper: &Remapper, caps: Caps, version: (u8, u8), fo
     };
     radix_klog::info!(
         "IOMMU: VT-d {}.{} unit {index} at {:#x} translates {what}: {}-level page tables, {} \
-         domains, {} invalidation{}{}",
+         domains, {} invalidation{}{}{}",
         version.0,
         version.1,
         remapper.registers,
@@ -232,6 +331,11 @@ fn log_unit(index: usize, remapper: &Remapper, caps: Caps, version: (u8, u8), fo
         caps.domains(),
         if caps.queued() { "queued" } else { "register" },
         if caps.caching_mode() { ", caching mode" } else { "" },
+        match remaps {
+            Some(true) => ", interrupt remapping to 32-bit APIC IDs",
+            Some(false) => ", interrupt remapping",
+            None => "",
+        },
         if found_on { "; the firmware had left it on" } else { "" }
     );
 }

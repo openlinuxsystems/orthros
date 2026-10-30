@@ -633,15 +633,20 @@ _target/userspace/_).
 		invalidation, every disk and the stick must work with each device
 		reaching only what is mapped for it, and *selftest=iommu*
 		(*radix-debug*(7)) must pass, its two stopped writes logged (ADR
-		0164).
+		0164). The unit remaps interrupts (QEMU's *intremap=on*, with
+		*kernel-irqchip=split* under KVM), and the case ends with the
+		power button, whose SCI comes through the I/O APIC's interrupt
+		entry: Spark must power the machine off (ADR 0166).
 
 	*iommu-amd*
 		The *iommu* test behind QEMU's AMD IOMMU (*amd-iommu*), which the
 		ACPI IVRS table describes: the IOMMU must translate with 4-level
 		page tables and 65536 domains, every disk and the stick must work
 		with each device reaching only what is mapped for it, and
-		*selftest=iommu* must pass. QEMU's AMD IOMMU logs no event for a
-		page that is not mapped, so the test counts none (ADR 0165).
+		*selftest=iommu* must pass, and the power button must power the
+		machine off through the remapped SCI. QEMU's AMD IOMMU logs no
+		event for a page that is not mapped, so the test counts none (ADR
+		0165, 0166).
 
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial

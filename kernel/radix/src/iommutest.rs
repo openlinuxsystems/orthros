@@ -4,16 +4,21 @@
 //! `selftest=iommu`: QEMU's `edu` device, behind its IOMMU, copies by DMA
 //! from and to a page given to it, and is stopped copying into one that
 //! was never given to it or was taken back (ADR 0164). The unit logs each
-//! stopped copy as a fault.
+//! stopped copy as a fault. With interrupt remapping (ADR 0166), edu's
+//! own interrupt arrives, and one given to another function, which edu
+//! raises with that function's message, is blocked.
 //!
 //! edu's registers (QEMU's docs/specs/edu.rst): 0x00 reads `0x010000ed`;
 //! a DMA copies 0x90 bytes from 0x80 to 0x88 when bit 0 of 0x98 is set,
 //! from memory into the device's own buffer at 0x40000, or the other way
-//! with bit 1, and bit 0 clears when it is done.
+//! with bit 1, and bit 0 clears when it is done. A write to 0x60 raises
+//! its interrupt, through its MSI capability, and one to 0x64 lowers it.
+
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use radix_hal::{Devices, PciSegment};
-use radix_hw::pci::{self, Bar, Function};
-use radix_hw::{Dma, Mmio};
+use radix_hw::pci::{self, Address, Bar, Function, Msi};
+use radix_hw::{Dma, Mmio, MsiMessage};
 use radix_klog::{error, info};
 
 use crate::{Arch, sched};
@@ -30,12 +35,18 @@ const TO_MEMORY: u64 = 1 << 1;
 const BUFFER: u64 = 0x40000;
 /// The bytes each copy moves.
 const BYTES: u64 = 256;
+const RAISE: usize = 0x60;
+const LOWER: usize = 0x64;
+
+/// The interrupts the test's two vectors brought: edu's own, and the one
+/// given to another function.
+static RAISED: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
 
 pub fn run() {
     match check() {
         Ok(()) => info!(
-            "selftest iommu: passed; the edu device reached only the pages given to it, and lost \
-             one taken back"
+            "selftest iommu: passed; the edu device reached only the pages given to it, lost one \
+             taken back, and raised only its own interrupt"
         ),
         Err(what) => error!("selftest iommu: failed; {what}"),
     }
@@ -129,5 +140,62 @@ fn check() -> Result<(), &'static str> {
     if !untouched(&other) {
         return Err("edu still wrote to a page after it was taken back");
     }
-    Ok(())
+    interrupts(&function, &regs)
+}
+
+fn raised(which: usize) {
+    RAISED[which].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Has edu raise its interrupt with `message`, and waits up to `ns` for
+/// the test's vector `which` to bring it; whether it did.
+fn raise(
+    function: &Function,
+    msi: Msi,
+    regs: &Mmio,
+    message: MsiMessage,
+    which: usize,
+    ns: u64,
+) -> bool {
+    let before = RAISED[which].load(Ordering::Relaxed);
+    msi.enable(function, message);
+    regs.write32(RAISE, 1);
+    let deadline = sched::now_ns() + ns;
+    let came = loop {
+        if RAISED[which].load(Ordering::Relaxed) != before {
+            break true;
+        }
+        if sched::now_ns() > deadline {
+            break false;
+        }
+        sched::sleep_ns(1_000_000);
+    };
+    regs.write32(LOWER, 1);
+    msi.disable(function);
+    came
+}
+
+/// edu raises its own interrupt, which arrives, and then one given to the
+/// host bridge of its segment, which raises none, with the host bridge's
+/// message: the IOMMU blocks it.
+fn interrupts(function: &Function, regs: &Mmio) -> Result<(), &'static str> {
+    let msi = Msi::find(function).ok_or("edu has no MSI capability")?;
+    let source = function.address();
+    let bridge = Address { segment: source.segment, bus: 0, device: 0, function: 0 };
+    let (own, message) =
+        <Arch as Devices>::allocate_interrupt(source, raised, 0).ok_or("no vector is free")?;
+    let Some((given, elsewhere)) = <Arch as Devices>::allocate_interrupt(bridge, raised, 1) else {
+        <Arch as Devices>::free_interrupt(own);
+        return Err("no second vector is free");
+    };
+    let result = if !raise(function, msi, regs, message, 0, 1_000_000_000) {
+        Err("edu's own interrupt did not arrive within a second")
+    } else if raise(function, msi, regs, elsewhere, 1, 50_000_000) {
+        Err("edu raised an interrupt given to another function")
+    } else {
+        Ok(())
+    };
+    <Arch as Devices>::free_interrupt(own);
+    <Arch as Devices>::free_interrupt(given);
+    result
 }

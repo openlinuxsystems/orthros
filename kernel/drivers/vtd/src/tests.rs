@@ -14,7 +14,9 @@ use std::vec::Vec;
 use proptest::prelude::*;
 use radix_hw::{Mmio, Registers};
 
-use crate::{Caps, Domain, Flush, MapError, Memory, PAGE, Refused, Unit, blocks};
+use crate::{
+    Caps, Domain, Fault, Flush, MapError, Memory, PAGE, Refused, Unit, blocks, remappable,
+};
 
 /// A page of table entries, aligned as the unit needs.
 #[repr(C, align(4096))]
@@ -83,8 +85,23 @@ impl Memory for HostMemory {
 /// What the simulated unit was told to invalidate, and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Told {
-    Context { granularity: u64, source: u16, domain: u16, queued: bool },
-    Iotlb { granularity: u64, domain: u16, address: u64, order: u8, queued: bool },
+    Context {
+        granularity: u64,
+        source: u16,
+        domain: u16,
+        queued: bool,
+    },
+    Iotlb {
+        granularity: u64,
+        domain: u16,
+        address: u64,
+        order: u8,
+        queued: bool,
+    },
+    /// The interrupt entry cache: one entry, or all.
+    Interrupts {
+        index: Option<u16>,
+    },
 }
 
 #[derive(Default)]
@@ -111,6 +128,12 @@ struct State {
     deaf: u32,
     /// Refuse every queued descriptor.
     refuse: bool,
+    /// The interrupt remapping table register, and the table the unit took
+    /// from it.
+    interrupt_register: u64,
+    interrupt_table: Option<u64>,
+    /// What the interrupt entry cache keeps: index to entry.
+    interrupt_cache: BTreeMap<u16, (u64, u64)>,
 }
 
 /// A simulated remapping unit.
@@ -139,9 +162,13 @@ fn cap(levels: &[u8]) -> u64 {
 }
 
 /// Extended capabilities: coherent if asked, queued if asked, interrupt
-/// remapping.
+/// remapping in extended interrupt mode.
 fn ecap(coherent: bool, queued: bool) -> u64 {
-    u64::from(coherent) | (u64::from(queued) << 1) | (1 << 3) | (((IOTLB_OFFSET / 16) as u64) << 8)
+    u64::from(coherent)
+        | (u64::from(queued) << 1)
+        | (1 << 3)
+        | (1 << 4)
+        | (((IOTLB_OFFSET / 16) as u64) << 8)
 }
 
 impl FakeUnit {
@@ -161,23 +188,84 @@ impl FakeUnit {
         let mut state = self.state.lock().unwrap();
         let result = self.translate(&mut state, source, address, write);
         if let Err(reason) = result {
-            let at = state.next_record;
-            if state.records[at].1 & (1 << 63) == 0 {
-                let kind = if write { 0 } else { 1 << 62 };
-                state.records[at] = (
-                    address & !(PAGE - 1),
-                    (1 << 63) | kind | (u64::from(reason) << 32) | u64::from(source),
-                );
-                if state.fault_status & 2 == 0 {
-                    state.fault_status = (state.fault_status & !0xff00) | ((at as u32) << 8);
-                }
-                state.fault_status |= 2;
-                state.next_record = (at + 1) % RECORDS;
-            } else {
-                state.fault_status |= 1;
-            }
+            Self::record(&mut state, source, address & !(PAGE - 1), write, reason);
         }
         result
+    }
+
+    /// Records a fault, if a recording register is free.
+    fn record(state: &mut State, source: u16, low: u64, write: bool, reason: u8) {
+        let at = state.next_record;
+        if state.records[at].1 & (1 << 63) == 0 {
+            let kind = if write { 0 } else { 1 << 62 };
+            state.records[at] =
+                (low, (1 << 63) | kind | (u64::from(reason) << 32) | u64::from(source));
+            if state.fault_status & 2 == 0 {
+                state.fault_status = (state.fault_status & !0xff00) | ((at as u32) << 8);
+            }
+            state.fault_status |= 2;
+            state.next_record = (at + 1) % RECORDS;
+        } else {
+            state.fault_status |= 1;
+        }
+    }
+
+    /// Delivers the interrupt the device `source` raises by writing `data`
+    /// at `address`, as the unit does: the vector and APIC ID it arrives
+    /// as, or the fault it records.
+    fn interrupt(&self, source: u16, address: u64, data: u32) -> Result<(u8, u32), u8> {
+        let mut state = self.state.lock().unwrap();
+        let result = Self::remap(&mut state, &self.memory, source, address, data);
+        if let Err(reason) = result {
+            let handle = ((address >> 5) & 0x7fff) | (((address >> 2) & 1) << 15);
+            Self::record(&mut state, source, handle << 48, true, reason);
+        }
+        result
+    }
+
+    fn remap(
+        state: &mut State,
+        memory: &HostMemory,
+        source: u16,
+        address: u64,
+        data: u32,
+    ) -> Result<(u8, u32), u8> {
+        let compatible = (data as u8, ((address >> 12) & 0xff) as u32);
+        if state.status & (1 << 25) == 0 {
+            return Ok(compatible);
+        }
+        if address & (1 << 4) == 0 {
+            return if state.status & (1 << 23) != 0 { Ok(compatible) } else { Err(0x25) };
+        }
+        let mut handle = ((address >> 5) & 0x7fff) | (((address >> 2) & 1) << 15);
+        if address & (1 << 3) != 0 {
+            handle += u64::from(data & 0xffff);
+        }
+        let register = state.interrupt_table.expect("remapping with a table");
+        if handle >= 2 << (register & 0xf) {
+            return Err(0x21);
+        }
+        let handle = handle as u16;
+        let (low, high) = match state.interrupt_cache.get(&handle) {
+            Some(&entry) => entry,
+            None => {
+                let at = (register & !0xfff) + u64::from(handle) * 16;
+                (memory.read(at), memory.read(at + 8))
+            }
+        };
+        if low & 1 == 0 {
+            return Err(0x22);
+        }
+        state.interrupt_cache.insert(handle, (low, high));
+        if (high >> 18) & 3 == 1 && high as u16 != source {
+            return Err(0x26);
+        }
+        let destination = if register & (1 << 11) != 0 {
+            (low >> 32) as u32
+        } else {
+            ((low >> 40) & 0xff) as u32
+        };
+        Ok(((low >> 16) as u8, destination))
     }
 
     fn translate(
@@ -277,6 +365,14 @@ impl FakeUnit {
                         queued: true,
                     },
                 ),
+                4 => {
+                    let index = (low & (1 << 4) != 0).then_some((low >> 32) as u16);
+                    match index {
+                        Some(index) => drop(state.interrupt_cache.remove(&index)),
+                        None => state.interrupt_cache.clear(),
+                    }
+                    state.told.push(Told::Interrupts { index });
+                }
                 5 => {
                     assert!(low & (1 << 5) != 0, "a wait descriptor writes its status");
                     let address = high & !3;
@@ -320,6 +416,7 @@ impl Registers for FakeUnit {
             0x64 => u64::from(state.protected),
             0x80 => state.queue_head,
             0x90 => state.queue_address,
+            0xb8 => state.interrupt_register,
             IOTLB_OFFSET => state.iotlb_address,
             o if o == IOTLB_OFFSET + 8 => state.iotlb_command,
             _ => 0,
@@ -344,11 +441,15 @@ impl Registers for FakeUnit {
             0x18 => {
                 let command = value as u32 & !state.deaf;
                 // The bits that stay follow the command; the others act once.
-                for bit in [31, 26, 25] {
+                for bit in [31, 26, 25, 23] {
                     let mask = 1 << bit;
                     if command & mask != 0 {
                         if bit == 31 {
                             assert!(state.root.is_some(), "translation on without a root table");
+                        }
+                        if bit == 25 {
+                            assert!(state.interrupt_table.is_some(), "remapping without a table");
+                            assert!(state.status & (1 << 26) != 0, "remapping without the queue");
                         }
                         if bit == 26 && state.status & mask == 0 {
                             state.queue_head = 0;
@@ -361,6 +462,10 @@ impl Registers for FakeUnit {
                 if command & (1 << 30) != 0 {
                     state.root = Some(state.root_register & !0xfff);
                     state.status |= 1 << 30;
+                }
+                if command & (1 << 24) != 0 {
+                    state.interrupt_table = Some(state.interrupt_register);
+                    state.status |= 1 << 24;
                 }
             }
             0x20 => state.root_register = value,
@@ -392,6 +497,7 @@ impl Registers for FakeUnit {
             0x88 if queued => self.run_queue(&mut state, value & 0xfff0),
             0x88 => assert_eq!(value, 0, "a queue tail with the queue off"),
             0x90 => state.queue_address = value & !0xfff,
+            0xb8 => state.interrupt_register = value,
             IOTLB_OFFSET => state.iotlb_address = value,
             o if o == IOTLB_OFFSET + 8 => {
                 assert!(!queued, "a register invalidation while the queue is on");
@@ -482,13 +588,15 @@ fn what_firmware_left_on_goes_off_first() {
     {
         let mut state = fake.state.lock().unwrap();
         state.root = Some(0x7000);
-        state.status = (1 << 31) | (1 << 26) | (1 << 25) | (1 << 30);
+        state.status = (1 << 31) | (1 << 26) | (1 << 25) | (1 << 30) | (1 << 23);
+        state.interrupt_table = Some(0x8000);
     }
     let unit = Unit::new(fake.mmio(), memory.clone()).unwrap();
-    assert!(unit.found_on());
+    assert!(unit.found_on() && !unit.remapping());
     let status = fake.state.lock().unwrap().status;
     assert_eq!(status & (1 << 31), 0, "translation is off until enabled");
     assert_eq!(status & (1 << 25), 0, "interrupt remapping is off");
+    assert_eq!(status & (1 << 23), 0, "compatibility-format interrupts are no longer let through");
     assert_ne!(status & (1 << 26), 0, "the queue is on again, at its own page");
     assert_ne!(fake.state.lock().unwrap().root, Some(0x7000));
 }
@@ -727,6 +835,70 @@ fn a_queue_that_refuses_a_descriptor_is_reported() {
     fake.state.lock().unwrap().refuse = true;
     assert_eq!(unit.flush(&[Flush::All]), Err(Refused::QueueError));
     assert_eq!(fake.state.lock().unwrap().fault_status & (1 << 4), 0, "the error is cleared");
+}
+
+/// The faults `unit` recorded since last asked.
+fn faults(unit: &mut Unit<Arc<HostMemory>>) -> Vec<Fault> {
+    let mut found = Vec::new();
+    unit.faults(|fault| found.push(fault));
+    found
+}
+
+#[test]
+fn a_device_raises_only_the_interrupts_given_to_it() {
+    let (mut unit, fake, memory) = unit(&[4], true, true);
+    unit.enable().unwrap();
+    fake.told();
+    let live = memory.live();
+    // Before remapping, every interrupt goes through as it is.
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x60), Ok((0x60, 1)));
+    unit.remap_interrupts(false).unwrap();
+    assert!(unit.remapping() && !unit.names_every_cpu());
+    assert_eq!(memory.live(), live + 1, "the table is a page");
+    assert_eq!(fake.told(), [Told::Interrupts { index: None }]);
+    // The compatibility format is blocked, and so is an entry not given.
+    assert_eq!(fake.interrupt(DISK, 0xfee0_1000, 0x60), Err(0x25));
+    let (address, data) = remappable(0x51);
+    assert_eq!(fake.interrupt(DISK, address, data), Err(0x22));
+    unit.remap(0x51, 0x51, 3, DISK, false).unwrap();
+    assert_eq!(fake.told(), [Told::Interrupts { index: Some(0x51) }]);
+    assert_eq!(fake.interrupt(DISK, address, data), Ok((0x51, 3)));
+    // Only the device it was given to raises it.
+    assert_eq!(fake.interrupt(OTHER, address, data), Err(0x26));
+    // Taken away, it is blocked, though the unit had cached it.
+    unit.unremap(0x51).unwrap();
+    assert_eq!(fake.told(), [Told::Interrupts { index: Some(0x51) }]);
+    assert_eq!(fake.interrupt(DISK, address, data), Err(0x22));
+    let found = faults(&mut unit);
+    let reasons: Vec<u8> = found.iter().map(|fault| fault.reason).collect();
+    assert_eq!(reasons, [0x25, 0x22, 0x26, 0x22]);
+    assert!(found.iter().all(Fault::interrupt));
+    assert_eq!(found[0].why(), "the interrupt is in the compatibility format, which is blocked");
+    assert_eq!(found[2].source, OTHER);
+    assert_eq!(found[2].why(), "the interrupt is not one given to it");
+}
+
+#[test]
+fn x2apic_entries_name_every_cpu() {
+    let (mut unit, fake, _memory) = unit(&[4], false, true);
+    unit.remap_interrupts(true).unwrap();
+    assert!(unit.names_every_cpu());
+    assert_ne!(fake.state.lock().unwrap().interrupt_register & (1 << 11), 0);
+    // An I/O APIC's level-triggered input.
+    unit.remap(0x70, 0x70, 0x1_0002, OTHER, true).unwrap();
+    let (address, data) = remappable(0x70);
+    assert_eq!(fake.interrupt(OTHER, address, data), Ok((0x70, 0x1_0002)));
+    let (low, _) = fake.state.lock().unwrap().interrupt_cache[&0x70];
+    assert_ne!(low & (1 << 4), 0, "the entry is level-triggered");
+}
+
+#[test]
+fn a_unit_without_a_queue_does_not_remap_interrupts() {
+    let (mut unit, fake, _memory) = unit(&[4], true, false);
+    assert_eq!(unit.remap_interrupts(false), Err(Refused::NoInterruptRemapping));
+    assert_eq!(unit.remap(0x51, 0x51, 0, DISK, false), Err(Refused::NoInterruptRemapping));
+    assert!(!unit.remapping());
+    assert_eq!(fake.state.lock().unwrap().status & (1 << 25), 0);
 }
 
 #[test]
