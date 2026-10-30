@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::vec::Vec;
 
-use smoltcp::iface::SocketStorage;
+use smoltcp::iface::{SocketHandle, SocketStorage};
 use smoltcp::socket::icmp;
 
 use crate::{
@@ -84,14 +84,14 @@ fn pair() -> (Stack<End>, Stack<End>) {
         mac: [2, 0, 0, 0, 0, 1],
         inbox: b_to_a.clone(),
         out: a_to_b.clone(),
-        sent: Default::default(),
+        sent: Rc::default(),
         flushes: 0,
     };
     let b = End {
         mac: [2, 0, 0, 0, 0, 2],
         inbox: a_to_b,
         out: b_to_a,
-        sent: Default::default(),
+        sent: Rc::default(),
         flushes: 0,
     };
     let mut a = Stack::new(a, memory(), 1, 0);
@@ -114,7 +114,7 @@ fn run(a: &mut Stack<End>, b: &mut Stack<End>, now: &mut u64, rounds: usize) {
 #[test]
 fn pings_the_other_stack_which_answers() {
     let (mut a, mut b) = pair();
-    let pinger = Pinger::new(&mut a, ping_memory(), 0x1234).unwrap();
+    let pinger = Pinger::new(&mut a, ping_memory(), 0x1234).ok().unwrap();
     let mut now = 0;
     for seq in 0..3 {
         pinger.send(&mut a, Ipv4Address::new(10, 0, 0, 2), seq).unwrap();
@@ -136,7 +136,7 @@ fn sends_to_an_address_off_the_link_through_the_gateway() {
         Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24),
         Some(Ipv4Address::new(10, 0, 0, 2)),
     );
-    let pinger = Pinger::new(&mut a, ping_memory(), 7).unwrap();
+    let pinger = Pinger::new(&mut a, ping_memory(), 7).ok().unwrap();
     pinger.send(&mut a, Ipv4Address::new(192, 0, 2, 9), 1).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 5);
@@ -153,26 +153,23 @@ fn sends_to_an_address_off_the_link_through_the_gateway() {
 
 #[test]
 fn an_unconfigured_stack_cannot_ping() {
-    let (a_link, _) = (
-        End {
-            mac: [2, 0, 0, 0, 0, 9],
-            inbox: Default::default(),
-            out: Default::default(),
-            sent: Default::default(),
-            flushes: 0,
-        },
-        (),
-    );
-    let mut a = Stack::new(a_link, memory(), 3, 0);
-    let pinger = Pinger::new(&mut a, ping_memory(), 1).unwrap();
+    let link = End {
+        mac: [2, 0, 0, 0, 0, 9],
+        inbox: Rc::default(),
+        out: Rc::default(),
+        sent: Rc::default(),
+        flushes: 0,
+    };
+    let mut a = Stack::new(link, memory(), 3, 0);
+    let pinger = Pinger::new(&mut a, ping_memory(), 1).ok().unwrap();
     assert_eq!(pinger.send(&mut a, Ipv4Address::new(10, 0, 0, 2), 0), Err(PingError::NoAddress));
 }
 
 #[test]
 fn ignores_replies_for_other_pingers_and_garbage_frames() {
     let (mut a, mut b) = pair();
-    let mine = Pinger::new(&mut a, ping_memory(), 1).unwrap();
-    let theirs = Pinger::new(&mut a, ping_memory(), 2).unwrap();
+    let mine = Pinger::new(&mut a, ping_memory(), 1).ok().unwrap();
+    let theirs = Pinger::new(&mut a, ping_memory(), 2).ok().unwrap();
     // Garbage on the wire first: too short, and a bad IPv4 packet.
     a.link().inbox.borrow_mut().push_back(std::vec![0xff; 10]);
     let mut bad = std::vec![0u8; 60];
@@ -186,20 +183,64 @@ fn ignores_replies_for_other_pingers_and_garbage_frames() {
     assert_eq!(theirs.reply(&mut a), Some((5, Ipv4Address::new(10, 0, 0, 2))));
 }
 
+/// Where each of a pinger's buffers is, and how long.
+fn places(memory: &PingMemory) -> [(usize, usize); 4] {
+    [
+        (memory.receive_meta.as_ptr().addr(), memory.receive_meta.len()),
+        (memory.receive.as_ptr().addr(), memory.receive.len()),
+        (memory.transmit_meta.as_ptr().addr(), memory.transmit_meta.len()),
+        (memory.transmit.as_ptr().addr(), memory.transmit.len()),
+    ]
+}
+
 #[test]
-fn refuses_sockets_past_its_slots() {
+fn refuses_sockets_past_its_slots_and_gives_their_memory_back() {
     let (mut a, _b) = pair();
+    let mut pingers = Vec::new();
     for ident in 0..4 {
-        assert!(Pinger::new(&mut a, ping_memory(), ident).is_some());
+        pingers.push(Pinger::new(&mut a, ping_memory(), ident).ok().unwrap());
     }
-    assert!(Pinger::new(&mut a, ping_memory(), 9).is_none());
+    let memory = ping_memory();
+    let lent = places(&memory);
+    let back = Pinger::new(&mut a, memory, 9).err().unwrap();
+    assert_eq!(places(&back), lent);
+    // A slot closed is a slot free.
+    pingers.pop().unwrap().close(&mut a).ok().unwrap();
+    assert!(Pinger::new(&mut a, back, 9).is_ok());
+}
+
+#[test]
+fn a_closed_pinger_gives_back_the_memory_it_was_lent() {
+    let (mut a, mut b) = pair();
+    let memory = ping_memory();
+    let lent = places(&memory);
+    let pinger = Pinger::new(&mut a, memory, 1).ok().unwrap();
+    pinger.send(&mut a, Ipv4Address::new(10, 0, 0, 2), 1).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 5);
+    assert_eq!(pinger.reply(&mut a), Some((1, Ipv4Address::new(10, 0, 0, 2))));
+    let back = pinger.close(&mut a).ok().unwrap();
+    assert_eq!(places(&back), lent);
+    // The stack goes on without it.
+    run(&mut a, &mut b, &mut now, 5);
+}
+
+#[test]
+fn a_pinger_is_not_used_or_closed_on_another_stack() {
+    let (mut a, mut b) = pair();
+    let pinger = Pinger::new(&mut a, ping_memory(), 1).ok().unwrap();
+    assert_eq!(pinger.send(&mut b, Ipv4Address::new(10, 0, 0, 1), 1), Err(PingError::NotHere));
+    assert_eq!(pinger.reply(&mut b), None);
+    let pinger = pinger.close(&mut b).err().unwrap();
+    assert!(pinger.close(&mut a).is_ok());
+    assert!(a.remove_socket(SocketHandle::default()).is_none());
 }
 
 #[test]
 fn says_when_it_has_nothing_to_do() {
     let (mut a, _b) = pair();
     assert_eq!(a.poll_delay(0), None);
-    let pinger = Pinger::new(&mut a, ping_memory(), 1).unwrap();
+    let pinger = Pinger::new(&mut a, ping_memory(), 1).ok().unwrap();
     pinger.send(&mut a, Ipv4Address::new(10, 0, 0, 2), 0).unwrap();
     assert_eq!(a.poll_delay(0), Some(0));
 }

@@ -23,6 +23,9 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
     "auto-icmp-echo-reply",
     "iface-neighbor-cache-count-64",
 ] }
+# smoltcp's buffers' storage, which a socket's buffers come back as (ADR
+# 0182); the version and features smoltcp has, without `alloc` or `std`.
+managed = { version = "0.8.0", default-features = false, features = ["map"] }
 
 [lints]
 workspace = true

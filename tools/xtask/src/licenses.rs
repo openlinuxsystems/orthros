@@ -16,7 +16,7 @@ use std::process::Command;
 
 use crate::ports::Ports;
 use crate::process::{self, step};
-use crate::{Context, Ctx, Error, Result, VERSION, kernel, userspace};
+use crate::{Context, Ctx, Error, Result, VERSION, kernel, patched, userspace};
 
 /// Where the manifest and notices go, relative to the image root.
 pub const DIR: &str = "system/resources/licenses";
@@ -271,6 +271,9 @@ const USER_PROGRAMS: [Program; 4] = [
 /// The crates linked into a program, from `cargo tree`. Build scripts and
 /// dev-dependencies never reach the image, so only normal edges count.
 fn rust_crates(ctx: &Ctx, program: &Program) -> Result<Vec<Package>> {
+    if program.workspace == "kernel" {
+        patched::ensure(ctx)?;
+    }
     let mut cmd = process::cargo(ctx);
     let manifest = format!("{}/Cargo.toml", program.workspace);
     cmd.args(["tree", "--manifest-path", &manifest, "-p", program.package, "--target"])
@@ -313,6 +316,7 @@ fn listed_packages(
     own: Option<&Path>,
 ) -> Result<Vec<Package>> {
     let commit = git_commit(ctx);
+    let kernel_patched = ctx.root.join(patched::DIR);
     let mut seen = BTreeSet::new();
     let mut packages = Vec::new();
     for line in text.lines() {
@@ -346,6 +350,36 @@ fn listed_packages(
                 };
                 packages.push(patched);
                 continue;
+            }
+            Source::Path(path) if path.starts_with(&kernel_patched) => {
+                let crates = patched::crates(ctx)?;
+                let Some(krate) = crates
+                    .iter()
+                    .find(|krate| krate.name == package.name && krate.version == package.version)
+                else {
+                    crate::bail!(
+                        "{what} uses {} {} from {}, which {} does not list",
+                        package.name,
+                        package.version,
+                        path.display(),
+                        patched::LIST
+                    );
+                };
+                if krate.license != package.license {
+                    crate::bail!(
+                        "{} gives {} {} the license {}, but its Cargo.toml says {}",
+                        patched::LIST,
+                        package.name,
+                        package.version,
+                        krate.license,
+                        package.license
+                    );
+                }
+                package.sha256 = Some(krate.sha256.clone());
+                package.download = crate_download(&package.name, &package.version);
+                package.comment =
+                    "A crate from crates.io, patched by kernel/patches of Dukovo.".into();
+                package.notices = notice_files(&path);
             }
             Source::Path(path) => {
                 package.download =

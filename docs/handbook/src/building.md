@@ -32,7 +32,9 @@ cd orthros
 `./ob setup` installs the nightly Rust toolchain pinned in
 `rust-toolchain.toml` through rustup, with the Rust sources the kernel
 build needs and the AArch64 target the lint step checks against, then runs
-`./ob doctor`, which checks every other tool. If rustup itself is
+`./ob doctor`, which checks every other tool, and `./ob crates`, which
+fetches the crates from crates.io that the kernel builds with patches of
+its own (smoltcp, for now) and patches them into `kernel/patched/`. If rustup itself is
 missing, `ob` says so; install it from your distribution (`rustup`
 package) or from <https://rustup.rs>.
 
