@@ -22,6 +22,7 @@ mod device;
 mod df;
 mod diskhealth;
 mod dmesg;
+mod eject;
 mod findmnt;
 mod fstrim;
 mod hexdump;
@@ -54,6 +55,7 @@ mod sys;
 mod top;
 mod tree;
 mod util;
+mod volumed;
 mod watch;
 mod watchdog;
 mod which;
@@ -82,6 +84,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("device", device::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
+    ("eject", eject::main),
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),
     ("free", memory::free),
@@ -122,6 +125,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("uptime", sessions::uptime),
     ("users", sessions::users),
     ("vmstat", memory::vmstat),
+    ("volumed", volumed::main),
     ("w", sessions::w),
     ("watch", watch::main),
     ("watchdog", watchdog::main),

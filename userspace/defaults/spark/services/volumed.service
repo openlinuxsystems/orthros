@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Volumes: volumed(8) mounts each disk or partition plugged in after boot
+# at /volumes/<label>, as udisks does on Linux, and unmounts those of a
+# disk pulled out; eject(1) unmounts one before it is pulled out.
+
+description = Volumes
+program = /system/commands/volumed
+# After the disks are mounted, which it takes as done.
+order = 40
+restart = always

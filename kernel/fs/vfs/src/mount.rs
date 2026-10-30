@@ -27,7 +27,7 @@
 //! points in its directory cache for the same reason (`DCACHE_MOUNTED`).
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_sync::Mutex;
 
@@ -53,6 +53,8 @@ pub struct Mount {
     detached: bool,
     /// What it was mounted from: a device's name, or the filesystem's.
     source: KVec<u8>,
+    /// Whether the disk it was mounted from is gone ([`Vfs::lose`]).
+    lost: AtomicBool,
     /// The filter of its nodes that something is mounted on: bit
     /// [`filter_bit`] of each is set. Changed only under the table's lock;
     /// a bit is set before its mount is in the table, and cleared after it
@@ -90,6 +92,7 @@ impl Mount {
             path: mem::vec(),
             detached: true,
             source: mem::copy(source.as_bytes())?,
+            lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?)
     }
@@ -187,6 +190,7 @@ impl Vfs {
             path: mem::vec(),
             detached: false,
             source: mem::copy(source.as_bytes())?,
+            lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
         let mut mounts = mem::vec();
@@ -686,7 +690,11 @@ impl Vfs {
         }
         let read_only = read_only || from.mount.read_only();
         let (fs, root) = (from.mount.fs.clone(), from.node.clone());
-        self.mount_at(base, path, fs, root, from.mount.source(), read_only)
+        let mount = self.mount_at(base, path, fs, root, from.mount.source(), read_only)?;
+        if from.mount.lost.load(Ordering::Acquire) {
+            mount.lost.store(true, Ordering::Release);
+        }
+        Ok(mount)
     }
 
     /// Mounts `fs`, its directory `root` at the top, on the directory
@@ -724,6 +732,7 @@ impl Vfs {
             path: where_,
             detached: false,
             source: mem::copy(source.as_bytes())?,
+            lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
         })?;
         let mut mounts = self.mounts.lock();
@@ -747,9 +756,34 @@ impl Vfs {
         Ok(mount)
     }
 
+    /// Marks each mount from a device `gone` says is gone as lost: its
+    /// disk is, and nothing it holds can be written any more, so a sync
+    /// that fails no longer keeps it mounted ([`Vfs::unmount`]), as
+    /// Linux's umount does not keep a filesystem whose disk was pulled
+    /// out. Returns how many there were.
+    pub fn lose(&self, gone: impl Fn(&str) -> bool) -> usize {
+        let mounts = self.mounts.lock();
+        let mut lost = 0;
+        for mount in mounts.iter().filter(|m| gone(m.source())) {
+            mount.lost.store(true, Ordering::Release);
+            lost += 1;
+        }
+        lost
+    }
+
+    /// Syncs `mount` before it is unmounted: a lost one ([`Vfs::lose`])
+    /// is unmounted whether or not what it held could be written.
+    fn sync_before_unmount(mount: &Mount) -> Result<()> {
+        match mount.fs.sync() {
+            Err(_) if mount.lost.load(Ordering::Acquire) => Ok(()),
+            done => done,
+        }
+    }
+
     /// Unmounts the filesystem whose root `path` beneath `base` is, after
     /// syncing it. Fails with [`Error::InUse`] while anything is mounted
-    /// on it or any handle holds a place on it.
+    /// on it or any handle holds a place on it, and with the sync's error
+    /// if it fails, unless the mount's disk is gone.
     pub fn unmount(&self, base: &Location, path: &str) -> Result<()> {
         let at = self.resolve(base, path)?;
         if at.mount.on.is_none() || address(&at.node) != address(&at.mount.root) {
@@ -765,7 +799,7 @@ impl Vfs {
         if KArc::strong_count(&mount) > 2 {
             return Err(Error::InUse);
         }
-        mount.fs.sync()?;
+        Self::sync_before_unmount(&mount)?;
         mounts.retain(|m| !KArc::ptr_eq(m, &mount));
         if let Some((on, _)) = &mount.on {
             refilter(&mounts, on);
@@ -815,7 +849,7 @@ impl Vfs {
             }
         }
         for mount in &doomed {
-            mount.fs.sync()?;
+            Self::sync_before_unmount(mount)?;
         }
         mounts.retain(|m| !doomed.iter().any(|d| KArc::ptr_eq(m, d)));
         if let Some((on, _)) = &top.on {

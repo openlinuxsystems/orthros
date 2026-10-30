@@ -211,7 +211,10 @@ right, and its write right to mend.
 
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
-or anything holds a capability to a place in it. A rename never moves a
+or anything holds a capability to a place in it, and with the sync's
+error if what the filesystem holds cannot be written; once the disk it
+was mounted from is gone, as a USB stick pulled out is, it unmounts all
+the same, what it held unwritten lost (ADR 0163). A rename never moves a
 file between filesystems (*cross_mount*), and a mount point cannot be
 removed.
 
@@ -308,9 +311,10 @@ another device. A mount replays the journal Linux left on ext4, and the
 log of fsyncs it left on Btrfs. A device with
 none of them is left alone, and so is an EFI system partition, which
 boots the machine and is not one of the user's volumes. Spark mounts the
-disks found at boot, USB sticks plugged in then among them. Removable
-media, mounted by label at _/volumes/_*label* as they are plugged in,
-with safe eject, come with *volumed* in Phase 11.
+disks found at boot, USB sticks plugged in then among them. Those
+plugged in later *volumed*(8) mounts the same way, at _/volumes/_*label*,
+their filesystem's label; it unmounts the volumes of a disk pulled out,
+and *eject*(1) unmounts one before its disk is pulled out.
 
 A disk or partition in _/devices_ is read and written raw, at any offset and
 length, with nothing cached between, as Linux's are when opened with

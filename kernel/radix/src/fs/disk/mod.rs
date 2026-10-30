@@ -452,13 +452,19 @@ fn register(entry: Entry) {
 
 /// Takes the disk `name` and its partitions out of the kernel's list,
 /// `/devices` and `/kernel/block`: it is gone. Those who opened them keep
-/// them, and their requests fail.
+/// them, and their requests fail; what is mounted from them is lost, and
+/// unmounts though it cannot be written (ADR 0163).
 fn unregister(name: &str) {
-    let ours = |entry: &Entry| {
-        let rest = entry.name.as_str().strip_prefix(name);
+    let ours = |disk: &str| {
+        let rest = disk.strip_prefix(name);
         let rest = rest.map(|rest| rest.strip_prefix('p').unwrap_or(rest));
         rest.is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
     };
+    // Before they leave the list, so that whoever sees them gone may
+    // unmount what was mounted from them.
+    if let Some(vfs) = super::vfs() {
+        vfs.lose(ours);
+    }
     let mut names = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
     {
         let mut disks = DISKS.lock();
@@ -467,7 +473,7 @@ fn unregister(name: &str) {
         // reference may go with them.
         let mut at = 0;
         while at < disks.len() {
-            if ours(&disks[at]) {
+            if ours(disks[at].name.as_str()) {
                 if names.try_reserve(1).is_err() {
                     break;
                 }
