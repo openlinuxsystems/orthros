@@ -15,12 +15,19 @@ bench = false
 
 [dependencies]
 # Without `alloc`: every buffer is lent to it (ADR 0180). A neighbour
-# cache of 64 entries, as each one is looked for in turn.
+# cache of 64 entries, as each one is looked for in turn. `medium-ip` is
+# for the loopback interface, whose packets have no Ethernet header, and
+# which has every card's address with its own, 8 at most; TCP and UDP
+# are programs' sockets (ADR 0183).
 smoltcp = { version = "0.14.0", default-features = false, features = [
     "medium-ethernet",
+    "medium-ip",
     "proto-ipv4",
     "socket-icmp",
+    "socket-tcp",
+    "socket-udp",
     "auto-icmp-echo-reply",
+    "iface-max-addr-count-8",
     "iface-neighbor-cache-count-64",
 ] }
 # smoltcp's buffers' storage, which a socket's buffers come back as (ADR

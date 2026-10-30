@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "sockets"
+description = "A test program: TCP and UDP over the loopback interface and a virtio network card, and what a network capability's rights and ports allow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sockets"
+test = false
+bench = false
+
+[dependencies]
+libradix = { path = "../libradix" }
+radix-rt = { path = "../radix-rt" }
+
+[lints]
+workspace = true

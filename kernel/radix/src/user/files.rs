@@ -19,7 +19,9 @@
 //! (`fs::pipe`, `fs::socket`, `fs::tty`), which may wait. Opening a
 //! terminal makes it the controlling terminal of a session leader that
 //! has none, unless asked not to. Since Phase 9 directories name sockets
-//! and connect them, and sockets listen, accept, and send files.
+//! and connect them, and sockets listen, accept, and send files. Since
+//! Phase 12 network sockets (`fs::inet`) are bound and connected through
+//! network capabilities, whose rights and ports allow it (ADR 0183).
 
 use core::mem::size_of;
 
@@ -44,7 +46,7 @@ use super::memory::cap_rights;
 use super::methods::{Answer, answer};
 use super::objects::{self, Found, Object};
 use super::{Result, UserRef, UserThread, cap_error, error};
-use crate::fs::{self, Description, FileObject, FileRef, locks, pipe, socket, tty};
+use crate::fs::{self, Description, FileObject, FileRef, inet, locks, pipe, socket, tty};
 use crate::{Arch, caps};
 
 /// The most bytes one read or write moves, as on Linux.
@@ -1007,10 +1009,13 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Target::Tty(handle) => {
                     handle.control(user, a.request, a.argument, a.buffer, a.size)?
                 }
-                Target::Pipe(_) | Target::Socket(_) if a.request == terminal::READABLE => {
+                Target::Pipe(_) | Target::Socket(_) | Target::Inet(_)
+                    if a.request == terminal::READABLE =>
+                {
                     let len = match target(file) {
                         Target::Pipe(end) => end.pipe().len(),
                         Target::Socket(socket) => socket.pending(),
+                        Target::Inet(socket) => socket.pending(),
                         _ => 0,
                     } as u32;
                     if a.size < 4 || !Arch::copy_to_user(a.buffer, &len.to_le_bytes()) {
@@ -1059,42 +1064,54 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::LOCK | file::LOCK_HOLDER => lock_method(user, found, ObjectKind::File, label, args),
         file::SEND => {
             let a = file::SendArgs::decode(args)?;
-            let (file, socket) = socket_of(found, Rights::WRITE)?;
+            let (file, socket) = any_socket_of(found, Rights::WRITE)?;
             let (address, len) = user_range(a.data)?;
             let data = UserIn { address, len };
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
             let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
-            let count = socket.send(&data, non_blocking, signal)? as u64;
+            let count = match socket {
+                AnySocket::Unix(socket) => socket.send(&data, non_blocking, signal)?,
+                AnySocket::Inet(socket) => socket.send(&data, None, non_blocking, signal)?,
+            } as u64;
             user.process.note_written(count);
             answer(label, file::SendResults::WORDS, file::SendResults { count }.encode())
         }
         file::RECEIVE => {
             let a = file::ReceiveArgs::decode(args)?;
-            let (file, socket) = socket_of(found, Rights::READ)?;
+            let (file, socket) = any_socket_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
-            let count = socket.receive(&mut out, non_blocking)? as u64;
+            let count = match socket {
+                AnySocket::Unix(socket) => socket.receive(&mut out, non_blocking)?,
+                AnySocket::Inet(socket) => socket.receive(&mut out, non_blocking)?.0,
+            } as u64;
             user.process.note_read(count);
             answer(label, file::ReceiveResults::WORDS, file::ReceiveResults { count }.encode())
         }
         file::SHUTDOWN => {
             let a = file::ShutdownArgs::decode(args)?;
-            let (_, socket) = socket_of(found, Rights::NONE)?;
-            socket.connected()?.shutdown(a.read, a.write);
+            match any_socket_of(found, Rights::NONE)?.1 {
+                AnySocket::Unix(socket) => socket.connected()?.shutdown(a.read, a.write),
+                AnySocket::Inet(socket) => socket.shutdown(a.read, a.write)?,
+            }
             answer(label, 0, [0; 8])
         }
         file::LISTEN => {
             let a = file::ListenArgs::decode(args)?;
-            let (_, socket) = socket_of(found, Rights::WRITE)?;
-            socket::listen(socket, a.backlog, user.process.number())?;
+            match any_socket_of(found, Rights::WRITE)?.1 {
+                AnySocket::Unix(socket) => {
+                    socket::listen(socket, a.backlog, user.process.number())?;
+                }
+                AnySocket::Inet(socket) => socket.listen(a.backlog)?,
+            }
             answer(label, 0, [0; 8])
         }
         file::ACCEPT => {
             let a = file::AcceptArgs::decode(args)?;
-            let (file, socket) = socket_of(found, Rights::READ)?;
+            let (file, socket) = any_socket_of(found, Rights::READ)?;
             // The slot first, so that no connection is taken for nothing.
             match caps::get(SlotRef::new(user.cspace, a.to)) {
                 Err(CapError::Empty) => {}
@@ -1102,15 +1119,34 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 Err(err) => return Err(cap_error(err)),
             }
             let non_blocking = file.description().non_blocking;
-            socket::accept(user, socket, a.to, a.flags, non_blocking)?;
+            match socket {
+                AnySocket::Unix(socket) => {
+                    socket::accept(user, socket, a.to, a.flags, non_blocking)?;
+                }
+                AnySocket::Inet(socket) => {
+                    // A connection that cannot go in the slot, as another
+                    // thread filled it first, is closed.
+                    let accepted = inet::file(socket.accept(non_blocking)?, a.flags)?;
+                    inet::install(user, a.to, accepted, a.flags)?;
+                }
+            }
             answer(label, 0, [0; 8])
         }
         file::SOCKET_NAME => {
             let a = file::SocketNameArgs::decode(args)?;
-            let (_, socket) = socket_of(found, Rights::NONE)?;
-            let name = socket.name(a.peer)?;
             let (address, len) = user_range(a.buffer)?;
-            let bytes = name.bytes();
+            let named;
+            let inet_named;
+            let bytes = match any_socket_of(found, Rights::NONE)?.1 {
+                AnySocket::Unix(socket) => {
+                    named = socket.name(a.peer)?;
+                    named.bytes()
+                }
+                AnySocket::Inet(socket) => {
+                    inet_named = inet::address_of(socket.name(a.peer)?);
+                    &inet_named[..]
+                }
+            };
             let fits = &bytes[..bytes.len().min(len)];
             if !fits.is_empty() && !Arch::copy_to_user(address, fits) {
                 return Err(error(Kernel::BadAddress));
@@ -1120,13 +1156,88 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         }
         file::SOCKET_STATE => {
             file::SocketStateArgs::decode(args)?;
-            let (_, socket) = socket_of(found, Rights::NONE)?;
-            let results = file::SocketStateResults {
-                listening: socket.listens(),
-                connected: socket.end().is_some(),
-                peer: socket.end().map_or(0, socket::End::peer_process),
+            let results = match any_socket_of(found, Rights::NONE)?.1 {
+                AnySocket::Unix(socket) => file::SocketStateResults {
+                    listening: socket.listens(),
+                    connected: socket.end().is_some(),
+                    peer: socket.end().map_or(0, socket::End::peer_process),
+                },
+                AnySocket::Inet(socket) => {
+                    let (listening, connected) = socket.listens_and_connected();
+                    file::SocketStateResults { listening, connected, peer: 0 }
+                }
             };
             answer(label, file::SocketStateResults::WORDS, results.encode())
+        }
+        file::BIND_ADDRESS => {
+            let a = file::BindAddressArgs::decode(args)?;
+            let (_, socket) = inet_of(found, Rights::WRITE)?;
+            let authority = network(user, a.network, Rights::NONE)?;
+            if !authority.rights.contains(Rights::SEND)
+                && !authority.rights.contains(Rights::RECEIVE)
+            {
+                return Err(Kernel::MissingRights.status(u32::from(Rights::SEND.bits())));
+            }
+            socket.bind(address_in(a.address)?, authority)?;
+            answer(label, 0, [0; 8])
+        }
+        file::CONNECT_ADDRESS => {
+            let a = file::ConnectAddressArgs::decode(args)?;
+            let (file, socket) = inet_of(found, Rights::WRITE)?;
+            network(user, a.network, Rights::SEND)?;
+            let to = peer_in(a.address)?;
+            socket.connect(to, file.description().non_blocking)?;
+            answer(label, 0, [0; 8])
+        }
+        file::SEND_TO => {
+            let a = file::SendToArgs::decode(args)?;
+            let (file, socket) = inet_of(found, Rights::WRITE)?;
+            // A stream socket sends to where it is connected, as on Linux.
+            let to = match socket.kind() {
+                inet::Kind::Stream => None,
+                inet::Kind::Datagram => {
+                    network(user, a.network, Rights::SEND)?;
+                    Some(peer_in(a.address)?)
+                }
+            };
+            let (address, len) = user_range(a.data)?;
+            let data = UserIn { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let signal = !a.flags.contains(SocketFlags::NO_SIGNAL);
+            let count = socket.send(&data, to, non_blocking, signal)? as u64;
+            user.process.note_written(count);
+            answer(label, file::SendToResults::WORDS, file::SendToResults { count }.encode())
+        }
+        file::RECEIVE_FROM => {
+            let a = file::ReceiveFromArgs::decode(args)?;
+            let (file, socket) = inet_of(found, Rights::READ)?;
+            let (address, len) = user_range(a.buffer)?;
+            let (from_address, from_len) = user_range(a.address)?;
+            let mut out = UserOut { address, len };
+            let non_blocking =
+                a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
+            let (count, from) = socket.receive(&mut out, non_blocking)?;
+            let bytes = inet::address_of(from.map_or((None, 0), |(ip, port)| (Some(ip), port)));
+            let fits = &bytes[..bytes.len().min(from_len)];
+            if !fits.is_empty() && !Arch::copy_to_user(from_address, fits) {
+                return Err(error(Kernel::BadAddress));
+            }
+            let count = count as u64;
+            user.process.note_read(count);
+            answer(
+                label,
+                file::ReceiveFromResults::WORDS,
+                file::ReceiveFromResults { count }.encode(),
+            )
+        }
+        file::SOCKET_OPTION => {
+            let a = file::SocketOptionArgs::decode(args)?;
+            let needs = if a.set { Rights::WRITE } else { Rights::NONE };
+            let (_, socket) = inet_of(found, needs)?;
+            let value = socket.option(a.option, a.set.then_some(a.value))?;
+            let results = file::SocketOptionResults { value };
+            answer(label, file::SocketOptionResults::WORDS, results.encode())
         }
         file::SEND_FILES => {
             let a = file::SendFilesArgs::decode(args)?;
@@ -1173,12 +1284,77 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
 }
 
 /// The file `found` designates and the socket it is of, if its
-/// capability has the rights `needs`; not_socket for any other file.
+/// capability has the rights `needs`; not_supported for a network socket,
+/// which has none of the methods that take this, and not_socket for any
+/// other file.
 fn socket_of(found: &Found, needs: Rights) -> Result<(&FileRef, &socket::Socket)> {
     let file = file_of(found, Rights::NONE)?;
+    if file.inet().is_some() {
+        return Err(error(Kernel::NotSupported));
+    }
     let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
     file_of(found, needs)?;
     Ok((file, socket))
+}
+
+/// A socket of either family.
+enum AnySocket<'a> {
+    Unix(&'a socket::Socket),
+    Inet(&'a inet::InetSocket),
+}
+
+/// The file `found` designates and the socket, of either family, it is
+/// of, as [`socket_of`].
+fn any_socket_of(found: &Found, needs: Rights) -> Result<(&FileRef, AnySocket<'_>)> {
+    let file = file_of(found, Rights::NONE)?;
+    let socket = match (file.socket(), file.inet()) {
+        (Some(socket), _) => AnySocket::Unix(socket),
+        (None, Some(socket)) => AnySocket::Inet(socket),
+        (None, None) => return Err(error(Kernel::NotSocket)),
+    };
+    file_of(found, needs)?;
+    Ok((file, socket))
+}
+
+/// The file `found` designates and the network socket it is of, as
+/// [`socket_of`]: not_supported for a socket of the Unix family.
+fn inet_of(found: &Found, needs: Rights) -> Result<(&FileRef, &inet::InetSocket)> {
+    match any_socket_of(found, needs)? {
+        (file, AnySocket::Inet(socket)) => Ok((file, socket)),
+        (_, AnySocket::Unix(_)) => Err(error(Kernel::NotSupported)),
+    }
+}
+
+/// What the network capability in the caller's slot `slot` allows, if it
+/// has the rights `needs`.
+fn network(user: &UserRef, slot: u32, needs: Rights) -> Result<inet::Authority> {
+    let cap = objects::capability(user.cspace, slot)?;
+    cap.check(ObjectKind::Network, needs).map_err(cap_error)?;
+    let ports = cap.range().ok_or(error(Kernel::WrongKind))?;
+    Ok(inet::Authority { rights: cap.rights(), ports })
+}
+
+/// The address, radix-network(2)'s Address, the caller's `buffer` holds.
+fn address_in(buffer: UserBuffer) -> Result<inet::Endpoint> {
+    let mut bytes = [0; radix_abi::network::Address::SIZE];
+    if buffer.len != bytes.len() as u64 {
+        return Err(error(Kernel::InvalidArgument));
+    }
+    if !radix_ipc::range::user_bytes(buffer.address, buffer.len)
+        || !Arch::copy_from_user(&mut bytes, buffer.address)
+    {
+        return Err(error(Kernel::BadAddress));
+    }
+    inet::endpoint_of(&bytes)
+}
+
+/// The address the caller's `buffer` holds, as one to connect or send to:
+/// with an address and a port.
+fn peer_in(buffer: UserBuffer) -> Result<inet::Peer> {
+    match address_in(buffer)? {
+        (Some(ip), port) if port != 0 => Ok((ip, port)),
+        _ => Err(error(Kernel::InvalidArgument)),
+    }
 }
 
 /// The files `send_files` sends: those whose slots the caller's `slots`
@@ -1391,8 +1567,10 @@ fn lock_method(
 enum Target<'a> {
     /// An end of a pipe.
     Pipe(&'a pipe::End),
-    /// A socket.
+    /// A socket of the Unix family.
     Socket(&'a socket::Socket),
+    /// A network socket.
+    Inet(&'a inet::InetSocket),
     /// A side of a terminal.
     Tty(&'a tty::Handle),
     /// `/devices/kmsg`.
@@ -1412,6 +1590,8 @@ fn target(file: &FileObject) -> Target<'_> {
         Target::Pipe(end)
     } else if let Some(socket) = file.socket() {
         Target::Socket(socket)
+    } else if let Some(socket) = file.inet() {
+        Target::Inet(socket)
     } else if let Some(handle) = file.tty_handle() {
         Target::Tty(handle)
     } else if file.is_kmsg() {
@@ -1475,6 +1655,7 @@ fn read_special(
     match target(file) {
         Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
         Target::Socket(socket) => socket.receive(out, non_blocking).map(|n| n as u64),
+        Target::Inet(socket) => socket.receive(out, non_blocking).map(|(n, _)| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::read(file, out, non_blocking).map(|n| n as u64),
         Target::Keyboard => fs::keyboard::read(file, out, non_blocking).map(|n| n as u64),
@@ -1536,6 +1717,7 @@ fn write_special(
     match target(file) {
         Target::Pipe(end) => end.pipe().write(data, non_blocking, true).map(|n| n as u64),
         Target::Socket(socket) => socket.send(data, non_blocking, true).map(|n| n as u64),
+        Target::Inet(socket) => socket.send(data, None, non_blocking, true).map(|n| n as u64),
         Target::Tty(handle) => handle.write(user, data, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::write(data).map(|n| n as u64),
         Target::Framebuffer if offset == file::CURRENT => {

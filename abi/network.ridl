@@ -1,0 +1,84 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The network capability (Phase 12, ADR 0183): the right to use the
+//! network, as a range of its ports.
+//!
+//! A network capability designates a range of ports, the 65,536 of the
+//! whole network for the first, which the kernel gives Spark when it
+//! starts. Its send right lets its holder connect out, to any address and
+//! port, from a port the kernel picks: what the permission
+//! network.outbound grants. Its receive right lets its holder bind a
+//! socket to a port in its range, and listen there for the connections
+//! that come: network.listen, for those ports. `restrict` derives one
+//! for fewer ports, or fewer rights, which Spark gives each service as
+//! its manifest asks.
+//!
+//! Sockets are made from a network capability (`socket`), and are files
+//! (radix-file(2)) with the socket methods: `bind_address`,
+//! `connect_address`, `send_to` and `receive_from` take the slot of a
+//! network capability, which must allow what they do, and `listen`
+//! needs a socket bound with the receive right for its port. A program
+//! finds its network capabilities in radix-startup(2)'s NETWORK_SLOTS
+//! slots from SLOT_NETWORK.
+
+module network;
+
+/// The first port the kernel picks from when a socket needs one of its
+/// own, to connect from or when bound to port 0: Linux's and IANA's
+/// dynamic ports, 49152 to 65535.
+const EPHEMERAL_FIRST: u64 = 49152;
+
+/// The version of IP an address is of.
+enum AddressFamily: u32 {
+    /// IPv4, POSIX's AF_INET.
+    ipv4 = 4;
+    /// IPv6, POSIX's AF_INET6: from Phase 12c.
+    ipv6 = 6;
+}
+
+/// What a socket carries.
+enum SocketType: u32 {
+    /// A stream of bytes, in order, over a connection: TCP, POSIX's
+    /// SOCK_STREAM.
+    stream = 1;
+    /// Datagrams, each on its own, which may be lost: UDP, POSIX's
+    /// SOCK_DGRAM.
+    datagram = 2;
+}
+
+/// An address and port: where a socket is bound or connected, or where a
+/// datagram goes or came from, as POSIX's sockaddr_in and sockaddr_in6.
+struct Address {
+    /// Which version of IP `ip` is of: an AddressFamily.
+    family: u32;
+    /// The port, as a number: 0 for any, when binding.
+    port: u16;
+    /// Zero.
+    reserved: u16;
+    /// The address, in network byte order: an IPv4 address in the first
+    /// 4 bytes, the rest zero. All zero is any address, when binding.
+    ip: [u8; 16];
+}
+
+/// A range of the network's ports, and the rights to connect out and to
+/// listen on them.
+interface network = 0x000f version 1 {
+    kind = network;
+    /// Makes a socket of `family` and `kind` in slot `to`, with `flags`:
+    /// one that is neither bound nor connected (POSIX's `socket`). Fails
+    /// with not_supported for IPv6 until Phase 12c. Needs the send or the
+    /// receive right.
+    method socket = 1 (to: slot, family: AddressFamily, kind: SocketType, flags: PipeFlags) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, occupied, no_memory,
+                not_supported];
+    /// Puts in slot `to` a network capability derived from this one, for
+    /// the `count` ports from `first`, which must be among its own, and
+    /// with `rights`, of its own. Needs the copy right.
+    method restrict = 2 (to: slot, first: u32, count: u32, rights: Rights) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, occupied, out_of_range,
+                too_deep, revoking, no_memory];
+    /// The capability's range of ports: the first, and how many.
+    method ports = 3 () -> (first: u32, count: u32)
+        raises [no_such_slot, empty_slot, wrong_kind];
+}

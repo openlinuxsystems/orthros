@@ -54,6 +54,13 @@ const SLOT_PROCESS: u32 = 6;
 const SLOT_ROOT: u32 = 7;
 /// The first of the slots the start-up page's `slots` describe.
 const SLOT_FIRST_EXTRA: u32 = 8;
+/// The first of the slots that hold the program's network capabilities
+/// (radix-network(2)), if it was given any: the program finds them in
+/// the NETWORK_SLOTS slots from here, and they stay through `fork` and
+/// `exec`.
+const SLOT_NETWORK: u32 = 24;
+/// The number of slots for network capabilities.
+const NETWORK_SLOTS: u32 = 8;
 /// The first slot of the receive window programs start with.
 const SLOT_WINDOW: u32 = 32;
 /// The number of slots in the receive window programs start with.

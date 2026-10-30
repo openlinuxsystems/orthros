@@ -15,7 +15,8 @@
 //!   below `STACK_TOP`; the start-up page with its arguments;
 //! - its thread, address space, memory, process, random number generator
 //!   and kernel log in the slots radix-startup(2) lists, a root directory
-//!   in `SLOT_ROOT` if the caller gives one, and the capabilities the
+//!   in `SLOT_ROOT` if the caller gives one, a network capability in
+//!   `SLOT_NETWORK` likewise (radix-network(2)), and the capabilities the
 //!   caller shares from `SLOT_FIRST_EXTRA` on.
 //!
 //! The image, stack and start-up page are written through mappings in the
@@ -59,6 +60,9 @@ pub struct Spawn<'a> {
     /// Its root directory, in `SLOT_ROOT`: the caller's slot and the
     /// rights to give.
     pub root: Option<(u32, Rights)>,
+    /// Its network capability, in `SLOT_NETWORK`: the caller's slot and
+    /// the rights to give.
+    pub network: Option<(u32, Rights)>,
 }
 
 /// Why a program could not be started.
@@ -236,6 +240,10 @@ fn build(
     if let Some((from, rights)) = spawn.root {
         let shared = process::share(&SYS, process, from, startup::SLOT_ROOT, rights, 0);
         step("giving it its root directory", shared)?;
+    }
+    if let Some((from, rights)) = spawn.network {
+        let shared = process::share(&SYS, process, from, startup::SLOT_NETWORK, rights, 0);
+        step("giving it the network", shared)?;
     }
     let mut kinds = [0u8; SHARE_MAX];
     for (i, &(from, rights, badge)) in spawn.share.iter().enumerate() {

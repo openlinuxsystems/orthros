@@ -10,9 +10,10 @@
 //! own (`loader`), with the archive mapped read-only for it, the root of the
 //! file tree in `SLOT_ROOT` (`crate::fs`), from `SLOT_FIRST_EXTRA` on a
 //! memory object for the programs it starts, a capability to `services`,
-//! the resource domain below the root that its services run in, and the
-//! power capability (Phase 9), and the words after a lone `--` on the
-//! command line as its arguments. From then on Spark
+//! the resource domain below the root that its services run in, the
+//! power capability (Phase 9) and a network capability for all of the
+//! network's ports (Phase 12, ADR 0183), and the words after a lone `--`
+//! on the command line as its arguments. From then on Spark
 //! starts every other program. The kernel keeps Spark's process
 //! capability, and Spark is the one program that must not end: if it
 //! does, the kernel stops.
@@ -130,17 +131,20 @@ fn start_spark(
     }
     // The kernel's own capability space for Spark: its process's original
     // capability, the memory for the programs it starts, the domain its
-    // services' domains go below, the machine's power, and the boot
-    // archive's memory and frames. It is never destroyed.
-    let slots = loader::archive_slots(archive.len()).saturating_add(4);
+    // services' domains go below, the machine's power, the network, and
+    // the boot archive's memory and frames. It is never destroyed.
+    let slots = loader::archive_slots(archive.len()).saturating_add(5);
     let kept =
         caps::with(|store| store.create_space(slots)).and_then(|made| made).map_err(cap_error)?;
     let slot = |n| SlotRef::new(kept, n);
-    let (at, pool, services, power) = (slot(0), slot(1), slot(2), slot(3));
+    let (at, pool, services, power, network) = (slot(0), slot(1), slot(2), slot(3), slot(4));
     caps::create_memory(pool, MEMORY_ORDER).map_err(cap_error)?;
     let settings = Settings::new(OomClass::Service);
     caps::create_domain(services, &domains::root(), SERVICES, settings).map_err(cap_error)?;
     process::install(power, ObjectKind::Power, Object::Power)?;
+    caps::with(|store| store.grant_range(network, ObjectKind::Network, 0, 1 << 16))
+        .and_then(|done| done)
+        .map_err(cap_error)?;
     let program = Program {
         name: "spark",
         image,
@@ -153,8 +157,9 @@ fn start_spark(
             (pool, ObjectKind::Memory.rights(), 0),
             (services, ObjectKind::ResourceDomain.rights(), 0),
             (power, ObjectKind::Power.rights(), 0),
+            (network, ObjectKind::Network.rights(), 0),
         ],
-        archive: Some((archive, slot(4))),
+        archive: Some((archive, slot(5))),
         root: true,
         domain: domains::root(),
         on_exit: Some(spark_exited),

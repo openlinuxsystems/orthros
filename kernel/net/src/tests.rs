@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Two stacks on the host, joined by a simulated wire.
+//! Two stacks on the host, joined by a simulated wire, and one on a
+//! loopback link.
 
 use std::boxed::Box;
 use std::cell::RefCell;
@@ -10,10 +11,12 @@ use std::rc::Rc;
 use std::vec::Vec;
 
 use smoltcp::iface::{SocketHandle, SocketStorage};
-use smoltcp::socket::icmp;
+use smoltcp::socket::{icmp, tcp, udp};
+use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use crate::{
-    FRAME, Ipv4Address, Ipv4Cidr, Link, Memory, PingError, PingMemory, Pinger, Stack, parse_cidr,
+    ConnectError, FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingError,
+    PingMemory, Pinger, Stack, TcpMemory, UdpMemory, parse_cidr,
 };
 
 type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
@@ -254,4 +257,188 @@ fn reads_addresses_with_their_prefixes() {
     for bad in ["10.0.2.15/33", "10.0.2/24", "10.0.2.15/", "/24", "", "10.0.2.256", "a.b.c.d"] {
         assert_eq!(parse_cidr(bad), None, "{bad}");
     }
+}
+
+fn tcp_memory() -> TcpMemory {
+    TcpMemory { receive: leak(0u8, 4096), transmit: leak(0u8, 4096) }
+}
+
+fn udp_memory() -> UdpMemory {
+    UdpMemory {
+        receive_meta: leak(udp::PacketMetadata::EMPTY, 4),
+        receive: leak(0u8, 2048),
+        transmit_meta: leak(udp::PacketMetadata::EMPTY, 4),
+        transmit: leak(0u8, 2048),
+    }
+}
+
+/// Where a TCP socket's memory is, to compare with where it was lent.
+fn tcp_places(memory: &TcpMemory) -> [(*const u8, usize); 2] {
+    [
+        (memory.receive.as_ptr(), memory.receive.len()),
+        (memory.transmit.as_ptr(), memory.transmit.len()),
+    ]
+}
+
+#[test]
+fn makes_a_tcp_connection_and_gives_its_memory_back() {
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let memory = tcp_memory();
+    let lent = tcp_places(&memory);
+    let client = a.add_socket(memory.socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    // Connecting twice is refused while the first goes on.
+    assert_eq!(
+        a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49153),
+        Err(ConnectError::Open)
+    );
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    let socket = a.socket_mut::<tcp::Socket<'static>>(client).unwrap();
+    assert_eq!(socket.state(), tcp::State::Established);
+    assert_eq!(socket.send_slice(b"hello").unwrap(), 5);
+    run(&mut a, &mut b, &mut now, 10);
+    let mut got = [0; 16];
+    let len = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"hello");
+    let peer = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().remote_endpoint().unwrap();
+    assert_eq!(peer, IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)), 49152));
+    // Closed and taken out, the client's socket gives back what it had.
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().abort();
+    run(&mut a, &mut b, &mut now, 10);
+    assert!(a.remove_udp(client).is_none(), "a TCP socket is not taken out as UDP");
+    assert_eq!(tcp_places(&a.remove_tcp(client).unwrap()), lent);
+    assert!(a.remove_tcp(client).is_none());
+    assert_eq!(
+        a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152),
+        Err(ConnectError::NotHere)
+    );
+}
+
+#[test]
+fn a_connection_to_a_port_no_one_listens_on_is_reset() {
+    let (mut a, mut b) = pair();
+    let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 9), None, 50000).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::Closed);
+}
+
+#[test]
+fn sends_udp_datagrams_and_gives_their_memory_back() {
+    let (mut a, mut b) = pair();
+    let receiver = b.add_socket(udp_memory().socket()).ok().unwrap();
+    b.socket_mut::<udp::Socket<'static>>(receiver).unwrap().bind(53).unwrap();
+    let sender = a.add_socket(udp_memory().socket()).ok().unwrap();
+    let socket = a.socket_mut::<udp::Socket<'static>>(sender).unwrap();
+    socket.bind(40000).unwrap();
+    let to = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 2)), 53);
+    socket.send_slice(b"query", to).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 5);
+    let socket = b.socket_mut::<udp::Socket<'static>>(receiver).unwrap();
+    let (data, meta) = socket.recv().unwrap();
+    assert_eq!(data, b"query");
+    assert_eq!(meta.endpoint.port, 40000);
+    let memory = b.remove_udp(receiver).unwrap();
+    assert_eq!(memory.receive.len(), 2048);
+    assert_eq!(memory.receive_meta.len(), 4);
+    assert!(b.remove_udp(receiver).is_none());
+}
+
+#[test]
+fn knows_its_addresses_and_routes() {
+    let (mut a, _b) = pair();
+    assert!(a.has_address(Ipv4Address::new(10, 0, 0, 1)));
+    assert!(!a.has_address(Ipv4Address::new(10, 0, 0, 2)));
+    assert!(a.routes_to(Ipv4Address::new(10, 0, 0, 200)));
+    assert!(!a.routes_to(Ipv4Address::new(192, 0, 2, 1)));
+    assert_eq!(a.source_for(Ipv4Address::new(10, 0, 0, 2)), Some(Ipv4Address::new(10, 0, 0, 1)));
+    a.set_ipv4(
+        Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24),
+        Some(Ipv4Address::new(10, 0, 0, 254)),
+    );
+    assert!(a.routes_to(Ipv4Address::new(192, 0, 2, 1)));
+    assert!(!a.reaches(Ipv4Address::new(192, 0, 2, 1)));
+    assert_eq!(a.mtu(), 1500);
+    // The loopback interface's way: several addresses, no router.
+    let own = Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 32);
+    a.set_ipv4_addresses(&[Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8), own]);
+    assert!(a.has_address(Ipv4Address::new(127, 0, 0, 1)) && a.has_address(own.address()));
+    assert!(!a.routes_to(Ipv4Address::new(192, 0, 2, 1)));
+    assert!(a.reaches(Ipv4Address::new(127, 3, 0, 1)) && a.reaches(own.address()));
+    assert_eq!(a.source_for(own.address()), Some(own.address()));
+    assert_eq!(a.ipv4(), Some(Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8)));
+}
+
+/// A stack on a loopback link, at 127.0.0.1/8.
+fn loopback() -> Stack<Loopback> {
+    let memory = Memory {
+        receive: leak(0u8, 4096),
+        transmit: leak(0u8, 4096),
+        sockets: Box::leak(Box::new([SocketStorage::EMPTY; 4])),
+    };
+    let mut stack = Stack::new(Loopback::new(leak(0u8, 16384), 4096), memory, 3, 0);
+    stack.set_ipv4(Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8), None);
+    stack
+}
+
+#[test]
+fn the_loopback_link_gives_back_what_is_sent_in_order() {
+    let mut link = Loopback::new(leak(0u8, 64), 30);
+    assert_eq!(link.medium(), Medium::Ip);
+    assert!(!link.pending() && link.can_send());
+    let mut frame = [0u8; 40];
+    for round in 0..10u8 {
+        // Round the ring's end and back.
+        assert!(link.send(&[round; 30]));
+        assert!(link.send(&[round + 100; 5]));
+        assert!(!link.can_send(), "two packets leave no room for a third of 30 bytes");
+        assert!(!link.send(&[0; 30]));
+        assert_eq!(link.receive(&mut frame), Some(30));
+        assert_eq!(frame[..30], [round; 30]);
+        assert_eq!(link.receive(&mut frame[..3]), Some(3), "a short buffer takes what fits");
+        assert_eq!(frame[..3], [round + 100; 3]);
+        assert_eq!(link.receive(&mut frame), None);
+    }
+    assert!(!link.send(&[0; 31]), "longer than its MTU");
+}
+
+#[test]
+fn tcp_and_udp_go_through_the_loopback_link_in_one_poll() {
+    let mut lo = loopback();
+    let local = Ipv4Address::new(127, 0, 0, 1);
+    let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
+    let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.connect(client, (local, 80), None, 49152).unwrap();
+    assert_eq!(lo.poll_delay(0), Some(0));
+    // The SYN, its answer and the last ACK of the handshake, in one call.
+    lo.poll(1_000_000);
+    assert_eq!(
+        lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(),
+        tcp::State::Established
+    );
+    assert_eq!(
+        lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().state(),
+        tcp::State::Established
+    );
+    lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(&[7; 3000]).unwrap();
+    lo.poll(2_000_000);
+    let mut got = [0u8; 4096];
+    let len = lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], &[7; 3000][..]);
+    assert_eq!(lo.mtu(), 4096);
+
+    let udp = lo.add_socket(udp_memory().socket()).ok().unwrap();
+    let socket = lo.socket_mut::<udp::Socket<'static>>(udp).unwrap();
+    socket.bind(5353).unwrap();
+    socket.send_slice(b"to myself", IpEndpoint::new(IpAddress::Ipv4(local), 5353)).unwrap();
+    lo.poll(3_000_000);
+    let socket = lo.socket_mut::<udp::Socket<'static>>(udp).unwrap();
+    assert_eq!(socket.recv().unwrap().0, b"to myself");
+    assert!(!lo.link().pending());
 }

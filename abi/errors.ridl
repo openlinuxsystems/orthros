@@ -116,6 +116,27 @@ errors kernel = 1 {
     /// Too many files are on their way through the socket already, sent
     /// and not yet received (radix-file(2)'s `send_files`).
     too_many = 41 => ETOOMANYREFS;
+    /// Another socket is bound to the address and port already
+    /// (radix-file(2)'s `bind_address`), or every port the kernel picks
+    /// from is taken.
+    address_in_use = 42 => EADDRINUSE;
+    /// The address is not one of the machine's own, so no socket can be
+    /// bound to it.
+    address_not_available = 43 => EADDRNOTAVAIL;
+    /// The other end of the connection reset it.
+    reset = 44 => ECONNRESET;
+    /// No interface has a route to the address.
+    unreachable = 45 => ENETUNREACH;
+    /// The connection is being made, and the socket's description is
+    /// non_blocking: `poll` finds it writable once it is made or failed,
+    /// and radix-file(2)'s `socket_option` error tells which.
+    in_progress = 46 => EINPROGRESS;
+    /// A connection is being made already.
+    already = 47 => EALREADY;
+    /// The datagram is too long to send in one piece.
+    message_too_long = 48 => EMSGSIZE;
+    /// The kernel has no room for another socket on the interface.
+    no_buffers = 49 => ENOBUFS;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).

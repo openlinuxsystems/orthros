@@ -106,7 +106,8 @@ impl Polled {
 
 /// Calls `each` with what `object` keeps for its pollers: a pipe end's
 /// pipe, both pipes of a connected socket or a listening one's listener,
-/// a terminal, the kernel log or the keyboard, or a notification.
+/// networking's for a network socket, a terminal, the kernel log or the
+/// keyboard, or a notification.
 fn polled_by(object: &Object, each: &mut dyn FnMut(&Polled)) {
     match object {
         Object::File(file) => {
@@ -114,6 +115,8 @@ fn polled_by(object: &Object, each: &mut dyn FnMut(&Polled)) {
                 each(end.pipe().polled());
             } else if let Some(socket) = file.socket() {
                 socket.polled(each);
+            } else if file.inet().is_some() {
+                crate::fs::inet::polled(each);
             } else if let Some(handle) = file.tty_handle() {
                 each(handle.polled());
             } else if file.is_kmsg() {
@@ -195,6 +198,8 @@ fn events_of(object: &Object) -> u16 {
             if let Some(end) = file.pipe_end() {
                 end.events()
             } else if let Some(socket) = file.socket() {
+                socket.events()
+            } else if let Some(socket) = file.inet() {
                 socket.events()
             } else if let Some(handle) = file.tty_handle() {
                 handle.events()
