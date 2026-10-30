@@ -36,7 +36,7 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
     process::run(ctx, &mut cmd)?;
 
     step("Running Clippy on the kernel (x86-64)");
-    let mut cmd = kernel::cargo(ctx, "clippy");
+    let mut cmd = kernel::cargo(ctx, "clippy")?;
     cmd.args(["-p", "radix", "-p", "radix-arch-x86_64"])
         .args(kernel::target_args(ctx))
         .args(["--", "-D", "warnings"]);
@@ -45,13 +45,13 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
     // The common kernel must build against the HAL alone; the AArch64 stubs
     // implement every trait, so x86-64 assumptions fail here.
     step("Running Clippy on the kernel (AArch64, against the HAL stubs)");
-    let mut cmd = kernel::cargo(ctx, "clippy");
+    let mut cmd = kernel::cargo(ctx, "clippy")?;
     cmd.args(["-p", "radix", "-p", "radix-arch-aarch64", "--target", kernel::AARCH64_TARGET])
         .args(["--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)?;
 
     step("Running Clippy on the kernel libraries and their host tests");
-    let mut cmd = kernel::cargo(ctx, "clippy");
+    let mut cmd = kernel::cargo(ctx, "clippy")?;
     for library in test::KERNEL_LIBRARIES {
         cmd.args(["-p", library]);
     }

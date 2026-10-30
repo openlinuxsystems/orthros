@@ -12,10 +12,12 @@
 //!
 //! smoltcp is built without its `alloc` feature, since the kernel's
 //! allocations are explicit and fallible (ADR 0017): every buffer it
-//! uses is lent to it as a slice that lives as long as the stack. A
-//! frame is copied once on the way in, from the card's slot to the
-//! stack's receive buffer, and once on the way out, from the transmit
-//! buffer to a slot.
+//! uses is lent to it as a `&'static mut` slice. The stack's own live as
+//! long as it does. A socket's come back when it is removed, through the
+//! kernel's patch to smoltcp (ADR 0182), so that the kernel can take
+//! their memory back. A frame is copied once on the way in, from the
+//! card's slot to the stack's receive buffer, and once on the way out,
+//! from the transmit buffer to a slot.
 //!
 //! [`Pinger`] sends ICMP echo requests and matches their replies, for
 //! the kernel's own checks of a link (`selftest=net`). The stack itself
@@ -32,9 +34,10 @@ mod tests;
 pub use smoltcp;
 pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
 
+use managed::ManagedSlice;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
-use smoltcp::socket::icmp;
+use smoltcp::socket::{AnySocket, Socket, icmp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr};
 
@@ -78,8 +81,6 @@ pub struct Stack<L: Link> {
     link: L,
     iface: Interface,
     sockets: SocketSet<'static>,
-    /// How many sockets fit in `sockets`.
-    slots: usize,
     receive: &'static mut [u8],
     transmit: &'static mut [u8],
 }
@@ -191,8 +192,7 @@ impl<L: Link> Stack<L> {
         config.random_seed = seed;
         let mut phy = Phy { link: &mut link, receive: &mut *receive, transmit: &mut *transmit };
         let iface = Interface::new(config, &mut phy, instant(now_ns));
-        let slots = sockets.len();
-        Stack { link, iface, sockets: SocketSet::new(sockets), slots, receive, transmit }
+        Stack { link, iface, sockets: SocketSet::new(sockets), receive, transmit }
     }
 
     /// Gives the interface `address` (with its prefix) as its only IPv4
@@ -246,14 +246,35 @@ impl<L: Link> Stack<L> {
             .map(|delay| delay.total_micros().saturating_mul(1_000))
     }
 
-    /// Adds `socket` to the stack: `None` if every socket slot is taken.
-    pub fn add_socket(
-        &mut self,
-        socket: impl smoltcp::socket::AnySocket<'static>,
-    ) -> Option<SocketHandle> {
-        // `SocketSet::add` panics when it is full; it is not let fill.
-        let full = self.sockets.iter().count() >= self.slots;
-        (!full).then(|| self.sockets.add(socket))
+    /// Adds `socket` to the stack, or gives it back if every socket slot
+    /// is taken.
+    ///
+    /// # Errors
+    ///
+    /// `socket`, when the stack has no room for it.
+    pub fn add_socket<S: AnySocket<'static>>(&mut self, socket: S) -> Result<SocketHandle, S> {
+        self.sockets.try_add(socket)
+    }
+
+    /// The socket `handle` of the stack: `None` if the stack has no such
+    /// socket, or it is of another kind. smoltcp's own `get_mut` panics
+    /// then; the kernel's calls do not (ADR 0182).
+    pub fn socket_mut<S: AnySocket<'static>>(&mut self, handle: SocketHandle) -> Option<&mut S> {
+        self.sockets.try_get_mut(handle)
+    }
+
+    /// Takes the socket `handle` out of the stack, with the buffers it was
+    /// lent: `None` if the stack has no such socket.
+    pub fn remove_socket(&mut self, handle: SocketHandle) -> Option<Socket<'static>> {
+        self.sockets.try_remove(handle)
+    }
+}
+
+/// The slice a buffer was lent, given back. smoltcp is built without
+/// `alloc`, so a buffer has no other kind of storage.
+fn lent<T>(storage: ManagedSlice<'static, T>) -> &'static mut [T] {
+    match storage {
+        ManagedSlice::Borrowed(slice) => slice,
     }
 }
 
@@ -270,6 +291,21 @@ pub struct PingMemory {
     pub transmit: &'static mut [u8],
 }
 
+impl PingMemory {
+    /// The memory `socket` was made with, back.
+    fn of(socket: icmp::Socket<'static>) -> PingMemory {
+        let (receive, transmit) = socket.into_buffers();
+        let (receive_meta, receive) = receive.into_storage();
+        let (transmit_meta, transmit) = transmit.into_storage();
+        PingMemory {
+            receive_meta: lent(receive_meta),
+            receive: lent(receive),
+            transmit_meta: lent(transmit_meta),
+            transmit: lent(transmit),
+        }
+    }
+}
+
 /// What [`Pinger::send`] can fail with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PingError {
@@ -277,9 +313,13 @@ pub enum PingError {
     Busy,
     /// The interface has no IPv4 address to send from.
     NoAddress,
+    /// The pinger's socket is not on the stack it was given: it was made
+    /// on another.
+    NotHere,
 }
 
-/// Sends ICMP echo requests ("pings") and matches their replies.
+/// Sends ICMP echo requests ("pings") and matches their replies, until
+/// [`Pinger::close`] gives its memory back.
 pub struct Pinger {
     handle: SocketHandle,
     ident: u16,
@@ -290,18 +330,49 @@ pub struct Pinger {
 const PING_DATA: usize = 8;
 
 impl Pinger {
-    /// A pinger on `stack` whose requests carry the identifier `ident`:
-    /// `None` if the stack has no socket slot left.
-    pub fn new<L: Link>(stack: &mut Stack<L>, memory: PingMemory, ident: u16) -> Option<Pinger> {
+    /// A pinger on `stack` whose requests carry the identifier `ident`.
+    ///
+    /// # Errors
+    ///
+    /// `memory`, back, if the stack has no socket slot left.
+    pub fn new<L: Link>(
+        stack: &mut Stack<L>,
+        memory: PingMemory,
+        ident: u16,
+    ) -> Result<Pinger, PingMemory> {
         let PingMemory { receive_meta, receive, transmit_meta, transmit } = memory;
         let mut socket = icmp::Socket::new(
             icmp::PacketBuffer::new(receive_meta, receive),
             icmp::PacketBuffer::new(transmit_meta, transmit),
         );
         // An unbound socket cannot be bound wrongly: the endpoint is set.
-        socket.bind(icmp::Endpoint::Ident(ident)).ok()?;
-        let handle = stack.add_socket(socket)?;
-        Some(Pinger { handle, ident })
+        if socket.bind(icmp::Endpoint::Ident(ident)).is_err() {
+            return Err(PingMemory::of(socket));
+        }
+        match stack.add_socket(socket) {
+            Ok(handle) => Ok(Pinger { handle, ident }),
+            Err(socket) => Err(PingMemory::of(socket)),
+        }
+    }
+
+    /// Takes the pinger's socket out of `stack`, and gives back the memory
+    /// it was lent.
+    ///
+    /// # Errors
+    ///
+    /// The pinger, back, if `stack` has no ICMP socket where its was: it
+    /// is not the stack the pinger was made on.
+    pub fn close<L: Link>(self, stack: &mut Stack<L>) -> Result<PingMemory, Pinger> {
+        // Another kind of socket in the slot is another's, and stays.
+        if stack.socket_mut::<icmp::Socket<'static>>(self.handle).is_none() {
+            return Err(self);
+        }
+        match stack.remove_socket(self.handle) {
+            Some(Socket::Icmp(socket)) => Ok(PingMemory::of(socket)),
+            // ICMP is the only kind of socket until UDP and TCP (12a.2b).
+            #[allow(unreachable_patterns)]
+            _ => Err(self),
+        }
     }
 
     /// Queues echo request number `seq` to `to`; [`Stack::poll`] sends it.
@@ -316,7 +387,8 @@ impl Pinger {
         }
         let data = u64::from(seq).to_be_bytes();
         let request = Icmpv4Repr::EchoRequest { ident: self.ident, seq_no: seq, data: &data };
-        let socket = stack.sockets.get_mut::<icmp::Socket<'static>>(self.handle);
+        let socket =
+            stack.socket_mut::<icmp::Socket<'static>>(self.handle).ok_or(PingError::NotHere)?;
         let buffer =
             socket.send(request.buffer_len(), IpAddress::Ipv4(to)).map_err(|_| PingError::Busy)?;
         let mut packet = Icmpv4Packet::new_unchecked(buffer);
@@ -328,7 +400,7 @@ impl Pinger {
     /// who sent it. Other ICMP messages, and replies that do not echo
     /// their request's data, are skipped.
     pub fn reply<L: Link>(&self, stack: &mut Stack<L>) -> Option<(u16, Ipv4Address)> {
-        let socket = stack.sockets.get_mut::<icmp::Socket<'static>>(self.handle);
+        let socket = stack.socket_mut::<icmp::Socket<'static>>(self.handle)?;
         while let Ok((payload, from)) = socket.recv() {
             // IPv4 is the stack's only protocol (until IPv6, in 12c).
             let IpAddress::Ipv4(from) = from;

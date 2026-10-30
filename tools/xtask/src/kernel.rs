@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Profile;
 use crate::process::{self, step};
-use crate::{Context, Ctx, Result, bail, doctor, frames, krelocs, ksyms, ports};
+use crate::{Context, Ctx, Result, bail, doctor, frames, krelocs, ksyms, patched, ports};
 
 /// The kernel's target specification, relative to the repository root.
 /// docs/adr/0011-kernel-target-and-build-std.md explains why the kernel has
@@ -43,8 +43,10 @@ pub fn target_args(ctx: &Ctx) -> Vec<String> {
     ]
 }
 
-/// A Cargo command for the kernel workspace, writing to `target/kernel`.
-pub fn cargo(ctx: &Ctx, subcommand: &str) -> std::process::Command {
+/// A Cargo command for the kernel workspace, writing to `target/kernel`,
+/// once the crates the kernel patches are in place (ADR 0182).
+pub fn cargo(ctx: &Ctx, subcommand: &str) -> Result<std::process::Command> {
+    patched::ensure(ctx)?;
     let mut cmd = process::cargo(ctx);
     cmd.args([subcommand, "--manifest-path", "kernel/Cargo.toml"])
         .arg("--target-dir")
@@ -59,7 +61,7 @@ pub fn cargo(ctx: &Ctx, subcommand: &str) -> std::process::Command {
     if let Some(ar) = ports::find_llvm("llvm-ar") {
         cmd.env("RADIX_AR", ar);
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Cargo output directory of the kernel workspace.
@@ -76,7 +78,7 @@ pub fn installed(ctx: &Ctx) -> PathBuf {
 /// installs it as `out/sysroot/boot/radix`.
 pub fn build(ctx: &Ctx, profile: Profile) -> Result<PathBuf> {
     step(&format!("Building the Radix kernel ({profile})"));
-    let mut cmd = cargo(ctx, "build");
+    let mut cmd = cargo(ctx, "build")?;
     cmd.args(["-p", "radix"]).args(target_args(ctx));
     if profile == Profile::Release {
         cmd.arg("--release");

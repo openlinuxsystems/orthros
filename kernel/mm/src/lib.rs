@@ -14,6 +14,8 @@
 //!   stacks and device memory are mapped with guard gaps between them;
 //! - [`Pcids`], the allocator of address-space identifiers;
 //! - [`bytes`], byte vectors zeroed or filled with one string store;
+//! - [`lease`], memory lent as a `&'static mut` slice that comes back
+//!   when the slice is handed back, as smoltcp's socket buffers do;
 //! - the heap [stress test](stress) the kernel runs on every CPU.
 //!
 //! Every allocation takes [`Flags`] that say whether the caller may sleep,
@@ -28,8 +30,8 @@
 //! touch memory the allocators manage, each `unsafe` with its contract
 //! written down: the `raw` module, the frame allocator's zeroing of the
 //! blocks it hands out, the slab layer's free-object pattern, the heap's
-//! `free`, the [`Platform`] trait, the stress test and the lengths
-//! [`bytes`] sets.
+//! `free`, the [`Platform`] trait, the stress test, the lengths
+//! [`bytes`] sets and the memory a [`lease`] takes back.
 //! The crate builds for the host too, where its unit and property tests
 //! run, and for Kani, which proves the allocators' invariants
 //! (`docs/design/memory.md`).
@@ -38,6 +40,9 @@
 #![deny(unsafe_code)]
 // `AllocatorClone`, which `Arc`s in the heap need to be cloned.
 #![cfg_attr(not(kani), feature(allocator_ext))]
+// Kani's own, older nightly has the allocator API, which leases use,
+// unstable still.
+#![cfg_attr(kani, feature(allocator_api))]
 
 extern crate alloc;
 
@@ -49,6 +54,7 @@ pub mod class;
 pub mod context;
 pub mod frames;
 pub mod heap;
+pub mod lease;
 pub mod magazine;
 pub mod page;
 pub mod platform;

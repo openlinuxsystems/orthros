@@ -15,14 +15,20 @@
 //!
 //! `selftest=net` pings the router from the first card (QEMU's user
 //! network answers at 10.0.2.2, which is what it uses without flags).
+//!
+//! A stack's own buffers live as long as it does. A socket's are lent to
+//! it through leases (`radix_mm::lease`), and come back when the socket
+//! is taken apart (ADR 0182).
 
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
+use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use radix_hal::Devices;
 use radix_hw::pci::{Bar, Function, MsiX};
 use radix_klog::{TextBuf, error, info, warn};
+use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_net::smoltcp::iface::SocketStorage;
 use radix_net::smoltcp::socket::icmp;
@@ -133,13 +139,90 @@ fn forever(len: usize) -> Option<&'static mut [u8]> {
     radix_mm::bytes::zeroed(len, kmalloc()).ok().map(Vec::leak)
 }
 
-/// `len` values made by `make` on the heap, for as long as the kernel
-/// runs.
-fn forever_of<T>(make: fn() -> T, len: usize) -> Option<&'static mut [T]> {
+/// `len` values made by `make`, on the heap.
+fn values<T>(make: fn() -> T, len: usize) -> Option<Vec<T, Kmalloc>> {
     let mut items = Vec::new_in(kmalloc());
     items.try_reserve_exact(len).ok()?;
     while items.len() < len && items.push_within_capacity(make()).is_ok() {}
-    Some(items.leak())
+    Some(items)
+}
+
+/// `len` values made by `make` on the heap, for as long as the kernel
+/// runs.
+fn forever_of<T>(make: fn() -> T, len: usize) -> Option<&'static mut [T]> {
+    values(make, len).map(Vec::leak)
+}
+
+/// The leases of a pinger's memory, which comes back when it closes.
+struct PingLeases {
+    receive_meta: Lease<icmp::PacketMetadata, Kmalloc>,
+    receive: Lease<u8, Kmalloc>,
+    transmit_meta: Lease<icmp::PacketMetadata, Kmalloc>,
+    transmit: Lease<u8, Kmalloc>,
+}
+
+/// Where a pinger's memory is once it came back, as raw pointers: what
+/// it was lent as is not used again.
+struct PingPlaces {
+    receive_meta: *mut [icmp::PacketMetadata],
+    receive: *mut [u8],
+    transmit_meta: *mut [icmp::PacketMetadata],
+    transmit: *mut [u8],
+}
+
+impl PingPlaces {
+    /// Where `memory` is: its slices end here.
+    fn of(memory: PingMemory) -> PingPlaces {
+        let PingMemory { receive_meta, receive, transmit_meta, transmit } = memory;
+        PingPlaces {
+            receive_meta: ptr::from_mut(receive_meta),
+            receive: ptr::from_mut(receive),
+            transmit_meta: ptr::from_mut(transmit_meta),
+            transmit: ptr::from_mut(transmit),
+        }
+    }
+}
+
+impl PingLeases {
+    /// Memory for a pinger, lent from the heap: room for four echo
+    /// messages of up to 128 bytes each way.
+    fn lend() -> Option<(PingLeases, PingMemory)> {
+        let receive_meta = values(|| icmp::PacketMetadata::EMPTY, 4)?;
+        let receive = radix_mm::bytes::zeroed(512, kmalloc()).ok()?;
+        let transmit_meta = values(|| icmp::PacketMetadata::EMPTY, 4)?;
+        let transmit = radix_mm::bytes::zeroed(512, kmalloc()).ok()?;
+        let (receive_meta_lease, receive_meta) = lease::lend(receive_meta);
+        let (receive_lease, receive) = lease::lend(receive);
+        let (transmit_meta_lease, transmit_meta) = lease::lend(transmit_meta);
+        let (transmit_lease, transmit) = lease::lend(transmit);
+        let leases = PingLeases {
+            receive_meta: receive_meta_lease,
+            receive: receive_lease,
+            transmit_meta: transmit_meta_lease,
+            transmit: transmit_lease,
+        };
+        Some((leases, PingMemory { receive_meta, receive, transmit_meta, transmit }))
+    }
+
+    /// Takes the memory back, from where it came back to: false if some of
+    /// it was not where it was lent, and stays lent.
+    #[allow(unsafe_code)]
+    fn end(self, places: &PingPlaces) -> bool {
+        // SAFETY: `places` is where the pinger's memory came back to, as
+        // the return value of `Pinger::new` or `Pinger::close`, turned into
+        // raw pointers by `PingPlaces::of` and not used otherwise: nothing
+        // else reaches the memory, and no call still running has it as an
+        // argument. `end` checks each is where it was lent.
+        let ended = unsafe {
+            [
+                self.receive_meta.end(places.receive_meta).is_ok(),
+                self.receive.end(places.receive).is_ok(),
+                self.transmit_meta.end(places.transmit_meta).is_ok(),
+                self.transmit.end(places.transmit).is_ok(),
+            ]
+        };
+        ended.into_iter().all(|ended| ended)
+    }
 }
 
 fn on_interrupt(index: usize) {
@@ -328,19 +411,16 @@ pub fn selftest() {
     }
 }
 
+/// Pings the router with a pinger lent memory for the test, and takes
+/// the memory back after: the test fails if it does not come back.
 fn ping_router() -> Result<u64, &'static str> {
     let interface = first().ok_or("there is no network card")?;
     let (address, gateway) = match FLAGS.get().copied().unwrap_or((None, None)) {
         (Some(address), Some(gateway)) => (address, gateway),
         _ => (Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24), Ipv4Address::new(10, 0, 2, 2)),
     };
-    let memory = PingMemory {
-        receive_meta: forever_of(|| icmp::PacketMetadata::EMPTY, 4).ok_or("out of memory")?,
-        receive: forever(512).ok_or("out of memory")?,
-        transmit_meta: forever_of(|| icmp::PacketMetadata::EMPTY, 4).ok_or("out of memory")?,
-        transmit: forever(512).ok_or("out of memory")?,
-    };
-    let pinger = {
+    let (leases, memory) = PingLeases::lend().ok_or("out of memory")?;
+    let made = {
         let mut stack = interface.stack.lock();
         if stack.ipv4().is_none() {
             stack.set_ipv4(address, Some(gateway));
@@ -349,8 +429,31 @@ fn ping_router() -> Result<u64, &'static str> {
                 interface.name
             );
         }
-        Pinger::new(&mut stack, memory, 0x5254).ok_or("no socket slot is free")?
+        Pinger::new(&mut stack, memory, 0x5254)
     };
+    let (result, back) = match made {
+        Ok(pinger) => {
+            let result = pings(interface, &pinger, gateway);
+            match pinger.close(&mut interface.stack.lock()) {
+                Ok(memory) => (result, PingPlaces::of(memory)),
+                Err(_) => return Err("the pinger's socket was not where it was made"),
+            }
+        }
+        Err(memory) => (Err("no socket slot is free"), PingPlaces::of(memory)),
+    };
+    if !leases.end(&back) {
+        return Err("the pinger's memory did not come back");
+    }
+    result
+}
+
+/// Sends PINGS echo requests to `gateway` with `pinger`, one at a time,
+/// and returns the fastest reply's round trip, in nanoseconds.
+fn pings(
+    interface: &Interface,
+    pinger: &Pinger,
+    gateway: Ipv4Address,
+) -> Result<u64, &'static str> {
     let mut fastest = u64::MAX;
     for seq in 1..=PINGS {
         let sent = sched::now_ns();

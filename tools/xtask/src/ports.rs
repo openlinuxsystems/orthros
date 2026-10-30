@@ -880,7 +880,7 @@ cpu_family = 'x86_64'\n\
 cpu = 'x86_64'\n\
 endian = 'little'\n";
 
-fn write_file(path: &Path, text: &str) -> Result<()> {
+pub fn write_file(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).context(|| format!("writing {}", path.display()))
 }
 
@@ -1174,7 +1174,7 @@ fn listing(dir: &Path) -> Result<String> {
 /// once, checks its SHA-256, and unpacks it there. Returns where it is
 /// unpacked: with a `.cargo-checksum.json` that gives its checksum, as
 /// Cargo wants of a vendored crate.
-fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
+pub fn fetch_crate(ctx: &Ctx, krate: &Crate) -> Result<PathBuf> {
     let crates = ctx.target.join("ports/sources/crates");
     let name = format!("{}-{}", krate.name, krate.version);
     let dir = crates.join(&name);
@@ -1258,7 +1258,7 @@ pub fn export(ctx: &Ctx, repo: &Path, to: &Path, paths: &[String]) -> Result<()>
 /// each file's time: make would otherwise find a release's generated
 /// files, such as its configure script, older than what they are made
 /// from, and make them again with programs the host need not have.
-fn copy_tree(ctx: &Ctx, from: &Path, to: &Path) -> Result<()> {
+pub fn copy_tree(ctx: &Ctx, from: &Path, to: &Path) -> Result<()> {
     process::create_dir(to)?;
     let mut cmd = Command::new("cp");
     cmd.arg("-R").arg("-p").arg(from.join(".")).arg(to);

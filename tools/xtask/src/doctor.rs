@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::process::{self, step};
-use crate::{Ctx, Error, Result, btrfs, kernel, ports, qemu, tla};
+use crate::{Ctx, Error, Result, btrfs, kernel, patched, ports, qemu, tla};
 
 /// mdBook release the handbook is built and tested with.
 pub const MDBOOK_VERSION: &str = "0.4.52";
@@ -438,14 +438,14 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "patch",
-            purpose: "applies the ports' patches",
+            purpose: "applies the patches of the ports and of the kernel's crates",
             found: |_| program_version("patch", "--version"),
             packages: all("patch"),
             fallback: None,
         },
         Requirement {
             name: "curl",
-            purpose: "fetches the ports' release archives and crates",
+            purpose: "fetches the ports' release archives and crates, and the kernel's crates",
             found: |_| program_version("curl", "--version"),
             packages: all("curl"),
             fallback: None,
@@ -624,7 +624,8 @@ pub fn setup(ctx: &Ctx) -> Result<()> {
         .current_dir(&ctx.root);
     process::run(ctx, &mut cmd)?;
     step("Checking host tools");
-    doctor(ctx)
+    doctor(ctx)?;
+    patched::ensure(ctx)
 }
 
 #[cfg(test)]

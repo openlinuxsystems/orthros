@@ -5,6 +5,8 @@
 /target/
 /out/
 /kernel/target/
+# The crates ob patches for the kernel (ADR 0182)
+/kernel/patched/
 
 # Caches used by ./ob --container
 /.cache/

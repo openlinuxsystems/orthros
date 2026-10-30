@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Networking
 
-This chapter describes networking in Dukovo as of Phase 12a.1 of the
+This chapter describes networking in Dukovo as of Phase 12a.2 of the
 roadmap. Phase 12 builds it up in steps: sockets for programs, TCP
 that matches Linux, `netd` with DHCP, DNS and `curl`, the time service,
 the Realtek, Intel and USB Ethernet cards, IPv6, the firewall and
@@ -25,6 +25,12 @@ WireGuard. This page grows with each.
   driver copies frames through slots of DMA memory that belong to the
   card
   ([ADR 0181](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0181-virtio-net-copies-frames-through-slots-of-its-own.md)).
+- **smoltcp is patched** so that a socket's memory goes back to the
+  kernel when the socket closes, and so that a full socket table or a
+  stale socket never panics the kernel
+  ([ADR 0182](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md)).
+  `./ob crates` fetches it from crates.io and applies the patch, and
+  every build does that first.
 
 Programs cannot open sockets yet, and nothing configures the network
 by itself: there is no DHCP until `netd` lands.

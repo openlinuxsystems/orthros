@@ -24,6 +24,7 @@ mod libc_check;
 mod licenses;
 mod lint;
 mod manuals;
+mod patched;
 mod ports;
 mod process;
 mod qemu;
@@ -46,10 +47,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Every command with a one-line summary, in the order `ob help` lists them.
 /// `ob docs --check` verifies that ob(1) documents each one.
 pub const COMMANDS: &[(&str, &str)] = &[
-    ("setup", "Install the pinned Rust toolchain, then run doctor"),
+    ("setup", "Install the pinned Rust toolchain, then run doctor and crates"),
     ("doctor", "Check host tools and print the commands that install what is missing"),
     ("build", "Build the kernel, with its symbol table, and the user programs into out/sysroot"),
     ("ports", "Build the ports (the C library and programs from elsewhere) into out/sysroot"),
+    ("crates", "Fetch the crates.io crates the kernel patches, and patch them into kernel/patched"),
     ("image", "Build the bootable USB image (or an ISO with --iso)"),
     ("run", "Boot the image in QEMU with the serial console on this terminal"),
     ("test", "Run unit tests, then boot the image in QEMU under UEFI and BIOS"),
@@ -92,7 +94,19 @@ fn command_usage(name: &str) -> Option<&'static str> {
 Installs the Rust toolchain pinned in rust-toolchain.toml with rustup,
 including its rust-src component (the kernel builds `core` itself) and the
 aarch64-unknown-none target (CI checks the AArch64 HAL stubs), then runs
-`./ob doctor`."
+`./ob doctor` and `./ob crates`, so that editors find the crates the kernel
+patches."
+        }
+        "crates" => {
+            "Usage: ./ob crates
+
+Fetches each crate from crates.io that kernel/patches/crates.toml lists,
+checks the SHA-256 of its .crate file, applies its patch from
+kernel/patches and puts it in kernel/patched, where kernel/Cargo.toml takes
+it from in place of crates.io's (ADR 0182). A crate already there from the
+same file and patch is left as it is. ob's own commands do this before any
+Cargo command on the kernel; run it before Cargo commands of your own, such
+as cargo-deny's."
         }
         "doctor" => {
             "Usage: ./ob doctor
@@ -388,7 +402,8 @@ CI runs this on the commits of every pull request."
 
 Removes out/ and the kernel's and user programs' build directories.
 
-  --all        Also remove target/ and .cache/ (the build tool and caches)"
+  --all        Also remove target/, .cache/ and kernel/patched/ (the build
+               tool, caches and the crates the kernel patches)"
         }
         "help" => {
             "Usage: ./ob help [<command>]
@@ -628,6 +643,10 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
             args.finish()?;
             doctor::doctor(&ctx)
         }
+        "crates" => {
+            args.finish()?;
+            patched::ensure(&ctx)
+        }
         "build" => {
             let profile = args.profile(&ctx.config)?;
             args.finish()?;
@@ -700,6 +719,7 @@ fn clean(ctx: &Ctx, all: bool) -> Result<()> {
     if all {
         paths.push(ctx.target.clone());
         paths.push(ctx.root.join(".cache"));
+        paths.push(ctx.root.join(patched::DIR));
     }
     for path in paths {
         if path.exists() {

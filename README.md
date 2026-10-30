@@ -72,10 +72,11 @@ the pinned build container with Podman or Docker:
 
 | Command | What it does |
 | --- | --- |
-| `./ob setup` | Install the pinned Rust toolchain, then run `doctor` |
+| `./ob setup` | Install the pinned Rust toolchain, then run `doctor` and `crates` |
 | `./ob doctor` | Check host tools and print the commands that install what is missing |
 | `./ob build` | Build the kernel, with its symbol table, into `out/sysroot/` |
 | `./ob ports` | Build the software Dukovo ports from elsewhere (mlibc, Rust's standard library, Lua and the rest) at their pinned commits |
+| `./ob crates` | Fetch the crates.io crates the kernel patches (smoltcp) and patch them into `kernel/patched/` |
 | `./ob image` | Build the hybrid USB/disk image `out/dukovo-<version>-x86_64.img` (`--iso` for an ISO, `--cmdline`, `--microcode`) |
 | `./ob run` | Boot the image in QEMU with the serial console in your terminal (`--bios`, `--media usb\|cdrom\|disk`, `--gdb`, `--cmdline`) |
 | `./ob test` | Run unit tests, then the boot tests in QEMU, from the boot paths and the memory manager to processes, storage and POSIX (`kani` for the Kani proofs, `tla` for the TLA+ models, `corpus` for the shell corpus instead) |

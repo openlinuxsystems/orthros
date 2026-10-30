@@ -8,6 +8,9 @@
 
 [workspace]
 resolver = "3"
+# The crates `ob` patches (tools/xtask/src/patched.rs): dependencies, not
+# members of the workspace.
+exclude = ["patched"]
 members = [
     "radix",
     "abi",
@@ -119,6 +122,13 @@ trivially_copy_pass_by_ref = "warn"
 unnested_or_patterns = "warn"
 unused_self = "warn"
 used_underscore_binding = "warn"
+
+# Crates from crates.io that the kernel builds with changes of its own
+# (ADR 0182): `ob` puts each in patched/, from kernel/patches/crates.toml
+# and its patch there, before any Cargo command it runs on the kernel; run
+# `./ob crates` before Cargo commands of your own.
+[patch.crates-io]
+smoltcp = { path = "patched/smoltcp-0.14.0" }
 
 [profile.dev]
 panic = "abort"
