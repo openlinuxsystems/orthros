@@ -591,8 +591,10 @@ boots.
 	10.0.2.15/24 through the router 10.0.2.2, unless the *ip* and
 	*gateway* flags gave it one, then sends the router four echo
 	requests, one at a time, each of which must be answered within 2
-	seconds. Logs each round trip, and reports *selftest net: passed*
-	with the fastest.
+	seconds, from a socket lent its memory for the test. Logs each round
+	trip, closes the socket, and reports *selftest net: passed* with the
+	fastest once the socket's memory has come back to the heap (ADR
+	0182).
 
 # TRACE POINTS
 

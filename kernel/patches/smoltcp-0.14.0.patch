@@ -1,0 +1,188 @@
+SPDX-FileCopyrightText: smoltcp contributors
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: 0BSD
+
+smoltcp lends its sockets their buffers for as long as they live, and
+has no way to take a socket or a buffer apart again: SocketSet::remove
+gives the socket back, but not the memory it was given. The kernel
+lends each socket memory from its heap (ADR 0180), which must come back
+when a program closes the socket (ADR 0182). This adds `into_buffers`
+to the TCP, UDP and ICMP sockets and `into_storage` to RingBuffer and
+PacketBuffer, which give the socket or buffer up and return what it was
+made with.
+
+SocketSet's `add`, `get`, `get_mut` and `remove` panic when the set is
+full or a handle is not the set's; the kernel must not panic because a
+program closed a socket twice or opened too many. This adds `try_add`,
+`try_get`, `try_get_mut` and `try_remove`, which return an `Option`
+instead (and `try_add` the socket that did not fit).
+
+To be offered upstream.
+
+--- a/src/iface/socket_set.rs
++++ b/src/iface/socket_set.rs
+@@ -90,6 +90,40 @@
+         }
+     }
+ 
++    /// Add a socket to the set, and return its handle, or give the socket
++    /// back if the storage is fixed-size (not a `Vec`) and is full.
++    pub fn try_add<T: AnySocket<'a>>(&mut self, socket: T) -> Result<SocketHandle, T> {
++        if self.sockets.iter().all(|slot| slot.inner.is_some()) {
++            #[cfg(feature = "alloc")]
++            if let ManagedSlice::Owned(_) = self.sockets {
++                return Ok(self.add(socket));
++            }
++            return Err(socket);
++        }
++        Ok(self.add(socket))
++    }
++
++    /// Get a socket from the set by its handle, or `None` if the handle
++    /// does not refer to a socket of this set or the socket has another
++    /// type.
++    pub fn try_get<T: AnySocket<'a>>(&self, handle: SocketHandle) -> Option<&T> {
++        T::downcast(&self.sockets.get(handle.0)?.inner.as_ref()?.socket)
++    }
++
++    /// Get a mutable socket from the set by its handle, or `None` if the
++    /// handle does not refer to a socket of this set or the socket has
++    /// another type.
++    pub fn try_get_mut<T: AnySocket<'a>>(&mut self, handle: SocketHandle) -> Option<&mut T> {
++        T::downcast_mut(&mut self.sockets.get_mut(handle.0)?.inner.as_mut()?.socket)
++    }
++
++    /// Remove a socket from the set, without changing its state, or return
++    /// `None` if the handle does not refer to a socket of this set.
++    pub fn try_remove(&mut self, handle: SocketHandle) -> Option<Socket<'a>> {
++        net_trace!("[{}]: removing", handle.0);
++        Some(self.sockets.get_mut(handle.0)?.inner.take()?.socket)
++    }
++
+     /// Get a socket from the set by its handle, as mutable.
+     ///
+     /// # Panics
+@@ -149,3 +183,32 @@
+         self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
+     }
+ }
++
++#[cfg(all(test, feature = "socket-udp", feature = "socket-tcp"))]
++mod test {
++    use super::*;
++    use crate::socket::{tcp, udp};
++
++    fn udp_socket() -> udp::Socket<'static> {
++        udp::Socket::new(
++            udp::PacketBuffer::new(vec![], vec![]),
++            udp::PacketBuffer::new(vec![], vec![]),
++        )
++    }
++
++    #[test]
++    fn test_try_add_get_remove() {
++        let mut storage = [SocketStorage::EMPTY];
++        let mut set = SocketSet::new(&mut storage[..]);
++        let handle = set.try_add(udp_socket()).unwrap();
++        assert!(set.try_add(udp_socket()).is_err());
++        assert!(set.try_get::<udp::Socket>(handle).is_some());
++        assert!(set.try_get_mut::<udp::Socket>(handle).is_some());
++        assert!(set.try_get::<tcp::Socket>(handle).is_none());
++        assert!(set.try_get_mut::<udp::Socket>(SocketHandle(1)).is_none());
++        assert!(set.try_remove(handle).is_some());
++        assert!(set.try_remove(handle).is_none());
++        assert!(set.try_get::<udp::Socket>(handle).is_none());
++        assert!(set.try_add(udp_socket()).is_ok());
++    }
++}
+--- a/src/socket/icmp.rs
++++ b/src/socket/icmp.rs
+@@ -143,6 +143,12 @@
+         }
+     }
+ 
++    /// Give up the socket, and return its receive and transmit buffers,
++    /// so that memory lent to them can be taken back.
++    pub fn into_buffers(self) -> (PacketBuffer<'a>, PacketBuffer<'a>) {
++        (self.rx_buffer, self.tx_buffer)
++    }
++
+     /// Register a waker for receive operations.
+     ///
+     /// The waker is woken on state changes that might affect the return value
+--- a/src/socket/tcp.rs
++++ b/src/socket/tcp.rs
+@@ -632,6 +632,12 @@
+         }
+     }
+ 
++    /// Give up the socket, and return its receive and transmit buffers,
++    /// so that memory lent to them can be taken back.
++    pub fn into_buffers(self) -> (SocketBuffer<'a>, SocketBuffer<'a>) {
++        (self.rx_buffer, self.tx_buffer)
++    }
++
+     /// Enable or disable TCP Timestamp.
+     pub fn set_tsval_generator(&mut self, generator: Option<TcpTimestampGenerator>) {
+         self.tsval_generator = generator;
+--- a/src/socket/udp.rs
++++ b/src/socket/udp.rs
+@@ -141,6 +141,12 @@
+         }
+     }
+ 
++    /// Give up the socket, and return its receive and transmit buffers,
++    /// so that memory lent to them can be taken back.
++    pub fn into_buffers(self) -> (PacketBuffer<'a>, PacketBuffer<'a>) {
++        (self.rx_buffer, self.tx_buffer)
++    }
++
+     /// Register a waker for receive operations.
+     ///
+     /// The waker is woken on state changes that might affect the return value
+--- a/src/storage/packet_buffer.rs
++++ b/src/storage/packet_buffer.rs
+@@ -253,6 +253,15 @@
+         self.payload_ring.clear();
+         self.metadata_ring.clear();
+     }
++
++    /// Give up the packet buffer, and return its metadata and payload
++    /// storage, so that memory lent to it can be taken back.
++    pub fn into_storage(self) -> (ManagedSlice<'a, PacketMetadata<H>>, ManagedSlice<'a, u8>) {
++        (
++            self.metadata_ring.into_storage(),
++            self.payload_ring.into_storage(),
++        )
++    }
+ }
+ 
+ #[cfg(test)]
+--- a/src/storage/ring_buffer.rs
++++ b/src/storage/ring_buffer.rs
+@@ -93,6 +93,12 @@
+         self.window() == 0
+     }
+ 
++    /// Give up the ring buffer, and return its storage, so that memory
++    /// lent to it can be taken back.
++    pub fn into_storage(self) -> ManagedSlice<'a, T> {
++        self.storage
++    }
++
+     /// Shorthand for `(self.read + idx) % self.capacity()` with an
+     /// additional check to ensure that the capacity is not zero.
+     fn get_idx(&self, idx: usize) -> usize {
+@@ -800,4 +806,12 @@
+         let large = ring.enqueue_many(8);
+         assert_eq!(large.len(), 8);
+     }
++
++    #[test]
++    fn test_buffer_into_storage() {
++        let mut storage = [b'.'; 4];
++        let mut ring = RingBuffer::new(&mut storage[..]);
++        assert_eq!(ring.enqueue_slice(b"abc"), 3);
++        assert_eq!(&ring.into_storage()[..], b"abc.");
++    }
+ }

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Crates from crates.io that the kernel builds with changes of its own
+# (ADR 0182): `ob` fetches each, checks the SHA-256 of its .crate file (the
+# one Cargo.lock files record), applies <name>-<version>.patch from this
+# directory and puts it in kernel/patched/, where kernel/Cargo.toml's
+# [patch.crates-io] takes it from. Each change is one to offer upstream.
+
+# The TCP/IP stack (ADR 0180). The patch lets a socket and its buffers be
+# taken apart again, so that the memory the kernel lent them comes back
+# when a socket closes (`into_buffers` and `into_storage`), and gives the
+# socket set ways to add, find and remove sockets that do not panic.
+[[crate]]
+name = "smoltcp"
+version = "0.14.0"
+sha256 = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+license = "0BSD"

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0180. The TCP/IP stack runs in the kernel, on smoltcp
 
-- Status: Accepted
+- Status: Accepted; smoltcp is patched, and a closed socket's memory comes back, since [0182](0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md)
 - Date: 2026-10-30
 
 ## Context

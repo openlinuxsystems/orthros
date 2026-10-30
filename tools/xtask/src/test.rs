@@ -73,6 +73,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-mca",
     "radix-microcode",
     "radix-mm",
+    "radix-net",
     "radix-nvme",
     "radix-posix",
     "radix-random",
@@ -2068,7 +2069,7 @@ fn unit_tests(ctx: &Ctx) -> Result<()> {
     process::run(ctx, &mut cmd)?;
 
     step("Running unit tests for the kernel libraries on the host");
-    let mut cmd = kernel::cargo(ctx, "test");
+    let mut cmd = kernel::cargo(ctx, "test")?;
     for library in KERNEL_LIBRARIES {
         cmd.args(["-p", library]);
     }
@@ -2114,7 +2115,7 @@ fn kani(ctx: &Ctx) -> Result<()> {
     }
     for library in PROVED_LIBRARIES {
         step(&format!("Checking the Kani proofs of {library}"));
-        let mut cmd = kernel::cargo(ctx, "kani");
+        let mut cmd = kernel::cargo(ctx, "kani")?;
         // Kani builds with its own toolchain, so it gets a directory of its
         // own instead of sharing the kernel's.
         cmd.arg("--target-dir").arg(ctx.target.join("kani"));
@@ -6434,6 +6435,52 @@ fn microcode(vm: &mut Vm, case: &Case) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every member of the kernel workspace with host tests is in
+    /// KERNEL_LIBRARIES, so that `ob test unit` runs them and `ob lint`
+    /// lints them.
+    #[test]
+    fn every_kernel_library_with_tests_is_tested() {
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            workspace: Option<Workspace>,
+            package: Option<Package>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Workspace {
+            members: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Package {
+            name: String,
+        }
+        fn has_tests(dir: &Path) -> bool {
+            std::fs::read_dir(dir).unwrap().flatten().any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    return has_tests(&path);
+                }
+                path.extension().is_some_and(|e| e == "rs")
+                    && std::fs::read_to_string(&path).unwrap().contains("#[cfg(test)]")
+            })
+        }
+        let kernel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernel");
+        let read = |path: &Path| -> Manifest {
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let members = read(&kernel.join("Cargo.toml")).workspace.unwrap().members;
+        assert!(members.len() > 40);
+        for member in members {
+            let dir = kernel.join(&member);
+            let name = read(&dir.join("Cargo.toml")).package.unwrap().name;
+            if has_tests(&dir.join("src")) {
+                assert!(
+                    KERNEL_LIBRARIES.contains(&name.as_str()),
+                    "{name} is not in KERNEL_LIBRARIES"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_churn_cut_short_may_have_removed_one_file_unsaid() {

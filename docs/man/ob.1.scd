@@ -56,8 +56,10 @@ _target/userspace/_).
 	*rustup*(1), including rustfmt, Clippy, the Rust sources (the kernel
 	compiles its own copy of the *core* library) and the
 	aarch64-unknown-none target (*lint* checks the AArch64 stubs of the
-	hardware abstraction layer against it), then run *doctor*. Run it once
-	after cloning and again whenever the pinned toolchain changes.
+	hardware abstraction layer against it), then run *doctor* and
+	*crates*, so that editors' Rust tools find the crates the kernel
+	patches. Run it once after cloning and again whenever the pinned
+	toolchain changes.
 
 *doctor*
 	Check every host tool the build needs: rustup, the pinned toolchain
@@ -65,7 +67,8 @@ _target/userspace/_).
 	UEFI, xorriso, mtools, dosfstools, exfatprogs, The Sleuth Kit,
 	btrfs-progs, e2fsprogs, the tools that build
 	the ports (Clang 20 or later with compiler-rt's builtins, LLD, LLVM's
-	tools, Meson 1.3 or later, Ninja, *localedef*, git and patch), scdoc,
+	tools, Meson 1.3 or later, Ninja, *localedef*, git, curl and patch,
+	the last two of which the kernel's patched crates need too), scdoc,
 	mandoc and mdBook. For anything missing, print the exact install
 	command for Debian, Ubuntu, Fedora or Arch Linux. Also report whether KVM is usable (without it QEMU still works,
 	only slower), whether GDB is installed for *run --gdb*, and whether
@@ -117,6 +120,18 @@ _target/userspace/_).
 	*--rebuild* _name_
 		Build this port even if nothing changed; repeat the option for
 		more.
+
+*crates*
+	Fetch each crate from crates.io that _kernel/patches/crates.toml_
+	lists, check the SHA-256 of its _.crate_ file, apply its patch from
+	_kernel/patches/_ and put it in _kernel/patched/_, where
+	_kernel/Cargo.toml_ takes it from in place of crates.io's: smoltcp,
+	patched so that a closed socket's memory comes back (ADR 0182). A
+	crate already there from the same file and patch is left as it is,
+	and one the list no longer has is removed. Every *ob* command that
+	runs Cargo on the kernel does this first; run it before Cargo
+	commands of your own on the kernel, such as cargo-deny's, which CI
+	runs after it.
 
 *image* [*--iso*] [*--cmdline* _flags_] [*--microcode* _path_] [*--disk-check* _serial_] [*--debug* | *--release*]
 	Build the kernel, then the boot image
@@ -1086,8 +1101,9 @@ _target/userspace/_).
 	directories.
 
 	*--all*
-		Also remove _target/_ and _.cache/_, which hold the build tool
-		itself and the container's Cargo cache.
+		Also remove _target/_, _.cache/_ and _kernel/patched/_, which hold
+		the build tool itself, the container's Cargo cache and the
+		crates the kernel patches.
 
 *help* [_command_]
 	Show the list of commands, or the help for one command.
@@ -1283,6 +1299,14 @@ _out/sysroot/boot/bootfs_
 _kernel/deny.toml_
 	The license allow-list of the kernel, used by *ob image* and by
 	cargo-deny in CI.
+
+_kernel/patches/_
+	The crates from crates.io the kernel builds patched: _crates.toml_,
+	which lists each with the SHA-256 of its _.crate_ file and its
+	license, and each one's _<name>-<version>.patch_.
+
+_kernel/patched/_
+	The patched crates, made by *crates* (not in git).
 
 _LICENSES/_
 	The texts of the licenses that files in the repository use, as the
