@@ -3,7 +3,7 @@
 
 [package]
 name = "radix-virtio"
-description = "Virtio over PCI for the Radix kernel: the modern transport, split virtqueues and the block device driver"
+description = "Virtio over PCI for the Radix kernel: the modern transport, split virtqueues, and the block and network drivers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

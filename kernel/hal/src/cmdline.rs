@@ -74,6 +74,16 @@ pub const FLAGS: &[Flag] = &[
         summary: "read the CPUs' machine-check banks this often (300 by default)",
     },
     Flag {
+        name: "ip",
+        value: Some("address/prefix"),
+        summary: "give the first network card this IPv4 address, such as 10.0.2.15/24",
+    },
+    Flag {
+        name: "gateway",
+        value: Some("address"),
+        summary: "send IPv4 packets for other networks through this router",
+    },
+    Flag {
         name: "font",
         value: Some("size"),
         summary: "framebuffer console font: 8x16, 12x24 or 16x32",
@@ -88,7 +98,7 @@ pub const FLAGS: &[Flag] = &[
         value: Some("name"),
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
                   mm-stress, stack-overflow, smep, smap, tlb, caps, fpu, sched-fair, sched-rt, \
-                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz, bench or iommu",
+                  sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz, bench, iommu or net",
     },
     Flag {
         name: "fuzz-seed",
@@ -138,6 +148,7 @@ pub const SELFTESTS: &[&str] = &[
     "fuzz",
     "bench",
     "iommu",
+    "net",
 ];
 
 /// A parsed view of the command line.

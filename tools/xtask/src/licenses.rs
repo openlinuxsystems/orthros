@@ -43,9 +43,10 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// notify crate, ADR 0080). ncurses' license is the X11 license that also
 /// lets one distribute with modifications; the One True Awk's is Lucent's,
 /// which SPDX has no identifier for. The rest are permissive licenses of
-/// the compression and archive ports: XZ Utils' 0BSD, bzip2's own,
-/// Info-ZIP's for zip, and in jq, ICU's for decNumber, David M. Gay's for
-/// its number formatting, and CC-BY-3.0 for its manual (ADR 0088). The
+/// the compression and archive ports: bzip2's own, Info-ZIP's for zip,
+/// and in jq, ICU's for decNumber, David M. Gay's for its number
+/// formatting, and CC-BY-3.0 for its manual (ADR 0088); XZ Utils' 0BSD
+/// is in the kernel area's list, for smoltcp (ADR 0180). The
 /// 4.4BSD database library vi keeps its lines in is under the University
 /// of California's license with the advertising clause, which the
 /// University rescinded in 1999 (ADR 0090). 7-Zip is under the LGPL, as a
@@ -59,7 +60,6 @@ const PORT_EXTRA_ALLOW: &[&str] = &[
     "GPL-3.0-or-later",
     "X11-distribute-modifications-variant",
     "LicenseRef-onetrueawk",
-    "0BSD",
     "bzip2-1.0.6",
     "Info-ZIP",
     "ICU",

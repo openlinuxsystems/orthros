@@ -558,6 +558,11 @@ const RAW_WRITES: &[(u64, u64)] =
     &[(513, 3), (3 * 512 - 1, 2), (20 * 4096 + 100, 70_000), (1 << 20, 8192)];
 const RAW_DISCARD: (u64, u64) = (4 << 20, 1 << 20);
 
+/// The `net` test's network card: virtio 1.0 only, behind the IOMMU, with
+/// the MAC address the test looks for.
+const NET_CARD: &str = "virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on,\
+                        mac=52:54:00:12:34:56";
+
 /// The size of the `disk-check` test's disk: the smallest disktest takes.
 const CHECK_KIB: u64 = 128 * 1024;
 
@@ -1976,6 +1981,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: oom,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "net",
+        about: "behind QEMU's Intel IOMMU, a virtio network card takes the address of the ip= and gateway= flags, and QEMU's router answers its pings",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "qemu-exit lockdep selftest=net ip=10.0.2.15/24 gateway=10.0.2.2",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "intel-iommu,intremap=on", "-netdev", "user,id=n0", "-device", NET_CARD],
+        script: net,
         disks: &[],
         second: None,
     },
@@ -4102,6 +4123,38 @@ fn caps(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect(" forgeries and ")?;
     vm.expect(" derivations by 3 other CPUs during a ")?;
     selftest_passed(vm, "caps")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    selftest_passed(vm, "net")?;
+    // The card is found during the PCI scan, among lines boot_report
+    // reads past.
+    let log = vm.log();
+    let card = log
+        .lines()
+        .find_map(|line| line.find("Net: net0 is a virtio network card at ").map(|at| &line[at..]))
+        .ok_or("the kernel never found the network card")?;
+    let described =
+        card.contains(", MAC 52:54:00:12:34:56, 256 receive and 256 transmit slots, MSI-X vector ");
+    if !described {
+        return Err(format!("the kernel described the card as \"{card}\""));
+    }
+    // Behind the IOMMU, as ACCESS_PLATFORM lets it be.
+    let address = card.split(" at ").nth(1).and_then(|rest| rest.split(',').next());
+    let confined = address.map(|address| format!("IOMMU: {address} reaches only what is mapped"));
+    let mut needles = vec![
+        confined.ok_or("the card's line names no address")?,
+        "Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2".to_string(),
+    ];
+    needles.extend((1..=4).map(|seq| format!("Net: 10.0.2.2 answered ping {seq} in ")));
+    needles.push("selftest net: passed; the router answered 4 pings, the fastest in ".into());
+    for needle in &needles {
+        if !log.contains(needle.as_str()) {
+            return Err(format!("the kernel never said \"{needle}\""));
+        }
+    }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
