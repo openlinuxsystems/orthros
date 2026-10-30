@@ -15,6 +15,7 @@ bench = false
 
 [dependencies]
 radix-hw = { path = "../../lib/hw" }
+radix-iopt = { path = "../../lib/iopt" }
 
 [dev-dependencies]
 proptest = { version = "1.7", default-features = false, features = ["std"] }

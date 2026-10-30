@@ -16,9 +16,11 @@ bench = false
 
 [dependencies]
 radix-acpi = { path = "../../lib/acpi" }
+radix-amdvi = { path = "../../drivers/amdvi" }
 radix-bootinfo = { path = "../../lib/bootinfo" }
 radix-hal = { path = "../../hal" }
 radix-hw = { path = "../../lib/hw" }
+radix-iopt = { path = "../../lib/iopt" }
 radix-klog = { path = "../../lib/klog" }
 radix-mca = { path = "../../lib/mca" }
 radix-microcode = { path = "../../lib/microcode" }

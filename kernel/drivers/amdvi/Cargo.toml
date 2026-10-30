@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-amdvi"
+description = "AMD-Vi for the Radix kernel: the IOMMUs' device tables, each device's own domain of pages, and their event logs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+radix-iopt = { path = "../../lib/iopt" }
+
+[dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true

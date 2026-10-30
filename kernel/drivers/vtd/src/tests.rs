@@ -50,7 +50,7 @@ impl HostMemory {
     }
 }
 
-impl Memory for Arc<HostMemory> {
+impl Memory for HostMemory {
     fn alloc_page(&self) -> Option<u64> {
         let allowed = self.allowed.load(Ordering::Relaxed);
         if allowed == 0 {
