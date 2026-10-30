@@ -9,7 +9,7 @@ dmesg - print or clear the kernel log
 
 # SYNOPSIS
 
-*dmesg* [*-cdrTtwWx*] [*-l* _levels_]
+*dmesg* [*-cdkrTtuwWx*] [*-l* _levels_]
 
 *dmesg* *-C*
 
@@ -21,9 +21,11 @@ text. It reads the records from _/devices/kmsg_ (*radix-kernel-log*(2)),
 the oldest kept first. The kernel keeps the newest records in a ring;
 older ones are gone.
 
-The log holds what the kernel says and what programs write to it
-before their own logs are up; each line a program wrote starts with its
-name. Every record is of the kernel's facility.
+The log holds what the kernel says and what programs write to it; each
+line a program wrote starts with its name and is of the user facility,
+the kernel's own of the kernel facility. *log*(1) shows the same records
+with the services' lines named by service, kept across boots by
+*logd*(8).
 
 # OPTIONS
 
@@ -62,10 +64,15 @@ name. Every record is of the kernel's facility.
 *-x*, *--decode*
 	Each record's facility and level by name before it.
 
-*-u* prints nothing, as Radix keeps no userspace records in the
-kernel's log. *-n*, *-D* and *-E* fail: Radix has no console log level
-to set. *-k*, *-H*, *-L*, *-P*, *--kernel*, *--color*, *--nopager* and
-*--human* are taken and change nothing.
+*-k*, *--kernel*
+	Only the kernel's own records.
+
+*-u*, *--userspace*
+	Only the records programs wrote.
+
+*-n*, *-D* and *-E* fail: Radix has no console log level to set. *-H*,
+*-L*, *-P*, *--color*, *--nopager* and *--human* are taken and change
+nothing.
 
 # EXAMPLES
 
@@ -79,5 +86,5 @@ Watch the log:
 
 # SEE ALSO
 
-*systools*(1), *radix-kernel-log*(2), *radix-debug*(7),
-*radix-files*(7)
+*log*(1), *logd*(8), *systools*(1), *radix-kernel-log*(2),
+*radix-debug*(7), *radix-files*(7)

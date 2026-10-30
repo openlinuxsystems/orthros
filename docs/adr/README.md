@@ -189,3 +189,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |
+| [0210](0210-logd-keeps-the-kernel-log-as-the-system-log.md) | logd keeps the kernel log as the system's log, and the kernel says which process wrote each record | Accepted |

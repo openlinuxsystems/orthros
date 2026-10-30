@@ -1159,6 +1159,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "logging",
+        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix /system/tests/posix/logtest",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: logging,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "page-fault",
         about: "a page fault panics with registers and a symbolized backtrace, on screen too",
         firmware: Firmware::Bios,
@@ -6578,6 +6594,29 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err("the log does not show hog's own line, \"hog: taking memory\"".into());
     }
     Ok(())
+}
+
+/// The `logging` test: logd(8) starts with the services and keeps the
+/// kernel log; logtest (userspace/posix/logtest.c) checks what log(1),
+/// journalctl(1) and dmesg(1) show of it, and that logd started again
+/// keeps no record twice (ADR 0210).
+fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("logd: keeping the log in /system/state/log")?;
+    vm.expect_ahead("spark: started /system/tests/posix/logtest as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/logtest) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("logtest: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("logtest failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("logtest: every check passed") {
+        return Err(format!("logtest exited with code {code}"));
+    }
+    vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")?;
+    vm.expect("spark: nothing more to do; waiting")
 }
 
 /// Spark supervises three services: `stubborn` ignores SIGTERM, so 5 s

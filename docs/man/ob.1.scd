@@ -443,6 +443,17 @@ _target/userspace/_).
 		process in its domain, which Spark stops; _driver_ makes the
 		requests and powers the machine off (*spark*(8)).
 
+	*logging*
+		Boot 2 CPUs with the default services (Spark's *--services*) and
+		_/system/tests/posix/logtest_, which writes lines to the kernel
+		log as a program and checks what *log*(1), *journalctl*(1) and
+		*dmesg*(1) show of them and of the services: levels, names and
+		process numbers, a program's line with a service's name in front
+		of it kept as the program's, the kernel's records alone, a line
+		*log -f* shows as it comes, the boots and the day files; then
+		*service logd restart*, after which no record is kept twice
+		(*logd*(8)).
+
 	*page-fault*
 		Boot with *selftest=page-fault* and check the panic report on the
 		serial port and on the screen, with its symbolized backtrace.

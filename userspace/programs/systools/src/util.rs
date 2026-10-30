@@ -103,11 +103,24 @@ pub fn monotonic_ns() -> u64 {
 
 /// Seconds since the epoch, formatted with strftime(3) in local time.
 pub fn local_time(seconds: i64, format: &str) -> String {
+    time_text(seconds, format, false)
+}
+
+/// Seconds since the epoch, formatted with strftime(3) in UTC, or in
+/// local time.
+pub fn time_text(seconds: i64, format: &str, utc: bool) -> String {
     let time = seconds as libc::time_t;
-    // SAFETY: an all-zero tm is valid; localtime_r fills it.
+    // SAFETY: an all-zero tm is valid; gmtime_r and localtime_r fill it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: both pointers are valid for the call.
-    if unsafe { libc::localtime_r(&raw const time, &raw mut tm) }.is_null() {
+    let filled = unsafe {
+        if utc {
+            libc::gmtime_r(&raw const time, &raw mut tm)
+        } else {
+            libc::localtime_r(&raw const time, &raw mut tm)
+        }
+    };
+    if filled.is_null() {
         return seconds.to_string();
     }
     let Ok(format) = CString::new(format) else { return String::new() };

@@ -365,7 +365,14 @@ fn debug_log(me: &ThreadRef, cspace: SpaceId, a: sys::DebugLogArgs) -> Result<()
     while let [rest @ .., b'\n' | b'\r'] = text {
         text = rest;
     }
-    info!("{}[{}]: {}", me.name(), me.id(), Shown(text));
+    let (level, text) = crate::fs::kmsg::level_of(text);
+    let process = me.user().map_or(0, |user| user.process.number());
+    // Saturating, as `/devices/kmsg`'s writes (ADR 0210).
+    radix_klog::log_from(
+        level,
+        u32::try_from(process).unwrap_or(u32::MAX),
+        format_args!("{}[{}]: {}", me.name(), me.id(), Shown(text)),
+    );
     Ok(())
 }
 

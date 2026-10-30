@@ -7,7 +7,9 @@
 //! the domain the kernel gave Spark (radix-resource-domain(2)), with the
 //! CPU weight, memory limit and out-of-memory class its file gives
 //! (`services`). Its standard output and error are a pipe whose lines
-//! Spark copies to the kernel log, its input is _/devices/null_. When it ends
+//! Spark copies to the kernel log, each after the service's name, where
+//! logd(8) finds them by Spark's process number (ADR 0210); its input is
+//! _/devices/null_. When it ends
 //! Spark starts it again as its file says, waiting 0.1 s after a quick
 //! end, then twice as long after each one in a row, up to 30 s; a service
 //! the out-of-memory policy stopped ends as if killed, and is started
@@ -1221,16 +1223,26 @@ enum Source {
 }
 
 /// Logs `line` after `name: `, unless it starts with that, and empties it.
+/// A `<N>` before the text, which sets its level as on Linux (sd-daemon(3)'s
+/// `<3>` for an error), stays in front, where the kernel reads it.
 fn flush_line(line: &mut Vec<u8>, name: Option<&str>) {
     if line.is_empty() {
         return;
     }
     let text = String::from_utf8_lossy(line);
+    let (level, text) = match text.strip_prefix('<').and_then(|rest| rest.split_once('>')) {
+        Some((digits, rest))
+            if (1..=9).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            (&text[..digits.len() + 2], rest)
+        }
+        _ => ("", &*text),
+    };
     match name {
         Some(name) if !text.starts_with(name) || !text[name.len()..].starts_with(':') => {
-            println!("{name}: {text}");
+            println!("{level}{name}: {text}");
         }
-        _ => println!("{text}"),
+        _ => println!("{level}{text}"),
     }
     line.clear();
 }

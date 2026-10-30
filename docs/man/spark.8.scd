@@ -162,10 +162,11 @@ spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
 spark: built the hierarchy of 9 directories and mounted 8 filesystems
 spark: added 6 default settings to /system/settings
 spark: listening at /system/live/spark/control
-spark: 3 services in /system/settings/spark/services, 3 enabled
-spark: started consoled (/system/commands/consoled) as process 12
-spark: started volumed (/system/commands/volumed) as process 13
-spark: started diskhealth (/system/commands/diskhealth) as process 14
+spark: 4 services in /system/settings/spark/services, 4 enabled
+spark: started logd (/system/commands/logd) as process 12
+spark: started consoled (/system/commands/consoled) as process 13
+spark: started volumed (/system/commands/volumed) as process 14
+spark: started diskhealth (/system/commands/diskhealth) as process 15
 ```
 
 On Dukovo's root, as on a SATA disk written from the image, the
@@ -255,7 +256,12 @@ its standard output and error, _/_ as its working directory, and the
 environment *PATH=/system/commands*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8*
 and *EDITOR=nano* with the file's *environment* over it. It copies what
 the service writes, line by line, to the kernel log, after the service's
-name and a colon unless the line starts with them already.
+name and a colon unless the line starts with them already, and keeps a
+level the line starts with (*<3>* for an error, as systemd's services
+write) in front, where the kernel takes it. *logd*(8) keeps these
+lines in the system's log as the service's: the kernel marks each line
+with the number of the process that wrote it, and only Spark's lines
+name services.
 
 When a service ends, Spark logs how, and starts it again as its
 *restart* says: after 0.1 seconds, and twice as long after each end in a
