@@ -55,6 +55,20 @@ starts. A session that ends within 2 seconds five times in a row waits
 10 seconds before the next. Users and login(1) come in Phase 13 of the
 roadmap; until then each session is root's, with no password asked.
 
+# NOTIFICATIONS
+
+consoled shows the notifications *notifyd*(8) passes on, such as
+*notify-send*(1)'s, on the bottom line of the screen, over the shown
+console's last line: the name of the program that sent it, its title
+and its body on one line, cut with *...* if it is too long, in white on
+blue, or in red for a critical one and grey for a low one (ADR 0212). It
+stays for its time, 8 seconds unless it asked for another; a critical
+one, or one of 0 seconds, stays until a key is pressed, and the key
+still goes to the console. A newer notification takes the line at once,
+and *notifications*(1) lists them all. consoled logs *showing
+notifications from notifyd* when it finds notifyd, and tries again every
+5 seconds while it is not running.
+
 # KEYS
 
 *Alt+F1* to *Alt+F6*
@@ -132,7 +146,11 @@ _/system/settings/keymaps/name.keymap_
 _/system/settings/spark/services/consoled.service_
 	The service.
 
+_/system/live/notify/socket_
+	notifyd's socket, which consoled follows.
+
 # SEE ALSO
 
 *spark*(8), *reboot*(8), *keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
+*notifyd*(8), *notify-send*(1),
 *radix-framebuffer*(2), *radix-input*(2), *radix-files*(7)

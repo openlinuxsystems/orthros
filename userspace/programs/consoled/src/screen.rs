@@ -212,23 +212,31 @@ impl Screen {
         self.drawn_cursor = None;
     }
 
-    /// Draws what changed of `term` since the last draw.
-    pub fn draw(&mut self, term: &Terminal) -> io::Result<()> {
+    /// Draws what changed of `term` since the last draw, with `bottom`'s
+    /// cells over its last row if there are any: a notification
+    /// (`notices`).
+    pub fn draw(&mut self, term: &Terminal, bottom: Option<&[Cell]>) -> io::Result<()> {
         let reverse = term.modes().reverse_screen;
         if reverse != self.drawn_reverse {
             self.invalidate();
             self.drawn_reverse = reverse;
         }
-        let cursor = term.cursor();
         let (cols, rows) = (self.cols.min(term.cols()), self.rows.min(term.rows()));
+        let last = rows - 1;
+        let shown = |x: usize, y: usize| match bottom {
+            Some(cells) if y == last => cells.get(x).copied().unwrap_or(Cell::BLANK),
+            _ => term.shown(x, y),
+        };
+        // No cursor under a notification.
+        let cursor = term.cursor().filter(|&(_, cy)| bottom.is_none() || cy != last);
         for y in 0..rows {
             let cursor_here = cursor.filter(|&(_, cy)| cy == y).map(|(cx, _)| cx);
             let cursor_was = self.drawn_cursor.as_ref().is_some_and(|&(_, cy)| cy == y);
             let changed = cursor_here.is_some() != cursor_was
                 || (cursor_here.is_some() && self.drawn_cursor != cursor)
-                || (0..cols).any(|x| self.drawn[y * self.cols + x] != Some(term.shown(x, y)));
+                || (0..cols).any(|x| self.drawn[y * self.cols + x] != Some(shown(x, y)));
             if changed {
-                self.draw_row(term, y, cols, cursor_here, reverse)?;
+                self.draw_row(|x| shown(x, y), y, cols, cursor_here, reverse)?;
             }
         }
         self.drawn_cursor = cursor;
@@ -237,7 +245,7 @@ impl Screen {
 
     fn draw_row(
         &mut self,
-        term: &Terminal,
+        shown: impl Fn(usize) -> Cell,
         y: usize,
         cols: usize,
         cursor: Option<usize>,
@@ -246,7 +254,7 @@ impl Screen {
         let (fw, fh, bpp) = (self.font.width, self.font.height, self.format.bpp);
         let pitch = self.format.pitch;
         for x in 0..cols {
-            let cell = term.shown(x, y);
+            let cell = shown(x);
             self.drawn[y * self.cols + x] = Some(cell);
             let (mut fg, mut bg) = (cell.fg, cell.bg);
             if cell.flags & BOLD != 0 && fg < 8 {

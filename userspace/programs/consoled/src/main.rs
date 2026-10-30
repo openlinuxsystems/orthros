@@ -12,11 +12,13 @@
 //! Shift+Page Up looks back; Scroll Lock holds the shown console's output;
 //! Ctrl+Alt+Delete runs reboot(8). The keys type in the layout
 //! _/system/settings/keyboard_ names (keymap(1), ADR 0149), read again on
-//! SIGHUP, which `service consoled reload` sends. When consoled ends, the
-//! screen is the kernel log's again. Spark starts it as a service
-//! (spark(8)).
+//! SIGHUP, which `service consoled reload` sends. Notifications from
+//! notifyd(8) show on the bottom line (`notices`, ADR 0212). When
+//! consoled ends, the screen is the kernel log's again. Spark starts it as
+//! a service (spark(8)).
 
 mod keys;
+mod notices;
 mod screen;
 mod session;
 mod sys;
@@ -32,7 +34,8 @@ use std::time::Instant;
 
 use keymap::Keymap;
 use keys::{Action, Keyboard};
-use radix_abi::input::{Event, SET_LEDS};
+use notices::Notices;
+use radix_abi::input::{Event, PRESSED, SET_LEDS};
 use screen::Screen;
 use session::{Console, Shell};
 
@@ -189,6 +192,7 @@ struct Consoled {
     keyboard: Keyboard,
     kbd: Option<File>,
     shell: Shell,
+    notices: Notices,
 }
 
 impl Consoled {
@@ -237,6 +241,11 @@ impl Consoled {
         let value =
             u16::from_le_bytes([event[Event::OFFSET_VALUE], event[Event::OFFSET_VALUE + 1]]);
         let modes = self.consoles[self.active].term.modes();
+        // A key takes a notification that waits for one off the line; the
+        // key itself goes on as usual.
+        if value == PRESSED {
+            self.notices.key();
+        }
         match self.keyboard.key(code, value, modes) {
             Action::None => {}
             Action::Send(bytes) => {
@@ -282,7 +291,8 @@ impl Consoled {
     fn run(&mut self, wake: &mut File) -> io::Result<()> {
         let mut events = vec![0u8; Event::SIZE * 32];
         loop {
-            // The wake pipe, the keyboard, then each console's master.
+            // The wake pipe, the keyboard, notifyd, then each console's
+            // master.
             let mut fds =
                 vec![libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             fds.push(libc::pollfd {
@@ -290,6 +300,7 @@ impl Consoled {
                 events: libc::POLLIN,
                 revents: 0,
             });
+            fds.push(libc::pollfd { fd: self.notices.fd(), events: libc::POLLIN, revents: 0 });
             for (i, console) in self.consoles.iter().enumerate() {
                 let held = i == self.active && self.keyboard.scroll;
                 let fd = console.master_fd().filter(|_| !held).unwrap_or(-1);
@@ -297,8 +308,12 @@ impl Consoled {
             }
             let now = Instant::now();
             let retry = self.consoles.iter().filter_map(|c| c.retry_at).min();
+            let next = match (retry, self.notices.deadline()) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let timeout =
-                retry.map_or(-1, |at| at.saturating_duration_since(now).as_millis() as i32);
+                next.map_or(-1, |at| at.saturating_duration_since(now).as_millis() as i32);
             // SAFETY: `fds` holds valid pollfds.
             let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
             if ready < 0 {
@@ -334,19 +349,24 @@ impl Consoled {
                     }
                 }
             }
+            let now = Instant::now();
+            if fds[2].revents != 0 {
+                self.notices.read(now);
+            }
             for (i, console) in self.consoles.iter_mut().enumerate() {
-                if fds[2 + i].revents != 0 {
+                if fds[3 + i].revents != 0 {
                     console.read();
                 }
             }
-            let now = Instant::now();
             for i in 0..self.consoles.len() {
                 if self.consoles[i].retry_at.is_some_and(|at| at <= now) {
                     self.start(i);
                 }
             }
+            self.notices.tick(now);
             // Only the cells that changed are drawn.
-            self.screen.draw(&self.consoles[self.active].term)?;
+            let bottom = self.notices.shown.as_ref().map(|shown| shown.cells(self.screen.cols()));
+            self.screen.draw(&self.consoles[self.active].term, bottom.as_deref())?;
         }
     }
 }
@@ -390,7 +410,8 @@ fn main() -> ExitCode {
     let (cols, rows) = (screen.cols(), screen.rows());
     let consoles = (1..=options.consoles).map(|n| Console::new(n, cols, rows)).collect();
     let keyboard = Keyboard::new(chosen_keymap());
-    let mut consoled = Consoled { screen, consoles, active: 0, keyboard, kbd, shell };
+    let notices = Notices::new(Instant::now());
+    let mut consoled = Consoled { screen, consoles, active: 0, keyboard, kbd, shell, notices };
     consoled.lights();
     consoled.switch(0);
     eprintln!("consoled: {} consoles; tty1 is shown", options.consoles);

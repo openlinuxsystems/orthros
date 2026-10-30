@@ -29,7 +29,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 - [Logs, monitoring and troubleshooting](logs.md)
 - [SSH and remote access]()
 - [Power, laptops and desktops]()
-- [Privacy and security reporting]()
+- [Privacy and security reporting](privacy.md)
 - [Moving from Linux: familiar commands and their Dukovo equivalents]()
 
 # Reference

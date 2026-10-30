@@ -928,7 +928,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "consoles",
-        about: "a normal boot shows a shell on consoled's virtual consoles; typing, Alt+F2, a German keyboard layout, poweroff",
+        about: "a normal boot shows a shell on consoled's virtual consoles; typing, notifications on the bottom line, Alt+F2, a German keyboard layout, poweroff",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
@@ -1185,7 +1185,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "logging",
-        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice; the audit log holds Spark's and the kernel's security events and no program's; logtrim and journalctl --vacuum-time trim the log",
+        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice; the audit log holds Spark's and the kernel's security events and no program's; logtrim and journalctl --vacuum-time trim the log; notifyd names each notification's sender as the kernel does, refuses a flood and logs none of them",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --services --posix /system/tests/posix/logtest",
@@ -3380,6 +3380,22 @@ impl Vm {
         }
     }
 
+    /// Waits until no line of the framebuffer console shows `needle`, for
+    /// up to 15 seconds.
+    pub fn expect_screen_without(&mut self, needle: &str) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let screen = self.screen()?;
+            if !screen.iter().any(|line| line.contains(needle)) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("the screen still shows \"{needle}\""));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     /// Takes a screenshot and reads the framebuffer console's text.
     pub fn screen(&mut self) -> Result<Vec<String>, String> {
         let geometry = screen::Geometry::from_log(&self.log())
@@ -3781,7 +3797,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 4 services in /system/settings/spark/services, 4 enabled")?;
+    vm.expect("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -3789,6 +3805,22 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     vm.type_text("echo $((6 * 7)) consoles\n")?;
     vm.expect_screen(&["# echo $((6 * 7)) consoles", "42 consoles"])?;
+    // notifyd's notifications on the bottom line (ADR 0212): one for its
+    // time, a critical one until a key is pressed, and both in the list.
+    vm.expect_anywhere("consoled: showing notifications from notifyd")?;
+    vm.type_text("notify-send -t 4000 -a backup 'Backup done' 'All 3 disks'\n")?;
+    vm.expect_screen(&["notify-send (backup): Backup done - All 3 disks"])?;
+    vm.expect_screen_without("Backup done - All")?;
+    vm.type_text("notify-send -u critical 'Disk full'\n")?;
+    vm.expect_screen(&["notify-send: Disk full"])?;
+    vm.press(&["shift"])?;
+    vm.expect_screen_without("notify-send: Disk full")?;
+    vm.type_text("notifications\n")?;
+    vm.expect_screen(&[
+        "  notify-send (backup): Backup done",
+        "    All 3 disks",
+        "  notify-send [critical]: Disk full",
+    ])?;
     vm.press(&["alt-f2"])?;
     vm.expect("consoled: started /system/commands/nukesh on tty2 as process ")?;
     vm.expect_screen(&["(tty2)"])?;

@@ -324,6 +324,9 @@ _target/userspace/_).
 		Boot normally, with no program on the command line, so Spark
 		starts its services: read Nukesh's prompt off consoled's tty1,
 		type a command on QEMU's PS/2 keyboard and read its answer back,
+		send two notifications with *notify-send*(1) and read them off
+		the bottom line, one until its time is up and a critical one
+		until a key is pressed, and list them with *notifications*(1),
 		switch to tty2 with Alt+F2, switch the keyboard to the German
 		layout with *keymap*(1) and type a Z, an E with a dead acute and
 		an @ with AltGr, restart consoled with *service*(8), which must
@@ -465,8 +468,11 @@ _target/userspace/_).
 		*log -f* shows as it comes, the boots and the day files; then
 		*service logd restart*, after which no record is kept twice
 		(*logd*(8)); the audit log's events from Spark and the kernel
-		and none from a program; and *logtrim*(8) and journalctl's
-		*--vacuum-time* removing old day files, each removal an event.
+		and none from a program; *logtrim*(8) and journalctl's
+		*--vacuum-time* removing old day files, each removal an event;
+		and *notifyd*(8) naming each notification's sender as the kernel
+		does, whatever name it claims, refusing a flood and keeping
+		nothing of a notification in the log.
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
