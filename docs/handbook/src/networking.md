@@ -44,11 +44,37 @@ WireGuard. This page grows with each.
   `./ob crates` fetches it from crates.io and applies the patch, and
   every build does that first.
 
+- **The C library's BSD sockets**: `socket`, `bind`, `listen`,
+  `connect`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `sendmsg`,
+  `recvmsg`, `getsockname`, `getpeername`, `getsockopt`, `setsockopt`
+  and `shutdown` work on `AF_INET` TCP and UDP sockets, as radix-posix(7)
+  describes. A call the program's capabilities do not allow fails with
+  `EACCES`
+  ([ADR 0184](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0184-services-and-the-c-library-use-the-network-capabilities-they-were-given.md)).
+- **Services get the network their files ask for**: a service file's
+  `network.outbound = yes` lets it connect out, and `network.listen`
+  names the ports it may listen on (spark(8)). A service that asks for
+  neither cannot use the network.
+
 Native programs use the sockets through radix-network(2) and
-radix-file(2); the C library's `socket`, `connect` and the rest come
-with 12a.2c, along with services getting the network their manifests
-ask for. Nothing configures the network by itself yet: there is no
-DHCP until `netd` lands.
+radix-file(2). Nothing configures the network by itself yet: there is
+no DHCP until `netd` lands.
+
+## Giving a service the network
+
+A service file asks for what it needs, and gets nothing else:
+
+```
+description = A web server
+program = /system/commands/httpd
+network.outbound = no
+network.listen = 80, 443
+```
+
+Spark derives one capability for each range from its own and puts them
+in the service's network slots. The service can bind to and listen on
+ports 80 and 443, and nothing more: binding another port, connecting
+out or sending a datagram anywhere fails with `EACCES`.
 
 ## Giving a card an address
 

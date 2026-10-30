@@ -12,7 +12,13 @@
 // SCM_RIGHTS descriptors, `send_files` and `receive_files`; shutdown is
 // its `shutdown`.
 //
-// Other families come with networking (Phase 12).
+// AF_INET stream and datagram sockets are the kernel's TCP and UDP
+// (ADR 0183), made, bound, connected and sent from through the network
+// capabilities in the NETWORK_SLOTS slots from SLOT_NETWORK
+// (radix-network(2)). Each such call tries them in turn until one allows
+// it; when none does, it fails with EACCES, as Linux's calls do when a
+// policy forbids them. A program given none cannot use the network.
+// AF_INET6 comes with IPv6 (Phase 12c).
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +32,10 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/time.h>
+#include <stdlib.h>
 
 #include "radix.hpp"
 
@@ -247,14 +257,19 @@ int unix_path(const struct sockaddr *addr, socklen_t length, char *out, size_t *
 	return 0;
 }
 
+bool is_inet(uint32_t slot, int *type = nullptr);
+int inet_name(uint32_t slot, bool peer, struct sockaddr *addr, socklen_t max, socklen_t *actual);
+
 // The address of socket `fd`, or with `peer` of the socket at the other
 // end of its connection, as getsockname and getpeername give it: the
 // family, and the name the socket was bound to, if it has one, with its
-// NUL.
+// NUL; or a network socket's address and port.
 int address(int fd, bool peer, struct sockaddr *addr, socklen_t max, socklen_t *actual) {
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
+	if(is_inet(slot))
+		return inet_name(slot, peer, addr, max, actual);
 	struct sockaddr_un un;
 	memset(&un, 0, sizeof(un));
 	un.sun_family = AF_UNIX;
@@ -334,14 +349,385 @@ void give_rights(struct msghdr *hdr, const Received &files) {
 	hdr->msg_controllen = used < room ? used : room;
 }
 
+// Whether socket `slot` is a network socket, and its type in `type`
+// (SOCK_STREAM or SOCK_DGRAM) if it is: a Unix socket has no options.
+bool is_inet(uint32_t slot, int *type) {
+	struct radix_file_socket_option_results r;
+	if(radix_file_socket_option(slot, RADIX_SOCKET_OPTION_KIND, false, 0, &r))
+		return false;
+	if(type)
+		*type = r.value == RADIX_SOCKET_TYPE_DATAGRAM ? SOCK_DGRAM : SOCK_STREAM;
+	return true;
+}
+
+// Whether a call failed with `status` because the network capability in
+// the slot it was given does not allow it, or there is none there: the
+// next one may.
+bool not_allowed(uint64_t status) {
+	if(RADIX_STATUS_DOMAIN(status) != RADIX_KERNEL_ERROR_DOMAIN)
+		return false;
+	switch(RADIX_STATUS_CODE(status)) {
+	case RADIX_KERNEL_EMPTY_SLOT:
+	case RADIX_KERNEL_NO_SUCH_SLOT:
+	case RADIX_KERNEL_WRONG_KIND:
+	case RADIX_KERNEL_OUT_OF_RANGE: return true;
+	// Without the send or receive right; a socket's own descriptor without
+	// the right a call needs (read or write) is EBADF, as for the others.
+	case RADIX_KERNEL_MISSING_RIGHTS:
+		return RADIX_STATUS_DETAIL(status) & (RADIX_RIGHTS_SEND | RADIX_RIGHTS_RECEIVE);
+	default: return false;
+	}
+}
+
+// The errno of a network socket call that failed with `status`.
+int inet_errno(uint64_t status) {
+	if(not_allowed(status))
+		return EACCES;
+	return socket_errno(status);
+}
+
+// Makes `call(network)` with each network capability's slot in turn,
+// until one allows it: 0, or the errno of the first failure that is not
+// a refusal, or EACCES if every one refused.
+template<typename F>
+int through_network(F call) {
+	for(uint32_t i = 0; i < RADIX_STARTUP_NETWORK_SLOTS; i++) {
+		uint64_t status = call(RADIX_STARTUP_SLOT_NETWORK + i);
+		if(!status)
+			return 0;
+		if(!not_allowed(status))
+			return inet_errno(status);
+	}
+	return EACCES;
+}
+
+// The kernel's address for `addr`, an AF_INET address of `length` bytes.
+int inet_address(const struct sockaddr *addr, socklen_t length, struct radix_address *out) {
+	if(!addr || length < sizeof(struct sockaddr_in))
+		return EINVAL;
+	if(addr->sa_family != AF_INET)
+		return EAFNOSUPPORT;
+	auto in = reinterpret_cast<const struct sockaddr_in *>(addr);
+	memset(out, 0, sizeof(*out));
+	out->family = RADIX_ADDRESS_FAMILY_IPV4;
+	out->port = ntohs(in->sin_port);
+	memcpy(out->ip, &in->sin_addr, sizeof(in->sin_addr));
+	return 0;
+}
+
+// Copies the AF_INET address of the kernel's `address` to `addr`, at most
+// `max` bytes of it, and its length to `actual`.
+void give_inet(const struct radix_address &address, struct sockaddr *addr, socklen_t max,
+		socklen_t *actual) {
+	struct sockaddr_in in;
+	memset(&in, 0, sizeof(in));
+	in.sin_family = AF_INET;
+	in.sin_port = htons(address.port);
+	memcpy(&in.sin_addr, address.ip, sizeof(in.sin_addr));
+	if(addr)
+		memcpy(addr, &in, max < sizeof(in) ? max : sizeof(in));
+	*actual = sizeof(in);
+}
+
+// The address of network socket `slot`, or with `peer` where it is
+// connected, as getsockname and getpeername give it.
+int inet_name(uint32_t slot, bool peer, struct sockaddr *addr, socklen_t max, socklen_t *actual) {
+	struct radix_address address;
+	struct radix_file_socket_name_results r;
+	if(uint64_t status = radix_file_socket_name(slot, peer, &address, sizeof(address), &r);
+			status)
+		return inet_errno(status);
+	give_inet(address, addr, max, actual);
+	return 0;
+}
+
+// Binds network socket `slot` to any address and a port the kernel picks,
+// through a network capability with the receive right, as Linux binds a
+// socket that listens unbound. EACCES if there is none.
+int bind_to_listen(uint32_t slot) {
+	struct radix_address any;
+	memset(&any, 0, sizeof(any));
+	any.family = RADIX_ADDRESS_FAMILY_IPV4;
+	for(uint32_t i = 0; i < RADIX_STARTUP_NETWORK_SLOTS; i++) {
+		uint32_t network = RADIX_STARTUP_SLOT_NETWORK + i;
+		struct radix_capability_info_results info;
+		if(radix_capability_info(network, &info) || info.kind != RADIX_OBJECT_KIND_NETWORK
+				|| !(info.rights & RADIX_RIGHTS_RECEIVE))
+			continue;
+		uint64_t status = radix_file_bind_address(slot, network, &any, sizeof(any));
+		return status ? inet_errno(status) : 0;
+	}
+	return EACCES;
+}
+
+// The bytes of the `count` buffers at `iov` gathered into one buffer of
+// `size` bytes from malloc, in `out`: a datagram is sent in one call.
+int gather(const struct iovec *iov, int count, size_t size, char **out) {
+	*out = static_cast<char *>(malloc(size ? size : 1));
+	if(!*out)
+		return ENOBUFS;
+	size_t at = 0;
+	for(int i = 0; i < count; i++) {
+		memcpy(*out + at, iov[i].iov_base, iov[i].iov_len);
+		at += iov[i].iov_len;
+	}
+	return 0;
+}
+
+// The kernel's SocketFlags for a network socket's receive `flags`: only
+// MSG_DONTWAIT means anything to a datagram's receive.
+uint32_t receive_flags(int flags) {
+	return flags & MSG_DONTWAIT ? RADIX_SOCKET_FLAGS_DONT_WAIT : 0;
+}
+
+// Receives one datagram on network socket `slot` into the buffers of
+// `iov`, as recvmsg(2) with `flags`, and who sent it into `from` (up to
+// `from_max` bytes, its length in `from_len`; nothing if `from` is null).
+int receive_datagram(uint32_t slot, const struct iovec *iov, int count, int flags,
+		struct sockaddr *from, socklen_t from_max, socklen_t *from_len, ssize_t *length) {
+	if(flags & ~(MSG_DONTWAIT | MSG_CMSG_CLOEXEC))
+		return EOPNOTSUPP;
+	size_t size;
+	if(int e = radix::iov_total(iov, count, &size); e)
+		return e;
+	// One buffer is received into in place, more through one of the sum's
+	// size, as the datagram comes whole.
+	char *buffer = count == 1 ? static_cast<char *>(iov[0].iov_base) : nullptr;
+	if(count != 1) {
+		buffer = static_cast<char *>(malloc(size ? size : 1));
+		if(!buffer)
+			return ENOBUFS;
+	}
+	struct radix_address address;
+	memset(&address, 0, sizeof(address));
+	struct radix_file_receive_from_results r;
+	uint64_t status = radix_file_receive_from_with(radix::cancellable, slot, buffer, size,
+			&address, sizeof(address), receive_flags(flags), &r);
+	if(!status && count != 1) {
+		size_t at = 0;
+		for(int i = 0; i < count && at < r.count; i++) {
+			size_t n = r.count - at < iov[i].iov_len ? r.count - at : iov[i].iov_len;
+			memcpy(iov[i].iov_base, buffer + at, n);
+			at += n;
+		}
+	}
+	if(count != 1)
+		free(buffer);
+	if(status)
+		return inet_errno(status);
+	if(from_len) {
+		if(from)
+			give_inet(address, from, from_max, from_len);
+		else
+			*from_len = 0;
+	}
+	*length = static_cast<ssize_t>(r.count);
+	return 0;
+}
+
+// Sends `size` bytes from `data` on network socket `slot` as send(2) with
+// `flags`, to `to` (an AF_INET address of `length` bytes) if it is not
+// null, through a network capability that allows it.
+int send_inet(uint32_t slot, const void *data, size_t size, int flags,
+		const struct sockaddr *to, socklen_t length, ssize_t *sent) {
+	if(flags & ~SEND_FLAGS)
+		return EOPNOTSUPP;
+	if(!to) {
+		struct radix_file_send_results r;
+		uint64_t status = radix_file_send_with(radix::cancellable, slot, data, size,
+				send_flags(flags), &r);
+		if(status)
+			return inet_errno(status);
+		*sent = static_cast<ssize_t>(r.count);
+		return 0;
+	}
+	struct radix_address address;
+	if(int e = inet_address(to, length, &address); e)
+		return e;
+	struct radix_file_send_to_results r;
+	if(int e = through_network([&](uint32_t network) {
+			return radix_file_send_to_with(radix::cancellable, slot, network, &address,
+					sizeof(address), data, size, send_flags(flags), &r);
+		}); e)
+		return e;
+	*sent = static_cast<ssize_t>(r.count);
+	return 0;
+}
+
+// Reads network socket option `option` of `slot` into `value`.
+int get_option(uint32_t slot, enum radix_socket_option option, uint64_t *value) {
+	struct radix_file_socket_option_results r;
+	if(uint64_t status = radix_file_socket_option(slot, option, false, 0, &r); status)
+		return inet_errno(status);
+	*value = r.value;
+	return 0;
+}
+
+// Sets network socket option `option` of `slot` to `value`.
+int set_option(uint32_t slot, enum radix_socket_option option, uint64_t value) {
+	struct radix_file_socket_option_results r;
+	uint64_t status = radix_file_socket_option(slot, option, true, value, &r);
+	return status ? inet_errno(status) : 0;
+}
+
+// The kernel's option for `layer` and `number`, and whether it is a time
+// (a struct timeval, in nanoseconds to the kernel): false for one it does
+// not have.
+bool inet_option(int layer, int number, enum radix_socket_option *option, bool *time) {
+	*time = false;
+	if(layer == SOL_SOCKET) {
+		switch(number) {
+		case SO_REUSEADDR: *option = RADIX_SOCKET_OPTION_REUSE_ADDRESS; return true;
+		case SO_KEEPALIVE: *option = RADIX_SOCKET_OPTION_KEEP_ALIVE; return true;
+		case SO_BROADCAST: *option = RADIX_SOCKET_OPTION_BROADCAST; return true;
+		case SO_RCVBUF: *option = RADIX_SOCKET_OPTION_RECEIVE_BUFFER; return true;
+		case SO_SNDBUF: *option = RADIX_SOCKET_OPTION_SEND_BUFFER; return true;
+		case SO_ERROR: *option = RADIX_SOCKET_OPTION_ERROR; return true;
+		case SO_RCVTIMEO:
+			*option = RADIX_SOCKET_OPTION_RECEIVE_TIMEOUT;
+			*time = true;
+			return true;
+		case SO_SNDTIMEO:
+			*option = RADIX_SOCKET_OPTION_SEND_TIMEOUT;
+			*time = true;
+			return true;
+		default: return false;
+		}
+	}
+	if(layer == IPPROTO_TCP && number == TCP_NODELAY) {
+		*option = RADIX_SOCKET_OPTION_NO_DELAY;
+		return true;
+	}
+	if(layer == IPPROTO_IP && number == IP_TTL) {
+		*option = RADIX_SOCKET_OPTION_TIME_TO_LIVE;
+		return true;
+	}
+	return false;
+}
+
+// getsockopt(2) on network socket `slot`, of type `type`.
+int inet_getsockopt(uint32_t slot, int type, int layer, int number, void *buffer,
+		socklen_t *size) {
+	uint64_t value;
+	enum radix_socket_option option;
+	bool time = false;
+	if(layer == SOL_SOCKET && (number == SO_TYPE || number == SO_DOMAIN
+			|| number == SO_PROTOCOL || number == SO_ACCEPTCONN)) {
+		struct radix_file_socket_state_results state;
+		if(uint64_t status = radix_file_socket_state(slot, &state); status)
+			return inet_errno(status);
+		switch(number) {
+		case SO_TYPE: value = type; break;
+		case SO_DOMAIN: value = AF_INET; break;
+		case SO_PROTOCOL: value = type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP; break;
+		default: value = state.listening; break;
+		}
+	} else if(inet_option(layer, number, &option, &time)) {
+		if(int e = get_option(slot, option, &value); e)
+			return e;
+		// Errors come back from the calls, and SO_ERROR as an errno.
+		if(option == RADIX_SOCKET_OPTION_ERROR && value)
+			value = static_cast<uint64_t>(radix::to_errno(value));
+	} else {
+		return ENOPROTOOPT;
+	}
+	if(time) {
+		struct timeval tv;
+		tv.tv_sec = static_cast<time_t>(value / 1000000000);
+		tv.tv_usec = static_cast<suseconds_t>(value % 1000000000 / 1000);
+		socklen_t len = *size < sizeof(tv) ? *size : sizeof(tv);
+		memcpy(buffer, &tv, len);
+		*size = len;
+		return 0;
+	}
+	if(*size < sizeof(int))
+		return EINVAL;
+	int as_int = static_cast<int>(value);
+	memcpy(buffer, &as_int, sizeof(int));
+	*size = sizeof(int);
+	return 0;
+}
+
+// setsockopt(2) on network socket `slot`.
+int inet_setsockopt(uint32_t slot, int layer, int number, const void *buffer, socklen_t size) {
+	enum radix_socket_option option;
+	bool time;
+	if(!inet_option(layer, number, &option, &time))
+		return ENOPROTOOPT;
+	uint64_t value;
+	if(time) {
+		struct timeval tv;
+		if(size < sizeof(tv))
+			return EINVAL;
+		memcpy(&tv, buffer, sizeof(tv));
+		if(tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
+			return EDOM;
+		value = static_cast<uint64_t>(tv.tv_sec) * 1000000000
+				+ static_cast<uint64_t>(tv.tv_usec) * 1000;
+	} else {
+		int as_int;
+		if(size < sizeof(int))
+			return EINVAL;
+		memcpy(&as_int, buffer, sizeof(int));
+		switch(option) {
+		// A time to live of -1 is the default, as on Linux.
+		case RADIX_SOCKET_OPTION_TIME_TO_LIVE:
+			if(as_int == -1)
+				as_int = 64;
+			if(as_int < 1 || as_int > 255)
+				return EINVAL;
+			break;
+		case RADIX_SOCKET_OPTION_ERROR: return ENOPROTOOPT;
+		default: break;
+		}
+		value = static_cast<uint64_t>(as_int < 0 ? 0 : as_int);
+	}
+	return set_option(slot, option, value);
+}
+
 } // namespace
 
 namespace mlibc {
 
 int Sysdeps<Socket>::operator()(int family, int type_and_flags, int protocol, int *fd) {
+	int type = type_and_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+	if(family == AF_INET) {
+		enum radix_socket_type kind;
+		switch(type) {
+		case SOCK_STREAM:
+			kind = RADIX_SOCKET_TYPE_STREAM;
+			if(protocol != 0 && protocol != IPPROTO_TCP)
+				return EPROTONOSUPPORT;
+			break;
+		case SOCK_DGRAM:
+			kind = RADIX_SOCKET_TYPE_DATAGRAM;
+			if(protocol != 0 && protocol != IPPROTO_UDP)
+				return EPROTONOSUPPORT;
+			break;
+		// Raw sockets need a right of their own (ICMP, later).
+		case SOCK_RAW: return EPERM;
+		case SOCK_SEQPACKET: return ESOCKTNOSUPPORT;
+		default: return EINVAL;
+		}
+		uint32_t flags = description_flags(type_and_flags);
+		for(uint32_t i = 0; i < RADIX_STARTUP_NETWORK_SLOTS; i++) {
+			bool refused = false;
+			int e = radix::place(0, fd, [&](uint32_t slot) {
+				uint64_t status = radix_network_socket(RADIX_STARTUP_SLOT_NETWORK + i, slot,
+						RADIX_ADDRESS_FAMILY_IPV4, kind, flags);
+				refused = not_allowed(status);
+				return status;
+			});
+			// Refused by this capability: the next one may allow it.
+			if(!refused)
+				return e;
+		}
+		return EACCES;
+	}
+	if(family == AF_INET6)
+		return EAFNOSUPPORT;
 	if(family != AF_UNIX)
 		return EAFNOSUPPORT;
-	int type = type_and_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
 	switch(type) {
 	case SOCK_STREAM: break;
 	// Linux's AF_UNIX has these, which Radix does not yet.
@@ -376,6 +762,14 @@ int Sysdeps<Bind>::operator()(int fd, const struct sockaddr *addr, socklen_t len
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
+	if(is_inet(slot)) {
+		struct radix_address address;
+		if(int e = inet_address(addr, length, &address); e)
+			return e;
+		return through_network([&](uint32_t network) {
+			return radix_file_bind_address(slot, network, &address, sizeof(address));
+		});
+	}
 	char name[sizeof(sockaddr_un::sun_path) + 1];
 	size_t len;
 	if(int e = unix_path(addr, length, name, &len); e)
@@ -400,6 +794,21 @@ int Sysdeps<Listen>::operator()(int fd, int backlog) {
 	// As on Linux, a backlog out of range is the most there may be.
 	uint32_t most = backlog < 0 || static_cast<uint64_t>(backlog) > RADIX_FILE_BACKLOG_MAX
 			? static_cast<uint32_t>(RADIX_FILE_BACKLOG_MAX) : static_cast<uint32_t>(backlog);
+	if(is_inet(slot)) {
+		uint64_t status = radix_file_listen(slot, most);
+		// Unbound, it is bound to a port the kernel picks first, as on
+		// Linux.
+		if(not_allowed(status)) {
+			struct radix_address bound;
+			struct radix_file_socket_name_results r;
+			if(!radix_file_socket_name(slot, false, &bound, sizeof(bound), &r) && !bound.port) {
+				if(int e = bind_to_listen(slot); e)
+					return e;
+				status = radix_file_listen(slot, most);
+			}
+		}
+		return status ? inet_errno(status) : 0;
+	}
 	uint64_t status = radix_file_listen(slot, most);
 	return status ? socket_errno(status) : 0;
 }
@@ -408,6 +817,16 @@ int Sysdeps<Connect>::operator()(int fd, const struct sockaddr *addr, socklen_t 
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
+	if(is_inet(slot)) {
+		struct radix_address address;
+		if(int e = inet_address(addr, length, &address); e)
+			return e;
+		// A cancellation point, as accept is.
+		return through_network([&](uint32_t network) {
+			return radix_file_connect_address_with(radix::cancellable, slot, network, &address,
+					sizeof(address));
+		});
+	}
 	char name[sizeof(sockaddr_un::sun_path) + 1];
 	size_t len;
 	if(int e = unix_path(addr, length, name, &len); e)
@@ -457,9 +876,17 @@ int Sysdeps<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr, sockl
 
 int Sysdeps<Sendto>::operator()(int fd, const void *buffer, size_t size, int flags,
 		const struct sockaddr *sock_addr, socklen_t addr_length, ssize_t *length) {
-	// A stream socket sends to the socket it is connected to: an address
-	// is one too many, as on Linux.
+	// send(2) is sendto with no address: the kernel's send is the same
+	// call for both families, so the family is asked for only with an
+	// address, as these calls are made often.
 	if(sock_addr && addr_length) {
+		uint32_t slot;
+		if(int e = slot_of(fd, &slot); e)
+			return e;
+		if(is_inet(slot))
+			return send_inet(slot, buffer, size, flags, sock_addr, addr_length, length);
+		// A stream socket sends to the socket it is connected to: an
+		// address is one too many, as on Linux.
 		if(int e = check_socket(fd); e)
 			return e;
 		return EISCONN;
@@ -472,6 +899,37 @@ int Sysdeps<Sendto>::operator()(int fd, const void *buffer, size_t size, int fla
 }
 
 int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ssize_t *length) {
+	// The family is asked for only when it changes what is sent, as in
+	// sendto.
+	bool control = hdr->msg_control && hdr->msg_controllen >= sizeof(struct cmsghdr);
+	uint32_t slot;
+	if(int e = slot_of(fd, &slot); e)
+		return e;
+	int type;
+	if(((hdr->msg_name && hdr->msg_namelen) || control || hdr->msg_iovlen > 1)
+			&& is_inet(slot, &type)) {
+		// Descriptors go only over Unix sockets.
+		if(control)
+			return EOPNOTSUPP;
+		if(hdr->msg_iovlen < 0 || hdr->msg_iovlen > IOV_MAX)
+			return EMSGSIZE;
+		size_t sum;
+		if(int e = radix::iov_total(hdr->msg_iov, hdr->msg_iovlen, &sum); e)
+			return e;
+		auto to = hdr->msg_namelen ? static_cast<const struct sockaddr *>(hdr->msg_name)
+				: nullptr;
+		// A datagram goes in one send, and so do a stream's bytes of one
+		// buffer.
+		if(hdr->msg_iovlen == 1 || (type == SOCK_STREAM && hdr->msg_iovlen == 0))
+			return send_inet(slot, hdr->msg_iovlen ? hdr->msg_iov[0].iov_base : nullptr,
+					sum, flags, to, hdr->msg_namelen, length);
+		char *gathered;
+		if(int e = gather(hdr->msg_iov, hdr->msg_iovlen, sum, &gathered); e)
+			return e;
+		int e = send_inet(slot, gathered, sum, flags, to, hdr->msg_namelen, length);
+		free(gathered);
+		return e;
+	}
 	if(hdr->msg_name && hdr->msg_namelen) {
 		if(int e = check_socket(fd); e)
 			return e;
@@ -537,6 +995,25 @@ int Sysdeps<MsgSend>::operator()(int fd, const struct msghdr *hdr, int flags, ss
 int Sysdeps<Recvfrom>::operator()(int fd, void *buffer, size_t size, int flags,
 		struct sockaddr *sock_addr, socklen_t *addr_length, ssize_t *length) {
 	struct iovec iov = {buffer, size};
+	uint32_t slot;
+	if(int e = slot_of(fd, &slot); e)
+		return e;
+	// recv(2) is recvfrom with no address; a network datagram socket's
+	// receive takes one datagram, so the family is asked for only when the
+	// sender is, as in sendto.
+	int type;
+	if(addr_length && is_inet(slot, &type)) {
+		if(type == SOCK_DGRAM)
+			return receive_datagram(slot, &iov, 1, flags, sock_addr,
+					addr_length ? *addr_length : 0, addr_length, length);
+		// A stream's bytes say nothing of where they came from, as on
+		// Linux.
+		if(int e = receive_vector(fd, &iov, 1, flags, nullptr, length); e)
+			return e;
+		if(addr_length)
+			*addr_length = 0;
+		return 0;
+	}
 	if(int e = receive_vector(fd, &iov, 1, flags, nullptr, length); e)
 		return e;
 	// The sender is the socket at the other end.
@@ -555,6 +1032,34 @@ int Sysdeps<MsgRecv>::operator()(int fd, struct msghdr *hdr, int flags, ssize_t 
 	// one is too many.
 	if(hdr->msg_iovlen < 0 || hdr->msg_iovlen > IOV_MAX)
 		return EMSGSIZE;
+	uint32_t slot;
+	if(int e = slot_of(fd, &slot); e)
+		return e;
+	// The family is asked for only when it changes what is received, as
+	// in recvfrom.
+	bool asks = (hdr->msg_name && hdr->msg_namelen) || hdr->msg_iovlen > 1
+			|| (hdr->msg_control && hdr->msg_controllen);
+	int type;
+	if(asks && is_inet(slot, &type)) {
+		auto from = static_cast<struct sockaddr *>(hdr->msg_name);
+		socklen_t from_len = hdr->msg_namelen;
+		int e;
+		if(type == SOCK_DGRAM) {
+			e = receive_datagram(slot, hdr->msg_iov, hdr->msg_iovlen, flags, from, from_len,
+					&from_len, length);
+		} else {
+			e = receive_vector(fd, hdr->msg_iov, hdr->msg_iovlen,
+					flags & ~MSG_CMSG_CLOEXEC, nullptr, length);
+			from_len = 0;
+		}
+		if(e)
+			return e;
+		hdr->msg_flags = 0;
+		hdr->msg_namelen = from ? from_len : 0;
+		// Nothing comes but bytes.
+		hdr->msg_controllen = 0;
+		return 0;
+	}
 	if(int e = radix::iov_total(hdr->msg_iov, hdr->msg_iovlen, &sum); e)
 		return e;
 	// Room for as many descriptors as the control buffer holds: those
@@ -597,6 +1102,8 @@ int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restr
 	uint32_t slot;
 	if(int e = slot_of(fd, &slot); e)
 		return e;
+	if(int type; is_inet(slot, &type))
+		return inet_getsockopt(slot, type, layer, number, buffer, size);
 	struct radix_file_socket_state_results state;
 	if(uint64_t status = radix_file_socket_state(slot, &state); status)
 		return socket_errno(status);
@@ -635,7 +1142,11 @@ int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restr
 
 int Sysdeps<SetSockopt>::operator()(int fd, int layer, int number, const void *buffer,
 		socklen_t size) {
-	(void)buffer;
+	uint32_t slot;
+	if(int e = slot_of(fd, &slot); e)
+		return e;
+	if(is_inet(slot))
+		return inet_setsockopt(slot, layer, number, buffer, size);
 	if(int e = check_socket(fd); e)
 		return e;
 	if(layer != SOL_SOCKET)

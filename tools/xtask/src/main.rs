@@ -230,6 +230,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    service leaves behind
   logging          logd keeps the kernel log and the services' lines; log,
                    journalctl and dmesg read them; a restart keeps none twice
+  spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
   crash-log-bios   the same under BIOS

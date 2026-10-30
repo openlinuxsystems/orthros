@@ -55,9 +55,9 @@ use libradix::abi::process::{
 };
 use libradix::abi::resource_domain::{self, NO_LIMIT};
 use libradix::abi::startup::{
-    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
+    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
 };
-use libradix::abi::{power, signal, syscalls};
+use libradix::abi::{network, power, signal, syscalls};
 use radix_rt::fs::{Dir, File};
 use radix_rt::{SYS, println, slots};
 
@@ -163,6 +163,30 @@ fn non_blocking(slot: u32) {
     let _ = file_abi::status_flags(&SYS, slot, true, DescriptionFlags::NON_BLOCKING);
 }
 
+/// Gives `child` the network capabilities `spec` asks for, derived from
+/// Spark's `network`, in the slots from SLOT_NETWORK: one to connect out,
+/// and one to listen on each range of ports. They have the copy and
+/// transfer rights, so that they last through `fork` (ADR 0183).
+fn grant_network(network: Option<u32>, spec: &Spec, child: u32) -> Result<(), String> {
+    if spec.network_grants() == 0 {
+        return Ok(());
+    }
+    let network = network.ok_or("Spark has no network capability to give")?;
+    let kept = Rights::COPY.union(Rights::TRANSFER);
+    let outbound = spec.outbound.then_some((0, 1 << 16, Rights::SEND.union(kept)));
+    let listen =
+        spec.listen.iter().map(|&(first, count)| (first, count, Rights::RECEIVE.union(kept)));
+    for (to, (first, count, rights)) in (SLOT_NETWORK..).zip(outbound.into_iter().chain(listen)) {
+        let slot = slots::take().ok_or("no free slot")?;
+        let given = network::restrict(&SYS, network, slot, first, count, rights)
+            .and_then(|()| process::share(&SYS, child, slot, to, Rights::ALL, 0));
+        let _ = capability::delete(&SYS, slot);
+        slots::give_back(slot);
+        given.map_err(|status| format!("giving it the network failed: {:#x}", status.0))?;
+    }
+    Ok(())
+}
+
 /// Where a service is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -258,9 +282,11 @@ struct Connection {
 /// Spark's supervision.
 pub struct Supervisor {
     root: Dir,
-    /// The `services` domain and the power capability, from the kernel.
+    /// The `services` domain, the power capability and the network
+    /// capability, from the kernel.
     services_domain: Option<u32>,
     power: Option<u32>,
+    network: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
     /// The notification the kernel signals when the power button is
@@ -288,6 +314,7 @@ impl Supervisor {
         };
         let domain = SLOT_FIRST_EXTRA + 1;
         let power = SLOT_FIRST_EXTRA + 2;
+        let network = SLOT_FIRST_EXTRA + 3;
         let children = slots::take().filter(|&slot| {
             process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
                 && process::notify_children(&SYS, SLOT_PROCESS, slot).is_ok()
@@ -308,6 +335,7 @@ impl Supervisor {
             root,
             services_domain: holds(domain, ObjectKind::ResourceDomain).then_some(domain),
             power,
+            network: holds(network, ObjectKind::Network).then_some(network),
             children,
             button,
             listener: None,
@@ -581,6 +609,7 @@ impl Supervisor {
                 process::share(&SYS, child, from, to, Rights::ALL, 0)
                     .map_err(|status| format!("sharing slot {to} failed: {:#x}", status.0))
             })
+            .and_then(|()| grant_network(self.network, spec, child))
             .and_then(|()| {
                 let block = exec_block(&spec.program, &args, &spec.environment);
                 process::exec(&SYS, child, program.slot(), &block)
