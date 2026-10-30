@@ -211,7 +211,10 @@ right, and its write right to mend.
 
 A second mount on a directory stacks on the first. *unmount* syncs the
 filesystem first, and fails with *in_use* while anything is mounted on it
-or anything holds a capability to a place in it. A rename never moves a
+or anything holds a capability to a place in it, and with the sync's
+error if what the filesystem holds cannot be written; once the disk it
+was mounted from is gone, as a USB stick pulled out is, it unmounts all
+the same, what it held unwritten lost (ADR 0163). A rename never moves a
 file between filesystems (*cross_mount*), and a mount point cannot be
 removed.
 

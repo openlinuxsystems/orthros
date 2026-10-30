@@ -39,6 +39,11 @@ event for a disk that comes or goes yet; `/kernel/block` lists them.
 - A disk or partition that goes has whatever is mounted from it at
   `/volumes`, Spark's mounts at boot among them, unmounted, and the
   directory removed. Nothing outside `/volumes` is touched.
+- The kernel marks each mount from a disk that goes as lost. `unmount`
+  syncs a filesystem first and fails if the sync does, so that a volume
+  whose disk is there is not unmounted with what it holds unwritten; a
+  lost one unmounts all the same, as Linux's umount does once a disk is
+  pulled out, since nothing can reach it any more.
 - **eject(1)** unmounts a volume after its filesystem writes out what it
   holds, and removes its directory, as util-linux's eject does with a
   mount point. It takes a label, a path under `/volumes`, or a disk or

@@ -21,7 +21,7 @@ desktop's removable media (ADR 0163). Spark runs it as the *volumed*
 service. A volume whose filesystem has no label is mounted at
 _/volumes/_*name*, its name in _/devices_, as Spark mounts the disks
 there at boot; one whose label another volume has is mounted at
-_/volumes/_*label*_-_*name*. A label's slashes become underscores.
+_/volumes/_*label*-*name*. A label's slashes become underscores.
 
 It mounts FAT, exFAT, Btrfs and ext4 as Spark does at boot (*spark*(8)):
 FAT and exFAT are tried first, and a filesystem the disk or Radix cannot

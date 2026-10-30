@@ -402,6 +402,43 @@ fn a_tree_of_mounts_goes_at_once() {
     vfs.unmount(&root, "other").unwrap();
 }
 
+/// A filesystem whose sync fails, as one on a disk pulled out does.
+struct Unsyncable(FsRef);
+
+impl FileSystem for Unsyncable {
+    fn kind(&self) -> FsKind {
+        self.0.kind()
+    }
+
+    fn root(&self) -> NodeRef {
+        self.0.root()
+    }
+
+    fn info(&self) -> crate::FsInfo {
+        self.0.info()
+    }
+
+    fn sync(&self) -> Result<()> {
+        Err(Error::Io)
+    }
+}
+
+#[test]
+fn a_mount_whose_disk_is_gone_unmounts_though_its_sync_fails() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&root, "stick").unwrap();
+    let stick: FsRef = mem::arc(Unsyncable(tmpfs(1 << 20))).unwrap();
+    vfs.mount(&root, "stick", stick, "sdb1", false).unwrap();
+    // While its disk is there, a failed sync keeps it mounted.
+    assert_eq!(vfs.unmount(&root, "stick"), Err(Error::Io));
+    assert_eq!(vfs.lose(|source| source == "sdb"), 0);
+    assert_eq!(vfs.lose(|source| source == "sdb1"), 1);
+    vfs.unmount(&root, "stick").unwrap();
+    assert_eq!(vfs.lose(|source| source == "sdb1"), 0);
+    vfs.remove(&root, "stick").unwrap();
+}
+
 #[test]
 fn mounts_join_filesystems() {
     let vfs = vfs();
