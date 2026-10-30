@@ -454,8 +454,12 @@ static void kernel_log(void) {
 	CONTAINS("a line for dmesg", "/bin/dmesg", "-l", "warn");
 	CHECK(run_program((const char *const[]){"/bin/dmesg", "-l", "err", NULL}, "", 0) == 0);
 	CHECK(strstr(output, "a line for dmesg") == NULL);
-	CONTAINS("<4>", "/bin/dmesg", "-r", "-l", "warn");
-	CONTAINS("kern  :warn  : ", "/bin/dmesg", "-x", "-l", "warn");
+	// A program's line is of the user facility (ADR 0210).
+	CONTAINS("<12>", "/bin/dmesg", "-r", "-l", "warn");
+	CONTAINS("user  :warn  : ", "/bin/dmesg", "-x", "-l", "warn");
+	CONTAINS("a line for dmesg", "/bin/dmesg", "-u");
+	CHECK(run_program((const char *const[]){"/bin/dmesg", "-k", NULL}, "", 0) == 0);
+	CHECK(strstr(output, "a line for dmesg") == NULL);
 	STATUS(0, "/bin/dmesg", "-C");
 	CHECK(run_program((const char *const[]){"/bin/dmesg", NULL}, "", 0) == 0);
 	CHECK(strstr(output, "a line for dmesg") == NULL);

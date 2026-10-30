@@ -3688,7 +3688,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 3 services in /system/settings/spark/services, 3 enabled")?;
+    vm.expect("spark: 4 services in /system/settings/spark/services, 4 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -6615,8 +6615,8 @@ fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
     if code != "0x0" || !log.contains("logtest: every check passed") {
         return Err(format!("logtest exited with code {code}"));
     }
-    vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")?;
-    vm.expect("spark: nothing more to do; waiting")
+    // Spark goes on supervising the services: no line ends the boot.
+    vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")
 }
 
 /// Spark supervises three services: `stubborn` ignores SIGTERM, so 5 s

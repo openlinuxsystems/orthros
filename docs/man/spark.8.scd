@@ -335,10 +335,11 @@ or halts its processors (*radix-power*(2)):
 
 ```
 spark: asked to power off the machine
-spark: shutting down to power off: stopping 3 services
-spark: diskhealth (process 14) was ended by signal 15
-spark: volumed (process 13) was ended by signal 15
-spark: consoled (process 12) was ended by signal 15
+spark: shutting down to power off: stopping 4 services
+spark: diskhealth (process 15) was ended by signal 15
+spark: volumed (process 14) was ended by signal 15
+spark: consoled (process 13) was ended by signal 15
+spark: logd (process 12) exited with code 0x0
 spark: every service has stopped
 Power: `spark` asked to power off the machine; syncing the filesystems
 ```
@@ -354,7 +355,7 @@ changes nothing:
 ```
 Power: the power button was pressed
 spark: the power button was pressed; powering off the machine
-spark: shutting down to power off: stopping 3 services
+spark: shutting down to power off: stopping 4 services
 ```
 
 Where the kernel cannot hear it, the firmware keeps the button.
