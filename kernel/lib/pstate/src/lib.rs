@@ -385,6 +385,11 @@ mod tests {
         Cpu { registers: registers.iter().copied().collect(), writes: Vec::new() }
     }
 
+    /// A register from its fields' bytes, the lowest first.
+    fn fields(bytes: &[u8]) -> u64 {
+        bytes.iter().rev().fold(0, |value, &byte| value << 8 | u64::from(byte))
+    }
+
     #[test]
     fn cpuid_says_which_control_a_cpu_has() {
         let intel = Cpuid { intel: true, leaf6_eax: LEAF6_HWP | LEAF6_EPP, ..Cpuid::default() };
@@ -416,8 +421,8 @@ mod tests {
         let driver = Driver::Hwp { epp: true };
         // Lowest 4, most efficient 8, guaranteed 18, highest 34; the
         // firmware asked for 8 to 18 with an activity window, at 0x80.
-        let caps = 34 | 18 << 8 | 8 << 16 | 4 << 24;
-        let firmware = 1 << 32 | 0x80 << 24 | 18 << 8 | 8;
+        let caps = fields(&[34, 18, 8, 4]);
+        let firmware = fields(&[8, 18, 0, 0x80, 1]);
         let mut cpu = cpu(&[(HWP_CAPABILITIES, caps), (HWP_REQUEST, firmware)]);
 
         let (levels, request) = driver.start(&mut cpu);
@@ -429,11 +434,11 @@ mod tests {
         let boot = Request::at_boot(levels, request, None);
         assert_eq!(boot, Request { min: 4, max: 34, desired: 0, preference: 0x80 });
         driver.set_request(&mut cpu, boot);
-        assert_eq!(cpu.registers[&HWP_REQUEST], 1 << 32 | 0x80 << 24 | 34 << 8 | 4);
+        assert_eq!(cpu.registers[&HWP_REQUEST], fields(&[4, 34, 0, 0x80, 1]));
 
         let power = Request::at_boot(levels, request, Some(Preference::Power.value(driver)));
         driver.set_request(&mut cpu, power.capped(20));
-        assert_eq!(cpu.registers[&HWP_REQUEST], 1 << 32 | 0xff << 24 | 20 << 8 | 4);
+        assert_eq!(cpu.registers[&HWP_REQUEST], fields(&[4, 20, 0, 0xff, 1]));
         assert_eq!(
             driver.request(&mut cpu),
             Request { min: 4, max: 20, desired: 0, preference: 0xff }
@@ -455,9 +460,9 @@ mod tests {
     fn cppc_is_turned_on_and_asked_for_every_level() {
         let driver = Driver::Cppc;
         // Lowest 18, lowest nonlinear 50, nominal 120, highest 196.
-        let caps = 18 | 50 << 8 | 120 << 16 | 196 << 24;
+        let caps = fields(&[18, 50, 120, 196]);
         // The firmware's request, maximum first: 196, 18, desired 0, 0x80.
-        let firmware = 0x80 << 24 | 18 << 8 | 196;
+        let firmware = fields(&[196, 18, 0, 0x80]);
         let mut cpu = cpu(&[(CPPC_CAPABILITY, caps), (CPPC_REQUEST, firmware)]);
 
         let (levels, request) = driver.start(&mut cpu);
@@ -468,7 +473,7 @@ mod tests {
         let saving =
             Request::at_boot(levels, request, Some(Preference::BalancePower.value(driver)));
         driver.set_request(&mut cpu, saving.capped(150));
-        assert_eq!(cpu.registers[&CPPC_REQUEST], 0xbf << 24 | 18 << 8 | 150);
+        assert_eq!(cpu.registers[&CPPC_REQUEST], fields(&[150, 18, 0, 0xbf]));
     }
 
     #[test]
