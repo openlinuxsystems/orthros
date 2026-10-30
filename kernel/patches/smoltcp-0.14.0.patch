@@ -17,14 +17,73 @@ program closed a socket twice or opened too many. This adds `try_add`,
 `try_get`, `try_get_mut` and `try_remove`, which return an `Option`
 instead (and `try_add` the socket that did not fit).
 
+SocketSet goes through every slot of its storage each time it iterates
+its sockets, several times on every poll, though the kernel gives each
+interface 128 slots and few hold a socket. It now keeps where its last
+socket is and stops there.
+
+A FIN that comes in FIN-WAIT-1 or FIN-WAIT-2 while the delayed-ACK timer
+runs, for data that came before it or with it, is acknowledged only when
+the timer ends, 10 ms by default: the other end waits in LAST-ACK that
+long, and the socket owes the ACK in TIME-WAIT. Linux acknowledges such a
+FIN at once (tcp_fin), and so does this; the kernel takes a loopback
+connection in TIME-WAIT apart at once (ADR 0185), which must not lose
+that ACK.
+
 To be offered upstream.
 
 --- a/src/iface/socket_set.rs
 +++ b/src/iface/socket_set.rs
-@@ -90,6 +90,40 @@
+@@ -43,6 +43,10 @@
+ #[derive(Debug)]
+ pub struct SocketSet<'a> {
+     sockets: ManagedSlice<'a, SocketStorage<'a>>,
++    /// One past the last slot that holds a socket: every slot from it on is
++    /// empty, so iterating the sockets stops there rather than going
++    /// through every slot of a large storage on each poll.
++    used: usize,
+ }
+ 
+ impl<'a> SocketSet<'a> {
+@@ -52,7 +56,11 @@
+         SocketsT: Into<ManagedSlice<'a, SocketStorage<'a>>>,
+     {
+         let sockets = sockets.into();
+-        SocketSet { sockets }
++        let used = sockets
++            .iter()
++            .rposition(|slot| slot.inner.is_some())
++            .map_or(0, |index| index + 1);
++        SocketSet { sockets, used }
+     }
+ 
+     /// Add a socket to the set, and return its handle.
+@@ -75,6 +83,7 @@
+ 
+         for (index, slot) in self.sockets.iter_mut().enumerate() {
+             if slot.inner.is_none() {
++                self.used = self.used.max(index + 1);
+                 return put(index, slot, socket);
+             }
+         }
+@@ -85,11 +94,56 @@
+             ManagedSlice::Owned(sockets) => {
+                 sockets.push(SocketStorage { inner: None });
+                 let index = sockets.len() - 1;
++                self.used = index + 1;
+                 put(index, &mut sockets[index], socket)
+             }
          }
      }
  
++    /// Moves `used` back past the empty slots at its end, after a socket
++    /// was removed.
++    fn trim(&mut self) {
++        while self.used > 0 && self.sockets[self.used - 1].inner.is_none() {
++            self.used -= 1;
++        }
++    }
++
 +    /// Add a socket to the set, and return its handle, or give the socket
 +    /// back if the storage is fixed-size (not a `Vec`) and is full.
 +    pub fn try_add<T: AnySocket<'a>>(&mut self, socket: T) -> Result<SocketHandle, T> {
@@ -56,16 +115,40 @@ To be offered upstream.
 +    /// `None` if the handle does not refer to a socket of this set.
 +    pub fn try_remove(&mut self, handle: SocketHandle) -> Option<Socket<'a>> {
 +        net_trace!("[{}]: removing", handle.0);
-+        Some(self.sockets.get_mut(handle.0)?.inner.take()?.socket)
++        let item = self.sockets.get_mut(handle.0)?.inner.take()?;
++        self.trim();
++        Some(item.socket)
 +    }
 +
      /// Get a socket from the set by its handle, as mutable.
      ///
      /// # Panics
-@@ -149,3 +183,32 @@
-         self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
+@@ -124,7 +178,10 @@
+     pub fn remove(&mut self, handle: SocketHandle) -> Socket<'a> {
+         net_trace!("[{}]: removing", handle.0);
+         match self.sockets[handle.0].inner.take() {
+-            Some(item) => item.socket,
++            Some(item) => {
++                self.trim();
++                item.socket
++            }
+             None => panic!("handle does not refer to a valid socket"),
+         }
      }
- }
+@@ -141,11 +198,63 @@
+ 
+     /// Iterate every socket in this set.
+     pub(crate) fn items(&self) -> impl Iterator<Item = &Item<'a>> + '_ {
+-        self.sockets.iter().filter_map(|x| x.inner.as_ref())
++        self.sockets[..self.used].iter().filter_map(|x| x.inner.as_ref())
+     }
+ 
+     /// Iterate every socket in this set.
+     pub(crate) fn items_mut(&mut self) -> impl Iterator<Item = &mut Item<'a>> + '_ {
+-        self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
++        self.sockets[..self.used].iter_mut().filter_map(|x| x.inner.as_mut())
++    }
++}
 +
 +#[cfg(all(test, feature = "socket-udp", feature = "socket-tcp"))]
 +mod test {
@@ -94,7 +177,30 @@ To be offered upstream.
 +        assert!(set.try_get::<udp::Socket>(handle).is_none());
 +        assert!(set.try_add(udp_socket()).is_ok());
 +    }
-+}
++
++    #[test]
++    fn test_iterates_only_up_to_the_last_socket() {
++        let mut storage = [SocketStorage::EMPTY, SocketStorage::EMPTY, SocketStorage::EMPTY];
++        let mut set = SocketSet::new(&mut storage[..]);
++        assert_eq!(set.used, 0);
++        let first = set.add(udp_socket());
++        let second = set.add(udp_socket());
++        let third = set.add(udp_socket());
++        assert_eq!(set.used, 3);
++        set.remove(second);
++        assert_eq!(set.used, 3, "a hole before the last socket stays");
++        assert_eq!(set.iter().count(), 2);
++        assert!(set.try_remove(third).is_some());
++        assert_eq!(set.used, 1, "the hole goes with the socket after it");
++        assert_eq!(set.iter().map(|(handle, _)| handle).collect::<Vec<_>>(), [first]);
++        assert_eq!(set.add(udp_socket()), second);
++        assert_eq!(set.used, 2);
++        set.remove(first);
++        set.remove(second);
++        assert_eq!(set.used, 0);
++        assert_eq!(set.iter().count(), 0);
+     }
+ }
 --- a/src/socket/icmp.rs
 +++ b/src/socket/icmp.rs
 @@ -143,6 +143,12 @@
@@ -125,6 +231,26 @@ To be offered upstream.
      /// Enable or disable TCP Timestamp.
      pub fn set_tsval_generator(&mut self, generator: Option<TcpTimestampGenerator>) {
          self.tsval_generator = generator;
+@@ -2008,6 +2014,10 @@
+             (State::FinWait1, TcpControl::Fin) => {
+                 self.remote_seq_no += 1;
+                 self.rx_fin_received = true;
++                // The FIN is acknowledged at once, not after the ACK delay,
++                // as Linux does: no data of ours will carry the ACK, and the
++                // other end cannot finish closing until it comes.
++                self.ack_delay_timer = AckDelayTimer::Immediate;
+                 if ack_of_fin {
+                     self.set_state(State::TimeWait);
+                     self.timer.set_for_close(cx.now());
+@@ -2022,6 +2032,8 @@
+             (State::FinWait2, TcpControl::Fin) => {
+                 self.remote_seq_no += 1;
+                 self.rx_fin_received = true;
++                // Acknowledged at once, as in FIN-WAIT-1.
++                self.ack_delay_timer = AckDelayTimer::Immediate;
+                 self.set_state(State::TimeWait);
+                 self.timer.set_for_close(cx.now());
+             }
 --- a/src/socket/udp.rs
 +++ b/src/socket/udp.rs
 @@ -141,6 +141,12 @@

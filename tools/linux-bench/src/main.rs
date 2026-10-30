@@ -33,7 +33,9 @@
 //! (`userspace/posix/bench.c`, built with this machine's C compiler and C
 //! library), given with `--posix-bench`, or at `/posix-bench` as process 1,
 //! where it also gives them the virtual machine's disks, `/dev/vda` and
-//! `/dev/nvme0n1`, for their disk benchmarks.
+//! `/dev/nvme0n1`, for their disk benchmarks. They time TCP and UDP over
+//! the loopback interface too, which process 1 brings up first, as a
+//! booting system does.
 //!
 //! After the TLB shootdowns it prints how many TLB interrupts reached the
 //! other CPU (the `TLB` line of `/proc/interrupts`), as Radix prints its
@@ -184,7 +186,8 @@ fn main() {
         if std::process::id() == 1 && mount_btrfs() {
             disks.push(("--btrfs", Path::new(BTRFS_AT)));
         }
-        posix_bench(&program, &cpus, &disks);
+        let network = std::process::id() != 1 || loopback_up();
+        posix_bench(&program, &cpus, &disks, network);
     }
 
     if std::process::id() == 1 {
@@ -798,13 +801,49 @@ fn allowed_cpus() -> Vec<usize> {
     (0..libc::CPU_SETSIZE as usize).filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) }).collect()
 }
 
+/// Brings the loopback interface up, as the virtual machine's process 1
+/// finds it down: false if it could not.
+fn loopback_up() -> bool {
+    // SAFETY: a socket of any family is what the interface ioctls take.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        eprintln!("linux-bench: no socket for lo: {}", std::io::Error::last_os_error());
+        return false;
+    }
+    // SAFETY: the descriptor was just made, and is this one's alone.
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: an all-zero ifreq is a valid one with an empty name.
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (to, from) in request.ifr_name.iter_mut().zip(b"lo") {
+        *to = *from as libc::c_char;
+    }
+    // SAFETY: SIOCGIFFLAGS fills the flags of the ifreq it is given.
+    let got = unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCGIFFLAGS as _, &raw mut request) };
+    let set = got == 0 && {
+        // SAFETY: SIOCGIFFLAGS set the union's flags; SIOCSIFFLAGS reads
+        // the name and flags of the ifreq.
+        unsafe {
+            request.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+            libc::ioctl(socket.as_raw_fd(), libc::SIOCSIFFLAGS as _, &raw const request) == 0
+        }
+    };
+    if !set {
+        eprintln!("linux-bench: cannot bring lo up: {}", std::io::Error::last_os_error());
+    }
+    set
+}
+
 /// Runs the POSIX benchmarks at `program`, which print their own lines,
 /// on every CPU this process may run on: it pins itself and its threads
-/// as it needs, as on Radix.
-fn posix_bench(program: &Path, cpus: &[usize], disks: &[(&str, &Path)]) {
+/// as it needs, as on Radix. With `network` they time the loopback
+/// interface too.
+fn posix_bench(program: &Path, cpus: &[usize], disks: &[(&str, &Path)], network: bool) {
     allow(cpus);
     std::io::stdout().flush().ok();
     let mut command = std::process::Command::new(program);
+    if network {
+        command.arg("--network");
+    }
     for (option, disk) in disks {
         command.arg(option).arg(disk);
     }

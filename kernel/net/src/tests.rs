@@ -405,6 +405,7 @@ fn the_loopback_link_gives_back_what_is_sent_in_order() {
         assert_eq!(link.receive(&mut frame), None);
     }
     assert!(!link.send(&[0; 31]), "longer than its MTU");
+    assert!(!link.needs_checksums(), "its packets never leave memory");
 }
 
 #[test]
@@ -440,5 +441,33 @@ fn tcp_and_udp_go_through_the_loopback_link_in_one_poll() {
     lo.poll(3_000_000);
     let socket = lo.socket_mut::<udp::Socket<'static>>(udp).unwrap();
     assert_eq!(socket.recv().unwrap().0, b"to myself");
+    assert!(!lo.link().pending());
+}
+
+#[test]
+fn a_connection_on_the_loopback_link_ends_without_waiting() {
+    let mut lo = loopback();
+    let local = Ipv4Address::new(127, 0, 0, 1);
+    let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
+    let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.poll(1_000_000);
+    // The client closes first; the server sends its last bytes, which the
+    // client's delayed-ACK timer waits to acknowledge, then closes. Its FIN
+    // is acknowledged at once all the same, as Linux does, so the server is
+    // not left in LAST-ACK for the delay and the client's TIME-WAIT owes
+    // nothing.
+    lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    lo.poll(1_000_000);
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"bye").unwrap();
+    lo.poll(1_000_000);
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().close();
+    lo.poll(1_000_000);
+    assert_eq!(
+        lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(),
+        tcp::State::TimeWait
+    );
+    assert_eq!(lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().state(), tcp::State::Closed);
     assert!(!lo.link().pending());
 }

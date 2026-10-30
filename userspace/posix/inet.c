@@ -66,6 +66,31 @@ static int connected(unsigned short port) {
 	return fd;
 }
 
+// The order the benchmarks use: the port read right after bind, and
+// TCP_NODELAY set before the connection.
+static void bench_order(void) {
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(fd >= 0);
+	struct sockaddr_in at = loopback(0);
+	socklen_t length = sizeof(at);
+	CHECK(bind(fd, (struct sockaddr *)&at, sizeof(at)) == 0);
+	CHECK(getsockname(fd, (struct sockaddr *)&at, &length) == 0);
+	unsigned short port = ntohs(at.sin_port);
+	printf("inet: bound to port %u\n", port);
+	CHECK(listen(fd, 16) == 0);
+	CHECK(port_of(fd) == port);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	int on = 1;
+	CHECK(setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) == 0);
+	struct sockaddr_in to = loopback(port);
+	CHECK(connect(client, (struct sockaddr *)&to, sizeof(to)) == 0);
+	int accepted = accept(fd, NULL, NULL);
+	CHECK(accepted >= 0);
+	close(client);
+	close(accepted);
+	close(fd);
+}
+
 static void tcp(void) {
 	int server = listener();
 	unsigned short port = port_of(server);
@@ -400,6 +425,7 @@ static void capabilities(void) {
 
 int main(void) {
 	check_start("inet");
+	RUN(bench_order);
 	RUN(tcp);
 	RUN(non_blocking);
 	RUN(unbound);

@@ -93,4 +93,8 @@ impl Link for Loopback {
     }
 
     fn flush(&mut self) {}
+
+    fn needs_checksums(&self) -> bool {
+        false
+    }
 }

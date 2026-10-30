@@ -94,6 +94,12 @@ pub trait Link {
     /// Tells the card about the frames sent and taken since the last
     /// time (its doorbells).
     fn flush(&mut self);
+    /// Whether a frame can be damaged on its way, so that the stack makes
+    /// and checks checksums: a card's can; the loopback link's packets
+    /// never leave memory, and Linux's loopback skips them too.
+    fn needs_checksums(&self) -> bool {
+        true
+    }
 }
 
 /// The memory a stack works in, lent to it for as long as it lives.
@@ -196,12 +202,14 @@ impl<L: Link> phy::Device for Phy<'_, L> {
             }
         }
         // Every checksum is made and checked here, in software: the card
-        // is asked for no offloads.
+        // is asked for no offloads. A link that cannot damage a frame
+        // needs none.
+        let both = if self.link.needs_checksums() { Checksum::Both } else { Checksum::None };
         let mut checksum = ChecksumCapabilities::default();
-        checksum.ipv4 = Checksum::Both;
-        checksum.icmpv4 = Checksum::Both;
-        checksum.udp = Checksum::Both;
-        checksum.tcp = Checksum::Both;
+        checksum.ipv4 = both;
+        checksum.icmpv4 = both;
+        checksum.udp = both;
+        checksum.tcp = both;
         caps.checksum = checksum;
         caps
     }

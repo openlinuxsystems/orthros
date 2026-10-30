@@ -410,7 +410,17 @@ two threads passing a turn there and back through two semaphores, on
 one CPU and on two (`posix_futex_same_cpu`, `posix_futex_cross_cpu`),
 and two processes doing the same through semaphores in shared memory
 (`posix_futex_shared_same_cpu`, `posix_futex_shared_cross_cpu`, ADR
-0110). Given `--disk`, it last reads and writes that disk 4 KiB, 64 KiB
+0110). Given `--network`, it then uses TCP and UDP on the loopback
+interface, at 127.0.0.1 (ADR 0185): a connection made, accepted and
+closed at both ends, 2,000 times, by one thread (`posix_tcp_connect`); a
+byte there and back over a TCP connection with `TCP_NODELAY` to a child
+that echoes it, and a datagram there and back to one, both on one CPU
+and on two (`posix_tcp_roundtrip_same_cpu` to
+`posix_udp_roundtrip_cross_cpu`); and 256 MiB over a TCP connection in
+64 KiB writes from a child, both on one CPU, per MiB (`posix_tcp_mib`).
+Spark gives it a network capability (`--network`), and `linux-bench`,
+which is the whole of user space on Linux, brings `lo` up first. Given
+`--disk`, it last reads and writes that disk 4 KiB, 64 KiB
 and 1 MiB at a time, one transfer after the other through its first 32
 MiB (`posix_disk_read_4k` to `posix_disk_write_mib`, ADR 0111), and
 given `--nvme`, an NVMe disk the same way (`posix_nvme_read_4k` to
